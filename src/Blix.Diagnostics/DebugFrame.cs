@@ -21,7 +21,7 @@ public sealed class DebugFrame
         IReadOnlyList<DebugValueEntry> values,
         IReadOnlyList<DebugControlEntry> controls,
         IReadOnlyList<DebugDrawCommand> drawCommands,
-        Matrix4x4 drawViewProjection,
+        IReadOnlyList<ViewDeclaration> views,
         IReadOnlyList<DebugStatEntry> stats,
         IReadOnlyList<DebugTimerEntry> timers,
         IReadOnlyList<DebugEventEntry> events,
@@ -33,7 +33,7 @@ public sealed class DebugFrame
         Values = values;
         Controls = controls;
         DrawCommands = drawCommands;
-        DrawViewProjection = drawViewProjection;
+        Views = views;
         Stats = stats;
         Timers = timers;
         Events = events;
@@ -57,7 +57,15 @@ public sealed class DebugFrame
 
     public IReadOnlyList<DebugDrawCommand> DrawCommands { get; }
 
-    public Matrix4x4 DrawViewProjection { get; }
+    /// <summary>
+    /// The views declared this frame. Replaces the single DrawViewProjection this record used to carry.
+    /// </summary>
+    /// <remarks>
+    /// Value snapshots, not references to live views: Freeze() holds frames past the live builder's
+    /// lifetime, and a frame that pointed at a view object would re-render through whatever camera that
+    /// object holds NOW — a lie that would be indistinguishable from a diagnostics bug.
+    /// </remarks>
+    public IReadOnlyList<ViewDeclaration> Views { get; }
 
     public IReadOnlyList<DebugStatEntry> Stats { get; }
 

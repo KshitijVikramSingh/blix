@@ -15,6 +15,35 @@ public readonly record struct ScissorRect(int X, int Y, int Width, int Height);
 // (StorageImage → bound in GENERAL and barriered for compute write, SampledImage
 // → combined sampler). PushConstants matches the declared ranges. Recorded as a
 // compute pass via RenderCommandList.ComputePass.
+// <b>Recorded commands own their push payload.</b> A pass body RECORDS; the GPU work
+// happens later, at Execute. A byte[] handed over here is therefore read long after the
+// caller has moved on — and a caller that reuses one scratch array across draws gives
+// every draw the array's FINAL contents.
+//
+// That is not hypothetical. VkLineDrawer hit it (all views submitting whatever the last
+// one left), LabRenderer hit it (seven objects rendering at the seventh's transform, six
+// apparently missing while the draw counts looked perfectly healthy), and the
+// index-offset DrawIndexed overload below exists because the same hazard bit vertex
+// buffers. Three consumers, one semantic mistake: recording accepted mutable
+// caller-owned payloads whose lifetime had to secretly extend to Execute.
+//
+// The copy lives on the RECORD rather than at the call sites because there are ten call
+// sites today and the eleventh is the one that would get it wrong. Push payloads are
+// bounded by the Vulkan minimum of 128 bytes, so this is a memcpy of at most that per
+// draw.
+//
+// NOT yet frozen: the Uniforms and Textures lists, and in particular the array inside a
+// Matrix4x4ArrayUniform. Those are shared per pass rather than per draw, so copying them
+// per draw costs far more than 128 bytes; that one wants measuring before it is done.
+//
+// This used to say "the next thing to settle before any skeletal work". The skeletal work
+// has since happened and did not settle it: a bone palette does NOT travel as a
+// Matrix4x4ArrayUniform in any consumer. Runner, Bulwark, RTSGame and the toolchain lab
+// all send it as a set-3 storage buffer through MaterialBindings, one buffer per frame
+// slot — which solves the across-frames half of the hazard and leaves the within-frame
+// half untouched (two draws in one frame sharing one palette material both render the
+// second pose). So the note stands, unexercised, and the honest reason is that nothing
+// has wanted the uniform-array path rather than that it was checked.
 public sealed record DispatchCommand(
     PipelineHandle Pipeline,
     int GroupsX,
@@ -22,7 +51,18 @@ public sealed record DispatchCommand(
     int GroupsZ,
     IReadOnlyList<ShaderUniform> Uniforms,
     IReadOnlyList<ShaderTextureBinding> Textures,
-    byte[]? PushConstants = null) : RenderCommand;
+    byte[]? PushConstants = null) : RenderCommand
+{
+    private readonly byte[]? pushConstants = PushConstants is null ? null : PushConstants.AsSpan().ToArray();
+
+    /// <summary>The push payload, copied at record time so a caller may reuse its scratch buffer.</summary>
+    public byte[]? PushConstants
+    {
+        get => pushConstants;
+        init => pushConstants = value is null ? null : value.AsSpan().ToArray();
+    }
+}
+
 
 // Per-material indirect multi-draw (Vulkan-only). Binds the same state as a
 // DrawIndexedCommand (pipeline, shared VB/IB, set0 uniforms/textures, set2
@@ -30,6 +70,35 @@ public sealed record DispatchCommand(
 // DrawCount VkDrawIndexedIndirectCommand structs from IndirectBuffer starting at
 // IndirectByteOffset. All sub-draws share the bound state — group objects by
 // (pipeline, material) and emit one of these per group.
+// <b>Recorded commands own their push payload.</b> A pass body RECORDS; the GPU work
+// happens later, at Execute. A byte[] handed over here is therefore read long after the
+// caller has moved on — and a caller that reuses one scratch array across draws gives
+// every draw the array's FINAL contents.
+//
+// That is not hypothetical. VkLineDrawer hit it (all views submitting whatever the last
+// one left), LabRenderer hit it (seven objects rendering at the seventh's transform, six
+// apparently missing while the draw counts looked perfectly healthy), and the
+// index-offset DrawIndexed overload below exists because the same hazard bit vertex
+// buffers. Three consumers, one semantic mistake: recording accepted mutable
+// caller-owned payloads whose lifetime had to secretly extend to Execute.
+//
+// The copy lives on the RECORD rather than at the call sites because there are ten call
+// sites today and the eleventh is the one that would get it wrong. Push payloads are
+// bounded by the Vulkan minimum of 128 bytes, so this is a memcpy of at most that per
+// draw.
+//
+// NOT yet frozen: the Uniforms and Textures lists, and in particular the array inside a
+// Matrix4x4ArrayUniform. Those are shared per pass rather than per draw, so copying them
+// per draw costs far more than 128 bytes; that one wants measuring before it is done.
+//
+// This used to say "the next thing to settle before any skeletal work". The skeletal work
+// has since happened and did not settle it: a bone palette does NOT travel as a
+// Matrix4x4ArrayUniform in any consumer. Runner, Bulwark, RTSGame and the toolchain lab
+// all send it as a set-3 storage buffer through MaterialBindings, one buffer per frame
+// slot — which solves the across-frames half of the hazard and leaves the within-frame
+// half untouched (two draws in one frame sharing one palette material both render the
+// second pose). So the note stands, unexercised, and the honest reason is that nothing
+// has wanted the uniform-array path rather than that it was checked.
 public sealed record DrawIndexedIndirectCommand(
     VertexBufferHandle VertexBuffer,
     IndexBufferHandle IndexBuffer,
@@ -40,7 +109,18 @@ public sealed record DrawIndexedIndirectCommand(
     IReadOnlyList<ShaderUniform> Uniforms,
     IReadOnlyList<ShaderTextureBinding> Textures,
     MaterialHandle? Material = null,
-    byte[]? PushConstants = null) : RenderCommand;
+    byte[]? PushConstants = null) : RenderCommand
+{
+    private readonly byte[]? pushConstants = PushConstants is null ? null : PushConstants.AsSpan().ToArray();
+
+    /// <summary>The push payload, copied at record time so a caller may reuse its scratch buffer.</summary>
+    public byte[]? PushConstants
+    {
+        get => pushConstants;
+        init => pushConstants = value is null ? null : value.AsSpan().ToArray();
+    }
+}
+
 
 public sealed record DrawIndexedCommand(
     VertexBufferHandle VertexBuffer,
@@ -92,4 +172,21 @@ public sealed record DrawIndexedCommand(
     // the slice, so index 0 reads the slice's first vertex. The transient arena
     // (IGraphicsDevice.AllocVertices) returns a stride-aligned offset for exactly
     // this. 0 preserves historical whole-buffer behavior for every caller.
-    ulong VertexBufferByteOffset = 0) : RenderCommand;
+    ulong VertexBufferByteOffset = 0) : RenderCommand
+{
+    private readonly byte[]? pushConstants = PushConstants is null ? null : PushConstants.AsSpan().ToArray();
+
+    /// <summary>
+    /// The push payload, copied at record time so a caller may reuse its scratch buffer.
+    /// </summary>
+    /// <remarks>
+    /// This is the one that bit: LabRenderer packed each object's model matrix into a single shared array
+    /// and every draw read the last object's, so seven boxes rendered in one place and six looked missing
+    /// while the draw counts stayed perfectly healthy. Found from a screenshot, not from four green runs.
+    /// </remarks>
+    public byte[]? PushConstants
+    {
+        get => pushConstants;
+        init => pushConstants = value is null ? null : value.AsSpan().ToArray();
+    }
+}

@@ -99,7 +99,7 @@ var t = new TestRunner();
     {
         debug.Controls.Toggle("On", true);
         debug.Controls.Float("Strength", 0.5f, 0.0f, 1.0f);
-        debug.Draw.ViewProjection = vp;
+        using var view = debug.Draw.In("main", vp);
         debug.Draw.Line("ray", new Vector3(0, 0, 0), new Vector3(1, 0, 0),
             new GraphicsColor(1, 0, 0, 1));
     }));
@@ -108,10 +108,182 @@ var t = new TestRunner();
     var frame = sys.LatestFrame!;
     t.ExpectTrue("Controls captured", frame.Controls.Count == 2);
     t.ExpectTrue("Draw commands captured", frame.DrawCommands.Count == 1);
-    t.ExpectTrue("Draw view-projection captured",
-        frame.DrawViewProjection.M41 == 7 &&
-        frame.DrawViewProjection.M42 == 8 &&
-        frame.DrawViewProjection.M43 == 9);
+    t.ExpectTrue("Declared view captured",
+        frame.Views.Count == 1 &&
+        frame.Views[0].Name == "main" &&
+        frame.Views[0].ViewProjection.M41 == 7 &&
+        frame.Views[0].ViewProjection.M42 == 8 &&
+        frame.Views[0].ViewProjection.M43 == 9);
+    t.ExpectTrue("Command names the view it was drawn into",
+        frame.DrawCommands[0].View == frame.Views[0].Id);
+}
+
+// -- Two views over the same geometry, in one frame ---------------------------
+// The acceptance criterion for the view arc, and the thing RTS §212 needed and could not ask for: watch
+// one body from a fixed vantage while the game camera does its own thing. It was impossible while a frame
+// carried a single matrix, and it is a second scope now.
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+    sys.BeginFrame(new RenderFrameContext(Width: 8, Height: 4));
+    var game = Matrix4x4.CreateTranslation(1, 0, 0);
+    var watch = Matrix4x4.CreateTranslation(0, 50, 0);
+    sys.Run(new TestDebuggable("TwoViews", debug =>
+    {
+        var subject = new Vector3(3, 0, 3);
+        using (debug.Draw.In("game", game))
+        {
+            debug.Draw.Cross("subject", subject, 1f, new GraphicsColor(1, 1, 1, 1));
+        }
+
+        using (debug.Draw.In("overhead", watch))
+        {
+            debug.Draw.Cross("subject", subject, 1f, new GraphicsColor(1, 1, 0, 1));
+        }
+    }));
+    sys.EndFrame();
+
+    var frame = sys.LatestFrame!;
+    t.ExpectTrue("Both views declared in one frame", frame.Views.Count == 2);
+    t.ExpectTrue("Views keep distinct identities", frame.Views[0].Id != frame.Views[1].Id);
+    t.ExpectTrue("Same geometry drawn twice", frame.DrawCommands.Count == 2);
+    t.ExpectTrue("Each command names its own view",
+        frame.DrawCommands[0].View == frame.Views[0].Id &&
+        frame.DrawCommands[1].View == frame.Views[1].Id);
+
+    // Ids are interned from names, so the same name in a LATER frame is the same view — which is what any
+    // trail or history has to rely on to mean anything.
+    sys.BeginFrame(new RenderFrameContext(Width: 8, Height: 4));
+    sys.Run(new TestDebuggable("Again", debug =>
+    {
+        using var again = debug.Draw.In("overhead", watch);
+        debug.Draw.Cross("subject", Vector3.Zero, 1f, new GraphicsColor(1, 1, 0, 1));
+    }));
+    sys.EndFrame();
+    t.ExpectTrue("A view keeps its identity across frames",
+        sys.LatestFrame!.Views[0].Id == frame.Views[1].Id);
+}
+
+// -- Drawing with no view in scope is a bug, not a default --------------------
+{
+    var sys = new DebugSystem(historyCapacity: 2);
+    sys.BeginFrame(new RenderFrameContext(Width: 2, Height: 2));
+    var threw = false;
+    try
+    {
+        sys.Run(new TestDebuggable("NoView", debug =>
+            debug.Draw.Line("orphan", Vector3.Zero, Vector3.UnitX, new GraphicsColor(1, 0, 0, 1))));
+    }
+    catch (InvalidOperationException)
+    {
+        threw = true;
+    }
+
+    sys.EndFrame();
+    t.ExpectTrue("A primitive with no view throws", threw);
+}
+
+// -- Trails: the one thing in diagnostics that remembers ----------------------
+// Tested against DebugTrails directly, because it takes the current time as an argument rather than
+// reading a clock. Anything that ages out is untestable if it can only be asked "what time is it?"
+{
+    var trails = new DebugTrails();
+
+    var a = trails.Append("body/7", new Vector3(0, 0, 0), nowMs: 0, seconds: 1f, frameNumber: 1);
+    t.ExpectTrue("A fresh trail holds the one point", a.Count == 1);
+
+    trails.Append("body/7", new Vector3(1, 0, 0), nowMs: 200, seconds: 1f, frameNumber: 2);
+    var grown = trails.Append("body/7", new Vector3(2, 0, 0), nowMs: 400, seconds: 1f, frameNumber: 3);
+    t.ExpectTrue("A trail grows across calls", grown.Count == 3);
+
+    // 1500ms later with a 1s window: the first two points are older than the window and go.
+    // At t=1500 with a 1s window the point from t=400 is 1100ms old, so only the new one survives.
+    var aged = trails.Append("body/7", new Vector3(3, 0, 0), nowMs: 1500, seconds: 1f, frameNumber: 4);
+    t.ExpectTrue("Points older than the window age out", aged.Count == 1);
+    t.ExpectTrue("The surviving point is the recent one", aged[0] == new Vector3(3, 0, 0));
+
+    t.ExpectTrue("Trails are kept per path", trails.Count == 1);
+    trails.Append("body/8", Vector3.Zero, nowMs: 1500, seconds: 1f, frameNumber: 4);
+    t.ExpectTrue("A second path is a second trail", trails.Count == 2);
+
+    // A producer that goes quiet must not leak its key forever. The points age to nothing on their own;
+    // the dictionary entry is what Expire is for.
+    trails.Expire(nowMs: 60_000, staleSeconds: 30f);
+    t.ExpectTrue("Trails nobody has touched are forgotten", trails.Count == 0);
+
+    t.ExpectTrue("Forget returns false for a path that is not there", !trails.Forget("body/7"));
+
+    // Asking twice in one frame is one sample: a trail is a fact about the frame, not about how many
+    // times somebody wanted to look at it.
+    var twice = new DebugTrails();
+    twice.Append("b", new Vector3(0, 0, 0), nowMs: 0, seconds: 10f, frameNumber: 1);
+    var second = twice.Append("b", new Vector3(9, 9, 9), nowMs: 0, seconds: 10f, frameNumber: 1);
+    t.ExpectTrue("A repeat call in the same frame does not re-sample", second.Count == 1);
+    var nextFrame = twice.Append("b", new Vector3(1, 0, 0), nowMs: 16, seconds: 10f, frameNumber: 2);
+    t.ExpectTrue("The next frame samples again", nextFrame.Count == 2);
+}
+
+// -- A trail drawn across frames, through the channel -------------------------
+{
+    var sys = new DebugSystem(historyCapacity: 8);
+    var seen = new List<int>();
+    for (var i = 0; i < 3; i++)
+    {
+        var step = i;
+        sys.BeginFrame(new RenderFrameContext(Width: 4, Height: 4));
+        sys.Run(new TestDebuggable("Mover", debug =>
+        {
+            using var view = debug.Draw.In("main", Matrix4x4.Identity);
+            debug.Draw.Trail("body", new Vector3(step, 0, 0), new GraphicsColor(1, 1, 1, 1), seconds: 60f);
+        }));
+        sys.EndFrame();
+        var line = (DebugDrawPolyline)sys.LatestFrame!.DrawCommands.First(c => c is DebugDrawPolyline);
+        seen.Add(line.Points.Count);
+    }
+
+    t.ExpectTrue("A trail lengthens frame over frame",
+        seen.Count == 3 && seen[0] == 1 && seen[1] == 2 && seen[2] == 3);
+
+    // The subtle one. The store rewrites its list every frame, so a command holding it BY REFERENCE would
+    // make an already-sealed frame change under a sink still reading it — the same fault the per-frame
+    // view declarations exist to prevent.
+    var first = sys.History.EnumerateLatestFirst().Last();
+    var firstLine = (DebugDrawPolyline)first.DrawCommands.First(c => c is DebugDrawPolyline);
+    t.ExpectTrue("An old frame still reports the trail it actually had", firstLine.Points.Count == 1);
+}
+
+// -- One history, seen from two views -----------------------------------------
+// Where the two singulars meet: a trail is keyed by path and drawn into whichever view is in scope, so
+// asking for it twice is one history painted twice, not two histories diverging.
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+    for (var i = 0; i < 2; i++)
+    {
+        var step = i;
+        sys.BeginFrame(new RenderFrameContext(Width: 4, Height: 4));
+        sys.Run(new TestDebuggable("Mover", debug =>
+        {
+            var here = new Vector3(step, 0, 0);
+            using (debug.Draw.In("game", Matrix4x4.Identity))
+            {
+                debug.Draw.Trail("body", here, new GraphicsColor(1, 1, 1, 1), seconds: 60f);
+            }
+
+            using (debug.Draw.In("overhead", Matrix4x4.CreateTranslation(0, 20, 0)))
+            {
+                debug.Draw.Trail("body", here, new GraphicsColor(1, 1, 0, 1), seconds: 60f);
+            }
+        }));
+        sys.EndFrame();
+    }
+
+    var lines = sys.LatestFrame!.DrawCommands.OfType<DebugDrawPolyline>().ToArray();
+    t.ExpectTrue("The trail is drawn once per view", lines.Length == 2);
+    t.ExpectTrue("Each copy goes to its own view", lines[0].View != lines[1].View);
+
+    // Four calls over two frames against ONE remembered path: if the store keyed on view as well, each
+    // view would hold half the history and both would be wrong.
+    t.ExpectTrue("Both views show the same single history — sampled per frame, not per call",
+        lines[0].Points.Count == 2 && lines[1].Points.Count == 2);
 }
 
 // -- Ring buffer wrap --------------------------------------------------------
@@ -864,6 +1036,7 @@ var t = new TestRunner();
     var sys = new DebugSystem(historyCapacity: 4);
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
     var d = sys.Current!.Draw;
+    using var primitivesView = d.In("main", Matrix4x4.Identity);
     var col = new GraphicsColor(1, 0, 0, 1);
     d.Line("L", Vector3.Zero, Vector3.UnitX, col);
     d.Aabb("A", -Vector3.One, Vector3.One, col);
@@ -903,6 +1076,7 @@ var t = new TestRunner();
     {
         using (debug.Scope("aabb"))
         {
+            using var boxView = debug.Draw.In("main", Matrix4x4.Identity);
             debug.Draw.Aabb("box-3", -Vector3.One, Vector3.One,
                 new GraphicsColor(0, 1, 0, 1));
         }
@@ -949,6 +1123,7 @@ var t = new TestRunner();
 
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
     var d = sys.Current!.Draw;
+    using var dumpView = d.In("overhead", Matrix4x4.CreateTranslation(0, 9, 0));
     var col = new GraphicsColor(1, 1, 1, 1);
     d.Sphere("ball", new Vector3(1, 2, 3), 0.5f, col);
     d.Arrow("vec", Vector3.Zero, Vector3.UnitX, col);
@@ -963,6 +1138,15 @@ var t = new TestRunner();
     t.ExpectTrue("JSON arrow endpoints renamed to dodge factory collision",
         json.Contains("\"FromPoint\"") && json.Contains("\"ToPoint\""));
 
+    // Schema 2. The version field is asserted because schema 1 did not have one despite the file claiming
+    // a stable contract, and an unversioned dump is only readable by guessing.
+    t.ExpectTrue("JSON declares its schema version", json.Contains("\"SchemaVersion\": 2"));
+    t.ExpectTrue("JSON carries the frame's views", json.Contains("\"Views\""));
+    t.ExpectTrue("JSON names the view by name, not by process-local id",
+        json.Contains("\"View\": \"overhead\""));
+    t.ExpectTrue("JSON no longer carries a single frame-wide camera",
+        !json.Contains("\"DrawViewProjection\""));
+
     Directory.Delete(tempDir, recursive: true);
 }
 
@@ -975,6 +1159,7 @@ var t = new TestRunner();
         emitBody:  ctx =>
         {
             order.Add("EmitGeometry");
+            using var submeshView = ctx.Draw.In("main", Matrix4x4.Identity);
             ctx.Draw.Aabb("submesh-0", -Vector3.One, Vector3.One,
                 new GraphicsColor(0, 1, 0, 1));
         });
@@ -1047,8 +1232,11 @@ var t = new TestRunner();
     var edges = new int[] { 0, 1, 1, 2, 2, 0 };
     var pos = new Vector3[] { Vector3.Zero };
     var norms = new Vector3[] { Vector3.UnitY };
-    sys.Current!.Draw.MeshWireframe("tri", verts, edges, new GraphicsColor(1, 1, 0, 1));
-    sys.Current!.Draw.Normals("vn", pos, norms, 0.5f, new GraphicsColor(0, 1, 1, 1));
+    using (sys.Current!.Draw.In("main", Matrix4x4.Identity))
+    {
+        sys.Current!.Draw.MeshWireframe("tri", verts, edges, new GraphicsColor(1, 1, 0, 1));
+        sys.Current!.Draw.Normals("vn", pos, norms, 0.5f, new GraphicsColor(0, 1, 1, 1));
+    }
     sys.EndFrame();
 
     var frame = sys.LatestFrame!;
@@ -1068,6 +1256,7 @@ var t = new TestRunner();
     var sink = new JsonDumpSink(tempDir);
 
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
+    using var meshView = sys.Current!.Draw.In("main", Matrix4x4.Identity);
     sys.Current!.Draw.MeshWireframe("m",
         new Vector3[] { Vector3.Zero, Vector3.UnitX, Vector3.UnitY },
         new int[] { 0, 1, 1, 2, 2, 0 },
@@ -1164,7 +1353,13 @@ var t = new TestRunner();
     // With selection: inspect fires + highlight aabb appears.
     sys.Select("scene/foo/sub-0", new Bounds3(new Vector3(-1), new Vector3(1)));
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
-    sys.Run();
+    // The highlight is drawn into whatever views the frame declared, so the frame needs one. A frame with
+    // no views drew no picture, and there is nothing for system feedback to annotate.
+    using (sys.Current!.Draw.In("main", Matrix4x4.Identity))
+    {
+        sys.Run();
+    }
+
     sys.EndFrame();
     t.ExpectTrue("Inspect called with selected path",
         inspectCalls.Count == 1 && inspectCalls[0] == "scene/foo/sub-0");
@@ -1205,7 +1400,11 @@ var t = new TestRunner();
     sys.Select("scene/foo", new Bounds3(new Vector3(0), new Vector3(1)));
     sys.State.LayersEnabled["selection"] = false;
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
-    sys.Run();
+    using (sys.Current!.Draw.In("main", Matrix4x4.Identity))
+    {
+        sys.Run();
+    }
+
     sys.EndFrame();
 
     t.ExpectTrue("Highlight emitted even when 'selection' layer is off",

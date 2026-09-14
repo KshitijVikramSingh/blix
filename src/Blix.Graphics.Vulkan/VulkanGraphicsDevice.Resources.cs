@@ -314,7 +314,13 @@ public sealed partial class VulkanGraphicsDevice
             bindings[i] = new DescriptorSetLayoutBinding
             {
                 Binding = (uint)s.Binding,
-                DescriptorType = MapDescriptorType(s.Type),
+                // Program-owned uniform blocks (sets 0-1) are DYNAMIC: their storage comes from the
+                // per-frame uniform arena and the offset is supplied at bind time, so a draw's
+                // uniforms belong to that draw. Material sets keep their own buffers and stay
+                // static. See VulkanGraphicsDevice.UniformArena.
+                DescriptorType = IsDynamicUniformSlot(setIdx, s)
+                    ? DescriptorType.UniformBufferDynamic
+                    : MapDescriptorType(s.Type),
                 DescriptorCount = (uint)s.Count,
                 StageFlags = MapStageFlags(s.Stages),
             };
@@ -339,6 +345,9 @@ public sealed partial class VulkanGraphicsDevice
         foreach (var s in setSlots)
         {
             if (s.BlockLayout is not { } block) continue;
+            // A dynamic slot's storage is the arena's, not the program's — allocating a buffer here
+            // would be one per program per frame slot that nothing ever binds.
+            if (IsDynamicUniformSlot(setIdx, s)) continue;
             var usage = s.Type == ShaderResourceType.StorageBuffer
                 ? BufferUsageFlags.StorageBufferBit
                 : BufferUsageFlags.UniformBufferBit;
@@ -353,6 +362,14 @@ public sealed partial class VulkanGraphicsDevice
 
         return resources;
     }
+
+    // A uniform block the PROGRAM owns, on a set no material binds. Storage buffers are excluded:
+    // they arrive through MaterialBindings (the bone palette is the live case) and are written by
+    // their owner, not by the per-draw uniform path.
+    internal static bool IsDynamicUniformSlot(int setIdx, DescriptorSetSlot slot) =>
+        SetUsesDynamicUniforms(setIdx)
+        && slot.Type == ShaderResourceType.UniformBuffer
+        && slot.BlockLayout is not null;
 
     internal static DescriptorType MapDescriptorType(ShaderResourceType t) => t switch
     {

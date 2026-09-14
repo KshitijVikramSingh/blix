@@ -29,14 +29,18 @@ public sealed partial class VulkanGraphicsDevice
     private unsafe void CreateTransientDescriptorPools()
     {
         transientPools = new DescriptorPool[MaxFramesInFlightConst];
-        var poolSizes = stackalloc DescriptorPoolSize[3];
+        var poolSizes = stackalloc DescriptorPoolSize[4];
         poolSizes[0] = new DescriptorPoolSize { Type = DescriptorType.UniformBuffer, DescriptorCount = TransientPoolPerType };
         poolSizes[1] = new DescriptorPoolSize { Type = DescriptorType.StorageBuffer, DescriptorCount = TransientPoolPerType };
         poolSizes[2] = new DescriptorPoolSize { Type = DescriptorType.CombinedImageSampler, DescriptorCount = TransientPoolPerType };
+        // Program-owned uniform blocks on sets 0-1 are UNIFORM_BUFFER_DYNAMIC — a DISTINCT pool
+        // type, not a flavour of UNIFORM_BUFFER. Omitting it allocates sets the pool never budgeted
+        // for; the layers say so, and an implementation is entitled to fail the allocation instead.
+        poolSizes[3] = new DescriptorPoolSize { Type = DescriptorType.UniformBufferDynamic, DescriptorCount = TransientPoolPerType };
         var poolCi = new DescriptorPoolCreateInfo
         {
             SType = StructureType.DescriptorPoolCreateInfo,
-            PoolSizeCount = 3,
+            PoolSizeCount = 4,
             PPoolSizes = poolSizes,
             MaxSets = TransientPoolMaxSets,
         };

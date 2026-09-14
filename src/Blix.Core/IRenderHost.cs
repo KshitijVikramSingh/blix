@@ -1,3 +1,5 @@
+using Blix.Graphics;
+
 namespace Blix.Core;
 
 public interface IRenderHost
@@ -25,6 +27,22 @@ public interface IRenderHost
     // profiling — the displayed FPS reflects real frame cost, not what
     // the refresh rate clamps it to). On is the user-facing default.
     void SetVSync(bool enabled);
+
+    // Make a texture drawable inside a UI panel, and return the opaque id the UI layer
+    // knows it by. Registering the same handle twice returns the same id.
+    //
+    // <b>Why the host and not the UI library.</b> A panel is built by application code that has
+    // no reference to the runtime; it can only reach `ImGui.Image(id, size)`, and an id is the
+    // one thing that can cross that gap. The host owns the UI renderer, so the host is the only
+    // place that can turn a graphics handle into one.
+    //
+    // The id is valid until ReleaseUiTexture, or until the texture is destroyed — after which it
+    // is a dangling reference the UI layer cannot detect, exactly like any other handle. Register
+    // long-lived targets once at load rather than per frame.
+    nint RegisterUiTexture(TextureHandle texture);
+
+    // Forget a registered id. Safe to call with an id that was never registered.
+    void ReleaseUiTexture(nint id);
 
     // The display's refresh rate in hertz, or null where the platform will not say.
     //

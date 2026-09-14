@@ -90,9 +90,13 @@ static void PrintUsage()
     Console.WriteLine("    --flip-v canonicalises bottom-up (OpenGL) UVs to a top-down");
     Console.WriteLine("    origin, baked into the cooked vertices.");
     Console.WriteLine("  blix-cook inspect <gltf-or-glb>");
-    Console.WriteLine("    Print the node hierarchy + each mesh node's composed-world");
-    Console.WriteLine("    scale/translation (= rig pivot) and assembled bounds, for");
-    Console.WriteLine("    fitting an articulated model onto a Transform3D rig.");
+    Console.WriteLine("    LISTS what is in an asset: the node hierarchy + each mesh node's");
+    Console.WriteLine("    composed-world scale/translation (= rig pivot) and assembled");
+    Console.WriteLine("    bounds, for fitting an articulated model onto a Transform3D rig.");
+    Console.WriteLine("    Always exits 0 — it reports, it does not judge.");
+    Console.WriteLine("    To CHECK an asset is sound (clip lengths, skeleton, binding");
+    Console.WriteLine("    contracts) and get an exit code, use the toolchain probe:");
+    Console.WriteLine("      dotnet run --project src/Blix.Labs.Toolchain.Probe -- --model <path>");
     Console.WriteLine();
     Console.WriteLine("  --out <dir>  (textures/probe/mesh) write cooked output into a separate");
     Console.WriteLine("    tree, mirroring each source's path relative to the input root, instead");

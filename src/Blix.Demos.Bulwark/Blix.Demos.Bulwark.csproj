@@ -52,13 +52,5 @@
     <GlslInclude Include="..\Blix.Shaders\shadow.glsl" />
   </ItemGroup>
 
-  <Target Name="CompileSpirV"
-          AfterTargets="CopyFilesToOutputDirectory"
-          Inputs="@(GlslShader);@(GlslInclude);$(BlixShaderCompilerDll)"
-          Outputs="@(GlslShader -> '$(OutDir)Shaders\%(Filename)%(Extension).spv')">
-    <MakeDir Directories="$(OutDir)Shaders" />
-    <Message Text="Compiling SPIR-V: %(GlslShader.Identity)" Importance="high" />
-    <Exec Command="dotnet &quot;$(BlixShaderCompilerDll)&quot; --glslc &quot;$(Glslc)&quot; --input &quot;%(GlslShader.FullPath)&quot; --output &quot;$(OutDir)Shaders\%(GlslShader.Filename)%(GlslShader.Extension).spv&quot; --include &quot;$(MSBuildProjectDirectory)/../Blix.Shaders&quot;" />
-  </Target>
 
 </Project>

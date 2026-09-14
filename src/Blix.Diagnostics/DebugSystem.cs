@@ -64,6 +64,9 @@ public sealed class DebugSystem
 
     public DebugState State { get; } = new();
 
+    /// <summary>How long a trail survives after its producer stops asking for it.</summary>
+    private const float TrailStaleSeconds = 30f;
+
     public DebugFrameHistory History { get; }
 
     // The live, mutable builder for the in-flight frame. Null between
@@ -278,9 +281,34 @@ public sealed class DebugSystem
                     var sphereR = MathF.Min(MathF.Max(longest * 0.15f, 0.05f), 0.75f);
                     var crossSize = longest * 0.5f;
 
-                    Current.Draw.Aabb(SelectedPath, bounds.Min, bounds.Max, SelectionHighlightColor);
-                    Current.Draw.Sphere(SelectedPath + "/center", center, sphereR, SelectionHighlightColor, segments: 16);
-                    Current.Draw.Cross(SelectedPath + "/marker", center, crossSize, SelectionHighlightColor);
+                    // <b>Into every view — and this is a local default, not an engine law.</b>
+                    // The selection highlight answers "here is what you picked", and the answer is the
+                    // same whichever window you look through — so a second viewport that can see the
+                    // object should show it selected too. Views are already declared by here: the
+                    // selection sweep runs after every contributor, which is where an application
+                    // declares the views it drew into.
+                    //
+                    // No views declared means the application drew nothing this frame, so there is no
+                    // picture to annotate. That is not an error.
+                    //
+                    // Worth being explicit about the limit, because this is the one place in the view work
+                    // where policy could walk back in unnoticed: "is this view an audience for selection
+                    // overlays?" is NOT intrinsic to being a view. A view can be an inspector, a game
+                    // camera, a shadow cascade, a capture target — and a cascade has no business showing a
+                    // selection outline. Painting all of them is the right default for the one selection
+                    // mechanism that exists today and nothing more. Do not generalise this into "system
+                    // feedback goes into every view"; when a second consumer disagrees, the answer is for
+                    // the SELECTION to learn which views it addresses, not for a view to grow a kind.
+                    var declared = Current.Draw.Views.ToArray();
+                    foreach (var view in declared)
+                    {
+                        using (Current.Draw.In(view))
+                        {
+                            Current.Draw.Aabb(SelectedPath, bounds.Min, bounds.Max, SelectionHighlightColor);
+                            Current.Draw.Sphere(SelectedPath + "/center", center, sphereR, SelectionHighlightColor, segments: 16);
+                            Current.Draw.Cross(SelectedPath + "/marker", center, crossSize, SelectionHighlightColor);
+                        }
+                    }
                 }
 
                 foreach (var contributor in contributors)
@@ -313,6 +341,11 @@ public sealed class DebugSystem
         var frameTicks = Stopwatch.GetTimestamp() - frameStartTicks;
         var frameMs = frameTicks * (1000.0 / Stopwatch.Frequency);
         Current.Timers.AppendCompleted(FrameTimerName, scope: string.Empty, frameMs);
+
+        // Trails whose producer has gone quiet are dropped, or every entity that ever had one would keep
+        // its dictionary entry forever — the points age to empty on their own, the key does not. A leak
+        // guard, deliberately far longer than any sensible trail duration, not a visual parameter.
+        State.Trails.Expire(clock.Elapsed.TotalMilliseconds, TrailStaleSeconds);
 
         var snapshot = Current.Snapshot(clock.Elapsed.TotalMilliseconds, SelectedPath);
         History.Push(snapshot);

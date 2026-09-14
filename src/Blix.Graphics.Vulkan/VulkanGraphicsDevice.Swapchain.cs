@@ -113,6 +113,7 @@ public sealed partial class VulkanGraphicsDevice
         CreateGpuTimingPool();
         CreateTransientDescriptorPools();
         CreateTransientArena();
+        CreateUniformArena();
     }
 
     private unsafe void CreateDepthBuffer()
@@ -338,7 +339,9 @@ public sealed partial class VulkanGraphicsDevice
             Format = depthFormat,
             Samples = SampleCountFlags.Count1Bit,
             LoadOp = AttachmentLoadOp.Clear,
-            StoreOp = AttachmentStoreOp.DontCare,
+            // Discarded unless something later means to read it. An overlay that depth-tests is
+            // the only such reader today, and it is opt-in — see preserveSwapchainDepth.
+            StoreOp = preserveSwapchainDepth ? AttachmentStoreOp.Store : AttachmentStoreOp.DontCare,
             StencilLoadOp = AttachmentLoadOp.DontCare,
             StencilStoreOp = AttachmentStoreOp.DontCare,
             InitialLayout = ImageLayout.Undefined,
@@ -405,11 +408,19 @@ public sealed partial class VulkanGraphicsDevice
         {
             Format = depthFormat,
             Samples = SampleCountFlags.Count1Bit,
-            LoadOp = AttachmentLoadOp.DontCare,
+            // <b>Loaded when the scene pass kept it.</b> This was DontCare/Undefined
+            // unconditionally, so debug geometry on the swapchain tested against discarded depth
+            // and drew through everything — the gizmo floated in front of the world however
+            // carefully the depth was carried into the buffer beforehand.
+            LoadOp = preserveSwapchainDepth ? AttachmentLoadOp.Load : AttachmentLoadOp.DontCare,
             StoreOp = AttachmentStoreOp.DontCare,
             StencilLoadOp = AttachmentLoadOp.DontCare,
             StencilStoreOp = AttachmentStoreOp.DontCare,
-            InitialLayout = ImageLayout.Undefined,
+            // Must match the loadOp: LOAD from UNDEFINED is a validation error, and the
+            // contents would be meaningless anyway.
+            InitialLayout = preserveSwapchainDepth
+                ? ImageLayout.DepthStencilAttachmentOptimal
+                : ImageLayout.Undefined,
             FinalLayout = ImageLayout.DepthStencilAttachmentOptimal,
         };
         var colorRef = new AttachmentReference(0, ImageLayout.ColorAttachmentOptimal);
@@ -621,10 +632,17 @@ public sealed partial class VulkanGraphicsDevice
             Extent2D extentToUse;
             if (customSurface is { } surf)
             {
-                renderPassToUse = surf.RenderPass;
+                // <b>An empty clear list means "draw over what is there", on any surface.</b> This used to
+                // read `hasClear = true` unconditionally, with a comment saying custom surfaces have no
+                // Load variant — so a pass aimed at an off-screen target always cleared it, and debug
+                // geometry drawn into a scene target landed on a wiped image. Graph-owned surfaces now
+                // supply a load form; one that does not still clears, which is the old behaviour and the
+                // honest fallback.
+                var wantsLoad = pass.Description.LoadExisting && surf.RenderPassLoad.Handle != 0;
+                renderPassToUse = wantsLoad ? surf.RenderPassLoad : surf.RenderPass;
                 framebufferToUse = surf.Framebuffer;
                 extentToUse = new Extent2D(surf.Width, surf.Height);
-                hasClear = true;
+                if (!wantsLoad) hasClear = true;
             }
             else
             {
@@ -638,7 +656,16 @@ public sealed partial class VulkanGraphicsDevice
             // its depth clear at index 0 — getting this wrong clears depth
             // to 0.0 (reinterpreted ClearColorValue zero) and every fragment
             // reads back near-plane depth from the "shadow map".
-            var colorCount = customSurface is null ? 1 : pass.Description.ClearColors.Count;
+            // <b>The surface's own attachment count, not the caller's clear list.</b> This read
+            // ClearColors.Count, so a pass with an EMPTY clear list on a custom surface computed
+            // colorCount = 0 — and then wrote the depth clear into clearValues[0], i.e. into
+            // colour attachment 0. A ClearDepthStencilValue{depth = 1.0f} reinterpreted through
+            // the union is float32[4] = {1, 0, 0, 0}, so the target cleared to PURE RED and the
+            // scene in it was destroyed. Found by capturing a frame and looking at it; no
+            // validation error, no exception, healthy draw counts.
+            //
+            // It is the same fault the comment above warns about, running the other way.
+            var colorCount = customSurface is null ? 1 : customSurface.ColorAttachmentCount;
             var hasDepthAttachment = customSurface is null ? true : customSurface.HasDepth;
             for (var i = 0; i < colorCount; i++)
             {
@@ -669,6 +696,10 @@ public sealed partial class VulkanGraphicsDevice
             var canTimePass = timestampsSupported && nextQueryIndex + 1 < slotQueryBase + QueriesPerFrameSlot;
             if (!canTimePass) startIndex = endIndex = uint.MaxValue;
             else nextQueryIndex += 2;
+
+            // Named so a uniform-conflict message can say WHICH two passes disagreed, which is the
+            // difference between "something wrote this twice" and "lab.lit and lab.viewport did".
+            currentPassName = pass.Name;
 
             Vk.CmdBeginRenderPass(f.CommandBuffer, in rpBegin, SubpassContents.Inline);
             // Timestamps INSIDE the pass — MoltenVK resolves counter samplers
@@ -774,6 +805,10 @@ public sealed partial class VulkanGraphicsDevice
         // newly-current slot (GPU-complete) so next frame's AllocVertices starts
         // clean. Same race-free reasoning as the indirect ring.
         AdvanceArenaSlot();
+
+        // The uniform ring shares the vertex ring's slot index, so it must be rewound AFTER the
+        // advance — same slot, same GPU-completeness argument.
+        ResetUniformArenaSlot();
         AdvanceTextureUploadSlot();
         return defaultPasses > 0;
     }
@@ -1062,6 +1097,23 @@ public sealed partial class VulkanGraphicsDevice
     private readonly Dictionary<(int Set, int Binding), nint> uniformMappedPtrs = new();
     private readonly List<VkBufferEntry> uniformMappedBuffers = new();
 
+    // Per-frame record of what each uniform member was written with, and by which pass. Only
+    // populated under validation — see NoteUniformWrite for why this exists at all.
+    // Per-frame dynamic-uniform state: the CPU shadow of each block, and where that block's bytes
+    // currently live in the arena. Both cleared per frame.
+    private readonly Dictionary<(string Program, int Set, int Binding), byte[]> uniformShadows = new();
+    private readonly Dictionary<(string Program, int Set, int Binding), (Silk.NET.Vulkan.Buffer Buffer, uint Offset, byte[] Bytes)> uniformUploaded = new();
+    private readonly List<(int Set, int Binding)> uniformTouched = new();
+
+    // Scratch for one set's dynamic offsets. A set with more than this many dynamic uniform blocks
+    // does not exist in this tree (the busiest has one), and the array is per-set rather than
+    // per-frame so its size is a property of a shader, not of a scene.
+    private readonly uint[] dynamicOffsetScratch = new uint[8];
+
+    private readonly Dictionary<(string Program, int Set, int Binding, int Offset), byte[]> uniformWritesThisFrame = new();
+    private readonly Dictionary<(string Program, int Set, int Binding, int Offset), string> uniformWriteOwners = new();
+    private string currentPassName = "<none>";
+
     // Record a compute pass: a single dispatch with the storage-image barriers
     // it needs. Runs outside any render pass (the pass loop ends the prior
     // render pass before this). Storage-image targets are transitioned to
@@ -1156,10 +1208,29 @@ public sealed partial class VulkanGraphicsDevice
         uniformMappedPtrs.Clear();
         uniformMappedBuffers.Clear();
 
+        // Which (set, binding) blocks this draw touched, so the dynamic ones can be uploaded once
+        // at the end rather than per member.
+        uniformTouched.Clear();
+
         foreach (var u in uniforms)
         {
             if (!FindBufferMember(prog, u.Name, out var setIdx, out var binding, out var member)) continue;
-            var buf = prog.Sets[setIdx]!.BuffersPerBinding[binding][frameSlot];
+            var slot = prog.Sets[setIdx]!;
+
+            // ── The dynamic path: sets 0-1, program-owned blocks ────────────
+            // Written into a CPU shadow, uploaded to a fresh arena slice at the end of the draw.
+            // The shadow persists across draws in a frame, so a draw that writes only SOME members
+            // keeps the rest — which is the behaviour the program-owned buffer had, minus the
+            // aliasing.
+            if (FindDynamicSlot(slot, binding) is { } dynamicSlot)
+            {
+                var shadow = ShadowFor(prog, setIdx, binding, dynamicSlot.BlockLayout!.TotalSize);
+                WriteUniformValue(shadow.AsSpan(member.Offset, member.Size), u.Value);
+                uniformTouched.Add((setIdx, binding));
+                continue;
+            }
+
+            var buf = slot.BuffersPerBinding[binding][frameSlot];
             if (!uniformMappedPtrs.TryGetValue((setIdx, binding), out var ptr))
             {
                 void* raw;
@@ -1171,10 +1242,124 @@ public sealed partial class VulkanGraphicsDevice
                 uniformMappedBuffers.Add(buf);
             }
             var dst = new Span<byte>((void*)ptr, (int)buf.Size);
-            WriteUniformValue(dst.Slice(member.Offset, member.Size), u.Value);
+            var memberSlice = dst.Slice(member.Offset, member.Size);
+            WriteUniformValue(memberSlice, u.Value);
+
+            // Only the STATIC path can still alias — a dynamic slot gets its own slice per distinct
+            // value, so two draws disagreeing there is now correct rather than a fault.
+            if (detectUniformConflicts) NoteUniformWrite(prog, setIdx, binding, member, u.Name, memberSlice);
         }
 
         foreach (var buf in uniformMappedBuffers) Vk.UnmapMemory(Device, buf.Memory);
+
+        // <b>One slice per DISTINCT block, not per draw.</b> The common shape is a per-pass block
+        // handed to every draw in the pass; re-uploading it hundreds of times would burn the arena
+        // for nothing. A memcmp against what is already up there turns that into one allocation.
+        foreach (var (setIdx, binding) in uniformTouched)
+        {
+            var key = (prog.Name, setIdx, binding);
+            var shadow = uniformShadows[key];
+            if (uniformUploaded.TryGetValue(key, out var live) && live.Bytes.AsSpan().SequenceEqual(shadow))
+            {
+                continue;
+            }
+
+            var (buffer, offset) = AllocUniformBlock(shadow, $"{prog.Name}.set{setIdx}.binding{binding}");
+            uniformUploaded[key] = (buffer, offset, shadow.AsSpan().ToArray());
+        }
+    }
+
+    // The declared slot at this binding, if its uniforms are arena-allocated. Null for a static
+    // slot (a material set, or a storage buffer).
+    private static DescriptorSetSlot? FindDynamicSlot(VkShaderSetResources set, int binding)
+    {
+        foreach (var s in set.Slots)
+        {
+            if (s.Binding != binding) continue;
+            return IsDynamicUniformSlot(set.Set, s) ? s : null;
+        }
+
+        return null;
+    }
+
+    // The CPU-side copy of a dynamic block, kept for the frame. Zeroed on first use, which is also
+    // what the program-owned buffer effectively gave: its contents were per frame SLOT, so anything
+    // written once and not re-written was already wrong on every other slot.
+    private byte[] ShadowFor(VkShaderProgramEntry prog, int setIdx, int binding, int size)
+    {
+        var key = (prog.Name, setIdx, binding);
+        if (uniformShadows.TryGetValue(key, out var existing) && existing.Length == size) return existing;
+        var made = new byte[size];
+        uniformShadows[key] = made;
+        return made;
+    }
+
+    private void BeginUniformConflictFrame()
+    {
+        // <b>Cleared every frame regardless of the detector.</b> The shadows and slices are the
+        // dynamic path's working state, not diagnostics: a slice from last frame points into a ring
+        // slot that is about to be rewound.
+        uniformShadows.Clear();
+        uniformUploaded.Clear();
+
+        if (!detectUniformConflicts) return;
+        uniformWritesThisFrame.Clear();
+        uniformWriteOwners.Clear();
+    }
+
+    /// <summary>
+    /// Throws when two draws in one frame write DIFFERENT values to the same uniform member.
+    /// </summary>
+    /// <remarks>
+    /// <b>The invariant this makes loud.</b> A ShaderUniform lands in a buffer owned by the PROGRAM,
+    /// indexed by frame slot — so its granularity is (program, frame), not (program, draw). Every
+    /// host write happens while commands are recorded and the GPU reads at execution, so when two
+    /// draws disagree the LAST one wins for both. It is not a race; it is deterministic aliasing,
+    /// and it produces a picture that is internally consistent and wrong.
+    /// <para>
+    /// It cost two bugs in one session to learn this — a second camera whose pass shared the lit
+    /// program, then every debug view sharing the line drawer's — and not one existing instrument
+    /// saw either. Validation was clean, draw counts were right, and a capture of either target
+    /// alone looked exactly as it should, because both targets held the same camera and neither
+    /// picture could contradict the other. A person looking at the screen found both.
+    /// </para>
+    /// <para>
+    /// <b>Why throwing rather than warning.</b> The device already refuses a push payload whose
+    /// length disagrees with the shader; this is the same class of fault — a binding-model promise
+    /// the caller is not keeping — and the same answer. Two draws writing the SAME value is normal
+    /// and common (a per-pass matrix, drawn many times), so this cannot fire on correct code.
+    /// </para>
+    /// <para>
+    /// Gated on the validation flag: free in an ordinary run, and on wherever the layers are.
+    /// </para>
+    /// </remarks>
+    private void NoteUniformWrite(
+        VkShaderProgramEntry prog,
+        int setIdx,
+        int binding,
+        UniformBlockMember member,
+        string name,
+        ReadOnlySpan<byte> written)
+    {
+        var key = (prog.Name, setIdx, binding, member.Offset);
+        if (uniformWritesThisFrame.TryGetValue(key, out var previous))
+        {
+            if (previous.AsSpan().SequenceEqual(written)) return;
+
+            var was = uniformWriteOwners.TryGetValue(key, out var owner) ? owner : "an earlier draw";
+            throw new InvalidOperationException(
+                $"Uniform '{name}' on program '{prog.Name}' (set {setIdx}, binding {binding}) was " +
+                $"written with two different values in one frame — first by {was}, then again here. " +
+                $"This set's buffers are owned by the PROGRAM, one per frame slot — so both draws " +
+                $"will read the second value and the first picture will be silently wrong.\n" +
+                $"Sets 0-1 are per-draw (uniform arena + dynamic offsets) and do not have this " +
+                $"problem; this is a material-owned or storage-buffer slot. Move the value to a " +
+                $"set 0-1 uniform, to push constants, or give the consumer its own program. See " +
+                $"docs/conventions.md §2.");
+        }
+
+        uniformWritesThisFrame[key] = written.ToArray();
+        uniformWriteOwners[key] = $"pass '{currentPassName}'";
     }
 
     // Allocates a fresh transient set per non-material declared set, batches
@@ -1217,9 +1402,54 @@ public sealed partial class VulkanGraphicsDevice
             var ds = AllocateTransientSet(frameSlot, sr.Layout);
             var writeIdx = 0;
 
-            foreach (var slot in sr.Slots)
+            // <b>Dynamic offsets, in ASCENDING BINDING ORDER.</b> Vulkan does not label them: it
+            // consumes the array in the order the set's dynamic descriptors appear by binding
+            // number. Handing them over in declaration order instead would compile, validate and
+            // silently swap two blocks between bindings.
+            var dynamicCount = 0;
+
+            foreach (var slot in sr.Slots.OrderBy(x => x.Binding))
             {
                 if (slot.BlockLayout is not { } block) continue;
+
+                if (IsDynamicUniformSlot(setIdx, slot))
+                {
+                    // The descriptor names the arena buffer and the block's SIZE; the dynamic offset
+                    // supplied at bind time says which slice. A draw that wrote nothing this frame
+                    // reuses whatever the last writer left, which is the behaviour the program-owned
+                    // buffer had — minus the aliasing, because a differing write gets its own slice.
+                    var key = (prog.Name, setIdx, slot.Binding);
+                    if (!uniformUploaded.TryGetValue(key, out var live))
+                    {
+                        // Nothing has written this block this frame. Upload the zeroed shadow so the
+                        // descriptor points somewhere real rather than at a stale ring slot.
+                        var zeroed = ShadowFor(prog, setIdx, slot.Binding, block.TotalSize);
+                        var fresh = AllocUniformBlock(zeroed, $"{prog.Name}.set{setIdx}.binding{slot.Binding}");
+                        live = (fresh.Buffer, fresh.Offset, zeroed.AsSpan().ToArray());
+                        uniformUploaded[key] = live;
+                    }
+
+                    bufInfos[writeIdx] = new DescriptorBufferInfo
+                    {
+                        Buffer = live.Buffer,
+                        Offset = 0,
+                        Range = (ulong)block.TotalSize,
+                    };
+                    writes[writeIdx] = new WriteDescriptorSet
+                    {
+                        SType = StructureType.WriteDescriptorSet,
+                        DstSet = ds,
+                        DstBinding = (uint)slot.Binding,
+                        DstArrayElement = 0,
+                        DescriptorType = DescriptorType.UniformBufferDynamic,
+                        DescriptorCount = 1,
+                        PBufferInfo = &bufInfos[writeIdx],
+                    };
+                    dynamicOffsetScratch[dynamicCount++] = live.Offset;
+                    writeIdx++;
+                    continue;
+                }
+
                 if (!sr.BuffersPerBinding.TryGetValue(slot.Binding, out var buffers)) continue;
                 var buf = buffers[frameSlot];
                 bufInfos[writeIdx] = new DescriptorBufferInfo
@@ -1283,15 +1513,18 @@ public sealed partial class VulkanGraphicsDevice
                 Vk.UpdateDescriptorSets(Device, (uint)writeIdx, writes, 0, default(CopyDescriptorSet*));
             }
 
-            Vk.CmdBindDescriptorSets(
-                cmd,
-                bindPoint,
-                pipeLayout,
-                firstSet: (uint)setIdx,
-                descriptorSetCount: 1,
-                &ds,
-                dynamicOffsetCount: 0,
-                pDynamicOffsets: null);
+            fixed (uint* offsets = dynamicOffsetScratch)
+            {
+                Vk.CmdBindDescriptorSets(
+                    cmd,
+                    bindPoint,
+                    pipeLayout,
+                    firstSet: (uint)setIdx,
+                    descriptorSetCount: 1,
+                    &ds,
+                    dynamicOffsetCount: (uint)dynamicCount,
+                    pDynamicOffsets: dynamicCount > 0 ? offsets : null);
+            }
         }
     }
 

@@ -1,0 +1,57 @@
+{
+    "entryPoints" : [
+        {
+            "name" : "main",
+            "mode" : "frag"
+        }
+    ],
+    "types" : {
+        "_166" : {
+            "name" : "Present",
+            "members" : [
+                {
+                    "name" : "uParams",
+                    "type" : "vec4",
+                    "offset" : 0
+                }
+            ]
+        }
+    },
+    "inputs" : [
+        {
+            "type" : "vec2",
+            "name" : "vUv",
+            "location" : 0
+        }
+    ],
+    "outputs" : [
+        {
+            "type" : "vec4",
+            "name" : "outColour",
+            "location" : 0
+        }
+    ],
+    "textures" : [
+        {
+            "type" : "sampler2D",
+            "name" : "uScene",
+            "set" : 0,
+            "binding" : 0
+        },
+        {
+            "type" : "sampler2D",
+            "name" : "uSceneDepth",
+            "set" : 0,
+            "binding" : 1
+        }
+    ],
+    "ubos" : [
+        {
+            "type" : "_166",
+            "name" : "Present",
+            "block_size" : 16,
+            "set" : 1,
+            "binding" : 0
+        }
+    ]
+}

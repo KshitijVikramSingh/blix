@@ -17,7 +17,7 @@ public sealed class DebugContext
         SelectedPath = selectedPath;
         Values = new DebugValues(this);
         Controls = new DebugControls(this);
-        Draw = new DebugDrawChannel(this);
+        Draw = new DebugDrawChannel(this, clock);
         Stats = new DebugStatsChannel(this);
         Timers = new DebugTimersChannel(this);
         Events = new DebugEventsChannel(this, clock);
@@ -119,7 +119,7 @@ public sealed class DebugContext
             Values.Entries.ToArray(),
             Controls.Entries.ToArray(),
             Draw.Commands.ToArray(),
-            Draw.ViewProjection,
+            Draw.Views.ToArray(),
             Stats.Entries.ToArray(),
             Timers.Entries.ToArray(),
             Events.Entries.ToArray(),

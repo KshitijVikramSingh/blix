@@ -39,10 +39,44 @@ behaviour here, that test should fail first.
   parent.
 - No dirty-flag cache, no `Origin`/`Pivot`, no non-uniform scale on shared
   parents (it shears children). These are deliberate limits, documented inline.
+- **A clip sample starts from a base pose, always.** `AnimationClip.Sample`
+  writes only the channels a clip has tracks for; without resetting to the rest
+  pose first, every untouched bone keeps the *previous* frame's value. That is
+  invisible on a full clip and is a character whose legs lag its arms on a
+  partial one. `ClipPlayer` owns the reset, the loop wrap and the zero-duration
+  guard so it is made once rather than remembered three times.
+- **A palette matrix is not a joint position.** `ComputeBonePalette` produces
+  `InverseBindPose × world` — a *rest vertex's* displacement, exactly zero at
+  rest. Where a joint **is** comes from the hierarchy walk's `world` term alone.
+  Drawing a skeleton from palette translations is correct arithmetic answering
+  the wrong question, and it looks like a knot at the origin.
+- **Root motion is a delta, taken across the loop.** `RootMotion` reports the
+  travel between two clip times in the root's parent frame; `AcrossLoop` walks
+  to the end of the cycle and on from its start rather than subtracting, which
+  is the one place every implementation of this is wrong. Applying it — rotating
+  it into world, driving a body with it — stays the caller's decision.
+- **Taking a delta obliges you to strip it.** A clip that walks its root already
+  moves the mesh. A caller that also drives its object transform by the delta
+  applies the travel twice: double speed, and a snap back once per loop.
+  `RootMotion.Strip` reverts every parentless bone to rest, and the pairing is
+  the whole division — the clip says how far, the game says where.
+- **N posed bodies share ONE palette buffer, sliced at `i * BoneCount`.** A
+  descriptor set's buffer is not copied at record time, so two draws in a frame
+  sharing one palette binding both read the second pose. `BonePaletteSet` owns
+  the stride — the sentence a C# packing loop and a GLSL `gl_InstanceIndex *
+  stride` both have to mean — and deliberately owns nothing else: whether the
+  world placement is baked into the palette or carried in an instance buffer is
+  where its consumers genuinely differ.
+- **A one-shot clip finishes at the boundary in its direction of travel.**
+  `Rate` may be negative, so a non-looping clip played backwards ends at `t = 0`
+  as surely as a forward one ends at `Duration`. "Finished" is not "reached the
+  chronological end".
 
 **Enforced by:** [`blix.md` §Transform3D](blix.md) (incl. *Deliberate limits*) ·
-`Blix.Test.Graphics` Sections **AH** (compose / reparent / cycle) and **AJ**
-(pose basis / `LookAt` / `WorldRotation`).
+`Blix.Test.Graphics` Sections **AH** (compose / reparent / cycle), **AJ**
+(pose basis / `LookAt` / `WorldRotation`) and **AQ** (rest reset, loop-seam
+travel, palette-vs-joint, strip, direction-aware finish, palette stride) ·
+`Toolchain.Probe --rig` and its no-arg binding check.
 
 ## 2. Matrices & the graphics backend
 
@@ -60,6 +94,24 @@ behaviour here, that test should fail first.
 - **Gotcha:** the hand-built *projection* matrices (`CreatePerspectiveVulkan`,
   the orthographics) are authored directly in shader-space (column form). Don't
   pattern-match off them when reasoning about *model* matrices.
+- **A `ShaderUniform` on sets 0–1 is per-DRAW.** Its block is bump-allocated from
+  a per-frame uniform arena and bound with a **dynamic offset**, so two draws in a
+  frame — or two passes sharing one program — may hold different values. A draw
+  that writes nothing reuses the last writer's slice; a draw whose bytes are
+  unchanged reuses it too, so the common "one per-pass block, handed to every
+  draw" shape costs one allocation, not one per draw.
+  - This was **not** true until the uniform arena landed. A program owned one
+    buffer per frame slot, so the last writer won for every draw in the frame —
+    deterministic aliasing, producing a picture internally consistent and wrong.
+    It cost two bugs in one session and no instrument saw either.
+  - **Sets 2–3 are still per-program-per-frame.** Materials own their buffers
+    through `MaterialBindings`, which is already per-consumer and cannot alias;
+    making them dynamic would put an offset at ~33 call sites for no gain.
+  - Under `BLIX_VK_VALIDATE=1` the device **throws** when two draws disagree about
+    a uniform member *on the static path*, naming both passes. Two draws writing
+    the same value is normal and does not fire.
+  - Push constants remain the right home for small per-draw payloads (copied at
+    record time, up to the guaranteed 128 bytes) — they need no descriptor at all.
 - **Vulkan is the sole backend.** There is no cross-backend parity promise; new
   rendering capability is allowed to be Vulkan-shaped. The binding model *can be
   derived* — SPIR-V reflection → `ShaderInterface` (`spirv-cross --reflect` →
@@ -127,14 +179,77 @@ pose).
     continuous steering) — unifying them would force one shape onto two. The test
     isn't "is it duplicated?" but "do two consumers want the *same decision*, and
     does naming it add capability?" Often the honest answer is no.
+  - *Worked example (build infrastructure obeys the same rule):* thirteen projects
+    carried a copy of the SPIR-V compile target, and the raw count argued for one
+    shared target. They were not thirteen copies of one thing — eight were identical
+    (the app shape), two were a **library** shape building into their own source tree,
+    and two were different **algorithms** (reflection sidecars; `#define` variants).
+    The shared `BlixCompileSpirV` absorbs eleven; the other two opt out. Folding them
+    in would have produced a shader build *system*, which is policy, and policy waits
+    for a third consumer. The argument for extracting at all was never tidiness — it
+    was that copies **drift**, and one already had: a project missing `@(GlslInclude)`
+    from its `Inputs` would not rebuild when a shared `.glsl` changed.
 - **Library, not framework.** New rendering capability lands as a *primitive the
   game calls*, not a stage the engine runs for you. There is no `SceneRenderer`
   that owns read→cull→draw; demos compose engine primitives and keep their own
   draw groups, pass routing, and policy.
 
+- **A view is a value, not a registration.** `ViewDeclaration` — a camera, a
+  target and two rectangles — is all anything needs to render into a picture or
+  turn a pointer into a ray through it; `ViewPicking.RayThrough` never reads the
+  id. The one `ViewTable` lives on `DebugState` and exists to **group across
+  frames**: which debug commands belong to which picture, which trail remembers
+  which points. Build a declaration to point at a picture; intern a name only to
+  ask diagnostics to route geometry into it. (Settled by the toolchain lab's
+  embedded viewport — two stages of a real consumer, no friction from the
+  table's location. `plan-blix-view.md` §D.)
+
+- **Decomposing an application and extracting a library are different bars.**
+  Moving code into a shared library needs a *second consumer* wanting the same
+  decision. Splitting one executable into several classes needs only that the
+  file had stopped being readable — and those classes stay in the executable
+  until something else asks for them. A root constructs its parts and calls
+  them; there is no discovery, registration, or active-tool branch, and a
+  different executable simply builds a different root.
+
 **Enforced by:** [`architecture.md` §"Library, not framework"](architecture.md)
+· [`architecture.md` §"How an application is put together"](architecture.md)
 · the *Proves / Owns* header block on each `src/Blix.Demos.*/Program.cs` · the
 *Deliberate limits* sections throughout [`blix.md`](blix.md).
+
+---
+
+## 5. Remove assumptions; let policy wait
+
+Blix spent its early life assuming **one view, one frame, one world, one executable,
+one host** — a single camera per frame, no memory across frames, no container but the
+game's own, an application that finds its own assets and builds its own shaders, and a
+host that decided from one type test what an application was allowed to have. Those
+were never designed; they were what "one of each" looks like before anything needs two.
+
+The rule that unwound them, and the one to apply next time:
+
+> **Removing a singular assumption is almost never wrong. Adding a policy usually is.**
+
+Removing a constraint changes what is *sayable* and nothing downstream has to agree
+with it — named views, trails, a project scope, a host that composes rather than
+decides. Adding policy encodes a decision two consumers can disagree about — gizmo
+semantics, an IK solver, a navigation abstraction, a container that decides what a
+world contains. The first can be done ahead of a consumer; the second cannot, and §4
+is the same rule wearing different clothes.
+
+Two corollaries worth keeping:
+
+- **An instrument that filters on the predicate a bug lives in cannot see the bug.**
+  A facing test gated on `IsWorking` discarded the exact frame the fault occurred on
+  and reported calm for a year.
+- **A green build is not evidence that a build step ran.** A shared target that
+  silently overrode two projects shipped no shaders under "Build succeeded"; only
+  rebuilding the baseline to compare caught it.
+
+**Enforced by:** the absence list below · `Blix.Test.Graphics` Section **AN**
+(picking agrees with the camera) · `Blix.Test.Diagnostics` (a primitive with no view
+throws; a view keeps its identity across frames).
 
 ---
 
@@ -143,7 +258,14 @@ pose).
 Blix now reaches across the corners it set out to cover — rendering,
 assets/streaming, animation, physics, audio, 2D, diagnostics, and the
 game-layer — each *proven by a demo or game* rather than declared. That breadth
-is the milestone worth naming. It is **not** a stability promise: the principles
+is the milestone worth naming.
+
+The **application chassis** is the more recent one: an application now gets a window,
+its own interface, named views, retained trails, picking into any of them, shared
+shader compilation, shared arguments and a bounded run without restating any of it —
+and `src/Blix.Demos.Chassis/` is the proof, at 25 lines of project file and no shaders
+of its own. The layering that made room for it is unchanged; what moved was the set of
+things a single executable was assumed to own. It is **not** a stability promise: the principles
 above are frozen, but signatures still move, a primitive may be reshaped, and a
 corner may be restructured when a real consumer shows the current shape is
 wrong. New capability lands under the extract-under-pressure rule (§4), inside
@@ -161,7 +283,13 @@ pain forces it:
 ECS · engine-owned scene graph / GameObject hierarchy · prefab system · editor /
 scenes-as-assets format · asset registry · material graph · scripting boundary ·
 constraint-solver physics · navigation · project templates · reusable
-enemy/projectile/gameplay framework.
+enemy/projectile/gameplay framework · **preview/inspection world container** · **transform
+gizmos** · **a shader build system** (as opposed to one shared compile target).
+
+The last three are recent and were declined on §5 grounds rather than for lack of
+time: the engine can hand you a ray through any view and remember where a thing has
+been, but what a world *contains* — and what selecting something in it means — is a
+decision its two would-be consumers already disagree about.
 
 The per-subsystem **Deliberate limits** blocks in [`blix.md`](blix.md) record the
 smaller versions of the same call.

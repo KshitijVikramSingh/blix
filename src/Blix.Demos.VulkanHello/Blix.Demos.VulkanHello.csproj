@@ -1,6 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <!-- The application brings its own UI library. Blix.Core declares IUiSource with no UI types in
+         the signature, so the engine never takes this dependency on an application's behalf. -->
+    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
     <ProjectReference Include="..\Blix\Blix.csproj" />
     <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
     <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
@@ -19,9 +22,6 @@
     <RootNamespace>Blix.Demos.VulkanHello</RootNamespace>
   </PropertyGroup>
 
-  <!-- glslc: ship pre-compiled .spv at build time. Homebrew installs into
-       /opt/homebrew/bin (Apple Silicon) or /usr/local/bin (Intel); fall back
-       to PATH on Linux/Windows. Users can override with -p:Glslc=/path/to/glslc. -->
   <PropertyGroup>
     <Glslc Condition="'$(Glslc)' == '' AND Exists('/opt/homebrew/bin/glslc')">/opt/homebrew/bin/glslc</Glslc>
     <Glslc Condition="'$(Glslc)' == '' AND Exists('/usr/local/bin/glslc')">/usr/local/bin/glslc</Glslc>
@@ -46,13 +46,5 @@
   <!-- Compile GLSL → SPIR-V directly into the output dir so the demo's
        File.ReadAllBytes path picks them up without a separate <None> copy.
        Inputs/Outputs gates re-runs to actual source changes. -->
-  <Target Name="CompileSpirV"
-          AfterTargets="CopyFilesToOutputDirectory"
-          Inputs="@(GlslShader);@(GlslInclude);$(BlixShaderCompilerDll)"
-          Outputs="@(GlslShader -> '$(OutDir)Shaders\%(Filename)%(Extension).spv')">
-    <MakeDir Directories="$(OutDir)Shaders" />
-    <Message Text="Compiling SPIR-V: %(GlslShader.Identity)" Importance="high" />
-    <Exec Command="dotnet &quot;$(BlixShaderCompilerDll)&quot; --glslc &quot;$(Glslc)&quot; --input &quot;%(GlslShader.FullPath)&quot; --output &quot;$(OutDir)Shaders\%(GlslShader.Filename)%(GlslShader.Extension).spv&quot; --include &quot;$(MSBuildProjectDirectory)/../Blix.Shaders&quot;" />
-  </Target>
 
 </Project>

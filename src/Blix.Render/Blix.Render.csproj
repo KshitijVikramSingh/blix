@@ -13,6 +13,8 @@
   </ItemGroup>
 
   <PropertyGroup>
+    <!-- .spv ships with the library, not into a game's output folder. -->
+    <BlixShaderMode>Library</BlixShaderMode>
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
@@ -33,13 +35,6 @@
     <GlslShader Include="Shaders\sprite.frag" />
   </ItemGroup>
 
-  <Target Name="CompileSpirV"
-          BeforeTargets="AssignTargetPaths"
-          Inputs="@(GlslShader);$(BlixShaderCompilerDll)"
-          Outputs="@(GlslShader -> '$(MSBuildThisFileDirectory)Shaders\%(Filename)%(Extension).spv')">
-    <Message Text="Compiling SPIR-V (lib): %(GlslShader.Identity)" Importance="high" />
-    <Exec Command="dotnet &quot;$(BlixShaderCompilerDll)&quot; --glslc &quot;$(Glslc)&quot; --input &quot;%(GlslShader.FullPath)&quot; --output &quot;$(MSBuildThisFileDirectory)Shaders\%(GlslShader.Filename)%(GlslShader.Extension).spv&quot; --include &quot;$(MSBuildProjectDirectory)/../Blix.Shaders&quot;" />
-  </Target>
 
   <ItemGroup>
     <None Include="Shaders\*.spv">

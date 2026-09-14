@@ -6,6 +6,7 @@ using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 using Blix.Render;
 using Blix.Runtime.Silk;
+using ImGuiNET;
 
 namespace Blix.Demos.VulkanHello;
 
@@ -25,15 +26,26 @@ namespace Blix.Demos.VulkanHello;
 //   • nothing gameplay — this is the minimal reference call site; keep it minimal
 public static class Program
 {
-    public static void Main()
+    public static void Main(string[] args)
     {
         var loop = new HelloLoop();
-        using var window = new Window(loop, new WindowOptions("Blix — Vulkan Cube", 1280, 720));
+        // Through FromArgs so the host's shared arguments actually reach it. This demo used to
+        // construct its options directly, which silently ignored --frames: every "bounded" run of
+        // it was really an unbounded one that something else killed, and a killed process never
+        // tears down, so it never reported a leak either. A comparison against it was measuring
+        // nothing.
+        var options = WindowOptions.FromArgs(args, WindowOptions.Default with
+        {
+            Title = "Blix — Vulkan Cube",
+            Width = 1280,
+            Height = 720,
+        });
+        using var window = new Window(loop, options);
         window.Run();
     }
 }
 
-internal sealed class HelloLoop : IGameLoop, IDebuggable
+internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
 {
     public string DebugName => "vulkan-cube";
 
@@ -340,7 +352,9 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
         // ViewProjection is what the Vulkan-side line drawer uses to project
         // these world-space coordinates onto the swapchain. Must match the
         // camera's matrix or the overlay floats away from the cube.
-        debug.Draw.ViewProjection = viewProj;
+        // Every primitive below belongs to this view. Scoped rather than assigned: the old
+        // per-channel matrix meant a frame could only ever be one world seen one way.
+        using var view = debug.Draw.In("main", viewProj);
 
         // World axes at origin (X red, Y green, Z blue). One meter long.
         // Confirms which way each axis goes after the Vulkan +Y-down flip
@@ -363,6 +377,56 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable
         debug.Draw.Obb("cube/left/obb", leftObb, new GraphicsColor(1f, 1f, 1f, 0.85f));
         var rightObb = Matrix4x4.CreateScale(0.51f) * rightModel;
         debug.Draw.Obb("cube/right/obb", rightObb, new GraphicsColor(1f, 1f, 1f, 0.85f));
+
+        // <b>The one primitive with a memory.</b> A corner of each cube, remembered for two seconds, so a
+        // spinning cube draws the arc its corner has just travelled. Every other call in this method
+        // describes this instant; these two describe the recent past, which nothing in diagnostics could
+        // express before — a draw command could not outlive the frame that made it.
+        //
+        // Trails are also the cheapest possible demonstration that the two axes compose: the points are
+        // remembered per path and drawn into whichever view is in scope.
+        if (!trailsOn) return;
+        var corner = new Vector3(0.5f, 0.5f, 0.5f);
+        var leftCorner = Vector3.Transform(corner, leftModel);
+        var rightCorner = Vector3.Transform(corner, rightModel);
+        debug.Draw.Trail(
+            "cube/left/corner", leftCorner, new GraphicsColor(1f, 0.55f, 0.2f, 1f), trailSeconds);
+        debug.Draw.Trail(
+            "cube/right/corner", rightCorner, new GraphicsColor(0.3f, 0.9f, 1f, 1f), trailSeconds);
+
+    }
+
+    // --- IUiSource ----------------------------------------------------------
+    //
+    // An application's own panel, drawn into the same ImGui frame as the diagnostics overlay rather than
+    // instead of it. Before this, the only interface a Blix application could have WAS the overlay: ImGui
+    // existed only for an IDebuggable loop and the frame was hard-wired to the diagnostics panels.
+    //
+    // The text field is here deliberately. ImGui has always reported WantCaptureKeyboard and Blix never
+    // read it, so typing used to reach the game as well as the field — invisible while the overlay was
+    // the only UI, because it has hardly any text fields.
+
+    private bool trailsOn = true;
+    private float trailSeconds = 2f;
+    private string note = "type here — keys must not reach the game";
+
+    public string UiName => "hello";
+
+    public void DrawUi()
+    {
+        ImGui.SetNextWindowSize(new Vector2(340, 150), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowPos(new Vector2(20, 220), ImGuiCond.FirstUseEver);
+        if (!ImGui.Begin("Hello"))
+        {
+            ImGui.End();
+            return;
+        }
+
+        ImGui.Checkbox("corner trails", ref trailsOn);
+        ImGui.SliderFloat("seconds", ref trailSeconds, 0.25f, 8f);
+        ImGui.InputText("note", ref note, 128);
+        ImGui.TextDisabled($"{(trailsOn ? "tracing" : "off")} · {trailSeconds:0.0}s");
+        ImGui.End();
     }
 
     private static (VertexPosition3Texture[] Vertices, ushort[] Indices) BuildCube()

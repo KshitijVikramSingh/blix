@@ -1,6 +1,7 @@
 using System.Numerics;
 using Blix;
 using Blix.Assets;
+using Blix.Core;
 using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
@@ -513,8 +514,14 @@ static UniformBlockLayout Mat4Block() => new(
     var bytes = new byte[64];
     bytes[0] = 0xAB; bytes[63] = 0xCD;
     var withPush = baseCmd with { PushConstants = bytes };
-    t.ExpectTrue("H.1 with-update preserves PushConstants reference",
-        ReferenceEquals(withPush.PushConstants, bytes));
+
+    // <b>The contract inverted here, deliberately.</b> This asserted that a with-update
+    // PRESERVED the caller's reference, which is the aliasing the record now exists to
+    // prevent: a recorded command is read at Execute, long after the caller may have
+    // reused its buffer. The payload must survive; the reference must not. See Section AP
+    // and Blix.Graphics/RenderCommand.cs.
+    t.ExpectTrue("H.1 with-update COPIES the payload rather than aliasing the caller's array",
+        !ReferenceEquals(withPush.PushConstants, bytes));
     t.ExpectClose("H.1 PushConstants[0] preserved", withPush.PushConstants![0], 0xAB);
     t.ExpectClose("H.1 PushConstants[63] preserved", withPush.PushConstants![63], 0xCD);
 }
@@ -2258,6 +2265,692 @@ static ShaderInterface MinimalShader() => new(new[]
         cycleDetected = exception.Message.Contains("Circular #include", StringComparison.Ordinal);
     }
     t.ExpectTrue("AM.4 pragma ownership does not weaken include-cycle detection", cycleDetected);
+}
+
+// ============================================================================
+// Section AN — ViewPicking: a ray through a named view, panel or not.
+// ============================================================================
+//
+// Camera3D.ScreenPointToRay recomputes the view-projection from a viewport aspect
+// ratio, which assumes the view fills the window and that its matrix is the one the
+// camera would derive. Neither holds for a view drawn into a panel, which is what
+// views were made first-class to allow. ViewPicking reads the view's OWN matrix and
+// rectangle instead.
+//
+// The first test is the important one: for a full-window view the two paths must
+// agree exactly, which pins the new one against the old one that Section X already
+// covers. A picking routine that disagrees with the camera is worse than none.
+{
+    var camera = new Camera3D();
+    const float W = 1600f, H = 900f;
+    var views = new ViewTable();
+    var full = views.Declare(
+        "main", camera.GetViewProjection(W / H), default, (int)W, (int)H);
+
+    var pointer = new Vector2(1180f, 300f);
+    var fromCamera = camera.ScreenPointToRay(pointer.X, pointer.Y, W, H);
+    var fromView = ViewPicking.RayThrough(full, pointer);
+
+    t.ExpectTrue("AN.1 a full-window view yields a ray", fromView is not null);
+    t.ExpectClose("AN.1 and it is the camera's ray, exactly",
+        new Vector4(fromView!.Value.Direction, 0f), new Vector4(fromCamera.Direction, 0f));
+    t.ExpectClose("AN.1 from the same origin",
+        new Vector4(fromView.Value.Origin, 1f), new Vector4(fromCamera.Origin, 1f));
+
+    // A panel: same camera, but the picture occupies a rectangle offset into the
+    // window. The centre of THAT rectangle must give the view's centre ray — which is
+    // precisely what passing the full window width/height to ScreenPointToRay cannot
+    // express, because it has nowhere to put the offset.
+    var panelRect = new Rect(400f, 100f, 800f, 450f);
+    var panel = views.Declare(
+        "inspector", camera.GetViewProjection(panelRect.Width / panelRect.Height),
+        default, panelRect, panelRect);
+
+    var panelCentre = new Vector2(panelRect.X + panelRect.Width / 2f, panelRect.Y + panelRect.Height / 2f);
+    var centreRay = ViewPicking.RayThrough(panel, panelCentre);
+    var cameraCentre = camera.ScreenPointToRay(
+        panelRect.Width / 2f, panelRect.Height / 2f, panelRect.Width, panelRect.Height);
+    t.ExpectTrue("AN.2 a panel view yields a ray at its own centre", centreRay is not null);
+    t.ExpectClose("AN.2 and it is the centre ray, offset and all",
+        new Vector4(centreRay!.Value.Direction, 0f), new Vector4(cameraCentre.Direction, 0f));
+
+    // Outside the rectangle is not a miss on the scene — it is not this view's pointer
+    // at all, which is how "which view is under the cursor" gets answered.
+    t.ExpectTrue("AN.3 a pointer left of the panel belongs to no view",
+        ViewPicking.RayThrough(panel, new Vector2(panelRect.X - 1f, panelCentre.Y)) is null);
+    t.ExpectTrue("AN.3 a pointer below the panel belongs to no view",
+        ViewPicking.RayThrough(panel, new Vector2(panelCentre.X, panelRect.Y + panelRect.Height + 1f)) is null);
+    t.ExpectTrue("AN.3 the window pointer that hit the full view misses the panel",
+        ViewPicking.RayThrough(panel, new Vector2(50f, 50f)) is null);
+
+    // The target is not consulted. A view rendered to an off-screen texture picks
+    // exactly like one on the swapchain — which is the whole reason an inspector
+    // viewport stops being a special case.
+    var offscreen = views.Declare(
+        "offscreen", camera.GetViewProjection(panelRect.Width / panelRect.Height),
+        new RenderSurfaceHandle(7), panelRect, panelRect);
+    var offscreenRay = ViewPicking.RayThrough(offscreen, panelCentre);
+    t.ExpectTrue("AN.4 an off-screen view picks at all", offscreenRay is not null);
+    t.ExpectClose("AN.4 and identically to the on-screen one",
+        new Vector4(offscreenRay!.Value.Direction, 0f), new Vector4(centreRay.Value.Direction, 0f));
+
+    // <b>Half-open on the far edges.</b> Two views sharing a boundary must not both claim
+    // the pixel on it, or "ask every view who owns the pointer" stops having one answer.
+    var left = views.Declare("left", camera.GetViewProjection(1f), default, new Rect(0f, 0f, 400f, 400f), new Rect(0f, 0f, 400f, 400f));
+    var right = views.Declare("right", camera.GetViewProjection(1f), default, new Rect(400f, 0f, 400f, 400f), new Rect(400f, 0f, 400f, 400f));
+    var onBoundary = new Vector2(400f, 200f);
+    var leftClaims = ViewPicking.RayThrough(left, onBoundary) is not null;
+    var rightClaims = ViewPicking.RayThrough(right, onBoundary) is not null;
+    t.ExpectTrue("AN.6 exactly one view owns a shared boundary pixel", leftClaims != rightClaims);
+    t.ExpectTrue("AN.6 and it is the one the pixel starts", rightClaims);
+    t.ExpectTrue("AN.6 the interior still belongs to the left view",
+        ViewPicking.RayThrough(left, new Vector2(399f, 200f)) is not null);
+
+    // A matrix can invert cleanly and still send a corner of the NDC cube to w = 0 — a
+    // point on the eye plane with no finite position. Infinities that survive every
+    // later test land as a ray pointing nowhere, diagnosed three hours later as "the
+    // mouse is offset".
+    var singular = new Matrix4x4(
+        1f, 0f, 0f, 0f,
+        0f, 1f, 0f, 0f,
+        0f, 0f, 1f, 1f,
+        0f, 0f, 0f, 0f);
+    var eyePlane = views.Declare("eyeplane", singular, default, panelRect, panelRect);
+    var eyeRay = ViewPicking.RayThrough(eyePlane, panelCentre);
+    t.ExpectTrue("AN.7 a view that unprojects to w=0 yields no ray rather than infinities",
+        eyeRay is null || (float.IsFinite(eyeRay.Value.Origin.X) && float.IsFinite(eyeRay.Value.Direction.X)));
+
+    // A degenerate matrix must not throw; there is no ray through a view you cannot
+    // invert, and callers already handle "the pointer is not over this view".
+    var broken = views.Declare("broken", default, default, panelRect, panelRect);
+    t.ExpectTrue("AN.5 a non-invertible view projection yields no ray",
+        ViewPicking.RayThrough(broken, panelCentre) is null);
+}
+
+// ============================================================================
+// Section AO — GestureOwnership: the release goes where the press went.
+// ============================================================================
+//
+// Two bugs that are reflections of each other. Routing a release by who wants input
+// NOW drops it when focus moves mid-gesture, stranding a button the application
+// believes is still held. Delivering every release unconditionally fixes that and
+// hands the application releases for presses the UI swallowed. The press already
+// answers the question; this pins that it is asked at the right moment.
+{
+    const int A = 65, B = 66;
+
+    // The ordinary case: application owns the press, hears the release.
+    var own = new GestureOwnership();
+    t.ExpectTrue("AO.1 an uncaptured press reaches the application", own.Press(A, uiWantsInput: false));
+    t.ExpectTrue("AO.1 and its release does too", own.Release(A));
+    t.ExpectTrue("AO.1 nothing is left held", own.HeldCount == 0);
+
+    // The case unconditional delivery got wrong: the UI owned the press.
+    t.ExpectTrue("AO.2 a captured press does not reach the application", !own.Press(B, uiWantsInput: true));
+    t.ExpectTrue("AO.2 and neither does its release", !own.Release(B));
+
+    // The case the guard got wrong: pressed in the world, released over a panel. Focus
+    // at release time is not consulted at all, which is the whole point.
+    t.ExpectTrue("AO.3 a press in the world is owned", own.Press(A, uiWantsInput: false));
+    t.ExpectTrue("AO.3 its release lands even if a panel now has focus", own.Release(A));
+
+    // A release with no press — the host consumed the key for a dump or an overlay
+    // toggle, so it never reached here.
+    t.ExpectTrue("AO.4 an unmatched release is not invented", !own.Release(B));
+
+    // Two gestures at once stay independent.
+    own.Press(A, uiWantsInput: false);
+    own.Press(B, uiWantsInput: true);
+    t.ExpectTrue("AO.5 only the application's own press is held", own.HeldCount == 1);
+    t.ExpectTrue("AO.5 the captured one releases to nobody", !own.Release(B));
+    t.ExpectTrue("AO.5 the owned one still releases", own.Release(A));
+
+    // Focus loss: the releases will never arrive, and an application left believing a
+    // key is held is the original bug in a different hat.
+    own.Press(A, uiWantsInput: false);
+    own.Clear();
+    t.ExpectTrue("AO.6 clearing forgets held presses", own.HeldCount == 0);
+    t.ExpectTrue("AO.6 so a later release delivers nothing", !own.Release(A));
+}
+
+// ============================================================================
+// Section AP — recorded commands own their push payload.
+// ============================================================================
+//
+// A pass body records; the GPU work happens at Execute. A command that kept a
+// reference to the caller's scratch array therefore read it long after the caller
+// had moved on — and a caller reusing one array across draws gave every draw the
+// array's final contents. VkLineDrawer hit it, LabRenderer hit it (seven objects at
+// the seventh's transform, six apparently missing, draw counts perfectly healthy),
+// and the index-offset DrawIndexed overload exists because it bit vertex buffers.
+{
+    var scratch = new byte[8];
+
+    scratch[0] = 1;
+    var first = new DrawIndexedCommand(
+        new VertexBufferHandle(1), new IndexBufferHandle(1), new PipelineHandle(1), 3,
+        Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(),
+        PushConstants: scratch);
+
+    // The caller reuses its buffer for the next draw, exactly as a renderer packing
+    // per-object data does.
+    scratch[0] = 2;
+    var second = new DrawIndexedCommand(
+        new VertexBufferHandle(1), new IndexBufferHandle(1), new PipelineHandle(1), 3,
+        Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(),
+        PushConstants: scratch);
+
+    t.ExpectTrue("AP.1 the first command kept what it was recorded with",
+        first.PushConstants is { } a && a[0] == 1);
+    t.ExpectTrue("AP.1 the second kept its own",
+        second.PushConstants is { } b && b[0] == 2);
+    t.ExpectTrue("AP.1 neither is the caller's array",
+        !ReferenceEquals(first.PushConstants, scratch) && !ReferenceEquals(second.PushConstants, scratch));
+
+    // And mutating the caller's buffer after recording changes nothing, which is the
+    // property the whole thing turns on.
+    scratch[0] = 99;
+    t.ExpectTrue("AP.2 a later mutation cannot reach a recorded command",
+        first.PushConstants![0] == 1 && second.PushConstants![0] == 2);
+
+    t.ExpectTrue("AP.3 a null payload stays null",
+        new DrawIndexedCommand(
+            new VertexBufferHandle(1), new IndexBufferHandle(1), new PipelineHandle(1), 3,
+            Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>()).PushConstants is null);
+
+    // The other two command families record payloads the same way.
+    var dispatch = new DispatchCommand(
+        new PipelineHandle(2), 1, 1, 1,
+        Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), scratch);
+    var indirect = new DrawIndexedIndirectCommand(
+        new VertexBufferHandle(1), new IndexBufferHandle(1), new PipelineHandle(1),
+        new IndirectBufferHandle(1), 0, 1,
+        Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), null, scratch);
+    scratch[0] = 7;
+    t.ExpectTrue("AP.4 compute dispatch owns its payload too", dispatch.PushConstants![0] == 99);
+    t.ExpectTrue("AP.4 indirect draw owns its payload too", indirect.PushConstants![0] == 99);
+}
+
+// ============================================================================
+// Section AQ — ClipPlayer: the rest reset, and root motion across the loop.
+// ============================================================================
+//
+// Two behaviours, both of which look correct in a still frame and are wrong over time:
+//
+//   1. A partial clip sampled without resetting to rest leaves every untouched bone
+//      holding LAST frame's value. Three consumers wrote that reset by hand.
+//   2. Root travel taken as `root(t1) - root(t0)` reports a jump backwards across the
+//      whole cycle every time t1 wraps — a walk that lurches once per loop.
+//
+// The fixture is a two-bone skeleton with a clip that animates ONLY the root, which
+// makes both failures observable in one setup: bone 1 is what the reset protects, and
+// bone 0 is what travels.
+{
+    // Bind pose: root at the origin, child one unit up. InverseBindPose is the inverse
+    // of the bone's object-space bind transform, which is what Skeleton documents.
+    var bones = new[]
+    {
+        new Bone("root", -1, Matrix4x4.Identity),
+        new Bone("child", 0, Matrix4x4.CreateTranslation(0, -1, 0)),
+    };
+    var skeleton = new Skeleton(bones);
+
+    // The root walks 2 m along +X over 1 s and does NOT return — real root motion.
+    var travel = new AnimationClip("walk", new[]
+    {
+        new BoneTrack
+        {
+            BoneIndex = 0,
+            Translation = new KeyframeVector3Curve(new[]
+            {
+                new Keyframe<Vector3>(0.0, Vector3.Zero),
+                new Keyframe<Vector3>(1.0, new Vector3(2f, 0f, 0f)),
+            }),
+        },
+    });
+
+    t.ExpectClose("AQ.1 clip duration comes from its longest channel", (float)travel.Duration, 1f);
+
+    var player = new ClipPlayer(skeleton, travel);
+
+    // ── The reset ────────────────────────────────────────────────────────────
+    // Bone 1 has no track, so every sample must leave it at its rest value. Dirty the
+    // pose first: without the CopyFrom, the dirt survives and the bone is one frame — or
+    // one clip — behind forever.
+    player.Pose.Locals[1] = new BoneTransform(new Vector3(99f, 99f, 99f), Quaternion.Identity, Vector3.One);
+    player.Advance(0.25);
+    t.ExpectClose("AQ.2 an untracked bone is reset to rest, not left dirty",
+        player.Pose.Locals[1].Translation.X, 0f);
+    t.ExpectClose("AQ.2 a tracked bone follows its curve", player.Pose.Locals[0].Translation.X, 0.5f);
+
+    // ── Travel inside one pass ───────────────────────────────────────────────
+    player.ScrubTo(0.0);
+    player.Advance(0.25);
+    t.ExpectClose("AQ.3 a quarter of the clip travels a quarter of the distance",
+        player.RootDelta.Translation.X, 0.5f);
+
+    // A scrub is a jump, not travel. Integrating a scrub would teleport whatever the
+    // delta drives, which is why the player clears it rather than reporting the gap.
+    player.ScrubTo(0.9);
+    t.ExpectClose("AQ.4 a scrub reports no travel", player.RootDelta.Translation.X, 0f);
+
+    // ── The loop boundary ────────────────────────────────────────────────────
+    // Standing at 0.9 and stepping 0.2 crosses the seam: 0.1 s left in this cycle plus
+    // 0.1 s of the next, which is 0.4 m forward. The subtraction form reports
+    // root(0.1) - root(0.9) = -1.6 m, and the sign alone gives it away.
+    player.ScrubTo(0.9);
+    player.Advance(0.2);
+    t.ExpectClose("AQ.5 travel across the seam is forward, not a cycle backwards",
+        player.RootDelta.Translation.X, 0.4f);
+    t.ExpectClose("AQ.5 and the clock lands where it should", (float)player.Time, 0.1f);
+
+    // ── Many cycles in one step ──────────────────────────────────────────────
+    // A long frame (a debugger pause, a hitch) must not lose the cycles it skipped.
+    player.ScrubTo(0.0);
+    player.Advance(3.5);
+    t.ExpectClose("AQ.6 a step spanning three and a half cycles travels seven metres",
+        player.RootDelta.Translation.X, 7f);
+
+    // ── Integrated, at a step that never lands on the seam ───────────────────
+    // The property Stage C is actually about: summing the per-frame deltas over several
+    // loops equals the per-cycle travel times the number of cycles. A step chosen NOT to
+    // divide the duration puts every wrap in the middle of a frame, which is the only
+    // case the piecewise walk exists for.
+    player.ScrubTo(0.0);
+    var summed = 0f;
+    for (var i = 0; i < 100; i++)
+    {
+        player.Advance(0.03);
+        summed += player.RootDelta.Translation.X;
+    }
+
+    t.ExpectClose("AQ.7 100 steps of 0.03 s integrate to three cycles of travel", summed, 6f, 0.001f);
+
+    // ── Reverse ──────────────────────────────────────────────────────────────
+    // Negative rate takes the mirrored path (bounded by the clip's start, not its end),
+    // so it is genuinely different code and genuinely able to be wrong on its own.
+    player.ScrubTo(0.1);
+    player.Rate = -1f;
+    player.Advance(0.2);
+    t.ExpectClose("AQ.8 running backwards across the seam travels backwards",
+        player.RootDelta.Translation.X, -0.4f);
+    t.ExpectClose("AQ.8 and wraps to the end of the clip", (float)player.Time, 0.9f);
+    player.Rate = 1f;
+
+    // ── An in-place clip ─────────────────────────────────────────────────────
+    // The common case: the root returns to where it started, so a whole cycle nets zero
+    // and the game owns locomotion. It must net zero through the SAME code path that
+    // reports 2 m for the travelling clip — a wrap handler that special-cased "no travel"
+    // would pass this and fail the one above.
+    var inPlace = new AnimationClip("idle", new[]
+    {
+        new BoneTrack
+        {
+            BoneIndex = 0,
+            Translation = new KeyframeVector3Curve(new[]
+            {
+                new Keyframe<Vector3>(0.0, Vector3.Zero),
+                new Keyframe<Vector3>(0.5, new Vector3(0.3f, 0f, 0f)),
+                new Keyframe<Vector3>(1.0, Vector3.Zero),
+            }),
+        },
+    });
+
+    t.ExpectClose("AQ.9 an in-place clip reports no per-cycle travel",
+        RootMotion.PerCycle(inPlace, 0, skeleton.CreateRestPose().Locals[0]).Distance, 0f, 0.0001f);
+
+    var idlePlayer = new ClipPlayer(skeleton, inPlace);
+    var drift = 0f;
+    for (var i = 0; i < 100; i++)
+    {
+        idlePlayer.Advance(0.03);
+        drift += idlePlayer.RootDelta.Translation.X;
+    }
+
+    t.ExpectClose("AQ.9 and integrating it over three cycles drifts nowhere", drift, 0f, 0.001f);
+
+    // ── A clip with no root track at all ─────────────────────────────────────
+    // RootAt falls back to the rest value on both ends, so the delta is exactly zero
+    // rather than approximately so. Worth pinning: a fallback that returned identity
+    // instead of rest would report the rest offset as travel on the first frame.
+    var armOnly = new AnimationClip("wave", new[]
+    {
+        new BoneTrack
+        {
+            BoneIndex = 1,
+            Rotation = new KeyframeQuaternionCurve(new[]
+            {
+                new Keyframe<Quaternion>(0.0, Quaternion.Identity),
+                new Keyframe<Quaternion>(1.0, Quaternion.CreateFromAxisAngle(Vector3.UnitZ, 1f)),
+            }),
+        },
+    });
+
+    var armPlayer = new ClipPlayer(skeleton, armOnly);
+    armPlayer.Advance(0.5);
+    t.ExpectClose("AQ.10 a clip with no root track reports exactly zero travel",
+        armPlayer.RootDelta.Translation.Length(), 0f);
+
+    // ── A zero-duration pose clip ────────────────────────────────────────────
+    // The Rogue ships seven. They are poses, not faults: advancing one holds it, and the
+    // guard against dividing by a zero duration is the reason every consumer wrote
+    // `duration > 0 ? ... : 0` by hand before this existed.
+    var poseClip = new AnimationClip("t-pose", new[]
+    {
+        new BoneTrack
+        {
+            BoneIndex = 0,
+            Translation = new KeyframeVector3Curve(new[] { new Keyframe<Vector3>(0.0, new Vector3(5f, 0f, 0f)) }),
+        },
+    });
+
+    var posePlayer = new ClipPlayer(skeleton, poseClip);
+    posePlayer.Advance(2.0);
+    t.ExpectClose("AQ.11 a zero-duration pose holds, and its clock stays at zero", (float)posePlayer.Time, 0f);
+    t.ExpectClose("AQ.11 and it still writes the pose it describes",
+        posePlayer.Pose.Locals[0].Translation.X, 5f);
+    t.ExpectClose("AQ.11 with no travel to report", posePlayer.RootDelta.Translation.Length(), 0f);
+
+    // ── A palette matrix is not a joint position ─────────────────────────────
+    // The distinction that cost the lab its first skeleton overlay, pinned here because
+    // it is a fact about ComputeBonePalette rather than about the lab. At rest every
+    // palette matrix is the identity by construction (BindWorld × InverseBindPose = I),
+    // so a skeleton drawn from palette translations collapses onto the origin — correct
+    // arithmetic, wrong question. Where the joint IS comes from the hierarchy walk's
+    // `world` term alone, which is the three-line recurrence below.
+    var rest = skeleton.CreateRestPose();
+    var palette = new BonePalette(skeleton.BoneCount);
+    skeleton.ComputeBonePalette(rest, palette);
+    t.ExpectClose("AQ.12 a rest palette matrix carries no translation", palette.Matrices[1].M42, 0f);
+
+    var worlds = new Matrix4x4[skeleton.BoneCount];
+    for (var i = 0; i < skeleton.BoneCount; i++)
+    {
+        var local = rest.Locals[i].ToMatrix();
+        var parent = skeleton.Bones[i].ParentIndex;
+        worlds[i] = parent < 0 ? local : local * worlds[parent];
+    }
+
+    t.ExpectClose("AQ.12 but the bone's world transform is where the joint is", worlds[1].M42, 1f);
+
+    // ── Stripping is the other half of taking a delta ────────────────────────
+    // A caller that reads RootDelta and ALSO leaves the root animated applies the travel
+    // twice: the clip moves the mesh and the transform moves it again, so a walk runs at
+    // double speed and snaps back once per loop. Strip reverts every root to rest, which
+    // is what makes "the clip says how far, the game says where" a coherent division.
+    player.ScrubTo(0.5);
+    t.ExpectClose("AQ.13 the clip's root has travelled by mid-clip",
+        player.Pose.Locals[0].Translation.X, 1f);
+
+    RootMotion.Strip(skeleton, player.Pose, player.RestPose);
+    t.ExpectClose("AQ.13 and stripping puts it back at rest", player.Pose.Locals[0].Translation.X, 0f);
+
+    // Non-root bones are untouched — stripping is about the root, not about resetting a pose.
+    t.ExpectClose("AQ.13 leaving every non-root bone alone",
+        player.Pose.Locals[1].Translation.Y, skeleton.CreateRestPose().Locals[1].Translation.Y);
+
+    // ── Finished is the boundary in the DIRECTION OF TRAVEL ──────────────────
+    // Negative Rate is a supported way to play a clip, so a one-shot run backwards ends at
+    // t=0 as surely as a forward one ends at Duration. This used to clamp to zero and return
+    // true forever, so a lifecycle driven by the return value hung on a clip that had
+    // visibly stopped — invisible because nothing in the tree played a one-shot backwards.
+    var once = new ClipPlayer(skeleton, travel) { Loop = false };
+    once.ScrubTo(0.9);
+    t.ExpectTrue("AQ.14 a one-shot forward run reports finished at the end", !once.Advance(0.2));
+    t.ExpectClose("AQ.14 and lands on the end", (float)once.Time, 1f);
+
+    var backwards = new ClipPlayer(skeleton, travel) { Loop = false, Rate = -1f };
+    backwards.ScrubTo(0.1);
+    t.ExpectTrue("AQ.14 a one-shot reverse run reports finished at the START", !backwards.Advance(0.2));
+    t.ExpectClose("AQ.14 and lands on zero, not on the end", (float)backwards.Time, 0f);
+    t.ExpectTrue("AQ.14 with Finished set either way", backwards.Finished && once.Finished);
+
+    // A reverse step that does NOT reach the start is still running.
+    var partway = new ClipPlayer(skeleton, travel) { Loop = false, Rate = -1f };
+    partway.ScrubTo(0.8);
+    t.ExpectTrue("AQ.14 and a reverse step short of the start keeps going", partway.Advance(0.2));
+    t.ExpectClose("AQ.14 travelling backwards as it goes", partway.RootDelta.Translation.X, -0.4f);
+
+    // ── BonePaletteSet: the stride, which two languages have to agree on ─────
+    // Instance i's matrices start at i * BoneCount. That sentence is restated in a C# packing
+    // loop and in a GLSL `gl_InstanceIndex * stride`, and nothing checks the two agree — when
+    // they disagree the bodies do not vanish, they render as other bodies' poses, smeared.
+    // Bulwark and RTSGame each carry their own copy of it; this names it once.
+    {
+        var set = new BonePaletteSet(skeleton.BoneCount, capacity: 3);
+        t.ExpectTrue("AQ.15 the buffer is capacity x bone count",
+            set.Matrices.Length == 3 * skeleton.BoneCount);
+        t.ExpectTrue("AQ.15 and starts with nothing live", set.Count == 0 && set.LiveMatrixCount == 0);
+
+        // Three DIFFERENT poses, so a set that wrote them all to one slot would be caught.
+        var a = skeleton.CreateRestPose();
+        var b = skeleton.CreateRestPose();
+        var c = skeleton.CreateRestPose();
+        a.Locals[0] = a.Locals[0] with { Translation = new Vector3(1f, 0f, 0f) };
+        b.Locals[0] = b.Locals[0] with { Translation = new Vector3(2f, 0f, 0f) };
+        c.Locals[0] = c.Locals[0] with { Translation = new Vector3(3f, 0f, 0f) };
+
+        t.ExpectTrue("AQ.15 Add returns the instance index", set.Add(skeleton, a, Matrix4x4.Identity) == 0);
+        t.ExpectTrue("AQ.15 counting up", set.Add(skeleton, b, Matrix4x4.Identity) == 1);
+        t.ExpectTrue("AQ.15 and again", set.Add(skeleton, c, Matrix4x4.Identity) == 2);
+        t.ExpectTrue("AQ.15 three live instances is three strides of matrices",
+            set.LiveMatrixCount == 3 * skeleton.BoneCount);
+
+        // The root bone of each instance sits at i * BoneCount and holds THAT instance's pose.
+        // This is the assertion a shader's `base = gl_InstanceIndex * stride` has to match.
+        t.ExpectClose("AQ.15 instance 0 at offset 0", set.Matrices[0].M41, 1f);
+        t.ExpectClose("AQ.15 instance 1 one stride along", set.Matrices[skeleton.BoneCount].M41, 2f);
+        t.ExpectClose("AQ.15 instance 2 two strides along", set.Matrices[2 * skeleton.BoneCount].M41, 3f);
+        t.ExpectClose("AQ.15 and Slice agrees with the arithmetic", set.Slice(1)[0].M41, 2f);
+
+        // `post` is where a caller bakes a world placement in (Bulwark's shape) or passes identity
+        // and places the body some other way (RTSGame's). The set takes no view; it just composes.
+        set.Reset();
+        t.ExpectTrue("AQ.16 Reset makes the slots free again", set.Count == 0);
+        set.Add(skeleton, a, Matrix4x4.CreateTranslation(10f, 0f, 0f));
+        t.ExpectClose("AQ.16 post-multiply bakes a placement into the palette", set.Matrices[0].M41, 11f);
+
+        // Full is an exception, not a silent drop. A crowd that quietly stops growing at capacity
+        // shows up as "the last few enemies are invisible", which looks like anything but this.
+        set.Add(skeleton, b, Matrix4x4.Identity);
+        set.Add(skeleton, c, Matrix4x4.Identity);
+        var overflowed = false;
+        try { set.Add(skeleton, a, Matrix4x4.Identity); }
+        catch (InvalidOperationException) { overflowed = true; }
+        t.ExpectTrue("AQ.16 a fourth instance in a set of three throws", overflowed);
+
+        // A stride mismatch is the failure this type exists to make impossible, so it is loud.
+        var wrongSized = new Skeleton(new[] { new Bone("only", -1, Matrix4x4.Identity) });
+        var rejected = false;
+        try { set.Add(wrongSized, wrongSized.CreateRestPose(), Matrix4x4.Identity); }
+        catch (ArgumentException) { rejected = true; }
+        t.ExpectTrue("AQ.16 and a skeleton of the wrong bone count is refused", rejected);
+    }
+
+    // ── Instancing is not phase-locked, clip-locked or state-locked ──────────
+    // The failure this guards is silent: a stride of zero, a write that always lands in slot 0, a
+    // pose object shared between bodies. None of them throws, none warps the geometry, and all of
+    // them render a row that looks entirely reasonable until you notice every body is doing the
+    // same thing. Checked in BOTH directions, because a test that only asserts "these differ"
+    // passes whenever anything differs, for any reason.
+    {
+        // A skeleton whose root is animated by two clips that disagree at every instant.
+        var bones2 = new[]
+        {
+            new Bone("root", -1, Matrix4x4.Identity),
+            new Bone("child", 0, Matrix4x4.CreateTranslation(0, -1, 0)),
+        };
+        var rig = new Skeleton(bones2);
+
+        AnimationClip Line(string name, float to) => new(name, new[]
+        {
+            new BoneTrack
+            {
+                BoneIndex = 0,
+                Translation = new KeyframeVector3Curve(new[]
+                {
+                    new Keyframe<Vector3>(0.0, Vector3.Zero),
+                    new Keyframe<Vector3>(1.0, new Vector3(to, 0f, 0f)),
+                }),
+            },
+        });
+
+        var slow = Line("slow", 1f);
+        var fast = Line("fast", 5f);
+        var set = new BonePaletteSet(rig.BoneCount, capacity: 3);
+
+        // Positive: three players, different clips, different phases, different rates.
+        var players = new[]
+        {
+            new ClipPlayer(rig, slow),
+            new ClipPlayer(rig, fast) { Rate = 2f },
+            new ClipPlayer(rig, slow) { Rate = 0.5f },
+        };
+        players[0].ScrubTo(0.1);
+        players[1].ScrubTo(0.4);
+        players[2].ScrubTo(0.8);
+        foreach (var p in players) set.Add(rig, p.Pose, Matrix4x4.Identity);
+
+        var prints = new[] { set.Fingerprint(0), set.Fingerprint(1), set.Fingerprint(2) };
+        t.ExpectTrue("AQ.17 three independently posed bodies give three fingerprints",
+            prints[0] != prints[1] && prints[1] != prints[2] && prints[0] != prints[2]);
+
+        // <b>The negative control, and it is the half that makes the other half mean anything.</b>
+        // One clip, one instant, one placement: every slot must come out bit-identical. A set that
+        // wrote every body to slot 0 would pass the positive check above and fail nothing — this is
+        // what catches it.
+        set.Reset();
+        var one = new ClipPlayer(rig, slow);
+        one.ScrubTo(0.37);
+        for (var i = 0; i < 3; i++) set.Add(rig, one.Pose, Matrix4x4.Identity);
+        t.ExpectTrue("AQ.17 and one pose in every slot comes back identical",
+            set.Fingerprint(0) == set.Fingerprint(1) && set.Fingerprint(1) == set.Fingerprint(2));
+
+        // Advancing one player must not disturb another's pose. Each ClipPlayer owns its own Pose;
+        // a shared one would make every body the last body written, which is the state-lock case.
+        players[0].ScrubTo(0.1);
+        var beforeX = players[0].Pose.Locals[0].Translation.X;
+        players[1].Advance(0.25);
+        players[2].Advance(0.25);
+        t.ExpectClose("AQ.18 advancing one body leaves another's pose alone",
+            players[0].Pose.Locals[0].Translation.X, beforeX);
+
+        // And different rates genuinely diverge — two bodies on the SAME clip must drift apart, which
+        // a frame-locked clock cannot do.
+        var a2 = new ClipPlayer(rig, slow) { Rate = 1f };
+        var b2 = new ClipPlayer(rig, slow) { Rate = 0.25f };
+        a2.Advance(0.4);
+        b2.Advance(0.4);
+        t.ExpectTrue("AQ.18 two bodies on one clip at different rates drift apart",
+            Math.Abs(a2.Time - b2.Time) > 0.2);
+    }
+}
+
+// ============================================================================
+// Section AR — a view that is NOT the whole window.
+// ============================================================================
+//
+// ViewPicking has been correct since it was written and had exactly one caller, which declared a
+// view covering the entire window. Every interesting property of a view — an offset, a letterbox,
+// a backing scale that differs from the logical size — was therefore untested, because a
+// full-window view at 1x makes all three the identity.
+//
+// The lab's embedded viewport is the first view that is none of those things: a picture fitted
+// inside a panel, at an offset, on a target half the framebuffer's size.
+{
+    // A 640x360 picture sitting at (200, 120) inside a window — the letterboxed image rect, not
+    // the panel rect that contains it.
+    var projection = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, 640f / 360f, 0.1f, 100f);
+    var vp = Matrix4x4.CreateLookAt(new Vector3(0, 0, 5), Vector3.Zero, Vector3.UnitY) * projection;
+
+    var panel = new ViewDeclaration(
+        new ViewId(1), "viewport", vp, new RenderSurfaceHandle(7),
+        LogicalViewport: new Rect(200f, 120f, 640f, 360f),
+        // Physical is the TARGET's own extent — half a 2560x1440 framebuffer — and deliberately
+        // shares neither origin nor size with the logical rect. A view whose two rectangles agree
+        // is the case that proves nothing.
+        PhysicalViewport: new Rect(0f, 0f, 1280f, 720f));
+
+    // The centre of the IMAGE, not of the window and not of the panel.
+    var centre = ViewPicking.RayThrough(panel, new Vector2(200f + 320f, 120f + 180f));
+    t.ExpectTrue("AR.1 a pointer at the image's centre yields a ray", centre is not null);
+    t.ExpectClose("AR.1 and it points straight down the camera's forward", centre!.Value.Direction.Z, -1f, 0.001f);
+    t.ExpectClose("AR.1 with no sideways component", centre.Value.Direction.X, 0f, 0.001f);
+
+    // <b>The offset is not optional.</b> The same coordinates read as if the view were at the
+    // window's origin land somewhere else entirely — this is the bug a full-window view can never
+    // expose, because there the two are the same point.
+    var asIfAtOrigin = ViewPicking.RayThrough(panel, new Vector2(320f, 180f));
+    t.ExpectTrue("AR.2 the window-centre point is NOT the image centre",
+        asIfAtOrigin is null || MathF.Abs(asIfAtOrigin.Value.Direction.X) > 0.01f);
+
+    // Outside the rect is no ray rather than an extrapolated one, which is what makes "ask every
+    // view, at most one answers" a usable way to route a pointer.
+    t.ExpectTrue("AR.3 a pointer left of the image misses",
+        ViewPicking.RayThrough(panel, new Vector2(199f, 300f)) is null);
+    t.ExpectTrue("AR.3 a pointer below it misses",
+        ViewPicking.RayThrough(panel, new Vector2(400f, 480f)) is null);
+    t.ExpectTrue("AR.3 the far edge is half-open",
+        ViewPicking.RayThrough(panel, new Vector2(200f + 640f, 300f)) is null);
+    t.ExpectTrue("AR.3 and the near edge is inclusive",
+        ViewPicking.RayThrough(panel, new Vector2(200f, 120f)) is not null);
+
+    // <b>The Retina invariant.</b> The physical rectangle is for the renderer; picking reads the
+    // logical one. Doubling the physical extent — which is exactly what moving the same window to
+    // a 2x display does — must not move where a ray goes for the same logical pointer. Getting
+    // this wrong is invisible on the machine it was written on.
+    var retina = panel with { PhysicalViewport = new Rect(0f, 0f, 2560f, 1440f) };
+    var a = ViewPicking.RayThrough(panel, new Vector2(420f, 250f));
+    var b = ViewPicking.RayThrough(retina, new Vector2(420f, 250f));
+    t.ExpectTrue("AR.4 the same logical pointer gives the same ray at 1x and 2x",
+        a is not null && b is not null &&
+        Vector3.Distance(a.Value.Direction, b.Value.Direction) < 1e-6f);
+
+    // Two abutting views: the shared edge belongs to exactly one of them. That is the property the
+    // half-open test exists for, and it is what lets a layout route a pointer by asking each view.
+    var left = panel with { LogicalViewport = new Rect(0f, 0f, 100f, 100f) };
+    var right = panel with { Id = new ViewId(2), LogicalViewport = new Rect(100f, 0f, 100f, 100f) };
+    var onSeam = new Vector2(100f, 50f);
+    var claims =
+        (ViewPicking.RayThrough(left, onSeam) is not null ? 1 : 0) +
+        (ViewPicking.RayThrough(right, onSeam) is not null ? 1 : 0);
+    t.ExpectTrue("AR.5 exactly one of two abutting views claims the shared pixel", claims == 1);
+}
+
+// ============================================================================
+// Section AS — the uniform arena's allocation rule.
+// ============================================================================
+//
+// A dynamic offset handed to vkCmdBindDescriptorSets must be a multiple of the device's
+// minUniformBufferOffsetAlignment. BumpSlot is what enforces that, and it already had Section AD —
+// but AD tests it against a VERTEX stride, where the alignment happens to equal the element size.
+// A uniform block's size and its required alignment are unrelated numbers, which is the case that
+// can be got wrong without AD noticing.
+{
+    // A 176-byte block (the lab's Frame) at 256-byte alignment: every slice must start on 256.
+    var slot = new BumpSlot(4096);
+    slot.TryAlloc(176, 256, out var a);
+    slot.TryAlloc(176, 256, out var b);
+    slot.TryAlloc(176, 256, out var c);
+    t.ExpectClose("AS.1 first block starts at zero", a, 0);
+    t.ExpectTrue("AS.1 every offset is a multiple of the alignment",
+        a % 256 == 0 && b % 256 == 0 && c % 256 == 0);
+    t.ExpectTrue("AS.1 and they do not overlap", b >= a + 176 && c >= b + 176);
+
+    // The alignment can be SMALLER than the block, which is the common case (16 on this machine).
+    // Packing must still not overlap — an alignment is a floor on the start, not on the stride.
+    var tight = new BumpSlot(4096);
+    tight.TryAlloc(176, 16, out var t0);
+    tight.TryAlloc(176, 16, out var t1);
+    t.ExpectTrue("AS.2 a sub-block alignment still packs without overlap", t1 >= t0 + 176);
+    t.ExpectTrue("AS.2 and still lands on the alignment", t1 % 16 == 0);
+
+    // Exhaustion must fail rather than hand back an offset past the end — the arena turns this
+    // into a named exception, and a silently wrapped offset would be memory corruption instead.
+    var small = new BumpSlot(256);
+    small.TryAlloc(176, 256, out _);
+    t.ExpectTrue("AS.3 a second 256-aligned block does not fit in 256 bytes",
+        !small.TryAlloc(176, 256, out _));
 }
 
 t.PrintSummary();

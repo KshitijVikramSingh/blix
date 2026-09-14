@@ -32,6 +32,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     private readonly IWindow window;
     private readonly IGameLoop gameLoop;
     private readonly IInputHandler? inputHandler;
+    private readonly IUiSource? uiSource;
     private readonly IRuntimeDiagnosticsSink? diagnostics;
     private readonly DebugSystem? debugSystem;
     private readonly DiagnosticsFrameRecorder? frameRecorder;
@@ -43,6 +44,13 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     private VkImGuiRenderer? imguiRenderer;
     private float lastWheel;
     private double totalTime;
+    private readonly WindowOptions options;
+    private int renderedFrames;
+
+    // Who owns each in-flight press. See Blix.Core.GestureOwnership: routing a release by who wants input
+    // NOW is wrong in both directions, and the press already answered the question.
+    private readonly GestureOwnership keysHeld = new();
+    private readonly GestureOwnership buttonsHeld = new();
 
     // Lightweight perf HUD (F1): a debounced real-FPS readout drawn without the
     // DebugOverlayUi panels, so it measures actual frame rate at minimal cost.
@@ -66,6 +74,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
         this.gameLoop = gameLoop;
         this.inputHandler = gameLoop as IInputHandler;
+        this.uiSource = gameLoop as IUiSource;
         this.diagnostics = diagnostics;
 
         if (gameLoop is IDebuggable)
@@ -86,9 +95,11 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             }
             jsonDumpSink = new JsonDumpSink();
             debugSystem.AddSink(jsonDumpSink);
+            if ((options ?? BlixWindowOptions.Default).Diagnostics) debugSystem.State.Enabled = true;
         }
 
         var resolved = options ?? BlixWindowOptions.Default;
+        this.options = resolved;
         var silkOptions = SilkWindowOptions.DefaultVulkan with
         {
             Title = resolved.Title,
@@ -102,6 +113,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         window.Render += OnRender;
         window.Resize += OnResize;
         window.FramebufferResize += OnFramebufferResize;
+        window.FocusChanged += OnFocusChanged;
         window.Closing += OnClosing;
     }
 
@@ -117,7 +129,10 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         var fb = window.FramebufferSize;
         var w = Math.Max(fb.X > 0 ? fb.X : window.Size.X, 1);
         var h = Math.Max(fb.Y > 0 ? fb.Y : window.Size.Y, 1);
-        graphicsDevice = new VulkanGraphicsDevice(vkSurface, w, h);
+        // An application that produces diagnostics gets a swapchain depth buffer that survives its
+        // pass, so debug geometry drawn over the scene can be hidden by it. One without pays nothing.
+        graphicsDevice = new VulkanGraphicsDevice(
+            vkSurface, w, h, preserveSwapchainDepth: gameLoop is IDebuggable);
         Console.WriteLine($"Graphics: {graphicsDevice.Info.Vendor} | {graphicsDevice.Info.Renderer} | {graphicsDevice.Info.Version}");
         if (debugSystem is not null)
         {
@@ -125,8 +140,13 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             // line-pipeline draw on the OverlayRenderPass. Only allocate when
             // diagnostics are live (no IDebuggable game loop → no overlay).
             lineDrawer = new VkLineDrawer(graphicsDevice);
-            // VkImGuiRenderer draws the on-screen diagnostics panels (the
-            // shared DebugOverlayUi). Toggle with the ` key.
+        }
+
+        // <b>Built for anyone who wants a frame, not only for IDebuggable.</b> This used to live inside
+        // the branch above, which is what made "does this application have an interface?" the same
+        // question as "does it produce diagnostics?" — two unrelated things decided by one type test.
+        if (debugSystem is not null || uiSource is not null)
+        {
             imguiRenderer = new VkImGuiRenderer(graphicsDevice);
         }
 
@@ -241,6 +261,16 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         // no-op and the window stays unpainted.
 
         debugSystem?.EndFrame();
+
+        // <b>Bounded runs belong to the host.</b> Six applications counted their own frames and asked to
+        // close; one (VulkanHello) never implemented it at all, so its launcher silently ignored --frames.
+        // The host is the thing that knows what a frame is.
+        renderedFrames++;
+        if (options.ExitAfterFrames > 0 && renderedFrames >= options.ExitAfterFrames)
+        {
+            Console.WriteLine($"Exiting after {renderedFrames} frame(s) as asked.");
+            window.Close();
+        }
     }
 
     private void OnResize(Vector2D<int> size)
@@ -260,6 +290,8 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
     private void OnKeyDown(IKeyboard kbd, SilkKey key, int scancode)
     {
+        // The runtime's own bindings answer first, so a UI with focus cannot swallow the dump key or the
+        // overlay toggle — the two things most needed exactly when something has gone wrong.
         if (key == SilkKey.F12 && TryDumpCurrentFrame()) return;
         if (key == SilkKey.F1)
         {
@@ -271,42 +303,94 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             debugSystem.State.ShowOverlay = !debugSystem.State.ShowOverlay;
             return;
         }
+        if (!keysHeld.Press((int)key, UiWantsKeyboard)) return;
         inputHandler?.OnKeyDown(MapKey(key));
     }
 
     private void OnKeyUp(IKeyboard kbd, SilkKey key, int scancode)
     {
+        // Delivered when the application owned the press, and not otherwise — see GestureOwnership. A
+        // release always reaching the application fixes the stranded-key case and creates its mirror: a
+        // key the UI swallowed handing the application an up it never had a down for.
+        if (!keysHeld.Release((int)key)) return;
         inputHandler?.OnKeyUp(MapKey(key));
     }
 
-    // True when the diagnostics overlay is up and ImGui is hovering/dragging a
-    // panel — mouse input then drives the UI, not the game (so opening a panel
-    // doesn't also swing the camera).
-    private bool OverlayWantsMouse =>
-        imguiRenderer is { } r &&
-        debugSystem is { State.Enabled: true, State.ShowOverlay: true } &&
-        r.WantCaptureMouse;
+    // True once an ImGui frame has actually been built, which is when WantCapture* mean anything.
+    private bool uiFrameBuilt;
+
+    // <b>Whether the UI wants the pointer — any UI, not the diagnostics overlay specifically.</b> This
+    // used to require debugSystem.State.ShowOverlay, so an application's own panels could be clicked
+    // straight through into the game beneath them.
+    private bool UiWantsMouse => imguiRenderer is { } r && uiFrameBuilt && r.WantCaptureMouse;
+
+    // <b>Keyboard capture was defined and never once honoured.</b> VkImGuiRenderer has exposed
+    // WantCaptureKeyboard since it was written and nothing read it, so typing into any ImGui text field
+    // also drove the game — every keystroke arriving at both. Nothing had noticed because the only UI
+    // that existed was the diagnostics overlay, which has almost no text fields.
+    private bool UiWantsKeyboard => imguiRenderer is { } r && uiFrameBuilt && r.WantCaptureKeyboard;
+
+    /// <summary>Forgets every in-flight press when the window loses focus.</summary>
+    /// <remarks>
+    /// <b>The releases are never coming.</b> Cmd-Tab away with a button or key down and the platform
+    /// delivers the up event to whoever has focus now, not to us — so an application holding state on
+    /// that press keeps holding it: a marquee that follows the cursor forever, a key the game believes
+    /// is still down. Exactly the stranded-press bug <see cref="GestureOwnership"/> was built for, from
+    /// the one direction it could not see.
+    /// <para>
+    /// <c>GestureOwnership.Clear</c> existed for this from the day it was written and nothing called it,
+    /// because nothing hooked focus. A remedy with no caller is a remedy that has never run.
+    /// </para>
+    /// <para>
+    /// The application is NOT handed synthetic releases. A release means "the gesture completed here",
+    /// and a window losing focus is the opposite of that — inventing one would fire whatever a release
+    /// means (a shot loosed, a menu opened) for a gesture the user abandoned. Forgetting the press is
+    /// the honest cancel; an application that needs to know a drag was abandoned can ask the host
+    /// whether it still has focus.
+    /// </para>
+    /// </remarks>
+    /// <summary>Makes a texture drawable inside a UI panel. See <see cref="IRenderHost"/>.</summary>
+    /// <remarks>
+    /// Returns 0 when there is no UI renderer — an application with no panels and no diagnostics
+    /// never builds one. Zero is ImGui's own "no texture", so a panel that draws it gets the atlas
+    /// fallback rather than a crash, which is the right shape for "there was nowhere to show this".
+    /// </remarks>
+    public nint RegisterUiTexture(TextureHandle texture) =>
+        imguiRenderer?.RegisterTexture(texture) ?? 0;
+
+    public void ReleaseUiTexture(nint id) => imguiRenderer?.ReleaseTexture(id);
+
+    private void OnFocusChanged(bool focused)
+    {
+        if (focused) return;
+        keysHeld.Clear();
+        buttonsHeld.Clear();
+    }
 
     private void OnMouseDown(IMouse mouse, SilkMouseButton button)
     {
-        if (OverlayWantsMouse) return;
+        if (!buttonsHeld.Press((int)button, UiWantsMouse)) return;
         inputHandler?.OnMouseDown(MapMouseButton(button));
     }
 
     private void OnMouseUp(IMouse mouse, SilkMouseButton button)
     {
-        // <b>A release is always delivered, even when the overlay owns the cursor, and the asymmetry with
-        // OnMouseDown above is the point.</b> A press decides who owns the gesture; a release only ends
-        // something, and the thing it ends belongs to whoever the press went to.
+        // <b>The release goes wherever the press went.</b> This was guarded on current UI capture once,
+        // which dropped the release whenever the pointer happened to be over a panel when the button came
+        // up — a drag begun in the world and finished over the panel left the game believing the button
+        // was still down, so a marquee stayed live and followed a cursor that had long left it. Reported
+        // from the chair as the mouse not lining up with the screen. Nothing about that looks like a
+        // missing event.
         //
-        // Guarded, this dropped the release whenever the pointer happened to be over a debug panel when the
-        // button came up — so a drag begun in the world and finished over the panel left the game believing the
-        // button was still down. The marquee stays live, anchored to a point the cursor has long left, and
-        // follows it around: reported from the chair as the mouse not lining up with the screen. Nothing about
-        // that looks like a missing event.
+        // Then it was unconditional, which fixes that case and creates its reflection: a press the UI owned
+        // still handing the application a release it never had a press for. Harmless if OnMouseUp only
+        // clears a held set, and not harmless if it MEANS something — a shot loosed on release, a menu
+        // opened. GestureOwnership settles it at the press, which is where it was always settled in the
+        // reasoning.
         //
-        // It costs the overlay nothing: ImGui does not learn the button state from these callbacks at all, it
-        // polls IsButtonPressed in BeginFrame. The guard was protecting something that was never listening.
+        // It costs the overlay nothing either way: ImGui never learned button state from these callbacks,
+        // it polls IsButtonPressed in BeginFrame.
+        if (!buttonsHeld.Release((int)button)) return;
         inputHandler?.OnMouseUp(MapMouseButton(button));
     }
 
@@ -316,7 +400,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     {
         var delta = position - lastMousePosition;
         lastMousePosition = position;
-        if (OverlayWantsMouse) return;
+        if (UiWantsMouse) return;
         inputHandler?.OnMouseMove(position.X, position.Y, delta.X, delta.Y);
     }
 
@@ -325,7 +409,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         // Feed the wheel to ImGui every time (consumed next BeginFrame); only
         // forward to the game when the overlay isn't capturing the mouse.
         lastWheel += wheel.Y;
-        if (OverlayWantsMouse) return;
+        if (UiWantsMouse) return;
         inputHandler?.OnMouseWheel(wheel.X, wheel.Y);
     }
 
@@ -424,77 +508,117 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         var commands = ctx.Draw.Commands;
         if (commands.Count == 0) return;
 
-        for (var i = 0; i < commands.Count; i++)
+        var views = ctx.Draw.Views;
+        if (views.Count == 0) return;
+
+        var depthTested = debugSystem?.State.DepthTestDrawing ?? true;
+
+        // One buffer for the whole frame, one span per view. Cleared here because the ranged Submit below
+        // deliberately does not reset — see VkLineDrawer.
+        lineDrawer.Clear();
+
+        for (var v = 0; v < views.Count; v++)
         {
-            var c = commands[i];
-            switch (c)
+            var view = views[v];
+            var first = lineDrawer.VertexCount;
+
+            for (var i = 0; i < commands.Count; i++)
             {
-                case DebugDrawLine d: lineDrawer.Line(d.A, d.B, d.Color); break;
-                case DebugDrawAabb d: lineDrawer.Aabb(d.Min, d.Max, d.Color); break;
-                case DebugDrawCross d: lineDrawer.Cross(d.Center, d.Size, d.Color); break;
-                case DebugDrawArrow d: lineDrawer.Arrow(d.From, d.To, d.Color); break;
-                case DebugDrawRay d:
-                    var end = d.Origin + global::System.Numerics.Vector3.Normalize(d.Direction) * d.Length;
-                    lineDrawer.Arrow(d.Origin, end, d.Color);
-                    break;
-                case DebugDrawObb d: lineDrawer.Obb(d.Transform, d.Color); break;
-                case DebugDrawFrustum d: DrawFrustumLines(d.ViewProjection, d.Color); break;
-                case DebugDrawSphere d: DrawSphereLines(d.Center, d.Radius, d.Segments, d.Color); break;
-                case DebugDrawGrid d: DrawGridLines(d.Center, d.Size, d.Divisions, d.Color); break;
-                // Plane / Capsule / Cone / MeshWireframe / Normals not
-                // implemented yet — silent skip rather than crash.
+                var c = commands[i];
+                if (c.View != view.Id) continue;
+                switch (c)
+                {
+                    case DebugDrawLine d: lineDrawer.Line(d.A, d.B, d.Color); break;
+                    case DebugDrawAabb d: lineDrawer.Aabb(d.Min, d.Max, d.Color); break;
+                    case DebugDrawCross d: lineDrawer.Cross(d.Center, d.Size, d.Color); break;
+                    case DebugDrawArrow d: lineDrawer.Arrow(d.From, d.To, d.Color); break;
+                    case DebugDrawRay d:
+                        var end = d.Origin + global::System.Numerics.Vector3.Normalize(d.Direction) * d.Length;
+                        lineDrawer.Arrow(d.Origin, end, d.Color);
+                        break;
+                    case DebugDrawObb d: lineDrawer.Obb(d.Transform, d.Color); break;
+                    case DebugDrawFrustum d: DrawFrustumLines(d.ViewProjection, d.Color); break;
+                    case DebugDrawSphere d: DrawSphereLines(d.Center, d.Radius, d.Segments, d.Color); break;
+                    case DebugDrawGrid d: DrawGridLines(d.Center, d.Size, d.Divisions, d.Color); break;
+                    case DebugDrawPolyline d:
+                        for (var p = 1; p < d.Points.Count; p++)
+                        {
+                            lineDrawer.Line(d.Points[p - 1], d.Points[p], d.Color);
+                        }
+
+                        break;
+                    case DebugDrawPlane d: DrawPlaneLines(d.Center, d.Normal, d.Size, d.Color); break;
+                    case DebugDrawCapsule d: DrawCapsuleLines(d.A, d.B, d.Radius, d.Segments, d.Color); break;
+                    case DebugDrawCone d:
+                        DrawConeLines(d.Apex, d.Axis, d.Length, d.HalfAngleRad, d.Segments, d.Color);
+                        break;
+                    case DebugDrawMeshWireframe d:
+                        for (var e = 0; e + 1 < d.Edges.Count; e += 2)
+                        {
+                            int i0 = d.Edges[e], i1 = d.Edges[e + 1];
+                            if ((uint)i0 >= d.Vertices.Count || (uint)i1 >= d.Vertices.Count) continue;
+                            lineDrawer.Line(d.Vertices[i0], d.Vertices[i1], d.Color);
+                        }
+
+                        break;
+                    case DebugDrawNormals d:
+                        var pairs = Math.Min(d.Positions.Count, d.Normals.Count);
+                        for (var n = 0; n < pairs; n++)
+                        {
+                            lineDrawer.Line(d.Positions[n], d.Positions[n] + d.Normals[n] * d.Length, d.Color);
+                        }
+
+                        break;
+
+                    // <b>An unknown primitive is a bug, not a no-op.</b> Five commands — Plane,
+                    // Capsule, Cone, MeshWireframe, Normals — sat in this switch for their whole
+                    // lives as a comment saying "not implemented yet, silent skip rather than
+                    // crash", so calling debug.Draw.Capsule() succeeded and drew nothing. A
+                    // diagnostic that quietly does nothing is worse than one that does not exist:
+                    // it answers a question wrongly. The same call was settled the same way when a
+                    // primitive emitted outside a view was made to throw, which immediately found
+                    // six producers drawing into nowhere.
+                    default:
+                        throw new NotSupportedException(
+                            $"Debug primitive {c.GetType().Name} has no line expansion. Add one here — " +
+                            "a debug command that draws nothing is a lie about what was asked.");
+                }
             }
+
+            var count = lineDrawer.VertexCount - first;
+            if (count == 0) continue;
+
+            // Each view lands on the surface it named. That one field is what makes an off-screen viewport
+            // ordinary rather than special: the swapchain is just the view whose target is Default.
+            var viewProj = view.ViewProjection;
+            commandList.Pass(
+                $"debug:{view.Name}",
+                new RenderPassDescription(
+                    Target: view.Target,
+                    ClearColors: Array.Empty<GraphicsColor?>(),
+                    ClearDepth: false,
+                    // Debug geometry annotates a picture; it must never erase one. On the swapchain the
+                    // empty clear list already selects the overlay pass; on an off-screen target this is
+                    // what asks for the same thing.
+                    LoadExisting: true),
+                pass => lineDrawer.Submit(pass, viewProj, first, count, view.Target, depthTested));
         }
-
-        if (!lineDrawer.HasLines) return;
-
-        // Footgun guard: emit-once warning when commands were issued but the
-        // game forgot to set debug.Draw.ViewProjection. Without this, lines
-        // render in clip space and are almost always invisible.
-        if (!warnedDebugIdentityVp && ctx.Draw.ViewProjection.Equals(global::System.Numerics.Matrix4x4.Identity))
-        {
-            warnedDebugIdentityVp = true;
-            Console.Error.WriteLine("[diagnostics] debug.Draw.ViewProjection is Identity; lines will render in clip space (likely invisible). Set debug.Draw.ViewProjection = viewProj.");
-        }
-
-        var viewProj = ctx.Draw.ViewProjection;
-        commandList.Pass(
-            "debug",
-            new RenderPassDescription(
-                Target: RenderSurfaceHandle.Default,
-                ClearColors: Array.Empty<GraphicsColor?>(),
-                ClearDepth: false),
-            pass => lineDrawer.Submit(pass, viewProj));
     }
 
-    // Build the ImGui diagnostics panels for this frame and append a swapchain
-    // overlay pass that draws them on top of the scene. Gated on the overlay
-    // toggle (` key) so the panels only render when asked for. Mirrors the GL
-    // backend's overlay hook; the panel content comes from the shared
-    // DebugOverlayUi inside VkImGuiRenderer.
+    // <b>One ImGui frame, composed from whoever wants to be in it.</b> This was two mutually exclusive
+    // paths — the diagnostics panels OR the perf HUD — each with its own copy of the IO setup, and an
+    // application had no way into either. The frame is now built once and filled by everyone who has
+    // something to draw, which is what lets an application's panels coexist with the diagnostics panels
+    // instead of replacing them.
     private void AppendImGuiPass(RenderCommandList commandList, RenderFrameContext frame, float deltaTime)
     {
+        uiFrameBuilt = false;
         if (imguiRenderer is null) return;
-        var overlayUp = debugSystem is { State.Enabled: true, State.ShowOverlay: true };
 
-        // Perf HUD: only when the full overlay is NOT up (the panels already show
-        // frame time, and the point of the HUD is a minimal-cost measurement).
-        if (!overlayUp)
-        {
-            if (!perfHudVisible) return;
-            var (w, h) = LogicalSize;
-            imguiRenderer.BeginFramePerfHud(
-                w, h, frame.Width, frame.Height, deltaTime,
-                $"{fpsDisplay:0} FPS  ({frameMsDisplay:0.0} ms)");
-            commandList.Pass(
-                "perf-hud",
-                new RenderPassDescription(
-                    Target: RenderSurfaceHandle.Default,
-                    ClearColors: Array.Empty<GraphicsColor?>(),
-                    ClearDepth: false),
-                pass => imguiRenderer.Submit(pass));
-            return;
-        }
+        var overlayUp = debugSystem is { State.Enabled: true, State.ShowOverlay: true };
+        var hudUp = perfHudVisible && !overlayUp;
+        var appUi = uiSource;
+        if (!overlayUp && !hudUp && appUi is null) return;
 
         var (logicalW, logicalH) = LogicalSize;
         var mousePos = global::System.Numerics.Vector2.Zero;
@@ -507,12 +631,26 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             right = m.IsButtonPressed(SilkMouseButton.Right);
             middle = m.IsButtonPressed(SilkMouseButton.Middle);
         }
+
         var wheel = lastWheel;
         lastWheel = 0f;
 
+        var hudText = $"{fpsDisplay:0} FPS  ({frameMsDisplay:0.0} ms)";
         imguiRenderer.BeginFrame(
             logicalW, logicalH, frame.Width, frame.Height, deltaTime,
-            mousePos, left, right, middle, wheel, debugSystem!); // overlayUp ⇒ non-null
+            mousePos, left, right, middle, wheel,
+            content: () =>
+            {
+                // The application first, then the engine's own panels. ImGui decides stacking itself, so
+                // this is an ordering of construction rather than of depth — but it keeps a misbehaving
+                // application from being able to prevent the diagnostics panels being built at all.
+                appUi?.DrawUi();
+                if (overlayUp) imguiRenderer.LayoutDiagnostics(debugSystem!);
+                else if (hudUp) imguiRenderer.DrawPerfHudText(hudText);
+            });
+
+        // Only now do WantCaptureMouse / WantCaptureKeyboard describe anything real.
+        uiFrameBuilt = true;
 
         commandList.Pass(
             "imgui",
@@ -522,8 +660,6 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
                 ClearDepth: false),
             pass => imguiRenderer.Submit(pass));
     }
-
-    private bool warnedDebugIdentityVp;
 
     // Expand a view-projection into its 8 frustum corners (inverse-VP applied
     // to the NDC cube; Vulkan z ∈ [0,1]) and draw the 12 edges. The canonical
@@ -566,6 +702,113 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             lineDrawer!.Line(center + new global::System.Numerics.Vector3(ca, 0, sa), center + new global::System.Numerics.Vector3(cb, 0, sb), color);
             lineDrawer!.Line(center + new global::System.Numerics.Vector3(0, ca, sa), center + new global::System.Numerics.Vector3(0, cb, sb), color);
         }
+    }
+
+    // A square patch of the plane, plus its normal — enough to read orientation, which is
+    // the thing a plane is usually being drawn to check.
+    private void DrawPlaneLines(
+        global::System.Numerics.Vector3 center, global::System.Numerics.Vector3 normal, float size, GraphicsColor color)
+    {
+        var n = normal.LengthSquared() > 1e-8f
+            ? global::System.Numerics.Vector3.Normalize(normal)
+            : global::System.Numerics.Vector3.UnitY;
+        var (u, v) = Basis(n);
+        var h = size * 0.5f;
+        var a = center + (u * h) + (v * h);
+        var b = center - (u * h) + (v * h);
+        var cc = center - (u * h) - (v * h);
+        var d = center + (u * h) - (v * h);
+        lineDrawer!.Line(a, b, color);
+        lineDrawer.Line(b, cc, color);
+        lineDrawer.Line(cc, d, color);
+        lineDrawer.Line(d, a, color);
+        lineDrawer.Arrow(center, center + (n * (size * 0.35f)), color);
+    }
+
+    // Two end caps joined by side lines. The caps are rings in the plane perpendicular to
+    // the axis plus two arcs over the ends, which reads as a capsule rather than as two
+    // circles — the difference matters when what is being checked is a character collider.
+    private void DrawCapsuleLines(
+        global::System.Numerics.Vector3 a, global::System.Numerics.Vector3 b, float radius, int segments, GraphicsColor color)
+    {
+        if (segments < 4) segments = 4;
+        var axis = b - a;
+        var length = axis.Length();
+        var n = length > 1e-6f ? axis / length : global::System.Numerics.Vector3.UnitY;
+        var (u, v) = Basis(n);
+        var step = MathF.PI * 2f / segments;
+
+        for (var s = 0; s < segments; s++)
+        {
+            var t0 = s * step;
+            var t1 = (s + 1) * step;
+            var r0 = (u * (MathF.Cos(t0) * radius)) + (v * (MathF.Sin(t0) * radius));
+            var r1 = (u * (MathF.Cos(t1) * radius)) + (v * (MathF.Sin(t1) * radius));
+            lineDrawer!.Line(a + r0, a + r1, color);   // end rings
+            lineDrawer.Line(b + r0, b + r1, color);
+        }
+
+        // Four side lines, and four arcs per cap through the poles.
+        for (var q = 0; q < 4; q++)
+        {
+            var t = q * MathF.PI * 0.5f;
+            var r = (u * (MathF.Cos(t) * radius)) + (v * (MathF.Sin(t) * radius));
+            lineDrawer!.Line(a + r, b + r, color);
+
+            var arc = Math.Max(3, segments / 4);
+            for (var k = 0; k < arc; k++)
+            {
+                var p0 = k / (float)arc * MathF.PI * 0.5f;
+                var p1 = (k + 1) / (float)arc * MathF.PI * 0.5f;
+                var dir0 = (r * MathF.Cos(p0)) - (n * (radius * MathF.Sin(p0)));
+                var dir1 = (r * MathF.Cos(p1)) - (n * (radius * MathF.Sin(p1)));
+                lineDrawer.Line(a + dir0, a + dir1, color);
+                lineDrawer.Line(b - dir0, b - dir1, color);
+            }
+        }
+    }
+
+    // Apex, base ring, and side lines. Half-angle rather than a base radius because that is
+    // how a spotlight, a view cone and a field of view are all described.
+    private void DrawConeLines(
+        global::System.Numerics.Vector3 apex,
+        global::System.Numerics.Vector3 axis,
+        float length,
+        float halfAngleRad,
+        int segments,
+        GraphicsColor color)
+    {
+        if (segments < 3) segments = 3;
+        var n = axis.LengthSquared() > 1e-8f
+            ? global::System.Numerics.Vector3.Normalize(axis)
+            : global::System.Numerics.Vector3.UnitZ;
+        var (u, v) = Basis(n);
+        var baseCentre = apex + (n * length);
+        var radius = MathF.Tan(Math.Clamp(halfAngleRad, 0.001f, 1.55f)) * length;
+        var step = MathF.PI * 2f / segments;
+
+        for (var s = 0; s < segments; s++)
+        {
+            var t0 = s * step;
+            var t1 = (s + 1) * step;
+            var p0 = baseCentre + (u * (MathF.Cos(t0) * radius)) + (v * (MathF.Sin(t0) * radius));
+            var p1 = baseCentre + (u * (MathF.Cos(t1) * radius)) + (v * (MathF.Sin(t1) * radius));
+            lineDrawer!.Line(p0, p1, color);
+            if (s % Math.Max(1, segments / 4) == 0) lineDrawer.Line(apex, p0, color);
+        }
+    }
+
+    // Any two axes perpendicular to n. Picking the smaller component to cross against keeps
+    // the result well-conditioned when n is near an axis.
+    private static (global::System.Numerics.Vector3 U, global::System.Numerics.Vector3 V) Basis(
+        global::System.Numerics.Vector3 n)
+    {
+        var reference = MathF.Abs(n.Y) < 0.9f
+            ? global::System.Numerics.Vector3.UnitY
+            : global::System.Numerics.Vector3.UnitX;
+        var u = global::System.Numerics.Vector3.Normalize(global::System.Numerics.Vector3.Cross(reference, n));
+        var v = global::System.Numerics.Vector3.Cross(n, u);
+        return (u, v);
     }
 
     // Flat grid of lines on the XZ plane at center.Y.

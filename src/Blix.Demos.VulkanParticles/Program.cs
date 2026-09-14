@@ -568,7 +568,9 @@ internal sealed class ParticlesLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         debug.State.Enabled = overlayEnabled;
         if (!overlayEnabled) return;
 
-        debug.Draw.ViewProjection = viewProj;
+        // Every primitive below belongs to this view. Scoped rather than assigned: the old
+        // per-channel matrix meant a frame could only ever be one world seen one way.
+        using var view = debug.Draw.In("main", viewProj);
         tunables.BuildControls(debug);
 
         using (debug.Scope("particles"))

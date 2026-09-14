@@ -35,12 +35,23 @@ public sealed partial class VulkanGraphicsDevice
     private ExtDebugUtils? debugUtils;
     private bool validationEnabled;
 
+    // <b>On with the validation layers, and for the same reason they are.</b> The uniform-conflict
+    // detector costs a dictionary lookup and a byte compare per uniform member per draw — nothing in
+    // absolute terms, and still not something an ordinary run should pay for a fault that only
+    // appears when a program is shared across passes. See NoteUniformWrite.
+    private bool detectUniformConflicts;
+
     private static readonly string[] ValidationLayers = { "VK_LAYER_KHRONOS_validation" };
 
     private void InitializeVulkan(IVkSurface windowSurface)
     {
         Vk = Vk.GetApi();
         validationEnabled = ShouldEnableValidation() && AreLayersAvailable(ValidationLayers);
+
+        // Deliberately NOT gated on the layers being present: this check is ours, needs no layer,
+        // and a machine without them installed is exactly where a silent aliasing bug would live
+        // longest.
+        detectUniformConflicts = ShouldEnableValidation();
 
         CreateInstance(windowSurface);
         TryAttachDebugMessenger();
@@ -265,6 +276,11 @@ public sealed partial class VulkanGraphicsDevice
         {
             Vk.GetPhysicalDeviceProperties(PhysicalDevice, out var props);
             MaxAnisotropy = props.Limits.MaxSamplerAnisotropy;
+
+            // Every dynamic offset handed to vkCmdBindDescriptorSets must be a multiple of this.
+            // Read rather than assumed: 256 on plenty of hardware, 16 on some, and a hard-coded
+            // guess is either wasteful or invalid with no middle ground.
+            uniformOffsetAlignment = (int)System.Math.Max(1ul, props.Limits.MinUniformBufferOffsetAlignment);
         }
 
         // multiDrawIndirect: one vkCmdDrawIndexedIndirect issuing drawCount>1

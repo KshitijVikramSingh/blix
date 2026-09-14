@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The third entry point onto the lab. No shaders, no render code, no UI. -->
+  <ItemGroup>
+    <ProjectReference Include="..\Blix\Blix.csproj" />
+    <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
+    <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
+    <ProjectReference Include="..\Blix.Graphics.Images\Blix.Graphics.Images.csproj" />
+    <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
+    <ProjectReference Include="..\Blix.Labs.Toolchain\Blix.Labs.Toolchain.csproj" />
+    <ProjectReference Include="..\Blix.Runtime.Silk\Blix.Runtime.Silk.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Blix.Labs.Toolchain.Capture</RootNamespace>
+    <AssemblyName>Blix.Labs.Toolchain.Capture</AssemblyName>
+  </PropertyGroup>
+
+</Project>

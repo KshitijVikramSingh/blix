@@ -116,32 +116,79 @@ public sealed class JsonDumpSink : IDebugFrameSink
 // Anything below is the JSON contract. Changing field names / shapes here is
 // a breaking change for external consumers (regression tooling, bug-repro
 // readers). Add fields rather than rename or restructure.
-
+//
+// SCHEMA 2 BREAKS THAT RULE, once, deliberately. `DrawViewProjection` — one
+// matrix for the whole frame — is gone, replaced by a `Views` array, and each
+// draw command names the view it belongs to. There is no add-a-field version
+// of that change: the old shape encodes "a frame is one world seen one way",
+// which is the assumption being retired.
+//
+// Schema 1 had no version field at all, despite the paragraph above claiming
+// a stable contract. That is why 2 is the first number that appears: an
+// unversioned dump is schema 1 by elimination.
 internal sealed record JsonDebugFrame(
+    int SchemaVersion,
     int Number,
     double WallClockMs,
     JsonRenderFrameContext Frame,
     JsonValueEntry[] Values,
     JsonControlEntry[] Controls,
     JsonDrawCommand[] DrawCommands,
-    JsonMatrix4 DrawViewProjection,
+    JsonView[] Views,
     JsonStatEntry[] Stats,
     JsonTimerEntry[] Timers,
     JsonEventEntry[] Events,
     string? SelectedPath)
 {
-    public static JsonDebugFrame From(DebugFrame f) => new(
+    /// <summary>The current on-disk schema. Bump whenever a field changes shape or leaves.</summary>
+    public const int CurrentSchemaVersion = 2;
+
+    public static JsonDebugFrame From(DebugFrame f)
+    {
+        // Commands carry a ViewId, which is a process-local index and means nothing in a file. The name is
+        // the identity that survives the trip to disk, so it is resolved here, once, rather than leaving
+        // every reader to join against the Views array.
+        var names = new Dictionary<Blix.Core.ViewId, string>();
+        foreach (var v in f.Views) names[v.Id] = v.Name;
+
+        return new(
+        SchemaVersion: CurrentSchemaVersion,
         Number: f.Number,
         WallClockMs: f.WallClockMs,
         Frame: new JsonRenderFrameContext(f.Frame.Width, f.Frame.Height),
         Values: f.Values.Select(JsonValueEntry.From).ToArray(),
         Controls: f.Controls.Select(JsonControlEntry.From).ToArray(),
-        DrawCommands: f.DrawCommands.Select(JsonDrawCommand.From).ToArray(),
-        DrawViewProjection: JsonMatrix4.From(f.DrawViewProjection),
+        DrawCommands: f.DrawCommands
+            .Select(c => JsonDrawCommand.From(c, names.GetValueOrDefault(c.View, "<undeclared>")))
+            .ToArray(),
+        Views: f.Views.Select(JsonView.From).ToArray(),
         Stats: f.Stats.Select(JsonStatEntry.From).ToArray(),
         Timers: f.Timers.Select(JsonTimerEntry.From).ToArray(),
         Events: f.Events.Select(JsonEventEntry.From).ToArray(),
         SelectedPath: f.SelectedPath);
+    }
+}
+
+// A view as it appears on disk: where the world was seen from, and where that picture landed.
+// Target is the raw surface id — opaque, but enough to tell two viewports apart in a dump.
+internal sealed record JsonView(
+    string Name,
+    JsonMatrix4 ViewProjection,
+    int Target,
+    JsonRect LogicalViewport,
+    JsonRect PhysicalViewport)
+{
+    public static JsonView From(Blix.Core.ViewDeclaration v) => new(
+        v.Name,
+        JsonMatrix4.From(v.ViewProjection),
+        v.Target.Id,
+        JsonRect.From(v.LogicalViewport),
+        JsonRect.From(v.PhysicalViewport));
+}
+
+internal sealed record JsonRect(float X, float Y, float Width, float Height)
+{
+    public static JsonRect From(Blix.Graphics.Rect r) => new(r.X, r.Y, r.Width, r.Height);
 }
 
 internal sealed record JsonRenderFrameContext(int Width, int Height);
@@ -168,7 +215,7 @@ internal sealed record JsonControlEntry(
 // about. New primitives extend by adding new optional fields, not by
 // restructuring.
 internal sealed record JsonDrawCommand(
-    string Kind, string Path, JsonColor Color,
+    string Kind, string Path, string View, JsonColor Color,
     JsonVec3? A = null,
     JsonVec3? B = null,
     JsonVec3? Min = null,
@@ -194,12 +241,16 @@ internal sealed record JsonDrawCommand(
     // array per frame would make dumps unusable. The producer's
     // identification path (DebugDrawCommand.Path) is enough for a
     // consumer to correlate back to a specific submesh.
+    // A polyline's points are the thing being reported — a motion question is unanswerable from a count —
+    // so unlike the mesh primitives these are written out. Bounded by DebugTrails.MaxPointsPerTrail.
+    JsonVec3[]? Points = null,
+    int? PointCount = null,
     int? VertexCount = null,
     int? EdgeCount = null,
     int? NormalCount = null,
     JsonMatrix4? Matrix = null)
 {
-    public static JsonDrawCommand From(DebugDrawCommand c)
+    public static JsonDrawCommand From(DebugDrawCommand c, string view)
     {
         var kind = c.GetType().Name.StartsWith("DebugDraw", StringComparison.Ordinal)
             ? c.GetType().Name.Substring("DebugDraw".Length)
@@ -207,37 +258,39 @@ internal sealed record JsonDrawCommand(
         var color = JsonColor.From(c.Color);
         return c switch
         {
-            DebugDrawLine x => new(kind, x.Path, color,
+            DebugDrawLine x => new(kind, x.Path, view, color,
                 A: JsonVec3.From(x.A), B: JsonVec3.From(x.B)),
-            DebugDrawAabb x => new(kind, x.Path, color,
+            DebugDrawAabb x => new(kind, x.Path, view, color,
                 Min: JsonVec3.From(x.Min), Max: JsonVec3.From(x.Max)),
-            DebugDrawGrid x => new(kind, x.Path, color,
+            DebugDrawGrid x => new(kind, x.Path, view, color,
                 Center: JsonVec3.From(x.Center), Size: x.Size, Divisions: x.Divisions),
-            DebugDrawFrustum x => new(kind, x.Path, color,
+            DebugDrawFrustum x => new(kind, x.Path, view, color,
                 Matrix: JsonMatrix4.From(x.ViewProjection)),
-            DebugDrawSphere x => new(kind, x.Path, color,
+            DebugDrawSphere x => new(kind, x.Path, view, color,
                 Center: JsonVec3.From(x.Center), Radius: x.Radius, Segments: x.Segments),
-            DebugDrawPlane x => new(kind, x.Path, color,
+            DebugDrawPlane x => new(kind, x.Path, view, color,
                 Center: JsonVec3.From(x.Center), Normal: JsonVec3.From(x.Normal), Size: x.Size),
-            DebugDrawRay x => new(kind, x.Path, color,
+            DebugDrawRay x => new(kind, x.Path, view, color,
                 Origin: JsonVec3.From(x.Origin), Direction: JsonVec3.From(x.Direction), Length: x.Length),
-            DebugDrawCapsule x => new(kind, x.Path, color,
+            DebugDrawCapsule x => new(kind, x.Path, view, color,
                 A: JsonVec3.From(x.A), B: JsonVec3.From(x.B), Radius: x.Radius, Segments: x.Segments),
-            DebugDrawObb x => new(kind, x.Path, color,
+            DebugDrawObb x => new(kind, x.Path, view, color,
                 Matrix: JsonMatrix4.From(x.Transform)),
-            DebugDrawCross x => new(kind, x.Path, color,
+            DebugDrawCross x => new(kind, x.Path, view, color,
                 Center: JsonVec3.From(x.Center), Size: x.Size),
-            DebugDrawCone x => new(kind, x.Path, color,
+            DebugDrawCone x => new(kind, x.Path, view, color,
                 Apex: JsonVec3.From(x.Apex), Axis: JsonVec3.From(x.Axis),
                 Length: x.Length, HalfAngleRad: x.HalfAngleRad, Segments: x.Segments),
-            DebugDrawArrow x => new(kind, x.Path, color,
+            DebugDrawArrow x => new(kind, x.Path, view, color,
                 FromPoint: JsonVec3.From(x.From), ToPoint: JsonVec3.From(x.To)),
-            DebugDrawMeshWireframe x => new(kind, x.Path, color,
+            DebugDrawPolyline x => new(kind, x.Path, view, color,
+                Points: x.Points.Select(JsonVec3.From).ToArray(), PointCount: x.Points.Count),
+            DebugDrawMeshWireframe x => new(kind, x.Path, view, color,
                 VertexCount: x.Vertices.Count, EdgeCount: x.Edges.Count / 2),
-            DebugDrawNormals x => new(kind, x.Path, color,
+            DebugDrawNormals x => new(kind, x.Path, view, color,
                 NormalCount: Math.Min(x.Positions.Count, x.Normals.Count),
                 Length: x.Length),
-            _ => new(kind, c.Path, color)
+            _ => new(kind, c.Path, view, color)
         };
     }
 }

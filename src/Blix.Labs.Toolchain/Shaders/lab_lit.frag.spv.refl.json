@@ -1,0 +1,117 @@
+{
+    "entryPoints" : [
+        {
+            "name" : "main",
+            "mode" : "frag"
+        }
+    ],
+    "types" : {
+        "_309" : {
+            "name" : "Frame",
+            "members" : [
+                {
+                    "name" : "uViewProjection",
+                    "type" : "mat4",
+                    "offset" : 0,
+                    "matrix_stride" : 16
+                },
+                {
+                    "name" : "uSunViewProjection",
+                    "type" : "mat4",
+                    "offset" : 64,
+                    "matrix_stride" : 16
+                },
+                {
+                    "name" : "uCameraPosition",
+                    "type" : "vec4",
+                    "offset" : 128
+                },
+                {
+                    "name" : "uSunDirection",
+                    "type" : "vec4",
+                    "offset" : 144
+                },
+                {
+                    "name" : "uSunColour",
+                    "type" : "vec4",
+                    "offset" : 160
+                }
+            ]
+        },
+        "_364" : {
+            "name" : "Push",
+            "members" : [
+                {
+                    "name" : "uModel",
+                    "type" : "mat4",
+                    "offset" : 0,
+                    "matrix_stride" : 16
+                },
+                {
+                    "name" : "uBaseColour",
+                    "type" : "vec4",
+                    "offset" : 64
+                },
+                {
+                    "name" : "uMaterial",
+                    "type" : "vec4",
+                    "offset" : 80
+                }
+            ]
+        }
+    },
+    "inputs" : [
+        {
+            "type" : "vec3",
+            "name" : "vNormal",
+            "location" : 1
+        },
+        {
+            "type" : "vec3",
+            "name" : "vWorld",
+            "location" : 0
+        },
+        {
+            "type" : "vec2",
+            "name" : "vUv",
+            "location" : 2
+        }
+    ],
+    "outputs" : [
+        {
+            "type" : "vec4",
+            "name" : "outColour",
+            "location" : 0
+        }
+    ],
+    "textures" : [
+        {
+            "type" : "sampler2D",
+            "name" : "uSunShadowMap",
+            "set" : 1,
+            "binding" : 0
+        },
+        {
+            "type" : "sampler2D",
+            "name" : "uAlbedo",
+            "set" : 1,
+            "binding" : 1
+        }
+    ],
+    "ubos" : [
+        {
+            "type" : "_309",
+            "name" : "Frame",
+            "block_size" : 176,
+            "set" : 0,
+            "binding" : 0
+        }
+    ],
+    "push_constants" : [
+        {
+            "type" : "_364",
+            "name" : "_366",
+            "push_constant" : true
+        }
+    ]
+}

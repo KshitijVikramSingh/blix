@@ -26,6 +26,7 @@ public sealed class VkLineDrawer : IDisposable
     private readonly IndexBufferHandle indexBuffer;
     private readonly ShaderProgramHandle shader;
     private readonly PipelineHandle pipeline;
+    private readonly Dictionary<(RenderSurfaceHandle Target, bool DepthTested), PipelineHandle> pipelines = new();
     private readonly byte[] uploadBuffer;
     private int vertexCount;
     private bool disposed;
@@ -49,32 +50,26 @@ public sealed class VkLineDrawer : IDisposable
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
         var vertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "debugline.vert.spv"));
         var fragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "debugline.frag.spv"));
-        var uniformLayout = new UniformBlockLayout(
-            TotalSize: 64,
-            Members: new[] { new UniformBlockMember("uViewProjection", Offset: 0, Size: 64) });
-        var lineInterface = new ShaderInterface(new[]
-        {
-            new DescriptorSetSlot(
-                Set: 0,
-                Binding: 0,
-                Type: ShaderResourceType.UniformBuffer,
-                Stages: ShaderStages.Vertex | ShaderStages.Fragment,
-                BlockLayout: uniformLayout),
-        });
+        // <b>A push range, where a uniform block used to be.</b> One program draws every declared
+        // view, so an inline uniform put all of them in the same 64 bytes and the last view's matrix
+        // won for the whole frame — a second view drew the first view's geometry through its own
+        // camera. Push payloads are copied at record time, so each draw owns its matrix. See
+        // debugline.vert for the long version.
+        var lineInterface = new ShaderInterface(
+            Slots: Array.Empty<DescriptorSetSlot>(),
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
         shader = device.CreateShaderProgramFromSpv(vertSpv, fragSpv, lineInterface, "debugline");
 
-        pipeline = device.CreatePipeline(new PipelineDescription(
-            shader,
-            VertexPosition3Color.Layout,
-            PrimitiveTopology.Lines,
-            DepthState.Disabled,
-            RasterizerState.NoCulling,
-            BlendState.AlphaBlend), "debugline");
+        // The swapchain pipeline, which is the common case and the only one there used to be.
+        pipeline = PipelineFor(RenderSurfaceHandle.Default, depthTested: false);
 
         uploadBuffer = new byte[MaxVertexCount * StrideBytes];
     }
 
     public bool HasLines => vertexCount > 0;
+
+    /// <summary>Vertices accumulated so far. Callers slice this to submit one view's lines at a time.</summary>
+    public int VertexCount => vertexCount;
 
     public void Clear() => vertexCount = 0;
 
@@ -158,22 +153,95 @@ public sealed class VkLineDrawer : IDisposable
         Line(corners[2], corners[6], color); Line(corners[3], corners[7], color);
     }
 
+    /// <summary>
+    /// The line pipeline for a given render target, baked on first use.
+    /// </summary>
+    /// <remarks>
+    /// <b>Debug geometry used to be swapchain-only, and nothing said so.</b> This pipeline was created
+    /// once with no RenderTarget, which bakes it against the default render pass — so pointing a debug view
+    /// at an off-screen surface was render-pass incompatible, and the view arc's promise that a view could
+    /// name any target quietly did not extend to the lines drawn into it. Found by trying to capture debug
+    /// geometry into an HDR target, which is exactly the case a collider capture needs.
+    /// <para>
+    /// Cached per target because a pipeline is bound to its pass's attachment formats; there are as many
+    /// as there are surfaces a view draws into, which is one or two.
+    /// </para>
+    /// </remarks>
+    private PipelineHandle PipelineFor(RenderSurfaceHandle target, bool depthTested)
+    {
+        var key = (target, depthTested);
+        if (pipelines.TryGetValue(key, out var existing)) return existing;
+
+        // <b>Tests depth, never writes it.</b> A gizmo is an annotation: it should be hidden by the
+        // geometry in front of it — drawing a collider through the model it wraps is disorienting, which
+        // is how this came up — but it has no business occluding anything else, and a line that wrote
+        // depth would shadow the very thing it describes.
+        var depth = depthTested
+            ? new DepthState(Enabled: true, WriteEnabled: false, DepthCompare.LessEqual)
+            : DepthState.Disabled;
+
+        var created = device.CreatePipeline(
+            new PipelineDescription(
+                shader,
+                VertexPosition3Color.Layout,
+                PrimitiveTopology.Lines,
+                depth,
+                RasterizerState.NoCulling,
+                new[] { BlendState.AlphaBlend },
+                RenderTarget: target.Id == RenderSurfaceHandle.Default.Id ? null : target),
+            $"debugline.target{target.Id}{(depthTested ? ".depth" : string.Empty)}");
+        pipelines[key] = created;
+        return created;
+    }
+
     public void Submit(RenderPassBuilder pass, Matrix4x4 viewProjection)
     {
-        if (vertexCount == 0) return;
-        var byteCount = vertexCount * StrideBytes;
+        Submit(pass, viewProjection, 0, vertexCount, RenderSurfaceHandle.Default, depthTested: false);
+        vertexCount = 0;
+    }
+
+    /// <summary>
+    /// Submits one contiguous run of the accumulated lines under its own view-projection.
+    /// </summary>
+    /// <remarks>
+    /// <b>Ranges rather than one drawer per view.</b> Passes are recorded as deferred lambdas that run at
+    /// execute time, long after the frame is built — so clearing this buffer between views would leave every
+    /// lambda reading whatever the LAST view left behind. Accumulating every view's lines into one buffer
+    /// and remembering each view's span keeps a single upload and costs one draw call per view.
+    /// <para>
+    /// Nothing is reset here, because a ranged caller is mid-frame by definition. The frame's owner calls
+    /// <see cref="Clear"/> once, before it starts.
+    /// </para>
+    /// </remarks>
+    public void Submit(
+        RenderPassBuilder pass,
+        Matrix4x4 viewProjection,
+        int firstVertex,
+        int count,
+        RenderSurfaceHandle target,
+        bool depthTested)
+    {
+        if (count <= 0) return;
+        var byteCount = count * StrideBytes;
         // Race-free per-frame vertices from the transient arena; bind at the slice
         // offset so the static base-0 index buffer addresses this frame's lines.
-        var slice = device.AllocVertices(uploadBuffer.AsSpan(0, byteCount), StrideBytes, "debugline.vb");
+        var slice = device.AllocVertices(
+            uploadBuffer.AsSpan(firstVertex * StrideBytes, byteCount), StrideBytes, "debugline.vb");
+        // Packed into a fresh array per submit rather than a shared scratch: a recorded command
+        // copies its push payload, so reuse would in fact be safe — but this runs once per view per
+        // frame, and a 64-byte allocation is not worth the reader having to check that.
+        var push = new byte[64];
+        MemoryMarshal.Write(push.AsSpan(), in viewProjection);
+
         pass.DrawIndexed(
             vertexBuffer: slice.Buffer,
             indexBuffer: indexBuffer,
-            pipeline: pipeline,
-            indexCount: vertexCount,
-            uniforms: new[] { new ShaderUniform("uViewProjection", new Matrix4x4Uniform(viewProjection)) },
+            pipeline: PipelineFor(target, depthTested),
+            indexCount: count,
+            uniforms: Array.Empty<ShaderUniform>(),
             textures: Array.Empty<ShaderTextureBinding>(),
+            pushConstants: push,
             vertexBufferByteOffset: slice.ByteOffset);
-        vertexCount = 0;
     }
 
     private void WriteVertex(int index, Vector3 position, GraphicsColor color)
@@ -192,7 +260,11 @@ public sealed class VkLineDrawer : IDisposable
     {
         if (disposed) return;
         disposed = true;
-        device.DestroyPipeline(pipeline);
+        // Every variant, not just the first. The cache grows one pipeline per (target, depth
+        // mode) the drawer is asked for, and destroying only the field it was seeded with leaked
+        // the rest — caught by BLIX_VK_VALIDATE reporting leaked objects at device teardown.
+        foreach (var created in pipelines.Values) device.DestroyPipeline(created);
+        pipelines.Clear();
         device.DestroyShaderProgram(shader);
         device.DestroyIndexBuffer(indexBuffer);
         // No vertex buffer to destroy — vertices come from the device-owned

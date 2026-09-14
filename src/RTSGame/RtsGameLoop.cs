@@ -4006,7 +4006,9 @@ plan.DrainageFirst = !eroded && mapTuning.DrainageFirst;
     private void ShowCascades(DebugContext debug)
     {
         if (!cascades.ShowBoxes) return;
-        debug.Draw.ViewProjection = camera.GetViewProjection(aspect);
+        // Every primitive below belongs to this view. Scoped rather than assigned: the old
+        // per-channel matrix meant a frame could only ever be one world seen one way.
+        using var view = debug.Draw.In("main", camera.GetViewProjection(aspect));
         debug.Draw.Arrow(
             "sun/dir",
             new Vector3(cameraFocus.X, simulation.Terrain.SampleHeight(cameraFocus) + 30f, cameraFocus.Y),

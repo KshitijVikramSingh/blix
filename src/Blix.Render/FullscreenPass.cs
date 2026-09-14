@@ -17,6 +17,22 @@ namespace Blix.Render;
 // entirely the caller's; this just gets the triangle on screen.
 public sealed class FullscreenPass : IDisposable
 {
+    /// <summary>The vertex layout a fullscreen pipeline should declare: the dummy buffer's stride, and no attributes.</summary>
+    /// <remarks>
+    /// <b>A fullscreen vertex shader reads gl_VertexIndex and nothing else</b>, so a pipeline that
+    /// declares attributes is promising the shader inputs it does not have. Vulkan permits it and the
+    /// validation layers say so every time a device is created — "Vertex attribute at location 0 not
+    /// consumed by vertex shader", twice per present pipeline. Harmless, and noise in exactly the stream
+    /// an instrument needs to be able to read.
+    /// <para>
+    /// The stride still has to match the dummy buffer this type binds, which is why the layout belongs
+    /// here rather than being something each caller invents: the buffer and the layout that describes it
+    /// are one decision, and today every caller restates half of it.
+    /// </para>
+    /// </remarks>
+    public static VertexLayout Layout { get; } =
+        new(VertexPosition3NormalTexture.Layout.Stride, Array.Empty<VertexAttribute>());
+
     private readonly VulkanGraphicsDevice device;
     private readonly VertexBufferHandle vertexBuffer;
     private readonly IndexBufferHandle indexBuffer;
