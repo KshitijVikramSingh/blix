@@ -182,6 +182,28 @@ when, why — has at least two, so it waits, exactly as the resolver and these m
 **Whether "a state machine" is a thing Blix ever defines is not decided.** It may be data, it may be
 each game's own code, it may be nothing. None of that has to be answered for this to be built.
 
+### Status — D1 is in
+
+`Blix/BoneMask.cs` and a masked `PoseBlend.Lerp`, pinned by `Blix.Test.Graphics` Section **AU** (16
+assertions). Weights only: no states, no links, no durations anywhere in it.
+
+**A subtree is one forward pass**, because `Skeleton`'s constructor already requires parents to
+precede children — so a bone is in the subtree exactly when it is the root or its parent already is.
+No recursion and no child lists, and the guarantee is checked where the skeleton is built rather than
+assumed where it is read.
+
+**A name that is not in the rig throws, and names what is.** A mask over a misspelled bone that
+quietly covered nothing would be the worst shape this bug can take: a layer that runs, costs, and
+changes nothing.
+
+**And one claim was withdrawn rather than shipped.** The masked blend skips bones whose effective
+weight is 0 or 1, and the first comment said that was what made "the legs are untouched, bit for
+bit" exact rather than approximate — that a slerp at weight 0 perturbs low bits. Deleting the
+shortcut turned no test red: not with identity rotations, and not with a pair 150° apart, which puts
+`Quaternion.Slerp` on its trigonometric branch. Both it and `Vector3.Lerp` return their input exactly
+at 0 and 1. The shortcut is a **cost** decision — a quarter-mask does a quarter of the work — and the
+comment now says so. The guarantee is real; that was not what provided it.
+
 ### D1 — the mask, and the blend that reads it
 
 `BoneMask` built from a subtree root, with an optional falloff up the chain; `PoseBlend.Lerp` gaining

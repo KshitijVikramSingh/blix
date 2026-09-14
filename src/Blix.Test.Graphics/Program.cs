@@ -3055,6 +3055,124 @@ static ShaderInterface MinimalShader() => new(new[]
         NoThrow(() => RenderCommandDiagnostics.VerifyUniforms("draw", "p", texCmd.Uniforms, texCmd.UniformFingerprint)));
 }
 
+// ============================================================================
+// Section AU — bone masks, and a blend that reads one.
+// ============================================================================
+//
+// The animation arc deferred masks "until a consumer asks", with three questions attached: which
+// bones, resolved how, blended in what space. The character arc asked, with a body playing a
+// one-shot chop at 0.868 m/s and its legs frozen mid-swing because one pose source cannot do both.
+//
+// The answers pinned here: a subtree named by its ROOT (not indices, which move when a rig is
+// re-exported), a per-bone weight multiplied by the caller's, and local space.
+{
+    // pelvis and spine both hang off a root; the arms hang off the chest; the legs off the pelvis.
+    // Parents precede children, which Skeleton's own constructor requires and BoneMask relies on.
+    var bones = new[]
+    {
+        new Bone("root", -1, Matrix4x4.Identity),
+        new Bone("pelvis", 0, Matrix4x4.Identity),
+        new Bone("spine", 1, Matrix4x4.Identity),
+        new Bone("chest", 2, Matrix4x4.Identity),
+        new Bone("armL", 3, Matrix4x4.Identity),
+        new Bone("armR", 3, Matrix4x4.Identity),
+        new Bone("legL", 1, Matrix4x4.Identity),
+        new Bone("legR", 1, Matrix4x4.Identity),
+    };
+    var skeleton = new Skeleton(bones);
+    var mask = BoneMask.Subtree(skeleton, "spine");
+
+    // ── Which bones ──────────────────────────────────────────────────────────────────────────────
+    t.ExpectTrue("AU.1 a subtree covers its root and everything beneath it",
+        mask[2] == 1f && mask[3] == 1f && mask[4] == 1f && mask[5] == 1f);
+    t.ExpectTrue("AU.1 and nothing above or beside it",
+        mask[0] == 0f && mask[1] == 0f && mask[6] == 0f && mask[7] == 0f);
+    t.ExpectTrue("AU.1 which is four bones of eight", mask.Reach() == 4);
+
+    // A name that is not in the rig is a typo, and a typo that yields a layer which quietly changes
+    // nothing is the worst shape a bug can take — so it throws, and names what is there.
+    t.ExpectTrue("AU.2 a mask over a bone that does not exist throws rather than covering nothing",
+        ThrowsArgument(() => BoneMask.Subtree(skeleton, "spien")));
+
+    // ── The falloff: the question the deferral did not name ──────────────────────────────────────
+    // A hard boundary puts the whole discontinuity in one joint. Fading UP the chain spreads it, and
+    // how far is a number nobody can derive — hence a parameter, and hence the tooling.
+    {
+        var faded = BoneMask.Subtree(skeleton, "spine", falloff: 2);
+        t.ExpectClose("AU.3 the parent of the root takes two thirds", faded[1], 2f / 3f);
+        t.ExpectClose("AU.3 its parent takes one third", faded[0], 1f / 3f);
+        t.ExpectTrue("AU.3 and the subtree itself is untouched by the fade", faded[2] == 1f && faded[4] == 1f);
+        t.ExpectTrue("AU.3 while the legs stay out of it", faded[6] == 0f && faded[7] == 0f);
+    }
+
+    // ── Two halves that sum to exactly one ───────────────────────────────────────────────────────
+    {
+        var lower = mask.Inverted();
+        var exact = true;
+        for (var i = 0; i < skeleton.BoneCount; i++) exact &= mask[i] + lower[i] == 1f;
+        t.ExpectTrue("AU.4 a mask and its inverse sum to exactly one at every bone", exact);
+    }
+
+    // ── Resolved how: one multiplication, and the exactness that follows ─────────────────────────
+    {
+        // FAR-APART ROTATIONS, and what trying to make them matter established. These cases pin
+        // BEHAVIOUR — a masked blend leaves unmasked bones alone — which is worth pinning however it
+        // is achieved. What they cannot pin is the shortcut that skips blending at the ends: deleting
+        // it turns nothing red, with identity rotations OR with a pair 150° apart on Slerp's
+        // trigonometric branch. Vector3.Lerp and Quaternion.Slerp both return their input exactly at
+        // 0 and at 1, so the shortcut is a COST decision and not a precision one, and the comment in
+        // PoseBlend that said otherwise has been corrected.
+        var near = Quaternion.CreateFromAxisAngle(Vector3.Normalize(new Vector3(0.3f, 1f, 0.2f)), 0.2f);
+        var far = Quaternion.CreateFromAxisAngle(Vector3.Normalize(new Vector3(-0.7f, 0.4f, 1f)), 2.6f);
+
+        BoneTransform Bone(float x, Quaternion r) => new(new Vector3(x, 0f, 0f), r, Vector3.One);
+
+        var walking = new Pose(skeleton.BoneCount);
+        var swinging = new Pose(skeleton.BoneCount);
+        for (var i = 0; i < skeleton.BoneCount; i++)
+        {
+            walking.Locals[i] = Bone(1f, near);
+            swinging.Locals[i] = Bone(2f, far);
+        }
+
+        var result = new Pose(skeleton.BoneCount);
+        PoseBlend.Lerp(walking, swinging, 1f, mask, result);
+
+        // THE CLAIM THE WHOLE STAGE EXISTS FOR: the upper body takes the swing, the legs keep
+        // walking, and the legs are untouched BIT FOR BIT rather than approximately.
+        t.ExpectTrue("AU.5 the masked bones take the second pose exactly",
+            result.Locals[2] == swinging.Locals[2] && result.Locals[4] == swinging.Locals[4]);
+        t.ExpectTrue("AU.5 and the unmasked bones keep the first, bit for bit",
+            result.Locals[6] == walking.Locals[6] && result.Locals[7] == walking.Locals[7] &&
+            result.Locals[0] == walking.Locals[0]);
+
+        // THE CONTROL. Without the mask the same blend moves the legs too — which is what says the
+        // mask did the work rather than the poses happening to agree.
+        var unmasked = new Pose(skeleton.BoneCount);
+        PoseBlend.Lerp(walking, swinging, 1f, unmasked);
+        t.ExpectTrue("AU.5 the control: unmasked, the same blend moves the legs as well",
+            unmasked.Locals[6] != walking.Locals[6]);
+
+        // The caller's weight multiplies the mask's, which is the whole of "resolved how".
+        var half = new Pose(skeleton.BoneCount);
+        PoseBlend.Lerp(walking, swinging, 0.5f, mask, half);
+        t.ExpectClose("AU.6 a half-weight layer reaches a masked bone halfway", half.Locals[2].Translation.X, 1.5f);
+        t.ExpectTrue("AU.6 and an unmasked bone not at all", half.Locals[6] == walking.Locals[6]);
+
+        // A zero-weight layer is not a cheap no-op by accident; it is exact by construction, because
+        // a bone whose effective weight is zero is COPIED rather than interpolated toward itself.
+        var off = new Pose(skeleton.BoneCount);
+        PoseBlend.Lerp(walking, swinging, 0f, mask, off);
+        var untouched = true;
+        for (var i = 0; i < skeleton.BoneCount; i++) untouched &= off.Locals[i] == walking.Locals[i];
+        t.ExpectTrue("AU.7 a layer at zero weight changes nothing at all, bit for bit", untouched);
+
+        // A mask belongs to the skeleton it was built from, and saying so beats a silent half-blend.
+        t.ExpectTrue("AU.8 a mask sized for another skeleton is refused",
+            ThrowsArgument(() => PoseBlend.Lerp(walking, swinging, 1f, BoneMask.All(3), result)));
+    }
+}
+
 t.PrintSummary();
 return t.FailedCount;
 
@@ -3067,6 +3185,16 @@ static bool Throws(Action action)
 }
 
 static bool NoThrow(Action action) => !Throws(action);
+
+// A refusal that names a bad ARGUMENT rather than a bad state — a mask over a bone that is not
+// there, or one sized for another skeleton. Kept separate from Throws above because which kind of
+// refusal a call makes is part of what is being pinned: an argument fault is the caller's typo and
+// an invalid-operation fault is the engine's invariant.
+static bool ThrowsArgument(Action action)
+{
+    try { action(); return false; }
+    catch (ArgumentException) { return true; }
+}
 
 // Calls Validate() on a ShaderInterface and returns the thrown exception
 // (or null on success). Lets test cases assert *which* failure occurred
