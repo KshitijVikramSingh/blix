@@ -589,6 +589,66 @@ foreach (var part in room.Parts)
             reached < 0.35f, $"reached {reached:0.000}");
     }
 
+
+    // ── No step may move the body faster than it walks ──────────────────────────────────────────
+    //
+    // THE SKID. Reported from the chair: a body pressed against a surface at an angle stops obeying
+    // its own speed and tears along the wall. It is the classic sweep-and-slide failure and every
+    // implementation meets it, so it gets an invariant rather than a fix and a hope: no single step
+    // may displace the body further than its speed allows, whatever it is touching.
+    //
+    // Measured per frame rather than as a total, because an average hides it — one frame in three at
+    // six times speed reads as twice speed over a second, which sounds like a tuning problem.
+    {
+        // The rule, stated exactly: a frame that CLIMBS may advance a radius, because that is what it
+        // costs a round body to get its axis onto a tread. Every other frame is limited to walking
+        // pace. Sliding is excluded by turning it off rather than by widening the bound, so anything
+        // over the line is the step rule cheating and nothing else.
+        static (float Walking, float Climbing) FastestStep(
+            TriangleMesh3D world, CharacterMotor motor, Vector3 wish, int steps)
+        {
+            var walking = 0f;
+            var climbing = 0f;
+            for (var i = 0; i < steps; i++)
+            {
+                var before = motor.Feet;
+                motor.Step(wish, 1f / 60f, world);
+                var moved = new Vector3(motor.Feet.X - before.X, 0f, motor.Feet.Z - before.Z).Length();
+                if (motor.SteppedUp) climbing = MathF.Max(climbing, moved);
+                else walking = MathF.Max(walking, moved);
+            }
+            return (walking, climbing);
+        }
+
+        var allowed = 3.5f / 60f;   // the default walk speed for one frame
+        var perClimb = 0.35f + 0.05f;   // a radius, which is what mounting a step costs
+
+        // Diagonally into the west wall: the component along the wall should carry on at walking
+        // pace and the component into it should stop.
+        var against = Settle(room.Collider, -13f, 0f, m => m.SlideSpeed = 0f);
+        var wall = FastestStep(room.Collider, against, Vector3.Normalize(new Vector3(-1f, 0f, 1f)), 120);
+        t.Expect("a body sliding along a wall never outruns its own walk speed",
+            wall.Walking <= allowed * 1.1f, $"one step moved {wall.Walking:0.0000} m, {wall.Walking / allowed:0.0} x walking");
+        t.Expect("and sliding along a wall is never mistaken for climbing one",
+            wall.Climbing == 0f, $"a step was accepted against a flat wall, moving {wall.Climbing:0.0000} m");
+
+        // And into the ramp fan, where the blocking surface is walkable rather than a wall.
+        var uphill = Settle(room.Collider, -7.5f, 0f, m => m.SlideSpeed = 0f);
+        var ramp = FastestStep(room.Collider, uphill, Vector3.Normalize(new Vector3(-1f, 0f, 0.4f)), 120);
+        t.Expect("nor does one working its way along a ramp",
+            ramp.Walking <= allowed * 1.1f, $"one step moved {ramp.Walking:0.0000} m, {ramp.Walking / allowed:0.0} x walking");
+        t.Expect("and a walkable ramp is never treated as something to climb over",
+            ramp.Climbing == 0f, $"a step was accepted on a ramp, moving {ramp.Climbing:0.0000} m");
+
+        // And climbing stairs, which is where a step rule has the most excuse to cheat.
+        var climbing = Settle(room.Collider, -2.2f, 2f, m => m.SlideSpeed = 0f);
+        var stairs = FastestStep(room.Collider, climbing, -Vector3.UnitX, 120);
+        t.Expect("nor does one walking between stair treads",
+            stairs.Walking <= allowed * 1.1f, $"one step moved {stairs.Walking:0.0000} m, {stairs.Walking / allowed:0.0} x walking");
+        t.Expect("and mounting a tread costs a radius and no more",
+            stairs.Climbing <= perClimb, $"one climb moved {stairs.Climbing:0.0000} m");
+    }
+
     // ── Walking off a ledge falls; walking down stairs does not ─────────────────────────────────
     {
         // Standing on the ledge, walking east off its edge: there is nothing within a step, so the

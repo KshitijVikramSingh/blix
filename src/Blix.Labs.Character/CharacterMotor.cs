@@ -129,7 +129,7 @@ public sealed class CharacterMotor
         // What a step-up actually asks is "did I get as far along my intended direction as I asked
         // for", and the retry is the WHOLE original motion from a lifted position rather than the
         // remains of it.
-        if (wasStanding && StepHeight > 0f && horizontal.LengthSquared() > 1e-10f)
+        if (wasStanding && StepHeight > 0f && horizontal.LengthSquared() > 1e-10f && Obstructed(walked))
         {
             var direction = Vector3.Normalize(horizontal);
             var flatGain = Vector3.Dot(Feet - beforeWalk, direction);
@@ -193,7 +193,21 @@ public sealed class CharacterMotor
     {
         var hit = Intersection.Sweep(Body, new Vector3(0f, -GroundProbeDepth, 0f), world);
         Grounded = hit is not null;
-        GroundNormal = hit?.Normal ?? Vector3.UnitY;
+        if (!Grounded) { GroundNormal = Vector3.UnitY; return; }
+
+        // <b>Two instruments, each asked what it is good at.</b> The sweep is exact about whether the
+        // body is TOUCHING anything — a hovering body is not grounded and no ray can say so, because
+        // a ray always finds the floor eventually. But the sweep's normal is the CAPSULE's contact
+        // normal, and a round body crossing a step's edge touches the corner, where that normal reads
+        // 56° on a perfectly flat tread. A body is not standing on a corner; it is standing on
+        // whatever is under it.
+        //
+        // So the normal comes from a ray straight down the axis, which reads a face rather than an
+        // edge. If it finds nothing — the body bridging a gap with its axis over thin air — the
+        // sweep's answer stands, because then the corner really is all there is.
+        var down = new Ray(Feet + new Vector3(0f, Radius, 0f), -Vector3.UnitY);
+        var under = Intersection.Raycast(down, world, Radius + GroundNormalReach);
+        GroundNormal = under?.Normal ?? hit!.Value.Normal;
     }
 
     /// <summary>Lift, move, drop — and keep it only if it got further AND landed somewhere standable.</summary>
@@ -212,17 +226,22 @@ public sealed class CharacterMotor
         if (lift.Position.Y < StepHeight - 1e-3f) { Feet = start; return false; }   // no headroom
         Feet += lift.Position;
 
-        // FAR ENOUGH TO PUT THE AXIS ON THE TREAD, not just as far as this frame asked for. A
-        // capsule is round underneath, so landing with its axis still short of the step's edge
-        // leaves it BALANCED on that edge — and the contact normal there is the edge's, which came
-        // back as 56.6° on a flat 0.30 m tread and was rejected as unstandable. Correctly: a body
-        // perched on a corner is not standing on the stair, and accepting it would have it slide
-        // straight back off.
+        // <b>A radius forward, because a capsule cannot mount a step any other way.</b> Its axis has
+        // to finish over the tread; land short and it is balanced on the edge, gains no height, and
+        // falls back. There is no frame-sized version of that for a 0.35 m body taking 0.058 m
+        // steps — either the axis gets across or the climb never starts.
         //
-        // The cost is a small lurch: a blocked frame that would have advanced 5.8 cm advances a
-        // radius instead. That is the price of a round body on a square step, it only fires on the
-        // frame that was going nowhere anyway, and it is visible in the viewer as a hop onto each
-        // tread rather than hidden in an average.
+        // <b>And that reach WAS the skid.</b> Every frame a body slides along anything at an angle is
+        // a frame that did not cover its full intended distance, so a step attempt that only asked
+        // "did I fall short?" fired every frame and bought 0.37 m each time — 6.3x walking pace up a
+        // ramp, 4.5x along a wall. Reported from the chair as a body tearing along surfaces, which is
+        // exactly what it was.
+        //
+        // The fix is not to take the reach away but to charge for it honestly: see the acceptance
+        // test below, which now asks whether the attempt CLIMBED anything. Sliding along a wall
+        // gains no height, so it is refused and the body keeps walking pace; a stair gains a riser,
+        // so it is allowed and costs one hop. The distinction is the one the rule was always meant
+        // to make, and "did I fall short" was never it.
         var reach = MathF.Max(horizontal.Length(), Radius + 0.02f);
         resolver.Deflect = DeflectAgainstSteepAsWall;
         var across = resolver.Move(Body, direction * reach, world);
@@ -234,8 +253,14 @@ public sealed class CharacterMotor
 
         ProbeGround(world);
 
+        // THREE CONDITIONS, and the height one is what makes the reach affordable. Standing, because
+        // a lip leading onto a cliff is not a step; further along, because a step that ends where
+        // walking into the wall ended is a body bobbing against it; and HIGHER, because an attempt
+        // that climbed nothing was not a step at all — it was a longer slide, and allowing it is how
+        // a body ends up outrunning its own speed along every wall it touches.
         var gain = Vector3.Dot(Feet - start, direction);
-        if (Standing && gain > flatGain + 1e-4f)
+        var climbed = Feet.Y - start.Y;
+        if (Standing && gain > flatGain + 1e-4f && climbed > MinStepGain)
         {
             SteppedUp = true;
             return true;
@@ -287,6 +312,21 @@ public sealed class CharacterMotor
 
     private static Vector3 StopDead(Vector3 remaining, Vector3 normal) => Vector3.Zero;
 
+    /// <summary>Was the move stopped by something too steep to walk on, rather than merely slowed?</summary>
+    /// <remarks>
+    /// A step-up exists to climb an OBSTRUCTION. Without this it also fired on every frame a body
+    /// spent working its way along a ramp — which is walkable ground, where nothing needs climbing —
+    /// and each attempt cost three more sweeps for a result the ordinary move had already reached.
+    /// </remarks>
+    private bool Obstructed(MoveResult move)
+    {
+        foreach (var contact in move.Contacts)
+        {
+            if (Room.SlopeDegrees(contact.Normal) > SlopeLimitDegrees) return true;
+        }
+        return false;
+    }
+
     private static Vector3 ProjectOnPlane(Vector3 v, Vector3 normal) =>
         v - (normal * Vector3.Dot(v, normal));
 
@@ -305,4 +345,21 @@ public sealed class CharacterMotor
     /// stair's height above the floor.
     /// </remarks>
     private const float GroundProbeDepth = 0.02f;
+
+    /// <summary>How far past the body's radius the ground-normal ray looks.</summary>
+    /// <remarks>
+    /// A body resting on a slope sits r/cos(theta) above the surface directly beneath it, so the ray
+    /// has to reach further than the radius to find the face it is standing on: 0.3 covers past 55°,
+    /// which is past any limit worth setting. It only ever chooses a NORMAL — the sweep has already
+    /// decided whether the body is touching anything — so reaching too far costs nothing.
+    /// </remarks>
+    private const float GroundNormalReach = 0.3f;
+
+    /// <summary>The least height an attempt must gain to count as having climbed something.</summary>
+    /// <remarks>
+    /// Anything that gains less than this did not step over an obstruction; it slid along one. A
+    /// centimetre is well under the room's shortest riser (0.10 m) and well over the skin gap the
+    /// resolver leaves, so neither a real step nor a flat slide is ambiguous.
+    /// </remarks>
+    private const float MinStepGain = 0.01f;
 }

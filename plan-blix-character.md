@@ -328,6 +328,32 @@ body stands still; remove the step allowance and the same flight stops it dead; 
 allowance above the ledge and the same ledge is climbed. The first attempt at the step control was
 ill-posed (a 0.25 m allowance against a 0.30 m riser) and the room's own geometry defeated it.
 
+### The skid — reported from the chair, and it was the step rule
+
+A body pressed against a surface at an angle stopped obeying its own speed and tore along the wall.
+The classic sweep-and-slide failure, and it got an invariant rather than a fix and a hope: **no
+frame may displace the body further than its speed allows**, measured per frame because an average
+hides it. It failed at **6.3x walking pace up a ramp and 4.5x along a wall**, and the number was
+exactly `Radius + 0.02` — the step-up's forward reach.
+
+**Every frame spent sliding along anything at an angle is a frame that fell short of its intended
+distance**, so a step rule that asks only "did I fall short?" fires on all of them and buys a radius
+each time.
+
+The reach itself is not the fault and cannot simply be removed: a capsule's axis has to finish over
+the tread, and there is no frame-sized version of that for a 0.35 m body taking 0.058 m steps —
+either the axis gets across or the climb never starts. What was missing is that **an attempt must
+have CLIMBED something**. Sliding along a wall gains no height, so it is refused and the body keeps
+walking pace; a stair gains a riser, so it is allowed and costs one hop. Two supporting changes fell
+out: a step is only attempted when a contact was too steep to walk on (a ramp needs no climbing),
+and **ground classification moved from the capsule's contact normal to a ray down the axis** — a
+body whose axis is over the tread is standing on the tread, whatever corner its shell touches.
+
+The invariant now states the rule exactly rather than approximately: a climbing frame may advance a
+radius, every other frame is limited to walking pace, and sliding is excluded by switching it off
+rather than by widening the bound. Verified to fail: dropping just the height condition turns
+"sliding along a wall is never mistaken for climbing one" red at 0.2631 m.
+
 **R-D — rest, and the numbers only a lab can find.** Slope limit, step up and step down,
 ledge behaviour, and the classic: a body on a slope below the limit must come to **actual
 rest**, not micro-slide forever. These are policy — the engine says it holds no opinion —
