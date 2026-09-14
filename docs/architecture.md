@@ -192,6 +192,50 @@ swapchain extent was. And nothing yet captures a *sequence* — one file per fra
 fixed timestep — which is what turning "does this motion look right" into a diffable
 artifact would need.
 
+## How an application is put together
+
+The toolchain lab's viewer is the worked example, and it earned the section by going wrong first:
+it reached **1,645 lines** with the camera, the animation clocks, picking and the entire UI in one
+type. The problem was never the line count on its own — it was that *what is shown* and *what is
+true* had become impossible to tell apart. A checkbox that hides a skeleton and a clock that
+advances one are different kinds of fact, and a reader had to know the codebase to say which a given
+field was.
+
+**The shape.** A root constructs its parts and calls them. Nothing else:
+
+```
+Program            parses args, owns the window
+  ViewerLoop       the root: load, update, render, debug, input
+    LabCamera      x2 — the window's view and the panel's viewport
+    RigSession     clocks, composition, palettes
+    LabSelection   what is selected, and what a click selects
+    ViewerPanels   every panel, and the display state they toggle
+```
+
+No discovery, no registration, no "which tool is active" branch. **A different executable simply
+builds a different root** — which is what the capture tool and the probe already are.
+
+**What crosses into the library, and what does not.** These are two different bars and conflating
+them is how a lab grows a framework:
+
+- **Into `Blix.Labs.Toolchain` requires a second consumer.** `LabCamera` went because the viewer had
+  *two* cameras with duplicated orbit arithmetic — the §4 bar met without either copy leaving the
+  file. `RigSession` went because the capture tool had independently grown its own pose composition,
+  root strip, palette packing and distinct-pose count; the viewer runs it live and the capture runs
+  it a fixed step at a time, which is one set of decisions on two clocks.
+- **Staying in the executable needs no second consumer at all.** `LabSelection` and `ViewerPanels`
+  are local decomposition: only the viewer picks, and only the viewer has panels. The bar there is
+  simply that the file had stopped being readable.
+
+**A view may hold its model.** `ViewerPanels` keeps a reference to the root and reads what it needs
+through a short, explicit list of internal accessors. That is not a circular dependency worth
+avoiding — it is the ordinary shape for a view, and it is what keeps each panel method's dependency
+list from being a dozen parameters. The rule that matters is the other direction: **the root never
+asks the panels what to do.** It reads their toggles, which is data, not control.
+
+**What this is not.** Not plugins, not a tool registry, not an "application framework". The parts
+are ordinary classes with constructors, called in an order you can read top to bottom.
+
 ## Host contracts
 
 `Blix.Core` owns the platform-facing interfaces. The runtime (`Blix.Runtime.Silk.Window`) implements all of them; game code consumes them. Game code never references `Blix.Runtime.Silk` directly.

@@ -567,6 +567,13 @@ Deliberately absent: cascades, texel snapping, bloom, IBL, MSAA, a depth pre-pas
 are earned in TankArena and VulkanSponza; a lab that grew them by default would be
 claiming to be a renderer.
 
+**How the viewer is put together.** `Program` builds a `ViewerLoop` root, which explicitly
+constructs and calls `LabCamera` (twice — the window's view and the panel's), `RigSession`,
+`LabSelection` and `ViewerPanels`. It reached 1,645 lines as one type first, and the reason to split
+it was not length: *what is shown* and *what is true* had become indistinguishable. See
+[`architecture.md` §"How an application is put together"](architecture.md) for the two bars — a
+second consumer to reach the library, readability alone to split an executable.
+
 Proves: several executables over one lab · reflected binding off the GPU · the shared
 build targets (`BlixShaderMode=Library` + `BlixShaderReflect`) · the chassis · glTF import,
 node hierarchy and pivots · picking through a named view · depth-tested gizmos · capture ·

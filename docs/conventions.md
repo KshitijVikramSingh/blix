@@ -204,7 +204,16 @@ pose).
   embedded viewport — two stages of a real consumer, no friction from the
   table's location. `plan-blix-view.md` §D.)
 
+- **Decomposing an application and extracting a library are different bars.**
+  Moving code into a shared library needs a *second consumer* wanting the same
+  decision. Splitting one executable into several classes needs only that the
+  file had stopped being readable — and those classes stay in the executable
+  until something else asks for them. A root constructs its parts and calls
+  them; there is no discovery, registration, or active-tool branch, and a
+  different executable simply builds a different root.
+
 **Enforced by:** [`architecture.md` §"Library, not framework"](architecture.md)
+· [`architecture.md` §"How an application is put together"](architecture.md)
 · the *Proves / Owns* header block on each `src/Blix.Demos.*/Program.cs` · the
 *Deliberate limits* sections throughout [`blix.md`](blix.md).
 

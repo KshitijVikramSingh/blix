@@ -79,11 +79,11 @@ public static class LabSkeletonView
     public static void Draw(
         DebugContext debug,
         Skeleton skeleton,
-        Matrix4x4[] boneWorlds,
+        IReadOnlyList<Matrix4x4> boneWorlds,
         Matrix4x4 modelTransform,
         Options options,
         int selectedBone = -1,
-        Matrix4x4[]? restWorlds = null,
+        IReadOnlyList<Matrix4x4>? restWorlds = null,
         IReadOnlyList<bool>? include = null)
     {
         ArgumentNullException.ThrowIfNull(debug);
@@ -198,7 +198,7 @@ public static class LabSkeletonView
     /// <summary>Largest extent across every joint position — the number every gizmo size is a fraction of.</summary>
     public static float Span(
         Skeleton skeleton,
-        Matrix4x4[] boneWorlds,
+        IReadOnlyList<Matrix4x4> boneWorlds,
         Matrix4x4 modelTransform,
         IReadOnlyList<bool>? include = null)
     {
