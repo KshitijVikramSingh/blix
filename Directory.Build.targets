@@ -106,6 +106,43 @@
     Extracted when a second consumer wanted it (conventions §4) — VulkanSponza had
     carried a bespoke copy since it was written, and the toolchain lab is the second.
   -->
+  <!--
+    THE APP INDEX.
+
+    Every assembly in the tree gets a sidecar listing the [BlixApp] methods it
+    declares, written next to its output. No opt-in: a project that declares none
+    gets an index saying so, which is itself the answer `blix ls` needs.
+
+    The attribute is the source of truth because it lives with the code it names and
+    cannot drift from it. But discovery must be instant and must not require a build —
+    the moment you most want to know what a project holds is often the moment its build
+    is broken. Generating the index from the attribute gets both properties: it is
+    regenerated rather than maintained, so it cannot drift, and it is a file, so reading
+    it costs nothing. It is also the only place that can record WHICH APPHOST runs which
+    app, which an attribute cannot say about itself and the launcher needs the moment a
+    project has more than one assembly.
+
+    Same shape as BlixReflectSpirV below, deliberately: Inputs are the assembly, Outputs
+    the sidecar, so incrementality is right and nothing re-runs for an unchanged build.
+
+    The Exists() guard is the bootstrap. Unlike the shader compiler, nothing references
+    this tool — a reference in all 39 projects would be a worse cure than the disease —
+    so on a fresh clone the first few assemblies may build before the indexer does. That
+    is why `blix` builds the indexer before it reads anything: by the time an index is
+    ASKED for it is correct, and a missing or stale one is reported rather than believed.
+  -->
+  <PropertyGroup>
+    <BlixAppIndexerDll>$(MSBuildThisFileDirectory)src/Blix.Tools.Apps/bin/$(Configuration)/net8.0/Blix.Tools.Apps.dll</BlixAppIndexerDll>
+  </PropertyGroup>
+
+  <Target Name="BlixIndexApps"
+          Condition="'$(BlixSkipAppIndex)' != 'true' AND '$(OutputType)' != '' AND Exists('$(BlixAppIndexerDll)')"
+          AfterTargets="CopyFilesToOutputDirectory"
+          Inputs="@(IntermediateAssembly);$(BlixAppIndexerDll)"
+          Outputs="$(OutDir)$(AssemblyName).blixapps.json">
+    <Exec Command="dotnet &quot;$(BlixAppIndexerDll)&quot; --assembly &quot;$(OutDir)$(AssemblyName).dll&quot; --output &quot;$(OutDir)$(AssemblyName).blixapps.json&quot;" />
+  </Target>
+
   <Target Name="BlixReflectSpirV"
           Condition="'@(GlslShader)' != '' AND '$(BlixShaderReflect)' == 'true'"
           AfterTargets="BlixCompileSpirV"

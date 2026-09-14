@@ -1,3 +1,4 @@
+using Blix.Core;
 using Blix.Graphics.Vulkan;
 using System.Numerics;
 using Blix.Assets;
@@ -35,6 +36,7 @@ namespace Blix.Labs.Toolchain.Probe;
 //   non-zero exit code before anything is submitted.
 public static class Program
 {
+    [BlixApp("check", Summary = "judge an asset — clips, skeleton, binding contracts; exits non-zero")]
     public static int Main(string[] args)
     {
         // --model <path> reports what an import produced, with no device anywhere in sight. A glTF

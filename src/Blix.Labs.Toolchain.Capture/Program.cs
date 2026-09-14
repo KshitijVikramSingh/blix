@@ -30,6 +30,7 @@ namespace Blix.Labs.Toolchain.Capture;
 //   the real radiance and the curve is an offline choice rather than baked in.
 public static class Program
 {
+    [BlixApp("shot", Summary = "render a model or rig to a PNG", Headed = true)]
     public static int Main(string[] args)
     {
         var output = ArgValue(args, "--out") ?? "capture.png";

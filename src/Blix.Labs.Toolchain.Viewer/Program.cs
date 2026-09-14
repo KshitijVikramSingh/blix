@@ -36,6 +36,7 @@ namespace Blix.Labs.Toolchain.Viewer;
 //     the root delta drives the model — all policy a game would decide for itself.
 public static class Program
 {
+    [BlixApp("view", Summary = "look at a model or rig", Headed = true)]
     public static void Main(string[] args)
     {
         // --model <path> loads a glTF as its authored NODE TREE; --rig <path> loads one as a
