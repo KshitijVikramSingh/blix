@@ -293,6 +293,12 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
             var shoulder = camera.ShoulderOffset;
             if (ImGui.SliderFloat("shoulder", ref shoulder, -1.5f, 1.5f)) camera.ShoulderOffset = shoulder;
 
+            // The framing dial. Aiming at the chest centres the body with floor below it — a follow
+            // camera; aiming over its head pushes it low and fills the frame with the ground it is
+            // about to walk into, which is what you want to be watching in a lab about walking.
+            var aim = camera.AimHeight;
+            if (ImGui.SliderFloat("aim height m", ref aim, 0f, 3f)) camera.AimHeight = aim;
+
             var fov = camera.FieldOfView * 180f / MathF.PI;
             if (ImGui.SliderFloat("fov deg", ref fov, 35f, 110f)) camera.FieldOfView = fov * MathF.PI / 180f;
 

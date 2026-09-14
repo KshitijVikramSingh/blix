@@ -44,6 +44,20 @@ public sealed class RoomCamera
 {
     private CameraRig rig = CameraRig.ThirdPerson;
 
+    /// <summary>
+    /// Starts on the rig it says it starts on, with that rig's own framing.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because the property setter cannot do it.</b> It returns early when the rig is unchanged —
+    /// which is right, or every mouse-move that re-selected the same radio button would snap the
+    /// camera back — but it means the INITIAL rig is the one rig whose defaults never ran. The
+    /// camera opened at the field initialisers instead: distance 11 and pitch 0.42, the orbit
+    /// camera's framing, on a rig that wants 4.2 and 0.22. A capture of the third-person rig came
+    /// back framing the whole hall with the body four pixels tall, which is what made it visible —
+    /// in the viewer you cannot tell a default you never got from one you disagree with.
+    /// </remarks>
+    public RoomCamera() => ApplyDefaults();
+
     /// <summary>Which rig. Setting it applies that rig's defaults — a camera you must re-tune by hand every time you switch is one you stop switching.</summary>
     public CameraRig Rig
     {
@@ -81,6 +95,18 @@ public sealed class RoomCamera
 
     /// <summary>How far to the side of the body a third-person eye sits. 0 is straight behind.</summary>
     public float ShoulderOffset { get; set; } = 0.55f;
+
+    /// <summary>
+    /// How far up the body the camera aims, in metres from the feet.
+    /// </summary>
+    /// <remarks>
+    /// <b>The framing control, and it was a hidden constant.</b> Aiming at a body's chest puts it in
+    /// the middle of the screen with the floor filling everything below — which is a follow camera.
+    /// Aiming ABOVE its head pushes it into the lower third and fills the frame with the ground it
+    /// is walking into, which is what a third-person action camera is for and why it can be played
+    /// with. Nothing about it is derivable from the body's height; it is a taste, so it is a dial.
+    /// </remarks>
+    public float AimHeight { get; set; } = 1.6f;
 
     /// <summary>Whether the body's own gizmo is worth drawing through this rig.</summary>
     public bool ShowsBody => Rig != CameraRig.FirstPerson;
@@ -148,7 +174,7 @@ public sealed class RoomCamera
                 // sits to one side of the screen. That IS the over-the-shoulder framing; the
                 // crooked walk never was.
                 var (_, right) = GroundBasis;
-                Target = feet + new Vector3(0f, eyeHeight * 0.85f, 0f) + (right * ShoulderOffset);
+                Target = feet + new Vector3(0f, AimHeight, 0f) + (right * ShoulderOffset);
                 var wanted = Target + Spherical(Yaw, Pitch, Distance);
 
                 // The pull-in slides the eye along the line to the target, so it shortens the view
@@ -172,7 +198,7 @@ public sealed class RoomCamera
             }
 
             case CameraRig.Isometric:
-                Target = feet + new Vector3(0f, 0.6f, 0f);
+                Target = feet + new Vector3(0f, AimHeight * 0.4f, 0f);
                 Position = Target + Spherical(Yaw, Pitch, Distance);
                 break;
         }
@@ -298,11 +324,15 @@ public sealed class RoomCamera
                 break;
 
             case CameraRig.ThirdPerson:
-                // Low and close: an action camera is behind the shoulder, not above the head, and
-                // the whole point of it is that you can see what the body is about to walk into.
-                (MinPitch, MaxPitch) = (-0.35f, 1.1f);
-                Pitch = 0.22f;
-                Distance = 4.2f;
+                // Behind and ABOVE the shoulder, looking down. The first cut was level with the body
+                // at 12.6° and read as a follow camera: the character sat dead centre, the floor
+                // filled everything below it and a quarter of the frame was empty sky. An action
+                // camera looks DOWN at the character so the ground it is about to walk into is the
+                // subject — which is also what stops a wall filling the screen the moment you turn.
+                (MinPitch, MaxPitch) = (-0.2f, 1.1f);
+                Pitch = 0.34f;
+                Distance = 4.0f;
+                AimHeight = 1.6f;
                 break;
 
             case CameraRig.FirstPerson:
@@ -318,7 +348,11 @@ public sealed class RoomCamera
                 (MinPitch, MaxPitch) = (0.5f, 1.4f);
                 Pitch = 0.95f;
                 Yaw = MathF.PI * 0.25f;
-                Distance = 22f;
+
+                // 22 m showed the whole hall and made the body a speck — a map view rather than a
+                // camera. 14 gives about nine metres of visible height, which is a body you can read
+                // and a couple of features around it, which is what this camera is for.
+                Distance = 14f;
                 break;
         }
 

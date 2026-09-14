@@ -32,13 +32,34 @@ public static class Program
         // answers about a third of what the room is for — the beam's underside and the gap's throat
         // are not visible from anywhere the default camera stands.
         var yaw = Float(args, "--yaw", 0.9f);
-        var pitch = Float(args, "--pitch", 0.55f);
-        var distance = Float(args, "--distance", 24f);
+        // NaN is the "not given" sentinel, so a rig's own defaults survive unless overridden. A
+        // literal default here would silently overwrite every rig with the orbit camera's framing,
+        // which is the thing these captures exist to compare.
+        var pitch = Float(args, "--pitch", float.NaN);
+        var distance = Float(args, "--distance", float.NaN);
         var targetX = Float(args, "--x", 0f);
         var targetZ = Float(args, "--z", 0f);
 
         // 0 draws each part's own colour, 1 shades every surface by the normal the collider reads.
         var slope = Float(args, "--slope-tint", 0f);
+
+        // <b>A capture of a RIG, which is what makes the rigs comparable at all.</b> Framing is the
+        // one thing about a camera that cannot be judged from its parameters — "pitch 0.22, distance
+        // 4.2" says nothing about whether the body sits where a third-person camera puts it — and
+        // the only honest way to compare four of them is four pictures taken the same way.
+        var rig = (ArgValue(args, "--rig") ?? "orbit").ToLowerInvariant() switch
+        {
+            "third" or "thirdperson" or "3" => CameraRig.ThirdPerson,
+            "fps" or "first" or "firstperson" => CameraRig.FirstPerson,
+            "iso" or "isometric" => CameraRig.Isometric,
+            _ => CameraRig.Orbit,
+        };
+
+        // Where the body stands. It is SETTLED by the real motor rather than placed, so the capture
+        // shows a body resting where the physics puts it — a picture of a camera framing a body that
+        // is floating would be a picture of nothing.
+        var bodyX = Float(args, "--body-x", Room.SpawnPoint.X);
+        var bodyZ = Float(args, "--body-z", Room.SpawnPoint.Z);
 
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
@@ -49,7 +70,9 @@ public static class Program
 
         if (options.ExitAfterFrames <= 0) options = options with { ExitAfterFrames = 8 };
 
-        var loop = new CaptureLoop(output, options.ExitAfterFrames, yaw, pitch, distance, targetX, targetZ, slope);
+        var loop = new CaptureLoop(
+            output, options.ExitAfterFrames, yaw, pitch, distance, targetX, targetZ, slope,
+            rig, new Vector3(bodyX, 0f, bodyZ));
         using (var window = new Window(loop, options))
         {
             window.Run();
@@ -86,6 +109,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private readonly string outputPath;
     private readonly int captureOnFrame;
     private readonly float slopeTint;
+    private readonly CameraRig rig;
+    private readonly CharacterMotor motor = new();
 
     private VulkanGraphicsDevice device = null!;
     private Matrix4x4 viewProjection = Matrix4x4.Identity;
@@ -96,24 +121,31 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     public CaptureLoop(
         string outputPath, int exitAfterFrames,
-        float yaw, float pitch, float distance, float targetX, float targetZ, float slopeTint)
+        float yaw, float pitch, float distance, float targetX, float targetZ, float slopeTint,
+        CameraRig rig, Vector3 bodyAt)
     {
         this.outputPath = outputPath;
         this.slopeTint = slopeTint;
+        this.rig = rig;
+
+        // Settle the body before anything is framed: 240 fixed steps, no wall clock, so the same
+        // arguments put it in the same place every run.
+        motor.Teleport(bodyAt + new Vector3(0f, 2f, 0f));
+        for (var i = 0; i < 240; i++) motor.Step(Vector3.Zero, 1f / 60f, room.Collider);
 
         // One before the last frame: the read-back needs the pass to have executed, and the last
         // frame of the run is the moment after which nothing else will.
         captureOnFrame = Math.Max(1, exitAfterFrames - 1);
 
-        camera.Rig = CameraRig.Orbit;
+        // The rig FIRST, because setting it applies that rig's defaults — and an explicit --pitch or
+        // --distance is meant to override those rather than be overwritten by them.
+        camera.Rig = rig;
         camera.Yaw = yaw;
-        camera.Pitch = pitch;
-        camera.Distance = distance;
-        camera.Target = new Vector3(targetX, 1.2f, targetZ);
+        if (Explicit(pitch)) camera.Pitch = pitch;
+        if (Explicit(distance)) camera.Distance = distance;
 
-        // The Orbit rig is the only one that does not place itself from a body, and a capture has no
-        // body. Called once because nothing here moves; the viewer calls it every frame.
-        camera.Place(Vector3.Zero, 1.8f, null);
+        if (rig == CameraRig.Orbit) camera.Target = new Vector3(targetX, 1.2f, targetZ);
+        camera.Place(motor.Feet, motor.Height, room.Collider);
     }
 
     public string DebugName => "room-capture";
@@ -136,11 +168,46 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         renderer.Render(commandList, room, viewProjection, camera.Position);
     }
 
+    /// <summary>
+    /// Draws the body INTO THE SCENE TARGET, so the capture holds it too.
+    /// </summary>
+    /// <remarks>
+    /// Naming <see cref="RoomRenderer.SceneSurface"/> rather than the swapchain is what puts these
+    /// lines inside the image that gets read back. Without it a rig capture would be a clean render
+    /// of a room with no body in it — which is a picture of everything except the thing being judged.
+    /// </remarks>
     public void Debug(DebugContext debug)
     {
         debug.Values.Value("frames", frames);
+
+        var declaration = debug.Draw.Declare(
+            "scene", viewProjection, renderer.SceneSurface,
+            new Rect(0f, 0f, debug.Frame.Width, debug.Frame.Height),
+            new Rect(0f, 0f, debug.Frame.Width, debug.Frame.Height));
+
+        using (debug.Draw.In(declaration))
+        {
+            if (rig != CameraRig.FirstPerson)
+            {
+                var body = motor.Body;
+                debug.Draw.Capsule(
+                    "body", body.PointA, body.PointB, body.Radius,
+                    new GraphicsColor(0.35f, 0.85f, 1f, 1f));
+
+                // Facing +X, which is arbitrary and stated: a settled body has not walked anywhere,
+                // so there is no travel direction to read one from.
+                var eye = motor.Feet + new Vector3(0f, 0.9f, 0f);
+                debug.Draw.Arrow("facing", eye, eye + new Vector3(0.9f, 0f, 0f), new GraphicsColor(1f, 1f, 1f, 1f));
+            }
+
+            debug.Draw.Grid("floor", new Vector3(0f, 0.02f, 0f), 28f, 28, new GraphicsColor(0.35f, 0.4f, 0.5f, 1f));
+        }
+
         if (frames == captureOnFrame && Written is null) Capture();
     }
+
+    /// <summary>Was a camera parameter actually given, or is it the sentinel meaning "use the rig's"?</summary>
+    private static bool Explicit(float value) => !float.IsNaN(value);
 
     private void Capture()
     {
