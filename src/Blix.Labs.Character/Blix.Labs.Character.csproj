@@ -26,6 +26,8 @@
     <GlslShader Include="Shaders\room_lit.frag" />
     <GlslShader Include="Shaders\room_shadow.vert" />
     <GlslShader Include="Shaders\room_shadow.frag" />
+    <GlslShader Include="Shaders\room_skinned.vert" />
+    <GlslShader Include="Shaders\room_skinned_shadow.vert" />
     <GlslShader Include="Shaders\room_present.vert" />
     <GlslShader Include="Shaders\room_present.frag" />
     <GlslInclude Include="..\Blix.Shaders\pbr.glsl" />

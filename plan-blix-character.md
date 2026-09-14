@@ -486,6 +486,34 @@ on demand — a flickering pose should be a switch, not an anecdote.
   statues and our woodcutters are on cocaine"; "each animation only plays until the impact frame and
   then resets") both live in the act clock, and the Rogue has attack clips to measure.
 
+### Status — M-A is in
+
+`MotionGraph` (states and ordered edges as data), `MotionMachine` (dwell, interrupts, history,
+changes-per-second), `MotionRig` (a rigged glTF against the ENGINE's types), skinned shaders reusing
+the unskinned fragment stages, and `Blix.Labs.Character.Motion` — flat ground, the Rogue, synthetic
+input, and a panel that answers "which transition fired and why". 102/102 probe checks.
+
+**The answer to the question R-A left open:** `MotionRig` came to about a hundred lines. There is no
+shared lab library to extract — what looked shared between the two labs was mostly each lab's own
+renderer, and the engine already had `GltfImporter`, `Skeleton`, `ClipPlayer`, `BonePalette` and
+`MaterialBindings` doing the actual work.
+
+**A DWELL DOES NOT STOP A FLICKER, and the lab found that out in its first run.** The dwell stops a
+one-frame spike, which is what RTSGame built it for. It does nothing for a body sitting *on* a
+threshold: that simply alternates once per dwell instead of once per frame — **measured at 5.4
+changes a second**, which is slower flicker and still flicker. What settles that is **hysteresis**,
+leaving a gait at a lower speed than you entered it at. Worth saying plainly because RTSGame has the
+dwell and not the band, so its bodies hovering at the walk threshold alternate at roughly
+`1/ActionHoldSeconds` and the hold is *bounding* that rather than preventing it.
+
+The two mechanisms answer different questions and the probe now separates them: a spike test whose
+control is the dwell switch, and a threshold test whose control collapses the band to a line — which
+still flickers **with the dwell on**, which is what says the band is doing the work.
+
+**The ordering is checked, not trusted.** Interrupts must be declared before every ordinary
+transition, because first-match-wins means an interrupt below one that also matches would never be
+reached — and would still be marked "interrupts", and would still never interrupt anything.
+
 ### M-A — the graph, and the panel that shows it
 
 A state graph as data: states and transitions whose conditions read a small input struct, with

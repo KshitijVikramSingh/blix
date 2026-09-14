@@ -104,6 +104,28 @@ public sealed class Room
     /// </remarks>
     public static Vector3 SpawnPoint => new(-1f, 0f, 0f);
 
+    /// <summary>
+    /// Nothing but a floor. What the Motion lab stands on.
+    /// </summary>
+    /// <remarks>
+    /// <b>The isolation the plan asks for, as a method.</b> Motion is about clips and states, and a
+    /// body that walks into a ramp while its clip is wrong gives you two suspects for one symptom.
+    /// The floor is the same floor the full room has, built by the same code, so nothing about
+    /// standing on it can differ between the two labs.
+    /// </remarks>
+    public static Room FlatGround()
+    {
+        var builder = new SolidBuilder();
+        builder.Box(new(-HallHalfX, -0.5f, -HallHalfZ), new(HallHalfX, 0f, HallHalfZ));
+
+        var parts = new List<RoomPart>
+        {
+            new("floor", 0, builder.TriangleCount, new Vector3(0.42f, 0.44f, 0.47f), WalkSlopeDegrees: 0f),
+        };
+
+        return Assemble(parts, builder);
+    }
+
     public static Room Build()
     {
         var builder = new SolidBuilder();
@@ -217,6 +239,12 @@ public sealed class Room
             () => builder.Dome(domeCentre, 3f, 0f),
             radius: 3f, centre: domeCentre);
 
+        return Assemble(parts, builder);
+    }
+
+    /// <summary>Turn a finished builder into the render vertices and the collider, from one source.</summary>
+    private static Room Assemble(IReadOnlyList<RoomPart> parts, SolidBuilder builder)
+    {
         var positions = builder.Positions.ToArray();
         var normals = builder.Normals.ToArray();
 

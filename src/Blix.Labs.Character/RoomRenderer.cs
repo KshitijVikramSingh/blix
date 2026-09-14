@@ -48,9 +48,18 @@ public sealed class RoomRenderer : IDisposable
     private ShaderProgramHandle litProgram;
     private ShaderProgramHandle shadowProgram;
     private ShaderProgramHandle presentProgram;
+    private ShaderProgramHandle skinnedProgram;
+    private ShaderProgramHandle skinnedShadowProgram;
     private PipelineHandle litPipeline;
     private PipelineHandle shadowPipeline;
     private PipelineHandle presentPipeline;
+    private PipelineHandle skinnedPipeline;
+    private PipelineHandle skinnedShadowPipeline;
+
+    private readonly byte[] skinnedPush = new byte[LitPushBytes];
+
+    /// <summary>The skinned program, which a rig needs in order to make its set-3 palette material.</summary>
+    public ShaderProgramHandle SkinnedProgram => skinnedProgram;
 
     private VertexBufferHandle roomVertices;
     private IndexBufferHandle roomIndices;
@@ -95,6 +104,12 @@ public sealed class RoomRenderer : IDisposable
         var litInterface = Reflect("room_lit.vert", "room_lit.frag");
         var presentInterface = Reflect("room_present.vert", "room_present.frag");
 
+        // The skinned pair reuses the UNSKINNED fragment stages, so these differ from the two above
+        // by exactly what skinning is: a set-3 palette and a per-draw model matrix the vertex stage
+        // reads. No new fragment shader, which is also why the push block stays byte-identical.
+        var skinnedInterface = Reflect("room_skinned.vert", "room_lit.frag");
+        var skinnedShadowInterface = Reflect("room_skinned_shadow.vert", "room_shadow.frag");
+
         graph = new RenderGraph(vk);
         var fullSize = new MatchSwapchainGraphSize(1.0f);
         shadowTarget = graph.DepthTarget("room-shadow", new FixedGraphSize(ShadowMapSize, ShadowMapSize));
@@ -123,6 +138,10 @@ public sealed class RoomRenderer : IDisposable
             Spv("room_lit.vert"), Spv("room_lit.frag"), litInterface, "room.lit");
         presentProgram = vk.CreateShaderProgramFromSpv(
             Spv("room_present.vert"), Spv("room_present.frag"), presentInterface, "room.present");
+        skinnedProgram = vk.CreateShaderProgramFromSpv(
+            Spv("room_skinned.vert"), Spv("room_lit.frag"), skinnedInterface, "room.skinned");
+        skinnedShadowProgram = vk.CreateShaderProgramFromSpv(
+            Spv("room_skinned_shadow.vert"), Spv("room_shadow.frag"), skinnedShadowInterface, "room.skinned.shadow");
 
         // BACK-FACE CULLING on the lit pass, which the toolchain lab's scene deliberately does not
         // do. Every solid here is closed and the probe says so, so an interior face is never the
@@ -148,6 +167,29 @@ public sealed class RoomRenderer : IDisposable
             RasterizerState.NoCulling,
             Array.Empty<BlendState>(),
             RenderTarget: graph.GetPassSurface(shadowPass)), "room.shadow");
+
+        // BACK-FACE CULLING for the character. A rig is a closed body whose interior is never the
+        // subject, culling halves the fill on the pass that costs most, and an inside-out import
+        // shows up as holes rather than as a mesh that merely looks odd.
+        skinnedPipeline = vk.CreatePipeline(new PipelineDescription(
+            skinnedProgram,
+            VertexPosition3NormalTextureSkin4Tangent.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite,
+            RasterizerState.BackFaceCulling,
+            new[] { BlendState.Disabled },
+            RenderTarget: graph.GetPassSurface(litPass)), "room.skinned");
+
+        // The caster does NOT cull: a shadow from front faces alone loses the far side of every
+        // limb, and a body's silhouette is mostly far sides.
+        skinnedShadowPipeline = vk.CreatePipeline(new PipelineDescription(
+            skinnedShadowProgram,
+            VertexPosition3NormalTextureSkin4Tangent.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite,
+            RasterizerState.NoCulling,
+            Array.Empty<BlendState>(),
+            RenderTarget: graph.GetPassSurface(shadowPass)), "room.skinned.shadow");
 
         presentPipeline = vk.CreatePipeline(new PipelineDescription(
             presentProgram,
@@ -188,8 +230,12 @@ public sealed class RoomRenderer : IDisposable
         return view * projection;
     }
 
-    public void Render(RenderCommandList commandList, Room room, Matrix4x4 viewProjection, Vector3 cameraPosition)
+    public void Render(
+        RenderCommandList commandList, Room room, Matrix4x4 viewProjection, Vector3 cameraPosition,
+        MotionRig? rig = null, Matrix4x4 rigModel = default)
     {
+        if (rigModel == default) rigModel = Matrix4x4.Identity;
+
         var sunViewProjection = SunViewProjection();
 
         // ONE draw for the whole room. The caster needs no per-part anything — it writes depth, and
@@ -207,6 +253,19 @@ public sealed class RoomRenderer : IDisposable
                     new("uLightViewProjection", new Matrix4x4Uniform(sunViewProjection)),
                 },
                 textures: Array.Empty<ShaderTextureBinding>());
+
+            // The rig casts too, into the same pass rather than one of its own: a body and a floor
+            // are the same lighting question with different vertex plumbing, and a second pass would
+            // mean a second clear and two places to fix the next time the sun moves.
+            rig?.Draw(
+                scope, skinnedShadowPipeline,
+                new ShaderUniform[]
+                {
+                    new("uLightViewProjection", new Matrix4x4Uniform(sunViewProjection)),
+                    new("uModel", new Matrix4x4Uniform(rigModel)),
+                },
+                Array.Empty<ShaderTextureBinding>(),
+                push: null);
         });
 
         graph.Pass(litPass, scope =>
@@ -237,6 +296,16 @@ public sealed class RoomRenderer : IDisposable
                     pushConstants: pushScratch,
                     indexOffset: part.FirstTriangle * 3);
             }
+
+            if (rig is not null)
+            {
+                PackPush(new Vector3(0.82f, 0.78f, 0.72f), 0.45f, skinnedPush);
+                rig.Draw(
+                    scope, skinnedPipeline,
+                    uniforms.Append(new ShaderUniform("uModel", new Matrix4x4Uniform(rigModel))).ToArray(),
+                    textures,
+                    push: skinnedPush);
+            }
         });
 
         graph.Execute(commandList);
@@ -261,12 +330,14 @@ public sealed class RoomRenderer : IDisposable
                 }));
     }
 
-    private void PackPush(RoomPart part, byte[] target)
+    private void PackPush(RoomPart part, byte[] target) => PackPush(part.Colour, 0.85f, target);
+
+    private void PackPush(Vector3 colour, float roughness, byte[] target)
     {
         var floats = MemoryMarshal.Cast<byte, float>(target.AsSpan());
-        floats[0] = part.Colour.X; floats[1] = part.Colour.Y; floats[2] = part.Colour.Z; floats[3] = 1f;
-        floats[4] = 0f;            // metallic — nothing in a physics room is metal
-        floats[5] = 0.85f;         // roughness: matte, so shape reads from shading rather than highlights
+        floats[0] = colour.X; floats[1] = colour.Y; floats[2] = colour.Z; floats[3] = 1f;
+        floats[4] = 0f;            // metallic — nothing in this lab is metal
+        floats[5] = roughness;
         floats[6] = SlopeTint;
         floats[7] = 0f;
     }
@@ -283,9 +354,13 @@ public sealed class RoomRenderer : IDisposable
         device.DestroyPipeline(litPipeline);
         device.DestroyPipeline(shadowPipeline);
         device.DestroyPipeline(presentPipeline);
+        device.DestroyPipeline(skinnedPipeline);
+        device.DestroyPipeline(skinnedShadowPipeline);
         device.DestroyShaderProgram(litProgram);
         device.DestroyShaderProgram(shadowProgram);
         device.DestroyShaderProgram(presentProgram);
+        device.DestroyShaderProgram(skinnedProgram);
+        device.DestroyShaderProgram(skinnedShadowProgram);
         device.DestroyVertexBuffer(roomVertices);
         device.DestroyIndexBuffer(roomIndices);
     }
