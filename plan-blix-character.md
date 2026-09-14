@@ -354,6 +354,38 @@ radius, every other frame is limited to walking pace, and sliding is excluded by
 rather than by widening the bound. Verified to fail: dropping just the height condition turns
 "sliding along a wall is never mistaken for climbing one" red at 0.2631 m.
 
+### The camera rigs, and four rounds of "that looks wrong"
+
+Asked for from the chair: curated camera setups to experiment through. Four rigs — orbit, third
+person, first person and a genuinely orthographic isometric — switched with 1-4. What the exchange
+that followed is worth recording for is the **ratio**: of the five things reported, **one was a
+mechanism bug and four were the instrument or its labels**.
+
+1. **The shoulder offset moved the eye and not the target** — a real bug. The camera looked across
+   the body while the body was steered by the raw yaw: `atan(shoulder / (distance · cos pitch))`,
+   7.6° at 4.2 m and 25° pulled in against a wall. First person has no shoulder, which is why it
+   felt right and is the half of the report that identified the cause. Now an invariant, headless:
+   **the flattened view direction IS the ground basis the body is steered by**, every rig.
+2. **The initial rig never applied its own defaults** — the setter returns early when unchanged, so
+   the starting rig opened on the orbit framing. Invisible in the viewer; obvious the moment a
+   capture came back framing the whole hall with the body four pixels tall.
+3. **A trail that should have been straight** — the motor was exonerated by measuring it (straight
+   to under a millimetre in four directions); the body's HEAD was catching the beam, a correct
+   sideways slide with no visible cause at the height you are looking. Contacts are coloured by
+   where on the body they land now, and overhead ones are magenta.
+4. **"Face the camera" was the wrong words** — it reads as *turn to look at the viewer*, which is the
+   opposite of what it does, while the readout said 0.0°. A label and a number disagreeing is not a
+   vector being wrong.
+5. **And the last one was perspective.** A direction parallel to the view axis, seen from off-axis,
+   projects toward the vanishing point — so an over-the-shoulder offset makes the facing marker lean
+   by exactly the angle the offset subtends, while being exactly correct. The reporter found it by
+   setting the shoulder to 0. It is 0 by default now: a shooter earns that offset by keeping the
+   character out of its own reticle, and a lab about watching a body move earns nothing by it.
+
+The instrument that made the last three answerable is the capture learning to photograph a rig —
+`--rig`, with the body settled by the real motor and drawn by the same rule the viewer uses, so a
+picture of the facing and the viewer's drawing of it cannot disagree.
+
 **R-D — rest, and the numbers only a lab can find.** Slope limit, step up and step down,
 ledge behaviour, and the classic: a body on a slope below the limit must come to **actual
 rest**, not micro-slide forever. These are policy — the engine says it holds no opinion —

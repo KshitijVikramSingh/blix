@@ -93,8 +93,28 @@ public sealed class RoomCamera
 
     public float MaxPitch { get; private set; } = 1.45f;
 
-    /// <summary>How far to the side of the body a third-person eye sits. 0 is straight behind.</summary>
-    public float ShoulderOffset { get; set; } = 0.55f;
+    /// <summary>
+    /// How far to the side of the body the third-person camera sits. 0 is straight behind.
+    /// </summary>
+    /// <remarks>
+    /// <b>Zero by default, and the reason is worth more than the setting.</b> An over-the-shoulder
+    /// offset puts the body OFF the view axis — and a direction parallel to the view axis, seen from
+    /// off-axis, projects toward the vanishing point rather than straight up the screen. So the
+    /// body's facing marker leans, by exactly the angle the offset subtends, while being exactly
+    /// correct. Reported from the chair across several rounds as the facing pointing somewhere other
+    /// than expected, and resolved by the reporter setting this to 0 and finding it read right.
+    /// <para>
+    /// Nothing about the steering changes with it: the probe checks that the camera steers where it
+    /// looks at offsets of 0, 0.55 and −1.2, and all three pass. What changes is only how a marker
+    /// that points away from you PROJECTS, which is a fact about perspective and not about the body.
+    /// </para>
+    /// <para>
+    /// A shooter earns the offset by keeping the character out of its own reticle. A lab about
+    /// watching a body move earns nothing by it and pays in exactly the ambiguity above, so the
+    /// slider stays and the default is centred.
+    /// </para>
+    /// </remarks>
+    public float ShoulderOffset { get; set; }
 
     /// <summary>
     /// How far up the body the camera aims, in metres from the feet.
@@ -333,6 +353,7 @@ public sealed class RoomCamera
                 Pitch = 0.34f;
                 Distance = 4.0f;
                 AimHeight = 1.6f;
+                ShoulderOffset = 0f;
                 break;
 
             case CameraRig.FirstPerson:
