@@ -214,6 +214,40 @@ The render mesh and the `TriangleMesh3D` come from **one** source. The recurring
 the last arc is that two things which should agree and cannot contradict each other hide
 bugs for weeks; a collider authored beside its picture is that fault waiting.
 
+### Status — R-B is in
+
+`Blix.Test.Physics3D` (29 cases), the 3D math's first suite — a fourth engine suite, deliberately.
+`Intersection` gains `Sweep(Capsule, motion, Plane)`, `Sweep(…, Triangle)` and `Sweep(…, TriangleMesh3D)`,
+and the character probe grows a section where the new math and the room's claims check each other.
+
+**The bug the suite found before it found anything else.** `TestCapsuleTriangle` has shipped since
+the initial commit with an **eight-candidate** closest-pair search: two endpoints against the
+triangle, three vertices against the segment, three edges against the segment. None of them can see
+a segment that passes clean THROUGH the triangle's interior — every candidate is a metre away while
+the true distance is zero. A capsule with a wall through its waist reported no contact at all. The
+ninth candidate is the segment's crossing of the triangle's plane, added as a candidate rather than
+special-cased, so when it lands inside the pair is (p, p) and the distance is zero.
+
+**Conservative advancement, not a closed form.** The exact TOI is a root of a piecewise system whose
+active polynomial changes as the closest features change, and the edge cases between those regions
+are where analytic implementations get it wrong. Advancement measures the gap, steps forward by the
+most the body could travel without closing it, and measures again — every step exact, the sequence
+only ever undershooting. **It cannot tunnel**, and the iteration cap is a budget rather than a
+correctness condition: exhaustion returns a time still before contact, so the body stops short.
+
+**The accuracy claim is made by the exact case.** `Sweep(Capsule, motion, Plane)` is one division,
+so the triangle sweep is pointed at a 100 m triangle in the same plane and required to agree to
+1e-4 of a step — and, separately, to never be LATE. Verified to fail: advancing by 1.35× the gap
+turns four cases red, and one of them is the contact NORMAL flipping to −1, because an overshooting
+sweep does not merely mistime — it lands the body through the surface and then pushes it further in.
+
+**Two things found by pointing the math at the room.** A drop test reads 5.4 cm high on a 30° ramp:
+a capsule rests on an incline touching it UP-SLOPE of its axis, so its lowest point sits r/cos θ
+above the surface, not r — which is how a straight-down ground probe decides a standing body is
+falling. And the first tunnelling control was wrong rather than the sweep: the body ended *inside*
+the 0.5 m wall instead of past it, and a tunnelling test whose body stops inside the obstacle is not
+testing tunnelling.
+
 **R-B — the math that does not exist.** There is no capsule sweep of any kind. Write
 `Sweep(Capsule, motion, Plane)`, `Sweep(Capsule, motion, Bounds3)` and
 `Sweep(Capsule, motion, TriangleMesh3D)`, and pin the discrete `Test(Capsule,

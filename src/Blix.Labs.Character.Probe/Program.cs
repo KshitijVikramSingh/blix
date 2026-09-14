@@ -263,6 +263,84 @@ foreach (var part in room.Parts)
     t.Expect("the spawn point is clear of every solid", clear, $"something stands at {spawn}");
 }
 
+// ── The sweep meets the room ────────────────────────────────────────────────────────────────────
+//
+// The first time the new capsule sweep and the room's claims are pointed at each other, and it is
+// worth more than either alone: the room says the ledge's top is at 1.20 m, the sweep says where a
+// body dropped onto it comes to rest, and those two numbers have no common ancestor. A room built
+// wrong and a sweep built wrong would have to be wrong in exactly the same way to agree.
+//
+// Dropped rather than placed: a capsule with its segment from y0 to y0+1 and radius 0.35 has its
+// lowest point at y0 - 0.35, so it rests with y0 exactly a radius above whatever it lands on.
+{
+    const float radius = 0.35f;
+    const float dropFrom = 8f;
+    const float dropBy = 12f;
+
+    foreach (var (name, x, z, expected) in new[]
+    {
+        ("floor at the spawn", Room.SpawnPoint.X, Room.SpawnPoint.Z, 0f),
+        ("the ledge's top", 4.5f, -5.5f, 1.2f),
+        ("the beam's top", 5f, 1.2f, 1.6f),
+        ("the dome's apex", 10.5f, 4.5f, 3f),
+        ("the top tread of the 0.30 m flight", -2.5f, 2f, 1.8f),
+        ("the top tread of the 0.10 m flight", -2.5f, -6f, 0.6f),
+    })
+    {
+        var body = new Capsule(new(x, dropFrom, z), new(x, dropFrom + 1f, z), radius);
+        var hit = Intersection.Sweep(body, new Vector3(0f, -dropBy, 0f), room.Collider);
+
+        if (hit is null)
+        {
+            t.Expect($"a body dropped on {name} lands", false, "swept through everything");
+            continue;
+        }
+
+        var restedAt = dropFrom - (hit.Value.Time * dropBy) - radius;
+        t.Expect($"a body dropped on {name} rests at {expected:0.000} m",
+            MathF.Abs(restedAt - expected) < 2e-3f, $"rested at {restedAt:0.0000}");
+    }
+
+    // A SLOPE IS NOT A FLOOR, and the drop test above cannot be used on one — which is worth a check
+    // of its own rather than a fudged expectation. A capsule resting on an incline touches it
+    // UP-SLOPE of its axis, so its lowest point sits r/cos(theta) above the surface rather than r,
+    // and a straight-down "how far to the ground" probe reads 5.4 cm high on a 30° ramp. That error
+    // is a ground check that thinks the body is floating, which is how a controller on a slope
+    // starts falling every frame.
+    //
+    // So the claim here is about the CONTACT rather than the rest height: wherever the sweep says
+    // the body touched, that point is on the ramp's analytic surface — y = tan(30°) x (x + 11).
+    {
+        var body = new Capsule(new(-10.9f, dropFrom, 0f), new(-10.9f, dropFrom + 1f, 0f), radius);
+        var hit = Intersection.Sweep(body, new Vector3(0f, -dropBy, 0f), room.Collider);
+        var tan30 = MathF.Tan(30f * MathF.PI / 180f);
+        var onSurface = hit is { } h && MathF.Abs(h.Point.Y - (tan30 * (h.Point.X + 11f))) < 2e-3f;
+
+        t.Expect("a body dropped on the 30° ramp touches it ON its surface", onSurface,
+            hit is null ? "no contact at all" : $"contact at {hit.Value.Point} is off the ramp plane");
+
+        // And the contact normal is the ramp's, not the floor's — the number a slope limit reads.
+        var slope = hit is { } h2 ? Room.SlopeDegrees(h2.Normal) : -1f;
+        t.Expect("and the contact normal reports 30°", MathF.Abs(slope - 30f) < 0.05f, $"reported {slope:0.###}°");
+    }
+
+    // IT CANNOT TUNNEL THROUGH THE ROOM EITHER. A body crossing the east wall at 100 m/s in a 16 ms
+    // step travels 1.6 m through a wall 0.5 m thick — and the control is that a discrete test where
+    // it would have ENDED sees nothing at all.
+    var runner = new Capsule(new(13f, 0.4f, 0f), new(13f, 1.4f, 0f), radius);
+
+    // 2.4 m, not 1.6. The first attempt had the body END inside the wall rather than past it, so the
+    // "discrete test sees nothing" control failed — correctly, and it was the control that was
+    // wrong. A tunnelling test whose body stops inside the obstacle is not testing tunnelling.
+    var motion = new Vector3(2.4f, 0f, 0f);
+    var arrived = new Capsule(runner.PointA + motion, runner.PointB + motion, radius);
+
+    t.Expect("the control: a discrete test past the east wall sees nothing",
+        Intersection.Test(arrived, room.Collider) is null, "it happened to overlap after all");
+    t.Expect("a body crossing the east wall at 144 m/s is stopped by it",
+        Intersection.Sweep(runner, motion, room.Collider) is not null, "swept clean through");
+}
+
 t.PrintSummary();
 return t.Failed;
 
