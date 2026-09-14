@@ -105,10 +105,15 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // frame of the run is the moment after which nothing else will.
         captureOnFrame = Math.Max(1, exitAfterFrames - 1);
 
+        camera.Rig = CameraRig.Orbit;
         camera.Yaw = yaw;
         camera.Pitch = pitch;
         camera.Distance = distance;
         camera.Target = new Vector3(targetX, 1.2f, targetZ);
+
+        // The Orbit rig is the only one that does not place itself from a body, and a capture has no
+        // body. Called once because nothing here moves; the viewer calls it every frame.
+        camera.Place(Vector3.Zero, 1.8f, null);
     }
 
     public string DebugName => "room-capture";

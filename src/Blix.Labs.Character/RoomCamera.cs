@@ -1,42 +1,72 @@
 using System.Numerics;
+using Blix.Geometry;
 using Blix.Graphics;
 
 namespace Blix.Labs.Character;
 
+/// <summary>Which camera you are looking through.</summary>
+/// <remarks>
+/// <b>Four rigs rather than four sliders.</b> A lab about how a body moves is a lab about how a body
+/// FEELS to move, and that is mostly the camera: the same resolver reads as heavy from behind the
+/// shoulder, precise down a barrel, and tactical from above. Each of these makes different faults
+/// obvious — the third-person one shows sliding and step hops, the first-person one shows every
+/// millimetre of vertical jitter, and the isometric one shows the path across the floor.
+/// </remarks>
+public enum CameraRig
+{
+    /// <summary>Free orbit around a point you can pan. For looking at the room rather than the body.</summary>
+    Orbit,
+
+    /// <summary>Over the shoulder, pulled in by anything it would otherwise see through.</summary>
+    ThirdPerson,
+
+    /// <summary>At the body's eyes.</summary>
+    FirstPerson,
+
+    /// <summary>High, fixed angle, orthographic. Tactical.</summary>
+    Isometric,
+}
+
 /// <summary>
-/// An orbit camera that can also be walked around the hall.
+/// The lab's camera: one set of orbit parameters, four ways of turning them into a view.
 /// </summary>
 /// <remarks>
-/// <b>Its own, rather than the toolchain lab's.</b> <c>LabCamera</c> orbits a subject that stands at
-/// the origin and normalises itself to a couple of metres; a room is 28 m across and the thing worth
-/// looking at is a different corner of it every time, so this one pans. Reaching across for it would
-/// also have pulled a second lab's shaders into this executable's output through content propagation.
-/// If stage M finds the rig types genuinely shared, THAT is the evidence for a common lab library —
-/// a camera that had to grow a pan is evidence against.
+/// <b>One type, because they share almost everything.</b> Yaw, pitch and distance mean the same thing
+/// in all four, and the ground basis every rig hands the body is the same arithmetic — splitting them
+/// into four classes would duplicate that and let the copies drift, which is exactly what happened to
+/// the ground basis when there were two of it.
+/// <para>
+/// What differs is three lines each: where the eye goes, what it looks at, and whether the projection
+/// is perspective or orthographic.
+/// </para>
 /// </remarks>
 public sealed class RoomCamera
 {
-    /// <summary>Where it looks. Defaults to the body's eye height at the spawn.</summary>
-    /// <remarks>
-    /// <b>Close, and at something.</b> The first defaults framed the whole 28 m hall from 24 m out,
-    /// which is far enough that no feature reads and nothing is obviously the subject — reported from
-    /// the chair as "too far away to read anything meaningfully". A lab opens on the thing it is
-    /// about, which since stage R-C is the body.
-    /// </remarks>
+    private CameraRig rig = CameraRig.ThirdPerson;
+
+    /// <summary>Which rig. Setting it applies that rig's defaults — a camera you must re-tune by hand every time you switch is one you stop switching.</summary>
+    public CameraRig Rig
+    {
+        get => rig;
+        set
+        {
+            if (rig == value) return;
+            rig = value;
+            ApplyDefaults();
+        }
+    }
+
+    /// <summary>What it looks at. Written by <see cref="Place"/> for every rig except Orbit, which pans.</summary>
     public Vector3 Target { get; set; } = Room.SpawnPoint + new Vector3(0f, 0.9f, 0f);
 
-    /// <summary>
-    /// Rotation about the world Y axis, in radians.
-    /// </summary>
-    /// <remarks>
-    /// Positioned in the room's OPEN corner, looking back at the closed one — so the walls are the
-    /// backdrop rather than the thing in the way, and the ramp fan (which rises west, and therefore
-    /// faces east) is seen face-on rather than as five vertical backs.
-    /// </remarks>
+    /// <summary>Where the eye ended up. Written by <see cref="Place"/>.</summary>
+    public Vector3 Position { get; private set; } = new(0f, 4f, 10f);
+
     public float Yaw { get; set; } = 0.9f;
 
     public float Pitch { get; set; } = 0.42f;
 
+    /// <summary>How far back the eye sits. Ignored by <see cref="CameraRig.FirstPerson"/>.</summary>
     public float Distance { get; set; } = 11f;
 
     public float FieldOfView { get; set; } = MathF.PI / 3.2f;
@@ -45,32 +75,23 @@ public sealed class RoomCamera
 
     public float FarPlane { get; set; } = 200f;
 
-    public Vector3 Position
-    {
-        get
-        {
-            var offset = new Vector3(
-                MathF.Cos(Pitch) * MathF.Sin(Yaw),
-                MathF.Sin(Pitch),
-                MathF.Cos(Pitch) * MathF.Cos(Yaw)) * Distance;
-            return Target + offset;
-        }
-    }
+    public float MinPitch { get; private set; } = 0.05f;
 
-    public Matrix4x4 ViewProjection(float aspect)
-    {
-        var safeAspect = aspect > 0.0001f && float.IsFinite(aspect) ? aspect : 16f / 9f;
-        var view = Matrix4x4.CreateLookAt(Position, Target, Vector3.UnitY);
-        return view * GraphicsMatrices.CreatePerspectiveVulkan(FieldOfView, safeAspect, NearPlane, FarPlane);
-    }
+    public float MaxPitch { get; private set; } = 1.45f;
 
-    public void Orbit(float deltaX, float deltaY)
-    {
-        Yaw -= deltaX * 0.008f;
-        Pitch = Math.Clamp(Pitch + (deltaY * 0.006f), 0.05f, 1.45f);
-    }
+    /// <summary>How far to the side of the body a third-person eye sits. 0 is straight behind.</summary>
+    public float ShoulderOffset { get; set; } = 0.55f;
 
-    public void Zoom(float wheelDelta) => Distance = Math.Clamp(Distance - (wheelDelta * 1.4f), 2f, 70f);
+    /// <summary>Whether the body's own gizmo is worth drawing through this rig.</summary>
+    public bool ShowsBody => Rig != CameraRig.FirstPerson;
+
+    /// <summary>Whether the body should be steered relative to this camera rather than the world.</summary>
+    /// <remarks>
+    /// All four, as it happens — even the isometric one, where screen-relative movement is what
+    /// every game with this camera does and world-relative movement is what every prototype does
+    /// once before changing it.
+    /// </remarks>
+    public bool SteersTheBody => true;
 
     /// <summary>
     /// The camera's own ground plane: where "forward" and "right" are for anything it steers.
@@ -96,8 +117,96 @@ public sealed class RoomCamera
         }
     }
 
+    /// <summary>Put the eye where this rig says it goes, given where the body is.</summary>
+    /// <remarks>
+    /// <paramref name="world"/> is used by the third-person rig alone, and only to stop the eye
+    /// ending up on the far side of a wall — see <see cref="PullIn"/>.
+    /// </remarks>
+    public void Place(Vector3 feet, float bodyHeight, TriangleMesh3D? world)
+    {
+        var eyeHeight = bodyHeight - 0.15f;
+
+        switch (Rig)
+        {
+            case CameraRig.Orbit:
+                // The only rig whose target is not the body's: it is whatever you last panned to.
+                Position = Target + Spherical(Yaw, Pitch, Distance);
+                break;
+
+            case CameraRig.ThirdPerson:
+            {
+                Target = feet + new Vector3(0f, eyeHeight * 0.85f, 0f);
+                var (_, right) = GroundBasis;
+                var wanted = Target + Spherical(Yaw, Pitch, Distance) + (right * ShoulderOffset);
+                Position = world is null ? wanted : PullIn(Target, wanted, world);
+                break;
+            }
+
+            case CameraRig.FirstPerson:
+            {
+                // The eye is AT the body, so there is nothing to pull in and nothing to orbit. The
+                // target is a point in front of it, which is the one place the pitch has to become a
+                // real direction rather than an elevation.
+                Position = feet + new Vector3(0f, eyeHeight, 0f);
+                var forward = new Vector3(
+                    -MathF.Sin(Yaw) * MathF.Cos(Pitch),
+                    -MathF.Sin(Pitch),
+                    -MathF.Cos(Yaw) * MathF.Cos(Pitch));
+                Target = Position + forward;
+                break;
+            }
+
+            case CameraRig.Isometric:
+                Target = feet + new Vector3(0f, 0.6f, 0f);
+                Position = Target + Spherical(Yaw, Pitch, Distance);
+                break;
+        }
+    }
+
+    public Matrix4x4 ViewProjection(float aspect)
+    {
+        var safeAspect = aspect > 0.0001f && float.IsFinite(aspect) ? aspect : 16f / 9f;
+        var up = Vector3.UnitY;
+
+        // Looking straight down the pole makes the up vector degenerate and the view matrix NaN,
+        // which propagates into every gizmo and every pick. The pitch clamps stop short of it, and
+        // this is the belt to that pair of braces.
+        var toTarget = Target - Position;
+        if (toTarget.LengthSquared() > 1e-8f &&
+            MathF.Abs(Vector3.Dot(Vector3.Normalize(toTarget), Vector3.UnitY)) > 0.999f)
+        {
+            up = Vector3.UnitZ;
+        }
+
+        var view = Matrix4x4.CreateLookAt(Position, Target, up);
+
+        // TRULY orthographic for the isometric rig rather than a long lens faking it. The difference
+        // is the point of the rig: parallel projection is what makes two objects the same size at
+        // any depth, which is what a tactical camera is FOR.
+        if (Rig == CameraRig.Isometric)
+        {
+            var height = MathF.Max(2f, Distance * 0.62f);
+            return view * GraphicsMatrices.CreateOrthographicVulkan(
+                height * safeAspect, height, 0.1f, FarPlane);
+        }
+
+        return view * GraphicsMatrices.CreatePerspectiveVulkan(FieldOfView, safeAspect, NearPlane, FarPlane);
+    }
+
+    public void Orbit(float deltaX, float deltaY)
+    {
+        Yaw -= deltaX * 0.008f;
+        Pitch = Math.Clamp(Pitch + (deltaY * 0.006f), MinPitch, MaxPitch);
+    }
+
+    public void Zoom(float wheelDelta)
+    {
+        if (Rig == CameraRig.FirstPerson) return;   // there is nowhere to zoom to from inside your own head
+        Distance = Math.Clamp(Distance - (wheelDelta * 1.4f), 1.2f, 70f);
+    }
+
     /// <summary>
-    /// Slide the target across the floor, in the camera's own frame.
+    /// Slide the target across the floor, in the camera's own frame. Orbit only.
     /// </summary>
     /// <remarks>
     /// Along the ground rather than along the view: dragging up on a pitched camera should walk you
@@ -106,6 +215,8 @@ public sealed class RoomCamera
     /// </remarks>
     public void Pan(float deltaX, float deltaY)
     {
+        if (Rig != CameraRig.Orbit) return;
+
         var (forward, right) = GroundBasis;
         var scale = Distance * 0.0016f;
 
@@ -116,10 +227,86 @@ public sealed class RoomCamera
             Math.Clamp(moved.Z, -Room.HallHalfZ, Room.HallHalfZ));
     }
 
-    /// <summary>Look at one feature of the room from far enough back to see all of it.</summary>
+    /// <summary>Look at one feature of the room from far enough back to see all of it. Orbit only.</summary>
     public void Frame(Vector3 centre, float size)
     {
+        Rig = CameraRig.Orbit;
         Target = centre;
         Distance = Math.Clamp(size * 2.6f, 4f, 70f);
+    }
+
+    private static Vector3 Spherical(float yaw, float pitch, float distance) => new(
+        MathF.Cos(pitch) * MathF.Sin(yaw) * distance,
+        MathF.Sin(pitch) * distance,
+        MathF.Cos(pitch) * MathF.Cos(yaw) * distance);
+
+    /// <summary>
+    /// Bring the eye forward until nothing is between it and the body.
+    /// </summary>
+    /// <remarks>
+    /// <b>A sphere sweep, which makes this the SECOND consumer of the character arc's sweep.</b> The
+    /// plan holds that open as stage C-C's question — whether <see cref="BodyResolver"/>'s loop
+    /// belongs in the engine — and this is a first look at the answer: the camera wants the SWEEP,
+    /// which is already engine math, and none of the loop. It needs no deflection, no step rule and
+    /// no ground state; it needs one cast and a clamp. On this evidence the resolver stays in the
+    /// lab, and the note is here rather than in a commit message because this is where a future
+    /// reader will ask.
+    /// <para>
+    /// A sphere rather than a ray so the near plane does not clip a wall the ray squeaked past, and
+    /// the pull-in keeps a small gap for the same reason.
+    /// </para>
+    /// </remarks>
+    private static Vector3 PullIn(Vector3 from, Vector3 to, TriangleMesh3D world)
+    {
+        const float probeRadius = 0.25f;
+        const float gap = 0.1f;
+
+        var motion = to - from;
+        var distance = motion.Length();
+        if (distance < 1e-4f) return to;
+
+        var probe = new Capsule(from, from, probeRadius);
+        if (Intersection.Sweep(probe, motion, world) is not { } hit) return to;
+
+        var allowed = MathF.Max(0f, (hit.Time * distance) - gap);
+        return from + (motion / distance * allowed);
+    }
+
+    private void ApplyDefaults()
+    {
+        switch (rig)
+        {
+            case CameraRig.Orbit:
+                (MinPitch, MaxPitch) = (0.05f, 1.45f);
+                Pitch = 0.42f;
+                Distance = 11f;
+                break;
+
+            case CameraRig.ThirdPerson:
+                // Low and close: an action camera is behind the shoulder, not above the head, and
+                // the whole point of it is that you can see what the body is about to walk into.
+                (MinPitch, MaxPitch) = (-0.35f, 1.1f);
+                Pitch = 0.22f;
+                Distance = 4.2f;
+                break;
+
+            case CameraRig.FirstPerson:
+                // Free to look up and down, and nowhere near the poles, where the view matrix's up
+                // vector degenerates.
+                (MinPitch, MaxPitch) = (-1.4f, 1.4f);
+                Pitch = 0f;
+                break;
+
+            case CameraRig.Isometric:
+                // The classic tactical angle. Pitch is fixed by convention rather than by clamping:
+                // you can still drag it, but it starts where the rig means to be.
+                (MinPitch, MaxPitch) = (0.5f, 1.4f);
+                Pitch = 0.95f;
+                Yaw = MathF.PI * 0.25f;
+                Distance = 22f;
+                break;
+        }
+
+        Pitch = Math.Clamp(Pitch, MinPitch, MaxPitch);
     }
 }

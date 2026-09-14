@@ -64,10 +64,9 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
     // that is on the panel, because the numbers are what a lab is for and one that hard-codes them
     // can only confirm the guess it was built with.
     private readonly CharacterMotor motor = new();
+    private float bodyFacing;
+    private float turnRate = 12f;
     private bool bodyEnabled = true;
-    // On by default: since R-C the body IS the subject, and a lab that opens looking at empty floor
-    // makes you find its subject before you can use it.
-    private bool followBody = true;
     private readonly HashSet<Key> held = new();
 
     private int selected = -1;
@@ -87,6 +86,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
     {
         this.host = host;
         motor.Teleport(Blix.Labs.Character.Room.SpawnPoint);
+        camera.Rig = CameraRig.ThirdPerson;
         var vk = (VulkanGraphicsDevice)graphicsDevice;
         renderer.Load(vk, Path.Combine(AppContext.BaseDirectory, "Shaders"), room);
 
@@ -98,7 +98,11 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
     {
         renderer.SlopeTint = slopeTint;
         if (bodyEnabled) MoveBody((float)time.Delta);
-        if (followBody) camera.Target = motor.Feet + new Vector3(0f, 0.9f, 0f);
+
+        // Every rig but Orbit places itself from the body, so "follow" is now a property of the rig
+        // rather than a toggle that fights it — which is what the old checkbox was, and why panning
+        // had to switch it off.
+        camera.Place(motor.Feet, motor.Height, room.Collider);
     }
 
     /// <summary>Gather the frame's intent and hand it to the motor.</summary>
@@ -111,6 +115,17 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
         if (held.Contains(Key.S)) wish -= forward;
         if (held.Contains(Key.D)) wish += right;
         if (held.Contains(Key.A)) wish -= right;
+
+        // WHICH WAY THE BODY IS POINTING. The motor has no opinion — a capsule is symmetric and
+        // nothing it computes depends on a facing — but a camera behind the shoulder needs one, and
+        // so will every clip the Motion lab plays. Turned toward the walk rather than snapped, at a
+        // rate that is a lab dial like everything else here.
+        if (wish.LengthSquared() > 1e-6f)
+        {
+            var wanted = MathF.Atan2(-wish.X, -wish.Z);
+            var delta = MathF.IEEERemainder(wanted - bodyFacing, MathF.Tau);
+            bodyFacing += Math.Clamp(delta, -turnRate * deltaSeconds, turnRate * deltaSeconds);
+        }
 
         motor.Step(wish, deltaSeconds, room.Collider);
 
@@ -175,7 +190,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
             // THE BODY, and what the resolver did to it. The capsule is the actual collider — the
             // same one handed to the sweep, not a stand-in — so a gap between it and a surface is a
             // gap the arithmetic believes in.
-            if (bodyEnabled)
+            if (bodyEnabled && camera.ShowsBody)
             {
                 // Blue standing, amber when the ground is too steep to stand on and it is sliding.
                 // A slope limit is a number in a panel until it changes the colour of the thing you
@@ -186,6 +201,13 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
                     motor.Standing
                         ? new GraphicsColor(0.35f, 0.85f, 1f, 1f)
                         : new GraphicsColor(1f, 0.7f, 0.2f, 1f));
+
+                var facing = new Vector3(-MathF.Sin(bodyFacing), 0f, -MathF.Cos(bodyFacing));
+                debug.Draw.Arrow(
+                    "facing",
+                    motor.Feet + new Vector3(0f, 0.9f, 0f),
+                    motor.Feet + new Vector3(0f, 0.9f, 0f) + (facing * 0.9f),
+                    new GraphicsColor(1f, 1f, 1f, 1f));
 
                 // The ground normal, which is what every slope decision actually reads.
                 if (motor.Grounded)
@@ -232,6 +254,33 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
         ImGui.Text($"{room.TriangleCount} triangles · {room.Parts.Count} parts · {room.SolidStarts.Count} solids");
         ImGui.Separator();
 
+        if (ImGui.CollapsingHeader("camera", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            // FOUR RIGS, because how a body feels to move is mostly the camera and the same
+            // resolver reads completely differently through each. 1-4 on the keyboard.
+            foreach (var (label, value) in new[]
+            {
+                ("orbit (1)", CameraRig.Orbit),
+                ("3rd person (2)", CameraRig.ThirdPerson),
+                ("first person (3)", CameraRig.FirstPerson),
+                ("isometric (4)", CameraRig.Isometric),
+            })
+            {
+                if (ImGui.RadioButton(label, camera.Rig == value)) camera.Rig = value;
+            }
+
+            var distance = camera.Distance;
+            if (ImGui.SliderFloat("distance", ref distance, 1.2f, 40f)) camera.Distance = distance;
+
+            var shoulder = camera.ShoulderOffset;
+            if (ImGui.SliderFloat("shoulder", ref shoulder, -1.5f, 1.5f)) camera.ShoulderOffset = shoulder;
+
+            var fov = camera.FieldOfView * 180f / MathF.PI;
+            if (ImGui.SliderFloat("fov deg", ref fov, 35f, 110f)) camera.FieldOfView = fov * MathF.PI / 180f;
+
+            ImGui.Text($"yaw {camera.Yaw:0.00}  pitch {camera.Pitch:0.00}");
+        }
+
         if (ImGui.CollapsingHeader("view", ImGuiTreeNodeFlags.DefaultOpen))
         {
             // The one control worth having before anything moves: it shades every surface by the
@@ -253,7 +302,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
         {
             ImGui.Checkbox("body", ref bodyEnabled);
             ImGui.SameLine();
-            ImGui.Checkbox("camera follows", ref followBody);
+            ImGui.SliderFloat("turn rad/s", ref turnRate, 1f, 30f);
 
             // EVERY ONE OF THESE IS A DECISION, which is why none of them is a constant. The ramp
             // fan exists so the slope limit can be dragged across 30, 45 and 60 and the consequence
@@ -343,13 +392,9 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
             return;
         }
 
-        if (!panning) return;
-
-        // Panning means "look somewhere that is not the body", so it takes the camera off the body
-        // rather than fighting it — following would overwrite the target on the very next frame and
-        // the drag would appear to do nothing at all.
-        followBody = false;
-        camera.Pan(deltaX, deltaY);
+        // Pan only means anything to the Orbit rig; every other one places itself from the body, and
+        // the camera says so rather than the caller having to know.
+        if (panning) camera.Pan(deltaX, deltaY);
     }
 
     public void OnMouseWheel(float offsetX, float offsetY) => camera.Zoom(offsetY);
@@ -360,7 +405,10 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
         if (key == Key.N) showNormals = !showNormals;
         if (key == Key.G) showGrid = !showGrid;
         if (key == Key.T) slopeTint = slopeTint > 0.5f ? 0f : 1f;
-        if (key == Key.F) followBody = !followBody;
+        if (key == Key.Number1) camera.Rig = CameraRig.Orbit;
+        if (key == Key.Number2) camera.Rig = CameraRig.ThirdPerson;
+        if (key == Key.Number3) camera.Rig = CameraRig.FirstPerson;
+        if (key == Key.Number4) camera.Rig = CameraRig.Isometric;
         if (key == Key.R) motor.Teleport(Blix.Labs.Character.Room.SpawnPoint);
     }
 
