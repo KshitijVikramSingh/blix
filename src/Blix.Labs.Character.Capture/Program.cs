@@ -69,13 +69,6 @@ public static class Program
         var walkSeconds = Float(args, "--walk", 0f);
         var walkDegrees = Float(args, "--walk-dir", 0f);
 
-        // --rig swaps the obstacle course for flat ground and a posed body. A skinned mesh with a
-        // wrong palette renders as an exploded mess, and draw counts cannot see that — which is
-        // precisely the class of fault this project has learned only a picture catches.
-        var rigPath = ArgValue(args, "--rig");
-        var clipName = ArgValue(args, "--clip");
-        var clipTime = Float(args, "--time", 0f);
-
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — character lab capture",
@@ -87,7 +80,7 @@ public static class Program
 
         var loop = new CaptureLoop(
             output, options.ExitAfterFrames, yaw, pitch, distance, targetX, targetZ, slope,
-            rig, new Vector3(bodyX, 0f, bodyZ), walkSeconds, walkDegrees, rigPath, clipName, clipTime);
+            rig, new Vector3(bodyX, 0f, bodyZ), walkSeconds, walkDegrees);
         using (var window = new Window(loop, options))
         {
             window.Run();
@@ -120,12 +113,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 {
     private readonly RoomRenderer renderer = new();
     private readonly RoomCamera camera = new();
-    private readonly Room room;
-    private readonly string? rigPath;
-    private readonly string? clipName;
-    private readonly float clipTime;
-    private MotionRig? motionRig;
-    private ClipPlayer? posed;
+    private readonly Room room = Room.Build();
     private readonly string outputPath;
     private readonly int captureOnFrame;
     private readonly float slopeTint;
@@ -144,13 +132,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     public CaptureLoop(
         string outputPath, int exitAfterFrames,
         float yaw, float pitch, float distance, float targetX, float targetZ, float slopeTint,
-        CameraRig rig, Vector3 bodyAt, float walkSeconds, float walkDegrees,
-        string? rigPath, string? clipName, float clipTime)
+        CameraRig rig, Vector3 bodyAt, float walkSeconds, float walkDegrees)
     {
-        this.rigPath = rigPath;
-        this.clipName = clipName;
-        this.clipTime = clipTime;
-        room = rigPath is null ? Room.Build() : Room.FlatGround();
         this.outputPath = outputPath;
         this.slopeTint = slopeTint;
         this.rig = rig;
@@ -204,24 +187,6 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         renderer.Load(device, Path.Combine(AppContext.BaseDirectory, "Shaders"), room);
         renderer.SlopeTint = slopeTint;
 
-        if (rigPath is not null)
-        {
-            motionRig = MotionRig.Load(device, Path.GetFullPath(rigPath), renderer.SkinnedProgram);
-            posed = new ClipPlayer(motionRig.Skeleton);
-            var player = posed;
-
-            if (clipName is not null && motionRig.Clip(clipName) is { } clip)
-            {
-                player.Clip = clip;
-                player.ScrubTo(clipTime);   // sampled once, never run: the same arguments, the same pose
-            }
-
-            motionRig.UploadPose(player.Pose);
-            Console.WriteLine(
-                $"rig — {Path.GetFileName(rigPath)}: {motionRig.Skeleton.BoneCount} bones, " +
-                $"{motionRig.Clips.Count} clips, clip '{player.Clip?.Name ?? "<rest pose>"}' at {clipTime:0.###}s");
-        }
-        Console.WriteLine($"room — {room.TriangleCount} triangles, {room.Parts.Count} parts, {room.SolidStarts.Count} solids");
     }
 
     public void OnUpdate(Time time) { }
@@ -231,13 +196,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         frames++;
         if (frame.Height > 0) aspect = frame.Width / (float)frame.Height;
         viewProjection = camera.ViewProjection(aspect);
-        // The palette is uploaded per frame because a material's buffer is per frame SLOT; the pose
-        // itself never changes, so every frame of a capture holds the same one.
-        if (motionRig is not null && posed is not null) motionRig.UploadPose(posed.Pose);
-
-        renderer.Render(
-            commandList, room, viewProjection, camera.Position,
-            motionRig, motionRig is null ? Matrix4x4.Identity : motionRig.MeshNodeTransform * Matrix4x4.CreateScale(0.9f));
+        renderer.Render(commandList, room, viewProjection, camera.Position);
     }
 
     /// <summary>
@@ -264,9 +223,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
         using (debug.Draw.In(declaration))
         {
-            // The physics body is noise in a rig capture: the subject is the posed mesh, and a
-            // capsule beside it is a second body in a picture of one.
-            if (rig != CameraRig.FirstPerson && motionRig is null)
+            if (rig != CameraRig.FirstPerson)
             {
                 var body = motor.Body;
                 debug.Draw.Capsule(
@@ -382,9 +339,5 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         return (byte)Math.Clamp((int)MathF.Round(encoded * 255f), 0, 255);
     }
 
-    public void Dispose()
-    {
-        motionRig?.Dispose();
-        renderer.Dispose();
-    }
+    public void Dispose() => renderer.Dispose();
 }
