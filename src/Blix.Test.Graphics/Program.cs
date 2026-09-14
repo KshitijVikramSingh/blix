@@ -35,6 +35,13 @@ using VkAccessFlags = Silk.NET.Vulkan.AccessFlags;
 // Tests below assert these invariants. Run against current code: should
 // fail loudly. Run after migration: should pass.
 
+// <b>Before anything builds a render command.</b> RenderCommandDiagnostics reads its switch once
+// and a process cannot half-enable it — a command fingerprinted at record must be verifiable at
+// execute — so the suite opts in here rather than depending on the developer's environment.
+// Section AT asserts the switch actually took, because a fingerprint check that is off would
+// report every case below as passing without reading a byte.
+Environment.SetEnvironmentVariable("BLIX_VK_VALIDATE", "1");
+
 var t = new TestRunner();
 
 // ============================================================================
@@ -2953,8 +2960,113 @@ static ShaderInterface MinimalShader() => new(new[]
         !small.TryAlloc(176, 256, out _));
 }
 
+// ============================================================================
+// Section AT — a recorded command's payload, fingerprinted.
+// ============================================================================
+//
+// A pass body RECORDS; the backend reads uniforms at Execute. PushConstants is copied into the
+// command for exactly that reason and the Uniforms/Textures lists are not — so a caller that
+// refills one scratch array between two draws hands both the array's FINAL contents. The per-draw
+// uniform arena does not help: it fixed the DESTINATION (a slice per distinct block) while this is
+// the SOURCE.
+//
+// What is genuinely at risk is narrower than the old comment implied, and AT.2 is the half that
+// says so: scalar and vector uniforms hold a struct by value and cannot be changed by whoever built
+// them. Only the array uniforms and a reused list can move.
+{
+    // The negative control for the whole section. Every assertion below asserts a THROW; if the
+    // check were off, Fingerprint would return null, VerifyUniforms would return early, and all of
+    // them would pass having read nothing at all.
+    t.ExpectTrue("AT.0 the record/execute check is on for this process", RenderCommandDiagnostics.Enabled);
+
+    var palette = new[] { Matrix4x4.CreateTranslation(1f, 0f, 0f), Matrix4x4.Identity };
+    var uniforms = new List<ShaderUniform> { new("uBones", new Matrix4x4ArrayUniform(palette)) };
+    var cmd = new DrawIndexedCommand(
+        new VertexBufferHandle(1), new IndexBufferHandle(1), new PipelineHandle(1), 3,
+        uniforms, Array.Empty<ShaderTextureBinding>());
+
+    t.ExpectTrue("AT.1 a recorded command carries one fingerprint per uniform",
+        cmd.UniformFingerprint is { Length: 1 });
+
+    // Unchanged: the ordinary case, which must stay silent however many times it is verified.
+    t.ExpectTrue("AT.1 an untouched payload verifies clean",
+        NoThrow(() => RenderCommandDiagnostics.VerifyUniforms("draw", "p", cmd.Uniforms, cmd.UniformFingerprint)));
+
+    // THE HAZARD, and the half that is now closed. The caller refills its scratch array between
+    // draws — which used to hand every draw the final contents, because the backend reads uniforms
+    // at Execute. The array uniform copies on construction now, so the command keeps what it was
+    // recorded with and the mutation simply does not reach it.
+    palette[0] = Matrix4x4.CreateTranslation(99f, 0f, 0f);
+    t.ExpectTrue("AT.2 a caller's array is copied into the uniform, not referenced",
+        !ReferenceEquals(((Matrix4x4ArrayUniform)cmd.Uniforms[0].Value).Value, palette));
+    t.ExpectTrue("AT.2 so mutating it after record changes nothing the draw will read",
+        ((Matrix4x4ArrayUniform)cmd.Uniforms[0].Value).Value[0].M41 == 1f);
+    t.ExpectTrue("AT.2 and the fingerprint still verifies clean",
+        NoThrow(() => RenderCommandDiagnostics.VerifyUniforms("draw", "p", cmd.Uniforms, cmd.UniformFingerprint)));
+
+    // And the half that cannot happen, stated as a test so the narrowing is pinned rather than
+    // remembered: a Matrix4x4Uniform holds its matrix by value.
+    var byValue = Matrix4x4.CreateTranslation(1f, 2f, 3f);
+    var valueCmd = new DrawIndexedCommand(
+        new VertexBufferHandle(1), new IndexBufferHandle(1), new PipelineHandle(1), 3,
+        new List<ShaderUniform> { new("uModel", new Matrix4x4Uniform(byValue)) },
+        Array.Empty<ShaderTextureBinding>());
+    byValue = Matrix4x4.CreateTranslation(9f, 9f, 9f);
+    t.ExpectTrue("AT.3 a scalar/vector uniform cannot be mutated behind a recorded command",
+        NoThrow(() => RenderCommandDiagnostics.VerifyUniforms("draw", "p", valueCmd.Uniforms, valueCmd.UniformFingerprint)));
+
+    // A reused LIST is the half the copy does NOT close: the values inside a command are frozen,
+    // but the list they sit in is still the caller's. Deliberate — P2 measured the freeze cost of
+    // the VALUES as zero bytes per frame across every runnable app, and the list's cost is one
+    // allocation per draw in a tree whose games pass no inline uniforms at all. That number wants
+    // a draw-heavy consumer rather than a guess, so the list stays detected rather than copied.
+    uniforms[0] = new ShaderUniform("uBones", new Matrix4x4ArrayUniform(new[] { Matrix4x4.Identity }));
+    t.ExpectTrue("AT.4 a list rewritten after record is caught",
+        Throws(() => RenderCommandDiagnostics.VerifyUniforms("draw", "p", cmd.Uniforms, cmd.UniformFingerprint)));
+
+    uniforms.Add(new ShaderUniform("uExtra", new FloatUniform(1f)));
+    t.ExpectTrue("AT.5 a list that grew after record is caught by count",
+        Throws(() => RenderCommandDiagnostics.VerifyUniforms("draw", "p", cmd.Uniforms, cmd.UniformFingerprint)));
+
+    // `with` must re-fingerprint rather than carry the original's. A copy constructor does not
+    // re-run field initialisers, so the init accessor is what makes this true — and a stale
+    // fingerprint would make the check fire on correct code, which is worse than not checking.
+    var swapped = cmd with
+    {
+        Uniforms = new List<ShaderUniform> { new("uBones", new Matrix4x4ArrayUniform(new[] { Matrix4x4.Identity })) },
+    };
+    t.ExpectTrue("AT.6 `with` re-fingerprints the new list",
+        NoThrow(() => RenderCommandDiagnostics.VerifyUniforms("draw", "p", swapped.Uniforms, swapped.UniformFingerprint)));
+
+    // Textures travel the same way: the list is read at Execute.
+    var bindings = new List<ShaderTextureBinding> { new("uAlbedo", new TextureHandle(7), 0) };
+    var texCmd = new DrawIndexedCommand(
+        new VertexBufferHandle(1), new IndexBufferHandle(1), new PipelineHandle(1), 3,
+        Array.Empty<ShaderUniform>(), bindings);
+    bindings[0] = new ShaderTextureBinding("uAlbedo", new TextureHandle(8), 0);
+    t.ExpectTrue("AT.7 a texture binding rewritten after record is caught",
+        Throws(() => RenderCommandDiagnostics.VerifyTextures("draw", "p", texCmd.Textures, texCmd.TextureFingerprint)));
+
+    // An empty list has nothing to print, and a null fingerprint must read as "nothing to check"
+    // rather than as a fault — the shape every draw with no uniforms takes.
+    t.ExpectTrue("AT.8 a command with no uniforms carries no fingerprint",
+        texCmd.UniformFingerprint is null);
+    t.ExpectTrue("AT.8 and verifying it is silent",
+        NoThrow(() => RenderCommandDiagnostics.VerifyUniforms("draw", "p", texCmd.Uniforms, texCmd.UniformFingerprint)));
+}
+
 t.PrintSummary();
 return t.FailedCount;
+
+// Did the action throw? Section AT asserts on the record/execute check firing, and a bare
+// try/catch at each site would bury the assertion it exists to make.
+static bool Throws(Action action)
+{
+    try { action(); return false; }
+    catch (InvalidOperationException) { return true; }
+}
+
+static bool NoThrow(Action action) => !Throws(action);
 
 // Calls Validate() on a ShaderInterface and returns the thrown exception
 // (or null on success). Lets test cases assert *which* failure occurred

@@ -112,6 +112,23 @@ travel, palette-vs-joint, strip, direction-aware finish, palette stride) ·
     the same value is normal and does not fire.
   - Push constants remain the right home for small per-draw payloads (copied at
     record time, up to the guaranteed 128 bytes) — they need no descriptor at all.
+- **A recorded command is read at Execute, so its payload must not move.** A pass
+  body *records*; the backend reads uniforms and texture bindings when the frame is
+  submitted. Anything a caller can still change between those two moments is read in
+  its final state, by every draw that shares it.
+  - **Values are frozen.** Scalar and vector uniforms hold a struct by copy and never
+    could move; the three *array* uniforms (`Matrix4x4ArrayUniform`,
+    `Vector3ArrayUniform`, `FloatArrayUniform`) copy their payload on construction.
+    Measured before it was done: 0 B/frame in every application that can be run here,
+    since only Sponza's cascades use the path at all.
+  - **Lists are detected, not copied.** A reused `List<ShaderUniform>` rewritten
+    between two draws is still a fault. Under `BLIX_VK_VALIDATE=1` each command
+    fingerprints its lists at record and the device re-checks at execute, throwing
+    with the uniform's name and the pass's. Copying the list is one allocation per
+    draw and waits for a draw-heavy consumer to price it — every game in the tree
+    passes *zero* inline uniforms today.
+  - The rule for a caller is short: **hand each draw its own list**, or reuse one only
+    when nothing touches it between the two draws.
 - **Vulkan is the sole backend.** There is no cross-backend parity promise; new
   rendering capability is allowed to be Vulkan-shaped. The binding model *can be
   derived* — SPIR-V reflection → `ShaderInterface` (`spirv-cross --reflect` →

@@ -121,7 +121,39 @@ the library from the start. The controller and the state machine do **not** move
 
 ---
 
-## Prologue — the record-time freeze (engine)
+## Prologue — the record-time freeze (engine) — **DONE**
+
+**Outcome, and it split rather than resolving one way.** The measurement (P2) is what made the
+decision takeable, and it said something no amount of reading would have:
+
+| 120 frames, `BLIX_VK_VALIDATE=1` | uniform-bearing commands | uniform entries | array payload |
+| --- | --- | --- | --- |
+| toolchain lab | 2,880 | 10,560 | **0 B** |
+| VulkanHello | 120 | 120 | 0 B |
+| TankArena · Bulwark · VulkanParticles · RTSGame | **0** | **0** | 0 B |
+
+Every game passes **zero** inline uniforms — push constants and materials instead — and nothing in
+the tree uses the uniform-array path at all. The note's worry that copying "costs far more than 128
+bytes" was about a shape no application here has.
+
+It also turned out the risk was narrower than the note implied: scalar and vector uniforms hold a
+struct **by value** and never could move. Only the list and the three array uniforms can. So:
+
+- **Values frozen.** `Matrix4x4ArrayUniform`, `Vector3ArrayUniform` and `FloatArrayUniform` copy on
+  construction, as `PushConstants` already did. Measured cost 0 B/frame everywhere runnable.
+- **Lists detected, not copied.** One allocation per draw is a price nothing here can quote — the
+  lab is the only consumer of the path at all. `RenderCommandDiagnostics` fingerprints each list at
+  record and the backend re-checks at execute, throwing with the uniform and the pass. **The Room
+  lab is the draw-heavy consumer that will finally price the list**, which is the one open thread
+  this prologue hands forward.
+
+Section **AT** (13 assertions) pins it, verified to fail where it should. `RenderCommand.cs`'s note
+and `conventions.md` §2 now describe the contract instead of deferring it.
+
+**Owed:** VulkanSponza is the tree's only `Matrix4x4ArrayUniform` consumer and its pack is on an
+unmounted SSD, so the one application whose behaviour this actually changes has not been run.
+
+### What it was
 
 Small, first, and it is a decision rather than a feature. The comment already says the
 honest blocker is measurement.
