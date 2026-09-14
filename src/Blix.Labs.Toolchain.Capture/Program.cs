@@ -510,7 +510,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private void CaptureSequenceFrame()
     {
         var path = SequencePath(sequenceWritten);
-        if (!WriteImage(path)) return;
+        if (!WriteImage(path, viewport ? renderer.ViewportColour : renderer.SceneColour)) return;
         sequenceWritten++;
         Written ??= path;
         if (sequenceWritten >= sequence) Console.WriteLine($"wrote {sequenceWritten} frame(s)");
@@ -676,7 +676,34 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     private void Capture()
     {
-        if (WriteImage(outputPath)) Written = Path.GetFullPath(outputPath);
+        if (WriteImage(outputPath, viewport ? renderer.ViewportColour : renderer.SceneColour))
+        {
+            Written = Path.GetFullPath(outputPath);
+        }
+
+        // <b>With a second camera, write BOTH targets.</b> Two cameras rendering one picture is a
+        // bug this session hit twice — once because two passes shared a shader program's uniform
+        // buffer, once because the line drawer did the same for every view — and BOTH times every
+        // instrument said the run was fine. Validation was clean, the draw counts were right, and a
+        // capture of either target on its own looked exactly as it should, because each target held
+        // the same camera and neither picture could contradict the other.
+        //
+        // Two files from one run is the instrument that was missing. If they show the same camera,
+        // something upstream is sharing state between the two views.
+        if (!viewport) return;
+        var companion = SceneCompanionPath();
+        if (WriteImage(companion, renderer.SceneColour))
+        {
+            Console.WriteLine($"wrote {Path.GetFullPath(companion)}  (main camera, for comparison)");
+        }
+    }
+
+    // "panel.png" -> "panel.scene.png".
+    private string SceneCompanionPath()
+    {
+        var directory = Path.GetDirectoryName(outputPath);
+        var name = $"{Path.GetFileNameWithoutExtension(outputPath)}.scene{Path.GetExtension(outputPath)}";
+        return string.IsNullOrEmpty(directory) ? name : Path.Combine(directory, name);
     }
 
     /// <summary>Reads the target back, tonemaps it, and writes a PNG. False when the read was not usable.</summary>
@@ -686,12 +713,11 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     /// curve — and the whole value of a sequence is that its frames are comparable with each other
     /// and with everything else the tool has ever written.
     /// </remarks>
-    private bool WriteImage(string path)
+    private bool WriteImage(string path, TextureHandle source)
     {
         // The viewport target is half the swapchain's size and holds the SECOND camera's picture.
         // Same format as the scene target — deliberately, so both take this one read-back path and
         // the tonemap below applies to either.
-        var source = viewport ? renderer.ViewportColour : renderer.SceneColour;
         var pixels = device.ReadTexture(source, out var width, out var height, out var format);
         if (format != TextureFormat.Rgba16F)
         {

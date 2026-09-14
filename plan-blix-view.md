@@ -104,10 +104,17 @@ its own graph pass, shown by an ImGui `Image`. Capture reads it back with `--vie
 - **The pickable rect is the IMAGE's, not the panel's.** The picture is letterboxed inside the
   panel to keep its aspect, so the two differ by the letterbox — and a ray cast through the panel
   rect is wrong by exactly that, silently, and only on panels whose shape happens not to match.
-- **Per-view debug routing already worked and had never had a second view.** Naming
-  `ViewportSurface` on the declaration is all it takes to put the grid, the sun arrow and three
-  skeletons inside the panel: the runtime groups debug commands by `ViewId` and submits each
-  group to its own view's target. Confirmed as two passes, `debug:main` and `debug:viewport`.
+- **Per-view debug routing had never had a second view, and did not work.** The *routing* was
+  right — the runtime groups debug commands by `ViewId` and submits each group to its own view's
+  target, which is two passes, `debug:main` and `debug:viewport`. The *camera* was not:
+  `VkLineDrawer` has one shader program and passed each view's `uViewProjection` as an inline
+  uniform, so every view wrote the same 64 bytes and the last one won. The main window's grid and
+  skeletons were drawn through the panel's camera — floating off their bodies at a wrong angle.
+  <br>I had written that this "worked for free". It had simply never been asked. Fixed by moving
+  the matrix to a **push constant**, which is copied per draw — 64 bytes against the 128-byte
+  minimum. The drawer had already reasoned about exactly this lifetime for its *vertex* buffer
+  (hence ranges rather than clearing between views) and left the uniform inline, which is what a
+  near-miss looks like.
 - **Trails are per-name and cross views.** A trail keyed by name and fed from two views
   interleaves two cameras' worth of points into one history. The panel view draws no trails.
 

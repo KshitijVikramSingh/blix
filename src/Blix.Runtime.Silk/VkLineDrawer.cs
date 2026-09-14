@@ -50,18 +50,14 @@ public sealed class VkLineDrawer : IDisposable
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
         var vertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "debugline.vert.spv"));
         var fragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "debugline.frag.spv"));
-        var uniformLayout = new UniformBlockLayout(
-            TotalSize: 64,
-            Members: new[] { new UniformBlockMember("uViewProjection", Offset: 0, Size: 64) });
-        var lineInterface = new ShaderInterface(new[]
-        {
-            new DescriptorSetSlot(
-                Set: 0,
-                Binding: 0,
-                Type: ShaderResourceType.UniformBuffer,
-                Stages: ShaderStages.Vertex | ShaderStages.Fragment,
-                BlockLayout: uniformLayout),
-        });
+        // <b>A push range, where a uniform block used to be.</b> One program draws every declared
+        // view, so an inline uniform put all of them in the same 64 bytes and the last view's matrix
+        // won for the whole frame — a second view drew the first view's geometry through its own
+        // camera. Push payloads are copied at record time, so each draw owns its matrix. See
+        // debugline.vert for the long version.
+        var lineInterface = new ShaderInterface(
+            Slots: Array.Empty<DescriptorSetSlot>(),
+            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
         shader = device.CreateShaderProgramFromSpv(vertSpv, fragSpv, lineInterface, "debugline");
 
         // The swapchain pipeline, which is the common case and the only one there used to be.
@@ -231,13 +227,20 @@ public sealed class VkLineDrawer : IDisposable
         // offset so the static base-0 index buffer addresses this frame's lines.
         var slice = device.AllocVertices(
             uploadBuffer.AsSpan(firstVertex * StrideBytes, byteCount), StrideBytes, "debugline.vb");
+        // Packed into a fresh array per submit rather than a shared scratch: a recorded command
+        // copies its push payload, so reuse would in fact be safe — but this runs once per view per
+        // frame, and a 64-byte allocation is not worth the reader having to check that.
+        var push = new byte[64];
+        MemoryMarshal.Write(push.AsSpan(), in viewProjection);
+
         pass.DrawIndexed(
             vertexBuffer: slice.Buffer,
             indexBuffer: indexBuffer,
             pipeline: PipelineFor(target, depthTested),
             indexCount: count,
-            uniforms: new[] { new ShaderUniform("uViewProjection", new Matrix4x4Uniform(viewProjection)) },
+            uniforms: Array.Empty<ShaderUniform>(),
             textures: Array.Empty<ShaderTextureBinding>(),
+            pushConstants: push,
             vertexBufferByteOffset: slice.ByteOffset);
     }
 

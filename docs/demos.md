@@ -456,11 +456,15 @@ rect is wrong by exactly that — silently, and only on panels whose shape happe
 `ViewPicking.RayThrough` reads the view's own logical rectangle, so no scale factor is written at
 the call site at all.
 
-**Gizmos land in the panel for free.** The runtime groups debug commands by `ViewId` and submits
-each group to that view's own target, so naming `ViewportSurface` on the declaration puts the
-grid, the sun arrow and every skeleton inside the panel — two passes, `debug:main` and
-`debug:viewport`. That routing had existed since the view arc began and had never had a second
-view to prove it.
+**Gizmos land in the panel by naming its surface** — the runtime groups debug commands by `ViewId`
+and submits each group to that view's own target, which is two passes, `debug:main` and
+`debug:viewport`. The routing had existed since the view arc began and had never had a second view
+to prove it, and when it finally got one, **the camera was wrong**: `VkLineDrawer` has one shader
+program and passed each view's `uViewProjection` as an inline uniform, so every view wrote the same
+64 bytes and the last one won. The main window's grid and skeletons were drawn through the panel's
+camera. The matrix is a **push constant** now — copied per draw, 64 bytes against a 128-byte
+minimum — which is what the drawer already did for its *vertex* data and had not done for its
+uniform.
 
 `Blix.Test.Graphics` Section **AR** pins what a full-window view could never exercise: an offset
 rect, the half-open far edge, two abutting views claiming a shared pixel exactly once, and the
@@ -487,8 +491,13 @@ which is what makes a regression diffable rather than arguable. Every instance a
 clock, so a sequence of a three-body scene shows three bodies moving, not one moving and two
 frozen.
 
-`--viewport` reads back the **panel camera's** target rather than the main scene's, and aims the
-debug geometry at it too. The panel is an ImGui window and this tool draws no UI, so without it
+`--viewport` reads back the **panel camera's** target rather than the main scene's, aims the debug
+geometry at it, and **also writes `<name>.scene.png` from the main camera**. Two files from one run
+is the instrument this arc turned out to need: two cameras rendering one picture happened twice
+here — two passes sharing a program's uniform buffer, then the line drawer doing the same per view
+— and both times validation was clean, the draw counts were right, and a capture of either target
+alone looked exactly as it should, because each held the same camera and neither could contradict
+the other. If the pair shows one camera, something upstream is sharing state between the views. The panel is an ImGui window and this tool draws no UI, so without it
 the second camera could only ever be checked by a person looking at a running window — which is
 the "verified by eye, once" the capture tool exists to replace.
 
