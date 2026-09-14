@@ -41,4 +41,11 @@ export VK_ICD_FILENAMES="$prefix/etc/vulkan/icd.d/MoltenVK_icd.json"
 export VK_LAYER_PATH="$prefix/share/vulkan/explicit_layer.d"
 
 dotnet build "$PROJECT" -c Debug --nologo -v:q
+# The Rogue unless told otherwise. The app's own fallback is relative to its binary, which is right
+# for a normal build and wrong for a copy run from anywhere else — and "no rig" is a confusing way
+# to start a lab whose whole subject is a rig.
+if [[ " $* " != *" --rig "* ]]; then
+    set -- "$@" --rig "$REPO_ROOT/src/Blix.Demos.Runner/Assets/models/Rogue.glb"
+fi
+
 exec "$APPHOST" "$@"
