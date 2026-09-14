@@ -13,6 +13,18 @@ public enum PoseMode
 
     /// <summary>B layered on A as an offset from rest — <see cref="PoseDelta.LayerOnto"/>.</summary>
     Additive,
+
+    /// <summary>
+    /// B blended onto A through a <see cref="BoneMask"/> — an upper body doing one thing while the
+    /// legs do another.
+    /// </summary>
+    /// <remarks>
+    /// The mode the animation arc's stage D was deferred for, and the one the character arc asked
+    /// for with a body playing a one-shot chop at 0.868 m/s and its legs frozen mid-swing. Blend
+    /// mixes two whole poses and cannot express that; this one can, and the only difference in the
+    /// arithmetic is a per-bone weight.
+    /// </remarks>
+    Masked,
 }
 
 /// <summary>
@@ -84,6 +96,65 @@ public sealed class RigSession
 
     /// <summary>Blend weight, or additive overlay strength. Clamped on use.</summary>
     public float Weight { get; set; } = 0.5f;
+
+    /// <summary>Which bones <see cref="PoseMode.Masked"/> reaches. Null masks nothing, so B is ignored.</summary>
+    public BoneMask? Mask { get; set; }
+
+    /// <summary>The bone the mask's subtree starts at, kept so a panel can show and change it.</summary>
+    public string MaskRoot { get; private set; } = string.Empty;
+
+    /// <summary>How many bones the mask fades over, up the chain from its root.</summary>
+    public int MaskFalloff { get; private set; }
+
+    /// <summary>
+    /// The bone a masked layer most likely wants to start at, by name, or null if nothing matches.
+    /// </summary>
+    /// <remarks>
+    /// <b>A guess, and labelled as one.</b> There is no standard for rig bone names — "Spine",
+    /// "spine_01", "mixamorig:Spine" and "Bip01 Spine1" are all real exports — so this tries the
+    /// common spellings in order and the panel lets you correct it in one click. A lab that opened
+    /// with no mask at all would be technically honest and practically useless: the first thing
+    /// anyone does is pick a spine.
+    /// </remarks>
+    public static string? GuessUpperBodyRoot(Skeleton skeleton)
+    {
+        ArgumentNullException.ThrowIfNull(skeleton);
+
+        foreach (var wanted in new[] { "spine", "spine_01", "spine1", "spine.001", "chest", "torso" })
+        {
+            foreach (var bone in skeleton.Bones)
+            {
+                var name = bone.Name;
+                var tail = name.LastIndexOf(':') >= 0 ? name[(name.LastIndexOf(':') + 1)..] : name;
+                if (string.Equals(tail, wanted, StringComparison.OrdinalIgnoreCase)) return name;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Build the mask from a named bone, or clear it when the name is not in the rig.</summary>
+    /// <remarks>
+    /// Swallowing the miss here rather than throwing, because this is driven by a panel and a
+    /// half-typed bone name is a normal thing for a panel to hold. <see cref="BoneMask.Subtree"/>
+    /// still throws for everyone else, which is right for a caller that meant it.
+    /// </remarks>
+    public bool SetMask(string rootBone, int falloff = 0)
+    {
+        MaskRoot = rootBone;
+        MaskFalloff = Math.Max(0, falloff);
+
+        try
+        {
+            Mask = BoneMask.Subtree(rig.Skeleton, rootBone, 1f, MaskFalloff);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            Mask = null;
+            return false;
+        }
+    }
 
     /// <summary>Put every echo on the subject's clip at the subject's instant — the negative control.</summary>
     /// <remarks>
@@ -236,6 +307,13 @@ public sealed class RigSession
         {
             case PoseMode.Blend:
                 PoseBlend.Lerp(Subject.Pose, Secondary.Pose, Math.Clamp(Weight, 0f, 1f), Posed);
+                break;
+
+            case PoseMode.Masked:
+                // No mask means no layer: A alone, rather than a silent whole-body blend. A mask that
+                // failed to build should look like nothing happening, not like the wrong thing.
+                if (Mask is null) Posed.CopyFrom(Subject.Pose);
+                else PoseBlend.Lerp(Subject.Pose, Secondary.Pose, Math.Clamp(Weight, 0f, 1f), Mask, Posed);
                 break;
 
             case PoseMode.Additive:

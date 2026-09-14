@@ -82,7 +82,7 @@ internal sealed class ViewerPanels
             $"{app.Rig.DeformHierarchyCount} drawn) · {app.Rig.Clips.Count} clips · {app.Rig.Parts.Count} prims");
 
         var mode = (int)app.Session.Mode;
-        if (ImGui.Combo("compose", ref mode, "single\0blend A to B\0additive B on A\0"))
+        if (ImGui.Combo("compose", ref mode, "single\0blend A to B\0additive B on A\0B masked onto A\0"))
         {
             app.Session.Mode = (PoseMode)mode;
         }
@@ -90,12 +90,20 @@ internal sealed class ViewerPanels
         if (app.Session.Mode != PoseMode.Single)
         {
             var weight = app.Session.Weight;
-            if (ImGui.SliderFloat(app.Session.Mode == PoseMode.Blend ? "weight" : "overlay", ref weight, 0f, 1f))
+            var label = app.Session.Mode switch
+            {
+                PoseMode.Blend => "weight",
+                PoseMode.Masked => "layer weight",
+                _ => "overlay",
+            };
+            if (ImGui.SliderFloat(label, ref weight, 0f, 1f))
             {
                 app.Session.Weight = weight;
                 app.Session.Refresh();
             }
         }
+
+        if (app.Session.Mode == PoseMode.Masked) DrawMask(app);
 
         DrawTransport(app.Session.Subject, "A");
         if (app.Session.Mode != PoseMode.Single) DrawTransport(app.Session.Secondary, "B");
@@ -204,6 +212,52 @@ internal sealed class ViewerPanels
         }
 
         ImGui.EndChild();
+    }
+
+    /// <summary>Which bones the layer reaches, and how softly it stops reaching them.</summary>
+    /// <remarks>
+    /// <b>The root is picked from the rig's own bone list, not typed.</b> A mask names a bone, and a
+    /// bone's name comes from whoever exported the rig — "Spine", "spine_01" and "mixamorig:Spine"
+    /// are all real, and a lab that makes you guess which is a lab that mostly reports typos. The
+    /// names are right there; offering them is free.
+    /// <para>
+    /// The falloff has no correct value. It depends on the rig and on taste, which is exactly why it
+    /// is a slider beside a skeleton that paints it — the number is found by looking at the joint it
+    /// softens, and there is no other way to find it.
+    /// </para>
+    /// </remarks>
+    private void DrawMask(ViewerLoop app)
+    {
+        var session = app.Session;
+        if (session is null || app.Rig is null) return;
+
+        var bones = app.Rig.Skeleton.Bones;
+
+        if (ImGui.BeginCombo("mask from", session.Mask is null ? "<none>" : session.MaskRoot))
+        {
+            for (var i = 0; i < bones.Length; i++)
+            {
+                if (!ImGui.Selectable(bones[i].Name, bones[i].Name == session.MaskRoot)) continue;
+                session.SetMask(bones[i].Name, session.MaskFalloff);
+                session.Refresh();
+            }
+            ImGui.EndCombo();
+        }
+
+        var falloff = session.MaskFalloff;
+        if (ImGui.SliderInt("falloff bones", ref falloff, 0, 6))
+        {
+            session.SetMask(session.MaskRoot, falloff);
+            session.Refresh();
+        }
+
+        // THE NUMBER BEHIND THE PICTURE. A mask reaching every bone is a whole-body blend wearing a
+        // mask's name; one reaching none is a layer that costs and does nothing. Both look plausible
+        // on a slider and neither does on a count.
+        ImGui.TextDisabled(session.Mask is null
+            ? "no mask — B is ignored"
+            : $"reaches {session.Mask.Reach()} of {bones.Length} bones, " +
+              $"{session.Mask.Reach(0.999f)} fully");
     }
 
     public void DrawTransport(ClipPlayer player, string label)

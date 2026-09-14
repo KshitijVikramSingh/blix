@@ -182,7 +182,9 @@ when, why — has at least two, so it waits, exactly as the resolver and these m
 **Whether "a state machine" is a thing Blix ever defines is not decided.** It may be data, it may be
 each game's own code, it may be nothing. None of that has to be answered for this to be built.
 
-### Status — D1 is in
+### Status — D1 and D2 are in
+
+#### D1
 
 `Blix/BoneMask.cs` and a masked `PoseBlend.Lerp`, pinned by `Blix.Test.Graphics` Section **AU** (16
 assertions). Weights only: no states, no links, no durations anywhere in it.
@@ -203,6 +205,43 @@ shortcut turned no test red: not with identity rotations, and not with a pair 15
 `Quaternion.Slerp` on its trigonometric branch. Both it and `Vector3.Lerp` return their input exactly
 at 0 and 1. The shortcut is a **cost** decision — a quarter-mask does a quarter of the work — and the
 comment now says so. The guarantee is real; that was not what provided it.
+
+#### D2
+
+No new executables after all. The three that exist each grew the one thing they were already the
+right place for: the **viewer** got a Mask panel and a composition mode, the **capture** got
+`--mask-from`/`--mask-falloff`/`--skeleton-only`/`--zoom`, and the **probe** got a `layer masks`
+section. The plan said "new sibling executables rather than more flags, name the question each tool
+answers" — but the question here is not a new one. "Which bones does this layer reach" is the same
+question the viewer, the capture and the probe were already asking of a rig, asked of one more
+thing; a fourth executable would have been a fourth copy of rig loading answering it.
+
+**The mask is a colour on the skeleton.** Magenta at full weight, grey at none, a three-stop ramp
+between, so a falloff is a thing you look at rather than a number you trust. `--skeleton-only` drops
+the mesh, because the instrument is invisible inside an opaque body.
+
+**The probe judges rather than lists.** A mask reaching every bone is a whole-body blend wearing a
+mask's name; one reaching none is a layer that runs, costs and changes nothing. Both look fine on a
+slider and neither survives a count. Beyond the counts it asserts what the mask *means* — an
+upper-body mask reaches no bone named like a leg — and that claim survives the algorithm being
+wrong, which is the point of writing it that way.
+
+**The negative control, run.** Breaking `BoneMask.Subtree`'s walk to mark every bone with a parent
+takes the Rogue from 13 of 41 bones to 39 of 41 — which passes "not everything, not nothing" and
+passes the falloff check, and trips the leg check immediately, naming `upperleg.l, lowerleg.l,
+foot.l, toes.l, ...`. Section **AU** goes red at the same time (5 failures). Restored, both are
+green.
+
+**And the build that lied.** The first run of that control reported 39 of 41 with *no* problem — the
+probe had failed to compile (a shadowed local), `--no-build` had run yesterday's binary, and a
+solution build piped through `tail -2` had shown only the elapsed time. Nothing was wrong with the
+mask; the instrument was a week-old photograph. Grep the build output for `error CS`, not the tail
+of it.
+
+**Framing was a real fault, not a nicety.** The capture aimed at a hardcoded 1.4 m, which is over
+the head of the Rogue — so the first zoomed mask capture centred on empty sky with the skeleton
+falling off the bottom edge. The target is now the rig's own half-height, which is what `--zoom`
+composes with.
 
 ### D1 — the mask, and the blend that reads it
 

@@ -619,6 +619,103 @@ public static class Program
             $"  instancing: {usable.Length} slots, " +
             $"{(distinct ? "different clips give different poses" : "ALIASED")}; " +
             $"{(identical ? "one clip gives one pose in every slot" : "NOT REPRODUCIBLE")}");
+        problems += CheckMasks(skeleton);
+        return problems;
+    }
+
+    /// <summary>
+    /// What a layer mask over this rig would actually reach — judged, not listed.
+    /// </summary>
+    /// <remarks>
+    /// <b>Two failures a mask can have, and neither looks like one.</b> A mask that reaches every bone
+    /// is a whole-body blend wearing a mask's name; a mask that reaches none is a layer that runs,
+    /// costs, and changes nothing. Both look perfectly plausible on a slider and neither survives a
+    /// count, which is why this is a check and not a listing.
+    /// <para>
+    /// It judges the RIG as much as the mask: a skeleton with no bone the common spine names match
+    /// is one where every masked layer has to be wired by hand, and saying so once at import beats
+    /// finding out in a panel.
+    /// </para>
+    /// </remarks>
+    private static int CheckMasks(Skeleton skeleton)
+    {
+        Console.WriteLine();
+        Console.WriteLine("layer masks");
+
+        var root = RigSession.GuessUpperBodyRoot(skeleton);
+        if (root is null)
+        {
+            Console.WriteLine("  no bone matches the usual spine names — a masked layer must be named by hand");
+            return 0;
+        }
+
+        var problems = 0;
+        var hard = BoneMask.Subtree(skeleton, root);
+        var soft = BoneMask.Subtree(skeleton, root, falloff: 2);
+
+        Console.WriteLine($"  upper body from '{root}': {hard.Reach()} of {skeleton.BoneCount} bones");
+
+        // A mask has to divide the rig. Covering all of it or none of it is the same fault twice.
+        if (hard.Reach() == 0 || hard.Reach() == skeleton.BoneCount)
+        {
+            Console.Error.WriteLine(
+                $"  PROBLEM: a mask from '{root}' reaches {hard.Reach()} of {skeleton.BoneCount} bones — " +
+                "a layer that covers everything or nothing is not a layer");
+            problems++;
+        }
+
+        // The falloff must add reach without adding anyone at full weight: it fades bones the hard
+        // mask left out, and touches nothing the hard mask already had.
+        if (soft.Reach() <= hard.Reach() || soft.Reach(0.999f) != hard.Reach(0.999f))
+        {
+            Console.Error.WriteLine(
+                $"  PROBLEM: a falloff changed the fully-masked set ({hard.Reach(0.999f)} -> " +
+                $"{soft.Reach(0.999f)}) or added no partial bones ({hard.Reach()} -> {soft.Reach()})");
+            problems++;
+        }
+        else
+        {
+            Console.WriteLine(
+                $"  with a 2-bone falloff: {soft.Reach()} reached, {soft.Reach(0.999f)} fully — " +
+                $"{soft.Reach() - soft.Reach(0.999f)} fading");
+        }
+
+        // AN UPPER-BODY MASK MUST NOT REACH A LEG, which is a claim about what the mask MEANS rather
+        // than about how it was computed — so it survives the algorithm being wrong. Breaking the
+        // subtree walk to mark every bone moves the counts above without tripping them (39 of 41 is
+        // neither everything nor nothing), and trips this immediately.
+        var caught = new List<string>();
+        for (var i = 0; i < skeleton.BoneCount; i++)
+        {
+            var bone = skeleton.Bones[i].Name.ToLowerInvariant();
+            var isLeg = bone.Contains("leg") || bone.Contains("thigh") || bone.Contains("shin")
+                     || bone.Contains("calf") || bone.Contains("foot") || bone.Contains("toe");
+            if (isLeg && hard[i] > 0f) caught.Add(skeleton.Bones[i].Name);
+        }
+
+        if (caught.Count > 0)
+        {
+            Console.Error.WriteLine(
+                $"  PROBLEM: an upper-body mask reaches {caught.Count} lower-body bone(s): " +
+                string.Join(", ", caught.Take(6)));
+            problems++;
+        }
+        else
+        {
+            Console.WriteLine("  and it reaches no bone named like a leg");
+        }
+
+        // And the complement has to be the rest of the body, exactly. Two masks built separately are
+        // not guaranteed to partition a rig; a mask and its inverse are.
+        var lower = hard.Inverted();
+        var exact = true;
+        for (var i = 0; i < skeleton.BoneCount; i++) exact &= hard[i] + lower[i] == 1f;
+        if (!exact)
+        {
+            Console.Error.WriteLine("  PROBLEM: a mask and its inverse do not partition the rig");
+            problems++;
+        }
+
         return problems;
     }
 

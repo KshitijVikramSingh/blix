@@ -58,6 +58,12 @@ public static class Program
         var blendClip = ArgValue(args, "--blend");
         var additiveClip = ArgValue(args, "--additive");
 
+        // --mask names the bone a masked layer starts at, and picks the composition with it for the
+        // same reason --blend does: a mode reachable only through a combo box is a mode no bounded
+        // run and no capture can get to, which makes it a mode nothing checks.
+        var maskClip = ArgValue(args, "--mask");
+        var maskRoot = ArgValue(args, "--mask-from");
+
         // --instances N draws N copies of the rig, each on its own clock. One is the ordinary case
         // and takes exactly the same path as eight — there is no single-body shader.
         var instances = int.TryParse(ArgValue(args, "--instances"), out var n) ? n : 1;
@@ -68,7 +74,7 @@ public static class Program
             Height = 760,
         });
 
-        var loop = new ViewerLoop(modelPath, rigPath, clipName, blendClip, additiveClip, instances);
+        var loop = new ViewerLoop(modelPath, rigPath, clipName, blendClip, additiveClip, instances, maskClip, maskRoot);
         using var window = new Window(loop, options);
         window.Run();
     }
@@ -129,17 +135,23 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         string? clipName = null,
         string? blendClip = null,
         string? additiveClip = null,
-        int instances = 1)
+        int instances = 1,
+        string? maskClip = null,
+        string? maskRoot = null)
     {
         this.modelPath = modelPath;
         this.rigPath = rigPath;
         this.clipName = clipName;
+        this.maskRoot = maskRoot;
         requestedInstances = instances;
-        secondClip = blendClip ?? additiveClip;
+        secondClip = blendClip ?? additiveClip ?? maskClip;
         startMode = blendClip is not null ? PoseMode.Blend
             : additiveClip is not null ? PoseMode.Additive
+            : maskClip is not null ? PoseMode.Masked
             : PoseMode.Single;
     }
+
+    private readonly string? maskRoot;
 
 
     // <b>Two cameras, one class.</b> The window's view and the panel's viewport each carried their
@@ -354,6 +366,15 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         scene = LabScene.GroundOnly();
         session = new RigSession(rig, requestedInstances) { Mode = startMode };
+
+        // A mask before anyone asks for one, because the first thing anybody does in this mode is
+        // pick a spine. The guess is named as a guess in RigSession and the combo corrects it in one
+        // click; --mask-from overrides it outright.
+        var chosenRoot = maskRoot ?? RigSession.GuessUpperBodyRoot(rig.Skeleton);
+        if (chosenRoot is not null && !session.SetMask(chosenRoot, falloff: 2))
+        {
+            Console.WriteLine($"  no bone named '{chosenRoot}' — the mask is empty until one is picked");
+        }
 
         // Prefer a walk on A and an idle on B when the asset has them: a blend between two named
         // gaits is the case the weight slider was built to show, and finding it by hand in a
@@ -641,7 +662,11 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             options,
             instance == 0 ? selection.Bone : -1,
             instance == 0 && panels.ShowRestGhost ? session.RestWorlds : null,
-            panels.DeformBonesOnly ? rig.DeformHierarchy : null);
+            panels.DeformBonesOnly ? rig.DeformHierarchy : null,
+            // Painted only in the mode where a mask means anything. In the others the skeleton's
+            // colours already say something — which bone is selected — and two meanings on one
+            // channel is how an overlay stops being read at all.
+            session.Mode == PoseMode.Masked ? session.Mask : null);
     }
 
 

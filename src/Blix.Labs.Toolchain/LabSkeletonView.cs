@@ -56,6 +56,32 @@ public static class LabSkeletonView
     private static readonly GraphicsColor RestColour = new(0.35f, 0.38f, 0.45f, 1f);
     private static readonly GraphicsColor SelectedColour = new(1f, 1f, 1f, 1f);
 
+    // The mask ramp: out, halfway, in. THREE stops rather than two, because the interesting part of a
+    // mask is not its inside or its outside — it is the fade between them, and a two-stop ramp makes
+    // a falloff of two bones look like one dark bone.
+    private static readonly GraphicsColor MaskOut = new(0.26f, 0.28f, 0.34f, 1f);
+    private static readonly GraphicsColor MaskHalf = new(1f, 0.72f, 0.2f, 1f);
+    private static readonly GraphicsColor MaskIn = new(1f, 0.3f, 0.85f, 1f);
+
+    /// <summary>What colour a bone is when a mask is shown: how much of a layer reaches it.</summary>
+    /// <remarks>
+    /// <b>The whole reason stage D2 exists.</b> "Which bones" is a question no amount of arithmetic
+    /// answers as well as a picture — a subtree is easy to describe and hard to be sure of — and the
+    /// falloff is a number nobody can derive. Painting the weight onto the skeleton makes both
+    /// things you check by looking.
+    /// </remarks>
+    private static GraphicsColor MaskColour(float weight)
+    {
+        var w = Math.Clamp(weight, 0f, 1f);
+        return w <= 0.5f ? Mix(MaskOut, MaskHalf, w * 2f) : Mix(MaskHalf, MaskIn, (w - 0.5f) * 2f);
+    }
+
+    private static GraphicsColor Mix(GraphicsColor a, GraphicsColor b, float t) =>
+        new(a.Red + ((b.Red - a.Red) * t),
+            a.Green + ((b.Green - a.Green) * t),
+            a.Blue + ((b.Blue - a.Blue) * t),
+            1f);
+
     /// <summary>
     /// Draws the skeleton implied by <paramref name="boneWorlds"/>, placed by <paramref name="modelTransform"/>.
     /// </summary>
@@ -84,7 +110,8 @@ public static class LabSkeletonView
         Options options,
         int selectedBone = -1,
         IReadOnlyList<Matrix4x4>? restWorlds = null,
-        IReadOnlyList<bool>? include = null)
+        IReadOnlyList<bool>? include = null,
+        BoneMask? mask = null)
     {
         ArgumentNullException.ThrowIfNull(debug);
         ArgumentNullException.ThrowIfNull(skeleton);
@@ -126,6 +153,12 @@ public static class LabSkeletonView
             var origin = Origin(world);
             var selected = i == selectedBone;
 
+            // A bone's colour says one of two things: which one is selected, or how much of the layer
+            // reaches it. Selection wins, because it is the thing you are pointing at.
+            var painted = mask is not null && i < mask.BoneCount;
+            var boneColour = selected ? SelectedColour : painted ? MaskColour(mask![i]) : BoneColour;
+            var jointColour = selected ? SelectedColour : painted ? MaskColour(mask![i]) : JointColour;
+
             if (options.Bones)
             {
                 var parent = skeleton.Bones[i].ParentIndex;
@@ -138,19 +171,19 @@ public static class LabSkeletonView
                         $"bone/{i}",
                         Origin(boneWorlds[parent] * modelTransform),
                         origin,
-                        selected ? SelectedColour : BoneColour);
+                        boneColour);
                 }
                 else
                 {
                     // A root has no parent to draw from; a cross marks where the rig's origin sits,
                     // which is the thing root motion moves.
-                    debug.Draw.Cross($"root/{i}", origin, tick * 2f, selected ? SelectedColour : BoneColour);
+                    debug.Draw.Cross($"root/{i}", origin, tick * 2f, boneColour);
                 }
             }
 
             if (options.Joints)
             {
-                debug.Draw.Cross($"joint/{i}", origin, tick, selected ? SelectedColour : JointColour);
+                debug.Draw.Cross($"joint/{i}", origin, tick, jointColour);
             }
 
             if (options.LeafStubs && options.Bones && IsLeaf(skeleton, i, include))
@@ -160,7 +193,7 @@ public static class LabSkeletonView
                 // another way gets stubs pointing sideways, and seeing that is the point.
                 debug.Draw.Line(
                     $"leaf/{i}", origin, origin + (Row(world, 1) * tick * 3f),
-                    selected ? SelectedColour : BoneColour);
+                    boneColour);
             }
 
             if (options.AllAxes || selected) DrawAxes(debug, i, world, selected ? axis : axis * 0.4f);
