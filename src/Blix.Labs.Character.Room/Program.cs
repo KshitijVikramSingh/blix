@@ -250,6 +250,12 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
                 debug.Draw.Line("chevron-l", tailL, nose, new GraphicsColor(1f, 1f, 1f, 1f));
                 debug.Draw.Line("chevron-r", tailR, nose, new GraphicsColor(1f, 1f, 1f, 1f));
 
+                // A POST AT THE NOSE, green, standing up out of the ground plane. A chevron seen from
+                // behind at a shallow pitch is two strokes that could be read either way round, and
+                // "which end is the front" is not a question a marker should leave open. The post is
+                // vertical, so it is the one part of the marker that is never foreshortened.
+                debug.Draw.Line("nose-post", nose, nose + new Vector3(0f, 0.55f, 0f), new GraphicsColor(0.2f, 1f, 0.4f, 1f));
+
                 var travelled = new Vector3(lastTravel.X, 0f, lastTravel.Z);
                 if (travelled.LengthSquared() > 1e-8f)
                 {
@@ -319,14 +325,19 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
 
             // WHICH WAY THE BODY POINTS is a game's decision, not a physics one — and the two models
             // are indistinguishable until you strafe.
-            ImGui.Checkbox("face the camera (off = face travel)", ref faceCamera);
+            //
+            // <b>"Face the camera" was the wrong words.</b> It reads as "turn to look at the viewer",
+            // which is the opposite of what it does — and it was reported that way: the arrow points
+            // the other way from what you would expect, while the readout said 0.0 degrees, which is
+            // a label and a number disagreeing rather than a vector being wrong. The body points the
+            // way the camera LOOKS, so you are behind it, which is what a third-person camera is.
+            ImGui.Checkbox("align to the camera's heading (off = face travel)", ref faceCamera);
             if (!faceCamera) ImGui.SliderFloat("turn rad/s", ref turnRate, 1f, 30f);
 
-            // The number behind "the facing looks wrong": how far the body is turned from where the
-            // camera looks. Facing the camera holds it at 0; facing travel swings it to 90 on a pure
-            // strafe, which is the model working rather than failing.
             var offset = MathF.IEEERemainder(bodyFacing - camera.Yaw, MathF.Tau) * 180f / MathF.PI;
-            ImGui.Text($"facing is {offset:+0.0;-0.0;0.0} deg from the camera");
+            ImGui.Text(faceCamera
+                ? $"points where the camera looks — away from you ({offset:0.0} deg off)"
+                : $"points where it walks — {offset:+0.0;-0.0;0.0} deg off the camera's heading");
 
             // EVERY ONE OF THESE IS A DECISION, which is why none of them is a constant. The ramp
             // fan exists so the slope limit can be dragged across 30, 45 and 60 and the consequence

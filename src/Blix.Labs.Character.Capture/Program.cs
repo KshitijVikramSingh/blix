@@ -194,10 +194,23 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                     "body", body.PointA, body.PointB, body.Radius,
                     new GraphicsColor(0.35f, 0.85f, 1f, 1f));
 
-                // Facing +X, which is arbitrary and stated: a settled body has not walked anywhere,
-                // so there is no travel direction to read one from.
+                // FACING THE CAMERA, the same rule the viewer's default uses — so a capture answers
+                // "which way does the marker point" with exactly the picture the viewer would draw.
+                var facing = new Vector3(-MathF.Sin(camera.Yaw), 0f, -MathF.Cos(camera.Yaw));
+                var side = new Vector3(-facing.Z, 0f, facing.X);
+
                 var eye = motor.Feet + new Vector3(0f, 0.9f, 0f);
-                debug.Draw.Arrow("facing", eye, eye + new Vector3(0.9f, 0f, 0f), new GraphicsColor(1f, 1f, 1f, 1f));
+                debug.Draw.Arrow("facing", eye, eye + (facing * 0.9f), new GraphicsColor(1f, 1f, 1f, 1f));
+
+                var nose = motor.Feet + (facing * 0.85f) + new Vector3(0f, 0.03f, 0f);
+                var tailL = motor.Feet + (facing * -0.15f) + (side * 0.42f) + new Vector3(0f, 0.03f, 0f);
+                var tailR = motor.Feet + (facing * -0.15f) - (side * 0.42f) + new Vector3(0f, 0.03f, 0f);
+                debug.Draw.Line("chevron-l", tailL, nose, new GraphicsColor(1f, 1f, 1f, 1f));
+                debug.Draw.Line("chevron-r", tailR, nose, new GraphicsColor(1f, 1f, 1f, 1f));
+
+                // A second marker whose meaning is unambiguous: a short post at the NOSE only. If the
+                // chevron reads backwards, this says which end the lab thinks is the front.
+                debug.Draw.Line("nose-post", nose, nose + new Vector3(0f, 0.5f, 0f), new GraphicsColor(0.2f, 1f, 0.4f, 1f));
             }
 
             debug.Draw.Grid("floor", new Vector3(0f, 0.02f, 0f), 28f, 28, new GraphicsColor(0.35f, 0.4f, 0.5f, 1f));
