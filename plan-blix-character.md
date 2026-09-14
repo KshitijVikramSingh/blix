@@ -471,7 +471,13 @@ an upper body doing something else. The character lab carries no rig code and no
 its own — it consumes what stage D produces, and whatever selection it needs, it owns itself until a
 second consumer disagrees with it.
 
-## Controller — the two together — **REPLANNED 2026-09-15**
+## Controller — the two together — **REPLANNED then PAUSED 2026-09-15**
+
+> **Paused at the tooling arc.** Replanning this stage surfaced that its first question —
+> where does a rig come from — is tree-wide rather than character-shaped, and that four other
+> arcs had hit the same wall from other sides. See `plan-blix-tooling.md`. **C-0 moved there
+> as T-C1.** C resumes after it, with C-A repurposed as the thing that proves the extraction:
+> the first consumer built *on* the extracted loader rather than around it.
 
 The original plan had four stages and a state machine. Three findings replaced it, and two of
 them were already sitting in the code before this was rewritten.
@@ -496,7 +502,10 @@ consumer. So does `Blix.Render/PropModel`. Two engine-side attempts at "a loaded
 each stranded at one consumer, because each baked a draw into itself and the draw is the part that
 differs — render graph, material sets, instancing, shadow passes.
 
-### C-0 — rig residency, extracted narrowly
+### C-0 — rig residency — **MOVED to plan-blix-tooling.md T-C1**
+
+Kept here as the record of how it was found. Six duplicate skinned-draw paths is a tree-wide
+number, and an extraction discovered by one arc does not belong to it.
 
 The duplicated part is **loading**, not drawing: glTF import, vertex and index buffers, albedo
 upload, material scalars, bounds, weighted-bone analysis. That part is identical in every consumer

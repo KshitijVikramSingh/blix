@@ -1,0 +1,985 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blix Module Topology</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root{
+  --paper:#F1F4F5; --surface:#FDFEFE; --sunk:#E6ECEE;
+  --ink:#111A1F; --body:#33454E; --muted:#677C86;
+  --rule:#C6D2D7; --hair:#DDE5E8;
+  --engine:#0D5F6E; --engine-soft:#0d5f6e14;
+  --consumer:#A55228; --consumer-soft:#a5522814;
+  --signal:#A2172F; --signal-soft:#a2172f12;
+  --tier0:#0D5F6E; --tier1:#236B77; --tier2:#3A7781; --tier3:#54848B; --tier4:#6F9196; --tier5:#8B9EA1;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --paper:#0C1216; --surface:#141D22; --sunk:#101820;
+  --ink:#E6EDEF; --body:#B4C4CA; --muted:#7D919A;
+  --rule:#26363D; --hair:#1D2A31;
+  --engine:#4FB6C6; --engine-soft:#4fb6c61c;
+  --consumer:#DE9760; --consumer-soft:#de97601c;
+  --signal:#E96A83; --signal-soft:#e96a8316;
+  --tier0:#4FB6C6; --tier1:#59ABB8; --tier2:#63A1AA; --tier3:#6E969C; --tier4:#788C8F; --tier5:#828283;
+}}
+:root[data-theme="dark"]{
+  --paper:#0C1216; --surface:#141D22; --sunk:#101820;
+  --ink:#E6EDEF; --body:#B4C4CA; --muted:#7D919A;
+  --rule:#26363D; --hair:#1D2A31;
+  --engine:#4FB6C6; --engine-soft:#4fb6c61c;
+  --consumer:#DE9760; --consumer-soft:#de97601c;
+  --signal:#E96A83; --signal-soft:#e96a8316;
+  --tier0:#4FB6C6; --tier1:#59ABB8; --tier2:#63A1AA; --tier3:#6E969C; --tier4:#788C8F; --tier5:#828283;
+}
+
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  background:var(--paper); color:var(--body);
+  font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  font-size:15px; line-height:1.6; margin:0;
+  padding-block:0 76px; padding-inline:20px;
+  -webkit-font-smoothing:antialiased;
+}
+.sheet{max-width:1180px;margin:0 auto}
+h1,h2,h3,h4{font-family:Archivo,"Helvetica Neue",Arial,sans-serif;color:var(--ink);text-wrap:balance;margin:0}
+code,.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+.num{font-variant-numeric:tabular-nums}
+p{margin:0}
+
+.masthead{padding-block:56px 30px;border-bottom:2px solid var(--ink)}
+.eyebrow{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+h1{font-size:clamp(34px,6.4vw,58px);font-weight:800;letter-spacing:-.022em;line-height:1.02;margin-top:10px}
+.standfirst{max-width:64ch;margin-top:16px;font-size:16.5px}
+.figures{display:flex;flex-wrap:wrap;gap:10px 38px;margin-top:30px}
+.fig{display:flex;flex-direction:column;gap:2px}
+.fig b{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums;font-size:25px;font-weight:600;color:var(--ink);line-height:1}
+.fig span{font-size:12px;color:var(--muted);letter-spacing:.03em}
+.toc{display:flex;flex-wrap:wrap;gap:6px 22px;margin-top:28px;font-family:"IBM Plex Mono",monospace;font-size:12px}
+.toc a{color:var(--muted);text-decoration:none;border-bottom:1px solid transparent;padding-bottom:1px}
+.toc a:hover,.toc a:focus-visible{color:var(--ink);border-bottom-color:var(--engine)}
+
+section{padding-block:46px;border-bottom:1px solid var(--hair)}
+h2{font-size:clamp(21px,3vw,28px);font-weight:700;letter-spacing:-.014em;margin-top:6px}
+h3{font-size:17px;font-weight:700;letter-spacing:-.008em}
+.lede{max-width:70ch;margin-top:12px}
+.note{max-width:74ch;margin-top:16px;font-size:13.5px;color:var(--muted)}
+.note b{color:var(--ink)}
+
+/* venn */
+.vennwrap{margin-top:26px;overflow-x:auto}
+svg.venn{display:block;width:100%;max-width:760px;height:auto;margin-inline:auto}
+.venn text{font-family:"IBM Plex Mono",monospace}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(252px,1fr));gap:1px;background:var(--hair);
+  border:1px solid var(--hair);margin-top:28px}
+.cell{background:var(--surface);padding:16px 18px}
+.cell .who{font-family:"IBM Plex Mono",monospace;font-size:13px;font-weight:600;color:var(--ink);word-break:break-word}
+.cell .verdict{font-size:12px;color:var(--muted);margin-top:3px;font-family:"IBM Plex Mono",monospace}
+.cell p{margin-top:9px;font-size:13.5px;line-height:1.5}
+.dirn{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.06em;text-transform:uppercase}
+.dirn.out{color:var(--consumer)} .dirn.in{color:var(--engine)}
+
+/* tiers */
+.tiers{margin-top:26px;display:flex;flex-direction:column}
+.tier{display:grid;grid-template-columns:96px 1fr;gap:16px;align-items:start;padding:14px 0;border-top:1px solid var(--hair)}
+.tier:first-child{border-top:1px solid var(--rule)}
+.tlabel{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);padding-top:5px}
+.tlabel b{display:block;color:var(--ink);font-size:14px;font-weight:600;letter-spacing:0;text-transform:none}
+.mods{display:grid;grid-template-columns:repeat(auto-fill,minmax(236px,1fr));gap:8px}
+.mod{background:var(--surface);border:1px solid var(--hair);border-left:3px solid var(--tc,var(--engine));padding:10px 12px}
+.mod .mname{font-family:"IBM Plex Mono",monospace;font-size:13px;font-weight:600;color:var(--ink);word-break:break-word}
+.mod .mmeta{display:flex;gap:12px;margin-top:5px;font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.mod .mrole{font-size:12.5px;line-height:1.45;margin-top:7px}
+.bar{height:3px;background:var(--hair);margin-top:8px}
+.bar i{display:block;height:100%;background:var(--tc,var(--engine))}
+
+/* module panels */
+.panels{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:1px;background:var(--hair);
+  border:1px solid var(--hair);margin-top:26px}
+.panel{background:var(--surface);padding:16px 18px 18px}
+.panel h4{font-family:"IBM Plex Mono",monospace;font-size:13.5px;font-weight:600;letter-spacing:-.01em;word-break:break-word}
+.panel .psub{font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--muted);margin-top:4px;font-variant-numeric:tabular-nums}
+.panel .role{font-size:13px;margin:10px 0 12px}
+.files{list-style:none;margin:0;padding:0;border-top:1px solid var(--hair)}
+.files li{display:flex;justify-content:space-between;gap:10px;padding:3px 0;font-family:"IBM Plex Mono",monospace;
+  font-size:11.5px;border-bottom:1px solid var(--hair)}
+.files li:last-child{border-bottom:0}
+.files span:first-child{color:var(--body);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.files span:last-child{color:var(--muted);font-variant-numeric:tabular-nums;flex:none}
+
+/* project register */
+.family{margin-top:34px}
+.fhead{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;padding-bottom:8px;border-bottom:1px solid var(--rule)}
+.fhead h3{font-size:18px}
+.fcount{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.fintro{max-width:74ch;margin-top:10px;font-size:13.5px;color:var(--muted)}
+.reg{display:flex;flex-direction:column;margin-top:12px}
+.row{display:grid;grid-template-columns:minmax(190px,270px) 1fr;gap:6px 26px;padding:14px 0;border-bottom:1px solid var(--hair);align-items:start}
+.row:last-child{border-bottom:0}
+.rname{font-family:"IBM Plex Mono",monospace;font-size:13px;font-weight:600;color:var(--ink);word-break:break-word;line-height:1.35}
+.rmeta{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--muted);margin-top:4px;font-variant-numeric:tabular-nums;
+  display:flex;flex-wrap:wrap;gap:4px 10px}
+.kind{display:inline-block;font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.06em;text-transform:uppercase;
+  padding:1px 5px;border:1px solid var(--rule);color:var(--muted)}
+.kind.lib{border-color:var(--engine);color:var(--engine)}
+.kind.exe{border-color:var(--consumer);color:var(--consumer)}
+.rbody p{font-size:13.5px;line-height:1.55;max-width:74ch}
+.rbody p + p{margin-top:7px}
+.run{display:inline-block;margin-top:7px;font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--muted);
+  background:var(--sunk);padding:2px 7px}
+.flag{margin-top:8px;font-size:12.5px;color:var(--signal);border-left:2px solid var(--signal);padding-left:10px;max-width:70ch}
+
+/* matrix */
+.tablewrap{overflow-x:auto;margin-top:24px;border:1px solid var(--hair)}
+table{border-collapse:collapse;width:100%;min-width:900px;background:var(--surface)}
+th,td{padding:9px 8px;font-size:11.5px;text-align:center;border-bottom:1px solid var(--hair)}
+thead th{font-family:"IBM Plex Mono",monospace;font-weight:500;color:var(--muted);border-bottom:1px solid var(--rule);white-space:nowrap}
+th.rowh,td.rowh{text-align:left;font-weight:600;color:var(--ink);font-size:13px;white-space:nowrap;padding-left:14px;
+  font-family:"IBM Plex Sans",sans-serif}
+td.num{font-variant-numeric:tabular-nums;color:var(--ink);font-family:"IBM Plex Mono",monospace}
+td.z{color:var(--muted)}
+tbody tr:last-child td{border-bottom:0}
+
+/* findings */
+.findings{margin-top:24px;display:flex;flex-direction:column;gap:1px;background:var(--hair);border:1px solid var(--hair)}
+.finding{background:var(--surface);padding:16px 20px;display:grid;grid-template-columns:112px 1fr;gap:20px;align-items:start}
+.fmetric{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums;font-size:21px;font-weight:600;
+  color:var(--signal);line-height:1.15;letter-spacing:-.02em}
+.fmetric small{display:block;font-size:10px;font-weight:400;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin-top:3px}
+.finding h4{font-size:15px;font-weight:600;font-family:"IBM Plex Sans",sans-serif;letter-spacing:0;color:var(--ink)}
+.finding p{margin-top:6px;font-size:13.5px;max-width:70ch}
+code.inl{font-size:12.5px;background:var(--sunk);padding:1px 4px}
+
+footer{padding-top:34px;font-size:12.5px;color:var(--muted);max-width:76ch}
+a{color:var(--engine)}
+@media (max-width:720px){
+  .tier{grid-template-columns:1fr;gap:8px}
+  .finding{grid-template-columns:1fr;gap:8px}
+  .row{grid-template-columns:1fr;gap:8px}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+
+<header class="masthead">
+  <div class="eyebrow">/Users/kshitij/dev/blix · branch character-lab · commit 2d3f478 · 2026-09-15</div>
+  <h1>Blix Module Topology</h1>
+  <p class="standfirst">Every project, lab, test and tool in the tree — what it is, what it proves,
+  what it depends on and who depends on it. Read off the <code>.csproj</code> graph and the files'
+  own headers, not from memory.</p>
+  <div class="figures">
+    <div class="fig"><b class="num">39</b><span>projects with a csproj</span></div>
+    <div class="fig"><b class="num">133,356</b><span>lines of C#</span></div>
+    <div class="fig"><b class="num" style="color:var(--engine)">15</b><span>engine · 35,357 lines</span></div>
+    <div class="fig"><b class="num" style="color:var(--consumer)">24</b><span>consumers · 97,999 lines</span></div>
+    <div class="fig"><b class="num">23</b><span>scripts in tools/</span></div>
+    <div class="fig"><b class="num">6</b><span>dependency tiers</span></div>
+  </div>
+  <nav class="toc">
+    <a href="#line">01 the line</a>
+    <a href="#stack">02 the stack</a>
+    <a href="#inside">03 inside the engine</a>
+    <a href="#register">04 the register — every consumer</a>
+    <a href="#tools">05 tools</a>
+    <a href="#reach">06 reach</a>
+    <a href="#pressure">07 pressure</a>
+  </nav>
+</header>
+
+<section id="line">
+  <div class="eyebrow">01 — the line</div>
+  <h2>Engine and consumer, and the four things that are genuinely arguable</h2>
+  <p class="lede">The split is cleaner than it feels from inside. The engine is a library stack that
+  never names a game; every consumer is an executable, or a lab library serving one. What is worth
+  arguing about is a short list, and each entry on it is a restructuring decision waiting to be made.</p>
+
+  <div class="vennwrap">
+  <svg class="venn" viewBox="0 0 760 420" role="img" aria-label="Venn diagram: 15 engine projects, 24 consumer projects, 4 arguable residents in the overlap">
+    <circle cx="280" cy="200" r="168" fill="var(--engine-soft)" stroke="var(--engine)" stroke-width="1.5"/>
+    <circle cx="480" cy="200" r="168" fill="var(--consumer-soft)" stroke="var(--consumer)" stroke-width="1.5"/>
+    <text x="176" y="150" text-anchor="middle" font-size="12" letter-spacing="2.4" fill="var(--engine)">ENGINE</text>
+    <text x="176" y="192" text-anchor="middle" font-size="40" font-weight="600" fill="var(--ink)">15</text>
+    <text x="176" y="214" text-anchor="middle" font-size="11.5" fill="var(--muted)">projects · 35,357 ln</text>
+    <text x="176" y="248" text-anchor="middle" font-size="10.5" fill="var(--muted)">names no game</text>
+    <text x="584" y="150" text-anchor="middle" font-size="12" letter-spacing="2.4" fill="var(--consumer)">CONSUMERS</text>
+    <text x="584" y="192" text-anchor="middle" font-size="40" font-weight="600" fill="var(--ink)">24</text>
+    <text x="584" y="214" text-anchor="middle" font-size="11.5" fill="var(--muted)">projects · 97,999 ln</text>
+    <text x="584" y="248" text-anchor="middle" font-size="10.5" fill="var(--muted)">11 demos · 8 labs</text>
+    <text x="584" y="264" text-anchor="middle" font-size="10.5" fill="var(--muted)">4 tests · 1 game</text>
+    <text x="380" y="178" text-anchor="middle" font-size="10" letter-spacing="1.4" fill="var(--signal)">ARGUABLE</text>
+    <text x="380" y="212" text-anchor="middle" font-size="30" font-weight="600" fill="var(--signal)">4</text>
+    <text x="380" y="232" text-anchor="middle" font-size="10" fill="var(--muted)">below</text>
+    <text x="380" y="404" text-anchor="middle" font-size="11" fill="var(--muted)">Circle area is not to scale — the consumer side holds 2.8&#215; the code.</text>
+  </svg>
+  </div>
+
+  <div class="grid2">
+    <div class="cell">
+      <div class="who">Blix/SkinnedGameObject.cs</div>
+      <div class="verdict">121 ln · in the engine · <span class="dirn out">1 consumer</span></div>
+      <p>A skinned model you can draw, offered to everyone. VulkanLit took it. Runner, Bulwark,
+      RTSGame and the toolchain lab each wrote their own instead — because it bakes in a draw, and
+      the draw is the part that differs.</p>
+    </div>
+    <div class="cell">
+      <div class="who">Blix.Render/PropModel.cs</div>
+      <div class="verdict">686 ln · in the engine · <span class="dirn out">1 consumer</span></div>
+      <p>The same story one layer up, and the largest file in <code>Blix.Render</code>. Only RTSGame
+      uses it. Two engine-side attempts at one abstraction, both stranded, both for the same reason.</p>
+    </div>
+    <div class="cell">
+      <div class="who">Blix.Labs.Toolchain/LabRig.cs</div>
+      <div class="verdict">458 ln · outside · <span class="dirn in">2nd consumer arriving</span></div>
+      <p>glTF import, GPU buffers, textures, bounds, weighted-bone analysis — then a bone material
+      that names a shader. The first half is what the character lab would otherwise copy. The second
+      half is what stranded the other two.</p>
+    </div>
+    <div class="cell">
+      <div class="who">Blix.Labs.Character/BodyResolver.cs</div>
+      <div class="verdict">183 ln · outside · <span class="dirn out">stays out</span></div>
+      <p>Sweep-and-slide. Its math already moved into <code>Blix.Geometry</code>; the loop did not.
+      The camera was expected to be its second consumer and turned out to want one cast and a clamp —
+      decided by evidence, not deferral.</p>
+    </div>
+  </div>
+  <p class="note">The pattern in all four: <b>geometry and loading travel; a draw does not.</b> An
+  abstraction that names a shader program, a material set or a pass has an owner whether it admits
+  one or not.</p>
+</section>
+
+<section id="stack">
+  <div class="eyebrow">02 — the stack</div>
+  <h2>The engine, tier by tier</h2>
+  <p class="lede">Tier is computed dependency depth through <code>ProjectReference</code>, so it is
+  what the build actually enforces. Three modules sit at the bottom with no dependencies at all, and
+  everything in the tree is ultimately standing on them.</p>
+
+  <div class="tiers">
+    <div class="tier">
+      <div class="tlabel"><b>Tier 0</b>foundation</div>
+      <div class="mods">
+        <div class="mod" style="--tc:var(--tier0)"><div class="mname">Blix.Graphics</div>
+          <div class="mmeta"><span>3,976 ln</span><span>30 consumers</span><span>0 deps</span></div>
+          <div class="mrole">Backend-independent drawing vocabulary — commands, handles, shader loading, mesh primitives. Names no API.</div>
+          <div class="bar"><i style="width:48%"></i></div></div>
+        <div class="mod" style="--tc:var(--tier0)"><div class="mname">Blix.Geometry</div>
+          <div class="mmeta"><span>3,145 ln</span><span>13 consumers</span><span>0 deps</span></div>
+          <div class="mrole">Pure math — intersection and sweep tests, bounds, capsules, planes, frustum.</div>
+          <div class="bar"><i style="width:38%"></i></div></div>
+        <div class="mod" style="--tc:var(--tier0)"><div class="mname">Blix.Audio</div>
+          <div class="mmeta"><span>118 ln</span><span>8 consumers</span><span>0 deps</span></div>
+          <div class="mrole">The audio interface and nothing else. One of two clean interface/implementation seams in the tree.</div>
+          <div class="bar"><i style="width:2%"></i></div></div>
+      </div>
+    </div>
+    <div class="tier">
+      <div class="tlabel"><b>Tier 1</b>device &amp; contracts</div>
+      <div class="mods">
+        <div class="mod" style="--tc:var(--tier1)"><div class="mname">Blix.Graphics.Vulkan</div>
+          <div class="mmeta"><span>8,267 ln</span><span>21 consumers</span><span>1 dep</span></div>
+          <div class="mrole">The sole backend. Device, swapchain, textures, render graph, SPIR-V reflection, the per-draw uniform arena.</div>
+          <div class="bar"><i style="width:100%"></i></div></div>
+        <div class="mod" style="--tc:var(--tier1)"><div class="mname">Blix.Core</div>
+          <div class="mmeta"><span>483 ln</span><span>22 consumers</span><span>2 deps</span></div>
+          <div class="mrole">Almost entirely interfaces — host, input, view, audio, diagnostics sinks.</div>
+          <div class="bar"><i style="width:6%"></i></div></div>
+        <div class="mod" style="--tc:var(--tier1)"><div class="mname">Blix.Graphics.Images</div>
+          <div class="mmeta"><span>1,750 ln</span><span>5 consumers</span><span>1 dep</span></div>
+          <div class="mrole">Image decode/encode and PNG readback — the reason a capture tool can exist at all.</div>
+          <div class="bar"><i style="width:21%"></i></div></div>
+        <div class="mod" style="--tc:var(--tier1)"><div class="mname">Blix.Audio.OpenAL</div>
+          <div class="mmeta"><span>338 ln</span><span>1 consumer</span><span>1 dep</span></div>
+          <div class="mrole">The one implementation behind Blix.Audio. Single consumer by design — only the host wires it.</div>
+          <div class="bar"><i style="width:4%"></i></div></div>
+        <div class="mod" style="--tc:var(--tier1)"><div class="mname">Blix.Tools.Shader</div>
+          <div class="mmeta"><span>144 ln</span><span>15 consumers</span><span>1 dep</span></div>
+          <div class="mrole">The glslc driver, referenced purely to run at build time. Not a runtime dependency.</div>
+          <div class="bar"><i style="width:2%"></i></div></div>
+      </div>
+    </div>
+    <div class="tier">
+      <div class="tlabel"><b>Tier 2</b>services</div>
+      <div class="mods">
+        <div class="mod" style="--tc:var(--tier2)"><div class="mname">Blix.Diagnostics</div>
+          <div class="mmeta"><span>3,167 ln</span><span>19 consumers</span><span>3 deps</span></div>
+          <div class="mrole">Debug channels, frame history, JSON dumps, live-tunable reflection — what makes a running session reportable.</div>
+          <div class="bar"><i style="width:38%"></i></div></div>
+        <div class="mod" style="--tc:var(--tier2)"><div class="mname">Blix.Assets</div>
+          <div class="mmeta"><span>1,839 ln</span><span>7 consumers</span><span>4 deps</span></div>
+          <div class="mrole">Importers and the asset database — OBJ, WAV, fonts, materials, the baked .blixmesh format.</div>
+          <div class="bar"><i style="width:22%"></i></div></div>
+      </div>
+    </div>
+    <div class="tier">
+      <div class="tlabel"><b>Tier 3</b>drawing &amp; overlay</div>
+      <div class="mods">
+        <div class="mod" style="--tc:var(--tier3)"><div class="mname">Blix.Render</div>
+          <div class="mmeta"><span>2,624 ln</span><span>16 consumers</span><span>6 deps</span></div>
+          <div class="mrole">Reusable primitives that own geometry and nothing else — the caller brings pipeline, push constants, textures. Except PropModel.</div>
+          <div class="bar"><i style="width:32%"></i></div></div>
+        <div class="mod" style="--tc:var(--tier3)"><div class="mname">Blix.Diagnostics.Overlay</div>
+          <div class="mmeta"><span>1,466 ln</span><span>1 consumer</span><span>1 dep</span></div>
+          <div class="mrole">ImGui panels over the diagnostics layer. One consumer by design — the host is the only thing that hosts UI.</div>
+          <div class="bar"><i style="width:18%"></i></div></div>
+      </div>
+    </div>
+    <div class="tier">
+      <div class="tlabel"><b>Tier 4</b>framework</div>
+      <div class="mods">
+        <div class="mod" style="--tc:var(--tier4)"><div class="mname">Blix</div>
+          <div class="mmeta"><span>5,348 ln</span><span>22 consumers</span><span>5 deps</span></div>
+          <div class="mrole">glTF import, the animation pipeline, transforms, collision worlds, game objects. Where a skeleton and a pose live.</div>
+          <div class="bar"><i style="width:65%"></i></div></div>
+      </div>
+    </div>
+    <div class="tier">
+      <div class="tlabel"><b>Tier 5</b>host &amp; tooling</div>
+      <div class="mods">
+        <div class="mod" style="--tc:var(--tier5)"><div class="mname">Blix.Runtime.Silk</div>
+          <div class="mmeta"><span>1,706 ln</span><span>16 consumers</span><span>10 deps</span></div>
+          <div class="mrole">The host — window, input, audio device, frame loop. Depends on ten modules because its job is to wire them together.</div>
+          <div class="bar"><i style="width:21%"></i></div></div>
+        <div class="mod" style="--tc:var(--tier5)"><div class="mname">Blix.Tools.Cook</div>
+          <div class="mmeta"><span>986 ln</span><span>0 consumers</span><span>4 deps</span></div>
+          <div class="mrole">The asset cooker CLI — <code>blix-cook textures / inspect</code>. Referenced by nothing; run by hand.</div>
+          <div class="bar"><i style="width:12%"></i></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="inside">
+  <div class="eyebrow">03 — inside the engine</div>
+  <h2>The largest files in each module</h2>
+  <p class="lede">The fastest honest answer to "what is this module for". Counts are whole-file totals
+  including comment blocks — in this tree those carry the reasoning, so they are part of the artifact
+  rather than noise against it.</p>
+
+  <div class="panels">
+    <div class="panel">
+      <h4>Blix.Graphics</h4><div class="psub">3,976 ln · tier 0 · 30 consumers</div>
+      <p class="role">The vocabulary every backend would have to speak.</p>
+      <ul class="files">
+        <li><span>GraphicsMatrices.cs</span><span>343</span></li>
+        <li><span>RenderCommand.cs</span><span>322</span></li>
+        <li><span>RenderCommandList.cs</span><span>289</span></li>
+        <li><span>RenderCommandDiagnostics.cs</span><span>271</span></li>
+        <li><span>GlslPreprocessor.cs</span><span>194</span></li>
+        <li><span>IGraphicsDevice.cs</span><span>170</span></li>
+        <li><span>TextureDescription.cs</span><span>167</span></li>
+        <li><span>TorusKnot.cs</span><span>155</span></li>
+        <li><span>ShaderTunables.cs</span><span>152</span></li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h4>Blix.Geometry</h4><div class="psub">3,145 ln · tier 0 · 13 consumers</div>
+      <p class="role">Two files are 79% of it. The 3D half went untested until Physics3D existed.</p>
+      <ul class="files">
+        <li><span>Intersection.cs</span><span>1,688</span></li>
+        <li><span>Intersection2D.cs</span><span>793</span></li>
+        <li><span>Frustum.cs</span><span>94</span></li>
+        <li><span>CollisionResponse.cs</span><span>85</span></li>
+        <li><span>TriangleMesh3D.cs</span><span>74</span></li>
+        <li><span>OrientedBounds3.cs</span><span>35</span></li>
+        <li><span>Capsule.cs</span><span>32</span></li>
+        <li><span>Plane.cs</span><span>29</span></li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h4>Blix.Graphics.Vulkan</h4><div class="psub">8,267 ln · tier 1 · 21 consumers</div>
+      <p class="role">Ten <code>VulkanGraphicsDevice.*</code> partials plus the render graph.</p>
+      <ul class="files">
+        <li><span>…Device.Swapchain.cs</span><span>1,679</span></li>
+        <li><span>…Device.Textures.cs</span><span>1,248</span></li>
+        <li><span>RenderGraph.Backend.cs</span><span>938</span></li>
+        <li><span>…Device.Resources.cs</span><span>912</span></li>
+        <li><span>…Device.Init.cs</span><span>465</span></li>
+        <li><span>…Device.RenderSurfaces.cs</span><span>414</span></li>
+        <li><span>RenderGraph.cs</span><span>399</span></li>
+        <li><span>MaterialBindings.cs</span><span>348</span></li>
+        <li><span>ShaderReflection.cs</span><span>263</span></li>
+        <li><span>…Device.UniformArena.cs</span><span>121</span></li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h4>Blix</h4><div class="psub">5,348 ln · tier 4 · 22 consumers</div>
+      <p class="role">Import and animation dominate. The whole pose pipeline is here.</p>
+      <ul class="files">
+        <li><span>GltfStaticImporter.cs</span><span>859</span></li>
+        <li><span>GltfImporter.cs</span><span>653</span></li>
+        <li><span>ClipPlayer.cs</span><span>280</span></li>
+        <li><span>CollisionWorld3D.cs</span><span>249</span></li>
+        <li><span>Curves.cs</span><span>223</span></li>
+        <li><span>RootMotion.cs</span><span>158</span></li>
+        <li><span>BonePaletteSet.cs</span><span>150</span></li>
+        <li><span>BoneMask.cs</span><span>140</span></li>
+        <li><span>Skeleton.cs</span><span>132</span></li>
+        <li><span>SkinnedGameObject.cs</span><span>121</span></li>
+        <li><span>PoseBlend.cs</span><span>99</span></li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h4>Blix.Diagnostics</h4><div class="psub">3,167 ln · tier 2 · 19 consumers</div>
+      <p class="role">The instrument layer. <code>JsonDumpSink</code> is how a session becomes a file.</p>
+      <ul class="files">
+        <li><span>DebugSystem.cs</span><span>400</span></li>
+        <li><span>JsonDumpSink.cs</span><span>379</span></li>
+        <li><span>TuneReflection.cs</span><span>267</span></li>
+        <li><span>DebugDrawChannel.cs</span><span>257</span></li>
+        <li><span>DebugTrails.cs</span><span>156</span></li>
+        <li><span>DebugContext.cs</span><span>149</span></li>
+        <li><span>DiagnosticsFrameRecorder.cs</span><span>130</span></li>
+        <li><span>DebugFrameHistory.cs</span><span>121</span></li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h4>Blix.Render</h4><div class="psub">2,624 ln · tier 3 · 16 consumers</div>
+      <p class="role">Geometry-only primitives — and one 686-line exception serving one game.</p>
+      <ul class="files">
+        <li><span>PropModel.cs</span><span>686</span></li>
+        <li><span>SpriteBatch.cs</span><span>370</span></li>
+        <li><span>SpriteBatchUiExtensions.cs</span><span>253</span></li>
+        <li><span>ResourceUploader.cs</span><span>242</span></li>
+        <li><span>ParticleBatch.cs</span><span>231</span></li>
+        <li><span>MeshBundler.cs</span><span>147</span></li>
+        <li><span>InstancedBatch.cs</span><span>144</span></li>
+        <li><span>PostChain.cs</span><span>131</span></li>
+        <li><span>FullscreenPass.cs</span><span>94</span></li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h4>Blix.Assets</h4><div class="psub">1,839 ln · tier 2 · 7 consumers</div>
+      <p class="role">Importers for everything that is not glTF — glTF lives in <code>Blix</code>.</p>
+      <ul class="files">
+        <li><span>ObjImporter.cs</span><span>361</span></li>
+        <li><span>BlixMesh.cs</span><span>235</span></li>
+        <li><span>WavefrontParts.cs</span><span>207</span></li>
+        <li><span>FontImporter.cs</span><span>204</span></li>
+        <li><span>MaterialImporter.cs</span><span>195</span></li>
+        <li><span>AssetDatabase.cs</span><span>153</span></li>
+        <li><span>WavImporter.cs</span><span>134</span></li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h4>Blix.Core</h4><div class="psub">483 ln · tier 1 · 22 consumers</div>
+      <p class="role">The second-most depended-on module and nearly the smallest. That is why it works.</p>
+      <ul class="files">
+        <li><span>View.cs</span><span>135</span></li>
+        <li><span>ConsoleFrameDebugSink.cs</span><span>74</span></li>
+        <li><span>GestureOwnership.cs</span><span>69</span></li>
+        <li><span>Key.cs</span><span>62</span></li>
+        <li><span>IRenderHost.cs</span><span>56</span></li>
+        <li><span>IUiSource.cs</span><span>32</span></li>
+        <li><span>IInputHandler.cs</span><span>19</span></li>
+        <li><span>IAudioHost.cs</span><span>13</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="register">
+  <div class="eyebrow">04 — the register</div>
+  <h2>Every consumer, and what it is for</h2>
+  <p class="lede">Twenty-four projects in four families. Descriptions come from each project's own
+  header block — most demos carry an explicit <em>proves</em> / <em>intentionally owns</em> pair,
+  which is the convention that keeps a demo from quietly becoming a game.</p>
+
+  <div class="family">
+    <div class="fhead"><h3>Demos</h3><span class="fcount">11 executables · 10,430 ln</span></div>
+    <p class="fintro">Roughly two kinds, and the tree does not label which is which. The first five
+    are executable specs — deliberately minimal call sites that exist so a primitive has a
+    known-good consumer. The last four are games that grew from one.</p>
+    <div class="reg">
+      <div class="row">
+        <div><div class="rname">Blix.Demos.Chassis</div><div class="rmeta"><span class="kind exe">exe</span><span>149 ln</span><span>4 deps</span></div></div>
+        <div class="rbody">
+          <p>The smallest application that can exist, and an executable spec for the chassis itself.
+          It answers two questions nothing else can, because every other app is also a diagnostics
+          producer: does an app get a UI <em>without</em> being <code>IDebuggable</code>, and does UI
+          capture actually suppress game input. Deliberately not <code>IDebuggable</code>.</p>
+          <span class="run">tools/run-chassis.sh</span>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Demos.VulkanHello</div><div class="rmeta"><span class="kind exe">exe</span><span>511 ln</span><span>8 deps</span></div></div>
+        <div class="rbody">
+          <p>A spinning lit cube — the narrowest known-good Vulkan path: depth attachment,
+          descriptor sets, per-frame UBO, name-keyed <code>ShaderUniform</code> through a
+          <code>UniformBlockLayout</code>. Kept minimal on purpose so it is the simplest reference
+          call site when something further up the stack breaks.</p>
+          <span class="run">tools/run-vulkan-hello.sh</span>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Demos.VulkanInstanced</div><div class="rmeta"><span class="kind exe">exe</span><span>180 ln</span><span>7 deps</span></div></div>
+        <div class="rbody">
+          <p>The instancing proof gate: 5,000 cubes in one <code>vkCmdDrawIndexed</code>, each
+          reading its transform and tint from a set-3 SSBO. Auto-exits after more frames than there
+          are frames in flight, so both replicated SSBO slots are written and bound at least once —
+          which is what would surface an in-flight hazard.</p>
+          <span class="run">tools/run-instanced.sh · assert under BLIX_VK_VALIDATE=1</span>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Demos.VulkanGraph</div><div class="rmeta"><span class="kind exe">exe</span><span>372 ln</span><span>8 deps</span></div></div>
+        <div class="rbody">
+          <p>Render-graph validation in three passes: a cube into an HDR offscreen, an invert pass
+          reading it through a graph Read edge, then an imperative present. If the edge is wired the
+          cube appears inverted; if it is broken the present shows garbage. The failure is visible
+          rather than silent, which is the whole design.</p>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Demos.VulkanParticles</div><div class="rmeta"><span class="kind exe">exe</span><span>647 ln</span><span>8 deps</span></div></div>
+        <div class="rbody">
+          <p>Three CPU-simulated effects — a spark fountain with drifting smoke, a periodic
+          explosion, a swirling vortex — riding the per-frame transient vertex arena through an HDR
+          bloom pipeline with soft-particle depth fade. <code>ParticleBatch</code> stays pure
+          geometry: the demo brings the pipeline, the push and the depth binding.</p>
+          <span class="run">tools/run-particles.sh</span>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Demos.VulkanLit</div><div class="rmeta"><span class="kind exe">exe</span><span>1,856 ln</span><span>8 deps</span></div></div>
+        <div class="rbody">
+          <p>PBR end to end: cube, skinned glTF, PBR spheres and ground under a sun, two spots and a
+          point light, each with PCF shadows, plus procedural-sky IBL, HDR bloom and ACES tonemap.
+          Shadow passes → lit scene → bloom → present.</p>
+          <p>It is also the <em>only</em> consumer of <code>Blix/SkinnedGameObject</code>.</p>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Demos.VulkanSponza</div><div class="rmeta"><span class="kind exe">exe</span><span>2,329 ln</span><span>11 deps</span></div></div>
+        <div class="rbody">
+          <p>The Khronos Intel Sponza scene — the renderer's performance and asset-pipeline proving
+          ground, and the most dependency-heavy project in the tree. Cooked siblings only
+          (<code>.blixtex</code>, <code>.blixprobe</code>, <code>.blixmesh</code> with LOD chains).
+          Shadow cascades → optional froxel fog → depth pre-pass → 4× MSAA lit scene → tonemap.</p>
+          <div class="flag">The tree's only consumer of <code>Matrix4x4ArrayUniform</code>, and
+          therefore the only thing that would exercise the record-time array freeze. Its asset pack
+          lives on an external SSD, so it is currently <b>unverified</b>.</div>
+          <span class="run">tools/run-vulkan-sponza.sh · needs BLIX_SPONZA_ASSETS</span>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Demos.Pong</div><div class="rmeta"><span class="kind exe">exe</span><span>711 ln</span><span>10 deps</span></div></div>
+        <div class="rbody">
+          <p>The 2D game proving the Vulkan <code>SpriteBatch</code> + <code>Font</code> path with a
+          CRT post-FX finish. Gameplay runs in a virtual playfield; sprites render to a 2× offscreen
+          through a Vulkan-NDC ortho, then a CRT shader downsamples to the swapchain. Owns its
+          rules, physics, scoring and look.</p>
+          <div class="flag">Known fault, attributed and unfixed: destroys pipeline, buffer,
+          framebuffer and render pass while a command buffer still references them.</div>
+          <span class="run">tools/run-pong.sh</span>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Demos.Runner</div><div class="rmeta"><span class="kind exe">exe</span><span>849 ln</span><span>10 deps</span></div></div>
+        <div class="rbody">
+          <p>A 3D endless runner — the instancing plus skeletal-animation showcase. The world flows
+          toward the camera and wraps procedurally; ground, barrels and coins each draw through a
+          per-mesh <code>InstancedBatch</code>, and the player is a skinned glTF character on the
+          bone-palette path whose run cadence tracks speed and switches to a jump clip mid-air.</p>
+          <p>Its CC0 KayKit Rogue is the tree's reference rig — 41 bones, 76 clips — and the subject
+          of every toolchain and character lab capture.</p>
+          <span class="run">tools/run-runner.sh</span>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Demos.TankArena</div><div class="rmeta"><span class="kind exe">exe</span><span>1,335 ln</span><span>9 deps</span></div></div>
+        <div class="rbody">
+          <p>A survival shooter built on <code>Transform3D</code> parenting. Each tank is a hull →
+          turret → barrel hierarchy: driving the hull carries the turret, which yaws independently.
+          Shells spawn as a child of the firing barrel, then <code>SetParent(null,
+          keepWorldPose)</code> detaches them into a physics arc — the parenting model's detach op,
+          demonstrated rather than described.</p>
+          <p>Its enemy steering was the first consumer to pressure a navigation primitive.</p>
+          <span class="run">tools/run-tank.sh</span>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Demos.Bulwark</div><div class="rmeta"><span class="kind exe">exe</span><span>1,491 ln</span><span>9 deps</span></div></div>
+        <div class="rbody">
+          <p>Tower defence, game #2, built specifically to pressure axes Runner, Pong and TankArena
+          left alone: pointer-driven picking, navigation, and a skinned animated crowd through
+          skinned-mesh instancing. Sun shadow → HDR scene → present, with a SpriteBatch HUD on the
+          present pass.</p>
+          <p>Its nav and turret rig were deliberately <em>not</em> extracted.</p>
+          <span class="run">tools/run-bulwark.sh · plan-bulwark.md</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="family">
+    <div class="fhead"><h3>Labs</h3><span class="fcount">2 libraries + 6 executables · 9,459 ln</span></div>
+    <p class="fintro">The pattern both families share: one library holds the scene, shaders and
+    renderer; several thin executables ask different questions of it. A viewer you drive, a probe
+    that judges and exits non-zero, a capture that writes a PNG. None of the executables declare
+    shaders or render code.</p>
+    <div class="reg">
+      <div class="row">
+        <div><div class="rname">Blix.Labs.Toolchain</div><div class="rmeta"><span class="kind lib">lib</span><span>2,321 ln</span><span>3 consumers</span></div></div>
+        <div class="rbody">
+          <p>The toolchain lab's library — <code>LabRenderer</code> (676), <code>LabRig</code> (458),
+          <code>RigSession</code> (363), <code>LabSkeletonView</code> (267), <code>LabModel</code>
+          (247), plus camera, scene and geometry. Subject: <b>assets and the binding model</b> — what
+          a glTF file actually contains and how it reaches the GPU.</p>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Labs.Toolchain.Viewer</div><div class="rmeta"><span class="kind exe">exe</span><span>1,711 ln</span><span>7 deps</span></div></div>
+        <div class="rbody">
+          <p>Chassis conventions over a real lit scene, with ImGui panels for the rig, its clips,
+          instancing and now bone masks. Every descriptor set, UBO offset and push range comes from
+          spirv-cross sidecars rather than a hand-written interface — reflected binding, proved by
+          being driven.</p>
+          <span class="run">tools/run-lab.sh --rig …/Rogue.glb --clip Walking_A --mask …</span>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Labs.Toolchain.Probe</div><div class="rmeta"><span class="kind exe">exe</span><span>774 ln</span><span>2 deps</span></div></div>
+        <div class="rbody">
+          <p>The binding model printed — and checked. Deliberately not merged with <code>blix-cook
+          inspect</code>: that <em>lists</em> what is in a file and always exits 0; this
+          <em>judges</em> clip lengths, the skeleton, the binding contracts and now layer masks, and
+          exits non-zero when they are wrong. They overlap in subject and not in purpose.</p>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Labs.Toolchain.Capture</div><div class="rmeta"><span class="kind exe">exe</span><span>830 ln</span><span>7 deps</span></div></div>
+        <div class="rbody">
+          <p>Renders the lab and writes what it rendered to a PNG — the capability Blix did not have
+          at all until this arc, since colour attachments were created without
+          <code>TransferSrcBit</code>. Reproducible single-frame sampling, <code>--xray</code>,
+          <code>--frames-out</code>, <code>--zoom</code>, and <code>--lockstep</code> as a negative
+          control: N bodies on one clip must come back as exactly one pose fingerprint.</p>
+          <span class="run">tools/run-lab-capture.sh</span>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Labs.Character</div><div class="rmeta"><span class="kind lib">lib</span><span>2,018 ln</span><span>3 consumers</span></div></div>
+        <div class="rbody">
+          <p>The character lab's library — <code>RoomCamera</code> (382, four rigs),
+          <code>CharacterMotor</code> (365), <code>Room</code> (301), <code>RoomRenderer</code>
+          (293), <code>RoomGeometry</code> (196), <code>BodyResolver</code> (183), plus
+          <code>LabReport</code> and <code>LabTrace</code>. Subject: <b>contact</b> — where a body
+          can go and what stops it.</p>
+          <p>It has no character in it. The body is a capsule; nothing here loads a rig.</p>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Labs.Character.Room</div><div class="rmeta"><span class="kind exe">exe</span><span>632 ln</span><span>8 deps</span></div></div>
+        <div class="rbody">
+          <p>The viewer you drive. Its central claim is <em>one source</em>: what is drawn and what
+          will be swept are the same triangles, and the flat shading means every facet you can see is
+          a facet the sweep will hit. The slope tint shades each surface by the normal the collider
+          reads, so a mis-wound face reads as a floor standing up rather than as odd lighting.</p>
+          <span class="run">tools/run-room.sh</span>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Labs.Character.Probe</div><div class="rmeta"><span class="kind exe">exe</span><span>830 ln</span><span>2 deps</span></div></div>
+        <div class="rbody">
+          <p>87 checks, no window and no device — the room's ground truth is closed form, so
+          verifying it is arithmetic. Every number in the room was authored, so "it looks like a
+          ramp" is not the question; whether the ramp the sweep hits is the 30° the claim says is.
+          A resolver resting at 31° and one sliding at 29° look identical in a screenshot.</p>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Labs.Character.Capture</div><div class="rmeta"><span class="kind exe">exe</span><span>343 ln</span><span>9 deps</span></div></div>
+        <div class="rbody">
+          <p>The room as a PNG, headless and reproducible. It caught the ramps facing a wall —
+          twice — when every probe check passed, which is the clearest case in the arc for keeping
+          both a judge and a picture.</p>
+          <span class="run">tools/run-room-capture.sh</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="family">
+    <div class="fhead"><h3>Tests</h3><span class="fcount">4 executables · 5,390 ln · 800 checks</span></div>
+    <p class="fintro">All four are the same shape: a CLI harness printing GREEN OK / RED FAIL per
+    case and exiting non-zero if any fails. No test framework, no attributes — the exit code is the
+    contract. Every claim is paired with a negative control, on the rule that a test that can only
+    pass is not a test.</p>
+    <div class="reg">
+      <div class="row">
+        <div><div class="rname">Blix.Test.Graphics</div><div class="rmeta"><span class="kind exe">exe</span><span>3,272 ln</span><span>516 checks</span></div></div>
+        <div class="rbody">
+          <p>The engine suite, CPU-only, organised into lettered sections A through AU that each
+          pin one decision — matrix convention, barrier equality, the reflected binding model, the
+          uniform arena, and most recently bone masks and masked blending. It began as the
+          acceptance criteria for the row-vector matrix migration and never stopped growing.</p>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Test.Diagnostics</div><div class="rmeta"><span class="kind exe">exe</span><span>1,603 ln</span><span>206 checks</span></div></div>
+        <div class="rbody">
+          <p>The debug system's frame lifecycle, channels, history and dump sinks. It is the suite
+          that should have caught <code>JsonDumpSink</code> serialising every
+          <code>System.Numerics</code> value as <code>{}</code> for the life of the feature, and did
+          not — nothing asserted on a published vector's contents.</p>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Test.Physics2D</div><div class="rmeta"><span class="kind exe">exe</span><span>238 ln</span><span>43 checks</span></div></div>
+        <div class="rbody">
+          <p>The 2D collision math. Each primitive pair gets a known overlap, a known disjoint case
+          and — where it means anything — an edge case: touching exactly, concentric, AABB aligned
+          with OBB. Raycasts get a hit and a miss.</p>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">Blix.Test.Physics3D</div><div class="rmeta"><span class="kind exe">exe</span><span>277 ln</span><span>35 checks</span></div></div>
+        <div class="rbody">
+          <p>The suite <code>Blix.Geometry</code> had never had, added by the character arc. The docs
+          described <code>Intersection2D</code> as mirroring the 3D pattern and being pressure-tested
+          by the 2D harness — so the mirror was tested and the original it mirrored was not, and had
+          not been touched since the initial commit. It starts at the capsule because a capsule is
+          what a character is.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="family">
+    <div class="fhead"><h3>Game</h3><span class="fcount">1 executable · 72,720 ln</span></div>
+    <p class="fintro">One project, 74% of all non-engine code, and larger than the engine by 2.1×.</p>
+    <div class="reg">
+      <div class="row">
+        <div><div class="rname">RTSGame</div><div class="rmeta"><span class="kind exe">exe</span><span>72,720 ln</span><span>9 deps</span></div></div>
+        <div class="rbody">
+          <p><code>Simulation/</code> 31,756 · <code>Debug/</code> 22,778 · root 10,864 ·
+          <code>Rendering/</code> 5,017 · <code>AI/</code> 1,383 · <code>Control/</code> 922.</p>
+          <p>Nearly a third of it is debug tooling — fingerprints, benches, harnesses, a rule-bot,
+          a fightbench matrix — which is the clearest statement in the tree of what this project
+          believes makes a system knowable.</p>
+          <p>It references no <code>Blix.Geometry</code>. A game with pathfinding, formations,
+          sweeps and collision built all of it locally.</p>
+          <div class="flag">Known fault, attributed and unfixed: leaks 6 objects at teardown —
+          3 <code>VkBuffer</code> and 3 <code>VkDeviceMemory</code>.</div>
+          <span class="run">tools/run-rts-game.sh · gate via tools/gate-rts-game.sh · plan-rts-game.md</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="family">
+    <div class="fhead"><h3>Not projects</h3><span class="fcount">2 folders under src/</span></div>
+    <div class="reg">
+      <div class="row">
+        <div><div class="rname">src/Blix.Shaders/</div><div class="rmeta"><span class="kind">glsl</span><span>3 files</span><span>no csproj</span></div></div>
+        <div class="rbody">
+          <p><code>bloom.glsl</code>, <code>fullscreen.glsl</code>, <code>noise.glsl</code> — shared
+          GLSL includes reached by path through <code>glslc -I</code>. Shaped like a C# project,
+          absent from the build graph entirely.</p>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="rname">src/Blix.Labs.Character.Motion/</div><div class="rmeta"><span class="kind">stale</span><span>bin/ obj/ only</span><span>untracked</span></div></div>
+        <div class="rbody">
+          <p>The Motion lab was built, its own dump argued against it, and it was deleted. The source
+          and csproj went; the build output did not. Harmless, and exactly the kind of thing that
+          makes <code>ls src</code> lie about what the tree contains.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="tools">
+  <div class="eyebrow">05 — tools</div>
+  <h2>tools/ — 23 files, three jobs</h2>
+  <p class="lede">Every headed application has a launcher, and they all exist for one reason:
+  Homebrew's <code>dotnet</code> is a <code>#!/bin/bash</code> shim, <code>/bin/bash</code> is
+  SIP-protected, and dyld strips <code>DYLD_*</code> from its environment — so the Vulkan loader
+  path never survives <code>dotnet run</code>. Each script sets the ICD and layer paths and then
+  <code>exec</code>s the apphost directly.</p>
+
+  <div class="grid2">
+    <div class="cell">
+      <div class="who">Launchers · 14</div>
+      <div class="verdict">exec the apphost, never dotnet run</div>
+      <p><code>run-chassis</code> · <code>run-vulkan-hello</code> · <code>run-instanced</code> ·
+      <code>run-particles</code> · <code>run-vulkan-sponza</code> · <code>run-pong</code> ·
+      <code>run-runner</code> · <code>run-tank</code> · <code>run-bulwark</code> ·
+      <code>run-rts-game</code> · <code>run-lab</code> · <code>run-lab-capture</code> ·
+      <code>run-room</code> · <code>run-room-capture</code></p>
+      <p>Each carries its application's argument documentation in its header, which is where the
+      flags are actually documented — <code>--rig</code>, <code>--clip</code>, <code>--mask</code>,
+      <code>--frames</code>, <code>--xray</code>, <code>--lockstep</code>.</p>
+    </div>
+    <div class="cell">
+      <div class="who">Gates &amp; measurement · 3</div>
+      <div class="verdict">judge, or tabulate</div>
+      <p><code>gate-rts-game.sh</code> — the RTS gate: three quick runs by default,
+      <code>--years</code> adds the two simulated years. Only for RTS work; engine changes go
+      through the four suites instead.</p>
+      <p><code>perf-matrix.sh</code> — the camera and daylight matrix run as one command and
+      tabulated from the runs themselves. <code>perf-pacing.sh</code> — the vsync-on pacing pass,
+      with repeats.</p>
+    </div>
+    <div class="cell">
+      <div class="who">Asset pipeline · 5</div>
+      <div class="verdict">cook, merge, convert</div>
+      <p><code>cook-character.sh</code> — turns a rigged character plus a folder of
+      single-animation files into one <code>.glb</code> the game can load, then reports what bound.
+      <code>character_merge.py</code> is the merge step: every clip on one skeleton, the shape
+      <code>GltfImporter</code> requires.</p>
+      <p><code>setup-sponza-modern.sh</code> populates the Sponza packs into a split raw/cooked
+      layout; <code>cook-sponza-modern.sh</code> encodes every PNG and JPEG into side-by-side
+      <code>.blixtex</code>. <code>vdb_to_blix_volume.py</code> converts VDB volumes.</p>
+    </div>
+    <div class="cell">
+      <div class="who">Not a script · 1</div>
+      <div class="verdict">imgui.ini</div>
+      <p>The saved ImGui layout, shared by every application that hosts panels. It is why a lab
+      viewer opens with its windows where you left them, and why deleting it resets every app at
+      once.</p>
+    </div>
+  </div>
+  <p class="note">Also outside <code>src/</code>: <b>docs/</b> (6 files, including
+  <code>conventions.md</code> — the numbered §-index the commit messages cite), <b>perf/</b> (154
+  files of captured measurement runs), <b>third_party/</b> (27 files), and seven
+  <code>plan-*.md</code> documents at the repo root, which are the arcs' written records rather than
+  their summaries.</p>
+</section>
+
+<section id="reach">
+  <div class="eyebrow">06 — reach</div>
+  <h2>Who leans on what</h2>
+  <p class="lede">Each cell is how many members of that family reference that module. It reads as a
+  portrait of the four families: demos take almost everything, labs skip the asset and audio stack
+  entirely, tests take the least they can, and the game takes one of nearly all.</p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr>
+      <th class="rowh">family</th>
+      <th>Graphics</th><th>Geometry</th><th>Audio</th><th>Core</th><th>Gfx.Vulkan</th><th>Gfx.Images</th>
+      <th>Audio.AL</th><th>Tools.Shader</th><th>Diagnostics</th><th>Diag.Overlay</th><th>Assets</th>
+      <th>Render</th><th>Blix</th><th>Runtime.Silk</th><th>Tools.Cook</th>
+    </tr></thead>
+    <tbody>
+      <tr><td class="rowh">Demos · 11</td>
+        <td class="num">11</td><td class="num">2</td><td class="num">3</td><td class="num">11</td><td class="num">10</td>
+        <td class="num">1</td><td class="z">·</td><td class="num">10</td><td class="num">8</td><td class="z">·</td>
+        <td class="num">4</td><td class="num">10</td><td class="num">11</td><td class="num">11</td><td class="z">·</td></tr>
+      <tr><td class="rowh">Labs · 8</td>
+        <td class="num">6</td><td class="num">4</td><td class="z">·</td><td class="num">6</td><td class="num">7</td>
+        <td class="num">2</td><td class="z">·</td><td class="num">2</td><td class="num">5</td><td class="z">·</td>
+        <td class="z">·</td><td class="num">2</td><td class="num">6</td><td class="num">4</td><td class="z">·</td></tr>
+      <tr><td class="rowh">Tests · 4</td>
+        <td class="num">2</td><td class="num">3</td><td class="z">·</td><td class="num">1</td><td class="num">1</td>
+        <td class="z">·</td><td class="z">·</td><td class="z">·</td><td class="num">2</td><td class="z">·</td>
+        <td class="z">·</td><td class="num">1</td><td class="num">2</td><td class="z">·</td><td class="z">·</td></tr>
+      <tr><td class="rowh">Game · 1</td>
+        <td class="num">1</td><td class="z">·</td><td class="z">·</td><td class="num">1</td><td class="num">1</td>
+        <td class="z">·</td><td class="z">·</td><td class="num">1</td><td class="num">1</td><td class="z">·</td>
+        <td class="num">1</td><td class="num">1</td><td class="num">1</td><td class="num">1</td><td class="z">·</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note"><b>RTSGame references no <code>Blix.Geometry</code>, and no lab references
+  <code>Blix.Assets</code>.</b> The first says a 72,720-line game built its own geometry; the second
+  says both labs import glTF through <code>Blix</code> directly and never touch the asset database.
+  Two different ways of not using what exists.</p>
+</section>
+
+<section id="pressure">
+  <div class="eyebrow">07 — pressure</div>
+  <h2>What the graph says needs attention</h2>
+  <p class="lede">Findings, not opinions — each is a number off the tree above, ordered by how much
+  of the structure it implicates rather than by how easy it is to fix.</p>
+
+  <div class="findings">
+    <div class="finding">
+      <div class="fmetric">2.1&#215;<small>game vs engine</small></div>
+      <div>
+        <h4>RTSGame is larger than everything it stands on</h4>
+        <p>72,720 lines against the engine's 35,357, and 74% of all non-engine code. Whatever it has
+        learned about geometry, nav, crowds and rendering has not travelled — and the empty
+        <code class="inl">Geometry</code> cell says that is not an accident of style.</p>
+      </div>
+    </div>
+    <div class="finding">
+      <div class="fmetric">6<small>skinned paths</small></div>
+      <div>
+        <h4>Six independent ways to draw a skinned mesh</h4>
+        <p>Runner, VulkanLit, the toolchain lab, Bulwark, RTSGame and
+        <code class="inl">SkinnedGameObject</code> — each with its own vertex shader. The pose
+        pipeline underneath is shared by all of them; only the draw is copied, because only the draw
+        was ever baked into the abstraction.</p>
+      </div>
+    </div>
+    <div class="finding">
+      <div class="fmetric">807<small>stranded lines</small></div>
+      <div>
+        <h4>Two engine abstractions with one consumer each</h4>
+        <p><code class="inl">SkinnedGameObject</code> (121, VulkanLit) and
+        <code class="inl">PropModel</code> (686, RTSGame). Both are shaped as shared infrastructure
+        and neither is. A third attempt should have to clear a higher bar than the first two did —
+        which is what stage C-0 of the character arc is written to do.</p>
+      </div>
+    </div>
+    <div class="finding">
+      <div class="fmetric">22,778<small>lines of debug</small></div>
+      <div>
+        <h4>A third of the game is instrumentation</h4>
+        <p>RTSGame's <code class="inl">Debug/</code> folder is larger than any engine module and
+        four times its <code class="inl">Rendering/</code>. None of it is reusable by anything else,
+        and the labs rebuilt their own equivalents — report, trace, probe — from scratch.</p>
+      </div>
+    </div>
+    <div class="finding">
+      <div class="fmetric">8,267<small>lines, one module</small></div>
+      <div>
+        <h4>Blix.Graphics.Vulkan is 23% of the engine</h4>
+        <p>The largest module, split across ten <code class="inl">VulkanGraphicsDevice.*</code>
+        partials plus the render graph. One dependency and 21 consumers, so the weight is contained —
+        but swapchain and textures alone are 2,927 lines.</p>
+      </div>
+    </div>
+    <div class="finding">
+      <div class="fmetric">1<small>unverified consumer</small></div>
+      <div>
+        <h4>The array-uniform freeze has never been exercised</h4>
+        <p>The prologue froze <code class="inl">Matrix4x4ArrayUniform</code> and built a record-time
+        detector. VulkanSponza is the tree's only consumer of it and its asset pack is on an
+        unmounted SSD, so the fix that started this whole arc is still unproven against the one
+        thing that would prove it.</p>
+      </div>
+    </div>
+    <div class="finding">
+      <div class="fmetric">2<small>folders, no csproj</small></div>
+      <div>
+        <h4>src/ contains things the build graph cannot see</h4>
+        <p><code class="inl">Blix.Shaders</code> is three GLSL includes reached by
+        <code class="inl">glslc -I</code>; <code class="inl">Blix.Labs.Character.Motion</code> is a
+        deleted project's leftover <code class="inl">bin/</code> and <code class="inl">obj/</code>.
+        Both make <code class="inl">ls src</code> lie about what the tree is.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  Generated from <code>src/*/*.csproj</code> — project references, output types and line counts read
+  off the working tree at commit <code>2d3f478</code> on branch <code>character-lab</code>. Project
+  descriptions are condensed from each file's own header block. Line counts are non-generated
+  <code>.cs</code> files excluding <code>bin/</code> and <code>obj/</code>; tiers are computed
+  dependency depth. <code>Blix.Shaders</code> and <code>Blix.Labs.Character.Motion</code> are absent
+  from the 39 because neither has a csproj.
+</footer>
+
+</div>
+</body>
+</html>
