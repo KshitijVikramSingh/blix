@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Blix Workbench</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root{
+  --paper:#F1F4F5; --surface:#FDFEFE; --sunk:#E7ECEE;
+  --ink:#111A1F; --body:#33454E; --muted:#677C86;
+  --rule:#C6D2D7; --hair:#DDE5E8;
+  --verb:#0D5F6E; --verb-soft:#0d5f6e14;
+  --subj:#6B4A9E; --subj-soft:#6b4a9e14;
+  --warm:#A55228; --warm-soft:#a5522814;
+  --signal:#A2172F;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --paper:#0C1216; --surface:#141D22; --sunk:#101820;
+  --ink:#E6EDEF; --body:#B4C4CA; --muted:#7D919A;
+  --rule:#26363D; --hair:#1D2A31;
+  --verb:#4FB6C6; --verb-soft:#4fb6c61c;
+  --subj:#A88FD6; --subj-soft:#a88fd61c;
+  --warm:#DE9760; --warm-soft:#de97601c;
+  --signal:#E96A83;
+}}
+:root[data-theme="dark"]{
+  --paper:#0C1216; --surface:#141D22; --sunk:#101820;
+  --ink:#E6EDEF; --body:#B4C4CA; --muted:#7D919A;
+  --rule:#26363D; --hair:#1D2A31;
+  --verb:#4FB6C6; --verb-soft:#4fb6c61c;
+  --subj:#A88FD6; --subj-soft:#a88fd61c;
+  --warm:#DE9760; --warm-soft:#de97601c;
+  --signal:#E96A83;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{background:var(--paper);color:var(--body);
+  font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  font-size:15px;line-height:1.62;margin:0;padding-block:0 76px;padding-inline:20px;-webkit-font-smoothing:antialiased}
+.sheet{max-width:1140px;margin:0 auto}
+h1,h2,h3,h4{font-family:Archivo,"Helvetica Neue",Arial,sans-serif;color:var(--ink);text-wrap:balance;margin:0}
+code,.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+p{margin:0}
+.masthead{padding-block:56px 30px;border-bottom:2px solid var(--ink)}
+.eyebrow{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+h1{font-size:clamp(34px,6.2vw,58px);font-weight:800;letter-spacing:-.023em;line-height:1.02;margin-top:10px}
+.standfirst{max-width:64ch;margin-top:18px;font-size:17px}
+.toc{display:flex;flex-wrap:wrap;gap:6px 22px;margin-top:26px;font-family:"IBM Plex Mono",monospace;font-size:12px}
+.toc a{color:var(--muted);text-decoration:none;border-bottom:1px solid transparent;padding-bottom:1px}
+.toc a:hover{color:var(--ink);border-bottom-color:var(--verb)}
+section{padding-block:48px;border-bottom:1px solid var(--hair)}
+h2{font-size:clamp(22px,3.1vw,30px);font-weight:700;letter-spacing:-.016em;margin-top:6px}
+h3{font-size:17px;font-weight:700;margin-top:30px}
+.lede{max-width:70ch;margin-top:13px;font-size:16px}
+p.t{max-width:72ch;margin-top:13px}
+.note{max-width:74ch;margin-top:16px;font-size:13.5px;color:var(--muted)}
+.note b,p.t b{color:var(--ink)}
+.pull{max-width:56ch;margin-top:26px;padding-left:20px;border-left:3px solid var(--verb);
+  font-family:Archivo,sans-serif;font-size:21px;line-height:1.35;font-weight:600;color:var(--ink);letter-spacing:-.012em}
+
+/* cost bar */
+.cost{margin-top:26px;border:1px solid var(--hair);background:var(--surface);padding:20px}
+.costbar{display:flex;height:42px;margin-top:14px;font-family:"IBM Plex Mono",monospace;font-size:11.5px}
+.costbar div{display:flex;align-items:center;justify-content:center;color:#fff;white-space:nowrap;overflow:hidden}
+.cb-q{background:var(--subj)} .cb-s{background:var(--warm)}
+.costkey{display:flex;flex-wrap:wrap;gap:8px 24px;margin-top:12px;font-size:12.5px;color:var(--muted)}
+.costkey b{color:var(--ink);font-weight:600}
+.sw{display:inline-block;width:11px;height:11px;vertical-align:-1px;margin-right:6px}
+.costlist{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;margin-top:18px;font-size:12.5px}
+.costlist ul{margin:6px 0 0;padding-left:16px}
+.costlist li{margin-top:2px;font-family:"IBM Plex Mono",monospace;font-size:11.5px}
+.costlist h4{font-size:12px;font-family:"IBM Plex Mono",monospace;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:500}
+
+/* matrix */
+.mxwrap{overflow-x:auto;margin-top:24px;border:1px solid var(--hair)}
+table{border-collapse:collapse;width:100%;min-width:860px;background:var(--surface)}
+th,td{padding:10px 12px;font-size:12.5px;text-align:left;border-bottom:1px solid var(--hair);border-right:1px solid var(--hair);vertical-align:top}
+th:last-child,td:last-child{border-right:0}
+thead th{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.05em;font-weight:600;color:var(--verb);
+  border-bottom:1px solid var(--rule);white-space:nowrap;background:var(--verb-soft)}
+thead th:first-child{background:var(--surface);color:var(--muted);font-weight:500}
+td.subj{font-family:"IBM Plex Mono",monospace;font-weight:600;color:var(--subj);white-space:nowrap;background:var(--subj-soft)}
+td.subj span{display:block;font-weight:400;color:var(--muted);font-size:11px;margin-top:3px}
+tbody tr:last-child td{border-bottom:0}
+.has{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--ink)}
+.has em{font-style:normal;color:var(--muted)}
+.gap{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--muted)}
+.free{color:var(--verb);font-weight:600}
+
+pre{background:var(--surface);border:1px solid var(--hair);padding:16px 18px;overflow-x:auto;margin-top:18px;
+  font-family:"IBM Plex Mono",monospace;font-size:12.5px;line-height:1.7;color:var(--body)}
+pre b{color:var(--ink);font-weight:600}
+pre i{font-style:normal;color:var(--muted)}
+pre u{text-decoration:none;color:var(--verb);font-weight:600}
+
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1px;background:var(--hair);
+  border:1px solid var(--hair);margin-top:24px}
+.col{background:var(--surface);padding:18px 20px}
+.col h4{font-family:"IBM Plex Mono",monospace;font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--muted);font-weight:500}
+.col ol{margin:12px 0 0;padding-left:20px;font-size:13.5px}
+.col li{margin-top:7px}
+.col .tot{margin-top:14px;font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--ink);
+  border-top:1px solid var(--hair);padding-top:10px}
+
+.defs{display:grid;grid-template-columns:repeat(auto-fit,minmax(268px,1fr));gap:1px;background:var(--hair);
+  border:1px solid var(--hair);margin-top:24px}
+.def{background:var(--surface);padding:18px 20px}
+.def .w{font-family:Archivo,sans-serif;font-size:20px;font-weight:700;color:var(--ink)}
+.def .rule{margin-top:9px;font-size:14px;color:var(--ink);font-weight:500}
+.def p{margin-top:10px;font-size:13.5px}
+
+.risks{display:flex;flex-direction:column;gap:1px;background:var(--hair);border:1px solid var(--hair);margin-top:24px}
+.risk{background:var(--surface);padding:17px 20px}
+.risk h4{font-size:15.5px;font-weight:600;font-family:"IBM Plex Sans",sans-serif;color:var(--ink);max-width:68ch}
+.risk p{margin-top:7px;font-size:13.5px;max-width:74ch}
+.risk .mine{margin-top:10px;font-size:13.5px;color:var(--body);border-left:2px solid var(--verb);padding-left:12px;max-width:70ch}
+.risk .mine b{color:var(--ink)}
+.qn{font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--signal);border:1px solid var(--signal);padding:2px 6px;margin-right:9px;vertical-align:2px}
+
+footer{padding-top:34px;font-size:12.5px;color:var(--muted);max-width:76ch}
+a{color:var(--verb)}
+</style>
+</head>
+<body>
+<div class="sheet">
+
+<header class="masthead">
+  <div class="eyebrow">a proposal to argue with · not a plan · 2026-09-15</div>
+  <h1>The Blix Workbench</h1>
+  <p class="standfirst">What building with Blix should feel like, and the one idea that would make
+  it true. Written from what the last two years of sessions actually cost, not from what the code
+  says it is owed.</p>
+  <nav class="toc">
+    <a href="#lens">01 the lens</a>
+    <a href="#thesis">02 verbs &amp; subjects</a>
+    <a href="#subject">03 what a subject is</a>
+    <a href="#words">04 tool, lab, game</a>
+    <a href="#flows">05 pipelines</a>
+    <a href="#risks">06 what this risks</a>
+  </nav>
+</header>
+
+<section id="lens">
+  <div class="eyebrow">01 — the lens</div>
+  <h2>The cost of asking a question</h2>
+  <p class="lede">Not duplication. Duplication is a symptom and a boring one. The thing that
+  actually shapes a session is how much apparatus you must build before you learn anything.</p>
+
+  <p class="t">The character lab was built to answer one question: <em>where can a body go, and what
+  stops it?</em> Answering it took <b>4,265 lines across four projects</b> — and roughly half of that
+  is not the question. It is the equipment for asking one.</p>
+
+  <div class="cost">
+    <div class="eyebrow">character lab · 4,265 lines · the split</div>
+    <div class="costbar">
+      <div class="cb-q" style="width:50.1%">the question — 2,137</div>
+      <div class="cb-s" style="width:49.9%">the apparatus — 2,128</div>
+    </div>
+    <div class="costkey">
+      <span><span class="sw" style="background:var(--subj)"></span><b>The question</b> — the room, its geometry, the motor, the resolver, the camera rigs, and the checks that judge them</span>
+      <span><span class="sw" style="background:var(--warm)"></span><b>The apparatus</b> — a renderer, shaders, three app loops, panels, argument parsing, image readback, two launchers</span>
+    </div>
+    <div class="costlist">
+      <div>
+        <h4>the question</h4>
+        <ul>
+          <li>Room 301 · RoomGeometry 196</li>
+          <li>CharacterMotor 365 · BodyResolver 183</li>
+          <li>RoomCamera 382</li>
+          <li>Probe checks ~710</li>
+        </ul>
+      </div>
+      <div>
+        <h4>the apparatus</h4>
+        <ul>
+          <li>RoomRenderer 293 · shaders 172</li>
+          <li>Room/Program 632 — loop, input, panels</li>
+          <li>Capture/Program 343 — camera, readback, args</li>
+          <li>LabReport 180 · LabTrace 118</li>
+          <li>Probe harness ~120 · 4 csproj 143 · 2 launchers 88</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <p class="t">And none of that apparatus was the first of its kind. The toolchain lab had already
+  built every piece of it, one arc earlier, and the character lab could not reach any of it — so it
+  wrote its own, and wrote it well, and the cost was half the lab.</p>
+
+  <p class="pull">To ask Blix a question, you currently have to build an application. That is the
+  experience problem, and everything else in these documents is downstream of it.</p>
+
+  <p class="t">The same tax shows up everywhere once you look for it. To fit a model's pivot you
+  build an overlay and read numbers off it by eye. To check whether a change broke anything you run
+  five executables and read five outputs. To look at an asset you need to know a project path and
+  which of three tools takes <code>--rig</code> versus <code>--model</code>. None of these are hard
+  problems. They are all the same problem: <b>there is nowhere to put a question except a new
+  program.</b></p>
+</section>
+
+<section id="thesis">
+  <div class="eyebrow">02 — the thesis</div>
+  <h2>Verbs are shared. Subjects are contributed.</h2>
+  <p class="lede">Everything Blix's tooling does is a small set of verbs applied to a growing set of
+  subjects. Today every pairing is its own executable, which is why there are eight command-line
+  entry points, two UI applications, fourteen launchers, and no way to ask a new question cheaply.</p>
+
+  <p class="t">The verbs are stable and there are about six of them. The subjects are the interesting
+  part and there should be many. Write the grid out and the proposal states itself — the cells are
+  not things to build, they are things you get:</p>
+
+  <div class="mxwrap">
+  <table>
+    <thead><tr>
+      <th>subject ↓ &nbsp; verb →</th>
+      <th>open</th><th>check</th><th>shot</th><th>trace</th><th>bench</th><th>cook</th>
+    </tr></thead>
+    <tbody>
+      <tr>
+        <td class="subj">model<span>a static glb</span></td>
+        <td class="has">viewer <em>--model</em></td>
+        <td class="has">probe</td>
+        <td class="has">capture</td>
+        <td class="gap free">free</td>
+        <td class="gap">—</td>
+        <td class="has">blix-cook</td>
+      </tr>
+      <tr>
+        <td class="subj">rig<span>skeleton + clips</span></td>
+        <td class="has">viewer <em>--rig</em></td>
+        <td class="has">probe</td>
+        <td class="has">capture</td>
+        <td class="gap free">free</td>
+        <td class="gap">—</td>
+        <td class="has">cook-character.sh</td>
+      </tr>
+      <tr>
+        <td class="subj">room<span>authored geometry</span></td>
+        <td class="has">Room <em>a 2nd app</em></td>
+        <td class="has">Probe <em>a 2nd probe</em></td>
+        <td class="has">Capture <em>a 2nd capture</em></td>
+        <td class="has">LabTrace</td>
+        <td class="gap">—</td>
+        <td class="gap">—</td>
+      </tr>
+      <tr>
+        <td class="subj">controller<span>a body that moves</span></td>
+        <td class="gap">not built</td>
+        <td class="gap">not built</td>
+        <td class="gap">not built</td>
+        <td class="gap">not built</td>
+        <td class="gap">not built</td>
+        <td class="gap">—</td>
+      </tr>
+      <tr>
+        <td class="subj">frame<span>passes, draws, uniforms</span></td>
+        <td class="has">overlay <em>per app</em></td>
+        <td class="has">VALIDATE=1</td>
+        <td class="gap">—</td>
+        <td class="has">--dump-frame</td>
+        <td class="has">perf-matrix.sh</td>
+        <td class="gap">—</td>
+      </tr>
+      <tr>
+        <td class="subj">world<span>an RTS map + sim</span></td>
+        <td class="has">the game</td>
+        <td class="has">35 scenarios</td>
+        <td class="gap">—</td>
+        <td class="has">StateFingerprint</td>
+        <td class="has">FightBenchmarks</td>
+        <td class="gap">—</td>
+      </tr>
+      <tr>
+        <td class="subj">pack<span>a cooked asset set</span></td>
+        <td class="gap">—</td>
+        <td class="gap">—</td>
+        <td class="gap">—</td>
+        <td class="gap">—</td>
+        <td class="gap">—</td>
+        <td class="has">cook-sponza</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p class="t"><b>Read the grid down a column and it is one verb implemented four to six times.</b>
+  Read it across a row and it is one subject that had to implement every verb itself before it could
+  use any. The empty cells are not missing features — most of them are things nobody could justify
+  building a whole application for.</p>
+
+  <p class="t">The proposition is to invert it: <b>the verbs become the substrate, and a subject is
+  the only thing you write.</b> Register a subject and every column you did not implement arrives
+  anyway — you get <code>shot</code> because the workbench knows how to render and read back, you
+  get <code>trace</code> because it knows how to write frames to disk, you get a headless mode
+  because headless is just the same subject without a window.</p>
+
+  <pre><b>blix open</b>  character:room        <i>headed, panels, gizmos</i>
+<b>blix check</b> character:room        <i>headless, judges, exit code</i>
+<b>blix shot</b>  character:room --out ramp.png
+<b>blix open</b>  rig:Assets/Rogue.glb --clip Walking_A --mask spine
+<b>blix check</b> pack:sponza
+<b>blix bench</b> world:rts --years 2</pre>
+
+  <p class="t">One argument surface, so <code>--clip</code> means one thing. One place to look, so
+  there is nothing to remember. And a new question costs <em>the question</em>.</p>
+</section>
+
+<section id="subject">
+  <div class="eyebrow">03 — the contract</div>
+  <h2>What a subject is, and what it gets</h2>
+  <p class="lede">The substrate is not a library of shared parts you go and fetch. It is a host, and
+  a subject is a thing it hosts — the same move <code>Blix.Demos.Chassis</code> already proved at the
+  application level, one level up.</p>
+
+  <div class="two">
+    <div class="col">
+      <h4>what a subject brings</h4>
+      <ol>
+        <li><b>Content</b> — what to draw. Triangles, a rig, a map, nothing at all.</li>
+        <li><b>State</b> — what is currently true of it, and how a fixed step advances that.</li>
+        <li><b>Panels</b> — its own read-outs, as objects that take what they draw rather than methods that call back into an app.</li>
+        <li><b>Checks</b> — what it claims, and how to falsify it. The headless verb is built out of these.</li>
+      </ol>
+      <div class="tot">the character lab, restated: Room · RoomGeometry · CharacterMotor ·<br>BodyResolver · its panels · its 87 checks</div>
+    </div>
+    <div class="col">
+      <h4>what the workbench brings</h4>
+      <ol>
+        <li><b>A scene</b> — shadow, lit HDR, present, a grid, a sun.</li>
+        <li><b>A camera</b> — orbit for looking, and whatever rigs a subject adds.</li>
+        <li><b>A shell</b> — window, docking, the embedded viewport, picking, selection.</li>
+        <li><b>Gizmos and channels</b> — debug draw, trails, report, trace.</li>
+        <li><b>Both modes</b> — headed with a window, headless without one, from the same subject.</li>
+        <li><b>An address</b> — the moment it exists it is <code>blix open &lt;name&gt;</code>. No project path, no launcher, no argument parser.</li>
+      </ol>
+      <div class="tot">what the character lab wrote for itself, twice over, in ~2,100 lines</div>
+    </div>
+  </div>
+
+  <h3>The same session, before and after</h3>
+  <div class="two">
+    <div class="col">
+      <h4>today — "is a 30° ramp climbable?"</h4>
+      <ol>
+        <li>Create a library project and three executables</li>
+        <li>Write six shaders and a render graph</li>
+        <li>Write a camera, a scene, a grid</li>
+        <li>Write an app loop, input, ImGui panels</li>
+        <li>Write argument parsing, three times</li>
+        <li>Write image readback and camera framing</li>
+        <li>Write two launcher scripts</li>
+        <li><b>Write the room and the motor</b></li>
+        <li>Ask the question</li>
+      </ol>
+      <div class="tot">≈ 2,100 lines before step 8</div>
+    </div>
+    <div class="col">
+      <h4>after</h4>
+      <ol>
+        <li><b>Write the room and the motor</b></li>
+        <li>Register the subject</li>
+        <li><code>blix open character:room</code></li>
+        <li>Ask the question</li>
+        <li>Later: <code>blix check character:room</code> in the same breath as everything else that is checked</li>
+      </ol>
+      <div class="tot">the apparatus is not yours to write, or to maintain, or to get wrong twice</div>
+    </div>
+  </div>
+  <p class="note">The second column is also what makes a lab genuinely <em>deletable</em>. Motion was
+  deleted correctly and it still cost a project, a launcher and a set of shaders to remove. A subject
+  is deleted by deleting a file.</p>
+</section>
+
+<section id="words">
+  <div class="eyebrow">04 — the words</div>
+  <h2>What this makes of tool, lab and game</h2>
+  <p class="lede">The three words stop being categories of project and become roles in one system.
+  That is the part I would most want to argue about, because it is the part that changes how
+  everything is named.</p>
+  <div class="defs">
+    <div class="def">
+      <div class="w">A tool</div>
+      <div class="rule">A verb.</div>
+      <p>Not a project. <code>open</code>, <code>check</code>, <code>shot</code>,
+      <code>trace</code>, <code>bench</code>, <code>cook</code>. There are about six, they are
+      written once, and adding a seventh is a real event rather than a Tuesday.</p>
+    </div>
+    <div class="def">
+      <div class="w">A lab</div>
+      <div class="rule">A subject with a question.</div>
+      <p>Content, state, panels, checks — and an expiry date. It is allowed to be wrong and expected
+      to be deleted. What it is <em>not</em> any more is an application, a render graph, a set of
+      shaders, and three executables.</p>
+    </div>
+    <div class="def">
+      <div class="w">A game</div>
+      <div class="rule">A subject that outgrew the workbench.</div>
+      <p>It owns its own window and loop, because shipping demands it. But its world can still be a
+      subject for the headless verbs — which is what RTSGame's 35 scenario files already are, written
+      by hand.</p>
+    </div>
+  </div>
+  <p class="note"><b>And "first class" stops meaning packaged.</b> A dotnet tool on <code>PATH</code>
+  was never the goal — the goal is that a thing you wrote is addressable and complete the moment it
+  exists. Under this shape it is, and the fourteen launchers collapse into one script for a reason
+  that has nothing to do with NuGet.</p>
+</section>
+
+<section id="flows">
+  <div class="eyebrow">05 — pipelines</div>
+  <h2>What the workflows look like when they are good</h2>
+  <p class="lede">Sketched broadly, as asked — these are compositions of verbs over subjects, and
+  writing them this way is what exposes the missing ones.</p>
+
+  <pre><b>bring content in</b>
+  blix cook   <u>pack</u>:kaykit/rogue          <i>textures, meshes, clip merge</i>
+  blix check  <u>rig</u>:rogue                  <i>skeleton, clips, bounds — exit code</i>
+  blix open   <u>rig</u>:rogue                  <i>look at it, fit the pivot with a read-out</i>
+                                          <i>rather than by eye through an overlay</i>
+
+<b>prove a change</b>
+  blix check  --all                       <i>every subject's checks, one verdict</i>
+                                          <i>today: five executables and a person reading five outputs</i>
+
+<b>keep the evidence</b>
+  blix shot   <u>character</u>:room --out ramps.png
+  blix trace  <u>character</u>:room --frames 200
+                                          <i>the same pair that found the ramps facing a wall — twice</i>
+
+<b>measure</b>
+  blix bench  <u>world</u>:rts --years 2
+  blix bench  <u>frame</u>:sponza --matrix        <i>perf-matrix.sh, addressed instead of scripted</i></pre>
+
+  <p class="t">Two things fall out of writing them down. <b>The first is that
+  <code>blix check --all</code> is probably the highest-value thing in this entire document</b> — it
+  is the step run most often in a session, it currently costs five invocations and a human, and it
+  is nearly free once subjects carry their own checks.</p>
+
+  <p class="t">The second is that the gaps become obvious and small. A pivot-fitting read-out is a
+  panel on the <code>rig</code> subject. A licence check is a field on the <code>pack</code> subject.
+  Neither is worth an application, which is exactly why neither exists.</p>
+</section>
+
+<section id="risks">
+  <div class="eyebrow">06 — argue with this</div>
+  <h2>What it risks, and the questions I would sit with</h2>
+  <p class="lede">The proposal is strong enough to be worth attacking properly. These are the places
+  I think it is most likely to be wrong.</p>
+
+  <div class="risks">
+    <div class="risk">
+      <h4><span class="qn">Q1</span>Is this an editor, which every plan in this repo says Blix will not build?</h4>
+      <p>Four plan documents list "an editor" under what an arc will not build. This proposal is one
+      window with panels, docking, a viewport, picking and a scene graph in it. From a distance the
+      difference is not obvious, and "we are not building an editor" has been load-bearing.</p>
+      <p class="mine"><b>My answer, and I think it holds:</b> an editor <em>authors</em>. It writes
+      content back out, owns a project format, and becomes the way you make things. A workbench only
+      ever reads and judges — it opens what exists, shows it, and says whether it is sound. The line
+      is whether it ever writes an asset. I would put that in the plan as a hard boundary, because it
+      is the one that stops this becoming Unity in four years.</p>
+    </div>
+    <div class="risk">
+      <h4><span class="qn">Q2</span>Does the substrate become the monolith the engine deliberately does not have?</h4>
+      <p>Every module in Blix today is small and takes few dependencies — <code>Blix.Core</code> is
+      483 lines and 22 consumers. A workbench that hosts everything would be the first thing in the
+      tree that everything tool-shaped depends on, and the first place where a bad decision is
+      expensive to reverse.</p>
+      <p class="mine">Partly mitigated by it sitting <em>outside</em> the engine — no game would
+      depend on it. But it is real, and it is the argument for the subject contract being very small:
+      four things in, six things out, and nothing clever.</p>
+    </div>
+    <div class="risk">
+      <h4><span class="qn">Q3</span>Does a subject's headless twin actually generalise?</h4>
+      <p>The proposal leans hard on "headless is the same subject without a window". That is true for
+      the room and the rig. Is it true for a frame? For an RTS world that needs a whole simulation
+      running before anything is checkable?</p>
+      <p class="mine">Unsure. This is the assumption most likely to break, and the cheapest way to
+      find out is to write the contract against the two hardest subjects first — <code>frame</code>
+      and <code>world</code> — rather than the two easiest.</p>
+    </div>
+    <div class="risk">
+      <h4><span class="qn">Q4</span>Who owns the window when a subject wants one?</h4>
+      <p>A game owns its loop. A lab does not. If both are subjects, something has to give — either
+      the workbench hosts the loop and a game can never be a subject, or subjects can take the loop
+      and the shell becomes optional.</p>
+      <p class="mine">I would let games out of it entirely at first: games are subjects for the
+      headless verbs only. It keeps the contract small and it matches what RTSGame already does.</p>
+    </div>
+    <div class="risk">
+      <h4><span class="qn">Q5</span>Is "one window, many subjects" actually better than several small tools?</h4>
+      <p>The opposite design is real and has a good track record: many small, sharp tools that do one
+      thing. This proposal argues for one because the <em>apparatus</em> is what is expensive, not the
+      tool. But that is an argument, not a fact.</p>
+      <p class="mine">I hold it loosely. The strongest evidence for one is that the viewer already
+      handles two subjects — models and rigs — in a single app, and the panels changing is what makes
+      it work rather than what strains it.</p>
+    </div>
+    <div class="risk">
+      <h4><span class="qn">Q6</span>What does this cost, and what does it cost to be wrong?</h4>
+      <p>Roughly: the substrate is most of what the two lab libraries already are, rearranged behind
+      a contract. The expensive part is not writing it, it is that every existing tool and lab has to
+      move onto it or the tree ends up with both.</p>
+      <p class="mine">Which argues for proving the contract on <em>one</em> subject end to end before
+      anything is renamed — and for the character controller being that subject, since it is the one
+      question already queued and it needs the rig, the room, panels and checks all at once.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  A proposal, not a plan — nothing here is staged, ordered or committed to. Line counts are read off
+  the working tree at <code>935f7a6</code>; the question/apparatus split in §01 is a judgement call
+  and the files on each side are listed so it can be disputed. Companion to
+  <code>docs/blix-topology.html</code> (the counted graph) — and it supersedes
+  <code>docs/blix-tooling-design.html</code>, which asked what had earned the right to move rather
+  than what should exist.
+</footer>
+
+</div>
+</body>
+</html>
