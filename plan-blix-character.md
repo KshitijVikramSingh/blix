@@ -392,6 +392,36 @@ rest**, not micro-slide forever. These are policy — the engine says it holds n
 and a lab is where the right number is found rather than guessed a second time (the
 gizmo-trail precedent).
 
+### Status — R-E is in, and it grew a second half
+
+The planned half: the capture drives the body with `--walk <seconds> --walk-dir <deg>` at a fixed
+1/60 step with no wall clock, draws the whole path it took, and draws what the RESOLVER did on the
+last step — the swept body at each contact, the contact normal, and the motion it had left
+afterwards. `MoveContact` carries `At` for that: three capsules in a corner is a picture of three
+deflections, and the same corner with one capsule is a picture of nothing.
+
+The unplanned half, asked for from the chair and worth more: **state that leaves the session.**
+
+- **`LabReport`** publishes the lab's whole state into the debug frame — camera rig, angles,
+  position, what it steers along AND what it looks along; body position, facing, facing rule,
+  ground, slope, every policy number; every contact with its normal, its slope, and where on the
+  body it landed. Shared by the viewer and the capture, so a dump from a window and one from a
+  headless run describe the same fields in the same units.
+- **`--dump-frame N`** on the host. The dump has existed since the chassis arc and was reachable
+  exactly one way — a person pressing F12 — so a headless run could not produce the artifact an
+  interactive run produces, and "send me a dump" had nothing to be checked against.
+- **`LabTrace`** — JSON lines, one per frame, flushed every row. A dump is a moment; a trace is the
+  interval, and "the trail curves and I only pressed W" is a claim about a sequence whose bad frame
+  is never the one you are looking at when you notice.
+
+**And it found a bug in the dump itself.** Every `System.Numerics` value published through
+`Values.Value(...)` serialised as `{}` — `Vector3` exposes X/Y/Z as **fields**, and the capture
+bridge had `IncludeFields = false`. So a dump carried the NAME of every position and direction an
+application reported and none of the numbers. Invisible since the dump existed, because draw
+commands go through explicit records and were always fine; it surfaced the first time an
+application published its whole state as values and someone read the file. The toolchain lab's
+`sun` had been empty in every dump it ever wrote.
+
 **R-E — the instruments.**
 - *Capture* draws each resolver iteration: the swept capsule, the contact point and
   normal, the deflected remainder, and the residual motion left when the iteration cap

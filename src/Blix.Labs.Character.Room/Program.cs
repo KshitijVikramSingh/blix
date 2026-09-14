@@ -38,9 +38,21 @@ public static class Program
             Height = 760,
         });
 
-        var loop = new RoomLoop();
+        // --trace <path> starts recording immediately; the panel can start and stop one at any time.
+        // A run that reproduces something is worth a file whether or not anyone thought to press a
+        // button first.
+        var loop = new RoomLoop(ArgValue(args, "--trace"));
         using var window = new Window(loop, options);
         window.Run();
+    }
+
+    private static string? ArgValue(string[] args, string name)
+    {
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] == name) return args[i + 1];
+        }
+        return null;
     }
 }
 
@@ -64,6 +76,9 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
     // that is on the panel, because the numbers are what a lab is for and one that hard-codes them
     // can only confirm the guess it was built with.
     private readonly CharacterMotor motor = new();
+    private readonly string? tracePath;
+    private LabTrace? trace;
+    private double seconds;
     private float bodyFacing;
     private Vector3 lastTravel;
 
@@ -100,6 +115,8 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
     private readonly List<Vector3> normalPoints = new();
     private readonly List<Vector3> normalDirections = new();
 
+    public RoomLoop(string? tracePath = null) => this.tracePath = tracePath;
+
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         this.host = host;
@@ -109,6 +126,13 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
         renderer.Load(vk, Path.Combine(AppContext.BaseDirectory, "Shaders"), room);
 
         Console.WriteLine($"room — {room.TriangleCount} triangles, {room.Parts.Count} parts, {room.SolidStarts.Count} solids");
+
+        // SAID OUT LOUD, because an instrument nobody knows about is not an instrument. Both of these
+        // produce a file somebody who was not at the keyboard can read, which is the whole point.
+        Console.WriteLine("F12 dumps this frame's full state (camera, body, ground, every contact) to dumps/");
+        Console.WriteLine("--trace <path>, or the panel button, records one line per frame to a .jsonl");
+
+        if (tracePath is not null) StartTrace(tracePath);
         foreach (var part in room.Parts) Console.WriteLine($"  {part.Name,-12} {part.TriangleCount,5} tri  {ClaimOf(part)}");
     }
 
@@ -121,6 +145,9 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
         // rather than a toggle that fights it — which is what the old checkbox was, and why panning
         // had to switch it off.
         camera.Place(motor.Feet, motor.Height, room.Collider);
+
+        seconds += time.Delta;
+        trace?.Row(frames, seconds, camera, motor, bodyFacing, lastTravel);
     }
 
     /// <summary>Gather the frame's intent and hand it to the motor.</summary>
@@ -175,9 +202,20 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
         debug.Values.Value("camera", camera.Target);
         debug.Stats.Gauge("triangles", room.TriangleCount);
         debug.Stats.Gauge("solids", room.SolidStarts.Count);
-        debug.Values.Value("body", motor.Feet);
-        debug.Values.Value("ground", motor.Grounded ? motor.GroundSlopeDegrees : -1f);
+        // EVERYTHING, into the frame F12 writes out. See LabReport for why this is a type rather
+        // than a handful of Value() calls: a dump from the viewer and one from the capture describe
+        // the same fields in the same units, so "it looks different in the viewer" is a diff.
+        LabReport.Publish(
+            debug, room, camera, motor, bodyFacing,
+            faceCamera ? LabReport.FacingRule.CameraHeading : LabReport.FacingRule.Travel,
+            lastTravel);
+
         debug.Stats.Gauge("contacts", motor.Contacts.Count);
+
+        // Events land in the dump too, and these are the states worth noticing in one: a body that
+        // could not spend its motion is wedged, and a body sliding is on ground it cannot stand on.
+        if (motor.SteppedUp) debug.Events.Info("stepped up", motor.Feet);
+        if (motor.Grounded && !motor.Standing) debug.Events.Warn("sliding", motor.GroundSlopeDegrees);
 
         var (logicalW, logicalH) = host?.LogicalSize ?? (debug.Frame.Width, debug.Frame.Height);
         var declaration = debug.Draw.Declare(
@@ -365,6 +403,19 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
             ImGui.Text($"contacts {motor.Contacts.Count}{(motor.SteppedUp ? " - stepped up" : string.Empty)}");
 
             if (ImGui.Button("respawn")) motor.Teleport(Blix.Labs.Character.Room.SpawnPoint);
+
+            ImGui.Separator();
+            if (trace is null)
+            {
+                if (ImGui.Button("record trace")) StartTrace(tracePath ?? DefaultTracePath());
+                ImGui.SameLine();
+                ImGui.Text("F12 dumps this frame");
+            }
+            else
+            {
+                if (ImGui.Button("stop trace")) StopTrace();
+                ImGui.Text($"{trace.Rows} rows -> {System.IO.Path.GetFileName(trace.Path)}");
+            }
         }
 
         if (ImGui.CollapsingHeader("camera", ImGuiTreeNodeFlags.DefaultOpen))
@@ -499,7 +550,29 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
 
     public void OnKeyUp(Key key) => held.Remove(key);
 
-    public void Dispose() => renderer.Dispose();
+    public void Dispose()
+    {
+        StopTrace();
+        renderer.Dispose();
+    }
+
+    private static string DefaultTracePath() =>
+        System.IO.Path.Combine(AppContext.BaseDirectory, "dumps", $"trace-{DateTime.Now:HHmmss}.jsonl");
+
+    private void StartTrace(string path)
+    {
+        StopTrace();
+        trace = LabTrace.Start(path);
+        Console.WriteLine($"[lab] tracing to {trace.Path}");
+    }
+
+    private void StopTrace()
+    {
+        if (trace is null) return;
+        Console.WriteLine($"[lab] trace closed: {trace.Rows} rows -> {trace.Path}");
+        trace.Dispose();
+        trace = null;
+    }
 
     private void RebuildNormals()
     {

@@ -4,7 +4,14 @@ using Blix.Geometry;
 namespace Blix.Labs.Character;
 
 /// <summary>One contact a move ran into, kept so the picture can show what the arithmetic did.</summary>
-public readonly record struct MoveContact(Vector3 Point, Vector3 Normal, float Time, Vector3 Before, Vector3 After);
+/// <remarks>
+/// <paramref name="At"/> is the body's displacement from the move's start AT THE MOMENT OF CONTACT —
+/// which is what lets an instrument draw the swept body where it actually stopped, rather than one
+/// capsule at the end and a set of points with no bodies attached. A resolver that deflects three
+/// times has three positions, and only the last of them is the one you can see without this.
+/// </remarks>
+public readonly record struct MoveContact(
+    Vector3 Point, Vector3 Normal, float Time, Vector3 Before, Vector3 After, Vector3 At);
 
 /// <summary>What a move actually managed.</summary>
 /// <remarks>
@@ -152,7 +159,7 @@ public sealed class BodyResolver
             if (!Enabled)
             {
                 // The control: stop dead at the first thing hit. Everything below is the loop.
-                contacts.Add(new MoveContact(hit.Point, hit.Normal, hit.Time, before, Vector3.Zero));
+                contacts.Add(new MoveContact(hit.Point, hit.Normal, hit.Time, before, Vector3.Zero, position));
                 remaining = Vector3.Zero;
                 break;
             }
@@ -165,7 +172,7 @@ public sealed class BodyResolver
             remaining = Deflect is { } policy
                 ? policy(remaining, hit.Normal)
                 : CollisionResponse.RemoveNormalComponent(remaining, hit.Normal);
-            contacts.Add(new MoveContact(hit.Point, hit.Normal, hit.Time, before, remaining));
+            contacts.Add(new MoveContact(hit.Point, hit.Normal, hit.Time, before, remaining, position));
         }
 
         return new MoveResult(position, remaining, iterations, depenetrations, contacts.ToArray());

@@ -33,6 +33,18 @@ public sealed record WindowOptions(string Title, int Width, int Height)
     public bool Diagnostics { get; init; }
 
     /// <summary>
+    /// Write a JSON dump of this frame and carry on. 0 never dumps.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because F12 needs a person.</b> The dump has existed since the chassis arc and has been
+    /// reachable exactly one way: someone at the keyboard. So a headless run could not produce the
+    /// artifact an interactive run produces, which makes "send me a dump" impossible to check
+    /// against — there is nothing to diff it with. A bounded run that writes one at a named frame is
+    /// reproducible by construction: same arguments, same frame, same file.
+    /// </remarks>
+    public int DumpOnFrame { get; init; }
+
+    /// <summary>
     /// Reads the arguments every Blix application shares, leaving the rest to the application.
     /// </summary>
     /// <remarks>
@@ -52,6 +64,9 @@ public sealed record WindowOptions(string Title, int Width, int Height)
             {
                 case "--frames" when int.TryParse(next, out var frames) && frames > 0:
                     result = result with { ExitAfterFrames = frames };
+                    break;
+                case "--dump-frame" when int.TryParse(next, out var dumpFrame) && dumpFrame > 0:
+                    result = result with { DumpOnFrame = dumpFrame };
                     break;
                 case "--width" when int.TryParse(next, out var width) && width > 0:
                     result = result with { Width = width };

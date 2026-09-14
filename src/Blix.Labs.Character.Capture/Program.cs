@@ -61,6 +61,14 @@ public static class Program
         var bodyX = Float(args, "--body-x", Room.SpawnPoint.X);
         var bodyZ = Float(args, "--body-z", Room.SpawnPoint.Z);
 
+        // <b>--walk drives the body before the picture is taken</b>, at a fixed 1/60 step and with no
+        // wall clock anywhere, so the same arguments put it in the same place every run. A still of a
+        // settled body shows where the resolver leaves things; only a body that has WALKED shows what
+        // the resolver did on the way — which iterations fired, what it deflected off, and whether it
+        // ended up wedged.
+        var walkSeconds = Float(args, "--walk", 0f);
+        var walkDegrees = Float(args, "--walk-dir", 0f);
+
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — character lab capture",
@@ -72,7 +80,7 @@ public static class Program
 
         var loop = new CaptureLoop(
             output, options.ExitAfterFrames, yaw, pitch, distance, targetX, targetZ, slope,
-            rig, new Vector3(bodyX, 0f, bodyZ));
+            rig, new Vector3(bodyX, 0f, bodyZ), walkSeconds, walkDegrees);
         using (var window = new Window(loop, options))
         {
             window.Run();
@@ -111,6 +119,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private readonly float slopeTint;
     private readonly CameraRig rig;
     private readonly CharacterMotor motor = new();
+    private readonly List<Vector3> path = new();
+    private Vector3 walked;
 
     private VulkanGraphicsDevice device = null!;
     private Matrix4x4 viewProjection = Matrix4x4.Identity;
@@ -122,7 +132,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     public CaptureLoop(
         string outputPath, int exitAfterFrames,
         float yaw, float pitch, float distance, float targetX, float targetZ, float slopeTint,
-        CameraRig rig, Vector3 bodyAt)
+        CameraRig rig, Vector3 bodyAt, float walkSeconds, float walkDegrees)
     {
         this.outputPath = outputPath;
         this.slopeTint = slopeTint;
@@ -132,6 +142,25 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // arguments put it in the same place every run.
         motor.Teleport(bodyAt + new Vector3(0f, 2f, 0f));
         for (var i = 0; i < 240; i++) motor.Step(Vector3.Zero, 1f / 60f, room.Collider);
+
+        if (walkSeconds > 0f)
+        {
+            var radians = walkDegrees * MathF.PI / 180f;
+            var wish = new Vector3(-MathF.Sin(radians), 0f, -MathF.Cos(radians));
+            var steps = (int)MathF.Round(walkSeconds * 60f);
+
+            path.Add(motor.Feet);
+            for (var i = 0; i < steps; i++)
+            {
+                motor.Step(wish, 1f / 60f, room.Collider);
+                path.Add(motor.Feet);
+            }
+
+            walked = wish;
+            Console.WriteLine(
+                $"walked {walkSeconds:0.##}s at {walkDegrees:0.#}° -> {motor.Feet}, " +
+                $"{motor.Contacts.Count} contact(s) on the last step");
+        }
 
         // One before the last frame: the read-back needs the pass to have executed, and the last
         // frame of the run is the moment after which nothing else will.
@@ -149,6 +178,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     }
 
     public string DebugName => "room-capture";
+
+    private static readonly Vector3 Up = new(0f, 0.04f, 0f);
 
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
@@ -179,6 +210,11 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     public void Debug(DebugContext debug)
     {
         debug.Values.Value("frames", frames);
+
+        // The same report the viewer publishes, so a dump from a capture and a dump from a window
+        // are the same fields in the same units and a difference between them is a real difference.
+        LabReport.Publish(
+            debug, room, camera, motor, camera.Yaw, LabReport.FacingRule.CameraHeading, walked);
 
         var declaration = debug.Draw.Declare(
             "scene", viewProjection, renderer.SceneSurface,
@@ -211,6 +247,35 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                 // A second marker whose meaning is unambiguous: a short post at the NOSE only. If the
                 // chevron reads backwards, this says which end the lab thinks is the front.
                 debug.Draw.Line("nose-post", nose, nose + new Vector3(0f, 0.5f, 0f), new GraphicsColor(0.2f, 1f, 0.4f, 1f));
+            }
+
+            // THE PATH IT WALKED, as a line rather than a trail: a trail ages out on a wall clock and
+            // a capture has none, so a reproducible run needs the whole path drawn at once.
+            for (var i = 1; i < path.Count; i++)
+            {
+                debug.Draw.Line($"path{i}", path[i - 1] + Up, path[i] + Up, new GraphicsColor(0.4f, 1f, 0.7f, 1f));
+            }
+
+            // WHAT THE RESOLVER DID ON THE LAST STEP: the body where each contact stopped it, the
+            // contact normal, and the motion it had left afterwards. Three capsules in a corner is a
+            // picture of three deflections; the same corner with one capsule is a picture of nothing.
+            foreach (var contact in motor.Contacts)
+            {
+                var at = motor.Body;
+                debug.Draw.Capsule(
+                    "swept", at.PointA + contact.At, at.PointB + contact.At, at.Radius,
+                    new GraphicsColor(0.6f, 0.6f, 0.75f, 1f));
+
+                debug.Draw.Arrow(
+                    "normal", contact.Point, contact.Point + (contact.Normal * 0.6f),
+                    new GraphicsColor(1f, 0.45f, 0.2f, 1f));
+
+                if (contact.After.LengthSquared() > 1e-10f)
+                {
+                    debug.Draw.Arrow(
+                        "deflected", contact.Point, contact.Point + (Vector3.Normalize(contact.After) * 0.5f),
+                        new GraphicsColor(0.3f, 0.95f, 1f, 1f));
+                }
             }
 
             debug.Draw.Grid("floor", new Vector3(0f, 0.02f, 0f), 28f, 28, new GraphicsColor(0.35f, 0.4f, 0.5f, 1f));
