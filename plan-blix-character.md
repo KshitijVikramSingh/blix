@@ -257,6 +257,34 @@ TriangleMesh3D)` that has been sitting untested since the initial commit. New su
 not graphics. (This takes the engine's suite count from three to four; that is a
 deliberate change to `blix-verification-scope`, not an accident.)
 
+### Status — R-C is in
+
+`BodyResolver` in the lab (not the engine), the room viewer gains a body you can drive, and the
+probe grows five invariants — each one paired with the same check run with the loop switched off.
+
+**The bug that defined the stage.** A body resting on the floor is in contact with it at time zero
+and stays in contact for as long as it rests there — so the sweep answered "the floor, now" to every
+horizontal step, and the resolver spent its whole iteration budget deflecting a motion that was
+already tangential. A 200-step walk moved 0.000 m and a graze along a wall travelled 0.000 m along
+it. **A surface you are not moving INTO does not obstruct you**: the rule `CollisionResponse`
+already applies to velocity, applied one layer earlier to the query. Overlap is deliberately not
+filtered — a body inside a solid must be pushed out whichever way it is moving, and that answer
+comes from the discrete test, which a resolver runs *before* it sweeps.
+
+**And one the resolver found in R-B's code.** The impaled contact's normal was signed toward
+whichever side `PointA` was on — which for a body sinking into a floor is the side *underneath*, so
+depenetration pushed it further in. A winding is not a tie-break: for a closed solid it already says
+which side is outside. That is where the room probe's closure check earns its keep — it is not
+tidiness, it is the precondition for getting an impaled body out.
+
+**The controls.** `BodyResolver.Enabled` is a field rather than a test double, so the negative
+control is also a checkbox in the viewer: off, the body stops dead at its first contact. The
+along-wall travel goes from 1.000 m to 0.15, which is what makes the 1.000 mean anything.
+
+**Deliberately still absent:** gravity as an acceleration, jumping, ground state, slope limits,
+step-up. The viewer applies a constant fall rate as its *own* policy. R-D is the stage that finds
+those numbers, and baking them in here would make them unchangeable by the stage meant to find them.
+
 **R-C — the resolver.** Sweep → advance to time of impact → deflect the remaining motion
 along the contact plane → repeat, bounded. Plus depenetration for a body that starts
 overlapped (single-pass is already a documented limit of the engine's response layer).

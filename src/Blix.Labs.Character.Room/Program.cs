@@ -58,6 +58,23 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
     private bool orbiting;
     private bool panning;
 
+    // ── The body, and the loop that moves it ────────────────────────────────
+    // <b>The lab owns the policy; the resolver owns the sliding.</b> How fast a body walks, how hard
+    // it falls and whether it can jump are decisions a game makes — BodyResolver is told a motion and
+    // reports where that motion got to. What is deliberately absent here is a GROUND STATE: nothing
+    // asks "am I standing", nothing limits a slope, nothing steps up. Those are stage R-D, and
+    // guessing them now would bake them into the thing that is supposed to find them.
+    private readonly BodyResolver resolver = new();
+    private Vector3 bodyFeet = Blix.Labs.Character.Room.SpawnPoint;
+    private const float BodyRadius = 0.35f;
+    private const float BodyHeight = 1.8f;
+    private float walkSpeed = 3.5f;
+    private float fallSpeed = 6f;
+    private bool bodyEnabled = true;
+    private bool followBody;
+    private MoveResult lastMove;
+    private readonly HashSet<Key> held = new();
+
     private int selected = -1;
     private bool showNormals;
     private bool showBounds = true;
@@ -84,6 +101,44 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
     public void OnUpdate(Time time)
     {
         renderer.SlopeTint = slopeTint;
+        if (bodyEnabled) MoveBody((float)time.Delta);
+        if (followBody) camera.Target = bodyFeet + new Vector3(0f, 0.9f, 0f);
+    }
+
+    /// <summary>One step of the lab's own movement policy, resolved against the room.</summary>
+    /// <remarks>
+    /// Camera-relative input, because a body driven in world axes is unplayable the moment the
+    /// camera turns — and an instrument nobody can steer is one nobody points at the interesting
+    /// corner. The fall is a constant rate rather than an acceleration: R-C is about whether the
+    /// deflection is right, and a body that accelerates makes every frame a different experiment.
+    /// </remarks>
+    private void MoveBody(float deltaSeconds)
+    {
+        var dt = MathF.Min(deltaSeconds, 1f / 30f);   // a hitch must not teleport the body through a wall
+
+        var forward = new Vector3(-MathF.Sin(camera.Yaw), 0f, -MathF.Cos(camera.Yaw));
+        var right = new Vector3(forward.Z, 0f, -forward.X);
+
+        var wish = Vector3.Zero;
+        if (held.Contains(Key.W)) wish += forward;
+        if (held.Contains(Key.S)) wish -= forward;
+        if (held.Contains(Key.D)) wish += right;
+        if (held.Contains(Key.A)) wish -= right;
+        if (wish.LengthSquared() > 1e-6f) wish = Vector3.Normalize(wish);
+
+        var motion = (wish * walkSpeed * dt) + new Vector3(0f, -fallSpeed * dt, 0f);
+
+        var body = new Capsule(
+            bodyFeet + new Vector3(0f, BodyRadius, 0f),
+            bodyFeet + new Vector3(0f, BodyHeight - BodyRadius, 0f),
+            BodyRadius);
+
+        lastMove = resolver.Move(body, motion, room.Collider);
+        bodyFeet += lastMove.Position;
+
+        // A body that leaves the room has found a hole, and chasing it off into the void is a worse
+        // way to learn that than being put back where it can be watched.
+        if (bodyFeet.Y < -4f) bodyFeet = Blix.Labs.Character.Room.SpawnPoint;
     }
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
@@ -101,6 +156,9 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
         debug.Values.Value("camera", camera.Target);
         debug.Stats.Gauge("triangles", room.TriangleCount);
         debug.Stats.Gauge("solids", room.SolidStarts.Count);
+        debug.Values.Value("body", bodyFeet);
+        debug.Stats.Gauge("deflections", lastMove.Iterations);
+        debug.Stats.Gauge("depenetrations", lastMove.Depenetrations);
 
         var (logicalW, logicalH) = host?.LogicalSize ?? (debug.Frame.Width, debug.Frame.Height);
         var declaration = debug.Draw.Declare(
@@ -136,7 +194,34 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
                 }
             }
 
-            // Where a body will start when stage R-C has one. Drawn now because the spawn point is
+            // THE BODY, and what the resolver did to it. The capsule is the actual collider — the
+            // same one handed to the sweep, not a stand-in — so a gap between it and a surface is a
+            // gap the arithmetic believes in.
+            if (bodyEnabled)
+            {
+                debug.Draw.Capsule(
+                    "body",
+                    bodyFeet + new Vector3(0f, BodyRadius, 0f),
+                    bodyFeet + new Vector3(0f, BodyHeight - BodyRadius, 0f),
+                    BodyRadius,
+                    new GraphicsColor(0.35f, 0.85f, 1f, 1f));
+
+                // Each contact the move ran into, with the normal it deflected along. An arrow
+                // pointing INTO a surface is the fault this whole stage can produce, and it is the
+                // one thing a position alone never shows.
+                foreach (var contact in lastMove.Contacts)
+                {
+                    debug.Draw.Arrow(
+                        "contact", contact.Point, contact.Point + (contact.Normal * 0.6f),
+                        new GraphicsColor(1f, 0.45f, 0.2f, 1f));
+                }
+
+                // Where it has been. A trail is the cheapest way to see a body juddering against a
+                // surface it should be sliding along, which is invisible frame by frame.
+                debug.Draw.Trail("body-path", bodyFeet, new GraphicsColor(0.4f, 1f, 0.7f, 1f), 4f);
+            }
+
+            // Where a body starts. Drawn now because the spawn point is
             // already a claim the probe checks, and a claim nothing can see is one that rots.
             var spawn = Room.SpawnPoint;
             debug.Draw.Cross("spawn", spawn + new Vector3(0f, 0.05f, 0f), 0.5f, new GraphicsColor(0.4f, 1f, 0.5f, 1f));
@@ -173,6 +258,35 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
 
             var exposure = renderer.Exposure;
             if (ImGui.SliderFloat("exposure", ref exposure, 0.2f, 3f)) renderer.Exposure = exposure;
+        }
+
+        if (ImGui.CollapsingHeader("body", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            ImGui.Checkbox("body", ref bodyEnabled);
+            ImGui.SameLine();
+            ImGui.Checkbox("camera follows", ref followBody);
+
+            ImGui.SliderFloat("walk m/s", ref walkSpeed, 0.5f, 12f);
+            ImGui.SliderFloat("fall m/s", ref fallSpeed, 0f, 30f);
+
+            var iterations = resolver.MaxIterations;
+            if (ImGui.SliderInt("deflections", ref iterations, 0, 8)) resolver.MaxIterations = iterations;
+
+            // THE NEGATIVE CONTROL, on a checkbox. With it off the body stops dead at whatever it
+            // first touches instead of sliding along it — which is what every invariant in the probe
+            // is measured against, and worth being able to feel rather than only read.
+            var deflecting = resolver.Enabled;
+            if (ImGui.Checkbox("deflect (off = stop dead)", ref deflecting)) resolver.Enabled = deflecting;
+
+            ImGui.Text($"feet {bodyFeet.X:0.00}, {bodyFeet.Y:0.00}, {bodyFeet.Z:0.00}");
+            ImGui.Text($"contacts {lastMove.Contacts?.Count ?? 0} · deflections {lastMove.Iterations} · pushes {lastMove.Depenetrations}");
+
+            // Residual is the interesting number: motion the resolver could not spend is a body
+            // wedged somewhere, and it reads as sticking long before it reads as a bug.
+            var residual = lastMove.Residual.Length();
+            ImGui.Text(residual > 1e-5f ? $"residual {residual:0.0000} m — wedged" : "residual none");
+
+            if (ImGui.Button("respawn")) bodyFeet = Blix.Labs.Character.Room.SpawnPoint;
         }
 
         if (ImGui.CollapsingHeader("parts", ImGuiTreeNodeFlags.DefaultOpen))
@@ -237,10 +351,15 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
 
     public void OnKeyDown(Key key)
     {
+        held.Add(key);
         if (key == Key.N) showNormals = !showNormals;
         if (key == Key.G) showGrid = !showGrid;
         if (key == Key.T) slopeTint = slopeTint > 0.5f ? 0f : 1f;
+        if (key == Key.F) followBody = !followBody;
+        if (key == Key.R) bodyFeet = Blix.Labs.Character.Room.SpawnPoint;
     }
+
+    public void OnKeyUp(Key key) => held.Remove(key);
 
     public void Dispose() => renderer.Dispose();
 

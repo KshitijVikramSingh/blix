@@ -403,16 +403,23 @@ public static class Intersection
         else
         {
             // The segment crosses the face: there is no direction between the closest pair, because
-            // they are the same point. The face normal is the stable choice, signed toward the side
-            // the capsule's FIRST endpoint is on so the push-out undoes the way it came in — an
-            // unsigned face normal drives an impaled body further through half the time.
+            // they are the same point. The triangle's OUTWARD normal is the answer, unsigned.
             //
-            // The Depth here is the radius, which UNDERSTATES an impaled capsule: the true minimum
-            // translation also has to carry the axis back out. Stated rather than papered over —
-            // the honest fix is a resolver that never lets a body reach this state, which is what
-            // stage R-C is for, and a depenetration pass for when it does anyway.
-            var unit = Vector3.Normalize(tri.NormalRaw);
-            normal = Vector3.Dot(capsule.PointA - bestTriPoint, unit) >= 0f ? unit : -unit;
+            // <b>Signing it toward an endpoint is wrong, and the resolver found that out.</b> The
+            // first version pointed it toward whichever side PointA was on — which for a body
+            // sinking into a floor is the side UNDERNEATH, so depenetration pushed it further in.
+            // A winding is not a tie-break; for a closed solid it already says which side is
+            // outside, which is exactly what a body that is inside needs to be told.
+            //
+            // That relies on the mesh being closed and outward-wound. Blix.Labs.Character's probe
+            // checks both for every solid in its room, which is where that check earns its keep:
+            // it is not tidiness, it is the precondition for getting an impaled body out.
+            //
+            // The Depth here is the radius, which UNDERSTATES an impaled capsule — the true minimum
+            // translation also has to carry the axis back out. Stated rather than papered over, and
+            // it is why a resolver runs depenetration more than once: each pass gets the body
+            // shallower until the ordinary closest-pair case takes over and finishes the job.
+            normal = Vector3.Normalize(tri.NormalRaw);
         }
         return new CollisionHit
         {
@@ -1271,12 +1278,30 @@ public static class Intersection
                 var length = separation.Length();
 
                 // At a grazing contact the closest pair has all but collapsed, so the direction
-                // between them is noise. The face normal is the stable answer, signed toward the
-                // side the capsule is arriving from — the same choice the discrete test makes when
-                // a segment lies in the plane.
+                // between them is noise. The outward face normal is the stable answer — the same
+                // choice the discrete test makes when a segment lies in the plane, and for the same
+                // reason: a winding says which side is outside, and a body arriving from outside a
+                // closed solid wants to be pushed back the way it came.
                 var normal = length > 1e-6f
                     ? separation / length
-                    : FaceNormalToward(tri, moved.PointA);
+                    : OutwardNormal(tri);
+
+                // <b>A surface you are not moving INTO does not obstruct you.</b> A body resting on
+                // the floor is in contact with it at time zero for ever, so without this a sweep
+                // answers "the floor, now" to every horizontal step — and a resolver spends its
+                // whole iteration budget deflecting a motion that was already tangential, arriving
+                // nowhere. That is exactly how it failed: a walk of 200 steps that never moved, and
+                // a graze along a wall that travelled 0.000 m.
+                //
+                // The rule is the one CollisionResponse already applies to velocity ("when it's
+                // already moving away, no change"), applied one layer earlier to the query. At a
+                // contact found part-way through a step the motion is approaching by construction,
+                // so this only ever fires on a contact the body is already in.
+                //
+                // Overlap is a different question and is not filtered here: a body INSIDE something
+                // has to be pushed out whichever way it happens to be moving, and that is what the
+                // discrete test is for — a resolver depenetrates before it sweeps.
+                if (Vector3.Dot(motion, normal) >= -1e-5f * speed) return null;
 
                 return new CollisionHit
                 {
@@ -1299,7 +1324,7 @@ public static class Intersection
         {
             Time = MathF.Min(time, 1f),
             Point = capsule.PointA + (motion * time),
-            Normal = FaceNormalToward(tri, capsule.PointA),
+            Normal = OutwardNormal(tri),
             Depth = 0f,
         };
     }
@@ -1361,14 +1386,17 @@ public static class Intersection
     /// </remarks>
     private const int MaxSweepIterations = 32;
 
-    private static Vector3 FaceNormalToward(Triangle tri, Vector3 point)
+    /// <summary>The triangle's outward normal, or up for a degenerate one.</summary>
+    /// <remarks>
+    /// Degenerate triangles have no normal at all, and a collider full of them reports contacts with
+    /// NaN normals — which propagate into a position and end a run somewhere no number can describe.
+    /// Up is arbitrary and finite, which is the property that matters.
+    /// </remarks>
+    private static Vector3 OutwardNormal(Triangle tri)
     {
         var raw = tri.NormalRaw;
         var lengthSquared = raw.LengthSquared();
-        if (lengthSquared < 1e-18f) return Vector3.UnitY;
-
-        var unit = raw / MathF.Sqrt(lengthSquared);
-        return Vector3.Dot(point - tri.V0, unit) >= 0f ? unit : -unit;
+        return lengthSquared < 1e-18f ? Vector3.UnitY : raw / MathF.Sqrt(lengthSquared);
     }
 
     public static CollisionHit? Raycast(Ray ray, BoundingSphere sphere, float maxDistance = float.PositiveInfinity)

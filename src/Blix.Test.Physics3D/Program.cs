@@ -176,6 +176,41 @@ var t = new TestRunner();
         hit?.Point.X ?? -99f, 1f, 1e-3f);
 }
 
+// ── A surface you are not moving into does not obstruct you ──────────────────────────────────────
+//
+// A body resting on the floor is in contact with it at time zero, and stays in contact for as long
+// as it rests there. A sweep that answers "the floor, now" to a horizontal step is technically
+// telling the truth and practically useless: a resolver spends its whole iteration budget
+// deflecting a motion that was already tangential and arrives nowhere. Found exactly that way — a
+// 200-step walk that did not move.
+{
+    var ground = new Triangle(new(-50f, 0f, -50f), new(50f, 0f, -50f), new(0f, 0f, 50f));
+
+    // Resting exactly on it: the lowest point of the capsule is at y = 0.
+    var resting = new Capsule(new(0f, 0.35f, 0f), new(0f, 1.45f, 0f), 0.35f);
+
+    t.ExpectMiss("a body resting on a surface is not obstructed by it when it walks along",
+        Intersection.Sweep(resting, new Vector3(1f, 0f, 0f), ground));
+
+    t.ExpectTrue("but is obstructed the moment it moves INTO it",
+        Intersection.Sweep(resting, new Vector3(0f, -1f, 0f), ground) is not null);
+
+    t.ExpectMiss("and is free to leave",
+        Intersection.Sweep(resting, new Vector3(0f, 1f, 0f), ground));
+
+    // Descending while travelling: still a contact, because the motion approaches.
+    var hit = Intersection.Sweep(resting, new Vector3(1f, -0.2f, 0f), ground);
+    t.ExpectTrue("a body walking downhill into a surface still meets it", hit is not null);
+    t.ExpectClose("at the very start of the step, since it was already touching", hit?.Time ?? -1f, 0f, 1e-3f);
+
+    // OVERLAP IS A DIFFERENT QUESTION and is deliberately not filtered: a body inside a solid has to
+    // be pushed out whichever way it happens to be moving. That answer comes from the discrete test,
+    // which a resolver runs before it sweeps.
+    var sunk = new Capsule(new(0f, 0.2f, 0f), new(0f, 1.3f, 0f), 0.35f);
+    t.ExpectHit("a body already inside a surface still reports the overlap, whatever its motion",
+        Intersection.Test(sunk, new TriangleMesh3D(new[] { ground })), expectedDepth: 0.15f);
+}
+
 t.PrintSummary();
 return t.Failed;
 

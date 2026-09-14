@@ -341,6 +341,119 @@ foreach (var part in room.Parts)
         Intersection.Sweep(runner, motion, room.Collider) is not null, "swept clean through");
 }
 
+// ── The resolver ────────────────────────────────────────────────────────────────────────────────
+//
+// Sweep, stop at the contact, deflect what is left, repeat. These are the invariants the loop is
+// judged by, and each one is followed by the SAME check with the loop switched off — because a
+// property of the geometry and a property of the resolver look identical when everything passes.
+{
+    const float radius = 0.35f;
+
+    static Capsule Body(float x, float y, float z) =>
+        new(new(x, y + radius, z), new(x, y + 1.45f, z), radius);
+
+    static Capsule Moved(Capsule body, Vector3 delta) =>
+        new(body.PointA + delta, body.PointB + delta, radius);
+
+    var resolver = new BodyResolver();
+
+    // ── 1. A walk that never ends inside anything ────────────────────────────────────────────────
+    //
+    // 200 steps of 8 cm from the spawn, straight at the ramp fan: across open floor, into the 30°
+    // ramp, and up it — the deflection carrying the body up the slope, since nothing here has
+    // gravity yet. Checked after EVERY step, because a resolver that is right 199 times and wrong
+    // once has a bug that a final position cannot see.
+    {
+        var body = Body(Room.SpawnPoint.X, 0f, Room.SpawnPoint.Z);
+        var worstDepth = 0f;
+        var stuckAt = -1;
+
+        for (var step = 0; step < 200; step++)
+        {
+            var result = resolver.Move(body, new Vector3(0.08f, 0f, 0f), room.Collider);
+            body = Moved(body, result.Position);
+
+            if (Intersection.Test(body, room.Collider) is { } overlap)
+            {
+                worstDepth = MathF.Max(worstDepth, overlap.Depth);
+                if (overlap.Depth > 2f * resolver.SkinWidth && stuckAt < 0) stuckAt = step;
+            }
+        }
+
+        t.Expect("a 16 m walk into the ramp fan never ends a step inside a surface",
+            stuckAt < 0, $"first penetration at step {stuckAt}, worst {worstDepth:0.0000} m");
+
+        // And it got somewhere: a body that refused to move would pass the check above trivially.
+        t.Expect("and the walk actually climbed the 30° ramp",
+            body.PointA.Y - radius > 1.0f, $"ended at y {body.PointA.Y - radius:0.000}");
+    }
+
+    // ── 2. It cannot be pushed through a wall ────────────────────────────────────────────────────
+    {
+        var body = Body(13f, 0f, 0f);
+        var result = resolver.Move(body, new Vector3(2.4f, 0f, 0f), room.Collider);
+        var ended = Moved(body, result.Position);
+
+        t.Expect("a body driven at the east wall at 144 m/s stays west of it",
+            ended.PointA.X + radius <= 14f + 1e-3f, $"ended at x {ended.PointA.X:0.000}");
+        t.Expect("and is not inside anything when it stops",
+            Intersection.Test(ended, room.Collider) is null, "it came to rest overlapping");
+    }
+
+    // ── 3. Grazing a wall keeps the speed along it ───────────────────────────────────────────────
+    //
+    // THE ONE THAT SEPARATES A RESOLVER FROM A STOP. A body moving diagonally into a wall should
+    // arrive at the far end of its along-wall motion — sliding past a doorframe rather than sticking
+    // to it. The east wall's inner face is at x = 14; the body starts 15 cm short of touching it.
+    {
+        var body = Body(13.5f, 0f, 0f);
+        var motion = new Vector3(1f, 0f, 1f);
+
+        var slid = resolver.Move(body, motion, room.Collider);
+        t.Expect("a body grazing a wall keeps its along-wall travel",
+            slid.Position.Z > 0.98f, $"travelled {slid.Position.Z:0.000} of 1.0 along the wall");
+        t.Expect("and stops against it across the wall",
+            slid.Position.X < 0.2f, $"travelled {slid.Position.X:0.000} into the wall");
+
+        // THE CONTROL. With the loop off the body simply stops at the contact, so the along-wall
+        // travel is whatever it managed before touching — about 15 cm. If this were ALSO ~1.0, the
+        // check above would be measuring the geometry rather than the resolver.
+        var stopper = new BodyResolver { Enabled = false };
+        var stopped = stopper.Move(body, motion, room.Collider);
+        t.Expect("the control: with deflection off it stops dead at the wall",
+            stopped.Position.Z < 0.2f, $"still travelled {stopped.Position.Z:0.000} along the wall");
+    }
+
+    // ── 4. A body that starts inside a solid gets out ────────────────────────────────────────────
+    //
+    // Sunk 25 cm into the floor, which is where the impaled contact lives: the segment crosses the
+    // floor's top face, so the closest pair collapses and the only thing that says which way is out
+    // is the winding. This is the check that made the outward-normal decision in Intersection.
+    {
+        var sunk = Body(0f, -0.25f, -6f);
+        t.Expect("the fixture really does start inside the floor",
+            Intersection.Test(sunk, room.Collider) is not null, "it was already clear");
+
+        var freed = resolver.Move(sunk, Vector3.Zero, room.Collider);
+        var after = Moved(sunk, freed.Position);
+
+        t.Expect("a body sunk into the floor is pushed out", freed.Depenetrations > 0, "no passes ran");
+        t.Expect("and ends up clear of it",
+            Intersection.Test(after, room.Collider) is null,
+            $"still overlapping after {freed.Depenetrations} pass(es)");
+        t.Expect("upward, not further in", freed.Position.Y > 0f, $"moved {freed.Position.Y:0.000} in Y");
+    }
+
+    // ── 5. The same move twice is the same move ──────────────────────────────────────────────────
+    {
+        var body = Body(13.5f, 0f, 0f);
+        var a = resolver.Move(body, new Vector3(1f, 0f, 1f), room.Collider);
+        var b = resolver.Move(body, new Vector3(1f, 0f, 1f), room.Collider);
+        t.Expect("the resolver is deterministic", a.Position == b.Position,
+            $"{a.Position} then {b.Position}");
+    }
+}
+
 t.PrintSummary();
 return t.Failed;
 
