@@ -222,6 +222,10 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // and exactly what Camera3D.ScreenPointToRay cannot be handed.
     private ViewDeclaration? mainView;
 
+    // The panel view, declared each frame with last frame's image rectangle. Kept so the panel can
+    // turn a pointer into a ray during layout, which is the only moment ImGui will let it.
+    private ViewDeclaration? viewportView;
+
     private Matrix4x4 viewProjection = Matrix4x4.Identity;
     private Vector3 cameraPosition;
     private float sunYaw = 0.5f;
@@ -257,6 +261,29 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     private nint shadowMapId;
     private float thumbnailScale = 1f;
 
+    // ── Stage B of the view arc: a second camera, shown in a panel ───────────
+    // Its own yaw/pitch/distance, because a viewport that follows the main camera is a mirror and
+    // proves nothing about views. Starts looking along a different axis so the two pictures are
+    // obviously not the same picture.
+    private nint viewportId;
+    private float viewportYaw = -1.4f;
+    private float viewportPitch = 0.25f;
+    private float viewportDistance = 7f;
+    private Matrix4x4 viewportViewProjection = Matrix4x4.Identity;
+    private Vector3 viewportCameraPosition;
+    private bool viewportOpen = true;
+
+    // <b>The panel's rectangle, from LAST frame.</b> UI layout runs after the views are declared
+    // and after the scene is recorded, so the rect a panel occupies this frame does not exist when
+    // the picture for it is drawn. Every immediate-mode editor answers this the same way: draw at
+    // the size the panel was, and wear one frame of stale aspect on a resize.
+    //
+    // Written down rather than hidden because stage D has to decide whether that lag is what the
+    // substrate wants or whether layout and submission should be split so the rect is known first.
+    private Vector2 viewportPanelSize = new(480f, 270f);
+    private Vector2 viewportImageMin;
+    private Vector2 viewportImageSize;
+
     public string DebugName => "lab";
 
     public string UiName => "lab";
@@ -275,6 +302,10 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // question it answers is coarse: is the caster pass drawing anything at all, and does the
         // sun's frustum cover the subject? Both are visible in red.
         shadowMapId = host.RegisterUiTexture(renderer.ShadowDepth);
+
+        // The panel viewport's colour. Registered once: the graph reallocates this texture on a
+        // window resize but mutates the registered entry in place, so the handle stays valid.
+        viewportId = host.RegisterUiTexture(renderer.ViewportColour);
 
         LoadRig(vk);
 
@@ -423,6 +454,18 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             MathF.Cos(sunPitch) * MathF.Sin(sunYaw),
             MathF.Sin(sunPitch),
             MathF.Cos(sunPitch) * MathF.Cos(sunYaw)));
+
+        // The viewport's own camera. Aspect comes from the PANEL, not the window — that is the
+        // whole difference between a second view and a second copy of this one.
+        var viewportAspect = viewportPanelSize.Y > 1f ? viewportPanelSize.X / viewportPanelSize.Y : 16f / 9f;
+        var viewportEye = new Vector3(
+            MathF.Cos(viewportPitch) * MathF.Sin(viewportYaw),
+            MathF.Sin(viewportPitch),
+            MathF.Cos(viewportPitch) * MathF.Cos(viewportYaw)) * viewportDistance;
+        viewportCameraPosition = viewportEye;
+        viewportViewProjection = Matrix4x4.CreateLookAt(viewportEye, new Vector3(0f, 1.2f, 0f), Vector3.UnitY)
+                                 * GraphicsMatrices.CreatePerspectiveVulkan(
+                                     MathF.PI / 3.2f, viewportAspect, 0.1f, 120f);
 
         UpdateRig(time.Delta);
     }
@@ -621,7 +664,8 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         renderer.Render(
             commandList, scene, viewProjection, cameraPosition, model, modelTransform,
-            rig, palettes?.Count ?? 0);
+            rig, palettes?.Count ?? 0,
+            viewportOpen ? viewportViewProjection : null, viewportCameraPosition);
     }
 
     public void Debug(DebugContext debug)
@@ -642,7 +686,52 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             new Rect(0f, 0f, logicalW, logicalH),
             new Rect(0f, 0f, debug.Frame.Width, debug.Frame.Height));
         mainView = declaration;
-        using var view = debug.Draw.In(declaration);
+        using (debug.Draw.In(declaration))
+        {
+            DrawSceneGizmos(debug, trails: true);
+        }
+
+        // ── Stage C: the same gizmos, through the panel's view ───────────────
+        // <b>Declared with the IMAGE's rectangle, not the panel's.</b> The picture is letterboxed
+        // inside the panel to keep its aspect, so the two differ by the letterbox — and a ray cast
+        // through the panel rect would be off by exactly that, silently, and only on panels whose
+        // shape happens not to match the target's.
+        //
+        // The runtime routes debug geometry to each declared view's own target, so naming
+        // ViewportSurface here is all it takes to put the skeleton and the grid inside the panel.
+        // That routing already existed and had never had a second view to prove it.
+        //
+        // The rectangle is LAST frame's: UI layout runs after this. See DrawViewportPanel.
+        if (viewportOpen && viewportImageSize.X > 1f && viewportImageSize.Y > 1f)
+        {
+            var panelDeclaration = debug.Draw.Declare(
+                "viewport",
+                viewportViewProjection,
+                renderer.ViewportSurface,
+                new Rect(viewportImageMin.X, viewportImageMin.Y, viewportImageSize.X, viewportImageSize.Y),
+                // The target is half the swapchain and the picture fills it, so the physical
+                // rectangle is the whole of it rather than a sub-rect of the window.
+                new Rect(0f, 0f, debug.Frame.Width * 0.5f, debug.Frame.Height * 0.5f));
+            viewportView = panelDeclaration;
+
+            using (debug.Draw.In(panelDeclaration))
+            {
+                // Trails off in the panel: a trail is keyed by name and remembers across frames, so
+                // feeding one the same name from two views would interleave two cameras' worth of
+                // points into a single history.
+                DrawSceneGizmos(debug, trails: false);
+            }
+        }
+        else
+        {
+            viewportView = null;
+        }
+    }
+
+    // Everything the lab draws into a view. Called once per view rather than once per frame,
+    // because a view is a camera AND a target — the same geometry seen twice is two sets of lines.
+    private void DrawSceneGizmos(DebugContext debug, bool trails)
+    {
         debug.Draw.Grid("floor", new Vector3(0f, 0.02f, 0f), 24f, 24, new GraphicsColor(0.2f, 0.24f, 0.3f, 1f));
 
         // The sun, drawn where it is actually pointing — an arrow that is wrong is the
@@ -653,7 +742,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         if (model is not null) DrawModelGizmos(debug);
         if (rig is not null) DrawRigGizmos(debug);
 
-        if (showTrail)
+        if (trails && showTrail)
         {
             // Where the sun has been while it was being dragged.
             debug.Draw.Trail("sun/path", sunFrom, new GraphicsColor(1f, 0.75f, 0.3f, 1f), trailSeconds);
@@ -1195,6 +1284,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         }
 
         DrawImagePanel();
+        DrawViewportPanel();
 
         ImGui.Separator();
         ImGui.TextDisabled(rig is not null
@@ -1206,6 +1296,109 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // Transport on the keyboard, because scrubbing a pose means looking at the model rather than at
     // the slider you are dragging. Space and the arrows are what every animation tool uses; a lab
     // that invented its own would be asking to be relearned.
+    // <b>A second camera, rendered off-screen and shown in a panel.</b> Stage B of the view arc.
+    //
+    // The picture here is the SAME scene through a different view-projection, drawn by the same
+    // pipelines into a target of its own — not a copy of the main view, which would prove a texture
+    // can be drawn (stage A did that) and nothing about views.
+    //
+    // Two things this settles, both written down because stage D has to weigh them:
+    //
+    //   • <b>The panel's rect is one frame old.</b> UI layout runs after views are declared and
+    //     after the scene is recorded, so this frame's picture is drawn at last frame's size. A
+    //     resize therefore shows one frame of stale aspect. That is what every immediate-mode
+    //     editor does; the alternative is splitting layout from submission, which moves who owns
+    //     the frame.
+    //   • <b>The image rect is not the panel rect.</b> The target has its own aspect and the panel
+    //     has another, so the picture is fitted inside with letterboxing. Stage C picks through
+    //     THAT rect, not the panel's — which is exactly the offset-and-scale case ViewDeclaration's
+    //     two rectangles exist for, and the case a full-window view could never exercise.
+    private void DrawViewportPanel()
+    {
+        if (viewportId == 0) return;
+
+        ImGui.SetNextWindowSize(new Vector2(520, 340), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowPos(new Vector2(480, 470), ImGuiCond.FirstUseEver);
+        if (!ImGui.Begin("viewport", ref viewportOpen))
+        {
+            ImGui.End();
+            return;
+        }
+
+        ImGui.SliderFloat("yaw", ref viewportYaw, -MathF.PI, MathF.PI);
+        ImGui.SliderFloat("pitch", ref viewportPitch, 0.05f, 1.45f);
+        ImGui.SliderFloat("dist", ref viewportDistance, 2.5f, 30f);
+
+        var available = ImGui.GetContentRegionAvail();
+        if (available.X < 32f || available.Y < 32f)
+        {
+            ImGui.End();
+            return;
+        }
+
+        // Read for NEXT frame's projection. Reading it here rather than guessing is the whole
+        // reason the lag is one frame and not permanent.
+        viewportPanelSize = available;
+
+        // Largest rect with the TARGET's aspect that fits the panel, centred. Stretching to fill
+        // would make the picture disagree with the projection it was drawn through, and every ray
+        // cast into it afterwards would be wrong by that same stretch — silently, and only on
+        // panels whose shape happens not to match.
+        var (targetW, targetH) = host?.LogicalSize ?? (16, 9);
+        var targetAspect = targetH > 0 ? targetW / (float)targetH : 16f / 9f;
+        var fitted = available.X / available.Y > targetAspect
+            ? new Vector2(available.Y * targetAspect, available.Y)
+            : new Vector2(available.X, available.X / targetAspect);
+
+        var cursor = ImGui.GetCursorScreenPos();
+        var offset = (available - fitted) * 0.5f;
+        ImGui.SetCursorScreenPos(cursor + offset);
+
+        viewportImageMin = cursor + offset;
+        viewportImageSize = fitted;
+        ImGui.Image(viewportId, fitted);
+
+        // ── Stage C: driving a view from inside the widget ───────────────────
+        // <b>Not through IInputHandler, and that is forced rather than chosen.</b> The viewport is
+        // an ImGui window, so ImGui captures the pointer over it, GestureOwnership hands the press
+        // to the UI, and the application's input handler is never called — correctly. The picture
+        // is an ImGui ITEM, so the only place that can ask "is the pointer on it" is right here,
+        // during layout, using the item state ImGui just computed.
+        //
+        // This is the shape every editor viewport has, and it is worth noticing that the engine
+        // needed no change to allow it: the capture rule was already right, and the widget asking
+        // about itself is what the rule leaves room for.
+        var hovered = ImGui.IsItemHovered();
+        if (ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left))
+        {
+            var drag = ImGui.GetIO().MouseDelta;
+            viewportYaw -= drag.X * 0.008f;
+            viewportPitch = Math.Clamp(viewportPitch + (drag.Y * 0.006f), 0.05f, 1.45f);
+        }
+
+        if (hovered)
+        {
+            var wheel = ImGui.GetIO().MouseWheel;
+            if (wheel != 0f) viewportDistance = Math.Clamp(viewportDistance - (wheel * 0.8f), 2.5f, 30f);
+
+            // <b>The ray, through the view's OWN rectangle.</b> ViewPicking compares the pointer
+            // against the declaration's logical rect, so a picture at an offset inside a panel on a
+            // 2x display picks correctly without a single scale factor written here. That is the
+            // whole claim of carrying two rectangles, and until now nothing had ever declared a
+            // view that was not the whole window.
+            if (ImGui.IsMouseClicked(ImGuiMouseButton.Left) && viewportView is { } declared)
+            {
+                if (ViewPicking.RayThrough(declared, ImGui.GetMousePos()) is { } ray) PickBone(ray);
+            }
+        }
+
+        var pointer = ImGui.GetMousePos();
+        ImGui.TextDisabled(hovered
+            ? $"pointer {pointer.X - viewportImageMin.X:0}, {pointer.Y - viewportImageMin.Y:0} in view"
+            : "drag to orbit · wheel to zoom · click to pick");
+        ImGui.End();
+    }
+
     // <b>The asset's own textures, drawn.</b> Stage A of the view arc, and the first thing in this
     // engine to put a non-font image on screen.
     //

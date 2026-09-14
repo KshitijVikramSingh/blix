@@ -2846,6 +2846,77 @@ static ShaderInterface MinimalShader() => new(new[]
     }
 }
 
+// ============================================================================
+// Section AR — a view that is NOT the whole window.
+// ============================================================================
+//
+// ViewPicking has been correct since it was written and had exactly one caller, which declared a
+// view covering the entire window. Every interesting property of a view — an offset, a letterbox,
+// a backing scale that differs from the logical size — was therefore untested, because a
+// full-window view at 1x makes all three the identity.
+//
+// The lab's embedded viewport is the first view that is none of those things: a picture fitted
+// inside a panel, at an offset, on a target half the framebuffer's size.
+{
+    // A 640x360 picture sitting at (200, 120) inside a window — the letterboxed image rect, not
+    // the panel rect that contains it.
+    var projection = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, 640f / 360f, 0.1f, 100f);
+    var vp = Matrix4x4.CreateLookAt(new Vector3(0, 0, 5), Vector3.Zero, Vector3.UnitY) * projection;
+
+    var panel = new ViewDeclaration(
+        new ViewId(1), "viewport", vp, new RenderSurfaceHandle(7),
+        LogicalViewport: new Rect(200f, 120f, 640f, 360f),
+        // Physical is the TARGET's own extent — half a 2560x1440 framebuffer — and deliberately
+        // shares neither origin nor size with the logical rect. A view whose two rectangles agree
+        // is the case that proves nothing.
+        PhysicalViewport: new Rect(0f, 0f, 1280f, 720f));
+
+    // The centre of the IMAGE, not of the window and not of the panel.
+    var centre = ViewPicking.RayThrough(panel, new Vector2(200f + 320f, 120f + 180f));
+    t.ExpectTrue("AR.1 a pointer at the image's centre yields a ray", centre is not null);
+    t.ExpectClose("AR.1 and it points straight down the camera's forward", centre!.Value.Direction.Z, -1f, 0.001f);
+    t.ExpectClose("AR.1 with no sideways component", centre.Value.Direction.X, 0f, 0.001f);
+
+    // <b>The offset is not optional.</b> The same coordinates read as if the view were at the
+    // window's origin land somewhere else entirely — this is the bug a full-window view can never
+    // expose, because there the two are the same point.
+    var asIfAtOrigin = ViewPicking.RayThrough(panel, new Vector2(320f, 180f));
+    t.ExpectTrue("AR.2 the window-centre point is NOT the image centre",
+        asIfAtOrigin is null || MathF.Abs(asIfAtOrigin.Value.Direction.X) > 0.01f);
+
+    // Outside the rect is no ray rather than an extrapolated one, which is what makes "ask every
+    // view, at most one answers" a usable way to route a pointer.
+    t.ExpectTrue("AR.3 a pointer left of the image misses",
+        ViewPicking.RayThrough(panel, new Vector2(199f, 300f)) is null);
+    t.ExpectTrue("AR.3 a pointer below it misses",
+        ViewPicking.RayThrough(panel, new Vector2(400f, 480f)) is null);
+    t.ExpectTrue("AR.3 the far edge is half-open",
+        ViewPicking.RayThrough(panel, new Vector2(200f + 640f, 300f)) is null);
+    t.ExpectTrue("AR.3 and the near edge is inclusive",
+        ViewPicking.RayThrough(panel, new Vector2(200f, 120f)) is not null);
+
+    // <b>The Retina invariant.</b> The physical rectangle is for the renderer; picking reads the
+    // logical one. Doubling the physical extent — which is exactly what moving the same window to
+    // a 2x display does — must not move where a ray goes for the same logical pointer. Getting
+    // this wrong is invisible on the machine it was written on.
+    var retina = panel with { PhysicalViewport = new Rect(0f, 0f, 2560f, 1440f) };
+    var a = ViewPicking.RayThrough(panel, new Vector2(420f, 250f));
+    var b = ViewPicking.RayThrough(retina, new Vector2(420f, 250f));
+    t.ExpectTrue("AR.4 the same logical pointer gives the same ray at 1x and 2x",
+        a is not null && b is not null &&
+        Vector3.Distance(a.Value.Direction, b.Value.Direction) < 1e-6f);
+
+    // Two abutting views: the shared edge belongs to exactly one of them. That is the property the
+    // half-open test exists for, and it is what lets a layout route a pointer by asking each view.
+    var left = panel with { LogicalViewport = new Rect(0f, 0f, 100f, 100f) };
+    var right = panel with { Id = new ViewId(2), LogicalViewport = new Rect(100f, 0f, 100f, 100f) };
+    var onSeam = new Vector2(100f, 50f);
+    var claims =
+        (ViewPicking.RayThrough(left, onSeam) is not null ? 1 : 0) +
+        (ViewPicking.RayThrough(right, onSeam) is not null ? 1 : 0);
+    t.ExpectTrue("AR.5 exactly one of two abutting views claims the shared pixel", claims == 1);
+}
+
 t.PrintSummary();
 return t.FailedCount;
 

@@ -419,6 +419,49 @@ The sun's depth buffer reads **red-scale**, which is the format and not a fault:
 depth image sampled by a colour shader is `(d, 0, 0, 1)`. It answers the coarse question — is the
 caster pass drawing anything, and does the sun's frustum cover the subject.
 
+#### The viewport panel — a second camera, in a window
+
+Stages B and C of the view arc. A **second camera** on the same scene, rendered into its own
+target at half the swapchain's size by its own graph pass, shown inside an ImGui window, orbited
+and picked through.
+
+A second camera and not a mirror: showing the main scene target in a panel would prove a texture
+can be drawn (stage A did that) and nothing about views.
+
+Three things it settled:
+
+- **The viewport needs no pipelines of its own.** Two render passes whose attachments match in
+  format and sample count are render-pass *compatible*, so every lit and skinned pipeline baked
+  against the scene pass is legal in the viewport pass. The cost of sharing formats is that the
+  panel holds untonemapped HDR — the curve lives in the present pass and a panel has none, so
+  anything over 1.0 clips. Written down rather than fixed; two pipeline families is a lot to pay
+  before the clipping is in the way.
+- **The panel's rect is one frame old.** UI layout runs *after* views are declared and after the
+  scene is recorded, so this frame's picture is drawn at last frame's size and a resize shows one
+  frame of stale aspect. That is what every immediate-mode editor does; the alternative is
+  splitting layout from submission, which moves who owns the frame.
+- **The interaction cannot go through `IInputHandler`, and that is correct.** The viewport is an
+  ImGui window, so ImGui captures the pointer, `GestureOwnership` gives the press to the UI, and
+  the application's handler is never called. The picture is an ImGui *item*, so the widget asks
+  about itself during layout. **The engine needed no change** — the capture rule was already
+  right, and this is what it leaves room for.
+
+**What gets picked is the image's rect, not the panel's.** The picture is letterboxed inside the
+panel to keep its aspect, so the two differ by the letterbox, and a ray cast through the panel
+rect is wrong by exactly that — silently, and only on panels whose shape happens not to match.
+`ViewPicking.RayThrough` reads the view's own logical rectangle, so no scale factor is written at
+the call site at all.
+
+**Gizmos land in the panel for free.** The runtime groups debug commands by `ViewId` and submits
+each group to that view's own target, so naming `ViewportSurface` on the declaration puts the
+grid, the sun arrow and every skeleton inside the panel — two passes, `debug:main` and
+`debug:viewport`. That routing had existed since the view arc began and had never had a second
+view to prove it.
+
+`Blix.Test.Graphics` Section **AR** pins what a full-window view could never exercise: an offset
+rect, the half-open far edge, two abutting views claiming a shared pixel exactly once, and the
+Retina invariant — the same logical pointer gives the same ray when the physical extent doubles.
+
 **The capture tool** renders the lab and writes what it rendered to a PNG. It captures
 the **HDR scene target**, not the swapchain — so the lab's render path needed no change,
 and the tonemap is applied on the CPU, which means a capture holds real radiance and the
@@ -428,7 +471,13 @@ curve is an offline choice rather than baked in.
 tools/run-lab-capture.sh --frames 10 --out shot.png
 tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --time 0.35 --xray --out walk.png
 tools/run-lab-capture.sh --rig .../Rogue.glb --clip Dodge_Forward --advance 2.0 --drive-root --out travel.png
+tools/run-lab-capture.sh --rig .../Rogue.glb --instances 3 --viewport --xray --out panel.png
 ```
+
+`--viewport` reads back the **panel camera's** target rather than the main scene's, and aims the
+debug geometry at it too. The panel is an ImGui window and this tool draws no UI, so without it
+the second camera could only ever be checked by a person looking at a running window — which is
+the "verified by eye, once" the capture tool exists to replace.
 
 `--advance <seconds>` runs the clock a fixed number of fixed 17 ms steps — no wall time
 anywhere, so the run stays reproducible — and draws the integrated root path with a tick every

@@ -55,8 +55,11 @@ public sealed class LabRenderer : IDisposable
     private GraphResourceHandle shadowTarget;
     private GraphResourceHandle sceneColourTarget;
     private GraphResourceHandle sceneDepthTarget;
+    private GraphResourceHandle viewportColourTarget;
+    private GraphResourceHandle viewportDepthTarget;
     private PassHandle shadowPass;
     private PassHandle litPass;
+    private PassHandle viewportPass;
 
     private ShaderProgramHandle litProgram;
     private ShaderProgramHandle shadowProgram;
@@ -139,6 +142,30 @@ public sealed class LabRenderer : IDisposable
         sceneColourTarget = graph.ColorTarget("lab-hdr", TextureFormat.Rgba16F, fullSize);
         sceneDepthTarget = graph.DepthTarget("lab-scene-depth", fullSize);
 
+        // <b>A SECOND camera on the same scene, not a mirror of the first.</b> Showing the main
+        // scene target in a panel would be a picture of the picture — it proves a texture can be
+        // drawn (stage A did that) and nothing about views. A viewport is only a view if it can
+        // look somewhere else, so this is its own target, its own camera and its own depth.
+        //
+        // <b>The SAME formats as the scene target, deliberately.</b> Two render passes whose
+        // attachments match in format and sample count are render-pass COMPATIBLE, so a pipeline
+        // baked against one is legal in the other — which means the viewport needs no pipelines of
+        // its own. Give it an Rgba8 target instead and every lit and skinned pipeline would need a
+        // twin, for a picture that is the same picture from a different chair.
+        //
+        // What that costs: the viewport holds HDR radiance with no tonemap, because the curve lives
+        // in the present pass and a panel has no present pass — ImGui samples a texture and draws
+        // it. Anything over 1.0 therefore clips. Accepted for now and written down; the fix is a
+        // fragment stage that tonemaps, and it is not worth two pipeline families until the clipping
+        // is actually in the way.
+        //
+        // Half the swapchain's size. A panel is a fraction of the window, the scene is drawn twice
+        // to fill both, and paying full resolution for the smaller of the two is the kind of cost
+        // that is invisible until a frame budget is tight.
+        var halfSize = new MatchSwapchainGraphSize(0.5f);
+        viewportColourTarget = graph.ColorTarget("lab-viewport", TextureFormat.Rgba16F, halfSize);
+        viewportDepthTarget = graph.DepthTarget("lab-viewport-depth", halfSize);
+
         shadowPass = graph.GraphicsPass("lab.shadow")
             .Depth(shadowTarget, LoadOp.Clear, StoreOp.Store)
             .Shader(shadowInterface)
@@ -149,6 +176,16 @@ public sealed class LabRenderer : IDisposable
         litPass = graph.GraphicsPass("lab.lit")
             .Target(sceneColourTarget, LoadOp.Clear, StoreOp.Store)
             .Depth(sceneDepthTarget, LoadOp.Clear, StoreOp.Store)
+            .Read(shadowTarget)
+            .Shader(litInterface)
+            .Handle;
+
+        // Same shader interface as the lit pass and the same Read edge on the shadow map — the
+        // viewport is the lit pass pointed somewhere else, which is exactly what makes it a view
+        // rather than a second renderer.
+        viewportPass = graph.GraphicsPass("lab.viewport")
+            .Target(viewportColourTarget, LoadOp.Clear, StoreOp.Store)
+            .Depth(viewportDepthTarget, LoadOp.Clear, StoreOp.Store)
             .Read(shadowTarget)
             .Shader(litInterface)
             .Handle;
@@ -272,6 +309,12 @@ public sealed class LabRenderer : IDisposable
     /// </remarks>
     public ShaderProgramHandle SkinnedProgram => skinnedProgram;
 
+    /// <summary>The panel viewport's colour, already rendered. Register it with the host to show it.</summary>
+    public TextureHandle ViewportColour => graph.GetColorTexture(viewportColourTarget);
+
+    /// <summary>The surface the viewport draws into, so debug geometry can land in the panel's picture too.</summary>
+    public RenderSurfaceHandle ViewportSurface => graph.GetPassSurface(viewportPass);
+
     /// <param name="rigInstances">
     /// How many instances of <paramref name="rig"/> to draw, and how many palettes the caller has
     /// already written into its bone buffer. Zero draws nothing; one is the ordinary case and takes
@@ -285,7 +328,9 @@ public sealed class LabRenderer : IDisposable
         LabModel? model = null,
         Matrix4x4 modelTransform = default,
         LabRig? rig = null,
-        int rigInstances = 1)
+        int rigInstances = 1,
+        Matrix4x4? viewportViewProjection = null,
+        Vector3 viewportCameraPosition = default)
     {
         if (modelTransform == default) modelTransform = Matrix4x4.Identity;
 
@@ -338,6 +383,30 @@ public sealed class LabRenderer : IDisposable
             DrawModelParts(scope, model, modelTransform, litPipeline, uniforms, textures, casterOnly: false);
             DrawRigParts(scope, rig, rigInstances, skinnedPipeline, uniforms, textures, casterOnly: false);
         });
+
+        // Pass 2b — the SAME scene from a second camera, into the panel's target. Same content,
+        // same shadow map, same pipelines; only the view-projection differs. That is what makes it
+        // a view and not a second renderer, and it is why every draw below is the same call the
+        // lit pass makes rather than a parallel implementation that could drift from it.
+        if (viewportViewProjection is { } panelViewProjection)
+        {
+            graph.Pass(viewportPass, scope =>
+            {
+                var uniforms = new ShaderUniform[]
+                {
+                    new("uViewProjection", new Matrix4x4Uniform(panelViewProjection)),
+                    new("uSunViewProjection", new Matrix4x4Uniform(sunViewProjection)),
+                    new("uCameraPosition", new Vector4Uniform(new Vector4(viewportCameraPosition, 1f))),
+                    new("uSunDirection", new Vector4Uniform(new Vector4(scene.SunDirection, 0f))),
+                    new("uSunColour", new Vector4Uniform(new Vector4(scene.SunColour, scene.AmbientStrength))),
+                };
+                var textures = new[] { new ShaderTextureBinding("uSunShadowMap", shadowTexture, Slot: 0) };
+
+                foreach (var item in scene.Objects) DrawObject(scope, item, litPipeline, uniforms, textures);
+                DrawModelParts(scope, model, modelTransform, litPipeline, uniforms, textures, casterOnly: false);
+                DrawRigParts(scope, rig, rigInstances, skinnedPipeline, uniforms, textures, casterOnly: false);
+            });
+        }
 
         graph.Execute(commandList);
 

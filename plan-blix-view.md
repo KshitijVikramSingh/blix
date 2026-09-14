@@ -61,29 +61,50 @@ lab showing every distinct albedo the asset uploaded plus the sun's depth buffer
   quietly renders nothing sends you looking in the wrong place; a rectangle of font atlas is
   unmistakably "wrong texture here", and neither can crash.
 
-## Stage B — a scene in a panel
+## Stage B — a scene in a panel — **DONE**
 
-An off-screen colour target, sized from the panel's rectangle, rendered before the UI submits
-and shown by it.
+A second camera on the same scene, its own colour + depth target at half the swapchain's size,
+its own graph pass, shown by an ImGui `Image`. Capture reads it back with `--viewport`.
 
-**The frame-ordering decision lands here, and the answer is probably "one frame".** The panel's
-rect is known only after layout; the view needs it before. Every immediate-mode editor resolves
-this the same way — *this* frame's picture is drawn at *last* frame's size — and a resize costs
-one frame of stale aspect. The alternative is splitting layout from submission so panel rects
-are known before rendering, which is the real fix and a much larger change to who owns the
-frame. Stage B should take the one-frame lag, **write down that it did**, and let stage D decide
-whether the lag or the split is what the substrate wants.
+**Found by doing it:**
 
-## Stage C — picking and orbiting through the panel
+- **The viewport needed no pipelines of its own.** Two render passes whose attachments match in
+  format and sample count are render-pass *compatible*, so every lit and skinned pipeline baked
+  against the scene pass is legal in the viewport pass. Giving the panel an `Rgba8` target — the
+  obvious choice, since a panel wants display-referred colour — would have doubled the pipeline
+  families for a picture that is the same picture from a different chair.
+- **The cost of that is untonemapped HDR.** The curve lives in the present pass and a panel has
+  no present pass; ImGui samples a texture and draws it. Anything over 1.0 clips. Accepted and
+  written down — the fix is a fragment stage that tonemaps, and it is not worth two pipeline
+  families until the clipping is in the way.
+- **The one-frame lag is real and taken.** The panel's rect is read during layout, which runs
+  after views are declared and after the scene is recorded, so this frame's picture is drawn at
+  last frame's size. A resize shows one frame of stale aspect. Stage D decides whether that is
+  what the substrate wants or whether layout and submission should be split.
 
-The first use of `ViewDeclaration`'s two rectangles for something other than the whole window.
-A pointer in window-logical pixels has to be mapped into the panel's rect before it becomes a
-ray, and on a 2x display the physical rect is what the framebuffer was.
+## Stage C — picking and orbiting through the panel — **DONE**
 
-**Why this is the stage that proves the type:** `RayThrough` has been correct and untested
-against anything but a full-window view. A panel at an offset, on a Retina display, is the case
-the two-rectangle design exists for, and the case where an off-by-the-backing-scale bug is
-invisible in a screenshot and obvious to a hand.
+**Found by doing it:**
+
+- **The interaction cannot go through `IInputHandler`, and that is correct rather than a
+  limitation.** The viewport is an ImGui window, so ImGui captures the pointer over it,
+  `GestureOwnership` gives the press to the UI, and the application's handler is never called.
+  The picture is an ImGui *item*, so the only thing that can ask "is the pointer on it" is the
+  widget, during layout. The engine needed **no change** to allow this — the capture rule was
+  already right, and a widget asking about itself is what the rule leaves room for.
+- **The pickable rect is the IMAGE's, not the panel's.** The picture is letterboxed inside the
+  panel to keep its aspect, so the two differ by the letterbox — and a ray cast through the panel
+  rect is wrong by exactly that, silently, and only on panels whose shape happens not to match.
+- **Per-view debug routing already worked and had never had a second view.** Naming
+  `ViewportSurface` on the declaration is all it takes to put the grid, the sun arrow and three
+  skeletons inside the panel: the runtime groups debug commands by `ViewId` and submits each
+  group to its own view's target. Confirmed as two passes, `debug:main` and `debug:viewport`.
+- **Trails are per-name and cross views.** A trail keyed by name and fed from two views
+  interleaves two cameras' worth of points into one history. The panel view draws no trails.
+
+Section **AR** pins what a full-window view could never exercise: an offset rect, the half-open
+far edge, two abutting views claiming a shared pixel exactly once, and the Retina invariant —
+the same logical pointer must give the same ray when the physical extent doubles.
 
 ## Stage D — who owns a view
 

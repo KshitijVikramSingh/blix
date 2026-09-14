@@ -71,6 +71,12 @@ public static class Program
         // only by where they stand. A capture that can only ever show "different" proves nothing.
         var lockstep = args.Contains("--lockstep");
 
+        // <b>--viewport reads back the PANEL's target rather than the main scene's.</b> The panel
+        // itself is an ImGui window and this tool draws no UI, so without this the second camera
+        // could only ever be checked by a person looking at a running window — which is exactly the
+        // kind of "verified by eye, once" the capture tool exists to replace.
+        var viewport = args.Contains("--viewport");
+
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — lab capture",
@@ -84,7 +90,7 @@ public static class Program
 
         var loop = new CaptureLoop(
             output, options.ExitAfterFrames, modelPath, rigPath, clipName, clipTime, xray, advance,
-            driveRoot, instances, lockstep);
+            driveRoot, instances, lockstep, viewport);
         using (var window = new Window(loop, options))
         {
             window.Run();
@@ -144,6 +150,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private readonly List<Matrix4x4> instancePlacements = new();
     private readonly List<Pose> instancePoses = new();
     private readonly bool lockstep;
+    private readonly bool viewport;
     private readonly List<string> instanceClips = new();
     private float rowWidth;
 
@@ -158,8 +165,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         double advance = 0.0,
         bool driveRoot = false,
         int instances = 1,
-        bool lockstep = false)
+        bool lockstep = false,
+        bool viewport = false)
     {
+        this.viewport = viewport;
         instanceCount = Math.Clamp(instances, 1, LabRig.MaxInstances);
         this.lockstep = lockstep;
         this.xray = xray;
@@ -394,8 +403,21 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
         if (rig is not null && palettes is not null) rig.UploadPalettes(palettes);
 
+        // The panel camera looks from the opposite side, so a --viewport capture and a plain one of
+        // the same arguments are visibly two cameras rather than one picture twice.
+        var panelEye = new Vector3(-eye.X, eye.Y, -eye.Z);
+        var panelView = Matrix4x4.CreateLookAt(panelEye, target, Vector3.UnitY)
+                        * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, aspect, 0.1f, 120f);
+
         renderer.Render(
-            commandList, scene, viewProjection, eye, model, modelTransform, rig, palettes?.Count ?? 0);
+            commandList, scene, viewProjection, eye, model, modelTransform, rig, palettes?.Count ?? 0,
+            viewport ? panelView : null, panelEye);
+
+        // Debug() runs BEFORE this in the frame, so it annotates with whatever was stored last time
+        // round. Storing the matrix the read-back target is actually drawn through — rather than
+        // the main camera's — is what stops a --viewport capture's skeleton from being drawn in the
+        // wrong place by exactly the difference between two cameras.
+        viewProjection = viewport ? panelView : viewProjection;
 
         // Captured after the frame this call records has been executed — so the read
         // happens on the NEXT OnRender, when the target holds a finished picture rather
@@ -424,10 +446,17 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     {
         debug.State.DepthTestDrawing = !xray;
 
+        // <b>Whichever target is being read back.</b> A --viewport capture that drew its gizmos into
+        // the scene target would come back as a clean render with no overlay at all — the geometry
+        // would exist, in the other picture. Naming the surface the capture reads is what keeps the
+        // annotation and the image the same image.
+        var surface = viewport ? renderer.ViewportSurface : renderer.SceneSurface;
+        var width = viewport ? debug.Frame.Width * 0.5f : debug.Frame.Width;
+        var height = viewport ? debug.Frame.Height * 0.5f : debug.Frame.Height;
         var declaration = debug.Draw.Declare(
-            "scene", viewProjection, renderer.SceneSurface,
-            new Rect(0f, 0f, debug.Frame.Width, debug.Frame.Height),
-            new Rect(0f, 0f, debug.Frame.Width, debug.Frame.Height));
+            viewport ? "viewport" : "scene", viewProjection, surface,
+            new Rect(0f, 0f, width, height),
+            new Rect(0f, 0f, width, height));
 
         using var view = debug.Draw.In(declaration);
 
@@ -546,7 +575,11 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     private void Capture()
     {
-        var pixels = device.ReadTexture(renderer.SceneColour, out var width, out var height, out var format);
+        // The viewport target is half the swapchain's size and holds the SECOND camera's picture.
+        // Same format as the scene target — deliberately, so both take this one read-back path and
+        // the tonemap below applies to either.
+        var source = viewport ? renderer.ViewportColour : renderer.SceneColour;
+        var pixels = device.ReadTexture(source, out var width, out var height, out var format);
         if (format != TextureFormat.Rgba16F)
         {
             Console.Error.WriteLine($"Expected an Rgba16F scene target, got {format}.");
