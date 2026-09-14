@@ -236,7 +236,19 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
                 // two looked identical.
                 var eye = motor.Feet + new Vector3(0f, 0.9f, 0f);
                 var facing = new Vector3(-MathF.Sin(bodyFacing), 0f, -MathF.Cos(bodyFacing));
+                var side = new Vector3(-facing.Z, 0f, facing.X);
                 debug.Draw.Arrow("facing", eye, eye + (facing * 0.9f), new GraphicsColor(1f, 1f, 1f, 1f));
+
+                // A CHEVRON ON THE GROUND, because an arrow pointing away from the camera is a dot.
+                // In third person the facing is, by definition, mostly along the view axis — which
+                // is exactly the direction a single line cannot show. Two strokes meeting at a point
+                // stay readable at any foreshortening, which is why every game that has to show a
+                // heading from behind draws a wedge rather than an arrow.
+                var nose = motor.Feet + (facing * 0.85f) + new Vector3(0f, 0.03f, 0f);
+                var tailL = motor.Feet + (facing * -0.15f) + (side * 0.42f) + new Vector3(0f, 0.03f, 0f);
+                var tailR = motor.Feet + (facing * -0.15f) - (side * 0.42f) + new Vector3(0f, 0.03f, 0f);
+                debug.Draw.Line("chevron-l", tailL, nose, new GraphicsColor(1f, 1f, 1f, 1f));
+                debug.Draw.Line("chevron-r", tailR, nose, new GraphicsColor(1f, 1f, 1f, 1f));
 
                 var travelled = new Vector3(lastTravel.X, 0f, lastTravel.Z);
                 if (travelled.LengthSquared() > 1e-8f)
@@ -257,11 +269,21 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
                 // Each contact the move ran into, with the normal it deflected along. An arrow
                 // pointing INTO a surface is the fault this whole stage can produce, and it is the
                 // one thing a position alone never shows.
+                // CONTACTS COLOURED BY WHERE ON THE BODY THEY LANDED, because the confusing ones
+                // are never at your feet. A body walking under the beam catches it with the TOP of
+                // its capsule and gets deflected sideways — a perfectly correct slide that looks
+                // like a curved path with no cause, since nothing is in the way at the height you
+                // are looking. Reported from the chair as a trail that should have been straighter.
                 foreach (var contact in motor.Contacts)
                 {
-                    debug.Draw.Arrow(
-                        "contact", contact.Point, contact.Point + (contact.Normal * 0.6f),
-                        new GraphicsColor(1f, 0.45f, 0.2f, 1f));
+                    var height = contact.Point.Y - motor.Feet.Y;
+                    var colour = height < 0.45f
+                        ? new GraphicsColor(0.5f, 1f, 0.6f, 1f)      // underfoot
+                        : height > motor.Height - 0.5f
+                            ? new GraphicsColor(1f, 0.25f, 0.9f, 1f) // overhead — the one that surprises
+                            : new GraphicsColor(1f, 0.45f, 0.2f, 1f);
+
+                    debug.Draw.Arrow("contact", contact.Point, contact.Point + (contact.Normal * 0.6f), colour);
                 }
 
                 // Where it has been. A trail is the cheapest way to see a body juddering against a
@@ -290,6 +312,49 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
 
         ImGui.Text($"{room.TriangleCount} triangles · {room.Parts.Count} parts · {room.SolidStarts.Count} solids");
         ImGui.Separator();
+
+        if (ImGui.CollapsingHeader("body", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            ImGui.Checkbox("body", ref bodyEnabled);
+
+            // WHICH WAY THE BODY POINTS is a game's decision, not a physics one — and the two models
+            // are indistinguishable until you strafe.
+            ImGui.Checkbox("face the camera (off = face travel)", ref faceCamera);
+            if (!faceCamera) ImGui.SliderFloat("turn rad/s", ref turnRate, 1f, 30f);
+
+            // The number behind "the facing looks wrong": how far the body is turned from where the
+            // camera looks. Facing the camera holds it at 0; facing travel swings it to 90 on a pure
+            // strafe, which is the model working rather than failing.
+            var offset = MathF.IEEERemainder(bodyFacing - camera.Yaw, MathF.Tau) * 180f / MathF.PI;
+            ImGui.Text($"facing is {offset:+0.0;-0.0;0.0} deg from the camera");
+
+            // EVERY ONE OF THESE IS A DECISION, which is why none of them is a constant. The ramp
+            // fan exists so the slope limit can be dragged across 30, 45 and 60 and the consequence
+            // watched rather than argued about.
+            var walk = motor.WalkSpeed;
+            if (ImGui.SliderFloat("walk m/s", ref walk, 0.5f, 12f)) motor.WalkSpeed = walk;
+
+            var gravity = motor.Gravity;
+            if (ImGui.SliderFloat("gravity m/s2", ref gravity, 0f, 40f)) motor.Gravity = gravity;
+
+            var limit = motor.SlopeLimitDegrees;
+            if (ImGui.SliderFloat("slope limit deg", ref limit, 0f, 89f)) motor.SlopeLimitDegrees = limit;
+
+            var step = motor.StepHeight;
+            if (ImGui.SliderFloat("step height m", ref step, 0f, 1.5f)) motor.StepHeight = step;
+
+            var slide = motor.SlideSpeed;
+            if (ImGui.SliderFloat("slide m/s", ref slide, 0f, 15f)) motor.SlideSpeed = slide;
+
+            ImGui.Separator();
+            ImGui.Text($"feet {motor.Feet.X:0.00}, {motor.Feet.Y:0.00}, {motor.Feet.Z:0.00}");
+            ImGui.Text(motor.Grounded
+                ? $"{(motor.Standing ? "standing" : "SLIDING")} on {motor.GroundSlopeDegrees:0.#} deg"
+                : "airborne");
+            ImGui.Text($"contacts {motor.Contacts.Count}{(motor.SteppedUp ? " - stepped up" : string.Empty)}");
+
+            if (ImGui.Button("respawn")) motor.Teleport(Blix.Labs.Character.Room.SpawnPoint);
+        }
 
         if (ImGui.CollapsingHeader("camera", ImGuiTreeNodeFlags.DefaultOpen))
         {
@@ -339,49 +404,6 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
 
             var exposure = renderer.Exposure;
             if (ImGui.SliderFloat("exposure", ref exposure, 0.2f, 3f)) renderer.Exposure = exposure;
-        }
-
-        if (ImGui.CollapsingHeader("body", ImGuiTreeNodeFlags.DefaultOpen))
-        {
-            ImGui.Checkbox("body", ref bodyEnabled);
-
-            // WHICH WAY THE BODY POINTS is a game's decision, not a physics one — and the two models
-            // are indistinguishable until you strafe.
-            ImGui.Checkbox("face the camera (off = face travel)", ref faceCamera);
-            if (!faceCamera) ImGui.SliderFloat("turn rad/s", ref turnRate, 1f, 30f);
-
-            // The number behind "the facing looks wrong": how far the body is turned from where the
-            // camera looks. Facing the camera holds it at 0; facing travel swings it to 90 on a pure
-            // strafe, which is the model working rather than failing.
-            var offset = MathF.IEEERemainder(bodyFacing - camera.Yaw, MathF.Tau) * 180f / MathF.PI;
-            ImGui.Text($"facing is {offset:+0.0;-0.0;0.0} deg from the camera");
-
-            // EVERY ONE OF THESE IS A DECISION, which is why none of them is a constant. The ramp
-            // fan exists so the slope limit can be dragged across 30, 45 and 60 and the consequence
-            // watched rather than argued about.
-            var walk = motor.WalkSpeed;
-            if (ImGui.SliderFloat("walk m/s", ref walk, 0.5f, 12f)) motor.WalkSpeed = walk;
-
-            var gravity = motor.Gravity;
-            if (ImGui.SliderFloat("gravity m/s2", ref gravity, 0f, 40f)) motor.Gravity = gravity;
-
-            var limit = motor.SlopeLimitDegrees;
-            if (ImGui.SliderFloat("slope limit deg", ref limit, 0f, 89f)) motor.SlopeLimitDegrees = limit;
-
-            var step = motor.StepHeight;
-            if (ImGui.SliderFloat("step height m", ref step, 0f, 1.5f)) motor.StepHeight = step;
-
-            var slide = motor.SlideSpeed;
-            if (ImGui.SliderFloat("slide m/s", ref slide, 0f, 15f)) motor.SlideSpeed = slide;
-
-            ImGui.Separator();
-            ImGui.Text($"feet {motor.Feet.X:0.00}, {motor.Feet.Y:0.00}, {motor.Feet.Z:0.00}");
-            ImGui.Text(motor.Grounded
-                ? $"{(motor.Standing ? "standing" : "SLIDING")} on {motor.GroundSlopeDegrees:0.#} deg"
-                : "airborne");
-            ImGui.Text($"contacts {motor.Contacts.Count}{(motor.SteppedUp ? " - stepped up" : string.Empty)}");
-
-            if (ImGui.Button("respawn")) motor.Teleport(Blix.Labs.Character.Room.SpawnPoint);
         }
 
         if (ImGui.CollapsingHeader("parts", ImGuiTreeNodeFlags.DefaultOpen))

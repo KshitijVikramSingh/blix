@@ -718,6 +718,52 @@ foreach (var part in room.Parts)
         $"turned by {MathF.Acos(Math.Clamp(Vector3.Dot(openAir, againstWall), -1f, 1f)) * 180f / MathF.PI:0.##}°");
 }
 
+// ── A straight input makes a straight path ──────────────────────────────────────────────────────
+//
+// Reported from the chair: "I'm only pressing W/S so I'd expect the trail to be straighter". That is
+// a claim about the motor and it can be measured — walk in one direction with nothing in the way and
+// see how far the body wanders off the line it started on.
+{
+    static float WanderOffLine(TriangleMesh3D world, CharacterMotor motor, Vector3 direction, int steps)
+    {
+        var start = motor.Feet;
+        var worst = 0f;
+        for (var i = 0; i < steps; i++)
+        {
+            motor.Step(direction, 1f / 60f, world);
+            var along = Vector3.Dot(motor.Feet - start, direction);
+            var sideways = (motor.Feet - start) - (direction * along);
+            worst = MathF.Max(worst, new Vector3(sideways.X, 0f, sideways.Z).Length());
+        }
+        return worst;
+    }
+
+    static CharacterMotor Standing(TriangleMesh3D world, float x, float z)
+    {
+        var motor = new CharacterMotor();
+        motor.Teleport(new Vector3(x, 4f, z));
+        for (var i = 0; i < 240; i++) motor.Step(Vector3.Zero, 1f / 60f, world);
+        return motor;
+    }
+
+    // Open floor, well clear of every solid: down the middle of the hall heading east.
+    foreach (var (name, x, z, dx, dz, steps) in new[]
+    {
+        ("east", -1f, -4f, 1f, 0f, 180),
+        ("north-east", -2f, -3f, 0.707f, 0.707f, 60),
+        ("south", -1f, 0f, 0f, -1f, 180),
+        ("west-north-west", 0f, 7f, -0.92f, 0.38f, 90),
+    })
+    {
+        var motor = Standing(room.Collider, x, z);
+        var direction = Vector3.Normalize(new Vector3(dx, 0f, dz));
+        var wander = WanderOffLine(room.Collider, motor, direction, steps);
+
+        t.Expect($"walking {name} across open floor holds a straight line",
+            wander < 1e-3f, $"wandered {wander * 1000f:0.##} mm off it");
+    }
+}
+
 t.PrintSummary();
 return t.Failed;
 
