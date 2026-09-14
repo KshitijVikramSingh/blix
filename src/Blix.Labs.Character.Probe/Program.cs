@@ -663,6 +663,61 @@ foreach (var part in room.Parts)
     }
 }
 
+// ── What steers the body is what the camera looks along ─────────────────────────────────────────
+//
+// Reported from the chair: movement felt right in first person and 15-30 degrees off in every other
+// rig. It was the shoulder offset — applied to the EYE only, which leaves the camera looking across
+// the body rather than along its own yaw, while the body is still steered by that yaw. The error is
+// atan(shoulder / (distance * cos pitch)): 7.6° at the default 4.2 m and 25° once the camera pulls
+// in against a wall. First person has no shoulder, which is exactly why it felt right.
+//
+// So the rule gets an invariant, for every rig and at offsets no one would choose: the direction the
+// camera looks, flattened to the ground, IS the direction the body is steered by. A camera needs no
+// GPU to answer that.
+{
+    var camera = new RoomCamera();
+
+    foreach (var rig in new[] { CameraRig.Orbit, CameraRig.ThirdPerson, CameraRig.FirstPerson, CameraRig.Isometric })
+    {
+        foreach (var shoulder in new[] { 0f, 0.55f, -1.2f })
+        {
+            camera.Rig = rig;                      // applies the rig's defaults, so set the rest after
+            camera.ShoulderOffset = shoulder;
+            camera.Yaw = 0.7f;
+
+            // Against the west wall, so the third-person rig's pull-in is actually exercised — a
+            // pull-in that turned the view rather than shortening it would be this same bug again,
+            // arriving from the other direction.
+            camera.Place(new Vector3(-13.4f, 0f, 0f), 1.8f, room.Collider);
+
+            var toTarget = camera.Target - camera.Position;
+            var flat = new Vector3(toTarget.X, 0f, toTarget.Z);
+            var (forward, _) = camera.GroundBasis;
+
+            var agreement = flat.LengthSquared() < 1e-8f ? 1f : Vector3.Dot(Vector3.Normalize(flat), forward);
+            var offBy = MathF.Acos(Math.Clamp(agreement, -1f, 1f)) * 180f / MathF.PI;
+
+            t.Expect($"{rig} at shoulder {shoulder:0.00} steers where it looks",
+                offBy < 0.05f, $"off by {offBy:0.##}°");
+        }
+    }
+
+    // And the pull-in shortens the view without turning it, which is what lets the check above be
+    // this simple — and what makes a camera in a corner still walk the body up the screen.
+    camera.Rig = CameraRig.ThirdPerson;
+    camera.ShoulderOffset = 0.55f;
+    camera.Yaw = 0.7f;
+    camera.Place(new Vector3(0f, 0f, 0f), 1.8f, room.Collider);
+    var openAir = Vector3.Normalize(camera.Target - camera.Position);
+
+    camera.Place(new Vector3(-13.4f, 0f, 0f), 1.8f, room.Collider);
+    var againstWall = Vector3.Normalize(camera.Target - camera.Position);
+
+    t.Expect("and pulling the camera out of a wall shortens the view without turning it",
+        Vector3.Dot(openAir, againstWall) > 0.9999f,
+        $"turned by {MathF.Acos(Math.Clamp(Vector3.Dot(openAir, againstWall), -1f, 1f)) * 180f / MathF.PI:0.##}°");
+}
+
 t.PrintSummary();
 return t.Failed;
 

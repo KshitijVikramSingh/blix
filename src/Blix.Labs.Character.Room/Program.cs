@@ -65,7 +65,12 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
     // can only confirm the guess it was built with.
     private readonly CharacterMotor motor = new();
     private float bodyFacing;
-    private float turnRate = 12f;
+    private Vector3 lastTravel;
+    // Fast enough that the drawn facing keeps up with a camera being swung about: at 12 rad/s a
+    // steady drag left the arrow a constant 15-20° behind where the body was actually going, which
+    // reads as the facing being wrong rather than as lag. The slider stays, because dialling it
+    // DOWN to see a body turn like a vehicle is a thing the Motion lab will want.
+    private float turnRate = 20f;
     private bool bodyEnabled = true;
     private readonly HashSet<Key> held = new();
 
@@ -127,7 +132,9 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
             bodyFacing += Math.Clamp(delta, -turnRate * deltaSeconds, turnRate * deltaSeconds);
         }
 
+        var before = motor.Feet;
         motor.Step(wish, deltaSeconds, room.Collider);
+        lastTravel = motor.Feet - before;
 
         // A body that leaves the room has found a hole, and chasing it into the void is a worse way
         // to learn that than being put back where it can be watched.
@@ -202,12 +209,23 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
                         ? new GraphicsColor(0.35f, 0.85f, 1f, 1f)
                         : new GraphicsColor(1f, 0.7f, 0.2f, 1f));
 
+                // TWO ARROWS, because they are two different facts and only their disagreement is
+                // interesting. White is the FACING — a smoothed value the motor knows nothing about,
+                // which a mesh would be rotated by. Cyan is where the body actually went this frame.
+                // A body walking sideways is a perfectly good state; a body whose facing lags its
+                // travel by a constant angle is a turn rate too low, and until both were drawn those
+                // two looked identical.
+                var eye = motor.Feet + new Vector3(0f, 0.9f, 0f);
                 var facing = new Vector3(-MathF.Sin(bodyFacing), 0f, -MathF.Cos(bodyFacing));
-                debug.Draw.Arrow(
-                    "facing",
-                    motor.Feet + new Vector3(0f, 0.9f, 0f),
-                    motor.Feet + new Vector3(0f, 0.9f, 0f) + (facing * 0.9f),
-                    new GraphicsColor(1f, 1f, 1f, 1f));
+                debug.Draw.Arrow("facing", eye, eye + (facing * 0.9f), new GraphicsColor(1f, 1f, 1f, 1f));
+
+                var travelled = new Vector3(lastTravel.X, 0f, lastTravel.Z);
+                if (travelled.LengthSquared() > 1e-8f)
+                {
+                    debug.Draw.Arrow(
+                        "travel", eye, eye + (Vector3.Normalize(travelled) * 0.7f),
+                        new GraphicsColor(0.3f, 0.95f, 1f, 1f));
+                }
 
                 // The ground normal, which is what every slope decision actually reads.
                 if (motor.Grounded)

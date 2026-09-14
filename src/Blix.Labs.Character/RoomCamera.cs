@@ -135,9 +135,24 @@ public sealed class RoomCamera
 
             case CameraRig.ThirdPerson:
             {
-                Target = feet + new Vector3(0f, eyeHeight * 0.85f, 0f);
+                // <b>The shoulder offsets the TARGET as well as the eye</b>, and that is the whole
+                // difference between an over-the-shoulder camera and a broken one. Offsetting only
+                // the eye leaves it looking ACROSS the body, so the view direction is no longer the
+                // yaw direction — and the body is steered by the yaw, so pressing forward walks it
+                // diagonally across the screen. Off by atan(shoulder / (distance * cos pitch)):
+                // 7.6° at the default 4.2 m, and 25° once the camera pulls in to 1.2 m against a
+                // wall. Reported from the chair as 15-30° off in every rig but first person — which
+                // has no shoulder offset, which is exactly why that one felt right.
+                //
+                // Offsetting both keeps the eye looking straight down the yaw, and the body simply
+                // sits to one side of the screen. That IS the over-the-shoulder framing; the
+                // crooked walk never was.
                 var (_, right) = GroundBasis;
-                var wanted = Target + Spherical(Yaw, Pitch, Distance) + (right * ShoulderOffset);
+                Target = feet + new Vector3(0f, eyeHeight * 0.85f, 0f) + (right * ShoulderOffset);
+                var wanted = Target + Spherical(Yaw, Pitch, Distance);
+
+                // The pull-in slides the eye along the line to the target, so it shortens the view
+                // without turning it. That is why it can be this simple.
                 Position = world is null ? wanted : PullIn(Target, wanted, world);
                 break;
             }
