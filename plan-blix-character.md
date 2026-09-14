@@ -471,28 +471,87 @@ an upper body doing something else. The character lab carries no rig code and no
 its own — it consumes what stage D produces, and whatever selection it needs, it owns itself until a
 second consumer disagrees with it.
 
-## Controller — the two together
+## Controller — the two together — **REPLANNED 2026-09-15**
 
-**C-A — contact drives the states.** Speed and groundedness come out of the resolver
-rather than from a guess; feet stop scuffing because the locomotion clock is distance and
-the distance is now real.
+The original plan had four stages and a state machine. Three findings replaced it, and two of
+them were already sitting in the code before this was rewritten.
 
-**C-B — and then the clip drives the contact.** Root motion says *how far*, the room says
-*where you can actually go*. `RootMotion.Strip` exists for exactly this seam, and the
-animation arc already found the trap: driving the body while the root is still animated
-applies the travel twice. Honest expectation — the Rogue has 4 travelling clips out of 76,
-so this stage may end as a **decided-no** like view arc D. That is a legitimate output.
+### What was found, before planning anything
 
-**C-C — the camera, and it is the §4 evidence.** A third-person follow camera that does
-not pass through walls is a **second consumer of the sweep resolver**, and it is what
-decides whether the resolver crosses into `Blix` or stays lab-local. This is the stage
-that answers R-C's deferred question, which is why it is in the plan rather than left to
-be noticed.
+**C-C's question answered itself, and the answer was no.** The stage existed to decide whether
+`BodyResolver` belongs in the engine, on the theory that a wall-avoiding camera would be its second
+consumer. `RoomCamera.PullIn` was written during R-E and it calls `Intersection.Sweep` **directly**:
+the camera wants one cast and a clamp — no deflection, no step rule, no ground state. It is a second
+consumer of the sweep *math*, which is already engine code in `Blix.Geometry` and correctly placed,
+and not a consumer of the resolver *policy* at all. The note is already in `RoomCamera.cs` at the
+seam. **C-C is dropped**, and the resolver stays lab-local on evidence rather than on deferral.
 
-**C-D — acceptance, from the chair.** A person walks the room: up ramps, up stairs, off
-ledges, along walls, with no scuffing and no state flicker. Every arc on this branch had
-at least one bug that only a person watching could see; planning for that is cheaper than
-being surprised by it a fourth time.
+**There is no character in the character lab.** `RoomRenderer.Render` takes a room and nothing else;
+the body is a capsule. Every Controller stage needs a rig, so where the rig comes from is a blocking
+structural decision rather than a detail — which is the good reason to have asked it first.
+
+**The tree holds six independent skinned-draw paths** — Runner, VulkanLit, the toolchain lab,
+Bulwark, RTSGame, and `Blix/SkinnedGameObject`. The engine's own abstraction has exactly one
+consumer. So does `Blix.Render/PropModel`. Two engine-side attempts at "a loaded model you can draw",
+each stranded at one consumer, because each baked a draw into itself and the draw is the part that
+differs — render graph, material sets, instancing, shadow passes.
+
+### C-0 — rig residency, extracted narrowly
+
+The duplicated part is **loading**, not drawing: glTF import, vertex and index buffers, albedo
+upload, material scalars, bounds, weighted-bone analysis. That part is identical in every consumer
+and contains no draw. The part that differs — the bone material, its shader program and set index,
+the palette buffer's instance layout, the passes — stays with the consumer.
+
+Two rules keep this from becoming the third stranded abstraction:
+
+1. **No shader program, no material, no pass, no instancing count** crosses into it. If a parameter
+   exists only so a caller can say how it will be drawn, the line is in the wrong place.
+2. **`LabRig` is rewritten on top of it, not left beside it.** An extraction whose first consumer
+   keeps its own copy has not been proved by anything. The toolchain lab is the existing consumer
+   and it has to actually move.
+
+If rule 1 cannot be held, the honest outcome is a **decided-no**: the character lab writes its own
+loader, the duplication is recorded, and no third stranded abstraction is added to the tree.
+
+### C-A — contact drives weights, and there are no states
+
+Speed and groundedness come out of the resolver, and they drive **blend weights directly**. Walk
+against run by speed; an airborne weight by `Grounded`. No states, no transitions, no dwell timers —
+which is not a simplification but the point: the thing that flickered in M-A does not exist here to
+flicker, and the engine was deliberately given weights and no structure.
+
+This is also where the D stage gets its first **working** consumer. Until now a `BoneMask` has only
+ever been looked at in an inspector. Here it does work: locomotion on the legs, a one-shot on the
+upper body, through the mask — a body that walks and punches without its legs freezing mid-swing,
+which is the exact case that made masks stop being deferred policy.
+
+**Negative control**: the mask set to `All` must visibly break the legs, and set to `None` must
+leave the walk bit-for-bit unchanged. A layer that changes nothing and a layer that changes
+everything are the two failures a mask has, and both are invisible without being asked for.
+
+### C-B — and then the clip drives the contact
+
+Root motion says *how far*, the room says *where you can actually go*. `RootMotion.Strip` exists for
+this seam and the animation arc already found the trap: driving the body while the root is still
+animated applies the travel twice.
+
+Honest expectation unchanged — the Rogue has 4 travelling clips out of 76, so this may end as a
+**decided-no** like view arc D. Reaching that conclusion with the instrument built is the output;
+assuming it now is not.
+
+### C-C — dropped
+
+See above. Its evidence arrived during R-E, early and negative.
+
+### C-D — acceptance, from the chair
+
+A person walks the room: up ramps, up stairs, off ledges, along walls. No scuffing, no snapping,
+and the upper body doing something the legs do not know about.
+
+Every stage of this arc had at least one fault only a person watching could see — a mirrored basis,
+a facing label, a camera too far off, a shoulder offset. Four of the five were **legibility, not
+mechanism**. Planning for a fifth is cheaper than being surprised by it again.
 
 ---
 
@@ -532,11 +591,20 @@ record many draws with per-draw uniform values out of shared scratch.
 
 Room → Motion → Controller, isolated before combined. Room first because contact is the
 half with no existing consumer at all, and because Motion's distance clock is a guess
-until something real produces the distance. Motion second because its §4 evidence is
-already in hand and it needs no new math. Controller last because it is the only stage
+until something real produces the distance. Controller last because it is the only stage
 whose faults are ambiguous between two new subsystems — and by then neither is new.
 
-The honest stopping point is after Controller C-A: at that point Blix can move a body
-through a world and animate it truthfully, which is the whole of what a character *is*.
-C-B and C-C are each gated on a question the earlier stages ask, and Spear should be
-pulled into existence by what they answer rather than pushed.
+**Motion went sideways rather than second**, and the order survived it. It was built,
+its own dump was the argument against it, and it was deleted; the interpolation half
+became the animation arc's stage D (masks, weights only) and the selection half is
+undecided and unbuilt. Controller is now where selection gets asked again — and the
+answer C-A gives is that contact can drive weights with nothing in between.
+
+Within Controller: C-0 → C-A → C-B, and C-0 is first only because C-A cannot see a foot
+without it. If C-0's line cannot be drawn without a draw crossing it, it is abandoned and
+C-A proceeds on a local loader — the stage exists to be decidable, not to be completed.
+
+The honest stopping point is after C-A: at that point Blix can move a body through a
+world and animate it truthfully, which is the whole of what a character *is*. C-B is
+gated on a question C-A asks, and Spear should be pulled into existence by what it
+answers rather than pushed.
