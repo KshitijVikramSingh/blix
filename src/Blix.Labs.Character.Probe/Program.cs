@@ -280,11 +280,11 @@ foreach (var part in room.Parts)
     foreach (var (name, x, z, expected) in new[]
     {
         ("floor at the spawn", Room.SpawnPoint.X, Room.SpawnPoint.Z, 0f),
-        ("the ledge's top", 4.5f, -5.5f, 1.2f),
-        ("the beam's top", 5f, 1.2f, 1.6f),
-        ("the dome's apex", 10.5f, 4.5f, 3f),
-        ("the top tread of the 0.30 m flight", -2.5f, 2f, 1.8f),
-        ("the top tread of the 0.10 m flight", -2.5f, -6f, 0.6f),
+        ("the ledge's top", 3.5f, -5f, 1.2f),
+        ("the beam's top", 4f, 2.4f, 1.6f),
+        ("the dome's apex", 11f, -4f, 3f),
+        ("the top tread of the 0.30 m flight", -5.1f, 2f, 1.8f),
+        ("the top tread of the 0.10 m flight", -5.1f, -6f, 0.6f),
     })
     {
         var body = new Capsule(new(x, dropFrom, z), new(x, dropFrom + 1f, z), radius);
@@ -311,10 +311,12 @@ foreach (var part in room.Parts)
     // So the claim here is about the CONTACT rather than the rest height: wherever the sweep says
     // the body touched, that point is on the ramp's analytic surface — y = tan(30°) x (x + 11).
     {
-        var body = new Capsule(new(-10.9f, dropFrom, 0f), new(-10.9f, dropFrom + 1f, 0f), radius);
+        // The 30° ramp's foot is at x = -8.5 and it rises toward -X, so its surface is
+        // y = tan(30°) x (-8.5 - x) for x in [-11, -8.5].
+        var body = new Capsule(new(-8.6f, dropFrom, 0f), new(-8.6f, dropFrom + 1f, 0f), radius);
         var hit = Intersection.Sweep(body, new Vector3(0f, -dropBy, 0f), room.Collider);
         var tan30 = MathF.Tan(30f * MathF.PI / 180f);
-        var onSurface = hit is { } h && MathF.Abs(h.Point.Y - (tan30 * (h.Point.X + 11f))) < 2e-3f;
+        var onSurface = hit is { } h && MathF.Abs(h.Point.Y - (tan30 * (-8.5f - h.Point.X))) < 2e-3f;
 
         t.Expect("a body dropped on the 30° ramp touches it ON its surface", onSurface,
             hit is null ? "no contact at all" : $"contact at {hit.Value.Point} is off the ramp plane");
@@ -327,17 +329,17 @@ foreach (var part in room.Parts)
     // IT CANNOT TUNNEL THROUGH THE ROOM EITHER. A body crossing the east wall at 100 m/s in a 16 ms
     // step travels 1.6 m through a wall 0.5 m thick — and the control is that a discrete test where
     // it would have ENDED sees nothing at all.
-    var runner = new Capsule(new(13f, 0.4f, 0f), new(13f, 1.4f, 0f), radius);
+    var runner = new Capsule(new(-13f, 0.4f, 0f), new(-13f, 1.4f, 0f), radius);
 
     // 2.4 m, not 1.6. The first attempt had the body END inside the wall rather than past it, so the
     // "discrete test sees nothing" control failed — correctly, and it was the control that was
     // wrong. A tunnelling test whose body stops inside the obstacle is not testing tunnelling.
-    var motion = new Vector3(2.4f, 0f, 0f);
+    var motion = new Vector3(-2.4f, 0f, 0f);
     var arrived = new Capsule(runner.PointA + motion, runner.PointB + motion, radius);
 
-    t.Expect("the control: a discrete test past the east wall sees nothing",
+    t.Expect("the control: a discrete test past the west wall sees nothing",
         Intersection.Test(arrived, room.Collider) is null, "it happened to overlap after all");
-    t.Expect("a body crossing the east wall at 144 m/s is stopped by it",
+    t.Expect("a body crossing the west wall at 144 m/s is stopped by it",
         Intersection.Sweep(runner, motion, room.Collider) is not null, "swept clean through");
 }
 
@@ -370,7 +372,7 @@ foreach (var part in room.Parts)
 
         for (var step = 0; step < 200; step++)
         {
-            var result = resolver.Move(body, new Vector3(0.08f, 0f, 0f), room.Collider);
+            var result = resolver.Move(body, new Vector3(-0.08f, 0f, 0f), room.Collider);
             body = Moved(body, result.Position);
 
             if (Intersection.Test(body, room.Collider) is { } overlap)
@@ -380,7 +382,7 @@ foreach (var part in room.Parts)
             }
         }
 
-        t.Expect("a 16 m walk into the ramp fan never ends a step inside a surface",
+        t.Expect("a 16 m walk west into the ramp fan never ends a step inside a surface",
             stuckAt < 0, $"first penetration at step {stuckAt}, worst {worstDepth:0.0000} m");
 
         // And it got somewhere: a body that refused to move would pass the check above trivially.
@@ -390,12 +392,12 @@ foreach (var part in room.Parts)
 
     // ── 2. It cannot be pushed through a wall ────────────────────────────────────────────────────
     {
-        var body = Body(13f, 0f, 0f);
-        var result = resolver.Move(body, new Vector3(2.4f, 0f, 0f), room.Collider);
+        var body = Body(-13f, 0f, 0f);
+        var result = resolver.Move(body, new Vector3(-2.4f, 0f, 0f), room.Collider);
         var ended = Moved(body, result.Position);
 
-        t.Expect("a body driven at the east wall at 144 m/s stays west of it",
-            ended.PointA.X + radius <= 14f + 1e-3f, $"ended at x {ended.PointA.X:0.000}");
+        t.Expect("a body driven at the west wall at 144 m/s stays east of it",
+            ended.PointA.X - radius >= -14f - 1e-3f, $"ended at x {ended.PointA.X:0.000}");
         t.Expect("and is not inside anything when it stops",
             Intersection.Test(ended, room.Collider) is null, "it came to rest overlapping");
     }
@@ -404,16 +406,16 @@ foreach (var part in room.Parts)
     //
     // THE ONE THAT SEPARATES A RESOLVER FROM A STOP. A body moving diagonally into a wall should
     // arrive at the far end of its along-wall motion — sliding past a doorframe rather than sticking
-    // to it. The east wall's inner face is at x = 14; the body starts 15 cm short of touching it.
+    // to it. The west wall's inner face is at x = -14; the body starts 15 cm short of touching it.
     {
-        var body = Body(13.5f, 0f, 0f);
-        var motion = new Vector3(1f, 0f, 1f);
+        var body = Body(-13.5f, 0f, 0f);
+        var motion = new Vector3(-1f, 0f, 1f);
 
         var slid = resolver.Move(body, motion, room.Collider);
         t.Expect("a body grazing a wall keeps its along-wall travel",
             slid.Position.Z > 0.98f, $"travelled {slid.Position.Z:0.000} of 1.0 along the wall");
         t.Expect("and stops against it across the wall",
-            slid.Position.X < 0.2f, $"travelled {slid.Position.X:0.000} into the wall");
+            MathF.Abs(slid.Position.X) < 0.2f, $"travelled {slid.Position.X:0.000} into the wall");
 
         // THE CONTROL. With the loop off the body simply stops at the contact, so the along-wall
         // travel is whatever it managed before touching — about 15 cm. If this were ALSO ~1.0, the

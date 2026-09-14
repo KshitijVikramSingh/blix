@@ -91,31 +91,49 @@ public sealed class SolidBuilder
     }
 
     /// <summary>
-    /// A ramp: a right-triangular prism rising along +X from <paramref name="xNear"/> to
-    /// <paramref name="xFar"/>, spanning z and standing on <paramref name="yBase"/>.
+    /// A ramp: a right-triangular prism whose foot is at <paramref name="foot"/> and which rises
+    /// toward <paramref name="upSlope"/>.
     /// </summary>
     /// <remarks>
-    /// The rise is the caller's, not an angle, because a run and a rise are exact in binary and an angle
-    /// is not — <c>3 * tan(30°)</c> is 1.7320509 and the probe would then be checking a float against
-    /// its own rounding. The angle is derived from them for the claim, so the claim is exactly what the
-    /// geometry is.
+    /// <para>
+    /// <b>Directional, because the first version could only rise along +X</b> — which meant every
+    /// ramp's walkable face looked west, and the room had to be arranged around that rather than
+    /// around what is worth looking at. A ramp you approach from the wrong side is a ramp nobody
+    /// climbs.
+    /// </para>
+    /// <para>
+    /// The wedge is built in its own frame — <c>u</c> up-slope, <c>+Y</c>, <c>w = cross(u, Y)</c>
+    /// across — and mapped out. That map is a ROTATION, not a reflection, so every winding derived
+    /// for the axis-aligned case still holds; mirroring the coordinates instead would reverse the
+    /// orientation of every face and turn the solid inside out, which the probe would catch and
+    /// nothing else would.
+    /// </para>
+    /// <para>
+    /// The rise is the caller's, not an angle, because a run and a rise are exact in binary and an
+    /// angle is not — <c>2.5 * tan(30°)</c> is 1.4433757 and the probe would then be checking a
+    /// float against its own rounding. The angle is derived from them for the claim, so the claim is
+    /// exactly what the geometry is.
+    /// </para>
     /// </remarks>
-    public void Ramp(float xNear, float xFar, float zMin, float zMax, float yBase, float rise)
+    public void Ramp(Vector3 foot, Vector3 upSlope, float run, float rise, float width)
     {
         BeginSolid();
 
-        var top = yBase + rise;
+        var u = Vector3.Normalize(new Vector3(upSlope.X, 0f, upSlope.Z));
+        var w = Vector3.Cross(u, Vector3.UnitY);
+        var h = width * 0.5f;
+
+        Vector3 P(float alongSlope, float up, float across) =>
+            foot + (u * alongSlope) + (Vector3.UnitY * up) + (w * across);
 
         // The inclined face — the only walkable one, and the only one with a slope claim.
-        var slopeNormal = Vector3.Normalize(new Vector3(-rise, xFar - xNear, 0f));
-        Quad(
-            new(xNear, yBase, zMax), new(xFar, top, zMax), new(xFar, top, zMin), new(xNear, yBase, zMin),
-            slopeNormal);
+        var slopeNormal = Vector3.Normalize((u * -rise) + (Vector3.UnitY * run));
+        Quad(P(0f, 0f, h), P(run, rise, h), P(run, rise, -h), P(0f, 0f, -h), slopeNormal);
 
-        Quad(new(xFar, yBase, zMin), new(xFar, top, zMin), new(xFar, top, zMax), new(xFar, yBase, zMax), Vector3.UnitX);
-        Quad(new(xNear, yBase, zMin), new(xFar, yBase, zMin), new(xFar, yBase, zMax), new(xNear, yBase, zMax), -Vector3.UnitY);
-        Triangle(new(xNear, yBase, zMax), new(xFar, yBase, zMax), new(xFar, top, zMax), Vector3.UnitZ);
-        Triangle(new(xNear, yBase, zMin), new(xFar, top, zMin), new(xFar, yBase, zMin), -Vector3.UnitZ);
+        Quad(P(run, 0f, -h), P(run, rise, -h), P(run, rise, h), P(run, 0f, h), u);
+        Quad(P(0f, 0f, -h), P(run, 0f, -h), P(run, 0f, h), P(0f, 0f, h), -Vector3.UnitY);
+        Triangle(P(0f, 0f, h), P(run, 0f, h), P(run, rise, h), w);
+        Triangle(P(0f, 0f, -h), P(run, rise, -h), P(run, 0f, -h), -w);
     }
 
     /// <summary>

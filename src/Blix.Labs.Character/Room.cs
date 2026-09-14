@@ -102,7 +102,7 @@ public sealed class Room
     /// where the old spawn stood. A spawn point inside a solid is a bug that looks exactly like a
     /// resolver bug on the first frame of every run, which is why it is a claim the probe checks.
     /// </remarks>
-    public static Vector3 SpawnPoint => new(-12.8f, 0f, 0f);
+    public static Vector3 SpawnPoint => new(-1f, 0f, 0f);
 
     public static Room Build()
     {
@@ -125,27 +125,33 @@ public sealed class Room
             () => builder.Box(new(-HallHalfX, -0.5f, -HallHalfZ), new(HallHalfX, 0f, HallHalfZ)),
             slope: 0f);
 
+        // TWO WALLS, MEETING AT A CORNER — one long, one short. Reported from the chair: four of them
+        // is a prison, and a room you can only look into from above is a room you cannot read. An L
+        // gives the hall a back and a side to sit against and leaves the other two open, so a camera
+        // outside the corner sees every surface face-on instead of over a parapet.
+        //
+        // Three metres rather than five, for the same reason: a wall exists here to stop a body and
+        // to catch a shadow, and every centimetre above that is something between you and the room.
         Part("walls", new Vector3(0.30f, 0.31f, 0.34f), () =>
         {
-            const float t = 0.5f, h = 5f;
+            const float t = 0.5f, h = 3f;
             builder.Box(new(-HallHalfX - t, 0f, -HallHalfZ - t), new(HallHalfX + t, h, -HallHalfZ));
-            builder.Box(new(-HallHalfX - t, 0f, HallHalfZ), new(HallHalfX + t, h, HallHalfZ + t));
             builder.Box(new(-HallHalfX - t, 0f, -HallHalfZ), new(-HallHalfX, h, HallHalfZ));
-            builder.Box(new(HallHalfX, 0f, -HallHalfZ), new(HallHalfX + t, h, HallHalfZ));
         });
 
         // THE RAMP FAN. One run, five rises — so the angles are exact ratios rather than the result of
         // rounding a tangent, and the pair that straddles a plausible slope limit (30 and 45) sit beside
         // each other where one run can try both.
         //
-        // <b>The foot faces the open floor, and the first layout had it the other way.</b> A ramp rises
-        // along +X, so its walkable face looks west — and with the fan against the west wall that face
-        // was a metre from it, approachable by nothing. Found by looking at a capture: the fan showed
-        // five vertical BACKS and not one inclined surface, which is exactly what a ramp you cannot
-        // reach looks like. The probe could not have caught it; every claim it checks was true.
+        // <b>They rise toward the closed corner, so their faces look into the open hall.</b> Twice now
+        // the fan has been pointed the wrong way: first into the west wall, where the walkable faces
+        // had a metre of floor in front of them, and then away from the only open side, where they
+        // showed five vertical backs to anyone looking. Neither was a claim the probe could check —
+        // every angle was exact both times. A ramp you approach from the wrong side is a ramp nobody
+        // climbs.
         //
-        // The run is 2.5 m because the rise is what it costs: at 60° a 3 m run stands 5.2 m tall, over
-        // the walls and out of the room.
+        // The run is 2.5 m because the rise is what it costs: at 60° a 3 m run stands 5.2 m tall,
+        // which is taller than the walls.
         const float rampRun = 2.5f;
         const float rampWidth = 2.2f;
         foreach (var (degrees, zCentre) in new[] { (5f, -7.2f), (15f, -3.6f), (30f, 0f), (45f, 3.6f), (60f, 7.2f) })
@@ -153,7 +159,7 @@ public sealed class Room
             var rise = rampRun * MathF.Tan(degrees * MathF.PI / 180f);
             var z = zCentre;
             Part($"ramp-{degrees:00}", RampColour(degrees),
-                () => builder.Ramp(-11f, -11f + rampRun, z - rampWidth * 0.5f, z + rampWidth * 0.5f, 0f, rise),
+                () => builder.Ramp(new Vector3(-8.5f, 0f, z), -Vector3.UnitX, rampRun, rise, rampWidth),
                 slope: degrees);
         }
 
@@ -165,33 +171,40 @@ public sealed class Room
             var z = zCentre;
             Part($"stairs-{riser * 100f:00}", new Vector3(0.52f, 0.45f, 0.38f), () =>
             {
+                // Each step is a box from the flight's far (high) end back toward the foot, one tread
+                // shorter than the last — so every tread below the top stays exposed instead of being
+                // buried under the step above it. Climbs west, like the ramps, and is met from the
+                // open hall.
+                const float tread = 0.35f;
+                const float foot = -3.2f;
                 for (var step = 1; step <= 6; step++)
                 {
-                    var x0 = -4.5f + (step - 1) * 0.35f;
-                    builder.Box(new(x0, 0f, z - 1f), new(-4.5f + 6 * 0.35f, step * r, z + 1f));
+                    builder.Box(
+                        new(foot - (6 * tread), 0f, z - 1f),
+                        new(foot - ((step - 1) * tread), step * r, z + 1f));
                 }
             }, riser: r);
         }
 
         Part("ledge", new Vector3(0.46f, 0.40f, 0.52f),
-            () => builder.Box(new(2f, 0f, -8f), new(7f, 1.2f, -3f)),
+            () => builder.Box(new(1f, 0f, -7.5f), new(6f, 1.2f, -2.5f)),
             slope: 0f, top: 1.2f);
 
         // A bar to walk under and hit your head on: the case a capsule's TOP cap decides, which a
         // ground-only controller gets wrong without ever failing a slope test.
         Part("beam", new Vector3(0.55f, 0.47f, 0.30f),
-            () => builder.Box(new(1f, 1.2f, 1f), new(9f, 1.6f, 1.4f)),
+            () => builder.Box(new(0f, 1.2f, 2.2f), new(8f, 1.6f, 2.6f)),
             top: 1.2f);
 
         // Two walls 0.6 m apart. Wider than a 0.35 m capsule and narrower than two of them, so a
         // resolver that depenetrates along the wrong axis squeezes the body out sideways here first.
         Part("gap", new Vector3(0.38f, 0.48f, 0.44f), () =>
         {
-            builder.Box(new(3f, 0f, 4f), new(5f, 2f, 6f));
-            builder.Box(new(3f, 0f, 6.6f), new(5f, 2f, 8.6f));
+            builder.Box(new(7f, 0f, 4.5f), new(9f, 2f, 6.5f));
+            builder.Box(new(7f, 0f, 7.1f), new(9f, 2f, 8.6f));
         }, clear: 0.6f);
 
-        var domeCentre = new Vector3(10.5f, 0f, 4.5f);
+        var domeCentre = new Vector3(11f, 0f, -4f);
         Part("dome", new Vector3(0.36f, 0.50f, 0.56f),
             () => builder.Dome(domeCentre, 3f, 0f),
             radius: 3f, centre: domeCentre);

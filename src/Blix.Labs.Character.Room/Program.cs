@@ -71,7 +71,9 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
     private float walkSpeed = 3.5f;
     private float fallSpeed = 6f;
     private bool bodyEnabled = true;
-    private bool followBody;
+    // On by default: since R-C the body IS the subject, and a lab that opens looking at empty floor
+    // makes you find its subject before you can use it.
+    private bool followBody = true;
     private MoveResult lastMove;
     private readonly HashSet<Key> held = new();
 
@@ -116,8 +118,9 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
     {
         var dt = MathF.Min(deltaSeconds, 1f / 30f);   // a hitch must not teleport the body through a wall
 
-        var forward = new Vector3(-MathF.Sin(camera.Yaw), 0f, -MathF.Cos(camera.Yaw));
-        var right = new Vector3(forward.Z, 0f, -forward.X);
+        // The camera's basis, not a second derivation of it — see RoomCamera.GroundBasis for what
+        // having two of these cost.
+        var (forward, right) = camera.GroundBasis;
 
         var wish = Vector3.Zero;
         if (held.Contains(Key.W)) wish += forward;
@@ -343,8 +346,19 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
 
     public void OnMouseMove(float x, float y, float deltaX, float deltaY)
     {
-        if (orbiting) camera.Orbit(deltaX, deltaY);
-        else if (panning) camera.Pan(deltaX, deltaY);
+        if (orbiting)
+        {
+            camera.Orbit(deltaX, deltaY);
+            return;
+        }
+
+        if (!panning) return;
+
+        // Panning means "look somewhere that is not the body", so it takes the camera off the body
+        // rather than fighting it — following would overwrite the target on the very next frame and
+        // the drag would appear to do nothing at all.
+        followBody = false;
+        camera.Pan(deltaX, deltaY);
     }
 
     public void OnMouseWheel(float offsetX, float offsetY) => camera.Zoom(offsetY);
