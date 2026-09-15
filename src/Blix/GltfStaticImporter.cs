@@ -54,12 +54,26 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             var settings = new ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip };
             ArraySegment<byte> Reader(string assetName)
             {
-                // SharpGLTF asks for the .gltf JSON first; supply it. Then
-                // asks for any external .bin / image files; return empty so
-                // the parser stops short of reading them. Material + image
-                // metadata stays intact since it all lives in the JSON.
+                // SharpGLTF asks for the CONTAINER first; supply it. Then it asks for any external
+                // .bin / image files; return empty so the parser stops short of reading them.
+                // Material and image metadata survives because it all lives in the JSON.
+                //
+                // <b>Matched by path, not by extension, and that distinction was a real bug.</b>
+                // This tested `extension == ".gltf"`, so a cooked .glb got an empty buffer for its
+                // own container and died with "JSon is empty". It went unnoticed because the path
+                // was written for Sponza, which is .gltf plus external .bin, and the only cooked
+                // .glb in the tree was loaded through the rigged importer, which has no cooked
+                // path at all. It surfaced the moment asset coverage became complete and
+                // TankArena's four .glb files got siblings.
+                //
+                // For a .glb the saving is smaller by nature — the buffer is inside the container,
+                // so reading the JSON means reading the file — but the geometry still comes from
+                // the .blixmesh rather than from accessor interpretation, which is the larger half.
                 var full = Path.Combine(gltfDirInfo, assetName);
-                if (Path.GetExtension(full).Equals(".gltf", StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(Path.GetFullPath(full), gltfFullPath, StringComparison.Ordinal)
+                    || Path.GetExtension(full) is { } ext
+                       && (ext.Equals(".gltf", StringComparison.OrdinalIgnoreCase)
+                           || ext.Equals(".glb", StringComparison.OrdinalIgnoreCase)))
                 {
                     return new ArraySegment<byte>(File.ReadAllBytes(full));
                 }

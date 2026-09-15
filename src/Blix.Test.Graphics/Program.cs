@@ -3333,6 +3333,56 @@ static ShaderInterface MinimalShader() => new(new[]
         t.Expect("AW.7 .blixtex magic is BLXT, no longer the odd one out", CookPreamble.Describe(BlixTex.Magic) == "'BLXT'");
         t.Expect("AW.7 .blixprobe magic", CookPreamble.Describe(BlixProbe.Magic) == "'BLXP'");
 
+        // ── a cooked .glb loads, which it did not ───────────────────────────
+        // <b>The cooked fast path only ever worked for .gltf.</b> It skips buffer reads by handing
+        // the parser empty bytes for everything that is not the container — and it identified the
+        // container by testing for the ".gltf" extension, so a .glb was handed nothing and died
+        // with "JSon is empty". Nobody hit it because the path was written for Sponza, which is
+        // .gltf plus external .bin, and the only cooked .glb in the tree was loaded through the
+        // rigged importer, which has no cooked path. It surfaced the day asset coverage became
+        // complete and four .glb files got siblings.
+        //
+        // Built here rather than pointed at a repo asset, so the check owns its own scenario: a
+        // .glb, cooked, then loaded through the importer that prefers the cooked sibling.
+        var glbDir = Path.Combine(temp, "glb");
+        Directory.CreateDirectory(glbDir);
+        var glbPath = Path.Combine(glbDir, "cooked-glb.glb");
+
+        var mesh = new SharpGLTF.Geometry.MeshBuilder<SharpGLTF.Geometry.VertexTypes.VertexPositionNormal>("m");
+        var meshPrim = mesh.UsePrimitive(SharpGLTF.Materials.MaterialBuilder.CreateDefault());
+        meshPrim.AddTriangle(
+            new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 0, 0, 1, 0),
+            new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(1, 0, 0, 0, 1, 0),
+            new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 1, 0, 1, 0));
+        var scene = new SharpGLTF.Scenes.SceneBuilder();
+        scene.AddRigidMesh(mesh, new SharpGLTF.Scenes.NodeBuilder("only"));
+        scene.ToGltf2().SaveGLB(glbPath);
+
+        // Uncooked first, so the check cannot pass by the cooked path never being taken.
+        var beforeCook = new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("aw/glb"), glbPath));
+        t.Expect("AW.9 a .glb imports statically before it is cooked", beforeCook.Primitives.Length == 1);
+
+        var cookedGlb = Path.ChangeExtension(glbPath, ".blixmesh");
+        Blix.Recipes.MeshRecipe.CookToBlixMesh(glbPath, cookedGlb);
+        t.ExpectTrue("AW.9 and the cook writes a sibling", File.Exists(cookedGlb));
+
+        // Caught rather than allowed to escape: the failure mode being guarded against is a refusal,
+        // and an uncaught one would take the whole suite down with it — losing every check after
+        // this point, which is how one bug hides the next.
+        try
+        {
+            var afterCook = new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("aw/glb2"), glbPath));
+            t.Expect("AW.9 and it still imports once a cooked sibling exists", afterCook.Primitives.Length == 1);
+            t.Expect("AW.9 with the same geometry as before it was cooked",
+                afterCook.Primitives[0].Mesh.VertexCount == beforeCook.Primitives[0].Mesh.VertexCount,
+                $"{beforeCook.Primitives[0].Mesh.VertexCount} -> {afterCook.Primitives[0].Mesh.VertexCount}");
+        }
+        catch (AssetImportException refused)
+        {
+            t.Fail("AW.9 and it still imports once a cooked sibling exists", refused.Message);
+            t.Fail("AW.9 with the same geometry as before it was cooked", "the import was refused");
+        }
+
         // ── The three recipes, as declared ───────────────────────────────────
         // <b>These check the DECLARATIONS, not the cooking.</b> A recipe whose id does not match
         // the constant its format stamps would write files nothing could attribute, and the two

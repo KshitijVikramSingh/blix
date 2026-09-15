@@ -65,4 +65,11 @@
   </ItemGroup>
 
 
+
+  <!-- What this project cooks, declared so coverage cannot drift. -->
+  <ItemGroup>
+    <CookMesh Include="Assets/models/**/*.gltf" />
+    <CookMesh Include="Assets/models/**/*.glb" />
+  </ItemGroup>
+
 </Project>
