@@ -85,7 +85,7 @@ public static class Program
         // produce the same files, which is what makes a regression diffable rather than arguable.
         var sequence = int.TryParse(ArgValue(args, "--frames-out"), out var sq) ? Math.Max(0, sq) : 0;
 
-        // --mask-from paints a mask onto the skeleton overlay. It changes no pose: the question it
+        // --mask-root paints a mask onto the skeleton overlay. It changes no pose: the question it
         // answers is "which bones does a layer rooted here reach, and how softly does it stop", and
         // that is a picture of the MASK rather than of anything the mask was used for.
         // --skeleton-only draws the rig's bones and not its mesh. A mask lives INSIDE a body, and a
@@ -99,7 +99,11 @@ public static class Program
         // mask needed.
         var zoom = float.TryParse(ArgValue(args, "--zoom"), out var zf) && zf > 0.05f ? zf : 1f;
 
-        var maskRoot = ArgValue(args, "--mask-from");
+        // --mask-root, matching the name RigSession's MaskRoot member derives in the viewer. This
+        // tool parses it by hand because it has no session — so the two names agree by care rather
+        // than by construction, and that difference is the standing argument for eventually giving
+        // it one.
+        var maskRoot = ArgValue(args, "--mask-root");
         var maskFalloff = int.TryParse(ArgValue(args, "--mask-falloff"), out var mf) ? Math.Max(0, mf) : 0;
 
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with

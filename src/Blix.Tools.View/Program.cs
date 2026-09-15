@@ -59,11 +59,16 @@ public static class Program
         var blendClip = ArgValue(args, "--blend");
         var additiveClip = ArgValue(args, "--additive");
 
-        // --mask names the bone a masked layer starts at, and picks the composition with it for the
+        // --mask names the CLIP a masked layer plays, and picks the composition with it for the
         // same reason --blend does: a mode reachable only through a combo box is a mode no bounded
         // run and no capture can get to, which makes it a mode nothing checks.
         var maskClip = ArgValue(args, "--mask");
-        var maskRoot = ArgValue(args, "--mask-from");
+
+        // Which BONE that layer starts at is not parsed here, and neither is the weight, the
+        // falloff, the lockstep or the root drive. Those are declared state on RigSession, so
+        // their flags are derived from the members — --mask-root, --weight, --mask-falloff,
+        // --lockstep, --drive-root — and applied once the session exists. Nothing below writes a
+        // parser for them, which is the only way a flag and a panel stay one thing.
 
         // --instances N draws N copies of the rig, each on its own clock. One is the ordinary case
         // and takes exactly the same path as eight — there is no single-body shader.
@@ -75,7 +80,7 @@ public static class Program
             Height = 760,
         });
 
-        var loop = new ViewerLoop(modelPath, rigPath, clipName, blendClip, additiveClip, instances, maskClip, maskRoot);
+        var loop = new ViewerLoop(modelPath, rigPath, clipName, blendClip, additiveClip, instances, maskClip, args);
         using var window = new Window(loop, options);
         window.Run();
     }
@@ -138,12 +143,12 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         string? additiveClip = null,
         int instances = 1,
         string? maskClip = null,
-        string? maskRoot = null)
+        string[]? args = null)
     {
         this.modelPath = modelPath;
         this.rigPath = rigPath;
         this.clipName = clipName;
-        this.maskRoot = maskRoot;
+        this.args = args ?? Array.Empty<string>();
         requestedInstances = instances;
         secondClip = blendClip ?? additiveClip ?? maskClip;
         startMode = blendClip is not null ? PoseMode.Blend
@@ -152,7 +157,9 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             : PoseMode.Single;
     }
 
-    private readonly string? maskRoot;
+    // Kept whole rather than pre-parsed, because the declared flags cannot be applied until the
+    // subject they write to exists — and the subject is a rig that has not been loaded yet.
+    private readonly string[] args;
 
 
     // <b>Two cameras, one class.</b> The window's view and the panel's viewport each carried their
@@ -383,13 +390,46 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             tunables.Bespoke.Add(member);
         }
 
+        // Every declared flag, parsed by nobody. A bad value throws with the member's own range or
+        // option list in the message, which is more than the hand-written parsing it replaced ever
+        // said — but it throws HERE, after the window is open, because a flag that writes a subject
+        // cannot be applied before the subject exists and this subject is a rig that had to load
+        // first. So it is caught and reported rather than allowed to surface as a stack trace
+        // through Window.Run, which is what it did the first time.
+        try
+        {
+            tunables.Apply(args);
+        }
+        catch (ArgumentException bad)
+        {
+            Console.Error.WriteLine(bad.Message);
+            Environment.Exit(1);
+        }
+
         // A mask before anyone asks for one, because the first thing anybody does in this mode is
-        // pick a spine. The guess is named as a guess in RigSession and the combo corrects it in one
-        // click; --mask-from overrides it outright.
-        var chosenRoot = maskRoot ?? RigSession.GuessUpperBodyRoot(rig.Skeleton);
-        if (chosenRoot is not null && !session.SetMask(chosenRoot, falloff: 2))
+        // pick a spine. The guess is named as a guess in RigSession and the combo corrects it in
+        // one click. --mask-root has already been applied above, so it wins by simply being there.
+        var chosenRoot = session.MaskRoot.Length > 0
+            ? session.MaskRoot
+            : RigSession.GuessUpperBodyRoot(rig.Skeleton);
+
+        var falloff = session.MaskFalloff > 0 ? session.MaskFalloff : 2;
+        if (chosenRoot is null)
+        {
+            Console.WriteLine("  no bone matches the usual spine names — pick one in the mask panel");
+        }
+        else if (!session.SetMask(chosenRoot, falloff))
         {
             Console.WriteLine($"  no bone named '{chosenRoot}' — the mask is empty until one is picked");
+        }
+        else
+        {
+            // Said out loud, because a flag that landed and a flag that was ignored look identical
+            // from a window. The capture has reported this since it was written; the viewer never
+            // did, and a bounded run was the one place it mattered most.
+            Console.WriteLine(
+                $"  mask from '{chosenRoot}' falloff {falloff}: reaches {session.Mask!.Reach()} of " +
+                $"{rig.Skeleton.BoneCount} bones, {session.Mask.Reach(0.999f)} fully");
         }
 
         // Prefer a walk on A and an idle on B when the asset has them: a blend between two named

@@ -21,12 +21,12 @@
 # --viewport reads back the PANEL camera's target instead of the main scene's.
 # --frames-out N writes N files, one per fixed 17ms step (out.000.png, out.001.png, ...).
 #     tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --frames-out 24 --out walk.png
-# --mask-from <bone> --mask-falloff N colours the drawn skeleton by a layer mask: magenta where
+# --mask-root <bone> --mask-falloff N colours the drawn skeleton by a layer mask: magenta where
 # the layer reaches fully, grey where it does not, and the two-stop ramp between. --skeleton-only
 # drops the mesh so the colours are visible at all, and --zoom N pulls the camera in by N so a
 # wrist is more than four pixels.
 #     tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --mask Unarmed_Melee_Attack_Punch_A \
-#         --mask-from spine --mask-falloff 2 --skeleton-only --xray --zoom 2 --out mask.png
+#         --mask-root spine --mask-falloff 2 --skeleton-only --xray --zoom 2 --out mask.png
 # --lockstep is the negative control: every body on one clip at one instant, which must come
 # back as exactly ONE pose fingerprint. Varied must come back as N.
 set -euo pipefail
