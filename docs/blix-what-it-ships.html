@@ -127,7 +127,7 @@ a{color:var(--span)}
 <div class="sheet">
 
 <header class="masthead">
-  <div class="eyebrow">revision 2 · supersedes blix-workbench.html · 2026-09-15</div>
+  <div class="eyebrow">revision 3 · re-measured at 2aa1faa · 2026-09-15</div>
   <h1>What Blix Ships</h1>
   <p class="standfirst">Not an editor, not a game, not a lab. Tools, formats, pipelines, conventions,
   and a substrate deep enough that you can pick any two points in the stack and build a CLI or UI
@@ -242,15 +242,24 @@ a{color:var(--span)}
   <p class="lede">Once room, controller and world are gone, the list is short — and it gets shorter
   still when the first three collapse into one.</p>
 
-  <h3>A pack — content at rest</h3>
-  <p class="t"><b>A named set of content that travels together.</b> A <code>.glb</code> is a pack: it
-  carries meshes, a skeleton, clips, materials and textures in one file. A cooked Sponza directory is
-  a pack. So <em>model</em> and <em>rig</em> are not separate subjects — they are packs whose contents
-  differ, and the tools should discover what is inside rather than be told by a flag.</p>
-  <p class="t">That collapses the flag problem directly: today <code>--model</code> and
-  <code>--rig</code> are two switches meaning "which of my two code paths to take", set by a person
-  who already knows the answer. A pack knows what it contains. <code>blix open rogue.glb</code> should
-  need no flag, and the panels that appear should be the panels its contents justify.</p>
+  <h3>A pack — content at rest <span class="st open">corrected</span></h3>
+  <p class="t"><b>A named set of content that travels together.</b> A <code>.glb</code> is a pack in
+  that sense: it carries meshes, a skeleton, clips, materials and textures in one file. So
+  <em>model</em> and <em>rig</em> are not separate artifacts — they are the same file, and the tools
+  should discover what is inside rather than be told by a flag. <code>blix open rogue.glb</code>
+  should need no flag, and the panels that appear should be the panels its contents justify.</p>
+  <p class="t">Two claims in the last revision did not survive being measured, and both matter.
+  <b>"A cooked Sponza directory is a pack" is false</b> — cooking produces siblings, not a set:
+  <code>.blixmesh</code> holds geometry only and the source glTF is still parsed in full for every
+  material, so no cooked output is self-contained and none of it has an address of its own. And
+  <b><code>pack</code> is not a concept in this tree at all</b> — it appears zero times in code as
+  anything but a vendor's model bundle. The nearest real registry,
+  <code>AssetDatabase</code> + <code>manifest.json</code>, is 209 lines routing one TTF in four
+  projects.</p>
+  <p class="note">So the word is worth keeping as the noun the verbs take, and worth not mistaking
+  for something that exists. What actually addresses an asset in Blix is a file path — see
+  <a href="blix-assets.html">The Unfinished Cook</a> for the census, the three formats and where each
+  one stops.</p>
 
   <h3>A frame — content in motion</h3>
   <p class="t">The other real thing, and the one Blix uniquely owns: passes, targets, draws,
@@ -307,7 +316,7 @@ a{color:var(--span)}
     <div class="trow"><div class="tname">character probe</div>
       <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell on cheap"></div>
       <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
-      <div class="cost">830</div></div>
+      <div class="cost">812</div></div>
 
     <div class="trow"><div class="tname">RTS scenarios ×35</div>
       <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell on cheap"></div>
@@ -317,12 +326,12 @@ a{color:var(--span)}
     <div class="trow"><div class="tname">Test.Physics3D</div>
       <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell on cheap"></div>
       <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
-      <div class="cost">277</div></div>
+      <div class="cost">252</div></div>
 
     <div class="trow"><div class="tname">toolchain probe</div>
       <div class="cell on"></div><div class="cell on"></div><div class="cell"></div><div class="cell on"></div>
       <div class="cell on"></div><div class="cell"></div><div class="cell"></div><div class="cell on"></div><div class="cell"></div>
-      <div class="cost">774</div></div>
+      <div class="cost">640</div></div>
 
     <div class="trow"><div class="tname">frame dump / validate</div>
       <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
@@ -332,37 +341,42 @@ a{color:var(--span)}
     <div class="trow"><div class="tname">character room</div>
       <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell on"></div>
       <div class="cell on"></div><div class="cell on"></div><div class="cell on"></div><div class="cell on"></div><div class="cell on"></div>
-      <div class="cost big">1,097</div></div>
+      <div class="cost">633</div></div>
 
     <div class="trow"><div class="tname">character capture</div>
       <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell on"></div>
       <div class="cell on"></div><div class="cell on"></div><div class="cell on"></div><div class="cell on"></div><div class="cell on"></div>
-      <div class="cost big">808</div></div>
+      <div class="cost">344</div></div>
 
     <div class="trow"><div class="tname">toolchain viewer</div>
       <div class="cell on"></div><div class="cell on"></div><div class="cell"></div><div class="cell on"></div>
       <div class="cell on"></div><div class="cell on"></div><div class="cell on"></div><div class="cell on"></div><div class="cell on"></div>
-      <div class="cost big">2,388</div></div>
+      <div class="cost big">1,741</div></div>
 
     <div class="trow"><div class="tname">toolchain capture</div>
       <div class="cell on"></div><div class="cell on"></div><div class="cell"></div><div class="cell on"></div>
       <div class="cell on"></div><div class="cell on"></div><div class="cell on"></div><div class="cell on"></div><div class="cell on"></div>
-      <div class="cost big">1,507</div></div>
+      <div class="cost big">944</div></div>
   </div>
   </div>
   <div class="chartkey" style="padding-inline:20px">
     <span><span class="sw" style="background:var(--pack)"></span>span that stops before the GPU</span>
     <span><span class="sw" style="background:var(--span)"></span>span that reaches the screen</span>
-    <span>cost = the tool's own lines plus its share of the library written for it</span>
+    <span>cost = the tool executable's own lines. shared libraries counted separately, below.</span>
   </div>
 
-  <p class="pull">Every tool that stops before P4 costs a few hundred lines. Every tool that reaches
-  P8 costs one to two thousand. The stack is thin in exactly one place, and it is the place between
+  <p class="note" style="margin-top:14px">Shared libraries, counted once rather than apportioned:
+  <b>Blix.Tools.Studio 2,261</b> across five consumers (viewer, capture, probe, shell, its suite) and
+  <b>Blix.Labs.Character 2,018</b> across three. Both were written for the rows above them and exist
+  for no other reason.</p>
+  <p class="pull">Every tool that stops before P4 costs a few hundred lines of its own. Every tool
+  that reaches P8 either costs one to two thousand — or sits on a library that size written for it.
+  The character room is 633 lines on top of 2,018. The stack is thin in exactly one place, and it is the place between
   having data and seeing it.</p>
 
   <p class="t">That is a much narrower diagnosis than "the labs hold things that should be shared". It
   says: <b>P0→P3 is already good substrate</b> — an importer you can call, CPU data you can hold, and
-  a convention (OK/FAIL, exit code) that makes a 277-line tool complete. Five tools in this chart are
+  a convention (OK/FAIL, exit code) that makes a 252-line tool complete. Five tools in this chart are
   cheap for exactly that reason, and three of them are not even in a lab.</p>
 
   <p class="t">And it says <b>P4→P8 is not substrate at all.</b> It is a thing each tool builds from
@@ -377,6 +391,10 @@ a{color:var(--span)}
   <p class="lede">Five things, all of them in the P4→P8 gap, none of them a framework. The test each
   has to pass is yours: a well-defined job, boxed in one place, a stable surface, and no opinion
   imposed on what comes after.</p>
+  <p class="note"><b>Two of the five have landed since revision 2</b>, and their <em>today</em> lines
+  now record what happened rather than what is missing. The studio arc took the scene; the shell took
+  the widget. Both are marked below, and neither was extracted under pressure — they were authored,
+  which was the argument for doing them at all.</p>
 
   <div class="needs">
     <div class="need">
@@ -395,7 +413,10 @@ a{color:var(--span)}
         <h4>A scene that can show a thing</h4>
         <p>Shadow → lit → present, a grid, a sun, a camera. Not "the lab scene" — a default that a
         tool takes when it has no opinion, and replaces entirely when it does.</p>
-        <div class="today">today: the same graph written twice, differing by a string prefix and one pass</div>
+        <div class="today">landed — <b>Blix.Tools.Studio</b>, 2,261 lines: one graph, a ladder from
+        knobs to bring-a-draw to append-a-pass, and the look declared as <code>[Tune]</code> so every
+        tool on it gets a Scene panel and <code>--sun-elevation</code> without parsing one. Five
+        consumers, one of them headless with no device at all.</div>
       </div>
     </div>
     <div class="need">
@@ -403,19 +424,23 @@ a{color:var(--span)}
       <div>
         <h4>Readback as a call, not a program</h4>
         <p>Render n frames, hand back an image. The capability arrived this year — colour attachments
-        were not legal copy sources before it — and it currently exists as two 300-line programs
-        rather than as something you can call.</p>
-        <div class="today">today: Capture/Program.cs, twice, incl. camera framing and argument parsing</div>
+        were not legal copy sources before it — and it still exists as whole programs rather than as
+        something you can call.</p>
+        <div class="today">still open — <b>Blix.Tools.Shot 944</b> + Character/Capture 344, both of
+        them a camera, an argument parser and a readback path around one <code>ReadTexture</code>.</div>
       </div>
     </div>
     <div class="need">
       <div class="n">UI</div>
       <div>
         <h4>A window with panels, without an application</h4>
-        <p>The chassis already gives a window, input, a loop and ImGui. What is missing is everything
-        above it: docking, the embedded viewport, picking — which exist, and are inside one
-        executable where nothing can reach them.</p>
-        <div class="today">today: ViewerPanels.cs 717 + LabSelection.cs 129, in an .exe</div>
+        <p>The chassis already gives a window, input, a loop and ImGui. Above it, the embedded
+        viewport is now a widget a tool calls — it reports <code>Clicked</code> and the caller casts
+        its own ray. What deliberately did <em>not</em> move is the frame layout and the selection:
+        a thing that invokes your code is a host, and a tool's panel order is its identity.</p>
+        <div class="today">partly landed — <b>Blix.Tools.Studio.Shell</b>, 167 lines, one widget.
+        Still in an executable: ViewerPanels.cs 625 + StudioSelection.cs 129 — and the second is
+        per-asset-kind work that belongs beside a mesh view and a rig view, not in a shell.</div>
       </div>
     </div>
     <div class="need">
@@ -426,7 +451,11 @@ a{color:var(--span)}
         <code>.blixprobe</code> — and the only way to see inside one is a cooker subcommand. Each
         should be listable, judgeable and openable, because a format you cannot inspect is a format
         you debug by printf.</p>
-        <div class="today">today: blix-cook inspect, and nothing for .blixtex or .blixprobe</div>
+        <div class="today">still open, and now measured — <b>blix-cook inspect</b>, and nothing that can
+        open a <code>.blixmesh</code>, <code>.blixtex</code> or <code>.blixprobe</code>. Worse than
+        unopenable: <code>AssetLoadReport</code> names the four states a load can be in and
+        <b>has zero emitters</b>, so which path a load took is not observable either. See
+        <a href="blix-assets.html">The Unfinished Cook</a>.</div>
       </div>
     </div>
   </div>
@@ -454,39 +483,56 @@ a{color:var(--span)}
       individually, which is mostly a constraint on their surfaces rather than their size.</p>
     </div>
     <div class="q">
+      <h4><span class="st open">open</span>Whether a load may stay silent</h4>
+      <p>Every loader that chooses between a cooked file, a source file and a fallback makes that
+      choice without saying so, and <code>AssetLoadReport</code> — the type that names the four
+      states — has zero emitters. Cooking was left opt-in and quiet on purpose, waiting for this arc
+      to say what it should be.</p>
+      <p class="mine">This is the cheapest high-value item in either document, and it is what makes
+      a cooker checkable at all. Five decisions it forces are laid out as D1–D5 in
+      <a href="blix-assets.html">The Unfinished Cook</a>.</p>
+    </div>
+    <div class="q">
       <h4><span class="st settled">settled</span>Headed and headless do not unify</h4>
       <p>Three programs over one library, which is the shape that already works. Dropping this also
       removes the main reason the last draft wanted a contract.</p>
     </div>
     <div class="q">
-      <h4><span class="st open">open</span>Where the window and the loop sit</h4>
-      <p>You said take them a layer up if required. The chassis owns them now and a tool takes them
-      by being an application. The question is whether "a window with panels" is something a tool
-      <em>calls</em> or something it <em>is</em> — and that is the difference between a UI tool costing
-      50 lines and costing 600.</p>
-      <p class="mine">The thing I would want to settle first, because the UI piece of the substrate
-      cannot be designed until it is answered, and it is the piece you said matters most.</p>
+      <h4><span class="st settled">settled</span>Where the window and the loop sit</h4>
+      <p>A tool <em>is</em> an application and <em>calls</em> the pieces. The test that decided it is
+      mechanical — <b>who calls whom</b>: a thing you invoke inside your own <code>ImGui.Begin</code>
+      is a library; a thing that invokes your code is a host. So the viewport became a widget and the
+      frame layout did not move, because a tool's window title, panel order and what it says when
+      nothing is loaded are its identity.</p>
+      <p class="mine">Settled by building it rather than by arguing it, which is why it is here as
+      state rather than as a proposal. <b>Blix.Tools.Studio.Shell is 167 lines.</b></p>
     </div>
     <div class="q">
       <h4><span class="st open">open</span>Does a pack know what it is?</h4>
-      <p>Dropping <code>--model</code> and <code>--rig</code> means a pack reports its own contents
-      and tools react. That is clearly right for glTF, where the file says. It is less obvious for a
-      cooked directory, and it decides whether "pack" is a real type in the code or only a word in
-      the CLI.</p>
-      <p class="mine">Leaning real type, small — a manifest and a content list, nothing more.</p>
+      <p>Dropping <code>--model</code> and <code>--rig</code> means a file reports its own contents
+      and tools react. Clearly right for glTF, where the file says. <b>Not askable of a cooked
+      directory</b>, because measurement since says there is no such artifact — the cook makes
+      siblings, materials are never cooked, and nothing produced is self-contained.</p>
+      <p class="mine">So the question splits, and the smaller half is answerable now: the flag goes,
+      and what the viewer shows is decided by what the file <em>is</em>. Whether "pack" ever becomes
+      a real type waits on <b>whether materials get cooked</b> — which is the thing that would give
+      cooked output an address at all. That decision is now written down as D3 in
+      <a href="blix-assets.html">The Unfinished Cook</a>.</p>
     </div>
     <div class="q">
       <h4><span class="st open">open</span>What the frame subject actually is</h4>
       <p>It is the one thing here Blix uniquely owns and the least tooled: a dump flag, an
       environment variable, a fingerprint, an overlay, all differently shaped. Whether that becomes
-      one addressable subject or stays a set of habits is undecided, and I have not thought about it
-      as hard as the pack side.</p>
+      one addressable artifact or stays a set of habits is undecided, and I have not thought about it
+      as hard as the asset side.</p>
     </div>
   </div>
 </section>
 
 <footer>
-  Revision 2. Supersedes <code>docs/blix-workbench.html</code> (a central application — wrong) and
+  Revision 3, re-measured at <code>2aa1faa</code>. Companion to <code>docs/blix-engine.html</code>
+  (every project counted, at file granularity) and <code>docs/blix-assets.html</code> (the cook,
+  measured). Supersedes <code>docs/blix-workbench.html</code> (a central application — wrong) and
   <code>docs/blix-tooling-design.html</code> (what had earned the right to move — the wrong question).
   <code>docs/blix-topology.html</code> still stands: it is the counted graph. Costs in §04 are each
   tool's own lines plus its share of the library written for it, at <code>935f7a6</code>; the shares

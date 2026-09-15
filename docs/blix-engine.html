@@ -1,0 +1,395 @@
+<title>The Engine, Counted</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+:root{
+  --paper:#F1F4F5; --surface:#FDFEFE; --sunk:#E7ECEE;
+  --ink:#111A1F; --body:#33454E; --muted:#677C86;
+  --rule:#C6D2D7; --hair:#DDE5E8;
+  --eng:#0D5F6E; --eng-soft:#0d5f6e14;
+  --tool:#6B4A9E; --tool-soft:#6b4a9e14;
+  --warm:#A55228; --warm-soft:#a5522814;
+  --app:#2F6B4F; --app-soft:#2f6b4f14;
+  --signal:#A2172F;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --paper:#0C1216; --surface:#141D22; --sunk:#101820;
+  --ink:#E6EDEF; --body:#B4C4CA; --muted:#7D919A;
+  --rule:#26363D; --hair:#1D2A31;
+  --eng:#4FB6C6; --eng-soft:#4fb6c61c;
+  --tool:#A88FD6; --tool-soft:#a88fd61c;
+  --warm:#DE9760; --warm-soft:#de97601c;
+  --app:#6FBE94; --app-soft:#6fbe941c;
+  --signal:#E96A83;
+}}
+:root[data-theme="dark"]{
+  --paper:#0C1216; --surface:#141D22; --sunk:#101820;
+  --ink:#E6EDEF; --body:#B4C4CA; --muted:#7D919A;
+  --rule:#26363D; --hair:#1D2A31;
+  --eng:#4FB6C6; --eng-soft:#4fb6c61c;
+  --tool:#A88FD6; --tool-soft:#a88fd61c;
+  --warm:#DE9760; --warm-soft:#de97601c;
+  --app:#6FBE94; --app-soft:#6fbe941c;
+  --signal:#E96A83;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{background:var(--paper);color:var(--body);
+  font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  font-size:15px;line-height:1.62;margin:0;padding-block:0 76px;padding-inline:20px;-webkit-font-smoothing:antialiased}
+.sheet{max-width:1140px;margin:0 auto}
+h1,h2,h3,h4{font-family:Archivo,"Helvetica Neue",Arial,sans-serif;color:var(--ink);text-wrap:balance;margin:0}
+code,.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+p{margin:0}
+.masthead{padding-block:56px 30px;border-bottom:2px solid var(--ink)}
+.eyebrow{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+h1{font-size:clamp(34px,6.2vw,58px);font-weight:800;letter-spacing:-.023em;line-height:1.02;margin-top:10px}
+.standfirst{max-width:64ch;margin-top:18px;font-size:17px}
+.toc{display:flex;flex-wrap:wrap;gap:6px 22px;margin-top:26px;font-family:"IBM Plex Mono",monospace;font-size:12px}
+.toc a{color:var(--muted);text-decoration:none;border-bottom:1px solid transparent;padding-bottom:1px}
+.toc a:hover{color:var(--ink);border-bottom-color:var(--eng)}
+section{padding-block:48px;border-bottom:1px solid var(--hair)}
+h2{font-size:clamp(22px,3.1vw,30px);font-weight:700;letter-spacing:-.016em;margin-top:6px}
+h3{font-size:17px;font-weight:700;margin-top:32px}
+.lede{max-width:70ch;margin-top:13px;font-size:16px}
+p.t{max-width:72ch;margin-top:13px}
+.note{max-width:74ch;margin-top:16px;font-size:13.5px;color:var(--muted)}
+.note b,p.t b,.lede b{color:var(--ink)}
+.pull{max-width:56ch;margin-top:26px;padding-left:20px;border-left:3px solid var(--eng);
+  font-family:Archivo,sans-serif;font-size:21px;line-height:1.35;font-weight:600;color:var(--ink);letter-spacing:-.012em}
+/* band chart */
+.bands{margin-top:26px}
+.bandbar{display:flex;height:46px;font-family:"IBM Plex Mono",monospace;font-size:11px}
+.bandbar div{display:flex;align-items:center;justify-content:center;color:#fff;overflow:hidden;white-space:nowrap}
+.b-game{background:var(--signal)} .b-eng{background:var(--eng)} .b-demo{background:var(--app)}
+.b-tool{background:var(--tool)} .b-ver{background:var(--warm)} .b-lab{background:var(--muted)}
+.bandkey{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:9px 22px;margin-top:16px;font-size:12.5px}
+.bandkey div{display:flex;gap:8px;align-items:baseline}
+.sw{display:inline-block;width:11px;height:11px;flex:0 0 11px;transform:translateY(1px)}
+.bandkey b{color:var(--ink);font-weight:600}
+.bandkey span.n{font-family:"IBM Plex Mono",monospace;color:var(--muted);margin-left:auto;white-space:nowrap}
+/* tables */
+.tablewrap{overflow-x:auto;margin-top:24px;border:1px solid var(--hair)}
+table{border-collapse:collapse;width:100%;min-width:800px;background:var(--surface)}
+th,td{padding:10px 12px;font-size:12.5px;text-align:left;border-bottom:1px solid var(--hair);vertical-align:top}
+thead th{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;
+  font-weight:500;color:var(--muted);border-bottom:1px solid var(--rule);white-space:nowrap}
+tbody tr:last-child td{border-bottom:0}
+td.n,th.n{font-family:"IBM Plex Mono",monospace;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+td.name{font-family:"IBM Plex Mono",monospace;color:var(--ink);font-weight:500;white-space:nowrap}
+td.what{color:var(--body);max-width:44ch}
+tr.hi td{background:var(--eng-soft)}
+/* inner breakdown */
+.inner{display:flex;flex-direction:column;gap:1px;background:var(--hair);border:1px solid var(--hair);margin-top:22px}
+.ib{background:var(--surface);padding:16px 19px}
+.ib .hd{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline}
+.ib .hd .nm{font-family:"IBM Plex Mono",monospace;font-size:14px;font-weight:600;color:var(--ink)}
+.ib .hd .meta{font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--muted)}
+.ib .hd .fan{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--eng);border:1px solid var(--eng);padding:1px 6px}
+.ib p{margin-top:9px;font-size:13.5px;max-width:76ch}
+.ib p b{color:var(--ink)}
+.seg{display:flex;height:26px;margin-top:12px;font-family:"IBM Plex Mono",monospace;font-size:10px;gap:1px}
+.seg div{display:flex;align-items:center;justify-content:center;color:#fff;overflow:hidden;white-space:nowrap}
+.s1{background:var(--eng)} .s2{background:var(--tool)} .s3{background:var(--warm)}
+.s4{background:var(--app)} .s5{background:var(--muted)}
+.seglabels{display:flex;flex-wrap:wrap;gap:4px 18px;margin-top:9px;font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--muted)}
+.seglabels b{color:var(--ink);font-weight:500}
+/* spine */
+.spine{display:flex;flex-direction:column;gap:1px;background:var(--hair);border:1px solid var(--hair);margin-top:24px}
+.lvl{background:var(--surface);padding:14px 19px;display:grid;grid-template-columns:104px 1fr;gap:18px;align-items:baseline}
+.lvl .tier{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+.lvl .mods{display:flex;flex-wrap:wrap;gap:7px}
+.lvl .mods span{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--ink);
+  border:1px solid var(--rule);padding:2px 8px;background:var(--sunk)}
+/* findings */
+.finds{display:flex;flex-direction:column;gap:1px;background:var(--hair);border:1px solid var(--hair);margin-top:24px}
+.f{background:var(--surface);padding:17px 20px}
+.f h4{font-size:15.5px;font-weight:600;font-family:"IBM Plex Sans",sans-serif;color:var(--ink);max-width:70ch}
+.f p{margin-top:7px;font-size:13.5px;max-width:76ch}
+.f .fig{margin-top:9px;font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--muted);
+  border-left:2px solid var(--rule);padding-left:11px;line-height:1.75}
+.f .fig b{color:var(--ink);font-weight:500}
+footer{padding-top:34px;font-size:12.5px;color:var(--muted);max-width:78ch}
+a{color:var(--eng)}
+@media (max-width:560px){
+  .lvl{grid-template-columns:1fr;gap:8px}
+  .bandbar{height:auto;flex-direction:column}
+  .bandbar div{height:26px;justify-content:flex-start;padding-left:10px}
+}
+</style>
+
+<div class="sheet">
+
+<header class="masthead">
+  <div class="eyebrow">counted at 2aa1faa · 2026-09-15 · 46 projects</div>
+  <h1>The Engine, Counted</h1>
+  <p class="standfirst">Every project in the tree, what is inside each one, and who depends on it —
+  read off the working tree rather than off the plans. The point is granularity: at project level
+  the engine looks like thirteen tidy modules, and at file level three of them are one subsystem
+  each wearing a general name.</p>
+  <nav class="toc">
+    <a href="#tree">01 the tree</a>
+    <a href="#engine">02 the thirteen</a>
+    <a href="#inside">03 inside the big four</a>
+    <a href="#spine">04 the spine</a>
+    <a href="#findings">05 what the counting found</a>
+  </nav>
+</header>
+
+<section id="tree">
+  <div class="eyebrow">01 — the tree</div>
+  <h2>135,743 lines, and where they are</h2>
+  <p class="lede">Six bands. The first number worth sitting with is that <b>one game is more than
+  half the tree</b>, and the engine it is built on is a quarter of it.</p>
+
+  <div class="bands">
+    <div class="bandbar">
+      <div class="b-game" style="width:53.6%">RTSGame 53.6%</div>
+      <div class="b-eng" style="width:25.8%">engine 25.8%</div>
+      <div class="b-demo" style="width:7.8%">demos</div>
+      <div class="b-tool" style="width:5.6%">tools</div>
+      <div class="b-ver" style="width:4.5%">tests</div>
+      <div class="b-lab" style="width:2.8%">labs</div>
+    </div>
+    <div class="bandkey">
+      <div><i class="sw" style="background:var(--signal)"></i><b>RTSGame</b> one project, 124 files<span class="n">72,720</span></div>
+      <div><i class="sw" style="background:var(--eng)"></i><b>Engine</b> 13 projects<span class="n">34,981</span></div>
+      <div><i class="sw" style="background:var(--app)"></i><b>Demos</b> 11 projects<span class="n">10,522</span></div>
+      <div><i class="sw" style="background:var(--tool)"></i><b>Tools</b> 9 projects<span class="n">7,668</span></div>
+      <div><i class="sw" style="background:var(--warm)"></i><b>Verification</b> 7 projects<span class="n">6,045</span></div>
+      <div><i class="sw" style="background:var(--muted)"></i><b>Labs</b> 4 projects<span class="n">3,807</span></div>
+    </div>
+  </div>
+
+  <p class="t">The engine is the smallest thing here that everything else needs, which is the shape
+  you want. What the bands hide is that the tool band is nine projects averaging 852 lines and the
+  engine band is thirteen averaging 2,691 — so <b>"a project" means two quite different sizes of
+  thing</b> depending on which band it sits in, and the tools band is where the arithmetic of a new
+  one is cheap.</p>
+  <p class="note">Counted with <code>find … -name "*.cs"</code> excluding <code>bin/</code> and
+  <code>obj/</code>; blank lines and comment lines included, because in this tree the comments are
+  a substantial and deliberate part of what a file is. Shaders, scripts and assets are not counted.</p>
+</section>
+
+<section id="engine">
+  <div class="eyebrow">02 — the engine</div>
+  <h2>Thirteen projects, ordered by who needs them</h2>
+  <p class="lede">Fan-in is the count of projects declaring a <code>ProjectReference</code> to it —
+  the honest measure of how load-bearing a module is, and it does not track size at all.
+  <b>The most-referenced module after <code>Blix.Graphics</code> is the second-smallest one.</b></p>
+
+  <div class="tablewrap"><table>
+    <thead><tr>
+      <th>project</th><th class="n">lines</th><th class="n">files</th><th class="n">fan-in</th><th>what it is</th>
+    </tr></thead>
+    <tbody>
+      <tr class="hi"><td class="name">Blix.Graphics</td><td class="n">3,976</td><td class="n">51</td><td class="n">30</td>
+        <td class="what">The device interface and the vocabulary — commands, vertex layouts, primitives, shader loading. Names no backend.</td></tr>
+      <tr class="hi"><td class="name">Blix.Core</td><td class="n">681</td><td class="n">13</td><td class="n">24</td>
+        <td class="what">Host seams: <code>IRenderHost</code>, <code>IInputHandler</code>, <code>IUiSource</code>, views, keys, gesture ownership — and the <code>[BlixApp]</code> layer.</td></tr>
+      <tr class="hi"><td class="name">Blix</td><td class="n">5,454</td><td class="n">61</td><td class="n">22</td>
+        <td class="what">Game objects, transforms, cameras, lights — plus animation and glTF import, which are three quarters of it. See §03.</td></tr>
+      <tr><td class="name">Blix.Graphics.Vulkan</td><td class="n">8,267</td><td class="n">23</td><td class="n">21</td>
+        <td class="what">The only backend. Device, swapchain, textures, resources, and the render graph.</td></tr>
+      <tr><td class="name">Blix.Diagnostics</td><td class="n">3,543</td><td class="n">30</td><td class="n">21</td>
+        <td class="what">Debug draw, channels, frames, sinks — and <code>TuneReflection</code>, which turns <code>[Tune]</code> into panels and flags.</td></tr>
+      <tr><td class="name">Blix.Runtime.Silk</td><td class="n">1,706</td><td class="n">5</td><td class="n">16</td>
+        <td class="what">The window and the loop. Silk.NET + MoltenVK bootstrap, the ImGui renderer, the line drawer.</td></tr>
+      <tr><td class="name">Blix.Render</td><td class="n">2,624</td><td class="n">15</td><td class="n">16</td>
+        <td class="what">Batches and bundles that own geometry only — sprites, particles, instances, props, fonts, post chain.</td></tr>
+      <tr><td class="name">Blix.Geometry</td><td class="n">3,145</td><td class="n">21</td><td class="n">13</td>
+        <td class="what">Shapes and intersection. 79% of it is two files. See §03.</td></tr>
+      <tr><td class="name">Blix.Audio</td><td class="n">118</td><td class="n">4</td><td class="n">8</td>
+        <td class="what">Interfaces only — the seam a backend plugs into.</td></tr>
+      <tr><td class="name">Blix.Assets</td><td class="n">1,873</td><td class="n">16</td><td class="n">7</td>
+        <td class="what">Importers, the asset database, the refusal type, and the <code>.blixmesh</code> container.</td></tr>
+      <tr><td class="name">Blix.Graphics.Images</td><td class="n">1,750</td><td class="n">10</td><td class="n">5</td>
+        <td class="what">Image and IBL work: BC7/BC5 <code>.blixtex</code>, the PBR probe baker, PNG write, cubemaps.</td></tr>
+      <tr><td class="name">Blix.Diagnostics.Overlay</td><td class="n">1,506</td><td class="n">2</td><td class="n">1</td>
+        <td class="what">The ImGui overlay. 98% of it is one file, and its one consumer is the runtime.</td></tr>
+      <tr><td class="name">Blix.Audio.OpenAL</td><td class="n">338</td><td class="n">1</td><td class="n">1</td>
+        <td class="what">The one audio backend, reached only through the runtime.</td></tr>
+    </tbody>
+  </table></div>
+
+  <p class="pull">Size and load-bearing are unrelated here. <code>Blix.Core</code> is 1.9% of the
+  engine and 24 projects need it; <code>Blix.Graphics.Vulkan</code> is 23.6% of it and 21 do.</p>
+</section>
+
+<section id="inside">
+  <div class="eyebrow">03 — granularity</div>
+  <h2>Inside the four that carry the weight</h2>
+  <p class="lede">At project level these read as four general-purpose modules. At file level, three of
+  them are one dominant subsystem each, and the name on the folder does not say so.</p>
+
+  <div class="inner">
+
+    <div class="ib">
+      <div class="hd"><span class="nm">Blix</span><span class="meta">5,454 lines · 61 files</span><span class="fan">fan-in 22</span></div>
+      <p><b>The name says "the engine"; the contents say "animation and glTF".</b> Together those two
+      are 73% of it, and both are subsystems a project can want without wanting the other. The actual
+      game-object layer — <code>Game</code>, <code>GameObject</code>, transforms, cameras, lights,
+      the clock, picking — is 847 lines, 15.5% of the file it lends its name to.</p>
+      <div class="seg">
+        <div class="s1" style="width:41.9%">animation 2,288</div>
+        <div class="s2" style="width:31.2%">glTF import 1,700</div>
+        <div class="s4" style="width:15.5%">objects 847</div>
+        <div class="s3" style="width:11.3%">physics 619</div>
+      </div>
+      <div class="seglabels">
+        <span><b>animation</b> ClipPlayer 280 · Curves 223 · SkeletonGizmo 267 · BonePaletteSet 150 · RootMotion 158 · BoneMask 140 · Skeleton 132</span>
+      </div>
+      <div class="seglabels">
+        <span><b>glTF</b> GltfStaticImporter 616 · GltfImporter 446 · GltfShared 289 · GltfTextureLoader 130 · GltfTexture 99</span>
+      </div>
+    </div>
+
+    <div class="ib">
+      <div class="hd"><span class="nm">Blix.Graphics.Vulkan</span><span class="meta">8,267 lines · 23 files</span><span class="fan">fan-in 21</span></div>
+      <p><b>The largest engine project, and it is three device concerns plus a graph.</b> The
+      swapchain alone is 1,679 lines — more than <code>Blix.Render</code>'s two biggest files
+      together — which is the honest cost of presentation, resize and frames-in-flight on MoltenVK.
+      The render graph is five files and a fifth of the project.</p>
+      <div class="seg">
+        <div class="s1" style="width:20.3%">swapchain 1,679</div>
+        <div class="s2" style="width:20.2%">graph 1,666</div>
+        <div class="s3" style="width:15.1%">textures 1,248</div>
+        <div class="s4" style="width:11.0%">resources 912</div>
+        <div class="s5" style="width:33.4%">device, surfaces, reflection, arenas 2,762</div>
+      </div>
+      <div class="seglabels">
+        <span><b>graph</b> Backend 938 · RenderGraph 399 · Builders 150 · Validate 132 · BarrierInference 47</span>
+      </div>
+    </div>
+
+    <div class="ib">
+      <div class="hd"><span class="nm">Blix.Geometry</span><span class="meta">3,145 lines · 21 files</span><span class="fan">fan-in 13</span></div>
+      <p><b>Two files are 79% of the project.</b> <code>Intersection.cs</code> at 1,688 lines and
+      <code>Intersection2D.cs</code> at 793 are the whole substance; the nineteen shape types around
+      them average 35 lines each. This is a maths library with a thin type vocabulary, and it is the
+      only substantial engine project with no graphics dependency at all — which is why
+      <code>Blix.Test.Physics3D</code> can reference it and nothing else.</p>
+      <div class="seg">
+        <div class="s1" style="width:53.7%">Intersection 1,688</div>
+        <div class="s2" style="width:25.2%">Intersection2D 793</div>
+        <div class="s5" style="width:21.1%">19 shape types 664</div>
+      </div>
+    </div>
+
+    <div class="ib">
+      <div class="hd"><span class="nm">Blix.Graphics</span><span class="meta">3,976 lines · 51 files</span><span class="fan">fan-in 30</span></div>
+      <p><b>The most-referenced project in the tree, and the most evenly spread.</b> No file exceeds
+      343 lines. A fifth of it is ten procedural primitive meshes and another tenth is ten vertex
+      layouts — content rather than machinery, which is why it can be depended on by thirty projects
+      without any of them inheriting a decision.</p>
+      <div class="seg">
+        <div class="s1" style="width:22.2%">commands 882</div>
+        <div class="s2" style="width:20.9%">primitives 832</div>
+        <div class="s3" style="width:10.7%">vertex layouts 427</div>
+        <div class="s4" style="width:16.2%">shaders 644</div>
+        <div class="s5" style="width:30.0%">device, matrices, textures, registry 1,191</div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<section id="spine">
+  <div class="eyebrow">04 — the spine</div>
+  <h2>What sits on what</h2>
+  <p class="lede">Five tiers, and nothing skips upward. Two projects have no engine reference at
+  all, which is what lets them be depended on without cost.</p>
+
+  <div class="spine">
+    <div class="lvl"><div class="tier">no deps</div><div class="mods">
+      <span>Blix.Graphics</span><span>Blix.Geometry</span><span>Blix.Audio</span>
+      <span>Blix.Verify</span><span>Blix.Tools.Apps</span><span>Blix.Cli</span></div></div>
+    <div class="lvl"><div class="tier">on graphics</div><div class="mods">
+      <span>Blix.Graphics.Vulkan</span><span>Blix.Graphics.Images</span><span>Blix.Core</span>
+      <span>Blix.Tools.Shader</span><span>Blix.Audio.OpenAL</span></div></div>
+    <div class="lvl"><div class="tier">on those</div><div class="mods">
+      <span>Blix.Diagnostics</span><span>Blix.Assets</span><span>Blix.Render</span>
+      <span>Blix.Diagnostics.Overlay</span></div></div>
+    <div class="lvl"><div class="tier">the engine</div><div class="mods">
+      <span>Blix</span><span>Blix.Runtime.Silk</span></div></div>
+    <div class="lvl"><div class="tier">on the engine</div><div class="mods">
+      <span>Blix.Tools.Studio</span><span>Blix.Tools.Cook</span><span>11 demos</span>
+      <span>4 labs</span><span>RTSGame</span><span>7 suites</span></div></div>
+  </div>
+
+  <p class="t">The tier that matters most is the first. <b>Three projects reference nothing at all,
+  and in every case that is the design rather than an accident.</b> <code>Blix.Verify</code> is a
+  test tally that must not depend on what it counts. <code>Blix.Tools.Apps</code> reads assembly
+  metadata without loading assemblies, so it must not reference the graph it indexes.
+  <code>Blix.Cli</code> resolves and execs apps, and an app must not be able to tell it exists.</p>
+  <p class="note">A fourth, <code>Blix.Graphics</code>, has no references either — but it is referenced
+  by thirty, which makes it a different kind of thing: a root, not an island.</p>
+</section>
+
+<section id="findings">
+  <div class="eyebrow">05 — what the counting found</div>
+  <h2>Five things that are only visible at this granularity</h2>
+
+  <div class="finds">
+
+    <div class="f">
+      <h4>Three importers in <code>Blix.Assets</code> have no callers.</h4>
+      <p>Searched across every <code>.cs</code> in <code>src/</code>. <code>FontImporter</code> is the
+      only <code>IAssetImporter</code> anything ever registers — glTF, textures and audio all bypass
+      the database entirely and call their loaders directly.</p>
+      <div class="fig"><b>MaterialImporter</b> 195 lines — 0 callers<br>
+      <b>WavImporter</b> 134 lines — 0 callers<br>
+      <b>TextureImporter</b> 13 lines — 0 callers</div>
+    </div>
+
+    <div class="f">
+      <h4>The asset database exists to route one font.</h4>
+      <p>Four projects call <code>LoadManifest</code>. All four manifests contain exactly one entry,
+      and it is the same TTF. <code>AssetDatabase</code> + <code>AssetId</code> +
+      <code>IAssetImporter</code> + the manifest schema is 209 lines serving one file type.</p>
+      <div class="fig">Runner, Bulwark, Pong → <b>fonts/bowlby</b> · RTSGame → <b>fonts/hud</b><br>
+      same source: <b>BowlbyOne-Regular.font.json</b></div>
+    </div>
+
+    <div class="f">
+      <h4>The two viewer projects outweigh most of the engine, one module at a time.</h4>
+      <p><code>Blix.Tools.Studio</code> at 2,261 is larger than seven of the thirteen engine
+      projects; <code>Blix.Tools.View</code> at 1,741 is larger than five. The tooling is not a thin
+      layer on the engine any more — by mass it is a peer of the modules it sits on.</p>
+      <div class="fig">tools 7,668 across 9 · engine 34,981 across 13<br>
+      the two viewers alone: <b>4,002</b> — and <b>944</b> more in Shot showing the same two assets</div>
+    </div>
+
+    <div class="f">
+      <h4>The verification band is 6,045 lines and 84% of it is two suites.</h4>
+      <p><code>Blix.Test.Graphics</code> (3,338) and <code>Blix.Test.Diagnostics</code> (1,758) carry
+      almost all of it, each as a single file. The four small suites average 205 lines, which is the
+      size at which adding one is a cheap decision — and <code>Blix.Verify</code>, the shared tally
+      that made that true, is 129 lines with zero references.</p>
+      <div class="fig">Graphics 3,338 · Diagnostics 1,758 · Physics3D 252 · Physics2D 230 · Studio 194 · Apps 144 · <b>Verify 129</b></div>
+    </div>
+
+    <div class="f">
+      <h4>Ten of the eleven demos depend on <code>Blix.Tools.Shader</code>.</h4>
+      <p>Fifteen projects reference it — a 144-line build-time tool — because compiling GLSL is part
+      of being an application here, not part of being a tool. It is the clearest case in the tree of
+      something named <code>Tools.</code> that is actually engine-side, and the naming has never been
+      corrected because nothing has gone wrong because of it. The eleventh demo,
+      <code>Chassis</code>, is the exception precisely because it draws nothing of its own.</p>
+      <div class="fig">fan-in <b>15</b>: 10 demos · RTSGame · Blix.Render · Blix.Runtime.Silk · Blix.Tools.Studio · Blix.Labs.Character</div>
+    </div>
+
+  </div>
+</section>
+
+<footer>
+  Counted off the working tree at <code>2aa1faa</code>, 2026-09-15, with <code>bin/</code> and
+  <code>obj/</code> excluded throughout. Fan-in is <code>ProjectReference</code> declarations only —
+  it does not count <code>using</code>, so a project that references another and uses one type
+  counts the same as one that uses forty. Subsystem groupings inside <code>Blix</code>,
+  <code>Blix.Graphics.Vulkan</code> and <code>Blix.Graphics</code> are a judgement call, made by
+  file name; the file lists are given so the grouping can be disputed. Companion to
+  <code>docs/blix-assets.html</code> (the cook, measured) and
+  <code>docs/blix-what-it-ships.html</code>.
+</footer>
+
+</div>
