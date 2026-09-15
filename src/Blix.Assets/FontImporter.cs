@@ -1,6 +1,7 @@
 using System.Text.Json;
 using StbTrueTypeSharp;
 using static StbTrueTypeSharp.StbTrueType;
+using Blix.Cooked;
 
 namespace Blix.Assets;
 

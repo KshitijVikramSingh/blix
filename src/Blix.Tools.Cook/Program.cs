@@ -1,3 +1,5 @@
+using Blix.Cooked;
+using Blix.Assets;
 using System.Diagnostics;
 using System.Numerics;
 using BCnEncoder.Encoder;
@@ -173,15 +175,31 @@ static int CookMesh(string[] args)
             if (!string.Equals(Path.GetFullPath(gltfDest), Path.GetFullPath(src), StringComparison.Ordinal))
                 File.Copy(src, gltfDest, overwrite: true);
         }
-        // Skip if .blixmesh is newer than its .gltf source.
+        // Skip if the .blixmesh is newer than its .gltf source AND was written by this format
+        // version.
+        //
+        // <b>The version half is new, and its absence was a real trap.</b> The check used to compare
+        // timestamps alone, so bumping the format left every existing file "up-to-date" while no
+        // reader would accept it any more — the cook declining to do the one thing the bump
+        // required. Found by bumping to v4 and watching Rogue.blixmesh skip.
+        //
+        // Reading the preamble is what makes this possible at all: before it, the cook had no way
+        // to ask a cooked file what version it was without parsing the format itself.
         if (File.Exists(outPath))
         {
             var srcTime = File.GetLastWriteTimeUtc(src);
             var outTime = File.GetLastWriteTimeUtc(outPath);
-            if (outTime > srcTime)
+            var existing = CookedFile.TryReadHeader(outPath);
+            var currentFormat = existing is { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version4 };
+            if (outTime > srcTime && currentFormat)
             {
                 Console.WriteLine($"  up-to-date: {outPath}");
                 continue;
+            }
+
+            if (!currentFormat)
+            {
+                Console.WriteLine($"  re-cooking (format is not {nameof(BlixMesh)} v{BlixMesh.Version4}): {outPath}");
             }
         }
         var sw = Stopwatch.StartNew();
@@ -382,7 +400,15 @@ static int CookProbe(string[] args)
     var data = EnvironmentBaker.CookHdrProbeData(profile, brdfSize);
     Console.WriteLine($"  baked in {sw.ElapsedMilliseconds} ms");
     sw.Restart();
-    BlixProbeWriter.Write(outPath, data);
+    // Every knob that changes the bake, recorded verbatim — including --clamp, which was the one
+    // probe parameter the old header did NOT carry. Authored order, so the string is stable and a
+    // byte-compare between two cooks means something.
+    var probeStamp = CookStamp.Of(
+        BlixProbe.ShippedRecipe, BlixProbe.ShippedRecipeVersion, hdrPath,
+        $"env={envFace} irr={irrFace} prefilterBase={prefilterBase} prefilterMips={prefilterMips} " +
+        $"brdf={brdfSize} clamp={clamp.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+
+    BlixProbeWriter.Write(outPath, data, probeStamp);
     var size = new FileInfo(outPath).Length;
     Console.WriteLine($"  wrote {outPath} ({size / 1024.0 / 1024.0:0.00} MB) in {sw.ElapsedMilliseconds} ms");
     return 0;
@@ -687,8 +713,16 @@ static void CookOne(string source, string destination, out long sourceLen, out l
             for (var i = 0; i < mipsRgba.Count; i++) encodedMips[i] = mipsRgba[i].Pixels;
         }
 
+        // The role is what picks BC7sRGB vs BC5 vs BC7Unorm vs Rgba8, so it is the setting that
+        // decides the bytes and it goes in the stamp. `flags` rides along because sRGB and
+        // normal-map are read back out of the file, and recording the input beside the output is
+        // what makes a mismatch visible rather than a mystery.
+        var texStamp = CookStamp.Of(
+            BlixTex.ShippedRecipe, BlixTex.ShippedRecipeVersion, source,
+            $"format={format} flags={flags} mips={encodedMips.Length}");
+
         BlixTexWriter.Write(destination, new BlixTexImage(
-            image.Width, image.Height, format, encodedMips, flags));
+            image.Width, image.Height, format, encodedMips, flags), texStamp);
     }
     destLen = new FileInfo(destination).Length;
 }

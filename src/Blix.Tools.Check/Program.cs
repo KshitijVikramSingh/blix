@@ -3,6 +3,7 @@ using Blix.Graphics.Vulkan;
 using System.Numerics;
 using Blix.Assets;
 using Blix.Tools.Studio;
+using Blix.Cooked;
 
 namespace Blix.Tools.Check;
 

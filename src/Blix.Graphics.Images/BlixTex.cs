@@ -1,3 +1,4 @@
+using Blix.Cooked;
 using Blix.Graphics;
 
 namespace Blix.Graphics.Images;
@@ -9,33 +10,46 @@ namespace Blix.Graphics.Images;
 // decode per 4K texture, plus enables BCn-compressed formats that GL can't
 // generate mips for at upload time.
 //
-// File layout (little-endian), v2:
+// File layout (little-endian), v3:
 //
-//   offset  size  field
+//   The shared Blix cooked preamble first -- see Blix.Cooked/CookPreamble.cs.
+//   Then this format's own header:
+//
+//   offset  size  field           (relative to the end of the preamble)
 //   ---------------------------------
-//   0       4     magic       = "BLIX"
-//   4       2     version     = 2
-//   6       2     kind        = 1 (Texture2D)
-//   8       4     format      (TextureFormat enum value)
-//   12      4     width
-//   16      4     height
-//   20      4     mipCount
-//   24      4     dataOffset  (= 32 + mipCount * 8 for v2)
-//   28      4     flags       (bit 0 = sRGB; bit 1 = normal-map)
-//   --------- 32 bytes (header) ---------
-//   32      8*N   mip table (per mip: uint32 byteOffset relative to file
+//   0       4     kind        = 1 (Texture2D)
+//   4       4     format      (TextureFormat enum value)
+//   8       4     width
+//   12      4     height
+//   16      4     mipCount
+//   20      4     dataOffset  (absolute, from the start of the FILE)
+//   24      4     flags       (bit 0 = sRGB; bit 1 = normal-map)
+//   --------- 28 bytes (format header) ---------
+//           8*N   mip table (per mip: uint32 byteOffset relative to file
 //                 start, uint32 byteLength); mipCount entries
-//   --------- header + table (dataOffset bytes) ---------
-//   dataOffset ...  packed mip data: mip 0 first, then mip 1, etc.
+//   --------- dataOffset ---------
+//   packed mip data: mip 0 first, then mip 1, etc.
 //
-// v1 was a single-mip Rgba8-only variant with no mip table; v2 supersedes
-// it. Re-cook to migrate; the cook is fast.
+// v1 was a single-mip Rgba8-only variant with no mip table; v2 added the table.
+//
+// v3 is where this format stopped being its own island. It announced itself as
+// "BLIX" while .blixmesh and .blixprobe used BLX*, and its version was a ushort
+// where theirs were uint -- so no single function could read any Blix cooked
+// file's magic and version, which is the most basic thing a family of formats
+// gives you. Magic is now "BLXT" and the version is a uint like everyone
+// else's, in the shared preamble. Re-cook to migrate; the cook is fast.
 public static class BlixTex
 {
-    public const uint Magic = 0x58494C42;
-    public const ushort Version2 = 2;
-    public const ushort KindTexture2D = 1;
-    public const int HeaderSize = 32;
+    public const uint Magic = 0x54584C42; // "BLXT" little-endian
+
+    /// <summary>The recipe id the shipped texture cook stamps.</summary>
+    public const string ShippedRecipe = "gtex";
+
+    /// <summary>The texture cook's own version — see BlixMesh.MeshRecipeVersion for why.</summary>
+    public const uint ShippedRecipeVersion = 1;
+    public const uint Version3 = 3;
+    public const uint KindTexture2D = 1;
+    public const int HeaderSize = 28;
     public const int MipEntrySize = 8;
 
     [Flags]
@@ -59,7 +73,8 @@ public sealed record BlixTexImage(
 
 public static class BlixTexWriter
 {
-    public static void Write(string path, BlixTexImage image)
+    /// <param name="stamp">See <c>BlixMeshWriter.Write</c> — required, for the same reason.</param>
+    public static void Write(string path, BlixTexImage image, in CookStamp stamp)
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(image);
@@ -68,14 +83,15 @@ public static class BlixTexWriter
             throw new ArgumentException("Image must have at least one mip.", nameof(image));
         }
         using var stream = File.Create(path);
+        var preambleBytes = CookPreamble.Write(stream, BlixTex.Magic, BlixTex.Version3, stamp);
         using var writer = new BinaryWriter(stream);
 
         var mipCount = (uint)image.MipBytes.Count;
-        var dataOffset = (uint)(BlixTex.HeaderSize + mipCount * BlixTex.MipEntrySize);
+        // Absolute, so a mip extent stays a straight seek even though the preamble in front of it
+        // is variable-length.
+        var dataOffset = (uint)(preambleBytes + BlixTex.HeaderSize + mipCount * BlixTex.MipEntrySize);
 
-        // Header.
-        writer.Write(BlixTex.Magic);
-        writer.Write(BlixTex.Version2);
+        // Format header.
         writer.Write(BlixTex.KindTexture2D);
         writer.Write((uint)image.Format);
         writer.Write((uint)image.Width);
@@ -83,10 +99,10 @@ public static class BlixTexWriter
         writer.Write(mipCount);
         writer.Write(dataOffset);
         writer.Write((uint)image.Flags);
-        if (stream.Position != BlixTex.HeaderSize)
+        if (stream.Position != preambleBytes + BlixTex.HeaderSize)
         {
             throw new InvalidOperationException(
-                $"BlixTex header was {stream.Position} bytes; expected {BlixTex.HeaderSize}.");
+                $"BlixTex format header was {stream.Position - preambleBytes} bytes; expected {BlixTex.HeaderSize}.");
         }
 
         // Mip table.
@@ -119,7 +135,8 @@ public sealed record BlixTexLazyHandle(
     int Height,
     int MipCount,
     BlixTex.Flags Flags,
-    IReadOnlyList<(int Offset, int Length)> MipExtents);
+    IReadOnlyList<(int Offset, int Length)> MipExtents,
+    CookedHeader? Cooked = null);
 
 public static class BlixTexReader
 {
@@ -132,52 +149,39 @@ public static class BlixTexReader
     {
         ArgumentNullException.ThrowIfNull(path);
         using var stream = File.OpenRead(path);
-        if (stream.Length < BlixTex.HeaderSize)
-        {
-            throw new InvalidDataException($"BlixTex file '{path}' is shorter than the 32-byte header.");
-        }
+        var header = CookPreamble.Read(stream, path).Require(BlixTex.Magic, BlixTex.Version3, path, ".blixtex");
 
-        // Read header.
-        var headerBuf = new byte[BlixTex.HeaderSize];
-        stream.ReadExactly(headerBuf, 0, BlixTex.HeaderSize);
-        var magic = BitConverter.ToUInt32(headerBuf, 0);
-        if (magic != BlixTex.Magic)
+        return AssetImportException.Refusing(path, () =>
         {
-            throw new InvalidDataException(
-                $"BlixTex file '{path}' has wrong magic 0x{magic:X8}; expected 0x{BlixTex.Magic:X8}.");
-        }
-        var version = BitConverter.ToUInt16(headerBuf, 4);
-        if (version != BlixTex.Version2)
-        {
-            throw new InvalidDataException(
-                $"BlixTex file '{path}' has unsupported version {version}; re-cook to v{BlixTex.Version2}.");
-        }
-        var kind = BitConverter.ToUInt16(headerBuf, 6);
-        if (kind != BlixTex.KindTexture2D)
-        {
-            throw new InvalidDataException(
-                $"BlixTex file '{path}' has kind {kind}; only Texture2D (1) supported.");
-        }
-        var format = (TextureFormat)BitConverter.ToUInt32(headerBuf, 8);
-        var width = (int)BitConverter.ToUInt32(headerBuf, 12);
-        var height = (int)BitConverter.ToUInt32(headerBuf, 16);
-        var mipCount = (int)BitConverter.ToUInt32(headerBuf, 20);
-        var dataOffset = (int)BitConverter.ToUInt32(headerBuf, 24);
-        var flags = (BlixTex.Flags)BitConverter.ToUInt32(headerBuf, 28);
+            var headerBuf = new byte[BlixTex.HeaderSize];
+            stream.ReadExactly(headerBuf, 0, BlixTex.HeaderSize);
+            var kind = BitConverter.ToUInt32(headerBuf, 0);
+            if (kind != BlixTex.KindTexture2D)
+            {
+                throw new AssetImportException(
+                    path, null, $"a .blixtex of kind {kind}; this Blix reads Texture2D (1) only");
+            }
+            var format = (TextureFormat)BitConverter.ToUInt32(headerBuf, 4);
+            var width = (int)BitConverter.ToUInt32(headerBuf, 8);
+            var height = (int)BitConverter.ToUInt32(headerBuf, 12);
+            var mipCount = (int)BitConverter.ToUInt32(headerBuf, 16);
+            var dataOffset = (int)BitConverter.ToUInt32(headerBuf, 20);
+            var flags = (BlixTex.Flags)BitConverter.ToUInt32(headerBuf, 24);
 
-        // Read mip table.
-        var tableSize = mipCount * BlixTex.MipEntrySize;
-        var tableBuf = new byte[tableSize];
-        stream.ReadExactly(tableBuf, 0, tableSize);
-        var extents = new (int Offset, int Length)[mipCount];
-        for (var i = 0; i < mipCount; i++)
-        {
-            var off = (int)BitConverter.ToUInt32(tableBuf, i * BlixTex.MipEntrySize);
-            var len = (int)BitConverter.ToUInt32(tableBuf, i * BlixTex.MipEntrySize + 4);
-            extents[i] = (off, len);
-        }
+            // Read mip table.
+            var tableSize = mipCount * BlixTex.MipEntrySize;
+            var tableBuf = new byte[tableSize];
+            stream.ReadExactly(tableBuf, 0, tableSize);
+            var extents = new (int Offset, int Length)[mipCount];
+            for (var i = 0; i < mipCount; i++)
+            {
+                var off = (int)BitConverter.ToUInt32(tableBuf, i * BlixTex.MipEntrySize);
+                var len = (int)BitConverter.ToUInt32(tableBuf, i * BlixTex.MipEntrySize + 4);
+                extents[i] = (off, len);
+            }
 
-        return new BlixTexLazyHandle(path, format, width, height, mipCount, flags, extents);
+            return new BlixTexLazyHandle(path, format, width, height, mipCount, flags, extents, header);
+        }, ".blixtex");
     }
 
     // Reads one mip's bytes from disk. Cheap (single file open + seek +
@@ -262,67 +266,17 @@ public static class BlixTexReader
         return mips;
     }
 
+    /// <summary>Reads a whole cooked texture, mips and all.</summary>
+    /// <remarks>
+    /// <b>Goes through <see cref="ReadHandle"/> rather than parsing the header a second time.</b>
+    /// It used to be its own full parser over <c>File.ReadAllBytes</c> — a second copy of the same
+    /// offsets, the same magic check and the same version check — and the v3 preamble change is
+    /// what surfaced it: the two copies had to be edited together, which is the definition of the
+    /// problem. One parser, two read strategies.
+    /// </remarks>
     public static BlixTexImage Read(string path)
     {
-        ArgumentNullException.ThrowIfNull(path);
-        var bytes = File.ReadAllBytes(path);
-        if (bytes.Length < BlixTex.HeaderSize)
-        {
-            throw new InvalidDataException($"BlixTex file '{path}' is shorter than the 32-byte header.");
-        }
-
-        var magic = BitConverter.ToUInt32(bytes, 0);
-        if (magic != BlixTex.Magic)
-        {
-            throw new InvalidDataException(
-                $"BlixTex file '{path}' has wrong magic 0x{magic:X8}; expected 0x{BlixTex.Magic:X8}.");
-        }
-        var version = BitConverter.ToUInt16(bytes, 4);
-        if (version != BlixTex.Version2)
-        {
-            throw new InvalidDataException(
-                $"BlixTex file '{path}' has unsupported version {version}; runtime supports {BlixTex.Version2}. " +
-                "Re-cook with the current tool to migrate.");
-        }
-        var kind = BitConverter.ToUInt16(bytes, 6);
-        if (kind != BlixTex.KindTexture2D)
-        {
-            throw new InvalidDataException(
-                $"BlixTex file '{path}' has kind {kind}; only Texture2D (1) supported.");
-        }
-        var format = (TextureFormat)BitConverter.ToUInt32(bytes, 8);
-        var width = (int)BitConverter.ToUInt32(bytes, 12);
-        var height = (int)BitConverter.ToUInt32(bytes, 16);
-        var mipCount = (int)BitConverter.ToUInt32(bytes, 20);
-        var dataOffset = (int)BitConverter.ToUInt32(bytes, 24);
-        var flags = (BlixTex.Flags)BitConverter.ToUInt32(bytes, 28);
-
-        if (mipCount <= 0)
-        {
-            throw new InvalidDataException($"BlixTex file '{path}' has invalid mipCount {mipCount}.");
-        }
-        var expectedTableEnd = BlixTex.HeaderSize + mipCount * BlixTex.MipEntrySize;
-        if (dataOffset < expectedTableEnd || dataOffset > bytes.Length)
-        {
-            throw new InvalidDataException(
-                $"BlixTex file '{path}' has invalid dataOffset {dataOffset} (table-end={expectedTableEnd}, fileLen={bytes.Length}).");
-        }
-
-        var mips = new byte[mipCount][];
-        for (var i = 0; i < mipCount; i++)
-        {
-            var entryOffset = BlixTex.HeaderSize + i * BlixTex.MipEntrySize;
-            var mipOffset = (int)BitConverter.ToUInt32(bytes, entryOffset);
-            var mipLength = (int)BitConverter.ToUInt32(bytes, entryOffset + 4);
-            if (mipOffset < dataOffset || mipOffset + mipLength > bytes.Length)
-            {
-                throw new InvalidDataException(
-                    $"BlixTex file '{path}' has invalid mip {i} entry (offset={mipOffset}, length={mipLength}).");
-            }
-            var mipBytes = new byte[mipLength];
-            Array.Copy(bytes, mipOffset, mipBytes, 0, mipLength);
-            mips[i] = mipBytes;
-        }
-        return new BlixTexImage(width, height, format, mips, flags);
+        var handle = ReadHandle(path);
+        return new BlixTexImage(handle.Width, handle.Height, handle.Format, ReadAllMips(handle), handle.Flags);
     }
 }

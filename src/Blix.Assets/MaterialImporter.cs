@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Text.Json;
 using Blix.Graphics;
+using Blix.Cooked;
 
 namespace Blix.Assets;
 

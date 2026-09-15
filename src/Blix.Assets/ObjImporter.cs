@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Numerics;
 using Blix.Geometry;
 using Blix.Graphics;
+using Blix.Cooked;
 
 namespace Blix.Assets;
 

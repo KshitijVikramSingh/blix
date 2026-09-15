@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!-- NO ProjectReference, deliberately. Every cooked artifact starts with this
+       preamble, so anything that wants to read one — a loader, a judge, `blix cook
+       status`, a UI — must be able to take this and nothing else. The moment this
+       references graphics, reading a file's provenance costs a Vulkan device. -->
+
+</Project>

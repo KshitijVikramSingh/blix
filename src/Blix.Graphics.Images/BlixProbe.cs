@@ -1,3 +1,4 @@
+using Blix.Cooked;
 using System.Numerics;
 using System.Runtime.InteropServices;
 
@@ -12,21 +13,22 @@ namespace Blix.Graphics.Images;
 // of equirect convolution + ~1.6s BRDF LUT integration the runtime
 // EnvironmentBaker would otherwise burn at startup.
 //
-// File layout (little-endian), v1:
+// File layout (little-endian), v2:
+//
+//   The shared Blix cooked preamble first -- see Blix.Cooked/CookPreamble.cs.
+//   Then this format's own header, at offsets relative to the end of it:
 //
 //   offset  size  field
 //   ---------------------------------
-//   0       4     magic       = "BLXP"
-//   4       4     version     = 1
-//   8       4     flags       (bit 0 = has sun direction)
-//   12      4     envFaceSize
-//   16      4     irrFaceSize
-//   20      4     prefilterBaseSize
-//   24      4     prefilterMipCount
-//   28      4     brdfLutSize
-//   32      12    sunDirection (vec3 float32, valid only when flag bit 0)
-//   --------- 44 bytes (header) ---------
-//   44      ...   envCube      : 4 channels * 6 faces * envFaceSize^2     Halves (RGBA16F)
+//   0       4     flags       (bit 0 = has sun direction)
+//   4       4     envFaceSize
+//   8       4     irrFaceSize
+//   12      4     prefilterBaseSize
+//   16      4     prefilterMipCount
+//   20      4     brdfLutSize
+//   24      12    sunDirection (vec3 float32, valid only when flag bit 0)
+//   --------- 36 bytes (format header) ---------
+//                 envCube      : 4 channels * 6 faces * envFaceSize^2     Halves (RGBA16F)
 //                 irrCube      : 4 channels * 6 faces * irrFaceSize^2     Halves (RGBA16F)
 //                 prefilter[k] : 4 * 6 * (prefilterBaseSize>>k)^2 Halves, k=0..prefilterMipCount-1
 //                 brdfLut      : brdfLutSize * brdfLutSize * 4 bytes      (RGBA8)
@@ -36,8 +38,19 @@ namespace Blix.Graphics.Images;
 public static class BlixProbe
 {
     public const uint Magic = 0x50584C42; // "BLXP" little-endian
-    public const uint Version1 = 1;
-    public const int HeaderSize = 44;
+
+    // v2: the shared cooked preamble replaces the private magic+version pair.
+    // This format already recorded five of its six cook parameters in its own
+    // header -- the one of the three that had worked out it should be
+    // reproducible -- and the preamble generalises that to all of them.
+    public const uint Version2 = 2;
+    public const int HeaderSize = 36;
+
+    /// <summary>The recipe id the shipped probe cook stamps.</summary>
+    public const string ShippedRecipe = "gpro";
+
+    /// <summary>The probe cook's own version — see BlixMesh.MeshRecipeVersion for why.</summary>
+    public const uint ShippedRecipeVersion = 1;
 
     [Flags]
     public enum Flags : uint
@@ -61,7 +74,8 @@ public sealed record BlixProbeData(
 
 public static class BlixProbeWriter
 {
-    public static void Write(string path, BlixProbeData data)
+    /// <param name="stamp">See <c>BlixMeshWriter.Write</c> — required, for the same reason.</param>
+    public static void Write(string path, BlixProbeData data, in CookStamp stamp)
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(data);
@@ -73,13 +87,12 @@ public static class BlixProbeWriter
         }
 
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
+        CookPreamble.Write(fs, BlixProbe.Magic, BlixProbe.Version2, stamp);
         using var bw = new BinaryWriter(fs);
 
         var flags = BlixProbe.Flags.None;
         if (data.SunDirection.HasValue) flags |= BlixProbe.Flags.HasSunDirection;
 
-        bw.Write(BlixProbe.Magic);
-        bw.Write(BlixProbe.Version1);
         bw.Write((uint)flags);
         bw.Write(data.EnvFaceSize);
         bw.Write(data.IrradianceFaceSize);
@@ -114,20 +127,14 @@ public static class BlixProbeReader
         ArgumentNullException.ThrowIfNull(path);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        CookPreamble.Read(fs, path).Require(BlixProbe.Magic, BlixProbe.Version2, path, ".blixprobe");
+        return AssetImportException.Refusing(path, () => ReadBody(fs, path), ".blixprobe");
+    }
+
+    private static BlixProbeData ReadBody(Stream fs, string path)
+    {
         using var br = new BinaryReader(fs);
 
-        var magic = br.ReadUInt32();
-        if (magic != BlixProbe.Magic)
-        {
-            throw new InvalidDataException(
-                $"'{path}' is not a .blixprobe file (magic mismatch: got 0x{magic:X8}).");
-        }
-        var version = br.ReadUInt32();
-        if (version != BlixProbe.Version1)
-        {
-            throw new InvalidDataException(
-                $"'{path}' has unsupported .blixprobe version {version}; expected {BlixProbe.Version1}.");
-        }
         var flags = (BlixProbe.Flags)br.ReadUInt32();
         var envFace = br.ReadInt32();
         var irrFace = br.ReadInt32();

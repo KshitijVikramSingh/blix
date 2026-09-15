@@ -8,6 +8,7 @@ using Blix.Graphics.Vulkan;
 using Blix.Tools.Studio;
 using Blix.Diagnostics;
 using Blix.Runtime.Silk;
+using Blix.Cooked;
 
 namespace Blix.Tools.Shot;
 

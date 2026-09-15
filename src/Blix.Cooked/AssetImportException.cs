@@ -1,5 +1,16 @@
-namespace Blix.Assets;
+namespace Blix.Cooked;
 
+/// <summary>
+/// The engine declining a file: Blix cannot read this, and here is which file and why.
+/// </summary>
+/// <remarks>
+/// <b>Moved down from <c>Blix.Assets</c> by the cook arc, because it was stranded above two of the
+/// three things that needed it.</b> <c>Blix.Assets</c> sits a tier above
+/// <c>Blix.Graphics.Images</c>, which holds the <c>.blixtex</c> and <c>.blixprobe</c> readers — so
+/// those two could not refuse a corrupt file by name and had to throw whatever the parse threw,
+/// which is precisely the failure this type exists to prevent. A refusal type that only some
+/// readers can reach is not a single refusal type.
+/// </remarks>
 public sealed class AssetImportException : Exception
 {
     public AssetImportException(string sourcePath, int? lineNumber, string message)
@@ -24,7 +35,12 @@ public sealed class AssetImportException : Exception
     /// stays on <see cref="Exception.InnerException"/> for whoever wants it.
     /// </para>
     /// </remarks>
-    public static T Refusing<T>(string sourcePath, Func<T> read)
+    /// <param name="what">
+    /// What was being read, for the message. Defaults to a glTF because that is where this started;
+    /// a cooked reader passes its own extension so a bad <c>.blixmesh</c> does not report itself as
+    /// a bad glTF.
+    /// </param>
+    public static T Refusing<T>(string sourcePath, Func<T> read, string what = "glTF")
     {
         ArgumentNullException.ThrowIfNull(read);
 
@@ -39,7 +55,7 @@ public sealed class AssetImportException : Exception
         catch (Exception reason)
         {
             var first = reason.Message.Split('\n', '\r')[0].Trim();
-            throw new AssetImportException(sourcePath, null, $"not a glTF Blix can read — {first}", reason);
+            throw new AssetImportException(sourcePath, null, $"not a {what} Blix can read — {first}", reason);
         }
     }
 

@@ -4,6 +4,7 @@ using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Images;
 using SharpGLTF.Schema2;
+using Blix.Cooked;
 
 namespace Blix;
 
@@ -63,8 +64,16 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         }
         if (primarySkinNode is null)
         {
-            throw new InvalidOperationException(
-                $"glTF '{context.SourcePath}' contains no node with both a mesh and a skin.");
+            // <b>A refusal, not a fault.</b> An unskinned glTF is a perfectly good file that this
+            // importer is the wrong one for — so it is the engine declining, and it says which
+            // importer does want it. As an InvalidOperationException it escaped every tool's catch
+            // and took the process down: `blix check --model` on any static prop exited through a
+            // stack trace, which is the exact failure Section AV exists to prevent, still open one
+            // importer away.
+            throw new AssetImportException(
+                context.SourcePath, null,
+                "no node has both a mesh and a skin, so there is no rig here — " +
+                "load it as a static model instead (GltfStaticImporter)");
         }
 
         var skin = primarySkinNode.Skin;

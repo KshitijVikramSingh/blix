@@ -4,6 +4,7 @@ using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Images;
 using SharpGLTF.Schema2;
+using Blix.Cooked;
 
 namespace Blix;
 
@@ -243,6 +244,13 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
     // when null, the file is written LOD0-only (Blix has no simplifier of its own).
     public delegate SimplifyResult SimplifyFn(float[] positions, uint[] indices, int vertexCount, float targetRatio);
 
+    /// <summary>
+    /// The mesh cook's own version, bumped whenever this method would produce different bytes from
+    /// the same source and settings. Recorded in every file it writes, so a re-cook can be told
+    /// from a rewrite.
+    /// </summary>
+    public const uint MeshRecipeVersion = 1;
+
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false, bool includeTangents = false,
         SimplifyFn? simplify = null, int splitTriBudget = 0, bool splitFoliage = true)
@@ -294,7 +302,28 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             }
         }
 
-        BlixMeshWriter.Write(outPath, new BlixMeshFile(layout, primitives));
+        // Every setting that changes the bytes, recorded verbatim. Before this, --flip-v, --split
+        // and --no-split-foliage silently altered the output and nothing anywhere said which had
+        // been used — so the cooked half of the tree could not be reproduced from the tree, and
+        // "cook it again and compare" was a test nobody could write. Authored order, not sorted,
+        // so the string is stable across runs and a byte-compare means something.
+        //
+        // `simplify` is in here because a null simplifier writes LOD0 only: same source, same
+        // flags, a different file. That it is a delegate rather than a flag is exactly why it was
+        // the easiest one to forget.
+        var parameters =
+            $"flipV={(flipTextureV ? 1 : 0)} tangents={(includeTangents ? 1 : 0)} " +
+            $"split={splitTriBudget} splitFoliage={(splitFoliage ? 1 : 0)} " +
+            $"simplify={(simplify is null ? "none" : "yes")}";
+
+        // SourceRequired, and it is not a formality: this cook replaces geometry only. Every
+        // material factor, texture reference and alpha mode is still parsed out of the sibling
+        // glTF on every load, so the source is a permanent runtime dependency and the flag says so
+        // where a tool can see it. Stage K-F is finished when this stops being set.
+        var stamp = CookStamp.Of(
+            BlixMesh.ShippedRecipe, MeshRecipeVersion, gltfPath, parameters, CookedFlags.SourceRequired);
+
+        BlixMeshWriter.Write(outPath, new BlixMeshFile(layout, primitives), stamp);
         return primitives.Count;
     }
 

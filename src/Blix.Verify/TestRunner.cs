@@ -107,6 +107,43 @@ public sealed class TestRunner
         Fail(label, "it did not throw");
     }
 
+    /// <summary>
+    /// As <see cref="ExpectThrows(string, Action, string?)"/>, but the exception must be of a
+    /// particular type.
+    /// </summary>
+    /// <remarks>
+    /// <b>The untyped form cannot express "refused rather than crashed".</b> A tool that survives
+    /// bad input catches exactly one type and lets everything else through — that is the only way
+    /// it both handles a bad asset AND does not swallow its own faults. So a check that any
+    /// exception was thrown passes just as happily when the code under test crashed for an
+    /// unrelated reason, which is the failure the check was written to catch.
+    /// </remarks>
+    public void ExpectThrows<TException>(string label, Action action, string? mustMention = null)
+        where TException : Exception
+    {
+        ArgumentNullException.ThrowIfNull(action);
+
+        try
+        {
+            action();
+        }
+        catch (Exception thrown)
+        {
+            var actual = thrown is TargetInvocationException { InnerException: { } inner } ? inner : thrown;
+            if (actual is not TException)
+            {
+                Fail(label, $"threw {actual.GetType().Name}, expected {typeof(TException).Name}: {actual.Message}");
+                return;
+            }
+
+            if (mustMention is null || actual.Message.Contains(mustMention, StringComparison.Ordinal)) Pass(label);
+            else Fail(label, $"threw {typeof(TException).Name}, but never mentioned '{mustMention}': {actual.Message}");
+            return;
+        }
+
+        Fail(label, "it did not throw");
+    }
+
     /// <summary>Record a pass directly, for a suite expressing its own vocabulary on top of this.</summary>
     public void Pass(string label)
     {

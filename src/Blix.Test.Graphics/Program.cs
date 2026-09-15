@@ -14,6 +14,8 @@ using Blix.Render;
 using VkImageLayout = Silk.NET.Vulkan.ImageLayout;
 using VkPipelineStageFlags = Silk.NET.Vulkan.PipelineStageFlags;
 using VkAccessFlags = Silk.NET.Vulkan.AccessFlags;
+using Blix.Cooked;
+using Blix.Graphics.Images;
 
 // CLI test harness for Blix.Graphics. Currently focused on the F-016
 // matrix-convention migration acceptance criteria. After migration:
@@ -3198,6 +3200,136 @@ static ShaderInterface MinimalShader() => new(new[]
 }
 
 // ============================================================================
+// ============================================================================
+// Section AW — the cooked preamble: three formats that are one family.
+// ============================================================================
+//
+// <b>Before this, no single function could read any Blix cooked file's magic and version.</b>
+// .blixtex announced itself as "BLIX" while .blixmesh and .blixprobe used BLX*, and its version
+// was a ushort where theirs were uint. The consequence was not cosmetic: nothing in the tree
+// could report on a cooked artifact without knowing in advance what it was looking at, which is
+// why coverage was decided by shell history and AssetLoadReport had four states and no emitters.
+//
+// The checks below are the family being one thing. The ones that matter most are the negative
+// controls — a stamp is not proved by reading back what you wrote, it is proved by the reader
+// refusing a file that does not have one.
+{
+    var temp = Path.Combine(Path.GetTempPath(), $"blix-aw-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(temp);
+    try
+    {
+        // A source to cook FROM, so the stamp has real size and mtime to record.
+        var source = Path.Combine(temp, "source.bin");
+        File.WriteAllBytes(source, new byte[] { 1, 2, 3, 4, 5, 6, 7 });
+
+        var stamp = CookStamp.Of("tst1", 7, source, "alpha=1 beta=two", CookedFlags.SourceRequired);
+        t.Expect("AW.1 stamp reads the source's size off disk", stamp.SourceSize == 7L, $"got {stamp.SourceSize}");
+        t.ExpectTrue("AW.1 and its modification time", stamp.SourceTicks != 0);
+        t.ExpectTrue("AW.1 and SourceRequired surfaces as a property", stamp.SourceRequired);
+
+        // Round-trip through a real file, with a body after the preamble so the offset is exercised
+        // rather than assumed.
+        var artifact = Path.Combine(temp, "one.cooked");
+        const uint magic = 0x54534554; // "TEST"
+        int preambleBytes;
+        using (var fs = File.Create(artifact))
+        {
+            preambleBytes = CookPreamble.Write(fs, magic, 3, stamp);
+            fs.Write(new byte[] { 0xAA, 0xBB, 0xCC, 0xDD });
+        }
+
+        t.ExpectTrue("AW.2 the preamble is 4-byte aligned", preambleBytes % 4 == 0);
+
+        var read = CookedFile.ReadHeader(artifact);
+        t.Expect("AW.2 magic round-trips", read.Magic == magic, $"got 0x{read.Magic:X8}");
+        t.Expect("AW.2 format version round-trips", read.FormatVersion == 3u, $"got {read.FormatVersion}");
+        t.Expect("AW.2 recipe id round-trips", read.Stamp.Recipe == "tst1", $"got '{read.Stamp.Recipe}'");
+        t.Expect("AW.2 recipe version round-trips", read.Stamp.RecipeVersion == 7u, $"got {read.Stamp.RecipeVersion}");
+        t.Expect("AW.2 parameters round-trip verbatim", read.Stamp.Parameters == "alpha=1 beta=two", $"got '{read.Stamp.Parameters}'");
+        t.Expect("AW.2 source path round-trips", read.Stamp.SourcePath == source, $"got '{read.Stamp.SourcePath}'");
+        t.Expect("AW.2 source size round-trips", read.Stamp.SourceSize == 7L, $"got {read.Stamp.SourceSize}");
+        t.ExpectTrue("AW.2 flags round-trip", read.Stamp.SourceRequired);
+
+        // <b>The body starts where the preamble said it would.</b> Everything downstream — every
+        // format's own header, every mip extent — is placed relative to this number, so a preamble
+        // that lied about its own length would corrupt files that still passed every check above.
+        using (var fs = File.OpenRead(artifact))
+        {
+            fs.Position = read.PreambleBytes;
+            var body = new byte[4];
+            fs.ReadExactly(body, 0, 4);
+            t.ExpectTrue("AW.3 the body sits exactly at PreambleBytes",
+                body[0] == 0xAA && body[1] == 0xBB && body[2] == 0xCC && body[3] == 0xDD);
+        }
+
+        // ── Negative controls ────────────────────────────────────────────────
+        // A reader that only ever succeeds on files it wrote itself proves nothing.
+
+        var notCooked = Path.Combine(temp, "not-cooked.bin");
+        File.WriteAllText(notCooked, "nowhere near long enough to be a preamble");
+        t.ExpectThrows<AssetImportException>(
+            "AW.4 a file that is not a cooked artifact is refused as AssetImportException",
+            () => CookedFile.ReadHeader(notCooked),
+            mustMention: "not-cooked.bin");
+
+        var truncated = Path.Combine(temp, "truncated.cooked");
+        File.WriteAllBytes(truncated, File.ReadAllBytes(artifact).AsSpan(0, 20).ToArray());
+        t.ExpectThrows<AssetImportException>(
+            "AW.4 a truncated preamble is refused, not read as zeroes",
+            () => CookedFile.ReadHeader(truncated));
+
+        t.ExpectTrue("AW.4 TryReadHeader answers null rather than throwing, for walking a tree",
+            CookedFile.TryReadHeader(notCooked) is null);
+
+        // Wrong format, and wrong version of the right format, say DIFFERENT things — one means
+        // "this is not that kind of file", the other means "it is, and it is old", which is the
+        // actionable one.
+        t.ExpectThrows<AssetImportException>(
+            "AW.5 the wrong magic is refused as the wrong kind of file",
+            () => CookedFile.ReadHeader(artifact).Require(0x21212121, 3, artifact, ".other"),
+            mustMention: "magic");
+        t.ExpectThrows<AssetImportException>(
+            "AW.5 an old version of the right format is told to re-cook",
+            () => CookedFile.ReadHeader(artifact).Require(magic, 99, artifact, ".cooked"),
+            mustMention: "re-cook");
+
+        // ── Freshness, including the third answer ────────────────────────────
+        t.Expect("AW.6 an untouched source reads as Current",
+            CookedFile.Compare(read, source) == CookedFile.Freshness.Current,
+            $"got {CookedFile.Compare(read, source)}");
+
+        File.WriteAllBytes(source, new byte[] { 9, 9, 9 });
+        t.Expect("AW.6 a changed source reads as Stale",
+            CookedFile.Compare(read, source) == CookedFile.Freshness.Stale,
+            $"got {CookedFile.Compare(read, source)}");
+
+        File.Delete(source);
+        t.Expect("AW.6 a deleted source reads as SourceMissing",
+            CookedFile.Compare(read, source) == CookedFile.Freshness.SourceMissing,
+            $"got {CookedFile.Compare(read, source)}");
+
+        // <b>Unknown is a third answer and not a "yes".</b> Flattening it would rebuild the exact
+        // bug this arc exists to fix — a check that cannot tell a current file from one it knows
+        // nothing about.
+        var blind = new CookStamp("tst1", 1, "gone.bin", 0, 0, 0, "", CookedFlags.None);
+        var blindArtifact = Path.Combine(temp, "blind.cooked");
+        using (var fs = File.Create(blindArtifact)) CookPreamble.Write(fs, magic, 1, blind);
+        t.Expect("AW.6 a stamp with nothing recorded reads as Unknown, not Current",
+            CookedFile.Compare(CookedFile.ReadHeader(blindArtifact), notCooked) == CookedFile.Freshness.Unknown);
+
+        // ── The family is actually a family ──────────────────────────────────
+        // Read as a 4cc rather than compared as hex, because the point is that they share a
+        // namespace a person can see.
+        t.Expect("AW.7 .blixmesh magic", CookPreamble.Describe(BlixMesh.Magic) == "'BLXM'");
+        t.Expect("AW.7 .blixtex magic is BLXT, no longer the odd one out", CookPreamble.Describe(BlixTex.Magic) == "'BLXT'");
+        t.Expect("AW.7 .blixprobe magic", CookPreamble.Describe(BlixProbe.Magic) == "'BLXP'");
+    }
+    finally
+    {
+        try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
+    }
+}
+
 // Section AV — the importer refuses by NAME, not by whatever the parser threw.
 // ============================================================================
 //

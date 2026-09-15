@@ -9,6 +9,7 @@ using Blix.Graphics.Vulkan;
 using Blix.Tools.Studio;
 using Blix.Runtime.Silk;
 using ImGuiNET;
+using Blix.Cooked;
 
 namespace Blix.Tools.View;
 

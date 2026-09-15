@@ -1,5 +1,6 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
+using Blix.Cooked;
 using Blix.Geometry;
 using Blix.Graphics;
 
@@ -12,15 +13,18 @@ namespace Blix.Assets;
 // ModelRoot.Load + per-accessor interpretation otherwise burns for big
 // scenes like Khronos Sponza Modern.
 //
-// File layout (little-endian), v1:
+// File layout (little-endian), v4:
+//
+//   The shared Blix cooked preamble first — see Blix.Cooked/CookPreamble.cs for
+//   its fields. It carries the magic, the version, which recipe produced this
+//   file, what it was cooked from, and the settings used, and it tells a reader
+//   where this header starts. Then:
 //
 //   offset  size    field
 //   ---------------------------------
-//   0       4       magic        = "BLXM"
-//   4       4       version      = 1
-//   8       4       layoutId     (VertexLayout id; currently only 1 = Position3NormalTexture)
-//   12      4       primitiveCount
-//   --------- 16 bytes (header) ---------
+//   0       4       layoutId     (VertexLayout id; 1 = Position3NormalTexture, 2 = +Tangent)
+//   4       4       primitiveCount
+//   --------- 8 bytes (format header) ---------
 //   For each primitive, sequentially:
 //     nameLen[4]
 //     name[nameLen]    UTF-8 (no NUL terminator)
@@ -45,13 +49,22 @@ namespace Blix.Assets;
 public static class BlixMesh
 {
     public const uint Magic = 0x4D584C42; // "BLXM" little-endian
+
+    /// <summary>
+    /// The recipe id the shipped mesh cook stamps. A project cooking its own meshes to this format
+    /// stamps its own, which is what makes "who made this file" answerable.
+    /// </summary>
+    public const string ShippedRecipe = "gmsh";
     // v2: tangent-layout support + per-primitive LOD index chains (one shared
     // vertex buffer, N index buffers, coarsest selected by distance at runtime).
     // v3: each LOD level also carries its world-space geometric error (a float
     // after indexCount) so the runtime can do screen-space-error selection
     // instead of a magic metres-per-level distance. No back-read path — re-cook
     // to migrate (the cook is fast, and nothing ships older files).
-    public const uint Version3 = 3;
+    // v4: the shared cooked preamble replaces the private magic+version pair, so
+    // provenance and settings travel with the file and a tool can read them
+    // without knowing this format at all.
+    public const uint Version4 = 4;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
 
@@ -86,23 +99,32 @@ public sealed record BlixMeshPrimitive(
     IndexFormat IndexFormat,
     IReadOnlyList<BlixMeshLod> Lods);
 
+/// <param name="Cooked">
+/// The preamble, when this came off disk. Null when it was built in memory on the way to being
+/// written — a file knows its own provenance, a thing about to become one does not yet.
+/// </param>
 public sealed record BlixMeshFile(
     VertexLayout Layout,
-    IReadOnlyList<BlixMeshPrimitive> Primitives);
+    IReadOnlyList<BlixMeshPrimitive> Primitives,
+    CookedHeader? Cooked = null);
 
 public static class BlixMeshWriter
 {
-    public static void Write(string path, BlixMeshFile file)
+    /// <param name="stamp">
+    /// Who cooked this, from what, with which settings. <b>Required, and that is the point</b> — a
+    /// recipe never writes bytes itself, so making this a parameter is what makes an unstamped
+    /// cooked file impossible to produce rather than merely discouraged.
+    /// </param>
+    public static void Write(string path, BlixMeshFile file, in CookStamp stamp)
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(file);
         var layoutId = BlixMesh.LayoutIdForStride(file.Layout.Stride);
 
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
+        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version4, stamp);
         using var bw = new BinaryWriter(fs);
 
-        bw.Write(BlixMesh.Magic);
-        bw.Write(BlixMesh.Version3);
         bw.Write(layoutId);
         bw.Write(file.Primitives.Count);
 
@@ -148,25 +170,25 @@ public static class BlixMeshWriter
 
 public static class BlixMeshReader
 {
+    /// <summary>Reads a cooked mesh, refusing anything that is not one by name.</summary>
+    /// <remarks>
+    /// Everything past the preamble is wrapped, so a truncated or corrupt body arrives as the
+    /// engine declining a file rather than as whatever <see cref="BinaryReader"/> happened to throw
+    /// — the same sentence a bad glTF gets, so a tool catches one type and survives both.
+    /// </remarks>
     public static BlixMeshFile Read(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version4, path, ".blixmesh");
+        return AssetImportException.Refusing(path, () => ReadBody(fs, path, header), ".blixmesh");
+    }
+
+    private static BlixMeshFile ReadBody(Stream fs, string path, CookedHeader header)
+    {
         using var br = new BinaryReader(fs);
 
-        var magic = br.ReadUInt32();
-        if (magic != BlixMesh.Magic)
-        {
-            throw new InvalidDataException(
-                $"'{path}' is not a .blixmesh file (magic mismatch: got 0x{magic:X8}).");
-        }
-        var version = br.ReadUInt32();
-        if (version != BlixMesh.Version3)
-        {
-            throw new InvalidDataException(
-                $"'{path}' has unsupported .blixmesh version {version}; expected {BlixMesh.Version3}. Re-run blix-cook mesh.");
-        }
         var layoutId = br.ReadUInt32();
         var layout = layoutId switch
         {
@@ -230,6 +252,6 @@ public static class BlixMeshReader
                 Lods: lods);
         }
 
-        return new BlixMeshFile(layout, primitives);
+        return new BlixMeshFile(layout, primitives, header);
     }
 }
