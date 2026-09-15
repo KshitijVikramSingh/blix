@@ -10,9 +10,17 @@ namespace Blix.Tools.Studio;
 /// <para>
 /// <b>Why this exists at all, and why it is a construction-time thing.</b> A render graph's passes
 /// have to be declared before it compiles; after that the shape is fixed. So a tool that needs a
-/// pass of its own — a selection outline, a depth pre-pass, an object-id buffer — has exactly one
-/// moment to say so, and without this its only option is to stop using the stage and write a
-/// renderer.
+/// pass of its own — a selection outline, an object-id buffer — has exactly one moment to say so,
+/// and without this its only option is to stop using the stage and write a renderer.
+/// </para>
+/// <para>
+/// <b>It APPENDS; it cannot insert.</b> A tool declares here, after the stage has declared its own
+/// passes, and <c>RenderGraph.Execute</c> walks declaration order — so an extension always runs
+/// after the lit pass and before presentation. A true depth PRE-pass is therefore not reachable
+/// this way, and that is recorded rather than worked around: an outline and an id buffer are both
+/// appends, they are the pressure tooling actually applies, and the first tool that genuinely needs
+/// something before the lit pass should force the next shape instead of a speculative insertion
+/// point being invented for it now.
 /// </para>
 /// <para>
 /// It hands out the targets rather than hiding them, because a pass that cannot read the scene

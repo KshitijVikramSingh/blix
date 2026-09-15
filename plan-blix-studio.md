@@ -47,11 +47,19 @@ the instrument.
 
 ---
 
-## The shell is welded to the setup
+## The shell is welded to the setup — and split at one seam
 
-One library, not two. What must stay true is that the **setup itself is pullable** — a project that
-wants the look without the window can take it — but that does not require a seam that only one
-hypothetical case uses.
+Designed and shipped together, in **two projects**, divided at the one place a real dependency
+divides them: **ImGui**. `Blix.Tools.Studio` names no UI toolkit and a present consumer depends on
+that staying true — `Blix.Tools.Check` is a headless probe with no device and no window that links
+the studio for the stage's declared look, and putting ImGui in the stage would make a tool that
+judges glTF files pull a toolkit and a native binary it never calls.
+
+That is what keeps "welded" and "the setup is pullable" both true at once. A game that wants the
+look takes no ImGui.
+
+**Revised from "one library, not two" after S-D**, which is also where the rest of this section's
+original claim went: the frame layout does **not** move into the studio. See below.
 
 ---
 
@@ -75,12 +83,21 @@ The setup owns the **stage**; a tool contributes **draws** to it.
 | **1 · Knobs** | Sun, ground, grid, exposure, shadow resolution — `[Tune]`, so every tool gets a Scene panel and `--sun-angle` free | everyone |
 | **2 · Bring a draw** | Register geometry into the lit and shadow passes, using the pipelines the setup already made. **The ordinary case, not an escape hatch** | the map generator |
 | **3 · Bring a pipeline** | Your own material when the standard lit shader will not do — terrain splatting, a custom look. Still on the stage; you brought your own brush | a level editor |
-| **4 · Add a pass** | A pre-pass, a selection outline. The first rung that changes the stage rather than what stands on it | expected, not hypothetical |
+| **4 · Append a pass** | A selection outline, an id buffer — *after* the stage's scene passes and before presentation. The first rung that changes the stage rather than what stands on it | expected, not hypothetical |
 | **5 · Replace the graph** | You have left the setup. Allowed, unsupported, and saying so plainly is what keeps 1–3 honest | nobody yet |
 
 Rung 4 is in the first version on the strength of one prediction and it is worth recording as one:
 **tooling asks to extend a graph before it asks to replace one.** If that turns out false it is one
 thing to remove.
+
+**And it appends rather than inserts, which is a statement of fact rather than a limitation
+chosen.** A tool's passes are declared in the window after the stage has declared its own, and
+`RenderGraph.Execute` walks declaration order — so an extension always runs after `studio.lit` and
+before presentation. A true depth pre-pass, which would have to run *before* it, is not reachable
+this way. That is left alone deliberately: a selection outline and an object-id buffer are both
+appends, they are the pressure tooling actually applies, and the first tool that genuinely needs
+something before the lit pass should be the thing that forces the next shape rather than a
+speculative insertion point.
 
 And the setup ships **ready-made contributors** for the common subjects — a model, a rig, a ground
 plane — so the rig viewer writes no draw at all and the map generator writes exactly one.
@@ -114,10 +131,19 @@ a sun-angle change exactly as a session recomposes on a weight change — **the 
 substrate uses its own capability rather than only providing it**, which is worth watching: if it
 reads badly here it will read badly for everyone.
 
-## Stage S-D — the shell
+## Stage S-D — the shell — **DONE, and smaller than this said**
 
-The viewport panel (render-to-texture into ImGui, offset and Retina picking) and the frame layout
-move out of `Blix.Tools.View`'s executable, where nothing else can reach them, and into the studio.
+The viewport panel moves into `Blix.Tools.Studio.Shell` as a widget a tool calls. **The frame layout
+does not move, and neither does selection** — both argued their own way out.
+
+The test that decided it has a mechanical form: **who calls whom.** A thing you invoke inside your
+own `ImGui.Begin` is a library; a thing that invokes your code is a host. A tool's window title, its
+panel order, what it says when nothing is loaded — that is its identity, and a shell that owns it
+has started deciding what an application is. And `StudioSelection`'s own comment already said the
+rest: *only the viewer picks — the capture has no pointer and the probe has no device.*
+
+The widget reports rather than calling back. It sets `Clicked`; the caller casts its own ray through
+its own view declaration into its own selection.
 
 ## Stage S-E — the rig and animation tool, on it
 

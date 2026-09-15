@@ -238,6 +238,10 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // Written down rather than hidden because stage D has to decide whether that lag is what the
     // substrate wants or whether layout and submission should be split so the rect is known first.
     private Vector2 viewportPanelSize = new(480f, 270f);
+
+    // The aspect the viewport's projection was actually built with, kept so it can be published
+    // beside the target's rather than assumed to match it.
+    private float viewportAspect = 16f / 9f;
     private Vector2 viewportImageMin;
     private Vector2 viewportImageSize;
 
@@ -501,8 +505,21 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // The viewport's own camera. Aspect comes from the PANEL, not the window — that is the
         // whole difference between a second view and a second copy of this one, and it is why
         // StudioCamera takes the aspect rather than storing it.
-        var viewportAspect = viewportPanelSize.Y > 1f ? viewportPanelSize.X / viewportPanelSize.Y : 16f / 9f;
+        // <b>The TARGET's aspect, not the panel's.</b> The viewport target is half the swapchain on
+        // both sides, so it carries the window's aspect; the panel then letterboxes the picture to
+        // that same aspect. Projecting through the panel's aspect instead made three numbers out of
+        // one — measured at 2.089 against a target of 1.684 in a default window, a 24% horizontal
+        // stretch that turns a sphere into an ellipse and throws every pick off by the same factor.
+        //
+        // The fit's own comment had stated the invariant all along: stretching "would make the
+        // picture disagree with the projection it was drawn through, and every ray cast into it
+        // afterwards would be wrong by that same stretch". It was the caller breaking it.
+        //
+        // A panel-shaped picture would need a panel-shaped target, which means resizing a graph
+        // resource as a window is dragged. Letterboxing is the cheaper answer and the one the panel
+        // was already written for.
         viewportCameraPosition = viewportCamera.Position;
+        viewportAspect = aspect;
         viewportViewProjection = viewportCamera.ViewProjection(viewportAspect);
 
         UpdateRig(time.Delta);
@@ -588,6 +605,19 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         debug.State.DepthTestDrawing = panels.DepthTestGizmos;
         debug.Values.Value("frames", frames);
         debug.Values.Value("sun", renderer.SunDirection);
+
+        // <b>Three aspects that must be one number, published so they can be checked.</b> The
+        // viewport target is half the swapchain, the panel letterboxes to that same aspect, and the
+        // projection is read back out of the matrix it was actually built with rather than from the
+        // value that was meant to go in. A bounded run reports all three, so "they agree" is an
+        // observation and not a comment — and it was False before this was fixed.
+        // MatchSwapchainGraphSize(0.5) halves both sides, so the target carries the window's shape.
+        var targetAspect = aspect;
+        var panelAspect = viewportPanelSize.Y > 1f ? viewportPanelSize.X / viewportPanelSize.Y : 0f;
+        debug.Values.Value("aspect/viewport-target", targetAspect);
+        debug.Values.Value("aspect/viewport-projection", viewportAspect);
+        debug.Values.Value("aspect/panel", panelAspect);
+        debug.Values.Value("aspect/agree", MathF.Abs(viewportAspect - targetAspect) < 0.01f);
 
         // Declared with BOTH rectangles rather than through the whole-surface shorthand: that one
         // fills logical and physical from RenderFrameContext, which is physical pixels, so on a 2x
