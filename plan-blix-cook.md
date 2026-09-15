@@ -190,7 +190,7 @@ the convention.
 A thin version of this — which branch was taken, nothing more — is available from K-A onward and can
 be pulled forward if we want evidence before the build rule lands.
 
-### K-F — materials, and `flags` bit 0 gets cleared
+### K-F — materials, and `flags` bit 0 gets cleared — **PARKED, see above**
 
 `.blixmesh` ships from K-A declaring *source still required*, because it is true: materials are
 parsed from the glTF in full on every load, so the source is a permanent runtime dependency. This
@@ -217,7 +217,7 @@ substrate is not real and we have written three formats a fourth time.
 | **D2** | is a stale cooked file an error, a warning, or ignored? | **visible before enforced** — the stamp makes it checkable in K-A; the loader does not refuse |
 | **D3 / Q-E** | do materials get cooked? | **yes** — K-F, and the flag exists from K-A so the debt is declared rather than implied |
 | **D4 / Q-A** | is cook a transform or a state? | **state**, as a build rule — K-D. Decided by the shader pipeline, not by preference |
-| **D5** | can the texture cook reach how Blix assets are authored? | **deferred, with a reason** — see below |
+| **D5** | can the texture cook reach how Blix assets are authored? | **parked, with a wall** — see "the chain" |
 | **Q-B** | who owns the options? | **header records what was done; project records what should be done** |
 | **Q-C** | does cooking stay invisible at load? | **engine reports, check asserts** — K-E |
 | **Q-D** | what is cooking for? | whatever a project needs. Three economics, and the report distinguishes them |
@@ -228,6 +228,67 @@ substrate is not real and we have written three formats a fourth time.
 is authored. The two answers — an unpack step, or textures cooked *into* a container rather than
 beside one — both want the format family settled first, and neither has a consumer asking. It is
 recorded here so it is deferred rather than forgotten.
+
+---
+
+## What K-E measured, and the wall it found
+
+Stages K-A through K-E landed. The substrate exists: recipes are declared, discovered, covered by a
+build rule, reproducible byte for byte, and a load now says what it did. What that instrument then
+reported changes the plan for what remains.
+
+### The numbers
+
+| | uncooked | cooked | saved |
+|---|---|---|---|
+| RTSGame's 29 kit props | 97 ms | **39 ms** | 58 ms, 2.5× |
+| RTSGame's 4 villagers | 1,856 ms | **1,416 ms** | 440 ms, 24% |
+
+`.blixmesh` earns its place — two and a half times on geometry-heavy assets. But on the only assets
+that cost seconds it removes a quarter, because **the texture decode is the dominant term and
+`.blixtex` cannot reach it**: every image in this tree is embedded in its container, and a
+sideloaded `.blixtex` needs a file URI. Ten slow loads in the whole repository, all ten the four
+villagers' PBR textures, 3.17 s of CPU per launch.
+
+**Two of the three formats have no live consumer here at all.** `.blixtex` and `.blixprobe` exist
+for Sponza, which is unverified and on an unmounted drive. The one with real consumers is the one
+whose design is least Sponza-specific.
+
+### The chain, which is why K-F is not independently doable
+
+> **self-containment ← textures ← a grouping decision ← a requirement that does not exist**
+
+**K-F cannot deliver what it was for.** Cooking materials was meant to clear `SourceRequired` and
+make cooked output distributable. It cannot: with images embedded in the container, **the glTF *is*
+the image store**, so the source stays required however completely the materials are cooked. K-F is
+gated behind D5.
+
+**D5 is gated behind a grouping decision.** The obvious fix — one texture artifact per source, so
+the three formats share an addressing rule — was rejected, and correctly: texture packing across
+models is a project's decision (atlases, arrays, shared palettes, streaming pools), and a
+per-source artifact forecloses all of it permanently. Sibling-by-extension is a **1:1 assumption**;
+it fits `.blixmesh` and `.blixprobe` because those genuinely are one-per-source, and textures are
+the case where grouping is not the format's to decide.
+
+**And no requirement is driving that decision.** Nothing in the tree is asking for atlases. The
+measured cost is four character assets.
+
+So this is a wall rather than a queue, and pushing on it means inventing the requirement that
+justifies the design — which is the failure mode this whole arc was written against.
+
+### What that makes K-F and D5
+
+**Both parked, with the reason recorded rather than rediscovered.** Neither is "not done yet"; both
+are blocked on a decision that has nothing to decide it. The day a project's numbers hurt — real PBR
+content, or shipping without sources — the requirement will design the format, and
+`blix check --cooked` is the instrument that will say when that day arrives, per project, in
+milliseconds.
+
+**A ground-up redesign is the door this opens, and it is a different arc.** Content-addressed
+resource store, an index mapping sources to the resources they need, grouping as policy over the
+store — that answers embedding, dedup, packing and self-containment together. It is also exactly
+what every plan in this repository has declined to build, and the evidence does not support it yet.
+Worth knowing where the door leads; not worth walking through it on four assets.
 
 ---
 
