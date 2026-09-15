@@ -98,7 +98,8 @@ tr.hi td{background:var(--eng-soft)}
 .lvl{background:var(--surface);padding:14px 19px;display:grid;grid-template-columns:104px 1fr;gap:18px;align-items:baseline}
 .lvl .tier{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
 .lvl .mods{display:flex;flex-wrap:wrap;gap:7px}
-.lvl .mods span{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--ink);
+.lvl .mods span.app{border-color:var(--signal);color:var(--signal);background:transparent}
+    .lvl .mods span{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--ink);
   border:1px solid var(--rule);padding:2px 8px;background:var(--sunk)}
 /* findings */
 .finds{display:flex;flex-direction:column;gap:1px;background:var(--hair);border:1px solid var(--hair);margin-top:24px}
@@ -120,14 +121,15 @@ a{color:var(--eng)}
 <div class="sheet">
 
 <header class="masthead">
-  <div class="eyebrow">counted at 2aa1faa · 2026-09-15 · 45 projects</div>
+  <div class="eyebrow">counted at 2aa1faa · 2026-09-15 · 40 projects, applications set aside</div>
   <h1>The Engine, Counted</h1>
-  <p class="standfirst">Every project in the tree, what is inside each one, and who depends on it —
-  read off the working tree rather than off the plans. The point is granularity: at project level
-  the engine looks like thirteen tidy modules, and at file level three of them are one subsystem
-  each wearing a general name.</p>
+  <p class="standfirst">Every project that <em>is</em> Blix — what is inside each one, and who
+  depends on it — read off the working tree rather than off the plans. Applications are set aside
+  from the mass and kept in the graph, because a game tells you what Blix is for and not what it is.
+  The point is granularity: at project level the engine looks like thirteen tidy modules, and at file
+  level three of them are one subsystem each wearing a general name.</p>
   <nav class="toc">
-    <a href="#tree">01 the tree</a>
+    <a href="#tree">01 what Blix is</a>
     <a href="#engine">02 the thirteen</a>
     <a href="#inside">03 inside the big four</a>
     <a href="#spine">04 the spine</a>
@@ -136,38 +138,78 @@ a{color:var(--eng)}
 </header>
 
 <section id="tree">
-  <div class="eyebrow">01 — the tree</div>
-  <h2>135,743 lines, and where they are</h2>
-  <p class="lede">Six bands. The first number worth sitting with is that <b>one game is more than
-  half the tree</b>, and the engine it is built on is a quarter of it.</p>
+  <div class="eyebrow">01 — what Blix is</div>
+  <h2>58,637 lines, once the applications are set aside</h2>
+  <p class="lede">The five bands below are Blix. <b>A game and the four demos that became games are
+  not counted</b> — they are what Blix is <em>for</em>, and counting them told you about RTSGame
+  rather than about the engine. Set them aside and the shape is legible in one line: <b>the engine is
+  60% of it</b>, and every band around it is small.</p>
 
   <div class="bands">
     <div class="bandbar">
-      <div class="b-game" style="width:53.6%">RTSGame 53.6%</div>
-      <div class="b-eng" style="width:25.8%">engine 25.8%</div>
-      <div class="b-demo" style="width:7.8%">demos</div>
-      <div class="b-tool" style="width:5.6%">tools</div>
-      <div class="b-ver" style="width:4.5%">tests</div>
-      <div class="b-lab" style="width:2.8%">labs</div>
+      <div class="b-eng" style="width:59.7%">engine 59.7%</div>
+      <div class="b-tool" style="width:13.1%">tools 13.1%</div>
+      <div class="b-demo" style="width:10.5%">demos</div>
+      <div class="b-ver" style="width:10.3%">tests</div>
+      <div class="b-lab" style="width:6.5%">labs</div>
     </div>
     <div class="bandkey">
-      <div><i class="sw" style="background:var(--signal)"></i><b>RTSGame</b> one project, 124 files<span class="n">72,720</span></div>
       <div><i class="sw" style="background:var(--eng)"></i><b>Engine</b> 13 projects<span class="n">34,981</span></div>
-      <div><i class="sw" style="background:var(--app)"></i><b>Demos</b> 11 projects<span class="n">10,522</span></div>
       <div><i class="sw" style="background:var(--tool)"></i><b>Tools</b> 9 projects<span class="n">7,668</span></div>
+      <div><i class="sw" style="background:var(--app)"></i><b>Demos</b> 7 executable specs<span class="n">6,136</span></div>
       <div><i class="sw" style="background:var(--warm)"></i><b>Verification</b> 7 projects<span class="n">6,045</span></div>
       <div><i class="sw" style="background:var(--muted)"></i><b>Labs</b> 4 projects<span class="n">3,807</span></div>
     </div>
   </div>
 
-  <p class="t">The engine is the smallest thing here that everything else needs, which is the shape
-  you want. What the bands hide is that the tool band is nine projects averaging 852 lines and the
-  engine band is thirteen averaging 2,691 — so <b>"a project" means two quite different sizes of
-  thing</b> depending on which band it sits in, and the tools band is where the arithmetic of a new
-  one is cheap.</p>
+  <h3>What was set aside, and why each</h3>
+  <p class="t">The excluded five are larger than everything counted — 77,106 lines against 58,637 —
+  which is exactly why counting them buried the subject.</p>
+
+  <div class="bands" style="margin-top:18px">
+    <div class="bandbar" style="height:30px">
+      <div class="b-eng" style="width:43.2%">Blix — 58,637</div>
+      <div class="b-game" style="width:56.8%">applications — 77,106</div>
+    </div>
+    <div class="bandkey">
+      <div><i class="sw" style="background:var(--signal)"></i><b>RTSGame</b> the game<span class="n">72,720</span></div>
+      <div><i class="sw" style="background:var(--signal)"></i><b>Bulwark</b> tower defence<span class="n">1,491</span></div>
+      <div><i class="sw" style="background:var(--signal)"></i><b>TankArena</b> survival shooter<span class="n">1,335</span></div>
+      <div><i class="sw" style="background:var(--signal)"></i><b>Runner</b> endless runner<span class="n">849</span></div>
+      <div><i class="sw" style="background:var(--signal)"></i><b>Pong</b> the 2D game<span class="n">711</span></div>
+    </div>
+  </div>
+
+  <p class="t"><b>The demo band splits, and only half of it is excluded.</b> Seven of the eleven
+  demos are executable specs — the smallest call site that exercises a primitive, existing so the
+  primitive has a known-good consumer. <code>VulkanInstanced</code> is 180 lines and its whole job is
+  that 5,000 cubes go through one draw call. That is engine evidence and it counts. The other four
+  grew into games with rules, scoring and a look of their own, and a game is a game regardless of
+  which folder it sits in.</p>
+
+  <p class="t"><b>Labs are counted, and they are the one band I am not sure about.</b> A lab is
+  supposed to be temporary — allowed to be wrong, expected to be deleted. But
+  <code>Blix.Labs.Character</code> is a 2,018-line library that three executables stand on, which is
+  substrate-shaped rather than experiment-shaped, and the last lab that stopped being fuzzy turned
+  out to be <code>Blix.Tools.Studio</code> under a misleading name. Until that is settled they count,
+  and 6.5% is small enough that the answer does not move the picture either way.</p>
+
+  <p class="pull">Applications are excluded from the mass, not from the graph. Fan-in throughout the
+  rest of this page still counts all 45 projects — a module is load-bearing precisely because a game
+  depends on it.</p>
+
+  <p class="t">What the bands then say is that <b>Blix is an engine with a small amount of everything
+  else around it</b>. Nine tool projects average 852 lines against the engine's thirteen at 2,691, so
+  "a project" means two different sizes of thing depending on the band — and the tools band is where
+  adding one is arithmetically cheap. Whether it is <em>actually</em> cheap is the question the rest
+  of this page and its companions are about.</p>
+
   <p class="note">Counted with <code>find … -name "*.cs"</code> excluding <code>bin/</code> and
-  <code>obj/</code>; blank lines and comment lines included, because in this tree the comments are
-  a substantial and deliberate part of what a file is. Shaders, scripts and assets are not counted.</p>
+  <code>obj/</code>; blank lines and comment lines included, because in this tree the comments are a
+  substantial and deliberate part of what a file is. Shaders, scripts and assets are not counted. The
+  spec/game split among the demos is a judgement call and the two lists are given above so it can be
+  disputed — <code>VulkanLit</code> and <code>VulkanSponza</code> are the two I would argue about, and
+  both are counted as specs because neither has rules or a player.</p>
 </section>
 
 <section id="engine">
@@ -312,8 +354,8 @@ a{color:var(--eng)}
     <div class="lvl"><div class="tier">the engine</div><div class="mods">
       <span>Blix</span><span>Blix.Runtime.Silk</span></div></div>
     <div class="lvl"><div class="tier">on the engine</div><div class="mods">
-      <span>Blix.Tools.Studio</span><span>Blix.Tools.Cook</span><span>11 demos</span>
-      <span>4 labs</span><span>RTSGame</span><span>7 suites</span></div></div>
+      <span>Blix.Tools.Studio</span><span>Blix.Tools.Cook</span><span>7 demo specs</span>
+      <span>4 labs</span><span>7 suites</span><span class="app">4 demo games</span><span class="app">RTSGame</span></div></div>
   </div>
 
   <p class="t">The tier that matters most is the first. <b>Three projects reference nothing at all,
@@ -353,9 +395,10 @@ a{color:var(--eng)}
     <div class="f">
       <h4>The two viewer projects outweigh most of the engine, one module at a time.</h4>
       <p><code>Blix.Tools.Studio</code> at 2,261 is larger than seven of the thirteen engine
-      projects; <code>Blix.Tools.View</code> at 1,741 is larger than five. The tooling is not a thin
-      layer on the engine any more — by mass it is a peer of the modules it sits on.</p>
-      <div class="fig">tools 7,668 across 9 · engine 34,981 across 13<br>
+      projects; <code>Blix.Tools.View</code> at 1,741 is larger than five. With the applications set
+      aside the band is 13.1% of Blix against the engine's 59.7% — so the tooling is not a thin layer
+      any more, it is a peer of the modules it sits on, and two of its nine projects are half of it.</p>
+      <div class="fig">tools 7,668 across 9 (13.1%) · engine 34,981 across 13 (59.7%)<br>
       the two viewers alone: <b>4,002</b> — and <b>944</b> more in Shot showing the same two assets</div>
     </div>
 
@@ -383,7 +426,12 @@ a{color:var(--eng)}
 
 <footer>
   Counted off the working tree at <code>2aa1faa</code>, 2026-09-15, with <code>bin/</code> and
-  <code>obj/</code> excluded throughout. Fan-in is <code>ProjectReference</code> declarations only —
+  <code>obj/</code> excluded throughout. <b>Five application projects are excluded from every line
+  total on this page</b> — RTSGame, Pong, Runner, TankArena and Bulwark, 77,106 lines between them —
+  on the grounds that they are what Blix is for rather than what it is. They are <b>not</b> excluded
+  from fan-in, which still counts all 45 projects: a module is load-bearing because applications
+  depend on it, and removing them from the graph would misreport exactly the thing fan-in is for.
+  <code>docs/blix-topology.html</code> counts the whole tree including them. Fan-in is <code>ProjectReference</code> declarations only —
   it does not count <code>using</code>, so a project that references another and uses one type
   counts the same as one that uses forty. Subsystem groupings inside <code>Blix</code>,
   <code>Blix.Graphics.Vulkan</code> and <code>Blix.Graphics</code> are a judgement call, made by
