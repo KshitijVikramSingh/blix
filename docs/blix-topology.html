@@ -156,6 +156,21 @@ code.inl{font-size:12.5px;background:var(--sunk);padding:1px 4px}
 
 footer{padding-top:34px;font-size:12.5px;color:var(--muted);max-width:76ch}
 a{color:var(--engine)}
+
+.supersede{border:1px solid var(--signal);border-left:4px solid var(--signal);background:var(--surface);
+  margin-top:30px;padding:20px 22px}
+.supersede .badge{font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--signal);font-weight:600}
+.supersede h3{font-family:Archivo,sans-serif;font-size:19px;font-weight:700;color:var(--ink);margin-top:8px;letter-spacing:-.012em}
+.supersede p{margin-top:11px;font-size:13.5px;max-width:76ch}
+.supersede p b{color:var(--ink)}
+.supersede ul{margin:10px 0 0;padding-left:18px;font-size:13.5px;max-width:74ch}
+.supersede li{margin-top:5px}
+.supersede li b{color:var(--ink)}
+.cell .lens{margin-top:10px;padding-top:9px;border-top:1px solid var(--hair);font-size:12.5px;color:var(--muted)}
+.cell .lens b{color:var(--ink)}
+.supersede .rd{margin-top:14px;padding-top:12px;border-top:1px solid var(--hair);
+  font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--muted);line-height:1.8}
 @media (max-width:720px){
   .tier{grid-template-columns:1fr;gap:8px}
   .finding{grid-template-columns:1fr;gap:8px}
@@ -167,17 +182,17 @@ a{color:var(--engine)}
 <div class="sheet">
 
 <header class="masthead">
-  <div class="eyebrow">/Users/kshitij/dev/blix · branch character-lab · commit 2d3f478 · 2026-09-15</div>
+  <div class="eyebrow">re-counted on main · commit 2aa1faa · 2026-09-15</div>
   <h1>Blix Module Topology</h1>
   <p class="standfirst">Every project, lab, test and tool in the tree — what it is, what it proves,
   what it depends on and who depends on it. Read off the <code>.csproj</code> graph and the files'
   own headers, not from memory.</p>
   <div class="figures">
-    <div class="fig"><b class="num">39</b><span>projects with a csproj</span></div>
-    <div class="fig"><b class="num">133,356</b><span>lines of C#</span></div>
-    <div class="fig"><b class="num" style="color:var(--engine)">15</b><span>engine · 35,357 lines</span></div>
-    <div class="fig"><b class="num" style="color:var(--consumer)">24</b><span>consumers · 97,999 lines</span></div>
-    <div class="fig"><b class="num">23</b><span>scripts in tools/</span></div>
+    <div class="fig"><b class="num">45</b><span>projects with a csproj</span></div>
+    <div class="fig"><b class="num">135,743</b><span>lines of C#</span></div>
+    <div class="fig"><b class="num" style="color:var(--engine)">13</b><span>engine · 34,981 lines</span></div>
+    <div class="fig"><b class="num" style="color:var(--consumer)">32</b><span>consumers · 100,762 lines</span></div>
+    <div class="fig"><b class="num">20</b><span>scripts in tools/</span></div>
     <div class="fig"><b class="num">6</b><span>dependency tiers</span></div>
   </div>
   <nav class="toc">
@@ -191,30 +206,68 @@ a{color:var(--engine)}
   </nav>
 </header>
 
+<div class="supersede">
+  <div class="badge">re-counted · the graph holds, one section's framing does not</div>
+  <h3>Still the register. No longer the argument.</h3>
+  <p>This page counts the tree, and counting is what it is for — so unlike its two companions from
+  the same day it has been <b>re-measured rather than retired</b>. Every figure above and below now
+  reads off <code>2aa1faa</code> on <code>main</code> instead of <code>2d3f478</code> on the deleted
+  <code>character-lab</code> branch.</p>
+  <p><b>What changed structurally, and why the family counts moved:</b></p>
+  <ul>
+    <li><b>The toolchain lab became tools.</b> <code>Blix.Labs.Toolchain</code> and its three
+      executables are now <code>Blix.Tools.Studio</code>, <code>.Shell</code>, <code>.View</code>,
+      <code>.Shot</code> and <code>.Check</code> — which is why labs fell from 8 to 4 and tools rose
+      to 9. The rename was the point: <em>Lab</em> named nothing true.</li>
+    <li><b>An app layer landed.</b> <code>[BlixApp]</code>, a build-time index read from ECMA-335
+      metadata, and <code>blix</code> as a resolver — so the fourteen launcher scripts collapsed into
+      one, and <code>tools/</code> fell from 23 entries to 20.</li>
+    <li><b>Verification grew a shared tally.</b> <code>Blix.Verify</code>, 129 lines and zero
+      references, replaced six copies of the same counter — and <code>Blix.Test.Studio</code> split
+      out of <code>check</code>, which turned out to be two tools sharing a name.</li>
+    <li><b>The two glTF importers became one extraction path.</b> <code>GltfStaticImporter</code>
+      859 → 616 and <code>GltfImporter</code> 653 → 446, with the shared 289 in
+      <code>GltfShared</code>. §03's file lists below reflect it.</li>
+  </ul>
+  <p><b>§01's framing is the part that did not survive.</b> It reads the four overlap cases as
+  extraction decisions — what has earned the right to move. That question produced correct local
+  answers and the wrong global one. <b>Duplication is a symptom;</b> what actually shapes a session
+  is how much apparatus you must build before you learn anything. The four cases are annotated
+  in place below with what each looks like under the later lens.</p>
+  <div class="rd">the current statement &nbsp;→&nbsp; <a href="blix-what-it-ships.html">blix-what-it-ships.html</a> (revision 3)<br>
+  the engine at file granularity &nbsp;→&nbsp; <a href="blix-engine.html">blix-engine.html</a><br>
+  the asset pipeline, measured &nbsp;→&nbsp; <a href="blix-assets.html">blix-assets.html</a></div>
+</div>
+
+
 <section id="line">
   <div class="eyebrow">01 — the line</div>
   <h2>Engine and consumer, and the four things that are genuinely arguable</h2>
   <p class="lede">The split is cleaner than it feels from inside. The engine is a library stack that
-  never names a game; every consumer is an executable, or a lab library serving one. What is worth
-  arguing about is a short list, and each entry on it is a restructuring decision waiting to be made.</p>
+  never names a game; every consumer is an executable, a tool, or a lab library serving one. What is
+  worth arguing about is a short list — though not, it turned out, for the reason given here.</p>
+  <p class="note"><b>Read this section as a census, not as a verdict.</b> The four cases below are
+  real and the counts are current. What was wrong was treating "does this have a second consumer?"
+  as the question that decides the shape of the tree. Each card now carries a second line saying
+  what it looks like under the lens that replaced it.</p>
 
   <div class="vennwrap">
-  <svg class="venn" viewBox="0 0 760 420" role="img" aria-label="Venn diagram: 15 engine projects, 24 consumer projects, 4 arguable residents in the overlap">
+  <svg class="venn" viewBox="0 0 760 420" role="img" aria-label="Venn diagram: 13 engine projects, 32 consumer projects, 4 arguable residents in the overlap">
     <circle cx="280" cy="200" r="168" fill="var(--engine-soft)" stroke="var(--engine)" stroke-width="1.5"/>
     <circle cx="480" cy="200" r="168" fill="var(--consumer-soft)" stroke="var(--consumer)" stroke-width="1.5"/>
     <text x="176" y="150" text-anchor="middle" font-size="12" letter-spacing="2.4" fill="var(--engine)">ENGINE</text>
-    <text x="176" y="192" text-anchor="middle" font-size="40" font-weight="600" fill="var(--ink)">15</text>
-    <text x="176" y="214" text-anchor="middle" font-size="11.5" fill="var(--muted)">projects · 35,357 ln</text>
+    <text x="176" y="192" text-anchor="middle" font-size="40" font-weight="600" fill="var(--ink)">13</text>
+    <text x="176" y="214" text-anchor="middle" font-size="11.5" fill="var(--muted)">projects · 34,981 ln</text>
     <text x="176" y="248" text-anchor="middle" font-size="10.5" fill="var(--muted)">names no game</text>
     <text x="584" y="150" text-anchor="middle" font-size="12" letter-spacing="2.4" fill="var(--consumer)">CONSUMERS</text>
-    <text x="584" y="192" text-anchor="middle" font-size="40" font-weight="600" fill="var(--ink)">24</text>
-    <text x="584" y="214" text-anchor="middle" font-size="11.5" fill="var(--muted)">projects · 97,999 ln</text>
-    <text x="584" y="248" text-anchor="middle" font-size="10.5" fill="var(--muted)">11 demos · 8 labs</text>
-    <text x="584" y="264" text-anchor="middle" font-size="10.5" fill="var(--muted)">4 tests · 1 game</text>
+    <text x="584" y="192" text-anchor="middle" font-size="40" font-weight="600" fill="var(--ink)">32</text>
+    <text x="584" y="214" text-anchor="middle" font-size="11.5" fill="var(--muted)">projects · 100,762 ln</text>
+    <text x="584" y="248" text-anchor="middle" font-size="10.5" fill="var(--muted)">11 demos · 9 tools</text>
+    <text x="584" y="264" text-anchor="middle" font-size="10.5" fill="var(--muted)">7 tests · 4 labs · 1 game</text>
     <text x="380" y="178" text-anchor="middle" font-size="10" letter-spacing="1.4" fill="var(--signal)">ARGUABLE</text>
     <text x="380" y="212" text-anchor="middle" font-size="30" font-weight="600" fill="var(--signal)">4</text>
     <text x="380" y="232" text-anchor="middle" font-size="10" fill="var(--muted)">below</text>
-    <text x="380" y="404" text-anchor="middle" font-size="11" fill="var(--muted)">Circle area is not to scale — the consumer side holds 2.8&#215; the code.</text>
+    <text x="380" y="404" text-anchor="middle" font-size="11" fill="var(--muted)">Circle area is not to scale — the consumer side holds 2.9&#215; the code.</text>
   </svg>
   </div>
 
@@ -223,21 +276,31 @@ a{color:var(--engine)}
       <div class="who">Blix/SkinnedGameObject.cs</div>
       <div class="verdict">121 ln · in the engine · <span class="dirn out">1 consumer</span></div>
       <p>A skinned model you can draw, offered to everyone. VulkanLit took it. Runner, Bulwark,
-      RTSGame and the toolchain lab each wrote their own instead — because it bakes in a draw, and
-      the draw is the part that differs.</p>
+      RTSGame and the studio each wrote their own instead — because it bakes in a draw, and the draw
+      is the part that differs.</p>
+      <p class="lens"><b>Still one consumer, and still correct to leave.</b> Under the later lens the
+      finding is not that five projects duplicated a draw — it is that writing one costs a render
+      graph, six shaders and a camera first. <code>Blix.Tools.Studio</code> is the answer to that,
+      and it deliberately does not absorb this.</p>
     </div>
     <div class="cell">
       <div class="who">Blix.Render/PropModel.cs</div>
       <div class="verdict">686 ln · in the engine · <span class="dirn out">1 consumer</span></div>
       <p>The same story one layer up, and the largest file in <code>Blix.Render</code>. Only RTSGame
-      uses it. Two engine-side attempts at one abstraction, both stranded, both for the same reason.</p>
+      uses it — now from three of its files. Two engine-side attempts at one abstraction, both
+      stranded, both for the same reason.</p>
+      <p class="lens"><b>Unchanged, and no longer framed as debt.</b> A 686-line module serving one
+      72,720-line game well is a module that found its consumer, not one that failed to find four.</p>
     </div>
     <div class="cell">
-      <div class="who">Blix.Labs.Toolchain/LabRig.cs</div>
-      <div class="verdict">458 ln · outside · <span class="dirn in">2nd consumer arriving</span></div>
+      <div class="who">Blix.Tools.Studio/StudioRig.cs</div>
+      <div class="verdict">458 ln · outside · <span class="dirn in">resolved — 5 consumers</span></div>
       <p>glTF import, GPU buffers, textures, bounds, weighted-bone analysis — then a bone material
       that names a shader. The first half is what the character lab would otherwise copy. The second
       half is what stranded the other two.</p>
+      <p class="lens"><b>Resolved, and not by extraction.</b> It did not move into the engine; the
+      lab around it was renamed to what it always was. Five consumers now, one of them headless with
+      no device at all — which is the property that made the rename honest rather than cosmetic.</p>
     </div>
     <div class="cell">
       <div class="who">Blix.Labs.Character/BodyResolver.cs</div>
@@ -245,11 +308,15 @@ a{color:var(--engine)}
       <p>Sweep-and-slide. Its math already moved into <code>Blix.Geometry</code>; the loop did not.
       The camera was expected to be its second consumer and turned out to want one cast and a clamp —
       decided by evidence, not deferral.</p>
+      <p class="lens"><b>The one card that was always asking the right question</b>, because it
+      tested a prediction against a real second consumer and let the answer be no.</p>
     </div>
   </div>
   <p class="note">The pattern in all four: <b>geometry and loading travel; a draw does not.</b> An
   abstraction that names a shader program, a material set or a pass has an owner whether it admits
-  one or not.</p>
+  one or not. <b>That observation held.</b> What did not hold is the conclusion drawn from it — that
+  the tree's problem was things failing to travel. Three of these four were correct exactly as they
+  stood, and the fourth was fixed by renaming a folder rather than by moving any code.</p>
 </section>
 
 <section id="stack">
@@ -285,7 +352,7 @@ a{color:var(--engine)}
           <div class="mrole">The sole backend. Device, swapchain, textures, render graph, SPIR-V reflection, the per-draw uniform arena.</div>
           <div class="bar"><i style="width:100%"></i></div></div>
         <div class="mod" style="--tc:var(--tier1)"><div class="mname">Blix.Core</div>
-          <div class="mmeta"><span>483 ln</span><span>22 consumers</span><span>2 deps</span></div>
+          <div class="mmeta"><span>681 ln</span><span>24 consumers</span><span>2 deps</span></div>
           <div class="mrole">Almost entirely interfaces — host, input, view, audio, diagnostics sinks.</div>
           <div class="bar"><i style="width:6%"></i></div></div>
         <div class="mod" style="--tc:var(--tier1)"><div class="mname">Blix.Graphics.Images</div>
@@ -306,11 +373,11 @@ a{color:var(--engine)}
       <div class="tlabel"><b>Tier 2</b>services</div>
       <div class="mods">
         <div class="mod" style="--tc:var(--tier2)"><div class="mname">Blix.Diagnostics</div>
-          <div class="mmeta"><span>3,167 ln</span><span>19 consumers</span><span>3 deps</span></div>
+          <div class="mmeta"><span>3,543 ln</span><span>21 consumers</span><span>3 deps</span></div>
           <div class="mrole">Debug channels, frame history, JSON dumps, live-tunable reflection — what makes a running session reportable.</div>
           <div class="bar"><i style="width:38%"></i></div></div>
         <div class="mod" style="--tc:var(--tier2)"><div class="mname">Blix.Assets</div>
-          <div class="mmeta"><span>1,839 ln</span><span>7 consumers</span><span>4 deps</span></div>
+          <div class="mmeta"><span>1,873 ln</span><span>7 consumers</span><span>4 deps</span></div>
           <div class="mrole">Importers and the asset database — OBJ, WAV, fonts, materials, the baked .blixmesh format.</div>
           <div class="bar"><i style="width:22%"></i></div></div>
       </div>
@@ -323,7 +390,7 @@ a{color:var(--engine)}
           <div class="mrole">Reusable primitives that own geometry and nothing else — the caller brings pipeline, push constants, textures. Except PropModel.</div>
           <div class="bar"><i style="width:32%"></i></div></div>
         <div class="mod" style="--tc:var(--tier3)"><div class="mname">Blix.Diagnostics.Overlay</div>
-          <div class="mmeta"><span>1,466 ln</span><span>1 consumer</span><span>1 dep</span></div>
+          <div class="mmeta"><span>1,506 ln</span><span>1 consumer</span><span>1 dep</span></div>
           <div class="mrole">ImGui panels over the diagnostics layer. One consumer by design — the host is the only thing that hosts UI.</div>
           <div class="bar"><i style="width:18%"></i></div></div>
       </div>
@@ -332,7 +399,7 @@ a{color:var(--engine)}
       <div class="tlabel"><b>Tier 4</b>framework</div>
       <div class="mods">
         <div class="mod" style="--tc:var(--tier4)"><div class="mname">Blix</div>
-          <div class="mmeta"><span>5,348 ln</span><span>22 consumers</span><span>5 deps</span></div>
+          <div class="mmeta"><span>5,454 ln</span><span>22 consumers</span><span>5 deps</span></div>
           <div class="mrole">glTF import, the animation pipeline, transforms, collision worlds, game objects. Where a skeleton and a pose live.</div>
           <div class="bar"><i style="width:65%"></i></div></div>
       </div>
@@ -407,11 +474,13 @@ a{color:var(--engine)}
       </ul>
     </div>
     <div class="panel">
-      <h4>Blix</h4><div class="psub">5,348 ln · tier 4 · 22 consumers</div>
+      <h4>Blix</h4><div class="psub">5,454 ln · tier 4 · 22 consumers</div>
       <p class="role">Import and animation dominate. The whole pose pipeline is here.</p>
       <ul class="files">
-        <li><span>GltfStaticImporter.cs</span><span>859</span></li>
-        <li><span>GltfImporter.cs</span><span>653</span></li>
+        <li><span>GltfStaticImporter.cs</span><span>616</span></li>
+        <li><span>GltfImporter.cs</span><span>446</span></li>
+        <li><span>GltfShared.cs</span><span>289</span></li>
+        <li><span>Gizmos/SkeletonGizmo.cs</span><span>267</span></li>
         <li><span>ClipPlayer.cs</span><span>280</span></li>
         <li><span>CollisionWorld3D.cs</span><span>249</span></li>
         <li><span>Curves.cs</span><span>223</span></li>
@@ -424,12 +493,12 @@ a{color:var(--engine)}
       </ul>
     </div>
     <div class="panel">
-      <h4>Blix.Diagnostics</h4><div class="psub">3,167 ln · tier 2 · 19 consumers</div>
+      <h4>Blix.Diagnostics</h4><div class="psub">3,543 ln · tier 2 · 21 consumers</div>
       <p class="role">The instrument layer. <code>JsonDumpSink</code> is how a session becomes a file.</p>
       <ul class="files">
         <li><span>DebugSystem.cs</span><span>400</span></li>
         <li><span>JsonDumpSink.cs</span><span>379</span></li>
-        <li><span>TuneReflection.cs</span><span>267</span></li>
+        <li><span>TuneReflection.cs</span><span>614</span></li>
         <li><span>DebugDrawChannel.cs</span><span>257</span></li>
         <li><span>DebugTrails.cs</span><span>156</span></li>
         <li><span>DebugContext.cs</span><span>149</span></li>
@@ -453,7 +522,7 @@ a{color:var(--engine)}
       </ul>
     </div>
     <div class="panel">
-      <h4>Blix.Assets</h4><div class="psub">1,839 ln · tier 2 · 7 consumers</div>
+      <h4>Blix.Assets</h4><div class="psub">1,873 ln · tier 2 · 7 consumers</div>
       <p class="role">Importers for everything that is not glTF — glTF lives in <code>Blix</code>.</p>
       <ul class="files">
         <li><span>ObjImporter.cs</span><span>361</span></li>
@@ -466,10 +535,12 @@ a{color:var(--engine)}
       </ul>
     </div>
     <div class="panel">
-      <h4>Blix.Core</h4><div class="psub">483 ln · tier 1 · 22 consumers</div>
+      <h4>Blix.Core</h4><div class="psub">681 ln · tier 1 · 24 consumers</div>
       <p class="role">The second-most depended-on module and nearly the smallest. That is why it works.</p>
       <ul class="files">
+        <li><span>BlixApps.cs</span><span>137</span></li>
         <li><span>View.cs</span><span>135</span></li>
+        <li><span>BlixAppAttribute.cs</span><span>61</span></li>
         <li><span>ConsoleFrameDebugSink.cs</span><span>74</span></li>
         <li><span>GestureOwnership.cs</span><span>69</span></li>
         <li><span>Key.cs</span><span>62</span></li>
@@ -617,49 +688,68 @@ a{color:var(--engine)}
   </div>
 
   <div class="family">
-    <div class="fhead"><h3>Labs</h3><span class="fcount">2 libraries + 6 executables · 9,459 ln</span></div>
-    <p class="fintro">The pattern both families share: one library holds the scene, shaders and
-    renderer; several thin executables ask different questions of it. A viewer you drive, a probe
-    that judges and exits non-zero, a capture that writes a PNG. None of the executables declare
-    shaders or render code.</p>
+    <div class="fhead"><h3>Tools &amp; labs</h3><span class="fcount">2 libraries + 7 executables + 1 widget · 9,454 ln</span></div>
+    <p class="fintro">The pattern both share: one library holds the scene, shaders and renderer;
+    several thin executables ask different questions of it. A viewer you drive, a judge that exits
+    non-zero, a capture that writes a PNG. None of the executables declare shaders or render code.</p>
+    <p class="fintro"><b>The first group is no longer a lab.</b> <code>Blix.Labs.Toolchain</code>
+    and its three executables became <code>Blix.Tools.Studio</code>, <code>.View</code>,
+    <code>.Check</code> and <code>.Shot</code> — the rename was the point, because <em>Lab</em>
+    named nothing true about a library eight projects were already standing on. The character lab
+    below is still a lab, and is still expected to be deleted.</p>
     <div class="reg">
       <div class="row">
-        <div><div class="rname">Blix.Labs.Toolchain</div><div class="rmeta"><span class="kind lib">lib</span><span>2,321 ln</span><span>3 consumers</span></div></div>
+        <div><div class="rname">Blix.Tools.Studio</div><div class="rmeta"><span class="kind lib">lib</span><span>2,261 ln</span><span>5 consumers</span></div></div>
         <div class="rbody">
-          <p>The toolchain lab's library — <code>LabRenderer</code> (676), <code>LabRig</code> (458),
-          <code>RigSession</code> (363), <code>LabSkeletonView</code> (267), <code>LabModel</code>
-          (247), plus camera, scene and geometry. Subject: <b>assets and the binding model</b> — what
-          a glTF file actually contains and how it reaches the GPU.</p>
+          <p>Blix's opinionated 3D tooling stage — <code>StudioRenderer</code> (635),
+          <code>StudioRig</code> (458), <code>RigSession</code> (389), <code>StudioModel</code>
+          (247), <code>StudioViews</code> (133), plus camera, graph and push layout. Authored with
+          taste rather than extracted under pressure: nothing is required to use it, and the two
+          games with hand-built graphs keep them.</p>
+          <p>A tool contributes <em>draws</em> through <code>IStudioView</code> rather than being
+          one of a fixed set of subjects — the case that forced it is terrain, which is neither a
+          model nor a rig. The look is declared as <code>[Tune]</code>, so every tool on the stage
+          gets a Scene panel and <code>--sun-elevation</code> without parsing one.</p>
+          <div class="flag"><code>LabSkeletonView</code> did not come with it — it became
+          <code>Blix/Gizmos/SkeletonGizmo.cs</code>, in the engine, because drawing a skeleton is
+          not a tooling opinion.</div>
         </div>
       </div>
       <div class="row">
-        <div><div class="rname">Blix.Labs.Toolchain.Viewer</div><div class="rmeta"><span class="kind exe">exe</span><span>1,711 ln</span><span>7 deps</span></div></div>
+        <div><div class="rname">Blix.Tools.View</div><div class="rmeta"><span class="kind exe">exe</span><span>1,741 ln</span><span>8 deps</span></div></div>
         <div class="rbody">
           <p>Chassis conventions over a real lit scene, with ImGui panels for the rig, its clips,
-          instancing and now bone masks. Every descriptor set, UBO offset and push range comes from
+          instancing and bone masks. Every descriptor set, UBO offset and push range comes from
           spirv-cross sidecars rather than a hand-written interface — reflected binding, proved by
           being driven.</p>
-          <span class="run">tools/run-lab.sh --rig …/Rogue.glb --clip Walking_A --mask …</span>
+          <div class="flag">The largest tool in the tree, and the one the next arc is aimed at: its
+          own half is the rig, the clips and the trail; the other half is a camera, three aspects,
+          two view declarations and a viewport round-trip that every future tool would write again.</div>
+          <span class="run">blix run view -- --rig …/Rogue.glb --clip Walking_A --mask …</span>
         </div>
       </div>
       <div class="row">
-        <div><div class="rname">Blix.Labs.Toolchain.Probe</div><div class="rmeta"><span class="kind exe">exe</span><span>774 ln</span><span>2 deps</span></div></div>
+        <div><div class="rname">Blix.Tools.Check</div><div class="rmeta"><span class="kind exe">exe</span><span>640 ln</span><span>2 deps</span></div></div>
         <div class="rbody">
           <p>The binding model printed — and checked. Deliberately not merged with <code>blix-cook
           inspect</code>: that <em>lists</em> what is in a file and always exits 0; this
-          <em>judges</em> clip lengths, the skeleton, the binding contracts and now layer masks, and
+          <em>judges</em> clip lengths, the skeleton, the binding contracts and layer masks, and
           exits non-zero when they are wrong. They overlap in subject and not in purpose.</p>
+          <div class="flag">It was two tools sharing a name. Its binding-model half — which needed
+          no asset and no device — split out as <code>Blix.Test.Studio</code> (194), and running the
+          remainder bare on a bad file was what exposed that it crashed on one, exit 134, rather
+          than refusing it. It now catches <code>AssetImportException</code> and nothing else.</div>
         </div>
       </div>
       <div class="row">
-        <div><div class="rname">Blix.Labs.Toolchain.Capture</div><div class="rmeta"><span class="kind exe">exe</span><span>830 ln</span><span>7 deps</span></div></div>
+        <div><div class="rname">Blix.Tools.Shot</div><div class="rmeta"><span class="kind exe">exe</span><span>944 ln</span><span>7 deps</span></div></div>
         <div class="rbody">
           <p>Renders the lab and writes what it rendered to a PNG — the capability Blix did not have
           at all until this arc, since colour attachments were created without
           <code>TransferSrcBit</code>. Reproducible single-frame sampling, <code>--xray</code>,
           <code>--frames-out</code>, <code>--zoom</code>, and <code>--lockstep</code> as a negative
           control: N bodies on one clip must come back as exactly one pose fingerprint.</p>
-          <span class="run">tools/run-lab-capture.sh</span>
+          <span class="run">blix run shot -- --rig … --out shot.png</span>
         </div>
       </div>
       <div class="row">
@@ -674,7 +764,7 @@ a{color:var(--engine)}
         </div>
       </div>
       <div class="row">
-        <div><div class="rname">Blix.Labs.Character.Room</div><div class="rmeta"><span class="kind exe">exe</span><span>632 ln</span><span>8 deps</span></div></div>
+        <div><div class="rname">Blix.Labs.Character.Room</div><div class="rmeta"><span class="kind exe">exe</span><span>633 ln</span><span>8 deps</span></div></div>
         <div class="rbody">
           <p>The viewer you drive. Its central claim is <em>one source</em>: what is drawn and what
           will be swept are the same triangles, and the flat shading means every facet you can see is
@@ -705,11 +795,15 @@ a{color:var(--engine)}
   </div>
 
   <div class="family">
-    <div class="fhead"><h3>Tests</h3><span class="fcount">4 executables · 5,390 ln · 800 checks</span></div>
-    <p class="fintro">All four are the same shape: a CLI harness printing GREEN OK / RED FAIL per
+    <div class="fhead"><h3>Tests</h3><span class="fcount">6 executables + 1 shared tally · 6,045 ln</span></div>
+    <p class="fintro">All six are the same shape: a CLI harness printing GREEN OK / RED FAIL per
     case and exiting non-zero if any fails. No test framework, no attributes — the exit code is the
     contract. Every claim is paired with a negative control, on the rule that a test that can only
     pass is not a test.</p>
+    <p class="fintro"><b>The shape is now written down once.</b> <code>Blix.Verify</code> — 129
+    lines, sealed, zero project references, because a tally must not depend on what it counts —
+    replaced six private copies of the same counter. The four small suites average 205 lines, which
+    is the size at which adding a seventh is a cheap decision rather than an arc.</p>
     <div class="reg">
       <div class="row">
         <div><div class="rname">Blix.Test.Graphics</div><div class="rmeta"><span class="kind exe">exe</span><span>3,272 ln</span><span>516 checks</span></div></div>
@@ -752,7 +846,7 @@ a{color:var(--engine)}
 
   <div class="family">
     <div class="fhead"><h3>Game</h3><span class="fcount">1 executable · 72,720 ln</span></div>
-    <p class="fintro">One project, 74% of all non-engine code, and larger than the engine by 2.1×.</p>
+    <p class="fintro">One project, 72% of all non-engine code, and larger than the engine by 2.1×.</p>
     <div class="reg">
       <div class="row">
         <div><div class="rname">RTSGame</div><div class="rmeta"><span class="kind exe">exe</span><span>72,720 ln</span><span>9 deps</span></div></div>
@@ -797,7 +891,7 @@ a{color:var(--engine)}
 
 <section id="tools">
   <div class="eyebrow">05 — tools</div>
-  <h2>tools/ — 23 files, three jobs</h2>
+  <h2>tools/ — 20 scripts, three jobs, and one fewer reason to exist</h2>
   <p class="lede">Every headed application has a launcher, and they all exist for one reason:
   Homebrew's <code>dotnet</code> is a <code>#!/bin/bash</code> shim, <code>/bin/bash</code> is
   SIP-protected, and dyld strips <code>DYLD_*</code> from its environment — so the Vulkan loader
@@ -806,13 +900,17 @@ a{color:var(--engine)}
 
   <div class="grid2">
     <div class="cell">
-      <div class="who">Launchers · 14</div>
+      <div class="who">Launchers · 12</div>
       <div class="verdict">exec the apphost, never dotnet run</div>
       <p><code>run-chassis</code> · <code>run-vulkan-hello</code> · <code>run-instanced</code> ·
       <code>run-particles</code> · <code>run-vulkan-sponza</code> · <code>run-pong</code> ·
       <code>run-runner</code> · <code>run-tank</code> · <code>run-bulwark</code> ·
-      <code>run-rts-game</code> · <code>run-lab</code> · <code>run-lab-capture</code> ·
-      <code>run-room</code> · <code>run-room-capture</code></p>
+      <code>run-rts-game</code> · <code>run-lab</code> · <code>run-lab-capture</code></p>
+      <p><b>Two are already gone.</b> <code>run-room</code> and <code>run-room-capture</code> were
+      deleted when the character lab moved onto the app layer — they are now
+      <code>blix run character:room</code>. The prologue they all carried lives once, in
+      <code>tools/blix</code>, which execs the resolver; the remaining twelve are what has not been
+      migrated yet rather than what still needs to exist.</p>
       <p>Each carries its application's argument documentation in its header, which is where the
       flags are actually documented — <code>--rig</code>, <code>--clip</code>, <code>--mask</code>,
       <code>--frames</code>, <code>--xray</code>, <code>--lockstep</code>.</p>
@@ -857,8 +955,8 @@ a{color:var(--engine)}
   <div class="eyebrow">06 — reach</div>
   <h2>Who leans on what</h2>
   <p class="lede">Each cell is how many members of that family reference that module. It reads as a
-  portrait of the four families: demos take almost everything, labs skip the asset and audio stack
-  entirely, tests take the least they can, and the game takes one of nearly all.</p>
+  portrait of the five families: demos take almost everything, tools take a narrow slice and no
+  geometry at all, tests take the least they can, and the game takes one of nearly all.</p>
 
   <div class="tablewrap">
   <table>
@@ -870,28 +968,29 @@ a{color:var(--engine)}
     </tr></thead>
     <tbody>
       <tr><td class="rowh">Demos · 11</td>
-        <td class="num">11</td><td class="num">2</td><td class="num">3</td><td class="num">11</td><td class="num">10</td>
-        <td class="num">1</td><td class="z">·</td><td class="num">10</td><td class="num">8</td><td class="z">·</td>
-        <td class="num">4</td><td class="num">10</td><td class="num">11</td><td class="num">11</td><td class="z">·</td></tr>
-      <tr><td class="rowh">Labs · 8</td>
-        <td class="num">6</td><td class="num">4</td><td class="z">·</td><td class="num">6</td><td class="num">7</td>
-        <td class="num">2</td><td class="z">·</td><td class="num">2</td><td class="num">5</td><td class="z">·</td>
-        <td class="z">·</td><td class="num">2</td><td class="num">6</td><td class="num">4</td><td class="z">·</td></tr>
-      <tr><td class="rowh">Tests · 4</td>
-        <td class="num">2</td><td class="num">3</td><td class="z">·</td><td class="num">1</td><td class="num">1</td>
-        <td class="z">·</td><td class="z">·</td><td class="z">·</td><td class="num">2</td><td class="z">·</td>
-        <td class="z">·</td><td class="num">1</td><td class="num">2</td><td class="z">·</td><td class="z">·</td></tr>
+        <td class="num">11</td><td class="num">2</td><td class="num">3</td><td class="num">11</td><td class="num">10</td><td class="num">1</td><td class="z">·</td><td class="num">10</td><td class="num">9</td><td class="z">·</td><td class="num">4</td><td class="num">10</td><td class="num">11</td><td class="num">11</td><td class="z">·</td></tr>
+      <tr><td class="rowh">Tools · 9</td>
+        <td class="num">5</td><td class="z">·</td><td class="z">·</td><td class="num">4</td><td class="num">4</td><td class="num">2</td><td class="z">·</td><td class="num">1</td><td class="num">2</td><td class="z">·</td><td class="num">1</td><td class="num">1</td><td class="num">4</td><td class="num">2</td><td class="z">·</td></tr>
+      <tr><td class="rowh">Tests · 7</td>
+        <td class="num">2</td><td class="num">3</td><td class="z">·</td><td class="num">2</td><td class="num">1</td><td class="z">·</td><td class="z">·</td><td class="z">·</td><td class="num">2</td><td class="z">·</td><td class="z">·</td><td class="num">1</td><td class="num">2</td><td class="z">·</td><td class="z">·</td></tr>
+      <tr><td class="rowh">Labs · 4</td>
+        <td class="num">3</td><td class="num">4</td><td class="z">·</td><td class="num">3</td><td class="num">3</td><td class="num">1</td><td class="z">·</td><td class="num">1</td><td class="num">3</td><td class="z">·</td><td class="z">·</td><td class="num">1</td><td class="num">3</td><td class="num">2</td><td class="z">·</td></tr>
       <tr><td class="rowh">Game · 1</td>
-        <td class="num">1</td><td class="z">·</td><td class="z">·</td><td class="num">1</td><td class="num">1</td>
-        <td class="z">·</td><td class="z">·</td><td class="num">1</td><td class="num">1</td><td class="z">·</td>
-        <td class="num">1</td><td class="num">1</td><td class="num">1</td><td class="num">1</td><td class="z">·</td></tr>
+        <td class="num">1</td><td class="z">·</td><td class="z">·</td><td class="num">1</td><td class="num">1</td><td class="z">·</td><td class="z">·</td><td class="num">1</td><td class="num">1</td><td class="z">·</td><td class="num">1</td><td class="num">1</td><td class="num">1</td><td class="num">1</td><td class="z">·</td></tr>
     </tbody>
   </table>
   </div>
-  <p class="note"><b>RTSGame references no <code>Blix.Geometry</code>, and no lab references
-  <code>Blix.Assets</code>.</b> The first says a 72,720-line game built its own geometry; the second
-  says both labs import glTF through <code>Blix</code> directly and never touch the asset database.
-  Two different ways of not using what exists.</p>
+  <p class="note"><b>RTSGame references no <code>Blix.Geometry</code>, and neither the labs nor the
+  tools reference <code>Blix.Assets</code>.</b> The first says a 72,720-line game built its own
+  geometry. The second is sharper than it was: every tool that opens a glTF — the viewer, the
+  capture, the judge, the studio — goes through <code>Blix</code> directly, so
+  <b>the asset database is bypassed by the entire tool family as well</b>, which is the graph saying
+  what <a href="blix-assets.html">the census</a> then confirmed by counting manifests.</p>
+  <p class="note"><b>And the two empty columns are the finding.</b>
+  <code>Blix.Audio.OpenAL</code> is empty by design — only the host wires a backend, and that is the
+  seam working. <code>Blix.Tools.Cook</code> is empty because nothing can call the cooker: it is a
+  command you run, and no consumer, check or tool can ask it anything. Two identical-looking
+  zeroes, one healthy and one the subject of its own document.</p>
 </section>
 
 <section id="pressure">
@@ -899,13 +998,17 @@ a{color:var(--engine)}
   <h2>What the graph says needs attention</h2>
   <p class="lede">Findings, not opinions — each is a number off the tree above, ordered by how much
   of the structure it implicates rather than by how easy it is to fix.</p>
+  <p class="note"><b>Re-checked rather than reprinted.</b> Every one of these still holds at
+  <code>2aa1faa</code>, which is worth saying because two of them were expected to have moved. What
+  has changed is what each is taken to mean — a count of five projects writing their own skinned
+  draw is a fact about cost, not a backlog of extractions owed.</p>
 
   <div class="findings">
     <div class="finding">
       <div class="fmetric">2.1&#215;<small>game vs engine</small></div>
       <div>
         <h4>RTSGame is larger than everything it stands on</h4>
-        <p>72,720 lines against the engine's 35,357, and 74% of all non-engine code. Whatever it has
+        <p>72,720 lines against the engine's 34,981, and 72% of all non-engine code. Whatever it has
         learned about geometry, nav, crowds and rendering has not travelled — and the empty
         <code class="inl">Geometry</code> cell says that is not an accident of style.</p>
       </div>
@@ -914,10 +1017,11 @@ a{color:var(--engine)}
       <div class="fmetric">6<small>skinned paths</small></div>
       <div>
         <h4>Six independent ways to draw a skinned mesh</h4>
-        <p>Runner, VulkanLit, the toolchain lab, Bulwark, RTSGame and
+        <p>Runner, VulkanLit, the studio, Bulwark, RTSGame and
         <code class="inl">SkinnedGameObject</code> — each with its own vertex shader. The pose
         pipeline underneath is shared by all of them; only the draw is copied, because only the draw
-        was ever baked into the abstraction.</p>
+        was ever baked into the abstraction. <b>Unchanged, and now read differently:</b> the studio's
+        copy is the one a tool can take without writing it, which was the point of authoring it.</p>
       </div>
     </div>
     <div class="finding">
@@ -925,13 +1029,16 @@ a{color:var(--engine)}
       <div>
         <h4>Two engine abstractions with one consumer each</h4>
         <p><code class="inl">SkinnedGameObject</code> (121, VulkanLit) and
-        <code class="inl">PropModel</code> (686, RTSGame). Both are shaped as shared infrastructure
-        and neither is. A third attempt should have to clear a higher bar than the first two did —
-        which is what stage C-0 of the character arc is written to do.</p>
+        <code class="inl">PropModel</code> (686, RTSGame, now from three of its files). Both are
+        shaped as shared infrastructure and neither is. <b>Both were left exactly as they are</b>,
+        and that is the finding: a module serving one consumer well is not debt. What the third
+        attempt did instead was not enter the engine at all —
+        <code class="inl">Blix.Tools.Studio</code> sits outside it, and nothing is required to use
+        it.</p>
       </div>
     </div>
     <div class="finding">
-      <div class="fmetric">22,778<small>lines of debug</small></div>
+      <div class="fmetric">22,784<small>lines of debug</small></div>
       <div>
         <h4>A third of the game is instrumentation</h4>
         <p>RTSGame's <code class="inl">Debug/</code> folder is larger than any engine module and
@@ -942,7 +1049,7 @@ a{color:var(--engine)}
     <div class="finding">
       <div class="fmetric">8,267<small>lines, one module</small></div>
       <div>
-        <h4>Blix.Graphics.Vulkan is 23% of the engine</h4>
+        <h4>Blix.Graphics.Vulkan is 24% of the engine</h4>
         <p>The largest module, split across ten <code class="inl">VulkanGraphicsDevice.*</code>
         partials plus the render graph. One dependency and 21 consumers, so the weight is contained —
         but swapchain and textures alone are 2,927 lines.</p>
@@ -959,13 +1066,28 @@ a{color:var(--engine)}
       </div>
     </div>
     <div class="finding">
+      <div class="fmetric">0<small>emitters</small></div>
+      <div>
+        <h4>The cooker has no consumers, and no load says which path it took</h4>
+        <p>The <code class="inl">Tools.Cook</code> column is empty in §06 — nothing can call the
+        cooker, because it is a command rather than something a tool can ask. And
+        <code class="inl">AssetLoadReport</code> names the four states a load can be in
+        (<em>Source, Cooked, Fallback, Missing</em>) with <b>zero emitters</b>: its only references
+        are the test that checks it round-trips. 30 of the tree's 62 mesh assets are cooked and the
+        line between them is which directory somebody typed. Counted in full in
+        <a href="blix-assets.html">The Unfinished Cook</a>.</p>
+      </div>
+    </div>
+    <div class="finding">
       <div class="fmetric">2<small>folders, no csproj</small></div>
       <div>
         <h4>src/ contains things the build graph cannot see</h4>
         <p><code class="inl">Blix.Shaders</code> is three GLSL includes reached by
         <code class="inl">glslc -I</code>; <code class="inl">Blix.Labs.Character.Motion</code> is a
         deleted project's leftover <code class="inl">bin/</code> and <code class="inl">obj/</code>.
-        Both make <code class="inl">ls src</code> lie about what the tree is.</p>
+        Both make <code class="inl">ls src</code> lie about what the tree is — and both are still
+        here, which is its own small finding about how long a leftover survives once nothing fails
+        because of it.</p>
       </div>
     </div>
   </div>
@@ -973,11 +1095,18 @@ a{color:var(--engine)}
 
 <footer>
   Generated from <code>src/*/*.csproj</code> — project references, output types and line counts read
-  off the working tree at commit <code>2d3f478</code> on branch <code>character-lab</code>. Project
+  off the working tree at commit <code>2aa1faa</code> on <code>main</code>, re-measured from the
+  original <code>2d3f478</code> on the since-deleted <code>character-lab</code> branch. Project
   descriptions are condensed from each file's own header block. Line counts are non-generated
   <code>.cs</code> files excluding <code>bin/</code> and <code>obj/</code>; tiers are computed
   dependency depth. <code>Blix.Shaders</code> and <code>Blix.Labs.Character.Motion</code> are absent
-  from the 39 because neither has a csproj.
+  from the 45 because neither has a csproj.
+  <br><br>
+  <b>Status:</b> this page is the register and is kept current. Its §01 framing was superseded —
+  see the band at the top. Companions: <a href="blix-engine.html">blix-engine.html</a> (the same
+  tree at file granularity, with the subsystem breakdowns), <a href="blix-assets.html">blix-assets.html</a>
+  (the cook, measured), and <a href="blix-what-it-ships.html">blix-what-it-ships.html</a> (the
+  current statement, revision 3).
 </footer>
 
 </div>

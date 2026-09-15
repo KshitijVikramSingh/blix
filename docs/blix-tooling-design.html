@@ -123,6 +123,20 @@ pre{background:var(--surface);border:1px solid var(--hair);padding:14px 16px;ove
 pre b{color:var(--ink);font-weight:600}
 footer{padding-top:34px;font-size:12.5px;color:var(--muted);max-width:76ch}
 a{color:var(--engine)}
+
+.supersede{border:1px solid var(--signal);border-left:4px solid var(--signal);background:var(--surface);
+  margin-top:30px;padding:20px 22px}
+.supersede .badge{font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--signal);font-weight:600}
+.supersede h3{font-family:Archivo,sans-serif;font-size:19px;font-weight:700;color:var(--ink);margin-top:8px;letter-spacing:-.012em}
+.supersede p{margin-top:11px;font-size:13.5px;max-width:76ch}
+.supersede p b{color:var(--ink)}
+.supersede ul{margin:10px 0 0;padding-left:18px;font-size:13.5px;max-width:74ch}
+.supersede li{margin-top:5px}
+.supersede li b{color:var(--ink)}
+.supersede .rd{margin-top:14px;padding-top:12px;border-top:1px solid var(--hair);
+  font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--muted);line-height:1.8}
+.supersede .rd a{font-weight:500}
 @media (max-width:720px){ .fl{grid-template-columns:1fr;gap:8px} }
 </style>
 </head>
@@ -130,7 +144,7 @@ a{color:var(--engine)}
 <div class="sheet">
 
 <header class="masthead">
-  <div class="eyebrow">design sketch · companion to blix-topology.html · not a plan</div>
+  <div class="eyebrow">superseded twice · kept for §01 and §06 · 2026-09-15</div>
   <h1>What Blix Tooling Should Be</h1>
   <p class="standfirst">Boundaries before stages. What a UI tool in this tree is actually made of,
   which parts are shared, what the words <em>tool</em> and <em>lab</em> have to mean for the next
@@ -149,6 +163,32 @@ a{color:var(--engine)}
     <a href="#open">07 open</a>
   </nav>
 </header>
+
+<div class="supersede">
+  <div class="badge">superseded twice — two generations back</div>
+  <h3>This asked what had earned the right to move. That was the wrong question.</h3>
+  <p>The frame throughout is extraction: which pieces have a second consumer, which have cleared the
+  bar, what is owed to whom. <b>Duplication turned out to be a symptom rather than the problem.</b>
+  The thing that actually shapes a session is how much apparatus you must build before you learn
+  anything — a lens this document does not have, and the one every document after it uses.</p>
+  <p>Superseded first by <a href="blix-workbench.html">The Blix Workbench</a> (which introduced that
+  lens, and whose own central proposal then died), and now by
+  <a href="blix-what-it-ships.html">What Blix Ships</a>, revision 3.</p>
+  <p><b>Two parts are still good and were not replaced.</b> §01's anatomy of a UI tool — what one is
+  physically made of, layer by layer — is still the most concrete breakdown anywhere in this set.
+  And §06's boundaries held: the editor line, and what a front door can and cannot be on this
+  platform, both survived into the shipped <code>blix</code> resolver.</p>
+  <p>Its §00 corrections address an older revision of <code>blix-topology.html</code>, which has
+  since been re-measured — read the topology page's own status band first.</p>
+  <p><b>Names throughout are pre-rename and left that way deliberately.</b> <code>LabRig</code>,
+  <code>LabModel</code>, <code>LabSkeletonView</code> and <code>Blix.Labs.Toolchain</code> are now
+  <code>StudioRig</code>, <code>StudioModel</code>, <code>Blix/Gizmos/SkeletonGizmo</code> and
+  <code>Blix.Tools.Studio</code>. Renaming them here would make the document claim to describe a
+  tree it was not written against.</p>
+  <div class="rd">read instead &nbsp;→&nbsp; <a href="blix-what-it-ships.html">blix-what-it-ships.html</a> — the current statement, revision 3<br>
+  the lens that replaced this &nbsp;→&nbsp; <a href="blix-workbench.html">blix-workbench.html §01</a><br>
+  for the numbers &nbsp;→&nbsp; <a href="blix-engine.html">blix-engine.html</a> · <a href="blix-assets.html">blix-assets.html</a></div>
+</div>
 
 <section id="corrections">
   <div class="eyebrow">00 — corrections</div>

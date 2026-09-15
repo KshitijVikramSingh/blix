@@ -124,13 +124,27 @@ pre u{text-decoration:none;color:var(--verb);font-weight:600}
 
 footer{padding-top:34px;font-size:12.5px;color:var(--muted);max-width:76ch}
 a{color:var(--verb)}
+
+.supersede{border:1px solid var(--signal);border-left:4px solid var(--signal);background:var(--surface);
+  margin-top:30px;padding:20px 22px}
+.supersede .badge{font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--signal);font-weight:600}
+.supersede h3{font-family:Archivo,sans-serif;font-size:19px;font-weight:700;color:var(--ink);margin-top:8px;letter-spacing:-.012em}
+.supersede p{margin-top:11px;font-size:13.5px;max-width:76ch}
+.supersede p b{color:var(--ink)}
+.supersede ul{margin:10px 0 0;padding-left:18px;font-size:13.5px;max-width:74ch}
+.supersede li{margin-top:5px}
+.supersede li b{color:var(--ink)}
+.supersede .rd{margin-top:14px;padding-top:12px;border-top:1px solid var(--hair);
+  font-family:"IBM Plex Mono",monospace;font-size:11.5px;color:var(--muted);line-height:1.8}
+.supersede .rd a{font-weight:500}
 </style>
 </head>
 <body>
 <div class="sheet">
 
 <header class="masthead">
-  <div class="eyebrow">a proposal to argue with · not a plan · 2026-09-15</div>
+  <div class="eyebrow">superseded · kept for §01 · 2026-09-15</div>
   <h1>The Blix Workbench</h1>
   <p class="standfirst">What building with Blix should feel like, and the one idea that would make
   it true. Written from what the last two years of sessions actually cost, not from what the code
@@ -144,6 +158,35 @@ a{color:var(--verb)}
     <a href="#risks">06 what this risks</a>
   </nav>
 </header>
+
+<div class="supersede">
+  <div class="badge">superseded — read the status before the argument</div>
+  <h3>The central idea here is wrong, and §01 is why the rest of the work happened.</h3>
+  <p>This proposed one application hosting many <em>subjects</em>, with six verbs falling out for
+  free. <b>That did not survive contact.</b> Blix ships no central application — it ships parts, and
+  a project builds its own tools out of them, which is what the character lab and RTSGame were
+  already doing correctly. Five specific claims died and are enumerated, with reasons, in
+  <a href="blix-what-it-ships.html#dead">What Blix Ships §01</a>:</p>
+  <ul>
+    <li><b>the workbench</b> — there is no one thing you open</li>
+    <li><b>room · controller · world as subjects</b> — those are project content, not Blix things</li>
+    <li><b>a four-part subject contract</b> — four required things is a framework</li>
+    <li><b>tool · lab · game as categories</b> — a project is many of each at once</li>
+    <li><b>"headless is the same subject without a window"</b> — probably false, and dropped</li>
+  </ul>
+  <p><b>What survives is §01, and it is the reason every arc since exists:</b> the cost of a session
+  is not duplication, it is how much apparatus you must build before you learn anything — measured
+  on the character lab at 4,265 lines split 2,137 question / 2,128 apparatus. Every document after
+  this one is downstream of that measurement. §06's six objections are also still worth reading;
+  Q1 (is this an editor) and Q2 (does the substrate become a monolith) were both answered, and the
+  answers are in What Blix Ships §06.</p>
+  <p>One further correction from measurement since: the <b>pack</b> row in §02's grid is empty
+  because <b>pack is not a concept in this tree</b> — it appears zero times in code as anything but
+  a vendor's model bundle. See <a href="blix-assets.html">The Unfinished Cook</a>.</p>
+  <div class="rd">read instead &nbsp;→&nbsp; <a href="blix-what-it-ships.html">blix-what-it-ships.html</a> — the current statement, revision 3<br>
+  for the numbers &nbsp;→&nbsp; <a href="blix-engine.html">blix-engine.html</a> — every project counted at file granularity<br>
+  for the pipeline &nbsp;→&nbsp; <a href="blix-assets.html">blix-assets.html</a> — the cook, measured</div>
+</div>
 
 <section id="lens">
   <div class="eyebrow">01 — the lens</div>

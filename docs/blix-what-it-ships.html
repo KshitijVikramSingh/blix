@@ -534,9 +534,11 @@ a{color:var(--span)}
   (every project counted, at file granularity) and <code>docs/blix-assets.html</code> (the cook,
   measured). Supersedes <code>docs/blix-workbench.html</code> (a central application — wrong) and
   <code>docs/blix-tooling-design.html</code> (what had earned the right to move — the wrong question).
-  <code>docs/blix-topology.html</code> still stands: it is the counted graph. Costs in §04 are each
-  tool's own lines plus its share of the library written for it, at <code>935f7a6</code>; the shares
-  are a judgement call and the chart is worth disputing on that basis.
+  <code>docs/blix-topology.html</code> still stands and has been re-measured: it is the counted
+  graph. Costs in §04 are now each tool executable's own lines at <code>2aa1faa</code>, with shared
+  libraries counted once beneath the chart rather than apportioned across the rows — the previous
+  revision apportioned them, which made the two cheap P8 rows look expensive and hid the fact that
+  they are cheap <em>because</em> a 2,018-line library was written for them first.
 </footer>
 
 </div>
