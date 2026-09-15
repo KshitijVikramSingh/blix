@@ -58,11 +58,12 @@ hypothetical case uses.
 ## The ladder — what "configurable" means, rung by rung
 
 The case that sets the shape is the map generator: **terrain is neither a model nor a rig.** So the
-setup cannot be closed around its subjects the way `LabRenderer` is today —
+setup cannot be closed around its subjects the way the renderer is today —
 
 ```csharp
 Render(commandList, scene, viewProjection, cameraPosition,
-       LabModel? model, Matrix4x4 modelTransform, LabRig? rig, int rigInstances, ...)
+       StudioModel? model, Matrix4x4 modelTransform,
+       StudioRig? rig, int rigInstances, ...)
 ```
 
 — a signature that forces a third subject to either pretend to be one of two, or leave.
@@ -91,8 +92,10 @@ plane — so the rig viewer writes no draw at all and the map generator writes e
 `Lab` was a folder name for experiments that were not games or demos. It is stamped on the eight
 types that carry the actual taste, and it tells a reader nothing true.
 
-`Blix.Tools.Preview` → **`Blix.Tools.Studio`**, holding `StudioRenderer`, `StudioScene`,
-`StudioCamera`, `StudioShell`, and the `ModelView` / `RigView` / `GroundView` contributors.
+`Blix.Tools.Preview` → **`Blix.Tools.Studio`**, and every `Lab*` type with it: `StudioRenderer`,
+`StudioScene`, `StudioCamera`, `StudioGeometry`, `StudioModel`, `StudioRig`, `StudioObject`,
+`SkeletonView`, `StudioSelection`. Later, `StudioShell` and the `ModelView` / `RigView` /
+`GroundView` contributors.
 `RigSession` keeps its name: it is a subject, not stage furniture.
 
 It sits under `Blix.Tools.` deliberately. A game referencing `Blix.Tools.Studio` then reads as

@@ -1,7 +1,7 @@
 using Blix.Diagnostics;
 using System.Numerics;
 
-namespace Blix.Tools.Preview;
+namespace Blix.Tools.Studio;
 
 /// <summary>How a session composes its subject's pose from one or two clips.</summary>
 public enum PoseMode
@@ -50,22 +50,22 @@ public enum PoseMode
 /// </remarks>
 public sealed class RigSession : ITunable
 {
-    private readonly LabRig rig;
+    private readonly StudioRig rig;
     private readonly Matrix4x4[] boneWorlds;
     private readonly Matrix4x4[] restWorlds;
     private readonly Matrix4x4[] scratchWorlds;
     private BonePaletteSet? poseCheck;
 
-    public RigSession(LabRig rig, int instances)
+    public RigSession(StudioRig rig, int instances)
     {
         ArgumentNullException.ThrowIfNull(rig);
         this.rig = rig;
 
-        InstanceCount = Math.Clamp(instances, 1, LabRig.MaxInstances);
+        InstanceCount = Math.Clamp(instances, 1, StudioRig.MaxInstances);
         Subject = new ClipPlayer(rig.Skeleton, rig.Clips.Count > 0 ? rig.Clips[0] : null);
         Secondary = new ClipPlayer(rig.Skeleton, rig.Clips.Count > 1 ? rig.Clips[1] : null);
         Posed = rig.Skeleton.CreateRestPose();
-        Palettes = new BonePaletteSet(rig.Skeleton.BoneCount, LabRig.MaxInstances);
+        Palettes = new BonePaletteSet(rig.Skeleton.BoneCount, StudioRig.MaxInstances);
 
         Echoes = new ClipPlayer[Math.Max(0, InstanceCount - 1)];
         for (var i = 0; i < Echoes.Length; i++) Echoes[i] = new ClipPlayer(rig.Skeleton);
@@ -73,7 +73,7 @@ public sealed class RigSession : ITunable
         boneWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
         restWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
         scratchWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
-        LabRig.ComputeBoneWorlds(rig.Skeleton, Subject.RestPose, restWorlds);
+        StudioRig.ComputeBoneWorlds(rig.Skeleton, Subject.RestPose, restWorlds);
     }
 
     /// <summary>The body the panel's transport, bone list and root-motion readout describe.</summary>
@@ -307,7 +307,7 @@ public sealed class RigSession : ITunable
     /// </remarks>
     public IReadOnlyList<Matrix4x4> EchoBoneWorlds(int echoIndex)
     {
-        LabRig.ComputeBoneWorlds(rig.Skeleton, Echoes[echoIndex].Pose, scratchWorlds);
+        StudioRig.ComputeBoneWorlds(rig.Skeleton, Echoes[echoIndex].Pose, scratchWorlds);
         return scratchWorlds;
     }
 
@@ -365,7 +365,7 @@ public sealed class RigSession : ITunable
         // animated AND applying the delta moves a travelling clip twice.
         if (DriveRoot) RootMotion.Strip(rig.Skeleton, Posed, Subject.RestPose);
 
-        LabRig.ComputeBoneWorlds(rig.Skeleton, Posed, boneWorlds);
+        StudioRig.ComputeBoneWorlds(rig.Skeleton, Posed, boneWorlds);
     }
 
     // Placement is baked into every drawn palette, so bodies standing apart are never bit-identical
@@ -373,7 +373,7 @@ public sealed class RigSession : ITunable
     // incapable of failing, so the poses are re-packed at identity purely to be counted.
     private int CountDistinctPoses()
     {
-        poseCheck ??= new BonePaletteSet(rig.Skeleton.BoneCount, LabRig.MaxInstances);
+        poseCheck ??= new BonePaletteSet(rig.Skeleton.BoneCount, StudioRig.MaxInstances);
         poseCheck.Reset();
         poseCheck.Add(rig.Skeleton, Posed, Matrix4x4.Identity);
         foreach (var echo in Echoes) poseCheck.Add(rig.Skeleton, echo.Pose, Matrix4x4.Identity);

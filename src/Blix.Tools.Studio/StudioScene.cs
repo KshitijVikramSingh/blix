@@ -1,7 +1,7 @@
 using System.Numerics;
 using Blix.Graphics;
 
-namespace Blix.Tools.Preview;
+namespace Blix.Tools.Studio;
 
 /// <summary>One thing to draw: a pose, a colour, and how it responds to light.</summary>
 /// <remarks>
@@ -9,7 +9,7 @@ namespace Blix.Tools.Preview;
 /// to grow a scene model — see conventions, "what Blix deliberately does not have". If Spear needs one it
 /// should say so in its own words.
 /// </remarks>
-public readonly record struct LabObject(
+public readonly record struct StudioObject(
     Matrix4x4 Model,
     Vector3 BaseColour,
     float Metallic,
@@ -24,11 +24,11 @@ public readonly record struct LabObject(
 /// interesting surface here is the toolchain around it — reflected binding, shared shaders, several
 /// executables over one lab — not the scene graph, which is why there isn't one.
 /// </remarks>
-public sealed class LabScene
+public sealed class StudioScene
 {
-    private readonly List<LabObject> objects = new();
+    private readonly List<StudioObject> objects = new();
 
-    public IReadOnlyList<LabObject> Objects => objects;
+    public IReadOnlyList<StudioObject> Objects => objects;
 
     /// <summary>Direction TOWARD the sun. Normalised on assignment.</summary>
     public Vector3 SunDirection { get; private set; } = Vector3.Normalize(new Vector3(0.45f, 0.8f, 0.35f));
@@ -46,7 +46,7 @@ public sealed class LabScene
 
     public void Clear() => objects.Clear();
 
-    public void Add(in LabObject item) => objects.Add(item);
+    public void Add(in StudioObject item) => objects.Add(item);
 
     /// <summary>
     /// Just the ground, for when the subject is an imported model.
@@ -56,10 +56,10 @@ public sealed class LabScene
     /// had it half-hidden behind one, with its pivot triads lost among seven unrelated silhouettes. What a
     /// model viewer needs behind the model is a floor and nothing else.
     /// </remarks>
-    public static LabScene GroundOnly()
+    public static StudioScene GroundOnly()
     {
-        var scene = new LabScene();
-        scene.Add(new LabObject(
+        var scene = new StudioScene();
+        scene.Add(new StudioObject(
             Matrix4x4.Identity,
             new Vector3(0.22f, 0.23f, 0.26f),
             Metallic: 0f,
@@ -69,10 +69,10 @@ public sealed class LabScene
     }
 
     /// <summary>The default lab: a ground plane and a ring of boxes at varied roughness.</summary>
-    public static LabScene Default()
+    public static StudioScene Default()
     {
-        var scene = new LabScene();
-        scene.Add(new LabObject(
+        var scene = new StudioScene();
+        scene.Add(new StudioObject(
             Matrix4x4.Identity,
             new Vector3(0.22f, 0.23f, 0.26f),
             Metallic: 0f,
@@ -92,7 +92,7 @@ public sealed class LabScene
                         * Matrix4x4.CreateTranslation(
                             MathF.Cos(angle) * radius, height, MathF.Sin(angle) * radius);
 
-            scene.Add(new LabObject(
+            scene.Add(new StudioObject(
                 model,
                 Vector3.Lerp(new Vector3(0.85f, 0.35f, 0.25f), new Vector3(0.25f, 0.55f, 0.85f), t),
                 Metallic: i % 3 == 0 ? 1f : 0f,

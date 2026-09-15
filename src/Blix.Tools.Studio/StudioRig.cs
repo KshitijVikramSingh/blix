@@ -4,13 +4,13 @@ using Blix.Assets;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 
-namespace Blix.Tools.Preview;
+namespace Blix.Tools.Studio;
 
 /// <summary>
 /// An imported glTF kept as a SKELETON and its clips, rather than as a node hierarchy.
 /// </summary>
 /// <remarks>
-/// <b>The sibling of <see cref="LabModel"/>, and deliberately not a mode of it.</b> A static asset raises
+/// <b>The sibling of <see cref="StudioModel"/>, and deliberately not a mode of it.</b> A static asset raises
 /// "where is this part's pivot"; a rigged one raises "is the motion right", and the two are answered by
 /// different data out of different importers. <c>GltfStaticImporter.ImportNodes</c> keeps the authored
 /// node tree and hands back <c>VertexPosition3NormalTexture</c>; <c>GltfImporter.Import</c> fuses the
@@ -22,9 +22,9 @@ namespace Blix.Tools.Preview;
 /// clock: <see cref="Blix.ClipPlayer"/> does, and a lab that wants two of them for a blend makes two.
 /// </para>
 /// </remarks>
-public sealed class LabRig : IDisposable
+public sealed class StudioRig : IDisposable
 {
-    /// <summary>Matches the fixed bound in <c>lab_skinned.vert</c>.</summary>
+    /// <summary>Matches the fixed bound in <c>studio_skinned.vert</c>.</summary>
     /// <remarks>
     /// Public so the probe can check a rig against it without a device. A rig over this draws nothing
     /// useful — the shader would index past its array — and finding that out at load is a message,
@@ -154,9 +154,9 @@ public sealed class LabRig : IDisposable
     /// The program whose set-3 slot describes the palette buffer. Reflected, so the buffer's size comes
     /// from the shader's own declaration rather than from a number restated here.
     /// </param>
-    public static LabRig Load(VulkanGraphicsDevice vk, string path, ShaderProgramHandle skinnedProgram)
+    public static StudioRig Load(VulkanGraphicsDevice vk, string path, ShaderProgramHandle skinnedProgram)
     {
-        var rig = new LabRig { device = vk, SourcePath = path };
+        var rig = new StudioRig { device = vk, SourcePath = path };
 
         var imported = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("lab.rig"), path));
         rig.Skeleton = imported.Skeleton;
@@ -218,7 +218,7 @@ public sealed class LabRig : IDisposable
         //
         // What it does NOT solve: two draws in the SAME frame wanting different poses. They would
         // share this one buffer and both render the second. The lab draws one rig, so the question
-        // does not arise here — a second rig gets a second LabRig and a second material, which is
+        // does not arise here — a second rig gets a second StudioRig and a second material, which is
         // why this is per-rig rather than owned by the renderer.
         rig.bones = vk.CreateMaterial(
             skinnedProgram, setIndex: 3, framesInFlight: vk.MaxFramesInFlightCount, name: "lab.rig.bones");

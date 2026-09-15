@@ -2,7 +2,7 @@
 
   <!--
     A thin entry point onto the lab. It declares NO shaders: they are compiled once by
-    Blix.Tools.Preview and arrive here through that project's content propagation,
+    Blix.Tools.Studio and arrive here through that project's content propagation,
     alongside their reflection sidecars. A second executable — a probe, a capture tool —
     is another file like this one, not another copy of the lab.
   -->
@@ -13,7 +13,7 @@
     <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
     <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
-    <ProjectReference Include="..\Blix.Tools.Preview\Blix.Tools.Preview.csproj" />
+    <ProjectReference Include="..\Blix.Tools.Studio\Blix.Tools.Studio.csproj" />
     <ProjectReference Include="..\Blix.Runtime.Silk\Blix.Runtime.Silk.csproj" />
   </ItemGroup>
 

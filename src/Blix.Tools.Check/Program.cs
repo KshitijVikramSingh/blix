@@ -2,7 +2,7 @@ using Blix.Core;
 using Blix.Graphics.Vulkan;
 using System.Numerics;
 using Blix.Assets;
-using Blix.Tools.Preview;
+using Blix.Tools.Studio;
 
 namespace Blix.Tools.Check;
 
@@ -23,7 +23,7 @@ namespace Blix.Tools.Check;
 // ── Proves ──────────────────────────────────────────────────────────────────
 //   • A second executable over one lab. This project declares no shaders, owns no
 //     render code and never opens a window; the .spv sidecars and the lab's types
-//     both arrive from Blix.Tools.Preview. That was the whole claim of splitting
+//     both arrive from Blix.Tools.Studio. That was the whole claim of splitting
 //     the lab out, and until now nothing tested it.
 //   • Reflection is worth something OFF the GPU: the binding model is a build
 //     artifact, so it can be read, diffed and asserted against without a device.
@@ -68,21 +68,21 @@ public static class Program
 
         var programs = new (string Name, string[] Stages, int? ExpectedPush)[]
         {
-            ("lab.shadow", new[] { "lab_shadow.vert", "lab_shadow.frag" }, LabRenderer.CasterPushBytes),
-            ("lab.lit", new[] { "lab_lit.vert", "lab_lit.frag" }, LabRenderer.LitPushBytes),
-            ("lab.present", new[] { "lab_present.vert", "lab_present.frag" }, null),
+            ("lab.shadow", new[] { "studio_shadow.vert", "studio_shadow.frag" }, StudioRenderer.CasterPushBytes),
+            ("lab.lit", new[] { "studio_lit.vert", "studio_lit.frag" }, StudioRenderer.LitPushBytes),
+            ("lab.present", new[] { "studio_present.vert", "studio_present.frag" }, null),
 
             // The skinned LIT pass pushes the same 96-byte block as the unskinned one — the stride
             // rides in uMaterial's spare .z rather than widening it, because the block has to stay
-            // byte-identical to what lab_lit.frag declares. The skinned CASTER pushes 16: its
+            // byte-identical to what studio_lit.frag declares. The skinned CASTER pushes 16: its
             // fragment stage declares no block at all, so it was free to be exactly what the stage
             // uses, and an instance's placement is already in its palette.
             //
             // Worth checking because the renderer packs to these constants: if a shader grew a push
             // member, the tail of the payload would be whatever was left in the scratch buffer.
-            ("lab.skinned", new[] { "lab_skinned.vert", "lab_lit.frag" }, LabRenderer.LitPushBytes),
+            ("lab.skinned", new[] { "studio_skinned.vert", "studio_lit.frag" }, StudioRenderer.LitPushBytes),
             ("lab.skinned.shadow",
-                new[] { "lab_skinned_shadow.vert", "lab_shadow.frag" }, LabRenderer.SkinnedCasterPushBytes),
+                new[] { "studio_skinned_shadow.vert", "studio_shadow.frag" }, StudioRenderer.SkinnedCasterPushBytes),
         };
 
         var failures = 0;
@@ -148,27 +148,27 @@ public static class Program
             Console.WriteLine();
         }
 
-        // <b>The palette's size, from the shader rather than from a C# constant.</b> LabRig.MaxBones
-        // and the `mat4 m[128]` in lab_skinned.vert are the same number written in two files, which
+        // <b>The palette's size, from the shader rather than from a C# constant.</b> StudioRig.MaxBones
+        // and the `mat4 m[128]` in studio_skinned.vert are the same number written in two files, which
         // is exactly the drift this probe exists for. The reflected block is the authority.
         try
         {
             var skinned = ShaderReflection.MergeStages(
-                ShaderReflection.Load(Path.Combine(shaderDirectory, "lab_skinned.vert.spv.refl.json")));
+                ShaderReflection.Load(Path.Combine(shaderDirectory, "studio_skinned.vert.spv.refl.json")));
             var boneSlot = skinned.Slots.FirstOrDefault(s => s.Type == ShaderResourceType.StorageBuffer);
             if (boneSlot?.BlockLayout is { } block)
             {
                 var declared = block.TotalSize / 64;
-                var expected = LabRig.MaxBones * LabRig.MaxInstances;
+                var expected = StudioRig.MaxBones * StudioRig.MaxInstances;
                 Console.WriteLine(
                     $"bone palette: set {boneSlot.Set} binding {boneSlot.Binding}, " +
                     $"{block.TotalSize}B = {declared} matrices " +
-                    $"({LabRig.MaxInstances} instances x {LabRig.MaxBones} bones)");
+                    $"({StudioRig.MaxInstances} instances x {StudioRig.MaxBones} bones)");
                 if (declared != expected)
                 {
                     Console.Error.WriteLine(
                         $"  MISMATCH: the shader holds {declared} matrices, " +
-                        $"LabRig.MaxBones x MaxInstances says {expected}. The shader indexes " +
+                        $"StudioRig.MaxBones x MaxInstances says {expected}. The shader indexes " +
                         $"gl_InstanceIndex x stride into this array; a short one reads past its end.");
                     failures++;
                 }
@@ -178,7 +178,7 @@ public static class Program
                 // pose — and the lit pass would look perfect while it happened.
                 var casterSlot = ShaderReflection
                     .MergeStages(ShaderReflection.Load(
-                        Path.Combine(shaderDirectory, "lab_skinned_shadow.vert.spv.refl.json")))
+                        Path.Combine(shaderDirectory, "studio_skinned_shadow.vert.spv.refl.json")))
                     .Slots.FirstOrDefault(s => s.Type == ShaderResourceType.StorageBuffer);
                 if (casterSlot?.BlockLayout is not { } casterBlock)
                 {
@@ -214,12 +214,12 @@ public static class Program
 
         // Links the lab's own code, not just its build output — the scene is described
         // without a device anywhere in sight.
-        var scene = LabScene.Default();
+        var scene = StudioScene.Default();
         Console.WriteLine(
             $"scene: {scene.Objects.Count} object(s), " +
             $"{scene.Objects.Count(o => o.IsGround)} ground, " +
             $"sun {scene.SunDirection.X:0.00}, {scene.SunDirection.Y:0.00}, {scene.SunDirection.Z:0.00}, " +
-            $"shadow map {LabRenderer.ShadowMapSize}px");
+            $"shadow map {StudioRenderer.ShadowMapSize}px");
 
         if (failures == 0) return 0;
         Console.Error.WriteLine($"{failures} problem(s).");
@@ -321,10 +321,10 @@ public static class Program
         }
 
         Console.WriteLine($"  hierarchy: {roots} root(s), order valid");
-        if (skeleton.BoneCount > LabRig.MaxBones)
+        if (skeleton.BoneCount > StudioRig.MaxBones)
         {
             Console.Error.WriteLine(
-                $"  {skeleton.BoneCount} bones exceeds the lab shader's {LabRig.MaxBones}-matrix palette.");
+                $"  {skeleton.BoneCount} bones exceeds the lab shader's {StudioRig.MaxBones}-matrix palette.");
             problems++;
         }
 
@@ -362,7 +362,7 @@ public static class Program
         // origin: bone WORLD positions are metres apart, palette translations are near zero. Two
         // correct arithmetics, one of which answers a different question.
         var worlds = new System.Numerics.Matrix4x4[skeleton.BoneCount];
-        LabRig.ComputeBoneWorlds(skeleton, rest, worlds);
+        StudioRig.ComputeBoneWorlds(skeleton, rest, worlds);
 
         // <b>How many of those bones the mesh actually follows, and how many it takes to draw them.</b>
         // A rig ships the handles its animator posed through, and they are indistinguishable from
@@ -373,8 +373,8 @@ public static class Program
         // Weighted is the census: what the mesh is attached to. The hierarchy adds the ancestors that
         // carry those chains — the Rogue's `root` is weighted by nothing and is the parent of
         // everything — and is what an overlay must draw to avoid floating segments.
-        var weighted = LabRig.FindWeightedBones(skeleton, imported.Primitives);
-        var deform = LabRig.PromoteToHierarchy(skeleton, weighted);
+        var weighted = StudioRig.FindWeightedBones(skeleton, imported.Primitives);
+        var deform = StudioRig.PromoteToHierarchy(skeleton, weighted);
         var weightedCount = weighted.Count(b => b);
         var deformCount = deform.Count(b => b);
         Console.WriteLine(

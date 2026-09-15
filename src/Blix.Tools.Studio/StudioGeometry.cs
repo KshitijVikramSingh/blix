@@ -1,6 +1,6 @@
 using Blix.Graphics;
 
-namespace Blix.Tools.Preview;
+namespace Blix.Tools.Studio;
 
 /// <summary>
 /// The lab's geometry, built in code.
@@ -12,7 +12,7 @@ namespace Blix.Tools.Preview;
 /// it (winding, UV layout, smoothing, tangents). Noted here as a candidate: if a third consumer wants the
 /// same decisions, that is the bar conventions §4 sets.
 /// </remarks>
-public static class LabGeometry
+public static class StudioGeometry
 {
     /// <summary>A unit cube centred on the origin, flat-shaded — 24 vertices, 4 per face.</summary>
     public static (VertexPosition3NormalTexture[] Vertices, ushort[] Indices) Cube(float size = 1f)

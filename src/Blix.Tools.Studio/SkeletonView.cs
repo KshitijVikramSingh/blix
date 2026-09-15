@@ -2,7 +2,7 @@ using System.Numerics;
 using Blix.Diagnostics;
 using Blix.Graphics;
 
-namespace Blix.Tools.Preview;
+namespace Blix.Tools.Studio;
 
 /// <summary>
 /// Draws a pose: bones as lines, joints as crosses, a selected bone's axes, and the rest pose behind it.
@@ -24,7 +24,7 @@ namespace Blix.Tools.Preview;
 /// and the missing piece was that nothing had ever asked it about a skeleton.
 /// </para>
 /// </remarks>
-public static class LabSkeletonView
+public static class SkeletonView
 {
     /// <summary>What to draw. Every flag is a question someone asked while looking at a broken pose.</summary>
     /// <remarks>
@@ -86,7 +86,7 @@ public static class LabSkeletonView
     /// Draws the skeleton implied by <paramref name="boneWorlds"/>, placed by <paramref name="modelTransform"/>.
     /// </summary>
     /// <param name="boneWorlds">
-    /// Object-space bone transforms from <see cref="LabRig.ComputeBoneWorlds"/> — NOT palette matrices.
+    /// Object-space bone transforms from <see cref="StudioRig.ComputeBoneWorlds"/> — NOT palette matrices.
     /// A palette matrix's translation is a displacement from rest, so a skeleton drawn from one collapses
     /// into a knot at the origin: correct arithmetic, wrong question.
     /// </param>
@@ -95,8 +95,8 @@ public static class LabSkeletonView
     /// what turns "this looks a bit off" into "this bone is 30 degrees out and the rest are fine".
     /// </param>
     /// <param name="include">
-    /// Optional per-bone filter. <c>LabRig.DeformHierarchy</c> is the one to pass, NOT
-    /// <c>LabRig.WeightedBones</c>: a joint no vertex weights can still carry a chain that several do,
+    /// Optional per-bone filter. <c>StudioRig.DeformHierarchy</c> is the one to pass, NOT
+    /// <c>StudioRig.WeightedBones</c>: a joint no vertex weights can still carry a chain that several do,
     /// and filtering on the literal census leaves those chains as floating segments. A rig's IK handles
     /// and roll controls skin nothing and hang off the root, so drawing all of them turns a skeleton
     /// into a starburst at the character's feet. Null draws everything, which is the honest default

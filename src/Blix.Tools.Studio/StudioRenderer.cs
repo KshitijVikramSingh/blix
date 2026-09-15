@@ -4,7 +4,7 @@ using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 using Blix.Render;
 
-namespace Blix.Tools.Preview;
+namespace Blix.Tools.Studio;
 
 /// <summary>
 /// The lab's three passes: cast, light, present.
@@ -21,7 +21,7 @@ namespace Blix.Tools.Preview;
 /// claiming to be a renderer, and would stop being readable at exactly the point it became useful.
 /// </para>
 /// </remarks>
-public sealed class LabRenderer : IDisposable
+public sealed class StudioRenderer : IDisposable
 {
     /// <summary>Square shadow map, matching the texel size the lit shader offsets by.</summary>
     public const int ShadowMapSize = 2048;
@@ -41,7 +41,7 @@ public sealed class LabRenderer : IDisposable
     /// <remarks>
     /// Smaller than the unskinned caster's, not larger. That one pushes a mat4 because it has to place
     /// its object; a skinned instance's placement is already baked into its palette, so all this stage
-    /// needs is the stride. <c>lab_shadow.frag</c> declares no push block, so unlike the lit pair this
+    /// needs is the stride. <c>studio_shadow.frag</c> declares no push block, so unlike the lit pair this
     /// block was free to be exactly what the stage uses rather than shaped to match a fragment stage.
     /// </remarks>
     public const int SkinnedCasterPushBytes = 16;
@@ -121,16 +121,16 @@ public sealed class LabRenderer : IDisposable
                 stages.Select(s => ShaderReflection.Load(
                     Path.Combine(shaderDirectory, s + ".spv.refl.json"))).ToArray());
 
-        var shadowInterface = Reflect("lab_shadow.vert", "lab_shadow.frag");
-        var litInterface = Reflect("lab_lit.vert", "lab_lit.frag");
-        var presentInterface = Reflect("lab_present.vert", "lab_present.frag");
+        var shadowInterface = Reflect("studio_shadow.vert", "studio_shadow.frag");
+        var litInterface = Reflect("studio_lit.vert", "studio_lit.frag");
+        var presentInterface = Reflect("studio_present.vert", "studio_present.frag");
 
         // The skinned pair reuses the unskinned FRAGMENT stages, so these differ from the two above
         // by exactly one thing: a set-3 storage buffer the vertex stage reads. That is what makes
         // the bone palette's size a reflected fact rather than a constant restated in C# — the
         // hazard the probe exists to catch, in the one place the lab still had a hand-written number.
-        var skinnedInterface = Reflect("lab_skinned.vert", "lab_lit.frag");
-        var skinnedShadowInterface = Reflect("lab_skinned_shadow.vert", "lab_shadow.frag");
+        var skinnedInterface = Reflect("studio_skinned.vert", "studio_lit.frag");
+        var skinnedShadowInterface = Reflect("studio_skinned_shadow.vert", "studio_shadow.frag");
 
         // <b>A render graph, not hand-built surfaces.</b> The first cut of this used
         // CreateRenderSurface directly and failed on the first run: "RenderSurface needs at
@@ -208,15 +208,15 @@ public sealed class LabRenderer : IDisposable
                 byte[] Spv(string stage) => File.ReadAllBytes(Path.Combine(shaderDirectory, stage + ".spv"));
 
         shadowProgram = vk.CreateShaderProgramFromSpv(
-            Spv("lab_shadow.vert"), Spv("lab_shadow.frag"), shadowInterface, "lab.shadow");
+            Spv("studio_shadow.vert"), Spv("studio_shadow.frag"), shadowInterface, "lab.shadow");
         litProgram = vk.CreateShaderProgramFromSpv(
-            Spv("lab_lit.vert"), Spv("lab_lit.frag"), litInterface, "lab.lit");
+            Spv("studio_lit.vert"), Spv("studio_lit.frag"), litInterface, "lab.lit");
         presentProgram = vk.CreateShaderProgramFromSpv(
-            Spv("lab_present.vert"), Spv("lab_present.frag"), presentInterface, "lab.present");
+            Spv("studio_present.vert"), Spv("studio_present.frag"), presentInterface, "lab.present");
         skinnedProgram = vk.CreateShaderProgramFromSpv(
-            Spv("lab_skinned.vert"), Spv("lab_lit.frag"), skinnedInterface, "lab.skinned");
+            Spv("studio_skinned.vert"), Spv("studio_lit.frag"), skinnedInterface, "lab.skinned");
         skinnedShadowProgram = vk.CreateShaderProgramFromSpv(
-            Spv("lab_skinned_shadow.vert"), Spv("lab_shadow.frag"), skinnedShadowInterface, "lab.skinned.shadow");
+            Spv("studio_skinned_shadow.vert"), Spv("studio_shadow.frag"), skinnedShadowInterface, "lab.skinned.shadow");
 
 
         shadowPipeline = vk.CreatePipeline(new PipelineDescription(
@@ -262,7 +262,7 @@ public sealed class LabRenderer : IDisposable
             Array.Empty<BlendState>(),
             RenderTarget: graph.GetPassSurface(shadowPass)), "lab.skinned.shadow");
 
-        // FullscreenPass.Layout, not a vertex format: lab_present.vert builds its triangle from
+        // FullscreenPass.Layout, not a vertex format: studio_present.vert builds its triangle from
         // gl_VertexIndex and declares no inputs at all, so any attribute here is a promise the shader
         // does not keep — and the validation layers said so on every run.
         presentPipeline = vk.CreatePipeline(new PipelineDescription(
@@ -282,12 +282,12 @@ public sealed class LabRenderer : IDisposable
             new TextureDescription(1, 1, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
             new byte[] { 255, 255, 255, 255 }, "lab.white");
 
-        var (cv, ci) = LabGeometry.Cube();
+        var (cv, ci) = StudioGeometry.Cube();
         cubeVertices = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(cv), "lab.cube.vb");
         cubeIndices = vk.CreateIndexBuffer(ci, name: "lab.cube.ib");
         cubeIndexCount = ci.Length;
 
-        var (gv, gi) = LabGeometry.Ground();
+        var (gv, gi) = StudioGeometry.Ground();
         groundVertices = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(gv), "lab.ground.vb");
         groundIndices = vk.CreateIndexBuffer(gi, name: "lab.ground.ib");
         groundIndexCount = gi.Length;
@@ -331,12 +331,12 @@ public sealed class LabRenderer : IDisposable
     /// </param>
     public void Render(
         RenderCommandList commandList,
-        LabScene scene,
+        StudioScene scene,
         Matrix4x4 viewProjection,
         Vector3 cameraPosition,
-        LabModel? model = null,
+        StudioModel? model = null,
         Matrix4x4 modelTransform = default,
-        LabRig? rig = null,
+        StudioRig? rig = null,
         int rigInstances = 1,
         Matrix4x4? viewportViewProjection = null,
         Vector3 viewportCameraPosition = default)
@@ -452,7 +452,7 @@ public sealed class LabRenderer : IDisposable
     // mesh cannot answer where any part's pivot is, which is the question an asset raises.
     private void DrawModelParts(
         RenderPassBuilder pass,
-        LabModel? model,
+        StudioModel? model,
         Matrix4x4 modelTransform,
         PipelineHandle pipeline,
         ShaderUniform[] uniforms,
@@ -530,7 +530,7 @@ public sealed class LabRenderer : IDisposable
     // because a per-draw push constant cannot vary per instance.
     private void DrawRigParts(
         RenderPassBuilder pass,
-        LabRig? rig,
+        StudioRig? rig,
         int instances,
         PipelineHandle pipeline,
         ShaderUniform[] uniforms,
@@ -563,7 +563,7 @@ public sealed class LabRenderer : IDisposable
                 floats[19] = 1f;
                 floats[20] = part.Metallic;
                 floats[21] = part.Roughness;
-                // z, where the shader reads the per-instance stride. See lab_skinned.vert for why it
+                // z, where the shader reads the per-instance stride. See studio_skinned.vert for why it
                 // rides in a material slot rather than in a block of its own.
                 floats[22] = stride;
                 floats[23] = 0f;
@@ -598,7 +598,7 @@ public sealed class LabRenderer : IDisposable
 
     private void DrawObject(
         RenderPassBuilder pass,
-        in LabObject item,
+        in StudioObject item,
         PipelineHandle pipeline,
         ShaderUniform[] uniforms,
         ShaderTextureBinding[] textures,
@@ -622,7 +622,7 @@ public sealed class LabRenderer : IDisposable
     // mat4 model, vec4 base colour, vec4 (metallic, roughness, _, _) — 96 bytes, inside the
     // 128-byte floor every Vulkan implementation guarantees, which is why there is no
     // per-object descriptor set in this lab at all.
-    private static void PackPush(in LabObject item, byte[] target)
+    private static void PackPush(in StudioObject item, byte[] target)
     {
         var floats = MemoryMarshal.Cast<byte, float>(target.AsSpan());
         var m = item.Model;

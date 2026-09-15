@@ -4,7 +4,7 @@
 // mesh walks is the classic symptom of forgetting this one, and it is easy to miss because
 // the lit pass looks perfect — the shadow is the only thing that disagrees.
 //
-// Same set-3 layout and the same per-instance stride as lab_skinned.vert, so both passes bind
+// Same set-3 layout and the same per-instance stride as studio_skinned.vert, so both passes bind
 // ONE palette material in a frame and read the same poses out of it. Two layouts here would be
 // two chances for the shadow to disagree with the body.
 
@@ -19,7 +19,7 @@ layout(set = 0, binding = 0) uniform ShadowFrame {
     mat4 uLightViewProjection;
 };
 
-// 1024 = LabRig.MaxBones (128) x LabRig.MaxInstances (8). The literal is here because the
+// 1024 = StudioRig.MaxBones (128) x StudioRig.MaxInstances (8). The literal is here because the
 // build's SPIR-V target does not pass -D, so this cannot be a define — which means the number
 // lives in two files, and that is precisely what the probe checks: it reads the reflected
 // block size back and fails non-zero if it stops matching the C# constants.
@@ -29,7 +29,7 @@ layout(std430, set = 3, binding = 0) readonly buffer Bones {
 
 // <b>Sixteen bytes, and no model matrix.</b> The unskinned caster pushes a mat4 because it has
 // to place its object; this one does not, because each instance's placement is already baked
-// into its palette. What it does need is the per-instance stride, and lab_shadow.frag declares
+// into its palette. What it does need is the per-instance stride, and studio_shadow.frag declares
 // no push block at all — so unlike the lit pair, this block is free to be exactly what the
 // stage uses rather than shaped to match a fragment stage.
 //

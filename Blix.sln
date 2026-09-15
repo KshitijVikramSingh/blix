@@ -43,7 +43,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Diagnostics.Overlay", 
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RTSGame", "src\RTSGame\RTSGame.csproj", "{DCA6A102-33E7-45AD-9C2A-9D8314077DB8}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Tools.Preview", "src\Blix.Tools.Preview\Blix.Tools.Preview.csproj", "{476EC2D0-50A9-4804-ADC0-9ADB2E86FED5}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Tools.Studio", "src\Blix.Tools.Studio\Blix.Tools.Studio.csproj", "{476EC2D0-50A9-4804-ADC0-9ADB2E86FED5}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Tools.View", "src\Blix.Tools.View\Blix.Tools.View.csproj", "{592C72EB-7629-4F83-86A6-FF9EB05C3049}"
 EndProject

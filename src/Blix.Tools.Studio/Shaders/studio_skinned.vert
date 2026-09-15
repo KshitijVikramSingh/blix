@@ -1,6 +1,6 @@
 #version 450
 
-// lab_lit.vert with a bone palette in front of it, and N of them. Pairs with lab_lit.frag
+// studio_lit.vert with a bone palette in front of it, and N of them. Pairs with studio_lit.frag
 // unchanged — the fragment stage never learns that the vertices moved, which is the whole
 // reason skinning is a vertex-stage concern and not a material one.
 //
@@ -36,7 +36,7 @@ layout(set = 0, binding = 0) uniform Frame {
 // MaterialBindings needs — and a short write is legal, so three 41-bone rigs upload 7,872
 // bytes and the tail is simply never read.
 //
-// 1024 = LabRig.MaxBones (128) x LabRig.MaxInstances (8). A literal, because the build's
+// 1024 = StudioRig.MaxBones (128) x StudioRig.MaxInstances (8). A literal, because the build's
 // SPIR-V target does not pass -D — so the number does live in two files, and the probe is what
 // makes that safe: it reads the reflected block size back and exits non-zero the moment it
 // stops matching the C# constants. Bulwark hard-codes `#define BONE_COUNT 15` in two shaders
@@ -63,7 +63,7 @@ void main()
     // That is the one thing this does differently from the two consumers it copies from.
     //
     // It rides in uMaterial's spare .z because the push block has to stay byte-identical to the
-    // one lab_lit.frag declares. Give this stage a wider block and the two stages reflect
+    // one studio_lit.frag declares. Give this stage a wider block and the two stages reflect
     // different push ranges; the emit path sums range sizes and would then expect 208 bytes for a
     // 112-byte payload and refuse the draw. The alternative — a second fragment shader existing
     // for one float — is worse than a documented use of a slot the frag ignores.
@@ -83,7 +83,7 @@ void main()
     // no compose order that lets a shared uModel sit between the skin and a per-instance placement.
     //
     // Kept rather than deleted so this stage still reflects the whole 96-byte push block that
-    // lab_lit.frag declares. Drop it and glslc strips uModel from the vertex stage's reflection,
+    // studio_lit.frag declares. Drop it and glslc strips uModel from the vertex stage's reflection,
     // the two stages report different push ranges, and the emit path — which sums range sizes —
     // expects 128 bytes for a 96-byte payload and refuses the draw. One dead multiply per vertex
     // against a binding model that stays honest.

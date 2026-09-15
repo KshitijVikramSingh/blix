@@ -21,7 +21,7 @@ public readonly record struct ScissorRect(int X, int Y, int Width, int Height);
 // every draw the array's FINAL contents.
 //
 // That is not hypothetical. VkLineDrawer hit it (all views submitting whatever the last
-// one left), LabRenderer hit it (seven objects rendering at the seventh's transform, six
+// one left), StudioRenderer hit it (seven objects rendering at the seventh's transform, six
 // apparently missing while the draw counts looked perfectly healthy), and the
 // index-offset DrawIndexed overload below exists because the same hazard bit vertex
 // buffers. Three consumers, one semantic mistake: recording accepted mutable
@@ -124,7 +124,7 @@ public sealed record DispatchCommand(
 // every draw the array's FINAL contents.
 //
 // That is not hypothetical. VkLineDrawer hit it (all views submitting whatever the last
-// one left), LabRenderer hit it (seven objects rendering at the seventh's transform, six
+// one left), StudioRenderer hit it (seven objects rendering at the seventh's transform, six
 // apparently missing while the draw counts looked perfectly healthy), and the
 // index-offset DrawIndexed overload below exists because the same hazard bit vertex
 // buffers. Three consumers, one semantic mistake: recording accepted mutable
@@ -310,7 +310,7 @@ public sealed record DrawIndexedCommand(
     /// The push payload, copied at record time so a caller may reuse its scratch buffer.
     /// </summary>
     /// <remarks>
-    /// This is the one that bit: LabRenderer packed each object's model matrix into a single shared array
+    /// This is the one that bit: StudioRenderer packed each object's model matrix into a single shared array
     /// and every draw read the last object's, so seven boxes rendered in one place and six looked missing
     /// while the draw counts stayed perfectly healthy. Found from a screenshot, not from four green runs.
     /// </remarks>

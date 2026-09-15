@@ -4,7 +4,7 @@ using Blix.Core;
 using Blix.Graphics;
 using Blix.Graphics.Images;
 using Blix.Graphics.Vulkan;
-using Blix.Tools.Preview;
+using Blix.Tools.Studio;
 using Blix.Diagnostics;
 using Blix.Runtime.Silk;
 
@@ -157,8 +157,8 @@ public static class Program
 
 internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 {
-    private readonly LabRenderer renderer = new();
-    private LabScene scene = LabScene.Default();
+    private readonly StudioRenderer renderer = new();
+    private StudioScene scene = StudioScene.Default();
     private readonly string outputPath;
     private readonly int captureOnFrame;
 
@@ -167,7 +167,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private Matrix4x4 viewProjection = Matrix4x4.Identity;
 
     private readonly string? modelPath;
-    private LabModel? model;
+    private StudioModel? model;
     private Matrix4x4 modelTransform = Matrix4x4.Identity;
 
     private readonly string? rigPath;
@@ -179,7 +179,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private readonly List<Vector3> rootPath = new();
     private Vector3 rootTravel;
     private float rigDrawnHeight = 3f;
-    private LabRig? rig;
+    private StudioRig? rig;
     private ClipPlayer? player;
     private readonly bool skeletonOnly;
     private readonly float zoom;
@@ -230,7 +230,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         this.maskFalloff = maskFalloff;
         this.viewport = viewport;
         this.sequence = sequence;
-        instanceCount = Math.Clamp(instances, 1, LabRig.MaxInstances);
+        instanceCount = Math.Clamp(instances, 1, StudioRig.MaxInstances);
         this.lockstep = lockstep;
         this.xray = xray;
         this.advance = advance;
@@ -254,8 +254,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         LoadRig();
 
         if (modelPath is null || !File.Exists(modelPath)) return;
-        model = LabModel.Load(device, modelPath);
-        scene = LabScene.GroundOnly();
+        model = StudioModel.Load(device, modelPath);
+        scene = StudioScene.GroundOnly();
         var extent = model.LongestExtent;
         var scale = extent > 0.001f ? 3f / extent : 1f;
         modelTransform = Matrix4x4.CreateScale(scale)
@@ -271,8 +271,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     {
         if (rigPath is null || !File.Exists(rigPath)) return;
 
-        rig = LabRig.Load(device, rigPath, renderer.SkinnedProgram);
-        scene = LabScene.GroundOnly();
+        rig = StudioRig.Load(device, rigPath, renderer.SkinnedProgram);
+        scene = StudioScene.GroundOnly();
 
         player = new ClipPlayer(rig.Skeleton);
 
@@ -341,7 +341,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // <b>One palette per body, packed into one buffer at a known stride.</b> Each instance is the
         // same clip at a different phase, which is what makes the picture evidence: three bodies in
         // the same pose would prove only that three draws happened.
-        palettes = new BonePaletteSet(rig.Skeleton.BoneCount, LabRig.MaxInstances);
+        palettes = new BonePaletteSet(rig.Skeleton.BoneCount, StudioRig.MaxInstances);
         var spacing = MathF.Max(1.2f, rig.LongestExtent * scale * 0.75f);
         var half = (instanceCount - 1) * 0.5f;
         for (var i = 0; i < instanceCount; i++)
@@ -422,7 +422,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             }
         }
 
-        LabRig.ComputeBoneWorlds(rig.Skeleton, player.Pose, boneWorlds);
+        StudioRig.ComputeBoneWorlds(rig.Skeleton, player.Pose, boneWorlds);
 
         Console.WriteLine(
             $"rig: {Path.GetFileName(rigPath)} — {rig.Skeleton.BoneCount} bone(s), {rig.Clips.Count} clip(s), " +
@@ -565,7 +565,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             palettes.Add(rig.Skeleton, pose, rig.MeshNodeTransform * placement);
         }
 
-        LabRig.ComputeBoneWorlds(rig.Skeleton, instancePoses[0], boneWorlds);
+        StudioRig.ComputeBoneWorlds(rig.Skeleton, instancePoses[0], boneWorlds);
     }
 
     private void CaptureSequenceFrame()
@@ -594,7 +594,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     /// Draws debug geometry INTO THE SCENE TARGET, so a capture holds it too.
     /// </summary>
     /// <remarks>
-    /// The view names <see cref="LabRenderer.SceneSurface"/> rather than the swapchain, which is what puts
+    /// The view names <see cref="StudioRenderer.SceneSurface"/> rather than the swapchain, which is what puts
     /// these lines inside the image that gets read back. That was impossible until the line drawer learned
     /// to bake a pipeline per render target — it had exactly one, against the default pass, so debug
     /// geometry was silently swapchain-only and a capture could only ever show the scene without the
@@ -627,7 +627,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         debug.Draw.Grid("floor", new Vector3(0f, 0.02f, 0f), 24f, 24, new GraphicsColor(0.35f, 0.4f, 0.5f, 1f));
         debug.Draw.Arrow("sun", scene.SunDirection * 7f, Vector3.Zero, new GraphicsColor(1f, 0.9f, 0.5f, 1f));
 
-        // The skeleton, through the SAME LabSkeletonView the viewer uses. That shared call is the
+        // The skeleton, through the SAME SkeletonView the viewer uses. That shared call is the
         // whole reason the lab is a library: a capture drawn by its own copy of the overlay could
         // disagree with the window, and a picture that disagrees with the thing it documents is
         // worse than no picture.
@@ -640,13 +640,13 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             for (var i = 0; i < instancePlacements.Count; i++)
             {
                 using var instanceScope = debug.Scope($"i{i}");
-                LabRig.ComputeBoneWorlds(rig.Skeleton, instancePoses[i], worlds);
-                LabSkeletonView.Draw(
+                StudioRig.ComputeBoneWorlds(rig.Skeleton, instancePoses[i], worlds);
+                SkeletonView.Draw(
                     debug,
                     rig.Skeleton,
                     worlds,
                     rig.MeshNodeTransform * instancePlacements[i],
-                    LabSkeletonView.Options.Default,
+                    SkeletonView.Options.Default,
                     selectedBone: -1,
                     restWorlds: null,
                     include: rig.DeformHierarchy,
@@ -714,7 +714,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     // Instance i's clip: i steps along the rig's own list from whichever clip the subject is on.
     // In order rather than random, so two runs of the same arguments produce the same picture.
-    private static int ClipIndexFor(LabRig rig, AnimationClip? subject, int instance)
+    private static int ClipIndexFor(StudioRig rig, AnimationClip? subject, int instance)
     {
         var start = 0;
         for (var i = 0; i < rig.Clips.Count; i++)
@@ -729,10 +729,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     // Rebuilt per call rather than cached, because Debug() runs a handful of times in a bounded run
     // and a 41-matrix walk is not worth a field. Cache it the day a capture has hundreds of bones.
-    private static Matrix4x4[] RestWorlds(LabRig rig, ClipPlayer player)
+    private static Matrix4x4[] RestWorlds(StudioRig rig, ClipPlayer player)
     {
         var worlds = new Matrix4x4[rig.Skeleton.BoneCount];
-        LabRig.ComputeBoneWorlds(rig.Skeleton, player.RestPose, worlds);
+        StudioRig.ComputeBoneWorlds(rig.Skeleton, player.RestPose, worlds);
         return worlds;
     }
 

@@ -1,7 +1,7 @@
 using System.Numerics;
 using Blix;
 using Blix.Core;
-using Blix.Tools.Preview;
+using Blix.Tools.Studio;
 using ImGuiNET;
 
 namespace Blix.Tools.View;
@@ -175,7 +175,7 @@ internal sealed class ViewerPanels
         if (app.Rig is null || app.Session is null) return;
         if (!ImGui.CollapsingHeader("instances", ImGuiTreeNodeFlags.DefaultOpen)) return;
 
-        ImGui.TextDisabled($"{app.Session.InstanceCount} of max {LabRig.MaxInstances} · one draw, one palette buffer");
+        ImGui.TextDisabled($"{app.Session.InstanceCount} of max {StudioRig.MaxInstances} · one draw, one palette buffer");
 
         if (app.Session.InstanceCount <= 1)
         {
@@ -699,7 +699,7 @@ internal sealed class ViewerPanels
         }
 
         ImGui.Separator();
-        ImGui.TextDisabled($"sun depth  {LabRenderer.ShadowMapSize}x{LabRenderer.ShadowMapSize}");
+        ImGui.TextDisabled($"sun depth  {StudioRenderer.ShadowMapSize}x{StudioRenderer.ShadowMapSize}");
 
         // Red-scale, and that is the format rather than a fault: a single-channel depth image
         // sampled by a colour shader is (d, 0, 0, 1). It answers a coarse question — is the caster

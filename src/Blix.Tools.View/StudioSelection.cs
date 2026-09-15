@@ -1,7 +1,7 @@
 using System.Numerics;
 using Blix.Core;
 using Blix.Geometry;
-using Blix.Tools.Preview;
+using Blix.Tools.Studio;
 
 namespace Blix.Tools.View;
 
@@ -20,7 +20,7 @@ namespace Blix.Tools.View;
 /// against geometry the viewer does not show selects things the picture cannot explain.
 /// </para>
 /// </remarks>
-internal sealed class LabSelection
+internal sealed class StudioSelection
 {
     /// <summary>The selected node of a static model, or -1.</summary>
     public int Node { get; set; } = -1;
@@ -38,12 +38,12 @@ internal sealed class LabSelection
     public bool PickThrough(
         in ViewDeclaration view,
         Vector2 pointer,
-        LabRig? rig,
+        StudioRig? rig,
         Matrix4x4 rigPlacement,
         IReadOnlyList<Matrix4x4> boneWorlds,
         IReadOnlyList<bool>? boneFilter,
         float gizmoScale,
-        LabModel? model,
+        StudioModel? model,
         Matrix4x4 modelTransform)
     {
         if (ViewPicking.RayThrough(view, pointer) is not { } ray) return false;
@@ -64,7 +64,7 @@ internal sealed class LabSelection
     /// so what gets picked is exactly what is outlined. Triangle-accurate picking is a different
     /// question and no consumer has asked it.
     /// </remarks>
-    private static int PickNode(Ray ray, LabModel model, Matrix4x4 modelTransform)
+    private static int PickNode(Ray ray, StudioModel model, Matrix4x4 modelTransform)
     {
         var best = -1;
         var nearest = float.MaxValue;
@@ -96,14 +96,14 @@ internal sealed class LabSelection
     /// </remarks>
     private static int PickBone(
         Ray ray,
-        LabRig rig,
+        StudioRig rig,
         Matrix4x4 placement,
         IReadOnlyList<Matrix4x4> boneWorlds,
         IReadOnlyList<bool>? filter,
         float gizmoScale)
     {
         var place = rig.MeshNodeTransform * placement;
-        var span = LabSkeletonView.Span(rig.Skeleton, boneWorlds, place, filter);
+        var span = SkeletonView.Span(rig.Skeleton, boneWorlds, place, filter);
 
         // Twice the joint cross's own arm, so a click has to be close but not surgical — the same
         // slack the four-pixel click/drag threshold grants the gesture one layer up.

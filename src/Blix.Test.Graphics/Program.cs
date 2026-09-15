@@ -2450,7 +2450,7 @@ static ShaderInterface MinimalShader() => new(new[]
 // A pass body records; the GPU work happens at Execute. A command that kept a
 // reference to the caller's scratch array therefore read it long after the caller
 // had moved on — and a caller reusing one array across draws gave every draw the
-// array's final contents. VkLineDrawer hit it, LabRenderer hit it (seven objects at
+// array's final contents. VkLineDrawer hit it, StudioRenderer hit it (seven objects at
 // the seventh's transform, six apparently missing, draw counts perfectly healthy),
 // and the index-offset DrawIndexed overload exists because it bit vertex buffers.
 {

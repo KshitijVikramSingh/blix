@@ -196,7 +196,7 @@ A **lab** is not a demo. Demos are executable specs for an engine subsystem; a l
 testbed for *shape* — the toolchain, the pipeline layering, and how several executables
 sit over one body of work.
 
-### Toolchain lab — `Blix.Tools.Preview`
+### Toolchain lab — `Blix.Tools.Studio`
 
 ```sh
 tools/run-lab.sh                      # the viewer
@@ -276,12 +276,12 @@ Two things the first drawn skeleton taught, both of which look like bugs and are
   maps a *rest vertex* to where it ends up; its translation is a displacement, and at rest
   it is exactly zero. A skeleton drawn from palette translations collapses into a knot at
   the origin. The joint is at the hierarchy walk's `world` term on its own —
-  `LabRig.ComputeBoneWorlds`.
+  `StudioRig.ComputeBoneWorlds`.
 - **Half a rig is not skinned, and "half" is two different numbers.** The Rogue has 41 bones.
   **20 are weighted** — some vertex names them. **21 must be drawn**, because `root` is
   weighted by nothing and is the parent of everything, and a chain drawn without the joints
-  that carry it is a set of floating segments. `LabRig.WeightedBones` is the census and
-  `LabRig.DeformHierarchy` is what the overlay filters on; they were one property once, whose
+  that carry it is a set of floating segments. `StudioRig.WeightedBones` is the census and
+  `StudioRig.DeformHierarchy` is what the overlay filters on; they were one property once, whose
   name asked about weights while its value had been promoted up the ancestry. The remaining 20
   are IK handles and roll controls (`kneeIK.l`, `control-heel-roll.r`, `handIK.l`) parented
   straight to the root, which is why drawing all of them makes a starburst at the feet.
@@ -364,7 +364,7 @@ compiled shader serves a 15-bone robot and a 41-bone rogue and the CPU packing c
 with the GPU reading. The array bound still has to be a literal — the build's SPIR-V target
 passes no `-D` — so that number does live in two files, and the probe is what makes it safe: it
 reads the reflected block size back and fails non-zero when it stops matching
-`LabRig.MaxBones × MaxInstances`. It checks the **caster's** palette too, since both stages
+`StudioRig.MaxBones × MaxInstances`. It checks the **caster's** palette too, since both stages
 share one material and a shadow reading a different body's pose would leave the lit pass looking
 perfect.
 
@@ -568,8 +568,8 @@ are earned in TankArena and VulkanSponza; a lab that grew them by default would 
 claiming to be a renderer.
 
 **How the viewer is put together.** `Program` builds a `ViewerLoop` root, which explicitly
-constructs and calls `LabCamera` (twice — the window's view and the panel's), `RigSession`,
-`LabSelection` and `ViewerPanels`. It reached 1,645 lines as one type first, and the reason to split
+constructs and calls `StudioCamera` (twice — the window's view and the panel's), `RigSession`,
+`StudioSelection` and `ViewerPanels`. It reached 1,645 lines as one type first, and the reason to split
 it was not length: *what is shown* and *what is true* had become indistinguishable. See
 [`architecture.md` §"How an application is put together"](architecture.md) for the two bars — a
 second consumer to reach the library, readability alone to split an executable.
