@@ -5,7 +5,7 @@ using System.Text;
 namespace Blix.Diagnostics;
 
 // Kind of control a tunable maps to in the overlay.
-public enum TuneKind { Float, Int, Bool, Enum, Button }
+public enum TuneKind { Float, Int, Bool, Enum, Button, Text }
 
 // Marks a C# field or property as a live-tunable value — the CPU twin of a
 // shader `//@tune` decorator. The diagnostics overlay reflects these off a
@@ -49,6 +49,9 @@ public sealed class TuneAttribute : Attribute
     /// </remarks>
     public bool Action { get; init; }
 
+    /// <summary>How many characters a string member accepts. Ignored by every other kind.</summary>
+    public int MaxLength { get; init; } = 128;
+
     // bool / enum members — range is implied.
     public TuneAttribute() { }
 
@@ -69,10 +72,16 @@ public sealed class TunableField
 {
     private readonly Func<float> get;
     private readonly Action<float> set;
+    private readonly Func<string>? getText;
+    private readonly Action<string>? setText;
 
     internal TunableField(string name, string label, string group, TuneKind kind,
-        float min, float max, IReadOnlyList<string>? enumNames, Func<float> get, Action<float> set)
+        float min, float max, IReadOnlyList<string>? enumNames, Func<float> get, Action<float> set,
+        Func<string>? getText = null, Action<string>? setText = null, int maxLength = 0)
     {
+        this.getText = getText;
+        this.setText = setText;
+        MaxLength = maxLength;
         Name = name;
         Label = label;
         Group = group;
@@ -92,10 +101,34 @@ public sealed class TunableField
     public float Max { get; }
     public IReadOnlyList<string>? EnumNames { get; }
 
+    /// <summary>Buffer size for <see cref="TuneKind.Text"/>; zero for every other kind.</summary>
+    public int MaxLength { get; }
+
     public float Value
     {
         get => get();
         set => set(value);
+    }
+
+    /// <summary>
+    /// The string behind a <see cref="TuneKind.Text"/> member.
+    /// </summary>
+    /// <remarks>
+    /// A second accessor rather than a stringified <see cref="Value"/>, because every other kind is
+    /// float-backed and genuinely is a number — a bool is 0/1, an enum is an option index. Text is
+    /// the one kind that is not, and pretending otherwise would put a parse in the middle of every
+    /// read. Reading it on any other kind throws rather than returning something plausible.
+    /// </remarks>
+    public string Text
+    {
+        get => getText is null
+            ? throw new InvalidOperationException($"{Name} is {Kind}, not Text.")
+            : getText();
+        set
+        {
+            if (setText is null) throw new InvalidOperationException($"{Name} is {Kind}, not Text.");
+            setText(value ?? string.Empty);
+        }
     }
 }
 
@@ -151,10 +184,22 @@ public static class TuneReflection
                     () => Convert.ToSingle(getRaw()),
                     v => setRaw(isInt ? (object)(int)MathF.Round(v) : v)));
             }
+            else if (valueType == typeof(string))
+            {
+                // Numeric-free, so no range is required and none is meaningful. The bound a string
+                // has is a buffer length, and it is carried separately for exactly that reason.
+                result.Add(new TunableField(member.Name, label, group, TuneKind.Text, 0f, 0f, null,
+                    () => 0f,
+                    _ => { },
+                    () => (string?)getRaw() ?? string.Empty,
+                    v => setRaw(v ?? string.Empty),
+                    Math.Max(1, tune.MaxLength)));
+            }
             else
             {
                 throw new InvalidOperationException(
-                    $"[Tune] on {type.Name}.{member.Name}: unsupported type {valueType.Name} (float, int, bool, or enum).");
+                    $"[Tune] on {type.Name}.{member.Name}: unsupported type {valueType.Name} " +
+                    "(float, int, bool, enum, or string).");
             }
         }
         return result;
@@ -251,6 +296,12 @@ public sealed class ObjectTunables
             {
                 foreach (var f in items)
                 {
+                    if (f.Kind == TuneKind.Text)
+                    {
+                        f.Text = debug.Controls.Text(f.Label, f.Text, f.MaxLength);
+                        continue;
+                    }
+
                     f.Value = f.Kind switch
                     {
                         // A button reports the frame it was clicked and nothing else, so the member it is

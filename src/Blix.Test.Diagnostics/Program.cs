@@ -118,6 +118,49 @@ var t = new TestRunner();
         frame.DrawCommands[0].View == frame.Views[0].Id);
 }
 
+// -- A text control round-trips through the pending-value path ---------------
+//
+// The half TuneReflection's tests cannot reach: a control is only useful if what the
+// reader typed comes BACK on the next frame, through DebugSystem rather than through the
+// member. Text is the first non-numeric kind, so the pending path had only ever carried
+// bool, float and int — and a generic that silently returns default for an unexpected
+// type would hand back an empty string that looks exactly like "the reader cleared it".
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+
+    sys.BeginFrame(new RenderFrameContext(Width: 2, Height: 2));
+    var firstRead = string.Empty;
+    sys.Run(new TestDebuggable("Rig", debug => firstRead = debug.Controls.Text("Clip", "Walking_A")));
+    sys.EndFrame();
+
+    t.ExpectTrue("Text reads back what it was given", firstRead == "Walking_A");
+    t.ExpectTrue("Text control captured",
+        sys.LatestFrame!.Controls.Count == 1 &&
+        sys.LatestFrame.Controls[0].Kind == DebugControlKind.Text);
+    t.ExpectTrue("Text carries a buffer length, not a range",
+        sys.LatestFrame.Controls[0].MaxLength == 128 && sys.LatestFrame.Controls[0].Max == 1.0f);
+
+    // What the overlay does when the reader commits an edit.
+    sys.SetControlValue(sys.LatestFrame.Controls[0].Path, "Running_A");
+
+    sys.BeginFrame(new RenderFrameContext(Width: 2, Height: 2));
+    var secondRead = string.Empty;
+    sys.Run(new TestDebuggable("Rig", debug => secondRead = debug.Controls.Text("Clip", "Walking_A")));
+    sys.EndFrame();
+
+    t.ExpectTrue("the edit comes back on the next frame", secondRead == "Running_A");
+
+    // And the bound is enforced where it is declared rather than only in the widget: an
+    // overlay is not the only thing that can write a pending value.
+    sys.SetControlValue(sys.LatestFrame!.Controls[0].Path, "abcdefghij");
+    sys.BeginFrame(new RenderFrameContext(Width: 2, Height: 2));
+    var clamped = string.Empty;
+    sys.Run(new TestDebuggable("Rig", debug => clamped = debug.Controls.Text("Clip", "x", maxLength: 4)));
+    sys.EndFrame();
+
+    t.ExpectTrue("a value longer than MaxLength is cut, not accepted", clamped == "abcd");
+}
+
 // -- Two views over the same geometry, in one frame ---------------------------
 // The acceptance criterion for the view arc, and the thing RTS §212 needed and could not ask for: watch
 // one body from a fixed vantage while the game camera does its own thing. It was impossible while a frame

@@ -1408,6 +1408,24 @@ public sealed class DebugOverlayUi
 
                 break;
             }
+
+            case DebugControlKind.Text:
+            {
+                // <b>Committed on Enter or on losing focus, not per keystroke.</b> Every other
+                // control here is a value you drag and watch; a name is one you finish typing.
+                // Pushing each character through SetControlValue would make "spin" a real state
+                // on the way to "spine", and a tool reacting to it would reload four times and
+                // fail three.
+                var value = (string)entry.Value;
+                var length = (uint)Math.Max(1, entry.MaxLength);
+                if (ImGui.InputText(entry.Name, ref value, length, ImGuiInputTextFlags.EnterReturnsTrue)
+                    && interactive)
+                {
+                    debugSystem.SetControlValue(entry.Path, value);
+                }
+
+                break;
+            }
         }
 
         if (!interactive)
