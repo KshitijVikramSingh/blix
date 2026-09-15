@@ -3,4 +3,4 @@ blix
 
 # What `blix test` runs here. The step run most often in a session — five
 # invocations and a person reading five outputs, until this line existed.
-test: Blix.Test.Graphics, Blix.Test.Diagnostics, Blix.Test.Physics2D, Blix.Test.Physics3D, Blix.Test.Apps
+test: Blix.Test.Graphics, Blix.Test.Diagnostics, Blix.Test.Physics2D, Blix.Test.Physics3D, Blix.Test.Apps, Blix.Test.Studio

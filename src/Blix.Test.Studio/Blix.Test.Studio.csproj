@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The studio checking itself. Referencing Blix.Tools.Studio is what puts the compiled
+    .spv and their reflection sidecars in this project's output — the same <None> glob every
+    other consumer gets — so the shaders being judged are the ones the studio actually ships.
+
+    Headless, like every other leg of the gate: this reads reflection sidecars off disk and
+    constructs a StudioRenderer for its constants. No device, no window.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\Blix.Verify\Blix.Verify.csproj" />
+    <ProjectReference Include="..\Blix.Tools.Studio\Blix.Tools.Studio.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <UseAppHost>false</UseAppHost>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>
