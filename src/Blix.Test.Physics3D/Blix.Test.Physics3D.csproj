@@ -10,6 +10,7 @@
     call in the whole tree.
   -->
   <ItemGroup>
+    <ProjectReference Include="..\Blix.Verify\Blix.Verify.csproj" />
     <ProjectReference Include="..\Blix.Geometry\Blix.Geometry.csproj" />
   </ItemGroup>
 

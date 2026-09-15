@@ -1,3 +1,4 @@
+using Blix.Verify;
 using System.Numerics;
 using Blix.Geometry;
 using Blix.Labs.Character;
@@ -14,7 +15,7 @@ using Blix.Labs.Character;
 // screenshot, and the difference is the entire slope-limit stage.
 
 var room = Room.Build();
-var t = new ProbeRunner();
+var t = new TestRunner();
 
 Console.WriteLine($"room — {room.TriangleCount} triangles across {room.Parts.Count} part(s)");
 Console.WriteLine();
@@ -809,22 +810,3 @@ readonly record struct Key(int X, int Y, int Z) : IComparable<Key>
     }
 }
 
-sealed class ProbeRunner
-{
-    private int passed;
-
-    public int Failed { get; private set; }
-
-    public void Expect(string label, bool condition, string detail)
-    {
-        if (condition) { Console.WriteLine($"  OK   {label}"); passed++; return; }
-        Console.WriteLine($"  FAIL {label} — {detail}");
-        Failed++;
-    }
-
-    public void PrintSummary()
-    {
-        Console.WriteLine();
-        Console.WriteLine($"{passed}/{passed + Failed} passed, {Failed} failed");
-    }
-}
