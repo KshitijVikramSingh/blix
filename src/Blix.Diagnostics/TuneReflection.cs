@@ -261,6 +261,8 @@ public sealed class ObjectTunables
 
     public ObjectTunables(params object[] targets)
     {
+        // Seeded after reflection below, so the first BuildControls reports a quiet frame
+        // rather than every field at once.
         ArgumentNullException.ThrowIfNull(targets);
         var byGroup = new Dictionary<string, List<TunableField>>();
         foreach (var target in targets)
@@ -276,6 +278,11 @@ public sealed class ObjectTunables
                 list.Add(field);
             }
         }
+
+        foreach (var (_, items) in groups)
+        {
+            foreach (var f in items) lastSeen[f] = Snapshot(f);
+        }
     }
 
     /// <summary>Every group and how many controls it holds, so "my slider is missing" is answerable.</summary>
@@ -287,9 +294,42 @@ public sealed class ObjectTunables
         ", ",
         groups.Select(g => $"{g.Group}[{string.Join(" ", g.Items.Select(i => $"{i.Label}:{i.Kind}"))}]"));
 
+    /// <summary>
+    /// Did any declared value move since the last <see cref="BuildControls"/>?
+    /// </summary>
+    /// <remarks>
+    /// <b>The one piece of bookkeeping a tool cannot do for itself and should not have to.</b>
+    /// Declared state is written from several places — a panel this frame, a command-line
+    /// argument at startup, a sink replaying a frame — and something downstream almost always
+    /// has to recompute when it moves. Today that is a hand-written call after every write: the
+    /// rig viewer has eight of them, and the capture tool that composes the same state has none,
+    /// because nothing reminded it.
+    /// <para>
+    /// This is the reader of every declared member already, so it is the only thing positioned to
+    /// answer. It says a value MOVED; it has no opinion about what that should cause, which is
+    /// what keeps it bookkeeping rather than policy.
+    /// </para>
+    /// </remarks>
+    public bool Changed { get; private set; }
+
+    /// <summary>What moved, for a reader that wants to recompute only part of itself.</summary>
+    public IReadOnlyList<string> ChangedNames => changedNames;
+
+    private readonly List<string> changedNames = new();
+
+    // Last frame's value per field. Comparing across FRAMES rather than across the control
+    // round-trip is the whole of what makes this useful: a before/after within one frame only
+    // ever sees what the panel itself did, and the write a tool most needs to hear about comes
+    // from somewhere else — an argument at startup, a replayed frame, another system. Both look
+    // identical from here, and should.
+    private readonly Dictionary<TunableField, object> lastSeen = new();
+
     public void BuildControls(DebugContext debug)
     {
         ArgumentNullException.ThrowIfNull(debug);
+        Changed = false;
+        changedNames.Clear();
+
         foreach (var (group, items) in groups)
         {
             using (debug.Scope(group))
@@ -299,6 +339,7 @@ public sealed class ObjectTunables
                     if (f.Kind == TuneKind.Text)
                     {
                         f.Text = debug.Controls.Text(f.Label, f.Text, f.MaxLength);
+                        Note(f);
                         continue;
                     }
 
@@ -311,8 +352,34 @@ public sealed class ObjectTunables
                         TuneKind.Enum => debug.Controls.Enum(f.Label, (int)f.Value, f.EnumNames!),
                         _ => debug.Controls.Float(f.Label, f.Value, f.Min, f.Max),
                     };
+
+                    // A button is true for exactly the frame it is pressed, so across frames it
+                    // moves twice per press and the second move is the release. Only the press
+                    // is news.
+                    if (f.Kind == TuneKind.Button)
+                    {
+                        if (f.Value != 0f) Mark(f);
+                        lastSeen[f] = Snapshot(f);
+                    }
+                    else Note(f);
                 }
             }
         }
+    }
+
+    private void Note(TunableField f)
+    {
+        var now = Snapshot(f);
+        if (lastSeen.TryGetValue(f, out var before) && !Equals(before, now)) Mark(f);
+        lastSeen[f] = now;
+    }
+
+    private static object Snapshot(TunableField f) =>
+        f.Kind == TuneKind.Text ? f.Text : f.Value;
+
+    private void Mark(TunableField f)
+    {
+        Changed = true;
+        changedNames.Add(f.Name);
     }
 }

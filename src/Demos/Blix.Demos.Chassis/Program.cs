@@ -65,11 +65,18 @@ public static class Program
     [BlixApp("chassis-tune", Summary = "declared [Tune] state, rendered by the overlay", Headed = true)]
     public static void Tuned(string[] args)
     {
+        // <b>Diagnostics ON by default here, which every other app leaves off.</b>
+        // DebugState.Enabled starts false and the overlay is only laid out when it is true,
+        // so an IDebuggable loop that never sets it produces a window with no panel and no
+        // error — which is exactly what happened the first time this ran. An app whose whole
+        // purpose is to show a declared control opening with that control hidden is not a
+        // demonstration of anything.
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — chassis (declared state)",
             Width = 900,
             Height = 560,
+            Diagnostics = true,
         });
 
         var loop = new TunedLoop();

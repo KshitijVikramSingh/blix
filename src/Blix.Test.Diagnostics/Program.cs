@@ -161,6 +161,56 @@ var t = new TestRunner();
     t.ExpectTrue("a value longer than MaxLength is cut, not accepted", clamped == "abcd");
 }
 
+// -- ObjectTunables reports what moved ---------------------------------------
+//
+// The one thing a tool cannot do for itself. Declared state is written from several
+// places — a panel this frame, an argument at startup, a sink replaying a frame — and
+// something downstream nearly always has to recompute. Today that is a hand-written call
+// after every write: eight of them in the rig viewer, and none in the capture tool that
+// composes the same state, because nothing reminded it.
+{
+    var subject = new ChangeFixture();
+    var tunables = new ObjectTunables(subject);
+    var sys = new DebugSystem(historyCapacity: 4);
+
+    void Frame() 
+    {
+        sys.BeginFrame(new RenderFrameContext(Width: 2, Height: 2));
+        sys.Run(new TestDebuggable("Fixture", debug => tunables.BuildControls(debug)));
+        sys.EndFrame();
+    }
+
+    Frame();
+    t.ExpectTrue("a quiet frame reports no change", !tunables.Changed);
+    t.ExpectTrue("and names nothing", tunables.ChangedNames.Count == 0);
+
+    // Written from OUTSIDE any panel, which is the case a tool most needs told about:
+    // a flag at startup and a panel edit look identical from here, and should.
+    subject.Weight = 0.9f;
+    Frame();
+    t.ExpectTrue("a value moved is reported", tunables.Changed);
+    t.ExpectTrue("and it is named", tunables.ChangedNames.Count == 1 && tunables.ChangedNames[0] == "Weight");
+
+    Frame();
+    t.ExpectTrue("the report does not stick to the next frame", !tunables.Changed);
+
+    subject.Clip = "Running_A";
+    Frame();
+    t.ExpectTrue("a text member counts too", tunables.Changed && tunables.ChangedNames[0] == "Clip");
+
+    // Two at once, because a reader that recomputes per name must see both.
+    subject.Weight = 0.1f;
+    subject.Clip = "Idle";
+    Frame();
+    t.ExpectTrue("two moves are both named", tunables.ChangedNames.Count == 2);
+
+    // The NEGATIVE half: writing the same value is not a change. A tool that recomputes
+    // on every frame a panel merely EXISTS is a tool with no reason to ask.
+    subject.Weight = 0.1f;
+    Frame();
+    t.ExpectTrue("rewriting the same value is not a change", !tunables.Changed);
+}
+
 // -- Two views over the same geometry, in one frame ---------------------------
 // The acceptance criterion for the view arc, and the thing RTS §212 needed and could not ask for: watch
 // one body from a fixed vantage while the game camera does its own thing. It was impossible while a frame
@@ -1606,6 +1656,13 @@ sealed class CapturingSink : IDebugFrameSink
 sealed class ThrowingSink : IDebugFrameSink
 {
     public void Consume(DebugFrame frame) => throw new InvalidOperationException("boom");
+}
+
+sealed class ChangeFixture
+{
+    [Tune(0, 1)] public float Weight = 0.5f;
+    [Tune] public string Clip = "Walking_A";
+    [Tune] public bool Masked = true;
 }
 
 sealed class TestDebuggable : IDebuggable
