@@ -9,7 +9,7 @@
   -->
   <ItemGroup>
     <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
-    <ProjectReference Include="..\Blix.Tools.Preview\Blix.Tools.Preview.csproj" />
+    <ProjectReference Include="..\Blix.Tools.Studio\Blix.Tools.Studio.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

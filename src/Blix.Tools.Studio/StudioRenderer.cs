@@ -1,10 +1,11 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
+using Blix.Diagnostics;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 using Blix.Render;
 
-namespace Blix.Tools.Preview;
+namespace Blix.Tools.Studio;
 
 /// <summary>
 /// The lab's three passes: cast, light, present.
@@ -21,7 +22,7 @@ namespace Blix.Tools.Preview;
 /// claiming to be a renderer, and would stop being readable at exactly the point it became useful.
 /// </para>
 /// </remarks>
-public sealed class LabRenderer : IDisposable
+public sealed class StudioRenderer : IDisposable, ITunable
 {
     /// <summary>Square shadow map, matching the texel size the lit shader offsets by.</summary>
     public const int ShadowMapSize = 2048;
@@ -41,7 +42,7 @@ public sealed class LabRenderer : IDisposable
     /// <remarks>
     /// Smaller than the unskinned caster's, not larger. That one pushes a mat4 because it has to place
     /// its object; a skinned instance's placement is already baked into its palette, so all this stage
-    /// needs is the stride. <c>lab_shadow.frag</c> declares no push block, so unlike the lit pair this
+    /// needs is the stride. <c>studio_shadow.frag</c> declares no push block, so unlike the lit pair this
     /// block was free to be exactly what the stage uses rather than shaped to match a fragment stage.
     /// </remarks>
     public const int SkinnedCasterPushBytes = 16;
@@ -96,6 +97,18 @@ public sealed class LabRenderer : IDisposable
     // reads like a model-loading bug and is not one. White is the identity for a base-colour factor.
     private TextureHandle whiteTexture;
 
+    /// <summary>
+    /// The stage's graph, for a tool recording a pass of its own.
+    /// </summary>
+    /// <remarks>
+    /// <b>Recording needs no help from here, which is why there is no per-frame hook.</b>
+    /// RenderGraph.Pass stores a scope against a pass HANDLE, and Execute walks PassOrder —
+    /// declaration order — so when a tool records is irrelevant to when its pass runs. It calls this
+    /// itself, any time before Render, and its pass runs after the stage's because that is when it
+    /// was declared. Scopes are cleared at Execute, so it re-records each frame like everything else.
+    /// </remarks>
+    public RenderGraph Graph => graph;
+
     private readonly byte[] pushScratch = new byte[PushBytes];
     private readonly byte[] casterPushScratch = new byte[CasterPushBytes];
     private readonly byte[] skinnedCasterPushScratch = new byte[SkinnedCasterPushBytes];
@@ -105,13 +118,119 @@ public sealed class LabRenderer : IDisposable
     // device with the sizes named, which is the binding model earning its keep: a
     // hand-declared interface would have shrugged and corrupted the tail.
 
+    // ── the look, declared, and it is not a thing of its own ─────────────────────────────────
+    //
+    // <b>There is no StudioLook, and the reason is worth keeping.</b> Gathering these into one
+    // "look" object was the obvious move and it dissolved the moment they were sorted by what reads
+    // them: the sun and the ambient are the LIT pass's, the shadow extent is the SHADOW pass's, and
+    // the exposure and tonemap are the PRESENT pass's. That is not one concept, it is three sets of
+    // pass parameters — and parameters belong with what consumes them, which is this.
+    //
+    // They lived on a StudioScene because SetSunDirection needed somewhere to sit. "Scene" promised
+    // a graph this deliberately does not have, and once the light moved here and the ring of boxes
+    // turned out never to be drawn, there was nothing left in it.
+
+    /// <summary>Degrees around Y, from +Z toward +X.</summary>
+    [Tune(0, 360)] public float SunAzimuth { get; set; } = 52.125f;
+
+    /// <summary>Degrees above the horizon. Not 90: straight down has no stable up vector.</summary>
+    [Tune(0, 89)] public float SunElevation { get; set; } = 54.526f;
+
+    /// <summary>Scales the sun's tint. One is the light this stage was authored under.</summary>
+    [Tune(0, 3)] public float SunIntensity { get; set; } = 1f;
+
+    /// <summary>Flat stand-in for image-based lighting, which this stage does not carry.</summary>
+    [Tune(0, 0.5f)] public float AmbientStrength { get; set; } = 0.06f;
+
+    /// <summary>Half-width of the sun's orthographic box, in metres.</summary>
+    /// <remarks>
+    /// A knob because it is a trade every subject settles differently: too wide and a small rig gets
+    /// a few texels of shadow map, too narrow and a large one is cut off at the edge of the light.
+    /// </remarks>
+    [Tune(2, 40)] public float ShadowExtent { get; set; } = 9f;
+
+    /// <summary>Whether the floor is drawn. Off is how you look at a thing against nothing.</summary>
+    /// <remarks>
+    /// It is a lit mesh rather than a gizmo, and it has to be: a shadow needs something to land on.
+    /// The GRID over it is a gizmo and always was — <c>debug.Draw.Grid</c>, engine-native, drawn by
+    /// the tool. The two were never one thing; they only ever looked like one.
+    /// </remarks>
+    [Tune] public bool Ground { get; set; } = true;
+
     /// <summary>Exposure applied before tonemapping.</summary>
-    public float Exposure { get; set; } = 1.0f;
+    [Tune(0, 4)] public float Exposure { get; set; } = 1.0f;
 
     /// <summary>0 = ACES, 1 = AgX, 2 = Reinhard, 3 = neutral. Matches blix_tonemap.</summary>
-    public float TonemapMode { get; set; }
+    [Tune(0, 3)] public float TonemapMode { get; set; }
 
-    public void Load(VulkanGraphicsDevice vk, string shaderDirectory)
+    /// <summary>Direction TOWARD the sun. Derived from the two angles.</summary>
+    public Vector3 SunDirection { get; private set; } = Vector3.Normalize(new Vector3(0.45f, 0.8f, 0.35f));
+
+    /// <summary>Derived: the tint this stage was authored with, scaled by <see cref="SunIntensity"/>.</summary>
+    public Vector3 SunColour { get; private set; } = new(3.2f, 3.05f, 2.75f);
+
+    private static readonly Vector3 SunTint = new(3.2f, 3.05f, 2.75f);
+
+    /// <summary>
+    /// Derives the look once, so the declared angles and the derived vector agree from frame one.
+    /// </summary>
+    /// <remarks>
+    /// <b>Without this the two disagreed silently.</b> The vector fields carry the hardcoded
+    /// direction this stage was authored with, and nothing recomputed them until something MOVED —
+    /// so a run with no flags lit the scene from the old vector while the panel showed angles that
+    /// did not produce it. The capture is what caught it: it came back matching the picture from
+    /// before the angles existed, byte for byte, which is exactly what "the knob is ignored" looks
+    /// like when the default happens to be close.
+    /// </remarks>
+    public StudioRenderer() => Recompute();
+
+    /// <summary>A declared value moved. Recompute what is derived from it.</summary>
+    public void OnChanged(TunableChange change) => Recompute();
+
+    /// <summary>Derive the sun's vectors from its angles. Also run once at construction.</summary>
+    public void Recompute()
+    {
+        var elevation = SunElevation * (MathF.PI / 180f);
+        var azimuth = SunAzimuth * (MathF.PI / 180f);
+        var horizontal = MathF.Cos(elevation);
+
+        SunDirection = Vector3.Normalize(new Vector3(
+            horizontal * MathF.Sin(azimuth),
+            MathF.Sin(elevation),
+            horizontal * MathF.Cos(azimuth)));
+
+        SunColour = SunTint * SunIntensity;
+    }
+
+    /// <summary>
+    /// A sun view-projection that covers the stage, for the caster pass.
+    /// </summary>
+    /// <remarks>
+    /// An orthographic box aimed down the sun direction at the origin. No cascades and no texel
+    /// snapping — both belong to a renderer that has earned them (TankArena and Sponza have), and a
+    /// tooling stage that grew them by default would be quietly claiming to be one.
+    /// </remarks>
+    public Matrix4x4 SunViewProjection(float? extent = null, float depth = 30f)
+    {
+        var box = extent ?? ShadowExtent;
+        var eye = SunDirection * (depth * 0.5f);
+        var up = MathF.Abs(Vector3.Dot(SunDirection, Vector3.UnitY)) > 0.95f ? Vector3.UnitZ : Vector3.UnitY;
+        var view = Matrix4x4.CreateLookAt(eye, Vector3.Zero, up);
+        var projection = GraphicsMatrices.CreateOrthographicVulkan(box * 2f, box * 2f, 0.1f, depth);
+        return view * projection;
+    }
+
+    /// <param name="extend">
+    /// <b>Rung four: a tool adding a pass of its own.</b> Called with the stage's graph and targets
+    /// after they exist and BEFORE <c>Compile()</c>, which is the only window in which a pass can be
+    /// declared at all — so a selection outline, a pre-pass or an id buffer is a delegate rather
+    /// than a fork of this file.
+    /// <para>
+    /// It is here on one prediction, recorded as one: <b>tooling asks to extend a graph before it
+    /// asks to replace one.</b> If that turns out false this is one parameter to remove.
+    /// </para>
+    /// </param>
+    public void Load(VulkanGraphicsDevice vk, string shaderDirectory, Action<StudioGraph>? extend = null)
     {
         device = vk;
         fullscreen = new FullscreenPass(vk, "lab.present");
@@ -121,16 +240,16 @@ public sealed class LabRenderer : IDisposable
                 stages.Select(s => ShaderReflection.Load(
                     Path.Combine(shaderDirectory, s + ".spv.refl.json"))).ToArray());
 
-        var shadowInterface = Reflect("lab_shadow.vert", "lab_shadow.frag");
-        var litInterface = Reflect("lab_lit.vert", "lab_lit.frag");
-        var presentInterface = Reflect("lab_present.vert", "lab_present.frag");
+        var shadowInterface = Reflect("studio_shadow.vert", "studio_shadow.frag");
+        var litInterface = Reflect("studio_lit.vert", "studio_lit.frag");
+        var presentInterface = Reflect("studio_present.vert", "studio_present.frag");
 
         // The skinned pair reuses the unskinned FRAGMENT stages, so these differ from the two above
         // by exactly one thing: a set-3 storage buffer the vertex stage reads. That is what makes
         // the bone palette's size a reflected fact rather than a constant restated in C# — the
         // hazard the probe exists to catch, in the one place the lab still had a hand-written number.
-        var skinnedInterface = Reflect("lab_skinned.vert", "lab_lit.frag");
-        var skinnedShadowInterface = Reflect("lab_skinned_shadow.vert", "lab_shadow.frag");
+        var skinnedInterface = Reflect("studio_skinned.vert", "studio_lit.frag");
+        var skinnedShadowInterface = Reflect("studio_skinned_shadow.vert", "studio_shadow.frag");
 
         // <b>A render graph, not hand-built surfaces.</b> The first cut of this used
         // CreateRenderSurface directly and failed on the first run: "RenderSurface needs at
@@ -203,20 +322,27 @@ public sealed class LabRenderer : IDisposable
         // the rig its own pass would mean a second clear, a second sort order, and two places to fix
         // the next time the sun moves.
 
+        // Everything the stage owns exists; nothing is compiled. The one window a tool has, and a
+        // delegate rather than a property because the window is invisible: after the stage has
+        // declared its passes, before Compile freezes the shape. A one-shot call that hands you the
+        // graph is scoping; it is not the stage running your code.
+        extend?.Invoke(new StudioGraph(
+            graph, sceneColourTarget, sceneDepthTarget, shadowTarget, litInterface, shadowInterface));
+
         graph.Compile();
 
                 byte[] Spv(string stage) => File.ReadAllBytes(Path.Combine(shaderDirectory, stage + ".spv"));
 
         shadowProgram = vk.CreateShaderProgramFromSpv(
-            Spv("lab_shadow.vert"), Spv("lab_shadow.frag"), shadowInterface, "lab.shadow");
+            Spv("studio_shadow.vert"), Spv("studio_shadow.frag"), shadowInterface, "lab.shadow");
         litProgram = vk.CreateShaderProgramFromSpv(
-            Spv("lab_lit.vert"), Spv("lab_lit.frag"), litInterface, "lab.lit");
+            Spv("studio_lit.vert"), Spv("studio_lit.frag"), litInterface, "lab.lit");
         presentProgram = vk.CreateShaderProgramFromSpv(
-            Spv("lab_present.vert"), Spv("lab_present.frag"), presentInterface, "lab.present");
+            Spv("studio_present.vert"), Spv("studio_present.frag"), presentInterface, "lab.present");
         skinnedProgram = vk.CreateShaderProgramFromSpv(
-            Spv("lab_skinned.vert"), Spv("lab_lit.frag"), skinnedInterface, "lab.skinned");
+            Spv("studio_skinned.vert"), Spv("studio_lit.frag"), skinnedInterface, "lab.skinned");
         skinnedShadowProgram = vk.CreateShaderProgramFromSpv(
-            Spv("lab_skinned_shadow.vert"), Spv("lab_shadow.frag"), skinnedShadowInterface, "lab.skinned.shadow");
+            Spv("studio_skinned_shadow.vert"), Spv("studio_shadow.frag"), skinnedShadowInterface, "lab.skinned.shadow");
 
 
         shadowPipeline = vk.CreatePipeline(new PipelineDescription(
@@ -262,7 +388,7 @@ public sealed class LabRenderer : IDisposable
             Array.Empty<BlendState>(),
             RenderTarget: graph.GetPassSurface(shadowPass)), "lab.skinned.shadow");
 
-        // FullscreenPass.Layout, not a vertex format: lab_present.vert builds its triangle from
+        // FullscreenPass.Layout, not a vertex format: studio_present.vert builds its triangle from
         // gl_VertexIndex and declares no inputs at all, so any attribute here is a promise the shader
         // does not keep — and the validation layers said so on every run.
         presentPipeline = vk.CreatePipeline(new PipelineDescription(
@@ -282,12 +408,12 @@ public sealed class LabRenderer : IDisposable
             new TextureDescription(1, 1, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
             new byte[] { 255, 255, 255, 255 }, "lab.white");
 
-        var (cv, ci) = LabGeometry.Cube();
+        var (cv, ci) = StudioGeometry.Cube();
         cubeVertices = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(cv), "lab.cube.vb");
         cubeIndices = vk.CreateIndexBuffer(ci, name: "lab.cube.ib");
         cubeIndexCount = ci.Length;
 
-        var (gv, gi) = LabGeometry.Ground();
+        var (gv, gi) = StudioGeometry.Ground();
         groundVertices = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(gv), "lab.ground.vb");
         groundIndices = vk.CreateIndexBuffer(gi, name: "lab.ground.ib");
         groundIndexCount = gi.Length;
@@ -331,19 +457,14 @@ public sealed class LabRenderer : IDisposable
     /// </param>
     public void Render(
         RenderCommandList commandList,
-        LabScene scene,
         Matrix4x4 viewProjection,
         Vector3 cameraPosition,
-        LabModel? model = null,
-        Matrix4x4 modelTransform = default,
-        LabRig? rig = null,
-        int rigInstances = 1,
+        IReadOnlyList<IStudioView>? views = null,
         Matrix4x4? viewportViewProjection = null,
         Vector3 viewportCameraPosition = default)
     {
-        if (modelTransform == default) modelTransform = Matrix4x4.Identity;
-
-        var sunViewProjection = scene.SunViewProjection();
+        views ??= Array.Empty<IStudioView>();
+        var sunViewProjection = SunViewProjection();
 
         // Pass 1 — the sun's depth. No colour attachment at all, which is the thing the
         // raw surface path could not express.
@@ -354,20 +475,13 @@ public sealed class LabRenderer : IDisposable
                 new("uLightViewProjection", new Matrix4x4Uniform(sunViewProjection)),
             };
 
-            foreach (var item in scene.Objects)
-            {
-                // The ground casts nothing onto itself worth the fill.
-                if (item.IsGround) continue;
-                DrawObject(scope, item, shadowPipeline, uniforms, Array.Empty<ShaderTextureBinding>(), casterOnly: true);
-            }
+            // No furniture in the caster pass at all: the only furniture left is the ground, and
+            // the ground casts nothing onto itself worth the fill.
 
-            DrawModelParts(
-                scope, model, modelTransform, shadowPipeline, uniforms,
-                Array.Empty<ShaderTextureBinding>(), casterOnly: true);
-
-            DrawRigParts(
-                scope, rig, rigInstances, skinnedShadowPipeline, uniforms,
-                Array.Empty<ShaderTextureBinding>(), casterOnly: true);
+            var draw = new StudioDraw(
+                scope, StudioPass.Shadow, uniforms, Array.Empty<ShaderTextureBinding>(),
+                shadowPipeline, skinnedShadowPipeline, whiteTexture);
+            foreach (var view in views) view.Draw(draw);
         });
 
         // Pass 2 — light it into HDR, sampling the depth the caster pass just wrote.
@@ -379,18 +493,18 @@ public sealed class LabRenderer : IDisposable
                 new("uViewProjection", new Matrix4x4Uniform(viewProjection)),
                 new("uSunViewProjection", new Matrix4x4Uniform(sunViewProjection)),
                 new("uCameraPosition", new Vector4Uniform(new Vector4(cameraPosition, 1f))),
-                new("uSunDirection", new Vector4Uniform(new Vector4(scene.SunDirection, 0f))),
-                new("uSunColour", new Vector4Uniform(new Vector4(scene.SunColour, scene.AmbientStrength))),
+                new("uSunDirection", new Vector4Uniform(new Vector4(SunDirection, 0f))),
+                new("uSunColour", new Vector4Uniform(new Vector4(SunColour, AmbientStrength))),
             };
             var textures = new[] { new ShaderTextureBinding("uSunShadowMap", shadowTexture, Slot: 0) };
 
-            foreach (var item in scene.Objects)
-            {
-                DrawObject(scope, item, litPipeline, uniforms, textures);
-            }
+            // FURNITURE, and it stays the stage's: a tool does not choose whether the stage has a
+            // floor. That is part of what makes it a stage rather than a blank device.
+            if (Ground) DrawGround(scope, litPipeline, uniforms, textures);
 
-            DrawModelParts(scope, model, modelTransform, litPipeline, uniforms, textures, casterOnly: false);
-            DrawRigParts(scope, rig, rigInstances, skinnedPipeline, uniforms, textures, casterOnly: false);
+            var draw = new StudioDraw(
+                scope, StudioPass.Lit, uniforms, textures, litPipeline, skinnedPipeline, whiteTexture);
+            foreach (var view in views) view.Draw(draw);
         });
 
         // Pass 2b — the SAME scene from a second camera, into the panel's target. Same content,
@@ -406,20 +520,19 @@ public sealed class LabRenderer : IDisposable
                     new("uViewProjection", new Matrix4x4Uniform(panelViewProjection)),
                     new("uSunViewProjection", new Matrix4x4Uniform(sunViewProjection)),
                     new("uCameraPosition", new Vector4Uniform(new Vector4(viewportCameraPosition, 1f))),
-                    new("uSunDirection", new Vector4Uniform(new Vector4(scene.SunDirection, 0f))),
-                    new("uSunColour", new Vector4Uniform(new Vector4(scene.SunColour, scene.AmbientStrength))),
+                    new("uSunDirection", new Vector4Uniform(new Vector4(SunDirection, 0f))),
+                    new("uSunColour", new Vector4Uniform(new Vector4(SunColour, AmbientStrength))),
                 };
                 var textures = new[] { new ShaderTextureBinding("uSunShadowMap", shadowTexture, Slot: 0) };
 
-                foreach (var item in scene.Objects)
-                {
-                    DrawObject(scope, item, litPipeline, uniforms, textures);
-                }
+                if (Ground) DrawGround(scope, litPipeline, uniforms, textures);
 
-                DrawModelParts(
-                    scope, model, modelTransform, litPipeline, uniforms, textures, casterOnly: false);
-                DrawRigParts(
-                    scope, rig, rigInstances, skinnedPipeline, uniforms, textures, casterOnly: false);
+                // The SAME views, from the second camera. That is what makes it a view rather
+                // than a second renderer — and now that a view is an interface, a tool's own
+                // contribution appears in the panel for free, which it never did before.
+                var draw = new StudioDraw(
+                    scope, StudioPass.Lit, uniforms, textures, litPipeline, skinnedPipeline, whiteTexture);
+                foreach (var view in views) view.Draw(draw);
             });
         }
 
@@ -447,193 +560,39 @@ public sealed class LabRenderer : IDisposable
                 uniforms: present));
     }
 
-    // Each node's primitives, placed by that node's COMPOSED world transform — the same walk up
-    // the parent chain blix-cook inspect does. Drawn per part rather than fused, because a fused
-    // mesh cannot answer where any part's pivot is, which is the question an asset raises.
-    private void DrawModelParts(
+
+    /// <summary>
+    /// The floor: one lit quad, no shadow of its own, a fixed slate grey.
+    /// </summary>
+    /// <remarks>
+    /// The last of what used to be a scene. There were seven boxes beside it at varied roughness —
+    /// a good lighting subject and a terrible backdrop, as their own comment said — and both tools
+    /// replaced them with ground-only the moment they loaded anything, so they were never once
+    /// drawn. If look development wants a test subject again it arrives as a view, which is what
+    /// rung two is for.
+    /// </remarks>
+    private void DrawGround(
         RenderPassBuilder pass,
-        LabModel? model,
-        Matrix4x4 modelTransform,
         PipelineHandle pipeline,
         ShaderUniform[] uniforms,
-        ShaderTextureBinding[] textures,
-        bool casterOnly)
+        ShaderTextureBinding[] textures)
     {
-        if (model is null) return;
+        StudioPush.Matrix(Matrix4x4.Identity, pushScratch);
+        StudioPush.Material(pushScratch, GroundColour, metallic: 0f, roughness: 0.9f);
 
-        for (var index = 0; index < model.Parts.Count; index++)
-        {
-            var part = model.Parts[index];
-            var node = model.Nodes[part.NodeIndex];
-            var push = casterOnly ? casterPushScratch : pushScratch;
-            PackMatrix(node.WorldTransform * modelTransform, push);
-            if (!casterOnly)
-            {
-                var floats = MemoryMarshal.Cast<byte, float>(push.AsSpan());
-                floats[16] = part.BaseColour.X;
-                floats[17] = part.BaseColour.Y;
-                floats[18] = part.BaseColour.Z;
-                floats[19] = 1f;
-                floats[20] = part.Metallic;
-                floats[21] = part.Roughness;
-            }
-
-            // The caster samples nothing — its shader declares no textures at all, and it is
-            // handed an empty list. The lit draw gets a FRESH array per part: push payloads are
-            // copied at record time, texture lists are still retained by reference, so a shared
-            // array would give every draw the last part's albedo — the aliasing that stacked
-            // seven boxes, wearing a different hat.
-            if (casterOnly)
-            {
-                pass.DrawIndexed(
-                    vertexBuffer: part.Vertices,
-                    indexBuffer: part.Indices,
-                    pipeline: pipeline,
-                    indexCount: part.IndexCount,
-                    uniforms: uniforms,
-                    textures: textures,
-                    pushConstants: push);
-            }
-            else
-            {
-                pass.DrawIndexed(
-                    vertexBuffer: part.Vertices,
-                    indexBuffer: part.Indices,
-                    pipeline: pipeline,
-                    indexCount: part.IndexCount,
-                    uniforms: uniforms,
-                    textures: new[]
-                    {
-                        textures[0],
-                        new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 1),
-                    },
-                    pushConstants: push);
-            }
-        }
-    }
-
-    // The rig's primitives, drawn ONCE each for N instances out of one sliced palette.
-    //
-    // The contrast with DrawModelParts is the whole difference between a static asset and a rigged
-    // one: there, each part is placed by its node's composed world matrix, because the hierarchy IS
-    // the articulation. Here the hierarchy lives in the palette and every primitive of an instance
-    // reads the same slice — a skin that placed its parts individually would tear along their seams.
-    //
-    // <b>This is where the one-palette-per-frame gap was.</b> A descriptor set's BUFFER is not copied
-    // at record time the way a push payload is, so two draws in one frame sharing one palette binding
-    // both read whatever it held at Execute — the second pose, twice. The fix is not more bindings
-    // but a wider one: every instance's matrices in a single buffer at a known stride, indexed by
-    // gl_InstanceIndex. Bulwark and RTSGame both reached the same shape; BonePaletteSet is the
-    // stride contract they were each restating.
-    //
-    // uModel goes up as IDENTITY. Each instance's placement is baked into its own palette slice,
-    // because a per-draw push constant cannot vary per instance.
-    private void DrawRigParts(
-        RenderPassBuilder pass,
-        LabRig? rig,
-        int instances,
-        PipelineHandle pipeline,
-        ShaderUniform[] uniforms,
-        ShaderTextureBinding[] textures,
-        bool casterOnly)
-    {
-        if (rig is null || instances <= 0) return;
-
-        var stride = (float)rig.Skeleton.BoneCount;
-        foreach (var part in rig.Parts)
-        {
-            byte[] push;
-            if (casterOnly)
-            {
-                push = skinnedCasterPushScratch;
-                var casterFloats = MemoryMarshal.Cast<byte, float>(push.AsSpan());
-                casterFloats[0] = stride;
-                casterFloats[1] = 0f;
-                casterFloats[2] = 0f;
-                casterFloats[3] = 0f;
-            }
-            else
-            {
-                push = pushScratch;
-                PackMatrix(Matrix4x4.Identity, push);
-                var floats = MemoryMarshal.Cast<byte, float>(push.AsSpan());
-                floats[16] = part.BaseColour.X;
-                floats[17] = part.BaseColour.Y;
-                floats[18] = part.BaseColour.Z;
-                floats[19] = 1f;
-                floats[20] = part.Metallic;
-                floats[21] = part.Roughness;
-                // z, where the shader reads the per-instance stride. See lab_skinned.vert for why it
-                // rides in a material slot rather than in a block of its own.
-                floats[22] = stride;
-                floats[23] = 0f;
-            }
-
-            pass.DrawIndexedInstanced(
-                vertexBuffer: part.Vertices,
-                indexBuffer: part.Indices,
-                pipeline: pipeline,
-                indexCount: part.IndexCount,
-                instanceCount: instances,
-                uniforms: uniforms,
-                // A fresh array per part for the same reason DrawModelParts builds one: texture
-                // lists are retained by reference, so a shared array gives every draw the last
-                // part's albedo.
-                textures: casterOnly
-                    ? textures
-                    : new[] { textures[0], new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 1) },
-                perDrawMaterial: rig.BoneMaterial,
-                pushConstants: push);
-        }
-    }
-
-    private static void PackMatrix(Matrix4x4 m, byte[] target)
-    {
-        var floats = MemoryMarshal.Cast<byte, float>(target.AsSpan());
-        floats[0] = m.M11; floats[1] = m.M12; floats[2] = m.M13; floats[3] = m.M14;
-        floats[4] = m.M21; floats[5] = m.M22; floats[6] = m.M23; floats[7] = m.M24;
-        floats[8] = m.M31; floats[9] = m.M32; floats[10] = m.M33; floats[11] = m.M34;
-        floats[12] = m.M41; floats[13] = m.M42; floats[14] = m.M43; floats[15] = m.M44;
-    }
-
-    private void DrawObject(
-        RenderPassBuilder pass,
-        in LabObject item,
-        PipelineHandle pipeline,
-        ShaderUniform[] uniforms,
-        ShaderTextureBinding[] textures,
-        bool casterOnly = false)
-    {
-        var push = casterOnly ? casterPushScratch : pushScratch;
-        PackPush(item, push);
-        var bindings = casterOnly
-            ? textures
-            : new[] { textures[0], new ShaderTextureBinding("uAlbedo", whiteTexture, Slot: 1) };
         pass.DrawIndexed(
-            vertexBuffer: item.IsGround ? groundVertices : cubeVertices,
-            indexBuffer: item.IsGround ? groundIndices : cubeIndices,
+            vertexBuffer: groundVertices,
+            indexBuffer: groundIndices,
             pipeline: pipeline,
-            indexCount: item.IsGround ? groundIndexCount : cubeIndexCount,
+            indexCount: groundIndexCount,
             uniforms: uniforms,
-            textures: bindings,
-            pushConstants: push);
+            textures: new[] { textures[0], new ShaderTextureBinding("uAlbedo", whiteTexture, Slot: 1) },
+            pushConstants: pushScratch);
     }
 
-    // mat4 model, vec4 base colour, vec4 (metallic, roughness, _, _) — 96 bytes, inside the
-    // 128-byte floor every Vulkan implementation guarantees, which is why there is no
-    // per-object descriptor set in this lab at all.
-    private static void PackPush(in LabObject item, byte[] target)
-    {
-        var floats = MemoryMarshal.Cast<byte, float>(target.AsSpan());
-        var m = item.Model;
-        floats[0] = m.M11; floats[1] = m.M12; floats[2] = m.M13; floats[3] = m.M14;
-        floats[4] = m.M21; floats[5] = m.M22; floats[6] = m.M23; floats[7] = m.M24;
-        floats[8] = m.M31; floats[9] = m.M32; floats[10] = m.M33; floats[11] = m.M34;
-        floats[12] = m.M41; floats[13] = m.M42; floats[14] = m.M43; floats[15] = m.M44;
-        if (floats.Length < 24) return;   // the caster's 64-byte block is the model matrix only
-        floats[16] = item.BaseColour.X; floats[17] = item.BaseColour.Y; floats[18] = item.BaseColour.Z; floats[19] = 1f;
-        floats[20] = item.Metallic; floats[21] = item.Roughness; floats[22] = 0f; floats[23] = 0f;
-    }
+    private static readonly Vector3 GroundColour = new(0.22f, 0.23f, 0.26f);
+
+
 
     /// <summary>
     /// Releases everything this renderer made.

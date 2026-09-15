@@ -27,7 +27,7 @@ Blix.Demos.Bulwark             ← 3D game: tower defense (picking + multi-front
                                   skinned-mesh instancing, sun-shadow + HDR graph)
 Blix.Demos.Chassis             ← application-chassis spec (no diagnostics, own ImGui panel,
                                   host-owned --frames; 25-line csproj, no shaders)
-Blix.Tools.Preview            ← LAB library: lit scene + render graph + shaders + glTF
+Blix.Tools.Studio            ← LAB library: lit scene + render graph + shaders + glTF
                                   node/pivot model, reflected binding (library content)
    ↑        ↑
 Viewer  Probe  Capture        ← three executables over one lab; none declares a shader
@@ -206,9 +206,9 @@ field was.
 ```
 Program            parses args, owns the window
   ViewerLoop       the root: load, update, render, debug, input
-    LabCamera      x2 — the window's view and the panel's viewport
+    StudioCamera      x2 — the window's view and the panel's viewport
     RigSession     clocks, composition, palettes
-    LabSelection   what is selected, and what a click selects
+    StudioSelection   what is selected, and what a click selects
     ViewerPanels   every panel, and the display state they toggle
 ```
 
@@ -218,12 +218,12 @@ builds a different root** — which is what the capture tool and the probe alrea
 **What crosses into the library, and what does not.** These are two different bars and conflating
 them is how a lab grows a framework:
 
-- **Into `Blix.Tools.Preview` requires a second consumer.** `LabCamera` went because the viewer had
+- **Into `Blix.Tools.Studio` requires a second consumer.** `StudioCamera` went because the viewer had
   *two* cameras with duplicated orbit arithmetic — the §4 bar met without either copy leaving the
   file. `RigSession` went because the capture tool had independently grown its own pose composition,
   root strip, palette packing and distinct-pose count; the viewer runs it live and the capture runs
   it a fixed step at a time, which is one set of decisions on two clocks.
-- **Staying in the executable needs no second consumer at all.** `LabSelection` and `ViewerPanels`
+- **Staying in the executable needs no second consumer at all.** `StudioSelection` and `ViewerPanels`
   are local decomposition: only the viewer picks, and only the viewer has panels. The bar there is
   simply that the file had stopped being readable.
 

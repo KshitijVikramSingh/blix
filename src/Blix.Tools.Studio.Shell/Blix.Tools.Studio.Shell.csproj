@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The studio's panel half, split from the stage for exactly one reason: ImGui.
+
+    Blix.Tools.Studio references no UI toolkit, and a real consumer depends on that staying
+    true — Blix.Tools.Check is a headless probe with no device and no window that links the
+    studio for the stage's declared look. Putting ImGui in the stage would make a tool that
+    judges glTF files pull a UI toolkit and a native binary it never calls.
+
+    That is also what keeps "welded to the setup" and "the setup is pullable" both true:
+    designed and shipped together, separable at the one seam where a heavy native dependency
+    genuinely divides them. A game that wants the look takes no ImGui.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
+    <ProjectReference Include="..\Blix.Tools.Studio\Blix.Tools.Studio.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

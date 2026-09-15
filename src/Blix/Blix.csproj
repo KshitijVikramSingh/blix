@@ -5,6 +5,10 @@
     <ProjectReference Include="..\Blix.Geometry\Blix.Geometry.csproj" />
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
     <ProjectReference Include="..\Blix.Render\Blix.Render.csproj" />
+    <!-- Named directly for the gizmos below, though it was already here: Blix -> Blix.Render ->
+         Blix.Diagnostics. Making an existing edge explicit costs nothing and stops a reader
+         wondering how a skeleton gizmo reaches a debug channel. -->
+    <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
     <ProjectReference Include="..\Blix.Audio\Blix.Audio.csproj" />
   </ItemGroup>
 

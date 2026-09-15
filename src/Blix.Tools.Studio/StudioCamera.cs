@@ -1,7 +1,7 @@
 using System.Numerics;
 using Blix.Graphics;
 
-namespace Blix.Tools.Preview;
+namespace Blix.Tools.Studio;
 
 /// <summary>
 /// An orbit camera: a yaw, a pitch, a distance, and the matrices that follow from them.
@@ -23,7 +23,7 @@ namespace Blix.Tools.Preview;
 /// aspect is a parameter to <see cref="ViewProjection"/> and stays the caller's fact.
 /// </para>
 /// </remarks>
-public sealed class LabCamera
+public sealed class StudioCamera
 {
     /// <summary>Where the camera is looking. The lab's subjects stand at the origin.</summary>
     public Vector3 Target { get; set; } = new(0f, 1f, 0f);
@@ -53,7 +53,7 @@ public sealed class LabCamera
 
     public float MaxDistance { get; set; } = 40f;
 
-    public LabCamera(float yaw = 0.7f, float pitch = 0.45f, float distance = 11f)
+    public StudioCamera(float yaw = 0.7f, float pitch = 0.45f, float distance = 11f)
     {
         Yaw = yaw;
         Pitch = pitch;

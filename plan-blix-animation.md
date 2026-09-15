@@ -46,10 +46,10 @@ Shipped on `view-first-class`, in the toolchain lab and the engine:
 - `Blix/ClipPlayer.cs` — the extracted ritual: rest reset, loop wrap, zero-duration guard,
   clock, and the root delta.
 - `Blix/RootMotion.cs` — travel between two clip times, correct across the loop seam.
-- `Blix.Tools.Preview/LabRig.cs` — a rigged glTF as skeleton + clips + a set-3 palette
+- `Blix.Tools.Studio/StudioRig.cs` — a rigged glTF as skeleton + clips + a set-3 palette
   buffer; `ComputeBoneWorlds`; `FindDeformBones`.
-- `Blix.Tools.Preview/LabSkeletonView.cs` — the overlay, shared by viewer and capture.
-- `Shaders/lab_skinned.vert` + `lab_skinned_shadow.vert`, both reusing the unskinned
+- `Blix.Tools.Studio/SkeletonGizmo.cs` — the overlay, shared by viewer and capture.
+- `Shaders/studio_skinned.vert` + `studio_skinned_shadow.vert`, both reusing the unskinned
   fragment stages.
 - Viewer: `--rig`, transport, clip filter, blend/additive, bone panel, root-motion path.
 - Capture: `--rig --clip --time --xray`, sampled once so a run is reproducible.
@@ -75,7 +75,7 @@ Shipped on `view-first-class`, in the toolchain lab and the engine:
    written per frame slot through `MaterialBindings`, which is what all three existing
    consumers do — so the uniform-array aliasing hazard recorded in `RenderCommand.cs` is
    still open and still unexercised. Not settled: sidestepped, deliberately, and the
-   remaining hazard is named in `LabRig.Load` (two draws in one frame sharing one palette
+   remaining hazard is named in `StudioRig.Load` (two draws in one frame sharing one palette
    material would both render the second pose).
 6. **A fixed-size SSBO array, because reflection demands it.** spirv-cross reflects
    `mat4 m[]` as `block_size: 0`; `mat4 m[128]` reflects as 8192 bytes with a 64-byte
@@ -253,7 +253,7 @@ or 1 reproduces one input exactly, and a masked blend leaves unmasked bones unto
 ### D2 — the tooling, in the toolchain lab
 
 Masks, layers and blends become things you can **see and check**, in
-`Blix.Tools.Preview` — where `LabRig`, `LabSkeletonView` and `RigSession` already are, where the
+`Blix.Tools.Studio` — where `StudioRig`, `SkeletonGizmo` and `RigSession` already are, where the
 probe already judges clips, and where a rig viewer already exists. Building a second one elsewhere
 was the mistake the character arc caught itself about to make.
 

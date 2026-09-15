@@ -1,7 +1,8 @@
 using System.Numerics;
 using Blix;
 using Blix.Core;
-using Blix.Tools.Preview;
+using Blix.Tools.Studio;
+using Blix.Tools.Studio.Shell;
 using ImGuiNET;
 
 namespace Blix.Tools.View;
@@ -52,9 +53,10 @@ internal sealed class ViewerPanels
     public bool ShowRootTrail = true;
     public float TrailSeconds = 1.5f;
     public float ThumbnailScale = 1f;
-    public bool ViewportOpen = true;
-    public float SunYaw = 0.5f;
-    public float SunPitch = 0.9f;
+    private readonly ViewportPanel viewport = new();
+
+    /// <summary>Whether the viewport window is up. The shell owns the flag; this forwards it.</summary>
+    public ref bool ViewportOpen => ref viewport.Open;
 
     private string clipFilter = string.Empty;
     private int clipIndexA;
@@ -175,7 +177,7 @@ internal sealed class ViewerPanels
         if (app.Rig is null || app.Session is null) return;
         if (!ImGui.CollapsingHeader("instances", ImGuiTreeNodeFlags.DefaultOpen)) return;
 
-        ImGui.TextDisabled($"{app.Session.InstanceCount} of max {LabRig.MaxInstances} · one draw, one palette buffer");
+        ImGui.TextDisabled($"{app.Session.InstanceCount} of max {StudioRig.MaxInstances} · one draw, one palette buffer");
 
         if (app.Session.InstanceCount <= 1)
         {
@@ -312,7 +314,7 @@ internal sealed class ViewerPanels
         ImGui.TextDisabled($"           {app.Session.RootTurnPathDegrees:0.0}° of turning done to get there");
 
         var drive = app.Session.DriveRoot;
-        if (ImGui.Checkbox("drive the app.Model", ref drive))
+        if (ImGui.Checkbox("drive the model", ref drive))
         {
             app.Session.DriveRoot = drive;
         }
@@ -435,7 +437,7 @@ internal sealed class ViewerPanels
         // depth-tested, one layer up.
         if (app.Rig is not null) ImGui.TextDisabled(Path.GetFileName(app.Rig.SourcePath));
         else if (app.Model is not null) ImGui.TextDisabled(Path.GetFileName(app.Model.SourcePath));
-        else ImGui.TextDisabled("nothing loaded — pass --app.Model <path.glb> or --app.Rig <rigged.glb>");
+        else ImGui.TextDisabled("nothing loaded — pass --model <path.glb> or --rig <rigged.glb>");
 
         if (ImGui.CollapsingHeader("image", ImGuiTreeNodeFlags.DefaultOpen))
         {
@@ -451,11 +453,11 @@ internal sealed class ViewerPanels
 
         if (ImGui.CollapsingHeader("sun", ImGuiTreeNodeFlags.DefaultOpen))
         {
-            ImGui.SliderFloat("yaw", ref SunYaw, -MathF.PI, MathF.PI);
-            ImGui.SliderFloat("pitch", ref SunPitch, 0.15f, 1.5f);
-
-            var ambient = app.Scene.AmbientStrength;
-            if (ImGui.SliderFloat("ambient", ref ambient, 0f, 0.4f)) app.Scene.AmbientStrength = ambient;
+            // The sun's own controls are GONE from here, not moved: StudioScene declares azimuth,
+            // elevation, intensity, ambient and shadow extent with [Tune], so the diagnostics
+            // overlay renders them and the command line parses them without this file mentioning
+            // any of it. What is left below is this viewer's own — a trail is not the stage's.
+            ImGui.TextDisabled("sun, ambient and shadow extent are in the Scene panel");
 
             ImGui.Checkbox("trail", ref ShowTrail);
             if (ShowTrail) ImGui.SliderFloat("trail seconds", ref TrailSeconds, 0.25f, 8f);
@@ -533,127 +535,38 @@ internal sealed class ViewerPanels
     //     has another, so the picture is fitted inside with letterboxing. Stage C picks through
     //     THAT rect, not the panel's — which is exactly the offset-and-scale case ViewDeclaration's
     //     two rectangles exist for, and the case a full-window view could never exercise.
+    /// <summary>
+    /// The viewport, drawn by the shell — and the pick, which stays here.
+    /// </summary>
+    /// <remarks>
+    /// What is left of a 130-line panel: a call, and the one decision the widget must not make.
+    /// <see cref="ViewportPanel.Clicked"/> says the pointer was pressed on the picture; what that
+    /// MEANS — which view declaration to cast through, whether a node or a joint is selected —
+    /// is this tool's business and nobody else's.
+    /// </remarks>
     public void DrawViewportPanel()
     {
-        if (app.ViewportId == 0) return;
+        viewport.Draw(
+            app.ViewportId,
+            app.ViewportCamera,
+            app.Host?.LogicalSize ?? (16, 9),
+            footer: $"frame {app.Frames} · yaw {app.ViewportCamera.Yaw:0.00} · " +
+                    $"{viewport.ImageSize.X:0}x{viewport.ImageSize.Y:0}");
 
-        // <b>ImGui does not close a window for you.</b> Begin(name, ref open) draws the X and sets
-        // the flag; NOT calling Begin next frame is what actually closes it. Calling it regardless
-        // left the window on screen while the render was switched off — so the X looked like it
-        // froze the picture, which is a considerably worse thing for a button to appear to do.
-        if (!ViewportOpen) return;
+        app.ViewportPanelSize = viewport.PanelSize;
+        app.ViewportImageMin = viewport.ImageMin;
+        app.ViewportImageSize = viewport.ImageSize;
 
-        ImGui.SetNextWindowSize(new Vector2(520, 340), ImGuiCond.FirstUseEver);
-        ImGui.SetNextWindowPos(new Vector2(480, 470), ImGuiCond.FirstUseEver);
-        if (!ImGui.Begin("viewport", ref ViewportOpen))
+        if (viewport.Clicked is { } pointer && app.ViewportView is { } declared)
         {
-            ImGui.End();
-            return;
+            app.PickThrough(declared, pointer);
         }
-
-        var vYaw = app.ViewportCamera.Yaw;
-        var vPitch = app.ViewportCamera.Pitch;
-        var vDist = app.ViewportCamera.Distance;
-        if (ImGui.SliderFloat("yaw", ref vYaw, -MathF.PI, MathF.PI)) app.ViewportCamera.Yaw = vYaw;
-        if (ImGui.SliderFloat("pitch", ref vPitch, app.ViewportCamera.MinPitch, app.ViewportCamera.MaxPitch))
-        {
-            app.ViewportCamera.Pitch = vPitch;
-        }
-
-        if (ImGui.SliderFloat("dist", ref vDist, app.ViewportCamera.MinDistance, app.ViewportCamera.MaxDistance))
-        {
-            app.ViewportCamera.Distance = vDist;
-        }
-
-        var available = ImGui.GetContentRegionAvail();
-        if (available.X < 32f || available.Y < 32f)
-        {
-            ImGui.End();
-            return;
-        }
-
-        // Read for NEXT frame's projection. Reading it here rather than guessing is the whole
-        // reason the lag is one frame and not permanent.
-        app.ViewportPanelSize = available;
-
-        // Largest rect with the TARGET's aspect that fits the panel, centred. Stretching to fill
-        // would make the picture disagree with the projection it was drawn through, and every ray
-        // cast into it afterwards would be wrong by that same stretch — silently, and only on
-        // panels whose shape happens not to match.
-        var (targetW, targetH) = app.Host?.LogicalSize ?? (16, 9);
-        var targetAspect = targetH > 0 ? targetW / (float)targetH : 16f / 9f;
-        var fitted = available.X / available.Y > targetAspect
-            ? new Vector2(available.Y * targetAspect, available.Y)
-            : new Vector2(available.X, available.X / targetAspect);
-
-        var cursor = ImGui.GetCursorScreenPos();
-        var offset = (available - fitted) * 0.5f;
-        ImGui.SetCursorScreenPos(cursor + offset);
-
-        app.ViewportImageMin = cursor + offset;
-        app.ViewportImageSize = fitted;
-        ImGui.Image(app.ViewportId, fitted);
-
-        // <b>An Image is not an interactive item, and IsItemActive on one is always false.</b>
-        // ImGui.Image calls ItemAdd with a bounding box — enough for IsItemHovered — but it runs no
-        // ButtonBehavior and mints no id, so nothing can ever hold it "active". Dragging on the
-        // picture therefore did nothing at all: the wheel worked, a click picked, and the one
-        // gesture a viewport exists for was silently inert.
-        //
-        // An InvisibleButton over the same rectangle is the idiom. It gives the picture an id and
-        // real press/drag state, and the Image underneath still draws — the button is placed back
-        // at the image's own origin rather than after it.
-        ImGui.SetCursorScreenPos(app.ViewportImageMin);
-        ImGui.InvisibleButton("##viewport-surface", fitted, ImGuiButtonFlags.MouseButtonLeft);
-
-        // ── Stage C: driving a view from inside the widget ───────────────────
-        // <b>Not through IInputHandler, and that is forced rather than chosen.</b> The viewport is
-        // an ImGui window, so ImGui captures the pointer over it, GestureOwnership hands the press
-        // to the UI, and the application's input handler is never called — correctly. The picture
-        // is an ImGui ITEM, so the only place that can ask "is the pointer on it" is right here,
-        // during layout, using the item state ImGui just computed.
-        //
-        // This is the shape every editor viewport has, and it is worth noticing that the engine
-        // needed no change to allow it: the capture rule was already right, and the widget asking
-        // about itself is what the rule leaves room for.
-        var hovered = ImGui.IsItemHovered();
-        if (ImGui.IsItemActive() && ImGui.IsMouseDragging(ImGuiMouseButton.Left))
-        {
-            var drag = ImGui.GetIO().MouseDelta;
-            app.ViewportCamera.Orbit(drag.X, drag.Y);
-        }
-
-        if (hovered)
-        {
-            var wheel = ImGui.GetIO().MouseWheel;
-            if (wheel != 0f) app.ViewportCamera.Zoom(wheel);
-
-            // <b>The ray, through the view's OWN rectangle.</b> ViewPicking compares the pointer
-            // against the declaration's logical rect, so a picture at an offset inside a panel on a
-            // 2x display picks correctly without a single scale factor written here. That is the
-            // whole claim of carrying two rectangles, and until now nothing had ever declared a
-            // view that was not the whole window.
-            if (ImGui.IsMouseClicked(ImGuiMouseButton.Left) && app.ViewportView is { } declared)
-            {
-                app.PickThrough(declared, ImGui.GetMousePos());
-            }
-        }
-
-        // The frame counter sits next to the picture on purpose: if the numbers advance while the
-        // image does not, the freeze is in what the UI samples rather than in what the camera does,
-        // and those are two completely different bugs to go looking for.
-        var pointer = ImGui.GetMousePos();
-        ImGui.TextDisabled(hovered
-            ? $"pointer {pointer.X - app.ViewportImageMin.X:0}, {pointer.Y - app.ViewportImageMin.Y:0} in view"
-            : "drag to orbit · wheel to zoom · click to pick");
-        ImGui.TextDisabled($"frame {app.Frames} · yaw {app.ViewportCamera.Yaw:0.00} · {fitted.X:0}x{fitted.Y:0}");
-        ImGui.End();
     }
 
     // <b>The asset's own textures, drawn.</b> Stage A of the view arc, and the first thing in this
     // engine to put a non-font image on screen.
     //
-    // The lab has reported texture COUNTS since it learned to load a app.Model — "1 image across 12
+    // The lab has reported texture COUNTS since it learned to load a model — "1 image across 12
     // parts" — and a count is the least interesting fact about a texture. Which image, at what
     // size, and whether it is the one you meant are all answerable by looking, and until the UI
     // layer could read `cmd.TextureId` there was nowhere to look.
@@ -699,7 +612,7 @@ internal sealed class ViewerPanels
         }
 
         ImGui.Separator();
-        ImGui.TextDisabled($"sun depth  {LabRenderer.ShadowMapSize}x{LabRenderer.ShadowMapSize}");
+        ImGui.TextDisabled($"sun depth  {StudioRenderer.ShadowMapSize}x{StudioRenderer.ShadowMapSize}");
 
         // Red-scale, and that is the format rather than a fault: a single-channel depth image
         // sampled by a colour shader is (d, 0, 0, 1). It answers a coarse question — is the caster

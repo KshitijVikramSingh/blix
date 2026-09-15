@@ -4,7 +4,7 @@ using Blix.Core;
 using Blix.Graphics;
 using Blix.Graphics.Images;
 using Blix.Graphics.Vulkan;
-using Blix.Tools.Preview;
+using Blix.Tools.Studio;
 using Blix.Diagnostics;
 using Blix.Runtime.Silk;
 
@@ -103,6 +103,13 @@ public static class Program
         // tool parses it by hand because it has no session — so the two names agree by care rather
         // than by construction, and that difference is the standing argument for eventually giving
         // it one.
+        // <b>The stage self-test: rung four, exercised.</b> The extension hook lets a tool add a
+        // pass of its own, and a hook nothing calls is a hook that rots. This declares a trivial
+        // pass over the scene colour and asserts its record delegate ran — so the mechanism is
+        // checked by something rather than shipped on faith, and deleting the loop that records
+        // extensions fails it immediately.
+        var stageSelfTest = args.Contains("--stage-selftest");
+
         var maskRoot = ArgValue(args, "--mask-root");
         var maskFalloff = int.TryParse(ArgValue(args, "--mask-falloff"), out var mf) ? Math.Max(0, mf) : 0;
 
@@ -128,10 +135,24 @@ public static class Program
         var loop = new CaptureLoop(
             output, options.ExitAfterFrames, modelPath, rigPath, clipName, clipTime, xray, advance,
             driveRoot, instances, lockstep, viewport, sequence, maskRoot, maskFalloff, skeletonOnly,
-            zoom);
+            zoom, stageSelfTest, args);
         using (var window = new Window(loop, options))
         {
             window.Run();
+        }
+
+        // The stage self-test judges, so it exits non-zero rather than only printing. A mechanism
+        // check that reports failure and returns 0 is a mechanism check nobody runs twice.
+        if (stageSelfTest)
+        {
+            if (loop.ExtensionRecords == 0)
+            {
+                Console.Error.WriteLine(
+                    "stage self-test: the extension pass was declared and NEVER recorded — rung four is broken.");
+                return 1;
+            }
+
+            Console.WriteLine($"stage self-test: the extension pass recorded {loop.ExtensionRecords} frame(s)");
         }
 
         if (loop.Written is { } path)
@@ -157,8 +178,7 @@ public static class Program
 
 internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 {
-    private readonly LabRenderer renderer = new();
-    private LabScene scene = LabScene.Default();
+    private readonly StudioRenderer renderer = new();
     private readonly string outputPath;
     private readonly int captureOnFrame;
 
@@ -167,7 +187,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private Matrix4x4 viewProjection = Matrix4x4.Identity;
 
     private readonly string? modelPath;
-    private LabModel? model;
+    private StudioModel? model;
     private Matrix4x4 modelTransform = Matrix4x4.Identity;
 
     private readonly string? rigPath;
@@ -179,9 +199,61 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private readonly List<Vector3> rootPath = new();
     private Vector3 rootTravel;
     private float rigDrawnHeight = 3f;
-    private LabRig? rig;
+    private StudioRig? rig;
     private ClipPlayer? player;
     private readonly bool skeletonOnly;
+    private readonly bool stageSelfTest;
+
+    // Kept whole so the stage's declared knobs can be applied to the scene once it exists. This
+    // tool parses its own flags in Main; the stage's it does not parse at all.
+    private readonly string[] args = Array.Empty<string>();
+    private int extensionRecords;
+
+    internal int ExtensionRecords => extensionRecords;
+
+    /// <summary>
+    /// Rung four, exercised: a pass this tool adds to the stage, and proof that it ran.
+    /// </summary>
+    /// <remarks>
+    /// It draws nothing. What is being checked is the seam — that a tool gets a window to declare a
+    /// pass before the graph compiles, and that the stage then records it every frame. A hook with
+    /// no consumer is a hook that rots, and this is the cheapest consumer that is honest: it makes
+    /// no claim about what an extension would be FOR, only that one is possible.
+    /// </remarks>
+    /// <summary>
+    /// The stage's own knobs, from the same declaration that renders them as a panel elsewhere.
+    /// </summary>
+    /// <remarks>
+    /// <b>Without this, --sun-elevation was accepted and ignored.</b> Declaring a knob on
+    /// StudioScene makes a flag exist; it does not make any particular tool read it, and this one
+    /// parses its arguments by hand in Main and never built an ObjectTunables at all. A flag that
+    /// silently does nothing is worse than one that does not exist, which is how this was found.
+    /// </remarks>
+    private void ApplyStageKnobs()
+    {
+        try
+        {
+            new ObjectTunables(renderer).Apply(args);
+        }
+        catch (ArgumentException bad)
+        {
+            Console.Error.WriteLine(bad.Message);
+            Environment.Exit(1);
+        }
+    }
+
+    private void ExtendStage(StudioGraph stage)
+    {
+        // Declared here because this is the only window in which a pass CAN be declared. Recorded
+        // elsewhere, every frame, because the stage offers no hook for that and needs none — see
+        // OnRender below.
+        selfTestPass = stage.Graph.GraphicsPass("shot.selftest")
+            .Target(stage.SceneColour, LoadOp.Load, StoreOp.Store)
+            .Shader(stage.Lit)
+            .Handle;
+    }
+
+    private PassHandle selfTestPass;
     private readonly float zoom;
     private readonly string? maskRoot;
     private readonly int maskFalloff;
@@ -222,15 +294,19 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         string? maskRoot = null,
         int maskFalloff = 0,
         bool skeletonOnly = false,
-        float zoom = 1f)
+        float zoom = 1f,
+        bool stageSelfTest = false,
+        string[]? args = null)
     {
+        this.args = args ?? Array.Empty<string>();
         this.skeletonOnly = skeletonOnly;
+        this.stageSelfTest = stageSelfTest;
         this.zoom = zoom;
         this.maskRoot = maskRoot;
         this.maskFalloff = maskFalloff;
         this.viewport = viewport;
         this.sequence = sequence;
-        instanceCount = Math.Clamp(instances, 1, LabRig.MaxInstances);
+        instanceCount = Math.Clamp(instances, 1, StudioRig.MaxInstances);
         this.lockstep = lockstep;
         this.xray = xray;
         this.advance = advance;
@@ -249,13 +325,16 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         device = (VulkanGraphicsDevice)graphicsDevice;
-        renderer.Load(device, Path.Combine(AppContext.BaseDirectory, "Shaders"));
+        renderer.Load(
+            device,
+            Path.Combine(AppContext.BaseDirectory, "Shaders"),
+            stageSelfTest ? ExtendStage : null);
 
         LoadRig();
 
         if (modelPath is null || !File.Exists(modelPath)) return;
-        model = LabModel.Load(device, modelPath);
-        scene = LabScene.GroundOnly();
+        model = StudioModel.Load(device, modelPath);
+        ApplyStageKnobs();
         var extent = model.LongestExtent;
         var scale = extent > 0.001f ? 3f / extent : 1f;
         modelTransform = Matrix4x4.CreateScale(scale)
@@ -271,8 +350,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     {
         if (rigPath is null || !File.Exists(rigPath)) return;
 
-        rig = LabRig.Load(device, rigPath, renderer.SkinnedProgram);
-        scene = LabScene.GroundOnly();
+        rig = StudioRig.Load(device, rigPath, renderer.SkinnedProgram);
+        ApplyStageKnobs();
 
         player = new ClipPlayer(rig.Skeleton);
 
@@ -341,7 +420,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // <b>One palette per body, packed into one buffer at a known stride.</b> Each instance is the
         // same clip at a different phase, which is what makes the picture evidence: three bodies in
         // the same pose would prove only that three draws happened.
-        palettes = new BonePaletteSet(rig.Skeleton.BoneCount, LabRig.MaxInstances);
+        palettes = new BonePaletteSet(rig.Skeleton.BoneCount, StudioRig.MaxInstances);
         var spacing = MathF.Max(1.2f, rig.LongestExtent * scale * 0.75f);
         var half = (instanceCount - 1) * 0.5f;
         for (var i = 0; i < instanceCount; i++)
@@ -422,7 +501,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             }
         }
 
-        LabRig.ComputeBoneWorlds(rig.Skeleton, player.Pose, boneWorlds);
+        StudioRig.ComputeBoneWorlds(rig.Skeleton, player.Pose, boneWorlds);
 
         Console.WriteLine(
             $"rig: {Path.GetFileName(rigPath)} — {rig.Skeleton.BoneCount} bone(s), {rig.Clips.Count} clip(s), " +
@@ -497,9 +576,18 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         var panelView = Matrix4x4.CreateLookAt(panelEye, target, Vector3.UnitY)
                         * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, aspect, 0.1f, 120f);
 
+        var views = new List<IStudioView>();
+        if (model is not null) views.Add(new ModelView(model, modelTransform));
+        if (!skeletonOnly && rig is not null) views.Add(new RigView(rig, palettes?.Count ?? 0));
+
+        // The self-test's own pass, recorded by this tool rather than by the stage. Any point
+        // before Render will do: RenderGraph.Pass stores a scope against a handle and Execute walks
+        // declaration order, so this runs after the stage's passes because that is where it was
+        // declared — not because of where this line sits.
+        if (stageSelfTest) renderer.Graph.Pass(selfTestPass, _ => extensionRecords++);
+
         renderer.Render(
-            commandList, scene, viewProjection, eye, model, modelTransform,
-            skeletonOnly ? null : rig, palettes?.Count ?? 0,
+            commandList, viewProjection, eye, views,
             viewport ? panelView : null, panelEye);
 
         // Debug() runs BEFORE this in the frame, so it annotates with whatever was stored last time
@@ -565,7 +653,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             palettes.Add(rig.Skeleton, pose, rig.MeshNodeTransform * placement);
         }
 
-        LabRig.ComputeBoneWorlds(rig.Skeleton, instancePoses[0], boneWorlds);
+        StudioRig.ComputeBoneWorlds(rig.Skeleton, instancePoses[0], boneWorlds);
     }
 
     private void CaptureSequenceFrame()
@@ -594,7 +682,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     /// Draws debug geometry INTO THE SCENE TARGET, so a capture holds it too.
     /// </summary>
     /// <remarks>
-    /// The view names <see cref="LabRenderer.SceneSurface"/> rather than the swapchain, which is what puts
+    /// The view names <see cref="StudioRenderer.SceneSurface"/> rather than the swapchain, which is what puts
     /// these lines inside the image that gets read back. That was impossible until the line drawer learned
     /// to bake a pipeline per render target — it had exactly one, against the default pass, so debug
     /// geometry was silently swapchain-only and a capture could only ever show the scene without the
@@ -625,9 +713,9 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // Lifted a hair off the ground quad: both at y=0 z-fight, and a patchy grid reads as a
         // rendering fault rather than as two coplanar surfaces.
         debug.Draw.Grid("floor", new Vector3(0f, 0.02f, 0f), 24f, 24, new GraphicsColor(0.35f, 0.4f, 0.5f, 1f));
-        debug.Draw.Arrow("sun", scene.SunDirection * 7f, Vector3.Zero, new GraphicsColor(1f, 0.9f, 0.5f, 1f));
+        debug.Draw.Arrow("sun", renderer.SunDirection * 7f, Vector3.Zero, new GraphicsColor(1f, 0.9f, 0.5f, 1f));
 
-        // The skeleton, through the SAME LabSkeletonView the viewer uses. That shared call is the
+        // The skeleton, through the SAME SkeletonGizmo the viewer uses. That shared call is the
         // whole reason the lab is a library: a capture drawn by its own copy of the overlay could
         // disagree with the window, and a picture that disagrees with the thing it documents is
         // worse than no picture.
@@ -640,13 +728,13 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             for (var i = 0; i < instancePlacements.Count; i++)
             {
                 using var instanceScope = debug.Scope($"i{i}");
-                LabRig.ComputeBoneWorlds(rig.Skeleton, instancePoses[i], worlds);
-                LabSkeletonView.Draw(
+                StudioRig.ComputeBoneWorlds(rig.Skeleton, instancePoses[i], worlds);
+                SkeletonGizmo.Draw(
                     debug,
                     rig.Skeleton,
                     worlds,
                     rig.MeshNodeTransform * instancePlacements[i],
-                    LabSkeletonView.Options.Default,
+                    SkeletonGizmo.Options.Default,
                     selectedBone: -1,
                     restWorlds: null,
                     include: rig.DeformHierarchy,
@@ -714,7 +802,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     // Instance i's clip: i steps along the rig's own list from whichever clip the subject is on.
     // In order rather than random, so two runs of the same arguments produce the same picture.
-    private static int ClipIndexFor(LabRig rig, AnimationClip? subject, int instance)
+    private static int ClipIndexFor(StudioRig rig, AnimationClip? subject, int instance)
     {
         var start = 0;
         for (var i = 0; i < rig.Clips.Count; i++)
@@ -729,10 +817,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     // Rebuilt per call rather than cached, because Debug() runs a handful of times in a bounded run
     // and a 41-matrix walk is not worth a field. Cache it the day a capture has hundreds of bones.
-    private static Matrix4x4[] RestWorlds(LabRig rig, ClipPlayer player)
+    private static Matrix4x4[] RestWorlds(StudioRig rig, ClipPlayer player)
     {
         var worlds = new Matrix4x4[rig.Skeleton.BoneCount];
-        LabRig.ComputeBoneWorlds(rig.Skeleton, player.RestPose, worlds);
+        StudioRig.ComputeBoneWorlds(rig.Skeleton, player.RestPose, worlds);
         return worlds;
     }
 

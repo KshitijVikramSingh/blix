@@ -27,6 +27,8 @@
 # wrist is more than four pixels.
 #     tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --mask Unarmed_Melee_Attack_Punch_A \
 #         --mask-root spine --mask-falloff 2 --skeleton-only --xray --zoom 2 --out mask.png
+# --stage-selftest exercises the studio's extension hook: it declares a pass of its own and fails
+# if the stage never records it. A mechanism check, not a picture — it exits non-zero on its own.
 # --lockstep is the negative control: every body on one clip at one instant, which must come
 # back as exactly ONE pose fingerprint. Varied must come back as N.
 set -euo pipefail

@@ -1,3 +1,4 @@
+using Blix.Verify;
 using System.Numerics;
 using Blix;
 using Blix.Geometry;
@@ -174,65 +175,56 @@ world.Overlap(new Circle(new(0, 2), 1.0f), overlapResults);
 t.ExpectTrue("World overlap finds OBB", overlapResults.Any(c => c.Owner == "obstacle"));
 
 t.PrintSummary();
-Environment.Exit(t.FailedCount);
+Environment.Exit(t.Failed);
 
 // ---------------------------------------------------------------------------------
 
-sealed class TestRunner
+// <b>The domain half, and only the domain half.</b> Hit-and-miss against a collision result is this
+// suite's vocabulary and belongs here; the tally, the OK/FAIL printing and the exit count are the
+// same in every judge in this tree and come from Blix.Verify. A runner that knew what a raycast was
+// would be the framework this deliberately is not.
+//
+// <b>Extension methods, not a subclass.</b> The tally is sealed on purpose: a base class is the
+// one shape that would turn a shared helper into a framework, because inheriting it makes every
+// suite a KIND of thing rather than a caller of one. Hit-and-miss is this suite's vocabulary,
+// expressed on top of Expect, and it reaches the runner the same way any caller would.
+static class Physics2DChecks
 {
-    int passed;
-    int failed;
-    public int FailedCount => failed;
-
-    public void ExpectHit(string label, CollisionHit2D? actual, float? expectedDepth = null, float? expectedMinDepth = null, float tolerance = 1e-3f)
+    public static void ExpectHit(this TestRunner t, string label, CollisionHit2D? actual, float? expectedDepth = null, float? expectedMinDepth = null, float tolerance = 1e-3f)
     {
-        if (actual is null) { Fail(label, "expected hit, got null"); return; }
+        if (actual is null) { t.Fail(label, "expected hit, got null"); return; }
         var hit = actual.Value;
         if (expectedDepth is float d && MathF.Abs(hit.Depth - d) > tolerance)
         {
-            Fail(label, $"depth {hit.Depth:0.0000} != expected {d:0.0000}");
+            t.Fail(label, $"depth {hit.Depth:0.0000} != expected {d:0.0000}");
             return;
         }
         if (expectedMinDepth is float md && hit.Depth < md)
         {
-            Fail(label, $"depth {hit.Depth:0.0000} below floor {md:0.0000}");
+            t.Fail(label, $"depth {hit.Depth:0.0000} below floor {md:0.0000}");
             return;
         }
-        Pass(label);
+        t.Pass(label);
     }
 
-    public void ExpectMiss(string label, CollisionHit2D? actual)
+    public static void ExpectMiss(this TestRunner t, string label, CollisionHit2D? actual)
     {
-        if (actual is not null) { Fail(label, $"expected miss, got hit at {actual.Value.Point} depth {actual.Value.Depth:0.0000}"); return; }
-        Pass(label);
+        if (actual is not null) { t.Fail(label, $"expected miss, got hit at {actual.Value.Point} depth {actual.Value.Depth:0.0000}"); return; }
+        t.Pass(label);
     }
 
-    public void ExpectRayHit(string label, CollisionHit2D? actual, float expectedTime, float tolerance = 1e-3f)
+    public static void ExpectRayHit(this TestRunner t, string label, CollisionHit2D? actual, float expectedTime, float tolerance = 1e-3f)
     {
-        if (actual is null) { Fail(label, "expected hit, got null"); return; }
+        if (actual is null) { t.Fail(label, "expected hit, got null"); return; }
         var hit = actual.Value;
         if (MathF.Abs(hit.Time - expectedTime) > tolerance)
         {
-            Fail(label, $"time {hit.Time:0.0000} != expected {expectedTime:0.0000}");
+            t.Fail(label, $"time {hit.Time:0.0000} != expected {expectedTime:0.0000}");
             return;
         }
-        Pass(label);
+        t.Pass(label);
     }
 
-    public void ExpectRayMiss(string label, CollisionHit2D? actual) => ExpectMiss(label, actual);
+    public static void ExpectRayMiss(this TestRunner t, string label, CollisionHit2D? actual) => t.ExpectMiss(label, actual);
 
-    public void ExpectTrue(string label, bool condition)
-    {
-        if (!condition) { Fail(label, "predicate was false"); return; }
-        Pass(label);
-    }
-
-    void Pass(string label) { Console.WriteLine($"  OK   {label}"); passed++; }
-    void Fail(string label, string detail) { Console.WriteLine($"  FAIL {label} - {detail}"); failed++; }
-
-    public void PrintSummary()
-    {
-        Console.WriteLine();
-        Console.WriteLine($"{passed}/{passed + failed} passed, {failed} failed");
-    }
 }

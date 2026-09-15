@@ -30,7 +30,7 @@ Not "what an engine usually has" — what is in this tree, checked rather than r
   `Skeleton.ComputeBonePalette` → `BonePalette` → skinned shader, plus `ClipPlayer`,
   `PoseBlend`, `PoseDelta`, `RootMotion` (`Between`/`AcrossLoop`/`Strip`) and
   `BonePaletteSet` for N bodies in one draw — all landed by the animation arc.
-- **The lab family.** `Blix.Tools.Preview` — one library, three executables, reflected
+- **The lab family.** `Blix.Tools.Studio` — one library, three executables, reflected
   binding model, gizmos that depth-test, capture to PNG, `--frames-out` sequences, a
   headless probe with an exit code, and a root that constructs its parts.
 
@@ -459,7 +459,7 @@ belong in different places:
   demonstrated at its own expense. **Not decided, and not this stage's problem.** Whether Blix ever
   defines "a state machine" is open; it may be data, it may be each game's code, it may be nothing.
 
-And the tooling half is not a lab at all — it is **another toolchain app**. `Blix.Tools.Preview`
+And the tooling half is not a lab at all — it is **another toolchain app**. `Blix.Tools.Studio`
 already loads rigs, plays and blends clips, draws skeletons and judges clips headlessly; masks and
 layers are the missing half of that same subject, and building a second rig viewer in the character
 lab to hold them was a mistake this arc caught itself about to make twice.
@@ -516,7 +516,7 @@ Two rules keep this from becoming the third stranded abstraction:
 
 1. **No shader program, no material, no pass, no instancing count** crosses into it. If a parameter
    exists only so a caller can say how it will be drawn, the line is in the wrong place.
-2. **`LabRig` is rewritten on top of it, not left beside it.** An extraction whose first consumer
+2. **`StudioRig` is rewritten on top of it, not left beside it.** An extraction whose first consumer
    keeps its own copy has not been proved by anything. The toolchain lab is the existing consumer
    and it has to actually move.
 

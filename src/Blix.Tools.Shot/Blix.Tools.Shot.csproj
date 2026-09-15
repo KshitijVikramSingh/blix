@@ -7,7 +7,7 @@
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
     <ProjectReference Include="..\Blix.Graphics.Images\Blix.Graphics.Images.csproj" />
     <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
-    <ProjectReference Include="..\Blix.Tools.Preview\Blix.Tools.Preview.csproj" />
+    <ProjectReference Include="..\Blix.Tools.Studio\Blix.Tools.Studio.csproj" />
     <ProjectReference Include="..\Blix.Runtime.Silk\Blix.Runtime.Silk.csproj" />
   </ItemGroup>
 

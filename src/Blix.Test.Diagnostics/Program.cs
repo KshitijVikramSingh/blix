@@ -1,3 +1,4 @@
+using Blix.Verify;
 using System.Numerics;
 using Blix.Geometry;
 using Blix.Core;
@@ -1641,7 +1642,7 @@ var t = new TestRunner();
 }
 
 t.PrintSummary();
-Environment.Exit(t.FailedCount);
+Environment.Exit(t.Failed);
 
 // Busy-wait so a Timer measurement spans at least `targetMs` of wall time.
 // Stopwatch is precise to sub-microsecond on modern hardware, so 1 ms is
@@ -1755,40 +1756,3 @@ sealed class TestDebuggable : IDebuggable
     public void Debug(DebugContext debug) => body?.Invoke(debug);
 }
 
-sealed class TestRunner
-{
-    int passed;
-    int failed;
-    public int FailedCount => failed;
-
-    /// <summary>The action must refuse. A test that only ever asserts success is not a test.</summary>
-    public void ExpectThrows(string label, Action action)
-    {
-        try
-        {
-            action();
-        }
-        catch (Exception)
-        {
-            Pass(label);
-            return;
-        }
-
-        Fail(label, "it did not throw");
-    }
-
-    public void ExpectTrue(string label, bool condition)
-    {
-        if (!condition) { Fail(label, "predicate was false"); return; }
-        Pass(label);
-    }
-
-    public void Pass(string label) { Console.WriteLine($"  OK   {label}"); passed++; }
-    public void Fail(string label, string detail) { Console.WriteLine($"  FAIL {label} - {detail}"); failed++; }
-
-    public void PrintSummary()
-    {
-        Console.WriteLine();
-        Console.WriteLine($"{passed}/{passed + failed} passed, {failed} failed");
-    }
-}

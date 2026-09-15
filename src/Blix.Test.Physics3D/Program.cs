@@ -1,3 +1,4 @@
+using Blix.Verify;
 using System.Numerics;
 using Blix.Geometry;
 
@@ -214,64 +215,39 @@ var t = new TestRunner();
 t.PrintSummary();
 return t.Failed;
 
-sealed class TestRunner
+// <b>The domain half only.</b> A capsule sweep's hit-or-miss is this suite's vocabulary; the tally,
+// the OK/FAIL printing and the exit count come from Blix.Verify, which learns no geometry.
+//
+// Extension methods rather than a subclass: the tally is sealed on purpose, because inheriting it
+// would make every suite a KIND of thing instead of a caller of one.
+static class Physics3DChecks
 {
-    private int passed;
-
-    public int Failed { get; private set; }
-
-    public void ExpectHit(
+    public static void ExpectHit(this TestRunner t, 
         string label, CollisionHit? actual,
         float? expectedDepth = null, float? expectedMinDepth = null, float tolerance = 1e-3f)
     {
-        if (actual is null) { Fail(label, "expected hit, got null"); return; }
+        if (actual is null) { t.Fail(label, "expected hit, got null"); return; }
         var hit = actual.Value;
         if (expectedDepth is float d && MathF.Abs(hit.Depth - d) > tolerance)
         {
-            Fail(label, $"depth {hit.Depth:0.0000} != expected {d:0.0000}");
+            t.Fail(label, $"depth {hit.Depth:0.0000} != expected {d:0.0000}");
             return;
         }
         if (expectedMinDepth is float md && hit.Depth < md)
         {
-            Fail(label, $"depth {hit.Depth:0.0000} below floor {md:0.0000}");
+            t.Fail(label, $"depth {hit.Depth:0.0000} below floor {md:0.0000}");
             return;
         }
-        Pass(label);
+        t.Pass(label);
     }
 
-    public void ExpectMiss(string label, CollisionHit? actual)
+    public static void ExpectMiss(this TestRunner t, string label, CollisionHit? actual)
     {
         if (actual is not null)
         {
-            Fail(label, $"expected miss, got hit at {actual.Value.Point} depth {actual.Value.Depth:0.0000}");
+            t.Fail(label, $"expected miss, got hit at {actual.Value.Point} depth {actual.Value.Depth:0.0000}");
             return;
         }
-        Pass(label);
-    }
-
-    public void ExpectTrue(string label, bool condition, string detail = "predicate was false")
-    {
-        if (!condition) { Fail(label, detail); return; }
-        Pass(label);
-    }
-
-    public void ExpectClose(string label, float actual, float expected, float tolerance = 1e-3f)
-    {
-        if (MathF.Abs(actual - expected) > tolerance)
-        {
-            Fail(label, $"{actual:0.00000} != expected {expected:0.00000} (tol {tolerance})");
-            return;
-        }
-        Pass(label);
-    }
-
-    private void Pass(string label) { Console.WriteLine($"  OK   {label}"); passed++; }
-
-    private void Fail(string label, string detail) { Console.WriteLine($"  FAIL {label} — {detail}"); Failed++; }
-
-    public void PrintSummary()
-    {
-        Console.WriteLine();
-        Console.WriteLine($"{passed}/{passed + Failed} passed, {Failed} failed");
+        t.Pass(label);
     }
 }

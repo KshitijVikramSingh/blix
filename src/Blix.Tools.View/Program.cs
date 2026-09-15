@@ -5,7 +5,7 @@ using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
-using Blix.Tools.Preview;
+using Blix.Tools.Studio;
 using Blix.Runtime.Silk;
 using ImGuiNET;
 
@@ -15,7 +15,7 @@ namespace Blix.Tools.View;
 //
 // ── Proves ──────────────────────────────────────────────────────────────────
 //   • Several executables over ONE lab: the shaders, scene and renderer live in
-//     Blix.Tools.Preview and arrive here as content. This project declares no
+//     Blix.Tools.Studio and arrive here as content. This project declares no
 //     shaders and has no render code.
 //   • Reflected binding: every descriptor set, UBO offset and push range comes from
 //     spirv-cross sidecars, not from a hand-written ShaderInterface.
@@ -24,7 +24,7 @@ namespace Blix.Tools.View;
 //     consumer that wanted it.
 //   • Chassis: IUiSource panel, IInputHandler with UI capture, host-owned --frames,
 //     named views and trails.
-//   • Skeletal animation, made visible: ClipPlayer drives a pose, LabSkeletonView
+//   • Skeletal animation, made visible: ClipPlayer drives a pose, SkeletonGizmo
 //     draws it, and RootMotion says where a clip travels. The three composition
 //     modes are three ENGINE primitives with no lab-local maths behind them —
 //     ClipPlayer, PoseBlend.Lerp, PoseDelta.LayerOnto. The last two had unit tests
@@ -98,16 +98,16 @@ public static class Program
 
 internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHandler, IDisposable
 {
-    private readonly LabRenderer renderer = new();
-    private LabScene scene = LabScene.Default();
+    private readonly StudioRenderer renderer = new();
+    private readonly List<IStudioView> views = new();
     private readonly string? modelPath;
-    private LabModel? model;
+    private StudioModel? model;
     private Matrix4x4 modelTransform = Matrix4x4.Identity;
 
     // What is selected and what a click selects. Its own class because picking has two genuinely
     // different questions in it (a model's node against drawn bounds, a rig's joint against a drawn
     // cross) and both were inline in a method that also did camera work.
-    private readonly LabSelection selection = new();
+    private readonly StudioSelection selection = new();
 
     // <b>Constructed here and called from here.</b> The root builds its parts and drives them; there
     // is no registry, no discovery and no "which tool is active" branch. A different executable over
@@ -126,7 +126,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     private readonly string? secondClip;
     private readonly int requestedInstances;
     private readonly PoseMode startMode;
-    private LabRig? rig;
+    private StudioRig? rig;
     private RigSession? session;
 
     private Matrix4x4 rigBase = Matrix4x4.Identity;
@@ -165,9 +165,9 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // <b>Two cameras, one class.</b> The window's view and the panel's viewport each carried their
     // own yaw/pitch/distance and their own copy of the spherical-to-cartesian arithmetic — the same
     // decision written twice inside one file, which is the §4 bar met without either copy leaving
-    // the building. LabCamera owns the orbit; where a drag came from stays here, because the two
+    // the building. StudioCamera owns the orbit; where a drag came from stays here, because the two
     // arrive by genuinely different routes (the host for one, an ImGui item for the other).
-    private readonly LabCamera camera = new(yaw: 0.7f, pitch: 0.45f, distance: 11f);
+    private readonly StudioCamera camera = new(yaw: 0.7f, pitch: 0.45f, distance: 11f);
     private bool dragging;
 
     // <b>A click is a press that did not become a drag.</b> Left-drag orbits, so selecting on the
@@ -217,7 +217,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // proves nothing about views. Starts looking along a different axis so the two pictures are
     // obviously not the same picture.
     private nint viewportId;
-    private readonly LabCamera viewportCamera = new(yaw: -1.4f, pitch: 0.25f, distance: 7f)
+    private readonly StudioCamera viewportCamera = new(yaw: -1.4f, pitch: 0.25f, distance: 7f)
     {
         // Looking a little higher than the main view, and from the other side, so the two pictures
         // are obviously not the same picture.
@@ -238,21 +238,24 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // Written down rather than hidden because stage D has to decide whether that lag is what the
     // substrate wants or whether layout and submission should be split so the rect is known first.
     private Vector2 viewportPanelSize = new(480f, 270f);
+
+    // The aspect the viewport's projection was actually built with, kept so it can be published
+    // beside the target's rather than assumed to match it.
+    private float viewportAspect = 16f / 9f;
     private Vector2 viewportImageMin;
     private Vector2 viewportImageSize;
 
     // ── What the panels may read ────────────────────────────────────────────
     // Deliberately a list rather than "make everything internal": each line here is a thing the UI
     // is allowed to know about, and adding one is a decision rather than a side effect.
-    internal LabRenderer Renderer => renderer;
+    internal StudioRenderer Renderer => renderer;
 
-    internal LabScene Scene => scene;
 
-    internal LabModel? Model => model;
+    internal StudioModel? Model => model;
 
     internal Matrix4x4 ModelTransform => modelTransform;
 
-    internal LabRig? Rig => rig;
+    internal StudioRig? Rig => rig;
 
     internal RigSession? Session => session;
 
@@ -262,9 +265,9 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // panel cannot do for itself, which are the command line and knowing that something moved.
     private ObjectTunables? tunables;
 
-    internal LabSelection Selection => selection;
+    internal StudioSelection Selection => selection;
 
-    internal LabCamera ViewportCamera => viewportCamera;
+    internal StudioCamera ViewportCamera => viewportCamera;
 
     internal IReadOnlyList<(string Label, nint Id, int Width, int Height)> UiImages => uiImages;
 
@@ -328,10 +331,9 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             return;
         }
 
-        model = LabModel.Load(vk, modelPath);
+        model = StudioModel.Load(vk, modelPath);
 
         // The model is the subject now; the box ring is a backdrop that hides it.
-        scene = LabScene.GroundOnly();
 
         // Assets arrive at whatever scale their author used — the Quaternius tank is ~14 units
         // long — so the lab normalises to a couple of metres and seats the model on the ground.
@@ -367,20 +369,22 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             return;
         }
 
-        rig = LabRig.Load(vk, rigPath, renderer.SkinnedProgram);
-        if (rig.Skeleton.BoneCount > LabRig.MaxBones)
+        rig = StudioRig.Load(vk, rigPath, renderer.SkinnedProgram);
+        if (rig.Skeleton.BoneCount > StudioRig.MaxBones)
         {
             // Said here rather than discovered on the GPU: past the shader's array bound the draw
             // reads whatever follows the buffer, which renders as a character exploded across the
             // map with no validation error to explain it.
             Console.Error.WriteLine(
                 $"{Path.GetFileName(rigPath)} has {rig.Skeleton.BoneCount} bones; the lab's skinned " +
-                $"shader holds {LabRig.MaxBones}. Raise the bound in lab_skinned.vert.");
+                $"shader holds {StudioRig.MaxBones}. Raise the bound in studio_skinned.vert.");
         }
 
-        scene = LabScene.GroundOnly();
         session = new RigSession(rig, requestedInstances) { Mode = startMode };
-        tunables = new ObjectTunables(session);
+        // TWO targets. The session's knobs are Bespoke because this viewer draws better controls
+        // for them; the SCENE's are not, so the stage's look is rendered by reflection — a Scene
+        // panel this file does not write, and --sun-elevation it does not parse.
+        tunables = new ObjectTunables(session, renderer);
         foreach (var member in new[]
         {
             nameof(RigSession.Mode), nameof(RigSession.Weight), nameof(RigSession.MaskRoot),
@@ -463,7 +467,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             $"bounds {rig.BoundsMin.Y:0.00}..{rig.BoundsMax.Y:0.00} tall, scaled x{rigScale:0.000}");
     }
 
-    private static int NamedClip(LabRig rig, string name)
+    private static int NamedClip(StudioRig rig, string name)
     {
         for (var i = 0; i < rig.Clips.Count; i++)
         {
@@ -479,7 +483,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         return 0;
     }
 
-    private static int PreferredClip(LabRig rig, string[] names, int fallback)
+    private static int PreferredClip(StudioRig rig, string[] names, int fallback)
     {
         foreach (var wanted in names)
         {
@@ -498,16 +502,24 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         cameraPosition = camera.Position;
         viewProjection = camera.ViewProjection(aspect);
 
-        scene.SetSunDirection(new Vector3(
-            MathF.Cos(panels.SunPitch) * MathF.Sin(panels.SunYaw),
-            MathF.Sin(panels.SunPitch),
-            MathF.Cos(panels.SunPitch) * MathF.Cos(panels.SunYaw)));
-
         // The viewport's own camera. Aspect comes from the PANEL, not the window — that is the
         // whole difference between a second view and a second copy of this one, and it is why
-        // LabCamera takes the aspect rather than storing it.
-        var viewportAspect = viewportPanelSize.Y > 1f ? viewportPanelSize.X / viewportPanelSize.Y : 16f / 9f;
+        // StudioCamera takes the aspect rather than storing it.
+        // <b>The TARGET's aspect, not the panel's.</b> The viewport target is half the swapchain on
+        // both sides, so it carries the window's aspect; the panel then letterboxes the picture to
+        // that same aspect. Projecting through the panel's aspect instead made three numbers out of
+        // one — measured at 2.089 against a target of 1.684 in a default window, a 24% horizontal
+        // stretch that turns a sphere into an ellipse and throws every pick off by the same factor.
+        //
+        // The fit's own comment had stated the invariant all along: stretching "would make the
+        // picture disagree with the projection it was drawn through, and every ray cast into it
+        // afterwards would be wrong by that same stretch". It was the caller breaking it.
+        //
+        // A panel-shaped picture would need a panel-shaped target, which means resizing a graph
+        // resource as a window is dragged. Letterboxing is the cheaper answer and the one the panel
+        // was already written for.
         viewportCameraPosition = viewportCamera.Position;
+        viewportAspect = aspect;
         viewportViewProjection = viewportCamera.ViewProjection(viewportAspect);
 
         UpdateRig(time.Delta);
@@ -561,9 +573,14 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // draw carries a descriptor set, not a copy of the matrices.
         if (rig is not null && session is not null) rig.UploadPalettes(session.Palettes);
 
+        // What this tool puts on the stage. Rebuilt per frame rather than cached, because the
+        // instance count follows the session and a stale RigView would draw last frame's crowd.
+        views.Clear();
+        if (model is not null) views.Add(new ModelView(model, modelTransform));
+        if (rig is not null) views.Add(new RigView(rig, session?.Palettes.Count ?? 0));
+
         renderer.Render(
-            commandList, scene, viewProjection, cameraPosition, model, modelTransform,
-            rig, session?.Palettes.Count ?? 0,
+            commandList, viewProjection, cameraPosition, views,
             panels.ViewportOpen ? viewportViewProjection : null, viewportCameraPosition);
     }
 
@@ -587,8 +604,20 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         debug.State.DepthTestDrawing = panels.DepthTestGizmos;
         debug.Values.Value("frames", frames);
-        debug.Values.Value("sun", scene.SunDirection);
-        debug.Stats.Gauge("objects", scene.Objects.Count);
+        debug.Values.Value("sun", renderer.SunDirection);
+
+        // <b>Three aspects that must be one number, published so they can be checked.</b> The
+        // viewport target is half the swapchain, the panel letterboxes to that same aspect, and the
+        // projection is read back out of the matrix it was actually built with rather than from the
+        // value that was meant to go in. A bounded run reports all three, so "they agree" is an
+        // observation and not a comment — and it was False before this was fixed.
+        // MatchSwapchainGraphSize(0.5) halves both sides, so the target carries the window's shape.
+        var targetAspect = aspect;
+        var panelAspect = viewportPanelSize.Y > 1f ? viewportPanelSize.X / viewportPanelSize.Y : 0f;
+        debug.Values.Value("aspect/viewport-target", targetAspect);
+        debug.Values.Value("aspect/viewport-projection", viewportAspect);
+        debug.Values.Value("aspect/panel", panelAspect);
+        debug.Values.Value("aspect/agree", MathF.Abs(viewportAspect - targetAspect) < 0.01f);
 
         // Declared with BOTH rectangles rather than through the whole-surface shorthand: that one
         // fills logical and physical from RenderFrameContext, which is physical pixels, so on a 2x
@@ -651,7 +680,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         // The sun, drawn where it is actually pointing — an arrow that is wrong is the
         // fastest way to notice a lighting convention has drifted.
-        var sunFrom = scene.SunDirection * 7f;
+        var sunFrom = renderer.SunDirection * 7f;
         debug.Draw.Arrow("sun", sunFrom, Vector3.Zero, new GraphicsColor(1f, 0.9f, 0.5f, 1f));
 
         if (model is not null) DrawModelGizmos(debug);
@@ -681,7 +710,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         if (panels.ShowSkeleton)
         {
-            var options = LabSkeletonView.Options.Default with
+            var options = SkeletonGizmo.Options.Default with
             {
                 Joints = panels.ShowJoints,
                 RestGhost = panels.ShowRestGhost,
@@ -721,12 +750,12 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // selecting "the left wrist" on three bodies at once would highlight three joints and point at
     // none of them.
     private void DrawInstanceSkeleton(
-        DebugContext debug, int instance, IReadOnlyList<Matrix4x4> worlds, LabSkeletonView.Options options)
+        DebugContext debug, int instance, IReadOnlyList<Matrix4x4> worlds, SkeletonGizmo.Options options)
     {
         if (rig is null || session is null || instance >= session.Placements.Count) return;
 
         using var scope = debug.Scope($"i{instance}");
-        LabSkeletonView.Draw(
+        SkeletonGizmo.Draw(
             debug,
             rig.Skeleton,
             worlds,
@@ -905,7 +934,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         if (mainView is { } view) Pick(view, position);
     }
 
-    /// <summary>Turns a pointer into a selection through one view. See <see cref="LabSelection"/>.</summary>
+    /// <summary>Turns a pointer into a selection through one view. See <see cref="StudioSelection"/>.</summary>
     private void Pick(in ViewDeclaration view, Vector2 pointer) =>
         selection.PickThrough(
             view,

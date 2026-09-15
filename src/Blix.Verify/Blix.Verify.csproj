@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    NO PROJECT REFERENCES, DELIBERATELY. Six suites and probes need this and they sit at
+    different heights: Blix.Test.Physics3D references only Blix.Geometry, Blix.Test.Apps
+    only Blix.Core, and neither of those sees the other. A shared helper that dragged
+    anything would make a pure-math suite link a graphics stack to count failures.
+
+    It is also why this is not in Blix.Core. A tally of claims is not a contract.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

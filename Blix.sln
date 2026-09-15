@@ -43,7 +43,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Diagnostics.Overlay", 
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RTSGame", "src\RTSGame\RTSGame.csproj", "{DCA6A102-33E7-45AD-9C2A-9D8314077DB8}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Tools.Preview", "src\Blix.Tools.Preview\Blix.Tools.Preview.csproj", "{476EC2D0-50A9-4804-ADC0-9ADB2E86FED5}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Tools.Studio", "src\Blix.Tools.Studio\Blix.Tools.Studio.csproj", "{476EC2D0-50A9-4804-ADC0-9ADB2E86FED5}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Tools.View", "src\Blix.Tools.View\Blix.Tools.View.csproj", "{592C72EB-7629-4F83-86A6-FF9EB05C3049}"
 EndProject
@@ -92,6 +92,10 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Demos.VulkanParticles", "src\Demos\Blix.Demos.VulkanParticles\Blix.Demos.VulkanParticles.csproj", "{9813A3D0-11AB-4C92-8413-F539E248AB10}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Demos.VulkanSponza", "src\Demos\Blix.Demos.VulkanSponza\Blix.Demos.VulkanSponza.csproj", "{8414D1F0-4779-485D-916C-740D9626700B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Tools.Studio.Shell", "src\Blix.Tools.Studio.Shell\Blix.Tools.Studio.Shell.csproj", "{429C233D-54DC-4D87-BE7B-F5379FA6E2B1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Verify", "src\Blix.Verify\Blix.Verify.csproj", "{7453DBA1-A6FA-472D-AFF6-2AD1B9D7C96C}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -270,6 +274,14 @@ Global
 		{8414D1F0-4779-485D-916C-740D9626700B}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{8414D1F0-4779-485D-916C-740D9626700B}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{8414D1F0-4779-485D-916C-740D9626700B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{429C233D-54DC-4D87-BE7B-F5379FA6E2B1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{429C233D-54DC-4D87-BE7B-F5379FA6E2B1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{429C233D-54DC-4D87-BE7B-F5379FA6E2B1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{429C233D-54DC-4D87-BE7B-F5379FA6E2B1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7453DBA1-A6FA-472D-AFF6-2AD1B9D7C96C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7453DBA1-A6FA-472D-AFF6-2AD1B9D7C96C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7453DBA1-A6FA-472D-AFF6-2AD1B9D7C96C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7453DBA1-A6FA-472D-AFF6-2AD1B9D7C96C}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{08594E40-7628-4DEF-B48B-A5F7305FEA22} = {3B3A88A9-9354-470A-A0C5-9CF4E0EB69F5}
@@ -316,5 +328,7 @@ Global
 		{C8CF21DF-D024-444C-B365-A6CA371207E3} = {0137BE33-7ED7-4E11-A6C3-586B7B8663C2}
 		{9813A3D0-11AB-4C92-8413-F539E248AB10} = {0137BE33-7ED7-4E11-A6C3-586B7B8663C2}
 		{8414D1F0-4779-485D-916C-740D9626700B} = {0137BE33-7ED7-4E11-A6C3-586B7B8663C2}
+		{429C233D-54DC-4D87-BE7B-F5379FA6E2B1} = {3B3A88A9-9354-470A-A0C5-9CF4E0EB69F5}
+		{7453DBA1-A6FA-472D-AFF6-2AD1B9D7C96C} = {3B3A88A9-9354-470A-A0C5-9CF4E0EB69F5}
 	EndGlobalSection
 EndGlobal

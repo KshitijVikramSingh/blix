@@ -1,3 +1,4 @@
+using Blix.Verify;
 using System.Numerics;
 using Blix;
 using Blix.Assets;
@@ -2450,7 +2451,7 @@ static ShaderInterface MinimalShader() => new(new[]
 // A pass body records; the GPU work happens at Execute. A command that kept a
 // reference to the caller's scratch array therefore read it long after the caller
 // had moved on — and a caller reusing one array across draws gave every draw the
-// array's final contents. VkLineDrawer hit it, LabRenderer hit it (seven objects at
+// array's final contents. VkLineDrawer hit it, StudioRenderer hit it (seven objects at
 // the seventh's transform, six apparently missing, draw counts perfectly healthy),
 // and the index-offset DrawIndexed overload exists because it bit vertex buffers.
 {
@@ -3197,7 +3198,7 @@ static ShaderInterface MinimalShader() => new(new[]
 }
 
 t.PrintSummary();
-return t.FailedCount;
+return t.Failed;
 
 // Did the action throw? Section AT asserts on the record/execute check firing, and a bare
 // try/catch at each site would bury the assertion it exists to make.
@@ -3239,64 +3240,6 @@ static Vector4 GlslMul(float[] colMajor, Vector4 v)
     return new Vector4(rx, ry, rz, rw);
 }
 
-sealed class TestRunner
-{
-    int passed;
-    int failed;
-    public int FailedCount => failed;
-
-    public void ExpectTrue(string label, bool condition)
-    {
-        if (!condition) { Fail(label, "predicate was false"); return; }
-        Pass(label);
-    }
-
-    /// <summary>The action must refuse. A test that only ever asserts success is not a test.</summary>
-    public void ExpectThrows(string label, Action action)
-    {
-        try
-        {
-            action();
-        }
-        catch (Exception)
-        {
-            Pass(label);
-            return;
-        }
-
-        Fail(label, "it did not throw");
-    }
-
-    public void ExpectClose(string label, Vector4 actual, Vector4 expected, float epsilon = 1e-3f)
-    {
-        var diff = actual - expected;
-        if (diff.Length() > epsilon)
-        {
-            Fail(label, $"expected ({expected.X},{expected.Y},{expected.Z},{expected.W}) got ({actual.X},{actual.Y},{actual.Z},{actual.W})");
-            return;
-        }
-        Pass(label);
-    }
-
-    public void ExpectClose(string label, float actual, float expected, float epsilon = 1e-3f)
-    {
-        if (MathF.Abs(actual - expected) > epsilon)
-        {
-            Fail(label, $"expected {expected} got {actual}");
-            return;
-        }
-        Pass(label);
-    }
-
-    public void Pass(string label) { Console.WriteLine($"  OK   {label}"); passed++; }
-    public void Fail(string label, string detail) { Console.WriteLine($"  FAIL {label} - {detail}"); failed++; }
-
-    public void PrintSummary()
-    {
-        Console.WriteLine();
-        Console.WriteLine($"{passed}/{passed + failed} passed, {failed} failed");
-    }
-}
 
 // Fixture for Section S: a [Tune]-tagged object the reflector should surface.
 enum TuneFixtureMode { A, B, C }

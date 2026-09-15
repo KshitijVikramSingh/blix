@@ -3,7 +3,7 @@ using Blix.Assets;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 
-namespace Blix.Tools.Preview;
+namespace Blix.Tools.Studio;
 
 /// <summary>
 /// An imported glTF, kept as its authored node hierarchy rather than one fused blob.
@@ -24,7 +24,7 @@ namespace Blix.Tools.Preview;
 /// already takes — so a real asset needed no shader change to appear.
 /// </para>
 /// </remarks>
-public sealed class LabModel : IDisposable
+public sealed class StudioModel : IDisposable
 {
     /// <summary>One drawable piece: a node's primitive, with where it sits and what it looks like.</summary>
     public readonly record struct Part(
@@ -64,7 +64,7 @@ public sealed class LabModel : IDisposable
 
     public IReadOnlyList<Node> Nodes => nodes;
 
-    /// <summary>The distinct base-colour images this asset uploaded. See LabRig.Images for why.</summary>
+    /// <summary>The distinct base-colour images this asset uploaded. See StudioRig.Images for why.</summary>
     public IReadOnlyList<Image> Images => images;
 
     /// <summary>Assembled bounds across every mesh-bearing node, in model space.</summary>
@@ -91,9 +91,9 @@ public sealed class LabModel : IDisposable
         }
     }
 
-    public static LabModel Load(VulkanGraphicsDevice vk, string path)
+    public static StudioModel Load(VulkanGraphicsDevice vk, string path)
     {
-        var model = new LabModel { device = vk, SourcePath = path };
+        var model = new StudioModel { device = vk, SourcePath = path };
 
         // A material without a base-colour texture still samples one, so the shader needs no
         // branch: glTF defines the factor as multiplying the texture, and white is the identity.

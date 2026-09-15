@@ -1,3 +1,4 @@
+using Blix.Verify;
 using System.Reflection;
 using System.Text.Json;
 using Blix.Core;
@@ -26,7 +27,7 @@ public static class Program
         // this suite never runs; without one, Dispatch returns null and we do.
         if (BlixApps.Dispatch(args) is { } code) return code;
 
-        var t = new Runner();
+        var t = new TestRunner();
         var self = Assembly.GetExecutingAssembly();
 
         // ── declaration ─────────────────────────────────────────────────────
@@ -83,7 +84,7 @@ public static class Program
     /// it is rewritten every build — but it could drift by the two readers disagreeing
     /// about what an attribute means, and nothing else in the layer would notice.
     /// </remarks>
-    private static void IndexMatchesReflection(Runner t, Assembly self, BlixApps.DeclaredApp[] found)
+    private static void IndexMatchesReflection(TestRunner t, Assembly self, BlixApps.DeclaredApp[] found)
     {
         var path = Path.Combine(
             AppContext.BaseDirectory, Path.GetFileNameWithoutExtension(self.Location) + ".blixapps.json");
@@ -140,55 +141,4 @@ public static class Program
 
     private sealed record IndexedApp(string Name, string? Summary, bool Headed, bool IsEntryPoint);
 
-    private sealed class Runner
-    {
-        private int passed;
-
-        public int Failed { get; private set; }
-
-        public void Expect(string label, bool condition, string? detail = null)
-        {
-            if (condition) Pass(label);
-            else Fail(label, detail ?? "predicate was false");
-        }
-
-        public void ExpectThrows(string label, Action action, string mustMention)
-        {
-            try
-            {
-                action();
-                Fail(label, "it did not throw");
-            }
-            catch (Exception thrown)
-            {
-                var message = thrown is TargetInvocationException { InnerException: { } inner }
-                    ? inner.Message
-                    : thrown.Message;
-
-                // A throw is not enough. An error that does not say what IS available is
-                // how a mis-declared tool stays invisible, which is the failure this whole
-                // layer exists to make impossible.
-                if (message.Contains(mustMention, StringComparison.Ordinal)) Pass(label);
-                else Fail(label, $"threw, but never mentioned '{mustMention}': {message}");
-            }
-        }
-
-        private void Pass(string label)
-        {
-            Console.WriteLine($"  OK   {label}");
-            passed++;
-        }
-
-        private void Fail(string label, string detail)
-        {
-            Console.WriteLine($"  FAIL {label} — {detail}");
-            Failed++;
-        }
-
-        public void PrintSummary()
-        {
-            Console.WriteLine();
-            Console.WriteLine($"{passed}/{passed + Failed} passed, {Failed} failed");
-        }
-    }
 }
