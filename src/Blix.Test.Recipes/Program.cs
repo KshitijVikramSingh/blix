@@ -1,3 +1,5 @@
+using Blix.Assets;
+using System.Diagnostics;
 using Blix.Cooked;
 using Blix.Recipes;
 using Blix.Verify;
@@ -83,7 +85,7 @@ public static class Program
 
         // ── The recipes, as declared ────────────────────────────────────────
         var recipes = BlixRecipes.Find(typeof(MeshRecipe).Assembly);
-        t.Expect("Blix ships three recipes", recipes.Length == 3, $"found {recipes.Length}");
+        t.Expect("Blix ships four recipes", recipes.Length == 4, $"found {recipes.Length}");
         t.ExpectTrue("every recipe id is a 4cc", recipes.All(r => r.Id.Length == CookStamp.RecipeIdLength));
         t.Expect("no two recipes share an id",
             recipes.Select(r => r.Id).Distinct(StringComparer.Ordinal).Count() == recipes.Length);
@@ -108,7 +110,112 @@ public static class Program
             BlixRecipes.For(typeof(MeshRecipe).Assembly, "a/b/c.glb")!.OutputFor("a/b/c.glb")
                 .EndsWith("c.blixmesh", StringComparison.Ordinal));
 
+        // ── the fourth recipe, which is the point of having a substrate ─────
+        // <b>These check what it cost to add one, not what fonts do.</b> The claim the whole cook
+        // arc rests on is that a recipe costs the recipe — stamping, discovery, coverage,
+        // re-cooking and reporting all arriving for free. Three recipes written together prove
+        // nothing about that. A fourth, written afterwards against the finished substrate, is the
+        // only honest test of it.
+        var fontTemp = Path.Combine(Path.GetTempPath(), $"blix-font-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(fontTemp);
+        var wasOn = AssetLoadLog.Enabled;
+        try
+        {
+            // The spec and its TTF, copied out of a project so this bakes a real font.
+            var ttfSource = FindFile("BowlbyOne-Regular.ttf");
+            var specSource = FindFile("BowlbyOne-Regular.font.json");
+            if (ttfSource is null || specSource is null)
+            {
+                t.Fail("a font to bake is findable", "no BowlbyOne under the repo");
+            }
+            else
+            {
+                File.Copy(ttfSource, Path.Combine(fontTemp, Path.GetFileName(ttfSource)));
+                var spec = Path.Combine(fontTemp, Path.GetFileName(specSource));
+                File.Copy(specSource, spec);
+
+                // Rasterised, for comparison — the path every launch took before this recipe.
+                var slow = Stopwatch.StartNew();
+                var rasterised = new FontImporter().ImportSource(
+                    new AssetImportContext(AssetId.Parse("t/font"), spec));
+                slow.Stop();
+
+                var baked = Path.ChangeExtension(spec, ".blixfont");
+                FontRecipe.CookOne(spec, baked);
+                t.ExpectTrue("the font recipe writes an artifact", File.Exists(baked));
+
+                // It is a Blix cooked artifact like any other, readable by a tool that knows
+                // nothing about fonts — which is what the shared preamble bought.
+                var header = CookedFile.TryReadHeader(baked);
+                t.ExpectTrue("and it carries the shared preamble", header is not null);
+                t.Expect("stamped by the font recipe", header!.Value.Stamp.Recipe == "fnt1",
+                    $"got '{header.Value.Stamp.Recipe}'");
+                t.ExpectTrue("recording the sizes it baked", header.Value.Stamp.Parameters.StartsWith("sizes=", StringComparison.Ordinal));
+                t.ExpectTrue("and its source, relatively",
+                    !Path.IsPathRooted(header.Value.Stamp.SourcePath));
+
+                // Round-trip: the baked atlas must BE the rasterised one, not merely resemble it.
+                var fast = Stopwatch.StartNew();
+                var read = BlixFontReader.Read(baked);
+                fast.Stop();
+
+                t.Expect("the baked font has every size", read.Sizes.Count == rasterised.Sizes.Count,
+                    $"{rasterised.Sizes.Count} -> {read.Sizes.Count}");
+                t.Expect("and every glyph",
+                    read.Sizes.Sum(x => x.Glyphs.Count) == rasterised.Sizes.Sum(x => x.Glyphs.Count));
+                t.ExpectTrue("with identical coverage bytes",
+                    read.Sizes.Zip(rasterised.Sizes).All(pair => pair.First.AlphaPixels.SequenceEqual(pair.Second.AlphaPixels)));
+                t.ExpectTrue("and identical metrics",
+                    read.Sizes.Zip(rasterised.Sizes).All(pair =>
+                        Math.Abs(pair.First.Ascent - pair.Second.Ascent) < 1e-4f
+                        && Math.Abs(pair.First.LineHeight - pair.Second.LineHeight) < 1e-4f));
+
+                Console.WriteLine($"     rasterise {slow.Elapsed.TotalMilliseconds:0.0} ms  ->  read baked {fast.Elapsed.TotalMilliseconds:0.0} ms");
+
+                // Reproducible, like the other three.
+                var first = File.ReadAllBytes(baked);
+                FontRecipe.CookOne(spec, baked);
+                t.ExpectTrue("a second cook is byte-identical", first.SequenceEqual(File.ReadAllBytes(baked)));
+
+                // And the loader prefers it, and says so.
+                AssetLoadLog.Start();
+                new FontImporter().Import(new AssetImportContext(AssetId.Parse("t/font2"), spec));
+                var cookedReport = AssetLoadLog.Drain().SingleOrDefault();
+                t.ExpectTrue("the loader reports a baked font as Cooked",
+                    cookedReport is { Mode: AssetLoadMode.Cooked, Recipe: "fnt1" });
+
+                File.Delete(baked);
+                AssetLoadLog.Start();
+                new FontImporter().Import(new AssetImportContext(AssetId.Parse("t/font3"), spec));
+                var sourceReport = AssetLoadLog.Drain().SingleOrDefault();
+                t.ExpectTrue("and without one, reports Source and says why",
+                    sourceReport is { Mode: AssetLoadMode.Source, Warning: { Length: > 0 } });
+            }
+        }
+        finally
+        {
+            AssetLoadLog.Enabled = wasOn;
+            AssetLoadLog.Drain();
+            try { Directory.Delete(fontTemp, recursive: true); } catch (IOException) { }
+        }
+
         t.PrintSummary();
         return t.Failed;
+    }
+
+    /// <summary>Walks up from the binary to the repo and finds one file by name.</summary>
+    /// <remarks>
+    /// A suite that baked a synthetic font would test the serialiser and nothing else. This bakes
+    /// the font four projects actually ship, so a change that breaks real content fails here.
+    /// </remarks>
+    private static string? FindFile(string name)
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "src"))) dir = dir.Parent;
+        return dir is null
+            ? null
+            : Directory.EnumerateFiles(Path.Combine(dir.FullName, "src"), name, SearchOption.AllDirectories)
+                .FirstOrDefault(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                                  && !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal));
     }
 }

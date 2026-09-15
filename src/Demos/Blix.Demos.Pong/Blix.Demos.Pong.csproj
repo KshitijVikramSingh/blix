@@ -45,4 +45,10 @@
   </ItemGroup>
 
 
+
+  <!-- What this project cooks, declared so coverage cannot drift. -->
+  <ItemGroup>
+    <CookFont Include="Assets/fonts/*.font.json" />
+  </ItemGroup>
+
 </Project>

@@ -43,7 +43,62 @@ public sealed class FontImporter : IAssetImporter<FontData>
 
     public string Name => "font.json";
 
+    /// <summary>
+    /// Loads a font, preferring a baked <c>.blixfont</c> sibling over rasterising the TTF.
+    /// </summary>
+    /// <remarks>
+    /// <b>Same shape as the mesh path, deliberately.</b> A cooked sibling is used when present and
+    /// the source is parsed when it is not, and — unlike every loader in this tree before K-E — it
+    /// says which it did. Before the cook existed this rasterised every glyph at every requested
+    /// size on every launch, because <c>.font.json</c> was a recipe with nothing to run it.
+    /// </remarks>
     public FontData Import(AssetImportContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        var baked = Path.ChangeExtension(context.SourcePath, ".blixfont");
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+
+        if (File.Exists(baked))
+        {
+            var cooked = BlixFontReader.Read(baked);
+            if (AssetLoadLog.Enabled)
+            {
+                AssetLoadLog.Report(new AssetLoadReport(
+                    SourcePath: context.SourcePath,
+                    CookedPath: baked,
+                    Mode: AssetLoadMode.Cooked,
+                    Bytes: new FileInfo(baked).Length,
+                    LoadMs: watch.Elapsed.TotalMilliseconds,
+                    Recipe: CookedFile.TryReadHeader(baked)?.Stamp.Recipe));
+            }
+
+            return cooked;
+        }
+
+        var rasterised = ImportSource(context);
+        if (AssetLoadLog.Enabled)
+        {
+            AssetLoadLog.Report(new AssetLoadReport(
+                SourcePath: context.SourcePath,
+                CookedPath: null,
+                Mode: AssetLoadMode.Source,
+                Bytes: rasterised.Sizes.Sum(x => (long)x.AlphaPixels.Length),
+                LoadMs: watch.Elapsed.TotalMilliseconds,
+                Warning: "no .blixfont sibling — every glyph rasterised at every size"));
+        }
+
+        return rasterised;
+    }
+
+    /// <summary>
+    /// Rasterises the TTF, ignoring any baked sibling.
+    /// </summary>
+    /// <remarks>
+    /// Public because the font recipe calls it: a recipe that went through <see cref="Import"/>
+    /// would read its own previous output and cook that forever.
+    /// </remarks>
+    public FontData ImportSource(AssetImportContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
         if (!File.Exists(context.SourcePath))

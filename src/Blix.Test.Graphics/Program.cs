@@ -3482,7 +3482,7 @@ static ShaderInterface MinimalShader() => new(new[]
             .Select(x => (x.Method, Attr: x.Attr!))
             .ToList();
 
-        t.Expect("AW.8 Blix ships three recipes", recipes.Count == 3, $"found {recipes.Count}");
+        t.Expect("AW.8 Blix ships four recipes", recipes.Count == 4, $"found {recipes.Count}");
 
         // Every id is exactly four characters, because it rides in the preamble as a 4cc — a
         // five-character id would silently truncate and attribute files to a recipe that does not
@@ -3511,6 +3511,8 @@ static ShaderInterface MinimalShader() => new(new[]
             recipes.Any(r => r.Attr.Id == BlixTex.ShippedRecipe && r.Attr.Produces == ".blixtex"));
         t.ExpectTrue("AW.8 the probe recipe's declared id is the one BlixProbe stamps",
             recipes.Any(r => r.Attr.Id == BlixProbe.ShippedRecipe && r.Attr.Produces == ".blixprobe"));
+        t.ExpectTrue("AW.8 the font recipe's declared id is the one BlixFont stamps",
+            recipes.Any(r => r.Attr.Id == BlixFont.ShippedRecipe && r.Attr.Produces == ".blixfont"));
 
         // And the signature the index will look for. A recipe declared with the wrong shape is the
         // worst failure this can have — found at the moment it is needed rather than at build.

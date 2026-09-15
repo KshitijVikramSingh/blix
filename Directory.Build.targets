@@ -186,6 +186,7 @@
     <BlixCook Include="@(CookMesh)"    Recipe="gmsh" Cooked=".blixmesh" />
     <BlixCook Include="@(CookTexture)" Recipe="gtex" Cooked=".blixtex" />
     <BlixCook Include="@(CookProbe)"   Recipe="gpro" Cooked=".blixprobe" />
+    <BlixCook Include="@(CookFont)"    Recipe="fnt1" Cooked=".blixfont" />
   </ItemGroup>
 
   <!-- Inputs/Outputs as item transforms, so MSBuild rebinds @(BlixCook) inside the

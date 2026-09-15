@@ -58,6 +58,7 @@
   <ItemGroup>
     <CookMesh Include="Assets/models/**/*.gltf" />
     <CookMesh Include="Assets/models/**/*.glb" />
+    <CookFont Include="Assets/fonts/*.font.json" />
   </ItemGroup>
 
 </Project>
