@@ -19,19 +19,23 @@ namespace Blix.Tools.Studio;
 /// depth or write the scene colour is not much of a pass. What it does not hand out is
 /// <see cref="RenderGraph.Compile"/> — the stage compiles, once, when it is ready.
 /// </para>
+/// <para>
+/// <b>Declaring is all it does.</b> There is no per-frame hook here and there was one: a tool
+/// records its own pass through <see cref="StudioRenderer.Graph"/> whenever it likes, because
+/// Execute walks declaration order rather than call order. A one-shot delegate handing you a window
+/// is scoping; a per-frame delegate running your code is hosting, and only the second was ever the
+/// thing to be careful about.
+/// </para>
 /// </remarks>
 public sealed class StudioGraph
 {
-    private readonly List<(PassHandle Pass, Action<RenderPassBuilder> Record)> extensions;
-
     internal StudioGraph(
         RenderGraph graph,
         GraphResourceHandle sceneColour,
         GraphResourceHandle sceneDepth,
         GraphResourceHandle shadowDepth,
         ShaderInterface lit,
-        ShaderInterface shadow,
-        List<(PassHandle, Action<RenderPassBuilder>)> extensions)
+        ShaderInterface shadow)
     {
         Graph = graph;
         SceneColour = sceneColour;
@@ -39,7 +43,6 @@ public sealed class StudioGraph
         ShadowDepth = shadowDepth;
         Lit = lit;
         Shadow = shadow;
-        this.extensions = extensions;
     }
 
     /// <summary>Declare passes on this. Do not compile it — the stage does that.</summary>
@@ -69,18 +72,4 @@ public sealed class StudioGraph
     /// <summary>The caster interface — a matrix and no materials.</summary>
     public ShaderInterface Shadow { get; }
 
-    /// <summary>
-    /// Record this pass every frame, after the stage's own.
-    /// </summary>
-    /// <remarks>
-    /// Two calls rather than one — declare the pass on <see cref="Graph"/>, then say how to record
-    /// it — because the graph's builder returns a handle and the recording is a per-frame delegate.
-    /// Folding them together would mean capturing the builder, which is a construction-time thing,
-    /// inside something called every frame.
-    /// </remarks>
-    public void Record(PassHandle pass, Action<RenderPassBuilder> record)
-    {
-        ArgumentNullException.ThrowIfNull(record);
-        extensions.Add((pass, record));
-    }
 }

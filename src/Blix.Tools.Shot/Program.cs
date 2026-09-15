@@ -244,13 +244,16 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     private void ExtendStage(StudioGraph stage)
     {
-        var pass = stage.Graph.GraphicsPass("shot.selftest")
+        // Declared here because this is the only window in which a pass CAN be declared. Recorded
+        // elsewhere, every frame, because the stage offers no hook for that and needs none — see
+        // OnRender below.
+        selfTestPass = stage.Graph.GraphicsPass("shot.selftest")
             .Target(stage.SceneColour, LoadOp.Load, StoreOp.Store)
             .Shader(stage.Lit)
             .Handle;
-
-        stage.Record(pass, _ => extensionRecords++);
     }
+
+    private PassHandle selfTestPass;
     private readonly float zoom;
     private readonly string? maskRoot;
     private readonly int maskFalloff;
@@ -576,6 +579,12 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         var views = new List<IStudioView>();
         if (model is not null) views.Add(new ModelView(model, modelTransform));
         if (!skeletonOnly && rig is not null) views.Add(new RigView(rig, palettes?.Count ?? 0));
+
+        // The self-test's own pass, recorded by this tool rather than by the stage. Any point
+        // before Render will do: RenderGraph.Pass stores a scope against a handle and Execute walks
+        // declaration order, so this runs after the stage's passes because that is where it was
+        // declared — not because of where this line sits.
+        if (stageSelfTest) renderer.Graph.Pass(selfTestPass, _ => extensionRecords++);
 
         renderer.Render(
             commandList, viewProjection, eye, views,

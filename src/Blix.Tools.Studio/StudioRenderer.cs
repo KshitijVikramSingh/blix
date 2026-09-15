@@ -97,9 +97,17 @@ public sealed class StudioRenderer : IDisposable, ITunable
     // reads like a model-loading bug and is not one. White is the identity for a base-colour factor.
     private TextureHandle whiteTexture;
 
-    // Passes a tool added, and how to record each. Empty for every tool that wants the stage as it
-    // comes, which is expected to be most of them.
-    private List<(PassHandle Pass, Action<RenderPassBuilder> Record)> extensions = new();
+    /// <summary>
+    /// The stage's graph, for a tool recording a pass of its own.
+    /// </summary>
+    /// <remarks>
+    /// <b>Recording needs no help from here, which is why there is no per-frame hook.</b>
+    /// RenderGraph.Pass stores a scope against a pass HANDLE, and Execute walks PassOrder —
+    /// declaration order — so when a tool records is irrelevant to when its pass runs. It calls this
+    /// itself, any time before Render, and its pass runs after the stage's because that is when it
+    /// was declared. Scopes are cleared at Execute, so it re-records each frame like everything else.
+    /// </remarks>
+    public RenderGraph Graph => graph;
 
     private readonly byte[] pushScratch = new byte[PushBytes];
     private readonly byte[] casterPushScratch = new byte[CasterPushBytes];
@@ -314,11 +322,12 @@ public sealed class StudioRenderer : IDisposable, ITunable
         // the rig its own pass would mean a second clear, a second sort order, and two places to fix
         // the next time the sun moves.
 
-        // Everything the stage owns exists; nothing is compiled. The one window a tool has.
-        extensions = new List<(PassHandle, Action<RenderPassBuilder>)>();
+        // Everything the stage owns exists; nothing is compiled. The one window a tool has, and a
+        // delegate rather than a property because the window is invisible: after the stage has
+        // declared its passes, before Compile freezes the shape. A one-shot call that hands you the
+        // graph is scoping; it is not the stage running your code.
         extend?.Invoke(new StudioGraph(
-            graph, sceneColourTarget, sceneDepthTarget, shadowTarget,
-            litInterface, shadowInterface, extensions));
+            graph, sceneColourTarget, sceneDepthTarget, shadowTarget, litInterface, shadowInterface));
 
         graph.Compile();
 
@@ -526,10 +535,6 @@ public sealed class StudioRenderer : IDisposable, ITunable
                 foreach (var view in views) view.Draw(draw);
             });
         }
-
-        // A tool's own passes, recorded in the order it added them and after the stage's, so an
-        // outline or an overlay reads the scene depth the lit pass just wrote.
-        foreach (var (pass, record) in extensions) graph.Pass(pass, record);
 
         graph.Execute(commandList);
 
