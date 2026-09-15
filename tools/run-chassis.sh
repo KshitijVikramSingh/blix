@@ -11,8 +11,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PROJECT="$REPO_ROOT/src/Blix.Demos.Chassis/Blix.Demos.Chassis.csproj"
-APPHOST="$REPO_ROOT/src/Blix.Demos.Chassis/bin/Debug/net8.0/Blix.Demos.Chassis"
+PROJECT="$REPO_ROOT/src/Demos/Blix.Demos.Chassis/Blix.Demos.Chassis.csproj"
+APPHOST="$REPO_ROOT/src/Demos/Blix.Demos.Chassis/bin/Debug/net8.0/Blix.Demos.Chassis"
 
 prefix=$(brew --prefix 2>/dev/null || echo "/opt/homebrew")
 if [ ! -f "$prefix/lib/libvulkan.dylib" ]; then

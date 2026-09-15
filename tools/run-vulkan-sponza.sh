@@ -17,12 +17,12 @@
 # cache by timestamp so the second run is fast.
 #
 # Linux + Windows: this whole dance is unnecessary; just
-#   dotnet run --project src/Blix.Demos.VulkanSponza/Blix.Demos.VulkanSponza.csproj
+#   dotnet run --project src/Demos/Blix.Demos.VulkanSponza/Blix.Demos.VulkanSponza.csproj
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PROJECT="$REPO_ROOT/src/Blix.Demos.VulkanSponza/Blix.Demos.VulkanSponza.csproj"
-PUBLISH_DIR="$REPO_ROOT/src/Blix.Demos.VulkanSponza/bin/Publish"
+PROJECT="$REPO_ROOT/src/Demos/Blix.Demos.VulkanSponza/Blix.Demos.VulkanSponza.csproj"
+PUBLISH_DIR="$REPO_ROOT/src/Demos/Blix.Demos.VulkanSponza/bin/Publish"
 RID="osx-arm64"
 
 # The Sponza pack set is large and typically kept outside the repo (e.g. on an
@@ -70,7 +70,7 @@ dotnet publish "$PROJECT" -c Debug -r "$RID" --self-contained true -o "$PUBLISH_
 # project's bin/Debug/net8.0/$RID/Shaders/ during the publish build, but
 # `dotnet publish` doesn't see those .spv files as content and skips them.
 # Mirror them over manually — they're a few KB each.
-SHADER_BUILD_DIR="$REPO_ROOT/src/Blix.Demos.VulkanSponza/bin/Debug/net8.0/$RID/Shaders"
+SHADER_BUILD_DIR="$REPO_ROOT/src/Demos/Blix.Demos.VulkanSponza/bin/Debug/net8.0/$RID/Shaders"
 if [ -d "$SHADER_BUILD_DIR" ]; then
     mkdir -p "$PUBLISH_DIR/Shaders"
     cp -p "$SHADER_BUILD_DIR"/*.spv "$PUBLISH_DIR/Shaders/" 2>/dev/null || true

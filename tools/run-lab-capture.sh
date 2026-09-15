@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launcher for Blix.Labs.Toolchain.Capture — the toolchain lab capture tool.
+# Launcher for Blix.Tools.Shot — the toolchain lab capture tool.
 #
 # Execs the apphost rather than `dotnet run`: Homebrew's $prefix/bin/dotnet is a
 # "#!/bin/bash" wrapper and /bin/bash is SIP-protected, so dyld strips DYLD_* from
@@ -32,8 +32,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PROJECT="$REPO_ROOT/src/Blix.Labs.Toolchain.Capture/Blix.Labs.Toolchain.Capture.csproj"
-APPHOST="$REPO_ROOT/src/Blix.Labs.Toolchain.Capture/bin/Debug/net8.0/Blix.Labs.Toolchain.Capture"
+PROJECT="$REPO_ROOT/src/Blix.Tools.Shot/Blix.Tools.Shot.csproj"
+APPHOST="$REPO_ROOT/src/Blix.Tools.Shot/bin/Debug/net8.0/Blix.Tools.Shot"
 
 prefix=$(brew --prefix 2>/dev/null || echo "/opt/homebrew")
 if [ ! -f "$prefix/lib/libvulkan.dylib" ]; then

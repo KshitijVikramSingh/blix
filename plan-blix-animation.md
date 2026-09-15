@@ -46,9 +46,9 @@ Shipped on `view-first-class`, in the toolchain lab and the engine:
 - `Blix/ClipPlayer.cs` — the extracted ritual: rest reset, loop wrap, zero-duration guard,
   clock, and the root delta.
 - `Blix/RootMotion.cs` — travel between two clip times, correct across the loop seam.
-- `Blix.Labs.Toolchain/LabRig.cs` — a rigged glTF as skeleton + clips + a set-3 palette
+- `Blix.Tools.Preview/LabRig.cs` — a rigged glTF as skeleton + clips + a set-3 palette
   buffer; `ComputeBoneWorlds`; `FindDeformBones`.
-- `Blix.Labs.Toolchain/LabSkeletonView.cs` — the overlay, shared by viewer and capture.
+- `Blix.Tools.Preview/LabSkeletonView.cs` — the overlay, shared by viewer and capture.
 - `Shaders/lab_skinned.vert` + `lab_skinned_shadow.vert`, both reusing the unskinned
   fragment stages.
 - Viewer: `--rig`, transport, clip filter, blend/additive, bone panel, root-motion path.
@@ -253,7 +253,7 @@ or 1 reproduces one input exactly, and a masked blend leaves unmasked bones unto
 ### D2 — the tooling, in the toolchain lab
 
 Masks, layers and blends become things you can **see and check**, in
-`Blix.Labs.Toolchain` — where `LabRig`, `LabSkeletonView` and `RigSession` already are, where the
+`Blix.Tools.Preview` — where `LabRig`, `LabSkeletonView` and `RigSession` already are, where the
 probe already judges clips, and where a rig viewer already exists. Building a second one elsewhere
 was the mistake the character arc caught itself about to make.
 

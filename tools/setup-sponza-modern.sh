@@ -3,7 +3,7 @@
 # Sponza repo packs, producing a split layout: raw sources (.png/.bin/.gltf/
 # .hdr) land in a SRC tree and are cooked out-of-place into a COOKED tree of
 # runtime .blix* (the demos read COOKED; SRC is only re-cook input). By default
-# COOKED = src/Blix.Demos.SponzaModern/Assets and SRC = its "-src" sibling; set
+# COOKED = src/Demos/Blix.Demos.SponzaModern/Assets and SRC = its "-src" sibling; set
 # BLIX_SPONZA_ASSETS (cooked dir) and/or BLIX_SPONZA_SRC (source dir) to place
 # them elsewhere — e.g. an external SSD. BLIX_SPONZA_SRC=$BLIX_SPONZA_ASSETS
 # keeps the legacy combined layout (raw + cooked in one dir).
@@ -45,7 +45,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # cooked set and raw set stay separated on disk (BLIX_SPONZA_SRC overrides).
 # Set BLIX_SPONZA_SRC=$BLIX_SPONZA_ASSETS for the legacy combined layout (raw +
 # cooked interleaved in one dir).
-COOKED="${BLIX_SPONZA_ASSETS:-$REPO_ROOT/src/Blix.Demos.SponzaModern/Assets}"
+COOKED="${BLIX_SPONZA_ASSETS:-$REPO_ROOT/src/Demos/Blix.Demos.SponzaModern/Assets}"
 SRC="${BLIX_SPONZA_SRC:-${COOKED%/}-src}"
 SCRATCH="$(mktemp -d -t blix-sponza-extract.XXXXXX)"
 trap 'rm -rf "$SCRATCH"' EXIT
@@ -147,7 +147,7 @@ copy_pack "pkg_d_10k_candles"  "candles"     "pkg_d_10k_candles"
 
 # Reuse the Walkthrough's HDR sky probe (kloppenheim) so the new demo can
 # bake IBL probes from frame one. Skip if it isn't present.
-WALK_HDR="$REPO_ROOT/src/Blix.Demos.Walkthrough/Assets/textures/sky_hdr.hdr"
+WALK_HDR="$REPO_ROOT/src/Demos/Blix.Demos.Walkthrough/Assets/textures/sky_hdr.hdr"
 if [[ -f "$WALK_HDR" ]]; then
     mkdir -p "$SRC/textures"
     cp -p "$WALK_HDR" "$SRC/textures/sky_hdr.hdr"

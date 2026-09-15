@@ -30,7 +30,7 @@ Not "what an engine usually has" — what is in this tree, checked rather than r
   `Skeleton.ComputeBonePalette` → `BonePalette` → skinned shader, plus `ClipPlayer`,
   `PoseBlend`, `PoseDelta`, `RootMotion` (`Between`/`AcrossLoop`/`Strip`) and
   `BonePaletteSet` for N bodies in one draw — all landed by the animation arc.
-- **The lab family.** `Blix.Labs.Toolchain` — one library, three executables, reflected
+- **The lab family.** `Blix.Tools.Preview` — one library, three executables, reflected
   binding model, gizmos that depth-test, capture to PNG, `--frames-out` sequences, a
   headless probe with an exit code, and a root that constructs its parts.
 
@@ -459,7 +459,7 @@ belong in different places:
   demonstrated at its own expense. **Not decided, and not this stage's problem.** Whether Blix ever
   defines "a state machine" is open; it may be data, it may be each game's code, it may be nothing.
 
-And the tooling half is not a lab at all — it is **another toolchain app**. `Blix.Labs.Toolchain`
+And the tooling half is not a lab at all — it is **another toolchain app**. `Blix.Tools.Preview`
 already loads rigs, plays and blends clips, draws skeletons and judges clips headlessly; masks and
 layers are the missing half of that same subject, and building a second rig viewer in the character
 lab to hold them was a mistake this arc caught itself about to make twice.

@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    A thin entry point onto the lab. It declares NO shaders: they are compiled once by
+    Blix.Tools.Preview and arrive here through that project's content propagation,
+    alongside their reflection sidecars. A second executable — a probe, a capture tool —
+    is another file like this one, not another copy of the lab.
+  -->
+  <ItemGroup>
+    <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
+    <ProjectReference Include="..\Blix\Blix.csproj" />
+    <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
+    <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
+    <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
+    <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
+    <ProjectReference Include="..\Blix.Tools.Preview\Blix.Tools.Preview.csproj" />
+    <ProjectReference Include="..\Blix.Runtime.Silk\Blix.Runtime.Silk.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Blix.Tools.View</RootNamespace>
+    <AssemblyName>Blix.Tools.View</AssemblyName>
+  </PropertyGroup>
+
+</Project>

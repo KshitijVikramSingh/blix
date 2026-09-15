@@ -34,8 +34,12 @@ public static class Program
             {
                 "ls" or "list" => List(),
                 "run" => Run(args.Skip(1).ToArray()),
+                "test" => Test(args.Skip(1).ToArray()),
                 "help" or "-h" or "--help" => Help(0),
-                _ => Unknown(verb),
+                // A bare name is a run. `blix view rogue.glb` reads better than
+                // `blix run view rogue.glb`, and underneath it is the same thing — which is
+                // what keeps Blix's own tools from becoming a special class of app.
+                _ => Run(args),
             };
         }
         catch (BlixCliException failure)
@@ -97,17 +101,40 @@ public static class Program
         return null;
     }
 
-    private static string ProjectName(DirectoryInfo root)
-    {
-        var marker = Path.Combine(root.FullName, "blix.project");
-        if (File.Exists(marker))
-        {
-            var named = File.ReadAllText(marker).Trim();
-            if (named.Length > 0) return named.Split('\n')[0].Trim();
-        }
+    private static string ProjectName(DirectoryInfo root) => Marker(root).Name;
 
-        return root.Name.ToLowerInvariant();
+    /// <summary>
+    /// What <c>blix.project</c> says: a name on the first line, then optional <c>key: value</c> lines.
+    /// </summary>
+    /// <remarks>
+    /// <b>The one hand-written file in this layer, and it earns it.</b> Everything about an app
+    /// comes from the app — the index is generated precisely so it cannot drift. But "what
+    /// constitutes verification for this project" is not a fact about any one app; it is a
+    /// statement the project makes about itself, and no attribute can carry it. That is the same
+    /// thing <c>tools/gate-rts-game.sh</c> already is, written in shell.
+    /// </remarks>
+    private static Marked Marker(DirectoryInfo root)
+    {
+        var path = Path.Combine(root.FullName, "blix.project");
+        if (!File.Exists(path)) return new Marked(root.Name.ToLowerInvariant(), Array.Empty<string>());
+
+        var lines = File.ReadAllLines(path)
+            .Select(l => l.Trim())
+            .Where(l => l.Length > 0 && !l.StartsWith('#'))
+            .ToArray();
+
+        var name = lines.FirstOrDefault(l => !l.Contains(':')) ?? root.Name.ToLowerInvariant();
+
+        var gate = lines
+            .FirstOrDefault(l => l.StartsWith("test:", StringComparison.OrdinalIgnoreCase))
+            ?.Split(':', 2)[1]
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            ?? Array.Empty<string>();
+
+        return new Marked(name, gate);
     }
+
+    private sealed record Marked(string Name, string[] Gate);
 
     private static List<App> Discover(DirectoryInfo root)
     {
@@ -287,6 +314,12 @@ public static class Program
             Console.Error.WriteLine($"blix: the index for '{app.Name}' is older than its assembly — rebuilding.");
         }
 
+        return Launch(app, rest);
+    }
+
+    /// <summary>Start an app, wait for it, and hand back its exit code.</summary>
+    private static int Launch(App app, string[] rest)
+    {
         var forwarded = app.Selector is null
             ? rest
             : new[] { "--blix-app", app.Selector }.Concat(rest).ToArray();
@@ -322,6 +355,67 @@ public static class Program
             ?? throw new BlixCliException($"could not start {app.AppHost}");
         process.WaitForExit();
         return process.ExitCode;
+    }
+
+    /// <summary>
+    /// Run everything this project calls its gate, and return one verdict.
+    /// </summary>
+    /// <remarks>
+    /// <b>The step run most often in a session, and the one with the least support.</b> Proving a
+    /// change meant five invocations and a person reading five outputs, which is exactly the shape
+    /// of thing that gets skipped. One command, one exit code, and it keeps going after a failure
+    /// so you learn everything that is broken rather than the first thing.
+    /// </remarks>
+    private static int Test(string[] args)
+    {
+        var root = ProjectRoot();
+        var marker = Marker(root);
+
+        if (marker.Gate.Length == 0)
+        {
+            throw new BlixCliException(
+                $"'{marker.Name}' declares no gate. Add a line to {Path.Combine(root.FullName, "blix.project")}:\n" +
+                "    test: <app>, <app>, ...");
+        }
+
+        var apps = Discover(root);
+        var failed = new List<string>();
+
+        foreach (var name in marker.Gate)
+        {
+            var app = Resolve(apps, name);
+            Console.WriteLine();
+            Console.WriteLine($"=== {app.Name}");
+
+            // <b>A gate leg that opens a window waits for a person, which makes it not a
+            // gate.</b> Said rather than refused, because a headed app given --frames does
+            // exit on its own and is a legitimate leg; what is never legitimate is finding
+            // out by watching a window appear and wondering why the run stopped.
+            //
+            // It only covers DECLARED apps. A convention app has no Headed to read — nothing
+            // said so and metadata cannot tell — so an undeclared window still surprises you.
+            // That is the first thing declaring buys beyond a better name, and the honest
+            // shape of the gap rather than a guess dressed as a check.
+            if (app.Headed && !args.Any(a => a.StartsWith("--frames", StringComparison.Ordinal)))
+            {
+                Console.Error.WriteLine(
+                    $"blix: '{app.Name}' opens a window and will wait for you to close it. " +
+                    "Pass --frames N to bound it.");
+            }
+
+            var code = Launch(app, args);
+            if (code != 0) failed.Add($"{app.Name} ({code})");
+        }
+
+        Console.WriteLine();
+        if (failed.Count == 0)
+        {
+            Console.WriteLine($"{marker.Name}: all {marker.Gate.Length} green");
+            return 0;
+        }
+
+        Console.Error.WriteLine($"{marker.Name}: {failed.Count} of {marker.Gate.Length} failed — {string.Join(", ", failed)}");
+        return 1;
     }
 
     /// <summary>
@@ -363,12 +457,6 @@ public static class Program
     {
         var dot = name.LastIndexOf('.');
         return dot >= 0 ? name[(dot + 1)..] : name;
-    }
-
-    private static int Unknown(string verb)
-    {
-        Console.Error.WriteLine($"blix: no verb '{verb}'.");
-        return Help(1);
     }
 
     private static int Help(int code)
