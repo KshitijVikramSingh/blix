@@ -53,8 +53,6 @@ internal sealed class ViewerPanels
     public float TrailSeconds = 1.5f;
     public float ThumbnailScale = 1f;
     public bool ViewportOpen = true;
-    public float SunYaw = 0.5f;
-    public float SunPitch = 0.9f;
 
     private string clipFilter = string.Empty;
     private int clipIndexA;
@@ -451,11 +449,11 @@ internal sealed class ViewerPanels
 
         if (ImGui.CollapsingHeader("sun", ImGuiTreeNodeFlags.DefaultOpen))
         {
-            ImGui.SliderFloat("yaw", ref SunYaw, -MathF.PI, MathF.PI);
-            ImGui.SliderFloat("pitch", ref SunPitch, 0.15f, 1.5f);
-
-            var ambient = app.Scene.AmbientStrength;
-            if (ImGui.SliderFloat("ambient", ref ambient, 0f, 0.4f)) app.Scene.AmbientStrength = ambient;
+            // The sun's own controls are GONE from here, not moved: StudioScene declares azimuth,
+            // elevation, intensity, ambient and shadow extent with [Tune], so the diagnostics
+            // overlay renders them and the command line parses them without this file mentioning
+            // any of it. What is left below is this viewer's own — a trail is not the stage's.
+            ImGui.TextDisabled("sun, ambient and shadow extent are in the Scene panel");
 
             ImGui.Checkbox("trail", ref ShowTrail);
             if (ShowTrail) ImGui.SliderFloat("trail seconds", ref TrailSeconds, 0.25f, 8f);

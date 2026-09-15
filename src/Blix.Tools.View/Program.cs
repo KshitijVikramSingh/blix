@@ -381,7 +381,10 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         scene = StudioScene.GroundOnly();
         session = new RigSession(rig, requestedInstances) { Mode = startMode };
-        tunables = new ObjectTunables(session);
+        // TWO targets. The session's knobs are Bespoke because this viewer draws better controls
+        // for them; the SCENE's are not, so the stage's look is rendered by reflection — a Scene
+        // panel this file does not write, and --sun-elevation it does not parse.
+        tunables = new ObjectTunables(session, scene);
         foreach (var member in new[]
         {
             nameof(RigSession.Mode), nameof(RigSession.Weight), nameof(RigSession.MaskRoot),
@@ -498,11 +501,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     {
         cameraPosition = camera.Position;
         viewProjection = camera.ViewProjection(aspect);
-
-        scene.SetSunDirection(new Vector3(
-            MathF.Cos(panels.SunPitch) * MathF.Sin(panels.SunYaw),
-            MathF.Sin(panels.SunPitch),
-            MathF.Cos(panels.SunPitch) * MathF.Cos(panels.SunYaw)));
 
         // The viewport's own camera. Aspect comes from the PANEL, not the window — that is the
         // whole difference between a second view and a second copy of this one, and it is why

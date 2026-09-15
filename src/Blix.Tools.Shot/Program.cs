@@ -135,7 +135,7 @@ public static class Program
         var loop = new CaptureLoop(
             output, options.ExitAfterFrames, modelPath, rigPath, clipName, clipTime, xray, advance,
             driveRoot, instances, lockstep, viewport, sequence, maskRoot, maskFalloff, skeletonOnly,
-            zoom, stageSelfTest);
+            zoom, stageSelfTest, args);
         using (var window = new Window(loop, options))
         {
             window.Run();
@@ -204,6 +204,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private ClipPlayer? player;
     private readonly bool skeletonOnly;
     private readonly bool stageSelfTest;
+
+    // Kept whole so the stage's declared knobs can be applied to the scene once it exists. This
+    // tool parses its own flags in Main; the stage's it does not parse at all.
+    private readonly string[] args = Array.Empty<string>();
     private int extensionRecords;
 
     internal int ExtensionRecords => extensionRecords;
@@ -217,6 +221,28 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     /// no consumer is a hook that rots, and this is the cheapest consumer that is honest: it makes
     /// no claim about what an extension would be FOR, only that one is possible.
     /// </remarks>
+    /// <summary>
+    /// The stage's own knobs, from the same declaration that renders them as a panel elsewhere.
+    /// </summary>
+    /// <remarks>
+    /// <b>Without this, --sun-elevation was accepted and ignored.</b> Declaring a knob on
+    /// StudioScene makes a flag exist; it does not make any particular tool read it, and this one
+    /// parses its arguments by hand in Main and never built an ObjectTunables at all. A flag that
+    /// silently does nothing is worse than one that does not exist, which is how this was found.
+    /// </remarks>
+    private void ApplyStageKnobs()
+    {
+        try
+        {
+            new ObjectTunables(scene).Apply(args);
+        }
+        catch (ArgumentException bad)
+        {
+            Console.Error.WriteLine(bad.Message);
+            Environment.Exit(1);
+        }
+    }
+
     private void ExtendStage(StudioStage stage)
     {
         var pass = stage.Graph.GraphicsPass("shot.selftest")
@@ -267,8 +293,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         int maskFalloff = 0,
         bool skeletonOnly = false,
         float zoom = 1f,
-        bool stageSelfTest = false)
+        bool stageSelfTest = false,
+        string[]? args = null)
     {
+        this.args = args ?? Array.Empty<string>();
         this.skeletonOnly = skeletonOnly;
         this.stageSelfTest = stageSelfTest;
         this.zoom = zoom;
@@ -305,6 +333,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         if (modelPath is null || !File.Exists(modelPath)) return;
         model = StudioModel.Load(device, modelPath);
         scene = StudioScene.GroundOnly();
+        ApplyStageKnobs();
         var extent = model.LongestExtent;
         var scale = extent > 0.001f ? 3f / extent : 1f;
         modelTransform = Matrix4x4.CreateScale(scale)
@@ -322,6 +351,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
         rig = StudioRig.Load(device, rigPath, renderer.SkinnedProgram);
         scene = StudioScene.GroundOnly();
+        ApplyStageKnobs();
 
         player = new ClipPlayer(rig.Skeleton);
 

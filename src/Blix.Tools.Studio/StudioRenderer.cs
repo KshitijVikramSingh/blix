@@ -401,6 +401,7 @@ public sealed class StudioRenderer : IDisposable
 
             foreach (var item in scene.Objects)
             {
+                if (item.IsGround && !scene.Ground) continue;
                 DrawObject(scope, item, litPipeline, uniforms, textures);
             }
 
