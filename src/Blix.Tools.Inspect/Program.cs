@@ -75,8 +75,14 @@ public static class Program
         // The state that used to be invisible. The loader's whole check was File.Exists, so a
         // cooked file older than its source was preferred over the source for as long as it sat
         // there, and nothing anywhere could say so.
-        var freshness = stamp.SourcePath.Length > 0
-            ? CookedFile.Compare(header, stamp.SourcePath)
+        // Resolved against the ARTIFACT's directory, because that is what the stamp is relative to.
+        // Resolving against the working directory instead would report every artifact's source as
+        // missing the moment you ran this from anywhere but the right folder.
+        var resolved = stamp.SourcePath.Length > 0
+            ? Path.GetFullPath(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".", stamp.SourcePath))
+            : null;
+        var freshness = resolved is not null
+            ? CookedFile.Compare(header, resolved)
             : CookedFile.Freshness.Unknown;
         Console.WriteLine($"  source is {freshness switch
         {

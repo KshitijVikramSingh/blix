@@ -29,6 +29,13 @@
     <None Include="Assets/**/*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- What this project cooks. Declared, so it cannot drift: before this, Rogue.glb
+       had a .blixmesh and barrel.glb and coin.glb did not, and nothing recorded why.
+       The answer was that somebody once cooked one file. -->
+  <ItemGroup>
+    <CookMesh Include="Assets/models/*.glb" />
+  </ItemGroup>
+
   <PropertyGroup>
     <Glslc Condition="'$(Glslc)' == '' AND Exists('/opt/homebrew/bin/glslc')">/opt/homebrew/bin/glslc</Glslc>
     <Glslc Condition="'$(Glslc)' == '' AND Exists('/usr/local/bin/glslc')">/usr/local/bin/glslc</Glslc>

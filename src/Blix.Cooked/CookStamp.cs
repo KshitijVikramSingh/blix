@@ -54,7 +54,10 @@ public enum CookedFlags : uint
 /// </remarks>
 /// <param name="Recipe">Four ASCII characters naming the recipe that produced this.</param>
 /// <param name="RecipeVersion">The recipe's own version. Bumped when its output would differ.</param>
-/// <param name="SourcePath">What it was made from, as the cook saw it. Informational.</param>
+/// <param name="SourcePath">
+/// What it was made from, <b>relative to this artifact's own directory</b> and with forward
+/// slashes — so it means the same thing on every machine. Usually just a filename.
+/// </param>
 /// <param name="SourceTicks">Source last-write time in UTC ticks, or 0 when unknown.</param>
 /// <param name="SourceSize">Source length in bytes, or 0 when unknown.</param>
 /// <param name="SourceHash">Content hash of the source, or 0 when not computed.</param>
@@ -80,15 +83,29 @@ public readonly record struct CookStamp(
     /// The ordinary way to make one. A recipe that has the source bytes in hand may set
     /// <see cref="SourceHash"/> afterwards with <c>stamp with { SourceHash = … }</c>.
     /// </remarks>
+    /// <param name="outputPath">
+    /// Where the cooked file is going. <b>The recorded source path is stored relative to this</b>,
+    /// which for the ordinary sibling case is just a filename.
+    /// </param>
+    /// <remarks>
+    /// <b>Relative, because an absolute path is not the same on two machines.</b> The build rule
+    /// hands MSBuild's <c>%(FullPath)</c> to recipes, so the first artifact it produced recorded
+    /// <c>/Users/…/dev/blix/…/barrel.glb</c> — into a file that is then committed. That would have
+    /// made cooked output differ per developer, leaked a home directory into the repository, and
+    /// made every freshness check wrong on anyone else's machine. Caught by comparing the bytes the
+    /// build rule produced against the bytes the command produced and finding they differed.
+    /// </remarks>
     public static CookStamp Of(
         string recipe,
         uint recipeVersion,
         string sourcePath,
+        string outputPath,
         string parameters = "",
         CookedFlags flags = CookedFlags.None)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(recipe);
         ArgumentNullException.ThrowIfNull(sourcePath);
+        ArgumentNullException.ThrowIfNull(outputPath);
 
         if (recipe.Length != RecipeIdLength)
         {
@@ -114,7 +131,24 @@ public readonly record struct CookStamp(
             // timestamp fatal to a transformation that does not need one.
         }
 
-        return new CookStamp(recipe, recipeVersion, sourcePath, ticks, size, 0UL, parameters ?? "", flags);
+        string recorded;
+        try
+        {
+            var from = Path.GetDirectoryName(Path.GetFullPath(outputPath));
+            recorded = string.IsNullOrEmpty(from)
+                ? Path.GetFileName(sourcePath)
+                : Path.GetRelativePath(from, Path.GetFullPath(sourcePath));
+        }
+        catch (ArgumentException)
+        {
+            recorded = Path.GetFileName(sourcePath);
+        }
+
+        // Forward slashes, so a file cooked on macOS and one cooked on Windows record the same
+        // string for the same relationship.
+        recorded = recorded.Replace('\\', '/');
+
+        return new CookStamp(recipe, recipeVersion, recorded, ticks, size, 0UL, parameters ?? "", flags);
     }
 
     /// <summary>True when this artifact still needs its source file present at load.</summary>

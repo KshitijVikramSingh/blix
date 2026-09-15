@@ -3223,14 +3223,15 @@ static ShaderInterface MinimalShader() => new(new[]
         var source = Path.Combine(temp, "source.bin");
         File.WriteAllBytes(source, new byte[] { 1, 2, 3, 4, 5, 6, 7 });
 
-        var stamp = CookStamp.Of("tst1", 7, source, "alpha=1 beta=two", CookedFlags.SourceRequired);
+        var artifactPath = Path.Combine(temp, "one.cooked");
+        var stamp = CookStamp.Of("tst1", 7, source, artifactPath, "alpha=1 beta=two", CookedFlags.SourceRequired);
         t.Expect("AW.1 stamp reads the source's size off disk", stamp.SourceSize == 7L, $"got {stamp.SourceSize}");
         t.ExpectTrue("AW.1 and its modification time", stamp.SourceTicks != 0);
         t.ExpectTrue("AW.1 and SourceRequired surfaces as a property", stamp.SourceRequired);
 
         // Round-trip through a real file, with a body after the preamble so the offset is exercised
         // rather than assumed.
-        var artifact = Path.Combine(temp, "one.cooked");
+        var artifact = artifactPath;
         const uint magic = 0x54534554; // "TEST"
         int preambleBytes;
         using (var fs = File.Create(artifact))
@@ -3247,7 +3248,14 @@ static ShaderInterface MinimalShader() => new(new[]
         t.Expect("AW.2 recipe id round-trips", read.Stamp.Recipe == "tst1", $"got '{read.Stamp.Recipe}'");
         t.Expect("AW.2 recipe version round-trips", read.Stamp.RecipeVersion == 7u, $"got {read.Stamp.RecipeVersion}");
         t.Expect("AW.2 parameters round-trip verbatim", read.Stamp.Parameters == "alpha=1 beta=two", $"got '{read.Stamp.Parameters}'");
-        t.Expect("AW.2 source path round-trips", read.Stamp.SourcePath == source, $"got '{read.Stamp.SourcePath}'");
+        // <b>Relative to the artifact, not as passed.</b> An absolute path would put this machine's
+        // home directory into a file that gets committed — which is exactly what the build rule did
+        // on its first run, and what made two cooks of one source differ between the command and
+        // the build.
+        t.Expect("AW.2 the source is recorded relative to the artifact, not absolutely",
+            read.Stamp.SourcePath == "source.bin", $"got '{read.Stamp.SourcePath}'");
+        t.ExpectTrue("AW.2 and never carries a machine path",
+            !read.Stamp.SourcePath.Contains('/') && !Path.IsPathRooted(read.Stamp.SourcePath));
         t.Expect("AW.2 source size round-trips", read.Stamp.SourceSize == 7L, $"got {read.Stamp.SourceSize}");
         t.ExpectTrue("AW.2 flags round-trip", read.Stamp.SourceRequired);
 

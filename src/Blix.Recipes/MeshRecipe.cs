@@ -127,7 +127,7 @@ public static class MeshRecipe
         // glTF on every load, so the source is a permanent runtime dependency and the flag says so
         // where a tool can see it. Stage K-F is finished when this stops being set.
         var stamp = CookStamp.Of(
-            BlixMesh.ShippedRecipe, MeshRecipeVersion, gltfPath, parameters, CookedFlags.SourceRequired);
+            BlixMesh.ShippedRecipe, MeshRecipeVersion, gltfPath, outPath, parameters, CookedFlags.SourceRequired);
 
         BlixMeshWriter.Write(outPath, new BlixMeshFile(layout, primitives), stamp);
         return primitives.Count;
@@ -272,6 +272,46 @@ public static class MeshRecipe
     }
 
 
+
+    /// <summary>
+    /// The decimation the shipped mesh cook uses, and the only one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This was a lambda inside the cook driver, and leaving it there was a silent downgrade.</b>
+    /// The uniform <see cref="Cook"/> path passed no simplifier, so a build rule invoking a recipe
+    /// produced LOD0-only files while the same recipe invoked by hand produced full LOD chains —
+    /// the build quietly making worse output than the command, which is exactly the class of thing
+    /// this arc exists to stop. Caught by watching Rogue.blixmesh lose its chain on the first
+    /// build-rule run.
+    /// </para>
+    /// <para>
+    /// <b>Prune, not LockBorder, except when splitting.</b> LockBorder pins every mesh-boundary
+    /// vertex, which is right when spatially split chunks must stay watertight where they meet and
+    /// ruinous otherwise: on a stylised tree, whose canopy is hundreds of separate leaf clusters,
+    /// nearly every vertex is a border vertex, so locking them forbids collapsing anything at all —
+    /// measured, a 4,345 triangle tree reduced to 3,975 and stopped. Prune lets whole components
+    /// go, which for foliage is the correct behaviour rather than a compromise: what a canopy looks
+    /// like from further away is fewer, larger masses.
+    /// </para>
+    /// </remarks>
+    public static SimplifyFn DefaultSimplifier(bool splitting)
+    {
+        var options = MeshoptNative.Options.Prune;
+        if (splitting) options |= MeshoptNative.Options.LockBorder;
+
+        return (positions, indices, vertexCount, ratio) =>
+        {
+            var reduced = MeshoptNative.Simplify(
+                indices, positions, vertexCount, 3, ratio, targetError: 1.0f, options, out var relError);
+
+            // meshopt's error is relative to the mesh extent; scale it to world units so the
+            // runtime can project it to screen pixels.
+            var scale = MeshoptNative.SimplifyScale(positions, vertexCount, 3);
+            return new SimplifyResult(reduced, relError * scale);
+        };
+    }
+
     /// <summary>The uniform entry point the index finds and <c>blix cook</c> calls.</summary>
     /// <remarks>
     /// Sits beside the typed <see cref="CookToBlixMesh"/> rather than replacing it. The typed form
@@ -287,19 +327,16 @@ public static class MeshRecipe
     public static CookOutcome Cook(CookRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        var split = request.Number("split");
         var count = CookToBlixMesh(
             request.SourcePath,
             request.OutputPath,
             flipTextureV: request.Flag("flipV"),
             includeTangents: request.Flag("tangents"),
-            simplify: null,
-            splitTriBudget: request.Number("split"),
+            simplify: DefaultSimplifier(split > 0),
+            splitTriBudget: split,
             splitFoliage: request.Flag("splitFoliage", true));
 
-        // <b>No simplifier here, and that is a real difference rather than an oversight.</b>
-        // Decimation is a native capability the driver supplies — see MeshoptNative — so a call
-        // through this uniform path writes LOD0 only. The stamp records `simplify=none`, so the
-        // two are told apart by looking at the file rather than by remembering how it was invoked.
-        return CookOutcome.Written($"{count} primitive(s), LOD0 only");
+        return CookOutcome.Written($"{count} primitive(s)");
     }
 }

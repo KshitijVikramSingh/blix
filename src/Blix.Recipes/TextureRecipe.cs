@@ -132,7 +132,7 @@ public static class TextureRecipe
             // normal-map are read back out of the file, and recording the input beside the output is
             // what makes a mismatch visible rather than a mystery.
             var texStamp = CookStamp.Of(
-                BlixTex.ShippedRecipe, BlixTex.ShippedRecipeVersion, source,
+                BlixTex.ShippedRecipe, BlixTex.ShippedRecipeVersion, source, destination,
                 $"format={format} flags={flags} mips={encodedMips.Length}");
 
             BlixTexWriter.Write(destination, new BlixTexImage(

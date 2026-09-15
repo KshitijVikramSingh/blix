@@ -51,7 +51,7 @@ public static class ProbeRecipe
         // probe parameter the old header did NOT carry. Authored order, so the string is stable and
         // a byte-compare between two cooks means something.
         var stamp = CookStamp.Of(
-            BlixProbe.ShippedRecipe, BlixProbe.ShippedRecipeVersion, hdrPath,
+            BlixProbe.ShippedRecipe, BlixProbe.ShippedRecipeVersion, hdrPath, outPath,
             $"env={envFace} irr={irrFace} prefilterBase={prefilterBase} prefilterMips={prefilterMips} " +
             $"brdf={brdfSize} clamp={clamp.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
 

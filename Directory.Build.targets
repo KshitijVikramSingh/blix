@@ -142,6 +142,108 @@
     <BlixAppIndexerDll>$(MSBuildThisFileDirectory)src/Blix.Tools.Apps/bin/$(Configuration)/net8.0/Blix.Tools.Apps.dll</BlixAppIndexerDll>
   </PropertyGroup>
 
+
+  <!-- ══ Cooking assets at build ═══════════════════════════════════════════════
+       A project declares WHAT it cooks; the recipe decides HOW.
+
+         <ItemGroup>
+           <CookMesh    Include="Assets/models/**/*.glb" />
+           <CookTexture Include="Assets/textures/**/*.png" />
+           <CookProbe   Include="Assets/sky.hdr" Options="env=512" />
+         </ItemGroup>
+
+       Why this exists, in one measurement: before it, 62 mesh assets sat in this
+       tree and 30 were cooked, and the line between them was a DIRECTORY —
+       RTSGame's kit/ entirely cooked, its models/ entirely not, same project and
+       same importer. Nobody decided that. Somebody once typed one path. Coverage
+       was shell history, and there was no way to find out except by listing files
+       by hand.
+
+       The shader pipeline had already shown the answer one layer down: declared
+       inputs, MSBuild Inputs/Outputs, runs automatically, 100% coverage because it
+       cannot be anything else. This is the same move for assets.
+
+       Escape hatch, taking BlixShaderCustomTarget's rule verbatim: set
+       BlixCookCustomTarget=true and this stands aside. Settings are Options;
+       a different ALGORITHM is your own target. There is nothing in between,
+       because the thing in between is a build system, and that is policy.
+
+       A project's own recipe needs no new target — it adds BlixCook directly:
+         <BlixCook Include="Maps/**/*.hmap" Recipe="hmap" Cooked=".blixterrain" />
+       which is the whole point: Blix's recipes and a project's take the same path.
+  ══════════════════════════════════════════════════════════════════════════════ -->
+
+  <PropertyGroup>
+    <BlixCookDll>$(MSBuildThisFileDirectory)src/Blix.Tools.Cook/bin/$(Configuration)/net8.0/Blix.Tools.Cook.dll</BlixCookDll>
+  </PropertyGroup>
+
+  <!-- Sugar for the three Blix ships. This file is imported AFTER the project body,
+       so the item groups it maps from are already populated. Recipe and Cooked are
+       stated here rather than looked up, because MSBuild needs the output path at
+       evaluation time to be incremental at all — and incrementality is the entire
+       reason this is a build rule instead of a command. -->
+  <ItemGroup>
+    <BlixCook Include="@(CookMesh)"    Recipe="gmsh" Cooked=".blixmesh" />
+    <BlixCook Include="@(CookTexture)" Recipe="gtex" Cooked=".blixtex" />
+    <BlixCook Include="@(CookProbe)"   Recipe="gpro" Cooked=".blixprobe" />
+  </ItemGroup>
+
+  <!-- Inputs/Outputs as item transforms, so MSBuild rebinds @(BlixCook) inside the
+       target to ONLY the out-of-date items. Touch one asset and one asset re-cooks;
+       touch nothing and the cook is not launched at all.
+
+       $(BlixCookDll) is in Inputs on purpose, and it is what covers the case
+       timestamps alone cannot: a format or recipe VERSION change leaves every
+       cooked file newer than its source and yet unreadable. Bumping a version
+       rebuilds the cook, which changes that timestamp, which makes every asset
+       out of date. Demonstrated by bumping MeshRecipeVersion and watching all
+       three of Runner's assets re-cook, and revert when it was put back.
+
+       Caveat, because it is a real one: this invokes a PRE-BUILT cook, the same
+       way the shader and app-index targets do. Building one project alone uses
+       whatever cook binary is on disk, so a recipe change takes effect once the
+       cook itself has been rebuilt — which a solution build does and a single
+       project build does not. -->
+  <Target Name="BlixCookAssets"
+          Condition="'@(BlixCook)' != '' AND '$(BlixCookCustomTarget)' != 'true' AND Exists('$(BlixCookDll)')"
+          BeforeTargets="AssignTargetPaths"
+          Inputs="@(BlixCook);$(BlixCookDll)"
+          Outputs="@(BlixCook -> '%(RootDir)%(Directory)%(Filename)%(Cooked)')">
+    <PropertyGroup>
+      <BlixCookList>$(IntermediateOutputPath)blixcook.txt</BlixCookList>
+    </PropertyGroup>
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+    <WriteLinesToFile
+        File="$(BlixCookList)"
+        Lines="@(BlixCook -> '%(Recipe)%09%(FullPath)%09%(RootDir)%(Directory)%(Filename)%(Cooked)%09%(Options)')"
+        Overwrite="true" WriteOnlyWhenDifferent="false" />
+    <Message Text="Cooking @(BlixCook->Count()) asset(s)" Importance="high" />
+    <Exec Command="dotnet &quot;$(BlixCookDll)&quot; batch &quot;$(BlixCookList)&quot;" />
+  </Target>
+
+  <!-- And ship what was cooked, on the build that cooked it.
+
+       A project's assets are usually a glob — <None Include="Assets/**/*" ...> —
+       and a glob is evaluated at project LOAD, before this target has run. So a
+       file cooked today would not be copied to the output until the NEXT build,
+       which is the same trap the shader pipeline hit when consumers silently got
+       no .spv: a build that reports success and ships an incomplete folder.
+
+       Declaring them inside a target is what fixes it, because item groups in a
+       target are evaluated when the target runs. -->
+  <Target Name="BlixStageCookedAssets"
+          Condition="'@(BlixCook)' != '' AND '$(BlixCookCustomTarget)' != 'true'"
+          DependsOnTargets="BlixCookAssets"
+          BeforeTargets="AssignTargetPaths">
+    <ItemGroup>
+      <ContentWithTargetPath
+          Include="@(BlixCook -> '%(RootDir)%(Directory)%(Filename)%(Cooked)')"
+          Condition="Exists('%(RootDir)%(Directory)%(Filename)%(Cooked)')"
+          TargetPath="@(BlixCook -> '%(RelativeDir)%(Filename)%(Cooked)')"
+          CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+
   <Target Name="BlixIndexApps"
           Condition="'$(BlixSkipAppIndex)' != 'true' AND '$(OutputType)' != '' AND Exists('$(BlixAppIndexerDll)')"
           AfterTargets="CopyFilesToOutputDirectory"

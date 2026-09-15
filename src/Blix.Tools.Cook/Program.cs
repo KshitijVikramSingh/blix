@@ -34,6 +34,7 @@ return args[0] switch
     "list" => ListRecipes(),
     "run" => RunRecipe(args),
     "status" => Status(args),
+    "batch" => Batch(args),
     "help" or "-h" or "--help" => Help(),
     _ => UnknownVerb(args[0]),
 };
@@ -179,18 +180,10 @@ static int CookMesh(string[] args)
         // that may not delete a component can only thin each one until it would vanish, which is almost
         // immediately. Prune lets whole components go — which for foliage is not a compromise but the
         // correct behaviour, since what a canopy looks like from further away is fewer, larger masses.
-        var options = Blix.Recipes.MeshoptNative.Options.Prune;
-        if (splitBudget > 0) options |= Blix.Recipes.MeshoptNative.Options.LockBorder;
+        // The recipe's own simplifier, not a second copy of it here. It used to be a lambda in
+        // this file, which is how the uniform [Recipe] path ended up with no decimation at all.
         var count = Blix.Recipes.MeshRecipe.CookToBlixMesh(src, outPath, flipV, tangents,
-            simplify: (positions, indices, vertexCount, ratio) =>
-            {
-                var reduced = Blix.Recipes.MeshoptNative.Simplify(indices, positions, vertexCount, 3, ratio,
-                    targetError: 1.0f, options, out var relError);
-                // meshopt's resultError is relative to the mesh extent; scale to
-                // world units so the runtime can project it to screen pixels.
-                var scale = Blix.Recipes.MeshoptNative.SimplifyScale(positions, vertexCount, 3);
-                return new Blix.Recipes.MeshRecipe.SimplifyResult(reduced, relError * scale);
-            },
+            simplify: Blix.Recipes.MeshRecipe.DefaultSimplifier(splitBudget > 0),
             splitTriBudget: splitBudget, splitFoliage: splitFoliage);
         var size = new FileInfo(outPath).Length;
         // Quick LOD readout: levels + triangle reduction on the largest primitive.
@@ -435,6 +428,91 @@ static int Status(string[] args)
 
     // Reports; does not judge. `blix check --cooked` is where an exit code will live, because a
     // status verb that failed would make every partially-cooked tree a broken build.
+    return 0;
+}
+
+
+// blix cook batch <list-file>
+//
+// One process for a whole build, rather than one per file. The shader pipeline runs glslc once per
+// shader and that is fine because glslc starts in milliseconds; a .NET process does not, so 29
+// assets would be 29 startups on every build that touched any of them. MSBuild writes the list, and
+// this walks it.
+//
+// Each line is TAB-separated: recipeId, source, output, options (k=v, space separated).
+static int Batch(string[] args)
+{
+    if (args.Length < 2)
+    {
+        Console.Error.WriteLine("Usage: blix cook batch <list-file>");
+        return 2;
+    }
+
+    if (!File.Exists(args[1]))
+    {
+        Console.Error.WriteLine($"No list file at {args[1]}.");
+        return 2;
+    }
+
+    var recipes = Recipes();
+    int cooked = 0, skipped = 0;
+
+    foreach (var line in File.ReadAllLines(args[1]))
+    {
+        if (line.Length == 0) continue;
+        var parts = line.Split('\t');
+        if (parts.Length < 3)
+        {
+            Console.Error.WriteLine($"blix cook batch: malformed line '{line}'");
+            return 1;
+        }
+
+        var (id, source, output) = (parts[0], parts[1], parts[2]);
+        var recipe = recipes.FirstOrDefault(r => r.Id == id);
+        if (recipe is null)
+        {
+            Console.Error.WriteLine($"blix cook batch: no recipe '{id}'. Known: {string.Join(", ", recipes.Select(r => r.Id))}");
+            return 1;
+        }
+
+        // <b>No skip check here, deliberately.</b> MSBuild has already filtered @(BlixCook) down
+        // to the out-of-date items before this is called, so anything reaching this loop is
+        // something the build decided needs doing — and a second opinion can only ever subtract.
+        // It did: an early version re-checked the preamble and "helpfully" skipped two files
+        // MSBuild had correctly marked stale, which left them carrying a stamp written by an older
+        // version of this tool.
+        //
+        // The preamble check belongs in the `mesh` driver instead, which walks a directory itself
+        // and therefore has to decide. Two layers, one decision each: MSBuild decides whether to
+        // look, the driver decides whether to work.
+        var options = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (parts.Length > 3)
+        {
+            foreach (var kv in parts[3].Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var eq = kv.Split('=', 2);
+                options[eq[0]] = eq.Length > 1 ? eq[1] : "1";
+            }
+        }
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
+            var outcome = recipe.Cook(new Blix.Cooked.CookRequest(source, output, options));
+            cooked++;
+            Console.WriteLine($"  cooked {recipe.Id} {Path.GetFileName(source)} -> {Path.GetFileName(output)} ({outcome.Detail})");
+        }
+        catch (Blix.Cooked.AssetImportException refused)
+        {
+            // A source the engine refuses FAILS the build, unlike a status report. A build that
+            // quietly shipped without an asset it was told to cook is the thing this whole rule
+            // exists to prevent.
+            Console.Error.WriteLine($"blix cook: cannot read {source} — {refused.Message}");
+            return 1;
+        }
+    }
+
+    if (cooked > 0 || skipped > 0) Console.WriteLine($"  {cooked} cooked, {skipped} already current");
     return 0;
 }
 
