@@ -1,3 +1,4 @@
+using Blix.Cooked;
 using System.Numerics;
 using Blix.Assets;
 using Blix.Graphics;
@@ -112,9 +113,21 @@ internal static class GltfShared
             // This drops the per-pack import-time memory peak from
             // "all mip data for all textures" (multi-GB) to ~hundreds of
             // bytes per texture.
+            var one = System.Diagnostics.Stopwatch.StartNew();
             var handle = BlixTexReader.ReadHandle(path);
             textureCache[idx] = new GltfTexture(
                 Path.GetFileNameWithoutExtension(path), handle);
+
+            if (AssetLoadLog.Enabled)
+            {
+                AssetLoadLog.Report(new AssetLoadReport(
+                    SourcePath: model.LogicalImages[idx].Content.SourcePath ?? $"image[{idx}]",
+                    CookedPath: path,
+                    Mode: AssetLoadMode.Cooked,
+                    Bytes: FileLength(path),
+                    LoadMs: one.Elapsed.TotalMilliseconds,
+                    Recipe: CookedFile.TryReadHeader(path)?.Stamp.Recipe));
+            }
         }
         cookedWatch.Stop();
         if (cookedSourcePaths.Count > 0)
@@ -129,6 +142,7 @@ internal static class GltfShared
         var decodeWatch = System.Diagnostics.Stopwatch.StartNew();
         System.Threading.Tasks.Parallel.ForEach(sourceImages, image =>
         {
+            var one = System.Diagnostics.Stopwatch.StartNew();
             var bytes = image.Content.Content.ToArray();
             using var stream = new MemoryStream(bytes);
             var d = mrImageIndices.Contains(image.LogicalIndex)
@@ -137,11 +151,41 @@ internal static class GltfShared
             decoded[image.LogicalIndex] = GltfTexture.Rgba8Single(
                 image.Name ?? $"image_{image.LogicalIndex}",
                 d.Pixels, d.Width, d.Height);
+
+            // <b>The silent one.</b> A texture that decodes from PNG on every load, because no
+            // .blixtex sibling was found, is indistinguishable from one that did not — and for an
+            // image embedded in a .glb it is not even possible to have a sibling, which is a fact
+            // about how the asset was authored that nothing could previously report.
+            if (AssetLoadLog.Enabled)
+            {
+                var embedded = string.IsNullOrEmpty(image.Content.SourcePath);
+                AssetLoadLog.Report(new AssetLoadReport(
+                    SourcePath: image.Content.SourcePath ?? $"{image.Name ?? "image"}[{image.LogicalIndex}] (embedded)",
+                    CookedPath: null,
+                    Mode: AssetLoadMode.Source,
+                    Bytes: bytes.LongLength,
+                    LoadMs: one.Elapsed.TotalMilliseconds,
+                    Warning: embedded
+                        ? "embedded in the container — a .blixtex sibling is not reachable for this image"
+                        : "no .blixtex sibling — decoded from source"));
+            }
         });
         foreach (var kv in decoded) textureCache[kv.Key] = kv.Value;
         Console.WriteLine(
             $"  decoded {sourceImages.Count} images in {decodeWatch.ElapsedMilliseconds} ms");
     }
+    private static long FileLength(string path)
+    {
+        try
+        {
+            return new FileInfo(path) is { Exists: true } f ? f.Length : 0L;
+        }
+        catch (IOException)
+        {
+            return 0L;
+        }
+    }
+
     // Returns the absolute path to a cooked .blixtex sibling for the image
     // if one exists, else null. glTF images carry either an embedded byte
     // blob (no source URI) or a file URI; we can only sideload .blixtex

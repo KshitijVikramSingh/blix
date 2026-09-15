@@ -2,6 +2,7 @@ using Blix.Verify;
 using System.Numerics;
 using Blix.Geometry;
 using Blix.Core;
+using Blix.Cooked;
 using Blix.Diagnostics;
 using Blix.Graphics;
 

@@ -1,6 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <ProjectReference Include="..\\Blix.Cooked\\Blix.Cooked.csproj" />
     <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
     <ProjectReference Include="..\Blix.Geometry\Blix.Geometry.csproj" />
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />

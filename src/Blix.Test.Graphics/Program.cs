@@ -3202,6 +3202,94 @@ static ShaderInterface MinimalShader() => new(new[]
 
 // ============================================================================
 // ============================================================================
+// ============================================================================
+// Section AX — a load says what it did.
+// ============================================================================
+//
+// <b>AssetLoadReport had four states and zero emitters for its whole existence, and the reason was
+// structural rather than neglect.</b> Its own documentation said to hand reports to
+// DebugContext.Events — a FRAME-time channel — while asset loading happens before there is a
+// frame, with no DebugContext anywhere in reach. The prescribed mechanism did not exist at the
+// moment the event occurred. It also sat in Blix.Diagnostics, a tier above two of the three cooked
+// readers, so half the loaders could not have referenced it anyway.
+//
+// These check the channel and the emitters, with the control that matters most: the same asset,
+// loaded with and without a cooked sibling, must report differently. A reporter that always says
+// "Cooked" is worse than no reporter, because it is believed.
+{
+    var temp = Path.Combine(Path.GetTempPath(), $"blix-ax-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(temp);
+    var wasEnabled = AssetLoadLog.Enabled;
+    try
+    {
+        var glb = Path.Combine(temp, "reported.glb");
+        var mesh = new SharpGLTF.Geometry.MeshBuilder<SharpGLTF.Geometry.VertexTypes.VertexPositionNormal>("m");
+        var prim = mesh.UsePrimitive(SharpGLTF.Materials.MaterialBuilder.CreateDefault());
+        prim.AddTriangle(
+            new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 0, 0, 1, 0),
+            new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(1, 0, 0, 0, 1, 0),
+            new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 1, 0, 1, 0));
+        var scene = new SharpGLTF.Scenes.SceneBuilder();
+        scene.AddRigidMesh(mesh, new SharpGLTF.Scenes.NodeBuilder("only"));
+        scene.ToGltf2().SaveGLB(glb);
+
+        // <b>Silent unless asked.</b> A game's load path pays nothing for an instrument nobody
+        // turned on, which is the same rule DebugState.Enabled follows one layer up.
+        AssetLoadLog.Enabled = false;
+        AssetLoadLog.Drain();
+        new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("ax/off"), glb));
+        t.Expect("AX.1 a load reports nothing while the log is off", AssetLoadLog.Peek().Length == 0,
+            $"got {AssetLoadLog.Peek().Length}");
+
+        // ── uncooked ────────────────────────────────────────────────────────
+        AssetLoadLog.Start();
+        new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("ax/src"), glb));
+        var uncooked = AssetLoadLog.Drain();
+        var meshReport = uncooked.SingleOrDefault(r => r.SourcePath == glb);
+
+        t.ExpectTrue("AX.2 an uncooked load is reported at all", meshReport is not null);
+        t.Expect("AX.2 and reports Source", meshReport!.Mode == AssetLoadMode.Source, $"got {meshReport.Mode}");
+        t.ExpectTrue("AX.2 with no cooked path", meshReport.CookedPath is null);
+        t.ExpectTrue("AX.2 and says why it was slow", meshReport.Warning is { Length: > 0 });
+        t.ExpectTrue("AX.2 carrying a cost, not just a branch", meshReport.LoadMs > 0 && meshReport.Bytes > 0);
+
+        // ── cooked ──────────────────────────────────────────────────────────
+        Blix.Recipes.MeshRecipe.CookToBlixMesh(glb, Path.ChangeExtension(glb, ".blixmesh"));
+        AssetLoadLog.Start();
+        new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("ax/cooked"), glb));
+        var afterCook = AssetLoadLog.Drain();
+        var cookedReport = afterCook.SingleOrDefault(r => r.SourcePath == glb);
+
+        t.ExpectTrue("AX.3 a cooked load is reported", cookedReport is not null);
+        t.Expect("AX.3 and reports Cooked — the same asset, a different answer",
+            cookedReport!.Mode == AssetLoadMode.Cooked, $"got {cookedReport.Mode}");
+        t.ExpectTrue("AX.3 naming the artifact it used",
+            cookedReport.CookedPath?.EndsWith(".blixmesh", StringComparison.Ordinal) == true);
+        t.Expect("AX.3 and the recipe that made it", cookedReport.Recipe == BlixMesh.ShippedRecipe,
+            $"got '{cookedReport.Recipe}'");
+        t.ExpectTrue("AX.3 with no warning, because nothing was wrong", cookedReport.Warning is null);
+
+        // ── the buffer behaves ──────────────────────────────────────────────
+        t.Expect("AX.4 Drain clears what it returned", AssetLoadLog.Peek().Length == 0);
+
+        AssetLoadLog.Start();
+        new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("ax/again"), glb));
+        var firstPeek = AssetLoadLog.Peek().Length;
+        var secondPeek = AssetLoadLog.Peek().Length;
+        t.Expect("AX.4 Peek does not clear", firstPeek > 0 && secondPeek == firstPeek,
+            $"{firstPeek} then {secondPeek}");
+
+        AssetLoadLog.Start();
+        t.Expect("AX.4 and Start clears what was there", AssetLoadLog.Peek().Length == 0);
+    }
+    finally
+    {
+        AssetLoadLog.Enabled = wasEnabled;
+        AssetLoadLog.Drain();
+        try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
+    }
+}
+
 // Section AW — the cooked preamble: three formats that are one family.
 // ============================================================================
 //

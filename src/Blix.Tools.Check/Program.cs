@@ -58,6 +58,7 @@ public static class Program
             {
                 if (args[i] == "--model") return InspectModel(args[i + 1]);
                 if (args[i] == "--rig") return InspectRig(args[i + 1], args.Contains("--verbose"));
+                if (args[i] == "--cooked") return JudgeCooked(args[i + 1]);
             }
         }
         catch (AssetImportException refused)
@@ -71,6 +72,8 @@ public static class Program
             Console.WriteLine("Usage: probe [--model <gltf-or-glb>] [--rig <rigged.glb> [--verbose]]");
             Console.WriteLine("  no args     check the lab's reflected binding model against the renderer");
             Console.WriteLine("  --model     check an asset: clip lengths, skeleton, mesh-node transform");
+            Console.WriteLine("  --cooked    judge a DIRECTORY: load every asset under it and fail if");
+            Console.WriteLine("              anything resolved to the slow path");
             Console.WriteLine("  --rig       check a RIG: hierarchy, rest palette, track coverage,");
             Console.WriteLine("              finiteness across every clip, root-motion loop continuity");
             Console.WriteLine("  Exits non-zero when something is wrong. For a plain listing of an");
@@ -95,6 +98,117 @@ public static class Program
     // pivots and the assembled bounds, which is most of what an asset raises — but not its clips,
     // not its skeleton, and not whether the numbers are finite. A skeleton whose rest pose does not
     // build, or a clip with no usable length, surfaces later as a character folding inside out.
+
+    /// <summary>
+    /// Loads every asset under a directory and fails if any of them took the slow path.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This judges what a LOAD does, not what files exist.</b> `blix cook status` answers the
+    /// second question and is the right tool for it; they differ whenever a cooked artifact is
+    /// present but unusable — corrupt, stale, or a format this build no longer reads — in which case
+    /// the files are all there and the loader quietly parses the source anyway. Only running the
+    /// load can tell you that, which is the whole reason the report exists.
+    /// </para>
+    /// <para>
+    /// <b>And this is what makes cooking enforceable without making it mandatory.</b> Nothing in the
+    /// engine refuses to run from source; a project that wants the guarantee asks for it here, and
+    /// the exit code is the contract — the same deal every other check in this tree makes.
+    /// </para>
+    /// <para>
+    /// Textures are judged too, for free: the mesh load pre-decodes its images and each reports
+    /// itself, so an asset whose geometry is cooked and whose albedo is still a PNG decode fails —
+    /// which it should, because that is the larger cost of the two.
+    /// </para>
+    /// </remarks>
+    private static int JudgeCooked(string root)
+    {
+        if (!Directory.Exists(root))
+        {
+            Console.Error.WriteLine($"No directory at {root}.");
+            return 2;
+        }
+
+        var sources = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+            .Where(f => Path.GetExtension(f) is { } e
+                && (e.Equals(".gltf", StringComparison.OrdinalIgnoreCase)
+                    || e.Equals(".glb", StringComparison.OrdinalIgnoreCase)))
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                     && !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .OrderBy(f => f, StringComparer.Ordinal)
+            .ToArray();
+
+        if (sources.Length == 0)
+        {
+            Console.WriteLine($"Nothing under {root} that this judges.");
+            return 0;
+        }
+
+        AssetLoadLog.Start();
+        var refused = 0;
+        foreach (var source in sources)
+        {
+            try
+            {
+                new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("check/cooked"), source));
+            }
+            catch (AssetImportException bad)
+            {
+                // Reported, not thrown: one unreadable asset should not stop the other forty from
+                // being judged. A sweep that stops at the first problem finds one problem.
+                Console.WriteLine($"RED  cannot read {Path.GetRelativePath(root, source)} — {bad.Message}");
+                refused++;
+            }
+        }
+
+        var reports = AssetLoadLog.Drain();
+        AssetLoadLog.Enabled = false;
+
+        var slow = reports.Where(r => r.Mode != AssetLoadMode.Cooked).ToArray();
+        var cooked = reports.Length - slow.Length;
+
+        foreach (var r in slow.OrderBy(r => r.SourcePath, StringComparer.Ordinal))
+        {
+            Console.WriteLine(
+                $"RED  {r.Mode.ToString().ToUpperInvariant(),-8} {Shorten(root, r.SourcePath)}" +
+                $"  {r.LoadMs:0.0} ms, {r.Bytes / 1024.0:0.0} KB — {r.Warning}");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"{sources.Length} asset(s), {reports.Length} load(s): {cooked} cooked, {slow.Length} on the slow path.");
+        if (reports.Length > 0)
+        {
+            // <b>Nested, not disjoint.</b> A mesh import pre-decodes its own images, so each
+            // texture's time sits INSIDE its asset's. Adding the two buckets would double-count and
+            // report more milliseconds than the wall clock saw — which is the kind of number that
+            // gets quoted later. Asset time is the total; slow-path time is the share of it.
+            var assetPaths = sources.Select(Path.GetFullPath).ToHashSet(StringComparer.Ordinal);
+            var totalMs = reports.Where(r => assetPaths.Contains(Path.GetFullPath(r.SourcePath))).Sum(r => r.LoadMs);
+            var slowMs = slow.Sum(r => r.LoadMs);
+            Console.WriteLine($"  {totalMs:0} ms to load all {sources.Length}, of which {slowMs:0} ms went on source paths.");
+        }
+
+        if (slow.Length == 0 && refused == 0)
+        {
+            Console.WriteLine("GREEN every load resolved to a cooked artifact.");
+            return 0;
+        }
+
+        return 1;
+    }
+
+    private static string Shorten(string root, string path)
+    {
+        try
+        {
+            return Path.IsPathRooted(path) ? Path.GetRelativePath(root, path) : path;
+        }
+        catch (ArgumentException)
+        {
+            return path;
+        }
+    }
+
     private static int InspectModel(string path)
     {
         if (!File.Exists(path))

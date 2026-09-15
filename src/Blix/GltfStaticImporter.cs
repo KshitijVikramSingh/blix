@@ -45,6 +45,13 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         // fail under this model, but BlixMeshReader.Read replaces them.
         var blixmeshPath = Path.ChangeExtension(context.SourcePath, ".blixmesh");
         var useCookedMesh = File.Exists(blixmeshPath);
+
+        // <b>The decision this whole arc is about, finally said out loud.</b> Which branch is taken
+        // here has always been invisible: the check is File.Exists and there is no return value,
+        // log line or field that says which way it went, so "is this asset on the fast path" was
+        // not a question anything could ask. The stopwatch is started unconditionally because it is
+        // three instructions and the alternative is a branch in a hot path to save them.
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         var gltfFullPath = Path.GetFullPath(context.SourcePath);
         var gltfDirInfo = Path.GetDirectoryName(gltfFullPath) ?? string.Empty;
         var gltfFileName = Path.GetFileName(gltfFullPath);
@@ -179,6 +186,20 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
 
         // Empty skeleton + zero animations. Identity meshNodeTransform — every
         // vertex has already had its node transform baked in.
+        // Reported before returning, so the cost covers the whole load rather than one phase of it.
+        if (AssetLoadLog.Enabled)
+        {
+            var cookedStamp = useCookedMesh ? CookedFile.TryReadHeader(blixmeshPath) : null;
+            AssetLoadLog.Report(new AssetLoadReport(
+                SourcePath: context.SourcePath,
+                CookedPath: useCookedMesh ? blixmeshPath : null,
+                Mode: useCookedMesh ? AssetLoadMode.Cooked : AssetLoadMode.Source,
+                Bytes: SafeLength(useCookedMesh ? blixmeshPath : context.SourcePath),
+                LoadMs: loadWatch.Elapsed.TotalMilliseconds,
+                Recipe: cookedStamp?.Stamp.Recipe,
+                Warning: useCookedMesh ? null : "no .blixmesh sibling — glTF accessors were walked"));
+        }
+
         return new GltfModel(
             primitives.ToArray(),
             new Skeleton(Array.Empty<Bone>()),
@@ -400,6 +421,18 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
 
 
 
+
+    private static long SafeLength(string path)
+    {
+        try
+        {
+            return new FileInfo(path) is { Exists: true } f ? f.Length : 0L;
+        }
+        catch (IOException)
+        {
+            return 0L;
+        }
+    }
 
     /// <summary>The inverse-transpose of a model matrix, for transforming normals.</summary>
     /// <remarks>
