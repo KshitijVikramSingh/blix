@@ -99,6 +99,7 @@ public static class Program
 internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHandler, IDisposable
 {
     private readonly StudioRenderer renderer = new();
+    private readonly List<IStudioView> views = new();
     private StudioScene scene = StudioScene.Default();
     private readonly string? modelPath;
     private StudioModel? model;
@@ -561,9 +562,14 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // draw carries a descriptor set, not a copy of the matrices.
         if (rig is not null && session is not null) rig.UploadPalettes(session.Palettes);
 
+        // What this tool puts on the stage. Rebuilt per frame rather than cached, because the
+        // instance count follows the session and a stale RigView would draw last frame's crowd.
+        views.Clear();
+        if (model is not null) views.Add(new ModelView(model, modelTransform));
+        if (rig is not null) views.Add(new RigView(rig, session?.Palettes.Count ?? 0));
+
         renderer.Render(
-            commandList, scene, viewProjection, cameraPosition, model, modelTransform,
-            rig, session?.Palettes.Count ?? 0,
+            commandList, scene, viewProjection, cameraPosition, views,
             panels.ViewportOpen ? viewportViewProjection : null, viewportCameraPosition);
     }
 

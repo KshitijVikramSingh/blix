@@ -103,6 +103,13 @@ public static class Program
         // tool parses it by hand because it has no session — so the two names agree by care rather
         // than by construction, and that difference is the standing argument for eventually giving
         // it one.
+        // <b>The stage self-test: rung four, exercised.</b> The extension hook lets a tool add a
+        // pass of its own, and a hook nothing calls is a hook that rots. This declares a trivial
+        // pass over the scene colour and asserts its record delegate ran — so the mechanism is
+        // checked by something rather than shipped on faith, and deleting the loop that records
+        // extensions fails it immediately.
+        var stageSelfTest = args.Contains("--stage-selftest");
+
         var maskRoot = ArgValue(args, "--mask-root");
         var maskFalloff = int.TryParse(ArgValue(args, "--mask-falloff"), out var mf) ? Math.Max(0, mf) : 0;
 
@@ -128,10 +135,24 @@ public static class Program
         var loop = new CaptureLoop(
             output, options.ExitAfterFrames, modelPath, rigPath, clipName, clipTime, xray, advance,
             driveRoot, instances, lockstep, viewport, sequence, maskRoot, maskFalloff, skeletonOnly,
-            zoom);
+            zoom, stageSelfTest);
         using (var window = new Window(loop, options))
         {
             window.Run();
+        }
+
+        // The stage self-test judges, so it exits non-zero rather than only printing. A mechanism
+        // check that reports failure and returns 0 is a mechanism check nobody runs twice.
+        if (stageSelfTest)
+        {
+            if (loop.ExtensionRecords == 0)
+            {
+                Console.Error.WriteLine(
+                    "stage self-test: the extension pass was declared and NEVER recorded — rung four is broken.");
+                return 1;
+            }
+
+            Console.WriteLine($"stage self-test: the extension pass recorded {loop.ExtensionRecords} frame(s)");
         }
 
         if (loop.Written is { } path)
@@ -182,6 +203,29 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private StudioRig? rig;
     private ClipPlayer? player;
     private readonly bool skeletonOnly;
+    private readonly bool stageSelfTest;
+    private int extensionRecords;
+
+    internal int ExtensionRecords => extensionRecords;
+
+    /// <summary>
+    /// Rung four, exercised: a pass this tool adds to the stage, and proof that it ran.
+    /// </summary>
+    /// <remarks>
+    /// It draws nothing. What is being checked is the seam — that a tool gets a window to declare a
+    /// pass before the graph compiles, and that the stage then records it every frame. A hook with
+    /// no consumer is a hook that rots, and this is the cheapest consumer that is honest: it makes
+    /// no claim about what an extension would be FOR, only that one is possible.
+    /// </remarks>
+    private void ExtendStage(StudioStage stage)
+    {
+        var pass = stage.Graph.GraphicsPass("shot.selftest")
+            .Target(stage.SceneColour, LoadOp.Load, StoreOp.Store)
+            .Shader(stage.Lit)
+            .Handle;
+
+        stage.Record(pass, _ => extensionRecords++);
+    }
     private readonly float zoom;
     private readonly string? maskRoot;
     private readonly int maskFalloff;
@@ -222,9 +266,11 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         string? maskRoot = null,
         int maskFalloff = 0,
         bool skeletonOnly = false,
-        float zoom = 1f)
+        float zoom = 1f,
+        bool stageSelfTest = false)
     {
         this.skeletonOnly = skeletonOnly;
+        this.stageSelfTest = stageSelfTest;
         this.zoom = zoom;
         this.maskRoot = maskRoot;
         this.maskFalloff = maskFalloff;
@@ -249,7 +295,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         device = (VulkanGraphicsDevice)graphicsDevice;
-        renderer.Load(device, Path.Combine(AppContext.BaseDirectory, "Shaders"));
+        renderer.Load(
+            device,
+            Path.Combine(AppContext.BaseDirectory, "Shaders"),
+            stageSelfTest ? ExtendStage : null);
 
         LoadRig();
 
@@ -497,9 +546,12 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         var panelView = Matrix4x4.CreateLookAt(panelEye, target, Vector3.UnitY)
                         * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, aspect, 0.1f, 120f);
 
+        var views = new List<IStudioView>();
+        if (model is not null) views.Add(new ModelView(model, modelTransform));
+        if (!skeletonOnly && rig is not null) views.Add(new RigView(rig, palettes?.Count ?? 0));
+
         renderer.Render(
-            commandList, scene, viewProjection, eye, model, modelTransform,
-            skeletonOnly ? null : rig, palettes?.Count ?? 0,
+            commandList, scene, viewProjection, eye, views,
             viewport ? panelView : null, panelEye);
 
         // Debug() runs BEFORE this in the frame, so it annotates with whatever was stored last time

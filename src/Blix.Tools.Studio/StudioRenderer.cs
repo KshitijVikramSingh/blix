@@ -96,6 +96,10 @@ public sealed class StudioRenderer : IDisposable
     // reads like a model-loading bug and is not one. White is the identity for a base-colour factor.
     private TextureHandle whiteTexture;
 
+    // Passes a tool added, and how to record each. Empty for every tool that wants the stage as it
+    // comes, which is expected to be most of them.
+    private List<(PassHandle Pass, Action<RenderPassBuilder> Record)> extensions = new();
+
     private readonly byte[] pushScratch = new byte[PushBytes];
     private readonly byte[] casterPushScratch = new byte[CasterPushBytes];
     private readonly byte[] skinnedCasterPushScratch = new byte[SkinnedCasterPushBytes];
@@ -111,7 +115,17 @@ public sealed class StudioRenderer : IDisposable
     /// <summary>0 = ACES, 1 = AgX, 2 = Reinhard, 3 = neutral. Matches blix_tonemap.</summary>
     public float TonemapMode { get; set; }
 
-    public void Load(VulkanGraphicsDevice vk, string shaderDirectory)
+    /// <param name="extend">
+    /// <b>Rung four: a tool adding a pass of its own.</b> Called with the stage's graph and targets
+    /// after they exist and BEFORE <c>Compile()</c>, which is the only window in which a pass can be
+    /// declared at all — so a selection outline, a pre-pass or an id buffer is a delegate rather
+    /// than a fork of this file.
+    /// <para>
+    /// It is here on one prediction, recorded as one: <b>tooling asks to extend a graph before it
+    /// asks to replace one.</b> If that turns out false this is one parameter to remove.
+    /// </para>
+    /// </param>
+    public void Load(VulkanGraphicsDevice vk, string shaderDirectory, Action<StudioStage>? extend = null)
     {
         device = vk;
         fullscreen = new FullscreenPass(vk, "lab.present");
@@ -202,6 +216,12 @@ public sealed class StudioRenderer : IDisposable
         // A rig and a box are the same lighting question with different vertex plumbing, and giving
         // the rig its own pass would mean a second clear, a second sort order, and two places to fix
         // the next time the sun moves.
+
+        // Everything the stage owns exists; nothing is compiled. The one window a tool has.
+        extensions = new List<(PassHandle, Action<RenderPassBuilder>)>();
+        extend?.Invoke(new StudioStage(
+            graph, sceneColourTarget, sceneDepthTarget, shadowTarget,
+            litInterface, shadowInterface, extensions));
 
         graph.Compile();
 
@@ -334,15 +354,11 @@ public sealed class StudioRenderer : IDisposable
         StudioScene scene,
         Matrix4x4 viewProjection,
         Vector3 cameraPosition,
-        StudioModel? model = null,
-        Matrix4x4 modelTransform = default,
-        StudioRig? rig = null,
-        int rigInstances = 1,
+        IReadOnlyList<IStudioView>? views = null,
         Matrix4x4? viewportViewProjection = null,
         Vector3 viewportCameraPosition = default)
     {
-        if (modelTransform == default) modelTransform = Matrix4x4.Identity;
-
+        views ??= Array.Empty<IStudioView>();
         var sunViewProjection = scene.SunViewProjection();
 
         // Pass 1 — the sun's depth. No colour attachment at all, which is the thing the
@@ -354,6 +370,8 @@ public sealed class StudioRenderer : IDisposable
                 new("uLightViewProjection", new Matrix4x4Uniform(sunViewProjection)),
             };
 
+            // FURNITURE first, and it stays the stage's. A tool does not choose whether the
+            // stage has a floor; that is part of what makes it a stage rather than a blank device.
             foreach (var item in scene.Objects)
             {
                 // The ground casts nothing onto itself worth the fill.
@@ -361,13 +379,10 @@ public sealed class StudioRenderer : IDisposable
                 DrawObject(scope, item, shadowPipeline, uniforms, Array.Empty<ShaderTextureBinding>(), casterOnly: true);
             }
 
-            DrawModelParts(
-                scope, model, modelTransform, shadowPipeline, uniforms,
-                Array.Empty<ShaderTextureBinding>(), casterOnly: true);
-
-            DrawRigParts(
-                scope, rig, rigInstances, skinnedShadowPipeline, uniforms,
-                Array.Empty<ShaderTextureBinding>(), casterOnly: true);
+            var draw = new StudioDraw(
+                scope, StudioPass.Shadow, uniforms, Array.Empty<ShaderTextureBinding>(),
+                shadowPipeline, skinnedShadowPipeline, whiteTexture);
+            foreach (var view in views) view.Draw(draw);
         });
 
         // Pass 2 — light it into HDR, sampling the depth the caster pass just wrote.
@@ -389,8 +404,9 @@ public sealed class StudioRenderer : IDisposable
                 DrawObject(scope, item, litPipeline, uniforms, textures);
             }
 
-            DrawModelParts(scope, model, modelTransform, litPipeline, uniforms, textures, casterOnly: false);
-            DrawRigParts(scope, rig, rigInstances, skinnedPipeline, uniforms, textures, casterOnly: false);
+            var draw = new StudioDraw(
+                scope, StudioPass.Lit, uniforms, textures, litPipeline, skinnedPipeline, whiteTexture);
+            foreach (var view in views) view.Draw(draw);
         });
 
         // Pass 2b — the SAME scene from a second camera, into the panel's target. Same content,
@@ -416,12 +432,18 @@ public sealed class StudioRenderer : IDisposable
                     DrawObject(scope, item, litPipeline, uniforms, textures);
                 }
 
-                DrawModelParts(
-                    scope, model, modelTransform, litPipeline, uniforms, textures, casterOnly: false);
-                DrawRigParts(
-                    scope, rig, rigInstances, skinnedPipeline, uniforms, textures, casterOnly: false);
+                // The SAME views, from the second camera. That is what makes it a view rather
+                // than a second renderer — and now that a view is an interface, a tool's own
+                // contribution appears in the panel for free, which it never did before.
+                var draw = new StudioDraw(
+                    scope, StudioPass.Lit, uniforms, textures, litPipeline, skinnedPipeline, whiteTexture);
+                foreach (var view in views) view.Draw(draw);
             });
         }
+
+        // A tool's own passes, recorded in the order it added them and after the stage's, so an
+        // outline or an overlay reads the scene depth the lit pass just wrote.
+        foreach (var (pass, record) in extensions) graph.Pass(pass, record);
 
         graph.Execute(commandList);
 
@@ -445,146 +467,6 @@ public sealed class StudioRenderer : IDisposable
                 },
                 pushConstants: null,
                 uniforms: present));
-    }
-
-    // Each node's primitives, placed by that node's COMPOSED world transform — the same walk up
-    // the parent chain blix-cook inspect does. Drawn per part rather than fused, because a fused
-    // mesh cannot answer where any part's pivot is, which is the question an asset raises.
-    private void DrawModelParts(
-        RenderPassBuilder pass,
-        StudioModel? model,
-        Matrix4x4 modelTransform,
-        PipelineHandle pipeline,
-        ShaderUniform[] uniforms,
-        ShaderTextureBinding[] textures,
-        bool casterOnly)
-    {
-        if (model is null) return;
-
-        for (var index = 0; index < model.Parts.Count; index++)
-        {
-            var part = model.Parts[index];
-            var node = model.Nodes[part.NodeIndex];
-            var push = casterOnly ? casterPushScratch : pushScratch;
-            PackMatrix(node.WorldTransform * modelTransform, push);
-            if (!casterOnly)
-            {
-                var floats = MemoryMarshal.Cast<byte, float>(push.AsSpan());
-                floats[16] = part.BaseColour.X;
-                floats[17] = part.BaseColour.Y;
-                floats[18] = part.BaseColour.Z;
-                floats[19] = 1f;
-                floats[20] = part.Metallic;
-                floats[21] = part.Roughness;
-            }
-
-            // The caster samples nothing — its shader declares no textures at all, and it is
-            // handed an empty list. The lit draw gets a FRESH array per part: push payloads are
-            // copied at record time, texture lists are still retained by reference, so a shared
-            // array would give every draw the last part's albedo — the aliasing that stacked
-            // seven boxes, wearing a different hat.
-            if (casterOnly)
-            {
-                pass.DrawIndexed(
-                    vertexBuffer: part.Vertices,
-                    indexBuffer: part.Indices,
-                    pipeline: pipeline,
-                    indexCount: part.IndexCount,
-                    uniforms: uniforms,
-                    textures: textures,
-                    pushConstants: push);
-            }
-            else
-            {
-                pass.DrawIndexed(
-                    vertexBuffer: part.Vertices,
-                    indexBuffer: part.Indices,
-                    pipeline: pipeline,
-                    indexCount: part.IndexCount,
-                    uniforms: uniforms,
-                    textures: new[]
-                    {
-                        textures[0],
-                        new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 1),
-                    },
-                    pushConstants: push);
-            }
-        }
-    }
-
-    // The rig's primitives, drawn ONCE each for N instances out of one sliced palette.
-    //
-    // The contrast with DrawModelParts is the whole difference between a static asset and a rigged
-    // one: there, each part is placed by its node's composed world matrix, because the hierarchy IS
-    // the articulation. Here the hierarchy lives in the palette and every primitive of an instance
-    // reads the same slice — a skin that placed its parts individually would tear along their seams.
-    //
-    // <b>This is where the one-palette-per-frame gap was.</b> A descriptor set's BUFFER is not copied
-    // at record time the way a push payload is, so two draws in one frame sharing one palette binding
-    // both read whatever it held at Execute — the second pose, twice. The fix is not more bindings
-    // but a wider one: every instance's matrices in a single buffer at a known stride, indexed by
-    // gl_InstanceIndex. Bulwark and RTSGame both reached the same shape; BonePaletteSet is the
-    // stride contract they were each restating.
-    //
-    // uModel goes up as IDENTITY. Each instance's placement is baked into its own palette slice,
-    // because a per-draw push constant cannot vary per instance.
-    private void DrawRigParts(
-        RenderPassBuilder pass,
-        StudioRig? rig,
-        int instances,
-        PipelineHandle pipeline,
-        ShaderUniform[] uniforms,
-        ShaderTextureBinding[] textures,
-        bool casterOnly)
-    {
-        if (rig is null || instances <= 0) return;
-
-        var stride = (float)rig.Skeleton.BoneCount;
-        foreach (var part in rig.Parts)
-        {
-            byte[] push;
-            if (casterOnly)
-            {
-                push = skinnedCasterPushScratch;
-                var casterFloats = MemoryMarshal.Cast<byte, float>(push.AsSpan());
-                casterFloats[0] = stride;
-                casterFloats[1] = 0f;
-                casterFloats[2] = 0f;
-                casterFloats[3] = 0f;
-            }
-            else
-            {
-                push = pushScratch;
-                PackMatrix(Matrix4x4.Identity, push);
-                var floats = MemoryMarshal.Cast<byte, float>(push.AsSpan());
-                floats[16] = part.BaseColour.X;
-                floats[17] = part.BaseColour.Y;
-                floats[18] = part.BaseColour.Z;
-                floats[19] = 1f;
-                floats[20] = part.Metallic;
-                floats[21] = part.Roughness;
-                // z, where the shader reads the per-instance stride. See studio_skinned.vert for why it
-                // rides in a material slot rather than in a block of its own.
-                floats[22] = stride;
-                floats[23] = 0f;
-            }
-
-            pass.DrawIndexedInstanced(
-                vertexBuffer: part.Vertices,
-                indexBuffer: part.Indices,
-                pipeline: pipeline,
-                indexCount: part.IndexCount,
-                instanceCount: instances,
-                uniforms: uniforms,
-                // A fresh array per part for the same reason DrawModelParts builds one: texture
-                // lists are retained by reference, so a shared array gives every draw the last
-                // part's albedo.
-                textures: casterOnly
-                    ? textures
-                    : new[] { textures[0], new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 1) },
-                perDrawMaterial: rig.BoneMaterial,
-                pushConstants: push);
-        }
     }
 
     private static void PackMatrix(Matrix4x4 m, byte[] target)
