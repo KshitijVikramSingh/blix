@@ -41,10 +41,28 @@ public static class Program
     {
         // --model <path> reports what an import produced, with no device anywhere in sight. A glTF
         // is a build artifact too, and everything below is readable without a GPU.
-        for (var i = 0; i < args.Length - 1; i++)
+        //
+        // <b>One catch, for one exception type, and deliberately not a blanket one.</b>
+        // AssetImportException is the engine saying "this is not something Blix can read" — a
+        // refusal, with the path in it, and the only thing a person can act on. Anything ELSE
+        // escaping from here is a fault in this tool and should arrive as a stack trace, because a
+        // judge that swallows its own bugs reports a clean bill of health on a broken asset.
+        //
+        // Before this, nothing was caught at all: `blix check --rig not-a-glb` exited 134 through
+        // the parser's own exception. A judge whose whole job is to survive a bad asset crashed on
+        // the first one it was handed.
+        try
         {
-            if (args[i] == "--model") return InspectModel(args[i + 1]);
-            if (args[i] == "--rig") return InspectRig(args[i + 1], args.Contains("--verbose"));
+            for (var i = 0; i < args.Length - 1; i++)
+            {
+                if (args[i] == "--model") return InspectModel(args[i + 1]);
+                if (args[i] == "--rig") return InspectRig(args[i + 1], args.Contains("--verbose"));
+            }
+        }
+        catch (AssetImportException refused)
+        {
+            Console.Error.WriteLine($"blix cannot read this: {refused.Message}");
+            return 1;
         }
 
         if (args.Contains("--help") || args.Contains("-h"))
@@ -157,13 +175,13 @@ public static class Program
         var roots = 0;
         for (var i = 0; i < skeleton.BoneCount; i++)
         {
+            // <b>Only the root count, because out-of-order cannot happen here.</b> Skeleton's
+            // constructor throws when a bone parents forward, and GltfImporter builds every
+            // skeleton through it — so a check for it downstream can only ever pass, and a check
+            // that can only pass is not a check. What an out-of-order export actually does is fail
+            // at IMPORT, naming the bone, which is both earlier and more useful.
             var parent = skeleton.Bones[i].ParentIndex;
             if (parent < 0) roots++;
-            else if (parent >= i)
-            {
-                Console.Error.WriteLine($"  bone {i} '{skeleton.Bones[i].Name}' parents to {parent} — out of order.");
-                problems++;
-            }
         }
 
         Console.WriteLine($"  hierarchy: {roots} root(s), order valid");

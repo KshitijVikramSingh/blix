@@ -1,3 +1,4 @@
+using Blix.Assets;
 using System.Numerics;
 using Blix;
 using Blix.Core;
@@ -331,7 +332,19 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             return;
         }
 
-        model = StudioModel.Load(vk, modelPath);
+        // <b>The same catch the judge has, for the same reason.</b> AssetImportException is the
+        // engine refusing a file by name; anything else escaping here is a fault in this tool.
+        // Without it a bad asset took the whole process down with a stack trace AFTER the window
+        // had opened — which reads as "the viewer is broken" rather than "that file is not a glTF".
+        try
+        {
+            model = StudioModel.Load(vk, modelPath);
+        }
+        catch (AssetImportException refused)
+        {
+            Console.Error.WriteLine($"blix cannot read this: {refused.Message}");
+            Environment.Exit(1);
+        }
 
         // The model is the subject now; the box ring is a backdrop that hides it.
 
@@ -369,7 +382,15 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             return;
         }
 
-        rig = StudioRig.Load(vk, rigPath, renderer.SkinnedProgram);
+        try
+        {
+            rig = StudioRig.Load(vk, rigPath, renderer.SkinnedProgram);
+        }
+        catch (AssetImportException refused)
+        {
+            Console.Error.WriteLine($"blix cannot read this: {refused.Message}");
+            Environment.Exit(1);
+        }
         if (rig.Skeleton.BoneCount > StudioRig.MaxBones)
         {
             // Said here rather than discovered on the GPU: past the shader's array bound the draw

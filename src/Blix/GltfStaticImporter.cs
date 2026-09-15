@@ -31,7 +31,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         ArgumentNullException.ThrowIfNull(context);
         if (!File.Exists(context.SourcePath))
         {
-            throw new FileNotFoundException($"glTF file not found: {context.SourcePath}", context.SourcePath);
+            throw new AssetImportException(context.SourcePath, null, "no file there.");
         }
 
         // When a cooked .blixmesh sibling exists, the runtime only needs the
@@ -64,13 +64,14 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 }
                 return ArraySegment<byte>.Empty;
             }
-            model = SharpGLTF.Schema2.ReadContext.Create(Reader)
-                .WithSettingsFrom(settings)
-                .ReadSchema2(gltfFileName);
+            model = AssetImportException.Refusing(context.SourcePath, () =>
+                SharpGLTF.Schema2.ReadContext.Create(Reader)
+                    .WithSettingsFrom(settings)
+                    .ReadSchema2(gltfFileName));
         }
         else
         {
-            model = ModelRoot.Load(context.SourcePath);
+            model = AssetImportException.Refusing(context.SourcePath, () => ModelRoot.Load(context.SourcePath));
         }
 
         var textureCache = new Dictionary<int, GltfTexture>();
@@ -85,7 +86,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         // siblings (see tools/Blix.Tools.Cook + BlixTex format) skip the
         // decode entirely; PreDecodeImages prefers them when present.
         var gltfDir = Path.GetDirectoryName(Path.GetFullPath(context.SourcePath)) ?? string.Empty;
-        PreDecodeImages(model, textureCache, gltfDir);
+        GltfShared.PreDecodeImages(model, textureCache, gltfDir);
 
         // Cooked-mesh fast path. The blixmesh sibling was detected above
         // (used to short-circuit ModelRoot.Load's buffer reads); now read
@@ -130,7 +131,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 var gltfMat = p.MaterialIndex >= 0 && p.MaterialIndex < model.LogicalMaterials.Count
                     ? model.LogicalMaterials[p.MaterialIndex]
                     : null;
-                var material = ExtractMaterial(gltfMat, materialCache, textureCache);
+                var material = GltfShared.ExtractMaterial(gltfMat, materialCache, textureCache);
                 primitives.Add(new GltfPrimitive(meshData, material));
             }
         }
@@ -149,7 +150,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                     var prim = node.Mesh.Primitives[i];
                     var meshName = $"{node.Mesh.Name ?? node.Name ?? "gltf_mesh"}.{i}";
                     var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix, context.FlipTextureV, context.IncludeTangents);
-                    var material = ExtractMaterial(prim.Material, materialCache, textureCache);
+                    var material = GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache);
                     primitives.Add(new GltfPrimitive(meshData, material));
                 }
             }
@@ -181,14 +182,14 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         ArgumentNullException.ThrowIfNull(context);
         if (!File.Exists(context.SourcePath))
         {
-            throw new FileNotFoundException($"glTF file not found: {context.SourcePath}", context.SourcePath);
+            throw new AssetImportException(context.SourcePath, null, "no file there.");
         }
 
-        var model = ModelRoot.Load(context.SourcePath);
+        var model = AssetImportException.Refusing(context.SourcePath, () => ModelRoot.Load(context.SourcePath));
         var gltfDir = Path.GetDirectoryName(Path.GetFullPath(context.SourcePath)) ?? string.Empty;
         var textureCache = new Dictionary<int, GltfTexture>();
         var materialCache = new Dictionary<int, GltfMaterial>();
-        PreDecodeImages(model, textureCache, gltfDir);
+        GltfShared.PreDecodeImages(model, textureCache, gltfDir);
 
         var glNodes = model.LogicalNodes.ToList();
         var indexOf = new Dictionary<Node, int>(glNodes.Count);
@@ -210,7 +211,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                     var name = $"{node.Name ?? mesh.Name ?? "node"}.{j}";
                     // Identity world + normal matrix → vertices stay in node-local space.
                     var meshData = BuildStaticMeshData(name, prim, Matrix4x4.Identity, Matrix4x4.Identity, context.FlipTextureV, context.IncludeTangents);
-                    prims[j] = new GltfPrimitive(meshData, ExtractMaterial(prim.Material, materialCache, textureCache));
+                    prims[j] = new GltfPrimitive(meshData, GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache));
                 }
             }
 
@@ -597,129 +598,8 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         return touched;
     }
 
-    // PBR channels we sample per material. Match the set ExtractMaterial walks
-    // below; if a new channel is added there, mirror it here so the pre-walk
-    // catches its image references.
-    private static readonly string[] PreDecodeChannels =
-    {
-        "BaseColor", "Normal", "MetallicRoughness", "Occlusion", "Emissive",
-    };
 
-    private static void PreDecodeImages(
-        ModelRoot model,
-        Dictionary<int, GltfTexture> textureCache,
-        string gltfDir)
-    {
-        var imageRefs = new HashSet<int>();
-        // Track which images are used as MetallicRoughness so we can route
-        // them through the channel-aware loader that handles 1-channel
-        // grayscale "roughness only" PNGs (Modern Sponza ships those, and
-        // the default LoadRgba32 expansion turns them into "matte metal"
-        // walls when shader reads .b as metallic). First channel-binding
-        // wins -- an image used as both BaseColor and MR somewhere
-        // (unlikely but valid in glTF) gets BaseColor's loader.
-        var mrImageIndices = new HashSet<int>();
-        foreach (var mat in model.LogicalMaterials)
-        {
-            foreach (var channelName in PreDecodeChannels)
-            {
-                var channel = mat.FindChannel(channelName);
-                if (!channel.HasValue) continue;
-                var img = channel.Value.Texture?.PrimaryImage;
-                if (img is null) continue;
-                imageRefs.Add(img.LogicalIndex);
-                if (channelName == "MetallicRoughness")
-                {
-                    mrImageIndices.Add(img.LogicalIndex);
-                }
-            }
-        }
-        if (imageRefs.Count == 0) return;
 
-        var imagesToConsider = model.LogicalImages
-            .Where(i => imageRefs.Contains(i.LogicalIndex))
-            .ToArray();
-
-        // Split: images that have a cooked .blixtex sibling go through the
-        // fast no-decode reader; the rest run through PNG/JPEG decode in
-        // parallel. The cooked sideload is so cheap relative to PNG decode
-        // that even sequential reads stay well under decode time.
-        var cookedSourcePaths = new Dictionary<int, string>();
-        var sourceImages = new List<SharpGLTF.Schema2.Image>();
-        foreach (var image in imagesToConsider)
-        {
-            var blixTexPath = TryResolveBlixTex(image, gltfDir);
-            if (blixTexPath is not null)
-            {
-                cookedSourcePaths[image.LogicalIndex] = blixTexPath;
-            }
-            else
-            {
-                sourceImages.Add(image);
-            }
-        }
-
-        var cookedWatch = System.Diagnostics.Stopwatch.StartNew();
-        foreach (var (idx, path) in cookedSourcePaths)
-        {
-            // Lazy handle: parses just the 32-byte header + per-mip
-            // (offset, length) table. The pixel bytes stay on disk until
-            // the upload pump pulls them mip-by-mip at GL upload time.
-            // This drops the per-pack import-time memory peak from
-            // "all mip data for all textures" (multi-GB) to ~hundreds of
-            // bytes per texture.
-            var handle = BlixTexReader.ReadHandle(path);
-            textureCache[idx] = new GltfTexture(
-                Path.GetFileNameWithoutExtension(path), handle);
-        }
-        cookedWatch.Stop();
-        if (cookedSourcePaths.Count > 0)
-        {
-            Console.WriteLine(
-                $"  indexed {cookedSourcePaths.Count} cooked .blixtex images in {cookedWatch.ElapsedMilliseconds} ms (lazy)");
-        }
-
-        if (sourceImages.Count == 0) return;
-
-        var decoded = new System.Collections.Concurrent.ConcurrentDictionary<int, GltfTexture>();
-        var decodeWatch = System.Diagnostics.Stopwatch.StartNew();
-        System.Threading.Tasks.Parallel.ForEach(sourceImages, image =>
-        {
-            var bytes = image.Content.Content.ToArray();
-            using var stream = new MemoryStream(bytes);
-            var d = mrImageIndices.Contains(image.LogicalIndex)
-                ? ImageLoader.LoadMetallicRoughness(stream)
-                : ImageLoader.LoadRgba32(stream);
-            decoded[image.LogicalIndex] = GltfTexture.Rgba8Single(
-                image.Name ?? $"image_{image.LogicalIndex}",
-                d.Pixels, d.Width, d.Height);
-        });
-        foreach (var kv in decoded) textureCache[kv.Key] = kv.Value;
-        Console.WriteLine(
-            $"  decoded {sourceImages.Count} images in {decodeWatch.ElapsedMilliseconds} ms");
-    }
-
-    // Returns the absolute path to a cooked .blixtex sibling for the image
-    // if one exists, else null. glTF images carry either an embedded byte
-    // blob (no source URI) or a file URI; we can only sideload .blixtex
-    // for the URI case. SharpGLTF stashes the loaded URI in
-    // MemoryImage.SourcePath -- absolute when an external URI was
-    // resolved, null for embedded buffer-view images.
-    private static string? TryResolveBlixTex(SharpGLTF.Schema2.Image image, string gltfDir)
-    {
-        var sourcePath = image.Content.SourcePath;
-        if (string.IsNullOrEmpty(sourcePath)) return null;
-        // SourcePath is absolute when the full ModelRoot.Load resolved URIs
-        // against the glTF dir; relative (e.g. "textures/foo.png") under the
-        // lite-load path where the buffer reader returns empty for non-.gltf
-        // assets. Resolve against gltfDir so File.Exists hits either way.
-        if (!Path.IsPathRooted(sourcePath))
-        {
-            sourcePath = Path.Combine(gltfDir, sourcePath);
-        }
-        var blixTexPath = Path.ChangeExtension(sourcePath, ".blixtex");
-        return File.Exists(blixTexPath) ? blixTexPath : null;
-    }
 
     private static Matrix4x4 ComputeNormalMatrix(Matrix4x4 model)
     {
@@ -732,128 +612,5 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         return Matrix4x4.Transpose(inverse);
     }
 
-    private static GltfMaterial? ExtractMaterial(
-        SharpGLTF.Schema2.Material? material,
-        Dictionary<int, GltfMaterial> materialCache,
-        Dictionary<int, GltfTexture> textureCache)
-    {
-        if (material is null) return null;
-        if (materialCache.TryGetValue(material.LogicalIndex, out var cached)) return cached;
 
-        var baseColorChannel = material.FindChannel("BaseColor");
-        var baseColorFactor = baseColorChannel.HasValue
-            ? baseColorChannel.Value.Color
-            : new Vector4(1.0f, 1.0f, 1.0f, 1.0f);
-        var baseColorTexture = baseColorChannel.HasValue
-            ? ExtractTexture(baseColorChannel.Value.Texture, textureCache)
-            : null;
-
-        var normalChannel = material.FindChannel("Normal");
-        var normalTexture = normalChannel.HasValue
-            ? ExtractTexture(normalChannel.Value.Texture, textureCache)
-            : null;
-
-        var metallicChannel = material.FindChannel("MetallicRoughness");
-        var metallic = 1.0f;
-        var roughness = 1.0f;
-        GltfTexture? metallicRoughnessTexture = null;
-        if (metallicChannel.HasValue)
-        {
-            foreach (var p in metallicChannel.Value.Parameters)
-            {
-                if (p.Name == "MetallicFactor") metallic = (float)Convert.ToDouble(p.Value);
-                else if (p.Name == "RoughnessFactor") roughness = (float)Convert.ToDouble(p.Value);
-            }
-            metallicRoughnessTexture = ExtractTexture(metallicChannel.Value.Texture, textureCache);
-        }
-
-        var occlusionChannel = material.FindChannel("Occlusion");
-        var occlusionStrength = 1.0f;
-        GltfTexture? occlusionTexture = null;
-        if (occlusionChannel.HasValue)
-        {
-            foreach (var p in occlusionChannel.Value.Parameters)
-            {
-                if (p.Name == "Strength") occlusionStrength = (float)Convert.ToDouble(p.Value);
-            }
-            occlusionTexture = ExtractTexture(occlusionChannel.Value.Texture, textureCache);
-        }
-
-        var emissiveChannel = material.FindChannel("Emissive");
-        var emissiveFactor = Vector3.Zero;
-        var emissiveStrength = 1.0f;
-        GltfTexture? emissiveTexture = null;
-        if (emissiveChannel.HasValue)
-        {
-            var c = emissiveChannel.Value.Color;
-            emissiveFactor = new Vector3(c.X, c.Y, c.Z);
-            emissiveTexture = ExtractTexture(emissiveChannel.Value.Texture, textureCache);
-            // KHR_materials_emissive_strength surfaces as an "EmissiveStrength"
-            // parameter on the channel when present. Absent => default 1.0.
-            foreach (var p in emissiveChannel.Value.Parameters)
-            {
-                if (p.Name == "EmissiveStrength") emissiveStrength = (float)Convert.ToDouble(p.Value);
-            }
-        }
-
-        var alphaMode = material.Alpha switch
-        {
-            SharpGLTF.Schema2.AlphaMode.OPAQUE => GltfAlphaMode.Opaque,
-            SharpGLTF.Schema2.AlphaMode.MASK   => GltfAlphaMode.Mask,
-            SharpGLTF.Schema2.AlphaMode.BLEND  => GltfAlphaMode.Blend,
-            _                                  => GltfAlphaMode.Opaque,
-        };
-
-        // KHR_materials_transmission: SharpGLTF surfaces it as a "Transmission"
-        // channel with a "TransmissionFactor" parameter. Absent => 0 (opaque).
-        var transmission = 0.0f;
-        var transmissionChannel = material.FindChannel("Transmission");
-        if (transmissionChannel.HasValue)
-        {
-            foreach (var p in transmissionChannel.Value.Parameters)
-            {
-                if (p.Name == "TransmissionFactor") transmission = (float)Convert.ToDouble(p.Value);
-            }
-        }
-
-        var result = new GltfMaterial(
-            material.Name ?? $"material_{material.LogicalIndex}",
-            baseColorFactor,
-            baseColorTexture,
-            normalTexture,
-            metallicRoughnessTexture,
-            metallic,
-            roughness,
-            occlusionTexture,
-            occlusionStrength,
-            emissiveTexture,
-            emissiveFactor,
-            emissiveStrength,
-            alphaMode,
-            material.AlphaCutoff,
-            material.DoubleSided,
-            transmission);
-        materialCache[material.LogicalIndex] = result;
-        return result;
-    }
-
-    private static GltfTexture? ExtractTexture(
-        SharpGLTF.Schema2.Texture? texture,
-        Dictionary<int, GltfTexture> textureCache)
-    {
-        if (texture is null) return null;
-        var image = texture.PrimaryImage;
-        if (image is null) return null;
-        if (textureCache.TryGetValue(image.LogicalIndex, out var cached)) return cached;
-
-        var bytes = image.Content.Content;
-        using var stream = new MemoryStream(bytes.ToArray());
-        var decoded = ImageLoader.LoadRgba32(stream);
-
-        var result = GltfTexture.Rgba8Single(
-            image.Name ?? texture.Name ?? $"image_{image.LogicalIndex}",
-            decoded.Pixels, decoded.Width, decoded.Height);
-        textureCache[image.LogicalIndex] = result;
-        return result;
-    }
 }

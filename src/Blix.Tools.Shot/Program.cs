@@ -1,3 +1,4 @@
+using Blix.Assets;
 using System.Numerics;
 using Blix;
 using Blix.Core;
@@ -333,7 +334,19 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         LoadRig();
 
         if (modelPath is null || !File.Exists(modelPath)) return;
-        model = StudioModel.Load(device, modelPath);
+        // <b>The same catch the judge has, for the same reason.</b> AssetImportException is the
+        // engine refusing a file by name; anything else escaping here is a fault in this tool.
+        // Without it a bad asset took the whole process down with a stack trace AFTER the window
+        // had opened — which reads as "the viewer is broken" rather than "that file is not a glTF".
+        try
+        {
+            model = StudioModel.Load(device, modelPath);
+        }
+        catch (AssetImportException refused)
+        {
+            Console.Error.WriteLine($"blix cannot read this: {refused.Message}");
+            Environment.Exit(1);
+        }
         ApplyStageKnobs();
         var extent = model.LongestExtent;
         var scale = extent > 0.001f ? 3f / extent : 1f;
@@ -350,7 +363,15 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     {
         if (rigPath is null || !File.Exists(rigPath)) return;
 
-        rig = StudioRig.Load(device, rigPath, renderer.SkinnedProgram);
+        try
+        {
+            rig = StudioRig.Load(device, rigPath, renderer.SkinnedProgram);
+        }
+        catch (AssetImportException refused)
+        {
+            Console.Error.WriteLine($"blix cannot read this: {refused.Message}");
+            Environment.Exit(1);
+        }
         ApplyStageKnobs();
 
         player = new ClipPlayer(rig.Skeleton);

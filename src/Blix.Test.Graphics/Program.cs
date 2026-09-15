@@ -3197,6 +3197,88 @@ static ShaderInterface MinimalShader() => new(new[]
     }
 }
 
+// ============================================================================
+// Section AV — the importer refuses by NAME, not by whatever the parser threw.
+// ============================================================================
+//
+// <b>This is what lets a tool tell a bad asset from a bug in itself.</b> Every refusal comes out
+// as AssetImportException carrying the path; anything else escaping an importer is a fault in
+// Blix. A tool can then catch exactly one type and let the rest crash, which is the only way a
+// judge both survives bad input AND does not swallow its own faults.
+//
+// Before this, `blix check --rig not-a-glb` exited 134 through the parser's own exception — a
+// judge whose whole job is to survive a bad asset, crashing on the first one it was handed.
+{
+    var temp = Path.Combine(Path.GetTempPath(), $"blix-av-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(temp);
+    try
+    {
+        var notGltf = Path.Combine(temp, "not-a.glb");
+        File.WriteAllText(notGltf, "this is not a glTF at all");
+
+        var refused = false;
+        var mentionsPath = false;
+        var keptInner = false;
+        try
+        {
+            new GltfImporter().Import(new AssetImportContext(AssetId.Parse("av.bad"), notGltf));
+        }
+        catch (AssetImportException bad)
+        {
+            refused = true;
+            mentionsPath = bad.Message.Contains("not-a.glb", StringComparison.Ordinal);
+            keptInner = bad.InnerException is not null;
+        }
+        catch (Exception)
+        {
+            // Any other type is the failure this section exists to catch.
+        }
+
+        t.ExpectTrue("AV.1 a file that is not glTF is refused as AssetImportException", refused);
+        t.ExpectTrue("AV.1 and the refusal names the file", mentionsPath);
+        t.ExpectTrue("AV.1 with the parser's own error kept as InnerException", keptInner);
+
+        // <b>One line, not the parser's three.</b> A parser writes for whoever maintains the
+        // parser: provenance, a byte position and a link to a validator. The sentence a person
+        // needs is the first one.
+        var single = true;
+        try
+        {
+            new GltfImporter().Import(new AssetImportContext(AssetId.Parse("av.bad2"), notGltf));
+        }
+        catch (AssetImportException bad)
+        {
+            single = !bad.Message.Contains('\n') && !bad.Message.Contains('\r');
+        }
+        catch (Exception)
+        {
+        }
+
+        t.ExpectTrue("AV.2 the refusal is one line", single);
+
+        // A missing file is the same kind of answer, not a different one.
+        var missingRefused = false;
+        try
+        {
+            new GltfImporter().Import(
+                new AssetImportContext(AssetId.Parse("av.gone"), Path.Combine(temp, "gone.glb")));
+        }
+        catch (AssetImportException)
+        {
+            missingRefused = true;
+        }
+        catch (Exception)
+        {
+        }
+
+        t.ExpectTrue("AV.3 a missing file is refused the same way", missingRefused);
+    }
+    finally
+    {
+        Directory.Delete(temp, recursive: true);
+    }
+}
+
 t.PrintSummary();
 return t.Failed;
 
