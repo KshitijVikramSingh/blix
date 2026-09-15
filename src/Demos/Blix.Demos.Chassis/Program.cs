@@ -1,5 +1,6 @@
 using Blix;
 using Blix.Core;
+using Blix.Diagnostics;
 using Blix.Graphics;
 using Blix.Runtime.Silk;
 using ImGuiNET;
@@ -29,8 +30,15 @@ namespace Blix.Demos.Chassis;
 // with time, so "is it running" is answerable at a glance.
 public static class Program
 {
-    public static void Main(string[] args)
+    public static int Main(string[] args)
     {
+        // Two apps in one assembly, which is the app layer working on itself: this project
+        // is a spec for the chassis, and "a declared control reaches the overlay" is a
+        // chassis-level fact that needed somewhere to be checked. It costs no csproj and no
+        // launcher, and the loop below is untouched — which matters, because being NOT
+        // IDebuggable is the thing it exists to prove.
+        if (BlixApps.Dispatch(args) is { } appCode) return appCode;
+
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — chassis",
@@ -41,6 +49,83 @@ public static class Program
         var loop = new ChassisLoop();
         using var window = new Window(loop, options);
         window.Run();
+        return 0;
+    }
+
+    /// <summary>
+    /// The other half of the spec: a loop that IS <see cref="IDebuggable"/>, declaring its state
+    /// with <c>[Tune]</c> and writing none of the controls that render it.
+    /// </summary>
+    /// <remarks>
+    /// <b>It exists for the text field.</b> Every other <c>[Tune]</c> kind is numeric — a bool is
+    /// 0/1, an enum is an option index — so until strings existed a tool could declare how a subject
+    /// was DISPLAYED and never which subject it was. Nothing in the tree put an InputText on screen
+    /// from a declaration, so nothing would have noticed if the overlay never drew one.
+    /// </remarks>
+    [BlixApp("chassis-tune", Summary = "declared [Tune] state, rendered by the overlay", Headed = true)]
+    public static void Tuned(string[] args)
+    {
+        var options = WindowOptions.FromArgs(args, WindowOptions.Default with
+        {
+            Title = "Blix — chassis (declared state)",
+            Width = 900,
+            Height = 560,
+        });
+
+        var loop = new TunedLoop();
+        using var window = new Window(loop, options);
+        window.Run();
+    }
+}
+
+/// <summary>Declares state; writes no controls. The overlay renders every one of these.</summary>
+internal sealed class TunedSubject
+{
+    [Tune] public string Clip = "Walking_A";
+
+    [Tune(MaxLength = 8)] public string Bone = "spine";
+
+    [Tune(0, 1)] public float Weight = 0.5f;
+
+    [Tune] public bool Masked = true;
+}
+
+internal sealed class TunedLoop : IGameLoop, IDebuggable
+{
+    private readonly TunedSubject subject = new();
+    private readonly ObjectTunables tunables;
+    private double now;
+
+    public TunedLoop() => tunables = new ObjectTunables(subject);
+
+    public string DebugName => "chassis-tune";
+
+    public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
+    {
+        now = time.Total;
+        var tint = (float)(Math.Sin(now * 0.6) * 0.5 + 0.5) * 0.10f;
+        commandList.Pass(
+            "clear",
+            new RenderPassDescription(
+                Target: RenderSurfaceHandle.Default,
+                ClearColors: new GraphicsColor?[] { new(0.05f + tint, 0.09f, 0.06f + tint * 0.5f, 1f) },
+                ClearDepth: false),
+            _ => { });
+    }
+
+    public void Debug(DebugContext debug)
+    {
+        tunables.BuildControls(debug);
+
+        // Read back through the members, so what the panel did is visible as a value rather
+        // than only as a widget that looked like it worked.
+        using (debug.Scope("read back"))
+        {
+            debug.Values.Value("clip", subject.Clip);
+            debug.Values.Value("bone", subject.Bone);
+            debug.Values.Value("weight", subject.Weight);
+            debug.Values.Value("masked", subject.Masked);
+        }
     }
 }
 
