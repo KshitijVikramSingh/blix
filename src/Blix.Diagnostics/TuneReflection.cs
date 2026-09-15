@@ -64,6 +64,33 @@ public sealed class TuneAttribute : Attribute
     }
 }
 
+/// <summary>One declared value moving, and where it moved from.</summary>
+/// <param name="Name">The member's name — the same one the flag and the panel are derived from.</param>
+public readonly record struct TunableChange(string Name, object From, object To)
+{
+    public override string ToString() => $"{Name}: {From} -> {To}";
+}
+
+/// <summary>
+/// A subject that wants to hear when its own declared state is driven from outside.
+/// </summary>
+/// <remarks>
+/// <b>One path in.</b> A value can be written by a flag at startup, by a panel mid-session, or by a
+/// frame being replayed, and a subject implementing this cannot tell which — because it should not
+/// have to. There is no separate initialisation hook for the same reason: applying a flag IS a
+/// change, reported from the value the declaration started at.
+/// <para>
+/// Reported per change rather than per frame, deliberately. Blix says what moved; whether eight
+/// flags at startup should cause one recompute or eight is an opinion about a particular tool, and
+/// a tool that wants to coalesce sets a flag and acts in its own update — which is what it would
+/// do anyway.
+/// </para>
+/// </remarks>
+public interface ITunable
+{
+    void OnChanged(TunableChange change);
+}
+
 // A reflected tunable bound to a live object: presentation metadata + a value
 // accessor that reads/writes the underlying member directly. The value is
 // float-backed across all kinds (bool = 0/1, enum = option index); `Kind` tells
@@ -103,6 +130,23 @@ public sealed class TunableField
 
     /// <summary>Buffer size for <see cref="TuneKind.Text"/>; zero for every other kind.</summary>
     public int MaxLength { get; }
+
+    /// <summary>
+    /// What this member held when it was first reflected — the value its declaration starts it at.
+    /// </summary>
+    /// <remarks>
+    /// Read from the member rather than declared on the attribute, because the field initializer
+    /// already says it: <c>[Tune(0, 1)] public float Weight = 0.5f</c> has stated where Weight
+    /// begins, and repeating it in the attribute would give it two answers that can disagree.
+    /// <para>
+    /// It is also the <c>From</c> of the first change, which is what makes a change report readable
+    /// at startup rather than only after the second edit.
+    /// </para>
+    /// </remarks>
+    public object Initial { get; internal set; } = 0f;
+
+    /// <summary>The value now, whichever kind this is — a float, or the string for Text.</summary>
+    public object Current => Kind == TuneKind.Text ? Text : Value;
 
     public float Value
     {
@@ -202,6 +246,7 @@ public static class TuneReflection
                     "(float, int, bool, enum, or string).");
             }
         }
+        foreach (var field in result) field.Initial = field.Current;
         return result;
     }
 
@@ -259,6 +304,10 @@ public sealed class ObjectTunables
 {
     private readonly List<(string Group, List<TunableField> Items)> groups = new();
 
+    // Which subject each field belongs to, so a change is reported to the object that owns it
+    // rather than to all of them. An ObjectTunables over three settings objects is normal.
+    private readonly Dictionary<TunableField, object> owners = new();
+
     public ObjectTunables(params object[] targets)
     {
         // Seeded after reflection below, so the first BuildControls reports a quiet frame
@@ -269,6 +318,7 @@ public sealed class ObjectTunables
         {
             foreach (var field in TuneReflection.Reflect(target))
             {
+                owners[field] = target;
                 if (!byGroup.TryGetValue(field.Group, out var list))
                 {
                     list = new List<TunableField>();
@@ -324,6 +374,154 @@ public sealed class ObjectTunables
     // identical from here, and should.
     private readonly Dictionary<TunableField, object> lastSeen = new();
 
+    /// <summary>
+    /// Drive declared state from a command line, and hand back what was not recognised.
+    /// </summary>
+    /// <remarks>
+    /// <b>The second face of one declaration.</b> A panel and a flag are the same member rendered
+    /// two ways, and the range that stops a slider leaving its bounds is the range that validates
+    /// <c>--weight 3</c>. Nothing here is written per tool, which is the whole point: the reason
+    /// one tool took <c>--mask</c> and another took <c>--mask-from</c> is that both were
+    /// hand-written a release apart.
+    /// <para>
+    /// Flags come from the MEMBER name rather than the label — <c>MaskRoot</c> is
+    /// <c>--mask-root</c>, not <c>--Mask root</c> — because a label is for reading and a flag is
+    /// for typing.
+    /// </para>
+    /// <para>
+    /// Unrecognised arguments are returned rather than rejected. A tool has flags of its own that
+    /// are not state (<c>--frames</c>, <c>--out</c>), and this has no business knowing them.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentException">
+    /// A declared flag was given a value it cannot hold. Loud, because the alternative is a tool
+    /// that silently ran with a default while its command line said otherwise.
+    /// </exception>
+    public string[] Apply(string[] args)
+    {
+        ArgumentNullException.ThrowIfNull(args);
+
+        var byFlag = new Dictionary<string, TunableField>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (_, items) in groups)
+        {
+            foreach (var f in items)
+            {
+                if (f.Kind != TuneKind.Button) byFlag[FlagFor(f.Name)] = f;
+            }
+        }
+
+        var rest = new List<string>();
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (!byFlag.TryGetValue(args[i], out var field))
+            {
+                rest.Add(args[i]);
+                continue;
+            }
+
+            var before = Snapshot(field);
+
+            if (field.Kind == TuneKind.Bool)
+            {
+                // Presence is true, which is how every hand-written flag in this tree already
+                // behaves. An explicit "--lockstep false" still works when it is spelled.
+                var explicitValue = i + 1 < args.Length && bool.TryParse(args[i + 1], out var parsed);
+                field.Value = explicitValue && !bool.Parse(args[++i]) ? 0f : 1f;
+            }
+            else
+            {
+                if (i + 1 >= args.Length)
+                {
+                    throw new ArgumentException($"{args[i]} needs a value after it.", nameof(args));
+                }
+
+                AssignFrom(field, args[i], args[++i]);
+            }
+
+            var after = Snapshot(field);
+            lastSeen[field] = after;
+            if (!Equals(before, after)) Mark(field, before, after);
+        }
+
+        return rest.ToArray();
+    }
+
+    /// <summary>Every flag this reports, for a caller that wants to print usage.</summary>
+    public IEnumerable<(string Flag, TuneKind Kind, string? Options)> Flags()
+    {
+        foreach (var (_, items) in groups)
+        {
+            foreach (var f in items)
+            {
+                if (f.Kind == TuneKind.Button) continue;
+                var options = f.Kind switch
+                {
+                    TuneKind.Enum => string.Join("|", f.EnumNames ?? Array.Empty<string>()),
+                    TuneKind.Float or TuneKind.Int => $"{f.Min}..{f.Max}",
+                    TuneKind.Text => $"text[{f.MaxLength}]",
+                    _ => null,
+                };
+                yield return (FlagFor(f.Name), f.Kind, options);
+            }
+        }
+    }
+
+    private static void AssignFrom(TunableField field, string flag, string raw)
+    {
+        switch (field.Kind)
+        {
+            case TuneKind.Text:
+                field.Text = raw;
+                break;
+
+            case TuneKind.Enum:
+            {
+                var names = field.EnumNames ?? Array.Empty<string>();
+                var at = -1;
+                for (var n = 0; n < names.Count; n++)
+                {
+                    if (string.Equals(names[n], raw, StringComparison.OrdinalIgnoreCase)) at = n;
+                }
+
+                if (at < 0)
+                {
+                    throw new ArgumentException(
+                        $"{flag} is one of {string.Join(", ", names)} — not '{raw}'.", nameof(raw));
+                }
+
+                field.Value = at;
+                break;
+            }
+
+            default:
+            {
+                if (!float.TryParse(raw, out var number))
+                {
+                    throw new ArgumentException($"{flag} takes a number, not '{raw}'.", nameof(raw));
+                }
+
+                // Clamped rather than refused, and the same clamp a slider gets. A range says what
+                // the value MEANS; arguing with a command line about it helps nobody.
+                field.Value = Math.Clamp(number, field.Min, field.Max);
+                break;
+            }
+        }
+    }
+
+    /// <summary>MaskRoot becomes --mask-root; flySpeed becomes --fly-speed.</summary>
+    public static string FlagFor(string member)
+    {
+        var sb = new StringBuilder("--");
+        for (var i = 0; i < member.Length; i++)
+        {
+            var c = member[i];
+            if (char.IsUpper(c) && i > 0) sb.Append('-');
+            sb.Append(char.ToLowerInvariant(c));
+        }
+
+        return sb.ToString();
+    }
+
     public void BuildControls(DebugContext debug)
     {
         ArgumentNullException.ThrowIfNull(debug);
@@ -358,7 +556,7 @@ public sealed class ObjectTunables
                     // is news.
                     if (f.Kind == TuneKind.Button)
                     {
-                        if (f.Value != 0f) Mark(f);
+                        if (f.Value != 0f) Mark(f, 0f, 1f);
                         lastSeen[f] = Snapshot(f);
                     }
                     else Note(f);
@@ -370,16 +568,24 @@ public sealed class ObjectTunables
     private void Note(TunableField f)
     {
         var now = Snapshot(f);
-        if (lastSeen.TryGetValue(f, out var before) && !Equals(before, now)) Mark(f);
+        if (lastSeen.TryGetValue(f, out var before) && !Equals(before, now)) Mark(f, before, now);
         lastSeen[f] = now;
     }
 
     private static object Snapshot(TunableField f) =>
         f.Kind == TuneKind.Text ? f.Text : f.Value;
 
-    private void Mark(TunableField f)
+    private void Mark(TunableField f, object from, object to)
     {
         Changed = true;
         changedNames.Add(f.Name);
+
+        // Reported to the subject that OWNS the field, not to every target — an ObjectTunables
+        // over three settings objects is normal, and two of them have no business hearing about
+        // the third's slider.
+        if (owners.TryGetValue(f, out var owner) && owner is ITunable tunable)
+        {
+            tunable.OnChanged(new TunableChange(f.Name, from, to));
+        }
     }
 }

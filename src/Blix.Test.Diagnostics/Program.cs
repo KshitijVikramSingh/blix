@@ -211,6 +211,66 @@ var t = new TestRunner();
     t.ExpectTrue("rewriting the same value is not a change", !tunables.Changed);
 }
 
+// -- Flags and panels are one declaration rendered twice ---------------------
+//
+// Nothing below is written per tool. The reason one tool took --mask and another took
+// --mask-from is that both were hand-written, a release apart; a flag derived from the
+// member cannot drift from the panel derived from the same member.
+{
+    var fixture = new FlagFixture();
+    var tunables = new ObjectTunables(fixture);
+
+    var rest = tunables.Apply(new[]
+    {
+        "--weight", "0.25", "--mask-root", "chest", "--lockstep",
+        "--mode", "masked", "--instances", "3",
+        "--frames", "60", "leftover",
+    });
+
+    t.ExpectTrue("a float flag lands", Math.Abs(fixture.Weight - 0.25f) < 1e-5f);
+    t.ExpectTrue("a text flag lands", fixture.MaskRoot == "chest");
+    t.ExpectTrue("a bool flag is true by presence", fixture.Lockstep);
+    t.ExpectTrue("an enum flag matches by name", fixture.Mode == FlagMode.Masked);
+    t.ExpectTrue("an int flag rounds into the member", fixture.Instances == 3);
+
+    // A tool has flags of its own that are not state, and this has no business knowing them.
+    t.ExpectTrue("unrecognised arguments come back", rest.Length == 3 &&
+        rest[0] == "--frames" && rest[1] == "60" && rest[2] == "leftover");
+
+    // camelCase and PascalCase both become one spelling, so a member rename is a flag rename
+    // rather than two things to remember.
+    t.ExpectTrue("MaskRoot is --mask-root", ObjectTunables.FlagFor("MaskRoot") == "--mask-root");
+    t.ExpectTrue("flySpeed is --fly-speed", ObjectTunables.FlagFor("flySpeed") == "--fly-speed");
+
+    // ONE PATH IN: a flag is a change, reported from where the declaration started it.
+    t.ExpectTrue("every flag was heard as a change", fixture.Heard.Count == 5);
+    var weight = fixture.Heard.Find(c => c.Name == "Weight");
+    t.ExpectTrue("and it says where it came from", Equals(weight.From, 0.5f) && Equals(weight.To, 0.25f));
+    var root = fixture.Heard.Find(c => c.Name == "MaskRoot");
+    t.ExpectTrue("text changes carry their strings",
+        (string)root.From == "spine" && (string)root.To == "chest");
+
+    // The NEGATIVE half, three ways it must refuse rather than quietly carry on.
+    var second = new ObjectTunables(new FlagFixture());
+    t.ExpectThrows("a non-numeric value for a numeric flag is refused",
+        () => second.Apply(new[] { "--weight", "loud" }));
+    t.ExpectThrows("an enum value that is not an option is refused",
+        () => second.Apply(new[] { "--mode", "sideways" }));
+    t.ExpectThrows("a flag with nothing after it is refused",
+        () => second.Apply(new[] { "--mask-root" }));
+
+    // Clamped rather than refused: a range says what a value MEANS, and arguing with a
+    // command line about it helps nobody — it is the same clamp the slider gets.
+    var third = new FlagFixture();
+    new ObjectTunables(third).Apply(new[] { "--weight", "9" });
+    t.ExpectTrue("out of range is clamped, as the slider is", Math.Abs(third.Weight - 1f) < 1e-5f);
+
+    // Applying a value it already holds is not a change, whichever door it came through.
+    var quiet = new FlagFixture();
+    new ObjectTunables(quiet).Apply(new[] { "--mask-root", "spine" });
+    t.ExpectTrue("a flag that changes nothing is not a change", quiet.Heard.Count == 0);
+}
+
 // -- Two views over the same geometry, in one frame ---------------------------
 // The acceptance criterion for the view arc, and the thing RTS §212 needed and could not ask for: watch
 // one body from a fixed vantage while the game camera does its own thing. It was impossible while a frame
@@ -1665,6 +1725,21 @@ sealed class ChangeFixture
     [Tune] public bool Masked = true;
 }
 
+enum FlagMode { Single, Blended, Masked }
+
+sealed class FlagFixture : ITunable
+{
+    [Tune(0, 1)] public float Weight = 0.5f;
+    [Tune(0, 8)] public int Instances = 1;
+    [Tune] public string MaskRoot = "spine";
+    [Tune] public bool Lockstep = false;
+    [Tune] public FlagMode Mode = FlagMode.Single;
+
+    public readonly List<TunableChange> Heard = new();
+
+    public void OnChanged(TunableChange change) => Heard.Add(change);
+}
+
 sealed class TestDebuggable : IDebuggable
 {
     private readonly Action<DebugContext>? body;
@@ -1685,6 +1760,22 @@ sealed class TestRunner
     int passed;
     int failed;
     public int FailedCount => failed;
+
+    /// <summary>The action must refuse. A test that only ever asserts success is not a test.</summary>
+    public void ExpectThrows(string label, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception)
+        {
+            Pass(label);
+            return;
+        }
+
+        Fail(label, "it did not throw");
+    }
 
     public void ExpectTrue(string label, bool condition)
     {
