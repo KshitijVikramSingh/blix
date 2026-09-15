@@ -178,14 +178,20 @@ public static class Program
         Console.WriteLine($"{sources.Length} asset(s), {reports.Length} load(s): {cooked} cooked, {slow.Length} on the slow path.");
         if (reports.Length > 0)
         {
-            // <b>Nested, not disjoint.</b> A mesh import pre-decodes its own images, so each
-            // texture's time sits INSIDE its asset's. Adding the two buckets would double-count and
-            // report more milliseconds than the wall clock saw — which is the kind of number that
-            // gets quoted later. Asset time is the total; slow-path time is the share of it.
+            // <b>These two numbers are not a whole and a share, and saying so took two tries.</b>
+            // A mesh import pre-decodes its own images, so a texture's time sits inside its
+            // asset's — but the decodes run in Parallel.ForEach, so their SUM is concurrent CPU
+            // time and can exceed the wall clock of the import containing them. The first version
+            // of this line called it "of which", and RTSGame duly reported 3195 ms of 1540 ms.
+            // Reported as what each actually is instead.
             var assetPaths = sources.Select(Path.GetFullPath).ToHashSet(StringComparer.Ordinal);
-            var totalMs = reports.Where(r => assetPaths.Contains(Path.GetFullPath(r.SourcePath))).Sum(r => r.LoadMs);
+            var wallMs = reports.Where(r => assetPaths.Contains(Path.GetFullPath(r.SourcePath))).Sum(r => r.LoadMs);
             var slowMs = slow.Sum(r => r.LoadMs);
-            Console.WriteLine($"  {totalMs:0} ms to load all {sources.Length}, of which {slowMs:0} ms went on source paths.");
+            Console.WriteLine($"  {wallMs:0} ms loading {sources.Length} asset(s).");
+            if (slow.Length > 0)
+            {
+                Console.WriteLine($"  {slowMs:0} ms of CPU on source paths (summed; texture decodes run in parallel).");
+            }
         }
 
         if (slow.Length == 0 && refused == 0)
