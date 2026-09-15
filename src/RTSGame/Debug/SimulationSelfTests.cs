@@ -1,3 +1,4 @@
+using Blix.Core;
 using System.Numerics;
 using RTSGame.Control;
 using RTSGame.Simulation;
@@ -53,6 +54,7 @@ internal static class SimulationSelfTests
         float CrowdPressureSeconds,
         int RepathsDuring);
 
+    [BlixApp("selftest", Summary = "the simulation's own invariants, headless")]
     public static int Run()
     {
         var failed = 0;

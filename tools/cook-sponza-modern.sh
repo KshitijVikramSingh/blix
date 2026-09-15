@@ -14,7 +14,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # COOKED is where the runtime-ready .blix* land (the in-repo Assets dir by
 # default, or BLIX_SPONZA_ASSETS when set — e.g. an external SSD).
-COOKED="${BLIX_SPONZA_ASSETS:-$REPO/src/Blix.Demos.SponzaModern/Assets}"
+COOKED="${BLIX_SPONZA_ASSETS:-$REPO/src/Demos/Blix.Demos.SponzaModern/Assets}"
 # SRC is the raw-source tree to cook FROM. BLIX_SPONZA_SRC, else a "-src" sibling
 # of COOKED when it exists (the split layout: sponza-src/ holds .png/.bin/.gltf/
 # .hdr, sponza/ holds the cooked output), else COOKED itself (legacy in-place,

@@ -27,7 +27,7 @@ Blix.Demos.Bulwark             ← 3D game: tower defense (picking + multi-front
                                   skinned-mesh instancing, sun-shadow + HDR graph)
 Blix.Demos.Chassis             ← application-chassis spec (no diagnostics, own ImGui panel,
                                   host-owned --frames; 25-line csproj, no shaders)
-Blix.Labs.Toolchain            ← LAB library: lit scene + render graph + shaders + glTF
+Blix.Tools.Preview            ← LAB library: lit scene + render graph + shaders + glTF
                                   node/pivot model, reflected binding (library content)
    ↑        ↑
 Viewer  Probe  Capture        ← three executables over one lab; none declares a shader
@@ -167,7 +167,7 @@ encodes the result, hand-rolled with stored-deflate blocks so no encoder depende
 added — the files are larger than real deflate would make them, and they are screenshots,
 not assets.
 
-**Picking through a view has one caller**: `Blix.Labs.Toolchain.Viewer` turns a click into a
+**Picking through a view has one caller**: `Blix.Tools.View` turns a click into a
 ray with `ViewPicking.RayThrough` and tests it against node bounds. Note what that requires
 — the view must be declared with a LOGICAL rectangle matching the coordinates a pointer
 arrives in. The whole-surface shorthand `debug.Draw.Declare(name, vp)` fills both rectangles
@@ -218,7 +218,7 @@ builds a different root** — which is what the capture tool and the probe alrea
 **What crosses into the library, and what does not.** These are two different bars and conflating
 them is how a lab grows a framework:
 
-- **Into `Blix.Labs.Toolchain` requires a second consumer.** `LabCamera` went because the viewer had
+- **Into `Blix.Tools.Preview` requires a second consumer.** `LabCamera` went because the viewer had
   *two* cameras with duplicated orbit arithmetic — the §4 bar met without either copy leaving the
   file. `RigSession` went because the capture tool had independently grown its own pose composition,
   root strip, palette packing and distinct-pose count; the viewer runs it live and the capture runs

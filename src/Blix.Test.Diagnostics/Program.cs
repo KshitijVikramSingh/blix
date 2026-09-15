@@ -118,6 +118,159 @@ var t = new TestRunner();
         frame.DrawCommands[0].View == frame.Views[0].Id);
 }
 
+// -- A text control round-trips through the pending-value path ---------------
+//
+// The half TuneReflection's tests cannot reach: a control is only useful if what the
+// reader typed comes BACK on the next frame, through DebugSystem rather than through the
+// member. Text is the first non-numeric kind, so the pending path had only ever carried
+// bool, float and int — and a generic that silently returns default for an unexpected
+// type would hand back an empty string that looks exactly like "the reader cleared it".
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+
+    sys.BeginFrame(new RenderFrameContext(Width: 2, Height: 2));
+    var firstRead = string.Empty;
+    sys.Run(new TestDebuggable("Rig", debug => firstRead = debug.Controls.Text("Clip", "Walking_A")));
+    sys.EndFrame();
+
+    t.ExpectTrue("Text reads back what it was given", firstRead == "Walking_A");
+    t.ExpectTrue("Text control captured",
+        sys.LatestFrame!.Controls.Count == 1 &&
+        sys.LatestFrame.Controls[0].Kind == DebugControlKind.Text);
+    t.ExpectTrue("Text carries a buffer length, not a range",
+        sys.LatestFrame.Controls[0].MaxLength == 128 && sys.LatestFrame.Controls[0].Max == 1.0f);
+
+    // What the overlay does when the reader commits an edit.
+    sys.SetControlValue(sys.LatestFrame.Controls[0].Path, "Running_A");
+
+    sys.BeginFrame(new RenderFrameContext(Width: 2, Height: 2));
+    var secondRead = string.Empty;
+    sys.Run(new TestDebuggable("Rig", debug => secondRead = debug.Controls.Text("Clip", "Walking_A")));
+    sys.EndFrame();
+
+    t.ExpectTrue("the edit comes back on the next frame", secondRead == "Running_A");
+
+    // And the bound is enforced where it is declared rather than only in the widget: an
+    // overlay is not the only thing that can write a pending value.
+    sys.SetControlValue(sys.LatestFrame!.Controls[0].Path, "abcdefghij");
+    sys.BeginFrame(new RenderFrameContext(Width: 2, Height: 2));
+    var clamped = string.Empty;
+    sys.Run(new TestDebuggable("Rig", debug => clamped = debug.Controls.Text("Clip", "x", maxLength: 4)));
+    sys.EndFrame();
+
+    t.ExpectTrue("a value longer than MaxLength is cut, not accepted", clamped == "abcd");
+}
+
+// -- ObjectTunables reports what moved ---------------------------------------
+//
+// The one thing a tool cannot do for itself. Declared state is written from several
+// places — a panel this frame, an argument at startup, a sink replaying a frame — and
+// something downstream nearly always has to recompute. Today that is a hand-written call
+// after every write: eight of them in the rig viewer, and none in the capture tool that
+// composes the same state, because nothing reminded it.
+{
+    var subject = new ChangeFixture();
+    var tunables = new ObjectTunables(subject);
+    var sys = new DebugSystem(historyCapacity: 4);
+
+    void Frame() 
+    {
+        sys.BeginFrame(new RenderFrameContext(Width: 2, Height: 2));
+        sys.Run(new TestDebuggable("Fixture", debug => tunables.BuildControls(debug)));
+        sys.EndFrame();
+    }
+
+    Frame();
+    t.ExpectTrue("a quiet frame reports no change", !tunables.Changed);
+    t.ExpectTrue("and names nothing", tunables.ChangedNames.Count == 0);
+
+    // Written from OUTSIDE any panel, which is the case a tool most needs told about:
+    // a flag at startup and a panel edit look identical from here, and should.
+    subject.Weight = 0.9f;
+    Frame();
+    t.ExpectTrue("a value moved is reported", tunables.Changed);
+    t.ExpectTrue("and it is named", tunables.ChangedNames.Count == 1 && tunables.ChangedNames[0] == "Weight");
+
+    Frame();
+    t.ExpectTrue("the report does not stick to the next frame", !tunables.Changed);
+
+    subject.Clip = "Running_A";
+    Frame();
+    t.ExpectTrue("a text member counts too", tunables.Changed && tunables.ChangedNames[0] == "Clip");
+
+    // Two at once, because a reader that recomputes per name must see both.
+    subject.Weight = 0.1f;
+    subject.Clip = "Idle";
+    Frame();
+    t.ExpectTrue("two moves are both named", tunables.ChangedNames.Count == 2);
+
+    // The NEGATIVE half: writing the same value is not a change. A tool that recomputes
+    // on every frame a panel merely EXISTS is a tool with no reason to ask.
+    subject.Weight = 0.1f;
+    Frame();
+    t.ExpectTrue("rewriting the same value is not a change", !tunables.Changed);
+}
+
+// -- Flags and panels are one declaration rendered twice ---------------------
+//
+// Nothing below is written per tool. The reason one tool took --mask and another took
+// --mask-from is that both were hand-written, a release apart; a flag derived from the
+// member cannot drift from the panel derived from the same member.
+{
+    var fixture = new FlagFixture();
+    var tunables = new ObjectTunables(fixture);
+
+    var rest = tunables.Apply(new[]
+    {
+        "--weight", "0.25", "--mask-root", "chest", "--lockstep",
+        "--mode", "masked", "--instances", "3",
+        "--frames", "60", "leftover",
+    });
+
+    t.ExpectTrue("a float flag lands", Math.Abs(fixture.Weight - 0.25f) < 1e-5f);
+    t.ExpectTrue("a text flag lands", fixture.MaskRoot == "chest");
+    t.ExpectTrue("a bool flag is true by presence", fixture.Lockstep);
+    t.ExpectTrue("an enum flag matches by name", fixture.Mode == FlagMode.Masked);
+    t.ExpectTrue("an int flag rounds into the member", fixture.Instances == 3);
+
+    // A tool has flags of its own that are not state, and this has no business knowing them.
+    t.ExpectTrue("unrecognised arguments come back", rest.Length == 3 &&
+        rest[0] == "--frames" && rest[1] == "60" && rest[2] == "leftover");
+
+    // camelCase and PascalCase both become one spelling, so a member rename is a flag rename
+    // rather than two things to remember.
+    t.ExpectTrue("MaskRoot is --mask-root", ObjectTunables.FlagFor("MaskRoot") == "--mask-root");
+    t.ExpectTrue("flySpeed is --fly-speed", ObjectTunables.FlagFor("flySpeed") == "--fly-speed");
+
+    // ONE PATH IN: a flag is a change, reported from where the declaration started it.
+    t.ExpectTrue("every flag was heard as a change", fixture.Heard.Count == 5);
+    var weight = fixture.Heard.Find(c => c.Name == "Weight");
+    t.ExpectTrue("and it says where it came from", Equals(weight.From, 0.5f) && Equals(weight.To, 0.25f));
+    var root = fixture.Heard.Find(c => c.Name == "MaskRoot");
+    t.ExpectTrue("text changes carry their strings",
+        (string)root.From == "spine" && (string)root.To == "chest");
+
+    // The NEGATIVE half, three ways it must refuse rather than quietly carry on.
+    var second = new ObjectTunables(new FlagFixture());
+    t.ExpectThrows("a non-numeric value for a numeric flag is refused",
+        () => second.Apply(new[] { "--weight", "loud" }));
+    t.ExpectThrows("an enum value that is not an option is refused",
+        () => second.Apply(new[] { "--mode", "sideways" }));
+    t.ExpectThrows("a flag with nothing after it is refused",
+        () => second.Apply(new[] { "--mask-root" }));
+
+    // Clamped rather than refused: a range says what a value MEANS, and arguing with a
+    // command line about it helps nobody — it is the same clamp the slider gets.
+    var third = new FlagFixture();
+    new ObjectTunables(third).Apply(new[] { "--weight", "9" });
+    t.ExpectTrue("out of range is clamped, as the slider is", Math.Abs(third.Weight - 1f) < 1e-5f);
+
+    // Applying a value it already holds is not a change, whichever door it came through.
+    var quiet = new FlagFixture();
+    new ObjectTunables(quiet).Apply(new[] { "--mask-root", "spine" });
+    t.ExpectTrue("a flag that changes nothing is not a change", quiet.Heard.Count == 0);
+}
+
 // -- Two views over the same geometry, in one frame ---------------------------
 // The acceptance criterion for the view arc, and the thing RTS §212 needed and could not ask for: watch
 // one body from a fixed vantage while the game camera does its own thing. It was impossible while a frame
@@ -1565,6 +1718,28 @@ sealed class ThrowingSink : IDebugFrameSink
     public void Consume(DebugFrame frame) => throw new InvalidOperationException("boom");
 }
 
+sealed class ChangeFixture
+{
+    [Tune(0, 1)] public float Weight = 0.5f;
+    [Tune] public string Clip = "Walking_A";
+    [Tune] public bool Masked = true;
+}
+
+enum FlagMode { Single, Blended, Masked }
+
+sealed class FlagFixture : ITunable
+{
+    [Tune(0, 1)] public float Weight = 0.5f;
+    [Tune(0, 8)] public int Instances = 1;
+    [Tune] public string MaskRoot = "spine";
+    [Tune] public bool Lockstep = false;
+    [Tune] public FlagMode Mode = FlagMode.Single;
+
+    public readonly List<TunableChange> Heard = new();
+
+    public void OnChanged(TunableChange change) => Heard.Add(change);
+}
+
 sealed class TestDebuggable : IDebuggable
 {
     private readonly Action<DebugContext>? body;
@@ -1585,6 +1760,22 @@ sealed class TestRunner
     int passed;
     int failed;
     public int FailedCount => failed;
+
+    /// <summary>The action must refuse. A test that only ever asserts success is not a test.</summary>
+    public void ExpectThrows(string label, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception)
+        {
+            Pass(label);
+            return;
+        }
+
+        Fail(label, "it did not throw");
+    }
 
     public void ExpectTrue(string label, bool condition)
     {

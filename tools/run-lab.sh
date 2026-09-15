@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launcher for Blix.Labs.Toolchain.Viewer — the toolchain lab viewer.
+# Launcher for Blix.Tools.View — the toolchain lab viewer.
 #
 # Execs the apphost rather than `dotnet run`: Homebrew's $prefix/bin/dotnet is a
 # "#!/bin/bash" wrapper and /bin/bash is SIP-protected, so dyld strips DYLD_* from
@@ -11,11 +11,11 @@
 #
 # --model <path.glb> loads an asset as its authored NODE TREE (pivots, bounds, picking).
 # --rig   <path.glb> loads one as a SKELETON and its clips (pose, playback, root motion).
-#     tools/run-lab.sh --rig src/Blix.Demos.Runner/Assets/models/Rogue.glb
+#     tools/run-lab.sh --rig src/Demos/Blix.Demos.Runner/Assets/models/Rogue.glb
 # --clip <name> starts on a clip; --blend <name> / --additive <name> name the second clip
 # and pick the composition with it.
 #     tools/run-lab.sh --rig .../Rogue.glb --clip Walking_A --blend Running_A
-# --mask <clip> composes that clip onto the first through a bone mask, and --mask-from <bone>
+# --mask <clip> composes that clip onto the first through a bone mask, and --mask-root <bone>
 # names the mask's root (default: the rig's own spine, guessed). The Mask panel moves the root and
 # the falloff live, and the drawn skeleton is coloured by the weights.
 #     tools/run-lab.sh --rig .../Rogue.glb --clip Walking_A --mask Unarmed_Melee_Attack_Punch_A
@@ -24,8 +24,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PROJECT="$REPO_ROOT/src/Blix.Labs.Toolchain.Viewer/Blix.Labs.Toolchain.Viewer.csproj"
-APPHOST="$REPO_ROOT/src/Blix.Labs.Toolchain.Viewer/bin/Debug/net8.0/Blix.Labs.Toolchain.Viewer"
+PROJECT="$REPO_ROOT/src/Blix.Tools.View/Blix.Tools.View.csproj"
+APPHOST="$REPO_ROOT/src/Blix.Tools.View/bin/Debug/net8.0/Blix.Tools.View"
 
 prefix=$(brew --prefix 2>/dev/null || echo "/opt/homebrew")
 if [ ! -f "$prefix/lib/libvulkan.dylib" ]; then

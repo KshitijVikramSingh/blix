@@ -21,6 +21,12 @@ public sealed class DebugOverlayUi
     // are text-only, user clicks the trailing icon to expand a graph.
     private readonly HashSet<string> sparklinesEnabled = new(StringComparer.Ordinal);
 
+    // In-progress text edits, keyed by control path. UI state with the same lifetime as the
+    // renderer, for the same reason as the set above — and load-bearing rather than a nicety:
+    // an ImGui text field is edited across frames, so its buffer cannot be rebuilt from the
+    // committed value on each one. See DebugControlKind.Text below.
+    private readonly Dictionary<string, string> textEdits = new(StringComparer.Ordinal);
+
     // Track the path we showed the Selection tab for last frame so we can
     // auto-focus the tab when a new pick happens. Without this, picking
     // doesn't pull the user's attention to the new info.
@@ -1332,7 +1338,7 @@ public sealed class DebugOverlayUi
             stride: sizeof(float));
     }
 
-    private static void DrawControls(DebugSystem debugSystem, IReadOnlyList<DebugControlEntry> entries, bool interactive)
+    private void DrawControls(DebugSystem debugSystem, IReadOnlyList<DebugControlEntry> entries, bool interactive)
     {
         foreach (var group in entries.GroupBy(entry => entry.Scope).OrderBy(group => group.Key, StringComparer.Ordinal))
         {
@@ -1351,7 +1357,7 @@ public sealed class DebugOverlayUi
         }
     }
 
-    private static void DrawControl(DebugSystem debugSystem, DebugControlEntry entry, bool interactive)
+    private void DrawControl(DebugSystem debugSystem, DebugControlEntry entry, bool interactive)
     {
         ImGui.PushID(entry.Path);
 
@@ -1404,6 +1410,40 @@ public sealed class DebugOverlayUi
                 if (ImGui.Button(entry.Name) && interactive)
                 {
                     debugSystem.SetControlValue(entry.Path, true);
+                }
+
+                break;
+            }
+
+            case DebugControlKind.Text:
+            {
+                // <b>The edit buffer has to outlive the frame.</b> Every other control here is
+                // stateless: a slider is handed this frame's float and hands one back. A text
+                // field is not — it is being edited across many frames, and re-seeding it from
+                // the committed value each frame overwrites the character just typed before it
+                // can be seen. The field looked completely dead.
+                //
+                // So while the item is active its buffer is kept here and the committed value is
+                // ignored; the moment it is not, the buffer is dropped and the field follows the
+                // value again, so a control written from anywhere else still shows up.
+                var editing = textEdits.TryGetValue(entry.Path, out var buffer);
+                if (!editing) buffer = (string)entry.Value;
+
+                var length = (uint)Math.Max(1, entry.MaxLength);
+                var entered = ImGui.InputText(
+                    entry.Name, ref buffer, length, ImGuiInputTextFlags.EnterReturnsTrue);
+
+                if (ImGui.IsItemActive()) textEdits[entry.Path] = buffer;
+                else textEdits.Remove(entry.Path);
+
+                // <b>Committed on Enter or on losing focus, not per keystroke.</b> A name is
+                // something you finish typing. Per-keystroke would make "spin" a real state on
+                // the way to "spine", and a tool reacting to it would reload four times and fail
+                // three.
+                if ((entered || ImGui.IsItemDeactivatedAfterEdit()) && interactive)
+                {
+                    debugSystem.SetControlValue(entry.Path, buffer);
+                    textEdits.Remove(entry.Path);
                 }
 
                 break;

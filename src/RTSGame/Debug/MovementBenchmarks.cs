@@ -1,3 +1,4 @@
+using Blix.Core;
 using System.Diagnostics;
 using RTSGame.Simulation;
 using RTSGame.Simulation.Agents;
@@ -19,6 +20,7 @@ internal static class MovementBenchmarks
     /// </remarks>
     private const int WalkingPace = 3;
 
+    [BlixApp("movebench", Summary = "movement timings under crowd pressure")]
     public static int Run()
     {
         var warmup = new SimulationWorld();

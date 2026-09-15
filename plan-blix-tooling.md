@@ -149,14 +149,14 @@ The negative controls, because a layer that can only succeed is not a layer:
 Not everything. Enough that every shape has a worked example and there is nothing left for rot to
 creep into. One of each:
 
-| shape | case | what it proves |
-|---|---|---|
-| many apps, one assembly | RTSGame's scenarios | the if-chain deletes incrementally |
-| many assemblies, one project | the character lab | a project is a folder, launchers go |
-| one app, one assembly | a demo | convention alone is enough |
-| headless tool | a test suite | `blix run` is how verification is invoked |
-| headed application | the toolchain viewer | a window changes nothing about addressing |
-| Blix's own | the cooker | Blix's tools are not special |
+| shape | case | what it proves | |
+|---|---|---|---|
+| many apps, one assembly | RTSGame's scenarios | the if-chain deletes incrementally | **done** — 3 of ~35 |
+| many assemblies, one project | the character lab | a project is a folder, launchers go | **done** — `src/Character/` |
+| one app, one assembly | the character probe | convention alone is enough | **done** — undeclared, still runnable |
+| headless tool | the test suites | `blix run` is how verification is invoked | **done** — all five, plus the RTS gate |
+| headed application | the toolchain viewer | a window changes nothing about addressing | **done** — `view`, `shot`, `room`, `room-shot` |
+| Blix's own | the cooker | Blix's tools are not special | **open** — top-level statements, needs a class first |
 
 **The character lab is the case that forces the folder question**: it is four sibling directories
 under `src/`, and a project is one folder. Moving it is what makes `blix.project` mean something.

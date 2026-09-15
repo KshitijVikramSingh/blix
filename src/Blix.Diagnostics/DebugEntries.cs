@@ -5,7 +5,12 @@ public enum DebugControlKind
     Boolean,
     Float,
     Enum,
-    Button
+    Button,
+
+    // A string the reader types. The only kind whose value is not numeric, which is
+    // why DebugControlEntry carries MaxLength rather than reusing Min/Max — a text
+    // field's bound is a buffer size, and calling it "Max" would read as a range.
+    Text
 }
 
 public sealed record DebugValueEntry(
@@ -22,7 +27,8 @@ public sealed record DebugControlEntry(
     object Value,
     float Min = 0.0f,
     float Max = 1.0f,
-    IReadOnlyList<string>? Options = null);
+    IReadOnlyList<string>? Options = null,
+    int MaxLength = 0);
 
 public enum DebugStatKind
 {

@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <UseAppHost>false</UseAppHost>
+    <IsPublishable>false</IsPublishable>
+    <UseAppHost Condition="'$(SelfContained)' == 'true'">true</UseAppHost>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <!-- The indexer cannot index itself: the target that runs it lives in
+         Directory.Build.targets, which this project also imports, and it needs the
+         tool to exist before it can run. Bootstrapping is the one thing this must
+         not attempt. -->
+    <BlixSkipAppIndex>true</BlixSkipAppIndex>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Reads assembly metadata without loading it. No reference to Blix.Core: the
+         attribute is matched by namespace and name out of the metadata tables, which
+         is what keeps this tool free of the graph it is indexing. -->
+    <PackageReference Include="System.Reflection.Metadata" Version="8.0.0" />
+  </ItemGroup>
+
+</Project>

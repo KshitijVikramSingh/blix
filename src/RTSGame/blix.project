@@ -1,0 +1,5 @@
+rts
+
+# The quick tier only. The simulated years stay in tools/gate-rts-game.sh, which
+# is a scheduling decision rather than a licence — see the comment there.
+test: selftest

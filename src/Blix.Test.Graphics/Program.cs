@@ -1342,7 +1342,7 @@ static ShaderInterface MinimalShader() => new(new[]
     }
 
     // S.0 — only [Tune] members surface (NotTunable excluded).
-    t.ExpectClose("S.0 five tunables found", fields.Count, 5);
+    t.ExpectClose("S.0 seven tunables found", fields.Count, 7);
     t.ExpectTrue("S.0 untagged field excluded", FindF("NotTunable") is null);
 
     // S.1 — range + inferred labels (PascalCase + camelCase).
@@ -1375,6 +1375,29 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectClose("S.4 default B reads index 1", mode?.Value ?? -1, 1f);
     if (mode is not null) mode.Value = 2f;
     t.ExpectTrue("S.4 enum set wrote C", fixture.Mode == TuneFixtureMode.C);
+
+    // S.5 — string member → text field. The kind that makes a declared value addressable
+    // by NAME rather than by number, which is what a tool's state is mostly made of.
+    var clip = FindF("Clip");
+    t.ExpectTrue("S.5 string member is Text kind", clip is { Kind: TuneKind.Text });
+    t.ExpectTrue("S.5 get reads the live string", clip?.Text == "Walking_A");
+    if (clip is not null) clip.Text = "Running_A";
+    t.ExpectTrue("S.5 set wrote the field", fixture.Clip == "Running_A");
+    t.ExpectTrue("S.5 a string needs no range", clip is { Min: 0f, Max: 0f });
+    t.ExpectTrue("S.5 default buffer is 128", clip?.MaxLength == 128);
+    t.ExpectTrue("S.5 MaxLength is carried", FindF("Bone")?.MaxLength == 4);
+
+    // S.6 — the NEGATIVE half: Text is the one kind that is not float-backed, so reading
+    // it as a number or reading a number as text must refuse rather than return something
+    // plausible. A silent 0 here is a tool that looks like it read your clip name.
+    t.ExpectThrows("S.6 Text on a float member throws", () => { _ = FindF("Density")!.Text; });
+    t.ExpectThrows("S.6 writing Text to a bool member throws", () => FindF("Wireframe")!.Text = "x");
+    t.ExpectTrue("S.6 a Text member still reports Value 0", FindF("Clip")!.Value == 0f);
+
+    // S.7 — a null write is an empty string, not a null field. Every reader of this is a
+    // control or a flag, and neither has a sensible rendering for null.
+    if (clip is not null) clip.Text = null!;
+    t.ExpectTrue("S.7 null becomes empty", fixture.Clip == string.Empty);
 }
 
 // ============================================================================
@@ -3228,6 +3251,22 @@ sealed class TestRunner
         Pass(label);
     }
 
+    /// <summary>The action must refuse. A test that only ever asserts success is not a test.</summary>
+    public void ExpectThrows(string label, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception)
+        {
+            Pass(label);
+            return;
+        }
+
+        Fail(label, "it did not throw");
+    }
+
     public void ExpectClose(string label, Vector4 actual, Vector4 expected, float epsilon = 1e-3f)
     {
         var diff = actual - expected;
@@ -3268,5 +3307,7 @@ sealed class TuneFixture
     [Tune(0, 60)]  public float flySpeed = 4.5f;
     [Tune]         public bool Wireframe = false;
     [Tune]         public TuneFixtureMode Mode = TuneFixtureMode.B;
+    [Tune]         public string Clip = "Walking_A";
+    [Tune(MaxLength = 4)] public string Bone = "spine";
     public float NotTunable = 9f;   // no attribute → must be ignored
 }

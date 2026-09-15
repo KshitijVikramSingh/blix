@@ -1,3 +1,4 @@
+using Blix.Core;
 using System.Numerics;
 using RTSGame.Simulation;
 using RTSGame.Simulation.Agents;
@@ -43,6 +44,7 @@ internal static class FightBenchmarks
     private static readonly FactionId Ours = new(0);
     private static readonly FactionId Theirs = new(1);
 
+    [BlixApp("fightbench", Summary = "the fight matrix over Flat, Rough and Village")]
     public static int Run()
     {
         Console.WriteLine("RTSGame fight benchmarks — one mechanism per scenario, open ground");

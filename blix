@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# blix — the front door. Find a project's apps and run one.
+#
+#   blix ls                    what this project has
+#   blix run <app> [args...]   run one
+#   blix run <project>:<app>   reach across folders
+#
+# ── Why this script exists at all ───────────────────────────────────────────
+# Everything below the `exec` is the environment a headed Blix app needs, and it is
+# the ONLY reason this is a script rather than just a binary. Fourteen launchers under
+# tools/ each carried an identical copy of these eleven lines — not because packaging
+# was missing, but because a project had no way to say what it contains, so every app
+# needed its own front door. This is that front door, once.
+#
+# It execs the APPHOST, never `dotnet blix.dll`: Homebrew's dotnet is a "#!/bin/bash"
+# wrapper, /bin/bash is SIP-protected, and dyld strips DYLD_* from a SIP-protected
+# interpreter's environment. Going through the muxer would silently undo every export
+# above it. Once we are inside a real binary, everything it spawns inherits a correct
+# environment for free — which is what lets a headed app run through two hops.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
+CONFIG="${BLIX_CONFIG:-Debug}"
+CLI="$REPO_ROOT/src/Blix.Cli/bin/$CONFIG/net8.0/blix"
+INDEXER="$REPO_ROOT/src/Blix.Tools.Apps/bin/$CONFIG/net8.0/Blix.Tools.Apps.dll"
+
+prefix=$(brew --prefix 2>/dev/null || echo "/opt/homebrew")
+if [ ! -f "$prefix/lib/libvulkan.dylib" ]; then
+    echo "libvulkan.dylib not found under $prefix/lib — install with:" >&2
+    echo "  brew install molten-vk vulkan-loader vulkan-headers vulkan-tools vulkan-validationlayers shaderc" >&2
+    exit 1
+fi
+
+if [ -z "${DOTNET_ROOT:-}" ] && [ -d "$prefix/opt/dotnet@8/libexec" ]; then
+    export DOTNET_ROOT="$prefix/opt/dotnet@8/libexec"
+fi
+
+export DYLD_FALLBACK_LIBRARY_PATH="$prefix/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"
+export VK_ICD_FILENAMES="$prefix/etc/vulkan/icd.d/MoltenVK_icd.json"
+export VK_LAYER_PATH="$prefix/share/vulkan/explicit_layer.d"
+
+# The indexer is the bootstrap: nothing in the tree references it, so on a fresh clone
+# the first assemblies build before it exists and are not indexed. Building it here
+# means that by the time an index is ASKED for, the next build writes a correct one —
+# which is why the targets file can guard on Exists() and no project needs a reference.
+if [ ! -f "$INDEXER" ]; then
+    echo "blix: building the app indexer (first run)" >&2
+    dotnet build "$REPO_ROOT/src/Blix.Tools.Apps/Blix.Tools.Apps.csproj" -c "$CONFIG" --nologo -v:q
+fi
+
+if [ ! -f "$CLI" ]; then
+    echo "blix: building the resolver (first run)" >&2
+    dotnet build "$REPO_ROOT/src/Blix.Cli/Blix.Cli.csproj" -c "$CONFIG" --nologo -v:q
+fi
+
+exec "$CLI" "$@"

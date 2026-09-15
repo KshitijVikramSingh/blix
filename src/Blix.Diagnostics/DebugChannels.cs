@@ -68,6 +68,29 @@ public sealed class DebugControls
         return value;
     }
 
+    /// <summary>A line of text the reader can edit, read back through the same call.</summary>
+    /// <remarks>
+    /// The kind that makes a declared value addressable by NAME rather than by number — a clip,
+    /// a bone, an output path. Everything else here is a knob you nudge; this is the one you type
+    /// the answer into, and it is what a tool needs before its state can describe a subject rather
+    /// than only how that subject is displayed.
+    /// </remarks>
+    public string Text(string name, string value, int maxLength = 128)
+    {
+        var path = context.BuildPath(name);
+        if (context.TryGetPendingControlValue<string>(path, out var pending))
+        {
+            value = pending ?? string.Empty;
+        }
+
+        value ??= string.Empty;
+        if (maxLength > 0 && value.Length > maxLength) value = value[..maxLength];
+
+        entries.Add(new DebugControlEntry(
+            path, context.CurrentScope, name, DebugControlKind.Text, value, MaxLength: Math.Max(1, maxLength)));
+        return value;
+    }
+
     public bool Button(string name)
     {
         var path = context.BuildPath(name);

@@ -8,8 +8,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PROJECT="$REPO_ROOT/src/Blix.Demos.VulkanInstanced/Blix.Demos.VulkanInstanced.csproj"
-PUBLISH_DIR="$REPO_ROOT/src/Blix.Demos.VulkanInstanced/bin/Publish"
+PROJECT="$REPO_ROOT/src/Demos/Blix.Demos.VulkanInstanced/Blix.Demos.VulkanInstanced.csproj"
+PUBLISH_DIR="$REPO_ROOT/src/Demos/Blix.Demos.VulkanInstanced/bin/Publish"
 RID="osx-arm64"
 
 prefix=$(brew --prefix 2>/dev/null || echo "/opt/homebrew")
@@ -35,8 +35,8 @@ dotnet publish "$PROJECT" -c Debug -r "$RID" --self-contained true -o "$PUBLISH_
 
 # InstancedBatch's instanced.*.spv are content shipped from Blix.Render. Mirror
 # any *.spv into the publish dir in case content propagation lags.
-BUILD_SHADERS="$REPO_ROOT/src/Blix.Demos.VulkanInstanced/bin/Debug/net8.0/$RID/Shaders"
-[ -d "$BUILD_SHADERS" ] || BUILD_SHADERS="$REPO_ROOT/src/Blix.Demos.VulkanInstanced/bin/Debug/net8.0/Shaders"
+BUILD_SHADERS="$REPO_ROOT/src/Demos/Blix.Demos.VulkanInstanced/bin/Debug/net8.0/$RID/Shaders"
+[ -d "$BUILD_SHADERS" ] || BUILD_SHADERS="$REPO_ROOT/src/Demos/Blix.Demos.VulkanInstanced/bin/Debug/net8.0/Shaders"
 if [ -d "$BUILD_SHADERS" ]; then
     mkdir -p "$PUBLISH_DIR/Shaders"
     cp -p "$BUILD_SHADERS"/*.spv "$PUBLISH_DIR/Shaders/" 2>/dev/null || true

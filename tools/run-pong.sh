@@ -13,8 +13,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PROJECT="$REPO_ROOT/src/Blix.Demos.Pong/Blix.Demos.Pong.csproj"
-PUBLISH_DIR="$REPO_ROOT/src/Blix.Demos.Pong/bin/Publish"
+PROJECT="$REPO_ROOT/src/Demos/Blix.Demos.Pong/Blix.Demos.Pong.csproj"
+PUBLISH_DIR="$REPO_ROOT/src/Demos/Blix.Demos.Pong/bin/Publish"
 RID="osx-arm64"
 
 prefix=$(brew --prefix 2>/dev/null || echo "/opt/homebrew")
@@ -43,8 +43,8 @@ dotnet publish "$PROJECT" -c Debug -r "$RID" --self-contained true -o "$PUBLISH_
 # The SpriteBatch shaders are content shipped from Blix.Render and the imgui
 # shaders from Blix.Runtime.Silk — both land in the regular build output.
 # Mirror any *.spv over to the publish dir in case content propagation lags.
-BUILD_SHADERS="$REPO_ROOT/src/Blix.Demos.Pong/bin/Debug/net8.0/$RID/Shaders"
-[ -d "$BUILD_SHADERS" ] || BUILD_SHADERS="$REPO_ROOT/src/Blix.Demos.Pong/bin/Debug/net8.0/Shaders"
+BUILD_SHADERS="$REPO_ROOT/src/Demos/Blix.Demos.Pong/bin/Debug/net8.0/$RID/Shaders"
+[ -d "$BUILD_SHADERS" ] || BUILD_SHADERS="$REPO_ROOT/src/Demos/Blix.Demos.Pong/bin/Debug/net8.0/Shaders"
 if [ -d "$BUILD_SHADERS" ]; then
     mkdir -p "$PUBLISH_DIR/Shaders"
     cp -p "$BUILD_SHADERS"/*.spv "$PUBLISH_DIR/Shaders/" 2>/dev/null || true

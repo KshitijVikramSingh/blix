@@ -96,7 +96,7 @@ static void PrintUsage()
     Console.WriteLine("    Always exits 0 — it reports, it does not judge.");
     Console.WriteLine("    To CHECK an asset is sound (clip lengths, skeleton, binding");
     Console.WriteLine("    contracts) and get an exit code, use the toolchain probe:");
-    Console.WriteLine("      dotnet run --project src/Blix.Labs.Toolchain.Probe -- --model <path>");
+    Console.WriteLine("      dotnet run --project src/Blix.Tools.Check -- --model <path>");
     Console.WriteLine();
     Console.WriteLine("  --out <dir>  (textures/probe/mesh) write cooked output into a separate");
     Console.WriteLine("    tree, mirroring each source's path relative to the input root, instead");

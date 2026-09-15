@@ -27,6 +27,19 @@ echo "building ..."
 dotnet build "$PROJECT" -c Debug --nologo -v:q || exit 1
 
 failed=0
+# A declared app, addressed rather than launched. No project path, no flag.
+run_app() {
+    local name="$1"; shift
+    echo
+    echo "=== $name ==="
+    if "$REPO_ROOT/blix" run "$@"; then
+        echo "--- $name OK"
+    else
+        echo "--- $name FAILED"
+        failed=$((failed + 1))
+    fi
+}
+
 run() {
     local name="$1"; shift
     echo
@@ -63,7 +76,11 @@ for arg in "$@"; do
     esac
 done
 
-run "self-test" --selftest
+# <b>Through blix, because --selftest is no longer a flag.</b> It is a declared app on the scenario
+# itself — the first three of this project's thirty-five to move off the 726-line if-chain in
+# Program.cs. The rest are still flags and still run through the line below; both shapes work at
+# once, which is the only way a chain that long gets shorter without one unreviewable commit.
+run_app "self-test" rts:selftest
 run "a settlement under raid" --raidtest --minutes 6 --every 45
 # <b>The same year again, on ground the generator actually makes.</b> The three legs above run on flat ground,
 # which is where every economic constant was measured and is therefore the control: it says whether a change

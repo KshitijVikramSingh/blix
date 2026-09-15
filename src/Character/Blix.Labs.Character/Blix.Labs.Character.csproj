@@ -1,0 +1,66 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    THE CHARACTER LAB, as a library with several roots on top of it.
+
+    Three isolated subjects rather than one: a Room with no character, a Motion lab with no room,
+    and a Controller that is both. Isolation is the method — when a body walks up a ramp with the
+    wrong clip playing, the only way to attribute the fault is to have watched each half alone.
+
+    Self-contained, and NOT a consumer of Blix.Tools.Preview. That was considered: its LabCamera
+    is orbit arithmetic this lab also wants, and at stage M its LabRig / LabSkeletonView will be a
+    much stronger pull. It was not reached for, for two reasons. Its LabRenderer draws a LabScene
+    of boxes with per-object model matrices, and this room is one world-space triangle soup whose
+    collider IS its vertices — bending one into the other is the "forcing one shape onto the other"
+    §4 names. And content propagation is transitive, so referencing it would put a second lab's
+    shaders in every executable here. If stage M finds the rig types genuinely shared, THAT is the
+    evidence for a common lab library; a camera is not.
+  -->
+  <PropertyGroup>
+    <BlixShaderMode>Library</BlixShaderMode>
+    <BlixShaderReflect>true</BlixShaderReflect>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <GlslShader Include="Shaders\room_lit.vert" />
+    <GlslShader Include="Shaders\room_lit.frag" />
+    <GlslShader Include="Shaders\room_shadow.vert" />
+    <GlslShader Include="Shaders\room_shadow.frag" />
+    <GlslShader Include="Shaders\room_present.vert" />
+    <GlslShader Include="Shaders\room_present.frag" />
+    <GlslInclude Include="..\..\Blix.Shaders\pbr.glsl" />
+    <GlslInclude Include="..\..\Blix.Shaders\shadow.glsl" />
+    <GlslInclude Include="..\..\Blix.Shaders\tonemap.glsl" />
+    <GlslInclude Include="..\..\Blix.Shaders\fullscreen.glsl" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Shaders\*.spv">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Shaders\%(Filename)%(Extension)</Link>
+    </None>
+    <None Include="Shaders\*.refl.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Shaders\%(Filename)%(Extension)</Link>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Blix\Blix.csproj" />
+    <ProjectReference Include="..\..\Blix.Core\Blix.Core.csproj" />
+    <ProjectReference Include="..\..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
+    <ProjectReference Include="..\..\Blix.Geometry\Blix.Geometry.csproj" />
+    <ProjectReference Include="..\..\Blix.Graphics\Blix.Graphics.csproj" />
+    <ProjectReference Include="..\..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
+    <ProjectReference Include="..\..\Blix.Render\Blix.Render.csproj" />
+    <ProjectReference Include="..\..\Blix.Tools.Shader\Blix.Tools.Shader.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" Private="false" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Blix.Labs.Character</RootNamespace>
+  </PropertyGroup>
+
+</Project>

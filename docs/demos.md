@@ -196,11 +196,11 @@ A **lab** is not a demo. Demos are executable specs for an engine subsystem; a l
 testbed for *shape* — the toolchain, the pipeline layering, and how several executables
 sit over one body of work.
 
-### Toolchain lab — `Blix.Labs.Toolchain`
+### Toolchain lab — `Blix.Tools.Preview`
 
 ```sh
 tools/run-lab.sh                      # the viewer
-dotnet run --project src/Blix.Labs.Toolchain.Probe   # the probe; no window, no launcher
+dotnet run --project src/Blix.Tools.Check   # the probe; no window, no launcher
 ```
 
 One library and three executables. The library owns the scene, the renderer and the

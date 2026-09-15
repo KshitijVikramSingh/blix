@@ -27,8 +27,8 @@ export VK_ICD_FILENAMES="$prefix/etc/vulkan/icd.d/MoltenVK_icd.json"
 export VK_LAYER_PATH="$prefix/share/vulkan/explicit_layer.d"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PROJECT="$REPO_ROOT/src/Blix.Demos.VulkanHello/Blix.Demos.VulkanHello.csproj"
-APPHOST="$REPO_ROOT/src/Blix.Demos.VulkanHello/bin/Debug/net8.0/Blix.Demos.VulkanHello"
+PROJECT="$REPO_ROOT/src/Demos/Blix.Demos.VulkanHello/Blix.Demos.VulkanHello.csproj"
+APPHOST="$REPO_ROOT/src/Demos/Blix.Demos.VulkanHello/bin/Debug/net8.0/Blix.Demos.VulkanHello"
 
 # Exec the apphost, never `dotnet run` — the same rationale the other launchers
 # carry, and the reason this one was broken while they worked.

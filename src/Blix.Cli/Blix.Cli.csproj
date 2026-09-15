@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>blix</AssemblyName>
+    <RootNamespace>Blix.Cli</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <!-- An apphost is required, not incidental. The `blix` script sets DYLD_* and then
+         execs THIS binary; going through `dotnet blix.dll` would put Homebrew's
+         #!/bin/bash shim in the middle, and dyld strips DYLD_* across a SIP-protected
+         interpreter. The whole point of the script is undone without a real binary to
+         exec into. -->
+    <UseAppHost>true</UseAppHost>
+
+    <!-- The resolver reads indexes; it declares no apps of its own. -->
+    <BlixSkipAppIndex>true</BlixSkipAppIndex>
+  </PropertyGroup>
+
+</Project>

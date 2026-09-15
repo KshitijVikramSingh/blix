@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launcher for Blix.Labs.Toolchain.Capture — the toolchain lab capture tool.
+# Launcher for Blix.Tools.Shot — the toolchain lab capture tool.
 #
 # Execs the apphost rather than `dotnet run`: Homebrew's $prefix/bin/dotnet is a
 # "#!/bin/bash" wrapper and /bin/bash is SIP-protected, so dyld strips DYLD_* from
@@ -21,19 +21,19 @@
 # --viewport reads back the PANEL camera's target instead of the main scene's.
 # --frames-out N writes N files, one per fixed 17ms step (out.000.png, out.001.png, ...).
 #     tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --frames-out 24 --out walk.png
-# --mask-from <bone> --mask-falloff N colours the drawn skeleton by a layer mask: magenta where
+# --mask-root <bone> --mask-falloff N colours the drawn skeleton by a layer mask: magenta where
 # the layer reaches fully, grey where it does not, and the two-stop ramp between. --skeleton-only
 # drops the mesh so the colours are visible at all, and --zoom N pulls the camera in by N so a
 # wrist is more than four pixels.
 #     tools/run-lab-capture.sh --rig .../Rogue.glb --clip Walking_A --mask Unarmed_Melee_Attack_Punch_A \
-#         --mask-from spine --mask-falloff 2 --skeleton-only --xray --zoom 2 --out mask.png
+#         --mask-root spine --mask-falloff 2 --skeleton-only --xray --zoom 2 --out mask.png
 # --lockstep is the negative control: every body on one clip at one instant, which must come
 # back as exactly ONE pose fingerprint. Varied must come back as N.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PROJECT="$REPO_ROOT/src/Blix.Labs.Toolchain.Capture/Blix.Labs.Toolchain.Capture.csproj"
-APPHOST="$REPO_ROOT/src/Blix.Labs.Toolchain.Capture/bin/Debug/net8.0/Blix.Labs.Toolchain.Capture"
+PROJECT="$REPO_ROOT/src/Blix.Tools.Shot/Blix.Tools.Shot.csproj"
+APPHOST="$REPO_ROOT/src/Blix.Tools.Shot/bin/Debug/net8.0/Blix.Tools.Shot"
 
 prefix=$(brew --prefix 2>/dev/null || echo "/opt/homebrew")
 if [ ! -f "$prefix/lib/libvulkan.dylib" ]; then
