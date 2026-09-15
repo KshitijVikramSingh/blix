@@ -24,7 +24,7 @@ namespace Blix.Tools.View;
 //     consumer that wanted it.
 //   • Chassis: IUiSource panel, IInputHandler with UI capture, host-owned --frames,
 //     named views and trails.
-//   • Skeletal animation, made visible: ClipPlayer drives a pose, SkeletonView
+//   • Skeletal animation, made visible: ClipPlayer drives a pose, SkeletonGizmo
 //     draws it, and RootMotion says where a clip travels. The three composition
 //     modes are three ENGINE primitives with no lab-local maths behind them —
 //     ClipPlayer, PoseBlend.Lerp, PoseDelta.LayerOnto. The last two had unit tests
@@ -100,7 +100,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 {
     private readonly StudioRenderer renderer = new();
     private readonly List<IStudioView> views = new();
-    private StudioScene scene = StudioScene.Default();
     private readonly string? modelPath;
     private StudioModel? model;
     private Matrix4x4 modelTransform = Matrix4x4.Identity;
@@ -247,7 +246,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // is allowed to know about, and adding one is a decision rather than a side effect.
     internal StudioRenderer Renderer => renderer;
 
-    internal StudioScene Scene => scene;
 
     internal StudioModel? Model => model;
 
@@ -332,7 +330,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         model = StudioModel.Load(vk, modelPath);
 
         // The model is the subject now; the box ring is a backdrop that hides it.
-        scene = StudioScene.GroundOnly();
 
         // Assets arrive at whatever scale their author used — the Quaternius tank is ~14 units
         // long — so the lab normalises to a couple of metres and seats the model on the ground.
@@ -379,12 +376,11 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
                 $"shader holds {StudioRig.MaxBones}. Raise the bound in studio_skinned.vert.");
         }
 
-        scene = StudioScene.GroundOnly();
         session = new RigSession(rig, requestedInstances) { Mode = startMode };
         // TWO targets. The session's knobs are Bespoke because this viewer draws better controls
         // for them; the SCENE's are not, so the stage's look is rendered by reflection — a Scene
         // panel this file does not write, and --sun-elevation it does not parse.
-        tunables = new ObjectTunables(session, scene);
+        tunables = new ObjectTunables(session, renderer);
         foreach (var member in new[]
         {
             nameof(RigSession.Mode), nameof(RigSession.Weight), nameof(RigSession.MaskRoot),
@@ -567,7 +563,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         if (rig is not null) views.Add(new RigView(rig, session?.Palettes.Count ?? 0));
 
         renderer.Render(
-            commandList, scene, viewProjection, cameraPosition, views,
+            commandList, viewProjection, cameraPosition, views,
             panels.ViewportOpen ? viewportViewProjection : null, viewportCameraPosition);
     }
 
@@ -591,8 +587,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         debug.State.DepthTestDrawing = panels.DepthTestGizmos;
         debug.Values.Value("frames", frames);
-        debug.Values.Value("sun", scene.SunDirection);
-        debug.Stats.Gauge("objects", scene.Objects.Count);
+        debug.Values.Value("sun", renderer.SunDirection);
 
         // Declared with BOTH rectangles rather than through the whole-surface shorthand: that one
         // fills logical and physical from RenderFrameContext, which is physical pixels, so on a 2x
@@ -655,7 +650,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         // The sun, drawn where it is actually pointing — an arrow that is wrong is the
         // fastest way to notice a lighting convention has drifted.
-        var sunFrom = scene.SunDirection * 7f;
+        var sunFrom = renderer.SunDirection * 7f;
         debug.Draw.Arrow("sun", sunFrom, Vector3.Zero, new GraphicsColor(1f, 0.9f, 0.5f, 1f));
 
         if (model is not null) DrawModelGizmos(debug);
@@ -685,7 +680,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         if (panels.ShowSkeleton)
         {
-            var options = SkeletonView.Options.Default with
+            var options = SkeletonGizmo.Options.Default with
             {
                 Joints = panels.ShowJoints,
                 RestGhost = panels.ShowRestGhost,
@@ -725,12 +720,12 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // selecting "the left wrist" on three bodies at once would highlight three joints and point at
     // none of them.
     private void DrawInstanceSkeleton(
-        DebugContext debug, int instance, IReadOnlyList<Matrix4x4> worlds, SkeletonView.Options options)
+        DebugContext debug, int instance, IReadOnlyList<Matrix4x4> worlds, SkeletonGizmo.Options options)
     {
         if (rig is null || session is null || instance >= session.Placements.Count) return;
 
         using var scope = debug.Scope($"i{instance}");
-        SkeletonView.Draw(
+        SkeletonGizmo.Draw(
             debug,
             rig.Skeleton,
             worlds,

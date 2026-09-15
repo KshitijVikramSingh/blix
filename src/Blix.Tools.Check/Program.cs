@@ -212,14 +212,14 @@ public static class Program
 
         Console.WriteLine();
 
-        // Links the lab's own code, not just its build output — the scene is described
-        // without a device anywhere in sight.
-        var scene = StudioScene.Default();
+        // Links the studio's own code, not just its build output — the stage's look is described
+        // without a device anywhere in sight, which is the point of it being declared state rather
+        // than a renderer's private field.
+        var stage = new StudioRenderer();
         Console.WriteLine(
-            $"scene: {scene.Objects.Count} object(s), " +
-            $"{scene.Objects.Count(o => o.IsGround)} ground, " +
-            $"sun {scene.SunDirection.X:0.00}, {scene.SunDirection.Y:0.00}, {scene.SunDirection.Z:0.00}, " +
-            $"shadow map {StudioRenderer.ShadowMapSize}px");
+            $"stage: sun {stage.SunAzimuth:0.0} az / {stage.SunElevation:0.0} el (degrees), " +
+            $"ambient {stage.AmbientStrength:0.00}, ground {(stage.Ground ? "on" : "off")}, " +
+            $"shadow box {stage.ShadowExtent:0.0}m at {StudioRenderer.ShadowMapSize}px");
 
         if (failures == 0) return 0;
         Console.Error.WriteLine($"{failures} problem(s).");

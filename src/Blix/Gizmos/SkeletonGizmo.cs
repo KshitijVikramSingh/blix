@@ -2,7 +2,7 @@ using System.Numerics;
 using Blix.Diagnostics;
 using Blix.Graphics;
 
-namespace Blix.Tools.Studio;
+namespace Blix;
 
 /// <summary>
 /// Draws a pose: bones as lines, joints as crosses, a selected bone's axes, and the rest pose behind it.
@@ -24,7 +24,7 @@ namespace Blix.Tools.Studio;
 /// and the missing piece was that nothing had ever asked it about a skeleton.
 /// </para>
 /// </remarks>
-public static class SkeletonView
+public static class SkeletonGizmo
 {
     /// <summary>What to draw. Every flag is a question someone asked while looking at a broken pose.</summary>
     /// <remarks>

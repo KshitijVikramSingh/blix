@@ -1,5 +1,6 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
+using Blix.Diagnostics;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 using Blix.Render;
@@ -21,7 +22,7 @@ namespace Blix.Tools.Studio;
 /// claiming to be a renderer, and would stop being readable at exactly the point it became useful.
 /// </para>
 /// </remarks>
-public sealed class StudioRenderer : IDisposable
+public sealed class StudioRenderer : IDisposable, ITunable
 {
     /// <summary>Square shadow map, matching the texel size the lit shader offsets by.</summary>
     public const int ShadowMapSize = 2048;
@@ -109,11 +110,107 @@ public sealed class StudioRenderer : IDisposable
     // device with the sizes named, which is the binding model earning its keep: a
     // hand-declared interface would have shrugged and corrupted the tail.
 
+    // ── the look, declared, and it is not a thing of its own ─────────────────────────────────
+    //
+    // <b>There is no StudioLook, and the reason is worth keeping.</b> Gathering these into one
+    // "look" object was the obvious move and it dissolved the moment they were sorted by what reads
+    // them: the sun and the ambient are the LIT pass's, the shadow extent is the SHADOW pass's, and
+    // the exposure and tonemap are the PRESENT pass's. That is not one concept, it is three sets of
+    // pass parameters — and parameters belong with what consumes them, which is this.
+    //
+    // They lived on a StudioScene because SetSunDirection needed somewhere to sit. "Scene" promised
+    // a graph this deliberately does not have, and once the light moved here and the ring of boxes
+    // turned out never to be drawn, there was nothing left in it.
+
+    /// <summary>Degrees around Y, from +Z toward +X.</summary>
+    [Tune(0, 360)] public float SunAzimuth { get; set; } = 52.125f;
+
+    /// <summary>Degrees above the horizon. Not 90: straight down has no stable up vector.</summary>
+    [Tune(0, 89)] public float SunElevation { get; set; } = 54.526f;
+
+    /// <summary>Scales the sun's tint. One is the light this stage was authored under.</summary>
+    [Tune(0, 3)] public float SunIntensity { get; set; } = 1f;
+
+    /// <summary>Flat stand-in for image-based lighting, which this stage does not carry.</summary>
+    [Tune(0, 0.5f)] public float AmbientStrength { get; set; } = 0.06f;
+
+    /// <summary>Half-width of the sun's orthographic box, in metres.</summary>
+    /// <remarks>
+    /// A knob because it is a trade every subject settles differently: too wide and a small rig gets
+    /// a few texels of shadow map, too narrow and a large one is cut off at the edge of the light.
+    /// </remarks>
+    [Tune(2, 40)] public float ShadowExtent { get; set; } = 9f;
+
+    /// <summary>Whether the floor is drawn. Off is how you look at a thing against nothing.</summary>
+    /// <remarks>
+    /// It is a lit mesh rather than a gizmo, and it has to be: a shadow needs something to land on.
+    /// The GRID over it is a gizmo and always was — <c>debug.Draw.Grid</c>, engine-native, drawn by
+    /// the tool. The two were never one thing; they only ever looked like one.
+    /// </remarks>
+    [Tune] public bool Ground { get; set; } = true;
+
     /// <summary>Exposure applied before tonemapping.</summary>
-    public float Exposure { get; set; } = 1.0f;
+    [Tune(0, 4)] public float Exposure { get; set; } = 1.0f;
 
     /// <summary>0 = ACES, 1 = AgX, 2 = Reinhard, 3 = neutral. Matches blix_tonemap.</summary>
-    public float TonemapMode { get; set; }
+    [Tune(0, 3)] public float TonemapMode { get; set; }
+
+    /// <summary>Direction TOWARD the sun. Derived from the two angles.</summary>
+    public Vector3 SunDirection { get; private set; } = Vector3.Normalize(new Vector3(0.45f, 0.8f, 0.35f));
+
+    /// <summary>Derived: the tint this stage was authored with, scaled by <see cref="SunIntensity"/>.</summary>
+    public Vector3 SunColour { get; private set; } = new(3.2f, 3.05f, 2.75f);
+
+    private static readonly Vector3 SunTint = new(3.2f, 3.05f, 2.75f);
+
+    /// <summary>
+    /// Derives the look once, so the declared angles and the derived vector agree from frame one.
+    /// </summary>
+    /// <remarks>
+    /// <b>Without this the two disagreed silently.</b> The vector fields carry the hardcoded
+    /// direction this stage was authored with, and nothing recomputed them until something MOVED —
+    /// so a run with no flags lit the scene from the old vector while the panel showed angles that
+    /// did not produce it. The capture is what caught it: it came back matching the picture from
+    /// before the angles existed, byte for byte, which is exactly what "the knob is ignored" looks
+    /// like when the default happens to be close.
+    /// </remarks>
+    public StudioRenderer() => Recompute();
+
+    /// <summary>A declared value moved. Recompute what is derived from it.</summary>
+    public void OnChanged(TunableChange change) => Recompute();
+
+    /// <summary>Derive the sun's vectors from its angles. Also run once at construction.</summary>
+    public void Recompute()
+    {
+        var elevation = SunElevation * (MathF.PI / 180f);
+        var azimuth = SunAzimuth * (MathF.PI / 180f);
+        var horizontal = MathF.Cos(elevation);
+
+        SunDirection = Vector3.Normalize(new Vector3(
+            horizontal * MathF.Sin(azimuth),
+            MathF.Sin(elevation),
+            horizontal * MathF.Cos(azimuth)));
+
+        SunColour = SunTint * SunIntensity;
+    }
+
+    /// <summary>
+    /// A sun view-projection that covers the stage, for the caster pass.
+    /// </summary>
+    /// <remarks>
+    /// An orthographic box aimed down the sun direction at the origin. No cascades and no texel
+    /// snapping — both belong to a renderer that has earned them (TankArena and Sponza have), and a
+    /// tooling stage that grew them by default would be quietly claiming to be one.
+    /// </remarks>
+    public Matrix4x4 SunViewProjection(float? extent = null, float depth = 30f)
+    {
+        var box = extent ?? ShadowExtent;
+        var eye = SunDirection * (depth * 0.5f);
+        var up = MathF.Abs(Vector3.Dot(SunDirection, Vector3.UnitY)) > 0.95f ? Vector3.UnitZ : Vector3.UnitY;
+        var view = Matrix4x4.CreateLookAt(eye, Vector3.Zero, up);
+        var projection = GraphicsMatrices.CreateOrthographicVulkan(box * 2f, box * 2f, 0.1f, depth);
+        return view * projection;
+    }
 
     /// <param name="extend">
     /// <b>Rung four: a tool adding a pass of its own.</b> Called with the stage's graph and targets
@@ -125,7 +222,7 @@ public sealed class StudioRenderer : IDisposable
     /// asks to replace one.</b> If that turns out false this is one parameter to remove.
     /// </para>
     /// </param>
-    public void Load(VulkanGraphicsDevice vk, string shaderDirectory, Action<StudioStage>? extend = null)
+    public void Load(VulkanGraphicsDevice vk, string shaderDirectory, Action<StudioGraph>? extend = null)
     {
         device = vk;
         fullscreen = new FullscreenPass(vk, "lab.present");
@@ -219,7 +316,7 @@ public sealed class StudioRenderer : IDisposable
 
         // Everything the stage owns exists; nothing is compiled. The one window a tool has.
         extensions = new List<(PassHandle, Action<RenderPassBuilder>)>();
-        extend?.Invoke(new StudioStage(
+        extend?.Invoke(new StudioGraph(
             graph, sceneColourTarget, sceneDepthTarget, shadowTarget,
             litInterface, shadowInterface, extensions));
 
@@ -351,7 +448,6 @@ public sealed class StudioRenderer : IDisposable
     /// </param>
     public void Render(
         RenderCommandList commandList,
-        StudioScene scene,
         Matrix4x4 viewProjection,
         Vector3 cameraPosition,
         IReadOnlyList<IStudioView>? views = null,
@@ -359,7 +455,7 @@ public sealed class StudioRenderer : IDisposable
         Vector3 viewportCameraPosition = default)
     {
         views ??= Array.Empty<IStudioView>();
-        var sunViewProjection = scene.SunViewProjection();
+        var sunViewProjection = SunViewProjection();
 
         // Pass 1 — the sun's depth. No colour attachment at all, which is the thing the
         // raw surface path could not express.
@@ -370,14 +466,8 @@ public sealed class StudioRenderer : IDisposable
                 new("uLightViewProjection", new Matrix4x4Uniform(sunViewProjection)),
             };
 
-            // FURNITURE first, and it stays the stage's. A tool does not choose whether the
-            // stage has a floor; that is part of what makes it a stage rather than a blank device.
-            foreach (var item in scene.Objects)
-            {
-                // The ground casts nothing onto itself worth the fill.
-                if (item.IsGround) continue;
-                DrawObject(scope, item, shadowPipeline, uniforms, Array.Empty<ShaderTextureBinding>(), casterOnly: true);
-            }
+            // No furniture in the caster pass at all: the only furniture left is the ground, and
+            // the ground casts nothing onto itself worth the fill.
 
             var draw = new StudioDraw(
                 scope, StudioPass.Shadow, uniforms, Array.Empty<ShaderTextureBinding>(),
@@ -394,16 +484,14 @@ public sealed class StudioRenderer : IDisposable
                 new("uViewProjection", new Matrix4x4Uniform(viewProjection)),
                 new("uSunViewProjection", new Matrix4x4Uniform(sunViewProjection)),
                 new("uCameraPosition", new Vector4Uniform(new Vector4(cameraPosition, 1f))),
-                new("uSunDirection", new Vector4Uniform(new Vector4(scene.SunDirection, 0f))),
-                new("uSunColour", new Vector4Uniform(new Vector4(scene.SunColour, scene.AmbientStrength))),
+                new("uSunDirection", new Vector4Uniform(new Vector4(SunDirection, 0f))),
+                new("uSunColour", new Vector4Uniform(new Vector4(SunColour, AmbientStrength))),
             };
             var textures = new[] { new ShaderTextureBinding("uSunShadowMap", shadowTexture, Slot: 0) };
 
-            foreach (var item in scene.Objects)
-            {
-                if (item.IsGround && !scene.Ground) continue;
-                DrawObject(scope, item, litPipeline, uniforms, textures);
-            }
+            // FURNITURE, and it stays the stage's: a tool does not choose whether the stage has a
+            // floor. That is part of what makes it a stage rather than a blank device.
+            if (Ground) DrawGround(scope, litPipeline, uniforms, textures);
 
             var draw = new StudioDraw(
                 scope, StudioPass.Lit, uniforms, textures, litPipeline, skinnedPipeline, whiteTexture);
@@ -423,15 +511,12 @@ public sealed class StudioRenderer : IDisposable
                     new("uViewProjection", new Matrix4x4Uniform(panelViewProjection)),
                     new("uSunViewProjection", new Matrix4x4Uniform(sunViewProjection)),
                     new("uCameraPosition", new Vector4Uniform(new Vector4(viewportCameraPosition, 1f))),
-                    new("uSunDirection", new Vector4Uniform(new Vector4(scene.SunDirection, 0f))),
-                    new("uSunColour", new Vector4Uniform(new Vector4(scene.SunColour, scene.AmbientStrength))),
+                    new("uSunDirection", new Vector4Uniform(new Vector4(SunDirection, 0f))),
+                    new("uSunColour", new Vector4Uniform(new Vector4(SunColour, AmbientStrength))),
                 };
                 var textures = new[] { new ShaderTextureBinding("uSunShadowMap", shadowTexture, Slot: 0) };
 
-                foreach (var item in scene.Objects)
-                {
-                    DrawObject(scope, item, litPipeline, uniforms, textures);
-                }
+                if (Ground) DrawGround(scope, litPipeline, uniforms, textures);
 
                 // The SAME views, from the second camera. That is what makes it a view rather
                 // than a second renderer — and now that a view is an interface, a tool's own
@@ -470,53 +555,39 @@ public sealed class StudioRenderer : IDisposable
                 uniforms: present));
     }
 
-    private static void PackMatrix(Matrix4x4 m, byte[] target)
-    {
-        var floats = MemoryMarshal.Cast<byte, float>(target.AsSpan());
-        floats[0] = m.M11; floats[1] = m.M12; floats[2] = m.M13; floats[3] = m.M14;
-        floats[4] = m.M21; floats[5] = m.M22; floats[6] = m.M23; floats[7] = m.M24;
-        floats[8] = m.M31; floats[9] = m.M32; floats[10] = m.M33; floats[11] = m.M34;
-        floats[12] = m.M41; floats[13] = m.M42; floats[14] = m.M43; floats[15] = m.M44;
-    }
 
-    private void DrawObject(
+    /// <summary>
+    /// The floor: one lit quad, no shadow of its own, a fixed slate grey.
+    /// </summary>
+    /// <remarks>
+    /// The last of what used to be a scene. There were seven boxes beside it at varied roughness —
+    /// a good lighting subject and a terrible backdrop, as their own comment said — and both tools
+    /// replaced them with ground-only the moment they loaded anything, so they were never once
+    /// drawn. If look development wants a test subject again it arrives as a view, which is what
+    /// rung two is for.
+    /// </remarks>
+    private void DrawGround(
         RenderPassBuilder pass,
-        in StudioObject item,
         PipelineHandle pipeline,
         ShaderUniform[] uniforms,
-        ShaderTextureBinding[] textures,
-        bool casterOnly = false)
+        ShaderTextureBinding[] textures)
     {
-        var push = casterOnly ? casterPushScratch : pushScratch;
-        PackPush(item, push);
-        var bindings = casterOnly
-            ? textures
-            : new[] { textures[0], new ShaderTextureBinding("uAlbedo", whiteTexture, Slot: 1) };
+        StudioPush.Matrix(Matrix4x4.Identity, pushScratch);
+        StudioPush.Material(pushScratch, GroundColour, metallic: 0f, roughness: 0.9f);
+
         pass.DrawIndexed(
-            vertexBuffer: item.IsGround ? groundVertices : cubeVertices,
-            indexBuffer: item.IsGround ? groundIndices : cubeIndices,
+            vertexBuffer: groundVertices,
+            indexBuffer: groundIndices,
             pipeline: pipeline,
-            indexCount: item.IsGround ? groundIndexCount : cubeIndexCount,
+            indexCount: groundIndexCount,
             uniforms: uniforms,
-            textures: bindings,
-            pushConstants: push);
+            textures: new[] { textures[0], new ShaderTextureBinding("uAlbedo", whiteTexture, Slot: 1) },
+            pushConstants: pushScratch);
     }
 
-    // mat4 model, vec4 base colour, vec4 (metallic, roughness, _, _) — 96 bytes, inside the
-    // 128-byte floor every Vulkan implementation guarantees, which is why there is no
-    // per-object descriptor set in this lab at all.
-    private static void PackPush(in StudioObject item, byte[] target)
-    {
-        var floats = MemoryMarshal.Cast<byte, float>(target.AsSpan());
-        var m = item.Model;
-        floats[0] = m.M11; floats[1] = m.M12; floats[2] = m.M13; floats[3] = m.M14;
-        floats[4] = m.M21; floats[5] = m.M22; floats[6] = m.M23; floats[7] = m.M24;
-        floats[8] = m.M31; floats[9] = m.M32; floats[10] = m.M33; floats[11] = m.M34;
-        floats[12] = m.M41; floats[13] = m.M42; floats[14] = m.M43; floats[15] = m.M44;
-        if (floats.Length < 24) return;   // the caster's 64-byte block is the model matrix only
-        floats[16] = item.BaseColour.X; floats[17] = item.BaseColour.Y; floats[18] = item.BaseColour.Z; floats[19] = 1f;
-        floats[20] = item.Metallic; floats[21] = item.Roughness; floats[22] = 0f; floats[23] = 0f;
-    }
+    private static readonly Vector3 GroundColour = new(0.22f, 0.23f, 0.26f);
+
+
 
     /// <summary>
     /// Releases everything this renderer made.

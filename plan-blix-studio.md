@@ -94,7 +94,7 @@ types that carry the actual taste, and it tells a reader nothing true.
 
 `Blix.Tools.Preview` → **`Blix.Tools.Studio`**, and every `Lab*` type with it: `StudioRenderer`,
 `StudioScene`, `StudioCamera`, `StudioGeometry`, `StudioModel`, `StudioRig`, `StudioObject`,
-`SkeletonView`, `StudioSelection`. Later, `StudioShell` and the `ModelView` / `RigView` /
+`SkeletonGizmo`, `StudioSelection`. Later, `StudioShell` and the `ModelView` / `RigView` /
 `GroundView` contributors.
 `RigSession` keeps its name: it is a subject, not stage furniture.
 

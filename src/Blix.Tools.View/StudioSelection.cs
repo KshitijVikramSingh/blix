@@ -103,7 +103,7 @@ internal sealed class StudioSelection
         float gizmoScale)
     {
         var place = rig.MeshNodeTransform * placement;
-        var span = SkeletonView.Span(rig.Skeleton, boneWorlds, place, filter);
+        var span = SkeletonGizmo.Span(rig.Skeleton, boneWorlds, place, filter);
 
         // Twice the joint cross's own arm, so a click has to be close but not surgical — the same
         // slack the four-pixel click/drag threshold grants the gesture one layer up.

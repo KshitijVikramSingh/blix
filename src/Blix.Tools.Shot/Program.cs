@@ -179,7 +179,6 @@ public static class Program
 internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 {
     private readonly StudioRenderer renderer = new();
-    private StudioScene scene = StudioScene.Default();
     private readonly string outputPath;
     private readonly int captureOnFrame;
 
@@ -234,7 +233,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     {
         try
         {
-            new ObjectTunables(scene).Apply(args);
+            new ObjectTunables(renderer).Apply(args);
         }
         catch (ArgumentException bad)
         {
@@ -243,7 +242,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         }
     }
 
-    private void ExtendStage(StudioStage stage)
+    private void ExtendStage(StudioGraph stage)
     {
         var pass = stage.Graph.GraphicsPass("shot.selftest")
             .Target(stage.SceneColour, LoadOp.Load, StoreOp.Store)
@@ -332,7 +331,6 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
         if (modelPath is null || !File.Exists(modelPath)) return;
         model = StudioModel.Load(device, modelPath);
-        scene = StudioScene.GroundOnly();
         ApplyStageKnobs();
         var extent = model.LongestExtent;
         var scale = extent > 0.001f ? 3f / extent : 1f;
@@ -350,7 +348,6 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         if (rigPath is null || !File.Exists(rigPath)) return;
 
         rig = StudioRig.Load(device, rigPath, renderer.SkinnedProgram);
-        scene = StudioScene.GroundOnly();
         ApplyStageKnobs();
 
         player = new ClipPlayer(rig.Skeleton);
@@ -581,7 +578,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         if (!skeletonOnly && rig is not null) views.Add(new RigView(rig, palettes?.Count ?? 0));
 
         renderer.Render(
-            commandList, scene, viewProjection, eye, views,
+            commandList, viewProjection, eye, views,
             viewport ? panelView : null, panelEye);
 
         // Debug() runs BEFORE this in the frame, so it annotates with whatever was stored last time
@@ -707,9 +704,9 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // Lifted a hair off the ground quad: both at y=0 z-fight, and a patchy grid reads as a
         // rendering fault rather than as two coplanar surfaces.
         debug.Draw.Grid("floor", new Vector3(0f, 0.02f, 0f), 24f, 24, new GraphicsColor(0.35f, 0.4f, 0.5f, 1f));
-        debug.Draw.Arrow("sun", scene.SunDirection * 7f, Vector3.Zero, new GraphicsColor(1f, 0.9f, 0.5f, 1f));
+        debug.Draw.Arrow("sun", renderer.SunDirection * 7f, Vector3.Zero, new GraphicsColor(1f, 0.9f, 0.5f, 1f));
 
-        // The skeleton, through the SAME SkeletonView the viewer uses. That shared call is the
+        // The skeleton, through the SAME SkeletonGizmo the viewer uses. That shared call is the
         // whole reason the lab is a library: a capture drawn by its own copy of the overlay could
         // disagree with the window, and a picture that disagrees with the thing it documents is
         // worse than no picture.
@@ -723,12 +720,12 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             {
                 using var instanceScope = debug.Scope($"i{i}");
                 StudioRig.ComputeBoneWorlds(rig.Skeleton, instancePoses[i], worlds);
-                SkeletonView.Draw(
+                SkeletonGizmo.Draw(
                     debug,
                     rig.Skeleton,
                     worlds,
                     rig.MeshNodeTransform * instancePlacements[i],
-                    SkeletonView.Options.Default,
+                    SkeletonGizmo.Options.Default,
                     selectedBone: -1,
                     restWorlds: null,
                     include: rig.DeformHierarchy,

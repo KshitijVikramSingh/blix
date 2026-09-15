@@ -20,11 +20,11 @@ namespace Blix.Tools.Studio;
 /// <see cref="RenderGraph.Compile"/> — the stage compiles, once, when it is ready.
 /// </para>
 /// </remarks>
-public sealed class StudioStage
+public sealed class StudioGraph
 {
     private readonly List<(PassHandle Pass, Action<RenderPassBuilder> Record)> extensions;
 
-    internal StudioStage(
+    internal StudioGraph(
         RenderGraph graph,
         GraphResourceHandle sceneColour,
         GraphResourceHandle sceneDepth,

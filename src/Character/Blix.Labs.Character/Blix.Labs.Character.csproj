@@ -8,7 +8,7 @@
     wrong clip playing, the only way to attribute the fault is to have watched each half alone.
 
     Self-contained, and NOT a consumer of Blix.Tools.Studio. That was considered: its StudioCamera
-    is orbit arithmetic this lab also wants, and at stage M its StudioRig / SkeletonView will be a
+    is orbit arithmetic this lab also wants, and at stage M its StudioRig / SkeletonGizmo will be a
     much stronger pull. It was not reached for, for two reasons. Its StudioRenderer draws a StudioScene
     of boxes with per-object model matrices, and this room is one world-space triangle soup whose
     collider IS its vertices — bending one into the other is the "forcing one shape onto the other"
