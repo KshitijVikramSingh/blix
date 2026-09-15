@@ -65,9 +65,9 @@ static int MeshoptSelfTest()
     Console.WriteLine($"meshopt self-test: grid {verts} verts, {indices.Length / 3} tris");
     foreach (var ratio in new[] { 0.5f, 0.25f, 0.1f })
     {
-        var lod = Blix.Tools.Cook.MeshoptNative.Simplify(
+        var lod = Blix.Recipes.MeshoptNative.Simplify(
             indices, positions, verts, 3, ratio, targetError: 1.0f,
-            Blix.Tools.Cook.MeshoptNative.Options.LockBorder, out var err);
+            Blix.Recipes.MeshoptNative.Options.LockBorder, out var err);
         Console.WriteLine($"  ratio {ratio:0.00} -> {lod.Length / 3} tris (error {err:0.0000})");
     }
     Console.WriteLine("meshopt P/Invoke OK.");
@@ -219,17 +219,17 @@ static int CookMesh(string[] args)
         // that may not delete a component can only thin each one until it would vanish, which is almost
         // immediately. Prune lets whole components go — which for foliage is not a compromise but the
         // correct behaviour, since what a canopy looks like from further away is fewer, larger masses.
-        var options = Blix.Tools.Cook.MeshoptNative.Options.Prune;
-        if (splitBudget > 0) options |= Blix.Tools.Cook.MeshoptNative.Options.LockBorder;
-        var count = Blix.GltfStaticImporter.CookToBlixMesh(src, outPath, flipV, tangents,
+        var options = Blix.Recipes.MeshoptNative.Options.Prune;
+        if (splitBudget > 0) options |= Blix.Recipes.MeshoptNative.Options.LockBorder;
+        var count = Blix.Recipes.MeshRecipe.CookToBlixMesh(src, outPath, flipV, tangents,
             simplify: (positions, indices, vertexCount, ratio) =>
             {
-                var reduced = Blix.Tools.Cook.MeshoptNative.Simplify(indices, positions, vertexCount, 3, ratio,
+                var reduced = Blix.Recipes.MeshoptNative.Simplify(indices, positions, vertexCount, 3, ratio,
                     targetError: 1.0f, options, out var relError);
                 // meshopt's resultError is relative to the mesh extent; scale to
                 // world units so the runtime can project it to screen pixels.
-                var scale = Blix.Tools.Cook.MeshoptNative.SimplifyScale(positions, vertexCount, 3);
-                return new Blix.GltfStaticImporter.SimplifyResult(reduced, relError * scale);
+                var scale = Blix.Recipes.MeshoptNative.SimplifyScale(positions, vertexCount, 3);
+                return new Blix.Recipes.MeshRecipe.SimplifyResult(reduced, relError * scale);
             },
             splitTriBudget: splitBudget, splitFoliage: splitFoliage);
         var size = new FileInfo(outPath).Length;
@@ -385,31 +385,8 @@ static int CookProbe(string[] args)
     Console.WriteLine($"  env={envFace} irr={irrFace} prefilter={prefilterBase}/{prefilterMips} brdf={brdfSize} clamp={clamp}");
 
     var sw = Stopwatch.StartNew();
-    var hdr = ImageLoader.LoadRgba32F(hdrPath);
-    Console.WriteLine($"  hdr loaded ({hdr.Width}x{hdr.Height}) in {sw.ElapsedMilliseconds} ms");
-    sw.Restart();
-    var profile = new EnvironmentProfile
-    {
-        Source = new HdrEnvironmentSource(hdr),
-        EnvCubeFaceSize = envFace,
-        IrradianceFaceSize = irrFace,
-        SpecularPrefilterBaseSize = prefilterBase,
-        SpecularPrefilterMipCount = prefilterMips,
-        SampleClampMagnitude = clamp,
-    };
-    var data = EnvironmentBaker.CookHdrProbeData(profile, brdfSize);
-    Console.WriteLine($"  baked in {sw.ElapsedMilliseconds} ms");
-    sw.Restart();
-    // Every knob that changes the bake, recorded verbatim — including --clamp, which was the one
-    // probe parameter the old header did NOT carry. Authored order, so the string is stable and a
-    // byte-compare between two cooks means something.
-    var probeStamp = CookStamp.Of(
-        BlixProbe.ShippedRecipe, BlixProbe.ShippedRecipeVersion, hdrPath,
-        $"env={envFace} irr={irrFace} prefilterBase={prefilterBase} prefilterMips={prefilterMips} " +
-        $"brdf={brdfSize} clamp={clamp.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
-
-    BlixProbeWriter.Write(outPath, data, probeStamp);
-    var size = new FileInfo(outPath).Length;
+    var size = Blix.Recipes.ProbeRecipe.CookOne(
+        hdrPath, outPath, envFace, irrFace, prefilterBase, prefilterMips, brdfSize, clamp);
     Console.WriteLine($"  wrote {outPath} ({size / 1024.0 / 1024.0:0.00} MB) in {sw.ElapsedMilliseconds} ms");
     return 0;
 }
@@ -560,7 +537,7 @@ static int CookTextures(string[] args)
         var sw = Stopwatch.StartNew();
         try
         {
-            CookOne(source, destination, out var srcLen, out var dstLen);
+            Blix.Recipes.TextureRecipe.CookOne(source, destination, out var srcLen, out var dstLen);
             Interlocked.Increment(ref cookedCount);
             Interlocked.Add(ref sourceBytes, srcLen);
             Interlocked.Add(ref cookedBytes, dstLen);
@@ -615,236 +592,3 @@ static string FormatDuration(double seconds)
     return $"{minutes}m{remaining:00}s";
 }
 
-static void CookOne(string source, string destination, out long sourceLen, out long destLen)
-{
-    var verbose = Environment.GetEnvironmentVariable("BLIX_COOK_VERBOSE") != null;
-    // Cook format selection. BC7 is 4x smaller than Rgba8 on disk + in GPU
-    // memory and is the DEFAULT when the fast native encoder (Bc7Native, the
-    // vendored bc7enc) is available — it BC7-encodes a 4K texture in a second
-    // or so. Without the native lib we fall back to Rgba8 rather than the
-    // managed BCnEncoder.Net path (minutes per 4K texture). Override:
-    //   BLIX_COOK_FORMAT=bc7   force BC7 (managed fallback if no native lib)
-    //   BLIX_COOK_FORMAT=rgba8 force uncompressed Rgba8
-    var formatEnv = Environment.GetEnvironmentVariable("BLIX_COOK_FORMAT");
-    var bcMode = formatEnv is not null
-        ? formatEnv.Equals("bc7", StringComparison.OrdinalIgnoreCase)
-        : Blix.Tools.Cook.Bc7Native.Available;
-    var name = Path.GetFileName(source);
-    sourceLen = new FileInfo(source).Length;
-    using var probe = File.OpenRead(source);
-    if (probe.Length == 0)
-    {
-        throw new InvalidDataException("source file is zero bytes (likely an APFS sparse-copy artifact; re-run tools/setup-sponza-modern.sh)");
-    }
-    probe.Close();
-
-    using (var stream = File.OpenRead(source))
-    {
-        var decodeSw = Stopwatch.StartNew();
-        var role = ClassifyRole(source);
-        // MR textures need channel-aware loading: 1-channel grayscale
-        // PNGs (Modern Sponza's "*_Roughness.png") get expanded by stb to
-        // (Y, Y, Y, 255), which the shader would then read as
-        // metallic = roughness. LoadMetallicRoughness detects the
-        // grayscale source and zeroes the B channel so the cooked
-        // .blixtex stores (255, Y, 0, 255) -- the canonical ORM layout.
-        var image = role == TextureRole.MetallicRoughness
-            ? ImageLoader.LoadMetallicRoughness(stream)
-            : ImageLoader.LoadRgba32(stream);
-        if (verbose) Console.WriteLine($"\r    decoded {name} {image.Width}x{image.Height} in {decodeSw.ElapsedMilliseconds} ms");
-        var (bcFormat, flags) = PickFormat(role);
-        var format = bcMode ? bcFormat : TextureFormat.Rgba8;
-
-        var mipSw = Stopwatch.StartNew();
-        var mipsRgba = GenerateMipsBoxFilter(image.Pixels, image.Width, image.Height, minDim: 4);
-        if (verbose) Console.WriteLine($"\r    mipped  {name} {mipsRgba.Count} levels in {mipSw.ElapsedMilliseconds} ms");
-
-        byte[][] encodedMips;
-        if (bcMode && bcFormat is TextureFormat.Bc7Srgb or TextureFormat.Bc7Unorm && Blix.Tools.Cook.Bc7Native.Available)
-        {
-            // Fast native BC7 (bc7enc). Perceptual YCbCr weighting for sRGB
-            // color maps; linear weighting for normal/data maps. Single-threaded
-            // per texture -- the outer Parallel.ForEach over textures already
-            // saturates cores.
-            var perceptual = (flags & BlixTex.Flags.Srgb) != 0;
-            var quality = Bc7Quality();
-            encodedMips = new byte[mipsRgba.Count][];
-            for (var i = 0; i < mipsRgba.Count; i++)
-            {
-                var (pixels, w, h) = mipsRgba[i];
-                var encodeSw = Stopwatch.StartNew();
-                encodedMips[i] = Blix.Tools.Cook.Bc7Native.EncodeImage(pixels, w, h, perceptual, quality, numThreads: 1);
-                if (verbose) Console.WriteLine($"\r    bc7(native q{quality}) {name} mip{i} {w}x{h} -> {encodedMips[i].Length} bytes in {encodeSw.ElapsedMilliseconds} ms");
-            }
-        }
-        else if (bcMode)
-        {
-            // Managed fallback (no native lib, or a non-BC7 target). Encoder-
-            // internal parallelism is OFF -- the outer Parallel.ForEach handles
-            // cores. Slow (minutes per 4K texture); only hit when Bc7Native is
-            // unavailable.
-            var encoder = new BcEncoder
-            {
-                Options = { IsParallel = false },
-                OutputOptions =
-                {
-                    GenerateMipMaps = false,
-                    Quality = CompressionQuality.Fast,
-                    Format = ToBcFormat(bcFormat),
-                    FileFormat = OutputFileFormat.Dds,
-                },
-            };
-            encodedMips = new byte[mipsRgba.Count][];
-            for (var i = 0; i < mipsRgba.Count; i++)
-            {
-                var (pixels, w, h) = mipsRgba[i];
-                var encodeSw = Stopwatch.StartNew();
-                encodedMips[i] = EncodeMip(encoder, pixels, w, h);
-                if (verbose) Console.WriteLine($"\r    encoded {name} mip{i} {w}x{h} -> {encodedMips[i].Length} bytes in {encodeSw.ElapsedMilliseconds} ms");
-            }
-        }
-        else
-        {
-            // Rgba8 multi-mip: the mip data is the pre-filtered RGBA bytes
-            // as-is. No compression cost; runtime gets pre-baked mips
-            // instead of glGenerateMipmap-at-upload, which is still a
-            // measurable win on large textures.
-            encodedMips = new byte[mipsRgba.Count][];
-            for (var i = 0; i < mipsRgba.Count; i++) encodedMips[i] = mipsRgba[i].Pixels;
-        }
-
-        // The role is what picks BC7sRGB vs BC5 vs BC7Unorm vs Rgba8, so it is the setting that
-        // decides the bytes and it goes in the stamp. `flags` rides along because sRGB and
-        // normal-map are read back out of the file, and recording the input beside the output is
-        // what makes a mismatch visible rather than a mystery.
-        var texStamp = CookStamp.Of(
-            BlixTex.ShippedRecipe, BlixTex.ShippedRecipeVersion, source,
-            $"format={format} flags={flags} mips={encodedMips.Length}");
-
-        BlixTexWriter.Write(destination, new BlixTexImage(
-            image.Width, image.Height, format, encodedMips, flags), texStamp);
-    }
-    destLen = new FileInfo(destination).Length;
-}
-
-// Native BC7 quality knob: 0 fastest, 1 balanced (default), 2 high. Set
-// BLIX_BC7_QUALITY to override. Higher = slower cook, better quality.
-static int Bc7Quality() =>
-    int.TryParse(Environment.GetEnvironmentVariable("BLIX_BC7_QUALITY"), out var q)
-        ? Math.Clamp(q, 0, 2)
-        : 1;
-
-// Picks a BCn format + flags based on the heuristic role classification.
-static (TextureFormat Format, BlixTex.Flags Flags) PickFormat(TextureRole role) => role switch
-{
-    TextureRole.BaseColor          => (TextureFormat.Bc7Srgb, BlixTex.Flags.Srgb),
-    TextureRole.Emissive           => (TextureFormat.Bc7Srgb, BlixTex.Flags.Srgb),
-    TextureRole.Normal             => (TextureFormat.Bc7Unorm, BlixTex.Flags.NormalMap),
-    TextureRole.MetallicRoughness  => (TextureFormat.Bc7Unorm, BlixTex.Flags.None),
-    TextureRole.Linear             => (TextureFormat.Bc7Unorm, BlixTex.Flags.None),
-    _                              => (TextureFormat.Bc7Unorm, BlixTex.Flags.None),
-};
-
-// BC5 is the textbook normal-map format (two-channel RG, reconstruct Z in
-// shader) but it requires shader changes that haven't landed yet. Until
-// then we use BC7 Unorm for normals: same 8 bpp + four-channel storage,
-// no shader change needed.
-static CompressionFormat ToBcFormat(TextureFormat fmt) => fmt switch
-{
-    TextureFormat.Bc7Srgb  => CompressionFormat.Bc7,  // sRGB selection lives on the GL internal format side
-    TextureFormat.Bc7Unorm => CompressionFormat.Bc7,
-    TextureFormat.Bc5Unorm => CompressionFormat.Bc5,
-    _ => throw new NotSupportedException($"Unsupported BC format target: {fmt}"),
-};
-
-static byte[] EncodeMip(BcEncoder encoder, byte[] rgbaPixels, int width, int height)
-{
-    // BCnEncoder takes a ReadOnlyMemory2D<ColorRgba32>. Reinterpret the
-    // byte[] as a span of ColorRgba32 (same layout: R, G, B, A bytes) and
-    // build a 2D view.
-    if (rgbaPixels.Length != width * height * 4)
-    {
-        throw new ArgumentException($"Mip data size mismatch: {rgbaPixels.Length} bytes != {width * height * 4}.");
-    }
-    var colors = new ColorRgba32[width * height];
-    for (var i = 0; i < colors.Length; i++)
-    {
-        colors[i] = new ColorRgba32(
-            rgbaPixels[i * 4 + 0],
-            rgbaPixels[i * 4 + 1],
-            rgbaPixels[i * 4 + 2],
-            rgbaPixels[i * 4 + 3]);
-    }
-    var memory2D = new ReadOnlyMemory2D<ColorRgba32>(colors, height, width);
-    // EncodeToRawBytes returns one byte[] per mip. We've already pre-generated
-    // the mip chain ourselves (encoder.OutputOptions.GenerateMipMaps = false),
-    // so the result is a single-entry array; take [0].
-    return encoder.EncodeToRawBytes(memory2D)[0];
-}
-
-// CPU mip chain via box filter (average of 2x2 pixels). Stops when the
-// smaller dimension hits `minDim`. Returns mip 0 (the original) first.
-static List<(byte[] Pixels, int Width, int Height)> GenerateMipsBoxFilter(
-    byte[] basePixels, int baseW, int baseH, int minDim)
-{
-    var mips = new List<(byte[], int, int)> { (basePixels, baseW, baseH) };
-    var current = basePixels;
-    var w = baseW;
-    var h = baseH;
-    while (w > minDim && h > minDim)
-    {
-        var nw = Math.Max(minDim, w / 2);
-        var nh = Math.Max(minDim, h / 2);
-        // Skip generating a mip that would equal the previous one.
-        if (nw == w && nh == h) break;
-        var next = new byte[nw * nh * 4];
-        var srcW = w;
-        for (var y = 0; y < nh; y++)
-        {
-            for (var x = 0; x < nw; x++)
-            {
-                var sx = x * 2;
-                var sy = y * 2;
-                var sx1 = Math.Min(sx + 1, w - 1);
-                var sy1 = Math.Min(sy + 1, h - 1);
-                for (var c = 0; c < 4; c++)
-                {
-                    var a = current[(sy * srcW + sx) * 4 + c];
-                    var b = current[(sy * srcW + sx1) * 4 + c];
-                    var d = current[(sy1 * srcW + sx) * 4 + c];
-                    var e = current[(sy1 * srcW + sx1) * 4 + c];
-                    next[(y * nw + x) * 4 + c] = (byte)((a + b + d + e + 2) / 4);
-                }
-            }
-        }
-        mips.Add((next, nw, nh));
-        current = next;
-        w = nw;
-        h = nh;
-    }
-    return mips;
-}
-
-static TextureRole ClassifyRole(string path)
-{
-    var name = Path.GetFileNameWithoutExtension(path).ToLowerInvariant();
-    if (name.Contains("basecolor") || name.Contains("albedo") || name.Contains("diffuse"))
-        return TextureRole.BaseColor;
-    if (name.Contains("emiss"))
-        return TextureRole.Emissive;
-    // MR detection. Modern Sponza names them "<material>_Roughness.png" or
-    // "<material>_Roughness<material>_Metalness.png" (the concatenation
-    // pattern is how their exporter joins the two original maps). Check
-    // for roughness/metalness/metallic/metalrough as substrings -- comes
-    // BEFORE the normal check so "normal_roughness.png" doesn't get mis-
-    // classified as normal.
-    if (name.Contains("roughness") || name.Contains("metalness")
-        || name.Contains("metallic") || name.Contains("metalrough")
-        || name.Contains("metal_rough"))
-        return TextureRole.MetallicRoughness;
-    if (name.Contains("normal") || name.EndsWith("_n") || name.EndsWith(".n"))
-        return TextureRole.Normal;
-    return TextureRole.Linear;
-}
-
-enum TextureRole { BaseColor, Normal, Emissive, MetallicRoughness, Linear }

@@ -1,12 +1,12 @@
 using System.Runtime.InteropServices;
 
-namespace Blix.Tools.Cook;
+namespace Blix.Recipes;
 
 // P/Invoke into vendored meshoptimizer (third_party/meshoptimizer, built to
 // libmeshoptimizer.dylib next to the cook by the BuildMeshopt MSBuild target).
 // Cook-time only — used to generate mesh LOD index chains. The runtime never
 // links meshopt; it just loads the cooked LOD buffers.
-internal static unsafe class MeshoptNative
+public static unsafe class MeshoptNative
 {
     private const string Lib = "meshoptimizer";
 

@@ -222,249 +222,6 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         return new GltfNodeModel(nodes);
     }
 
-    // Cook a .gltf/.glb to its .blixmesh sibling. CPU-only -- no GraphicsDevice
-    // required; safe to invoke from the offline cook tool. Walks the same
-    // node/primitive structure the runtime importer does, packs vertices via
-    // BuildStaticMeshData, and serialises each primitive's
-    // (name, materialIndex, bounds, vertexBytes, indices) to disk.
-    // Target triangle ratios for the LOD chain (relative to full detail). The
-    // chain stops early if a level doesn't reduce or falls below MinLodIndices.
-    private static readonly float[] LodRatios = { 0.5f, 0.25f, 0.125f };
-    private const int MinLodIndices = 96; // 32 triangles — below this, no point
-
-    // Reduced index list + the world-space geometric error it introduced
-    // (max deviation from the original surface, in mesh units). Error drives
-    // screen-space-error LOD selection: project it to pixels at the view
-    // distance and switch when it's below a pixel threshold.
-    public readonly record struct SimplifyResult(uint[] Indices, float WorldError);
-
-    // Simplify callback: (positions xyz tight float[3*vtx], indices, vertexCount,
-    // targetRatio) -> reduced index list + its world error, sharing the same
-    // vertices. The cook tool supplies a meshoptimizer-backed implementation;
-    // when null, the file is written LOD0-only (Blix has no simplifier of its own).
-    public delegate SimplifyResult SimplifyFn(float[] positions, uint[] indices, int vertexCount, float targetRatio);
-
-    /// <summary>
-    /// The mesh cook's own version, bumped whenever this method would produce different bytes from
-    /// the same source and settings. Recorded in every file it writes, so a re-cook can be told
-    /// from a rewrite.
-    /// </summary>
-    public const uint MeshRecipeVersion = 1;
-
-    public static int CookToBlixMesh(
-        string gltfPath, string outPath, bool flipTextureV = false, bool includeTangents = false,
-        SimplifyFn? simplify = null, int splitTriBudget = 0, bool splitFoliage = true)
-    {
-        ArgumentNullException.ThrowIfNull(gltfPath);
-        ArgumentNullException.ThrowIfNull(outPath);
-
-        var layout = includeTangents
-            ? VertexPosition3NormalTangentTexture.Layout
-            : VertexPosition3NormalTexture.Layout;
-        var model = ModelRoot.Load(gltfPath);
-        var primitives = new List<BlixMeshPrimitive>();
-        foreach (var node in model.LogicalNodes)
-        {
-            if (node.Mesh is null) continue;
-            // F-016: engine is now row-vector form; matches SharpGLTF.
-            var world = node.WorldMatrix;
-            var normalMatrix = ComputeNormalMatrix(world);
-            for (var i = 0; i < node.Mesh.Primitives.Count; i++)
-            {
-                var prim = node.Mesh.Primitives[i];
-                var meshName = $"{node.Mesh.Name ?? node.Name ?? "gltf_mesh"}.{i}";
-                var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix, flipTextureV, includeTangents);
-                var materialIndex = prim.Material?.LogicalIndex ?? BlixMesh.NoMaterial;
-
-                // Spatial split of oversized primitives so per-prim distance LOD
-                // gets fine-grained — a huge floor/wall becomes many chunks, the
-                // far ones coarsen while the near stay dense. Seam verts are
-                // duplicated per chunk + LockBorder-locked (BuildLods) → crack-free
-                // across LOD mismatch. Foliage (non-OPAQUE) optionally excluded so
-                // the impostor track can own it instead.
-                var isFoliage = prim.Material is { Alpha: not SharpGLTF.Schema2.AlphaMode.OPAQUE };
-                var doSplit = splitTriBudget > 0 && (splitFoliage || !isFoliage);
-                var chunks = doSplit
-                    ? SplitPrimitive(meshData, layout.Stride, splitTriBudget)
-                    : new List<MeshData> { meshData };
-
-                foreach (var chunk in chunks)
-                {
-                    primitives.Add(new BlixMeshPrimitive(
-                        Name: chunk.Name,
-                        MaterialIndex: materialIndex,
-                        Bounds: chunk.Bounds,
-                        VertexCount: chunk.VertexCount,
-                        VertexBytes: chunk.VertexBytes,
-                        IndexFormat: chunk.IndexFormat,
-                        Lods: BuildLods(chunk, layout.Stride, simplify)));
-                }
-            }
-        }
-
-        // Every setting that changes the bytes, recorded verbatim. Before this, --flip-v, --split
-        // and --no-split-foliage silently altered the output and nothing anywhere said which had
-        // been used — so the cooked half of the tree could not be reproduced from the tree, and
-        // "cook it again and compare" was a test nobody could write. Authored order, not sorted,
-        // so the string is stable across runs and a byte-compare means something.
-        //
-        // `simplify` is in here because a null simplifier writes LOD0 only: same source, same
-        // flags, a different file. That it is a delegate rather than a flag is exactly why it was
-        // the easiest one to forget.
-        var parameters =
-            $"flipV={(flipTextureV ? 1 : 0)} tangents={(includeTangents ? 1 : 0)} " +
-            $"split={splitTriBudget} splitFoliage={(splitFoliage ? 1 : 0)} " +
-            $"simplify={(simplify is null ? "none" : "yes")}";
-
-        // SourceRequired, and it is not a formality: this cook replaces geometry only. Every
-        // material factor, texture reference and alpha mode is still parsed out of the sibling
-        // glTF on every load, so the source is a permanent runtime dependency and the flag says so
-        // where a tool can see it. Stage K-F is finished when this stops being set.
-        var stamp = CookStamp.Of(
-            BlixMesh.ShippedRecipe, MeshRecipeVersion, gltfPath, parameters, CookedFlags.SourceRequired);
-
-        BlixMeshWriter.Write(outPath, new BlixMeshFile(layout, primitives), stamp);
-        return primitives.Count;
-    }
-
-    // LOD0 (full) + decimated levels via the injected simplifier. All levels
-    // share the primitive's index format (decimated indices reference the same
-    // vertex buffer, so a u16 primitive stays u16).
-    private static IReadOnlyList<BlixMeshLod> BuildLods(MeshData meshData, int stride, SimplifyFn? simplify)
-    {
-        // LOD0 is the original surface: zero geometric error.
-        var lods = new List<BlixMeshLod> { new(meshData.Indices, meshData.Indices32, Error: 0f) };
-        if (simplify is null) return lods;
-
-        var baseIndices = meshData.Indices32 ?? Array.ConvertAll(meshData.Indices, idx => (uint)idx);
-        if (baseIndices.Length < MinLodIndices) return lods;
-
-        var positions = new float[meshData.VertexCount * 3];
-        for (var v = 0; v < meshData.VertexCount; v++)
-        {
-            var o = v * stride;
-            positions[v * 3 + 0] = BitConverter.ToSingle(meshData.VertexBytes, o);
-            positions[v * 3 + 1] = BitConverter.ToSingle(meshData.VertexBytes, o + 4);
-            positions[v * 3 + 2] = BitConverter.ToSingle(meshData.VertexBytes, o + 8);
-        }
-
-        var prevCount = baseIndices.Length;
-        foreach (var ratio in LodRatios)
-        {
-            var result = simplify(positions, baseIndices, meshData.VertexCount, ratio);
-            var reduced = result.Indices;
-            if (reduced.Length < MinLodIndices || reduced.Length >= prevCount) break;
-            prevCount = reduced.Length;
-            lods.Add(meshData.IndexFormat == IndexFormat.UInt32
-                ? new BlixMeshLod(null, reduced, result.WorldError)
-                : new BlixMeshLod(Array.ConvertAll(reduced, idx => (ushort)idx), null, result.WorldError));
-        }
-        return lods;
-    }
-
-    // Recursively split a primitive's triangles into spatial chunks under
-    // triBudget, each a self-contained MeshData (own gathered + reindexed
-    // vertices). Median split along the longest centroid axis. Seam vertices
-    // are duplicated across chunks — with BuildLods' LockBorder this keeps chunk
-    // boundaries watertight even when adjacent chunks pick different LOD levels.
-    private static List<MeshData> SplitPrimitive(MeshData mesh, int stride, int triBudget)
-    {
-        var baseIdx = mesh.Indices32 ?? Array.ConvertAll(mesh.Indices, idx => (uint)idx);
-        var triCount = baseIdx.Length / 3;
-        if (triCount <= triBudget) return new List<MeshData> { mesh };
-
-        var centroids = new Vector3[triCount];
-        for (var t = 0; t < triCount; t++)
-        {
-            var a = VertexPosition(mesh.VertexBytes, baseIdx[t * 3], stride);
-            var b = VertexPosition(mesh.VertexBytes, baseIdx[t * 3 + 1], stride);
-            var c = VertexPosition(mesh.VertexBytes, baseIdx[t * 3 + 2], stride);
-            centroids[t] = (a + b + c) / 3f;
-        }
-
-        var leaves = new List<int[]>();
-        var allTris = new int[triCount];
-        for (var t = 0; t < triCount; t++) allTris[t] = t;
-        SplitTriangles(allTris, centroids, triBudget, leaves);
-
-        var chunks = new List<MeshData>(leaves.Count);
-        var chunkIdx = 0;
-        foreach (var leaf in leaves)
-            chunks.Add(BuildChunk($"{mesh.Name}#{chunkIdx++}", mesh, baseIdx, leaf, stride));
-        return chunks;
-    }
-
-    private static void SplitTriangles(int[] tris, Vector3[] centroids, int budget, List<int[]> leaves)
-    {
-        if (tris.Length <= budget) { leaves.Add(tris); return; }
-        var min = new Vector3(float.MaxValue);
-        var max = new Vector3(float.MinValue);
-        foreach (var t in tris) { min = Vector3.Min(min, centroids[t]); max = Vector3.Max(max, centroids[t]); }
-        var ext = max - min;
-        var axis = ext.X >= ext.Y && ext.X >= ext.Z ? 0 : (ext.Y >= ext.Z ? 1 : 2);
-        Array.Sort(tris, (p, q) => Axis(centroids[p], axis).CompareTo(Axis(centroids[q], axis)));
-        var mid = tris.Length / 2;
-        // Degenerate (centroids coincide along the split axis) — emit whole.
-        if (mid == 0 || mid == tris.Length) { leaves.Add(tris); return; }
-        SplitTriangles(tris[..mid], centroids, budget, leaves);
-        SplitTriangles(tris[mid..], centroids, budget, leaves);
-    }
-
-    private static float Axis(Vector3 v, int a) => a == 0 ? v.X : (a == 1 ? v.Y : v.Z);
-
-    private static Vector3 VertexPosition(byte[] vbytes, uint vtx, int stride)
-    {
-        var o = (int)vtx * stride;
-        return new Vector3(
-            BitConverter.ToSingle(vbytes, o),
-            BitConverter.ToSingle(vbytes, o + 4),
-            BitConverter.ToSingle(vbytes, o + 8));
-    }
-
-    // Gather the vertices a chunk's triangles reference, reindex compactly, copy
-    // their vertex bytes, recompute bounds. Downgrades to u16 indices when the
-    // chunk's vertex count fits (split chunks are far smaller than the parent).
-    private static MeshData BuildChunk(string name, MeshData mesh, uint[] baseIdx, int[] triIds, int stride)
-    {
-        var remap = new Dictionary<uint, uint>();
-        var newVerts = new List<uint>();
-        var newIndices = new uint[triIds.Length * 3];
-        var w = 0;
-        foreach (var t in triIds)
-        {
-            for (var k = 0; k < 3; k++)
-            {
-                var ov = baseIdx[t * 3 + k];
-                if (!remap.TryGetValue(ov, out var nv))
-                {
-                    nv = (uint)newVerts.Count;
-                    remap[ov] = nv;
-                    newVerts.Add(ov);
-                }
-                newIndices[w++] = nv;
-            }
-        }
-
-        var vbytes = new byte[newVerts.Count * stride];
-        var min = new Vector3(float.MaxValue);
-        var max = new Vector3(float.MinValue);
-        for (var v = 0; v < newVerts.Count; v++)
-        {
-            Array.Copy(mesh.VertexBytes, (int)newVerts[v] * stride, vbytes, v * stride, stride);
-            var p = VertexPosition(mesh.VertexBytes, newVerts[v], stride);
-            min = Vector3.Min(min, p); max = Vector3.Max(max, p);
-        }
-        var bounds = new Bounds3(min, max);
-
-        if (newVerts.Count <= ushort.MaxValue + 1)
-        {
-            var u16 = new ushort[newIndices.Length];
-            for (var i = 0; i < newIndices.Length; i++) u16[i] = (ushort)newIndices[i];
-            return new MeshData(name, vbytes, u16, mesh.Layout, bounds);
-        }
-        return new MeshData(name, vbytes, Array.Empty<ushort>(), mesh.Layout, bounds, Indices32: newIndices);
-    }
-
     public static MeshData BuildStaticMeshData(string name, MeshPrimitive primitive, Matrix4x4 world, Matrix4x4 normalMatrix, bool flipTextureV = false, bool includeTangents = false)
     {
         var positions = primitive.GetVertexAccessor("POSITION")?.AsVector3Array()
@@ -483,7 +240,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         // V canonicalisation (V -> 1-V), opt-in per import via FlipTextureV.
         // Bottom-up (OpenGL-authored) sources sample vertically inverted on a
         // top-down (Vulkan / D3D) sampler; baking the flip here is the single
-        // chokepoint the runtime importer and CookToBlixMesh share.
+        // chokepoint the runtime importer and the mesh recipe share (Blix.Recipes.MeshRecipe).
         Vector2 BuildUv(int v)
         {
             var uv = uvs is null ? Vector2.Zero : uvs[v];
@@ -630,7 +387,16 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
 
 
 
-    private static Matrix4x4 ComputeNormalMatrix(Matrix4x4 model)
+    /// <summary>The inverse-transpose of a model matrix, for transforming normals.</summary>
+    /// <remarks>
+    /// <b>Public because the mesh recipe needs it, and that is the whole test.</b> When the recipe
+    /// left the engine it needed exactly two things from it — this and
+    /// <see cref="BuildStaticMeshData"/> — and both are public API rather than something reached
+    /// through <c>InternalsVisibleTo</c>. An internals grant would have made Blix's own recipe able
+    /// to do what a project's recipe cannot, which is the blessing-by-privilege this arc exists to
+    /// remove, rebuilt one level down.
+    /// </remarks>
+    public static Matrix4x4 ComputeNormalMatrix(Matrix4x4 model)
     {
         // F-016: engine row-vector convention. For a direction transform,
         // GraphicsMatrices.TransformDirection treats the matrix as row-vector

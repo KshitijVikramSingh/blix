@@ -14,6 +14,7 @@ using Blix.Render;
 using VkImageLayout = Silk.NET.Vulkan.ImageLayout;
 using VkPipelineStageFlags = Silk.NET.Vulkan.PipelineStageFlags;
 using VkAccessFlags = Silk.NET.Vulkan.AccessFlags;
+using System.Reflection;
 using Blix.Cooked;
 using Blix.Graphics.Images;
 
@@ -3323,6 +3324,54 @@ static ShaderInterface MinimalShader() => new(new[]
         t.Expect("AW.7 .blixmesh magic", CookPreamble.Describe(BlixMesh.Magic) == "'BLXM'");
         t.Expect("AW.7 .blixtex magic is BLXT, no longer the odd one out", CookPreamble.Describe(BlixTex.Magic) == "'BLXT'");
         t.Expect("AW.7 .blixprobe magic", CookPreamble.Describe(BlixProbe.Magic) == "'BLXP'");
+
+        // ── The three recipes, as declared ───────────────────────────────────
+        // <b>These check the DECLARATIONS, not the cooking.</b> A recipe whose id does not match
+        // the constant its format stamps would write files nothing could attribute, and the two
+        // are in different assemblies now, so nothing but a check keeps them in step.
+        var recipes = typeof(Blix.Recipes.MeshRecipe).Assembly.GetTypes()
+            .SelectMany(ty => ty.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
+            .Select(m => (Method: m, Attr: m.GetCustomAttribute<RecipeAttribute>()))
+            .Where(x => x.Attr is not null)
+            .Select(x => (x.Method, Attr: x.Attr!))
+            .ToList();
+
+        t.Expect("AW.8 Blix ships three recipes", recipes.Count == 3, $"found {recipes.Count}");
+
+        // Every id is exactly four characters, because it rides in the preamble as a 4cc — a
+        // five-character id would silently truncate and attribute files to a recipe that does not
+        // exist.
+        t.ExpectTrue("AW.8 every recipe id is a 4cc",
+            recipes.All(r => r.Attr.Id.Length == CookStamp.RecipeIdLength));
+
+        // No two recipes share an id. With one assembly it is obvious; the moment a project
+        // declares its own it stops being.
+        t.Expect("AW.8 no two recipes share an id",
+            recipes.Select(r => r.Attr.Id).Distinct().Count() == recipes.Count,
+            string.Join(",", recipes.Select(r => r.Attr.Id)));
+
+        // Each declares what it consumes and what it produces, which is what a build rule needs to
+        // know before it can match a source file to a recipe at all.
+        t.ExpectTrue("AW.8 every recipe declares what it produces",
+            recipes.All(r => r.Attr.Produces.StartsWith('.')));
+        t.ExpectTrue("AW.8 every recipe declares what it consumes",
+            recipes.All(r => r.Attr.Consumes.Split(';').All(e => e.StartsWith('.'))));
+
+        // The id in the declaration IS the id stamped into the file. Different assemblies, so
+        // nothing but this keeps them agreeing.
+        t.ExpectTrue("AW.8 the mesh recipe's declared id is the one BlixMesh stamps",
+            recipes.Any(r => r.Attr.Id == BlixMesh.ShippedRecipe && r.Attr.Produces == ".blixmesh"));
+        t.ExpectTrue("AW.8 the texture recipe's declared id is the one BlixTex stamps",
+            recipes.Any(r => r.Attr.Id == BlixTex.ShippedRecipe && r.Attr.Produces == ".blixtex"));
+        t.ExpectTrue("AW.8 the probe recipe's declared id is the one BlixProbe stamps",
+            recipes.Any(r => r.Attr.Id == BlixProbe.ShippedRecipe && r.Attr.Produces == ".blixprobe"));
+
+        // And the signature the index will look for. A recipe declared with the wrong shape is the
+        // worst failure this can have — found at the moment it is needed rather than at build.
+        t.ExpectTrue("AW.8 every recipe is CookOutcome Cook(CookRequest)",
+            recipes.All(r => r.Method.ReturnType == typeof(CookOutcome)
+                             && r.Method.GetParameters() is [{ ParameterType: var pt }]
+                             && pt == typeof(CookRequest)));
     }
     finally
     {

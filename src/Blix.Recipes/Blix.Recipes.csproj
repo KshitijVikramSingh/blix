@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!-- Blix's own recipes, and NOT part of the engine.
+
+       This project exists so that "Blix ships three recipes" is a list rather
+       than a privilege. Before it, the mesh cook lived inside Blix/ next to the
+       format it wrote, which made Blix's own cooking engine code and a project's
+       own cooking something structurally different — blessed by location. Now
+       both are the same kind of thing: a file with a [Recipe] method, in an
+       assembly that references the engine rather than being it.
+
+       The test that it is honest: this project uses only PUBLIC engine API. No
+       InternalsVisibleTo, because an internals grant would let Blix's recipes do
+       what a project's recipe cannot, which is the same blessing wearing a
+       different hat. Lifting the mesh cook out needed exactly two engine members
+       made public — BuildStaticMeshData and ComputeNormalMatrix. -->
+
+  <ItemGroup>
+    <ProjectReference Include="..\Blix\Blix.csproj" />
+    <ProjectReference Include="..\Blix.Assets\Blix.Assets.csproj" />
+    <ProjectReference Include="..\Blix.Cooked\Blix.Cooked.csproj" />
+    <ProjectReference Include="..\Blix.Geometry\Blix.Geometry.csproj" />
+    <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
+    <ProjectReference Include="..\Blix.Graphics.Images\Blix.Graphics.Images.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SharpGLTF.Toolkit" Version="1.0.6" />
+    <PackageReference Include="BCnEncoder.Net" Version="2.1.0" />
+  </ItemGroup>
+
+</Project>

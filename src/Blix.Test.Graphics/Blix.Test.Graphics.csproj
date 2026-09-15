@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <ProjectReference Include="..\Blix.Recipes\Blix.Recipes.csproj" />
     <ProjectReference Include="..\\Blix.Verify\\Blix.Verify.csproj" />
     <ProjectReference Include="..\Blix\Blix.csproj" />
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />

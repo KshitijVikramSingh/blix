@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-namespace Blix.Tools.Cook;
+namespace Blix.Recipes;
 
 // P/Invoke into vendored bc7enc (third_party/bc7enc + blix_bc7.cpp wrapper,
 // built to libblix_bc7.dylib next to the cook by the BuildBc7 MSBuild target).
@@ -8,7 +8,7 @@ namespace Blix.Tools.Cook;
 // managed BCnEncoder.Net path (minutes per 4K texture) so BC7 cooking is fast
 // enough to be the default. Falls back to BCnEncoder.Net when the dylib is
 // unavailable (non-macOS, or clang build skipped).
-internal static unsafe class Bc7Native
+public static unsafe class Bc7Native
 {
     private const string Lib = "blix_bc7";
 
