@@ -14,15 +14,7 @@ public static unsafe class MeshoptNative
     // BuildMeshopt target drops it next to the cook assembly). Default native
     // probing doesn't reliably find an app-local .dylib by the bare name on
     // macOS, so resolve it by absolute path.
-    static MeshoptNative()
-    {
-        NativeLibrary.SetDllImportResolver(typeof(MeshoptNative).Assembly, (name, asm, search) =>
-        {
-            if (name != Lib) return IntPtr.Zero;
-            var path = Path.Combine(AppContext.BaseDirectory, "libmeshoptimizer.dylib");
-            return NativeLibrary.Load(path);
-        });
-    }
+    static MeshoptNative() => NativeLibraries.Ensure();
 
     // meshopt_Simplify* option flags (meshoptimizer.h).
     [Flags]

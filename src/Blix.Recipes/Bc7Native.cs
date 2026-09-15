@@ -12,14 +12,7 @@ public static unsafe class Bc7Native
 {
     private const string Lib = "blix_bc7";
 
-    static Bc7Native()
-    {
-        NativeLibrary.SetDllImportResolver(typeof(Bc7Native).Assembly, (name, asm, search) =>
-        {
-            if (name != Lib) return IntPtr.Zero;
-            return NativeLibrary.Load(LibPath);
-        });
-    }
+    static Bc7Native() => NativeLibraries.Ensure();
 
     private static string LibPath => Path.Combine(AppContext.BaseDirectory, "libblix_bc7.dylib");
 

@@ -31,80 +31,40 @@ return args[0] switch
     "textures" => CookTextures(args),
     "probe" => CookProbe(args),
     "mesh" => CookMesh(args),
-    "inspect" => InspectGltf(args),
-    "meshopt-selftest" => MeshoptSelfTest(),
+    "list" => ListRecipes(),
+    "run" => RunRecipe(args),
+    "status" => Status(args),
     "help" or "-h" or "--help" => Help(),
     _ => UnknownVerb(args[0]),
 };
 
-// Proves the meshoptimizer P/Invoke + dylib load end-to-end: builds a
-// subdivided grid, simplifies it, prints original vs reduced triangle counts.
-static int MeshoptSelfTest()
-{
-    const int n = 64; // (n+1)^2 verts, 2*n*n tris
-    var verts = (n + 1) * (n + 1);
-    var positions = new float[verts * 3];
-    for (var y = 0; y <= n; y++)
-        for (var x = 0; x <= n; x++)
-        {
-            var i = (y * (n + 1) + x) * 3;
-            positions[i] = x / (float)n;
-            positions[i + 1] = MathF.Sin(x * 0.3f) * MathF.Cos(y * 0.3f) * 0.2f; // some relief to simplify
-            positions[i + 2] = y / (float)n;
-        }
-    var indices = new uint[n * n * 6];
-    var k = 0;
-    for (var y = 0; y < n; y++)
-        for (var x = 0; x < n; x++)
-        {
-            uint a = (uint)(y * (n + 1) + x), b = a + 1, c = a + (uint)(n + 1), d = c + 1;
-            indices[k++] = a; indices[k++] = c; indices[k++] = b;
-            indices[k++] = b; indices[k++] = c; indices[k++] = d;
-        }
-
-    Console.WriteLine($"meshopt self-test: grid {verts} verts, {indices.Length / 3} tris");
-    foreach (var ratio in new[] { 0.5f, 0.25f, 0.1f })
-    {
-        var lod = Blix.Recipes.MeshoptNative.Simplify(
-            indices, positions, verts, 3, ratio, targetError: 1.0f,
-            Blix.Recipes.MeshoptNative.Options.LockBorder, out var err);
-        Console.WriteLine($"  ratio {ratio:0.00} -> {lod.Length / 3} tris (error {err:0.0000})");
-    }
-    Console.WriteLine("meshopt P/Invoke OK.");
-    return 0;
-}
-
 static void PrintUsage()
 {
-    Console.WriteLine("Usage:");
-    Console.WriteLine("  blix-cook textures <directory>");
-    Console.WriteLine("    Cook every .png/.jpg/.jpeg under <directory> (recursive)");
-    Console.WriteLine("    into a multi-mip BC7/BC5 .blixtex sibling.");
-    Console.WriteLine("  blix-cook probe <hdr-path> [--env-face=256] [--irr-face=32]");
-    Console.WriteLine("                            [--prefilter-base=128] [--prefilter-mips=5]");
-    Console.WriteLine("                            [--brdf-size=256] [--clamp=50]");
-    Console.WriteLine("    Bake equirect-to-cube + diffuse irradiance + GGX prefilter");
-    Console.WriteLine("    + BRDF LUT and write a sibling .blixprobe.");
-    Console.WriteLine("  blix-cook mesh <path> [--flip-v]");
-    Console.WriteLine("    Cook a .gltf/.glb (file) or every .gltf/.glb under a directory");
-    Console.WriteLine("    (recursive) into a sibling .blixmesh. Materials remain in the");
-    Console.WriteLine("    .gltf -- only the per-primitive vertex/index data is cooked.");
-    Console.WriteLine("    --flip-v canonicalises bottom-up (OpenGL) UVs to a top-down");
-    Console.WriteLine("    origin, baked into the cooked vertices.");
-    Console.WriteLine("  blix-cook inspect <gltf-or-glb>");
-    Console.WriteLine("    LISTS what is in an asset: the node hierarchy + each mesh node's");
-    Console.WriteLine("    composed-world scale/translation (= rig pivot) and assembled");
-    Console.WriteLine("    bounds, for fitting an articulated model onto a Transform3D rig.");
-    Console.WriteLine("    Always exits 0 — it reports, it does not judge.");
-    Console.WriteLine("    To CHECK an asset is sound (clip lengths, skeleton, binding");
-    Console.WriteLine("    contracts) and get an exit code, use the toolchain probe:");
-    Console.WriteLine("      dotnet run --project src/Blix.Tools.Check -- --model <path>");
+    Console.WriteLine("blix cook — run Blix's cooking recipes.");
     Console.WriteLine();
-    Console.WriteLine("  --out <dir>  (textures/probe/mesh) write cooked output into a separate");
-    Console.WriteLine("    tree, mirroring each source's path relative to the input root, instead");
-    Console.WriteLine("    of as siblings. Keeps cooked assets apart from raw sources (e.g. a");
-    Console.WriteLine("    cooked sponza/ vs a raw sponza-src/). mesh also copies the .gltf into");
-    Console.WriteLine("    the output tree, which the runtime needs alongside the .blixmesh.");
+    Console.WriteLine("  The host — knows nothing about any particular format:");
+    Console.WriteLine("    list                     what recipes this build declares");
+    Console.WriteLine("    status <dir>             what is cooked under <dir>, what is stale, what is not");
+    Console.WriteLine("    run <id> <src> [<out>] [-Dkey=value ...]");
+    Console.WriteLine("                             run one recipe on one file");
+    Console.WriteLine();
+    Console.WriteLine("  The drivers — each welded to one recipe, because each knows something");
+    Console.WriteLine("  the host does not (out-of-place trees, parallelism, a native simplifier):");
+    Console.WriteLine("    textures <dir>           cook every .png/.jpg under <dir> to .blixtex");
+    Console.WriteLine("    probe <hdr> [--env-face=256] [--irr-face=32] [--prefilter-base=128]");
+    Console.WriteLine("                [--prefilter-mips=5] [--brdf-size=256] [--clamp=50]");
+    Console.WriteLine("                             bake an HDR sky to a .blixprobe");
+    Console.WriteLine("    mesh <path> [--flip-v] [--tangents] [--split N] [--no-split-foliage]");
+    Console.WriteLine("                             cook a .gltf/.glb (or a tree of them) to .blixmesh");
+    Console.WriteLine();
+    Console.WriteLine("    --out <dir>              write cooked output into a separate tree, mirroring");
+    Console.WriteLine("                             each source's path. mesh also copies the .gltf, which");
+    Console.WriteLine("                             the runtime still needs beside the .blixmesh.");
+    Console.WriteLine();
+    Console.WriteLine("  Moved out of this tool, because a cooker's verbs cook:");
+    Console.WriteLine("    blix inspect <file>      list what is in an asset — source OR cooked");
+    Console.WriteLine("    blix run Blix.Test.Recipes");
+    Console.WriteLine("                             prove the native simplifier and BC7 encoder load");
 }
 
 static int CookMesh(string[] args)
@@ -253,90 +213,6 @@ static int CookMesh(string[] args)
 // give the model's size + forward axis. Read the values off this, hard-code the
 // pivots, and the model drops onto the rig with no blind dialing (see how
 // Blix.Demos.TankArena consumes the Quaternius tank).
-static int InspectGltf(string[] args)
-{
-    if (args.Length < 2)
-    {
-        Console.Error.WriteLine("Usage: blix-cook inspect <gltf-or-glb>");
-        return 1;
-    }
-    var path = args[1];
-    if (!File.Exists(path))
-    {
-        Console.Error.WriteLine($"File not found: {path}");
-        return 1;
-    }
-
-    var model = new Blix.GltfStaticImporter().ImportNodes(
-        new Blix.Assets.AssetImportContext(Blix.Assets.AssetId.Parse("inspect"), path));
-    var nodes = model.Nodes;
-
-    // Compose a node's world transform by walking up its parent chain (row-vector:
-    // child = local * parent). ImportNodes keeps every node in LOCAL space, so this
-    // is where the assembled placement comes from.
-    Matrix4x4 World(int i)
-    {
-        var m = nodes[i].LocalTransform;
-        for (var p = nodes[i].ParentIndex; p >= 0; p = nodes[p].ParentIndex) m *= nodes[p].LocalTransform;
-        return m;
-    }
-
-    var meshNodes = 0;
-    foreach (var n in nodes) if (n.Primitives.Length > 0) meshNodes++;
-    Console.WriteLine($"{Path.GetFileName(path)}: {nodes.Length} nodes, {meshNodes} mesh-bearing");
-    Console.WriteLine("  (mesh nodes show composed-world scale/translation [= rig PIVOT] + assembled bounds)");
-
-    // Hierarchy depth for indentation.
-    int Depth(int i)
-    {
-        var d = 0;
-        for (var p = nodes[i].ParentIndex; p >= 0; p = nodes[p].ParentIndex) d++;
-        return d;
-    }
-
-    for (var i = 0; i < nodes.Length; i++)
-    {
-        var n = nodes[i];
-        var indent = new string(' ', 2 + Depth(i) * 2);
-        if (n.Primitives.Length == 0)
-        {
-            // Transform-only node — list it (it may be an armature pivot) but keep it terse.
-            Console.WriteLine($"{indent}[{i,3}] {n.Name}  (no mesh, parent={n.ParentIndex})");
-            continue;
-        }
-
-        var w = World(i);
-        var min = new Vector3(float.MaxValue);
-        var max = new Vector3(float.MinValue);
-        var verts = 0;
-        foreach (var prim in n.Primitives)
-        {
-            var md = prim.Mesh;
-            verts += md.VertexCount;
-            var stride = md.Layout.Stride;
-            for (var v = 0; v < md.VertexCount; v++)
-            {
-                var o = v * stride;
-                var lp = new Vector3(
-                    BitConverter.ToSingle(md.VertexBytes, o),
-                    BitConverter.ToSingle(md.VertexBytes, o + 4),
-                    BitConverter.ToSingle(md.VertexBytes, o + 8));
-                var wp = Vector3.Transform(lp, w);
-                min = Vector3.Min(min, wp); max = Vector3.Max(max, wp);
-            }
-        }
-        Matrix4x4.Decompose(w, out var scale, out _, out var trans);
-        Console.WriteLine(
-            $"{indent}[{i,3}] {n.Name}  parent={n.ParentIndex} prims={n.Primitives.Length} verts={verts}");
-        Console.WriteLine(
-            $"{indent}      pivot/trans=({trans.X:0.###}, {trans.Y:0.###}, {trans.Z:0.###})  " +
-            $"scale=({scale.X:0.###}, {scale.Y:0.###}, {scale.Z:0.###})");
-        Console.WriteLine(
-            $"{indent}      bounds X[{min.X:0.##}, {max.X:0.##}]  Y[{min.Y:0.##}, {max.Y:0.##}]  Z[{min.Z:0.##}, {max.Z:0.##}]");
-    }
-    return 0;
-}
-
 static int CookProbe(string[] args)
 {
     var (outDir, args2) = ExtractOutDir(args);
@@ -402,6 +278,164 @@ static int UnknownVerb(string verb)
     Console.Error.WriteLine($"Unknown verb '{verb}'.");
     PrintUsage();
     return 1;
+}
+
+
+// --- cook as a host -------------------------------------------------------
+//
+// The three verbs above are DRIVERS: each knows how to walk a tree, report progress and
+// parallelise, and each is welded to one recipe. The three below are the HOST: they know nothing
+// about meshes, textures or probes and work on whatever recipes the assembly declares. A recipe
+// added tomorrow is listed, runnable and counted by them on the day it exists.
+
+static Blix.Cooked.FoundRecipe[] Recipes() =>
+    Blix.Cooked.BlixRecipes.Find(typeof(Blix.Recipes.MeshRecipe).Assembly);
+
+static int ListRecipes()
+{
+    foreach (var r in Recipes())
+    {
+        Console.WriteLine($"  {r.Id}  {string.Join(" ", r.Consumes),-18} -> {r.Produces,-11} v{r.Version}  {r.Summary}");
+    }
+
+    return 0;
+}
+
+// blix cook run <id> <source> [<output>] [-Dkey=value ...]
+//
+// The uniform path. `mesh`, `textures` and `probe` stay because each carries real driver knowledge
+// this does not have -- out-of-place trees, parallelism, a native simplifier -- and folding those
+// in would make this a build system, which is policy. This is the entry a build rule uses.
+static int RunRecipe(string[] args)
+{
+    if (args.Length < 3)
+    {
+        Console.Error.WriteLine("Usage: blix cook run <recipe-id> <source> [<output>] [-Dkey=value ...]");
+        return 2;
+    }
+
+    var recipe = Recipes().FirstOrDefault(r => r.Id == args[1]);
+    if (recipe is null)
+    {
+        Console.Error.WriteLine($"No recipe '{args[1]}'. Known: {string.Join(", ", Recipes().Select(r => r.Id))}");
+        return 2;
+    }
+
+    var source = args[2];
+    if (!File.Exists(source))
+    {
+        Console.Error.WriteLine($"No file at {source}.");
+        return 1;
+    }
+
+    var output = args.Length > 3 && !args[3].StartsWith("-D", StringComparison.Ordinal)
+        ? args[3]
+        : recipe.OutputFor(source);
+
+    var options = new Dictionary<string, string>(StringComparer.Ordinal);
+    foreach (var a in args.Where(a => a.StartsWith("-D", StringComparison.Ordinal)))
+    {
+        var kv = a[2..].Split('=', 2);
+        options[kv[0]] = kv.Length > 1 ? kv[1] : "1";
+    }
+
+    try
+    {
+        var outcome = recipe.Cook(new Blix.Cooked.CookRequest(source, output, options));
+        Console.WriteLine($"  {recipe.Id}: {source} -> {output} ({outcome.Detail})");
+        return 0;
+    }
+    catch (Blix.Cooked.AssetImportException refused)
+    {
+        Console.Error.WriteLine($"blix cannot read this: {refused.Message}");
+        return 1;
+    }
+}
+
+// blix cook status <dir>
+//
+// The answer to "what is cooked here", which nothing could give before. Coverage in this tree was
+// decided by shell history -- one directory fully cooked and its sibling untouched, same project
+// and same importer -- and there was no way to find that out short of listing files by hand. Every
+// column below is read from the cooked artifacts' own preambles, so this knows nothing about any
+// particular format.
+static int Status(string[] args)
+{
+    var root = args.Length > 1 ? args[1] : ".";
+    if (!Directory.Exists(root))
+    {
+        Console.Error.WriteLine($"No directory at {root}.");
+        return 2;
+    }
+
+    var recipes = Recipes();
+    int cooked = 0, missing = 0, stale = 0, unknown = 0, outdated = 0, pinned = 0;
+
+    foreach (var source in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories).OrderBy(x => x, StringComparer.Ordinal))
+    {
+        if (source.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal) ||
+            source.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)) continue;
+
+        var matches = recipes.Where(r => r.Accepts(source)).ToArray();
+        if (matches.Length != 1) continue;   // nothing claims it, or two do -- neither is this verb's call
+        var recipe = matches[0];
+
+        var output = recipe.OutputFor(source);
+        var rel = Path.GetRelativePath(root, source);
+
+        if (!File.Exists(output))
+        {
+            missing++;
+            Console.WriteLine($"  UNCOOKED   {rel}   ({recipe.Id} would make {Path.GetExtension(output)})");
+            continue;
+        }
+
+        if (Blix.Cooked.CookedFile.TryReadHeader(output) is not { } h)
+        {
+            unknown++;
+            Console.WriteLine($"  UNREADABLE {rel}   (its {Path.GetExtension(output)} has no Blix preamble)");
+            continue;
+        }
+
+        cooked++;
+        if (h.Stamp.SourceRequired) pinned++;
+
+        // Two different kinds of out-of-date, and flattening them would hide the second: the SOURCE
+        // may have changed, or the RECIPE may have. The first is the one everyone thinks of; the
+        // second is what silently leaves a tree half-cooked by two versions of one transformation.
+        var freshness = Blix.Cooked.CookedFile.Compare(h, source);
+        if (freshness == Blix.Cooked.CookedFile.Freshness.Stale)
+        {
+            stale++;
+            Console.WriteLine($"  STALE      {rel}   (source changed since it was cooked)");
+        }
+        else if (freshness == Blix.Cooked.CookedFile.Freshness.Unknown)
+        {
+            unknown++;
+            Console.WriteLine($"  UNKNOWN    {rel}   (cooked, but recorded nothing to compare against)");
+        }
+
+        if (h.Stamp.RecipeVersion != recipe.Version)
+        {
+            outdated++;
+            Console.WriteLine($"  OLD COOK   {rel}   (made by {h.Stamp.Recipe} v{h.Stamp.RecipeVersion}, current is v{recipe.Version})");
+        }
+    }
+
+    var total = cooked + missing;
+    Console.WriteLine();
+    Console.WriteLine(total == 0
+        ? $"  nothing under {root} is claimed by a recipe."
+        : $"  {cooked}/{total} cooked ({100.0 * cooked / total:0}%) -- {missing} uncooked, {stale} stale, " +
+          $"{outdated} by an older recipe, {unknown} unknown");
+    if (pinned > 0)
+    {
+        Console.WriteLine($"  {pinned} declare their source is still REQUIRED at load (an optimisation, not a replacement).");
+    }
+
+    // Reports; does not judge. `blix check --cooked` is where an exit code will live, because a
+    // status verb that failed would make every partially-cooked tree a broken build.
+    return 0;
 }
 
 // --- Out-of-place cooking -------------------------------------------------

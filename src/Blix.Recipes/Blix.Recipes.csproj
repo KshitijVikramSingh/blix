@@ -36,4 +36,80 @@
     <PackageReference Include="BCnEncoder.Net" Version="2.1.0" />
   </ItemGroup>
 
+
+  <!-- The vendored natives build HERE now, because this is where the P/Invoke
+       lives. They followed Bc7Native and MeshoptNative out of the cook tool: a
+       recipe that calls a native capability has to be able to carry it, or
+       "Blix's recipes and a project's recipes are the same kind of thing" stops
+       being true the moment one of them needs a dylib.
+
+       Consequence, named rather than discovered: this project has a clang++
+       build step and the engine does not. -->
+  <!-- The vendored natives build HERE now, because this is where the P/Invoke lives.
+       They followed Bc7Native and MeshoptNative out of the cook tool: a recipe that
+       calls a native capability has to be able to carry it, or "Blix's recipes and a
+       project's recipes are the same kind of thing" stops being true the moment one of
+       them needs a dylib.
+
+       Consequence, named rather than discovered: this project has a clang++ build step
+       and the engine does not.
+
+       They build into obj/ and are staged as ContentWithTargetPath rather than dropped
+       straight into $(TargetDir). That is the difference between a dylib that exists for
+       this project and one that REACHES its consumers — the cook tool and the recipes
+       suite both P/Invoke through this assembly, and a native that only lands in one
+       output directory resolves for exactly one of them. It is also why the staging
+       happens inside a target rather than as a top-level glob: a glob is evaluated at
+       project load, before the dylibs exist on a clean build, which is the same trap the
+       shader pipeline hit when consumers silently got no .spv. -->
+
+  <PropertyGroup>
+    <MeshoptSrc>$(MSBuildProjectDirectory)/../../third_party/meshoptimizer/src</MeshoptSrc>
+    <Bc7Src>$(MSBuildProjectDirectory)/../../third_party/bc7enc</Bc7Src>
+    <BlixNativeDir>$(MSBuildProjectDirectory)/obj/native/</BlixNativeDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <MeshoptCpp Include="$(MeshoptSrc)/*.cpp" />
+    <Bc7Cpp Include="$(Bc7Src)/bc7enc.c;$(Bc7Src)/blix_bc7.cpp" />
+  </ItemGroup>
+
+  <!-- macOS/clang only for now; Linux/Windows would add a .so/.dll branch.
+       Rebuilds only when a source is newer than the dylib. -->
+  <Target Name="BuildMeshopt" BeforeTargets="StageBlixNatives"
+          Condition="'$([MSBuild]::IsOSPlatform(OSX))' == 'true'"
+          Inputs="@(MeshoptCpp);$(MeshoptSrc)/meshoptimizer.h"
+          Outputs="$(BlixNativeDir)libmeshoptimizer.dylib">
+    <MakeDir Directories="$(BlixNativeDir)" />
+    <Message Text="Building libmeshoptimizer.dylib (clang++)" Importance="high" />
+    <Exec Command="clang++ -O2 -std=c++14 -dynamiclib @(MeshoptCpp->'&quot;%(FullPath)&quot;', ' ') -o &quot;$(BlixNativeDir)libmeshoptimizer.dylib&quot;" />
+  </Target>
+
+  <!-- bc7enc.c compiles cleanly as C++, hence -Wno-deprecated for clang's
+       "treating .c as C++" note. -->
+  <Target Name="BuildBc7" BeforeTargets="StageBlixNatives"
+          Condition="'$([MSBuild]::IsOSPlatform(OSX))' == 'true'"
+          Inputs="@(Bc7Cpp);$(Bc7Src)/bc7enc.h"
+          Outputs="$(BlixNativeDir)libblix_bc7.dylib">
+    <MakeDir Directories="$(BlixNativeDir)" />
+    <Message Text="Building libblix_bc7.dylib (clang++)" Importance="high" />
+    <Exec Command="clang++ -O2 -std=c++17 -Wno-deprecated -dynamiclib @(Bc7Cpp->'&quot;%(FullPath)&quot;', ' ') -o &quot;$(BlixNativeDir)libblix_bc7.dylib&quot;" />
+  </Target>
+
+  <!-- ContentWithTargetPath is the item MSBuild carries across a ProjectReference, so
+       this is what puts the dylibs beside every consumer's assembly rather than only
+       beside this one. -->
+  <Target Name="StageBlixNatives" BeforeTargets="AssignTargetPaths">
+    <ItemGroup>
+      <ContentWithTargetPath Include="$(BlixNativeDir)libmeshoptimizer.dylib"
+                             Condition="Exists('$(BlixNativeDir)libmeshoptimizer.dylib')"
+                             TargetPath="libmeshoptimizer.dylib"
+                             CopyToOutputDirectory="PreserveNewest" />
+      <ContentWithTargetPath Include="$(BlixNativeDir)libblix_bc7.dylib"
+                             Condition="Exists('$(BlixNativeDir)libblix_bc7.dylib')"
+                             TargetPath="libblix_bc7.dylib"
+                             CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+
 </Project>

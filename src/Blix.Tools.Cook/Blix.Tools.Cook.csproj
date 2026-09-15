@@ -1,5 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <UseAppHost>false</UseAppHost>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\Blix.Recipes\Blix.Recipes.csproj" />
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
@@ -11,47 +19,5 @@
   <ItemGroup>
     <PackageReference Include="BCnEncoder.Net" Version="2.1.0" />
   </ItemGroup>
-
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
-    <UseAppHost>false</UseAppHost>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <MeshoptSrc>$(MSBuildProjectDirectory)/../../third_party/meshoptimizer/src</MeshoptSrc>
-    <Bc7Src>$(MSBuildProjectDirectory)/../../third_party/bc7enc</Bc7Src>
-  </PropertyGroup>
-
-  <!-- Build vendored meshoptimizer into a dylib next to the cook exe so the
-       mesh-LOD P/Invoke (MeshoptNative) resolves it. macOS/clang only for now;
-       Linux/Windows would add a .so/.dll branch. Rebuilds when a source is
-       newer than the dylib. $(TargetDir) is absolute (unlike $(OutDir) at
-       property-eval time) so the dylib lands in the real output directory. -->
-  <ItemGroup>
-    <MeshoptCpp Include="$(MeshoptSrc)/*.cpp" />
-  </ItemGroup>
-  <Target Name="BuildMeshopt" AfterTargets="Build"
-          Condition="'$([MSBuild]::IsOSPlatform(OSX))' == 'true'"
-          Inputs="@(MeshoptCpp);$(MeshoptSrc)/meshoptimizer.h"
-          Outputs="$(TargetDir)libmeshoptimizer.dylib">
-    <Message Text="Building libmeshoptimizer.dylib (clang++)" Importance="high" />
-    <Exec Command="clang++ -O2 -std=c++14 -dynamiclib @(MeshoptCpp->'&quot;%(FullPath)&quot;', ' ') -o &quot;$(TargetDir)libmeshoptimizer.dylib&quot;" />
-  </Target>
-
-  <!-- Build vendored bc7enc (+ blix_bc7.cpp wrapper) into a dylib next to the
-       cook exe so the fast BC7 P/Invoke (Bc7Native) resolves it. Same pattern
-       as BuildMeshopt; macOS/clang only for now. -Wno-deprecated silences the
-       "treating .c as C++" note (bc7enc.c compiles cleanly as C++). -->
-  <ItemGroup>
-    <Bc7Cpp Include="$(Bc7Src)/bc7enc.c;$(Bc7Src)/blix_bc7.cpp" />
-  </ItemGroup>
-  <Target Name="BuildBc7" AfterTargets="Build"
-          Condition="'$([MSBuild]::IsOSPlatform(OSX))' == 'true'"
-          Inputs="@(Bc7Cpp);$(Bc7Src)/bc7enc.h"
-          Outputs="$(TargetDir)libblix_bc7.dylib">
-    <Message Text="Building libblix_bc7.dylib (clang++)" Importance="high" />
-    <Exec Command="clang++ -O2 -std=c++17 -Wno-deprecated -dynamiclib @(Bc7Cpp->'&quot;%(FullPath)&quot;', ' ') -o &quot;$(TargetDir)libblix_bc7.dylib&quot;" />
-  </Target>
 
 </Project>

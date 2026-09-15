@@ -35,6 +35,14 @@ public static class Program
     private const string AttributeNamespace = "Blix.Core";
     private const string AttributeName = "BlixAppAttribute";
 
+    // <b>Recipes are indexed by the same pass, for the same reason.</b> A cooking recipe has
+    // exactly the app layer's discovery problem — it lives with the code it names, it must be
+    // findable without a build, and a project's own must be found with no registration step. There
+    // was no argument for solving that twice, and the expensive half (reading ECMA-335 without
+    // loading anything) was already written.
+    private const string RecipeNamespace = "Blix.Cooked";
+    private const string RecipeName = "RecipeAttribute";
+
     public static int Main(string[] args)
     {
         var assemblyPath = Value(args, "--assembly");
@@ -53,10 +61,11 @@ public static class Program
         }
 
         List<AppEntry> apps;
+        List<RecipeEntry> recipes;
         bool hasEntryPoint;
         try
         {
-            (apps, hasEntryPoint) = Read(assemblyPath);
+            (apps, recipes, hasEntryPoint) = Read(assemblyPath);
         }
         catch (BadImageFormatException)
         {
@@ -79,12 +88,25 @@ public static class Program
             return 1;
         }
 
+        // The same rule for recipes, and it matters more: a recipe id is stamped into every file
+        // it writes, so two recipes sharing one would make the files' own provenance ambiguous
+        // after the fact, when there is nothing left to disambiguate them with.
+        var clash = recipes.GroupBy(r => r.Id, StringComparer.Ordinal).FirstOrDefault(g => g.Count() > 1);
+        if (clash is not null)
+        {
+            Console.Error.WriteLine(
+                $"blix-apps: recipe id '{clash.Key}' is declared {clash.Count()} times in " +
+                $"{Path.GetFileName(assemblyPath)}: {string.Join(", ", clash.Select(d => d.Method))}");
+            return 1;
+        }
+
         var host = Path.ChangeExtension(assemblyPath, null);
         var index = new AppIndex(
             Assembly: Path.GetFileName(assemblyPath),
             AppHost: File.Exists(host) ? Path.GetFileName(host) : null,
             HasEntryPoint: hasEntryPoint,
-            Apps: apps.OrderBy(a => a.Name, StringComparer.Ordinal).ToArray());
+            Apps: apps.OrderBy(a => a.Name, StringComparer.Ordinal).ToArray(),
+            Recipes: recipes.OrderBy(r => r.Id, StringComparer.Ordinal).ToArray());
 
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
         File.WriteAllText(outputPath, JsonSerializer.Serialize(index, JsonOptions));
@@ -97,7 +119,7 @@ public static class Program
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     };
 
-    private static (List<AppEntry> Apps, bool HasEntryPoint) Read(string assemblyPath)
+    private static (List<AppEntry> Apps, List<RecipeEntry> Recipes, bool HasEntryPoint) Read(string assemblyPath)
     {
         using var stream = File.OpenRead(assemblyPath);
         using var pe = new PEReader(stream);
@@ -121,24 +143,107 @@ public static class Program
             : default;
 
         var apps = new List<AppEntry>();
+        var recipes = new List<RecipeEntry>();
         foreach (var handle in reader.MethodDefinitions)
         {
             var method = reader.GetMethodDefinition(handle);
             foreach (var attributeHandle in method.GetCustomAttributes())
             {
                 var attribute = reader.GetCustomAttribute(attributeHandle);
-                if (!IsBlixApp(reader, attribute)) continue;
-
                 var where = Describe(reader, method, handle);
-                Validate(reader, method, where);
-                apps.Add(Decode(reader, attribute, where, isEntryPoint: handle == entryPoint));
+
+                if (IsAttribute(reader, attribute, AttributeNamespace, AttributeName))
+                {
+                    Validate(reader, method, where);
+                    apps.Add(Decode(reader, attribute, where, isEntryPoint: handle == entryPoint));
+                }
+                else if (IsAttribute(reader, attribute, RecipeNamespace, RecipeName))
+                {
+                    ValidateRecipe(reader, method, where);
+                    recipes.Add(DecodeRecipe(reader, attribute, where));
+                }
             }
         }
 
-        return (apps, hasEntryPoint);
+        return (apps, recipes, hasEntryPoint);
     }
 
-    private static bool IsBlixApp(MetadataReader reader, CustomAttribute attribute)
+    private static RecipeEntry DecodeRecipe(MetadataReader reader, CustomAttribute attribute, string where)
+    {
+        var value = attribute.DecodeValue(new StringTypeProvider());
+
+        var id = value.FixedArguments.Length > 0 ? value.FixedArguments[0].Value as string : null;
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            throw new DeclarationException($"[Recipe] on {where} has no id.");
+        }
+
+        // Four characters, because the id rides in every cooked file's preamble as a 4cc. A longer
+        // one would truncate on write and attribute files to a recipe that does not exist — which
+        // is the sort of thing that is obvious at build and impossible to diagnose afterwards.
+        if (id.Length != 4)
+        {
+            throw new DeclarationException(
+                $"[Recipe] on {where}: id '{id}' must be exactly 4 characters; it is stamped as a 4cc.");
+        }
+
+        string produces = "", consumes = "", summary = "";
+        uint version = 1;
+        foreach (var named in value.NamedArguments)
+        {
+            switch (named.Name)
+            {
+                case "Produces": produces = named.Value as string ?? ""; break;
+                case "Consumes": consumes = named.Value as string ?? ""; break;
+                case "Summary": summary = named.Value as string ?? ""; break;
+                case "Version": version = named.Value is int v ? (uint)v : 1; break;
+            }
+        }
+
+        if (!produces.StartsWith('.'))
+        {
+            throw new DeclarationException(
+                $"[Recipe] on {where}: Produces must be an extension beginning with '.', got '{produces}'.");
+        }
+
+        if (consumes.Length == 0 || consumes.Split(';').Any(e => !e.StartsWith('.')))
+        {
+            throw new DeclarationException(
+                $"[Recipe] on {where}: Consumes must be ';'-separated extensions beginning with '.', got '{consumes}'.");
+        }
+
+        return new RecipeEntry(id, produces, consumes, summary, version, where);
+    }
+
+    // The one shape a recipe may have. Checked here so a mis-declared recipe is a build failure
+    // rather than a cook that silently never runs — the same bar the app layer sets, for the same
+    // reason: a thing that cannot be found because it was declared slightly wrong is the worst
+    // failure this layer has.
+    private static void ValidateRecipe(MetadataReader reader, MethodDefinition method, string where)
+    {
+        if ((method.Attributes & MethodAttributes.Static) == 0)
+        {
+            throw new DeclarationException($"[Recipe] on {where}: a recipe must be static.");
+        }
+
+        var signature = method.DecodeSignature(new StringTypeProvider(), genericContext: null);
+
+        if (signature.ReturnType != "Blix.Cooked.CookOutcome")
+        {
+            throw new DeclarationException(
+                $"[Recipe] on {where}: a recipe returns Blix.Cooked.CookOutcome, not {signature.ReturnType}.");
+        }
+
+        if (signature.ParameterTypes is not ["Blix.Cooked.CookRequest"])
+        {
+            throw new DeclarationException(
+                $"[Recipe] on {where}: a recipe takes one Blix.Cooked.CookRequest, not " +
+                $"({string.Join(", ", signature.ParameterTypes)}).");
+        }
+    }
+
+    private static bool IsAttribute(
+        MetadataReader reader, CustomAttribute attribute, string attributeNamespace, string attributeName)
     {
         // The attribute's constructor is either a MemberReference (the usual case — the
         // attribute is defined in another assembly) or a MethodDefinition (Blix.Core
@@ -150,16 +255,16 @@ public static class Program
                 var member = reader.GetMemberReference((MemberReferenceHandle)attribute.Constructor);
                 if (member.Parent.Kind != HandleKind.TypeReference) return false;
                 var type = reader.GetTypeReference((TypeReferenceHandle)member.Parent);
-                return reader.GetString(type.Name) == AttributeName
-                    && reader.GetString(type.Namespace) == AttributeNamespace;
+                return reader.GetString(type.Name) == attributeName
+                    && reader.GetString(type.Namespace) == attributeNamespace;
             }
 
             case HandleKind.MethodDefinition:
             {
                 var ctor = reader.GetMethodDefinition((MethodDefinitionHandle)attribute.Constructor);
                 var type = reader.GetTypeDefinition(ctor.GetDeclaringType());
-                return reader.GetString(type.Name) == AttributeName
-                    && reader.GetString(type.Namespace) == AttributeNamespace;
+                return reader.GetString(type.Name) == attributeName
+                    && reader.GetString(type.Namespace) == attributeNamespace;
             }
 
             default:
@@ -234,7 +339,11 @@ public static class Program
 
     private sealed class DeclarationException(string message) : Exception(message);
 
-    private sealed record AppIndex(string Assembly, string? AppHost, bool HasEntryPoint, AppEntry[] Apps);
+    private sealed record AppIndex(
+        string Assembly, string? AppHost, bool HasEntryPoint, AppEntry[] Apps, RecipeEntry[] Recipes);
+
+    private sealed record RecipeEntry(
+        string Id, string Produces, string Consumes, string Summary, uint Version, string Method);
 
     private sealed record AppEntry(
         string Name, string? Summary, bool Headed, string Method, bool IsEntryPoint);

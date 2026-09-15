@@ -1,6 +1,7 @@
 using Blix.Verify;
 using System.Reflection;
 using System.Text.Json;
+using Blix.Cooked;
 using Blix.Core;
 
 namespace Blix.Test.Apps;
@@ -43,6 +44,27 @@ public static class Program
 
         // ── the two readers agree ───────────────────────────────────────────
         IndexMatchesReflection(t, self, found);
+
+        // ── and recipes, read by the same two readers ────────────────────────
+        // <b>The index gained a second kind of entry, so it gained a second way to be wrong.</b>
+        // Blix.Tools.Apps reads [Recipe] out of ECMA-335 at build; BlixRecipes.Find reads it off
+        // the loaded assembly at run time. The declarations below exist so this suite is a real
+        // consumer of both — a fixture is cheaper than a mock and cannot drift from the thing it
+        // stands for.
+        var recipes = BlixRecipes.Find(self);
+        t.Expect("a recipe declared here is found by reflection", recipes.Length == 2, $"found {recipes.Length}");
+        t.Expect("its id survives", recipes.Any(r => r.Id == "fix1"));
+        t.Expect("what it consumes survives, split", recipes.Single(r => r.Id == "fix1").Consumes.Length == 2);
+        t.Expect("what it produces survives", recipes.Single(r => r.Id == "fix1").Produces == ".fixture");
+        t.Expect("its version survives", recipes.Single(r => r.Id == "fix2").Version == 9u);
+
+        RecipeIndexMatchesReflection(t, self, recipes);
+
+        // A recipe is invoked by the same reflection that found it — the path a build rule takes.
+        var outcome = recipes.Single(r => r.Id == "fix1")
+            .Cook(new CookRequest("in.fixture-a", "out.fixture"));
+        t.Expect("a recipe found by reflection can be run", outcome.Wrote);
+        t.Expect("and its outcome comes back", outcome.Detail == "in.fixture-a -> out.fixture");
 
         // ── dispatch ────────────────────────────────────────────────────────
         t.Expect("no selector means this is not an app invocation",
@@ -134,11 +156,52 @@ public static class Program
     {
     }
 
-    [BlixApp("fixture-headed", Summary = "declares that it would open a window", Headed = true)]
-    private static int Headed(string[] args) => 0;
-
     private sealed record Index(string Assembly, string? AppHost, bool HasEntryPoint, IndexedApp[] Apps);
 
     private sealed record IndexedApp(string Name, string? Summary, bool Headed, bool IsEntryPoint);
 
+    // ── recipe fixtures ─────────────────────────────────────────────────────
+    // Two, because one cannot show that ids stay distinct or that two recipes can claim different
+    // extensions. Neither cooks anything: what is under test is declaration and discovery, and a
+    // fixture that did real work would be testing the work instead.
+    [Recipe("fix1", Produces = ".fixture", Consumes = ".fixture-a;.fixture-b", Summary = "a fixture recipe")]
+    public static CookOutcome FixtureRecipe(CookRequest request) =>
+        CookOutcome.Written($"{request.SourcePath} -> {request.OutputPath}");
+
+    [Recipe("fix2", Produces = ".fixture2", Consumes = ".fixture-c", Version = 9, Summary = "a second fixture recipe")]
+    public static CookOutcome SecondFixtureRecipe(CookRequest request) => CookOutcome.Skipped("nothing to do");
+
+    private static void RecipeIndexMatchesReflection(TestRunner t, Assembly self, FoundRecipe[] found)
+    {
+        var sidecar = Path.ChangeExtension(self.Location, null) + ".blixapps.json";
+        if (!File.Exists(sidecar))
+        {
+            t.Fail("the recipe index exists beside the assembly", $"no {Path.GetFileName(sidecar)}");
+            return;
+        }
+
+        using var document = JsonDocument.Parse(File.ReadAllText(sidecar));
+        if (!document.RootElement.TryGetProperty("recipes", out var listed))
+        {
+            t.Fail("the index carries recipes", "no 'recipes' array in the sidecar");
+            return;
+        }
+
+        var indexed = listed.EnumerateArray()
+            .Select(e => (Id: e.GetProperty("id").GetString(), Produces: e.GetProperty("produces").GetString()))
+            .OrderBy(x => x.Id, StringComparer.Ordinal)
+            .ToArray();
+
+        t.Expect("the index lists exactly the recipes reflection finds",
+            indexed.Length == found.Length, $"index {indexed.Length}, reflection {found.Length}");
+
+        // Ids AND outputs, because an index that agreed on names while disagreeing on what they
+        // write would send a build rule to the wrong file — which is worse than not finding one.
+        t.ExpectTrue("and agrees on every id and output",
+            indexed.Select(x => $"{x.Id}{x.Produces}")
+                .SequenceEqual(found.Select(r => $"{r.Id}{r.Produces}")));
+    }
+
+    [BlixApp("fixture-headed", Summary = "declares that it would open a window", Headed = true)]
+    private static int Headed(string[] args) => 0;
 }
