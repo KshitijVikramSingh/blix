@@ -249,6 +249,12 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
     internal RigSession? Session => session;
 
+    // Declared state, rendered as flags at startup and watched for movement every frame. Every
+    // member is Bespoke: this viewer already draws better controls than reflection could — a combo
+    // of THIS rig's bone names beats a text field — so what it takes from here is the two things a
+    // panel cannot do for itself, which are the command line and knowing that something moved.
+    private ObjectTunables? tunables;
+
     internal LabSelection Selection => selection;
 
     internal LabCamera ViewportCamera => viewportCamera;
@@ -367,6 +373,15 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         scene = LabScene.GroundOnly();
         session = new RigSession(rig, requestedInstances) { Mode = startMode };
+        tunables = new ObjectTunables(session);
+        foreach (var member in new[]
+        {
+            nameof(RigSession.Mode), nameof(RigSession.Weight), nameof(RigSession.MaskRoot),
+            nameof(RigSession.MaskFalloff), nameof(RigSession.Lockstep), nameof(RigSession.DriveRoot),
+        })
+        {
+            tunables.Bespoke.Add(member);
+        }
 
         // A mask before anyone asks for one, because the first thing anybody does in this mode is
         // pick a spine. The guess is named as a guess in RigSession and the combo corrects it in one
@@ -514,6 +529,22 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
     public void Debug(DebugContext debug)
     {
+        // <b>Watching, not rendering.</b> Every member is Bespoke — this viewer's own controls are
+        // better than reflection could generate — so nothing is drawn from here. What it takes is
+        // the thing a panel cannot do for itself: notice that state moved, and let the session
+        // recompose through ITunable.OnChanged.
+        //
+        // The five panel Refresh() calls this replaced turned out to have been REDUNDANT: Advance
+        // composes every frame and the viewer advances every frame, so each of them composed a
+        // second time in the same frame. Their cost was never the work, it was the belief that you
+        // had to remember one after every write — and the tool that did NOT remember is the
+        // capture, which composes once and for which this is load-bearing rather than ceremony.
+        //
+        // Three remain and all three are honest: one at startup before anything has advanced, and
+        // two behind frame-step keys that move ClipPlayer.Time, which is not declared state and so
+        // is not watched here.
+        tunables?.BuildControls(debug);
+
         debug.State.DepthTestDrawing = panels.DepthTestGizmos;
         debug.Values.Value("frames", frames);
         debug.Values.Value("sun", scene.SunDirection);

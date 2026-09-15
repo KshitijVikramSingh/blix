@@ -99,7 +99,6 @@ internal sealed class ViewerPanels
             if (ImGui.SliderFloat(label, ref weight, 0f, 1f))
             {
                 app.Session.Weight = weight;
-                app.Session.Refresh();
             }
         }
 
@@ -154,7 +153,6 @@ internal sealed class ViewerPanels
                 {
                     clipIndexA = i;
                     app.Session.Subject.Clip = clip;
-                    app.Session.Refresh();
                     app.ResetTravel();
                 }
             }
@@ -239,7 +237,6 @@ internal sealed class ViewerPanels
             {
                 if (!ImGui.Selectable(bones[i].Name, bones[i].Name == session.MaskRoot)) continue;
                 session.SetMask(bones[i].Name, session.MaskFalloff);
-                session.Refresh();
             }
             ImGui.EndCombo();
         }
@@ -248,7 +245,6 @@ internal sealed class ViewerPanels
         if (ImGui.SliderInt("falloff bones", ref falloff, 0, 6))
         {
             session.SetMask(session.MaskRoot, falloff);
-            session.Refresh();
         }
 
         // THE NUMBER BEHIND THE PICTURE. A mask reaching every bone is a whole-body blend wearing a
@@ -319,7 +315,6 @@ internal sealed class ViewerPanels
         if (ImGui.Checkbox("drive the app.Model", ref drive))
         {
             app.Session.DriveRoot = drive;
-            app.Session.Refresh();
         }
 
         ImGui.SameLine();

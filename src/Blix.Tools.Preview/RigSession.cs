@@ -1,3 +1,4 @@
+using Blix.Diagnostics;
 using System.Numerics;
 
 namespace Blix.Tools.Preview;
@@ -47,7 +48,7 @@ public enum PoseMode
 /// because a row of three in a lab and a crowd in a game disagree about it.
 /// </para>
 /// </remarks>
-public sealed class RigSession
+public sealed class RigSession : ITunable
 {
     private readonly LabRig rig;
     private readonly Matrix4x4[] boneWorlds;
@@ -92,19 +93,25 @@ public sealed class RigSession
 
     public int InstanceCount { get; }
 
-    public PoseMode Mode { get; set; } = PoseMode.Single;
+    [Tune] public PoseMode Mode { get; set; } = PoseMode.Single;
 
     /// <summary>Blend weight, or additive overlay strength. Clamped on use.</summary>
-    public float Weight { get; set; } = 0.5f;
+    [Tune(0, 1)] public float Weight { get; set; } = 0.5f;
 
     /// <summary>Which bones <see cref="PoseMode.Masked"/> reaches. Null masks nothing, so B is ignored.</summary>
     public BoneMask? Mask { get; set; }
 
-    /// <summary>The bone the mask's subtree starts at, kept so a panel can show and change it.</summary>
-    public string MaskRoot { get; private set; } = string.Empty;
+    /// <summary>The bone the mask's subtree starts at.</summary>
+    /// <remarks>
+    /// Declared rather than privately set, so <c>--mask-root</c> and the panel's bone combo are the
+    /// same member. The combo stays bespoke — a generated text field cannot know which bones THIS
+    /// rig has — but the state it writes is this one, and moving it rebuilds the mask through
+    /// <see cref="OnChanged"/> whichever door it came through.
+    /// </remarks>
+    [Tune] public string MaskRoot { get; set; } = string.Empty;
 
     /// <summary>How many bones the mask fades over, up the chain from its root.</summary>
-    public int MaskFalloff { get; private set; }
+    [Tune(0, 6)] public int MaskFalloff { get; set; }
 
     /// <summary>
     /// The bone a masked layer most likely wants to start at, by name, or null if nothing matches.
@@ -162,10 +169,10 @@ public sealed class RigSession
     /// collapse, "the bodies look different" is evidence only that something differs, which is what
     /// any number of broken mechanisms also produce.
     /// </remarks>
-    public bool Lockstep { get; set; }
+    [Tune] public bool Lockstep { get; set; }
 
     /// <summary>Strip the root and let the caller move the body by <see cref="RootTravel"/> instead.</summary>
-    public bool DriveRoot { get; set; }
+    [Tune] public bool DriveRoot { get; set; }
 
     /// <summary>Accumulated root travel, in the rig's post-mesh-node space.</summary>
     public Vector3 RootTravel { get; private set; }
@@ -233,6 +240,25 @@ public sealed class RigSession
 
     /// <summary>Recompose without moving any clock — after a mode, weight or clip change.</summary>
     public void Refresh() => Compose();
+
+    /// <summary>
+    /// A declared value moved — from a flag, a panel, or a replayed frame. Recompose.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the whole of what replaced eight hand-written Refresh() calls.</b> Every one of
+    /// them sat after a panel write, and the capture tool that composes the same state had none,
+    /// because nothing reminded it. A tool cannot forget to call this.
+    /// <para>
+    /// The mask is rebuilt only when its own inputs move, which is why the change carries a name:
+    /// reaching for a bone list because a weight slider moved would be exactly the per-frame
+    /// recompute that reporting per change exists to avoid.
+    /// </para>
+    /// </remarks>
+    public void OnChanged(TunableChange change)
+    {
+        if (change.Name is nameof(MaskRoot) or nameof(MaskFalloff)) SetMask(MaskRoot, MaskFalloff);
+        Compose();
+    }
 
     /// <summary>Forget the accumulated root motion.</summary>
     public void ResetTravel()

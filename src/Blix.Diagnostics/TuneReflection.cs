@@ -522,6 +522,21 @@ public sealed class ObjectTunables
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Members this tool draws better itself. Still declared, still flagged, still reported.
+    /// </summary>
+    /// <remarks>
+    /// <b>[Tune] declares state, not a widget.</b> A generated control is a floor rather than a
+    /// ceiling: a mask root rendered as a text field is worse than one rendered as a combo of the
+    /// bones this particular rig actually has, and no amount of reflection can know that list.
+    /// <para>
+    /// Naming a member here suppresses only the GENERATED control. The flag still exists, the
+    /// change is still detected and still reported, and the tool writes the member from whatever
+    /// control it drew instead — so a better widget costs a tool nothing but the widget.
+    /// </para>
+    /// </remarks>
+    public ISet<string> Bespoke { get; } = new HashSet<string>(StringComparer.Ordinal);
+
     public void BuildControls(DebugContext debug)
     {
         ArgumentNullException.ThrowIfNull(debug);
@@ -534,6 +549,14 @@ public sealed class ObjectTunables
             {
                 foreach (var f in items)
                 {
+                    // Detected either way — only the control is skipped. A member the tool draws
+                    // itself is still state, and the whole point is that it stays one member.
+                    if (Bespoke.Contains(f.Name))
+                    {
+                        Note(f);
+                        continue;
+                    }
+
                     if (f.Kind == TuneKind.Text)
                     {
                         f.Text = debug.Controls.Text(f.Label, f.Text, f.MaxLength);
