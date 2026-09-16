@@ -538,6 +538,32 @@ different gap, and not one a UV set fixes.
 
 ---
 
+### I-G — more than four bone influences — **DONE**
+
+**The one glTF gap here that produced a wrong result rather than a missing feature**, and the one no
+corpus covers: not this tree, not the Khronos sample assets, not the asset generator. Conventions §7
+says that is not a reason to leave it, so the fixture was authored — the way BB.2's was.
+
+glTF allows `JOINTS_1`/`WEIGHTS_1` and beyond. Weights sum to 1 across **all** sets, so reading only
+the first left them summing to less, and a skinning matrix scaled by 0.8 drags its vertex a fifth of
+the way to the origin. Nothing counted down and nothing warned.
+
+**Built:** every influence set is read; the **strongest four** are kept and **renormalised**. Not the
+first four, because glTF does not require the sets to be sorted and "first" can discard the influence
+that actually shapes the vertex.
+
+**Four stays the limit, and that is now a decision rather than an accident.** Widening the vertex to
+eight costs 32 bytes on every skinned vertex in every asset, for influences that are almost always
+negligible — bandwidth against fidelity, which by §5 is a trade to make deliberately. Approximate
+deformation is a limitation; a collapsing mesh was a bug. `GltfIgnored` still reports the dropped
+set, and its explanation still says TRUNCATED rather than merely unread.
+
+**Negative control:** removing the renormalisation puts the sum back to **0.8000** — the collapse,
+named exactly. **Control:** a single influence set passes through untouched, compared against the
+file's own accessor rather than against what the builder was handed, because SharpGLTF sorts
+influences as it writes and a first draft of that assertion failed on the fixture rather than the
+importer.
+
 ---
 
 ## Order, and why

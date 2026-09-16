@@ -473,6 +473,84 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
     // (up-normal, (0, 0)) if absent. JOINTS_0 / WEIGHTS_0 are required — this is
     // a skinned mesh importer; an unrigged mesh should use ObjImporter or a
     // future GltfStaticMeshImporter.
+    /// <summary>
+    /// The four strongest influences on one vertex, renormalised, out of however many the file gives.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Four is a deliberate limit, and dropping the rest silently was not.</b> The vertex layout
+    /// carries four bone indices and four weights; widening it to eight costs 32 bytes on every
+    /// skinned vertex in every asset, for influences that are almost always negligible. That is an
+    /// engineering trade — bandwidth against fidelity — and it is the kind §5 says to make
+    /// deliberately rather than by accident.
+    /// </para>
+    /// <para>
+    /// <b>The STRONGEST four, not the first four.</b> glTF does not require the sets to be sorted, so
+    /// "the first four" can discard the influence that actually shapes the vertex and keep three that
+    /// barely move it.
+    /// </para>
+    /// <para>
+    /// <b>And renormalised, which is the part that fixes the visible fault.</b> Weights sum to 1
+    /// across ALL sets, so keeping a subset leaves them summing to less, and a skinning matrix scaled
+    /// by 0.8 drags its vertex a fifth of the way to the origin. Approximate deformation is a
+    /// limitation; a collapsing mesh is a bug.
+    /// </para>
+    /// </remarks>
+    private static (Vector4 Joints, Vector4 Weights) SelectInfluences(
+        int v,
+        IList<Vector4> joints0, IList<Vector4> weights0,
+        List<IList<Vector4>> extraJoints, List<IList<Vector4>> extraWeights,
+        int[] oldToNew)
+    {
+        Span<(int Joint, float Weight)> all = stackalloc (int, float)[4 + (extraJoints.Count * 4)];
+        var n = 0;
+        void Take(Vector4 j, Vector4 w, Span<(int, float)> into, ref int at)
+        {
+            into[at++] = ((int)j.X, w.X);
+            into[at++] = ((int)j.Y, w.Y);
+            into[at++] = ((int)j.Z, w.Z);
+            into[at++] = ((int)j.W, w.W);
+        }
+
+        Take(joints0[v], weights0[v], all, ref n);
+        for (var s = 0; s < extraJoints.Count; s++) Take(extraJoints[s][v], extraWeights[s][v], all, ref n);
+
+        // Selection sort for the top four: n is at most a handful, and this keeps ties in the order
+        // the file listed them so a re-import gives the same answer.
+        for (var i = 0; i < 4 && i < n; i++)
+        {
+            var best = i;
+            for (var k = i + 1; k < n; k++)
+            {
+                if (all[k].Weight > all[best].Weight) best = k;
+            }
+
+            (all[i], all[best]) = (all[best], all[i]);
+        }
+
+        var total = 0f;
+        for (var i = 0; i < 4 && i < n; i++) total += all[i].Weight;
+        var scale = total > 1e-6f ? 1f / total : 0f;
+
+        var idx = Vector4.Zero;
+        var wt = Vector4.Zero;
+        for (var i = 0; i < 4; i++)
+        {
+            var (joint, weight) = i < n ? all[i] : (0, 0f);
+            var remapped = (float)oldToNew[joint];
+            var scaled = weight * scale;
+            switch (i)
+            {
+                case 0: idx.X = remapped; wt.X = scaled; break;
+                case 1: idx.Y = remapped; wt.Y = scaled; break;
+                case 2: idx.Z = remapped; wt.Z = scaled; break;
+                default: idx.W = remapped; wt.W = scaled; break;
+            }
+        }
+
+        return (idx, wt);
+    }
+
     private static MeshData BuildMeshData(string name, MeshPrimitive primitive, int[] oldToNew)
     {
         var positions = primitive.GetVertexAccessor("POSITION")?.AsVector3Array()
@@ -483,6 +561,22 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             ?? throw new InvalidOperationException("glTF mesh primitive missing WEIGHTS_0 — not a skinned mesh.");
         var jointsArray = jointsAcc.AsVector4Array();
         var weightsArray = weightsAcc.AsVector4Array();
+
+        // <b>Every further influence set, because dropping them is a WRONG RESULT rather than a
+        // missing feature.</b> glTF allows JOINTS_1/WEIGHTS_1 and beyond; a vertex with eight
+        // influences has its weights summing to 1 across all eight, so reading only the first four
+        // leaves them summing to less — and a skinning matrix scaled by 0.8 drags that vertex toward
+        // the origin. Nothing counts down, nothing warns, the character simply deforms wrongly.
+        var extraJoints = new List<IList<Vector4>>();
+        var extraWeights = new List<IList<Vector4>>();
+        for (var set = 1; ; set++)
+        {
+            var j = primitive.GetVertexAccessor($"JOINTS_{set}");
+            var w = primitive.GetVertexAccessor($"WEIGHTS_{set}");
+            if (j is null || w is null) break;
+            extraJoints.Add(j.AsVector4Array());
+            extraWeights.Add(w.AsVector4Array());
+        }
         var normals = primitive.GetVertexAccessor("NORMAL")?.AsVector3Array();
         var uvs = primitive.GetVertexAccessor("TEXCOORD_0")?.AsVector2Array();
         // Per-vertex tangents. glTF stores them as vec4 — XYZ is the tangent
@@ -522,13 +616,24 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             // we cast to int, look up, and store back as float (the vertex shader
             // does int(...) at lookup time). Unused slots (weight == 0) still get
             // remapped so the stored index stays within bounds.
-            var oldIdx = jointsArray[v];
-            var newIdx = new Vector4(
-                oldToNew[(int)oldIdx.X],
-                oldToNew[(int)oldIdx.Y],
-                oldToNew[(int)oldIdx.Z],
-                oldToNew[(int)oldIdx.W]);
-            var w = weightsArray[v];
+            Vector4 newIdx, w;
+            if (extraJoints.Count == 0)
+            {
+                // The ordinary path, untouched. Every asset in this tree takes it, and it must stay
+                // byte-for-byte what it was: reordering four influences that already fit would
+                // change every skinned vertex in the tree to no purpose.
+                var oldIdx = jointsArray[v];
+                newIdx = new Vector4(
+                    oldToNew[(int)oldIdx.X],
+                    oldToNew[(int)oldIdx.Y],
+                    oldToNew[(int)oldIdx.Z],
+                    oldToNew[(int)oldIdx.W]);
+                w = weightsArray[v];
+            }
+            else
+            {
+                (newIdx, w) = SelectInfluences(v, jointsArray, weightsArray, extraJoints, extraWeights, oldToNew);
+            }
 
             var t = tangents?[v] ?? Vector4.Zero;
 

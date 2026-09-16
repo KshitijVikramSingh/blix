@@ -3427,6 +3427,139 @@ static ShaderInterface MinimalShader() => new(new[]
 }
 
 // ============================================================================
+// Section BC — more than four bone influences per vertex.
+// ============================================================================
+//
+// <b>The one glTF gap here that produces a WRONG RESULT rather than a missing feature, and the one
+// no corpus covers.</b> glTF allows JOINTS_1/WEIGHTS_1 and beyond. The vertex layout carries four
+// influences, and the importer read only the first set — so a vertex weighted across eight had its
+// weights summing to less than 1, and a skinning matrix scaled by 0.8 drags that vertex a fifth of
+// the way to the origin. Nothing counted down and nothing warned.
+//
+// No asset in this tree has it, none of the Khronos sample assets do, and neither does the asset
+// generator. Conventions §7 says that is not a reason to leave it — the specification is the
+// requirement — so the fixture is authored here, the way BB.2's was.
+{
+    var temp = Path.Combine(Path.GetTempPath(), $"blix-bc-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(temp);
+    try
+    {
+        var root = new SharpGLTF.Scenes.NodeBuilder("root");
+        var joints = new List<SharpGLTF.Scenes.NodeBuilder> { root };
+        for (var i = 1; i < 8; i++) joints.Add(joints[i - 1].CreateNode($"j{i}"));
+
+        // Eight influences whose weights sum to 1: four of 0.2 and four of 0.05. Reading only the
+        // first set leaves 0.8, which is the collapse; keeping the strongest four and renormalising
+        // gives 1.0 again.
+        static SharpGLTF.Geometry.MeshBuilder<
+            SharpGLTF.Geometry.VertexTypes.VertexPosition,
+            SharpGLTF.Geometry.VertexTypes.VertexEmpty,
+            SharpGLTF.Geometry.VertexTypes.VertexJoints8> EightWay()
+        {
+            var m = new SharpGLTF.Geometry.MeshBuilder<
+                SharpGLTF.Geometry.VertexTypes.VertexPosition,
+                SharpGLTF.Geometry.VertexTypes.VertexEmpty,
+                SharpGLTF.Geometry.VertexTypes.VertexJoints8>("eight");
+            var p = m.UsePrimitive(SharpGLTF.Materials.MaterialBuilder.CreateDefault());
+            var w = new SharpGLTF.Geometry.VertexTypes.VertexJoints8(
+                (0, 0.2f), (1, 0.2f), (2, 0.2f), (3, 0.2f),
+                (4, 0.05f), (5, 0.05f), (6, 0.05f), (7, 0.05f));
+            p.AddTriangle(
+                (new SharpGLTF.Geometry.VertexTypes.VertexPosition(0, 0, 0), default, w),
+                (new SharpGLTF.Geometry.VertexTypes.VertexPosition(1, 0, 0), default, w),
+                (new SharpGLTF.Geometry.VertexTypes.VertexPosition(0, 0, 1), default, w));
+            return m;
+        }
+
+        var scene = new SharpGLTF.Scenes.SceneBuilder();
+        scene.AddSkinnedMesh(EightWay(), Matrix4x4.Identity, joints.ToArray());
+        var path = Path.Combine(temp, "eight-influences.glb");
+        scene.ToGltf2().SaveGLB(path);
+
+        var model = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("bc/eight"), path));
+        var mesh = model.Primitives[0].Mesh;
+
+        // The skinned vertex is pos(3) normal(3) uv(2) joints(4) weights(4) tangent(4) floats.
+        static (float[] Joints, float[] Weights) InfluencesOf(MeshData m, int vertex)
+        {
+            var f = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(
+                m.VertexBytes.AsSpan(vertex * m.Layout.Stride, m.Layout.Stride));
+            return (new[] { f[8], f[9], f[10], f[11] }, new[] { f[12], f[13], f[14], f[15] });
+        }
+
+        var (idx, wts) = InfluencesOf(mesh, 0);
+        var sum = wts.Sum();
+
+        // ── BC.1 the weights sum to one again ───────────────────────────────
+        //
+        // THE fault. Before, this summed to 0.8 and the vertex was dragged a fifth of the way to the
+        // origin — a deformation that is wrong rather than approximate.
+        t.ExpectTrue($"BC.1 the retained weights are renormalised to 1 (sum {sum:F4})",
+            Math.Abs(sum - 1.0) < 1e-4);
+
+        // ── BC.2 the STRONGEST four, not the first four ─────────────────────
+        //
+        // glTF does not require the sets to be sorted. Keeping "the first four" can discard the
+        // influence that shapes the vertex and retain three that barely move it.
+        t.ExpectTrue($"BC.2 every retained weight is one of the heavy ones ({string.Join(", ", wts.Select(x => x.ToString("F3")))})",
+            wts.All(x => Math.Abs(x - 0.25f) < 1e-3f));
+
+        // Joints 0..3 carry 0.2 each and 4..7 carry 0.05, so the four kept must be the first four
+        // JOINTS — after the skeleton's topological remap, which for this chain is the identity.
+        t.ExpectTrue($"BC.2 and names the heavy joints, not the light ones ({string.Join(", ", idx)})",
+            idx.All(i => i < 4));
+
+        // ── BC.3 CONTROL: four influences are untouched ─────────────────────
+        //
+        // Every rigged asset in this tree has exactly one influence set, and none of them may move.
+        // Sorting four influences that already fit would rewrite every skinned vertex to no purpose.
+        var four = new SharpGLTF.Geometry.MeshBuilder<
+            SharpGLTF.Geometry.VertexTypes.VertexPosition,
+            SharpGLTF.Geometry.VertexTypes.VertexEmpty,
+            SharpGLTF.Geometry.VertexTypes.VertexJoints4>("four");
+        var fp = four.UsePrimitive(SharpGLTF.Materials.MaterialBuilder.CreateDefault());
+        // Deliberately UNSORTED and summing to 1: if the ordinary path started sorting, this would
+        // come back reordered.
+        var fw = new SharpGLTF.Geometry.VertexTypes.VertexJoints4((0, 0.1f), (1, 0.6f), (2, 0.2f), (3, 0.1f));
+        fp.AddTriangle(
+            (new SharpGLTF.Geometry.VertexTypes.VertexPosition(0, 0, 0), default, fw),
+            (new SharpGLTF.Geometry.VertexTypes.VertexPosition(1, 0, 0), default, fw),
+            (new SharpGLTF.Geometry.VertexTypes.VertexPosition(0, 0, 1), default, fw));
+        var fourScene = new SharpGLTF.Scenes.SceneBuilder();
+        fourScene.AddSkinnedMesh(four, Matrix4x4.Identity, joints.Take(4).ToArray());
+        var fourPath = Path.Combine(temp, "four-influences.glb");
+        fourScene.ToGltf2().SaveGLB(fourPath);
+
+        var fourModel = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("bc/four"), fourPath));
+        var (fidx, fwts) = InfluencesOf(fourModel.Primitives[0].Mesh, 0);
+
+        // <b>Compared against what is IN THE FILE, not against what was handed to the builder.</b>
+        // SharpGLTF sorts influences by weight as it writes, so (0.1, 0.6, 0.2, 0.1) arrives on disk
+        // as (0.6, 0.2, 0.1, 0.1). A first draft of this asserted the authored order and failed — on
+        // the fixture, not the importer. Reading the accessor back makes the control say the thing it
+        // actually means: for a single influence set the importer is a passthrough.
+        var onDisk = SharpGLTF.Schema2.ModelRoot.Load(fourPath)
+            .LogicalMeshes[0].Primitives[0].GetVertexAccessor("WEIGHTS_0")!.AsVector4Array()[0];
+        t.ExpectTrue(
+            $"BC.3 CONTROL one influence set passes through untouched "
+            + $"(file {onDisk}, imported {string.Join(", ", fwts.Select(x => x.ToString("F3")))})",
+            Math.Abs(fwts[0] - onDisk.X) < 1e-5f && Math.Abs(fwts[1] - onDisk.Y) < 1e-5f
+            && Math.Abs(fwts[2] - onDisk.Z) < 1e-5f && Math.Abs(fwts[3] - onDisk.W) < 1e-5f);
+
+        // ── BC.4 and the file says what it could not keep ───────────────────
+        t.ExpectTrue("BC.4 the dropped influence set is reported, not silent",
+            model.IgnoredOrEmpty.Any(i => i.Semantic is "JOINTS_1" or "WEIGHTS_1"));
+        t.ExpectTrue("BC.4 and the report says the skin is TRUNCATED rather than merely unread",
+            model.IgnoredOrEmpty.Where(i => i.Semantic.StartsWith("JOINTS_", StringComparison.Ordinal))
+                 .All(i => i.Explanation.Contains("TRUNCATED", StringComparison.Ordinal)));
+    }
+    finally
+    {
+        try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
+    }
+}
+
+// ============================================================================
 // Section BB — every skin the file declares is read.
 // ============================================================================
 //
