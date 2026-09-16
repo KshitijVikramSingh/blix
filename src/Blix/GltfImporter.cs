@@ -107,11 +107,24 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         // file violates this, throw loudly so the import fails clearly instead
         // of silently displaying the wrong thing.
         var skinnedMeshNodes = new List<Node> { primarySkinNode };
+        var skipped = new List<GltfSkipped>();
         foreach (var node in model.LogicalNodes)
         {
             if (ReferenceEquals(node, primarySkinNode)) continue;
             if (node.Mesh is null) continue;
-            if (!ReferenceEquals(node.Skin, skin)) continue;
+
+            // <b>A bare `continue` used to live here, and it was the whole bug.</b> A mesh weighted
+            // to a second skin left no trace: the file arrived as a fraction of itself and every
+            // tool downstream agreed it was complete. tank.glb is eleven primitives across three
+            // skins, of which five were imported and six vanished without a word.
+            //
+            // Still skipped — reading more than one skin is a capability with real questions behind
+            // it, and tools/character_merge.py exists to avoid needing it — but skipped OUT LOUD.
+            if (!ReferenceEquals(node.Skin, skin))
+            {
+                if (node.Skin is not null) skipped.Add(Describe(node, GltfSkipReason.SecondarySkin));
+                continue;
+            }
 
             // Compare row-vector world matrices in SharpGLTF's native form -- no
             // conversion needed since we're just checking equality, not consuming
@@ -155,6 +168,29 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
 
         var attachments = CollectAttachments(model, skin, oldToNew, materialCache, textureCache);
 
+        // A static mesh under no joint is neither skinned geometry nor an attachment, so nothing
+        // takes it. That is a defensible rule and was an invisible one: the four static primitives
+        // in tank.glb are the rest of the six it loses.
+        var attached = new HashSet<string>(attachments.Select(a => a.Name), StringComparer.Ordinal);
+        foreach (var node in model.LogicalNodes)
+        {
+            if (node.Mesh is null || node.Skin is not null) continue;
+            var name = node.Name ?? node.Mesh.Name ?? "?";
+            if (attached.Contains(name)) continue;
+            skipped.Add(Describe(node, GltfSkipReason.UnparentedStatic));
+        }
+
+        // <b>One line, from the importer itself, not only from a tool that happens to ask.</b> A
+        // game loading a half-imported character should not have to run `blix check` to find out.
+        if (skipped.Count > 0)
+        {
+            var lost = skipped.Sum(x => x.Primitives);
+            Console.Error.WriteLine(
+                $"  {Path.GetFileName(context.SourcePath)}: {skipped.Count} mesh node(s), " +
+                $"{lost} primitive(s) NOT imported — " +
+                string.Join(", ", skipped.Select(x => $"{x.Name} ({x.Explanation})")));
+        }
+
         // Filter animations to those that touch our skin's joints; an animation
         // targeting only non-skin nodes (scene camera, light) becomes an empty clip
         // and gets dropped.
@@ -190,7 +226,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                 Warning: "a rigged glTF has no cooked form — .blixmesh holds no skinned vertex layout"));
         }
 
-        return new GltfModel(primitives, skeleton, animations.ToArray(), meshNodeTransform, attachments);
+        return new GltfModel(
+            primitives, skeleton, animations.ToArray(), meshNodeTransform, attachments, skipped.ToArray());
     }
 
     private static long SourceLength(string path)
@@ -238,6 +275,21 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
     /// instead, to be composed with the joint's animated transform at draw time.
     /// </para>
     /// </remarks>
+
+    private static GltfSkipped Describe(Node node, GltfSkipReason reason)
+    {
+        var mesh = node.Mesh!;
+        var vertices = 0;
+        foreach (var prim in mesh.Primitives)
+        {
+            vertices += prim.GetVertexAccessor("POSITION")?.Count ?? 0;
+        }
+
+        return new GltfSkipped(
+            node.Name ?? mesh.Name ?? "?", reason, mesh.Primitives.Count, vertices);
+    }
+
+
     private static GltfAttachment[] CollectAttachments(
         ModelRoot model,
         Skin skin,

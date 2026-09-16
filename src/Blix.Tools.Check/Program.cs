@@ -303,9 +303,39 @@ public static class Program
 
         Console.WriteLine($"{Path.GetFileName(path)}");
         var attachments = imported.AttachmentsOrEmpty;
+        var skipped = imported.SkippedOrEmpty;
         Console.WriteLine(
             $"  {skeleton.BoneCount} bone(s), {imported.Animations.Length} clip(s), " +
             $"{imported.Primitives.Length} skinned primitive(s), {attachments.Length} attachment(s)");
+
+        // ── 0a. What was NOT imported ───────────────────────────────────────
+        // <b>Judged, not merely listed.</b> A rig that arrives as a fraction of its file is the
+        // failure this section exists for, and it is one a count cannot show you on its own —
+        // five primitives looks exactly like a five-primitive asset. So the loss is named, sized,
+        // and it makes the check fail: an asset the engine can only half read is not sound.
+        if (skipped.Length > 0)
+        {
+            var lostPrims = skipped.Sum(x => x.Primitives);
+            var lostVerts = skipped.Sum(x => x.Vertices);
+            Console.WriteLine();
+            Console.WriteLine(
+                $"RED  {skipped.Length} mesh node(s) NOT imported — {lostPrims} primitive(s), {lostVerts} vertices");
+            foreach (var s in skipped.OrderBy(x => x.Name, StringComparer.Ordinal))
+            {
+                Console.WriteLine(
+                    $"       {s.Name,-28} {s.Primitives} prim, {s.Vertices,6} verts — {s.Explanation}");
+            }
+
+            if (skipped.Any(x => x.Reason == GltfSkipReason.SecondarySkin))
+            {
+                Console.WriteLine(
+                    "       a multi-skin character is merged offline by tools/character_merge.py;");
+                Console.WriteLine(
+                    "       this file has not been through it.");
+            }
+
+            problems++;
+        }
 
         // ── 0. Attachments ──────────────────────────────────────────────────
         // <b>Reported before anything is judged, because their absence was the bug.</b> The importer

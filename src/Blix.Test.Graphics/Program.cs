@@ -3308,6 +3308,44 @@ static ShaderInterface MinimalShader() => new(new[]
             bareModel.Primitives.Length == sceneryModel.Primitives.Length
             && bareModel.Primitives[0].Mesh.VertexCount == sceneryModel.Primitives[0].Mesh.VertexCount);
 
+        // ── AY.7 what the import leaves behind, said out loud ───────────────
+        // <b>A bare `continue` used to sit where this reporting is.</b> A mesh weighted to a second
+        // skin left no trace, so a file could arrive as a fraction of itself and every tool
+        // downstream agreed it was whole. tank.glb is the real instance: eleven primitives across
+        // three skins, of which five imported and six vanished.
+        //
+        // Still skipped — reading more than one skin is a capability with design behind it, and
+        // tools/character_merge.py exists to avoid needing it — but skipped visibly.
+        var second = new SharpGLTF.Scenes.NodeBuilder("second_root");
+        var secondTip = second.CreateNode("second_tip");
+
+        var twoSkins = new SharpGLTF.Scenes.SceneBuilder();
+        twoSkins.AddSkinnedMesh(skinned, Matrix4x4.Identity, tip, root, mid);
+        twoSkins.AddSkinnedMesh(skinned, Matrix4x4.Identity, secondTip, second);
+        twoSkins.AddRigidMesh(gear, new SharpGLTF.Scenes.NodeBuilder("loose_prop"));
+        var twoSkinPath = Path.Combine(temp, "two-skins.glb");
+        twoSkins.ToGltf2().SaveGLB(twoSkinPath);
+
+        var twoSkinModel = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("ay/two"), twoSkinPath));
+        var left = twoSkinModel.SkippedOrEmpty;
+
+        t.ExpectTrue("AY.7 a mesh on a second skin is reported, not silently dropped",
+            left.Any(x => x.Reason == GltfSkipReason.SecondarySkin));
+        t.ExpectTrue("AY.7 a static mesh under no joint is reported too",
+            left.Any(x => x.Reason == GltfSkipReason.UnparentedStatic && x.Name == "loose_prop"));
+        t.ExpectTrue("AY.7 each one carries what was lost with it",
+            left.All(x => x.Primitives > 0 && x.Vertices > 0));
+        t.ExpectTrue("AY.7 and a sentence rather than an enum name",
+            left.All(x => x.Explanation.Length > 20));
+
+        // <b>The control that stops this reporting everything.</b> A rig whose file is fully read
+        // must report nothing, and the attachment case must NOT appear here — it was taken, and a
+        // "skipped" list that included what was imported would be worse than no list.
+        t.Expect("AY.7 a fully-read rig reports nothing skipped",
+            bareModel.SkippedOrEmpty.Length == 0, $"got {bareModel.SkippedOrEmpty.Length}");
+        t.Expect("AY.7 and an attachment is imported, not skipped",
+            model.SkippedOrEmpty.Length == 0, $"got {model.SkippedOrEmpty.Length}");
+
         // ── AY.6 the joint world transforms, which were computed and dropped ─
         // <b>The palette is not the joints' transforms.</b> Matrices[i] is InverseBindPose · world —
         // a map from a REST vertex to its posed position, which is what a skinned shader wants and

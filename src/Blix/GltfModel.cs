@@ -25,8 +25,15 @@ public sealed record GltfModel(
     // skeleton without skinning it. Empty for most rigs and not empty for any character that holds
     // something. Defaulted so every existing construction site is unchanged, because the importer
     // is the only thing that can fill it.
-    GltfAttachment[]? Attachments = null)
+    GltfAttachment[]? Attachments = null,
+
+    // Mesh nodes this import did NOT take, and why. Empty for the ordinary one-skin character;
+    // not empty for anything the importer's rules exclude, which used to leave no trace at all.
+    GltfSkipped[]? Skipped = null)
 {
     /// <summary>Attachments, never null.</summary>
     public GltfAttachment[] AttachmentsOrEmpty => Attachments ?? [];
+
+    /// <summary>What the import left behind, never null.</summary>
+    public GltfSkipped[] SkippedOrEmpty => Skipped ?? [];
 }
