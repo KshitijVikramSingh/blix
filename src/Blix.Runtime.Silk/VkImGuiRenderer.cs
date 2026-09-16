@@ -48,6 +48,10 @@ public sealed class VkImGuiRenderer : IDisposable
     private readonly Dictionary<TextureHandle, nint> uiTextureIds = new();
     private nint nextTextureId = 1;
 
+    // Reported once per id rather than per frame: the failure repeats every frame for as long as it
+    // lasts, and a line per frame would bury the first one, which is the only one that says when.
+    private readonly HashSet<nint> reportedMissingIds = new();
+
     // Reused per frame so the overlay doesn't allocate two big arrays each
     // render. Sized to the max buffers above.
     private readonly byte[] vtxScratch = new byte[MaxVertices * VertexStride];
@@ -266,7 +270,24 @@ public sealed class VkImGuiRenderer : IDisposable
                     // draw. A panel that quietly renders nothing is a bug you go looking for in
                     // the wrong place; a rectangle of font atlas is unmistakably "wrong texture
                     // here", and neither can crash.
-                    var texture = uiTextures.TryGetValue(id, out var found) ? found : fontTexture;
+                    //
+                    // <b>But "unmistakable" only helps someone who is looking.</b> This fell back
+                    // silently, so a panel showing the font atlas where an albedo should be was a
+                    // thing you had to catch in a screenshot and then reason about from the
+                    // picture. It says so now, once per id: a fallback that reports is the
+                    // difference between a mystery and a line you can grep.
+                    var known = uiTextures.TryGetValue(id, out var found);
+                    if (!known && reportedMissingIds.Add(id))
+                    {
+                        Console.Error.WriteLine(
+                            $"[imgui] draw asked for texture id {id}, which is not registered — " +
+                            $"drawing the font atlas instead. Registered: " +
+                            (uiTextures.Count == 0
+                                ? "none"
+                                : string.Join(", ", uiTextures.Keys.OrderBy(k => k))));
+                    }
+
+                    var texture = known ? found : fontTexture;
                     binding = new[] { new ShaderTextureBinding("uFont", texture, Slot: 0) };
                     bindings[id] = binding;
                 }
