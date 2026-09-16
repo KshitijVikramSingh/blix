@@ -360,16 +360,69 @@ grown their own copy — but `Blix.Tools.Shot` still keeps its own `ClipPlayer`s
 and does not reference `RigAnimation` at all. The wiring here is therefore duplicated in both tools
 rather than shared. Not addressed; recorded so the header stops being believed.
 
-### I-D — a second skin is read, not only reported
+### I-D — read every skin the file declares
 
-Today the importer says what it dropped and drops it anyway. `tank.glb` is the asset: eleven
-primitives across three skins, five imported, six named and lost.
+Today the importer picks the first node carrying both a mesh and a skin, calls that skin primary,
+and drops every skinned node referencing a different one. `tank.glb` is the asset: eleven primitives
+across three skins, five imported, six named and lost.
 
-The design question is the whole stage and should not be pre-answered here: **one palette or
-several, one skeleton or a mapping between them.** `tools/character_merge.py` exists — 689 lines of
-Blender — specifically to avoid needing this, so the honest outcome may be a **decided-no** with the
-merge named as the answer. Reaching that conclusion with `tank.glb` in a window is the output;
-assuming it now is not.
+**The previous text for this stage reasoned in a circle, and the reasoning is retracted.** It said:
+*"`tools/character_merge.py` exists — 689 lines of Blender — specifically to avoid needing this, so
+the honest outcome may be a decided-no with the merge named as the answer."* And
+`character_merge.py`'s own header says: *"The importer's rules this script exists to satisfy: ONE
+skin per file."* The workaround exists because of the engine limit, and the engine limit was
+justified by the workaround existing. That is not an argument, and it was quoted as one more than
+once.
+
+**Nor is this a hard problem, which the old framing obscured.** "One skeleton or a mapping between
+them" reads like a research question. In glTF a skin is SELF-CONTAINED — a joints array plus its own
+inverse bind matrices — and every skinned node names the skin it uses. There is nothing to map. N
+skins are N joint arrays and N palettes. The obstacle is entirely our data model:
+
+- `GltfModel` carries a single `Skeleton`
+- `GltfPrimitive` is `(MeshData, GltfMaterial?)` and has no skin identity at all
+- so the importer must choose one skin and discard the rest
+
+**And the constraint is not neutral about which assets Blix can read.** It is comfortable with
+anything authored through our own Blender and hostile to anything downloaded — the category that
+found three real faults in a single afternoon (the `COLOR_0` placement, the alpha fields with no
+asset to exercise them, the six-encoding claim that had never been checked). An engine whose bar is
+"what our exporter emits" rather than "what the format defines" cannot read other people's work.
+
+**The narrow version was proposed and withdrawn.** "Accept a secondary skin when its joint set and
+order match the primary" would recover `tank.glb`'s two track meshes and nothing else — it encodes
+that one asset's shape into the reader, and would look principled while being a second workaround on
+top of the first.
+
+**What tank.glb measures**, which is useful as data even though it no longer decides the design:
+identical joint sets (45, pairwise intersection 45/45), identical joint order, rotation and scale
+components of the inverse bind matrices identical to `0.000000` — and **bind translations differing
+by up to 0.0397, about 20% of the model's diagonal.** So the skins are NOT interchangeable, and
+reusing the primary's palette would misplace the tracks by a fifth of the tank. That is the trap the
+narrow version would have had to avoid anyway.
+
+**Stages.** Additive rather than breaking, so the six single-skin assets and their consumers
+(RTSGame, Bulwark, Runner) are untouched at every step:
+
+- **I-D1** — the importer reads every skin. `GltfModel` gains `Skeletons`, `GltfPrimitive` gains a
+  skin index, and `Skeleton` stays as the primary so nothing downstream has to change to keep
+  working. Joint remapping is per skin, because each skin orders its own joints.
+- **I-D2** — the studio draws them: one palette set per skin, off one pose where the skins share
+  joints. `RigView` already draws per part; this is per part with the right palette.
+- **I-D3** — what `GltfSkipped.SecondarySkin` becomes. It should stop firing for the ordinary case
+  and stay for the genuinely unreadable one, rather than being deleted.
+
+**`character_merge.py` keeps its job and loses one bullet.** Merging N single-animation FBX files
+onto one rig, retargeting a CC0 library onto another skeleton, and flattening interpolation to
+LINEAR are real authoring work no importer replaces. "ONE skin per file" is the only line in it that
+exists to serve this limitation, and it is the only line this arc removes.
+
+**Negative controls**
+- Every single-skin asset in the tree imports **byte-identically** — six characters across three
+  exporters. This is the control that matters most: the change is additive or it is not.
+- `tank.glb` gains its two track meshes, and they land in the right place, which the 0.0397 bind
+  translation makes a real test rather than a formality.
+- A file whose second skin genuinely cannot be read is still reported rather than silently dropped.
 
 ### I-E — the second UV set, parked with a reason
 
