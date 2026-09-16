@@ -110,6 +110,52 @@ public static class Program
             BlixRecipes.For(typeof(MeshRecipe).Assembly, "a/b/c.glb")!.OutputFor("a/b/c.glb")
                 .EndsWith("c.blixmesh", StringComparison.Ordinal));
 
+        // ── the rigged path reports, and reports that it cannot be cooked ───
+        // <b>K-E wired the static importer and the font loader and left this one silent.</b> So
+        // `blix check --cooked` — which used to load everything statically — could not see the way
+        // a game actually loads a character, and the most expensive assets in the tree were
+        // measured on a path no game takes.
+        //
+        // It always reports Source, and that is a statement rather than a gap: .blixmesh carries
+        // two vertex layouts and neither holds skin weights, so a rigged glTF has nothing to
+        // prefer. A load that is slow because nobody cooked it and one that is slow because it
+        // CANNOT be cooked are different problems, and the warning has to say which.
+        var rig = FindFile("Rogue.glb");
+        if (rig is null)
+        {
+            t.Fail("a rigged asset is findable", "no Rogue.glb under the repo");
+        }
+        else
+        {
+            var wasLogging = AssetLoadLog.Enabled;
+            try
+            {
+                AssetLoadLog.Start();
+                new Blix.GltfImporter().Import(new AssetImportContext(AssetId.Parse("t/rig"), rig));
+                var rigReports = AssetLoadLog.Drain();
+
+                var meshReport = rigReports.SingleOrDefault(r => r.SourcePath == rig);
+                t.ExpectTrue("a rigged load is reported at all", meshReport is not null);
+                t.Expect("and reports Source", meshReport!.Mode == AssetLoadMode.Source, $"got {meshReport.Mode}");
+                t.ExpectTrue("saying a rigged glTF has no cooked form, not that nobody cooked it",
+                    meshReport.Warning?.Contains("no cooked form", StringComparison.Ordinal) == true);
+                t.ExpectTrue("with a cost attached", meshReport.LoadMs > 0 && meshReport.Bytes > 0);
+
+                // The same file through the static importer DOES have a cooked form — which is the
+                // asymmetry this check exists to keep visible until it is gone.
+                AssetLoadLog.Start();
+                new Blix.GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("t/static"), rig));
+                var staticReport = AssetLoadLog.Drain().SingleOrDefault(r => r.SourcePath == rig);
+                t.ExpectTrue("the same asset loaded statically reports Cooked",
+                    staticReport is { Mode: AssetLoadMode.Cooked });
+            }
+            finally
+            {
+                AssetLoadLog.Enabled = wasLogging;
+                AssetLoadLog.Drain();
+            }
+        }
+
         // ── the fourth recipe, which is the point of having a substrate ─────
         // <b>These check what it cost to add one, not what fonts do.</b> The claim the whole cook
         // arc rests on is that a recipe costs the recipe — stamping, discovery, coverage,

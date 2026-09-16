@@ -150,7 +150,25 @@ public static class Program
         {
             try
             {
-                new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("check/cooked"), source));
+                // <b>Loaded the way it would actually be used, not the way that is convenient.</b>
+                // This judged everything through the STATIC importer, which meant a rigged
+                // character was measured on a path no game takes — and the rigged path is the one
+                // with no cooked form at all, so the judge reported the cheaper half of the truth
+                // about the most expensive assets in the tree.
+                //
+                // Which importer wants a file is not guessed from its extension: the rigged one
+                // refuses, by name, when there is no node carrying both a mesh and a skin. So ask
+                // it first and let its refusal route the file. That refusal exists because a judge
+                // crashed on it once; it turns out to also be the cleanest way to ask "is this a
+                // rig?" without parsing the file twice ourselves.
+                try
+                {
+                    new GltfImporter().Import(new AssetImportContext(AssetId.Parse("check/rig"), source));
+                }
+                catch (AssetImportException noSkin) when (noSkin.Message.Contains("no rig here", StringComparison.Ordinal))
+                {
+                    new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("check/cooked"), source));
+                }
             }
             catch (AssetImportException bad)
             {

@@ -46,6 +46,9 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             throw new AssetImportException(context.SourcePath, null, "no file there.");
         }
 
+        // <b>Started here so the report covers the whole load, including the image pre-decode.</b>
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
+
         var model = AssetImportException.Refusing(context.SourcePath, () => ModelRoot.Load(context.SourcePath));
 
         // Pick the first node carrying both a mesh and a skin -- this becomes the
@@ -163,7 +166,41 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             }
         }
 
+        // <b>The rigged path reports too, and its absence was a hole in the instrument.</b>
+        // K-E wired the static importer and the font loader and left this one silent, so
+        // `blix check --cooked` — which loads every asset STATICALLY — could not see the way a game
+        // actually loads a character. RTSGame's four villagers cost 605 ms of PNG decode each
+        // through here, and the tool that exists to report exactly that was blind to it.
+        //
+        // <b>It always says Source, and that is not a placeholder.</b> There is no cooked form of a
+        // rigged mesh at all: .blixmesh carries two vertex layouts and neither holds skin weights,
+        // so this path has nothing to prefer. Saying so in the report is the point — a load that is
+        // slow because nobody cooked it and a load that is slow because it CANNOT be cooked are
+        // different problems, and only one of them is anybody's fault.
+        if (AssetLoadLog.Enabled)
+        {
+            AssetLoadLog.Report(new AssetLoadReport(
+                SourcePath: context.SourcePath,
+                CookedPath: null,
+                Mode: AssetLoadMode.Source,
+                Bytes: SourceLength(context.SourcePath),
+                LoadMs: loadWatch.Elapsed.TotalMilliseconds,
+                Warning: "a rigged glTF has no cooked form — .blixmesh holds no skinned vertex layout"));
+        }
+
         return new GltfModel(primitives, skeleton, animations.ToArray(), meshNodeTransform);
+    }
+
+    private static long SourceLength(string path)
+    {
+        try
+        {
+            return new FileInfo(path) is { Exists: true } f ? f.Length : 0L;
+        }
+        catch (IOException)
+        {
+            return 0L;
+        }
     }
 
 
