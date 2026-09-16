@@ -71,24 +71,27 @@ public sealed class StudioLook : ITunable
     /// </remarks>
     [Tune(0, 0.5f, Group = "sun")] public float AmbientStrength { get; set; } = 0.30f;
 
-    /// <summary>Half-width of the sun's orthographic box, in metres.</summary>
+    /// <summary>Metres around the origin the SHARPEST cascade covers — the subject's own box.</summary>
     /// <remarks>
-    /// A knob because it is a trade every subject settles differently: too wide and a small rig gets
-    /// a few texels of shadow map, too narrow and a large one is cut off at the edge of the light.
+    /// <b>This replaced ShadowExtent, which was the half-width of a single shadow box.</b> That box
+    /// is gone: the stage fits three concentric cascades now, so "how big is the one box" had no
+    /// meaning left and the number it carried was being multiplied by 0.3 at its only remaining use
+    /// — a knob whose value meant something other than what it said.
+    /// <para>
+    /// This is the radius of the innermost cascade, which is the one the subject stands in and the
+    /// one whose resolution decides whether a contact shadow reads. A model is normalised to about
+    /// three units on this stage, so 2.7 m puts the whole of it inside the sharp box with room for
+    /// what it is holding. Raising it trades the subject's shadow resolution for reach.
+    /// </para>
     /// </remarks>
-    [Tune(2, 40, Group = "shadow")] public float ShadowExtent { get; set; } = 9f;
+    [Tune(1, 12, Group = "shadow")] public float ShadowSubjectRadius { get; set; } = 2.7f;
 
     /// <summary>How far from the camera shadows are cast, in metres — the last cascade's far bound.</summary>
     /// <remarks>
-    /// <b>A distance, where <see cref="ShadowExtent"/> is a box half-width.</b> They are not the same
-    /// quantity and reusing the old one here would have been wrong in an unobvious way: the camera
-    /// sits 11 m from the subject by default, so a 9 m range cuts the shadow off in FRONT of the
-    /// thing being looked at. 30 m covers the stage's 12 m ground from the far side of the orbit.
-    /// <para>
-    /// <see cref="ShadowExtent"/> and <see cref="StudioRenderer.SunViewProjection"/> are the
-    /// single-box path this supersedes on this stage. They still work and are still flagged; whether
-    /// they should survive is a conversation, not a deletion.
-    /// </para>
+    /// <b>A distance, where <see cref="ShadowSubjectRadius"/> is a radius around the origin.</b> The
+    /// camera sits 11 m from the subject by default, so a 9 m range would cut the shadow off in
+    /// FRONT of the thing being looked at. 30 m covers the stage's 12 m ground from the far side of
+    /// the orbit.
     /// </remarks>
     [Tune(5, 120, Group = "shadow")] public float ShadowDistance { get; set; } = 30f;
 

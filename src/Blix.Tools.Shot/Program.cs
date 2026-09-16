@@ -267,7 +267,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             var stage = new ObjectTunables(renderer, renderer.Look);
             stage.RequireDeclared(
                 nameof(StudioLook.SunAzimuth), nameof(StudioLook.SunElevation), nameof(StudioLook.SunIntensity),
-                nameof(StudioLook.AmbientStrength), nameof(StudioLook.ShadowExtent), nameof(StudioLook.Ground),
+                nameof(StudioLook.AmbientStrength), nameof(StudioLook.ShadowSubjectRadius), nameof(StudioLook.Ground),
                 nameof(StudioLook.Exposure), nameof(StudioLook.TonemapMode));
             stage.Apply(args);
         }

@@ -226,24 +226,6 @@ public sealed class StudioRenderer : IDisposable
     /// </remarks>
     public StudioLook Look { get; } = new();
 
-    /// <summary>
-    /// A sun view-projection that covers the stage, for the caster pass.
-    /// </summary>
-    /// <remarks>
-    /// An orthographic box aimed down the sun direction at the origin. No cascades and no texel
-    /// snapping — both belong to a renderer that has earned them (TankArena and Sponza have), and a
-    /// tooling stage that grew them by default would be quietly claiming to be one.
-    /// </remarks>
-    public Matrix4x4 SunViewProjection(float? extent = null, float depth = 30f)
-    {
-        var box = extent ?? Look.ShadowExtent;
-        var eye = Look.SunDirection * (depth * 0.5f);
-        var up = MathF.Abs(Vector3.Dot(Look.SunDirection, Vector3.UnitY)) > 0.95f ? Vector3.UnitZ : Vector3.UnitY;
-        var view = Matrix4x4.CreateLookAt(eye, Vector3.Zero, up);
-        var projection = GraphicsMatrices.CreateOrthographicVulkan(box * 2f, box * 2f, 0.1f, depth);
-        return view * projection;
-    }
-
     /// <param name="extend">
     /// <b>Rung four: a tool adding a pass of its own.</b> Called with the stage's graph and targets
     /// after they exist and BEFORE <c>Compile()</c>, which is the only window in which a pass can be
@@ -923,7 +905,7 @@ public sealed class StudioRenderer : IDisposable
         // this stage — and the outermost to the ground the camera can orbit around.
         Span<float> radii = stackalloc float[CascadeCount];
         GraphicsMatrices.CascadeSplits(
-            MathF.Max(1f, Look.ShadowExtent * 0.3f),
+            MathF.Max(1f, Look.ShadowSubjectRadius),
             MathF.Max(2f, Look.ShadowDistance * 0.5f),
             Look.CascadeSplitLambda,
             radii);

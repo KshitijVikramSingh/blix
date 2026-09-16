@@ -106,9 +106,9 @@ public static class Program
         var stage = new StudioRenderer();
         var look = stage.Look;
         t.Expect("the stage's declared look is readable without a device",
-            look.SunElevation is > 0f and < 90f && look.ShadowExtent > 0f,
+            look.SunElevation is > 0f and < 90f && look.ShadowSubjectRadius > 0f,
             $"sun {look.SunAzimuth:0.0} az / {look.SunElevation:0.0} el, " +
-            $"ambient {look.AmbientStrength:0.00}, shadow box {look.ShadowExtent:0.0}m " +
+            $"ambient {look.AmbientStrength:0.00}, subject box {look.ShadowSubjectRadius:0.0}m " +
             $"at {StudioRenderer.ShadowMapSize}px");
 
         // <b>The house style is the type's defaults, so a fresh one must equal the stage's.</b> The
@@ -118,7 +118,7 @@ public static class Program
         var house = new StudioLook();
         t.Expect("a fresh StudioLook IS the house style the stage draws with",
             house.SunAzimuth == look.SunAzimuth && house.SunElevation == look.SunElevation
-            && house.AmbientStrength == look.AmbientStrength && house.ShadowExtent == look.ShadowExtent
+            && house.AmbientStrength == look.AmbientStrength && house.ShadowSubjectRadius == look.ShadowSubjectRadius
             && house.Exposure == look.Exposure && house.TonemapMode == look.TonemapMode
             && house.Ground == look.Ground,
             $"house sun {house.SunAzimuth:0.000}/{house.SunElevation:0.000} vs " +

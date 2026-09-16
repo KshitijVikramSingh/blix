@@ -500,7 +500,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // fails at startup instead of becoming a flag nobody notices is gone.
         tunables.RequireDeclared(
             nameof(StudioLook.SunAzimuth), nameof(StudioLook.SunElevation), nameof(StudioLook.SunIntensity),
-            nameof(StudioLook.AmbientStrength), nameof(StudioLook.ShadowExtent), nameof(StudioLook.Ground),
+            nameof(StudioLook.AmbientStrength), nameof(StudioLook.ShadowSubjectRadius), nameof(StudioLook.Ground),
             nameof(StudioLook.Exposure), nameof(StudioLook.TonemapMode));
 
         // Checked, because the failure above has no symptom: a dropped flag and an absent flag look
