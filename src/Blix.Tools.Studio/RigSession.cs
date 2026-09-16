@@ -311,6 +311,26 @@ public sealed class RigSession : ITunable
         return scratchWorlds;
     }
 
+    /// <summary>
+    /// Bone transforms for instance <paramref name="instance"/> — 0 is the subject, 1..N-1 the echoes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The mapping every caller would otherwise redo: the subject's worlds are a standing array and
+    /// an echo's are computed on demand, so the off-by-one between "instance" and "echo index" lives
+    /// here once instead of at each call site.
+    /// </para>
+    /// <para>
+    /// <b>Instance 0's result is a standing array; every other instance shares one scratch.</b> So
+    /// the return value is valid only until the next call for an echo, exactly as
+    /// <see cref="EchoBoneWorlds"/> says. Read it and be done before asking for the next — a caller
+    /// that collects these into an array gets N references to the same buffer and every instance
+    /// draws in the LAST echo's pose, which is not an error anything reports.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<Matrix4x4> InstanceBoneWorlds(int instance) =>
+        instance <= 0 ? boneWorlds : EchoBoneWorlds(instance - 1);
+
     /// <summary>The clip index echo <paramref name="i"/> plays — the subject's, stepped along the list.</summary>
     public int EchoClipIndex(int i)
     {

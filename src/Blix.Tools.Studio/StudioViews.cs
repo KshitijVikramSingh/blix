@@ -123,6 +123,59 @@ public sealed class RigView : IStudioView
     /// </remarks>
     public HashSet<string> VisibleAttachments { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Bone worlds for one instance, asked for at DRAW time. Null draws attachments for instance 0
+    /// alone, from <see cref="BoneWorlds"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A function rather than an array, and that is the whole design of this feature.</b>
+    /// <c>RigSession.InstanceBoneWorlds</c> hands back a SHARED scratch for every instance past the
+    /// first, valid only until the next call — so the obvious implementation,
+    /// </para>
+    /// <code>
+    /// for (var i = 0; i &lt; n; i++) worlds[i] = session.InstanceBoneWorlds(i);   // WRONG
+    /// </code>
+    /// <para>
+    /// fills the array with N references to one buffer and draws every body's gear in the LAST
+    /// echo's pose. No crash and no warning — the same aliasing that once gave every part of a model
+    /// the last part's albedo. Materialising N real arrays instead would be correct and would
+    /// allocate boneCount matrices per instance per frame; handing this view a <c>RigSession</c>
+    /// would be correct and would make a per-frame draw description reach back into durable state,
+    /// which is the one property that keeps these two types separable.
+    /// </para>
+    /// <para>
+    /// So the view asks for one instance's worlds at the moment it draws that instance and is
+    /// finished with them before it asks for the next. <b><see cref="DrawAttachments"/> must stay
+    /// instance-outer and attachment-inner for that to hold</b>, which is why the loops are written
+    /// that way rather than the other.
+    /// </para>
+    /// </remarks>
+    public Func<int, IReadOnlyList<Matrix4x4>>? InstanceBoneWorlds { get; set; }
+
+    /// <summary>
+    /// Where each body stands, one per instance — <c>RigSession.Placements</c>. Falls back to
+    /// <see cref="Placement"/> for any instance this does not cover.
+    /// </summary>
+    /// <remarks>
+    /// The palette bakes placement into each skinned slice, so the bodies already stand apart
+    /// without this. An attachment is not skinned, so it needs the same placement by another route —
+    /// the same asymmetry <see cref="Placement"/> documents, now once per body.
+    /// </remarks>
+    public IReadOnlyList<Matrix4x4>? Placements { get; set; }
+
+    /// <summary>
+    /// Which attachments instance <c>i</c> shows. Null gives every instance
+    /// <see cref="VisibleAttachments"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>The point of the stage: one body with a knife and its neighbour with a crossbow.</b> The
+    /// engine takes a selection per body and has no opinion about what drives it — a state machine,
+    /// an inventory, or a checkbox in a tool — which is the same rule pose composition follows,
+    /// where the engine takes weights and knows nothing about states.
+    /// </remarks>
+    public Func<int, ISet<string>>? InstanceAttachments { get; set; }
+
     public void Draw(in StudioDraw draw)
     {
         if (Instances <= 0) return;
@@ -185,18 +238,50 @@ public sealed class RigView : IStudioView
     // the ladder said bringing a draw should be the ordinary case, and this is a draw.
     private void DrawAttachments(in StudioDraw draw, bool casterOnly)
     {
-        if (VisibleAttachments.Count == 0 || BoneWorlds is null) return;
+        if (Rig.Attachments.Count == 0) return;
+        if (InstanceBoneWorlds is null && BoneWorlds is null) return;
 
         var attachPush = casterOnly ? attachCaster : attachLit;
+
+        // <b>Instance-outer, attachment-inner, and that order is load-bearing.</b> InstanceBoneWorlds
+        // hands back a shared scratch for every body past the first; this loop reads one body's
+        // worlds, draws everything that body carries, and only then asks for the next. Swapping the
+        // loops would ask N times before the first draw and leave every body wearing the last one's
+        // pose. See the remarks on InstanceBoneWorlds.
+        var bodies = InstanceBoneWorlds is null ? 1 : Math.Max(1, Instances);
+        for (var body = 0; body < bodies; body++)
+        {
+            var worlds = InstanceBoneWorlds is null ? BoneWorlds : InstanceBoneWorlds(body);
+            if (worlds is null) continue;
+
+            var visible = InstanceAttachments is null ? VisibleAttachments : InstanceAttachments(body);
+            if (visible is null || visible.Count == 0) continue;
+
+            var placement = Placements is not null && (uint)body < (uint)Placements.Count
+                ? Placements[body]
+                : Placement;
+
+            DrawAttachmentsFor(draw, casterOnly, worlds, visible, placement, attachPush);
+        }
+    }
+
+    private void DrawAttachmentsFor(
+        in StudioDraw draw,
+        bool casterOnly,
+        IReadOnlyList<Matrix4x4> worlds,
+        ISet<string> visible,
+        Matrix4x4 placement,
+        byte[] attachPush)
+    {
         foreach (var attachment in Rig.Attachments)
         {
-            if (!VisibleAttachments.Contains(attachment.Name)) continue;
-            if ((uint)attachment.JointIndex >= (uint)BoneWorlds.Count) continue;
+            if (!visible.Contains(attachment.Name)) continue;
+            if ((uint)attachment.JointIndex >= (uint)worlds.Count) continue;
 
             // local -> joint -> world. Row-vector, left to right, the same direction the hierarchy
             // walk composes in — a transposed multiply here puts the knife in the right place on a
             // rig with no rotation and nowhere near it on one with any.
-            var model = attachment.LocalTransform * BoneWorlds[attachment.JointIndex] * Placement;
+            var model = attachment.LocalTransform * worlds[attachment.JointIndex] * placement;
 
             StudioPush.Matrix(model, attachPush);
             if (!casterOnly)

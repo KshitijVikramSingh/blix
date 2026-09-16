@@ -240,7 +240,7 @@ Open: session-only or persisted, and where I-F sits against I-C/I-D.
 > `ObjectTunables.Apply` and are drawn in the viewer's own `lab` window, but they do not appear as a
 > tab in the debug overlay where one would look for them.
 
-### I-C — per-instance attachments
+### I-C — per-instance attachments — **DONE**
 
 Deferred from the attachment arc with the reason recorded: `RigView` draws N bodies from one sliced
 palette, and N bodies each holding a different weapon needs a per-instance selection.
@@ -250,6 +250,32 @@ with a lockstep control whose entire purpose is demonstrating they are *not* fra
 pose fingerprint that makes "they differ" a count rather than an impression. Instance 0 with a knife
 and instance 1 with a crossbow answers the question on screen, with an existing control proving the
 independence is real rather than a coincidence of timing.
+
+**Built as a delegate, and the reason is the interesting part.** `RigSession.InstanceBoneWorlds`
+hands back a SHARED scratch for every body past the first. `RigView` is built fresh each frame but
+`Draw` runs later, during pass recording — so the obvious implementation, collecting the worlds into
+an array at construction, fills it with N references to one buffer and draws every body's gear in
+the LAST echo's pose. No crash, no warning; the same aliasing that once gave every part of a model
+the last part's albedo. The alternatives were materialising N real arrays (correct, allocates
+boneCount matrices per body per frame) or handing `RigView` the session (correct, and it collapses
+the one property that keeps durable state and a per-frame draw description separable).
+
+So the view takes `Func<int, IReadOnlyList<Matrix4x4>>` and asks at draw time, one body at a time.
+**`DrawAttachments` must stay instance-outer and attachment-inner** for that to hold, and says so.
+`InstanceAttachments` follows the same shape, with per-body overrides sparse in the viewer so the
+ordinary case (everyone carrying the same thing) costs no per-body state.
+
+**Controls — run**
+- Three Rogues with `--attach Knife`: **before, only the leftmost carried it**; after, all three do,
+  each knife tracking its own body's arm. ✔
+- **One instance is byte-identical** across the change, which is what shows the delegate reproduces
+  the old path exactly rather than merely resembling it. ✔
+- `--lockstep` still reports one pose in every slot, so the instrument I-C rides on is intact. ✔
+
+**Found on the way:** `RigSession`'s header says it was extracted because "both lab executables" had
+grown their own copy — but `Blix.Tools.Shot` still keeps its own `ClipPlayer`s and `BonePaletteSet`
+and does not reference `RigSession` at all. The wiring here is therefore duplicated in both tools
+rather than shared. Not addressed; recorded so the header stops being believed.
 
 ### I-D — a second skin is read, not only reported
 

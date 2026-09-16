@@ -267,6 +267,11 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private readonly int instanceCount = 1;
     private readonly List<Matrix4x4> instancePlacements = new();
     private readonly List<Pose> instancePoses = new();
+
+    // A scratch of its own rather than reusing `boneWorlds`, which is instance 0's and is read by
+    // the skeleton overlay after the rig view is built. One buffer is still enough because RigView
+    // asks for one body at a time and is finished before asking for the next.
+    private Matrix4x4[] instanceWorlds = Array.Empty<Matrix4x4>();
     private readonly bool lockstep;
     private readonly bool viewport;
     private readonly int sequence;
@@ -439,6 +444,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         }
 
         boneWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
+        instanceWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
 
         for (var i = 0; i < args.Length - 1; i++)
         {
@@ -624,6 +630,12 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             {
                 BoneWorlds = boneWorlds,
                 Placement = rigTransform,
+                // Same wiring as the viewer: each body carries its gear at its own pose, so an
+                // --instances capture shows N bodies armed rather than N bodies and one weapon.
+                // This tool keeps its own players rather than a RigSession, so the delegate is built
+                // here from its instance poses instead of handed over.
+                InstanceBoneWorlds = instancePoses.Count == 0 ? null : InstanceWorldsFor,
+                Placements = instancePlacements,
             };
             foreach (var name in visibleAttachments) rigView.VisibleAttachments.Add(name);
             views.Add(rigView);
@@ -866,6 +878,19 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     // Rebuilt per call rather than cached, because Debug() runs a handful of times in a bounded run
     // and a 41-matrix walk is not worth a field. Cache it the day a capture has hundreds of bones.
+    /// <summary>One instance's bone worlds, into a shared scratch — valid until the next call.</summary>
+    /// <remarks>
+    /// Mirrors <c>RigSession.InstanceBoneWorlds</c>, and carries the same contract: RigView asks for
+    /// one body at a time at draw time and is finished with the answer before asking for the next.
+    /// Collecting these into an array would give every body the last one's pose.
+    /// </remarks>
+    private IReadOnlyList<Matrix4x4> InstanceWorldsFor(int instance)
+    {
+        var at = Math.Clamp(instance, 0, instancePoses.Count - 1);
+        StudioRig.ComputeBoneWorlds(rig!.Skeleton, instancePoses[at], instanceWorlds);
+        return instanceWorlds;
+    }
+
     private static Matrix4x4[] RestWorlds(StudioRig rig, ClipPlayer player)
     {
         var worlds = new Matrix4x4[rig.Skeleton.BoneCount];

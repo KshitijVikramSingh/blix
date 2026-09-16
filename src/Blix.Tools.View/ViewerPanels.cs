@@ -350,6 +350,52 @@ internal sealed class ViewerPanels
             ImGui.TextDisabled($"on {attachment.JointName} [{attachment.JointIndex}]");
         }
 
+        // ── per body ────────────────────────────────────────────────────────────────────────
+        //
+        // <b>The reason attachments were built per instance at all: one body with a knife and its
+        // neighbour with a crossbow.</b> Bodies without an override are not listed and cost nothing;
+        // the common case is everyone carrying the same thing, and a panel that demanded a row per
+        // body would make the ordinary case the expensive one.
+        var bodies = app.Session?.InstanceCount ?? 1;
+        if (bodies > 1)
+        {
+            ImGui.Separator();
+            ImGui.TextDisabled($"per body ({bodies} drawn)");
+
+            for (var i = 0; i < bodies; i++)
+            {
+                var own = app.HasAttachmentOverride(i);
+                var label = own ? $"body {i} (own)" : $"body {i} (shared)";
+                if (!ImGui.TreeNode(label)) continue;
+
+                if (!own)
+                {
+                    if (ImGui.SmallButton($"give body {i} its own set"))
+                    {
+                        app.OverrideAttachmentsFor(i);
+                    }
+
+                    ImGui.TextDisabled("  follows the shared selection above");
+                }
+                else
+                {
+                    if (ImGui.SmallButton($"share##{i}")) app.ClearAttachmentOverride(i);
+                    var mine = app.AttachmentsForInstance(i);
+                    foreach (var attachment in rig.Attachments)
+                    {
+                        var on = mine.Contains(attachment.Name);
+                        if (ImGui.Checkbox($"{attachment.Name}##body{i}", ref on))
+                        {
+                            if (on) mine.Add(attachment.Name);
+                            else mine.Remove(attachment.Name);
+                        }
+                    }
+                }
+
+                ImGui.TreePop();
+            }
+        }
+
         // Several on one joint is ordinary — four of the Rogue's six share handslot.r — so the
         // overlap a viewer sees with "all" on is expected rather than a bug being demonstrated.
         var crowded = rig.Attachments

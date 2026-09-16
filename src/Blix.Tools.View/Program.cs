@@ -273,6 +273,11 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // checkbox is a mode no bounded run and no capture can get to.
     private readonly HashSet<string> visibleAttachments = new(StringComparer.Ordinal);
 
+    // Per-body overrides, sparse on purpose: a body with no entry wears whatever `visibleAttachments`
+    // says, so the common case (everyone carries the same thing) costs no per-body state at all and
+    // the panel only writes an entry when someone asks for a difference.
+    private readonly Dictionary<int, HashSet<string>> perInstanceAttachments = new();
+
     /// <summary>
     /// Which attachments are drawn. Mutated by the panel and read when the view is rebuilt.
     /// </summary>
@@ -283,6 +288,25 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     /// nothing about who set them.
     /// </remarks>
     internal ISet<string> VisibleAttachments => visibleAttachments;
+
+    /// <summary>What body <paramref name="instance"/> carries — its override, or the shared set.</summary>
+    internal ISet<string> AttachmentsForInstance(int instance) =>
+        perInstanceAttachments.TryGetValue(instance, out var own) ? own : visibleAttachments;
+
+    /// <summary>Gives a body a set of its own, seeded from the shared one. Idempotent.</summary>
+    internal ISet<string> OverrideAttachmentsFor(int instance)
+    {
+        if (perInstanceAttachments.TryGetValue(instance, out var own)) return own;
+        own = new HashSet<string>(visibleAttachments, StringComparer.Ordinal);
+        perInstanceAttachments[instance] = own;
+        return own;
+    }
+
+    /// <summary>Hands a body back to the shared set.</summary>
+    internal void ClearAttachmentOverride(int instance) => perInstanceAttachments.Remove(instance);
+
+    /// <summary>Whether this body has a set of its own.</summary>
+    internal bool HasAttachmentOverride(int instance) => perInstanceAttachments.ContainsKey(instance);
 
     internal StudioSelection Selection => selection;
 
@@ -654,6 +678,12 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             {
                 BoneWorlds = session?.BoneWorlds,
                 Placement = rigTransform,
+                // Every body wears its gear at ITS OWN pose. Before this the attachments were drawn
+                // once, at instance 0's, so eight peasants shared one knife hanging off the first
+                // one's hand. The delegate is evaluated at draw time on purpose — see RigView.
+                InstanceBoneWorlds = session is null ? null : session.InstanceBoneWorlds,
+                Placements = session?.Placements,
+                InstanceAttachments = session is null ? null : AttachmentsForInstance,
             };
             foreach (var name in visibleAttachments) rigView.VisibleAttachments.Add(name);
             views.Add(rigView);
