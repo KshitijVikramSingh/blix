@@ -484,12 +484,29 @@ exists to serve this limitation, and it is the only line this arc removes.
   translation makes a real test rather than a formality.
 - A file whose second skin genuinely cannot be read is still reported rather than silently dropped.
 
-### I-E — the second UV set, parked with a reason
+### I-E — the second UV set — **DECIDED-NO on measurement**
 
-`TEXCOORD_1` on 9 primitives, `_2` and `_3` on 4 — the two textured villagers, the mannequin, and
-nothing else. Nothing in the tree reads a second UV set and no shader has a slot for one, so what it
-is *for* in these assets is unknown, and building a channel for an unknown purpose is how a vertex
-layout grows a field nobody can explain in a year. **Recorded, not built**, until something asks.
+`TEXCOORD_1` on 9 primitives, `_2` and `_3` on 4 — the two textured villagers, the mannequin. This
+was parked with the right instinct: *what it is for in these assets is unknown, and building a
+channel for an unknown purpose is how a vertex layout grows a field nobody can explain in a year.*
+
+Now measured, and the answer is that it is for nothing.
+
+The sets are **genuinely distinct** — every vertex of `villager_peasant`'s `TEXCOORD_1` differs from
+its `TEXCOORD_0`, by up to 3.64 in UV space, so they are not an exporter duplicating a buffer. On
+`villager_universal`'s mannequin one primitive's second set is bit-identical to its first and
+another's is not, which is the same story from the other side.
+
+But a glTF texture names the UV set it samples, and **zero of the 18 texture channels in this tree
+use anything but set 0.** The geometry carries the coordinates; no material reads them. Reading them
+would deliver a channel that nothing in any asset here asks to sample.
+
+**Not built, and now for a stated reason rather than an open question.** The gap is *reported* by
+`GltfIgnored` rather than silent, so a future asset that does sample set 1 says so on load. The
+Khronos corpus has `MultiUVTest`, which exists precisely to exercise a reader — a test wanting it is
+not the same as content wanting it, and building for the test alone would be the tail wagging.
+
+---
 
 ---
 
