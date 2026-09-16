@@ -57,11 +57,34 @@ public sealed class StudioRig : IDisposable
         float Roughness,
         TextureHandle Albedo);
 
+    /// <summary>
+    /// A static mesh carried by a joint — a knife in a hand, a cape on a chest.
+    /// </summary>
+    /// <remarks>
+    /// <b>Uploaded exactly like a <see cref="Part"/>, drawn nothing like one.</b> The geometry is
+    /// static, so it goes through the standard lit pipeline with an ordinary model matrix rather
+    /// than the skinned one with a palette — which is the whole reason it is a separate record and
+    /// not a Part with a flag.
+    /// </remarks>
+    public readonly record struct Attachment(
+        string Name,
+        string JointName,
+        int JointIndex,
+        Matrix4x4 LocalTransform,
+        VertexBufferHandle Vertices,
+        IndexBufferHandle Indices,
+        int IndexCount,
+        Vector3 BaseColour,
+        float Metallic,
+        float Roughness,
+        TextureHandle Albedo);
+
     /// <summary>One image the asset actually ships, with enough to label it in a panel.</summary>
     public readonly record struct Image(string Name, TextureHandle Texture, int Width, int Height);
 
     private VulkanGraphicsDevice device = null!;
     private readonly List<Part> parts = new();
+    private readonly List<Attachment> attachments = new();
     private readonly List<TextureHandle> ownedTextures = new();
     private readonly List<Image> images = new();
     private MaterialBindings bones = null!;
@@ -73,6 +96,9 @@ public sealed class StudioRig : IDisposable
     public IReadOnlyList<AnimationClip> Clips { get; private set; } = Array.Empty<AnimationClip>();
 
     public IReadOnlyList<Part> Parts => parts;
+
+    /// <summary>Static meshes the asset hangs off joints. Empty for most rigs.</summary>
+    public IReadOnlyList<Attachment> Attachments => attachments;
 
     /// <summary>The distinct base-colour images this asset uploaded, deduped per source texture.</summary>
     /// <remarks>
@@ -203,6 +229,42 @@ public sealed class StudioRig : IDisposable
                 Metallic: material?.MetallicFactor ?? 0f,
                 Roughness: material?.RoughnessFactor ?? 0.7f,
                 Albedo: rig.UploadAlbedo(vk, material?.BaseColorTexture, white, uploaded)));
+        }
+
+        // <b>Attachments upload beside the parts and are bounded out of the rest bounds.</b> A
+        // weapon is not part of the body's silhouette — including a two-handed crossbow in the
+        // bounds would push the camera back and shrink the character for every viewer, whether or
+        // not anything is drawing it.
+        for (var i = 0; i < imported.AttachmentsOrEmpty.Length; i++)
+        {
+            var source = imported.AttachmentsOrEmpty[i];
+            for (var p = 0; p < source.Primitives.Length; p++)
+            {
+                var mesh = source.Primitives[p].Mesh;
+                var name = $"lab.rig.{Path.GetFileNameWithoutExtension(path)}.attach.{i}.{p}";
+                var material = source.Primitives[p].Material;
+                rig.attachments.Add(new Attachment(
+                    Name: source.Primitives.Length > 1 ? $"{source.Name}.{p}" : source.Name,
+                    JointName: source.JointName,
+                    JointIndex: source.JointIndex,
+                    LocalTransform: source.LocalTransform,
+                    Vertices: vk.CreateVertexBuffer(
+                        new VertexBufferData(
+                            new VertexBufferDescription(mesh.Layout, mesh.VertexCount, GraphicsBufferUsage.Static),
+                            mesh.VertexBytes),
+                        $"{name}.vb"),
+                    Indices: mesh.Indices32 is { } attachWide
+                        ? vk.CreateIndexBuffer(attachWide, name: $"{name}.ib")
+                        : vk.CreateIndexBuffer(mesh.Indices, name: $"{name}.ib"),
+                    IndexCount: mesh.IndexCount,
+                    BaseColour: material is null
+                        ? new Vector3(0.75f)
+                        : new Vector3(
+                            material.BaseColorFactor.X, material.BaseColorFactor.Y, material.BaseColorFactor.Z),
+                    Metallic: material?.MetallicFactor ?? 0f,
+                    Roughness: material?.RoughnessFactor ?? 0.7f,
+                    Albedo: rig.UploadAlbedo(vk, material?.BaseColorTexture, white, uploaded)));
+            }
         }
 
         if (rig.parts.Count == 0)
@@ -449,10 +511,20 @@ public sealed class StudioRig : IDisposable
             device.DestroyIndexBuffer(part.Indices);
         }
 
+        // Attachments own buffers too. Their textures do not need freeing here — they come from the
+        // same `uploaded` cache the parts use and are already in ownedTextures, so releasing them
+        // again would be a double free.
+        foreach (var attachment in attachments)
+        {
+            device.DestroyVertexBuffer(attachment.Vertices);
+            device.DestroyIndexBuffer(attachment.Indices);
+        }
+
         foreach (var texture in ownedTextures) device.DestroyTexture(texture);
         ownedTextures.Clear();
         images.Clear();
         parts.Clear();
+        attachments.Clear();
         device.DestroyMaterial(bones.Handle);
     }
 }

@@ -267,6 +267,12 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // panel cannot do for itself, which are the command line and knowing that something moved.
     private ObjectTunables? tunables;
 
+    // <b>Repeatable, and empty by default.</b> Four of the Rogue's six attachments hang off one
+    // joint, so drawing all of them is four meshes in the same place — a picture of nothing. A flag
+    // rather than only a panel, for the same reason --mask is one: a mode reachable only through a
+    // checkbox is a mode no bounded run and no capture can get to.
+    private readonly List<string> visibleAttachments = new();
+
     internal StudioSelection Selection => selection;
 
     internal StudioCamera ViewportCamera => viewportCamera;
@@ -430,6 +436,35 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         {
             Console.Error.WriteLine(bad.Message);
             Environment.Exit(1);
+        }
+
+        // Named attachments, applied once the rig is loaded because a name only means something
+        // against a rig. An unknown name is reported rather than ignored: a flag that landed and a
+        // flag that was dropped look identical from a window.
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] != "--attach") continue;
+            var wanted = args[i + 1];
+            if (rig.Attachments.Any(a => string.Equals(a.Name, wanted, StringComparison.Ordinal)))
+            {
+                visibleAttachments.Add(wanted);
+            }
+            else
+            {
+                Console.Error.WriteLine(
+                    $"No attachment named '{wanted}'. This rig has: " +
+                    (rig.Attachments.Count == 0
+                        ? "none"
+                        : string.Join(", ", rig.Attachments.Select(a => a.Name))));
+            }
+        }
+
+        if (rig.Attachments.Count > 0)
+        {
+            Console.WriteLine(
+                $"  {rig.Attachments.Count} attachment(s): " +
+                string.Join(", ", rig.Attachments.Select(a => $"{a.Name}@{a.JointName}")) +
+                $" — showing {visibleAttachments.Count}");
         }
 
         // A mask before anyone asks for one, because the first thing anybody does in this mode is
@@ -599,7 +634,19 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // instance count follows the session and a stale RigView would draw last frame's crowd.
         views.Clear();
         if (model is not null) views.Add(new ModelView(model, modelTransform));
-        if (rig is not null) views.Add(new RigView(rig, session?.Palettes.Count ?? 0));
+        if (rig is not null)
+        {
+            // <b>The worlds come from the session, not from here.</b> They are already computed once
+            // per pose for the skeleton gizmo; an attachment is the second reader of the same
+            // number and recomputing them would be a second hierarchy walk for one knife.
+            var rigView = new RigView(rig, session?.Palettes.Count ?? 0)
+            {
+                BoneWorlds = session?.BoneWorlds,
+                Placement = rigTransform,
+            };
+            foreach (var name in visibleAttachments) rigView.VisibleAttachments.Add(name);
+            views.Add(rigView);
+        }
 
         renderer.Render(
             commandList, viewProjection, cameraPosition, views,

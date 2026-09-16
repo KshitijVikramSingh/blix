@@ -261,6 +261,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private readonly int maskFalloff;
     private BoneMask? mask;
     private BonePaletteSet? palettes;
+    private readonly List<string> visibleAttachments = new();
     private Matrix4x4[] boneWorlds = Array.Empty<Matrix4x4>();
     private Matrix4x4 rigTransform = Matrix4x4.Identity;
     private readonly int instanceCount = 1;
@@ -439,6 +440,21 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
         boneWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
 
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] != "--attach") continue;
+            if (rig.Attachments.Any(a => string.Equals(a.Name, args[i + 1], StringComparison.Ordinal)))
+            {
+                visibleAttachments.Add(args[i + 1]);
+            }
+            else
+            {
+                Console.Error.WriteLine(
+                    $"No attachment named '{args[i + 1]}'. This rig has: " +
+                    (rig.Attachments.Count == 0 ? "none" : string.Join(", ", rig.Attachments.Select(a => a.Name))));
+            }
+        }
+
         // <b>One palette per body, packed into one buffer at a known stride.</b> Each instance is the
         // same clip at a different phase, which is what makes the picture evidence: three bodies in
         // the same pose would prove only that three draws happened.
@@ -600,7 +616,18 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
         var views = new List<IStudioView>();
         if (model is not null) views.Add(new ModelView(model, modelTransform));
-        if (!skeletonOnly && rig is not null) views.Add(new RigView(rig, palettes?.Count ?? 0));
+        if (!skeletonOnly && rig is not null)
+        {
+            // Same wiring as the viewer, because a capture that could not show an attachment would
+            // make the one instrument that produces evidence blind to the thing being added.
+            var rigView = new RigView(rig, palettes?.Count ?? 0)
+            {
+                BoneWorlds = boneWorlds,
+                Placement = rigTransform,
+            };
+            foreach (var name in visibleAttachments) rigView.VisibleAttachments.Add(name);
+            views.Add(rigView);
+        }
 
         // The self-test's own pass, recorded by this tool rather than by the stage. Any point
         // before Render will do: RenderGraph.Pass stores a scope against a handle and Execute walks

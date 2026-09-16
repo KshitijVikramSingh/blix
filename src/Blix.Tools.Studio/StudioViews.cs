@@ -89,6 +89,40 @@ public sealed class RigView : IStudioView
     /// <summary>How many bodies this draw covers. One takes exactly the same path as eight.</summary>
     public int Instances { get; set; }
 
+    /// <summary>
+    /// Joint world transforms for the pose being drawn, from <c>RigSession.BoneWorlds</c>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Not the palette, and nothing here recomputes them.</b> A palette matrix is
+    /// <c>InverseBindPose · world</c> — a displacement, not a position — so composing a knife onto
+    /// one puts it near the origin. The worlds are already computed once per pose by the session;
+    /// this only needs to be handed them.
+    /// </remarks>
+    public IReadOnlyList<Matrix4x4>? BoneWorlds { get; set; }
+
+    /// <summary>
+    /// Where the body stands. Composed onto every attachment; the skin gets it through the palette.
+    /// </summary>
+    /// <remarks>
+    /// <b>The skinned path does not need this and the attachment path does</b>, which is the one
+    /// genuine asymmetry between them. <c>PackInstances</c> bakes placement into each palette slice,
+    /// so a skinned draw pushes the identity and the bones carry it — but an attachment is not
+    /// skinned, so its placement has to arrive some other way, and the caller is the only thing that
+    /// knows it.
+    /// </remarks>
+    public Matrix4x4 Placement { get; set; } = Matrix4x4.Identity;
+
+    /// <summary>
+    /// Attachments to draw, by name. Empty by default.
+    /// </summary>
+    /// <remarks>
+    /// <b>Empty by default because five weapons in one hand is not a picture of anything.</b> Four
+    /// of the Rogue's six attachments hang off <c>handslot.r</c>; a game shows one. Which one is the
+    /// caller's decision and the engine has no opinion — the same rule pose composition follows,
+    /// where the engine takes weights and knows nothing about states.
+    /// </remarks>
+    public HashSet<string> VisibleAttachments { get; } = new(StringComparer.Ordinal);
+
     public void Draw(in StudioDraw draw)
     {
         if (Instances <= 0) return;
@@ -129,5 +163,51 @@ public sealed class RigView : IStudioView
                 perDrawMaterial: Rig.BoneMaterial,
                 pushConstants: push);
         }
+
+        DrawAttachments(draw, casterOnly);
     }
+
+    // <b>An attachment is a rung-two draw and costs nothing structurally.</b> It uses the stage's
+    // STANDARD lit pipeline — the same one a ground plane or a box uses — with an ordinary model
+    // matrix, because it is static geometry that happens to be carried by something that moves. No
+    // fourth pipeline, no change to StudioPush, no new pass. That was the thing worth finding out:
+    // the ladder said bringing a draw should be the ordinary case, and this is a draw.
+    private void DrawAttachments(in StudioDraw draw, bool casterOnly)
+    {
+        if (VisibleAttachments.Count == 0 || BoneWorlds is null) return;
+
+        var attachPush = casterOnly ? attachCaster : attachLit;
+        foreach (var attachment in Rig.Attachments)
+        {
+            if (!VisibleAttachments.Contains(attachment.Name)) continue;
+            if ((uint)attachment.JointIndex >= (uint)BoneWorlds.Count) continue;
+
+            // local -> joint -> world. Row-vector, left to right, the same direction the hierarchy
+            // walk composes in — a transposed multiply here puts the knife in the right place on a
+            // rig with no rotation and nowhere near it on one with any.
+            var model = attachment.LocalTransform * BoneWorlds[attachment.JointIndex] * Placement;
+
+            StudioPush.Matrix(model, attachPush);
+            if (!casterOnly)
+            {
+                StudioPush.Material(attachPush, attachment.BaseColour, attachment.Metallic, attachment.Roughness);
+            }
+
+            draw.Scope.DrawIndexed(
+                vertexBuffer: attachment.Vertices,
+                indexBuffer: attachment.Indices,
+                pipeline: draw.Pipeline,
+                indexCount: attachment.IndexCount,
+                uniforms: draw.Uniforms,
+                textures: casterOnly
+                    ? draw.Textures
+                    : new[] { draw.Textures[0], new ShaderTextureBinding("uAlbedo", attachment.Albedo, Slot: 1) },
+                pushConstants: attachPush);
+        }
+    }
+
+    // Separate from the skinned buffers above: a skinned caster pushes sixteen bytes and a static
+    // one pushes sixty-four, so sharing would run one of them off the end of the other's buffer.
+    private readonly byte[] attachLit = new byte[StudioPush.LitBytes];
+    private readonly byte[] attachCaster = new byte[StudioPush.CasterBytes];
 }
