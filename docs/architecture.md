@@ -207,7 +207,7 @@ field was.
 Program            parses args, owns the window
   ViewerLoop       the root: load, update, render, debug, input
     StudioCamera      x2 — the window's view and the panel's viewport
-    RigSession     clocks, composition, palettes
+    RigAnimation     clocks, composition, palettes
     StudioSelection   what is selected, and what a click selects
     ViewerPanels   every panel, and the display state they toggle
 ```
@@ -220,7 +220,7 @@ them is how a lab grows a framework:
 
 - **Into `Blix.Tools.Studio` requires a second consumer.** `StudioCamera` went because the viewer had
   *two* cameras with duplicated orbit arithmetic — the §4 bar met without either copy leaving the
-  file. `RigSession` went because the capture tool had independently grown its own pose composition,
+  file. `RigAnimation` went because the capture tool had independently grown its own pose composition,
   root strip, palette packing and distinct-pose count; the viewer runs it live and the capture runs
   it a fixed step at a time, which is one set of decisions on two clocks.
 - **Staying in the executable needs no second consumer at all.** `StudioSelection` and `ViewerPanels`

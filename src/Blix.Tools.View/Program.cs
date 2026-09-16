@@ -67,7 +67,7 @@ public static class Program
         var maskClip = ArgValue(args, "--mask");
 
         // Which BONE that layer starts at is not parsed here, and neither is the weight, the
-        // falloff, the lockstep or the root drive. Those are declared state on RigSession, so
+        // falloff, the lockstep or the root drive. Those are declared state on RigAnimation, so
         // their flags are derived from the members — --mask-root, --weight, --mask-falloff,
         // --lockstep, --drive-root — and applied once the session exists. Nothing below writes a
         // parser for them, which is the only way a flag and a panel stay one thing.
@@ -129,7 +129,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     private readonly int requestedInstances;
     private readonly PoseMode startMode;
     private StudioRig? rig;
-    private RigSession? session;
+    private RigAnimation? session;
 
     private Matrix4x4 rigBase = Matrix4x4.Identity;
     private Matrix4x4 rigTransform = Matrix4x4.Identity;
@@ -259,7 +259,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
     internal StudioRig? Rig => rig;
 
-    internal RigSession? Session => session;
+    internal RigAnimation? Session => session;
 
     // Declared state, rendered as flags at startup and watched for movement every frame. Every
     // member is Bespoke: this viewer already draws better controls than reflection could — a combo
@@ -443,15 +443,15 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
                 $"shader holds {StudioRig.MaxBones}. Raise the bound in studio_skinned.vert.");
         }
 
-        session = new RigSession(rig, requestedInstances) { Mode = startMode };
+        session = new RigAnimation(rig, requestedInstances) { Mode = startMode };
         // TWO targets. The session's knobs are Bespoke because this viewer draws better controls
         // for them; the SCENE's are not, so the stage's look is rendered by reflection — a Scene
         // panel this file does not write, and --sun-elevation it does not parse.
         tunables = new ObjectTunables(session, renderer);
         foreach (var member in new[]
         {
-            nameof(RigSession.Mode), nameof(RigSession.Weight), nameof(RigSession.MaskRoot),
-            nameof(RigSession.MaskFalloff), nameof(RigSession.Lockstep), nameof(RigSession.DriveRoot),
+            nameof(RigAnimation.Mode), nameof(RigAnimation.Weight), nameof(RigAnimation.MaskRoot),
+            nameof(RigAnimation.MaskFalloff), nameof(RigAnimation.Lockstep), nameof(RigAnimation.DriveRoot),
         })
         {
             tunables.Bespoke.Add(member);
@@ -503,11 +503,11 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         }
 
         // A mask before anyone asks for one, because the first thing anybody does in this mode is
-        // pick a spine. The guess is named as a guess in RigSession and the combo corrects it in
+        // pick a spine. The guess is named as a guess in RigAnimation and the combo corrects it in
         // one click. --mask-root has already been applied above, so it wins by simply being there.
         var chosenRoot = session.MaskRoot.Length > 0
             ? session.MaskRoot
-            : RigSession.GuessUpperBodyRoot(rig.Skeleton);
+            : RigAnimation.GuessUpperBodyRoot(rig.Skeleton);
 
         var falloff = session.MaskFalloff > 0 ? session.MaskFalloff : 2;
         if (chosenRoot is null)
@@ -621,7 +621,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     /// <remarks>
     /// What is left here is the viewer's share of the work: deciding where the bodies stand, and
     /// remembering the path so it can be drawn. The clocks, the composition and the palette packing
-    /// are <see cref="RigSession"/>'s, because the capture tool makes exactly those decisions too.
+    /// are <see cref="RigAnimation"/>'s, because the capture tool makes exactly those decisions too.
     /// </remarks>
     private void UpdateRig(double delta)
     {

@@ -423,11 +423,11 @@ internal sealed class ViewerPanels
         // game's job. A clip with real travel reports a metre or two here, and that is the clip whose
         // delta is worth driving anything with.
         ImGui.Text($"per cycle  {perCycle.Translation.X:0.000}, {perCycle.Translation.Y:0.000}, {perCycle.Translation.Z:0.000}");
-        ImGui.TextDisabled($"           {perCycle.Distance:0.000} m, {RigSession.DegreesOf(perCycle.Rotation):0.0}°");
+        ImGui.TextDisabled($"           {perCycle.Distance:0.000} m, {RigAnimation.DegreesOf(perCycle.Rotation):0.0}°");
         var travel = app.Session.RootTravel;
         ImGui.Text($"travelled  {travel.X:0.000}, {travel.Y:0.000}, {travel.Z:0.000}");
         ImGui.TextDisabled(
-            $"           {travel.Length():0.000} m net, {RigSession.DegreesOf(app.Session.RootTurn):0.0}° net turn");
+            $"           {travel.Length():0.000} m net, {RigAnimation.DegreesOf(app.Session.RootTurn):0.0}° net turn");
         ImGui.TextDisabled($"           {app.Session.RootTurnPathDegrees:0.0}° of turning done to get there");
 
         var drive = app.Session.DriveRoot;
@@ -487,7 +487,7 @@ internal sealed class ViewerPanels
         // How far this bone has moved off its rest value, which is the one number that answers
         // "is this clip even touching this bone?" A bone a clip has no track for reads exactly 0.
         var offset = (local.Translation - rest.Translation).Length();
-        var turned = RigSession.DegreesOf(Quaternion.Inverse(rest.Rotation) * local.Rotation);
+        var turned = RigAnimation.DegreesOf(Quaternion.Inverse(rest.Rotation) * local.Rotation);
         ImGui.TextDisabled($"from rest  {offset:0.000} m, {turned:0.0}°");
     }
 

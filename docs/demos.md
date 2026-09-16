@@ -568,7 +568,7 @@ are earned in TankArena and VulkanSponza; a lab that grew them by default would 
 claiming to be a renderer.
 
 **How the viewer is put together.** `Program` builds a `ViewerLoop` root, which explicitly
-constructs and calls `StudioCamera` (twice — the window's view and the panel's), `RigSession`,
+constructs and calls `StudioCamera` (twice — the window's view and the panel's), `RigAnimation`,
 `StudioSelection` and `ViewerPanels`. It reached 1,645 lines as one type first, and the reason to split
 it was not length: *what is shown* and *what is true* had become indistinguishable. See
 [`architecture.md` §"How an application is put together"](architecture.md) for the two bars — a

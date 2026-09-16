@@ -253,7 +253,7 @@ or 1 reproduces one input exactly, and a masked blend leaves unmasked bones unto
 ### D2 — the tooling, in the toolchain lab
 
 Masks, layers and blends become things you can **see and check**, in
-`Blix.Tools.Studio` — where `StudioRig`, `SkeletonGizmo` and `RigSession` already are, where the
+`Blix.Tools.Studio` — where `StudioRig`, `SkeletonGizmo` and `RigAnimation` already are, where the
 probe already judges clips, and where a rig viewer already exists. Building a second one elsewhere
 was the mistake the character arc caught itself about to make.
 

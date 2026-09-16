@@ -32,6 +32,11 @@ public enum PoseMode
 /// A rig being animated: the clocks, the composed pose, and the palettes N bodies are drawn from.
 /// </summary>
 /// <remarks>
+/// <b>Named for the job rather than the lifetime.</b> This was <c>RigSession</c>, and "session"
+/// named only the fact that it persists — true of most objects, and silent about what this one
+/// holds. What it actually does is turn clips and a time into poses, palettes and placements.
+/// </remarks>
+/// <remarks>
 /// <b>Extracted because the capture tool had grown its own copy.</b> Both lab executables compose a
 /// pose from one or two clips, strip root motion when driving, pack one palette per instance at the
 /// stride the shader reads, and count how many distinct poses came out. The viewer does it live and
@@ -48,7 +53,7 @@ public enum PoseMode
 /// because a row of three in a lab and a crowd in a game disagree about it.
 /// </para>
 /// </remarks>
-public sealed class RigSession : ITunable
+public sealed class RigAnimation : ITunable
 {
     private readonly StudioRig rig;
     private readonly Matrix4x4[] boneWorlds;
@@ -56,7 +61,7 @@ public sealed class RigSession : ITunable
     private readonly Matrix4x4[] scratchWorlds;
     private BonePaletteSet? poseCheck;
 
-    public RigSession(StudioRig rig, int instances)
+    public RigAnimation(StudioRig rig, int instances)
     {
         ArgumentNullException.ThrowIfNull(rig);
         this.rig = rig;

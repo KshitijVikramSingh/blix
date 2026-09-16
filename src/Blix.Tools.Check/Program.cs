@@ -708,7 +708,7 @@ public static class Program
         Console.WriteLine();
         Console.WriteLine("layer masks");
 
-        var root = RigSession.GuessUpperBodyRoot(skeleton);
+        var root = RigAnimation.GuessUpperBodyRoot(skeleton);
         if (root is null)
         {
             Console.WriteLine("  no bone matches the usual spine names — a masked layer must be named by hand");

@@ -90,7 +90,7 @@ public sealed class RigView : IStudioView
     public int Instances { get; set; }
 
     /// <summary>
-    /// Joint world transforms for the pose being drawn, from <c>RigSession.BoneWorlds</c>.
+    /// Joint world transforms for the pose being drawn, from <c>RigAnimation.BoneWorlds</c>.
     /// </summary>
     /// <remarks>
     /// <b>Not the palette, and nothing here recomputes them.</b> A palette matrix is
@@ -130,7 +130,7 @@ public sealed class RigView : IStudioView
     /// <remarks>
     /// <para>
     /// <b>A function rather than an array, and that is the whole design of this feature.</b>
-    /// <c>RigSession.InstanceBoneWorlds</c> hands back a SHARED scratch for every instance past the
+    /// <c>RigAnimation.InstanceBoneWorlds</c> hands back a SHARED scratch for every instance past the
     /// first, valid only until the next call — so the obvious implementation,
     /// </para>
     /// <code>
@@ -140,7 +140,7 @@ public sealed class RigView : IStudioView
     /// fills the array with N references to one buffer and draws every body's gear in the LAST
     /// echo's pose. No crash and no warning — the same aliasing that once gave every part of a model
     /// the last part's albedo. Materialising N real arrays instead would be correct and would
-    /// allocate boneCount matrices per instance per frame; handing this view a <c>RigSession</c>
+    /// allocate boneCount matrices per instance per frame; handing this view a <c>RigAnimation</c>
     /// would be correct and would make a per-frame draw description reach back into durable state,
     /// which is the one property that keeps these two types separable.
     /// </para>
@@ -154,7 +154,7 @@ public sealed class RigView : IStudioView
     public Func<int, IReadOnlyList<Matrix4x4>>? InstanceBoneWorlds { get; set; }
 
     /// <summary>
-    /// Where each body stands, one per instance — <c>RigSession.Placements</c>. Falls back to
+    /// Where each body stands, one per instance — <c>RigAnimation.Placements</c>. Falls back to
     /// <see cref="Placement"/> for any instance this does not cover.
     /// </summary>
     /// <remarks>

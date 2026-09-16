@@ -101,7 +101,7 @@ public static class Program
         // mask needed.
         var zoom = float.TryParse(ArgValue(args, "--zoom"), out var zf) && zf > 0.05f ? zf : 1f;
 
-        // --mask-root, matching the name RigSession's MaskRoot member derives in the viewer. This
+        // --mask-root, matching the name RigAnimation's MaskRoot member derives in the viewer. This
         // tool parses it by hand because it has no session — so the two names agree by care rather
         // than by construction, and that difference is the standing argument for eventually giving
         // it one.
@@ -632,7 +632,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                 Placement = rigTransform,
                 // Same wiring as the viewer: each body carries its gear at its own pose, so an
                 // --instances capture shows N bodies armed rather than N bodies and one weapon.
-                // This tool keeps its own players rather than a RigSession, so the delegate is built
+                // This tool keeps its own players rather than a RigAnimation, so the delegate is built
                 // here from its instance poses instead of handed over.
                 InstanceBoneWorlds = instancePoses.Count == 0 ? null : InstanceWorldsFor,
                 Placements = instancePlacements,
@@ -880,7 +880,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     // and a 41-matrix walk is not worth a field. Cache it the day a capture has hundreds of bones.
     /// <summary>One instance's bone worlds, into a shared scratch — valid until the next call.</summary>
     /// <remarks>
-    /// Mirrors <c>RigSession.InstanceBoneWorlds</c>, and carries the same contract: RigView asks for
+    /// Mirrors <c>RigAnimation.InstanceBoneWorlds</c>, and carries the same contract: RigView asks for
     /// one body at a time at draw time and is finished with the answer before asking for the next.
     /// Collecting these into an array would give every body the last one's pose.
     /// </remarks>

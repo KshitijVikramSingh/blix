@@ -113,7 +113,7 @@ types that carry the actual taste, and it tells a reader nothing true.
 `StudioScene`, `StudioCamera`, `StudioGeometry`, `StudioModel`, `StudioRig`, `StudioObject`,
 `SkeletonGizmo`, `StudioSelection`. Later, `StudioShell` and the `ModelView` / `RigView` /
 `GroundView` contributors.
-`RigSession` keeps its name: it is a subject, not stage furniture.
+`RigAnimation` keeps its name: it is a subject, not stage furniture.
 
 It sits under `Blix.Tools.` deliberately. A game referencing `Blix.Tools.Studio` then reads as
 exactly the right signal — *I am using the tool setup on purpose* — and that slight awkwardness is

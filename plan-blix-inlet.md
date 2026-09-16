@@ -251,7 +251,7 @@ pose fingerprint that makes "they differ" a count rather than an impression. Ins
 and instance 1 with a crossbow answers the question on screen, with an existing control proving the
 independence is real rather than a coincidence of timing.
 
-**Built as a delegate, and the reason is the interesting part.** `RigSession.InstanceBoneWorlds`
+**Built as a delegate, and the reason is the interesting part.** `RigAnimation.InstanceBoneWorlds`
 hands back a SHARED scratch for every body past the first. `RigView` is built fresh each frame but
 `Draw` runs later, during pass recording — so the obvious implementation, collecting the worlds into
 an array at construction, fills it with N references to one buffer and draws every body's gear in
@@ -272,9 +272,9 @@ ordinary case (everyone carrying the same thing) costs no per-body state.
   the old path exactly rather than merely resembling it. ✔
 - `--lockstep` still reports one pose in every slot, so the instrument I-C rides on is intact. ✔
 
-**Found on the way:** `RigSession`'s header says it was extracted because "both lab executables" had
+**Found on the way:** `RigAnimation`'s header says it was extracted because "both lab executables" had
 grown their own copy — but `Blix.Tools.Shot` still keeps its own `ClipPlayer`s and `BonePaletteSet`
-and does not reference `RigSession` at all. The wiring here is therefore duplicated in both tools
+and does not reference `RigAnimation` at all. The wiring here is therefore duplicated in both tools
 rather than shared. Not addressed; recorded so the header stops being believed.
 
 ### I-D — a second skin is read, not only reported
