@@ -277,6 +277,25 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 $"'{name}': tangents and vertex colour cannot be imported together — no vertex layout carries both.");
         }
 
+        // ── What glTF 2.0 defines, and what this reads ──────────────────────────────────────
+        // Spec §3.7.2.1 "Meshes / Overview", the mesh.primitive attribute table:
+        //   https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#meshes-overview
+        //
+        // The set is closed and small — POSITION, NORMAL, TANGENT, TEXCOORD_n, COLOR_n, JOINTS_n,
+        // WEIGHTS_n, plus application-specific semantics which must be underscore-prefixed. Every
+        // multi-set semantic is read at INDEX 0 ONLY and the rest are dropped without a word:
+        //
+        //   TEXCOORD_1+  a second UV set — lightmaps, detail layers. Not read.
+        //   COLOR_1+     a second colour set. Not read.
+        //   JOINTS_1+ /  MORE THAN FOUR BONE INFLUENCES PER VERTEX. Not read, which means such a
+        //   WEIGHTS_1+   skin is silently TRUNCATED to its first four and the remaining weights
+        //                are lost — the one gap here with a wrong-looking result rather than a
+        //                missing feature.
+        //
+        // <b>Written down because the alternative was finding it by grepping assets.</b> COLOR_0
+        // was discovered that way — by noticing 49 primitives carried a channel nothing read — and
+        // that method only ever finds what happens to be in the content already. The table above
+        // is the complete surface, and it holds whether or not this tree owns an asset that uses it.
         var positions = primitive.GetVertexAccessor("POSITION")?.AsVector3Array()
             ?? throw new InvalidOperationException("glTF mesh primitive missing required POSITION accessor.");
         var normals = primitive.GetVertexAccessor("NORMAL")?.AsVector3Array();

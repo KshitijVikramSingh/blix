@@ -130,6 +130,35 @@ Covered by **Test.Graphics section AZ** (16 assertions). Negative control run: r
 drop fails the four AZ.2 value assertions and leaves the layout and identity claims green — the
 discrimination the section was written for.
 
+### The spec is the inventory, not the assets — **method correction**
+
+I-A was found by grepping assets: 49 primitives carried a `COLOR_0` nothing read. That works and
+it also only ever finds **what this tree happens to own**. glTF 2.0 defines a closed, small set of
+mesh attribute semantics (§3.7.2.1, the `mesh.primitive` table —
+<https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#meshes-overview>), so the complete gap
+list is derivable without opening a single file. Recorded in `GltfStaticImporter` where the
+accessors are read.
+
+| semantic | status |
+|---|---|
+| `POSITION` `NORMAL` `TEXCOORD_0` `JOINTS_0` `WEIGHTS_0` | read |
+| `TANGENT` | read, opt-in |
+| `COLOR_0` | read, opt-in — I-A |
+| `TEXCOORD_1+` | ignored — I-E |
+| `COLOR_1+` | ignored, no consumer |
+| **`JOINTS_1+` / `WEIGHTS_1+`** | **ignored — a skin with >4 influences per vertex is silently TRUNCATED** |
+| `_CUSTOM` | ignored; spec reserves the underscore prefix for these |
+
+**The one the asset sweep could never have found is `JOINTS_1`.** Every other gap is a missing
+feature; that one is a wrong result — the fifth and later influences are dropped and the vertex
+deforms incorrectly, with nothing said. No asset in this tree has it today, which is exactly why
+grepping was silent on it, and exactly why that is not evidence.
+
+Nothing in the tree warns when an ignored set is present. The arc already built the channel for
+this — `AssetLoadLog`, and `GltfSkipped` for meshes the rigged importer declines — so saying
+"this file has a second UV set I did not read" is a small addition to an existing shape rather
+than a new one. **Not built yet; listed so it is a decision rather than an oversight.**
+
 ### I-B — the viewer can express what the material already says
 
 `GltfMaterial` carries `AlphaMode`, `AlphaCutoff` and `DoubleSided` and has done for a long time.
