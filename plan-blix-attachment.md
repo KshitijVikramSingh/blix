@@ -172,6 +172,33 @@ consumer's own placement is` — and the consumer is the only one that knows the
 holding a different weapon is a real case and is not this arc; the shape that would serve it is a
 per-instance attachment selection, and nothing is asking yet.
 
+### How to build the rest of this without a consumer asking
+
+Recorded here because it answers the deferred item above, and because it is the method for the whole
+asset arc rather than for one feature.
+
+**The precedent is instancing itself.** `Blix.Demos.VulkanInstanced` is 180 lines whose entire job is
+that 5,000 cubes go through one `vkCmdDrawIndexed`, each reading its transform and tint from a set-3
+SSBO — and it auto-exits after more frames than there are frames in flight, so both replicated SSBO
+slots are written and bound at least once, which is what would surface an in-flight hazard. That is
+how a capability gets built and proved here when no game is waiting for it: a proof gate small enough
+to read, exercising the one thing that would break.
+
+**And boundaries do not move to make room for it.** Nothing goes into or out of the engine unless
+that is right on its own terms — the same rule that kept `BodyResolver` in a lab, `PropModel` at one
+consumer, and the studio outside the engine entirely. A capability can be proved without being
+promoted.
+
+**But the cheapest instrument is already built.** The viewer draws N instances on independent clocks,
+with a lockstep control whose whole purpose is showing that N bodies are *not* frame-locked — and a
+pose fingerprint that counts distinct poses so "they differ" is a number rather than an impression.
+Per-instance attachments, several skins, and anything else in this arc can ride that: give instance
+0 a knife and instance 1 a crossbow and the question answers itself on screen, with the existing
+control proving they are independent rather than a coincidence of timing.
+
+That is the order to reach for: **the viewer first, a proof-gate demo only when the viewer cannot
+show it.**
+
 **A skinned attachment is out of scope.** A cape *can* be skinned; `Rogue_Cape` is not. If one turns
 up, it is not an attachment at all — it is another skinned mesh sharing the skin, which the importer
 already handles.
