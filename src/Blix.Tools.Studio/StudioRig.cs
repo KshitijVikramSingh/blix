@@ -117,6 +117,19 @@ public sealed class StudioRig : IDisposable
     /// <summary>Static meshes the asset hangs off joints. Empty for most rigs.</summary>
     public IReadOnlyList<Attachment> Attachments => attachments;
 
+    /// <summary>Mesh nodes the import declined, and why. Empty when the file was read whole.</summary>
+    /// <remarks>
+    /// <b>Kept because a tool that cannot say what it dropped is the fault these records exist to
+    /// fix.</b> The importer learned to report skipped nodes and unread attributes, and both landed
+    /// in <c>AssetLoadLog</c> — a channel only the test suites drain. So the reports were being
+    /// produced and, in the one tool whose entire job is looking at assets, shown to nobody. Holding
+    /// them on the rig costs a reference and makes the panel possible.
+    /// </remarks>
+    public IReadOnlyList<GltfSkipped> Skipped { get; private set; } = Array.Empty<GltfSkipped>();
+
+    /// <summary>Vertex attributes the file declared that the importer did not read.</summary>
+    public IReadOnlyList<GltfIgnored> Ignored { get; private set; } = Array.Empty<GltfIgnored>();
+
     /// <summary>The distinct base-colour images this asset uploaded, deduped per source texture.</summary>
     /// <remarks>
     /// <b>What an asset viewer could never show.</b> The lab has reported texture COUNTS since it
@@ -203,6 +216,8 @@ public sealed class StudioRig : IDisposable
 
         var imported = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("lab.rig"), path));
         rig.Skeleton = imported.Skeleton;
+        rig.Skipped = imported.SkippedOrEmpty;
+        rig.Ignored = imported.IgnoredOrEmpty;
         rig.MeshNodeTransform = imported.MeshNodeTransform;
         rig.Clips = imported.Animations.OrderBy(c => c.Name, StringComparer.Ordinal).ToArray();
         rig.palettePayload = new byte[MaxBones * MaxInstances * 64];

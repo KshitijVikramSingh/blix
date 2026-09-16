@@ -164,6 +164,7 @@ internal sealed class ViewerPanels
 
         DrawInstancePanel();
         DrawAttachmentPanel();
+        DrawUnreadPanel();
         DrawRootMotionPanel();
         DrawBonePanel();
     }
@@ -405,6 +406,57 @@ internal sealed class ViewerPanels
         foreach (var g in crowded)
         {
             ImGui.TextDisabled($"  {g.Count(x => visible.Contains(x.Name))} shown on '{g.Key}' — they overlap");
+        }
+    }
+
+    /// <summary>What the importer did not take from this file.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The importer learned to report this and then reported it to nobody.</b> Skipped mesh nodes
+    /// and unread vertex attributes both go to <c>AssetLoadLog</c>, which only the test suites
+    /// drain — so the facts existed, were correct, and were invisible in the one tool whose entire
+    /// job is looking at assets. That is the same shape as the bug they were built to fix.
+    /// </para>
+    /// <para>
+    /// <b>Silent when there is nothing to say.</b> A panel that is always present trains you to stop
+    /// reading it, and "this file was read whole" is the ordinary case.
+    /// </para>
+    /// </remarks>
+    public void DrawUnreadPanel()
+    {
+        var rig = app.Rig;
+        if (rig is null) return;
+        if (rig.Skipped.Count == 0 && rig.Ignored.Count == 0) return;
+
+        var lost = rig.Skipped.Sum(s => s.Primitives);
+        if (!ImGui.CollapsingHeader(
+                $"not imported ({rig.Skipped.Count} node(s), {rig.Ignored.Count} attribute(s))###unread",
+                ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            return;
+        }
+
+        if (rig.Skipped.Count > 0)
+        {
+            ImGui.TextDisabled($"{rig.Skipped.Count} mesh node(s), {lost} primitive(s) dropped");
+            foreach (var s in rig.Skipped)
+            {
+                ImGui.TextUnformatted($"  {s.Name}");
+                ImGui.SameLine();
+                ImGui.TextDisabled($"{s.Primitives} prim, {s.Vertices} verts — {s.Explanation}");
+            }
+        }
+
+        if (rig.Ignored.Count > 0)
+        {
+            if (rig.Skipped.Count > 0) ImGui.Separator();
+            ImGui.TextDisabled("channels present in the file and not read");
+            foreach (var i in rig.Ignored)
+            {
+                ImGui.TextUnformatted($"  {i.Semantic}");
+                ImGui.SameLine();
+                ImGui.TextDisabled($"{i.Primitives} prim — {i.Explanation}");
+            }
         }
     }
 
