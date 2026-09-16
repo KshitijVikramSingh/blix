@@ -2,7 +2,7 @@
 
 // Depth-only caster pass. The sun's view-projection is per-pass, the model is per-draw.
 //
-// aNormal, aTexCoord and aColour are declared and unused. That is not sloppiness: the pipeline binds a
+// aNormal and aColour are declared and unused; aTexCoord is read for the cutout below. That is not sloppiness: the pipeline binds a
 // VertexPosition3NormalTexture buffer, and a pipeline that declares an attribute the shader has no
 // input for draws correctly while the validation layers report "Vertex attribute at location 2 not
 // consumed by vertex shader" on every device creation. Harmless, and noise in the one stream that
@@ -19,10 +19,18 @@ layout(set = 0, binding = 0) uniform ShadowFrame {
 
 layout(push_constant) uniform Push {
     mat4 uModel;
+    // x = alpha cutoff (0 = never), y = the material's baseColorFactor.a. The fragment stage reads
+    // these; the vertex stage declares them so both agree on one block.
+    vec4 uCutout;
 };
+
+layout(location = 0) out vec2 vUv;
 
 void main()
 {
     // model * v, untransposed upload: see conventions §2. No transposes anywhere.
+    // <b>Carried for the cutout test.</b> A caster that discards nothing would not need it, and a
+    // caster that cannot discard casts a solid rectangle for a leaf.
+    vUv = aTexCoord;
     gl_Position = uLightViewProjection * (uModel * vec4(aPosition, 1.0));
 }

@@ -25,11 +25,20 @@ public static class StudioPush
     /// <summary>Bytes a lit draw pushes: a model matrix and a material.</summary>
     public const int LitBytes = 96;
 
-    /// <summary>Bytes a shadow caster pushes: the model matrix alone. It shades nothing.</summary>
-    public const int CasterBytes = 64;
+    /// <summary>Bytes a shadow caster pushes: the model matrix, and what it takes to cut out.</summary>
+    /// <remarks>
+    /// <b>Sixty-four until a caster could discard.</b> "It shades nothing" was true and still is —
+    /// this is not shading, it is whether the fragment exists. A cutout that the lit pass honours and
+    /// the caster does not gives a leaf a solid rectangular shadow.
+    /// </remarks>
+    public const int CasterBytes = 80;
 
     /// <summary>Bytes a SKINNED caster pushes: a palette stride, with no model matrix at all.</summary>
-    /// <remarks>The bones carry the placement, so a model matrix here would apply it twice.</remarks>
+    /// <remarks>
+    /// The bones carry the placement, so a model matrix here would apply it twice. Still sixteen
+    /// after the cutout arrived: the cutoff and the material's alpha ride components of the same
+    /// vec4 that were already being pushed and ignored.
+    /// </remarks>
     public const int SkinnedCasterBytes = 16;
 
     /// <summary>Writes a model matrix into the first 64 bytes.</summary>
@@ -41,6 +50,21 @@ public static class StudioPush
         floats[4] = m.M21; floats[5] = m.M22; floats[6] = m.M23; floats[7] = m.M24;
         floats[8] = m.M31; floats[9] = m.M32; floats[10] = m.M33; floats[11] = m.M34;
         floats[12] = m.M41; floats[13] = m.M42; floats[14] = m.M43; floats[15] = m.M44;
+    }
+
+    /// <summary>What a STATIC caster needs to cut out: the cutoff and the material's alpha.</summary>
+    /// <remarks>
+    /// Written at the vec4 straight after the matrix, which is where <c>studio_shadow.frag</c> reads
+    /// it. Separate from <see cref="Material"/> because a caster's block is 80 bytes and that one
+    /// writes 96 — calling it here would run off the end, which is the same edge the skinned
+    /// caster's 16-byte buffer has always had.
+    /// </remarks>
+    public static void CasterCutout(byte[] target, float alphaCutoff, float baseAlpha)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        var floats = MemoryMarshal.Cast<byte, float>(target.AsSpan());
+        if (floats.Length < 20) return;
+        floats[16] = alphaCutoff; floats[17] = baseAlpha; floats[18] = 0f; floats[19] = 0f;
     }
 
     /// <summary>Writes the material block after the matrix. A no-op on a caster-sized buffer.</summary>

@@ -37,8 +37,13 @@ layout(std430, set = 3, binding = 0) readonly buffer Bones {
 // a count is a lie about what the value is, and the next reader deserves better than finding an
 // integer in M14.
 layout(push_constant) uniform Push {
-    vec4 uSkin;           // x = bones per instance
+    // x = bones per instance, y = alpha cutoff (0 = never), z = baseColorFactor.a.
+    // Still ONE vec4 and still sixteen bytes: the cutout rides in components that were already
+    // being pushed and ignored, so the caster's payload does not grow.
+    vec4 uSkin;
 };
+
+layout(location = 0) out vec2 vUv;
 
 void main()
 {
@@ -48,6 +53,8 @@ void main()
               + bones.m[base + int(aBoneIndices.y)] * aBoneWeights.y
               + bones.m[base + int(aBoneIndices.z)] * aBoneWeights.z
               + bones.m[base + int(aBoneIndices.w)] * aBoneWeights.w;
+
+    vUv = aTexCoord;
 
     // World-space palette, so there is nothing between the skin and the sun's projection.
     gl_Position = uLightViewProjection * (skin * vec4(aPosition, 1.0));

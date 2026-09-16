@@ -6,19 +6,13 @@
         }
     ],
     "types" : {
-        "_10" : {
+        "_9" : {
             "name" : "Push",
             "members" : [
                 {
-                    "name" : "uModel",
-                    "type" : "mat4",
-                    "offset" : 0,
-                    "matrix_stride" : 16
-                },
-                {
-                    "name" : "uCutout",
+                    "name" : "uSkin",
                     "type" : "vec4",
-                    "offset" : 64
+                    "offset" : 0
                 }
             ]
         }
@@ -40,8 +34,8 @@
     ],
     "push_constants" : [
         {
-            "type" : "_10",
-            "name" : "_12",
+            "type" : "_9",
+            "name" : "_11",
             "push_constant" : true
         }
     ]

@@ -49,14 +49,11 @@ public sealed class ModelView : IStudioView
             var node = Model.Nodes[part.NodeIndex];
             var push = casterOnly ? caster : lit;
 
+            var cutoff = StudioAlpha.CutoffFor(part.AlphaMode, part.AlphaCutoff);
             StudioPush.Matrix(node.WorldTransform * Transform, push);
-            if (!casterOnly)
-            {
-                StudioPush.Material(
-                    push, part.BaseColour, part.Metallic, part.Roughness,
-                    alphaCutoff: StudioAlpha.CutoffFor(part.AlphaMode, part.AlphaCutoff),
-                    baseAlpha: part.BaseAlpha);
-            }
+            if (casterOnly) StudioPush.CasterCutout(push, cutoff, part.BaseAlpha);
+            else StudioPush.Material(push, part.BaseColour, part.Metallic, part.Roughness,
+                     alphaCutoff: cutoff, baseAlpha: part.BaseAlpha);
 
             // A FRESH texture array per part. Push payloads are copied at record time; texture
             // lists are still retained by reference, so a shared array would give every draw the
@@ -68,8 +65,11 @@ public sealed class ModelView : IStudioView
                 pipeline: draw.Pipeline,
                 indexCount: part.IndexCount,
                 uniforms: draw.Uniforms,
+                // <b>The caster binds an albedo too, at slot 0.</b> Its shader declares one so it
+                // can cut out, and every draw on a pipeline must bind every texture that shader
+                // declares — the ground included — or the draw reaches a set nothing filled.
                 textures: casterOnly
-                    ? draw.Textures
+                    ? new[] { new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 0) }
                     : new[] { draw.Textures[0], new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 1) },
                 pushConstants: push);
         }
@@ -211,9 +211,14 @@ public sealed class RigView : IStudioView
                 // it twice. The stride is the whole payload.
                 // Sixteen bytes, and no StudioPush.Matrix call — that writes sixty-four and would
                 // run straight off the end of this buffer.
+                // y and z carry the cutout, in components this vec4 was already pushing and
+                // ignoring — so a skinned caster that can discard is still sixteen bytes.
                 push = caster;
                 var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(push.AsSpan());
-                floats[0] = stride; floats[1] = 0f; floats[2] = 0f; floats[3] = 0f;
+                floats[0] = stride;
+                floats[1] = StudioAlpha.CutoffFor(part.AlphaMode, part.AlphaCutoff);
+                floats[2] = part.BaseAlpha;
+                floats[3] = 0f;
             }
             else
             {
@@ -244,7 +249,7 @@ public sealed class RigView : IStudioView
                 instanceCount: Instances,
                 uniforms: draw.Uniforms,
                 textures: casterOnly
-                    ? draw.Textures
+                    ? new[] { new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 0) }
                     : new[] { draw.Textures[0], new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 1) },
                 // <b>This part's skin, not the rig's first one.</b> Every part carries the index of
                 // the skin that poses it, and each skin has its own palette buffer — same pose,
@@ -276,10 +281,8 @@ public sealed class RigView : IStudioView
         {
             // No joint, so no joint world: the node's own world matrix and the body's placement.
             StudioPush.Matrix(part.WorldTransform * Placement, push);
-            if (!casterOnly)
-            {
-                StudioPush.Material(push, part.BaseColour, part.Metallic, part.Roughness);
-            }
+            if (casterOnly) StudioPush.CasterCutout(push, 0f, 1f);
+            else StudioPush.Material(push, part.BaseColour, part.Metallic, part.Roughness);
 
             draw.Scope.DrawIndexed(
                 vertexBuffer: part.Vertices,
@@ -288,7 +291,7 @@ public sealed class RigView : IStudioView
                 indexCount: part.IndexCount,
                 uniforms: draw.Uniforms,
                 textures: casterOnly
-                    ? draw.Textures
+                    ? new[] { new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 0) }
                     : new[] { draw.Textures[0], new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 1) },
                 pushConstants: push);
         }
@@ -342,10 +345,8 @@ public sealed class RigView : IStudioView
             var model = attachment.LocalTransform * worlds[attachment.JointIndex] * placement;
 
             StudioPush.Matrix(model, attachPush);
-            if (!casterOnly)
-            {
-                StudioPush.Material(attachPush, attachment.BaseColour, attachment.Metallic, attachment.Roughness);
-            }
+            if (casterOnly) StudioPush.CasterCutout(attachPush, 0f, 1f);
+            else StudioPush.Material(attachPush, attachment.BaseColour, attachment.Metallic, attachment.Roughness);
 
             draw.Scope.DrawIndexed(
                 vertexBuffer: attachment.Vertices,
@@ -354,7 +355,7 @@ public sealed class RigView : IStudioView
                 indexCount: attachment.IndexCount,
                 uniforms: draw.Uniforms,
                 textures: casterOnly
-                    ? draw.Textures
+                    ? new[] { new ShaderTextureBinding("uAlbedo", attachment.Albedo, Slot: 0) }
                     : new[] { draw.Textures[0], new ShaderTextureBinding("uAlbedo", attachment.Albedo, Slot: 1) },
                 pushConstants: attachPush);
         }

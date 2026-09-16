@@ -254,7 +254,7 @@ public sealed class StudioRenderer : IDisposable, ITunable
         // the bone palette's size a reflected fact rather than a constant restated in C# — the
         // hazard the probe exists to catch, in the one place the lab still had a hand-written number.
         var skinnedInterface = Reflect("studio_skinned.vert", "studio_lit.frag");
-        var skinnedShadowInterface = Reflect("studio_skinned_shadow.vert", "studio_shadow.frag");
+        var skinnedShadowInterface = Reflect("studio_skinned_shadow.vert", "studio_skinned_shadow.frag");
 
         // <b>A render graph, not hand-built surfaces.</b> The first cut of this used
         // CreateRenderSurface directly and failed on the first run: "RenderSurface needs at
@@ -347,7 +347,7 @@ public sealed class StudioRenderer : IDisposable, ITunable
         skinnedProgram = vk.CreateShaderProgramFromSpv(
             Spv("studio_skinned.vert"), Spv("studio_lit.frag"), skinnedInterface, "lab.skinned");
         skinnedShadowProgram = vk.CreateShaderProgramFromSpv(
-            Spv("studio_skinned_shadow.vert"), Spv("studio_shadow.frag"), skinnedShadowInterface, "lab.skinned.shadow");
+            Spv("studio_skinned_shadow.vert"), Spv("studio_skinned_shadow.frag"), skinnedShadowInterface, "lab.skinned.shadow");
 
 
         shadowPipeline = vk.CreatePipeline(new PipelineDescription(

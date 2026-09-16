@@ -241,10 +241,20 @@ in puts it — an implementation that ignored it would sit on top of the 0.4 row
 
 **Two things NOT built, both stated rather than discovered later.**
 
-*Cutout shadows.* At cutoff 1.1 the plane vanishes and its shadow does not. Casters push a matrix
-and nothing else, the shadow fragment stage is empty, and the skinned caster pushes 16 bytes with a
-documented hazard about writing past them — so this is a change to the caster push layout and every
-draw that feeds it, not a shader line. No asset in the tree has an alpha source, so nothing asks.
+*Cutout shadows — **BUILT**, after being deferred on the reasoning §7 exists to forbid.* The
+deferral said "no asset in the tree has an alpha source, so nothing asks", which measures our library
+rather than the engine; `Material_AlphaMask_03` asks, and it is a download.
+
+At cutoff 1.1 the plane vanished and its shadow stayed. Now the caster cuts out too: **54,269 pixels
+of that capture lift by a uniform +132**, which is a shadow of nothing disappearing.
+
+The static caster's push grows 64 → 80 for the cutoff and the material's alpha. **The skinned caster
+stays at 16** — they ride components of the vec4 it was already pushing and ignoring. The two casters
+push different blocks, so the skinned one needed its own fragment stage; a fragment shader reads
+whatever its vertex stage declares, and one shared frag cannot serve both layouts.
+
+**Opaque captures are byte-identical**, unlike the lit cutout: a depth-only pass resolves no colour,
+so losing early-Z there changes nothing about which fragment wins.
 
 *BLEND.* Blending is pipeline state and needs draw ordering to be correct at all. `core.glb` is the
 only asset in the tree with a real blend alpha. Ordering is a design question the stage has not
