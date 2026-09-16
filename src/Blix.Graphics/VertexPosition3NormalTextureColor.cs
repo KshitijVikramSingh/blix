@@ -13,14 +13,21 @@ namespace Blix.Graphics;
 /// draws.
 /// </para>
 /// <para>
-/// <b>Four bytes, not sixteen.</b> UByte4Norm, the same packing the ImGui vertex already uses.
-/// <b>This does discard levels and it was measured rather than waved away:</b> the kit authors
-/// COLOR_0 as float (21 primitives) and normalised ushort (12), never as bytes, and quantising
-/// CommonTree_1's trunk takes it from 152 distinct authored values to 82. That is the right trade
-/// here and only here — the channel is greyscale occlusion multiplied into albedo, where a 1/255
-/// step is not visible on any surface, and the alternative is 12 more bytes a vertex on exactly the
-/// meshes drawn thousands of times a frame. A channel carrying real colour would deserve the
-/// question again.
+/// <b>Four bytes, not sixteen, and the measurement says four is not a compromise.</b> UByte4Norm,
+/// the same packing the ImGui vertex already uses. The kit authors COLOR_0 as float (21 primitives)
+/// and normalised ushort (12), never as bytes, so this quantises — but across all 33 primitives and
+/// 93,121 vertices the worst error is <b>0.00196, exactly half of 1/255</b>, which is the floor for
+/// round-to-nearest at 8 bits rather than a shortfall against it. Distinct values do drop
+/// (CommonTree_1's trunk goes from 239 authored to 78), and that is the same fact stated the other
+/// way: the authored values sit closer together than 1/255. Below a step, on greyscale occlusion
+/// multiplied into albedo, against 12 more bytes a vertex on the meshes drawn most.
+/// </para>
+/// <para>
+/// <b>It is greyscale on every primitive in the kit</b> — the largest spread between R, G and B on
+/// any vertex is 0.0002, which is ushort round-off and not authored hue. So four bytes carry one
+/// meaningful one, and the only saving available is downward. Not taken: a single-byte attribute
+/// buys three bytes at the cost of an unaligned stride. A channel carrying real colour would deserve
+/// both questions again.
 /// </para>
 /// <para>
 /// <b>A separate type rather than a wider <see cref="VertexPosition3NormalTexture"/>.</b> Thirty

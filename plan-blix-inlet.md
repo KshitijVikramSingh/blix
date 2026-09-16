@@ -112,11 +112,19 @@ it would not build a shader permutation matrix, and it did not have to.
 Attachments carry colour *unconditionally* where static meshes opt in. Not an inconsistency: an
 attachment has exactly one consumer in the tree and it is the studio, where a static mesh has six.
 
-**Quantisation, stated because it is a real loss.** The kit authors `COLOR_0` as float (21
-primitives) and normalised ushort (12) — never as bytes. Packing to `UByte4Norm` takes the tree
-trunk from 152 distinct authored values to 82. Right here and only here: greyscale occlusion
-multiplied into albedo, where a 1/255 step is invisible and the alternative is 12 more bytes a
-vertex on the meshes drawn most. A channel carrying real colour would deserve the question again.
+**Quantisation — reopened on request, and the measurement closed it.** The kit authors `COLOR_0` as
+float (21 primitives) and normalised ushort (12), never as bytes, so `UByte4Norm` quantises. Across
+all 33 primitives and 93,121 vertices the worst error is **0.00196 — exactly half of 1/255**, the
+floor for round-to-nearest at 8 bits rather than a shortfall against it. The distinct-value drop
+(CommonTree_1's trunk: 239 authored → 78) is the same fact stated the other way round: the authored
+values sit closer together than one step. An earlier note here called that "a real loss"; it
+overstated the case, and this is the correction.
+
+**And it is greyscale on every primitive** — largest R/G/B spread on any vertex is 0.0002, which is
+ushort round-off, not hue. (Checked because a first pass with a 1e-4 threshold flagged 21 primitives
+as coloured; the threshold was tighter than the encoding noise.) So the four bytes carry one
+meaningful byte and the only move available is *downward*, not up — declined, because a single-byte
+attribute buys three bytes against an unaligned stride.
 
 Covered by **Test.Graphics section AZ** (16 assertions). Negative control run: reintroducing the
 drop fails the four AZ.2 value assertions and leaves the layout and identity claims green — the
