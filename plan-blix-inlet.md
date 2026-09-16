@@ -256,9 +256,27 @@ accessors load fine.
 bone influences per vertex, which is the one glTF gap here that produces a wrong result rather than
 a missing feature.
 
+**Three corpora, and they do different jobs.** Worth keeping straight, because reaching for the
+wrong one wastes the trip:
+
+| corpus | what it is for |
+|---|---|
+| **glTF-Sample-Assets** | realistic models and feature demos — "does this asset look right" |
+| **glTF-Asset-Generator** | systematic PERMUTATION MATRICES per feature, with a `Manifest.json`, per-group `README` tables, reference thumbnails, and validator results. Also **negative tests** (`Mesh_NoPosition`, `Mesh_PrimitiveRestart`) — assets that must be REFUSED |
+| **Cesium `Specs/Data/Models/glTF-2.0`** | engine-hardening oddities nothing else carries: `BoxInterleaved`, `BoxVertexColorsDracoRGB`, `BoxWeb3dQuantizedAttributes`, `MeshoptCubeTest`, `BoxTexturedKtx2Basis`, `BoxNoNormals`, `BoxInverted`, `BoxBackFaceCulling`, `BoxCutout` |
+
+**The generator immediately paid for itself.** `Mesh_PrimitiveVertexColor` is exactly the six
+permutations of `COLOR_0` — vec3/vec4 × float/ubyte-norm/ushort-norm — that the importer's comment
+CLAIMED `AsColorArray` collapses. All six now render byte-identically, with the control that makes
+that mean something: the image carries 415,625 strongly coloured pixels, so six identical *white*
+renders cannot pass. The vec3 cases are the ones worth the trip — their alpha must arrive as 1.0.
+
+That is the shape to reuse: the generator's groups come with a declared expected result, so "all N
+render the same" is a real assertion rather than a coincidence of everything being broken equally.
+
 **Not committed.** The models live outside the repo pending a decision on where they belong and on
 licensing — Khronos sample assets carry per-model licences (a mix of CC0 and CC-BY), so they need a
-`CREDITS.md` entry the way the poly.pizza assets do.
+`CREDITS.md` entry the way the poly.pizza assets do. The generator's output is Apache-2.0.
 
 ### I-F — the viewer can supply the colour the asset does not have
 

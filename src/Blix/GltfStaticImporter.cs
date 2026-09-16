@@ -305,8 +305,14 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         var tangents = includeTangents ? primitive.GetVertexAccessor("TANGENT")?.AsVector4Array() : null;
         // AsColorArray, not AsVector4Array: COLOR_0 is legally float, ushort-normalised or
         // byte-normalised, and vec3 as well as vec4. This accessor collapses all six spellings to
-        // 0..1 RGBA with alpha defaulted to opaque, which is the only reading that is correct for
-        // every one of them.
+        // 0..1 RGBA with alpha defaulted to opaque, which is the only reading correct for every one.
+        //
+        // <b>Verified rather than assumed.</b> glTF-Asset-Generator's Mesh_PrimitiveVertexColor is
+        // exactly those six permutations, one per file. All six render BYTE-IDENTICALLY through this
+        // path — and the control that makes that mean something: the render carries 415,625 strongly
+        // coloured pixels, so six identical WHITE images (which would also agree) cannot pass it.
+        // The vec3 cases are the ones worth the trip: their alpha has to arrive as 1.0, and a 0 would
+        // be invisible here and fatal the moment anything multiplied by it.
         var colours = includeColour ? primitive.GetVertexAccessor("COLOR_0")?.AsColorArray() : null;
 
         var vertexCount = positions.Count;
