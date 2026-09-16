@@ -13,7 +13,7 @@ namespace Blix;
 // + a `GltfMaterial` carrying baseColor/normal/metallic-roughness textures), a
 // `Skeleton` with hierarchy-order bones, and one `AnimationClip` per glTF animation
 // that touches the skin's joints. Collects every skinned-mesh node that references
-// the primary skin so body+hair+clothing splits import as one bundle.
+// every skin it declares, so body+hair+clothing splits import as one bundle.
 //
 // Current limits:
 // - One skin per file. Secondary skins are ignored.
@@ -51,21 +51,29 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
 
         var model = AssetImportException.Refusing(context.SourcePath, () => ModelRoot.Load(context.SourcePath));
 
-        // Pick the first node carrying both a mesh and a skin -- this becomes the
-        // "primary" skin every other skinned-mesh node must reference. glTF
-        // allows multiple top-level skinned meshes sharing one skeleton (the
-        // body+hair+clothing pattern in real character content); we collect all
-        // of them below.
-        Node? primarySkinNode = null;
+        // <b>Group every skinned mesh node by the skin that drives it. No skin is privileged.</b>
+        // This used to pick the first node carrying both a mesh and a skin, call its skin "primary",
+        // and require every other skinned node to match it — which made one skin special for no
+        // reason the format supports. A glTF skin is self-contained: its own joints, its own inverse
+        // binds, named by each node that uses it. So they are simply collected, in the order they
+        // are met, and the order carries no meaning beyond being stable.
+        var skipped = new List<GltfSkipped>();
+        var skinOrder = new List<Skin>();
+        var nodesBySkin = new Dictionary<Skin, List<Node>>();
         foreach (var node in model.LogicalNodes)
         {
-            if (node.Skin is not null && node.Mesh is not null)
+            if (node.Mesh is null || node.Skin is null) continue;
+            if (!nodesBySkin.TryGetValue(node.Skin, out var group))
             {
-                primarySkinNode = node;
-                break;
+                group = new List<Node>();
+                nodesBySkin[node.Skin] = group;
+                skinOrder.Add(node.Skin);
             }
+
+            group.Add(node);
         }
-        if (primarySkinNode is null)
+
+        if (skinOrder.Count == 0)
         {
             // <b>A refusal, not a fault.</b> An unskinned glTF is a perfectly good file that this
             // importer is the wrong one for — so it is the engine declining, and it says which
@@ -79,65 +87,29 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                 "load it as a static model instead (GltfStaticImporter)");
         }
 
-        var skin = primarySkinNode.Skin;
-        var (bones, oldToNew) = BuildSkeletonAndOrdering(skin);
-        var skeleton = new Skeleton(bones);
-
-        // Capture the primary skin node's ancestor-chain transform — most glTF
-        // characters sit under a parent node that applies an axis-orientation
-        // correction (Z-up → Y-up, etc.). We do NOT bake it into vertices: per
-        // the glTF skinning spec, the inverse-bind matrices map *mesh-local*
-        // vertices into joint-local space, so the shader's vertex input has to
-        // stay mesh-local or the skinning math reaches the wrong frame.
-        // Instead, we expose the matrix on GltfModel so the renderer composes
-        // it into the model matrix at draw time:
-        //    uModel = userTransform.ToMatrix() * meshNodeTransform
-        // F-016: engine row-vector form now matches SharpGLTF — no transpose.
-        var meshNodeTransform = primarySkinNode.WorldMatrix;
-
-        // Collect every skinned-mesh node that references the primary skin.
-        // The typical case is one node (CesiumMan, Fox); multi-mesh characters
-        // split body/hair/clothing across N nodes all driven by the same
-        // armature. Each contributes its own primitives to the final
-        // GltfModel.Primitives list with the same skeleton-ordering remap.
+        // <b>The shared-world-matrix rule, narrowed to where it is actually true.</b> It used to
+        // apply across the whole file, which held only while one skin was mandatory. Nodes driven by
+        // the SAME skin must still agree: they feed one palette and one model matrix, so a
+        // divergence there is genuinely unsupported. Nodes on DIFFERENT skins may sit anywhere, and
+        // in tank.glb they do — the two tracks are ±3.97 along Z from the hull.
         //
-        // All such nodes must share the primary node's WorldMatrix. Diverging
-        // transforms would require per-submesh meshNodeTransform handling --
-        // a much richer GPU path that's not justified by current content. If a
-        // file violates this, throw loudly so the import fails clearly instead
-        // of silently displaying the wrong thing.
-        var skinnedMeshNodes = new List<Node> { primarySkinNode };
-        var skipped = new List<GltfSkipped>();
-        foreach (var node in model.LogicalNodes)
+        // Each skin's mesh-node transform is its group's. It is NOT baked into vertices: per the
+        // glTF skinning spec the inverse binds map MESH-LOCAL vertices into joint space, so baking
+        // it would put the skinning maths in the wrong frame. The renderer composes it at draw time
+        //    uModel = userTransform * MeshNodeTransform
+        // F-016: engine row-vector form matches SharpGLTF, so no transpose.
+        foreach (var group in nodesBySkin.Values)
         {
-            if (ReferenceEquals(node, primarySkinNode)) continue;
-            if (node.Mesh is null) continue;
-
-            // <b>A bare `continue` used to live here, and it was the whole bug.</b> A mesh weighted
-            // to a second skin left no trace: the file arrived as a fraction of itself and every
-            // tool downstream agreed it was complete. tank.glb is eleven primitives across three
-            // skins, of which five were imported and six vanished without a word.
-            //
-            // Still skipped — reading more than one skin is a capability with real questions behind
-            // it, and tools/character_merge.py exists to avoid needing it — but skipped OUT LOUD.
-            if (!ReferenceEquals(node.Skin, skin))
+            var head = group[0];
+            foreach (var node in group)
             {
-                if (node.Skin is not null) skipped.Add(Describe(node, GltfSkipReason.SecondarySkin));
-                continue;
-            }
-
-            // Compare row-vector world matrices in SharpGLTF's native form -- no
-            // conversion needed since we're just checking equality, not consuming
-            // them.
-            if (node.WorldMatrix != primarySkinNode.WorldMatrix)
-            {
+                if (node.WorldMatrix == head.WorldMatrix) continue;
                 throw new InvalidOperationException(
-                    $"glTF '{context.SourcePath}' has multiple skinned-mesh nodes sharing one skin " +
-                    $"but with different world matrices. Mesh '{node.Mesh.Name}' transform diverges " +
-                    $"from primary '{primarySkinNode.Mesh!.Name}'. Per-submesh mesh-node transforms " +
-                    $"aren't supported.");
+                    $"glTF '{context.SourcePath}' has multiple skinned-mesh nodes sharing ONE skin " +
+                    $"but with different world matrices. Mesh '{node.Mesh!.Name}' transform diverges " +
+                    $"from '{head.Mesh!.Name}'. Per-submesh mesh-node transforms aren't supported; " +
+                    $"meshes at different places need different skins, which this importer does read.");
             }
-            skinnedMeshNodes.Add(node);
         }
 
         // Decode every primitive across every skinned-mesh node. Each gets its
@@ -152,21 +124,56 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         GltfShared.PreDecodeImages(model, textureCache, gltfDir);
         var materialCache = new Dictionary<int, GltfMaterial>();
         var primitivesList = new List<GltfPrimitive>();
-        foreach (var node in skinnedMeshNodes)
+        var bindings = new List<GltfSkinBinding>();
+        var remapsBySkin = new List<int[]>();
+        for (var s = 0; s < skinOrder.Count; s++)
         {
-            var mesh = node.Mesh!;
-            for (var i = 0; i < mesh.Primitives.Count; i++)
+            var owner = skinOrder[s];
+            var group = nodesBySkin[owner];
+
+            // <b>Each skin orders its own joints, so each gets its own remap — every one built the
+            // same way.</b> Reusing another skin's would be the subtle version of the bug this stage
+            // removes: the indices stay in range and name the wrong bones, which reads as bad
+            // weighting rather than a bad import. Verified by BB.2, whose negative control sends
+            // skin 1's vertices to 'bmid' instead of 'btip'.
+            var (skinBones, skinRemap) = BuildSkeletonAndOrdering(owner);
+            var skinRemaps = skinRemap;
+            bindings.Add(new GltfSkinBinding(new Skeleton(skinBones), group[0].WorldMatrix));
+            remapsBySkin.Add(skinRemaps);
+
+            foreach (var node in group)
             {
-                var prim = mesh.Primitives[i];
-                var meshName = $"{mesh.Name ?? "gltf_mesh"}.{i}";
-                var meshData = BuildMeshData(meshName, prim, oldToNew);
-                var material = GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache);
-                primitivesList.Add(new GltfPrimitive(meshData, material));
+                var mesh = node.Mesh!;
+                for (var i = 0; i < mesh.Primitives.Count; i++)
+                {
+                    var prim = mesh.Primitives[i];
+                    var meshName = $"{mesh.Name ?? "gltf_mesh"}.{i}";
+                    var meshData = BuildMeshData(meshName, prim, skinRemap);
+                    var material = GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache);
+                    primitivesList.Add(new GltfPrimitive(meshData, material, SkinIndex: s));
+                }
             }
         }
         var primitives = primitivesList.ToArray();
 
-        var attachments = CollectAttachments(model, skin, oldToNew, materialCache, textureCache);
+        // <b>Attachments resolve against whichever skin owns the joint they hang from.</b> They
+        // used to be collected against the one chosen skin, which silently meant "equipment only
+        // counts if it hangs off the skin we happened to pick first". An attachment composes
+        // local × jointWorld × placement, and joint WORLDS are the same for any skin sharing that
+        // joint node — the inverse binds, which do differ, are not involved. So the skin index only
+        // decides which skeleton's bone array the index refers to, and the first skin containing the
+        // joint is a correct and stable answer.
+        var attachments = new List<GltfAttachment>();
+        var claimed = new HashSet<string>(StringComparer.Ordinal);
+        for (var s = 0; s < skinOrder.Count; s++)
+        {
+            foreach (var found in CollectAttachments(
+                         model, skinOrder[s], remapsBySkin[s], materialCache, textureCache))
+            {
+                if (!claimed.Add(found.Name)) continue;
+                attachments.Add(found with { SkinIndex = s });
+            }
+        }
 
         // A static mesh under no joint is neither skinned geometry nor an attachment, so nothing
         // takes it. That is a defensible rule and was an invisible one: the four static primitives
@@ -191,13 +198,20 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                 string.Join(", ", skipped.Select(x => $"{x.Name} ({x.Explanation})")));
         }
 
-        // Filter animations to those that touch our skin's joints; an animation
-        // targeting only non-skin nodes (scene camera, light) becomes an empty clip
-        // and gets dropped.
+        // Filter animations to those that touch a joint; an animation targeting only non-skin nodes
+        // (scene camera, light) becomes an empty clip and gets dropped.
+        //
+        // <b>Clips are built against skin 0's joint ordering, and that is the one place multi-skin
+        // is not yet finished.</b> An AnimationClip's tracks are bone INDICES, which only mean
+        // something against a particular skeleton — so a file whose skins order their joints
+        // differently would need a clip per skin, and this produces one set. It is correct wherever
+        // the skins agree on joint order, which is the case that exists: tank.glb's three skins are
+        // identical in joints and in order, differing only in bind translation. Recorded rather than
+        // hidden — a file that breaks it is the thing that should force the next shape.
         var animations = new List<AnimationClip>();
         foreach (var anim in model.LogicalAnimations)
         {
-            var clip = BuildAnimationClip(anim, skin, oldToNew);
+            var clip = BuildAnimationClip(anim, skinOrder[0], remapsBySkin[0]);
             if (clip.Tracks.Length > 0)
             {
                 animations.Add(clip);
@@ -239,8 +253,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         }
 
         return new GltfModel(
-            primitives, skeleton, animations.ToArray(), meshNodeTransform, attachments, skipped.ToArray(),
-            ignored);
+            primitives, bindings[0].Skeleton, animations.ToArray(), bindings[0].MeshNodeTransform,
+            attachments.ToArray(), skipped.ToArray(), ignored, bindings.ToArray());
     }
 
     private static long SourceLength(string path)

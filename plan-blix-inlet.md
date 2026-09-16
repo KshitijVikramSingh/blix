@@ -404,9 +404,14 @@ narrow version would have had to avoid anyway.
 **Stages.** Additive rather than breaking, so the six single-skin assets and their consumers
 (RTSGame, Bulwark, Runner) are untouched at every step:
 
-- **I-D1** — the importer reads every skin. `GltfModel` gains `Skeletons`, `GltfPrimitive` gains a
-  skin index, and `Skeleton` stays as the primary so nothing downstream has to change to keep
-  working. Joint remapping is per skin, because each skin orders its own joints.
+- **I-D1 — DONE.** The importer reads every skin, and there is **no primary skin any more** —
+  nodes are grouped by the skin that drives them, every skeleton is built the same way, and the
+  order is only the order they were met in. `GltfModel.Skins` carries them, `GltfPrimitive` and
+  `GltfAttachment` say which one they belong to, and `Skeleton`/`MeshNodeTransform` remain as
+  shorthand for skin 0 because most rigs have exactly one. Joint remapping is per skin.
+  **Remaining edge, recorded not hidden:** animation clips are bone INDICES, so they are built
+  against skin 0's ordering. Correct wherever skins agree on joint order — which `tank.glb` does —
+  and the file that breaks it should force the next shape.
 - **I-D2** — the studio draws them: one palette set per skin, off one pose where the skins share
   joints. `RigView` already draws per part; this is per part with the right palette.
 - **I-D3** — what `GltfSkipped.SecondarySkin` becomes. It should stop firing for the ordinary case

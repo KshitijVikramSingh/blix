@@ -326,13 +326,6 @@ public static class Program
                     $"       {s.Name,-28} {s.Primitives} prim, {s.Vertices,6} verts — {s.Explanation}");
             }
 
-            if (skipped.Any(x => x.Reason == GltfSkipReason.SecondarySkin))
-            {
-                Console.WriteLine(
-                    "       a multi-skin character is merged offline by tools/character_merge.py;");
-                Console.WriteLine(
-                    "       this file has not been through it.");
-            }
 
             problems++;
         }

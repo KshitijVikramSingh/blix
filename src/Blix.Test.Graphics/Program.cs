@@ -3314,8 +3314,11 @@ static ShaderInterface MinimalShader() => new(new[]
         // downstream agreed it was whole. tank.glb is the real instance: eleven primitives across
         // three skins, of which five imported and six vanished.
         //
-        // Still skipped — reading more than one skin is a capability with design behind it, and
-        // tools/character_merge.py exists to avoid needing it — but skipped visibly.
+        // <b>Reporting it was the first fix; reading it is the second.</b> "Still skipped" stood
+        // here, on the reasoning that tools/character_merge.py existed to avoid needing multi-skin
+        // support — which was circular, since that script's one-skin rule exists to satisfy this
+        // importer. A glTF skin is self-contained, so N skins are N skeletons and nothing has to be
+        // reconciled between them. What is still skipped is a mesh under no joint at all.
         var second = new SharpGLTF.Scenes.NodeBuilder("second_root");
         var secondTip = second.CreateNode("second_tip");
 
@@ -3329,8 +3332,15 @@ static ShaderInterface MinimalShader() => new(new[]
         var twoSkinModel = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("ay/two"), twoSkinPath));
         var left = twoSkinModel.SkippedOrEmpty;
 
-        t.ExpectTrue("AY.7 a mesh on a second skin is reported, not silently dropped",
-            left.Any(x => x.Reason == GltfSkipReason.SecondarySkin));
+        // The contract this assertion used to carry was "a second skin is reported as skipped".
+        // It is now read, so the file arrives whole and the only thing left behind is the loose prop.
+        t.Expect("AY.7 a second skin is READ, so only the unparented prop is left behind",
+            left.Length == 1, $"got {left.Length}: {string.Join(", ", left.Select(x => x.Name))}");
+        t.Expect("AY.7 both skins are present",
+            twoSkinModel.SkinsOrEmpty.Length == 2, $"{twoSkinModel.SkinsOrEmpty.Length}");
+        t.ExpectTrue("AY.7 and primitives from both of them arrive",
+            twoSkinModel.Primitives.Any(p => p.SkinIndex == 0)
+            && twoSkinModel.Primitives.Any(p => p.SkinIndex == 1));
         t.ExpectTrue("AY.7 a static mesh under no joint is reported too",
             left.Any(x => x.Reason == GltfSkipReason.UnparentedStatic && x.Name == "loose_prop"));
         t.ExpectTrue("AY.7 each one carries what was lost with it",
@@ -3412,6 +3422,159 @@ static ShaderInterface MinimalShader() => new(new[]
 
         t.ExpectThrows<ArgumentException>("AY.6 a wrongly-sized world array is refused, not silently partial",
             () => skel.ComputeBonePalette(posed, palette, new Matrix4x4[skel.BoneCount + 1]));
+    }
+    finally
+    {
+        try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
+    }
+}
+
+// ============================================================================
+// Section BB — every skin the file declares is read.
+// ============================================================================
+//
+// <b>The importer used to pick the first skin it met and drop every node referencing another.</b>
+// The justification recorded in the plan was that tools/character_merge.py "exists specifically to
+// avoid needing this" — and that script's header says it exists to satisfy the importer's ONE-skin
+// rule. The workaround existed because of the limit and the limit was justified by the workaround.
+//
+// The format was never the obstacle. A glTF skin is self-contained — its own joint list, its own
+// inverse bind matrices — and every skinned node names the skin it uses. N skins are N skeletons
+// and there is nothing to reconcile between them. What was missing was a place to put them:
+// GltfModel had one Skeleton and GltfPrimitive had no way to say which skin it belonged to.
+//
+// The fault worth testing is not "are both meshes present" — it is that EACH SKIN ORDERS ITS OWN
+// JOINTS. Reusing the first skin's remap gives indices that are in range and name the wrong bones,
+// which is the failure that looks like bad weighting rather than a bad import.
+{
+    var temp = Path.Combine(Path.GetTempPath(), $"blix-bb-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(temp);
+    try
+    {
+        // Two skins over the same three joints, DECLARED IN DIFFERENT ORDERS, with every vertex
+        // weighted entirely to 'tip'. Both must end up naming 'tip' after import; if the second
+        // borrows the first's remap it names 'mid' instead — in range, plausible, wrong.
+        static SharpGLTF.Geometry.MeshBuilder<
+            SharpGLTF.Geometry.VertexTypes.VertexPosition,
+            SharpGLTF.Geometry.VertexTypes.VertexEmpty,
+            SharpGLTF.Geometry.VertexTypes.VertexJoints4> Weighted(string name, int jointSlot)
+        {
+            var m = new SharpGLTF.Geometry.MeshBuilder<
+                SharpGLTF.Geometry.VertexTypes.VertexPosition,
+                SharpGLTF.Geometry.VertexTypes.VertexEmpty,
+                SharpGLTF.Geometry.VertexTypes.VertexJoints4>(name);
+            var p = m.UsePrimitive(SharpGLTF.Materials.MaterialBuilder.CreateDefault());
+            var w = new SharpGLTF.Geometry.VertexTypes.VertexJoints4((jointSlot, 1f));
+            p.AddTriangle(
+                (new SharpGLTF.Geometry.VertexTypes.VertexPosition(0, 0, 0), default, w),
+                (new SharpGLTF.Geometry.VertexTypes.VertexPosition(1, 0, 0), default, w),
+                (new SharpGLTF.Geometry.VertexTypes.VertexPosition(0, 0, 1), default, w));
+            return m;
+        }
+
+        var rootA = new SharpGLTF.Scenes.NodeBuilder("root");
+        var midA = rootA.CreateNode("mid");
+        var tipA = midA.CreateNode("tip");
+
+        var rootB = new SharpGLTF.Scenes.NodeBuilder("broot");
+        var midB = rootB.CreateNode("bmid");
+        var tipB = midB.CreateNode("btip");
+
+        var scene = new SharpGLTF.Scenes.SceneBuilder();
+        // Skin A declares (tip, root, mid): 'tip' is joint 0 in this skin's own space.
+        scene.AddSkinnedMesh(Weighted("a", 0), Matrix4x4.Identity, tipA, rootA, midA);
+        // Skin B declares (broot, bmid, btip): 'btip' is joint 2 in its own space.
+        scene.AddSkinnedMesh(Weighted("b", 2), Matrix4x4.Identity, rootB, midB, tipB);
+
+        var path = Path.Combine(temp, "two-orders.glb");
+        var built = scene.ToGltf2();
+        built.SaveGLB(path);
+        // Also as text, so BB.3 below can move a node the builder will not let it move.
+        built.SaveGLTF(Path.Combine(temp, "two-orders.gltf"));
+
+        var m2 = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("bb/two"), path));
+
+        t.Expect("BB.1 both skins are read", m2.SkinsOrEmpty.Length == 2, $"{m2.SkinsOrEmpty.Length}");
+        t.Expect("BB.1 and every primitive says which skin drives it",
+            m2.Primitives.Select(p => p.SkinIndex).Distinct().OrderBy(x => x).SequenceEqual(new[] { 0, 1 }),
+            string.Join(",", m2.Primitives.Select(p => p.SkinIndex)));
+
+        // Bone indices live at float slot 8 of the skinned vertex (pos 3, normal 3, uv 2).
+        static int FirstBoneIndex(MeshData mesh)
+        {
+            var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(
+                mesh.VertexBytes.AsSpan(0, mesh.Layout.Stride));
+            return (int)floats[8];
+        }
+
+        // ── BB.2 THE ONE THAT MATTERS ───────────────────────────────────────
+        //
+        // Each skeleton is sorted topologically, so 'tip'/'btip' is bone 2 in BOTH regardless of the
+        // order its skin declared them. Sharing skin A's remap sends skin B's raw index 2 to bone 1.
+        for (var i = 0; i < m2.Primitives.Length; i++)
+        {
+            var prim = m2.Primitives[i];
+            var skel = m2.SkinsOrEmpty[prim.SkinIndex].Skeleton;
+            var bone = FirstBoneIndex(prim.Mesh);
+            var named = (uint)bone < (uint)skel.BoneCount ? skel.Bones[bone].Name : "(out of range)";
+            t.ExpectTrue(
+                $"BB.2 skin {prim.SkinIndex}'s vertices name its own leaf joint, not another skin's bone "
+                + $"(bone {bone} = '{named}')",
+                named is "tip" or "btip");
+        }
+
+        // ── BB.3 each skin keeps its own frame ──────────────────────────────
+        //
+        // tank.glb is why: its two track meshes sit ±3.97 along Z from the hull, and each skin's
+        // inverse binds encode that same offset (0.0397 in the other space, the pair differing by
+        // exactly the 0.01 scale on the node). One shared mesh-node transform lands a track a fifth
+        // of the tank away — wrong in a way that reads as a physics bug rather than an import one.
+        //
+        // Built by editing the JSON because SceneBuilder normalises a skinned mesh node to identity:
+        // the world transform passed to AddSkinnedMesh does not survive into the node, so the
+        // condition cannot be expressed through that API at all. The first draft of this test tried
+        // and asserted <0,0,0> against <0,0,0>, which is a test that could only pass once it was
+        // weakened — so the fixture moves the node directly instead.
+        var framePath = Path.Combine(temp, "two-frames.gltf");
+        {
+            var doc = System.Text.Json.Nodes.JsonNode.Parse(
+                File.ReadAllText(Path.Combine(temp, "two-orders.gltf")))!;
+            var nodes = doc["nodes"]!.AsArray();
+            var skinned = nodes.Where(n => n!["mesh"] is not null && n["skin"] is not null).ToList();
+            // Move the SECOND skinned mesh node. The first stays put, so any difference measured
+            // below is this displacement and not a shared drift.
+            skinned[1]!["translation"] = new System.Text.Json.Nodes.JsonArray(0, 0, 4.0);
+            File.WriteAllText(framePath, doc.ToJsonString());
+        }
+
+        var m3 = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("bb/frames"), framePath));
+        t.Expect("BB.3 the displaced file still yields two skins",
+            m3.SkinsOrEmpty.Length == 2, $"{m3.SkinsOrEmpty.Length}");
+        if (m3.SkinsOrEmpty.Length == 2)
+        {
+            var a = m3.SkinsOrEmpty[0].MeshNodeTransform.Translation;
+            var b = m3.SkinsOrEmpty[1].MeshNodeTransform.Translation;
+            t.ExpectTrue($"BB.3 each skin carries its OWN frame ({a} vs {b})",
+                (a - b).Length() > 3.5f);
+        }
+
+        // ── BB.4 CONTROL: one skin is untouched ─────────────────────────────
+        //
+        // The whole change is additive or it is not. Six of the seven rigged assets in this tree have
+        // one skin, and every consumer of them reads Skeleton and MeshNodeTransform directly.
+        var one = new SharpGLTF.Scenes.SceneBuilder();
+        one.AddSkinnedMesh(Weighted("solo", 0), Matrix4x4.Identity, tipA, rootA, midA);
+        var onePath = Path.Combine(temp, "one-skin.glb");
+        one.ToGltf2().SaveGLB(onePath);
+
+        var m1 = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("bb/one"), onePath));
+        t.Expect("BB.4 CONTROL a single-skin file reports exactly one skin",
+            m1.SkinsOrEmpty.Length == 1, $"{m1.SkinsOrEmpty.Length}");
+        t.ExpectTrue("BB.4 CONTROL its primitives all sit on skin 0",
+            m1.Primitives.All(p => p.SkinIndex == 0));
+        t.ExpectTrue("BB.4 CONTROL and the singular Skeleton still means skin 0",
+            ReferenceEquals(m1.SkinsOrEmpty[0].Skeleton, m1.Skeleton)
+            || m1.SkinsOrEmpty[0].Skeleton.BoneCount == m1.Skeleton.BoneCount);
     }
     finally
     {

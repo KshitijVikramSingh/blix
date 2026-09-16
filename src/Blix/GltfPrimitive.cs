@@ -11,4 +11,8 @@ namespace Blix;
 // substitute their default (white-tinted skin material in the demo).
 public sealed record GltfPrimitive(
     MeshData Mesh,
-    GltfMaterial? Material);
+    GltfMaterial? Material,
+    // Which of GltfModel.Skins drives this primitive. 0 for every static import and for every
+    // single-skin rig, which is why it defaults -- a primitive that never knew its skin was the
+    // reason the importer had to choose one skin and discard the rest.
+    int SkinIndex = 0);

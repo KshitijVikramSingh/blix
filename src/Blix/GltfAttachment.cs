@@ -44,4 +44,12 @@ public sealed record GltfAttachment(
     string JointName,
     int JointIndex,
     Matrix4x4 LocalTransform,
-    GltfPrimitive[] Primitives);
+    GltfPrimitive[] Primitives,
+    /// <summary>Which of <c>GltfModel.Skins</c> the <see cref="JointIndex"/> counts against.</summary>
+    /// <remarks>
+    /// A bone index means nothing without the skeleton it indexes, and a file may declare several.
+    /// Joint WORLDS are shared by any skin using the same joint node — the inverse binds, which do
+    /// differ between skins, play no part in placing an attachment — so this selects the bone array
+    /// and nothing about the transform.
+    /// </remarks>
+    int SkinIndex = 0);
