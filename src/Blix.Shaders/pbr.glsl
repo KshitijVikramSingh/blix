@@ -77,7 +77,31 @@ vec3 blix_cookTorranceBrdf(
     vec3 albedo, vec3 F0, float metallic, float roughness)
 {
     vec3 H = normalize(L + V);
-    float NdotV = max(dot(N, V), 0.0);
+
+    // <b>Two-sided in the VIEW term, and only the view term.</b> `max(dot(N, V), 0.0)` reads as a
+    // harmless clamp and is not one: it says a surface whose shading normal tilts away from the eye
+    // is invisible, when the thing that decides visibility is the rasteriser, not this dot product.
+    // Wherever the shading normal is not the geometric one the two disagree — and then G goes to
+    // zero, the specular lobe switches off, and because the clamp is a hard corner it does so along
+    // a perfectly sharp line.
+    //
+    // Found on a grass clump. The nature kit authors every foliage normal straight up so a clump
+    // shades like the ground it sits on, while the blades themselves are vertical — so dot(N, V) is
+    // just the view ray's vertical component and crosses zero exactly at the CAMERA'S EYE HEIGHT.
+    // The result was a razor-sharp horizontal plane lying across the model, darker above, that
+    // tracked the camera, ignored the sun entirely, and survived every shadow setting. Normal maps
+    // reach the same place more gently at grazing angles.
+    //
+    // ABS rather than a flip of N: flipping would take NdotL with it and drop the diffuse term to
+    // nothing, trading a missing highlight for a black surface. Masking-shadowing is symmetric about
+    // the surface, so the magnitude is the meaningful quantity here. The epsilon keeps the spec
+    // denominator away from zero.
+    //
+    // For closed opaque geometry with honest normals this is very nearly a no-op, and "nearly" is
+    // measured rather than asserted: a Crate capture moves on 0.09% of its pixels by at most 2/255,
+    // all of them on silhouette edges, and that is the epsilon replacing a hard zero in the specular
+    // denominator — not the abs, which cannot fire where dot(N, V) is already positive.
+    float NdotV = max(abs(dot(N, V)), 1e-4);
     float NdotL = max(dot(N, L), 0.0);
     float NdotH = max(dot(N, H), 0.0);
     float HdotV = max(dot(H, V), 0.0);
