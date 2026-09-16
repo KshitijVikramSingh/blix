@@ -54,15 +54,22 @@ public sealed class StudioLook : ITunable
     /// <summary>How much of the environment reaches what the sun does not.</summary>
     /// <remarks>
     /// <b>It used to be described as a "flat stand-in for image-based lighting", and now it scales
-    /// the real thing.</b> The meaning a caller sees is unchanged — how strong the fill is — which
-    /// is why the number did not have to move when IBL arrived underneath it.
+    /// the real thing.</b> The meaning a caller sees is unchanged — how strong the fill is — so the
+    /// knob did not have to move when IBL arrived underneath it. The DEFAULT did.
+    /// <para>
+    /// 0.06 was tuned when the fill was flat and its whole job was stopping a shadowed face going
+    /// black; any more than that and a featureless wash sat on everything. A directional fill earns
+    /// more, and at 0.06 it earned nothing visible — IBL on and off was a seam you had to look for.
+    /// 0.30 is where the shaded side of a face reads without the key light losing its authority,
+    /// judged on the Rogue at Walking_A 0.35s against 0.06 and 0.35.
+    /// </para>
     /// <para>
     /// Zero is a legitimate inspection mode rather than a broken one: flattening the fill is how a
     /// silhouette becomes readable, and how you find out whether a shape is being carried by the key
     /// light or by the environment.
     /// </para>
     /// </remarks>
-    [Tune(0, 0.5f, Group = "sun")] public float AmbientStrength { get; set; } = 0.06f;
+    [Tune(0, 0.5f, Group = "sun")] public float AmbientStrength { get; set; } = 0.30f;
 
     /// <summary>Half-width of the sun's orthographic box, in metres.</summary>
     /// <remarks>
@@ -70,6 +77,39 @@ public sealed class StudioLook : ITunable
     /// a few texels of shadow map, too narrow and a large one is cut off at the edge of the light.
     /// </remarks>
     [Tune(2, 40, Group = "shadow")] public float ShadowExtent { get; set; } = 9f;
+
+    /// <summary>How far from the camera shadows are cast, in metres — the last cascade's far bound.</summary>
+    /// <remarks>
+    /// <b>A distance, where <see cref="ShadowExtent"/> is a box half-width.</b> They are not the same
+    /// quantity and reusing the old one here would have been wrong in an unobvious way: the camera
+    /// sits 11 m from the subject by default, so a 9 m range cuts the shadow off in FRONT of the
+    /// thing being looked at. 30 m covers the stage's 12 m ground from the far side of the orbit.
+    /// <para>
+    /// <see cref="ShadowExtent"/> and <see cref="StudioRenderer.SunViewProjection"/> are the
+    /// single-box path this supersedes on this stage. They still work and are still flagged; whether
+    /// they should survive is a conversation, not a deletion.
+    /// </para>
+    /// </remarks>
+    [Tune(5, 120, Group = "shadow")] public float ShadowDistance { get; set; } = 30f;
+
+    /// <summary>How the three cascades divide the range: 0 splits evenly, 1 logarithmically.</summary>
+    /// <remarks>
+    /// <b>0.85 rather than the usual 0.7, because this stage's subject is small and close.</b> The
+    /// textbook value assumes a camera standing among what it looks at, with real distance to spend.
+    /// Here the whole subject is a few metres across, so a near cascade sized by a uniform split is
+    /// mostly air — pushing toward logarithmic spends the first cascade on the thing you are actually
+    /// looking at, which is where a contact shadow lives.
+    /// </remarks>
+    [Tune(0, 1, Group = "shadow")] public float CascadeSplitLambda { get; set; } = 0.85f;
+
+    /// <summary>Paint each cascade a flat colour instead of shading. Magenta = past the last one.</summary>
+    /// <remarks>
+    /// <b>The one instrument that says whether three passes are doing three cascades' work.</b> A
+    /// scene whose near cascade never appears is paying three caster redraws for one cascade — a
+    /// fault with no symptom in the picture, because a correct-looking shadow from the wrong cascade
+    /// looks like a shadow.
+    /// </remarks>
+    [Tune(Group = "shadow")] public bool ShowCascades { get; set; }
 
     /// <summary>Whether the floor is drawn. Off is how you look at a thing against nothing.</summary>
     /// <remarks>
@@ -127,6 +167,20 @@ public sealed class StudioLook : ITunable
     }
 
     private int envMipCount = 5;
+
+    /// <summary>Side of each cascade's shadow map, in texels.</summary>
+    /// <remarks>
+    /// Structural: the depth targets are sized when the graph is built. Three maps at this size,
+    /// not one — so raising it costs three times what it looks like it costs.
+    /// </remarks>
+    [Tune(256, 4096, Group = "shadow", Structural = true)]
+    public int ShadowMapSize
+    {
+        get => shadowMapSize;
+        set { Seal(nameof(ShadowMapSize), shadowMapSize != value); shadowMapSize = value; }
+    }
+
+    private int shadowMapSize = 2048;
 
     /// <summary>Edge of the split-sum BRDF lookup table.</summary>
     /// <remarks>

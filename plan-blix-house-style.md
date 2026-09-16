@@ -198,6 +198,88 @@ That is a house-style decision and it is the user's, not a bug.
 changed, all 23 modes still behaving** — negatives still refuse, the self-test still passes, the
 lockstep control still reports one distinct pose — and a second run is byte-identical again.
 
+## Stage 3 — cascaded shadows — DONE
+
+Three cascades, and **not** the ones the textbook describes.
+
+### What the engine gained
+
+- `GraphicsMatrices.FrustumSliceCorners` / `FitCascadeViewProjection` / `CascadeSplits` — the
+  frustum-slice fit (bounding sphere, ceiling, texel-snapped **on the light's own axes**) and the
+  practical log/uniform split blend. Lifted from the algorithm RTSGame proved, which still carries
+  its own copy: converting it is a job of its own and not one to do while it is working.
+- `Blix.Shaders/shadow.glsl` gained `blix_sun_shadow_cascaded`, `blix_cascade_contains` and
+  `blix_cascade_tint`. **Selection only** — the sampling is the existing `blix_sun_shadow_soft`.
+  There are already three PCF implementations in this tree; the way to stop there being a fourth is
+  for the cascade layer not to need one.
+
+Three cascades, fixed. That is portability, not preference: indexing a `sampler2D` array at a
+computed index needs `shaderSampledImageArrayDynamicIndexing`, which is not guaranteed, so every
+implementation that works everywhere branches on a constant index. Making the count a `#define`
+variant would make it the first axis of a permutation matrix, for a number nobody has wanted to
+change.
+
+### The textbook fit was measurably wrong here, and the numbers said so
+
+Fitted to view-frustum slices — what every CSM tutorial does — the subject landed in a cascade
+**coarser than the single box the cascades replaced**, at every split ratio tried:
+
+| λ | cascade holding the subject | mm/texel | vs the old 18 m box (8.8) |
+| --- | --- | --- | --- |
+| 0 | 1 | 24.4 | 2.8x worse |
+| 0.3 | 1 | 19.5 | 2.2x worse |
+| 0.5 | 1 | 15.6 | 1.8x worse |
+| 0.85 | 2 | 36.1 | 4.1x worse |
+
+The cause is structural. A frustum-slice fit has to bound the **whole width of the frustum** at that
+depth, and this stage's camera orbits its subject from eleven metres out, where the frustum is about
+twenty metres wide. The old box was 18 m because it was fitted around the ORIGIN. RTSGame wrote this
+down from the other direction — *"the cascades split this, not the frustum, and the difference is
+two wasted cascades... it assumes a camera standing among the things it looks at"* — and I walked
+into it one stage over.
+
+**So the boxes are concentric on the stage's content and the shader selects by CONTAINMENT.** A
+turntable knows where its content is; a fit that ignores that spends resolution on the space between
+the camera and the thing.
+
+| | box | mm/texel |
+| --- | --- | --- |
+| cascade 0 (the subject) | 10.2 m | **4.97** |
+| cascade 1 | 17.7 m | 8.63 |
+| cascade 2 | 30.0 m | 14.65 |
+
+Against the single 18 m box at 8.8 mm/texel: the subject is **1.8x sharper** and shadow coverage
+grows from an 18 m box to a 30 m radius. Cost: the casters are drawn three times. Affordable on a
+stage that draws a handful of objects, and the first thing to look at if it ever gets a scene.
+
+### One bug the measurement caught that the picture did not
+
+The first fit clamped the far plane to `ShadowDistance` for the SPLITS but lerped toward frustum
+corners at the camera's own 120 m far plane — so a cascade whose far bound was 2.1 m was fitted to
+geometry 8 m out. Box 24 m, 11.7 mm/texel, worse than what it replaced. **Nothing in the picture
+said so**: the shadows were all present and merely soft. That is the entire reason the
+metres-per-texel line is printed into the capture log the baseline hashes.
+
+### The instrument that says the cost is being paid for
+
+`--show-cascades` paints each cascade flat — red, green, blue, magenta for "no cascade contained
+it". It is the only thing that answers whether three passes are doing three cascades' work, because
+a correct-looking shadow from the wrong cascade looks like a shadow. Measured on the default
+framing: 43.7% cascade 0, 6.6% cascade 1, 2.4% cascade 2, **no magenta** — concentric rings, subject
+wholly inside the sharp one.
+
+### Left alone, deliberately
+
+`ShadowExtent` and `StudioRenderer.SunViewProjection` are the single-box path this supersedes on this
+stage. They still work and are still flagged. Whether they should survive is a conversation, not a
+deletion — the standing rule.
+
+### Verified
+
+`Blix.Test.Graphics` 649/649 · `Blix.Test.Diagnostics` 235/235 · `Blix.Test.Physics2D` 43/43 ·
+`Blix.Test.Studio` 15/15. Validation clean. Baseline re-recorded, second run byte-identical.
+`AmbientStrength` also moved 0.06 → 0.30 in the same pass, now that the fill carries direction.
+
 ## Then
 
 **Cascades** — the shadow is one 9 m orthographic box, the most visible quality gap on the thing you

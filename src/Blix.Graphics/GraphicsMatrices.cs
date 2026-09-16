@@ -294,6 +294,122 @@ public static class GraphicsMatrices
         return view * ortho;
     }
 
+    /// <summary>
+    /// The eight world-space corners of one slice of a perspective view frustum.
+    /// </summary>
+    /// <remarks>
+    /// Near four first, then far four, each as (−right −up), (+right −up), (−right +up), (+right +up).
+    /// Split out from the fit below because a caller that already has its corners — a clipped frustum,
+    /// a band of ground the camera can actually see — should be able to fit a cascade to those rather
+    /// than to the ones this would compute.
+    /// </remarks>
+    public static void FrustumSliceCorners(
+        Vector3 eye, Vector3 forward, Vector3 right, Vector3 up,
+        float verticalFieldOfView, float aspect, float near, float far, Span<Vector3> corners)
+    {
+        if (corners.Length < 8) throw new ArgumentException("needs room for eight corners", nameof(corners));
+
+        var tall = MathF.Tan(verticalFieldOfView * 0.5f);
+        var wide = tall * aspect;
+        var at = 0;
+        for (var slice = 0; slice < 2; slice++)
+        {
+            var away = slice == 0 ? near : far;
+            var middle = eye + forward * away;
+            var h = away * tall;
+            var w = away * wide;
+            corners[at++] = middle - right * w - up * h;
+            corners[at++] = middle + right * w - up * h;
+            corners[at++] = middle - right * w + up * h;
+            corners[at++] = middle + right * w + up * h;
+        }
+    }
+
+    /// <summary>
+    /// Fits one shadow cascade's view-projection around a slice of the camera's frustum.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A bounding SPHERE, not a box.</b> A box fitted to the corners changes size as the camera
+    /// turns, and a shadow map whose world extent changes every frame crawls. The sphere through the
+    /// same corners is rotation-invariant, so the box derived from it is too — it costs some texels
+    /// and buys a still image.
+    /// </para>
+    /// <para>
+    /// <b>Snapped on the LIGHT's axes, which is the grid the texels are actually on.</b> Snapping the
+    /// centre in world XZ — the obvious version — snaps to a grid the texels are not aligned with
+    /// unless the sun happens to be axis-aligned, so the shimmer it is meant to stop only partly
+    /// stops. Learned in RTSGame, which still carries its own copy of this: converting it is a job
+    /// of its own and not one to do while it is working.
+    /// </para>
+    /// </remarks>
+    /// <param name="padding">
+    /// Extra metres on the box side, for casters standing OUTSIDE the slice that still shadow into
+    /// it. Zero is wrong in any scene with tall geometry: the fit only sees what the camera sees.
+    /// </param>
+    /// <param name="side">The box's width in metres, so a caller can report metres per texel.</param>
+    public static Matrix4x4 FitCascadeViewProjection(
+        Vector3 sunDirToward, ReadOnlySpan<Vector3> corners, int mapSize,
+        float padding, float sunDistance, out float side, out Vector3 center)
+    {
+        if (corners.Length < 8) throw new ArgumentException("needs eight corners", nameof(corners));
+        if (mapSize <= 0) throw new ArgumentOutOfRangeException(nameof(mapSize));
+
+        center = Vector3.Zero;
+        for (var i = 0; i < 8; i++) center += corners[i];
+        center /= 8f;
+
+        var radius = 0f;
+        for (var i = 0; i < 8; i++) radius = MathF.Max(radius, Vector3.Distance(corners[i], center));
+
+        // Ceiling so a camera creeping forward does not resize the box by a fraction of a texel
+        // every frame, which is the same crawl the snapping below exists to stop.
+        radius = MathF.Ceiling(radius);
+        side = radius * 2f + padding;
+
+        var toLight = Vector3.Normalize(sunDirToward);
+        var up = MathF.Abs(toLight.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
+        var forward = -toLight;
+        var axisRight = Vector3.Normalize(Vector3.Cross(up, forward));
+        var axisUp = Vector3.Cross(forward, axisRight);
+
+        var texel = side / mapSize;
+        center =
+            axisRight * (MathF.Round(Vector3.Dot(center, axisRight) / texel) * texel) +
+            axisUp * (MathF.Round(Vector3.Dot(center, axisUp) / texel) * texel) +
+            forward * Vector3.Dot(center, forward);
+
+        var away = radius + sunDistance;
+        return SunShadowViewProjection(sunDirToward, center, away, side, 0.05f, away * 2f + side);
+    }
+
+    /// <summary>
+    /// Practical split scheme: the distances at which one cascade hands over to the next.
+    /// </summary>
+    /// <remarks>
+    /// Blends the logarithmic distribution (which matches how perspective compresses distance, and
+    /// starves the far cascades) with the uniform one (which wastes the near cascade on air).
+    /// <paramref name="lambda"/> 0 is fully uniform, 1 fully logarithmic; ~0.7 is the usual answer.
+    /// Writes one far bound per cascade, ending at <paramref name="far"/>.
+    /// </remarks>
+    public static void CascadeSplits(float near, float far, float lambda, Span<float> splits)
+    {
+        var n = splits.Length;
+        if (n == 0) return;
+        near = MathF.Max(near, 0.001f);
+        lambda = Math.Clamp(lambda, 0f, 1f);
+
+        for (var i = 0; i < n; i++)
+        {
+            var t = (i + 1) / (float)n;
+            var log = near * MathF.Pow(far / near, t);
+            var uniform = near + (far - near) * t;
+            splits[i] = uniform + lambda * (log - uniform);
+        }
+
+        splits[n - 1] = far;
+    }
+
     private static Matrix4x4 CreateTranslation(Vector3 position)
     {
         return new Matrix4x4(

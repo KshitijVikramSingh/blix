@@ -10,8 +10,23 @@
 
 layout(set = 0, binding = 0) uniform Frame {
     mat4 uViewProjection;
-    mat4 uSunViewProjection;
+    // One fitted light view-projection per cascade, near to far.
+    mat4 uCascadeVP0;
+    mat4 uCascadeVP1;
+    mat4 uCascadeVP2;
     vec4 uCameraPosition;
+    // xyz = each cascade's far bound along the view, in metres. w = paint the cascades instead of
+    // shading, which is the only instrument that says whether three passes are doing three
+    // cascades' work.
+    vec4 uCascadeSplits;
+    // xyz = one texel as a fraction of each cascade's own map. Per cascade because the PCF radius
+    // is measured in texels and the three maps need not be the same size.
+    vec4 uCascadeTexels;
+    // The camera's unit forward. Cascade selection is by view DEPTH — dot(world - eye, forward) —
+    // not by distance to the eye: at equal depth a fragment at the edge of a wide frustum is
+    // further away than one in the centre, and picking by radius puts them in different cascades,
+    // which shows as an arc across the picture.
+    vec4 uCameraForward;
     vec4 uSunDirection;
     vec4 uSunColour;
     // x = prefilter mip ceiling (mip count - 1), FROM THE BAKE — see ibl.glsl for why this is a
@@ -35,8 +50,10 @@ layout(set = 0, binding = 0) uniform Frame {
 // the layout had it, the model draws passed it — but the lab's own GROUND goes through this
 // same pipeline and was still passing only the shadow map. Every draw on a pipeline must bind
 // every texture its shader declares, including the ones it does not care about.
-layout(set = 1, binding = 0) uniform sampler2D uSunShadowMap;
+layout(set = 1, binding = 0) uniform sampler2D uCascade0;
 layout(set = 1, binding = 1) uniform sampler2D uAlbedo;
+layout(set = 1, binding = 5) uniform sampler2D uCascade1;
+layout(set = 1, binding = 6) uniform sampler2D uCascade2;
 
 // The environment, baked once from the house style's own sun — see StudioLook.
 //
@@ -88,11 +105,18 @@ void main()
 
     float ndotl = max(dot(N, L), 0.0);
 
-    // Push the sample point off the surface along the normal before projecting into
-    // light space — the engine's own remedy for shadow acne, sized in shadow texels.
-    vec3 biased = blix_shadow_normal_offset(vWorld, N, ndotl, 4.0 / 2048.0, 1.5);
-    vec4 lightSpace = uSunViewProjection * vec4(biased, 1.0);
-    float shadow = blix_sun_shadow(uSunShadowMap, lightSpace, ndotl);
+    // Push the sample point off the surface along the normal before projecting into light space —
+    // the engine's own remedy for shadow acne, sized in shadow texels. Sized from the NEAR cascade,
+    // which is the tightest box and therefore the smallest offset that works; using the far
+    // cascade's texel here would peter-pan everything close to the camera.
+    vec3 biased = blix_shadow_normal_offset(vWorld, N, ndotl, uCascadeTexels.x * 4.0, 1.5);
+    int cascade;
+    float shadow = blix_sun_shadow_cascaded(
+        uCascade0, uCascade1, uCascade2,
+        uCascadeVP0, uCascadeVP1, uCascadeVP2,
+        uCascadeTexels.xyz,
+        biased, ndotl, 1.5, gl_FragCoord.xy,
+        cascade);
 
     float metallic = clamp(uMaterial.x, 0.0, 1.0);
     float roughness = clamp(uMaterial.y, 0.04, 1.0);
@@ -150,5 +174,13 @@ void main()
     // texture's, the material's baseColorFactor.a and the vertex colour's — the same three the
     // cutout tests, because glTF says alpha is all three whatever the mode does with it. On an
     // opaque pipeline blending is off and this channel is ignored.
-    outColour = vec4(direct + ambient, texture(uAlbedo, uvAlbedo).a * uBaseColour.a * vColour.a);
+    vec3 lit = direct + ambient;
+
+    // <b>The cascade tint replaces the shading rather than tinting it.</b> A tint multiplied into a
+    // shaded picture is still mostly the picture, and the question this answers — which cascade
+    // shaded this pixel — needs a flat answer. Shadow is kept as a brightness so the boundaries
+    // stay visible inside each band.
+    if (uCascadeTexels.w > 0.5) lit = blix_cascade_tint(cascade) * mix(0.35, 1.0, shadow);
+
+    outColour = vec4(lit, texture(uAlbedo, uvAlbedo).a * uBaseColour.a * vColour.a);
 }

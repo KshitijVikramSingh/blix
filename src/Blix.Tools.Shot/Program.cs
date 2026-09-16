@@ -157,6 +157,8 @@ public static class Program
             Console.WriteLine($"stage self-test: the extension pass recorded {loop.ExtensionRecords} frame(s)");
         }
 
+        loop.ReportCascades();
+
         if (loop.Written is { } path)
         {
             Console.WriteLine($"wrote {path}");
@@ -221,6 +223,21 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private int extensionRecords;
 
     internal int ExtensionRecords => extensionRecords;
+
+    private bool cascadeReport;
+
+    /// <summary>Each cascade's box and what one texel of it measures, once the fit has run.</summary>
+    internal void ReportCascades()
+    {
+        if (!cascadeReport) return;
+        for (var c = 0; c < StudioRenderer.CascadeCount; c++)
+        {
+            var side = renderer.CascadeSideMetres[c];
+            Console.WriteLine(
+                $"cascade {c}: to {renderer.CascadeSplits[c]:0.0} m, box {side:0.0} m, " +
+                $"{side / StudioRenderer.ShadowMapSize * 1000f:0.00} mm/texel");
+        }
+    }
 
     /// <summary>
     /// Rung four, exercised: a pass this tool adds to the stage, and proof that it ran.
@@ -368,6 +385,11 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // The environment, reported. It lands in the capture's log, which is half of what the lab
         // baseline hashes — so the house style's environment state is part of what a regression diff
         // shows, rather than something you have to go and ask about.
+        // Cascade geometry, reported into the log the baseline hashes: a shadow's resolution is the
+        // number that decides whether a contact shadow reads, and it is invisible in a picture until
+        // it is too coarse.
+        cascadeReport = true;
+
         Console.WriteLine(renderer.ImageBasedLightingActive
             ? $"environment: procedural probe from the stage sun, {renderer.BakeMilliseconds:0.0} ms"
             : "environment: OFF — flat ambient stands in for the probe");

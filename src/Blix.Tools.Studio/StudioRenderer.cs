@@ -38,6 +38,9 @@ public sealed class StudioRenderer : IDisposable
     /// <summary>Square shadow map, matching the texel size the lit shader offsets by.</summary>
     public const int ShadowMapSize = 2048;
 
+    /// <summary>Cascades in the sun's shadow. Fixed — see blix_sun_shadow_cascaded for why.</summary>
+    public const int CascadeCount = 3;
+
     /// <summary>Bytes the lit pass pushes. <see cref="StudioPush.LitBytes"/> is the definition.</summary>
     /// <remarks>
     /// <b>These were separate numbers, and they drifted.</b> This file declared its own 96, 64 and 16
@@ -67,12 +70,10 @@ public sealed class StudioRenderer : IDisposable
     private FullscreenPass fullscreen = null!;
 
     private RenderGraph graph = null!;
-    private GraphResourceHandle shadowTarget;
     private GraphResourceHandle sceneColourTarget;
     private GraphResourceHandle sceneDepthTarget;
     private GraphResourceHandle viewportColourTarget;
     private GraphResourceHandle viewportDepthTarget;
-    private PassHandle shadowPass;
     private PassHandle litPass;
     private PassHandle viewportPass;
 
@@ -121,6 +122,18 @@ public sealed class StudioRenderer : IDisposable
     // own ground and boxes went through the same pipeline passing only the shadow map, so binding 1
     // was left unwritten and validation reported uAlbedo "used in draw but never updated" — which
     // reads like a model-loading bug and is not one. White is the identity for a base-colour factor.
+    private readonly GraphResourceHandle[] cascadeTargets = new GraphResourceHandle[CascadeCount];
+    private readonly PassHandle[] cascadePasses = new PassHandle[CascadeCount];
+    private readonly Matrix4x4[] cascadeViewProjection = new Matrix4x4[CascadeCount];
+    private readonly float[] cascadeSplit = new float[CascadeCount];
+    private readonly float[] cascadeSide = new float[CascadeCount];
+
+    /// <summary>Each cascade's box width in metres, for reporting metres per texel.</summary>
+    public IReadOnlyList<float> CascadeSideMetres => cascadeSide;
+
+    /// <summary>Each cascade's far bound along the view, in metres.</summary>
+    public IReadOnlyList<float> CascadeSplits => cascadeSplit;
+
     private TextureHandle whiteTexture;
 
     // ── the environment, baked once ──────────────────────────────────────────────────────────
@@ -257,7 +270,14 @@ public sealed class StudioRenderer : IDisposable
         // knows a pass can want depth and nothing else.
         graph = new RenderGraph(vk);
         var fullSize = new MatchSwapchainGraphSize(1.0f);
-        shadowTarget = graph.DepthTarget("lab-shadow", new FixedGraphSize(ShadowMapSize, ShadowMapSize));
+        // <b>THREE maps, near to far.</b> One box sized to cover everything spends its texels on
+        // air: at the stage's default framing a single 2048 map over the visible ground is ~9 mm a
+        // texel, and a contact shadow under a foot is the thing that resolution decides.
+        for (var c = 0; c < CascadeCount; c++)
+        {
+            cascadeTargets[c] = graph.DepthTarget(
+                $"lab-shadow-{c}", new FixedGraphSize(Look.ShadowMapSize, Look.ShadowMapSize));
+        }
         sceneColourTarget = graph.ColorTarget("lab-hdr", TextureFormat.Rgba16F, fullSize);
         sceneDepthTarget = graph.DepthTarget("lab-scene-depth", fullSize);
 
@@ -285,17 +305,26 @@ public sealed class StudioRenderer : IDisposable
         viewportColourTarget = graph.ColorTarget("lab-viewport", TextureFormat.Rgba16F, halfSize);
         viewportDepthTarget = graph.DepthTarget("lab-viewport-depth", halfSize);
 
-        shadowPass = graph.GraphicsPass("lab.shadow")
-            .Depth(shadowTarget, LoadOp.Clear, StoreOp.Store)
-            .Shader(shadowInterface)
-            .Handle;
+        // <b>Three passes, and the caster geometry is drawn in every one of them.</b> That is the
+        // cost cascades actually have and it is worth saying out loud rather than discovering: this
+        // stage now redraws its casters 3x. It draws a handful of objects, so it is affordable here;
+        // it is the first thing to look at if this stage ever gets a scene.
+        for (var c = 0; c < CascadeCount; c++)
+        {
+            cascadePasses[c] = graph.GraphicsPass($"lab.shadow.{c}")
+                .Depth(cascadeTargets[c], LoadOp.Clear, StoreOp.Store)
+                .Shader(shadowInterface)
+                .Handle;
+        }
 
         // Read() is the edge that makes the ordering a fact rather than a convention: the
         // lit pass samples what the caster pass wrote, and the graph knows it.
         litPass = graph.GraphicsPass("lab.lit")
             .Target(sceneColourTarget, LoadOp.Clear, StoreOp.Store)
             .Depth(sceneDepthTarget, LoadOp.Clear, StoreOp.Store)
-            .Read(shadowTarget)
+            .Read(cascadeTargets[0])
+            .Read(cascadeTargets[1])
+            .Read(cascadeTargets[2])
             .Shader(litInterface)
             .Handle;
 
@@ -312,7 +341,9 @@ public sealed class StudioRenderer : IDisposable
         viewportPass = graph.GraphicsPass("lab.viewport")
             .Target(viewportColourTarget, LoadOp.Clear, StoreOp.Store)
             .Depth(viewportDepthTarget, LoadOp.Clear, StoreOp.Store)
-            .Read(shadowTarget)
+            .Read(cascadeTargets[0])
+            .Read(cascadeTargets[1])
+            .Read(cascadeTargets[2])
             .Shader(litInterface)
             .Handle;
 
@@ -326,7 +357,7 @@ public sealed class StudioRenderer : IDisposable
         // declared its passes, before Compile freezes the shape. A one-shot call that hands you the
         // graph is scoping; it is not the stage running your code.
         extend?.Invoke(new StudioGraph(
-            graph, sceneColourTarget, sceneDepthTarget, shadowTarget, litInterface, shadowInterface));
+            graph, sceneColourTarget, sceneDepthTarget, cascadeTargets[0], litInterface, shadowInterface));
 
         graph.Compile();
 
@@ -351,7 +382,7 @@ public sealed class StudioRenderer : IDisposable
             DepthState.LessEqualWrite,
             RasterizerState.NoCulling,
             Array.Empty<BlendState>(),
-            RenderTarget: graph.GetPassSurface(shadowPass)), "lab.shadow");
+            RenderTarget: graph.GetPassSurface(cascadePasses[0])), "lab.shadow");
 
         litPipeline = vk.CreatePipeline(new PipelineDescription(
             litProgram,
@@ -418,7 +449,7 @@ public sealed class StudioRenderer : IDisposable
             DepthState.LessEqualWrite,
             RasterizerState.NoCulling,
             Array.Empty<BlendState>(),
-            RenderTarget: graph.GetPassSurface(shadowPass)), "lab.skinned.shadow");
+            RenderTarget: graph.GetPassSurface(cascadePasses[0])), "lab.skinned.shadow");
 
         // FullscreenPass.Layout, not a vertex format: studio_present.vert builds its triangle from
         // gl_VertexIndex and declares no inputs at all, so any attribute here is a promise the shader
@@ -475,7 +506,12 @@ public sealed class StudioRenderer : IDisposable
     public RenderSurfaceHandle SceneSurface => graph.GetPassSurface(litPass);
 
     /// <summary>The sun's depth buffer. Exposed so a tool can look at what the caster pass produced.</summary>
-    public TextureHandle ShadowDepth => graph.GetDepthTexture(shadowTarget);
+    /// <summary>The NEAREST cascade's depth, which is the one worth looking at in a panel.</summary>
+    public TextureHandle ShadowDepth => graph.GetDepthTexture(cascadeTargets[0]);
+
+    /// <summary>One cascade's depth, near to far.</summary>
+    public TextureHandle CascadeDepth(int cascade) =>
+        graph.GetDepthTexture(cascadeTargets[Math.Clamp(cascade, 0, CascadeCount - 1)]);
 
     /// <summary>The program the bone-palette material must be created against.</summary>
     /// <remarks>
@@ -506,36 +542,45 @@ public sealed class StudioRenderer : IDisposable
         Vector3 viewportCameraPosition = default)
     {
         views ??= Array.Empty<IStudioView>();
-        var sunViewProjection = SunViewProjection();
+        FitCascades();
 
-        // Pass 1 — the sun's depth. No colour attachment at all, which is the thing the
-        // raw surface path could not express.
-        graph.Pass(shadowPass, scope =>
+        // Pass 1 — the sun's depth, ONCE PER CASCADE. Every caster is drawn three times; see the
+        // pass declaration for why that cost is accepted here and where it stops being affordable.
+        for (var c = 0; c < CascadeCount; c++)
         {
-            var uniforms = new ShaderUniform[]
+            var lightViewProjection = cascadeViewProjection[c];
+            graph.Pass(cascadePasses[c], scope =>
             {
-                new("uLightViewProjection", new Matrix4x4Uniform(sunViewProjection)),
-            };
+                var uniforms = new ShaderUniform[]
+                {
+                    new("uLightViewProjection", new Matrix4x4Uniform(lightViewProjection)),
+                };
 
-            // No furniture in the caster pass at all: the only furniture left is the ground, and
-            // the ground casts nothing onto itself worth the fill.
+                // No furniture in the caster pass at all: the only furniture left is the ground, and
+                // the ground casts nothing onto itself worth the fill.
 
-            var draw = new StudioDraw(
-                scope, StudioPass.Shadow, uniforms, Array.Empty<ShaderTextureBinding>(),
-                shadowPipeline, skinnedShadowPipeline, whiteTexture,
-                // The caster pass never culls, so both are the same handle here.
-                SkinnedDoubleSidedPipeline: skinnedShadowPipeline);
-            foreach (var view in views) view.Draw(draw);
-        });
+                var draw = new StudioDraw(
+                    scope, StudioPass.Shadow, uniforms, Array.Empty<ShaderTextureBinding>(),
+                    shadowPipeline, skinnedShadowPipeline, whiteTexture,
+                    // The caster pass never culls, so both are the same handle here.
+                    SkinnedDoubleSidedPipeline: skinnedShadowPipeline);
+                foreach (var view in views) view.Draw(draw);
+            });
+        }
 
-        // Pass 2 — light it into HDR, sampling the depth the caster pass just wrote.
-        var shadowTexture = graph.GetDepthTexture(shadowTarget);
+        // Pass 2 — light it into HDR, sampling the depth the caster passes just wrote.
+        var shadowTexture = graph.GetDepthTexture(cascadeTargets[0]);
         graph.Pass(litPass, scope =>
         {
             var uniforms = new ShaderUniform[]
             {
                 new("uViewProjection", new Matrix4x4Uniform(viewProjection)),
-                new("uSunViewProjection", new Matrix4x4Uniform(sunViewProjection)),
+                new("uCascadeVP0", new Matrix4x4Uniform(cascadeViewProjection[0])),
+                new("uCascadeVP1", new Matrix4x4Uniform(cascadeViewProjection[1])),
+                new("uCascadeVP2", new Matrix4x4Uniform(cascadeViewProjection[2])),
+                new("uCascadeTexels", new Vector4Uniform(new Vector4(
+                    1f / Look.ShadowMapSize, 1f / Look.ShadowMapSize, 1f / Look.ShadowMapSize,
+                    Look.ShowCascades ? 1f : 0f))),
                 new("uCameraPosition", new Vector4Uniform(new Vector4(cameraPosition, 1f))),
                 new("uSunDirection", new Vector4Uniform(new Vector4(Look.SunDirection, 0f))),
                 new("uSunColour", new Vector4Uniform(new Vector4(Look.SunColour, Look.AmbientStrength))),
@@ -565,7 +610,12 @@ public sealed class StudioRenderer : IDisposable
                 var uniforms = new ShaderUniform[]
                 {
                     new("uViewProjection", new Matrix4x4Uniform(panelViewProjection)),
-                    new("uSunViewProjection", new Matrix4x4Uniform(sunViewProjection)),
+                    new("uCascadeVP0", new Matrix4x4Uniform(cascadeViewProjection[0])),
+                new("uCascadeVP1", new Matrix4x4Uniform(cascadeViewProjection[1])),
+                new("uCascadeVP2", new Matrix4x4Uniform(cascadeViewProjection[2])),
+                new("uCascadeTexels", new Vector4Uniform(new Vector4(
+                    1f / Look.ShadowMapSize, 1f / Look.ShadowMapSize, 1f / Look.ShadowMapSize,
+                    Look.ShowCascades ? 1f : 0f))),
                     new("uCameraPosition", new Vector4Uniform(new Vector4(viewportCameraPosition, 1f))),
                     new("uSunDirection", new Vector4Uniform(new Vector4(Look.SunDirection, 0f))),
                     new("uSunColour", new Vector4Uniform(new Vector4(Look.SunColour, Look.AmbientStrength))),
@@ -707,6 +757,69 @@ public sealed class StudioRenderer : IDisposable
         iblActive = true;
     }
 
+    /// <summary>
+    /// Fits the three cascades as concentric boxes around the stage's content.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Around the CONTENT, not around slices of the view frustum, and that was measured rather
+    /// than chosen.</b> The textbook fit slices the frustum by depth, which assumes a camera
+    /// standing among what it looks at. This stage's camera orbits its subject from eleven metres
+    /// out, so the frustum where the subject stands is about twenty metres wide and any slice
+    /// containing it must be at least that big. Fitted that way, at every split ratio tried, the
+    /// subject landed in a cascade between 1.8x and 4.1x COARSER than the single origin-fitted box
+    /// the cascades replaced — 15.6 to 36.1 mm a texel against 8.8. Nothing in the picture said so;
+    /// the shadows were all present and merely soft.
+    /// </para>
+    /// <para>
+    /// So the boxes are concentric on the stage's origin, which is where its ground and its subject
+    /// both are, and the shader picks the first one that CONTAINS the fragment. That is the same
+    /// conclusion RTSGame reached from the other direction, and it is a fact about this stage rather
+    /// than about cascades: a turntable knows where its content is, and a fit that ignores that is
+    /// spending resolution on the space between the camera and the thing.
+    /// </para>
+    /// <para>
+    /// The radii follow the same practical split curve the frustum scheme uses, so
+    /// <see cref="StudioLook.CascadeSplitLambda"/> still means what it means — 0 spaces them evenly,
+    /// 1 concentrates them near the subject.
+    /// </para>
+    /// </remarks>
+    private void FitCascades()
+    {
+        // The innermost box is sized to the SUBJECT — a model is normalised to about three units on
+        // this stage — and the outermost to the ground the camera can orbit around.
+        Span<float> radii = stackalloc float[CascadeCount];
+        GraphicsMatrices.CascadeSplits(
+            MathF.Max(1f, Look.ShadowExtent * 0.3f),
+            MathF.Max(2f, Look.ShadowDistance * 0.5f),
+            Look.CascadeSplitLambda,
+            radii);
+
+        for (var c = 0; c < CascadeCount; c++)
+        {
+            var side = radii[c] * 2f;
+            cascadeSide[c] = side;
+            cascadeSplit[c] = radii[c];
+
+            // Snapped on the LIGHT's axes — the grid the texels are on. Snapping in world XZ, the
+            // obvious version, snaps to a grid the texels are not aligned with unless the sun
+            // happens to be axis-aligned, so the crawl it is meant to stop only partly stops.
+            var toLight = Vector3.Normalize(Look.SunDirection);
+            var up = MathF.Abs(toLight.Y) > 0.99f ? Vector3.UnitZ : Vector3.UnitY;
+            var forward = -toLight;
+            var axisRight = Vector3.Normalize(Vector3.Cross(up, forward));
+            var axisUp = Vector3.Cross(forward, axisRight);
+            var texel = side / Look.ShadowMapSize;
+            var centre =
+                axisRight * (MathF.Round(Vector3.Dot(Vector3.Zero, axisRight) / texel) * texel) +
+                axisUp * (MathF.Round(Vector3.Dot(Vector3.Zero, axisUp) / texel) * texel);
+
+            var away = radii[c] + 20f;
+            cascadeViewProjection[c] = GraphicsMatrices.SunShadowViewProjection(
+                Look.SunDirection, centre, away, side, 0.05f, away * 2f + side);
+        }
+    }
+
     private void Own(params TextureHandle[] textures)
     {
         foreach (var t in textures)
@@ -724,9 +837,11 @@ public sealed class StudioRenderer : IDisposable
     }
 
     /// <summary>What every lit draw binds, before its own albedo. The stage's one answer.</summary>
-    private ShaderTextureBinding[] EnvironmentTextures(TextureHandle shadowMap) => new[]
+    private ShaderTextureBinding[] EnvironmentTextures(TextureHandle _) => new[]
     {
-        new ShaderTextureBinding("uSunShadowMap", shadowMap, Slot: 0),
+        new ShaderTextureBinding("uCascade0", graph.GetDepthTexture(cascadeTargets[0]), Slot: 0),
+        new ShaderTextureBinding("uCascade1", graph.GetDepthTexture(cascadeTargets[1]), Slot: 5),
+        new ShaderTextureBinding("uCascade2", graph.GetDepthTexture(cascadeTargets[2]), Slot: 6),
         new ShaderTextureBinding("uIrradiance", irradianceTexture, Slot: 2),
         new ShaderTextureBinding("uPrefilteredEnv", prefilteredTexture, Slot: 3),
         new ShaderTextureBinding("uBrdfLut", brdfLutTexture, Slot: 4),

@@ -6,7 +6,7 @@
         }
     ],
     "types" : {
-        "_423" : {
+        "_701" : {
             "name" : "Frame",
             "members" : [
                 {
@@ -16,34 +16,61 @@
                     "matrix_stride" : 16
                 },
                 {
-                    "name" : "uSunViewProjection",
+                    "name" : "uCascadeVP0",
                     "type" : "mat4",
                     "offset" : 64,
                     "matrix_stride" : 16
                 },
                 {
+                    "name" : "uCascadeVP1",
+                    "type" : "mat4",
+                    "offset" : 128,
+                    "matrix_stride" : 16
+                },
+                {
+                    "name" : "uCascadeVP2",
+                    "type" : "mat4",
+                    "offset" : 192,
+                    "matrix_stride" : 16
+                },
+                {
                     "name" : "uCameraPosition",
                     "type" : "vec4",
-                    "offset" : 128
+                    "offset" : 256
+                },
+                {
+                    "name" : "uCascadeSplits",
+                    "type" : "vec4",
+                    "offset" : 272
+                },
+                {
+                    "name" : "uCascadeTexels",
+                    "type" : "vec4",
+                    "offset" : 288
+                },
+                {
+                    "name" : "uCameraForward",
+                    "type" : "vec4",
+                    "offset" : 304
                 },
                 {
                     "name" : "uSunDirection",
                     "type" : "vec4",
-                    "offset" : 144
+                    "offset" : 320
                 },
                 {
                     "name" : "uSunColour",
                     "type" : "vec4",
-                    "offset" : 160
+                    "offset" : 336
                 },
                 {
                     "name" : "uEnvironment",
                     "type" : "vec4",
-                    "offset" : 176
+                    "offset" : 352
                 }
             ]
         },
-        "_478" : {
+        "_774" : {
             "name" : "Push",
             "members" : [
                 {
@@ -107,9 +134,21 @@
     "textures" : [
         {
             "type" : "sampler2D",
-            "name" : "uSunShadowMap",
+            "name" : "uCascade0",
             "set" : 1,
             "binding" : 0
+        },
+        {
+            "type" : "sampler2D",
+            "name" : "uCascade1",
+            "set" : 1,
+            "binding" : 5
+        },
+        {
+            "type" : "sampler2D",
+            "name" : "uCascade2",
+            "set" : 1,
+            "binding" : 6
         },
         {
             "type" : "sampler2D",
@@ -138,17 +177,17 @@
     ],
     "ubos" : [
         {
-            "type" : "_423",
+            "type" : "_701",
             "name" : "Frame",
-            "block_size" : 192,
+            "block_size" : 368,
             "set" : 0,
             "binding" : 0
         }
     ],
     "push_constants" : [
         {
-            "type" : "_478",
-            "name" : "_480",
+            "type" : "_774",
+            "name" : "_776",
             "push_constant" : true
         }
     ]

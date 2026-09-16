@@ -113,3 +113,80 @@ vec3 blix_shadow_normal_offset(vec3 world, vec3 normal, float ndotl, float texel
     // linear falloff leaves nothing at all and the last of the acne survives.
     return world + normal * (texelWorld * texels * (0.30 + 0.70 * sqrt(slope)));
 }
+
+// --- Cascaded directional shadows -----------------------------------------
+//
+// Selection only: the sampling is blix_sun_shadow_soft above, called once, on whichever
+// cascade contains the fragment. That is the whole reason this is three lines of dispatch
+// rather than a fourth percentage-closer filter — there are already three PCF
+// implementations in this tree (here, Sponza's, VulkanLit's) and the way to stop there
+// being a fourth is for the cascade layer not to need one.
+//
+// <b>THREE, fixed, and that is a portability fact rather than a preference.</b> Sampling a
+// sampler2D array at a dynamically computed index needs
+// shaderSampledImageArrayDynamicIndexing, which is not guaranteed — so every implementation
+// that works everywhere branches on a constant index instead. Three named samplers say that
+// honestly, where an array parameter would look general and only work on some drivers. Making
+// the count a #define variant would make it the first axis of a shader permutation matrix, for
+// a number nobody has wanted to change.
+//
+//   texelSizes  1.0 / map side, per cascade. Separate because the three maps need not be the
+//               same size, and the PCF radius is measured in texels.
+//   chosen      which cascade answered, or -1 when no cascade contains the fragment. For a debug
+//               tint, and for finding out that a scene is spending three passes on one cascade's
+//               work.
+//
+// <b>Selection is by CONTAINMENT, not by view depth, and that is not the textbook choice.</b> The
+// usual scheme slices the view frustum by depth and picks by `dot(world - eye, forward)`. It assumes
+// a camera standing AMONG the things it looks at. A camera that orbits its subject from outside is
+// the other case, and there the frustum at the subject's depth is far wider than the subject —
+// measured on the studio stage, every split ratio put the subject in a cascade COARSER than the
+// single origin-fitted box it replaced, by 1.8x to 4.1x. Containment lets the boxes be fitted to
+// the content instead of to the frustum, which is the arrangement that stage actually wants, and it
+// costs the strictly more robust rule: the first cascade that can answer, answers.
+//
+// Returns 1 = lit, 0 = shadowed. Outside every cascade it returns 1: unshadowed is the honest answer
+// where there is no data, and it is the one that does not draw a hard edge across the world.
+float blix_cascade_contains(mat4 vp, vec3 world, out vec4 coord) {
+    coord = vp * vec4(world, 1.0);
+    vec3 ndc = coord.xyz / coord.w;
+    vec2 uv = ndc.xy * 0.5 + 0.5;
+    // A margin, so a fragment is not handed to a cascade whose PCF kernel would reach off the edge
+    // of the map and read whatever the clamp returns.
+    const float EDGE = 0.02;
+    if (uv.x < EDGE || uv.x > 1.0 - EDGE || uv.y < EDGE || uv.y > 1.0 - EDGE) return 0.0;
+    if (ndc.z < 0.0 || ndc.z > 1.0) return 0.0;
+    return 1.0;
+}
+
+float blix_sun_shadow_cascaded(
+        sampler2D map0, sampler2D map1, sampler2D map2,
+        mat4 vp0, mat4 vp1, mat4 vp2,
+        vec3 texelSizes,
+        vec3 world, float ndotl, float radiusTexels, vec2 pixel,
+        out int chosen) {
+    vec4 coord;
+    if (blix_cascade_contains(vp0, world, coord) > 0.5) {
+        chosen = 0;
+        return blix_sun_shadow_soft(map0, coord, ndotl, texelSizes.x, radiusTexels, pixel);
+    }
+    if (blix_cascade_contains(vp1, world, coord) > 0.5) {
+        chosen = 1;
+        return blix_sun_shadow_soft(map1, coord, ndotl, texelSizes.y, radiusTexels, pixel);
+    }
+    if (blix_cascade_contains(vp2, world, coord) > 0.5) {
+        chosen = 2;
+        return blix_sun_shadow_soft(map2, coord, ndotl, texelSizes.z, radiusTexels, pixel);
+    }
+    chosen = -1;
+    return 1.0;
+}
+
+// A flat tint per cascade, for looking at where the splits landed. Magenta means "beyond the
+// last cascade", which is the case a still picture otherwise cannot distinguish from "lit".
+vec3 blix_cascade_tint(int chosen) {
+    if (chosen == 0) return vec3(1.0, 0.45, 0.45);
+    if (chosen == 1) return vec3(0.45, 1.0, 0.45);
+    if (chosen == 2) return vec3(0.45, 0.6, 1.0);
+    return vec3(1.0, 0.2, 1.0);
+}
