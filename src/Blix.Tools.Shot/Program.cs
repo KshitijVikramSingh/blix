@@ -244,7 +244,15 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     {
         try
         {
-            new ObjectTunables(renderer).Apply(args);
+            // The look is its own object and TuneReflection does not recurse, so the renderer alone
+            // binds nothing about the look — the same shape as the flag this method's remark was
+            // written about, one refactor later.
+            var stage = new ObjectTunables(renderer, renderer.Look);
+            stage.RequireDeclared(
+                nameof(StudioLook.SunAzimuth), nameof(StudioLook.SunElevation), nameof(StudioLook.SunIntensity),
+                nameof(StudioLook.AmbientStrength), nameof(StudioLook.ShadowExtent), nameof(StudioLook.Ground),
+                nameof(StudioLook.Exposure), nameof(StudioLook.TonemapMode));
+            stage.Apply(args);
         }
         catch (ArgumentException bad)
         {
@@ -344,6 +352,13 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             Path.Combine(AppContext.BaseDirectory, "Shaders"),
             stageSelfTest ? ExtendStage : null);
 
+        // <b>Once, here, rather than on each subject's path.</b> It used to be called after a model
+        // loaded and after a rig loaded, which meant the EMPTY stage — no --model, no --rig — honoured
+        // no look flag at all: --ground false, --sun-azimuth, --exposure all parsed correctly and
+        // reached a renderer nobody had asked to re-read them. The stage has a look whether or not
+        // anything is standing on it.
+        ApplyStageKnobs();
+
         LoadRig();
 
         if (modelPath is null || !File.Exists(modelPath)) return;
@@ -360,7 +375,6 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             Console.Error.WriteLine($"blix cannot read this: {refused.Message}");
             Environment.Exit(1);
         }
-        ApplyStageKnobs();
         var extent = model.LongestExtent;
         var scale = extent > 0.001f ? 3f / extent : 1f;
         modelTransform = Matrix4x4.CreateScale(scale)
@@ -385,7 +399,6 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             Console.Error.WriteLine($"blix cannot read this: {refused.Message}");
             Environment.Exit(1);
         }
-        ApplyStageKnobs();
 
         animation = new RigInstances(rig, instanceCount)
         {
@@ -763,7 +776,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // Lifted a hair off the ground quad: both at y=0 z-fight, and a patchy grid reads as a
         // rendering fault rather than as two coplanar surfaces.
         debug.Draw.Grid("floor", new Vector3(0f, 0.02f, 0f), 24f, 24, new GraphicsColor(0.35f, 0.4f, 0.5f, 1f));
-        debug.Draw.Arrow("sun", renderer.SunDirection * 7f, Vector3.Zero, new GraphicsColor(1f, 0.9f, 0.5f, 1f));
+        debug.Draw.Arrow("sun", renderer.Look.SunDirection * 7f, Vector3.Zero, new GraphicsColor(1f, 0.9f, 0.5f, 1f));
 
         // The skeleton, through the SAME SkeletonGizmo the viewer uses. That shared call is the
         // whole reason the lab is a library: a capture drawn by its own copy of the overlay could
@@ -914,8 +927,18 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     /// curve — and the whole value of a sequence is that its frames are comparable with each other
     /// and with everything else the tool has ever written.
     /// </remarks>
+    private bool warnedAboutTonemap;
+
     private bool WriteImage(string path, TextureHandle source)
     {
+        if (renderer.Look.TonemapMode != 0f && !warnedAboutTonemap)
+        {
+            warnedAboutTonemap = true;
+            Console.Error.WriteLine(
+                $"--tonemap-mode {renderer.Look.TonemapMode:0} applies on screen, NOT to this capture: " +
+                "the read-back path tonemaps with ACES only. The picture below is the ACES one.");
+        }
+
         // The viewport target is half the swapchain's size and holds the SECOND camera's picture.
         // Same format as the scene target — deliberately, so both take this one read-back path and
         // the tonemap below applies to either.
@@ -938,7 +961,14 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             // then an sRGB encode because the swapchain's sRGB format does that in hardware
             // and a PNG has to do it itself. If a capture ever disagrees with the screen,
             // this pair is where to look first.
-            (r, g, b) = (Aces(r * renderer.Exposure), Aces(g * renderer.Exposure), Aces(b * renderer.Exposure));
+            //
+            // <b>ACES, always — which is why a non-ACES look cannot be captured yet.</b> The house
+            // style's tonemap is part of what a capture is supposed to certify, and this hardcodes
+            // one of the four curves blix_tonemap offers. Porting the other three to C# would be
+            // three more copies of a shader, each able to drift from it silently; the comment above
+            // is already the standing warning about the first copy. So the tool says so instead of
+            // writing a picture that quietly disagrees with the screen it claims to match.
+            (r, g, b) = (Aces(r * renderer.Look.Exposure), Aces(g * renderer.Look.Exposure), Aces(b * renderer.Look.Exposure));
 
             var dst = i * 4;
             rgba[dst] = ToSrgbByte(r);

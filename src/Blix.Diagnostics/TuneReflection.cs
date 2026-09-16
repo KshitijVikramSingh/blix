@@ -52,6 +52,29 @@ public sealed class TuneAttribute : Attribute
     /// <summary>How many characters a string member accepts. Ignored by every other kind.</summary>
     public int MaxLength { get; init; } = 128;
 
+    /// <summary>
+    /// This value is read once, when the thing that consumes it is BUILT — so a control that moves it
+    /// mid-run would be lying.
+    /// </summary>
+    /// <remarks>
+    /// <b>Some settings are pipeline state, not frame state.</b> A sample count, a cascade count, whether
+    /// a pre-pass exists: each is baked into pipelines and targets at construction, and nothing reads it
+    /// again. Declaring one <c>[Tune]</c> without saying so gives the panel a slider that appears to work
+    /// and changes nothing — the failure this flag exists to prevent, and the one a tool gets distrusted
+    /// for, because a dropped knob and an absent knob look identical from a window.
+    /// <para>
+    /// A structural member is still a FLAG: the command line runs before anything is built, so
+    /// <c>--msaa 4</c> is exactly the right way to set one. What changes is the panel, which shows it
+    /// among the read-only values rather than among the controls — where it reads as what it is, a fact
+    /// about this run.
+    /// </para>
+    /// <para>
+    /// The obvious next thing — a button that relaunches with the current values — is deliberately not
+    /// built. Noted here so the absence is a decision rather than an oversight.
+    /// </para>
+    /// </remarks>
+    public bool Structural { get; init; }
+
     // bool / enum members — range is implied.
     public TuneAttribute() { }
 
@@ -145,6 +168,10 @@ public sealed class TunableField
     /// </remarks>
     public object Initial { get; internal set; } = 0f;
 
+    /// <summary>Read once at build time, so the panel shows it rather than offering to move it.</summary>
+    /// <seealso cref="TuneAttribute.Structural"/>
+    public bool Structural { get; internal set; }
+
     /// <summary>The value now, whichever kind this is — a float, or the string for Text.</summary>
     public object Current => Kind == TuneKind.Text ? Text : Value;
 
@@ -198,6 +225,7 @@ public static class TuneReflection
             var (valueType, getRaw, setRaw) = AccessorsFor(member, target);
             var label = tune.Label ?? DeriveLabel(member.Name);
             var group = tune.Group ?? defaultGroup;
+            var before = result.Count;
 
             if (valueType == typeof(bool))
             {
@@ -245,6 +273,11 @@ public static class TuneReflection
                     $"[Tune] on {type.Name}.{member.Name}: unsupported type {valueType.Name} " +
                     "(float, int, bool, enum, or string).");
             }
+
+            // After the chain rather than through five constructors: every branch adds exactly one
+            // field, and threading one more argument through all of them to carry a flag that none of
+            // them reads would be five edits for one fact.
+            if (result.Count > before) result[^1].Structural = tune.Structural;
         }
         foreach (var field in result) field.Initial = field.Current;
         return result;
@@ -580,6 +613,17 @@ public sealed class ObjectTunables
                     // itself is still state, and the whole point is that it stays one member.
                     if (Bespoke.Contains(f.Name))
                     {
+                        Note(f);
+                        continue;
+                    }
+
+                    // <b>A structural value is shown, not offered.</b> It was read when the pipelines
+                    // were built and nothing reads it again, so a slider here would move a number and
+                    // change no pixel. Among the VALUES it reads as what it is — a fact about this run,
+                    // set on the command line before anything existed to consume it.
+                    if (f.Structural)
+                    {
+                        debug.Values.Value($"{f.Label} (startup)", f.Current);
                         Note(f);
                         continue;
                     }

@@ -58,8 +58,15 @@ public static class Program
             // fragment stage declares no block at all, so it was free to be exactly what the stage
             // uses, and an instance's placement is already in its palette.
             ("studio.skinned", new[] { "studio_skinned.vert", "studio_lit.frag" }, StudioRenderer.LitPushBytes),
+            // <b>studio_skinned_shadow.frag, not studio_shadow.frag.</b> This pairing was left behind
+            // when the skinned caster got a fragment stage of its own, and the stale half is what the
+            // reflected total then described: a vertex and fragment stage that declare different push
+            // blocks reflect the SUM, so pairing the skinned vert with the static frag reported 80
+            // bytes against a 16-byte payload and read as a renderer bug. The renderer was right the
+            // whole time — StudioRenderer builds this program from the matching frag.
             ("studio.skinned.shadow",
-                new[] { "studio_skinned_shadow.vert", "studio_shadow.frag" }, StudioRenderer.SkinnedCasterPushBytes),
+                new[] { "studio_skinned_shadow.vert", "studio_skinned_shadow.frag" },
+                StudioRenderer.SkinnedCasterPushBytes),
         };
 
         foreach (var (name, stages, expectedPush) in programs)
@@ -97,11 +104,33 @@ public static class Program
         // without a device anywhere in sight, which is the point of it being declared state rather
         // than a renderer's private field.
         var stage = new StudioRenderer();
+        var look = stage.Look;
         t.Expect("the stage's declared look is readable without a device",
-            stage.SunElevation is > 0f and < 90f && stage.ShadowExtent > 0f,
-            $"sun {stage.SunAzimuth:0.0} az / {stage.SunElevation:0.0} el, " +
-            $"ambient {stage.AmbientStrength:0.00}, shadow box {stage.ShadowExtent:0.0}m " +
+            look.SunElevation is > 0f and < 90f && look.ShadowExtent > 0f,
+            $"sun {look.SunAzimuth:0.0} az / {look.SunElevation:0.0} el, " +
+            $"ambient {look.AmbientStrength:0.00}, shadow box {look.ShadowExtent:0.0}m " +
             $"at {StudioRenderer.ShadowMapSize}px");
+
+        // <b>The house style is the type's defaults, so a fresh one must equal the stage's.</b> The
+        // renderer owning its look is what lets `view` be opinionated without being asked; if these
+        // two ever differ, the renderer has started adjusting the house style on the way past and
+        // "what Blix thinks this should look like" has quietly become "what this tool does".
+        var house = new StudioLook();
+        t.Expect("a fresh StudioLook IS the house style the stage draws with",
+            house.SunAzimuth == look.SunAzimuth && house.SunElevation == look.SunElevation
+            && house.AmbientStrength == look.AmbientStrength && house.ShadowExtent == look.ShadowExtent
+            && house.Exposure == look.Exposure && house.TonemapMode == look.TonemapMode
+            && house.Ground == look.Ground,
+            $"house sun {house.SunAzimuth:0.000}/{house.SunElevation:0.000} vs " +
+            $"stage {look.SunAzimuth:0.000}/{look.SunElevation:0.000}");
+
+        // The derived vectors agree with the angles from frame one — the fault the constructor's
+        // Recompute exists for, now asserted where it cannot be reached by looking at a picture.
+        var elevation = look.SunElevation * (MathF.PI / 180f);
+        t.Expect("and its derived sun direction agrees with its declared angles",
+            MathF.Abs(look.SunDirection.Y - MathF.Sin(elevation)) < 1e-5f
+            && MathF.Abs(look.SunDirection.Length() - 1f) < 1e-5f,
+            $"{look.SunDirection} vs elevation {look.SunElevation:0.000}°");
 
         t.PrintSummary();
         return t.Failed == 0 ? 0 : 1;

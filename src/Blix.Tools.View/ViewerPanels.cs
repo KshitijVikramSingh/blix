@@ -593,13 +593,13 @@ internal sealed class ViewerPanels
 
         if (ImGui.CollapsingHeader("image", ImGuiTreeNodeFlags.DefaultOpen))
         {
-            var exposure = app.Renderer.Exposure;
-            if (ImGui.SliderFloat("exposure", ref exposure, 0.1f, 4f)) app.Renderer.Exposure = exposure;
+            var exposure = app.Renderer.Look.Exposure;
+            if (ImGui.SliderFloat("exposure", ref exposure, 0.1f, 4f)) app.Renderer.Look.Exposure = exposure;
 
-            var mode = (int)app.Renderer.TonemapMode;
+            var mode = (int)app.Renderer.Look.TonemapMode;
             if (ImGui.Combo("tonemap", ref mode, "ACES\0AgX\0Reinhard\0Neutral\0"))
             {
-                app.Renderer.TonemapMode = mode;
+                app.Renderer.Look.TonemapMode = mode;
             }
         }
 

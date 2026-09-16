@@ -17,12 +17,22 @@ namespace Blix.Tools.Studio;
 /// has to be restated every time a shader gains a binding, and nothing checks the restatement against the
 /// shader it claims to describe. A lab meant to grow starts on the path that cannot drift.
 /// <para>
-/// <b>Deliberately not here:</b> cascades, texel snapping, bloom, IBL, MSAA, a depth pre-pass. Those exist
-/// in TankArena and VulkanSponza because those earned them. A lab that grew them by default would be
-/// claiming to be a renderer, and would stop being readable at exactly the point it became useful.
+/// <b>Not here YET:</b> cascades, texel snapping, bloom, IBL, MSAA, a depth pre-pass. This used to say
+/// "deliberately not here", on the grounds that a lab which grew them would be claiming to be a renderer
+/// — and that was the right call while this stage was only a lab. It is now also where Blix's house style
+/// lives (see <see cref="StudioLook"/>), which is a different job: the reference look is the answer to
+/// "what does Blix think this asset should look like", and a reference that is out-rendered by every demo
+/// answers it badly. So these arrive here rather than being kept out, one at a time, each earning its
+/// place in <see cref="StudioLook"/> as a declared value rather than a constant.
+/// <para>
+/// What has NOT changed is where the technique lives. A capability belongs in the engine and its shading
+/// vocabulary in <c>Blix.Shaders</c>; what this stage owns is the COMPOSITION — which of them are on, and
+/// at what settings. That is the same rule that sent the NdotV fix into the shared <c>pbr.glsl</c> rather
+/// than into this file.
+/// </para>
 /// </para>
 /// </remarks>
-public sealed class StudioRenderer : IDisposable, ITunable
+public sealed class StudioRenderer : IDisposable
 {
     /// <summary>Square shadow map, matching the texel size the lit shader offsets by.</summary>
     public const int ShadowMapSize = 2048;
@@ -133,89 +143,29 @@ public sealed class StudioRenderer : IDisposable, ITunable
     // device with the sizes named, which is the binding model earning its keep: a
     // hand-declared interface would have shrugged and corrupted the tail.
 
-    // ── the look, declared, and it is not a thing of its own ─────────────────────────────────
+    // ── the look ─────────────────────────────────────────────────────────────────────────────
     //
-    // <b>There is no StudioLook, and the reason is worth keeping.</b> Gathering these into one
-    // "look" object was the obvious move and it dissolved the moment they were sorted by what reads
-    // them: the sun and the ambient are the LIT pass's, the shadow extent is the SHADOW pass's, and
-    // the exposure and tonemap are the PRESENT pass's. That is not one concept, it is three sets of
-    // pass parameters — and parameters belong with what consumes them, which is this.
+    // <b>These moved to StudioLook, and the comment that used to sit here argued against it.</b> The
+    // old argument — that gathering them dissolves once they are sorted by what READS them, since the
+    // sun is the lit pass's, the shadow extent is the caster's and the exposure is the present pass's
+    // — is true, and it answers a different question than the one that matters. Sorted by who DECIDES
+    // them they are one artifact: Blix's house style, which a tool takes wholesale and a lab overrides
+    // in part. TuneAttribute.Group carries the by-pass grouping into the panel, so nothing was lost by
+    // letting the by-author grouping own the type.
     //
-    // They lived on a StudioScene because SetSunDirection needed somewhere to sit. "Scene" promised
-    // a graph this deliberately does not have, and once the light moved here and the ring of boxes
-    // turned out never to be drawn, there was nothing left in it.
+    // They lived on a StudioScene before that, because SetSunDirection needed somewhere to sit.
+    // "Scene" promised a graph this deliberately does not have, and once the light moved out and the
+    // ring of boxes turned out never to be drawn, there was nothing left in it.
 
-    /// <summary>Degrees around Y, from +Z toward +X.</summary>
-    [Tune(0, 360)] public float SunAzimuth { get; set; } = 52.125f;
-
-    /// <summary>Degrees above the horizon. Not 90: straight down has no stable up vector.</summary>
-    [Tune(0, 89)] public float SunElevation { get; set; } = 54.526f;
-
-    /// <summary>Scales the sun's tint. One is the light this stage was authored under.</summary>
-    [Tune(0, 3)] public float SunIntensity { get; set; } = 1f;
-
-    /// <summary>Flat stand-in for image-based lighting, which this stage does not carry.</summary>
-    [Tune(0, 0.5f)] public float AmbientStrength { get; set; } = 0.06f;
-
-    /// <summary>Half-width of the sun's orthographic box, in metres.</summary>
+    /// <summary>The house style this stage draws with. Owned here; a caller adjusts it in place.</summary>
     /// <remarks>
-    /// A knob because it is a trade every subject settles differently: too wide and a small rig gets
-    /// a few texels of shadow map, too narrow and a large one is cut off at the edge of the light.
+    /// <b>Owned rather than taken, and structural members are the reason the distinction is quiet.</b>
+    /// A per-frame value can be changed whenever. A <see cref="TuneAttribute.Structural"/> one is read
+    /// when the graph is built, so the window for setting it is between constructing this renderer and
+    /// the first frame — the same window rung four's <c>extend</c> hook uses, and the same window the
+    /// command line already runs in.
     /// </remarks>
-    [Tune(2, 40)] public float ShadowExtent { get; set; } = 9f;
-
-    /// <summary>Whether the floor is drawn. Off is how you look at a thing against nothing.</summary>
-    /// <remarks>
-    /// It is a lit mesh rather than a gizmo, and it has to be: a shadow needs something to land on.
-    /// The GRID over it is a gizmo and always was — <c>debug.Draw.Grid</c>, engine-native, drawn by
-    /// the tool. The two were never one thing; they only ever looked like one.
-    /// </remarks>
-    [Tune] public bool Ground { get; set; } = true;
-
-    /// <summary>Exposure applied before tonemapping.</summary>
-    [Tune(0, 4)] public float Exposure { get; set; } = 1.0f;
-
-    /// <summary>0 = ACES, 1 = AgX, 2 = Reinhard, 3 = neutral. Matches blix_tonemap.</summary>
-    [Tune(0, 3)] public float TonemapMode { get; set; }
-
-    /// <summary>Direction TOWARD the sun. Derived from the two angles.</summary>
-    public Vector3 SunDirection { get; private set; } = Vector3.Normalize(new Vector3(0.45f, 0.8f, 0.35f));
-
-    /// <summary>Derived: the tint this stage was authored with, scaled by <see cref="SunIntensity"/>.</summary>
-    public Vector3 SunColour { get; private set; } = new(3.2f, 3.05f, 2.75f);
-
-    private static readonly Vector3 SunTint = new(3.2f, 3.05f, 2.75f);
-
-    /// <summary>
-    /// Derives the look once, so the declared angles and the derived vector agree from frame one.
-    /// </summary>
-    /// <remarks>
-    /// <b>Without this the two disagreed silently.</b> The vector fields carry the hardcoded
-    /// direction this stage was authored with, and nothing recomputed them until something MOVED —
-    /// so a run with no flags lit the scene from the old vector while the panel showed angles that
-    /// did not produce it. The capture is what caught it: it came back matching the picture from
-    /// before the angles existed, byte for byte, which is exactly what "the knob is ignored" looks
-    /// like when the default happens to be close.
-    /// </remarks>
-    public StudioRenderer() => Recompute();
-
-    /// <summary>A declared value moved. Recompute what is derived from it.</summary>
-    public void OnChanged(TunableChange change) => Recompute();
-
-    /// <summary>Derive the sun's vectors from its angles. Also run once at construction.</summary>
-    public void Recompute()
-    {
-        var elevation = SunElevation * (MathF.PI / 180f);
-        var azimuth = SunAzimuth * (MathF.PI / 180f);
-        var horizontal = MathF.Cos(elevation);
-
-        SunDirection = Vector3.Normalize(new Vector3(
-            horizontal * MathF.Sin(azimuth),
-            MathF.Sin(elevation),
-            horizontal * MathF.Cos(azimuth)));
-
-        SunColour = SunTint * SunIntensity;
-    }
+    public StudioLook Look { get; } = new();
 
     /// <summary>
     /// A sun view-projection that covers the stage, for the caster pass.
@@ -227,9 +177,9 @@ public sealed class StudioRenderer : IDisposable, ITunable
     /// </remarks>
     public Matrix4x4 SunViewProjection(float? extent = null, float depth = 30f)
     {
-        var box = extent ?? ShadowExtent;
-        var eye = SunDirection * (depth * 0.5f);
-        var up = MathF.Abs(Vector3.Dot(SunDirection, Vector3.UnitY)) > 0.95f ? Vector3.UnitZ : Vector3.UnitY;
+        var box = extent ?? Look.ShadowExtent;
+        var eye = Look.SunDirection * (depth * 0.5f);
+        var up = MathF.Abs(Vector3.Dot(Look.SunDirection, Vector3.UnitY)) > 0.95f ? Vector3.UnitZ : Vector3.UnitY;
         var view = Matrix4x4.CreateLookAt(eye, Vector3.Zero, up);
         var projection = GraphicsMatrices.CreateOrthographicVulkan(box * 2f, box * 2f, 0.1f, depth);
         return view * projection;
@@ -548,14 +498,14 @@ public sealed class StudioRenderer : IDisposable, ITunable
                 new("uViewProjection", new Matrix4x4Uniform(viewProjection)),
                 new("uSunViewProjection", new Matrix4x4Uniform(sunViewProjection)),
                 new("uCameraPosition", new Vector4Uniform(new Vector4(cameraPosition, 1f))),
-                new("uSunDirection", new Vector4Uniform(new Vector4(SunDirection, 0f))),
-                new("uSunColour", new Vector4Uniform(new Vector4(SunColour, AmbientStrength))),
+                new("uSunDirection", new Vector4Uniform(new Vector4(Look.SunDirection, 0f))),
+                new("uSunColour", new Vector4Uniform(new Vector4(Look.SunColour, Look.AmbientStrength))),
             };
             var textures = new[] { new ShaderTextureBinding("uSunShadowMap", shadowTexture, Slot: 0) };
 
             // FURNITURE, and it stays the stage's: a tool does not choose whether the stage has a
             // floor. That is part of what makes it a stage rather than a blank device.
-            if (Ground) DrawGround(scope, litPipeline, uniforms, textures);
+            if (Look.Ground) DrawGround(scope, litPipeline, uniforms, textures);
 
             var draw = new StudioDraw(
                 scope, StudioPass.Lit, uniforms, textures, litPipeline, skinnedPipeline, whiteTexture,
@@ -577,12 +527,12 @@ public sealed class StudioRenderer : IDisposable, ITunable
                     new("uViewProjection", new Matrix4x4Uniform(panelViewProjection)),
                     new("uSunViewProjection", new Matrix4x4Uniform(sunViewProjection)),
                     new("uCameraPosition", new Vector4Uniform(new Vector4(viewportCameraPosition, 1f))),
-                    new("uSunDirection", new Vector4Uniform(new Vector4(SunDirection, 0f))),
-                    new("uSunColour", new Vector4Uniform(new Vector4(SunColour, AmbientStrength))),
+                    new("uSunDirection", new Vector4Uniform(new Vector4(Look.SunDirection, 0f))),
+                    new("uSunColour", new Vector4Uniform(new Vector4(Look.SunColour, Look.AmbientStrength))),
                 };
                 var textures = new[] { new ShaderTextureBinding("uSunShadowMap", shadowTexture, Slot: 0) };
 
-                if (Ground) DrawGround(scope, litPipeline, uniforms, textures);
+                if (Look.Ground) DrawGround(scope, litPipeline, uniforms, textures);
 
                 // The SAME views, from the second camera. That is what makes it a view rather
                 // than a second renderer — and now that a view is an interface, a tool's own
@@ -600,7 +550,7 @@ public sealed class StudioRenderer : IDisposable, ITunable
         // Pass 3 — exposure + tonemap onto the swapchain.
         var present = new ShaderUniform[]
         {
-            new("uParams", new Vector4Uniform(new Vector4(Exposure, TonemapMode, 0f, 0f))),
+            new("uParams", new Vector4Uniform(new Vector4(Look.Exposure, Look.TonemapMode, 0f, 0f))),
         };
         commandList.Pass(
             "lab.present",

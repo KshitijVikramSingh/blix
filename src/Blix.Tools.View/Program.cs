@@ -467,13 +467,25 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // five knobs declared on a type nobody had bound: --mode, --weight, --mask-root,
         // --mask-falloff and --drive-root all parsed to nothing, silently, because nameof survives
         // a member moving to another class.
-        tunables = new ObjectTunables(session, session.Driven, renderer);
+        // FOUR targets now. The look moved to a type of its own and TuneReflection does not recurse
+        // into a member, so binding the renderer alone would have dropped --sun-azimuth,
+        // --sun-elevation, --sun-intensity, --ambient-strength, --shadow-extent, --exposure,
+        // --tonemap-mode and --ground: eight flags parsed to nothing, silently, for exactly the
+        // reason the five above were. RequireDeclared covers them now so the next move fails loudly.
+        tunables = new ObjectTunables(session, session.Driven, renderer, renderer.Look);
 
         var bespoke = new[]
         {
             nameof(RigAnimation.Mode), nameof(RigAnimation.Weight), nameof(RigAnimation.MaskRoot),
             nameof(RigAnimation.MaskFalloff), nameof(RigInstances.Lockstep), nameof(RigInstances.DriveRoot),
         };
+
+        // Not bespoke — the panel draws these. Named here only so that a member leaving StudioLook
+        // fails at startup instead of becoming a flag nobody notices is gone.
+        tunables.RequireDeclared(
+            nameof(StudioLook.SunAzimuth), nameof(StudioLook.SunElevation), nameof(StudioLook.SunIntensity),
+            nameof(StudioLook.AmbientStrength), nameof(StudioLook.ShadowExtent), nameof(StudioLook.Ground),
+            nameof(StudioLook.Exposure), nameof(StudioLook.TonemapMode));
 
         // Checked, because the failure above has no symptom: a dropped flag and an absent flag look
         // the same from a window. This is the same rule the attachment names below already follow.
@@ -743,7 +755,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         debug.State.DepthTestDrawing = panels.DepthTestGizmos;
         debug.Values.Value("frames", frames);
-        debug.Values.Value("sun", renderer.SunDirection);
+        debug.Values.Value("sun", renderer.Look.SunDirection);
 
         // <b>Three aspects that must be one number, published so they can be checked.</b> The
         // viewport target is half the swapchain, the panel letterboxes to that same aspect, and the
@@ -819,7 +831,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         // The sun, drawn where it is actually pointing — an arrow that is wrong is the
         // fastest way to notice a lighting convention has drifted.
-        var sunFrom = renderer.SunDirection * 7f;
+        var sunFrom = renderer.Look.SunDirection * 7f;
         debug.Draw.Arrow("sun", sunFrom, Vector3.Zero, new GraphicsColor(1f, 0.9f, 0.5f, 1f));
 
         if (model is not null) DrawModelGizmos(debug);
