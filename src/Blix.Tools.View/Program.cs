@@ -462,15 +462,23 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // TWO targets. The session's knobs are Bespoke because this viewer draws better controls
         // for them; the SCENE's are not, so the stage's look is rendered by reflection — a Scene
         // panel this file does not write, and --sun-elevation it does not parse.
-        tunables = new ObjectTunables(session, renderer);
-        foreach (var member in new[]
+        // THREE targets now, not two. The set owns what is true of the row — how many bodies, are
+        // they locked together — and each body owns its own composition. Binding only the set left
+        // five knobs declared on a type nobody had bound: --mode, --weight, --mask-root,
+        // --mask-falloff and --drive-root all parsed to nothing, silently, because nameof survives
+        // a member moving to another class.
+        tunables = new ObjectTunables(session, session.Driven, renderer);
+
+        var bespoke = new[]
         {
             nameof(RigAnimation.Mode), nameof(RigAnimation.Weight), nameof(RigAnimation.MaskRoot),
             nameof(RigAnimation.MaskFalloff), nameof(RigInstances.Lockstep), nameof(RigAnimation.DriveRoot),
-        })
-        {
-            tunables.Bespoke.Add(member);
-        }
+        };
+
+        // Checked, because the failure above has no symptom: a dropped flag and an absent flag look
+        // the same from a window. This is the same rule the attachment names below already follow.
+        tunables.RequireDeclared(bespoke);
+        foreach (var member in bespoke) tunables.Bespoke.Add(member);
 
         // Every declared flag, parsed by nobody. A bad value throws with the member's own range or
         // option list in the message, which is more than the hand-written parsing it replaced ever

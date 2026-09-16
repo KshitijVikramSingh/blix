@@ -537,6 +537,33 @@ public sealed class ObjectTunables
     /// </remarks>
     public ISet<string> Bespoke { get; } = new HashSet<string>(StringComparer.Ordinal);
 
+    /// <summary>Every declared member name found across the bound targets.</summary>
+    public IEnumerable<string> MemberNames => groups.SelectMany(g => g.Items).Select(f => f.Name);
+
+    /// <summary>
+    /// Throws unless every name given is actually declared by one of the bound targets.
+    /// </summary>
+    /// <remarks>
+    /// <b>For the failure that has no symptom.</b> A caller naming members in strings — a Bespoke
+    /// list, a replay, a recorded flag — keeps compiling after those members move to another type,
+    /// because <c>nameof</c> only produces text. The binding is then silently gone: the flag parses
+    /// to nothing, the panel draws nothing, and a run with the flag looks exactly like a run
+    /// without it. That happened when N bodies were split out of one animation and five knobs went
+    /// with them.
+    /// </remarks>
+    public void RequireDeclared(params string[] names)
+    {
+        ArgumentNullException.ThrowIfNull(names);
+        var known = new HashSet<string>(MemberNames, StringComparer.Ordinal);
+        var missing = names.Where(n => !known.Contains(n)).ToArray();
+        if (missing.Length == 0) return;
+
+        throw new ArgumentException(
+            $"No bound target declares [Tune] {string.Join(", ", missing)}. "
+            + $"Bound targets declare: {string.Join(", ", known.OrderBy(x => x, StringComparer.Ordinal))}.",
+            nameof(names));
+    }
+
     public void BuildControls(DebugContext debug)
     {
         ArgumentNullException.ThrowIfNull(debug);
