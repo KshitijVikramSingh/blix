@@ -29,11 +29,15 @@ public sealed record GltfModel(
 
     // Mesh nodes this import did NOT take, and why. Empty for the ordinary one-skin character;
     // not empty for anything the importer's rules exclude, which used to leave no trace at all.
-    GltfSkipped[]? Skipped = null)
+    GltfSkipped[]? Skipped = null,
+    /// <summary>Attributes the file declared that this importer did not read.</summary>
+    GltfIgnored[]? Ignored = null)
 {
     /// <summary>Attachments, never null.</summary>
     public GltfAttachment[] AttachmentsOrEmpty => Attachments ?? [];
 
     /// <summary>What the import left behind, never null.</summary>
     public GltfSkipped[] SkippedOrEmpty => Skipped ?? [];
+
+    public GltfIgnored[] IgnoredOrEmpty => Ignored ?? [];
 }

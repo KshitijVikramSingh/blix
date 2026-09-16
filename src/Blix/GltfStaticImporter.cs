@@ -254,7 +254,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             nodes[i] = new GltfNode(node.Name ?? $"node{i}", parent, node.LocalMatrix, prims);
         }
 
-        return new GltfNodeModel(nodes);
+        return new GltfNodeModel(nodes, GltfShared.CollectIgnored(model));
     }
 
     /// <param name="includeColour">

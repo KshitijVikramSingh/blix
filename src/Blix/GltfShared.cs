@@ -207,6 +207,58 @@ internal static class GltfShared
         var blixTexPath = Path.ChangeExtension(sourcePath, ".blixtex");
         return File.Exists(blixTexPath) ? blixTexPath : null;
     }
+    /// <summary>The attribute semantics this importer actually reads. Everything else is reported.</summary>
+    /// <remarks>
+    /// <b>One list, because both importers have the same gap.</b> The rigged path reads JOINTS_0 and
+    /// WEIGHTS_0 where the static path does not, but neither reads index 1 of anything — so a single
+    /// set is honest for both and a second copy would be a place for them to drift.
+    /// </remarks>
+    private static readonly HashSet<string> ReadSemantics = new(StringComparer.Ordinal)
+    {
+        "POSITION", "NORMAL", "TANGENT", "TEXCOORD_0", "COLOR_0", "JOINTS_0", "WEIGHTS_0",
+    };
+
+    /// <summary>
+    /// Every attribute the file declares that this importer does not read, with how many primitives
+    /// carried each.
+    /// </summary>
+    /// <remarks>
+    /// Subtractive on purpose: it asks what the primitive HAS and removes what we read, rather than
+    /// looking for a list of names someone thought of. An exporter emitting something nobody here
+    /// anticipated is exactly the case worth hearing about, and a hardcoded list is deaf to it.
+    /// </remarks>
+    internal static GltfIgnored[] CollectIgnored(ModelRoot model)
+    {
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var mesh in model.LogicalMeshes)
+        {
+            foreach (var prim in mesh.Primitives)
+            {
+                foreach (var semantic in prim.VertexAccessors.Keys)
+                {
+                    if (ReadSemantics.Contains(semantic)) continue;
+                    counts[semantic] = counts.GetValueOrDefault(semantic) + 1;
+                }
+
+                if (prim.MorphTargetsCount > 0)
+                {
+                    counts[GltfIgnored.MorphTargets] = counts.GetValueOrDefault(GltfIgnored.MorphTargets) + 1;
+                }
+            }
+        }
+
+        if (counts.Count == 0) return Array.Empty<GltfIgnored>();
+
+        // Ordered so the report reads the same way twice, and so the one that corrupts geometry
+        // rather than merely omitting it comes first.
+        return counts
+            .Select(kv => new GltfIgnored(kv.Key, kv.Value))
+            .OrderByDescending(i => i.Semantic.StartsWith("JOINTS_", StringComparison.Ordinal)
+                                 || i.Semantic.StartsWith("WEIGHTS_", StringComparison.Ordinal))
+            .ThenBy(i => i.Semantic, StringComparer.Ordinal)
+            .ToArray();
+    }
+
     internal static GltfMaterial? ExtractMaterial(
         SharpGLTF.Schema2.Material? material,
         Dictionary<int, GltfMaterial> materialCache,

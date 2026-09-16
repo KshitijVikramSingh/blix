@@ -154,10 +154,24 @@ feature; that one is a wrong result — the fifth and later influences are dropp
 deforms incorrectly, with nothing said. No asset in this tree has it today, which is exactly why
 grepping was silent on it, and exactly why that is not evidence.
 
-Nothing in the tree warns when an ignored set is present. The arc already built the channel for
-this — `AssetLoadLog`, and `GltfSkipped` for meshes the rigged importer declines — so saying
-"this file has a second UV set I did not read" is a small addition to an existing shape rather
-than a new one. **Not built yet; listed so it is a decision rather than an oversight.**
+~~Nothing in the tree warns when an ignored set is present.~~ **Built** — `GltfIgnored`, the
+complement of `GltfSkipped`: that one reports whole mesh nodes the rigged import declined, this one
+reports the channels declined inside the nodes it took. On both importers, on `AssetLoadLog`, and
+covered by Test.Graphics section BA.
+
+**Subtractive, not a list of known-missing names.** It asks what the primitive declares and removes
+what the importer reads, so an exporter emitting something nobody anticipated is caught — which a
+hardcoded list is deaf to, and which is the one case worth hearing about. Section BA proves that
+with a `_CUSTOM_THING` attribute no code anywhere names.
+
+**The explanation separates omission from corruption**, because a reader who cannot tell them apart
+triages them the same way: an unread UV set is a missing capability, an unread `JOINTS_1` is a skin
+**truncated to its first four influences with vertices deforming incorrectly**. The list is ordered
+to put the corrupting kind first.
+
+**And it found one the sweep-by-grep had missed.** `villager_ranger.glb` carries `COLOR_1` and
+`COLOR_2` on three primitives each, alongside the `TEXCOORD_1` this plan already knew about. Nothing
+had ever said so.
 
 ### I-B — the viewer can express what the material already says — **DONE (reshaped on measurement)**
 

@@ -215,19 +215,32 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         // so this path has nothing to prefer. Saying so in the report is the point — a load that is
         // slow because nobody cooked it and a load that is slow because it CANNOT be cooked are
         // different problems, and only one of them is anybody's fault.
+        var ignored = GltfShared.CollectIgnored(model);
+
         if (AssetLoadLog.Enabled)
         {
+            // Two warnings can be true at once, and the attribute one is the louder of the pair
+            // when it fires: "this file has channels I did not read" is a different fact from "this
+            // file cannot be cooked", and folding them into one line would lose whichever came second.
+            var warning = "a rigged glTF has no cooked form — .blixmesh holds no skinned vertex layout";
+            if (ignored.Length > 0)
+            {
+                warning += "; ignored " + string.Join(", ",
+                    ignored.Select(i => $"{i.Semantic} ({i.Primitives} prim) — {i.Explanation}"));
+            }
+
             AssetLoadLog.Report(new AssetLoadReport(
                 SourcePath: context.SourcePath,
                 CookedPath: null,
                 Mode: AssetLoadMode.Source,
                 Bytes: SourceLength(context.SourcePath),
                 LoadMs: loadWatch.Elapsed.TotalMilliseconds,
-                Warning: "a rigged glTF has no cooked form — .blixmesh holds no skinned vertex layout"));
+                Warning: warning));
         }
 
         return new GltfModel(
-            primitives, skeleton, animations.ToArray(), meshNodeTransform, attachments, skipped.ToArray());
+            primitives, skeleton, animations.ToArray(), meshNodeTransform, attachments, skipped.ToArray(),
+            ignored);
     }
 
     private static long SourceLength(string path)

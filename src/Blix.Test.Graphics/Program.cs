@@ -3420,6 +3420,138 @@ static ShaderInterface MinimalShader() => new(new[]
 }
 
 // ============================================================================
+// Section BA — a file says which of its channels went unread.
+// ============================================================================
+//
+// <b>COLOR_0 was found by grepping assets, and that is the method this section exists to retire.</b>
+// Forty-nine primitives happened to carry a channel nothing read, and noticing took a search. That
+// only ever finds what the content already has: JOINTS_1 — more than four bone influences, which
+// TRUNCATES a skin and deforms vertices wrongly rather than merely omitting a feature — appears in
+// no asset here, in none of the Khronos sample assets, and would therefore never have been found
+// that way at all.
+//
+// glTF 2.0 defines a closed set of attribute semantics, so the gap is knowable from the spec. The
+// sweep is subtractive — what the primitive declares, minus what the importer reads — because a
+// hardcoded list of known-missing names is deaf to the one case worth hearing about: an exporter
+// emitting something nobody here anticipated.
+{
+    var temp = Path.Combine(Path.GetTempPath(), $"blix-ba-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(temp);
+    try
+    {
+        // A plain triangle, and the same triangle with a second UV set bolted on afterwards. Built
+        // by editing the JSON rather than through the builder API, because SharpGLTF's typed vertex
+        // builders will not emit a semantic the importer is not expected to want — which is exactly
+        // the shape this test needs to produce.
+        var material = SharpGLTF.Materials.MaterialBuilder.CreateDefault();
+        // Tangents are in the fixture so the file contains a VEC4 float accessor. The aliases below
+        // have to be TYPE-COMPATIBLE with the semantic they impersonate — SharpGLTF validates on
+        // load and refuses a JOINTS accessor that is not UBYTE4/USHORT4/FLOAT4, which is the
+        // validator being right and the first draft of this fixture being malformed.
+        var mesh = new SharpGLTF.Geometry.MeshBuilder<
+            SharpGLTF.Geometry.VertexTypes.VertexPositionNormalTangent,
+            SharpGLTF.Geometry.VertexTypes.VertexTexture1>("m");
+        var prim = mesh.UsePrimitive(material);
+        prim.AddTriangle(
+            (new SharpGLTF.Geometry.VertexTypes.VertexPositionNormalTangent(
+                 new Vector3(0, 0, 0), new Vector3(0, 1, 0), new Vector4(1, 0, 0, 1)),
+             new SharpGLTF.Geometry.VertexTypes.VertexTexture1(new Vector2(0, 0))),
+            (new SharpGLTF.Geometry.VertexTypes.VertexPositionNormalTangent(
+                 new Vector3(1, 0, 0), new Vector3(0, 1, 0), new Vector4(1, 0, 0, 1)),
+             new SharpGLTF.Geometry.VertexTypes.VertexTexture1(new Vector2(1, 0))),
+            (new SharpGLTF.Geometry.VertexTypes.VertexPositionNormalTangent(
+                 new Vector3(0, 0, 1), new Vector3(0, 1, 0), new Vector4(1, 0, 0, 1)),
+             new SharpGLTF.Geometry.VertexTypes.VertexTexture1(new Vector2(0, 1))));
+        var scene = new SharpGLTF.Scenes.SceneBuilder();
+        scene.AddRigidMesh(mesh, new SharpGLTF.Scenes.NodeBuilder("only"));
+
+        var plain = Path.Combine(temp, "plain.gltf");
+        scene.ToGltf2().SaveGLTF(plain);
+
+        // Bolt TEXCOORD_1 onto the primitive by pointing it at the accessor TEXCOORD_0 already uses.
+        // A second set that aliases the first is still a second set as far as the file is concerned,
+        // and the sweep reads the declaration rather than the data.
+        var extra = Path.Combine(temp, "extra.gltf");
+        var json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(plain))!;
+        var attrs = json["meshes"]![0]!["primitives"]![0]!["attributes"]!;
+        attrs["TEXCOORD_1"] = attrs["TEXCOORD_0"]!.DeepClone();
+        attrs["_CUSTOM_THING"] = attrs["TEXCOORD_0"]!.DeepClone();
+        File.WriteAllText(extra, json.ToJsonString());
+
+        var plainModel = new GltfStaticImporter().ImportNodes(
+            new AssetImportContext(AssetId.Parse("ba/plain"), plain));
+        var extraModel = new GltfStaticImporter().ImportNodes(
+            new AssetImportContext(AssetId.Parse("ba/extra"), extra));
+
+        // ── BA.1 THE CONTROL FIRST ──────────────────────────────────────────
+        //
+        // A file with nothing unread must report nothing. Without this, a sweep that returned every
+        // attribute it saw — including POSITION and NORMAL — would pass every other check here and
+        // make the report worthless by crying constantly.
+        t.Expect("BA.1 CONTROL a file with no unread attributes reports none",
+            plainModel.IgnoredOrEmpty.Length == 0,
+            $"got {string.Join(", ", plainModel.IgnoredOrEmpty.Select(i => i.Semantic))}");
+
+        // ── BA.2 what it does catch ─────────────────────────────────────────
+        var names = extraModel.IgnoredOrEmpty.Select(i => i.Semantic).ToArray();
+        t.ExpectTrue($"BA.2 a second UV set is reported (got {names.Length}: {string.Join(", ", names)})",
+            names.Contains("TEXCOORD_1"));
+
+        // The subtractive sweep's whole reason for being: nobody wrote "_CUSTOM_THING" into a list.
+        t.ExpectTrue("BA.2 and so is an attribute nobody anticipated, which a fixed list would miss",
+            names.Contains("_CUSTOM_THING"));
+
+        t.Expect("BA.2 the semantics Blix DOES read are not reported as ignored",
+            !names.Contains("POSITION") && !names.Contains("NORMAL") && !names.Contains("TEXCOORD_0"),
+            string.Join(", ", names));
+
+        var uv1 = extraModel.IgnoredOrEmpty.First(i => i.Semantic == "TEXCOORD_1");
+        t.Expect("BA.2 counted per primitive", uv1.Primitives == 1, $"{uv1.Primitives}");
+
+        // ── BA.3 the explanation separates omission from corruption ─────────
+        //
+        // The distinction the whole record exists to carry: an unread UV set is a missing feature,
+        // an unread fifth bone influence is a wrong answer. A reader who cannot tell them apart will
+        // triage them the same way, which is the failure mode this prevents.
+        t.ExpectTrue("BA.3 a second UV set explains itself as a missing capability",
+            uv1.Explanation.Contains("UV", StringComparison.Ordinal));
+
+        var joints1 = new GltfIgnored("JOINTS_1", 3);
+        t.ExpectTrue($"BA.3 JOINTS_1 says the skin is TRUNCATED, not merely unread ({joints1.Explanation})",
+            joints1.Explanation.Contains("TRUNCATED", StringComparison.Ordinal)
+            && joints1.Explanation.Contains("incorrectly", StringComparison.Ordinal));
+
+        t.ExpectTrue("BA.3 and an underscore attribute is named as application-specific",
+            new GltfIgnored("_BATCHID", 1).Explanation.Contains("application-specific", StringComparison.Ordinal));
+
+        // ── BA.4 the ordering puts the corrupting one first ─────────────────
+        //
+        // A list read top-down should lead with the entry that changes geometry rather than the one
+        // that omits a feature.
+        // Each alias borrows an accessor of a type its semantic actually allows: TEXCOORD_1 a VEC2,
+        // COLOR_1 a VEC3, JOINTS_1 the VEC4 tangent. Declared in an order that puts JOINTS_1 in the
+        // middle, so passing cannot be an accident of insertion order.
+        var mixedPath = Path.Combine(temp, "mixed.gltf");
+        var mixedJson = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(plain))!;
+        var mixedAttrs = mixedJson["meshes"]![0]!["primitives"]![0]!["attributes"]!;
+        mixedAttrs["TEXCOORD_1"] = mixedAttrs["TEXCOORD_0"]!.DeepClone();
+        mixedAttrs["JOINTS_1"] = mixedAttrs["TANGENT"]!.DeepClone();
+        mixedAttrs["COLOR_1"] = mixedAttrs["NORMAL"]!.DeepClone();
+        File.WriteAllText(mixedPath, mixedJson.ToJsonString());
+
+        var mixedModel = new GltfStaticImporter().ImportNodes(
+            new AssetImportContext(AssetId.Parse("ba/mixed"), mixedPath));
+        var first = mixedModel.IgnoredOrEmpty.FirstOrDefault()?.Semantic;
+        t.Expect("BA.4 the entry that corrupts geometry is listed first",
+            first == "JOINTS_1", $"got '{first}'");
+    }
+    finally
+    {
+        try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
+    }
+}
+
+// ============================================================================
 // Section AZ — the vertex colour that was being thrown away.
 // ============================================================================
 //

@@ -15,8 +15,11 @@ public sealed record GltfNode(
     Matrix4x4 LocalTransform,    // relative to the parent (engine row-vector form)
     GltfPrimitive[] Primitives); // node-local-space meshes (empty for transform-only nodes)
 
-public sealed record GltfNodeModel(GltfNode[] Nodes)
+public sealed record GltfNodeModel(GltfNode[] Nodes, GltfIgnored[]? Ignored = null)
 {
+    /// <summary>Attributes the file declared that this importer did not read.</summary>
+    public GltfIgnored[] IgnoredOrEmpty => Ignored ?? [];
+
     // First node whose name matches (ordinal). Null if absent — callers decide
     // whether a missing part is fatal.
     public GltfNode? Find(string name) => Array.Find(Nodes, n => n.Name == name);
