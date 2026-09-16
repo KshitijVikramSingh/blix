@@ -42,17 +42,21 @@ layout(push_constant) uniform Push {
 layout(location = 0) in vec3 vWorld;
 layout(location = 1) in vec3 vNormal;
 layout(location = 2) in vec2 vUv;
-// Baked ambient occlusion on the nature kit — a blade of grass dark where it meets the ground,
-// bark dark in its crevices. Multiplied, not added, which is what makes white the correct default.
+// The glTF COLOR_0 attribute: a multiplier on base colour. Multiplied, not added, which is what
+// makes white the correct default.
 //
-// <b>It modulates the AMBIENT term only, and getting that wrong is visible.</b> This first went
-// into `albedo`, ahead of the BRDF, on the reasoning that occlusion should darken everything —
-// which is wrong, and the grass said so. AMBIENT occlusion describes how much of the surrounding
-// sky a point can see; it has no authority over a direct ray from the sun, and the shadow map is
-// already the thing that decides whether the sun reaches a surface. Feeding it to both meant the
-// bottom fifth of every blade, authored at COLOR_0 ≈ 0.008, multiplied its direct response to
-// nothing as well and rendered PURE BLACK — a solid fan wherever the splayed bases overlapped,
-// which is exactly how it was spotted.
+// <b>It goes into ALBEDO, and the route here went the wrong way once.</b> On this tree's nature kit
+// the channel is greyscale baked occlusion — a blade dark where it meets the ground, bark dark in
+// its crevices — so it was moved to modulate the ambient term alone, on the reasoning that
+// occlusion has no authority over a direct ray from the sun. That reasoning is sound about
+// OCCLUSION and wrong about this ATTRIBUTE, and Khronos's own BoxVertexColors said so: it is the
+// reference test for vertex colour, and against an ambient term of 0.06 it rendered WHITE instead
+// of red, green and blue. COLOR_0 is a base-colour multiplier; the kit's use of it as occlusion is
+// an authoring convention, not what the attribute means.
+//
+// The consequence is deliberate and worth stating, because it looks like a regression. The kit's
+// blade bases are authored at COLOR_0 ≈ 0.008, so they multiply their albedo to nearly nothing and
+// render near-black. That is this asset being drawn as it is written, not the renderer failing.
 layout(location = 3) in vec4 vColour;
 
 layout(location = 0) out vec4 outColour;
@@ -73,16 +77,16 @@ void main()
 
     float metallic = clamp(uMaterial.x, 0.0, 1.0);
     float roughness = clamp(uMaterial.y, 0.04, 1.0);
-    vec3 albedo = uBaseColour.rgb * texture(uAlbedo, vUv).rgb;
+    vec3 albedo = uBaseColour.rgb * texture(uAlbedo, vUv).rgb * vColour.rgb;
 
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
     vec3 direct = blix_cookTorranceBrdf(N, V, L, albedo, F0, metallic, roughness)
                 * uSunColour.rgb * ndotl * shadow;
 
     // A flat ambient term standing in for image-based lighting, which this lab
-    // deliberately does not carry — VulkanLit is where IBL lives. The baked occlusion belongs
-    // HERE and only here: it is the fraction of that flat sky the point can actually see.
-    vec3 ambient = albedo * uSunColour.a * vColour.rgb;
+    // deliberately does not carry — VulkanLit is where IBL lives. It picks up the vertex colour
+    // through `albedo` above, so it is not applied twice here.
+    vec3 ambient = albedo * uSunColour.a;
 
     outColour = vec4(direct + ambient, 1.0);
 }

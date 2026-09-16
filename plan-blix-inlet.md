@@ -209,6 +209,57 @@ the culling one, because face culling is pipeline state in Vulkan and cannot be 
   drives it. `AlphaMode`/`AlphaCutoff` are **carried, not demonstrated** — stated so no one reads
   this stage as having proven them.
 
+### Where COLOR_0 belongs — **settled by the reference corpus, after two wrong turns**
+
+`COLOR_0` went into `albedo`, then into `ambient`, then back into `albedo`. Worth recording as a
+sequence, because each move was made on the best evidence available at the time and the first two
+were wrong in different ways.
+
+1. **Into `albedo`.** Correct placement, reached for the wrong reason, and it hid a real bug: the
+   BRDF's `max(dot(N, V), 0.0)` was switching the specular lobe off along the camera's eye-height
+   plane, which read as the channel being applied too strongly.
+2. **Into `ambient`.** Moved on the reasoning that occlusion has no authority over a direct sun ray.
+   Sound about *occlusion* and wrong about *this attribute* — and it made the effect nearly
+   invisible, since `AmbientStrength` is 0.06.
+3. **Back into `albedo`**, once `NdotV` was fixed and **Khronos's `BoxVertexColors` was run**. That
+   model is the reference test for vertex colour and it rendered **white**. `COLOR_0` is a
+   base-colour multiplier; the nature kit's use of it as greyscale occlusion is an authoring
+   convention, not what the attribute means.
+
+**The lesson is about the evidence, not the arithmetic.** Every reading in steps 1 and 2 came from
+the only assets this tree owned, and all 33 of those use the channel the same non-standard way. A
+corpus of one convention cannot tell you what a convention is. The Khronos sample assets answered it
+in a single run.
+
+**An import-time "occlusion vs colour" switch was considered and is NOT built.** With the `NdotV`
+fix in place the kit's grass reads correctly under the reference behaviour — bright tips, dark
+bases, smooth gradient — so the near-black blade bases are the asset's own authored values being
+drawn as written. Nothing is asking for the switch; if an asset later wants occlusion semantics,
+`AssetImportContext.IncludeColour` is the flag that would grow the second meaning.
+
+### Sample assets — the corpus, and what it caught immediately
+
+Six Khronos sample models were run through the viewer. Five loaded first try; the sixth was a `.gltf`
+whose sibling `.bin` had not been fetched, which was a download error and not a reader gap. Sparse
+accessors load fine.
+
+| model | what it showed |
+|---|---|
+| `BoxVertexColors` | rendered **white** — settled the `COLOR_0` question above |
+| `AlphaBlendModeTest` | all five panels **fully opaque** — the demonstration I-B could not have |
+| `MultiUVTest` | loads; the second UV set is ignored (I-E) |
+| `MorphPrimitivesTest` | loads; morph targets are not read at all |
+| `SimpleSparseAccessor` | correct |
+| `NormalTangentTest` | loads |
+
+**And a gap the corpus does not cover either:** nothing in it exercises `JOINTS_1` / more than four
+bone influences per vertex, which is the one glTF gap here that produces a wrong result rather than
+a missing feature.
+
+**Not committed.** The models live outside the repo pending a decision on where they belong and on
+licensing — Khronos sample assets carry per-model licences (a mix of CC0 and CC-BY), so they need a
+`CREDITS.md` entry the way the poly.pizza assets do.
+
 ### I-F — the viewer can supply the colour the asset does not have
 
 **Measured while answering "is the grass supposed to be greyscale?" — yes, it is.** All 40 materials
