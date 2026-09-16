@@ -464,10 +464,11 @@ internal sealed class ViewerPanels
             $"           {travel.Length():0.000} m net, {RigAnimation.DegreesOf(app.Session.Driven.RootTurn):0.0}° net turn");
         ImGui.TextDisabled($"           {app.Session.Driven.RootTurnPathDegrees:0.0}° of turning done to get there");
 
-        var drive = app.Session.Driven.DriveRoot;
+        // The whole row, not just the body this panel drives — see RigInstances.DriveRoot.
+        var drive = app.Session.DriveRoot;
         if (ImGui.Checkbox("drive the model", ref drive))
         {
-            app.Session.Driven.DriveRoot = drive;
+            app.Session.DriveRoot = drive;
         }
 
         ImGui.SameLine();

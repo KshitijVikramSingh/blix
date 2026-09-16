@@ -83,6 +83,21 @@ public sealed class RigInstances : ITunable
     /// </remarks>
     [Tune] public bool Lockstep { get; set; }
 
+    /// <summary>
+    /// Strip every body's root and let the caller move the row by the driven body's travel.
+    /// </summary>
+    /// <remarks>
+    /// <b>Set-level, because a half-driven row is incoherent.</b> The driven body would be moved by
+    /// the transform while the others kept their root motion in the pose and slid inside their
+    /// slots. This was one flag on the whole session until N bodies were split out of it; putting
+    /// it back here is what makes the row behave as one thing again.
+    /// </remarks>
+    [Tune] public bool DriveRoot
+    {
+        get => Driven.DriveRoot;
+        set { foreach (var body in bodies) body.DriveRoot = value; }
+    }
+
     /// <summary>How many distinct poses the bodies actually hold. 1 under lockstep.</summary>
     /// <remarks>
     /// Fingerprinted WITHOUT placement. The placement is baked into each drawn palette, so bodies

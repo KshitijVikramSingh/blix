@@ -414,7 +414,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             },
         };
 
-        for (var i = 0; i < animation.Count; i++) animation[i].DriveRoot = driveRoot;
+        animation.DriveRoot = driveRoot;
         player = animation.Driven.Subject;
 
         if (maskRoot is not null)

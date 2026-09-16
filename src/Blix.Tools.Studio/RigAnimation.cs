@@ -185,7 +185,14 @@ public sealed class RigAnimation : ITunable
 
 
     /// <summary>Strip the root and let the caller move the body by <see cref="RootTravel"/> instead.</summary>
-    [Tune] public bool DriveRoot { get; set; }
+    /// <remarks>
+    /// <b>Not [Tune] here — <see cref="RigInstances.DriveRoot"/> is, and it fans out to every body.</b>
+    /// Driving is a decision about the whole row: a row where one body is driven and the rest keep
+    /// their root motion in-pose has some bodies moved by the transform and others sliding inside
+    /// their slots. It was one session-wide flag before N bodies were split out, and setting only
+    /// the driven body's is exactly the regression that split introduced.
+    /// </remarks>
+    public bool DriveRoot { get; set; }
 
     /// <summary>Accumulated root travel, in the rig's post-mesh-node space.</summary>
     public Vector3 RootTravel { get; private set; }

@@ -472,7 +472,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         var bespoke = new[]
         {
             nameof(RigAnimation.Mode), nameof(RigAnimation.Weight), nameof(RigAnimation.MaskRoot),
-            nameof(RigAnimation.MaskFalloff), nameof(RigInstances.Lockstep), nameof(RigAnimation.DriveRoot),
+            nameof(RigAnimation.MaskFalloff), nameof(RigInstances.Lockstep), nameof(RigInstances.DriveRoot),
         };
 
         // Checked, because the failure above has no symptom: a dropped flag and an absent flag look
@@ -656,7 +656,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // already carries the normalising scale, so a `* rigScale` here squared it — the Rogue
         // normalises by 1.372, so the body ran 1.88x too far and the trail agreed with it, which is
         // why two wrong things looked like one right one.
-        rigTransform = session.Driven.DriveRoot
+        rigTransform = session.DriveRoot
             ? Matrix4x4.CreateTranslation(session.Driven.RootTravel) * rigBase
             : rigBase;
 
