@@ -360,6 +360,41 @@ a silhouette turns against a background.
 The panel's viewport stays at 1x deliberately: it is a fraction of the window and already renders the
 scene a second time.
 
+## The crash MSAA woke up, and the instrument that was missing
+
+Booting the three rigs headed found it, and the user named the trigger in three words: **resizing
+crashes it.** All three died with `vkAcquireNextImageKHR failed with ErrorDeviceLost`, thousands of
+frames after they started.
+
+**The bug predates this session and the comment sitting directly above it describes it.** The graph's
+resize path reallocates every matchSwapchain-sized resource, and its DEPTH branch restated the usage
+flags and the sample count instead of sharing the first allocation's decision — so a multisampled
+depth target came back **single-sampled**, asking for `SampledBit` that multisampled depth must not
+have, against a render pass that still expected multisample. The COLOUR branch four lines up carries
+a comment about this exact bug being found and fixed, ending *"the fix is not to copy the missing
+flag across — it is to stop there being two places that decide."* The fix was applied to colour and
+not to depth, and it stayed latent because nothing multisampled its depth **and** resized a window
+until the studio turned MSAA on by default.
+
+`DepthTargetUsage(bool msaa)` now exists as `ColorTargetUsage`'s sibling and both paths call it, and
+the resize passes the sample count. The framebuffer-rebuild check also now counts resolve targets:
+not the studio's case today, since its multisampled colour is already swapchain-sized, but the check
+should describe the rule rather than the one arrangement that happens to exist.
+
+### `tools/check-resize.sh`
+
+**Nothing here could see this class of bug, and now something can.** A resize failure surfaces as a
+device loss several frames later with no validation message and no stack naming the resize; the lab
+baseline is blind to it by construction, because every capture is a fixed-size bounded run that never
+resizes. The check drives the live window through System Events and reports whether it survived.
+
+Verified as an A/B rather than asserted: **before the fix, exit 134 and one DeviceLost on the first
+run; after, five resizes each on the Rogue and the ranger, exit 0, zero DeviceLost, both to frame
+1200.**
+
+That is the second time in two days that the honest instrument turned out to be *run it and look*,
+and the second time the user supplied the observation that made it findable.
+
 ## Then
 
 **Cascades** — the shadow is one 9 m orthographic box, the most visible quality gap on the thing you

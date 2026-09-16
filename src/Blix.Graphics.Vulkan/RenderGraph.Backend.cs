@@ -135,6 +135,18 @@ public sealed partial class RenderGraph : IDisposable
                 if (Resources[t.View.Resource.Id].Size is MatchSwapchainGraphSize) { needsRebuild = true; break; }
             if (!needsRebuild && gpass.Depth is { } d && Resources[d.View.Resource.Id].Size is MatchSwapchainGraphSize)
                 needsRebuild = true;
+            // Resolve destinations count too. A pass whose only swapchain-sized attachment is a
+            // resolve target would otherwise keep a framebuffer pointing at a freed image — not the
+            // studio's case today, where the multisampled colour is already swapchain-sized, but the
+            // check should describe the rule rather than the one arrangement that happens to exist.
+            if (!needsRebuild)
+            {
+                foreach (var r in gpass.ResolveTargets)
+                    if (Resources[r.Resource.Id].Size is MatchSwapchainGraphSize) { needsRebuild = true; break; }
+            }
+            if (!needsRebuild && gpass.DepthResolveTarget is { } dr
+                && Resources[dr.Resource.Id].Size is MatchSwapchainGraphSize)
+                needsRebuild = true;
             if (!needsRebuild) continue;
 
             // Destroy old framebuffer.
@@ -202,11 +214,24 @@ public sealed partial class RenderGraph : IDisposable
             }
             case GraphResourceKind.DepthTarget:
             {
+                // <b>The sample count and the usage, exactly as the first allocation chose them.</b>
+                // This branch restated both and got both wrong: a multisampled depth target came back
+                // SINGLE-SAMPLED, against a render pass that still expected multisample, and asked for
+                // SampledBit which multisampled depth must not have. The symptom is
+                // vkAcquireNextImageKHR failing with ErrorDeviceLost on the next frame — a crash with
+                // no validation message, several frames after the resize that caused it.
+                //
+                // Latent since the graph was written, because nothing multisampled its depth AND
+                // resized a window until the studio stage turned MSAA on by default. The identical
+                // bug in the COLOUR branch above was found and fixed; this one was one case away and
+                // stayed. That is the whole argument for DepthTargetUsage existing rather than the
+                // flags being written out twice.
                 var (img, mem, view) = device.AllocateAttachmentImage(
                     width, height, device.GraphDepthFormat,
-                    ImageUsageFlags.DepthStencilAttachmentBit | ImageUsageFlags.SampledBit,
+                    DepthTargetUsage(declared.Samples > 1),
                     ImageAspectFlags.DepthBit,
-                    $"graph.{declared.Name}");
+                    $"graph.{declared.Name}",
+                    SampleCount(declared.Samples));
                 entry.Image = img;
                 entry.Memory = mem;
                 entry.WholeImageView = view;
@@ -372,13 +397,22 @@ public sealed partial class RenderGraph : IDisposable
         _ => throw new ArgumentException($"Unsupported MSAA sample count {samples} (use 1/2/4/8)."),
     };
 
+    /// <summary>What a depth target is used for. ONE place decides, because two disagreed.</summary>
+    /// <remarks>
+    /// Multisampled depth is never sampled — it is resolved into a 1x target when anything needs to
+    /// read it — so it asks for TransientAttachment rather than Sampled. Sibling of
+    /// <see cref="ColorTargetUsage"/>, and it exists for the same reason that one does: the resize
+    /// path restated this decision instead of sharing it, and the restatement was wrong.
+    /// </remarks>
+    private static ImageUsageFlags DepthTargetUsage(bool msaa) => msaa
+        ? ImageUsageFlags.DepthStencilAttachmentBit | ImageUsageFlags.TransientAttachmentBit
+        : ImageUsageFlags.DepthStencilAttachmentBit | ImageUsageFlags.SampledBit;
+
     private unsafe void AllocateDepthTarget(GraphResourceEntry resource, uint width, uint height)
     {
         var device = Device!;
         var msaa = resource.Samples > 1;
-        var usage = msaa
-            ? ImageUsageFlags.DepthStencilAttachmentBit | ImageUsageFlags.TransientAttachmentBit
-            : ImageUsageFlags.DepthStencilAttachmentBit | ImageUsageFlags.SampledBit;
+        var usage = DepthTargetUsage(msaa);
         var (image, memory, view) = device.AllocateAttachmentImage(
             width, height, device.GraphDepthFormat, usage, ImageAspectFlags.DepthBit,
             $"graph.{resource.Name}", SampleCount(resource.Samples));
