@@ -3203,6 +3203,118 @@ static ShaderInterface MinimalShader() => new(new[]
 // ============================================================================
 // ============================================================================
 // ============================================================================
+// Section AY — a mesh parented to a joint is not thrown away.
+// ============================================================================
+//
+// <b>The rigged importer took nodes carrying both a mesh and a skin and dropped the rest in
+// silence.</b> Rogue.glb is twelve mesh-bearing nodes, six skinned and six not — a knife, two
+// crossbows, a throwable and a cape, each parented to a joint — so half of the tree's reference rig
+// arrived as nothing, with no warning and no count, across several arcs of looking straight at it.
+// A character with empty hands looks exactly like a character.
+//
+// <b>The rig here is synthetic and its joints are deliberately out of order</b>, which is the whole
+// reason it is synthetic. The skeleton is topologically sorted at import, so a skin whose joint list
+// is ALREADY sorted has an identity remap — and the Rogue's is. Checking against the Rogue would
+// therefore pass whether the remap were applied or not, which is a check that cannot fail.
+{
+    var temp = Path.Combine(Path.GetTempPath(), $"blix-ay-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(temp);
+    try
+    {
+        // root -> mid -> tip, and one static mesh hanging off `tip`.
+        var root = new SharpGLTF.Scenes.NodeBuilder("root");
+        var mid = root.CreateNode("mid");
+        var tip = mid.CreateNode("tip");
+        tip.LocalMatrix = Matrix4x4.CreateTranslation(0f, 2f, 0f);
+
+        var skinned = new SharpGLTF.Geometry.MeshBuilder<
+            SharpGLTF.Geometry.VertexTypes.VertexPositionNormal,
+            SharpGLTF.Geometry.VertexTypes.VertexEmpty,
+            SharpGLTF.Geometry.VertexTypes.VertexJoints4>("body");
+        var skinnedPrim = skinned.UsePrimitive(SharpGLTF.Materials.MaterialBuilder.CreateDefault());
+        skinnedPrim.AddTriangle(
+            (new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 0, 0, 1, 0), default, new SharpGLTF.Geometry.VertexTypes.VertexJoints4(0)),
+            (new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(1, 0, 0, 0, 1, 0), default, new SharpGLTF.Geometry.VertexTypes.VertexJoints4(0)),
+            (new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 1, 0, 1, 0), default, new SharpGLTF.Geometry.VertexTypes.VertexJoints4(0)));
+
+        var gear = new SharpGLTF.Geometry.MeshBuilder<SharpGLTF.Geometry.VertexTypes.VertexPositionNormal>("gear");
+        var gearPrim = gear.UsePrimitive(SharpGLTF.Materials.MaterialBuilder.CreateDefault());
+        gearPrim.AddTriangle(
+            new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 0, 0, 1, 0),
+            new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0.5f, 0, 0, 0, 1, 0),
+            new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 0.5f, 0, 1, 0));
+
+        var scene = new SharpGLTF.Scenes.SceneBuilder();
+        // <b>tip, root, mid.</b> Not sorted, so the importer's topological remap has to move things:
+        // tip goes from index 0 to index 2, and an attachment that recorded the RAW index would come
+        // back pointing at `root`.
+        scene.AddSkinnedMesh(skinned, Matrix4x4.Identity, tip, root, mid);
+        scene.AddRigidMesh(gear, tip.CreateNode("held"));
+
+        var withGear = Path.Combine(temp, "rig-with-gear.glb");
+        scene.ToGltf2().SaveGLB(withGear);
+
+        var model = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("ay/gear"), withGear));
+        var found = model.AttachmentsOrEmpty;
+
+        t.Expect("AY.1 a mesh parented to a joint survives import", found.Length == 1, $"found {found.Length}");
+        if (found.Length == 1)
+        {
+            var a = found[0];
+            t.Expect("AY.1 named by its node", a.Name == "held", $"got '{a.Name}'");
+            t.Expect("AY.2 carrying the joint it hangs from", a.JointName == "tip", $"got '{a.JointName}'");
+
+            // <b>The check the Rogue could not make.</b> `tip` is joint 0 in the skin's own list and
+            // bone 2 in the skeleton. A recorded raw index would name `root` here and every count
+            // would still be right.
+            t.Expect("AY.2 and the REMAPPED bone index, not the skin's",
+                a.JointIndex >= 0 && a.JointIndex < model.Skeleton.BoneCount
+                && model.Skeleton.Bones[a.JointIndex].Name == "tip",
+                $"bone[{a.JointIndex}] is '{(a.JointIndex >= 0 && a.JointIndex < model.Skeleton.BoneCount ? model.Skeleton.Bones[a.JointIndex].Name : "out of range")}'");
+            t.ExpectTrue("AY.2 which is a different number from the skin's", a.JointIndex != 0);
+
+            t.Expect("AY.3 with its geometry", a.Primitives.Length == 1 && a.Primitives[0].Mesh.VertexCount == 3);
+
+            // Unbaked: the static builder bakes a world matrix into positions, which is wrong for
+            // something carried by a hand. Identity goes in; the placement rides on LocalTransform.
+            var verts = a.Primitives[0].Mesh;
+            t.ExpectTrue("AY.3 in its own space, not baked to the joint's world position",
+                verts.Bounds.Min.Y > -0.001f && verts.Bounds.Max.Y < 0.001f);
+        }
+
+        // ── the negative controls ───────────────────────────────────────────
+        // A static mesh that merely shares the file is not equipment. Adopting it would put scenery
+        // in the character's hand.
+        var loose = new SharpGLTF.Scenes.SceneBuilder();
+        loose.AddSkinnedMesh(skinned, Matrix4x4.Identity, tip, root, mid);
+        loose.AddRigidMesh(gear, new SharpGLTF.Scenes.NodeBuilder("scenery"));
+        var withScenery = Path.Combine(temp, "rig-with-scenery.glb");
+        loose.ToGltf2().SaveGLB(withScenery);
+
+        var sceneryModel = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("ay/scenery"), withScenery));
+        t.Expect("AY.4 a static mesh NOT under a joint is not an attachment",
+            sceneryModel.AttachmentsOrEmpty.Length == 0, $"found {sceneryModel.AttachmentsOrEmpty.Length}");
+
+        // And a rig with nothing attached reports nothing, with its body untouched — because the
+        // collection walks every mesh node and a bug there would show up as either.
+        var bare = new SharpGLTF.Scenes.SceneBuilder();
+        bare.AddSkinnedMesh(skinned, Matrix4x4.Identity, tip, root, mid);
+        var bareGlb = Path.Combine(temp, "rig-bare.glb");
+        bare.ToGltf2().SaveGLB(bareGlb);
+
+        var bareModel = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("ay/bare"), bareGlb));
+        t.Expect("AY.5 a rig with nothing attached reports none", bareModel.AttachmentsOrEmpty.Length == 0);
+        t.Expect("AY.5 and its skinned primitives are unchanged",
+            bareModel.Primitives.Length == sceneryModel.Primitives.Length
+            && bareModel.Primitives[0].Mesh.VertexCount == sceneryModel.Primitives[0].Mesh.VertexCount);
+    }
+    finally
+    {
+        try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
+    }
+}
+
+// ============================================================================
 // Section AX — a load says what it did.
 // ============================================================================
 //

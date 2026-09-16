@@ -302,9 +302,40 @@ public static class Program
         var skeleton = imported.Skeleton;
 
         Console.WriteLine($"{Path.GetFileName(path)}");
+        var attachments = imported.AttachmentsOrEmpty;
         Console.WriteLine(
             $"  {skeleton.BoneCount} bone(s), {imported.Animations.Length} clip(s), " +
-            $"{imported.Primitives.Length} primitive(s)");
+            $"{imported.Primitives.Length} skinned primitive(s), {attachments.Length} attachment(s)");
+
+        // ── 0. Attachments ──────────────────────────────────────────────────
+        // <b>Reported before anything is judged, because their absence was the bug.</b> The importer
+        // used to take nodes carrying both a mesh and a skin and drop the rest in silence — so the
+        // Rogue loaded as six primitives of twelve and every tool agreed it was complete. Printing
+        // them is most of the fix; a count nobody can see is the state this arc exists to leave.
+        if (attachments.Length > 0)
+        {
+            Console.WriteLine();
+            foreach (var a in attachments.OrderBy(a => a.JointName, StringComparer.Ordinal).ThenBy(a => a.Name, StringComparer.Ordinal))
+            {
+                var verts = a.Primitives.Sum(p => p.Mesh.VertexCount);
+                Console.WriteLine(
+                    $"    {a.Name,-22} on {a.JointName,-14} bone[{a.JointIndex,2}]  " +
+                    $"{a.Primitives.Length} prim, {verts} verts");
+            }
+
+            // Several meshes on one joint is the ordinary case, not a fault — five of the Rogue's
+            // six hang off handslot.r, and a game shows one. Said out loud so the picture a viewer
+            // draws with all of them visible is expected rather than alarming.
+            var shared = attachments.GroupBy(a => a.JointName, StringComparer.Ordinal)
+                .Where(g => g.Count() > 1)
+                .ToArray();
+            foreach (var g in shared)
+            {
+                Console.WriteLine(
+                    $"    note: {g.Count()} attachments share '{g.Key}' — a caller picks one; " +
+                    $"showing all puts {g.Count()} meshes in the same place");
+            }
+        }
 
         // ── 1. Hierarchy ────────────────────────────────────────────────────
         // Skeleton's constructor already rejects a parent index that is not strictly less than the

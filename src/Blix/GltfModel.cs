@@ -19,4 +19,14 @@ public sealed record GltfModel(
     // is what makes the imported mesh come out oriented as the asset author
     // intended. Identity is a valid value for assets whose skin node sits at the
     // scene root with no ancestor transform.
-    System.Numerics.Matrix4x4 MeshNodeTransform);
+    System.Numerics.Matrix4x4 MeshNodeTransform,
+
+    // Static meshes parented to joints — equipment, capes, anything the asset hangs off the
+    // skeleton without skinning it. Empty for most rigs and not empty for any character that holds
+    // something. Defaulted so every existing construction site is unchanged, because the importer
+    // is the only thing that can fill it.
+    GltfAttachment[]? Attachments = null)
+{
+    /// <summary>Attachments, never null.</summary>
+    public GltfAttachment[] AttachmentsOrEmpty => Attachments ?? [];
+}

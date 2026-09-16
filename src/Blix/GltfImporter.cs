@@ -153,6 +153,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         }
         var primitives = primitivesList.ToArray();
 
+        var attachments = CollectAttachments(model, skin, oldToNew, materialCache, textureCache);
+
         // Filter animations to those that touch our skin's joints; an animation
         // targeting only non-skin nodes (scene camera, light) becomes an empty clip
         // and gets dropped.
@@ -188,7 +190,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                 Warning: "a rigged glTF has no cooked form — .blixmesh holds no skinned vertex layout"));
         }
 
-        return new GltfModel(primitives, skeleton, animations.ToArray(), meshNodeTransform);
+        return new GltfModel(primitives, skeleton, animations.ToArray(), meshNodeTransform, attachments);
     }
 
     private static long SourceLength(string path)
@@ -211,6 +213,85 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
     // Build the engine-side Bone[] in topo-sorted (parent-first) order, returning
     // the bones AND the old-to-new index mapping (used later to remap vertex joint
     // indices and animation channel targets).
+
+    /// <summary>
+    /// Every static mesh node whose ancestor chain reaches a joint of this skin.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Walks UP from each mesh node rather than down from each joint</b>, because a glTF is free
+    /// to put a group node between the joint and the mesh and the relationship is still an
+    /// attachment. Walking down would need to know how deep to look; walking up terminates at the
+    /// first joint or at the root, and there is nothing to guess.
+    /// </para>
+    /// <para>
+    /// <b>The joint index is remapped.</b> <see cref="BuildSkeletonAndOrdering"/> topologically
+    /// sorts the skin's joints so parents precede children, so the skin's own index and the
+    /// skeleton's are different numbers for the same bone on any rig that was not already sorted.
+    /// Recording the raw one would put the knife on whatever bone happened to land at that index —
+    /// a bug that looks like a content problem and survives every test that only counts.
+    /// </para>
+    /// <para>
+    /// <b>Vertices are left in the node's own space.</b> The static builder bakes a world matrix
+    /// into positions, which is right for a prop that never moves and wrong for one carried by a
+    /// hand; identity goes in and the placement rides on <see cref="GltfAttachment.LocalTransform"/>
+    /// instead, to be composed with the joint's animated transform at draw time.
+    /// </para>
+    /// </remarks>
+    private static GltfAttachment[] CollectAttachments(
+        ModelRoot model,
+        Skin skin,
+        int[] oldToNew,
+        Dictionary<int, GltfMaterial> materialCache,
+        Dictionary<int, GltfTexture> textureCache)
+    {
+        var jointToSkinIndex = new Dictionary<Node, int>();
+        for (var i = 0; i < skin.Joints.Count; i++) jointToSkinIndex[skin.Joints[i]] = i;
+
+        var found = new List<GltfAttachment>();
+        foreach (var node in model.LogicalNodes)
+        {
+            if (node.Mesh is null || node.Skin is not null) continue;
+
+            // Up the chain, composing as we go. Row-vector order (F-016): a child's local is
+            // pre-multiplied onto what is already accumulated, matching ComputeBonePalette's
+            // world = local * parentWorld recurrence.
+            var local = node.LocalMatrix;
+            var ancestor = node.VisualParent;
+            while (ancestor is not null && !jointToSkinIndex.ContainsKey(ancestor))
+            {
+                local *= ancestor.LocalMatrix;
+                ancestor = ancestor.VisualParent;
+            }
+
+            // Reached the root without meeting a joint: a static mesh that simply shares the file.
+            // Not an attachment, and quietly adopting it would put scenery in the character's hand.
+            if (ancestor is null) continue;
+
+            var primitives = new List<GltfPrimitive>();
+            for (var i = 0; i < node.Mesh.Primitives.Count; i++)
+            {
+                var prim = node.Mesh.Primitives[i];
+                var name = $"{node.Name ?? node.Mesh.Name ?? "attachment"}.{i}";
+                var meshData = GltfStaticImporter.BuildStaticMeshData(
+                    name, prim, Matrix4x4.Identity, Matrix4x4.Identity);
+                primitives.Add(new GltfPrimitive(
+                    meshData, GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache)));
+            }
+
+            if (primitives.Count == 0) continue;
+
+            found.Add(new GltfAttachment(
+                Name: node.Name ?? node.Mesh.Name ?? $"attachment_{found.Count}",
+                JointName: ancestor.Name ?? "?",
+                JointIndex: oldToNew[jointToSkinIndex[ancestor]],
+                LocalTransform: local,
+                Primitives: primitives.ToArray()));
+        }
+
+        return found.ToArray();
+    }
+
     private static (Bone[] bones, int[] oldToNew) BuildSkeletonAndOrdering(Skin skin)
     {
         var joints = skin.Joints;
