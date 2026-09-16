@@ -70,7 +70,15 @@ public sealed class RigAnimation : ITunable
         Subject = new ClipPlayer(rig.Skeleton, rig.Clips.Count > 0 ? rig.Clips[0] : null);
         Secondary = new ClipPlayer(rig.Skeleton, rig.Clips.Count > 1 ? rig.Clips[1] : null);
         Posed = rig.Skeleton.CreateRestPose();
-        Palettes = new BonePaletteSet(rig.Skeleton.BoneCount, StudioRig.MaxInstances);
+        // One set per skin. They are packed from the SAME pose — the joints are the same nodes —
+        // through each skin's own inverse binds and its own mesh-node frame.
+        palettesBySkin = new BonePaletteSet[rig.Skins.Count];
+        for (var i = 0; i < palettesBySkin.Length; i++)
+        {
+            palettesBySkin[i] = new BonePaletteSet(rig.Skins[i].Skeleton.BoneCount, StudioRig.MaxInstances);
+        }
+
+        Palettes = palettesBySkin[0];
 
         Echoes = new ClipPlayer[Math.Max(0, InstanceCount - 1)];
         for (var i = 0; i < Echoes.Length; i++) Echoes[i] = new ClipPlayer(rig.Skeleton);
@@ -94,7 +102,16 @@ public sealed class RigAnimation : ITunable
     public Pose Posed { get; }
 
     /// <summary>Every live instance's palette, sliced at the rig's bone count.</summary>
+    private readonly BonePaletteSet[] palettesBySkin;
+
+    /// <summary>Skin 0's palettes. Instance counts are the same across skins.</summary>
     public BonePaletteSet Palettes { get; }
+
+    /// <summary>One skin's palettes.</summary>
+    public BonePaletteSet PalettesFor(int skinIndex) => palettesBySkin[skinIndex];
+
+    /// <summary>How many skins this rig poses.</summary>
+    public int SkinCount => palettesBySkin.Length;
 
     public int InstanceCount { get; }
 
@@ -284,12 +301,16 @@ public sealed class RigAnimation : ITunable
     /// </remarks>
     public void PackInstances(Matrix4x4 origin, float spacing)
     {
-        Palettes.Reset();
+        foreach (var set in palettesBySkin) set.Reset();
         placements.Clear();
 
         var half = (InstanceCount - 1) * 0.5f;
         var subjectPlacement = Matrix4x4.CreateTranslation(-half * spacing, 0f, 0f) * origin;
-        Palettes.Add(rig.Skeleton, Posed, rig.MeshNodeTransform * subjectPlacement);
+        for (var i = 0; i < palettesBySkin.Length; i++)
+        {
+            palettesBySkin[i].Add(rig.Skins[i].Skeleton, Posed, rig.Skins[i].MeshNodeTransform * subjectPlacement);
+        }
+
         placements.Add(subjectPlacement);
 
         for (var i = 0; i < Echoes.Length; i++)
@@ -297,7 +318,11 @@ public sealed class RigAnimation : ITunable
             var pose = Echoes[i].Pose;
             if (DriveRoot) RootMotion.Strip(rig.Skeleton, pose, Echoes[i].RestPose);
             var placement = Matrix4x4.CreateTranslation((i + 1 - half) * spacing, 0f, 0f) * origin;
-            Palettes.Add(rig.Skeleton, pose, rig.MeshNodeTransform * placement);
+            for (var k = 0; k < palettesBySkin.Length; k++)
+            {
+                palettesBySkin[k].Add(rig.Skins[k].Skeleton, pose, rig.Skins[k].MeshNodeTransform * placement);
+            }
+
             placements.Add(placement);
         }
 

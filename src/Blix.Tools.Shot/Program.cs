@@ -261,6 +261,11 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private readonly int maskFalloff;
     private BoneMask? mask;
     private BonePaletteSet? palettes;
+
+    // One set per skin, the same shape RigAnimation carries. This tool keeps its own players rather
+    // than a RigAnimation, so the per-skin packing is written twice -- noted in plan-blix-inlet.md
+    // as duplication that should not have survived the extraction.
+    private BonePaletteSet[] palettesBySkin = Array.Empty<BonePaletteSet>();
     private readonly List<string> visibleAttachments = new();
     private Matrix4x4[] boneWorlds = Array.Empty<Matrix4x4>();
     private Matrix4x4 rigTransform = Matrix4x4.Identity;
@@ -464,7 +469,13 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // <b>One palette per body, packed into one buffer at a known stride.</b> Each instance is the
         // same clip at a different phase, which is what makes the picture evidence: three bodies in
         // the same pose would prove only that three draws happened.
-        palettes = new BonePaletteSet(rig.Skeleton.BoneCount, StudioRig.MaxInstances);
+        palettesBySkin = new BonePaletteSet[rig.Skins.Count];
+        for (var s = 0; s < palettesBySkin.Length; s++)
+        {
+            palettesBySkin[s] = new BonePaletteSet(rig.Skins[s].Skeleton.BoneCount, StudioRig.MaxInstances);
+        }
+
+        palettes = palettesBySkin[0];
         var spacing = MathF.Max(1.2f, rig.LongestExtent * scale * 0.75f);
         var half = (instanceCount - 1) * 0.5f;
         for (var i = 0; i < instanceCount; i++)
@@ -500,7 +511,11 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             }
 
             var placement = Matrix4x4.CreateTranslation((i - half) * spacing, 0f, 0f) * rigTransform;
-            palettes.Add(rig.Skeleton, pose, rig.MeshNodeTransform * placement);
+            for (var s = 0; s < palettesBySkin.Length; s++)
+            {
+                palettesBySkin[s].Add(rig.Skins[s].Skeleton, pose, rig.Skins[s].MeshNodeTransform * placement);
+            }
+
             instancePlacements.Add(placement);
             instancePoses.Add(pose);
             instanceClips.Add(label);
@@ -612,7 +627,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         var view = Matrix4x4.CreateLookAt(eye, target, Vector3.UnitY);
         viewProjection = view * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, aspect, 0.1f, 120f);
 
-        if (rig is not null && palettes is not null) rig.UploadPalettes(palettes);
+        if (rig is not null && palettes is not null)
+        {
+            for (var s = 0; s < palettesBySkin.Length; s++) rig.UploadPalettes(palettesBySkin[s], s);
+        }
 
         // The panel camera looks from the opposite side, so a --viewport capture and a plain one of
         // the same arguments are visibly two cameras rather than one picture twice.
@@ -691,7 +709,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         player.Advance(SequenceStep);
         rootTravel += Vector3.TransformNormal(player.RootDelta.Translation, rig.MeshNodeTransform);
 
-        palettes.Reset();
+        foreach (var set in palettesBySkin) set.Reset();
         for (var i = 0; i < instancePoses.Count; i++)
         {
             var pose = instancePoses[i];
@@ -711,7 +729,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             var placement = driveRoot && i == 0
                 ? Matrix4x4.CreateTranslation(rootTravel) * instancePlacements[i]
                 : instancePlacements[i];
-            palettes.Add(rig.Skeleton, pose, rig.MeshNodeTransform * placement);
+            for (var s = 0; s < palettesBySkin.Length; s++)
+            {
+                palettesBySkin[s].Add(rig.Skins[s].Skeleton, pose, rig.Skins[s].MeshNodeTransform * placement);
+            }
         }
 
         StudioRig.ComputeBoneWorlds(rig.Skeleton, instancePoses[0], boneWorlds);

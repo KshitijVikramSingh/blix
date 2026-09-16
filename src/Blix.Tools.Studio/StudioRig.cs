@@ -57,6 +57,13 @@ public sealed class StudioRig : IDisposable
         float Metallic,
         float Roughness,
         TextureHandle Albedo,
+        /// <summary>Which of <see cref="Skins"/> poses this part.</summary>
+        /// <remarks>
+        /// <b>Two skins can share every joint and still disagree about the bind pose.</b> tank.glb's
+        /// tracks are bound 3.97 from its hull, so drawing a part against another skin's palette
+        /// puts it somewhere plausible and wrong.
+        /// </remarks>
+        int SkinIndex,
         /// <summary>
         /// What the material says about its own surface: <c>OPAQUE</c>/<c>MASK</c>/<c>BLEND</c>, the
         /// cutout threshold, and whether the back face is part of the model.
@@ -105,6 +112,8 @@ public sealed class StudioRig : IDisposable
     private readonly List<TextureHandle> ownedTextures = new();
     private readonly List<Image> images = new();
     private MaterialBindings bones = null!;
+    private readonly List<SkinSlot> skins = new();
+    private readonly List<MaterialBindings> skinBones = new();
     private byte[] palettePayload = Array.Empty<byte>();
 
     public Skeleton Skeleton { get; private set; } = null!;
@@ -200,8 +209,22 @@ public sealed class StudioRig : IDisposable
         }
     }
 
-    /// <summary>The set-3 palette binding, handed to every skinned draw in the frame.</summary>
+    /// <summary>The set-3 palette binding for skin 0. Most rigs have exactly one skin.</summary>
     public MaterialHandle BoneMaterial => bones.Handle;
+
+    /// <summary>
+    /// One skin: the skeleton it poses, the frame its meshes were authored in, and the palette
+    /// buffer its parts are drawn against.
+    /// </summary>
+    public sealed record SkinSlot(Skeleton Skeleton, Matrix4x4 MeshNodeTransform, MaterialHandle BoneMaterial);
+
+    /// <summary>Every skin the asset declares. One for most rigs, three for tank.glb.</summary>
+    /// <remarks>
+    /// <b>A palette buffer each, because a palette matrix is inverse-bind times world.</b> The POSE
+    /// can be shared and is — the joints are the same nodes — but the inverse binds belong to the
+    /// skin, so the products differ and each needs somewhere to live.
+    /// </remarks>
+    public IReadOnlyList<SkinSlot> Skins => skins;
 
     /// <summary>
     /// Loads the skin, its clips and its skeleton, and creates the per-frame bone-palette buffer.
@@ -251,6 +274,7 @@ public sealed class StudioRig : IDisposable
 
             var material = primitive.Material;
             rig.parts.Add(new Part(
+                SkinIndex: primitive.SkinIndex,
                 Vertices: vb,
                 Indices: ib,
                 IndexCount: mesh.IndexCount,
@@ -317,8 +341,19 @@ public sealed class StudioRig : IDisposable
         // share this one buffer and both render the second. The lab draws one rig, so the question
         // does not arise here — a second rig gets a second StudioRig and a second material, which is
         // why this is per-rig rather than owned by the renderer.
-        rig.bones = vk.CreateMaterial(
-            skinnedProgram, setIndex: 3, framesInFlight: vk.MaxFramesInFlightCount, name: "lab.rig.bones");
+        // One palette buffer per skin. The single-skin case allocates exactly what it always did.
+        var imports = imported.SkinsOrEmpty;
+        for (var s = 0; s < imports.Length; s++)
+        {
+            var slotBones = vk.CreateMaterial(
+                skinnedProgram, setIndex: 3, framesInFlight: vk.MaxFramesInFlightCount,
+                name: $"lab.rig.bones.{s}");
+            rig.skinBones.Add(slotBones);
+            rig.skins.Add(new SkinSlot(
+                imports[s].Skeleton, imports[s].MeshNodeTransform, slotBones.Handle));
+        }
+
+        rig.bones = rig.skinBones[0];
 
         return rig;
     }
@@ -336,14 +371,30 @@ public sealed class StudioRig : IDisposable
     /// reads past <c>instanceCount</c>.
     /// </para>
     /// </remarks>
-    public void UploadPalettes(BonePaletteSet palettes)
+    public void UploadPalettes(BonePaletteSet palettes) => UploadPalettes(palettes, 0);
+
+    /// <summary>Copies one skin's live instance palettes into that skin's frame buffer.</summary>
+    /// <remarks>
+    /// <b>Per skin, because a palette is inverse-bind times world and the inverse binds are the
+    /// skin's own.</b> The pose behind them is shared — tank.glb's three skins are the same joints
+    /// in the same order — so this is N uploads of the same posed hierarchy through N different bind
+    /// matrices, not N poses.
+    /// </remarks>
+    public void UploadPalettes(BonePaletteSet palettes, int skinIndex)
     {
         ArgumentNullException.ThrowIfNull(palettes);
-        if (palettes.BoneCount != Skeleton.BoneCount)
+        if ((uint)skinIndex >= (uint)skinBones.Count)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(skinIndex), skinIndex, $"this rig has {skinBones.Count} skin(s).");
+        }
+
+        if (palettes.BoneCount != Skins[skinIndex].Skeleton.BoneCount)
         {
             throw new ArgumentException(
                 $"Palette set is packed at a stride of {palettes.BoneCount}; this rig has " +
-                $"{Skeleton.BoneCount} bones. The shader multiplies by the stride, so a mismatch " +
+                $"{Skins[skinIndex].Skeleton.BoneCount} bones. The shader multiplies by the stride, " +
+                "so a mismatch " +
                 $"renders other instances' poses rather than failing.",
                 nameof(palettes));
         }
@@ -354,7 +405,7 @@ public sealed class StudioRig : IDisposable
             MemoryMarshal.Write(palettePayload.AsSpan(i * 64, 64), in palettes.Matrices[i]);
         }
 
-        bones.WriteBuffer(device.CurrentFrameSlot, 0, palettePayload.AsSpan(0, live * 64));
+        skinBones[skinIndex].WriteBuffer(device.CurrentFrameSlot, 0, palettePayload.AsSpan(0, live * 64));
     }
 
     /// <summary>
@@ -560,6 +611,8 @@ public sealed class StudioRig : IDisposable
         images.Clear();
         parts.Clear();
         attachments.Clear();
-        device.DestroyMaterial(bones.Handle);
+        // Every skin's buffer, not just skin 0's. `bones` aliases skinBones[0], so destroying both
+        // would double-free it.
+        foreach (var slot in skinBones) device.DestroyMaterial(slot.Handle);
     }
 }

@@ -224,7 +224,12 @@ public sealed class RigView : IStudioView
                 textures: casterOnly
                     ? draw.Textures
                     : new[] { draw.Textures[0], new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 1) },
-                perDrawMaterial: Rig.BoneMaterial,
+                // <b>This part's skin, not the rig's first one.</b> Every part carries the index of
+                // the skin that poses it, and each skin has its own palette buffer — same pose,
+                // different inverse binds and a different authored frame.
+                perDrawMaterial: (uint)part.SkinIndex < (uint)Rig.Skins.Count
+                    ? Rig.Skins[part.SkinIndex].BoneMaterial
+                    : Rig.BoneMaterial,
                 pushConstants: push);
         }
 

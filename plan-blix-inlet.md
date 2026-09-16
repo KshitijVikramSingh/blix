@@ -412,8 +412,14 @@ narrow version would have had to avoid anyway.
   **Remaining edge, recorded not hidden:** animation clips are bone INDICES, so they are built
   against skin 0's ordering. Correct wherever skins agree on joint order — which `tank.glb` does —
   and the file that breaks it should force the next shape.
-- **I-D2** — the studio draws them: one palette set per skin, off one pose where the skins share
-  joints. `RigView` already draws per part; this is per part with the right palette.
+- **I-D2 — DONE.** One palette buffer per skin on `StudioRig`, one `BonePaletteSet` per skin in
+  `RigAnimation`, and `RigView` picks by the part's `SkinIndex`. The pose is shared — the joints
+  are the same nodes — so this is N uploads of one posed hierarchy through N sets of inverse binds
+  and N authored frames, not N poses. **Negative control:** forcing every skin to skin 0's bind
+  collapses tank.glb's tracks into the hull instead of flanking it, which is the 3.97 offset made
+  visible. `Blix.Tools.Shot` needed the same packing written a second time, because it keeps its own
+  players rather than a `RigAnimation` — the duplication already noted above, now with a second
+  instance of it.
 - **I-D3** — what `GltfSkipped.SecondarySkin` becomes. It should stop firing for the ordinary case
   and stay for the genuinely unreadable one, rather than being deleted.
 

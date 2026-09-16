@@ -663,7 +663,12 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         // Before recording, because the palette buffer is read at Execute and written here — the
         // draw carries a descriptor set, not a copy of the matrices.
-        if (rig is not null && session is not null) rig.UploadPalettes(session.Palettes);
+        // Every skin's buffer, once per frame, before recording. Uploading only skin 0's left
+        // tank.glb's tracks reading whatever the buffer happened to hold.
+        if (rig is not null && session is not null)
+        {
+            for (var s = 0; s < session.SkinCount; s++) rig.UploadPalettes(session.PalettesFor(s), s);
+        }
 
         // What this tool puts on the stage. Rebuilt per frame rather than cached, because the
         // instance count follows the session and a stale RigView would draw last frame's crowd.
