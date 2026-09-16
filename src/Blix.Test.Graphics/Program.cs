@@ -4028,10 +4028,21 @@ static ShaderInterface MinimalShader() => new(new[]
         // tangents are Sponza's normal-mapped interiors and COLOR_0 is the nature kit's occlusion.
         // The failure mode this prevents is the silent one — returning tangents and dropping the
         // colour, which looks like an importer that does not read COLOR_0 at all.
-        t.ExpectThrows<NotSupportedException>(
+        // The refusal arrives as AssetImportException — the engine's ONE refusal type, which names
+        // the file — with the reason kept on InnerException. It used to escape as a bare
+        // NotSupportedException that named a primitive and no file, because the importers wrapped
+        // only ModelRoot.Load: SharpGLTF's refusals were dressed and Blix's own were not. Asserting
+        // BOTH halves here is what stops the next widening from swallowing the reason.
+        var combined = t.ExpectThrows<AssetImportException>(
             "AZ.5 tangents and colour together are refused, not silently resolved",
             () => new GltfStaticImporter().ImportNodes(new AssetImportContext(
                 AssetId.Parse("az"), coloured, includeTangents: true, includeColour: true)));
+        t.Expect("AZ.5 the refusal names the file",
+            combined?.Message.Contains("coloured.glb", StringComparison.Ordinal) == true,
+            combined?.Message ?? "(nothing thrown)");
+        t.Expect("AZ.5 and keeps the reason it was refused for",
+            combined?.InnerException is NotSupportedException,
+            combined?.InnerException?.GetType().Name ?? "(no inner)");
 
         // CONTROL for AZ.5: each flag ALONE is accepted, so the refusal above is about the
         // combination and not about tangents having quietly stopped working.

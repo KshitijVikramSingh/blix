@@ -118,7 +118,15 @@ public sealed class TestRunner
     /// exception was thrown passes just as happily when the code under test crashed for an
     /// unrelated reason, which is the failure the check was written to catch.
     /// </remarks>
-    public void ExpectThrows<TException>(string label, Action action, string? mustMention = null)
+    /// <returns>
+    /// The exception, so a suite can go on to assert about its SHAPE and not only its message.
+    /// Null when nothing was thrown or the type was wrong — in which case this call has already
+    /// failed, and a follow-up assertion on the null reads as a second symptom of the same fault
+    /// rather than as a new one. Added when a refusal grew an <see cref="Exception.InnerException"/>
+    /// worth checking: "it named the file" is a substring, but "it kept the reason it was refused
+    /// for" is a type, and <paramref name="mustMention"/> cannot express a type.
+    /// </returns>
+    public TException? ExpectThrows<TException>(string label, Action action, string? mustMention = null)
         where TException : Exception
     {
         ArgumentNullException.ThrowIfNull(action);
@@ -130,18 +138,19 @@ public sealed class TestRunner
         catch (Exception thrown)
         {
             var actual = thrown is TargetInvocationException { InnerException: { } inner } ? inner : thrown;
-            if (actual is not TException)
+            if (actual is not TException typed)
             {
                 Fail(label, $"threw {actual.GetType().Name}, expected {typeof(TException).Name}: {actual.Message}");
-                return;
+                return null;
             }
 
             if (mustMention is null || actual.Message.Contains(mustMention, StringComparison.Ordinal)) Pass(label);
             else Fail(label, $"threw {typeof(TException).Name}, but never mentioned '{mustMention}': {actual.Message}");
-            return;
+            return typed;
         }
 
         Fail(label, "it did not throw");
+        return null;
     }
 
     /// <summary>Record a pass directly, for a suite expressing its own vocabulary on top of this.</summary>

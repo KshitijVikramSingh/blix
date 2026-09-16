@@ -519,6 +519,85 @@ makes a line's place in the scene readable — but a skeleton lives *inside* an 
 and the first rig capture drew only the root's IK children fanning out at the feet. The
 bones were right and the picture was lying.
 
+#### The conformance corpus, and the baseline that uses it
+
+Two instruments, both added after the inlet arc measured what the existing ones could not see.
+
+**`tools/fetch-gltf-corpus.sh`** pulls 190 files from three upstream corpora, pinned to a commit
+each, into the gitignored `third_party/gltf-corpus/`:
+
+| | what it is for |
+| --- | --- |
+| Khronos **glTF-Sample-Assets** | realistic models. *Does this asset look right.* |
+| Khronos **glTF-Asset-Generator** | permutation matrices where each group **declares its expected result**, so "all N render the same" is a real assertion — plus **negative** assets under `Output/Negative` that must be **refused**. |
+| **Cesium** `Specs/Data/Models/glTF-2.0` | engine-hardening oddities nothing else carries: interleaved, Draco, KTX2, quantized, no normals, inverted winding. |
+
+`third_party/gltf-corpus.manifest` is the banked artifact — which asset, from which commit, and
+**what each one proves**. The bytes are not committed, which is conventions §7 applied to this
+repo's own tree: the specification is the requirement, and owning an asset that exercises it is a
+download. It also keeps three upstream licences out of this history, and each Sample-Assets model's
+own `LICENSE.md` is fetched down beside it so the licence travels with the bytes.
+
+Every path is explicit and fetched from `raw.githubusercontent.com`. The GitHub contents API is the
+obvious way to enumerate a model directory and is the wrong one — 60 requests an hour unauthenticated,
+which this corpus exhausts while it is still being written, and a rate-limited enumeration returns an
+empty directory rather than an error. The fetcher also **plans every download and makes one parallel
+run**: a curl per file costs ~15 s of handshake each here, about fifty minutes against under one.
+
+One asset is **derived rather than downloaded**, expressed as the edit and not as bytes:
+`MultiUVTest_uv1.gltf` is `MultiUVTest` with `baseColorTexture.texCoord` set to 1. Upstream ships the
+second UV set but no material that *names* it, so the stock file renders identically whether a reader
+honours `texCoord` or always samples set 0 — it cannot tell the two apart.
+
+**`tools/lab-baseline.sh`** runs 23 fixed modes and hashes what they produce — 68 artifacts, byte for
+byte.
+
+```sh
+tools/lab-baseline.sh record        # into .baseline/ (gitignored)
+tools/lab-baseline.sh check         # re-run and diff
+tools/lab-baseline.sh list          # the modes, and why each is here
+```
+
+It hashes **two things per mode: the image and the tool's filtered stdout**, and the stdout is the
+half that earns its place. The capture tool already prints a per-body pose fingerprint, a
+distinct-pose verdict and an integrated root travel — numbers that *state* what a picture only
+implies. Filtered, because stdout is evidence only in the part that is the same on any machine: the
+GPU banner names this laptop, a decode time is a stopwatch, an absolute path is this checkout.
+
+**Why it was widened.** The eleven modes this grew from were all single-body wherever motion was
+involved — every `--drive-root` mode ran one instance. So the set was structurally blind to the whole
+multi-body class, and all three faults of that class during the inlet arc (root motion fanning out to
+every body, travel distance read from body 0, reset resetting only body 0) were found by a person
+running the viewer and noticing. **An instrument that cannot fail on a bug is not evidence about that
+bug.** `inst3-travel`, `inst3-travel-lockstep` and `inst5-travel` exist for exactly that class — and
+five is there because an index fault that reads body 0 or body N-1 can pass at three.
+
+That claim was checked rather than asserted: re-introducing the singular `DriveRoot` fault turns
+exactly those three modes red and leaves `advance`, `inst3` and `lockstep` green. The lockstep mode
+reports it by name rather than as a changed hash —
+
+```
+  3 instance(s), LOCKSTEP: CONTROL FAILED — one clip at one instant produced 2 poses
+    [0] Dodge_Forward   drawn edf934a4bfc82e78      <- unchanged
+    [1] Dodge_Forward   drawn c9a6fc7f1dd72938      <- changed
+```
+
+— body 0 unchanged and bodies 1+ changed, which is the singular-bug signature readable straight off
+the diff.
+
+Corpus-backed modes are **skipped** when the corpus is absent and `check` then **fails** rather than
+passing quietly. A control that silently shrinks to the modes you happen to be able to run reports
+green for the wrong reason, which is conventions §5's corollary: *a green build is not evidence that
+a build step ran.*
+
+Two negative modes assert an **exit code** rather than an image. They found a real gap on first run:
+`Mesh_NoPosition` aborted with a stack trace (134) instead of refusing, because every importer wrapped
+only `ModelRoot.Load` — **the parse, not the import**. SharpGLTF's refusals were dressed as
+`AssetImportException` and Blix's own conformance checks were not, so a file the parser accepts and
+glTF's own rules reject took the process down. The refusal now covers the import in all three entry
+points, and `Blix.Test.Graphics` AZ.5 asserts both halves: that it names the file, and that the reason
+survives on `InnerException`.
+
 **Which asset tool to reach for.** Two things report on assets and they answer different
 questions, deliberately kept apart:
 

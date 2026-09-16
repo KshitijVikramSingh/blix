@@ -23,3 +23,12 @@ src/Blix.Demos.SponzaModern/Assets-src/
 
 # Perf matrix logs: the plan is the record, the logs are the working notes.
 perf/
+
+# The glTF conformance corpus is a pinned DOWNLOAD, not a commit: the manifest beside
+# it is the record, and three upstream licences stay out of this history. See
+# third_party/gltf-corpus.manifest and tools/fetch-gltf-corpus.sh.
+third_party/gltf-corpus/
+
+# The lab baseline: 68 hashed artifacts, re-recordable in a minute by
+# tools/lab-baseline.sh record. A control is a thing you re-derive, not a thing you commit.
+.baseline/

@@ -45,7 +45,17 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         {
             throw new AssetImportException(context.SourcePath, null, "no file there.");
         }
+        // <b>The refusal covers the IMPORT, not only the parse.</b> Wrapping ModelRoot.Load alone
+        // catches what SharpGLTF rejects and nothing this importer rejects itself — so a file the
+        // parser accepts and glTF's own rules do not, like a primitive with no POSITION, escaped as
+        // an unhandled exception and took the process down with a stack trace. The generator's
+        // Mesh_NoPosition is exactly that asset: valid glTF JSON, an invalid mesh. A reader whose
+        // conformance checks abort instead of refusing has no usable negative behaviour to assert.
+        return AssetImportException.Refusing(context.SourcePath, () => ImportCore(context));
+    }
 
+    private GltfModel ImportCore(AssetImportContext context)
+    {
         // <b>Started here so the report covers the whole load, including the image pre-decode.</b>
         var loadWatch = System.Diagnostics.Stopwatch.StartNew();
 

@@ -1,0 +1,90 @@
+# The glTF conformance corpus: what Blix's reader is checked against, and where each file comes from.
+#
+# ── Why a manifest and not the bytes ────────────────────────────────────────────
+# Conventions §7 says the SPECIFICATION is the requirement and owning an asset that
+# exercises it is a download, not a precondition. So what is banked here is the
+# KNOWLEDGE — which asset, from which commit, and what it proves — and the bytes stay
+# a fetch. That also keeps three upstream licences (per-model CC0/CC-BY for the Khronos
+# samples, Apache-2.0 for the generator and Cesium) out of this repo's history: the
+# fetcher pulls each Sample-Assets model's own LICENSE.md down beside it.
+#
+# Commits are PINNED. An unpinned corpus is not a control — upstream can change an
+# asset under you and the diff shows up as a Blix regression.
+#
+#   tools/fetch-gltf-corpus.sh                 # everything
+#   tools/fetch-gltf-corpus.sh vertexcolor     # only lines matching a substring
+#
+# Fetched into third_party/gltf-corpus/, which is gitignored.
+#
+# ── Format ─────────────────────────────────────────────────────────────────────
+#   source   <key> <pinned base url>
+#   sample   <Name> [variant] [files...]        variant defaults to glTF-Binary/<Name>.glb
+#   generator <Group> <lo>-<hi> [extra files...]
+#   negative <Group> <lo>-<hi>
+#   cesium   <Name> <variant> <files...>
+# Everything after a trailing '#' is what the asset is FOR. Keep it — an asset whose
+# purpose nobody recorded gets deleted by the next person who tidies up.
+
+source SA https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/90d7ede14c7e280af263824604b427a1ca02cb66
+source AG https://raw.githubusercontent.com/KhronosGroup/glTF-Asset-Generator/3d99767e9a67fbfe109f0d298c1e8d909bcac9db
+source CS https://raw.githubusercontent.com/CesiumGS/cesium/08a0d8db4bb800664e447002e7af7d85bade3c29
+
+# ── Khronos glTF-Sample-Assets — realistic models. "Does this asset look right." ──
+
+sample BoxVertexColors          # COLOR_0 is a BASE-COLOUR MULTIPLIER. Rendered white until I-A; the asset that settled it against 33 nature-kit primitives that all use COLOR_0 as baked AO.
+sample AlphaBlendModeTest       # The MASK/BLEND/OPAQUE matrix with real alpha. The nature kit could not show this: all 26 of its MASK materials have baseAlpha 1.0, so a faithful cutout discards nothing.
+sample MultiUVTest glTF MultiUVTest.gltf MultiUVTest.bin uv0.png uv1.png   # TEXCOORD_1. The fetcher derives MultiUVTest_uv1.gltf from this — see below.
+sample MorphPrimitivesTest      # Morph targets, which Blix does NOT read. Kept as the standing negative: GltfIgnored must keep reporting them.
+sample NormalTangentTest        # TANGENT alongside a normal map.
+sample SimpleSparseAccessor glTF SimpleSparseAccessor.gltf SimpleSparseAccessor.bin   # Sparse accessors. Correct since before the inlet arc; kept so it stays that way.
+sample RiggedSimple             # The smallest real skin — 2 joints, 1 mesh.
+sample RiggedFigure             # A skin with a hierarchy under it.
+sample AnimatedMorphCube        # Animation channels targeting morph weights: channels Blix must ignore without mis-reading the rest of the animation.
+sample TextureCoordinateTest    # Which texCoord set each texture names, drawn so a wrong set is visible rather than subtle.
+sample BoxInterleaved           # Interleaved POSITION/NORMAL in one buffer view.
+sample OrientationTest          # Node transform composition. A sign error here reads as "the model is fine, the scene is wrong".
+
+# ── Khronos glTF-Asset-Generator — permutation matrices. Each group DECLARES its ──
+# expected result, so "all N render the same" is a real assertion rather than a hope.
+# Pair every such claim with a control that the renders are not uniformly blank:
+# six identical WHITE images also agree with each other.
+
+generator Mesh_PrimitiveVertexColor 0-5                                   # All six COLOR_0 spellings (float/ushort/ubyte x VEC3/VEC4). Verified byte-identical against a control of 415,625 strongly coloured pixels.
+generator Material_AlphaMask 0-5 Textures/BaseColor_Plane.png             # The cutoff matrix. _05 dims baseColorFactor.a to 0.7, making its EFFECTIVE cutoff 0.571 — which is why ordering these by nominal cutoff is wrong.
+generator Material_AlphaBlend 0-6 Textures/BaseColor_Plane.png            # BLEND. The conformance half; ordering within the blended group is still open.
+generator Material_DoubleSided 0-4 Textures/BaseColor_Plane.png           # doubleSided, which is pipeline state in Vulkan and so cannot be a push constant.
+generator Mesh_PrimitivesUV 0-8                                           # Multiple primitives with differing UV sets, the case a single "does it have UV1" flag gets wrong.
+generator Buffer_Interleaved 0-4 Textures/BaseColor_Grey.png              # Stride. A vertex buffer is walked at the PIPELINE's declared stride, so a mismatch here reads as garbage geometry, not as a missing attribute.
+generator Accessor_Sparse 0-3 Textures/BaseColor_A.png Textures/BaseColor_B.png   # Sparse, in every place the spec allows it.
+generator Node_NegativeScale 0-12 Textures/BaseColor_Nodes.png Textures/MetallicRoughness_Nodes.png Textures/Normal_Nodes.png   # Negative scale flips winding. Culling is pipeline state, so a determinant sign has to reach the pipeline choice.
+generator Animation_Skin 0-11                                             # Skins under animation. Animation channels target NODES, not skins — the thing the importer's clip-ordering guard currently refuses rather than solves.
+
+negative Mesh_NoPosition 0-0        # Must be REFUSED. A reader that invents positions passes every positive test.
+negative Mesh_PrimitiveRestart 0-0  # Must be REFUSED. Primitive restart is not in glTF.
+
+# ── Cesium — engine-hardening oddities nothing else carries ─────────────────────
+
+cesium BoxInterleaved glTF BoxInterleaved.gltf BoxInterleaved.bin   # A second interleaving, authored by a different tool than the Khronos one.
+cesium BoxInterleavedTranslucent glTF BoxInterleavedTranslucent.gltf BoxInterleavedTranslucent.bin   # Interleaved AND blended, which is the combination that finds a stride bug in the blend pipeline specifically.
+cesium BoxNoNormals glTF BoxNoNormals.gltf                          # NO NORMAL attribute. The spec says generate flat normals; Blix's behaviour here is unasserted.
+cesium BoxInverted glTF BoxInverted.gltf                            # Inverted winding.
+cesium BoxBackFaceCulling glTF BoxBackFaceCulling.gltf              # Culling as authored.
+cesium BoxCutout glTF BoxCutout.gltf                                # A cutout from outside the Khronos matrices.
+cesium BoxVertexColorsDracoRGB glTF-Draco BoxVertexColorsDracoRGB.gltf   # Draco. Blix does NOT decode it; this asset exists so the refusal is CHECKED rather than assumed.
+cesium BoxWeb3dQuantizedAttributes glTF BoxWeb3dQuantizedAttributes.gltf # Quantized attributes via an extension Blix does not implement.
+cesium BoxTexturedKtx2Basis glTF-Binary BoxTexturedKtx2Basis.glb    # KTX2/Basis textures, likewise unimplemented and likewise worth failing predictably.
+cesium CesiumMan glTF-Draco CesiumMan.gltf 0.bin CesiumMan.jpg      # A Draco-compressed SKIN.
+
+# ── Locally derived ────────────────────────────────────────────────────────────
+# Assets that do not exist upstream, expressed as the EDIT rather than as bytes.
+#
+#   MultiUVTest_uv1.gltf — MultiUVTest with baseColorTexture.texCoord set to 1.
+#     Upstream ships the second UV set but no material that NAMES it, so the stock
+#     asset cannot tell a reader that honours texCoord from one that always samples
+#     set 0. One key of difference; see tools/fetch-gltf-corpus.sh.
+#
+# ── The gap this corpus still does NOT cover ───────────────────────────────────
+# Nothing here exercises JOINTS_1 / more than four influences per vertex. That is the
+# one glTF gap whose failure is a WRONG RESULT (a silently truncated skin) rather than
+# a missing feature, and it is covered only by a SharpGLTF fixture in Test.Graphics
+# section BC. If an upstream asset for it ever appears, it belongs here.

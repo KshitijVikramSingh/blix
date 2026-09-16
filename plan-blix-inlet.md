@@ -595,3 +595,89 @@ and the studio outside the engine entirely. A capability can be proved without b
 so both replicated SSBO slots are written and bound at least once. That is how a capability gets
 proved when nothing is waiting for it — but the viewer already draws instances, masks, attachments
 and materials, and it should be asked first every time.
+
+---
+
+## After the arc: banking the corpus, widening the baseline
+
+Two loose ends the closing assessment named, both now closed.
+
+### The corpus was banked as knowledge, not as bytes
+
+The three corpora had been load-bearing for four findings while living in a scratchpad that
+disappears with the session. Banked as **`third_party/gltf-corpus.manifest`** — which asset, from
+which pinned commit, and **what each one proves** — plus **`tools/fetch-gltf-corpus.sh`**, which
+pulls 190 files into a gitignored tree in under a minute.
+
+**Not committing the bytes is §7 applied to this repo's own tree**: the specification is the
+requirement, and owning an asset that exercises it is a download. It also keeps three upstream
+licences out of this history, and each Sample-Assets model's own `LICENSE.md` is fetched beside it,
+so the licence travels with the bytes rather than depending on someone remembering to check.
+
+Three things the fetcher learned the hard way, all recorded in it:
+
+- **The GitHub contents API is the wrong instrument**, at 60 requests an hour unauthenticated —
+  exhausted while the manifest was still being written. Worse than slow: a rate-limited enumeration
+  returns an *empty directory*, not an error, so a silent no-op looks like a model with no files.
+  Every path is explicit now, and a rename upstream surfaces as a 404 naming the file.
+- **Plan first, then one parallel fetch.** A curl per file costs ~15 s of handshake here; fifty
+  minutes became under one.
+- **A trailing `#` comment must be stripped before the line is split.** Reading the manifest
+  straight into positionals made "what this asset is for" into arguments, and built a URL ending
+  `.../AlphaBlendModeTest/#/with`.
+
+One asset is **derived rather than downloaded**, expressed as the edit and not as bytes:
+`MultiUVTest_uv1.gltf` is `MultiUVTest` with `baseColorTexture.texCoord` set to 1. Upstream ships a
+second UV set and no material that *names* it, so the stock file cannot tell a reader that honours
+`texCoord` from one that always samples set 0.
+
+### The baseline was widened where it was blind
+
+`tools/lab-baseline.sh` — 23 modes, 68 hashed artifacts, `record` / `check` / `list`.
+
+**The blind spot, stated plainly.** The eleven modes it grew from were all single-body wherever
+motion was involved: every `--drive-root` mode ran one instance. So the set was structurally blind
+to the whole multi-body class, and all three faults of that class in this arc — root motion fanning
+out to every body, travel distance read from body 0, reset resetting only body 0 — were found by the
+user running the viewer. **An instrument that cannot fail on a bug is not evidence about that bug.**
+
+Two changes close it:
+
+1. **`inst3-travel`, `inst3-travel-lockstep`, `inst5-travel`.** Five as well as three, because an
+   index fault that reads body 0 or body N-1 passes at three.
+2. **Each mode hashes the tool's filtered stdout as well as its image.** The capture tool already
+   prints a per-body pose fingerprint, a distinct-pose verdict and an integrated root travel —
+   numbers that *state* what a picture only implies. Filtered, because stdout is evidence only in
+   the part that is the same on any machine.
+
+**Checked, not asserted.** Re-introducing the singular `DriveRoot` fault turns exactly those three
+modes red and leaves `advance`, `inst3` and `lockstep` green — and the lockstep mode names it rather
+than merely differing: *"CONTROL FAILED — one clip at one instant produced 2 poses"*, with body 0
+unchanged and bodies 1+ changed, which is the singular-bug signature readable off the diff.
+
+Corpus-backed modes are skipped when the corpus is absent, and **`check` then fails rather than
+passing quietly** — §5's corollary, since a control that silently shrinks to what you can run
+reports green for the wrong reason.
+
+### What the negative modes found on their first run
+
+Two modes assert an **exit code** rather than an image, and one of them was red immediately:
+`Mesh_NoPosition` **aborted with a stack trace (134) instead of refusing**.
+
+The cause is one line from a remark that already described this bug. Every importer wrapped
+`AssetImportException.Refusing` around `ModelRoot.Load` — **the parse, and not the import**. So
+SharpGLTF's refusals were dressed and Blix's own conformance checks were not, and a file the parser
+*accepts* while glTF's rules reject it — valid JSON, invalid mesh — escaped as an unhandled
+exception. `Mesh_PrimitiveRestart` refused cleanly the whole time, because that one is caught during
+the parse; the two look like the same test and exercise different halves.
+
+Fixed in all three entry points (`GltfImporter.Import`, `GltfStaticImporter.Import`,
+`GltfStaticImporter.ImportNodes`) by wrapping the import body rather than the load call.
+
+**The fix changed one existing test, and the test was the thing that was weaker.** AZ.5 asserted a
+bare `NotSupportedException` for tangents-plus-colour; it now arrives as the engine's one refusal
+type, naming the file, with the reason on `InnerException`. AZ.5 asserts **both halves** now — which
+took `TestRunner.ExpectThrows<T>` returning the exception rather than void, since `mustMention` can
+express a substring and not a type.
+
+`Blix.Test.Graphics` 649/649 · `Blix.Test.Diagnostics` 235/235 · `Blix.Test.Physics2D` 43/43.
