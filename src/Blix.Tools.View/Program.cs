@@ -656,9 +656,10 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // already carries the normalising scale, so a `* rigScale` here squared it — the Rogue
         // normalises by 1.372, so the body ran 1.88x too far and the trail agreed with it, which is
         // why two wrong things looked like one right one.
-        rigTransform = session.DriveRoot
-            ? Matrix4x4.CreateTranslation(session.Driven.RootTravel) * rigBase
-            : rigBase;
+        // <b>No travel here any more.</b> This used to fold the driven body's travel into the
+        // origin the whole row is laid on, which moved every body by one body's clip. Pack applies
+        // each body's own travel to its own slot; this is just where the row stands.
+        rigTransform = rigBase;
 
         // Bodies stand in a row across the camera's view, a stride apart, centred on the origin so
         // one body sits where one body always did. Where they stand is the lab's choice, which is

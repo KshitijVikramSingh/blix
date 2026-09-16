@@ -158,8 +158,26 @@ public sealed class RigInstances : ITunable
         for (var i = 0; i < Count; i++)
         {
             var body = bodies[i];
-            if (body.DriveRoot) RootMotion.Strip(rig.Skeleton, body.Posed, body.Subject.RestPose);
-            placements.Add(Matrix4x4.CreateTranslation((i - half) * spacing, 0f, 0f) * origin);
+            var slot = Matrix4x4.CreateTranslation((i - half) * spacing, 0f, 0f) * origin;
+
+            if (body.DriveRoot)
+            {
+                // <b>Its OWN travel, not the row's.</b> Driving strips the root from the pose and
+                // moves the body by the distance its clip asked for — and each body plays a
+                // different clip, so each asked for a different distance. Moving the whole row by
+                // the driven body's travel drags four bodies by a fifth one's Dodge, and a body with
+                // real root motion of its own is displaced by someone else's instead of following
+                // the curve it was stripped for. That is what the single session-wide RootTravel
+                // could not express: there was one accumulator for N clips.
+                //
+                // Under lockstep every body IS the driven one, at the same instant, so they share
+                // its travel — their own accumulators never ran, because a scrub is not an advance.
+                RootMotion.Strip(rig.Skeleton, body.Posed, body.Subject.RestPose);
+                var travel = Lockstep ? Driven.RootTravel : body.RootTravel;
+                slot = Matrix4x4.CreateTranslation(travel) * slot;
+            }
+
+            placements.Add(slot);
             posed.Add(body.Posed);
         }
 

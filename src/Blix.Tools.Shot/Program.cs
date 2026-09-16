@@ -464,20 +464,18 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // Same trick, same reason, as the probe's duration/7.37.
         const double Step = 0.017;
         var steps = advance > 0.0 ? (int)Math.Round(advance / Step) : 0;
+        // Through the animation, not the player underneath it: RootTravel accumulates in
+        // RigAnimation.Advance, and Pack moves each body by its OWN travel. Stepping the ClipPlayer
+        // directly left that accumulator at zero and the body standing still.
         for (var i = 0; i < steps; i++)
         {
-            player.Advance(Step);
-            rootTravel += Vector3.TransformNormal(player.RootDelta.Translation, rig.MeshNodeTransform);
-            rootPath.Add(Vector3.Transform(rootTravel, rigBase));
+            animation.Driven.Advance(Step);
+            rootPath.Add(Vector3.Transform(animation.Driven.RootTravel, rigBase));
         }
 
-        // Driving means the clip stops moving the body and the transform starts; leaving the root
-        // animated as well moves a travelling clip twice. Same pairing the viewer's toggle makes.
-        if (driveRoot)
-        {
-            RootMotion.Strip(rig.Skeleton, player.Pose, player.RestPose);
-            rigTransform = Matrix4x4.CreateTranslation(rootTravel) * rigBase;
-        }
+        // Kept for the printed report. Driving strips the root from the pose and moves the body by
+        // this instead — Compose does the strip, Pack does the move.
+        rootTravel = animation.Driven.RootTravel;
 
         boneWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
 
@@ -700,10 +698,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // Every body steps, not just the driven one: a sequence where only the subject moved would
         // show the instancing frozen and read as a bug.
         animation!.Advance(SequenceStep);
-        rootTravel += Vector3.TransformNormal(player.RootDelta.Translation, rig.MeshNodeTransform);
+        rootTravel = animation.Driven.RootTravel;
 
-        var origin = driveRoot ? Matrix4x4.CreateTranslation(rootTravel) * rigTransform : rigTransform;
-        animation.Pack(origin, rowSpacing);
+        // No travel folded in here: Pack moves each body by its own.
+        animation.Pack(rigTransform, rowSpacing);
 
         StudioRig.ComputeBoneWorlds(rig.Skeleton, animation.Driven.Posed, boneWorlds);
     }
