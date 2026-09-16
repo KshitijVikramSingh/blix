@@ -127,6 +127,18 @@ public sealed class RigInstances : ITunable
         return scratchWorlds;
     }
 
+    /// <summary>Send every body back to where it started.</summary>
+    /// <remarks>
+    /// <b>Every body, because every body has its own travel.</b> Resetting only the driven one left
+    /// the rest standing where their own clips had carried them, with the row half rewound — which
+    /// is the same mistake as moving the whole row by one body's distance, in the other direction.
+    /// There was one accumulator to reset before N bodies were peers.
+    /// </remarks>
+    public void ResetTravel()
+    {
+        foreach (var body in bodies) body.ResetTravel();
+    }
+
     /// <summary>Advance every body. The driven one by the delta; the rest by the caller's policy.</summary>
     public void Advance(double delta)
     {

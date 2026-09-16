@@ -919,7 +919,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
     private void ResetRootTravel()
     {
-        session?.Driven.ResetTravel();
+        session?.ResetTravel();
         rootPath.Clear();
     }
 
