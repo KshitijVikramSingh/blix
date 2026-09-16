@@ -51,11 +51,16 @@ public sealed class StudioLook : ITunable
     /// <summary>Scales the sun's tint. One is the light this stage was authored under.</summary>
     [Tune(0, 3, Group = "sun")] public float SunIntensity { get; set; } = 1f;
 
-    /// <summary>How much light reaches what the sun does not.</summary>
+    /// <summary>How much of the environment reaches what the sun does not.</summary>
     /// <remarks>
+    /// <b>It used to be described as a "flat stand-in for image-based lighting", and now it scales
+    /// the real thing.</b> The meaning a caller sees is unchanged — how strong the fill is — which
+    /// is why the number did not have to move when IBL arrived underneath it.
+    /// <para>
     /// Zero is a legitimate inspection mode rather than a broken one: flattening the fill is how a
     /// silhouette becomes readable, and how you find out whether a shape is being carried by the key
-    /// light or by the ambient.
+    /// light or by the environment.
+    /// </para>
     /// </remarks>
     [Tune(0, 0.5f, Group = "sun")] public float AmbientStrength { get; set; } = 0.06f;
 
@@ -73,6 +78,83 @@ public sealed class StudioLook : ITunable
     /// the tool. The two were never one thing; they only ever looked like one.
     /// </remarks>
     [Tune(Group = "stage")] public bool Ground { get; set; } = true;
+
+    // ── structural: read when the graph is built, never again ────────────────────────────────
+
+    /// <summary>Whether the environment lights the scene, or a flat fill stands in for it.</summary>
+    /// <remarks>
+    /// <b>Structural because the probe is baked once.</b> Turning this off is how you find out
+    /// whether a shape is being carried by the key light or by the environment, which is a real
+    /// inspection question — so it stays a flag rather than being removed once IBL works.
+    /// </remarks>
+    [Tune(Group = "environment", Structural = true)]
+    public bool ImageBasedLighting
+    {
+        get => imageBasedLighting;
+        set { Seal(nameof(ImageBasedLighting), imageBasedLighting != value); imageBasedLighting = value; }
+    }
+
+    private bool imageBasedLighting = true;
+
+    /// <summary>Faces of the prefiltered specular cube, at mip 0.</summary>
+    /// <remarks>
+    /// 128 is the engine profile's own default and it is plenty for a stage whose job is to make one
+    /// object legible: the specular cube is read at a roughness-selected mip, so all but the
+    /// smoothest materials are reading a blurred level of it anyway.
+    /// </remarks>
+    [Tune(32, 512, Group = "environment", Structural = true)]
+    public int EnvFaceSize
+    {
+        get => envFaceSize;
+        set { Seal(nameof(EnvFaceSize), envFaceSize != value); envFaceSize = value; }
+    }
+
+    private int envFaceSize = 128;
+
+    /// <summary>Mip levels of the prefiltered specular cube, each a rougher GGX convolution.</summary>
+    /// <remarks>
+    /// The shader reads <c>roughness * (this - 1)</c>, and that arithmetic is the reason this is a
+    /// declared value rather than a constant in GLSL: a demo carried the ceiling as
+    /// <c>const float MAX_REFLECTION_LOD = 6.0</c>, which has to equal a number produced by a C#
+    /// bake. A constant that silently disagrees with another language is a picture that is wrong
+    /// and compiles.
+    /// </remarks>
+    [Tune(2, 8, Group = "environment", Structural = true)]
+    public int EnvMipCount
+    {
+        get => envMipCount;
+        set { Seal(nameof(EnvMipCount), envMipCount != value); envMipCount = value; }
+    }
+
+    private int envMipCount = 5;
+
+    /// <summary>Edge of the split-sum BRDF lookup table.</summary>
+    /// <remarks>
+    /// <b>64 because 256 costs 1.45 seconds of startup, measured, for a table of constants.</b> The
+    /// LUT is the Karis split-sum integration — a function of (NdotV, roughness) and of nothing
+    /// else, so it does not depend on the environment, the sun, or the model. Its cost is O(n²) on
+    /// this machine: 32 → 25 ms, 64 → 84 ms, 128 → 407 ms, 256 → 1451 ms. At the engine's default of
+    /// 256 it was <b>96% of the entire environment bake</b>, with the probe itself at 35-70 ms.
+    /// <para>
+    /// The function is smooth in both axes, which is what makes a small table viable, and the choice
+    /// was CHECKED against 256 rather than assumed: on a Rogue capture, 64 differs from 256 on 0.11%
+    /// of pixels with a maximum difference of <b>1/255</b> — rounding. Even 32 stays within 2/255.
+    /// (128 differs on marginally more pixels than 64, also at 1/255; that is dither, not a quality
+    /// trend, and saying so is cheaper than implying the curve is monotonic.) The real fix is not a smaller table but a COOKED one
+    /// — it is the same numbers on every machine forever, and <c>Blix.Tools.Cook</c> already writes
+    /// a BRDF LUT into a <c>.blixprobe</c>. That is engine work and is not this arc's.
+    /// </para>
+    /// </remarks>
+    [Tune(32, 256, Group = "environment", Structural = true)]
+    public int BrdfLutSize
+    {
+        get => brdfLutSize;
+        set { Seal(nameof(BrdfLutSize), brdfLutSize != value); brdfLutSize = value; }
+    }
+
+    private int brdfLutSize = 64;
+
+    // ── per-frame ────────────────────────────────────────────────────────────────────────────
 
     /// <summary>Exposure applied before tonemapping.</summary>
     [Tune(0, 4, Group = "present")] public float Exposure { get; set; } = 1.0f;
@@ -100,6 +182,36 @@ public sealed class StudioLook : ITunable
     /// happens to be close.
     /// </remarks>
     public StudioLook() => Recompute();
+
+    private bool structuralSealed;
+
+    /// <summary>
+    /// The graph has been built: from here a structural change cannot take effect.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because the first structural setting shipped unable to be set.</b> Both tools called
+    /// <c>renderer.Load</c> — which bakes the probe — BEFORE applying the command line, so
+    /// <c>--image-based-lighting false</c> parsed correctly, assigned correctly, and changed
+    /// nothing. Byte-identical captures with the flag on and off were the only symptom, and only
+    /// because someone went looking.
+    /// <para>
+    /// The ordering is fixed in both tools. This exists so the next one is loud: cascades, MSAA and
+    /// a depth pre-pass are all structural, and each is another chance to make the same mistake in a
+    /// place where the picture looks plausible either way.
+    /// </para>
+    /// </remarks>
+    public void SealStructural() => structuralSealed = true;
+
+    // Same value assigned twice is not a mistake — the command line is applied once before the
+    // graph is built and again with the panel's full binding, which is deliberate. Only a CHANGE
+    // after sealing is the fault.
+    private void Seal(string member, bool changed)
+    {
+        if (!structuralSealed || !changed) return;
+        Console.Error.WriteLine(
+            $"StudioLook.{member} is structural — read when the graph was built, so this change " +
+            "does nothing. Set it before the renderer loads (the command line does).");
+    }
 
     /// <summary>A declared value moved. Recompute what is derived from it.</summary>
     public void OnChanged(TunableChange change) => Recompute();

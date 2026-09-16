@@ -6,7 +6,7 @@
         }
     ],
     "types" : {
-        "_311" : {
+        "_423" : {
             "name" : "Frame",
             "members" : [
                 {
@@ -35,10 +35,15 @@
                     "name" : "uSunColour",
                     "type" : "vec4",
                     "offset" : 160
+                },
+                {
+                    "name" : "uEnvironment",
+                    "type" : "vec4",
+                    "offset" : 176
                 }
             ]
         },
-        "_366" : {
+        "_478" : {
             "name" : "Push",
             "members" : [
                 {
@@ -111,21 +116,39 @@
             "name" : "uAlbedo",
             "set" : 1,
             "binding" : 1
+        },
+        {
+            "type" : "samplerCube",
+            "name" : "uIrradiance",
+            "set" : 1,
+            "binding" : 2
+        },
+        {
+            "type" : "samplerCube",
+            "name" : "uPrefilteredEnv",
+            "set" : 1,
+            "binding" : 3
+        },
+        {
+            "type" : "sampler2D",
+            "name" : "uBrdfLut",
+            "set" : 1,
+            "binding" : 4
         }
     ],
     "ubos" : [
         {
-            "type" : "_311",
+            "type" : "_423",
             "name" : "Frame",
-            "block_size" : 176,
+            "block_size" : 192,
             "set" : 0,
             "binding" : 0
         }
     ],
     "push_constants" : [
         {
-            "type" : "_366",
-            "name" : "_368",
+            "type" : "_478",
+            "name" : "_480",
             "push_constant" : true
         }
     ]

@@ -54,7 +54,30 @@ public readonly record struct StudioDraw(
     PipelineHandle BlendPipeline = default,
 
     /// <summary>Its skinned twin.</summary>
-    PipelineHandle SkinnedBlendPipeline = default);
+    PipelineHandle SkinnedBlendPipeline = default)
+{
+    /// <summary>The pass's textures plus this draw's albedo, at the slot this pass puts it in.</summary>
+    /// <remarks>
+    /// <b>Here because five views were assembling it by hand, and the stage grew a texture.</b> Each
+    /// of them wrote <c>{ draw.Textures[0], uAlbedo }</c> — correct while the lit pass bound exactly
+    /// one texture, and silently one-short the moment it bound four. Every draw on a pipeline must
+    /// bind every texture its shader declares, so the assembly belongs to whoever knows what the
+    /// pass binds, which is the stage and not the view.
+    /// <para>
+    /// The caster takes slot 0 and no shadow map: its shader declares an albedo so it can cut out,
+    /// and nothing else.
+    /// </para>
+    /// </remarks>
+    public ShaderTextureBinding[] WithAlbedo(TextureHandle albedo)
+    {
+        if (Pass == StudioPass.Shadow) return new[] { new ShaderTextureBinding("uAlbedo", albedo, Slot: 0) };
+
+        var all = new ShaderTextureBinding[Textures.Length + 1];
+        Textures.CopyTo(all, 0);
+        all[^1] = new ShaderTextureBinding("uAlbedo", albedo, Slot: 1);
+        return all;
+    }
+}
 
 /// <summary>
 /// Something a tool puts on the stage.

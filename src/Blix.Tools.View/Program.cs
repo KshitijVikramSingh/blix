@@ -351,6 +351,12 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         panels = new ViewerPanels(this);
         var vk = (VulkanGraphicsDevice)graphicsDevice;
 
+        // <b>Structural settings are read when the graph is built, so they are applied BEFORE it.</b>
+        // The full binding below still happens and re-applies them harmlessly; it cannot come first,
+        // because the things it also binds do not exist until the renderer has loaded. Without this
+        // pass --image-based-lighting parsed, assigned, and changed nothing.
+        new ObjectTunables(renderer.Look).Apply(args);
+
         // Shaders arrive from the lab library's content propagation — this executable
         // never compiled one.
         renderer.Load(vk, Path.Combine(AppContext.BaseDirectory, "Shaders"));
@@ -756,6 +762,12 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         debug.State.DepthTestDrawing = panels.DepthTestGizmos;
         debug.Values.Value("frames", frames);
         debug.Values.Value("sun", renderer.Look.SunDirection);
+        // <b>The sun the ENVIRONMENT was baked from, beside the live one.</b> The probe is
+        // structural — baked once, at the sun as it stood when the graph was built — so moving
+        // the sun afterwards moves the direct light and leaves the environment behind. That is
+        // accepted, and this is what stops it being discovered instead of seen.
+        debug.Values.Value("sun baked", renderer.BakedSunDirection);
+        debug.Values.Value("ibl", renderer.ImageBasedLightingActive ? $"on, baked in {renderer.BakeMilliseconds:0.0} ms" : "off (flat ambient)");
 
         // <b>Three aspects that must be one number, published so they can be checked.</b> The
         // viewport target is half the swapchain, the panel letterboxes to that same aspect, and the

@@ -6,6 +6,7 @@
 // changes, this moves with it.
 #include "pbr.glsl"
 #include "shadow.glsl"
+#include "ibl.glsl"
 
 layout(set = 0, binding = 0) uniform Frame {
     mat4 uViewProjection;
@@ -13,6 +14,10 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4 uCameraPosition;
     vec4 uSunDirection;
     vec4 uSunColour;
+    // x = prefilter mip ceiling (mip count - 1), FROM THE BAKE — see ibl.glsl for why this is a
+    // value and not a constant. y = 1 when the environment probe is real, 0 when it is the 1x1
+    // stand-in and the ambient should stay flat.
+    vec4 uEnvironment;
 };
 
 
@@ -32,6 +37,15 @@ layout(set = 0, binding = 0) uniform Frame {
 // every texture its shader declares, including the ones it does not care about.
 layout(set = 1, binding = 0) uniform sampler2D uSunShadowMap;
 layout(set = 1, binding = 1) uniform sampler2D uAlbedo;
+
+// The environment, baked once from the house style's own sun — see StudioLook.
+//
+// <b>Every draw on this pipeline must bind all three, including the ones it does not care
+// about.</b> That is the rule the uAlbedo comment above was written about, and these are three
+// more chances to break it: the stage's own GROUND goes down this pipeline too.
+layout(set = 1, binding = 2) uniform samplerCube uIrradiance;
+layout(set = 1, binding = 3) uniform samplerCube uPrefilteredEnv;
+layout(set = 1, binding = 4) uniform sampler2D uBrdfLut;
 
 layout(push_constant) uniform Push {
     mat4 uModel;
@@ -110,10 +124,27 @@ void main()
     vec3 direct = blix_cookTorranceBrdf(N, V, L, albedo, F0, metallic, roughness)
                 * uSunColour.rgb * ndotl * shadow;
 
-    // A flat ambient term standing in for image-based lighting, which this lab
-    // deliberately does not carry — VulkanLit is where IBL lives. It picks up the vertex colour
-    // through `albedo` above, so it is not applied twice here.
-    vec3 ambient = albedo * uSunColour.a;
+    // <b>Image-based ambient, from a probe baked out of this stage's own sun.</b> The flat term
+    // this replaces — `albedo * ambientStrength` — lit every surface identically whatever it faced,
+    // which is exactly the information a person is looking for when they turn a model around.
+    //
+    // uSunColour.a is still the ambient strength and still scales the whole term, so the knob a
+    // caller already had means the same thing it meant before; what changed is what it scales.
+    //
+    // The branch is on the PROBE, not on taste: with IBL off the stage binds a 1x1 stand-in, and
+    // integrating a single texel through the split-sum would be a slower way of computing a flat
+    // term that is also wrong. Uniform across the draw, so it costs nothing.
+    vec3 ambient;
+    if (uEnvironment.y > 0.5)
+    {
+        ambient = blix_iblAmbient(
+            N, V, albedo, metallic, roughness, F0,
+            uIrradiance, uPrefilteredEnv, uBrdfLut, uEnvironment.x) * uSunColour.a;
+    }
+    else
+    {
+        ambient = albedo * uSunColour.a;
+    }
 
     // <b>Alpha reaches the output, for the pipeline that blends.</b> It is the product of the
     // texture's, the material's baseColorFactor.a and the vertex colour's — the same three the

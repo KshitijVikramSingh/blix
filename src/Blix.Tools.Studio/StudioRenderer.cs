@@ -2,6 +2,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix.Diagnostics;
 using Blix.Graphics;
+using Blix.Graphics.Images;
 using Blix.Graphics.Vulkan;
 using Blix.Render;
 
@@ -121,6 +122,39 @@ public sealed class StudioRenderer : IDisposable
     // was left unwritten and validation reported uAlbedo "used in draw but never updated" — which
     // reads like a model-loading bug and is not one. White is the identity for a base-colour factor.
     private TextureHandle whiteTexture;
+
+    // ── the environment, baked once ──────────────────────────────────────────────────────────
+    // STRUCTURAL, per StudioLook: baked from the sun as it stood when the graph was built, and
+    // never rebaked. Moving --sun-azimuth afterwards moves the DIRECT light and leaves the
+    // environment where it was, so the two can disagree — which is why the baked direction is
+    // printed beside the live one rather than left to be discovered.
+    private TextureHandle irradianceTexture;
+    private TextureHandle prefilteredTexture;
+    private TextureHandle brdfLutTexture;
+
+    // <b>What this renderer must destroy, deduplicated — because the probe ALIASES.</b>
+    // EnvironmentBaker's procedural path returns ONE cube and assigns it to EnvCubemap,
+    // DiffuseIrradiance and PrefilteredSpecular alike, so destroying "the irradiance" and "the
+    // prefiltered env" is destroying the same texture twice. That double free is a SIGSEGV in
+    // teardown — intermittent, after the frame is captured and the PNG is on disk, so the run looks
+    // successful right up until the process dies and the exit code says 139.
+    // Kept as a set rather than by reasoning about which fields alias today: that is the baker's
+    // business and it may differ per source.
+    private readonly List<TextureHandle> ownedEnvironmentTextures = new();
+
+    private bool iblActive;
+    private float envMipCeiling;
+    private Vector3 bakedSunDirection;
+    private double bakeMilliseconds;
+
+    /// <summary>The sun the environment was baked from. Equal to the live one until one moves.</summary>
+    public Vector3 BakedSunDirection => bakedSunDirection;
+
+    /// <summary>Whether a real probe is bound, rather than the 1x1 stand-in.</summary>
+    public bool ImageBasedLightingActive => iblActive;
+
+    /// <summary>What the bake cost, in milliseconds. Printed by --debug.</summary>
+    public double BakeMilliseconds => bakeMilliseconds;
 
     /// <summary>
     /// The stage's graph, for a tool recording a pass of its own.
@@ -406,6 +440,11 @@ public sealed class StudioRenderer : IDisposable
             new TextureDescription(1, 1, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
             new byte[] { 255, 255, 255, 255 }, "lab.white");
 
+        BakeEnvironment(vk);
+
+        // From here a structural change cannot take effect, so say so rather than accept it quietly.
+        Look.SealStructural();
+
         var (cv, ci) = StudioGeometry.Cube();
         // Widened to white. The stage's own furniture has no authored colour and does not want
         // one; it rides the same 36-byte layout so that ONE pipeline draws the ground, the boxes,
@@ -500,8 +539,9 @@ public sealed class StudioRenderer : IDisposable
                 new("uCameraPosition", new Vector4Uniform(new Vector4(cameraPosition, 1f))),
                 new("uSunDirection", new Vector4Uniform(new Vector4(Look.SunDirection, 0f))),
                 new("uSunColour", new Vector4Uniform(new Vector4(Look.SunColour, Look.AmbientStrength))),
+                new("uEnvironment", new Vector4Uniform(new Vector4(envMipCeiling, iblActive ? 1f : 0f, 0f, 0f))),
             };
-            var textures = new[] { new ShaderTextureBinding("uSunShadowMap", shadowTexture, Slot: 0) };
+            var textures = EnvironmentTextures(shadowTexture);
 
             // FURNITURE, and it stays the stage's: a tool does not choose whether the stage has a
             // floor. That is part of what makes it a stage rather than a blank device.
@@ -529,8 +569,9 @@ public sealed class StudioRenderer : IDisposable
                     new("uCameraPosition", new Vector4Uniform(new Vector4(viewportCameraPosition, 1f))),
                     new("uSunDirection", new Vector4Uniform(new Vector4(Look.SunDirection, 0f))),
                     new("uSunColour", new Vector4Uniform(new Vector4(Look.SunColour, Look.AmbientStrength))),
+                    new("uEnvironment", new Vector4Uniform(new Vector4(envMipCeiling, iblActive ? 1f : 0f, 0f, 0f))),
                 };
-                var textures = new[] { new ShaderTextureBinding("uSunShadowMap", shadowTexture, Slot: 0) };
+                var textures = EnvironmentTextures(shadowTexture);
 
                 if (Look.Ground) DrawGround(scope, litPipeline, uniforms, textures);
 
@@ -595,9 +636,101 @@ public sealed class StudioRenderer : IDisposable
             pipeline: pipeline,
             indexCount: groundIndexCount,
             uniforms: uniforms,
-            textures: new[] { textures[0], new ShaderTextureBinding("uAlbedo", whiteTexture, Slot: 1) },
+            // The same array every other lit draw gets, plus this one's albedo. It used to be
+            // `textures[0]` and a white texture, which was exactly right while the pass bound one
+            // texture and one short of correct the moment it bound four.
+            textures: AppendAlbedo(textures, whiteTexture),
             pushConstants: pushScratch);
     }
+
+    /// <summary>
+    /// Bakes the house style's environment from its own sun — no asset, no HDR, no download.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Procedural, and that is the whole reason the stage can have IBL at all.</b> The engine's
+    /// baker takes either an HDR equirect or a sun direction, and a tool that must open any model on
+    /// any machine cannot depend on shipping an environment map. So the sun the house style already
+    /// declares bakes its own sky, and the look stays self-contained.
+    /// </para>
+    /// <para>
+    /// <b>The stand-in is 1x1 and the shader branches on it.</b> With IBL off there is still a cube
+    /// and a LUT bound, because every draw on a pipeline must bind every texture its shader
+    /// declares; what changes is a flag that sends the fragment down the flat-ambient path, rather
+    /// than integrating one texel through the split-sum to arrive at a worse version of the same
+    /// answer.
+    /// </para>
+    /// </remarks>
+    private void BakeEnvironment(VulkanGraphicsDevice vk)
+    {
+        bakedSunDirection = Look.SunDirection;
+
+        if (!Look.ImageBasedLighting)
+        {
+            iblActive = false;
+            envMipCeiling = 0f;
+            var grey = new byte[6 * 4];
+            for (var i = 0; i < grey.Length; i++) grey[i] = 128;
+            irradianceTexture = vk.CreateTextureCube(
+                1, TextureFormat.Rgba8, 1, grey, SamplerDescription.LinearClamp, "lab.ibl.off.cube");
+            prefilteredTexture = irradianceTexture;
+            brdfLutTexture = vk.CreateTexture2D(
+                new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.LinearClamp),
+                new byte[] { 255, 255, 255, 255 }, "lab.ibl.off.brdf");
+            Own(irradianceTexture, brdfLutTexture);
+            return;
+        }
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var probe = EnvironmentBaker.Bake(
+            vk,
+            new EnvironmentProfile
+            {
+                Source = new ProceduralEnvironmentSource(Look.SunDirection),
+                SpecularPrefilterBaseSize = Look.EnvFaceSize,
+                SpecularPrefilterMipCount = Look.EnvMipCount,
+            },
+            "lab.ibl");
+
+        brdfLutTexture = EnvironmentBaker.BakeBrdfLut(vk, Look.BrdfLutSize, "lab.ibl.brdf");
+        watch.Stop();
+        bakeMilliseconds = watch.Elapsed.TotalMilliseconds;
+
+        irradianceTexture = probe.DiffuseIrradiance;
+        prefilteredTexture = probe.PrefilteredSpecular;
+        Own(probe.EnvCubemap, probe.DiffuseIrradiance, probe.PrefilteredSpecular, brdfLutTexture);
+
+        // From the BAKE, not from the look: if the baker returns fewer mips than were asked for,
+        // the ceiling the shader samples to has to be the one that exists. A LOD above the top mip
+        // clamps silently and makes every rough surface read the same level.
+        envMipCeiling = MathF.Max(0f, probe.PrefilteredSpecularMipCount - 1);
+        iblActive = true;
+    }
+
+    private void Own(params TextureHandle[] textures)
+    {
+        foreach (var t in textures)
+        {
+            if (!ownedEnvironmentTextures.Contains(t)) ownedEnvironmentTextures.Add(t);
+        }
+    }
+
+    private static ShaderTextureBinding[] AppendAlbedo(ShaderTextureBinding[] pass, TextureHandle albedo)
+    {
+        var all = new ShaderTextureBinding[pass.Length + 1];
+        pass.CopyTo(all, 0);
+        all[^1] = new ShaderTextureBinding("uAlbedo", albedo, Slot: 1);
+        return all;
+    }
+
+    /// <summary>What every lit draw binds, before its own albedo. The stage's one answer.</summary>
+    private ShaderTextureBinding[] EnvironmentTextures(TextureHandle shadowMap) => new[]
+    {
+        new ShaderTextureBinding("uSunShadowMap", shadowMap, Slot: 0),
+        new ShaderTextureBinding("uIrradiance", irradianceTexture, Slot: 2),
+        new ShaderTextureBinding("uPrefilteredEnv", prefilteredTexture, Slot: 3),
+        new ShaderTextureBinding("uBrdfLut", brdfLutTexture, Slot: 4),
+    };
 
     private static readonly Vector3 GroundColour = new(0.22f, 0.23f, 0.26f);
 
@@ -643,5 +776,7 @@ public sealed class StudioRenderer : IDisposable
         device.DestroyVertexBuffer(groundVertices);
         device.DestroyIndexBuffer(groundIndices);
         device.DestroyTexture(whiteTexture);
+        foreach (var t in ownedEnvironmentTextures) device.DestroyTexture(t);
+        ownedEnvironmentTextures.Clear();
     }
 }

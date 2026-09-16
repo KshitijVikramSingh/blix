@@ -347,6 +347,12 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         device = (VulkanGraphicsDevice)graphicsDevice;
+        // <b>Structural settings are read when the graph is built, so they are applied BEFORE it.</b>
+        // The full binding below still happens and re-applies them harmlessly; it cannot come first,
+        // because the things it also binds do not exist until the renderer has loaded. Without this
+        // pass --image-based-lighting parsed, assigned, and changed nothing.
+        new ObjectTunables(renderer.Look).Apply(args);
+
         renderer.Load(
             device,
             Path.Combine(AppContext.BaseDirectory, "Shaders"),
@@ -358,6 +364,13 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // reached a renderer nobody had asked to re-read them. The stage has a look whether or not
         // anything is standing on it.
         ApplyStageKnobs();
+
+        // The environment, reported. It lands in the capture's log, which is half of what the lab
+        // baseline hashes — so the house style's environment state is part of what a regression diff
+        // shows, rather than something you have to go and ask about.
+        Console.WriteLine(renderer.ImageBasedLightingActive
+            ? $"environment: procedural probe from the stage sun, {renderer.BakeMilliseconds:0.0} ms"
+            : "environment: OFF — flat ambient stands in for the probe");
 
         LoadRig();
 
@@ -777,6 +790,19 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // rendering fault rather than as two coplanar surfaces.
         debug.Draw.Grid("floor", new Vector3(0f, 0.02f, 0f), 24f, 24, new GraphicsColor(0.35f, 0.4f, 0.5f, 1f));
         debug.Draw.Arrow("sun", renderer.Look.SunDirection * 7f, Vector3.Zero, new GraphicsColor(1f, 0.9f, 0.5f, 1f));
+
+        // <b>The sun the ENVIRONMENT was baked from, drawn beside the live one.</b> The probe is
+        // structural — baked once, from the sun as it stood when the graph was built — so moving the
+        // sun afterwards moves the direct light and leaves the environment behind. Accepted; this is
+        // what stops it being discovered rather than seen. The two arrows sit on top of each other
+        // until they do not.
+        if (renderer.ImageBasedLightingActive
+            && Vector3.Distance(renderer.BakedSunDirection, renderer.Look.SunDirection) > 1e-4f)
+        {
+            debug.Draw.Arrow(
+                "sun baked", renderer.BakedSunDirection * 7f, Vector3.Zero,
+                new GraphicsColor(0.4f, 0.55f, 1f, 1f));
+        }
 
         // The skeleton, through the SAME SkeletonGizmo the viewer uses. That shared call is the
         // whole reason the lab is a library: a capture drawn by its own copy of the overlay could

@@ -111,26 +111,92 @@ matched.
 `Blix.Test.Studio` 15/15. **Lab baseline: 68 artifacts byte-for-byte identical** — this stage moves
 no pixel, which is the whole claim it had to support.
 
-## Stage 2 — IBL — NEXT
+## Stage 2 — IBL — DONE
 
-Scoped and smaller than it sounds, because **the bake is already engine-owned**:
-`EnvironmentProfile`, `EnvironmentBaker.Bake` → `EnvironmentProbe` (env cube, diffuse irradiance,
-prefiltered specular), `BakeBrdfLut`, `PbrIblBaker` underneath. And there are two sources —
-`HdrEnvironmentSource` and **`ProceduralEnvironmentSource(SunDirection)`** — so Studio needs **no
-environment asset**: the house style's own sun bakes its own sky, which is what a tool that must
-open any model on any machine wants.
+`studio_lit.frag`'s flat ambient — `albedo * ambientStrength`, which lit every surface identically
+whatever it faced — is now the split-sum image-based term, from a probe baked out of the house
+style's **own sun**. No environment asset: `ProceduralEnvironmentSource(SunDirection)` means a tool
+that must open any model on any machine carries its own sky.
 
-PBR is already there too: `studio_lit.frag` builds on `blix_cookTorranceBrdf` / `blix_sun_shadow` /
-`blix_tonemap`. The delta is the IBL term.
+### What actually moved, which was not what was planned
 
-**What actually has to move is the shader half.** `ibl.glsl` lives in
-`src/Demos/Blix.Demos.VulkanLit/Shaders/`, not in `Blix.Shaders`. It is promoted to the vocabulary
-layer and VulkanLit switches to the shared copy — the technique going where technique goes, with
-Studio only composing it.
+I said `ibl.glsl` would be promoted from the VulkanLit demo and VulkanLit switched to the shared
+copy. Once read, both halves were wrong:
 
-`AmbientStrength` changes meaning rather than disappearing: from "flat stand-in for image-based
-lighting" to how much of the environment reaches shadow. Zero stays a legitimate inspection mode —
-flattening the fill is how a silhouette becomes readable.
+- **Its `fresnelSchlickRoughness` is already in `Blix.Shaders` as `blix_fresnelLazarov`** — better
+  documented, with an Apple-driver fix, and identical in output for clamped `NdotV` (the clamp is
+  the only textual difference). There were THREE copies: pbr.glsl's, VulkanLit's, and Sponza's own
+  in `lit.frag`. The demo file was a duplicate.
+- **Its only other content is `const float MAX_REFLECTION_LOD = 6.0`** — a GLSL constant that must
+  equal (prefilter mip count − 1) from a C# bake. Sponza already passes that as a uniform. Promoting
+  it would have promoted a landmine.
+- **VulkanLit's lit path has a complete parallel local library** — `brdf.glsl`, `shadows.glsl`,
+  `normal_mapping.glsl`, `debug_channels.glsl`. Swapping one of five leaves it half-converted, which
+  is worse than either end state. Its conversion is its own job.
+
+So: **`Blix.Shaders/ibl.glsl` is new vocabulary, not a promotion.** It carries `blix_iblAmbient`,
+built on `blix_fresnelLazarov`, and takes the prefilter ceiling as a PARAMETER supplied by the bake.
+VulkanLit and Sponza are untouched.
+
+### Three faults, all mine, all found by verification rather than by reading
+
+1. **The first structural setting shipped unable to be set.** Both tools called `renderer.Load` —
+   which bakes — BEFORE applying the command line, so `--image-based-lighting false` parsed, assigned
+   and changed nothing. The only symptom was byte-identical captures with the flag on and off.
+   Fixed by applying the look's flags before `Load` in both tools, and `StudioLook.SealStructural()`
+   now makes the next one loud: cascades, MSAA and a depth pre-pass are all structural, and each is
+   another chance to make this mistake somewhere the picture looks plausible either way.
+2. **A double free in teardown, intermittent, exit 139.** `EnvironmentBaker`'s procedural path
+   returns ONE cube assigned to `EnvCubemap`, `DiffuseIrradiance` AND `PrefilteredSpecular` alike, so
+   destroying "the irradiance" and "the prefiltered env" destroys the same texture twice. It crashed
+   after the frame was captured and the PNG was on disk, so the run looked successful until the
+   process died — caught only because the baseline records exit codes. The renderer now owns a
+   deduplicated list rather than reasoning about which fields alias today.
+3. **Every lit draw must bind every texture the shader declares**, and five views were assembling
+   that array by hand as `{ draw.Textures[0], uAlbedo }` — correct at one texture, one short at four.
+   `StudioDraw.WithAlbedo` now owns the assembly, so adding a texture to the stage is one edit.
+
+### The BRDF LUT was 96% of the bake
+
+Measured, because the engine's comment says procedural skies are "cheap enough to bake every frame"
+and the first bake took 1.9 s. The comment is right about the probe and wrong about the total:
+
+| | cost |
+| --- | --- |
+| procedural probe | **35–71 ms** |
+| BRDF LUT @ 256 (engine default) | **1451 ms** |
+
+The LUT is O(n²) — 32 → 25 ms, 64 → 84 ms, 128 → 407 ms, 256 → 1451 ms — and it depends on nothing
+but its own size: it is the Karis split-sum integration over (NdotV, roughness). Recomputing a table
+of constants at every launch of a tool you launch constantly is the wrong trade, so `BrdfLutSize` is
+a declared structural value defaulting to **64**, and the choice was CHECKED rather than asserted:
+against 256 it differs on 0.11% of pixels with a **maximum difference of 1/255**. Even 32 stays
+within 2/255.
+
+**The real fix is a cooked LUT, not a smaller one** — same numbers on every machine forever, and
+`Blix.Tools.Cook` already writes a BRDF LUT into a `.blixprobe`. Engine work, not this arc's.
+
+### One quality caveat, recorded rather than hidden
+
+The procedural probe is **not a true GGX prefilter**: the baker assigns the same cube to all three
+probe fields, so the specular half reads box-filtered mips of the env cube rather than roughness-
+convolved ones. The engine's own field comment says as much ("fallback, when PrefilteredSpecular
+isn't a real GGX bake"). Good enough for a stage whose job is legibility; worth knowing before the
+house style claims to be a reference for material authoring.
+
+### And a taste question the change raises
+
+`AmbientStrength` defaults to **0.06**, tuned when the fill was flat and its only job was to stop
+shadowed faces going black. With a directional fill at 0.06 the IBL is nearly invisible — on/off is
+a seam you have to look for. At ~0.35 the shaded side of a face reads and the ground picks up sky.
+That is a house-style decision and it is the user's, not a bug.
+
+### Verified
+
+`Blix.Test.Graphics` 649/649 · `Blix.Test.Diagnostics` 235/235 · `Blix.Test.Physics2D` 43/43 ·
+`Blix.Test.Studio` 15/15. Validation clean. Baseline re-recorded deliberately: **46 of 68 artifacts
+changed, all 23 modes still behaving** — negatives still refuse, the self-test still passes, the
+lockstep control still reports one distinct pose — and a second run is byte-identical again.
 
 ## Then
 

@@ -93,9 +93,7 @@ public sealed class ModelView : IStudioView
                 // <b>The caster binds an albedo too, at slot 0.</b> Its shader declares one so it
                 // can cut out, and every draw on a pipeline must bind every texture that shader
                 // declares — the ground included — or the draw reaches a set nothing filled.
-                textures: casterOnly
-                    ? new[] { new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 0) }
-                    : new[] { draw.Textures[0], new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 1) },
+                textures: draw.WithAlbedo(part.Albedo),
                 pushConstants: push);
         }
     }
@@ -283,9 +281,7 @@ public sealed class RigView : IStudioView
                 indexCount: part.IndexCount,
                 instanceCount: Instances,
                 uniforms: draw.Uniforms,
-                textures: casterOnly
-                    ? new[] { new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 0) }
-                    : new[] { draw.Textures[0], new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 1) },
+                textures: draw.WithAlbedo(part.Albedo),
                 // <b>This part's skin, not the rig's first one.</b> Every part carries the index of
                 // the skin that poses it, and each skin has its own palette buffer — same pose,
                 // different inverse binds and a different authored frame.
@@ -325,9 +321,7 @@ public sealed class RigView : IStudioView
                 pipeline: draw.Pipeline,
                 indexCount: part.IndexCount,
                 uniforms: draw.Uniforms,
-                textures: casterOnly
-                    ? new[] { new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 0) }
-                    : new[] { draw.Textures[0], new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 1) },
+                textures: draw.WithAlbedo(part.Albedo),
                 pushConstants: push);
         }
     }
@@ -389,9 +383,7 @@ public sealed class RigView : IStudioView
                 pipeline: draw.Pipeline,
                 indexCount: attachment.IndexCount,
                 uniforms: draw.Uniforms,
-                textures: casterOnly
-                    ? new[] { new ShaderTextureBinding("uAlbedo", attachment.Albedo, Slot: 0) }
-                    : new[] { draw.Textures[0], new ShaderTextureBinding("uAlbedo", attachment.Albedo, Slot: 1) },
+                textures: draw.WithAlbedo(attachment.Albedo),
                 pushConstants: attachPush);
         }
     }
