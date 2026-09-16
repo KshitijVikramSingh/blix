@@ -256,9 +256,25 @@ whatever its vertex stage declares, and one shared frag cannot serve both layout
 **Opaque captures are byte-identical**, unlike the lit cutout: a depth-only pass resolves no colour,
 so losing early-Z there changes nothing about which fragment wins.
 
-*BLEND.* Blending is pipeline state and needs draw ordering to be correct at all. `core.glb` is the
-only asset in the tree with a real blend alpha. Ordering is a design question the stage has not
-earned.
+*BLEND — **the conformance half BUILT, the ordering half deliberately not.*** Deferred before on
+"`core.glb` is the only asset in the tree", which §7 forbids; `Material_AlphaBlend` is seven
+permutations and a download.
+
+**Built:** a blend pipeline and its skinned twin — depth-tested but not depth-WRITING, never culled,
+`BlendState.AlphaBlend`. Alpha reaches the output as the product of the texture's, the material's
+`baseColorFactor.a` and the vertex colour's, the same three the cutout tests, because glTF says alpha
+is all three whatever the mode does with it. Blended parts draw after every opaque one and are
+skipped in the caster pass — a blended caster writes a solid silhouette into a depth-only shadow map,
+which is a transparent surface casting an opaque shadow.
+
+**Not built, and stated rather than half-done:** order *within* the blended group. Two overlapping
+transparent surfaces composite in the order the asset lists them, not by depth. Per-object sorting,
+per-triangle sorting, depth peeling and order-independent blending are all defensible, which by §5 is
+exactly when a policy waits for a consumer to choose. Rendering the material is conformance; ordering
+it is not.
+
+Verified on all seven permutations: `baseColorFactor.a = 0.7` shows the ground's grid through the
+plane, and casts nothing. **Opaque captures byte-identical** across all eleven modes.
 
 **One accepted cost, measured.** A shader containing `discard` cannot be early-Z tested even on
 fragments that never take the branch, so every opaque draw now resolves depth late. That moves

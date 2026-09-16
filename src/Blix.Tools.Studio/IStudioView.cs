@@ -43,7 +43,18 @@ public readonly record struct StudioDraw(
     PipelineHandle Pipeline,
     PipelineHandle SkinnedPipeline,
     TextureHandle White,
-    PipelineHandle SkinnedDoubleSidedPipeline = default);
+    PipelineHandle SkinnedDoubleSidedPipeline = default,
+
+    /// <summary>The stage's pipeline for a BLEND material — blending on, depth write off.</summary>
+    /// <remarks>
+    /// <b>A pipeline rather than a push constant, because blending is pipeline state.</b> That is
+    /// the whole reason MASK and BLEND land differently: a cutout is a comparison a fragment can
+    /// make, and blending is not.
+    /// </remarks>
+    PipelineHandle BlendPipeline = default,
+
+    /// <summary>Its skinned twin.</summary>
+    PipelineHandle SkinnedBlendPipeline = default);
 
 /// <summary>
 /// Something a tool puts on the stage.

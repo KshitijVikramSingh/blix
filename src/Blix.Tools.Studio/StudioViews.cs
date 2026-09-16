@@ -22,6 +22,21 @@ internal static class StudioAlpha
 {
     public static float CutoffFor(GltfAlphaMode mode, float cutoff) =>
         mode == GltfAlphaMode.Mask ? cutoff : 0f;
+
+    /// <summary>
+    /// Whether a part is drawn in the blended group: last, and not into the shadow map.
+    /// </summary>
+    /// <remarks>
+    /// <b>Order within the blended group is NOT solved, and saying so is the point.</b> Blended
+    /// surfaces are drawn after every opaque one, which is the part the depth buffer cannot do for
+    /// them; between themselves they are drawn in the order the asset lists them. Two overlapping
+    /// transparent surfaces therefore composite by list order rather than by depth. Sorting them is
+    /// a design choice with several defensible answers — per-object depth sort, per-triangle sort,
+    /// depth peeling, order-independent blending — and conventions §5 says a policy with several
+    /// answers waits for a consumer to pick between them. Rendering the material is conformance;
+    /// ordering it is not.
+    /// </remarks>
+    public static bool IsBlended(GltfAlphaMode mode) => mode == GltfAlphaMode.Blend;
 }
 
 public sealed class ModelView : IStudioView
@@ -43,9 +58,19 @@ public sealed class ModelView : IStudioView
     {
         var casterOnly = draw.Pass == StudioPass.Shadow;
 
+        // <b>Two sweeps: opaque, then blended.</b> A blended surface has to come after everything
+        // it might show through, and its own pipeline does not write depth — so drawing it in asset
+        // order alongside opaques would let an opaque part drawn later sit on top of it.
+        for (var pass = 0; pass < 2; pass++)
         for (var index = 0; index < Model.Parts.Count; index++)
         {
             var part = Model.Parts[index];
+            var blended = StudioAlpha.IsBlended(part.AlphaMode);
+            if (blended != (pass == 1)) continue;
+
+            // A blended caster would write a solid silhouette into the depth-only shadow map, which
+            // is a transparent surface casting an opaque shadow. Skipped rather than approximated.
+            if (casterOnly && blended) continue;
             var node = Model.Nodes[part.NodeIndex];
             var push = casterOnly ? caster : lit;
 
@@ -62,7 +87,7 @@ public sealed class ModelView : IStudioView
             draw.Scope.DrawIndexed(
                 vertexBuffer: part.Vertices,
                 indexBuffer: part.Indices,
-                pipeline: draw.Pipeline,
+                pipeline: blended && draw.BlendPipeline.Id != 0 ? draw.BlendPipeline : draw.Pipeline,
                 indexCount: part.IndexCount,
                 uniforms: draw.Uniforms,
                 // <b>The caster binds an albedo too, at slot 0.</b> Its shader declares one so it
@@ -202,8 +227,14 @@ public sealed class RigView : IStudioView
         var casterOnly = draw.Pass == StudioPass.Shadow;
         var stride = (float)Rig.Skeleton.BoneCount;
 
+        // Opaque then blended, for the same reason ModelView sweeps twice.
+        for (var pass = 0; pass < 2; pass++)
         foreach (var part in Rig.Parts)
         {
+            var blended = StudioAlpha.IsBlended(part.AlphaMode);
+            if (blended != (pass == 1)) continue;
+            if (casterOnly && blended) continue;
+
             byte[] push;
             if (casterOnly)
             {
@@ -237,9 +268,13 @@ public sealed class RigView : IStudioView
             // shading shifting — and 81% of those pixels fall in the head band where MI_Hair_1 sits.
             // A small effect from this camera, and a real one; a closed torso genuinely does not
             // care, which is why the culling comment on the pipeline above is not wrong either.
-            var skinned = part.DoubleSided && draw.SkinnedDoubleSidedPipeline.Id != 0
-                ? draw.SkinnedDoubleSidedPipeline
-                : draw.SkinnedPipeline;
+            // Blend first: its pipeline is already unculled, so a doubleSided blend material needs
+            // no fourth combination of the two.
+            var skinned = blended && draw.SkinnedBlendPipeline.Id != 0
+                ? draw.SkinnedBlendPipeline
+                : part.DoubleSided && draw.SkinnedDoubleSidedPipeline.Id != 0
+                    ? draw.SkinnedDoubleSidedPipeline
+                    : draw.SkinnedPipeline;
 
             draw.Scope.DrawIndexedInstanced(
                 vertexBuffer: part.Vertices,

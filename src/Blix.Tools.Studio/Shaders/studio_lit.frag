@@ -109,5 +109,9 @@ void main()
     // through `albedo` above, so it is not applied twice here.
     vec3 ambient = albedo * uSunColour.a;
 
-    outColour = vec4(direct + ambient, 1.0);
+    // <b>Alpha reaches the output, for the pipeline that blends.</b> It is the product of the
+    // texture's, the material's baseColorFactor.a and the vertex colour's — the same three the
+    // cutout tests, because glTF says alpha is all three whatever the mode does with it. On an
+    // opaque pipeline blending is off and this channel is ignored.
+    outColour = vec4(direct + ambient, texture(uAlbedo, vUv).a * uBaseColour.a * vColour.a);
 }

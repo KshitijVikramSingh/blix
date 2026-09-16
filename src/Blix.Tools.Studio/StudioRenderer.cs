@@ -77,6 +77,13 @@ public sealed class StudioRenderer : IDisposable, ITunable
     // material says doubleSided. Two pipelines rather than one, because face culling is pipeline
     // state in Vulkan and cannot be pushed per draw.
     private PipelineHandle skinnedDoubleSidedPipeline;
+
+    // <b>Blending is pipeline state, which is the whole reason BLEND costs a pipeline and MASK does
+    // not.</b> Depth-tested but not depth-WRITING, so a transparent surface does not hide what is
+    // behind it, and never culled, because a single-sided blend material shows its own far side
+    // through itself.
+    private PipelineHandle blendPipeline;
+    private PipelineHandle skinnedBlendPipeline;
     private PipelineHandle skinnedShadowPipeline;
 
     private VertexBufferHandle cubeVertices;
@@ -388,6 +395,24 @@ public sealed class StudioRenderer : IDisposable, ITunable
         // being drawn by the pipeline above, which culls. A closed body does not notice, so the
         // comment above stays true for the case it describes; what it missed is that a rig is not
         // only a closed body. See StudioViews.RigView for what honouring it actually moves.
+        blendPipeline = vk.CreatePipeline(new PipelineDescription(
+            litProgram,
+            VertexPosition3NormalTextureColor.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.LessEqualNoWrite,
+            RasterizerState.NoCulling,
+            new[] { BlendState.AlphaBlend },
+            RenderTarget: graph.GetPassSurface(litPass)), "lab.lit.blend");
+
+        skinnedBlendPipeline = vk.CreatePipeline(new PipelineDescription(
+            skinnedProgram,
+            VertexPosition3NormalTextureSkin4Tangent.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.LessEqualNoWrite,
+            RasterizerState.NoCulling,
+            new[] { BlendState.AlphaBlend },
+            RenderTarget: graph.GetPassSurface(litPass)), "lab.skinned.blend");
+
         skinnedDoubleSidedPipeline = vk.CreatePipeline(new PipelineDescription(
             skinnedProgram,
             VertexPosition3NormalTextureSkin4Tangent.Layout,
@@ -531,7 +556,8 @@ public sealed class StudioRenderer : IDisposable, ITunable
 
             var draw = new StudioDraw(
                 scope, StudioPass.Lit, uniforms, textures, litPipeline, skinnedPipeline, whiteTexture,
-                SkinnedDoubleSidedPipeline: skinnedDoubleSidedPipeline);
+                SkinnedDoubleSidedPipeline: skinnedDoubleSidedPipeline,
+                BlendPipeline: blendPipeline, SkinnedBlendPipeline: skinnedBlendPipeline);
             foreach (var view in views) view.Draw(draw);
         });
 
@@ -560,7 +586,8 @@ public sealed class StudioRenderer : IDisposable, ITunable
                 // contribution appears in the panel for free, which it never did before.
                 var draw = new StudioDraw(
                     scope, StudioPass.Lit, uniforms, textures, litPipeline, skinnedPipeline, whiteTexture,
-                    SkinnedDoubleSidedPipeline: skinnedDoubleSidedPipeline);
+                    SkinnedDoubleSidedPipeline: skinnedDoubleSidedPipeline,
+                    BlendPipeline: blendPipeline, SkinnedBlendPipeline: skinnedBlendPipeline);
                 foreach (var view in views) view.Draw(draw);
             });
         }
@@ -650,6 +677,8 @@ public sealed class StudioRenderer : IDisposable, ITunable
         device.DestroyPipeline(presentPipeline);
         device.DestroyPipeline(skinnedPipeline);
         device.DestroyPipeline(skinnedDoubleSidedPipeline);
+        device.DestroyPipeline(blendPipeline);
+        device.DestroyPipeline(skinnedBlendPipeline);
         device.DestroyPipeline(skinnedShadowPipeline);
         device.DestroyShaderProgram(litProgram);
         device.DestroyShaderProgram(shadowProgram);
