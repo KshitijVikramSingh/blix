@@ -168,6 +168,68 @@ public sealed class StudioLook : ITunable
 
     private int envMipCount = 5;
 
+    /// <summary>Samples per pixel in the scene pass. 1 is off; 2, 4 and 8 are the usual answers.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Structural, and unusually so: the sample count is baked into the render pass, the images
+    /// AND every pipeline.</b> There is no version of changing this at runtime that is not a rebuild,
+    /// which is what the flag on this attribute exists to say.
+    /// </para>
+    /// <para>
+    /// <b>1, because it does not work yet, and the blocker is in the render graph rather than
+    /// here.</b> The colour half is wired and correct; a multisampled attachment is not sampleable,
+    /// and this stage's present pass SAMPLES the scene depth to carry it to the swapchain so debug
+    /// gizmos depth-test against the scene. The graph has ResolveColor and no ResolveDepth. Asking
+    /// for more than 1 is refused by name at load rather than crashing at the first frame.
+    /// <para>
+    /// It is worth having when it works: a turntable shows a silhouette turning against a
+    /// background, and a stair-stepped silhouette is the most visible artefact this stage has.
+    /// </para>
+    /// </para>
+    /// <para>
+    /// Costs a multisampled colour and depth target and a resolve. The panel's viewport stays at 1x
+    /// deliberately: it is a fraction of the window and already renders the scene a second time.
+    /// </para>
+    /// </remarks>
+    [Tune(1, 8, Group = "present", Structural = true)]
+    public int MsaaSamples
+    {
+        get => msaaSamples;
+        set { Seal(nameof(MsaaSamples), msaaSamples != value); msaaSamples = value; }
+    }
+
+    private int msaaSamples = 1;
+
+    /// <summary>Lay depth down in a cheap pass first, so the lit pass shades fewer fragments.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>OFF, because the benefit could not be measured and the cost could.</b> The stage renders
+    /// correctly either way — with and without, a capture is byte-identical — so what is left is the
+    /// trade, and on this stage it does not pay: the pre-pass adds a whole geometry pass and two
+    /// pipelines (8 to 10) to save fragment work on a scene of a handful of objects.
+    /// </para>
+    /// <para>
+    /// <b>The instrument could not see it, and that is the finding rather than an excuse.</b> Frame
+    /// time here is vsync-locked with no present-mode switch, so it quantises to the refresh:
+    /// repeated A/B runs at eight bodies gave 7.93 ms on and 16.34 ms off, then 16.17 ms on and
+    /// 8.02 ms off — the same pair, inverted, which is noise reading as a 2x result. The only number
+    /// that stayed put was the CPU cost of building the extra pass, about +0.04 ms.
+    /// </para>
+    /// <para>
+    /// So it stays, structural and one flag away, for the case that changes the answer: a stage
+    /// showing terrain or a crowd IS fragment-bound, and that is the case IStudioView was shaped
+    /// around. Turning it on then is a measurement, not a guess.
+    /// </para>
+    /// </remarks>
+    [Tune(Group = "shadow", Structural = true)]
+    public bool DepthPrePass
+    {
+        get => depthPrePass;
+        set { Seal(nameof(DepthPrePass), depthPrePass != value); depthPrePass = value; }
+    }
+
+    private bool depthPrePass;
+
     /// <summary>Side of each cascade's shadow map, in texels.</summary>
     /// <remarks>
     /// Structural: the depth targets are sized when the graph is built. Three maps at this size,

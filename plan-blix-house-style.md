@@ -280,6 +280,67 @@ deletion — the standing rule.
 `Blix.Test.Studio` 15/15. Validation clean. Baseline re-recorded, second run byte-identical.
 `AmbientStrength` also moved 0.06 → 0.30 in the same pass, now that the fill carries direction.
 
+## Stage 4 — depth pre-pass — DONE, and OFF
+
+Built, correct, and defaulted **off** because the benefit could not be measured and the cost could.
+
+The caster shaders already do exactly this job — transform by a matrix, discard on a cutout — so the
+pre-pass is those shaders with the CAMERA's view-projection where the light's goes, and to a view it
+is just another `StudioPass.Shadow`. With and without, a capture is **byte-identical**, which is the
+correctness bar.
+
+**The instrument could not see the benefit, and that is the finding.** Frame time here is
+vsync-locked with no present-mode switch, so it quantises to the refresh. Paired A/B runs at eight
+bodies:
+
+| run | pre-pass on | pre-pass off |
+| --- | --- | --- |
+| first | 7.93 ms | 16.34 ms |
+| second | 16.17 ms | 8.02 ms |
+
+The same pair, inverted — noise reading as a 2x result. The only number that stayed put was the CPU
+cost of building the extra pass, about **+0.04 ms**. So: measurable cost, unmeasurable benefit, on a
+stage that draws a handful of objects. It stays, structural and one flag away, for the case that
+changes the answer — terrain or a crowd IS fragment-bound, and that is the case `IStudioView` was
+shaped around.
+
+It also cost two pipelines, 8 → **10**. That number is the thing to watch as the house style grows.
+
+**One bug on the way**, caught by the device rather than by a picture: the ground went down the
+pre-pass pushing the lit material block, 112 bytes into a caster pipeline that declares 80. The
+binding model named both sizes. The ground now pushes a caster block there, and binds the albedo the
+caster shader declares at slot 0.
+
+## Stage 5 — MSAA — BLOCKED, and the blocker is in the engine
+
+The colour half is wired and correct — `graph.ColorTarget(..., samples: n)` plus
+`GraphicsPassBuilder.ResolveColor`, the same two lines RTSGame uses, and its comment is right that
+switching the target is the whole of switching MSAA.
+
+**It cannot work on this stage yet, for a reason that is not about this stage.** A multisampled
+attachment is not sampleable, and the studio's present pass **samples the scene depth** —
+`gl_FragDepth = texture(uSceneDepth, vUv).r` — to carry it across to the swapchain so debug gizmos
+depth-test against the scene instead of floating in front of it. The render graph has `ResolveColor`
+and no `ResolveDepth`. RTSGame runs MSAA happily because it never samples its scene depth; this stage
+is the unusual one, and for a good reason.
+
+Asking for more than one sample is now **refused by name at load**, cleanly, exit 1 — rather than
+crashing at the first frame with *"graph resource id 6 has no sampleable handle"*, which names
+nothing a caller can act on. That is the same rule the asset refusals follow.
+
+**The decision, which is the user's:**
+
+1. Add `ResolveDepth` to the render graph. `VkSubpassDescriptionDepthStencilResolve` is core since
+   Vulkan 1.2 and this device reports 1.2, so it is tractable — but it is engine work on a graph two
+   games share, and it deserves its own verification rather than being the tail of a stage.
+2. Ship MSAA with gizmo depth-testing dropped when it is on. Visible regression for non-`--xray`
+   gizmos, which is most of what the stage draws them for.
+3. Leave it. The stage is a turntable and the silhouette is what a person looks at, so this is the
+   one of the three that gives up something real.
+
+My read is (1): the gap is genuinely in the engine, it benefits RTSGame too, and (2) trades away the
+thing the gizmos exist for.
+
 ## Then
 
 **Cascades** — the shadow is one 9 m orthographic box, the most visible quality gap on the thing you

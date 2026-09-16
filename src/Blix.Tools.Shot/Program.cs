@@ -370,10 +370,20 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // pass --image-based-lighting parsed, assigned, and changed nothing.
         new ObjectTunables(renderer.Look).Apply(args);
 
-        renderer.Load(
-            device,
-            Path.Combine(AppContext.BaseDirectory, "Shaders"),
-            stageSelfTest ? ExtendStage : null);
+        // A structural setting the stage cannot honour is a configuration error, not a crash. Same
+        // rule the asset refusals follow: say which setting and what to do, and exit non-zero.
+        try
+        {
+            renderer.Load(
+                device,
+                Path.Combine(AppContext.BaseDirectory, "Shaders"),
+                stageSelfTest ? ExtendStage : null);
+        }
+        catch (NotSupportedException refused)
+        {
+            Console.Error.WriteLine(refused.Message);
+            Environment.Exit(1);
+        }
 
         // <b>Once, here, rather than on each subject's path.</b> It used to be called after a model
         // loaded and after a rig loaded, which meant the EMPTY stage — no --model, no --rig — honoured

@@ -359,7 +359,17 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
         // Shaders arrive from the lab library's content propagation — this executable
         // never compiled one.
-        renderer.Load(vk, Path.Combine(AppContext.BaseDirectory, "Shaders"));
+                // A structural setting the stage cannot honour is a configuration error, not a crash. Same
+        // rule the asset refusals follow: say which setting and what to do, and exit non-zero.
+        try
+        {
+            renderer.Load(vk, Path.Combine(AppContext.BaseDirectory, "Shaders"));
+        }
+        catch (NotSupportedException refused)
+        {
+            Console.Error.WriteLine(refused.Message);
+            Environment.Exit(1);
+        }
 
         // The sun's depth buffer, registered so it can be looked at. A depth image sampled by a
         // colour shader arrives as (d, 0, 0, 1) — a red-scale map, not a mistake — and the useful

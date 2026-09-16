@@ -124,6 +124,10 @@ public sealed class StudioRenderer : IDisposable
     // reads like a model-loading bug and is not one. White is the identity for a base-colour factor.
     private readonly GraphResourceHandle[] cascadeTargets = new GraphResourceHandle[CascadeCount];
     private readonly PassHandle[] cascadePasses = new PassHandle[CascadeCount];
+    private GraphResourceHandle sceneColourMsaaTarget;
+    private PassHandle prePass;
+    private PipelineHandle prePassPipeline;
+    private PipelineHandle prePassSkinnedPipeline;
     private readonly Matrix4x4[] cascadeViewProjection = new Matrix4x4[CascadeCount];
     private readonly float[] cascadeSplit = new float[CascadeCount];
     private readonly float[] cascadeSide = new float[CascadeCount];
@@ -182,6 +186,7 @@ public sealed class StudioRenderer : IDisposable
     public RenderGraph Graph => graph;
 
     private readonly byte[] pushScratch = new byte[PushBytes];
+    private readonly byte[] casterScratch = new byte[StudioPush.CasterBytes];
     private readonly byte[] casterPushScratch = new byte[CasterPushBytes];
     private readonly byte[] skinnedCasterPushScratch = new byte[SkinnedCasterPushBytes];
 
@@ -279,7 +284,42 @@ public sealed class StudioRenderer : IDisposable
                 $"lab-shadow-{c}", new FixedGraphSize(Look.ShadowMapSize, Look.ShadowMapSize));
         }
         sceneColourTarget = graph.ColorTarget("lab-hdr", TextureFormat.Rgba16F, fullSize);
-        sceneDepthTarget = graph.DepthTarget("lab-scene-depth", fullSize);
+
+        // <b>MSAA is a second colour target and a resolve, and nothing else knows.</b> The pass
+        // builder takes its surface from whichever target it is given, so switching the target is
+        // the whole of switching MSAA — the same two lines RTSGame reaches for, and the reason there
+        // is no second code path here. The scene DEPTH has to match the colour's sample count or the
+        // render pass is invalid, which is why it is threaded even when MSAA is off.
+        var samples = Math.Clamp(Look.MsaaSamples, 1, 8);
+        if (samples > 1)
+        {
+            // <b>Refused, early and by name, because the graph cannot resolve DEPTH.</b> The colour
+            // half works — GraphicsPassBuilder.ResolveColor exists and this stage uses it below —
+            // but a multisampled attachment is not sampleable, and this stage's present pass SAMPLES
+            // the scene depth to carry it across to the swapchain so debug gizmos depth-test against
+            // the scene rather than floating in front of it.
+            //
+            // RTSGame runs MSAA happily because it never samples its scene depth. The fix is
+            // ResolveDepth on the graph (VkSubpassDescriptionDepthStencilResolve, core since Vulkan
+            // 1.2, and this device reports 1.2) — engine work on a render graph two games share, and
+            // a deliberate change rather than the tail of a stage.
+            //
+            // Failing here beats failing at the first frame with "graph resource id 6 has no
+            // sampleable handle", which is what it did before this check and names nothing a caller
+            // can act on.
+            throw new NotSupportedException(
+                $"MsaaSamples {samples}: the studio stage cannot multisample yet. Its present pass " +
+                "samples the scene depth (so gizmos depth-test against the scene), and the render " +
+                "graph has ResolveColor but no ResolveDepth. Use --msaa-samples 1.");
+        }
+
+        if (samples > 1)
+        {
+            sceneColourMsaaTarget = graph.ColorTarget(
+                "lab-hdr-msaa", TextureFormat.Rgba16F, fullSize, samples: samples);
+        }
+
+        sceneDepthTarget = graph.DepthTarget("lab-scene-depth", fullSize, samples: samples);
 
         // <b>A SECOND camera on the same scene, not a mirror of the first.</b> Showing the main
         // scene target in a panel would be a picture of the picture — it proves a texture can be
@@ -317,11 +357,30 @@ public sealed class StudioRenderer : IDisposable
                 .Handle;
         }
 
+        // <b>Depth first, into the same buffer the lit pass then tests against.</b> The caster
+        // shaders already do exactly this job — transform by a matrix, discard on a cutout — so the
+        // pre-pass is those shaders with the CAMERA's view-projection where the light's goes, and
+        // views need no new code path: to a view this is another StudioPass.Shadow.
+        if (Look.DepthPrePass)
+        {
+            prePass = graph.GraphicsPass("lab.prepass")
+                .Depth(sceneDepthTarget, LoadOp.Clear, StoreOp.Store)
+                .Shader(shadowInterface)
+                .Handle;
+        }
+
         // Read() is the edge that makes the ordering a fact rather than a convention: the
         // lit pass samples what the caster pass wrote, and the graph knows it.
-        litPass = graph.GraphicsPass("lab.lit")
-            .Target(sceneColourTarget, LoadOp.Clear, StoreOp.Store)
-            .Depth(sceneDepthTarget, LoadOp.Clear, StoreOp.Store)
+        var litBuilder = graph.GraphicsPass("lab.lit");
+        litBuilder = samples > 1
+            ? litBuilder.Target(sceneColourMsaaTarget, LoadOp.Clear, StoreOp.Store).ResolveColor(sceneColourTarget)
+            : litBuilder.Target(sceneColourTarget, LoadOp.Clear, StoreOp.Store);
+        litPass = litBuilder
+            // Loads what the pre-pass laid down, or clears it itself. The lit pipelines still WRITE
+            // depth either way: with a pre-pass those writes are redundant rather than wrong, and
+            // leaving them on is what lets the panel's viewport — which has no pre-pass of its own —
+            // keep using the same pipelines instead of needing a twin family.
+            .Depth(sceneDepthTarget, Look.DepthPrePass ? LoadOp.Load : LoadOp.Clear, StoreOp.Store)
             .Read(cascadeTargets[0])
             .Read(cascadeTargets[1])
             .Read(cascadeTargets[2])
@@ -383,6 +442,22 @@ public sealed class StudioRenderer : IDisposable
             RasterizerState.NoCulling,
             Array.Empty<BlendState>(),
             RenderTarget: graph.GetPassSurface(cascadePasses[0])), "lab.shadow");
+
+        if (Look.DepthPrePass)
+        {
+            // Its own pipelines rather than the caster's: those are baked against a 2048-square
+            // depth-only surface and this one is the scene's. Two more, which is the cost of the
+            // feature stated plainly — this stage is at ten pipelines now, and that number is the
+            // thing to watch as the house style grows.
+            prePassPipeline = vk.CreatePipeline(new PipelineDescription(
+                shadowProgram,
+                VertexPosition3NormalTexture2Color.Layout,
+                PrimitiveTopology.Triangles,
+                DepthState.LessEqualWrite,
+                RasterizerState.NoCulling,
+                Array.Empty<BlendState>(),
+                RenderTarget: graph.GetPassSurface(prePass)), "lab.prepass");
+        }
 
         litPipeline = vk.CreatePipeline(new PipelineDescription(
             litProgram,
@@ -450,6 +525,18 @@ public sealed class StudioRenderer : IDisposable
             RasterizerState.NoCulling,
             Array.Empty<BlendState>(),
             RenderTarget: graph.GetPassSurface(cascadePasses[0])), "lab.skinned.shadow");
+
+        if (Look.DepthPrePass)
+        {
+            prePassSkinnedPipeline = vk.CreatePipeline(new PipelineDescription(
+                skinnedShadowProgram,
+                VertexPosition3NormalTextureSkin4Tangent.Layout,
+                PrimitiveTopology.Triangles,
+                DepthState.LessEqualWrite,
+                RasterizerState.NoCulling,
+                Array.Empty<BlendState>(),
+                RenderTarget: graph.GetPassSurface(prePass)), "lab.prepass.skinned");
+        }
 
         // FullscreenPass.Layout, not a vertex format: studio_present.vert builds its triangle from
         // gl_VertexIndex and declares no inputs at all, so any attribute here is a promise the shader
@@ -568,6 +655,32 @@ public sealed class StudioRenderer : IDisposable
             });
         }
 
+        // Pass 1b — the camera's own depth, so the lit pass shades fewer fragments.
+        if (Look.DepthPrePass)
+        {
+            graph.Pass(prePass, scope =>
+            {
+                var uniforms = new ShaderUniform[]
+                {
+                    // The camera where the light goes. That is the whole of the difference.
+                    new("uLightViewProjection", new Matrix4x4Uniform(viewProjection)),
+                };
+
+                // The ground included, unlike the caster passes: it is the largest thing on screen
+                // and therefore the one whose fragments are most worth not shading twice.
+                if (Look.Ground)
+                {
+                    DrawGround(scope, prePassPipeline, uniforms, Array.Empty<ShaderTextureBinding>(), depthOnly: true);
+                }
+
+                var draw = new StudioDraw(
+                    scope, StudioPass.Shadow, uniforms, Array.Empty<ShaderTextureBinding>(),
+                    prePassPipeline, prePassSkinnedPipeline, whiteTexture,
+                    SkinnedDoubleSidedPipeline: prePassSkinnedPipeline);
+                foreach (var view in views) view.Draw(draw);
+            });
+        }
+
         // Pass 2 — light it into HDR, sampling the depth the caster passes just wrote.
         var shadowTexture = graph.GetDepthTexture(cascadeTargets[0]);
         graph.Pass(litPass, scope =>
@@ -671,14 +784,23 @@ public sealed class StudioRenderer : IDisposable
     /// drawn. If look development wants a test subject again it arrives as a view, which is what
     /// rung two is for.
     /// </remarks>
+    /// <param name="depthOnly">
+    /// <b>The pre-pass draws this through a CASTER pipeline, which declares a smaller push block.</b>
+    /// The lit block is 112 bytes and a caster's is 80, and pushing the larger at the smaller is
+    /// rejected by the device with both sizes named — which is the binding model earning its keep,
+    /// and how this was found the first time the ground went down the pre-pass.
+    /// </param>
     private void DrawGround(
         RenderPassBuilder pass,
         PipelineHandle pipeline,
         ShaderUniform[] uniforms,
-        ShaderTextureBinding[] textures)
+        ShaderTextureBinding[] textures,
+        bool depthOnly = false)
     {
-        StudioPush.Matrix(Matrix4x4.Identity, pushScratch);
-        StudioPush.Material(pushScratch, GroundColour, metallic: 0f, roughness: 0.9f);
+        var push = depthOnly ? casterScratch : pushScratch;
+        StudioPush.Matrix(Matrix4x4.Identity, push);
+        if (depthOnly) StudioPush.CasterCutout(push, alphaCutoff: 0f, baseAlpha: 1f);
+        else StudioPush.Material(push, GroundColour, metallic: 0f, roughness: 0.9f);
 
         pass.DrawIndexed(
             vertexBuffer: groundVertices,
@@ -689,8 +811,13 @@ public sealed class StudioRenderer : IDisposable
             // The same array every other lit draw gets, plus this one's albedo. It used to be
             // `textures[0]` and a white texture, which was exactly right while the pass bound one
             // texture and one short of correct the moment it bound four.
-            textures: AppendAlbedo(textures, whiteTexture),
-            pushConstants: pushScratch);
+            //
+            // The caster shader declares an albedo too — at slot 0, so it can cut out — and every
+            // draw on a pipeline must bind every texture that shader declares.
+            textures: depthOnly
+                ? new[] { new ShaderTextureBinding("uAlbedo", whiteTexture, Slot: 0) }
+                : AppendAlbedo(textures, whiteTexture),
+            pushConstants: push);
     }
 
     /// <summary>
