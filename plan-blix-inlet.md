@@ -484,27 +484,24 @@ exists to serve this limitation, and it is the only line this arc removes.
   translation makes a real test rather than a formality.
 - A file whose second skin genuinely cannot be read is still reported rather than silently dropped.
 
-### I-E — the second UV set — **DECIDED-NO on measurement**
+### I-E — the second UV set — **REOPENED; the decided-no was reasoned wrongly**
 
-`TEXCOORD_1` on 9 primitives, `_2` and `_3` on 4 — the two textured villagers, the mannequin. This
-was parked with the right instinct: *what it is for in these assets is unknown, and building a
-channel for an unknown purpose is how a vertex layout grows a field nobody can explain in a year.*
+`TEXCOORD_1` on 9 primitives, `_2` and `_3` on 4 — the two textured villagers, the mannequin.
 
-Now measured, and the answer is that it is for nothing.
+**What the measurement actually found, which is worth keeping:** the sets are genuinely distinct.
+Every vertex of `villager_peasant`'s `TEXCOORD_1` differs from its `TEXCOORD_0`, by up to 3.64 in UV
+space, so no exporter is duplicating a buffer; and on `villager_universal`'s mannequin one
+primitive's second set is bit-identical to its first while another's is not. Separately, **zero of
+the 18 texture channels in this tree sample anything but set 0.**
 
-The sets are **genuinely distinct** — every vertex of `villager_peasant`'s `TEXCOORD_1` differs from
-its `TEXCOORD_0`, by up to 3.64 in UV space, so they are not an exporter duplicating a buffer. On
-`villager_universal`'s mannequin one primitive's second set is bit-identical to its first and
-another's is not, which is the same story from the other side.
+**What was concluded from it, and is retracted:** that the stage is decided-no. The reasoning was
+*"a test wanting it is not content wanting it"* — dismissing `MultiUVTest`, which exists precisely
+because a reader is supposed to handle this. That is conventions §7 being broken in the same session
+it was derived: the tree's contents are an accident of what was downloaded, so "no asset of ours
+samples set 1" measures our library rather than the engine. Reading a UV set the format defines is
+conformance, and the spec is the requirement.
 
-But a glTF texture names the UV set it samples, and **zero of the 18 texture channels in this tree
-use anything but set 0.** The geometry carries the coordinates; no material reads them. Reading them
-would deliver a channel that nothing in any asset here asks to sample.
-
-**Not built, and now for a stated reason rather than an open question.** The gap is *reported* by
-`GltfIgnored` rather than silent, so a future asset that does sample set 1 says so on load. The
-Khronos corpus has `MultiUVTest`, which exists precisely to exercise a reader — a test wanting it is
-not the same as content wanting it, and building for the test alone would be the tail wagging.
+So it is built, not parked — after the two stages where something is visibly wrong today.
 
 ---
 

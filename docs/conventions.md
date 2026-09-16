@@ -320,6 +320,45 @@ is byte-identical) · Section **BB** (every skin read, each with its own remap) 
 
 ---
 
+## 7. Conformance is required; policy waits
+
+§5 says adding policy usually is wrong, and §6 says where policy goes when you need it. Both are
+about **decisions**. This is about the thing that is not a decision, and conflating the two costs
+real capability.
+
+> **For a format Blix reads, the SPECIFICATION is the requirement. Owning an asset that exercises it
+> is not a precondition — it is a download.**
+
+Two different questions wear the same clothes:
+
+- **Conformance.** Does Blix read and render what glTF defines? There is one right answer and the
+  spec has it. A reference asset is how the work is *verified*, not whether it may *begin*.
+- **Policy and architecture.** How should textures be grouped for residency? How should transparent
+  surfaces be ordered? Several answers are defensible, the wrong one calcifies, and a real consumer
+  is what tells them apart. That is §5, and it still holds.
+
+**The failure this prevents has a signature:** *"no asset in the tree needs it."* The tree's contents
+are an accident of what was downloaded, so that sentence measures our library and not the engine. It
+was said four times in one day — about cutout shadows, alpha blending, a second UV set, and a fifth
+bone influence — while three public corpora sat one `curl` away, and while a synthetic fixture had
+already been authored by hand that same day for a different gap.
+
+It is the same circle as a workaround justifying the limit that forced it (§6): a contingent fact is
+promoted to a requirement, and then defended with the evidence it produced. The reply to *"nothing
+asks for it"* is **go and get something that asks for it** — see [[blix-gltf-sample-corpus]] for the
+three corpora and what each is for.
+
+**Where the line actually falls**, using transparency as the case: *rendering* a BLEND material is
+conformance and the spec settles it. *Sorting* blended surfaces correctly is policy — depth peeling,
+per-triangle sorting, order-independent blending are all defensible — so that half waits, and the
+limitation is stated rather than half-built.
+
+**Enforced by:** `Blix.Test.Graphics` Section **AZ** and **BB** (synthetic fixtures authored for gaps
+no owned asset covers) · the glTF attribute table recorded in `GltfStaticImporter` from the spec
+rather than from a sweep of the content.
+
+---
+
 ## Where the surface stands
 
 Blix now reaches across the corners it set out to cover — rendering,
