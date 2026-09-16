@@ -94,7 +94,38 @@ public sealed class Skeleton
     // Matrix4x4[] per skinned object is negligible at the kind of object counts
     // we deal with; a poolable variant can land alongside the first profiling
     // evidence that the allocation matters.
-    public void ComputeBonePalette(Pose pose, BonePalette outPalette)
+    public void ComputeBonePalette(Pose pose, BonePalette outPalette) =>
+        ComputeBonePalette(pose, outPalette, null);
+
+    /// <summary>
+    /// Computes the skinning palette, and optionally hands back the joint world transforms it
+    /// builds on the way.
+    /// </summary>
+    /// <param name="outJointWorlds">
+    /// Filled with each bone's world transform when given, sized to <see cref="BoneCount"/>.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// <b>The palette is not the joints' transforms, and that distinction is why this exists.</b>
+    /// <c>Matrices[i]</c> is <c>InverseBindPose · world</c> — a map from a REST vertex to its posed
+    /// position, which is exactly what a skinned vertex shader wants and exactly the wrong thing to
+    /// hand something that has no rest vertices in this skin's space. A knife parented to a hand
+    /// has its own mesh and its own offset; what it needs is where the hand IS.
+    /// </para>
+    /// <para>
+    /// <b>And that array was already being built and thrown away.</b> The world transforms are the
+    /// intermediate the palette is derived from, computed on every call and dropped one line later,
+    /// so this adds no traversal and no arithmetic — it stops discarding a result.
+    /// </para>
+    /// <para>
+    /// <b>It also removes a per-frame allocation.</b> The scratch array was allocated inside this
+    /// method on every call — once per skinned body per frame, which in RTSGame is a crowd. A
+    /// caller that wants the worlds supplies the array and there is none; a caller that does not
+    /// gets the old behaviour, because making everyone provide one to fix an allocation they never
+    /// asked about is a worse trade than the allocation.
+    /// </para>
+    /// </remarks>
+    public void ComputeBonePalette(Pose pose, BonePalette outPalette, Matrix4x4[]? outJointWorlds)
     {
         ArgumentNullException.ThrowIfNull(pose);
         ArgumentNullException.ThrowIfNull(outPalette);
@@ -116,7 +147,14 @@ public sealed class Skeleton
         // so the recurrence pre-multiplies the child's local onto the parent's
         // accumulated world. Palette then maps rest → bone-local (InverseBindPose)
         // and bone-local → world (worldMatrices), in that left-to-right order.
-        var worldMatrices = new Matrix4x4[Bones.Length];
+        if (outJointWorlds is not null && outJointWorlds.Length != Bones.Length)
+        {
+            throw new ArgumentException(
+                $"Joint-world array has {outJointWorlds.Length} matrices; skeleton has {Bones.Length}.",
+                nameof(outJointWorlds));
+        }
+
+        var worldMatrices = outJointWorlds ?? new Matrix4x4[Bones.Length];
         for (var i = 0; i < Bones.Length; i++)
         {
             var localMatrix = pose.Locals[i].ToMatrix();

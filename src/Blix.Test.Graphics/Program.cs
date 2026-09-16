@@ -3307,6 +3307,73 @@ static ShaderInterface MinimalShader() => new(new[]
         t.Expect("AY.5 and its skinned primitives are unchanged",
             bareModel.Primitives.Length == sceneryModel.Primitives.Length
             && bareModel.Primitives[0].Mesh.VertexCount == sceneryModel.Primitives[0].Mesh.VertexCount);
+
+        // ── AY.6 the joint world transforms, which were computed and dropped ─
+        // <b>The palette is not the joints' transforms.</b> Matrices[i] is InverseBindPose · world —
+        // a map from a REST vertex to its posed position, which is what a skinned shader wants and
+        // the wrong thing entirely for a knife that has no rest vertices in this skin's space.
+        // ComputeBonePalette built the worlds as an intermediate and threw them away one line later.
+        var skel = model.Skeleton;
+        var rest = skel.CreateRestPose();
+        var palette = new BonePalette(skel.BoneCount);
+        var worlds = new Matrix4x4[skel.BoneCount];
+        skel.ComputeBonePalette(rest, palette, worlds);
+
+        // At rest, InverseBindPose · world is the identity for every bone — the invariant
+        // CreateRestPose already documents, read from the other end. If the worlds were wrong this
+        // is what would say so.
+        var worstRest = 0f;
+        for (var i = 0; i < skel.BoneCount; i++)
+        {
+            var shouldBeIdentity = skel.Bones[i].InverseBindPose * worlds[i];
+            worstRest = MathF.Max(worstRest, Deviation(shouldBeIdentity));
+        }
+
+        t.ExpectTrue($"AY.6 at rest, InverseBindPose x world is the identity (worst {worstRest:0.000000})",
+            worstRest < 1e-4f);
+
+        // <b>And they are NOT the palette.</b> Without this, "implementing" the worlds by copying
+        // Matrices[] would pass every other check here — at rest the palette IS the identity, so a
+        // copy looks right exactly where it is least useful.
+        var posed = skel.CreateRestPose();
+        posed.Locals[skel.BoneCount - 1] = posed.Locals[skel.BoneCount - 1] with
+        {
+            Translation = posed.Locals[skel.BoneCount - 1].Translation + new Vector3(0f, 1.5f, 0f),
+        };
+        skel.ComputeBonePalette(posed, palette, worlds);
+        t.ExpectTrue("AY.6 and a joint world is not its palette matrix",
+            Deviation(palette.Matrices[skel.BoneCount - 1] * Matrix4x4.Identity)
+                != Deviation(worlds[skel.BoneCount - 1]));
+
+        // A child's world is its local composed onto its parent's — the recurrence itself, checked
+        // rather than assumed, because a transposed multiply here puts equipment in the right place
+        // for a rig with no rotation and nowhere near it for one with any.
+        var worstChain = 0f;
+        for (var i = 0; i < skel.BoneCount; i++)
+        {
+            var p = skel.Bones[i].ParentIndex;
+            if (p < 0) continue;
+            var expected = posed.Locals[i].ToMatrix() * worlds[p];
+            worstChain = MathF.Max(worstChain, Deviation(expected * Invert(worlds[i])));
+        }
+
+        t.ExpectTrue($"AY.6 a child's world is local x parent's world (worst {worstChain:0.000000})",
+            worstChain < 1e-4f);
+
+        // The array is the scratch, so a caller that wants the worlds pays no allocation — and one
+        // that does not still gets a palette.
+        var noWorlds = new BonePalette(skel.BoneCount);
+        skel.ComputeBonePalette(posed, noWorlds);
+        var same = true;
+        for (var i = 0; i < skel.BoneCount; i++)
+        {
+            same &= Deviation(noWorlds.Matrices[i] * Invert(palette.Matrices[i])) < 1e-4f;
+        }
+
+        t.ExpectTrue("AY.6 asking for the worlds does not change the palette", same);
+
+        t.ExpectThrows<ArgumentException>("AY.6 a wrongly-sized world array is refused, not silently partial",
+            () => skel.ComputeBonePalette(posed, palette, new Matrix4x4[skel.BoneCount + 1]));
     }
     finally
     {
@@ -3725,6 +3792,29 @@ return t.Failed;
 
 // Did the action throw? Section AT asserts on the record/execute check firing, and a bare
 // try/catch at each site would bury the assertion it exists to make.
+static float Deviation(Matrix4x4 m)
+{
+    var identity = Matrix4x4.Identity;
+    var worst = 0f;
+    for (var r = 0; r < 4; r++)
+    for (var c = 0; c < 4; c++)
+    {
+        worst = MathF.Max(worst, MathF.Abs(Element(m, r, c) - Element(identity, r, c)));
+    }
+
+    return worst;
+
+    static float Element(Matrix4x4 x, int r, int c) => (r, c) switch
+    {
+        (0, 0) => x.M11, (0, 1) => x.M12, (0, 2) => x.M13, (0, 3) => x.M14,
+        (1, 0) => x.M21, (1, 1) => x.M22, (1, 2) => x.M23, (1, 3) => x.M24,
+        (2, 0) => x.M31, (2, 1) => x.M32, (2, 2) => x.M33, (2, 3) => x.M34,
+        _ => (r, c) switch { (3, 0) => x.M41, (3, 1) => x.M42, (3, 2) => x.M43, _ => x.M44 },
+    };
+}
+
+static Matrix4x4 Invert(Matrix4x4 m) => Matrix4x4.Invert(m, out var inv) ? inv : Matrix4x4.Identity;
+
 static bool Throws(Action action)
 {
     try { action(); return false; }
