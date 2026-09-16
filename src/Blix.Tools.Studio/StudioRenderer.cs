@@ -125,6 +125,13 @@ public sealed class StudioRenderer : IDisposable
     private readonly GraphResourceHandle[] cascadeTargets = new GraphResourceHandle[CascadeCount];
     private readonly PassHandle[] cascadePasses = new PassHandle[CascadeCount];
     private GraphResourceHandle sceneColourMsaaTarget;
+    private GraphResourceHandle sceneDepthResolveTarget;
+
+    /// <summary>The scene depth something can sample: the resolve target under MSAA, else the one.</summary>
+    private GraphResourceHandle SampleableSceneDepth =>
+        msaaSamplesUsed > 1 ? sceneDepthResolveTarget : sceneDepthTarget;
+
+    private int msaaSamplesUsed = 1;
     private PassHandle prePass;
     private PipelineHandle prePassPipeline;
     private PipelineHandle prePassSkinnedPipeline;
@@ -290,27 +297,14 @@ public sealed class StudioRenderer : IDisposable
         // the whole of switching MSAA — the same two lines RTSGame reaches for, and the reason there
         // is no second code path here. The scene DEPTH has to match the colour's sample count or the
         // render pass is invalid, which is why it is threaded even when MSAA is off.
-        var samples = Math.Clamp(Look.MsaaSamples, 1, 8);
-        if (samples > 1)
+        // Clamped to what the device can actually do, and said out loud. This laptop's Metal backend
+        // stops at 4x, and asking for 8 is a native assertion rather than an error anything can catch.
+        var samples = Math.Clamp(Look.MsaaSamples, 1, vk.MaxMsaaSamples);
+        if (samples != Look.MsaaSamples)
         {
-            // <b>Refused, early and by name, because the graph cannot resolve DEPTH.</b> The colour
-            // half works — GraphicsPassBuilder.ResolveColor exists and this stage uses it below —
-            // but a multisampled attachment is not sampleable, and this stage's present pass SAMPLES
-            // the scene depth to carry it across to the swapchain so debug gizmos depth-test against
-            // the scene rather than floating in front of it.
-            //
-            // RTSGame runs MSAA happily because it never samples its scene depth. The fix is
-            // ResolveDepth on the graph (VkSubpassDescriptionDepthStencilResolve, core since Vulkan
-            // 1.2, and this device reports 1.2) — engine work on a render graph two games share, and
-            // a deliberate change rather than the tail of a stage.
-            //
-            // Failing here beats failing at the first frame with "graph resource id 6 has no
-            // sampleable handle", which is what it did before this check and names nothing a caller
-            // can act on.
-            throw new NotSupportedException(
-                $"MsaaSamples {samples}: the studio stage cannot multisample yet. Its present pass " +
-                "samples the scene depth (so gizmos depth-test against the scene), and the render " +
-                "graph has ResolveColor but no ResolveDepth. Use --msaa-samples 1.");
+            Console.WriteLine(
+                $"msaa: {Look.MsaaSamples}x asked, {samples}x used — this device supports at most " +
+                $"{vk.MaxMsaaSamples}x for colour and depth together.");
         }
 
         if (samples > 1)
@@ -320,6 +314,16 @@ public sealed class StudioRenderer : IDisposable
         }
 
         sceneDepthTarget = graph.DepthTarget("lab-scene-depth", fullSize, samples: samples);
+
+        // <b>A 1x depth for the present pass to SAMPLE.</b> A multisampled attachment is not
+        // sampleable, and this stage's present pass carries scene depth across to the swapchain so
+        // debug gizmos depth-test against the scene. GraphicsPassBuilder.ResolveDepth exists because
+        // of this; before it, turning MSAA on failed at the first frame with "graph resource id 6
+        // has no sampleable handle".
+        if (samples > 1)
+        {
+            sceneDepthResolveTarget = graph.DepthTarget("lab-scene-depth-1x", fullSize);
+        }
 
         // <b>A SECOND camera on the same scene, not a mirror of the first.</b> Showing the main
         // scene target in a panel would be a picture of the picture — it proves a texture can be
@@ -375,6 +379,8 @@ public sealed class StudioRenderer : IDisposable
         litBuilder = samples > 1
             ? litBuilder.Target(sceneColourMsaaTarget, LoadOp.Clear, StoreOp.Store).ResolveColor(sceneColourTarget)
             : litBuilder.Target(sceneColourTarget, LoadOp.Clear, StoreOp.Store);
+        msaaSamplesUsed = samples;
+        if (samples > 1) litBuilder = litBuilder.ResolveDepth(sceneDepthResolveTarget);
         litPass = litBuilder
             // Loads what the pre-pass laid down, or clears it itself. The lit pipelines still WRITE
             // depth either way: with a pre-pass those writes are redundant rather than wrong, and
@@ -767,7 +773,7 @@ public sealed class StudioRenderer : IDisposable
                 new[]
                 {
                     new ShaderTextureBinding("uScene", graph.GetColorTexture(sceneColourTarget), Slot: 0),
-                    new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(sceneDepthTarget), Slot: 1),
+                    new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth), Slot: 1),
                 },
                 pushConstants: null,
                 uniforms: present));

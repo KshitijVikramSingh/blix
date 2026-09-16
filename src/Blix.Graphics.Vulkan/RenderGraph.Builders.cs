@@ -46,6 +46,41 @@ public sealed class GraphicsPassBuilder
     public GraphicsPassBuilder ResolveColor(GraphResourceHandle handle) =>
         ResolveColor((TextureView)handle);
 
+    /// <summary>
+    /// Resolve this pass's multisampled DEPTH into a 1x target, so something can sample it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A multisampled attachment is not sampleable, and that is what this is for.</b> A pass that
+    /// multisamples its depth and also needs that depth readable afterwards — to carry it to the
+    /// swapchain, to drive a depth-based effect — has no way to get at it otherwise. The studio
+    /// stage is the case that asked: its present pass writes gl_FragDepth from the scene's depth so
+    /// debug gizmos depth-test against the scene, and turning MSAA on broke exactly that.
+    /// </para>
+    /// <para>
+    /// <b>Asking for this builds the pass with vkCreateRenderPass2.</b> Depth resolve is a structure
+    /// chained onto VkSubpassDescription2 and has no equivalent in the original call, so a pass that
+    /// wants it takes a second construction path. Every pass that does NOT ask keeps the original
+    /// one, byte for byte — this is an addition, not a migration, because the graph is shared by two
+    /// games and a rewrite of pass creation is not a thing to do as the tail of a feature.
+    /// </para>
+    /// <para>
+    /// The resolve mode is SAMPLE_ZERO. Averaging depth is meaningless across a silhouette — the
+    /// mean of a near sample and a far one is a surface that is not there — and min/max are not
+    /// portable. Sample zero is what a depth-forward wants: one real sample of the real geometry.
+    /// </para>
+    /// </remarks>
+    public GraphicsPassBuilder ResolveDepth(TextureView view)
+    {
+        EnsureMutable();
+        entry.DepthResolveTarget = view;
+        return this;
+    }
+
+    /// <inheritdoc cref="ResolveDepth(TextureView)"/>
+    public GraphicsPassBuilder ResolveDepth(GraphResourceHandle handle) =>
+        ResolveDepth((TextureView)handle);
+
     // Declare the depth attachment for this pass. At most one per pass;
     // a second call replaces the previous declaration.
     public GraphicsPassBuilder Depth(TextureView view, LoadOp load, StoreOp store)

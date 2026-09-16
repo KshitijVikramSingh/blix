@@ -387,6 +387,18 @@ internal sealed class GraphicsPassEntry
     // Single-sample resolve destinations for MSAA color targets, parallel to
     // ColorTargets (resolve i ← color i). Empty when the pass isn't MSAA.
     public List<TextureView> ResolveTargets { get; } = new();
+
+    /// <summary>
+    /// A 1x depth target this pass resolves its multisampled depth into, or null.
+    /// </summary>
+    /// <remarks>
+    /// <b>Separate from <see cref="ResolveTargets"/> because depth resolve is a different Vulkan
+    /// feature, not another entry in the same list.</b> Colour resolve is a field on
+    /// VkSubpassDescription; depth resolve is a structure chained onto VkSubpassDescription2, which
+    /// means the pass has to be built with vkCreateRenderPass2. A pass that asks for this therefore
+    /// takes a different construction path — see CreateGraphicsPassRenderPass.
+    /// </remarks>
+    public TextureView? DepthResolveTarget { get; set; }
 }
 
 internal sealed class ComputePassEntry

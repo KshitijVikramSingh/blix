@@ -176,14 +176,15 @@ public sealed class StudioLook : ITunable
     /// which is what the flag on this attribute exists to say.
     /// </para>
     /// <para>
-    /// <b>1, because it does not work yet, and the blocker is in the render graph rather than
-    /// here.</b> The colour half is wired and correct; a multisampled attachment is not sampleable,
-    /// and this stage's present pass SAMPLES the scene depth to carry it to the swapchain so debug
-    /// gizmos depth-test against the scene. The graph has ResolveColor and no ResolveDepth. Asking
-    /// for more than 1 is refused by name at load rather than crashing at the first frame.
+    /// <b>On, because a turntable shows a silhouette turning against a background and a
+    /// stair-stepped silhouette is the most visible artefact this stage has.</b> Unlike the depth
+    /// pre-pass beside it — a performance trade that could not be measured here — this is an
+    /// image-quality change anyone can see in one frame.
     /// <para>
-    /// It is worth having when it works: a turntable shows a silhouette turning against a
-    /// background, and a stair-stepped silhouette is the most visible artefact this stage has.
+    /// It needed an engine change to work at all: a multisampled attachment is not sampleable, and
+    /// this stage's present pass SAMPLES the scene depth to carry it to the swapchain so debug
+    /// gizmos depth-test against the scene. The render graph had ResolveColor and no ResolveDepth;
+    /// it has both now, and a pass that asks for depth resolve is built with vkCreateRenderPass2.
     /// </para>
     /// </para>
     /// <para>
@@ -198,7 +199,7 @@ public sealed class StudioLook : ITunable
         set { Seal(nameof(MsaaSamples), msaaSamples != value); msaaSamples = value; }
     }
 
-    private int msaaSamples = 1;
+    private int msaaSamples = 4;
 
     /// <summary>Lay depth down in a cheap pass first, so the lit pass shades fewer fragments.</summary>
     /// <remarks>

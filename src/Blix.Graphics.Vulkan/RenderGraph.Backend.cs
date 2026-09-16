@@ -587,9 +587,218 @@ public sealed partial class RenderGraph : IDisposable
     /// pipelines and the framebuffer built for the clearing form.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// The same pass, built with vkCreateRenderPass2 so its multisampled depth can be resolved.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A deliberate near-duplicate of <see cref="CreateGraphicsPassRenderPass"/> rather than a
+    /// replacement for it. The two differ in exactly one thing — the depth resolve — and every
+    /// judgement in the original about layouts and load ops is reproduced here, because those were
+    /// learned the hard way and are what makes the load variant work.
+    /// </para>
+    /// <para>
+    /// Attachment order is [colour…, depth, colour-resolve…, depth-resolve], which
+    /// CreateFramebuffer matches.
+    /// </para>
+    /// </remarks>
+    private unsafe Silk.NET.Vulkan.RenderPass CreateGraphicsPassRenderPass2(
+        GraphicsPassEntry pass, bool loadVariant)
+    {
+        var device = Device!;
+        var colorCount = pass.ColorTargets.Count;
+        var hasDepth = pass.Depth is not null;
+        var resolveCount = pass.ResolveTargets.Count;
+        var attachmentCount = colorCount + (hasDepth ? 1 : 0) + resolveCount + 1;
+
+        var attachments = stackalloc AttachmentDescription2[attachmentCount];
+        var colorRefs = stackalloc AttachmentReference2[Math.Max(1, colorCount)];
+        var resolveRefs = stackalloc AttachmentReference2[Math.Max(1, colorCount)];
+
+        for (var i = 0; i < colorCount; i++)
+        {
+            var binding = pass.ColorTargets[i];
+            var resource = BackendResources[binding.View.Resource.Id];
+            var samples = Resources[binding.View.Resource.Id].Samples;
+            attachments[i] = new AttachmentDescription2
+            {
+                SType = StructureType.AttachmentDescription2,
+                Format = resource.Format,
+                Samples = SampleCount(samples),
+                LoadOp = loadVariant ? AttachmentLoadOp.Load : MapLoadOp(binding.Load),
+                StoreOp = MapStoreOp(binding.Store),
+                StencilLoadOp = AttachmentLoadOp.DontCare,
+                StencilStoreOp = AttachmentStoreOp.DontCare,
+                InitialLayout = loadVariant || binding.Load == LoadOp.Load
+                    ? ImageLayout.ShaderReadOnlyOptimal
+                    : ImageLayout.Undefined,
+                FinalLayout = ImageLayout.ShaderReadOnlyOptimal,
+            };
+            colorRefs[i] = new AttachmentReference2
+            {
+                SType = StructureType.AttachmentReference2,
+                Attachment = (uint)i,
+                Layout = ImageLayout.ColorAttachmentOptimal,
+                AspectMask = ImageAspectFlags.ColorBit,
+            };
+            resolveRefs[i] = new AttachmentReference2
+            {
+                SType = StructureType.AttachmentReference2,
+                Attachment = Vk.AttachmentUnused,
+                Layout = ImageLayout.Undefined,
+            };
+        }
+
+        var depthIdx = colorCount;
+        var depthResource = BackendResources[pass.Depth!.View.Resource.Id];
+        attachments[depthIdx] = new AttachmentDescription2
+        {
+            SType = StructureType.AttachmentDescription2,
+            Format = depthResource.Format,
+            Samples = SampleCount(Resources[pass.Depth!.View.Resource.Id].Samples),
+            LoadOp = loadVariant ? AttachmentLoadOp.Load : MapLoadOp(pass.Depth.Load),
+            StoreOp = MapStoreOp(pass.Depth.Store),
+            StencilLoadOp = AttachmentLoadOp.DontCare,
+            StencilStoreOp = AttachmentStoreOp.DontCare,
+            // Multisampled depth is never sampled, so it stays a depth attachment at both ends —
+            // the thing that gets sampled is the resolve target below.
+            InitialLayout = loadVariant || pass.Depth.Load == LoadOp.Load
+                ? ImageLayout.DepthStencilAttachmentOptimal
+                : ImageLayout.Undefined,
+            FinalLayout = ImageLayout.DepthStencilAttachmentOptimal,
+        };
+        var depthRef = new AttachmentReference2
+        {
+            SType = StructureType.AttachmentReference2,
+            Attachment = (uint)depthIdx,
+            Layout = ImageLayout.DepthStencilAttachmentOptimal,
+            AspectMask = ImageAspectFlags.DepthBit,
+        };
+
+        var resolveBase = colorCount + 1;
+        for (var i = 0; i < resolveCount; i++)
+        {
+            var resource = BackendResources[pass.ResolveTargets[i].Resource.Id];
+            var idx = resolveBase + i;
+            attachments[idx] = new AttachmentDescription2
+            {
+                SType = StructureType.AttachmentDescription2,
+                Format = resource.Format,
+                Samples = SampleCountFlags.Count1Bit,
+                LoadOp = AttachmentLoadOp.DontCare,
+                StoreOp = AttachmentStoreOp.Store,
+                StencilLoadOp = AttachmentLoadOp.DontCare,
+                StencilStoreOp = AttachmentStoreOp.DontCare,
+                InitialLayout = ImageLayout.Undefined,
+                FinalLayout = ImageLayout.ShaderReadOnlyOptimal,
+            };
+            resolveRefs[i] = new AttachmentReference2
+            {
+                SType = StructureType.AttachmentReference2,
+                Attachment = (uint)idx,
+                Layout = ImageLayout.ColorAttachmentOptimal,
+                AspectMask = ImageAspectFlags.ColorBit,
+            };
+        }
+
+        // The depth resolve destination, last. This IS the sampleable one.
+        var depthResolveIdx = resolveBase + resolveCount;
+        var depthResolveView = pass.DepthResolveTarget!.Value;
+        var depthResolveResource = BackendResources[depthResolveView.Resource.Id];
+        attachments[depthResolveIdx] = new AttachmentDescription2
+        {
+            SType = StructureType.AttachmentDescription2,
+            Format = depthResolveResource.Format,
+            Samples = SampleCountFlags.Count1Bit,
+            LoadOp = AttachmentLoadOp.DontCare,
+            StoreOp = AttachmentStoreOp.Store,
+            StencilLoadOp = AttachmentLoadOp.DontCare,
+            StencilStoreOp = AttachmentStoreOp.DontCare,
+            InitialLayout = ImageLayout.Undefined,
+            FinalLayout = ImageLayout.ShaderReadOnlyOptimal,
+        };
+        var depthResolveRef = new AttachmentReference2
+        {
+            SType = StructureType.AttachmentReference2,
+            Attachment = (uint)depthResolveIdx,
+            Layout = ImageLayout.DepthStencilAttachmentOptimal,
+            AspectMask = ImageAspectFlags.DepthBit,
+        };
+
+        // SAMPLE_ZERO, not average. Averaging depth across a silhouette produces a surface that is
+        // not there — the mean of a near sample and a far one — and min/max are not portable.
+        var depthResolve = new SubpassDescriptionDepthStencilResolve
+        {
+            SType = StructureType.SubpassDescriptionDepthStencilResolve,
+            DepthResolveMode = ResolveModeFlags.SampleZeroBit,
+            StencilResolveMode = ResolveModeFlags.None,
+            PDepthStencilResolveAttachment = &depthResolveRef,
+        };
+
+        var subpass = new SubpassDescription2
+        {
+            SType = StructureType.SubpassDescription2,
+            PNext = &depthResolve,
+            PipelineBindPoint = PipelineBindPoint.Graphics,
+            ColorAttachmentCount = (uint)colorCount,
+            PColorAttachments = colorCount > 0 ? colorRefs : null,
+            PResolveAttachments = resolveCount > 0 ? resolveRefs : null,
+            PDepthStencilAttachment = &depthRef,
+        };
+
+        var deps = stackalloc SubpassDependency2[2];
+        deps[0] = new SubpassDependency2
+        {
+            SType = StructureType.SubpassDependency2,
+            SrcSubpass = Vk.SubpassExternal,
+            DstSubpass = 0,
+            SrcStageMask = PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.LateFragmentTestsBit,
+            DstStageMask = PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.EarlyFragmentTestsBit,
+            SrcAccessMask = AccessFlags.ShaderReadBit | AccessFlags.DepthStencilAttachmentWriteBit,
+            DstAccessMask = AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit,
+            DependencyFlags = DependencyFlags.ByRegionBit,
+        };
+        deps[1] = new SubpassDependency2
+        {
+            SType = StructureType.SubpassDependency2,
+            SrcSubpass = 0,
+            DstSubpass = Vk.SubpassExternal,
+            SrcStageMask = PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.LateFragmentTestsBit,
+            DstStageMask = PipelineStageFlags.FragmentShaderBit,
+            SrcAccessMask = AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit,
+            DstAccessMask = AccessFlags.ShaderReadBit,
+            DependencyFlags = DependencyFlags.ByRegionBit,
+        };
+
+        var ci = new RenderPassCreateInfo2
+        {
+            SType = StructureType.RenderPassCreateInfo2,
+            AttachmentCount = (uint)attachmentCount,
+            PAttachments = attachments,
+            SubpassCount = 1,
+            PSubpasses = &subpass,
+            DependencyCount = 2,
+            PDependencies = deps,
+        };
+
+        Silk.NET.Vulkan.RenderPass rp;
+        VulkanGraphicsDevice.ThrowIfNotSuccess(
+            device.Vk.CreateRenderPass2(device.Device, in ci, null, &rp),
+            $"vkCreateRenderPass2(graph.{pass.Name}{(loadVariant ? ".load" : string.Empty)})");
+        return rp;
+    }
+
     private unsafe Silk.NET.Vulkan.RenderPass CreateGraphicsPassRenderPass(
         GraphicsPassEntry pass, bool loadVariant = false)
     {
+        // <b>A pass that resolves DEPTH is built with vkCreateRenderPass2 and nothing else is.</b>
+        // Depth resolve is a structure chained onto VkSubpassDescription2 with no equivalent in the
+        // original call, so it needs the newer entry point — and the original path below stays
+        // exactly as it was for every pass that does not ask, which is all of them but one. The
+        // graph is shared by two games; a rewrite of pass creation is not something to do as the
+        // tail of a feature.
+        if (pass.DepthResolveTarget is not null) return CreateGraphicsPassRenderPass2(pass, loadVariant);
+
         var device = Device!;
         var colorCount = pass.ColorTargets.Count;
         var hasDepth = pass.Depth is not null;
@@ -749,9 +958,10 @@ public sealed partial class RenderGraph : IDisposable
         var colorCount = pass.ColorTargets.Count;
         var hasDepth = pass.Depth is not null;
         var resolveCount = pass.ResolveTargets.Count;
+        var hasDepthResolve = pass.DepthResolveTarget is not null;
         // Attachment order must match CreateGraphicsPassRenderPass:
-        // [colour…, depth, resolve…].
-        var viewCount = colorCount + (hasDepth ? 1 : 0) + resolveCount;
+        // [colour…, depth, resolve…, depth-resolve].
+        var viewCount = colorCount + (hasDepth ? 1 : 0) + resolveCount + (hasDepthResolve ? 1 : 0);
         var views = stackalloc ImageView[viewCount];
         for (var i = 0; i < colorCount; i++)
         {
@@ -765,6 +975,10 @@ public sealed partial class RenderGraph : IDisposable
         for (var i = 0; i < resolveCount; i++)
         {
             views[resolveBase + i] = ResolveView(pass.ResolveTargets[i]);
+        }
+        if (pass.DepthResolveTarget is { } dr)
+        {
+            views[resolveBase + resolveCount] = ResolveView(dr);
         }
         var ci = new FramebufferCreateInfo
         {

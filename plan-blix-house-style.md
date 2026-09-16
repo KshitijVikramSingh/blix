@@ -311,35 +311,54 @@ pre-pass pushing the lit material block, 112 bytes into a caster pipeline that d
 binding model named both sizes. The ground now pushes a caster block there, and binds the albedo the
 caster shader declares at slot 0.
 
-## Stage 5 — MSAA — BLOCKED, and the blocker is in the engine
+## Stage 5 — MSAA — DONE, and it needed an engine change
 
-The colour half is wired and correct — `graph.ColorTarget(..., samples: n)` plus
-`GraphicsPassBuilder.ResolveColor`, the same two lines RTSGame uses, and its comment is right that
-switching the target is the whole of switching MSAA.
+The blocker was real and in the right place to fix: a multisampled attachment is not sampleable, and
+this stage's present pass **samples the scene depth** to carry it to the swapchain so debug gizmos
+depth-test against the scene. The render graph had `ResolveColor` and no `ResolveDepth`.
 
-**It cannot work on this stage yet, for a reason that is not about this stage.** A multisampled
-attachment is not sampleable, and the studio's present pass **samples the scene depth** —
-`gl_FragDepth = texture(uSceneDepth, vUv).r` — to carry it across to the swapchain so debug gizmos
-depth-test against the scene instead of floating in front of it. The render graph has `ResolveColor`
-and no `ResolveDepth`. RTSGame runs MSAA happily because it never samples its scene depth; this stage
-is the unusual one, and for a good reason.
+### `GraphicsPassBuilder.ResolveDepth`, and a second construction path
 
-Asking for more than one sample is now **refused by name at load**, cleanly, exit 1 — rather than
-crashing at the first frame with *"graph resource id 6 has no sampleable handle"*, which names
-nothing a caller can act on. That is the same rule the asset refusals follow.
+Depth resolve is a structure chained onto `VkSubpassDescription2`, with no equivalent in the original
+call — so a pass that asks for it is built with **`vkCreateRenderPass2`**.
 
-**The decision, which is the user's:**
+**An addition, not a migration.** Every pass that does not ask keeps the original path byte for byte.
+The graph is shared by two games and a rewrite of pass creation is not a thing to do as the tail of
+a feature, so `CreateGraphicsPassRenderPass2` is a deliberate near-duplicate: it reproduces every
+layout and load-op judgement the original made, because those were learned the hard way and are what
+makes the load variant work.
 
-1. Add `ResolveDepth` to the render graph. `VkSubpassDescriptionDepthStencilResolve` is core since
-   Vulkan 1.2 and this device reports 1.2, so it is tractable — but it is engine work on a graph two
-   games share, and it deserves its own verification rather than being the tail of a stage.
-2. Ship MSAA with gizmo depth-testing dropped when it is on. Visible regression for non-`--xray`
-   gizmos, which is most of what the stage draws them for.
-3. Leave it. The stage is a turntable and the silhouette is what a person looks at, so this is the
-   one of the three that gives up something real.
+Resolve mode is **`SAMPLE_ZERO`**. Averaging depth across a silhouette produces a surface that is not
+there — the mean of a near sample and a far one — and min/max are not portable. One real sample of
+the real geometry is exactly what a depth-forward wants.
 
-My read is (1): the gap is genuinely in the engine, it benefits RTSGame too, and (2) trades away the
-thing the gizmos exist for.
+### The device limit, reported rather than discovered
+
+Asking Metal for 8x on a device that does 4x is a **native assertion** —
+*"MTLTextureDescriptor sampleCount (8) is not supported by device"* — which kills the process with no
+managed exception and no Vulkan validation message. `VulkanGraphicsDevice.MaxMsaaSamples` now reports
+the highest count colour **and** depth can both do (a render pass requires them to agree), and the
+stage clamps to it and says so:
+
+    msaa: 8x asked, 4x used — this device supports at most 4x for colour and depth together.
+
+### Measured, both halves
+
+**It antialiases.** Silhouette transitions against the background that are soft rather than hard:
+**0.6% at 1x, 4.7% at 4x** — roughly eight times as many antialiased edge pixels — and visible at 3x
+zoom on the head.
+
+**And the thing the resolve exists for still works.** Near-white gizmo-line pixels *inside* the
+model's silhouette — what you would see if the depth were undefined and the sun arrow drew straight
+through the head — are **0 at 1x and 0 at 4x**. Gizmos depth-test against the scene under MSAA
+exactly as they did without it.
+
+Default **4x**. Unlike the depth pre-pass beside it — a performance trade that could not be measured
+here — this is an image-quality change anyone can see in one frame, and a turntable is a place where
+a silhouette turns against a background.
+
+The panel's viewport stays at 1x deliberately: it is a fraction of the window and already renders the
+scene a second time.
 
 ## Then
 

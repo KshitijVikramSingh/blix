@@ -24,6 +24,14 @@ public sealed partial class VulkanGraphicsDevice
     // Anisotropic filtering capability, resolved at device creation.
     internal bool AnisotropySupported { get; private set; }
     internal float MaxAnisotropy { get; private set; } = 1.0f;
+
+    /// <summary>The highest MSAA sample count this device can do for colour AND depth together.</summary>
+    /// <remarks>
+    /// Both, because a render pass requires its colour and depth attachments to agree. Exposed so a
+    /// caller can clamp: over-asking is a native Metal assertion that kills the process with no
+    /// managed exception and no validation message.
+    /// </remarks>
+    public int MaxMsaaSamples { get; private set; } = 1;
     // Whether vkCmdDrawIndexedIndirect with drawCount>1 is available (enabled at
     // device creation when supported). Gates the per-material indirect path.
     internal bool MultiDrawIndirectSupported { get; private set; }
@@ -276,6 +284,18 @@ public sealed partial class VulkanGraphicsDevice
         {
             Vk.GetPhysicalDeviceProperties(PhysicalDevice, out var props);
             MaxAnisotropy = props.Limits.MaxSamplerAnisotropy;
+
+            // <b>The highest sample count BOTH colour and depth can do, because a render pass needs
+            // them to match.</b> Reported rather than discovered: asking Metal for 8x on a device
+            // that does 4x is a native assertion — "MTLTextureDescriptor sampleCount (8) is not
+            // supported by device" — which kills the process with no managed exception and no
+            // Vulkan validation message. A caller that can see the limit can clamp to it and say so.
+            var shared = (uint)props.Limits.FramebufferColorSampleCounts & (uint)props.Limits.FramebufferDepthSampleCounts;
+            MaxMsaaSamples = 1;
+            foreach (var n in new[] { 2, 4, 8, 16, 32, 64 })
+            {
+                if ((shared & (uint)n) != 0) MaxMsaaSamples = n;
+            }
 
             // Every dynamic offset handed to vkCmdBindDescriptorSets must be a multiple of this.
             // Read rather than assumed: 256 on plenty of hardware, 16 on some, and a hard-coded
