@@ -53,7 +53,7 @@ six rows above and nothing wider.
 
 ## Stages
 
-### I-A — vertex colours survive import
+### I-A — vertex colours survive import — **DONE**
 
 `COLOR_0` on **49 primitives**, and it is not decoration. Sampled from the content: greyscale,
 0.0 to 1.0, 152 distinct values on one tree trunk and 51 on a blade of grass, with the tree's leaf
@@ -61,8 +61,11 @@ card uniformly 1.0. **That is baked ambient occlusion** — grass darkening at i
 crevices — thrown away at import on every piece of scatter RTSGame draws, which is thousands per
 frame.
 
-The engine already has the layouts: `VertexPosition3TextureColor` and `VertexPosition3Color` exist
-and the glTF path simply never reaches for them.
+~~The engine already has the layouts: `VertexPosition3TextureColor` and `VertexPosition3Color`
+exist and the glTF path simply never reaches for them.~~ **Wrong, and checked rather than assumed.**
+Both exist and neither carries a NORMAL, so neither can be lit — they are unlit debug layouts, and
+the thing vertex AO has to survive is the lighting. `VertexPosition3NormalTextureColor` is new, at
+36 bytes, with the colour packed to four bytes rather than sixteen.
 
 **This does not change the hand-tinting**, and the distinction matters. `SettlementArt` colours the
 kit by material name on purpose, and its comment argues the case: the pack's textures are palettes
@@ -70,12 +73,54 @@ rather than pictures, and a texture path for flat-shaded low-poly props is a gre
 little. Vertex AO is a *second* channel that multiplies what that already decides. Reading it as
 "the colour we were missing" would be the wrong lesson from the right finding.
 
-**Negative controls**
-- An asset with no `COLOR_0` produces a **byte-identical** capture.
+**Negative controls — all three run**
+- An asset with no `COLOR_0` produces a **byte-identical** capture. ✔ `Crate.gltf` captured
+  identically with the channel live and forced to white; `CommonTree_1` differs across the same
+  pair.
 - A blade of grass visibly darkens at its base and not at its tip — the thing AO is *for*, checked
-  by looking, because a uniform multiply would also pass a numeric test.
+  by looking, because a uniform multiply would also pass a numeric test. ✔ `Grass_Common_Tall`
+  renders near-black at the base and white at the tips, gradient between. This is the control the
+  numbers could not have made: a uniform multiply darkens the whole blade and passes every
+  stride, range and distinctness check in section AZ.
 - The white leaf card (`COLOR_0` = 1.0 everywhere) is unchanged, which is the control that catches a
-  channel being applied in the wrong space.
+  channel being applied in the wrong space. ✔ `CommonTree_1` prim1 imports uniform white through
+  the same branch, in the same model, as the trunk's 82 distinct values.
+
+And the one the A/B added on its own: across the tree capture **21,551 pixels changed and every
+single one darkened — zero got lighter.** That is the invariant that separates a multiply into
+albedo from an add or an inversion, and no test written up front had asked for it.
+
+**What the scope fear turned out to be.** The arc was opened expecting a fork: six applications
+pin `VertexPosition3NormalTexture` in a pipeline of their own, Vulkan walks a vertex buffer at the
+*pipeline's* stride, and one `.blixmesh` per asset is read by both the viewer and RTSGame — so
+showing AO in the viewer looked like it required changing the cooked files a live game reads.
+**It did not, and the reason is a fact about the tool rather than a compromise:** `StudioModel.Load`
+imports from source glTF, not from a cooked sibling. So the viewer reads `COLOR_0` directly, the
+cook is untouched, and all six pipeline-pinning consumers are untouched. Whether `.blixmesh` ever
+carries colour is now a separate decision with nothing forcing it — which is where it should sit,
+since no consumer has asked.
+
+**Shape of the change.** `includeColour` is opt-in on `BuildStaticMeshData` and on
+`AssetImportContext`, alongside the existing `includeTangents` precedent, and the two refuse to
+combine rather than silently dropping one (0 of 33 `COLOR_0` primitives in the tree carry a
+`TANGENT`, so nothing is lost by the refusal and a future asset gets a sentence instead of a
+mystery). The studio takes the opposite default: its static pipeline declares the 36-byte layout
+outright and the ground, the boxes, models and attachments all ride it, with anything colourless
+widened to white. **That is what kept this from needing a pipeline variant at all** — the arc said
+it would not build a shader permutation matrix, and it did not have to.
+
+Attachments carry colour *unconditionally* where static meshes opt in. Not an inconsistency: an
+attachment has exactly one consumer in the tree and it is the studio, where a static mesh has six.
+
+**Quantisation, stated because it is a real loss.** The kit authors `COLOR_0` as float (21
+primitives) and normalised ushort (12) — never as bytes. Packing to `UByte4Norm` takes the tree
+trunk from 152 distinct authored values to 82. Right here and only here: greyscale occlusion
+multiplied into albedo, where a 1/255 step is invisible and the alternative is 12 more bytes a
+vertex on the meshes drawn most. A channel carrying real colour would deserve the question again.
+
+Covered by **Test.Graphics section AZ** (16 assertions). Negative control run: reintroducing the
+drop fails the four AZ.2 value assertions and leaves the layout and identity claims green — the
+discrimination the section was written for.
 
 ### I-B — the viewer can express what the material already says
 

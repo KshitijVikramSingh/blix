@@ -347,7 +347,7 @@ public sealed class StudioRenderer : IDisposable, ITunable
 
         shadowPipeline = vk.CreatePipeline(new PipelineDescription(
             shadowProgram,
-            VertexPosition3NormalTexture.Layout,
+            VertexPosition3NormalTextureColor.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite,
             RasterizerState.NoCulling,
@@ -356,7 +356,7 @@ public sealed class StudioRenderer : IDisposable, ITunable
 
         litPipeline = vk.CreatePipeline(new PipelineDescription(
             litProgram,
-            VertexPosition3NormalTexture.Layout,
+            VertexPosition3NormalTextureColor.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite,
             RasterizerState.NoCulling,
@@ -409,12 +409,17 @@ public sealed class StudioRenderer : IDisposable, ITunable
             new byte[] { 255, 255, 255, 255 }, "lab.white");
 
         var (cv, ci) = StudioGeometry.Cube();
-        cubeVertices = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(cv), "lab.cube.vb");
+        // Widened to white. The stage's own furniture has no authored colour and does not want
+        // one; it rides the same 36-byte layout so that ONE pipeline draws the ground, the boxes,
+        // a model and an attachment — which is why this arc adds no pipeline variant at all.
+        cubeVertices = vk.CreateVertexBuffer(
+            VertexPosition3NormalTextureColor.CreateBufferData(VertexPosition3NormalTextureColor.From(cv)), "lab.cube.vb");
         cubeIndices = vk.CreateIndexBuffer(ci, name: "lab.cube.ib");
         cubeIndexCount = ci.Length;
 
         var (gv, gi) = StudioGeometry.Ground();
-        groundVertices = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(gv), "lab.ground.vb");
+        groundVertices = vk.CreateVertexBuffer(
+            VertexPosition3NormalTextureColor.CreateBufferData(VertexPosition3NormalTextureColor.From(gv)), "lab.ground.vb");
         groundIndices = vk.CreateIndexBuffer(gi, name: "lab.ground.ib");
         groundIndexCount = gi.Length;
     }

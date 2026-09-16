@@ -45,7 +45,7 @@
                 }
             ]
         },
-        "_175" : {
+        "_178" : {
             "name" : "gl_PerVertex",
             "members" : [
                 {
@@ -78,7 +78,7 @@
                 }
             ]
         },
-        "_178" : {
+        "_181" : {
             "name" : "Frame",
             "members" : [
                 {
@@ -158,6 +158,11 @@
             "type" : "vec2",
             "name" : "vUv",
             "location" : 2
+        },
+        {
+            "type" : "vec4",
+            "name" : "vColour",
+            "location" : 3
         }
     ],
     "ssbos" : [
@@ -172,7 +177,7 @@
     ],
     "ubos" : [
         {
-            "type" : "_178",
+            "type" : "_181",
             "name" : "Frame",
             "block_size" : 176,
             "set" : 0,

@@ -3420,6 +3420,189 @@ static ShaderInterface MinimalShader() => new(new[]
 }
 
 // ============================================================================
+// Section AZ — the vertex colour that was being thrown away.
+// ============================================================================
+//
+// <b>COLOR_0 appears on 49 primitives in this tree and the engine had no code that mentioned it.</b>
+// Sampled rather than assumed, it is not colour: greyscale, 0..1, 152 distinct values on one tree
+// trunk and a uniform 1.0 on that same tree's leaf card. That is baked ambient occlusion, and it was
+// dropped on every piece of scatter the RTS draws.
+//
+// The checks that matter here are the controls, because "the importer produced 36-byte vertices" is
+// satisfied by an importer that writes 36 bytes of garbage. So each claim is paired: the channel
+// arrives AND an asset without one is white, the layout widens AND the default path is untouched,
+// the two flags are exclusive AND saying so is a refusal rather than a silent drop.
+{
+    var temp = Path.Combine(Path.GetTempPath(), $"blix-az-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(temp);
+    try
+    {
+        // Three vertices carrying three DIFFERENT greys, the way baked occlusion is authored. A
+        // single value would let a constant pass, and 1.0 would let the white default pass.
+        static string BuildGltf(string path, bool withColour)
+        {
+            var material = SharpGLTF.Materials.MaterialBuilder.CreateDefault();
+            var scene = new SharpGLTF.Scenes.SceneBuilder();
+            if (withColour)
+            {
+                var mesh = new SharpGLTF.Geometry.MeshBuilder<
+                    SharpGLTF.Geometry.VertexTypes.VertexPositionNormal,
+                    SharpGLTF.Geometry.VertexTypes.VertexColor1>("coloured");
+                var prim = mesh.UsePrimitive(material);
+                prim.AddTriangle(
+                    (new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 0, 0, 1, 0),
+                     new SharpGLTF.Geometry.VertexTypes.VertexColor1(new Vector4(0.25f, 0.25f, 0.25f, 1f))),
+                    (new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(1, 0, 0, 0, 1, 0),
+                     new SharpGLTF.Geometry.VertexTypes.VertexColor1(new Vector4(0.50f, 0.50f, 0.50f, 1f))),
+                    (new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 1, 0, 1, 0),
+                     new SharpGLTF.Geometry.VertexTypes.VertexColor1(new Vector4(0.75f, 0.75f, 0.75f, 1f))));
+                scene.AddRigidMesh(mesh, new SharpGLTF.Scenes.NodeBuilder("only"));
+            }
+            else
+            {
+                var mesh = new SharpGLTF.Geometry.MeshBuilder<
+                    SharpGLTF.Geometry.VertexTypes.VertexPositionNormal>("plain");
+                var prim = mesh.UsePrimitive(material);
+                prim.AddTriangle(
+                    new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 0, 0, 1, 0),
+                    new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(1, 0, 0, 0, 1, 0),
+                    new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 1, 0, 1, 0));
+                scene.AddRigidMesh(mesh, new SharpGLTF.Scenes.NodeBuilder("only"));
+            }
+            scene.ToGltf2().SaveGLB(path);
+            return path;
+        }
+
+        var coloured = BuildGltf(Path.Combine(temp, "coloured.glb"), withColour: true);
+        var plain = BuildGltf(Path.Combine(temp, "plain.glb"), withColour: false);
+
+        static MeshData First(string path, bool includeColour)
+        {
+            var m = new GltfStaticImporter().ImportNodes(
+                new AssetImportContext(AssetId.Parse("az"), path, includeColour: includeColour));
+            foreach (var n in m.Nodes)
+            {
+                if (n.Primitives.Length > 0) return n.Primitives[0].Mesh;
+            }
+            throw new InvalidOperationException("no primitive");
+        }
+
+        // Colour lives in the last four bytes of the vertex, as UByte4Norm.
+        static (byte R, byte G, byte B, byte A) ColourOf(MeshData m, int vertex)
+        {
+            var at = vertex * m.Layout.Stride + 8 * sizeof(float);
+            return (m.VertexBytes[at], m.VertexBytes[at + 1], m.VertexBytes[at + 2], m.VertexBytes[at + 3]);
+        }
+
+        var withFlag = First(coloured, includeColour: true);
+        var withoutFlag = First(coloured, includeColour: false);
+
+        // ── AZ.1 the layout widens, and ONLY when asked ─────────────────────
+        t.Expect("AZ.1 importing with colour gives the 36-byte layout",
+            withFlag.Layout.Stride == 36, $"stride {withFlag.Layout.Stride}");
+        t.Expect("AZ.1 and it declares four attributes, not three",
+            withFlag.Layout.Attributes.Count == 4, $"{withFlag.Layout.Attributes.Count}");
+
+        // THE CONTROL. The same file, the same importer, the flag off. Six applications in this
+        // tree pin the 32-byte layout in a pipeline of their own, and Vulkan walks a vertex buffer
+        // at the stride the PIPELINE declares — so a default that widened would hand every one of
+        // them 36-byte vertices read at 32. Not a crash and not a compile error: a wrong mesh.
+        t.Expect("AZ.1 CONTROL the default path is still 32 bytes",
+            withoutFlag.Layout.Stride == 32, $"stride {withoutFlag.Layout.Stride}");
+        t.Expect("AZ.1 CONTROL and still three attributes",
+            withoutFlag.Layout.Attributes.Count == 3, $"{withoutFlag.Layout.Attributes.Count}");
+
+        // ── AZ.2 the authored values arrive, not merely the space for them ──
+        var c0 = ColourOf(withFlag, 0);
+        var c1 = ColourOf(withFlag, 1);
+        var c2 = ColourOf(withFlag, 2);
+
+        // 0.25 / 0.50 / 0.75 through a byte-normalised round trip: 64 / 128 / 191, within a step
+        // either way. Asserted as a RANGE rather than a constant because the encoder chooses the
+        // component type, and pinning its choice would be testing SharpGLTF rather than the import.
+        t.ExpectTrue($"AZ.2 vertex 0 carries its authored grey (got {c0.R})", Math.Abs(c0.R - 64) <= 2);
+        t.ExpectTrue($"AZ.2 vertex 1 carries its authored grey (got {c1.R})", Math.Abs(c1.R - 128) <= 2);
+        t.ExpectTrue($"AZ.2 vertex 2 carries its authored grey (got {c2.R})", Math.Abs(c2.R - 191) <= 2);
+
+        // The claim that "36 bytes" alone cannot make: the three vertices DIFFER. A widened layout
+        // filled with a constant — white, zero, or whatever was in the buffer — passes every stride
+        // check above and fails this one.
+        t.ExpectTrue("AZ.2 and the three differ, so this is the channel and not a constant",
+            c0.R != c1.R && c1.R != c2.R);
+
+        // Alpha survives as opaque rather than arriving zero, which would make a MASK material
+        // vanish the moment anything multiplied by it.
+        t.ExpectTrue($"AZ.2 alpha is opaque (got {c0.A})", c0.A >= 253);
+
+        // ── AZ.3 white is the identity, and absence is not a failure ────────
+        //
+        // Asking for colour from an asset that has none is the COMMON case, not an error:
+        // CommonTree_1 carries occlusion on its trunk and nothing on its leaf card, and both arrive
+        // through this branch inside one model. White because the shader MULTIPLIES — a zero
+        // default would render every such primitive black.
+        var plainWithFlag = First(plain, includeColour: true);
+        t.Expect("AZ.3 an asset with no COLOR_0 still imports when colour is asked for",
+            plainWithFlag.Layout.Stride == 36, $"stride {plainWithFlag.Layout.Stride}");
+        var white = ColourOf(plainWithFlag, 0);
+        t.ExpectTrue($"AZ.3 and every vertex is opaque white, the identity for a multiply (got {white})",
+            white is (255, 255, 255, 255));
+
+        t.Expect("AZ.3 White is the value the packer produces for 1,1,1,1",
+            VertexPosition3NormalTextureColor.Pack(1f, 1f, 1f, 1f) == VertexPosition3NormalTextureColor.White,
+            $"0x{VertexPosition3NormalTextureColor.Pack(1f, 1f, 1f, 1f):X8}");
+
+        // ── AZ.4 the geometry is untouched — colour is added, not substituted ─
+        //
+        // The bytes ahead of the colour must be the SAME bytes. A widening that also perturbed a
+        // position or a normal would show up as a shading change and be blamed on the new channel.
+        var sameGeometry = true;
+        for (var v = 0; v < withFlag.VertexCount && sameGeometry; v++)
+        {
+            for (var b = 0; b < 32; b++)
+            {
+                if (withFlag.VertexBytes[v * 36 + b] != withoutFlag.VertexBytes[v * 32 + b])
+                {
+                    sameGeometry = false;
+                    break;
+                }
+            }
+        }
+        t.ExpectTrue("AZ.4 position, normal and uv are byte-identical with the flag on",
+            sameGeometry);
+        t.Expect("AZ.4 and the indices are unchanged",
+            withFlag.IndexCount == withoutFlag.IndexCount,
+            $"{withFlag.IndexCount} vs {withoutFlag.IndexCount}");
+
+        // ── AZ.5 the two wide layouts refuse to combine, out loud ───────────
+        //
+        // No vertex type carries both tangents and colour, because nothing has ever wanted both:
+        // tangents are Sponza's normal-mapped interiors and COLOR_0 is the nature kit's occlusion.
+        // The failure mode this prevents is the silent one — returning tangents and dropping the
+        // colour, which looks like an importer that does not read COLOR_0 at all.
+        t.ExpectThrows<NotSupportedException>(
+            "AZ.5 tangents and colour together are refused, not silently resolved",
+            () => new GltfStaticImporter().ImportNodes(new AssetImportContext(
+                AssetId.Parse("az"), coloured, includeTangents: true, includeColour: true)));
+
+        // CONTROL for AZ.5: each flag ALONE is accepted, so the refusal above is about the
+        // combination and not about tangents having quietly stopped working.
+        var tangentsOnly = new GltfStaticImporter().ImportNodes(new AssetImportContext(
+            AssetId.Parse("az"), coloured, includeTangents: true));
+        var tangentStride = 0;
+        foreach (var n in tangentsOnly.Nodes)
+        {
+            if (n.Primitives.Length > 0) { tangentStride = n.Primitives[0].Mesh.Layout.Stride; break; }
+        }
+        t.Expect("AZ.5 CONTROL tangents alone still import",
+            tangentStride == 48, $"stride {tangentStride}");
+    }
+    finally
+    {
+        try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
+    }
+}
+
+// ============================================================================
 // Section AX — a load says what it did.
 // ============================================================================
 //

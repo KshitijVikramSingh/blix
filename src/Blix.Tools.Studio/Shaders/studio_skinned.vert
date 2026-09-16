@@ -54,6 +54,11 @@ layout(push_constant) uniform Push {
 layout(location = 0) out vec3 vWorld;
 layout(location = 1) out vec3 vNormal;
 layout(location = 2) out vec2 vUv;
+// White: the skinned layout carries no colour attribute and a character has no baked occlusion to
+// carry. Written anyway because this stage shares studio_lit.frag, and a varying the fragment
+// stage reads but no vertex stage writes is undefined — it would read as whatever was in the
+// register, which is a bug that looks like a lighting bug.
+layout(location = 3) out vec4 vColour;
 
 void main()
 {
@@ -96,5 +101,6 @@ void main()
     vNormal = normalize(mat3(uModel) * (mat3(skin) * aNormal));
 
     vUv = aTexCoord;
+    vColour = vec4(1.0);
     gl_Position = uViewProjection * world;
 }

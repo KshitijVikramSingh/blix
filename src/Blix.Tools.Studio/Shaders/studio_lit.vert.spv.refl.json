@@ -27,7 +27,7 @@
                 }
             ]
         },
-        "_57" : {
+        "_62" : {
             "name" : "gl_PerVertex",
             "members" : [
                 {
@@ -60,7 +60,7 @@
                 }
             ]
         },
-        "_60" : {
+        "_65" : {
             "name" : "Frame",
             "members" : [
                 {
@@ -108,6 +108,11 @@
             "type" : "vec2",
             "name" : "aTexCoord",
             "location" : 2
+        },
+        {
+            "type" : "vec4",
+            "name" : "aColour",
+            "location" : 3
         }
     ],
     "outputs" : [
@@ -125,11 +130,16 @@
             "type" : "vec2",
             "name" : "vUv",
             "location" : 2
+        },
+        {
+            "type" : "vec4",
+            "name" : "vColour",
+            "location" : 3
         }
     ],
     "ubos" : [
         {
-            "type" : "_60",
+            "type" : "_65",
             "name" : "Frame",
             "block_size" : 176,
             "set" : 0,

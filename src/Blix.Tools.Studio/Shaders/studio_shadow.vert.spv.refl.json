@@ -77,6 +77,11 @@
             "type" : "vec2",
             "name" : "aTexCoord",
             "location" : 2
+        },
+        {
+            "type" : "vec4",
+            "name" : "aColour",
+            "location" : 3
         }
     ],
     "ubos" : [

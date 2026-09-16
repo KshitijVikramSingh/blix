@@ -75,6 +75,11 @@
             "type" : "vec2",
             "name" : "vUv",
             "location" : 2
+        },
+        {
+            "type" : "vec4",
+            "name" : "vColour",
+            "location" : 3
         }
     ],
     "outputs" : [

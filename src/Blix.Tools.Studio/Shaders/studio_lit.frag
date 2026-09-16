@@ -42,6 +42,11 @@ layout(push_constant) uniform Push {
 layout(location = 0) in vec3 vWorld;
 layout(location = 1) in vec3 vNormal;
 layout(location = 2) in vec2 vUv;
+// <b>Multiplied into albedo, not added, which is what makes white the correct default.</b> On the
+// nature kit this channel is baked ambient occlusion — a blade of grass dark where it meets the
+// ground, bark dark in its crevices — so it belongs on the albedo term ahead of the BRDF, darkening
+// both the direct and the ambient response the way real occlusion does.
+layout(location = 3) in vec4 vColour;
 
 layout(location = 0) out vec4 outColour;
 
@@ -61,7 +66,7 @@ void main()
 
     float metallic = clamp(uMaterial.x, 0.0, 1.0);
     float roughness = clamp(uMaterial.y, 0.04, 1.0);
-    vec3 albedo = uBaseColour.rgb * texture(uAlbedo, vUv).rgb;
+    vec3 albedo = uBaseColour.rgb * texture(uAlbedo, vUv).rgb * vColour.rgb;
 
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
     vec3 direct = blix_cookTorranceBrdf(N, V, L, albedo, F0, metallic, roughness)

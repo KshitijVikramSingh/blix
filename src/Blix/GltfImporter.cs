@@ -325,8 +325,13 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             {
                 var prim = node.Mesh.Primitives[i];
                 var name = $"{node.Name ?? node.Mesh.Name ?? "attachment"}.{i}";
+                // <b>Colour unconditionally here, where the static importer makes it opt-in.</b>
+                // Not an inconsistency: an attachment has exactly ONE consumer in the tree — the
+                // studio's RigView, drawing it on the studio's static pipeline — where a static
+                // mesh has six, each with a pipeline of its own. With one consumer the layout can
+                // simply agree with it, and a flag would only be a thing to forget.
                 var meshData = GltfStaticImporter.BuildStaticMeshData(
-                    name, prim, Matrix4x4.Identity, Matrix4x4.Identity);
+                    name, prim, Matrix4x4.Identity, Matrix4x4.Identity, includeColour: true);
                 primitives.Add(new GltfPrimitive(
                     meshData, GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache)));
             }

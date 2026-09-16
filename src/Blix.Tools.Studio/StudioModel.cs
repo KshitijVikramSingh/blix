@@ -102,8 +102,11 @@ public sealed class StudioModel : IDisposable
             new byte[] { 255, 255, 255, 255 }, "lab.white");
         model.ownedTextures.Add(model.white);
 
+        // includeColour: the stage's static pipeline declares the 36-byte layout, so everything
+        // drawn on it must carry a colour — and a kit model's COLOR_0 is baked ambient occlusion
+        // that was being thrown away on every piece of scatter.
         var imported = new GltfStaticImporter().ImportNodes(
-            new AssetImportContext(AssetId.Parse("lab"), path));
+            new AssetImportContext(AssetId.Parse("lab"), path, includeColour: true));
 
         var source = imported.Nodes;
         var world = new Matrix4x4[source.Length];

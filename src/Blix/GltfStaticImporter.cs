@@ -171,7 +171,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 {
                     var prim = node.Mesh.Primitives[i];
                     var meshName = $"{node.Mesh.Name ?? node.Name ?? "gltf_mesh"}.{i}";
-                    var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix, context.FlipTextureV, context.IncludeTangents);
+                    var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix, context.FlipTextureV, context.IncludeTangents, context.IncludeColour);
                     var material = GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache);
                     primitives.Add(new GltfPrimitive(meshData, material));
                 }
@@ -246,7 +246,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                     var prim = mesh.Primitives[j];
                     var name = $"{node.Name ?? mesh.Name ?? "node"}.{j}";
                     // Identity world + normal matrix → vertices stay in node-local space.
-                    var meshData = BuildStaticMeshData(name, prim, Matrix4x4.Identity, Matrix4x4.Identity, context.FlipTextureV, context.IncludeTangents);
+                    var meshData = BuildStaticMeshData(name, prim, Matrix4x4.Identity, Matrix4x4.Identity, context.FlipTextureV, context.IncludeTangents, context.IncludeColour);
                     prims[j] = new GltfPrimitive(meshData, GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache));
                 }
             }
@@ -257,8 +257,26 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         return new GltfNodeModel(nodes);
     }
 
-    public static MeshData BuildStaticMeshData(string name, MeshPrimitive primitive, Matrix4x4 world, Matrix4x4 normalMatrix, bool flipTextureV = false, bool includeTangents = false)
+    /// <param name="includeColour">
+    /// Read <c>COLOR_0</c> into a 36-byte vertex. <b>Opt-in, because the layout is the contract with
+    /// a pipeline that was already created.</b> Vulkan reads vertices at the stride the PIPELINE
+    /// declares, so widening every static import would make six applications walk 36-byte vertices
+    /// with a 32-byte stride — not a crash, not a compile error, just geometry that comes out wrong.
+    /// The caller that opts in is the caller that built a pipeline to match.
+    /// </param>
+    public static MeshData BuildStaticMeshData(string name, MeshPrimitive primitive, Matrix4x4 world, Matrix4x4 normalMatrix, bool flipTextureV = false, bool includeTangents = false, bool includeColour = false)
     {
+        if (includeTangents && includeColour)
+        {
+            // Refused rather than silently dropping one. No vertex type in the tree carries both,
+            // because nothing has ever wanted both: tangents are Sponza's normal-mapped interiors
+            // and COLOR_0 is the nature kit's baked occlusion, and no asset in this tree ships the
+            // pair. The day one does, this throw is where to add the fourth layout — which is a
+            // better thing to find than a mesh that quietly lost its ambient occlusion.
+            throw new NotSupportedException(
+                $"'{name}': tangents and vertex colour cannot be imported together — no vertex layout carries both.");
+        }
+
         var positions = primitive.GetVertexAccessor("POSITION")?.AsVector3Array()
             ?? throw new InvalidOperationException("glTF mesh primitive missing required POSITION accessor.");
         var normals = primitive.GetVertexAccessor("NORMAL")?.AsVector3Array();
@@ -266,6 +284,11 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         // Authored tangents (glTF vec4: xyz dir + w handedness). MikkTSpace-
         // compatible per spec, so forwarding beats recomputing.
         var tangents = includeTangents ? primitive.GetVertexAccessor("TANGENT")?.AsVector4Array() : null;
+        // AsColorArray, not AsVector4Array: COLOR_0 is legally float, ushort-normalised or
+        // byte-normalised, and vec3 as well as vec4. This accessor collapses all six spellings to
+        // 0..1 RGBA with alpha defaulted to opaque, which is the only reading that is correct for
+        // every one of them.
+        var colours = includeColour ? primitive.GetVertexAccessor("COLOR_0")?.AsColorArray() : null;
 
         var vertexCount = positions.Count;
 
@@ -323,6 +346,32 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             packed = VertexPosition3NormalTangentTexture.Pack(verts);
             layout = VertexPosition3NormalTangentTexture.Layout;
             uvOffset = 10 * sizeof(float);
+        }
+        else if (includeColour)
+        {
+            var verts = new VertexPosition3NormalTextureColor[vertexCount];
+            for (var v = 0; v < vertexCount; v++)
+            {
+                var pWorld = GraphicsMatrices.TransformPoint(world, positions[v]);
+                var nWorld = BuildNormal(v);
+                var uv = BuildUv(v);
+                // White when the primitive has no COLOR_0 of its own. Asked for and absent is the
+                // COMMON case, not an error: CommonTree_1 carries occlusion on its trunk and
+                // nothing on its leaf card, and both arrive through this branch in one model.
+                var c = colours is null
+                    ? VertexPosition3NormalTextureColor.White
+                    : VertexPosition3NormalTextureColor.Pack(colours[v].X, colours[v].Y, colours[v].Z, colours[v].W);
+                verts[v] = new VertexPosition3NormalTextureColor(
+                    new GraphicsVector3(pWorld.X, pWorld.Y, pWorld.Z),
+                    new GraphicsVector3(nWorld.X, nWorld.Y, nWorld.Z),
+                    new GraphicsVector2(uv.X, uv.Y),
+                    c);
+                minB = Vector3.Min(minB, pWorld);
+                maxB = Vector3.Max(maxB, pWorld);
+            }
+            packed = VertexPosition3NormalTextureColor.Pack(verts);
+            layout = VertexPosition3NormalTextureColor.Layout;
+            uvOffset = 6 * sizeof(float);
         }
         else
         {
