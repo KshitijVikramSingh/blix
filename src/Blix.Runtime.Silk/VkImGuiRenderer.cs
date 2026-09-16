@@ -30,8 +30,26 @@ public sealed class VkImGuiRenderer : IDisposable
 
     private readonly VulkanGraphicsDevice device;
     private readonly DebugOverlayUi ui = new();
-    private readonly VertexBufferHandle vertexBuffer;
-    private readonly IndexBufferHandle indexBuffer;
+    // <b>One set of buffers per frame in flight, and that is a bug fix rather than a tidy-up.</b>
+    // This was a single vertex buffer and a single index buffer, host-visible, rewritten by a
+    // straight memcpy on every frame — with two frames in flight. So frame N's upload landed in
+    // memory the GPU was still reading for frame N-1, and what you saw was the two frames' geometry
+    // interleaved: panels tearing while scrolling, and a draw command binding the font atlas while
+    // indexing vertices that in the NEW layout were an image thumbnail — which is why the images
+    // panel showed rows of glyphs and the ImGui cursor arrow where a model albedo belonged.
+    //
+    // It looked like a texture bug and was not one. The registry was exonerated first: with the
+    // images panel open and thirteen imgui draws in the glitching frame, the unregistered-id
+    // fallback fired ZERO times, so every draw bound exactly the texture it asked for. Standard
+    // validation said nothing either, which is expected — overwriting a host-visible buffer that is
+    // still being read is a synchronisation hazard, not an API misuse.
+    //
+    // Rotated internally rather than asking the device which slot it is on: Render is called once
+    // per frame, so a local counter and the device's frame index advance in lockstep, and the
+    // renderer does not grow a dependency on swapchain internals to fix its own buffer.
+    private readonly VertexBufferHandle[] vertexBuffers;
+    private readonly IndexBufferHandle[] indexBuffers;
+    private int bufferSlot;
     private readonly ShaderProgramHandle shader;
     private readonly PipelineHandle pipeline;
     private readonly TextureHandle fontTexture;
@@ -86,13 +104,19 @@ public sealed class VkImGuiRenderer : IDisposable
             new VertexAttribute(Location: 2, VertexAttributeFormat.UByte4Norm, Offset: 16),
         });
         var emptyVtx = new byte[MaxVertices * VertexStride];
-        vertexBuffer = device.CreateVertexBuffer(
-            new VertexBufferData(
-                new VertexBufferDescription(layout, MaxVertices, GraphicsBufferUsage.Dynamic),
-                emptyVtx),
-            name: "imgui.vb");
-        indexBuffer = device.CreateIndexBuffer(
-            new ushort[MaxIndices], GraphicsBufferUsage.Dynamic, name: "imgui.ib");
+        var slots = Math.Max(1, device.MaxFramesInFlightCount);
+        vertexBuffers = new VertexBufferHandle[slots];
+        indexBuffers = new IndexBufferHandle[slots];
+        for (var slot = 0; slot < slots; slot++)
+        {
+            vertexBuffers[slot] = device.CreateVertexBuffer(
+                new VertexBufferData(
+                    new VertexBufferDescription(layout, MaxVertices, GraphicsBufferUsage.Dynamic),
+                    emptyVtx),
+                name: $"imgui.vb.{slot}");
+            indexBuffers[slot] = device.CreateIndexBuffer(
+                new ushort[MaxIndices], GraphicsBufferUsage.Dynamic, name: $"imgui.ib.{slot}");
+        }
 
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
         var vertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "imgui.vert.spv"));
@@ -214,6 +238,11 @@ public sealed class VkImGuiRenderer : IDisposable
             idxBase += idxCount;
         }
         if (vtxBase == 0) return;
+
+        // Advanced BEFORE the upload, so this frame writes the slot the GPU is not reading.
+        bufferSlot = (bufferSlot + 1) % vertexBuffers.Length;
+        var vertexBuffer = vertexBuffers[bufferSlot];
+        var indexBuffer = indexBuffers[bufferSlot];
 
         device.UpdateVertexBuffer(vertexBuffer, vtxScratch.AsSpan(0, vtxBase * VertexStride));
         device.UpdateIndexBuffer(indexBuffer, idxScratch.AsSpan(0, idxBase * sizeof(ushort)));
@@ -347,8 +376,8 @@ public sealed class VkImGuiRenderer : IDisposable
         disposed = true;
         device.DestroyPipeline(pipeline);
         device.DestroyShaderProgram(shader);
-        device.DestroyVertexBuffer(vertexBuffer);
-        device.DestroyIndexBuffer(indexBuffer);
+        foreach (var buffer in vertexBuffers) device.DestroyVertexBuffer(buffer);
+        foreach (var buffer in indexBuffers) device.DestroyIndexBuffer(buffer);
         device.DestroyTexture(fontTexture);
         ImGui.DestroyContext();
     }
