@@ -48,12 +48,25 @@ public static class StudioPush
     /// Bones per instance, which the skinned vertex stage reads out of a material slot — see
     /// studio_skinned.vert for why it rides there rather than in a block of its own.
     /// </param>
-    public static void Material(byte[] target, Vector3 baseColour, float metallic, float roughness, float stride = 0f)
+    /// <param name="alphaCutoff">
+    /// Discard the fragment when its alpha falls below this. <b>Zero means never</b>, which is what
+    /// makes OPAQUE the default without a second pipeline: a cutout is a comparison the fragment
+    /// stage can make, so MASK needs a number rather than a pipeline variant. BLEND does need one,
+    /// because blending is pipeline state.
+    /// </param>
+    /// <param name="baseAlpha">
+    /// The material's <c>baseColorFactor.a</c>, multiplied into the sampled alpha before the test.
+    /// It was hardcoded to 1 here, which silently ignored every material that dimmed its own alpha —
+    /// the generator's AlphaMask_05 is exactly that case and looked identical to AlphaMask_01.
+    /// </param>
+    public static void Material(
+        byte[] target, Vector3 baseColour, float metallic, float roughness, float stride = 0f,
+        float alphaCutoff = 0f, float baseAlpha = 1f)
     {
         ArgumentNullException.ThrowIfNull(target);
         var floats = MemoryMarshal.Cast<byte, float>(target.AsSpan());
         if (floats.Length < 24) return;   // a caster's 64 bytes are the matrix and nothing else
-        floats[16] = baseColour.X; floats[17] = baseColour.Y; floats[18] = baseColour.Z; floats[19] = 1f;
-        floats[20] = metallic; floats[21] = roughness; floats[22] = stride; floats[23] = 0f;
+        floats[16] = baseColour.X; floats[17] = baseColour.Y; floats[18] = baseColour.Z; floats[19] = baseAlpha;
+        floats[20] = metallic; floats[21] = roughness; floats[22] = stride; floats[23] = alphaCutoff;
     }
 }

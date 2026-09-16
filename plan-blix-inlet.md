@@ -219,9 +219,44 @@ the culling one, because face culling is pipeline state in Vulkan and cannot be 
 - The peasant differs: 731 px (0.02%), max delta 203/255, **mean +40.4** — positive, so surfaces
   are appearing rather than shading shifting — with **81% of the changed pixels in the head band**
   where `MI_Hair_1` sits. A small effect from the default camera, and a real one. ✔
-- Not done: `core.glb` is the one asset in the tree that could exercise BLEND, and nothing here
-  drives it. `AlphaMode`/`AlphaCutoff` are **carried, not demonstrated** — stated so no one reads
-  this stage as having proven them.
+**MASK is now consumed, and demonstrated.** The cutoff and the material's `baseColorFactor.a` ride
+the spare slot in the push block's material vector, and the fragment stage discards below it.
+**Zero means never**, which is what lets OPAQUE and MASK share one pipeline: a cutout is a
+comparison a fragment can make, where blending is pipeline state and cannot be.
+
+Verified against glTF-Asset-Generator's `Material_AlphaMask` — six permutations with a declared
+expected result, which is what made this assertable rather than a look:
+
+| effective cutoff | plane pixels |
+|---|---|
+| 0.0 | 183,304 |
+| 0.4 | 176,699 |
+| 0.5 (default) | 176,665 |
+| 0.571 (0.4 with `baseColorFactor.a` 0.7) | 176,632 |
+| 0.7 | 168,082 |
+| 1.1 | **0** (only its shadow remains) |
+
+Monotonic, and the `baseColorFactor.a` case lands between 0.5 and 0.7 exactly where multiplying it
+in puts it — an implementation that ignored it would sit on top of the 0.4 row.
+
+**Two things NOT built, both stated rather than discovered later.**
+
+*Cutout shadows.* At cutoff 1.1 the plane vanishes and its shadow does not. Casters push a matrix
+and nothing else, the shadow fragment stage is empty, and the skinned caster pushes 16 bytes with a
+documented hazard about writing past them — so this is a change to the caster push layout and every
+draw that feeds it, not a shader line. No asset in the tree has an alpha source, so nothing asks.
+
+*BLEND.* Blending is pipeline state and needs draw ordering to be correct at all. `core.glb` is the
+only asset in the tree with a real blend alpha. Ordering is a design question the stage has not
+earned.
+
+**One accepted cost, measured.** A shader containing `discard` cannot be early-Z tested even on
+fragments that never take the branch, so every opaque draw now resolves depth late. That moves
+between 1 and 60 pixels of a 3.7M-pixel capture — silhouette fragments where a different one wins.
+Removing the `discard` restores byte-identity exactly, which is how it was attributed after the
+expression was blamed first. Accepted rather than split into a MASK pipeline variant: this stage
+draws a handful of objects so early-Z buys it little, and a variant is the first tile of the
+permutation matrix this arc said it would not build.
 
 ### Where COLOR_0 belongs — **settled by the reference corpus, after two wrong turns**
 

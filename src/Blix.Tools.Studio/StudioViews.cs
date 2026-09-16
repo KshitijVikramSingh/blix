@@ -11,6 +11,19 @@ namespace Blix.Tools.Studio;
 /// <see cref="RigView"/> is the whole difference between a static asset and a rigged one: here each
 /// part is placed by its node's composed world matrix, because the hierarchy IS the articulation.
 /// </remarks>
+/// <summary>The cutout threshold a part's material asks for. Zero for anything that never cuts.</summary>
+/// <remarks>
+/// <b>Zero rather than the material's own cutoff for OPAQUE and BLEND.</b> glTF gives every material
+/// an alphaCutoff whether or not its alphaMode uses one — the field defaults to 0.5 and means nothing
+/// unless the mode is MASK. Pushing it regardless would punch holes in every opaque surface whose
+/// texture happened to carry an alpha channel.
+/// </remarks>
+internal static class StudioAlpha
+{
+    public static float CutoffFor(GltfAlphaMode mode, float cutoff) =>
+        mode == GltfAlphaMode.Mask ? cutoff : 0f;
+}
+
 public sealed class ModelView : IStudioView
 {
     private readonly byte[] lit = new byte[StudioPush.LitBytes];
@@ -37,7 +50,13 @@ public sealed class ModelView : IStudioView
             var push = casterOnly ? caster : lit;
 
             StudioPush.Matrix(node.WorldTransform * Transform, push);
-            if (!casterOnly) StudioPush.Material(push, part.BaseColour, part.Metallic, part.Roughness);
+            if (!casterOnly)
+            {
+                StudioPush.Material(
+                    push, part.BaseColour, part.Metallic, part.Roughness,
+                    alphaCutoff: StudioAlpha.CutoffFor(part.AlphaMode, part.AlphaCutoff),
+                    baseAlpha: part.BaseAlpha);
+            }
 
             // A FRESH texture array per part. Push payloads are copied at record time; texture
             // lists are still retained by reference, so a shared array would give every draw the
@@ -200,7 +219,10 @@ public sealed class RigView : IStudioView
             {
                 push = lit;
                 StudioPush.Matrix(Matrix4x4.Identity, push);
-                StudioPush.Material(push, part.BaseColour, part.Metallic, part.Roughness, stride);
+                StudioPush.Material(
+                    push, part.BaseColour, part.Metallic, part.Roughness, stride,
+                    alphaCutoff: StudioAlpha.CutoffFor(part.AlphaMode, part.AlphaCutoff),
+                    baseAlpha: part.BaseAlpha);
             }
 
             // <b>The material decides whether its back face exists.</b> Every material on all three

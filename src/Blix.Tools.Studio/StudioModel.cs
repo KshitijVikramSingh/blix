@@ -50,6 +50,8 @@ public sealed class StudioModel : IDisposable
         /// the material is threaded and because the next asset may mean it, NOT because it is
         /// demonstrated here.
         /// </remarks>
+        /// <summary>The material's <c>baseColorFactor.a</c>, which the cutout test multiplies in.</summary>
+        float BaseAlpha = 1f,
         GltfAlphaMode AlphaMode = GltfAlphaMode.Opaque,
         float AlphaCutoff = 0.5f,
         bool DoubleSided = false);
@@ -175,6 +177,7 @@ public sealed class StudioModel : IDisposable
                     Metallic: material?.MetallicFactor ?? 0f,
                     Roughness: material?.RoughnessFactor ?? 0.7f,
                     Albedo: model.UploadAlbedo(vk, material?.BaseColorTexture),
+                    BaseAlpha: material?.BaseColorFactor.W ?? 1f,
                     AlphaMode: material?.AlphaMode ?? GltfAlphaMode.Opaque,
                     AlphaCutoff: material?.AlphaCutoff ?? 0.5f,
                     DoubleSided: material?.DoubleSided ?? false));

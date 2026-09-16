@@ -77,6 +77,27 @@ void main()
 
     float metallic = clamp(uMaterial.x, 0.0, 1.0);
     float roughness = clamp(uMaterial.y, 0.04, 1.0);
+    // <b>Cutout, before any shading is paid for.</b> uMaterial.w is the alpha cutoff and ZERO MEANS
+    // NEVER, which is what lets OPAQUE and MASK share one pipeline: a cutout is a comparison the
+    // fragment stage can make, where blending is pipeline state and cannot be.
+    //
+    // Alpha is the sampled texture's, times the material's baseColorFactor.a, times the vertex
+    // colour's. All three are part of it per the glTF material model, and dropping any of them
+    // makes a material that dims its own alpha look identical to one that does not.
+    //
+    // <b>A shader containing `discard` cannot be early-Z tested, even on a fragment that does not
+    // take the branch.</b> Measured, after first blaming the expression: removing this line restores
+    // byte-for-byte identity with the pre-cutout captures, and rewriting the arithmetic around it
+    // does not. So every opaque draw on this stage now resolves depth late, which moves between 1
+    // and 60 pixels of a 3.7M-pixel capture — silhouette fragments where a different one wins.
+    //
+    // Accepted rather than split into a MASK pipeline variant. The stage draws a handful of objects,
+    // so early-Z buys it little, and a variant here is the first tile of the permutation matrix this
+    // arc said it would not build: mask and non-mask times skinned and static times single- and
+    // double-sided. If the studio ever draws enough for early-Z to matter, that is the fix, and this
+    // comment is the reason it was not taken now.
+    if (uMaterial.w > 0.0 && texture(uAlbedo, vUv).a * uBaseColour.a * vColour.a < uMaterial.w) discard;
+
     vec3 albedo = uBaseColour.rgb * texture(uAlbedo, vUv).rgb * vColour.rgb;
 
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
