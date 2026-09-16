@@ -27,25 +27,28 @@ public sealed class StudioRenderer : IDisposable, ITunable
     /// <summary>Square shadow map, matching the texel size the lit shader offsets by.</summary>
     public const int ShadowMapSize = 2048;
 
-    /// <summary>Bytes the lit pass pushes: mat4 model (64) + vec4 colour (16) + vec4 material (16).</summary>
+    /// <summary>Bytes the lit pass pushes. <see cref="StudioPush.LitBytes"/> is the definition.</summary>
     /// <remarks>
-    /// Public so a tool can check it against what the shader actually declares. The one number in this
-    /// file that can silently disagree with the SPIR-V — and did, on the first run, when the caster was
-    /// handed the lit pass's block.
+    /// <b>These were separate numbers, and they drifted.</b> This file declared its own 96, 64 and 16
+    /// beside <see cref="StudioPush"/>'s, with a comment calling the lit one "the one number in this
+    /// file that can silently disagree with the SPIR-V". It disagreed with <see cref="StudioPush"/>
+    /// instead, the moment a second UV set widened the block there and not here: every draw from this
+    /// file pushed 96 bytes into a pipeline declaring 112.
+    ///
+    /// Forwarding rather than deleting, because the names are public and a tool checks them against
+    /// what the shader declares — which is exactly the check that should keep working.
     /// </remarks>
-    public const int LitPushBytes = 96;
+    public const int LitPushBytes = StudioPush.LitBytes;
 
-    /// <summary>Bytes the caster pushes: the model matrix, and nothing else.</summary>
-    public const int CasterPushBytes = 64;
+    /// <summary>Bytes the caster pushes: the model matrix, and what it takes to cut out.</summary>
+    public const int CasterPushBytes = StudioPush.CasterBytes;
 
-    /// <summary>Bytes the SKINNED caster pushes: a vec4 whose x is the per-instance bone stride.</summary>
+    /// <summary>Bytes the SKINNED caster pushes: a vec4 carrying the bone stride and the cutout.</summary>
     /// <remarks>
     /// Smaller than the unskinned caster's, not larger. That one pushes a mat4 because it has to place
-    /// its object; a skinned instance's placement is already baked into its palette, so all this stage
-    /// needs is the stride. <c>studio_shadow.frag</c> declares no push block, so unlike the lit pair this
-    /// block was free to be exactly what the stage uses rather than shaped to match a fragment stage.
+    /// its object; a skinned instance's placement is already baked into its palette.
     /// </remarks>
-    public const int SkinnedCasterPushBytes = 16;
+    public const int SkinnedCasterPushBytes = StudioPush.SkinnedCasterBytes;
 
     private const int PushBytes = LitPushBytes;
 
@@ -359,7 +362,7 @@ public sealed class StudioRenderer : IDisposable, ITunable
 
         shadowPipeline = vk.CreatePipeline(new PipelineDescription(
             shadowProgram,
-            VertexPosition3NormalTextureColor.Layout,
+            VertexPosition3NormalTexture2Color.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite,
             RasterizerState.NoCulling,
@@ -368,7 +371,7 @@ public sealed class StudioRenderer : IDisposable, ITunable
 
         litPipeline = vk.CreatePipeline(new PipelineDescription(
             litProgram,
-            VertexPosition3NormalTextureColor.Layout,
+            VertexPosition3NormalTexture2Color.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite,
             RasterizerState.NoCulling,
@@ -397,7 +400,7 @@ public sealed class StudioRenderer : IDisposable, ITunable
         // only a closed body. See StudioViews.RigView for what honouring it actually moves.
         blendPipeline = vk.CreatePipeline(new PipelineDescription(
             litProgram,
-            VertexPosition3NormalTextureColor.Layout,
+            VertexPosition3NormalTexture2Color.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualNoWrite,
             RasterizerState.NoCulling,
@@ -458,13 +461,13 @@ public sealed class StudioRenderer : IDisposable, ITunable
         // one; it rides the same 36-byte layout so that ONE pipeline draws the ground, the boxes,
         // a model and an attachment — which is why this arc adds no pipeline variant at all.
         cubeVertices = vk.CreateVertexBuffer(
-            VertexPosition3NormalTextureColor.CreateBufferData(VertexPosition3NormalTextureColor.From(cv)), "lab.cube.vb");
+            VertexPosition3NormalTexture2Color.CreateBufferData(VertexPosition3NormalTexture2Color.From(cv)), "lab.cube.vb");
         cubeIndices = vk.CreateIndexBuffer(ci, name: "lab.cube.ib");
         cubeIndexCount = ci.Length;
 
         var (gv, gi) = StudioGeometry.Ground();
         groundVertices = vk.CreateVertexBuffer(
-            VertexPosition3NormalTextureColor.CreateBufferData(VertexPosition3NormalTextureColor.From(gv)), "lab.ground.vb");
+            VertexPosition3NormalTexture2Color.CreateBufferData(VertexPosition3NormalTexture2Color.From(gv)), "lab.ground.vb");
         groundIndices = vk.CreateIndexBuffer(gi, name: "lab.ground.ib");
         groundIndexCount = gi.Length;
     }

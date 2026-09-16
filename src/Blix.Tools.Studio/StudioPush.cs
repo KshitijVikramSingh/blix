@@ -23,7 +23,14 @@ namespace Blix.Tools.Studio;
 public static class StudioPush
 {
     /// <summary>Bytes a lit draw pushes: a model matrix and a material.</summary>
-    public const int LitBytes = 96;
+    /// <remarks>
+    /// <b>112 since a texture could name its own UV set.</b> The material vector was full — metallic,
+    /// roughness, palette stride, alpha cutoff — so the selector needed a slot of its own rather than
+    /// the sign of something that already meant a number. Still inside the 128-byte floor every
+    /// Vulkan implementation guarantees, which is why nothing on this stage needs a per-object
+    /// descriptor set.
+    /// </remarks>
+    public const int LitBytes = 112;
 
     /// <summary>Bytes a shadow caster pushes: the model matrix, and what it takes to cut out.</summary>
     /// <remarks>
@@ -59,12 +66,12 @@ public static class StudioPush
     /// writes 96 — calling it here would run off the end, which is the same edge the skinned
     /// caster's 16-byte buffer has always had.
     /// </remarks>
-    public static void CasterCutout(byte[] target, float alphaCutoff, float baseAlpha)
+    public static void CasterCutout(byte[] target, float alphaCutoff, float baseAlpha, float albedoUvSet = 0f)
     {
         ArgumentNullException.ThrowIfNull(target);
         var floats = MemoryMarshal.Cast<byte, float>(target.AsSpan());
         if (floats.Length < 20) return;
-        floats[16] = alphaCutoff; floats[17] = baseAlpha; floats[18] = 0f; floats[19] = 0f;
+        floats[16] = alphaCutoff; floats[17] = baseAlpha; floats[18] = albedoUvSet; floats[19] = 0f;
     }
 
     /// <summary>Writes the material block after the matrix. A no-op on a caster-sized buffer.</summary>
@@ -85,12 +92,13 @@ public static class StudioPush
     /// </param>
     public static void Material(
         byte[] target, Vector3 baseColour, float metallic, float roughness, float stride = 0f,
-        float alphaCutoff = 0f, float baseAlpha = 1f)
+        float alphaCutoff = 0f, float baseAlpha = 1f, float albedoUvSet = 0f)
     {
         ArgumentNullException.ThrowIfNull(target);
         var floats = MemoryMarshal.Cast<byte, float>(target.AsSpan());
         if (floats.Length < 24) return;   // a caster's 64 bytes are the matrix and nothing else
         floats[16] = baseColour.X; floats[17] = baseColour.Y; floats[18] = baseColour.Z; floats[19] = baseAlpha;
         floats[20] = metallic; floats[21] = roughness; floats[22] = stride; floats[23] = alphaCutoff;
+        if (floats.Length >= 28) { floats[24] = albedoUvSet; floats[25] = 0f; floats[26] = 0f; floats[27] = 0f; }
     }
 }

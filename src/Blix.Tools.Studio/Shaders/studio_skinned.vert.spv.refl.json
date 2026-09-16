@@ -24,6 +24,11 @@
                     "name" : "uMaterial",
                     "type" : "vec4",
                     "offset" : 80
+                },
+                {
+                    "name" : "uExtra",
+                    "type" : "vec4",
+                    "offset" : 96
                 }
             ]
         },
@@ -45,7 +50,7 @@
                 }
             ]
         },
-        "_178" : {
+        "_180" : {
             "name" : "gl_PerVertex",
             "members" : [
                 {
@@ -78,7 +83,7 @@
                 }
             ]
         },
-        "_181" : {
+        "_183" : {
             "name" : "Frame",
             "members" : [
                 {
@@ -163,6 +168,11 @@
             "type" : "vec4",
             "name" : "vColour",
             "location" : 3
+        },
+        {
+            "type" : "vec2",
+            "name" : "vUv1",
+            "location" : 4
         }
     ],
     "ssbos" : [
@@ -177,7 +187,7 @@
     ],
     "ubos" : [
         {
-            "type" : "_181",
+            "type" : "_183",
             "name" : "Frame",
             "block_size" : 176,
             "set" : 0,

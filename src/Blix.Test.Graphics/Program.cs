@@ -3800,10 +3800,11 @@ static ShaderInterface MinimalShader() => new(new[]
             throw new InvalidOperationException("no primitive");
         }
 
-        // Colour lives in the last four bytes of the vertex, as UByte4Norm.
+        // Colour lives in the last four bytes of the vertex, as UByte4Norm — after TWO UV sets since
+        // the layout widened for TEXCOORD_1, which is why this reads the stride rather than a constant.
         static (byte R, byte G, byte B, byte A) ColourOf(MeshData m, int vertex)
         {
-            var at = vertex * m.Layout.Stride + 8 * sizeof(float);
+            var at = vertex * m.Layout.Stride + m.Layout.Stride - 4;
             return (m.VertexBytes[at], m.VertexBytes[at + 1], m.VertexBytes[at + 2], m.VertexBytes[at + 3]);
         }
 
@@ -3811,15 +3812,17 @@ static ShaderInterface MinimalShader() => new(new[]
         var withoutFlag = First(coloured, includeColour: false);
 
         // ── AZ.1 the layout widens, and ONLY when asked ─────────────────────
-        t.Expect("AZ.1 importing with colour gives the 36-byte layout",
-            withFlag.Layout.Stride == 36, $"stride {withFlag.Layout.Stride}");
-        t.Expect("AZ.1 and it declares four attributes, not three",
-            withFlag.Layout.Attributes.Count == 4, $"{withFlag.Layout.Attributes.Count}");
+        // 44, not 36: the same opt-in also carries TEXCOORD_1, because both widen one studio layout
+        // and separate flags would let a caller ask for a layout no vertex type declares.
+        t.Expect("AZ.1 importing with colour gives the 44-byte layout",
+            withFlag.Layout.Stride == 44, $"stride {withFlag.Layout.Stride}");
+        t.Expect("AZ.1 and it declares five attributes, not three",
+            withFlag.Layout.Attributes.Count == 5, $"{withFlag.Layout.Attributes.Count}");
 
         // THE CONTROL. The same file, the same importer, the flag off. Six applications in this
         // tree pin the 32-byte layout in a pipeline of their own, and Vulkan walks a vertex buffer
         // at the stride the PIPELINE declares — so a default that widened would hand every one of
-        // them 36-byte vertices read at 32. Not a crash and not a compile error: a wrong mesh.
+        // them 44-byte vertices read at 32. Not a crash and not a compile error: a wrong mesh.
         t.Expect("AZ.1 CONTROL the default path is still 32 bytes",
             withoutFlag.Layout.Stride == 32, $"stride {withoutFlag.Layout.Stride}");
         t.Expect("AZ.1 CONTROL and still three attributes",
@@ -3855,7 +3858,7 @@ static ShaderInterface MinimalShader() => new(new[]
         // default would render every such primitive black.
         var plainWithFlag = First(plain, includeColour: true);
         t.Expect("AZ.3 an asset with no COLOR_0 still imports when colour is asked for",
-            plainWithFlag.Layout.Stride == 36, $"stride {plainWithFlag.Layout.Stride}");
+            plainWithFlag.Layout.Stride == 44, $"stride {plainWithFlag.Layout.Stride}");
         var white = ColourOf(plainWithFlag, 0);
         t.ExpectTrue($"AZ.3 and every vertex is opaque white, the identity for a multiply (got {white})",
             white is (255, 255, 255, 255));
@@ -3873,7 +3876,7 @@ static ShaderInterface MinimalShader() => new(new[]
         {
             for (var b = 0; b < 32; b++)
             {
-                if (withFlag.VertexBytes[v * 36 + b] != withoutFlag.VertexBytes[v * 32 + b])
+                if (withFlag.VertexBytes[v * 44 + b] != withoutFlag.VertexBytes[v * 32 + b])
                 {
                     sameGeometry = false;
                     break;

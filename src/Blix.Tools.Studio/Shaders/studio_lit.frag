@@ -37,6 +37,10 @@ layout(push_constant) uniform Push {
     mat4 uModel;
     vec4 uBaseColour;
     vec4 uMaterial;
+    // <b>Which TEXCOORD set the albedo samples.</b> glTF lets every texture on a material name its
+    // own set, and a reader that assumes 0 does not fail on a material naming 1 — it samples the
+    // wrong coordinates and draws something merely wrong.
+    vec4 uExtra;          // x = albedo UV set
 };
 
 layout(location = 0) in vec3 vWorld;
@@ -58,6 +62,7 @@ layout(location = 2) in vec2 vUv;
 // blade bases are authored at COLOR_0 ≈ 0.008, so they multiply their albedo to nearly nothing and
 // render near-black. That is this asset being drawn as it is written, not the renderer failing.
 layout(location = 3) in vec4 vColour;
+layout(location = 4) in vec2 vUv1;
 
 layout(location = 0) out vec4 outColour;
 
@@ -96,9 +101,10 @@ void main()
     // arc said it would not build: mask and non-mask times skinned and static times single- and
     // double-sided. If the studio ever draws enough for early-Z to matter, that is the fix, and this
     // comment is the reason it was not taken now.
-    if (uMaterial.w > 0.0 && texture(uAlbedo, vUv).a * uBaseColour.a * vColour.a < uMaterial.w) discard;
+    vec2 uvAlbedo = uExtra.x > 0.5 ? vUv1 : vUv;
+    if (uMaterial.w > 0.0 && texture(uAlbedo, uvAlbedo).a * uBaseColour.a * vColour.a < uMaterial.w) discard;
 
-    vec3 albedo = uBaseColour.rgb * texture(uAlbedo, vUv).rgb * vColour.rgb;
+    vec3 albedo = uBaseColour.rgb * texture(uAlbedo, uvAlbedo).rgb * vColour.rgb;
 
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
     vec3 direct = blix_cookTorranceBrdf(N, V, L, albedo, F0, metallic, roughness)
@@ -113,5 +119,5 @@ void main()
     // texture's, the material's baseColorFactor.a and the vertex colour's — the same three the
     // cutout tests, because glTF says alpha is all three whatever the mode does with it. On an
     // opaque pipeline blending is off and this channel is ignored.
-    outColour = vec4(direct + ambient, texture(uAlbedo, vUv).a * uBaseColour.a * vColour.a);
+    outColour = vec4(direct + ambient, texture(uAlbedo, uvAlbedo).a * uBaseColour.a * vColour.a);
 }

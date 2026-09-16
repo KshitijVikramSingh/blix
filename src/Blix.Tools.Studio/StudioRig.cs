@@ -77,6 +77,8 @@ public sealed class StudioRig : IDisposable
         /// the material is threaded and because the next asset may mean it, NOT because it is
         /// demonstrated here.
         /// </remarks>
+        /// <summary>Which TEXCOORD set this part's albedo samples — 0 for almost everything.</summary>
+        int AlbedoUvSet = 0,
         /// <summary>The material's <c>baseColorFactor.a</c>, which the cutout test multiplies in.</summary>
         float BaseAlpha = 1f,
         GltfAlphaMode AlphaMode = GltfAlphaMode.Opaque,
@@ -308,6 +310,7 @@ public sealed class StudioRig : IDisposable
                 Metallic: material?.MetallicFactor ?? 0f,
                 Roughness: material?.RoughnessFactor ?? 0.7f,
                 Albedo: rig.UploadAlbedo(vk, material?.BaseColorTexture, white, uploaded),
+                AlbedoUvSet: material?.BaseColorTexCoord ?? 0,
                 BaseAlpha: material?.BaseColorFactor.W ?? 1f,
                 AlphaMode: material?.AlphaMode ?? GltfAlphaMode.Opaque,
                 AlphaCutoff: material?.AlphaCutoff ?? 0.5f,

@@ -15,12 +15,16 @@ layout(set = 1, binding = 0) uniform sampler2D uAlbedo;
 
 layout(push_constant) uniform Push {
     mat4 uModel;
-    vec4 uCutout;         // x = alpha cutoff (0 = never), y = baseColorFactor.a
+    vec4 uCutout;         // x = alpha cutoff (0 = never), y = baseColorFactor.a, z = albedo UV set
 };
 
 layout(location = 0) in vec2 vUv;
+layout(location = 1) in vec2 vUv1;
 
 void main()
 {
-    if (uCutout.x > 0.0 && texture(uAlbedo, vUv).a * uCutout.y < uCutout.x) discard;
+    // The cutout has to sample the same coordinates the lit pass does, or a leaf is cut out of the
+    // picture and not out of its own shadow.
+    vec2 uv = uCutout.z > 0.5 ? vUv1 : vUv;
+    if (uCutout.x > 0.0 && texture(uAlbedo, uv).a * uCutout.y < uCutout.x) discard;
 }

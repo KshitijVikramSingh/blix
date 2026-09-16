@@ -11,7 +11,8 @@
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
-layout(location = 3) in vec4 aColour;
+layout(location = 3) in vec2 aTexCoord1;
+layout(location = 4) in vec4 aColour;
 
 layout(set = 0, binding = 0) uniform ShadowFrame {
     mat4 uLightViewProjection;
@@ -21,10 +22,11 @@ layout(push_constant) uniform Push {
     mat4 uModel;
     // x = alpha cutoff (0 = never), y = the material's baseColorFactor.a. The fragment stage reads
     // these; the vertex stage declares them so both agree on one block.
-    vec4 uCutout;
+    vec4 uCutout;         // x = alpha cutoff, y = baseColorFactor.a, z = albedo UV set
 };
 
 layout(location = 0) out vec2 vUv;
+layout(location = 1) out vec2 vUv1;
 
 void main()
 {
@@ -32,5 +34,6 @@ void main()
     // <b>Carried for the cutout test.</b> A caster that discards nothing would not need it, and a
     // caster that cannot discard casts a solid rectangle for a leaf.
     vUv = aTexCoord;
+    vUv1 = aTexCoord1;
     gl_Position = uLightViewProjection * (uModel * vec4(aPosition, 1.0));
 }

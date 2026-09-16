@@ -510,24 +510,31 @@ exists to serve this limitation, and it is the only line this arc removes.
   translation makes a real test rather than a formality.
 - A file whose second skin genuinely cannot be read is still reported rather than silently dropped.
 
-### I-E — the second UV set — **REOPENED; the decided-no was reasoned wrongly**
+### I-E — the second UV set — **DONE**
 
-`TEXCOORD_1` on 9 primitives, `_2` and `_3` on 4 — the two textured villagers, the mannequin.
+`TEXCOORD_1` on 9 primitives, `_2` and `_3` on 4. Measured first: the sets are genuinely distinct
+(every vertex of `villager_peasant`'s differs from its first, by up to 3.64 in UV space), and **zero
+of the 18 texture channels in this tree sample anything but set 0**.
 
-**What the measurement actually found, which is worth keeping:** the sets are genuinely distinct.
-Every vertex of `villager_peasant`'s `TEXCOORD_1` differs from its `TEXCOORD_0`, by up to 3.64 in UV
-space, so no exporter is duplicating a buffer; and on `villager_universal`'s mannequin one
-primitive's second set is bit-identical to its first while another's is not. Separately, **zero of
-the 18 texture channels in this tree sample anything but set 0.**
+That measurement was used once to close the stage, which §7 forbids — "a test wanting it is not
+content wanting it" dismissed `MultiUVTest`, which exists precisely because a reader is supposed to
+handle this. The tree's contents are an accident of what was downloaded.
 
-**What was concluded from it, and is retracted:** that the stage is decided-no. The reasoning was
-*"a test wanting it is not content wanting it"* — dismissing `MultiUVTest`, which exists precisely
-because a reader is supposed to handle this. That is conventions §7 being broken in the same session
-it was derived: the tree's contents are an accident of what was downloaded, so "no asset of ours
-samples set 1" measures our library rather than the engine. Reading a UV set the format defines is
-conformance, and the spec is the requirement.
+**Built.** The importer reads `TEXCOORD_1` on the same opt-in as the colour, because both widen one
+studio layout and separate flags would let a caller ask for a layout no vertex type declares. A mesh
+with no second set gets its first one **mirrored rather than zeroed**: a material naming set 1 anyway
+then samples the same place, where (0,0) would collapse the surface onto one texel and read as a
+broken texture rather than a broken asset. `GltfMaterial` records which set its base colour samples,
+because that is a property of the CHANNEL — glTF lets every texture choose independently.
 
-So it is built, not parked — after the two stages where something is visibly wrong today.
+**Verified by changing one field.** `MultiUVTest`'s base colour names set 0; a copy naming set 1 —
+one JSON edit, nothing else — moves **615,936 pixels**. With the shader's selection disabled the two
+are byte-identical, which is what says those pixels came from honouring `texCoord` and not from
+anything else.
+
+**Scope stated:** the studio samples base colour and nothing else, so that is the channel that
+honours its set. `MultiUVTest` puts its second set on EMISSIVE, which this stage does not have — a
+different gap, and not one a UV set fixes.
 
 ---
 

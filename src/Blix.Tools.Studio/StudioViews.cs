@@ -76,9 +76,9 @@ public sealed class ModelView : IStudioView
 
             var cutoff = StudioAlpha.CutoffFor(part.AlphaMode, part.AlphaCutoff);
             StudioPush.Matrix(node.WorldTransform * Transform, push);
-            if (casterOnly) StudioPush.CasterCutout(push, cutoff, part.BaseAlpha);
+            if (casterOnly) StudioPush.CasterCutout(push, cutoff, part.BaseAlpha, part.AlbedoUvSet);
             else StudioPush.Material(push, part.BaseColour, part.Metallic, part.Roughness,
-                     alphaCutoff: cutoff, baseAlpha: part.BaseAlpha);
+                     alphaCutoff: cutoff, baseAlpha: part.BaseAlpha, albedoUvSet: part.AlbedoUvSet);
 
             // A FRESH texture array per part. Push payloads are copied at record time; texture
             // lists are still retained by reference, so a shared array would give every draw the
@@ -258,7 +258,7 @@ public sealed class RigView : IStudioView
                 StudioPush.Material(
                     push, part.BaseColour, part.Metallic, part.Roughness, stride,
                     alphaCutoff: StudioAlpha.CutoffFor(part.AlphaMode, part.AlphaCutoff),
-                    baseAlpha: part.BaseAlpha);
+                    baseAlpha: part.BaseAlpha, albedoUvSet: part.AlbedoUvSet);
             }
 
             // <b>The material decides whether its back face exists.</b> Every material on all three

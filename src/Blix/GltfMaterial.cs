@@ -11,6 +11,16 @@ public sealed record GltfMaterial(
     // BaseColor: linear-space tint multiplied with the sampled albedo texture.
     Vector4 BaseColorFactor,
     GltfTexture? BaseColorTexture,
+
+    /// <summary>Which TEXCOORD set <see cref="BaseColorTexture"/> samples. Almost always 0.</summary>
+    /// <remarks>
+    /// <b>Carried because a material naming set 1 on a reader that assumes 0 does not fail — it
+    /// samples the wrong coordinates.</b> glTF lets every texture on a material choose its set
+    /// independently, so this is a property of the CHANNEL rather than of the mesh or the material.
+    /// Only base colour is recorded because only base colour is sampled by anything here; the rest
+    /// of the channels keep their sets when something reads them.
+    /// </remarks>
+    int BaseColorTexCoord,
     // Tangent-space normal map. Null when the material has none -- the lit
     // shader's NormalScale uniform doubles as "use this map at all" gate.
     GltfTexture? NormalTexture,

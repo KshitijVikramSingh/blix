@@ -6,7 +6,7 @@
         }
     ],
     "types" : {
-        "_10" : {
+        "_12" : {
             "name" : "Push",
             "members" : [
                 {
@@ -26,6 +26,11 @@
     "inputs" : [
         {
             "type" : "vec2",
+            "name" : "vUv1",
+            "location" : 1
+        },
+        {
+            "type" : "vec2",
             "name" : "vUv",
             "location" : 0
         }
@@ -40,8 +45,8 @@
     ],
     "push_constants" : [
         {
-            "type" : "_10",
-            "name" : "_12",
+            "type" : "_12",
+            "name" : "_14",
             "push_constant" : true
         }
     ]

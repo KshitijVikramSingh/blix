@@ -6,7 +6,7 @@
         }
     ],
     "types" : {
-        "_17" : {
+        "_20" : {
             "name" : "gl_PerVertex",
             "members" : [
                 {
@@ -39,7 +39,7 @@
                 }
             ]
         },
-        "_23" : {
+        "_26" : {
             "name" : "ShadowFrame",
             "members" : [
                 {
@@ -50,7 +50,7 @@
                 }
             ]
         },
-        "_29" : {
+        "_32" : {
             "name" : "Push",
             "members" : [
                 {
@@ -74,6 +74,11 @@
             "location" : 2
         },
         {
+            "type" : "vec2",
+            "name" : "aTexCoord1",
+            "location" : 3
+        },
+        {
             "type" : "vec3",
             "name" : "aPosition",
             "location" : 0
@@ -86,7 +91,7 @@
         {
             "type" : "vec4",
             "name" : "aColour",
-            "location" : 3
+            "location" : 4
         }
     ],
     "outputs" : [
@@ -94,11 +99,16 @@
             "type" : "vec2",
             "name" : "vUv",
             "location" : 0
+        },
+        {
+            "type" : "vec2",
+            "name" : "vUv1",
+            "location" : 1
         }
     ],
     "ubos" : [
         {
-            "type" : "_23",
+            "type" : "_26",
             "name" : "ShadowFrame",
             "block_size" : 64,
             "set" : 0,
@@ -107,8 +117,8 @@
     ],
     "push_constants" : [
         {
-            "type" : "_29",
-            "name" : "_31",
+            "type" : "_32",
+            "name" : "_34",
             "push_constant" : true
         }
     ]

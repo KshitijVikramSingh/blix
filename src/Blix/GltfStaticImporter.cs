@@ -315,6 +315,12 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         // be invisible here and fatal the moment anything multiplied by it.
         var colours = includeColour ? primitive.GetVertexAccessor("COLOR_0")?.AsColorArray() : null;
 
+        // <b>Read alongside the colour, on the same flag.</b> Both widen the same studio layout and
+        // both are opt-in for the same reason: a consumer that pinned a narrower stride reads
+        // garbage otherwise. Splitting them into two flags would let a caller ask for a layout that
+        // no vertex type in this tree declares.
+        var uv1 = includeColour ? primitive.GetVertexAccessor("TEXCOORD_1")?.AsVector2Array() : null;
+
         var vertexCount = positions.Count;
 
         var minB = new Vector3(float.PositiveInfinity);
@@ -374,7 +380,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         }
         else if (includeColour)
         {
-            var verts = new VertexPosition3NormalTextureColor[vertexCount];
+            var verts = new VertexPosition3NormalTexture2Color[vertexCount];
             for (var v = 0; v < vertexCount; v++)
             {
                 var pWorld = GraphicsMatrices.TransformPoint(world, positions[v]);
@@ -386,16 +392,21 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 var c = colours is null
                     ? VertexPosition3NormalTextureColor.White
                     : VertexPosition3NormalTextureColor.Pack(colours[v].X, colours[v].Y, colours[v].Z, colours[v].W);
-                verts[v] = new VertexPosition3NormalTextureColor(
+                // A mesh with no second set gets its first one mirrored, not zeroed: a material
+                // that names set 1 anyway then samples the same place rather than collapsing the
+                // whole surface onto one texel.
+                var uv1v = uv1 is null ? uv : new Vector2(uv1[v].X, flipTextureV ? 1.0f - uv1[v].Y : uv1[v].Y);
+                verts[v] = new VertexPosition3NormalTexture2Color(
                     new GraphicsVector3(pWorld.X, pWorld.Y, pWorld.Z),
                     new GraphicsVector3(nWorld.X, nWorld.Y, nWorld.Z),
                     new GraphicsVector2(uv.X, uv.Y),
+                    new GraphicsVector2(uv1v.X, uv1v.Y),
                     c);
                 minB = Vector3.Min(minB, pWorld);
                 maxB = Vector3.Max(maxB, pWorld);
             }
-            packed = VertexPosition3NormalTextureColor.Pack(verts);
-            layout = VertexPosition3NormalTextureColor.Layout;
+            packed = VertexPosition3NormalTexture2Color.Pack(verts);
+            layout = VertexPosition3NormalTexture2Color.Layout;
             uvOffset = 6 * sizeof(float);
         }
         else

@@ -274,6 +274,7 @@ internal static class GltfShared
         var baseColorTexture = baseColorChannel.HasValue
             ? ExtractTexture(baseColorChannel.Value.Texture, textureCache)
             : null;
+        var baseColorTexCoord = baseColorChannel.HasValue ? baseColorChannel.Value.TextureCoordinate : 0;
 
         var normalChannel = material.FindChannel("Normal");
         var normalTexture = normalChannel.HasValue
@@ -347,6 +348,7 @@ internal static class GltfShared
             material.Name ?? $"material_{material.LogicalIndex}",
             baseColorFactor,
             baseColorTexture,
+            baseColorTexCoord,
             normalTexture,
             metallicRoughnessTexture,
             metallic,

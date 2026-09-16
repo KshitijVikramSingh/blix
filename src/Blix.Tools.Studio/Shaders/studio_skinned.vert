@@ -49,6 +49,10 @@ layout(push_constant) uniform Push {
     mat4 uModel;
     vec4 uBaseColour;
     vec4 uMaterial;       // x = metallic, y = roughness, z = bones per instance
+    // Declared so this stage's block matches studio_lit.frag's. A vertex and fragment stage sharing
+    // a program must agree on the push block; when they disagree the reflected total is their SUM,
+    // which is how a 112-byte payload came to meet a pipeline declaring 208.
+    vec4 uExtra;
 };
 
 layout(location = 0) out vec3 vWorld;
@@ -59,6 +63,7 @@ layout(location = 2) out vec2 vUv;
 // stage reads but no vertex stage writes is undefined — it would read as whatever was in the
 // register, which is a bug that looks like a lighting bug.
 layout(location = 3) out vec4 vColour;
+layout(location = 4) out vec2 vUv1;
 
 void main()
 {
@@ -102,5 +107,6 @@ void main()
 
     vUv = aTexCoord;
     vColour = vec4(1.0);
+    vUv1 = aTexCoord;   // the skinned layout carries one UV set
     gl_Position = uViewProjection * world;
 }

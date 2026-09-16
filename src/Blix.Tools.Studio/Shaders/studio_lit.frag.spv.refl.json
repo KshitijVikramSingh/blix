@@ -56,6 +56,11 @@
                     "name" : "uMaterial",
                     "type" : "vec4",
                     "offset" : 80
+                },
+                {
+                    "name" : "uExtra",
+                    "type" : "vec4",
+                    "offset" : 96
                 }
             ]
         }
@@ -70,6 +75,11 @@
             "type" : "vec3",
             "name" : "vWorld",
             "location" : 0
+        },
+        {
+            "type" : "vec2",
+            "name" : "vUv1",
+            "location" : 4
         },
         {
             "type" : "vec2",
