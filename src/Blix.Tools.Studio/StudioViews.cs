@@ -234,6 +234,7 @@ public sealed class RigView : IStudioView
         }
 
         DrawAttachments(draw, casterOnly);
+        DrawStaticParts(draw, casterOnly);
     }
 
     // <b>An attachment is a rung-two draw and costs nothing structurally.</b> It uses the stage's
@@ -241,6 +242,36 @@ public sealed class RigView : IStudioView
     // matrix, because it is static geometry that happens to be carried by something that moves. No
     // fourth pipeline, no change to StudioPush, no new pass. That was the thing worth finding out:
     // the ladder said bringing a draw should be the ordinary case, and this is a draw.
+    // <b>Always drawn, with no visibility set.</b> An attachment is a choice — four of the Rogue's
+    // six share one hand and a game shows one — so the caller picks. A turret is not a choice; it is
+    // part of the model, and hiding it by default would be the old bug wearing a checkbox.
+    private void DrawStaticParts(in StudioDraw draw, bool casterOnly)
+    {
+        if (Rig.StaticParts.Count == 0) return;
+
+        var push = casterOnly ? attachCaster : attachLit;
+        foreach (var part in Rig.StaticParts)
+        {
+            // No joint, so no joint world: the node's own world matrix and the body's placement.
+            StudioPush.Matrix(part.WorldTransform * Placement, push);
+            if (!casterOnly)
+            {
+                StudioPush.Material(push, part.BaseColour, part.Metallic, part.Roughness);
+            }
+
+            draw.Scope.DrawIndexed(
+                vertexBuffer: part.Vertices,
+                indexBuffer: part.Indices,
+                pipeline: draw.Pipeline,
+                indexCount: part.IndexCount,
+                uniforms: draw.Uniforms,
+                textures: casterOnly
+                    ? draw.Textures
+                    : new[] { draw.Textures[0], new ShaderTextureBinding("uAlbedo", part.Albedo, Slot: 1) },
+                pushConstants: push);
+        }
+    }
+
     private void DrawAttachments(in StudioDraw draw, bool casterOnly)
     {
         if (Rig.Attachments.Count == 0) return;

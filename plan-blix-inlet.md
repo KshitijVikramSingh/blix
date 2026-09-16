@@ -420,8 +420,22 @@ narrow version would have had to avoid anyway.
   visible. `Blix.Tools.Shot` needed the same packing written a second time, because it keeps its own
   players rather than a `RigAnimation` — the duplication already noted above, now with a second
   instance of it.
-- **I-D3** — what `GltfSkipped.SecondarySkin` becomes. It should stop firing for the ordinary case
-  and stay for the genuinely unreadable one, rather than being deleted.
+- **I-D3 — DONE, and it ended by deleting the reporting.** `GltfSkipped` existed to make the
+  importer's refusals visible. There were two: a mesh on a second skin, and a static mesh under no
+  joint. **Neither was a format restriction** — a glTF node with a mesh and no skin is an ordinary
+  mesh in the scene, and "not equipment" was this importer's rule. Both are now read, so nothing is
+  skipped and the type has gone with them. `GltfStaticPart` carries the second case, placed by the
+  world matrix its node already has.
+
+  Kept separate from `GltfAttachment` deliberately: an attachment follows a joint and a turret does
+  not, so folding them together would need a joint index meaning "no joint" — a contradiction in a
+  field name — and would drop scenery into the viewer's weapon picker.
+
+  `blix check`'s block for this used to FAIL the check, calling a half-read asset unsound. Right
+  about the symptom, wrong about the cause; it is now a listing.
+
+  **tank.glb imports 11 of 11 primitives**, the number it always had. Control: every other rigged
+  asset reports zero static parts, and the Rogue's six attachments are still attachments.
 
 **`character_merge.py` keeps its job and loses one bullet.** Merging N single-animation FBX files
 onto one rig, retargeting a CC0 library onto another skeleton, and flattening interpolation to

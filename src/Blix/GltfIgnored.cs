@@ -5,9 +5,11 @@ namespace Blix;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>The complement of <see cref="GltfSkipped"/>, and it exists for the same reason.</b> That one
-/// reports whole mesh nodes the rigged import declined; this one reports the CHANNELS declined
-/// inside the nodes it did take. Both were silent, and a constraint nobody can see is
+/// <b>What the import did not read, and the last of its kind.</b> There was a companion,
+/// <c>GltfSkipped</c>, reporting whole mesh NODES the rigged import declined — first meshes on a
+/// second skin, then static meshes under no joint. Both turned out to be this importer's rules
+/// rather than the format's, and once they were removed there was nothing left to skip, so it went.
+/// This one remains because attributes genuinely are unread: a constraint nobody can see is
 /// indistinguishable from an asset that had nothing there.
 /// </para>
 /// <para>

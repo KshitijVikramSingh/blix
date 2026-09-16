@@ -303,31 +303,27 @@ public static class Program
 
         Console.WriteLine($"{Path.GetFileName(path)}");
         var attachments = imported.AttachmentsOrEmpty;
-        var skipped = imported.SkippedOrEmpty;
+        var staticParts = imported.StaticPartsOrEmpty;
         Console.WriteLine(
             $"  {skeleton.BoneCount} bone(s), {imported.Animations.Length} clip(s), " +
-            $"{imported.Primitives.Length} skinned primitive(s), {attachments.Length} attachment(s)");
+            $"{imported.Primitives.Length} skinned primitive(s), {attachments.Length} attachment(s), " +
+            $"{staticParts.Length} static part(s)");
 
-        // ── 0a. What was NOT imported ───────────────────────────────────────
-        // <b>Judged, not merely listed.</b> A rig that arrives as a fraction of its file is the
-        // failure this section exists for, and it is one a count cannot show you on its own —
-        // five primitives looks exactly like a five-primitive asset. So the loss is named, sized,
-        // and it makes the check fail: an asset the engine can only half read is not sound.
-        if (skipped.Length > 0)
+        // ── 0a. Static parts ────────────────────────────────────────────────
+        // <b>This block used to fail the check.</b> It counted what the importer had refused to read
+        // and called an asset it could only half load unsound — which was right about the symptom
+        // and wrong about the cause. Both refusals (a mesh on a second skin, a static mesh under no
+        // joint) were this importer's rules rather than the format's, and both are gone. What is
+        // left is a listing: these are read now, and seeing them is still worth the line.
+        if (staticParts.Length > 0)
         {
-            var lostPrims = skipped.Sum(x => x.Primitives);
-            var lostVerts = skipped.Sum(x => x.Vertices);
             Console.WriteLine();
-            Console.WriteLine(
-                $"RED  {skipped.Length} mesh node(s) NOT imported — {lostPrims} primitive(s), {lostVerts} vertices");
-            foreach (var s in skipped.OrderBy(x => x.Name, StringComparer.Ordinal))
+            foreach (var sp in staticParts.OrderBy(x => x.Name, StringComparer.Ordinal))
             {
+                var verts = sp.Primitives.Sum(p => p.Mesh.VertexCount);
                 Console.WriteLine(
-                    $"       {s.Name,-28} {s.Primitives} prim, {s.Vertices,6} verts — {s.Explanation}");
+                    $"    {sp.Name,-22} static, on no joint      {sp.Primitives.Length} prim, {verts,6} verts");
             }
-
-
-            problems++;
         }
 
         // ── 0. Attachments ──────────────────────────────────────────────────

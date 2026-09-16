@@ -3330,31 +3330,28 @@ static ShaderInterface MinimalShader() => new(new[]
         twoSkins.ToGltf2().SaveGLB(twoSkinPath);
 
         var twoSkinModel = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("ay/two"), twoSkinPath));
-        var left = twoSkinModel.SkippedOrEmpty;
-
-        // The contract this assertion used to carry was "a second skin is reported as skipped".
-        // It is now read, so the file arrives whole and the only thing left behind is the loose prop.
-        t.Expect("AY.7 a second skin is READ, so only the unparented prop is left behind",
-            left.Length == 1, $"got {left.Length}: {string.Join(", ", left.Select(x => x.Name))}");
+        // Nothing is left behind any more. Both of this file's refusals — a mesh on a second skin,
+        // a static mesh under no joint — were this importer's rules rather than the format's, and
+        // both are gone. The fixture's loose_prop is now a static part instead of a casualty.
         t.Expect("AY.7 both skins are present",
             twoSkinModel.SkinsOrEmpty.Length == 2, $"{twoSkinModel.SkinsOrEmpty.Length}");
         t.ExpectTrue("AY.7 and primitives from both of them arrive",
             twoSkinModel.Primitives.Any(p => p.SkinIndex == 0)
             && twoSkinModel.Primitives.Any(p => p.SkinIndex == 1));
-        t.ExpectTrue("AY.7 a static mesh under no joint is reported too",
-            left.Any(x => x.Reason == GltfSkipReason.UnparentedStatic && x.Name == "loose_prop"));
-        t.ExpectTrue("AY.7 each one carries what was lost with it",
-            left.All(x => x.Primitives > 0 && x.Vertices > 0));
-        t.ExpectTrue("AY.7 and a sentence rather than an enum name",
-            left.All(x => x.Explanation.Length > 20));
 
-        // <b>The control that stops this reporting everything.</b> A rig whose file is fully read
-        // must report nothing, and the attachment case must NOT appear here — it was taken, and a
-        // "skipped" list that included what was imported would be worse than no list.
-        t.Expect("AY.7 a fully-read rig reports nothing skipped",
-            bareModel.SkippedOrEmpty.Length == 0, $"got {bareModel.SkippedOrEmpty.Length}");
-        t.Expect("AY.7 and an attachment is imported, not skipped",
-            model.SkippedOrEmpty.Length == 0, $"got {model.SkippedOrEmpty.Length}");
+        var looseParts = twoSkinModel.StaticPartsOrEmpty;
+        t.ExpectTrue($"AY.7 a static mesh under no joint is READ, not dropped (got {looseParts.Length})",
+            looseParts.Any(x => x.Name == "loose_prop"));
+        t.ExpectTrue("AY.7 and it carries its geometry",
+            looseParts.All(x => x.Primitives.Length > 0 && x.Primitives.All(p => p.Mesh.VertexCount > 0)));
+
+        // <b>The control that stops static parts swallowing everything.</b> Equipment hangs off a
+        // joint and must stay an ATTACHMENT — if it fell through to here it would stop following the
+        // hand that holds it, which is a silent downgrade rather than a visible loss.
+        t.Expect("AY.7 CONTROL an attachment is NOT also a static part",
+            model.StaticPartsOrEmpty.Length == 0, $"got {model.StaticPartsOrEmpty.Length}");
+        t.Expect("AY.7 CONTROL a rig with nothing loose has no static parts",
+            bareModel.StaticPartsOrEmpty.Length == 0, $"got {bareModel.StaticPartsOrEmpty.Length}");
 
         // ── AY.6 the joint world transforms, which were computed and dropped ─
         // <b>The palette is not the joints' transforms.</b> Matrices[i] is InverseBindPose · world —

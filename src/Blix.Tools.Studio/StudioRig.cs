@@ -113,6 +113,7 @@ public sealed class StudioRig : IDisposable
     private readonly List<Image> images = new();
     private MaterialBindings bones = null!;
     private readonly List<SkinSlot> skins = new();
+    private readonly List<StaticPart> staticParts = new();
     private readonly List<MaterialBindings> skinBones = new();
     private byte[] palettePayload = Array.Empty<byte>();
 
@@ -134,7 +135,27 @@ public sealed class StudioRig : IDisposable
     /// produced and, in the one tool whose entire job is looking at assets, shown to nobody. Holding
     /// them on the rig costs a reference and makes the panel possible.
     /// </remarks>
-    public IReadOnlyList<GltfSkipped> Skipped { get; private set; } = Array.Empty<GltfSkipped>();
+    /// <summary>
+    /// Static geometry the model carries that hangs off no joint — a turret, a gun.
+    /// </summary>
+    /// <remarks>
+    /// <b>Not an <see cref="Attachment"/>, because an attachment follows a joint and this does not.</b>
+    /// Reusing that record would need a joint index meaning "no joint" — a contradiction sitting in
+    /// a field name — and would drop scenery into the viewer's attachment picker, where the
+    /// meaningful act is choosing which weapon a hand holds.
+    /// </remarks>
+    public readonly record struct StaticPart(
+        string Name,
+        Matrix4x4 WorldTransform,
+        VertexBufferHandle Vertices,
+        IndexBufferHandle Indices,
+        int IndexCount,
+        Vector3 BaseColour,
+        float Metallic,
+        float Roughness,
+        TextureHandle Albedo);
+
+    public IReadOnlyList<StaticPart> StaticParts => staticParts;
 
     /// <summary>Vertex attributes the file declared that the importer did not read.</summary>
     public IReadOnlyList<GltfIgnored> Ignored { get; private set; } = Array.Empty<GltfIgnored>();
@@ -239,7 +260,7 @@ public sealed class StudioRig : IDisposable
 
         var imported = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("lab.rig"), path));
         rig.Skeleton = imported.Skeleton;
-        rig.Skipped = imported.SkippedOrEmpty;
+
         rig.Ignored = imported.IgnoredOrEmpty;
         rig.MeshNodeTransform = imported.MeshNodeTransform;
         rig.Clips = imported.Animations.OrderBy(c => c.Name, StringComparer.Ordinal).ToArray();
@@ -294,6 +315,36 @@ public sealed class StudioRig : IDisposable
         // weapon is not part of the body's silhouette — including a two-handed crossbow in the
         // bounds would push the camera back and shrink the character for every viewer, whether or
         // not anything is drawing it.
+        for (var i = 0; i < imported.StaticPartsOrEmpty.Length; i++)
+        {
+            var source = imported.StaticPartsOrEmpty[i];
+            for (var p = 0; p < source.Primitives.Length; p++)
+            {
+                var mesh = source.Primitives[p].Mesh;
+                var name = $"lab.rig.{Path.GetFileNameWithoutExtension(path)}.static.{i}.{p}";
+                var material = source.Primitives[p].Material;
+                rig.staticParts.Add(new StaticPart(
+                    Name: source.Primitives.Length > 1 ? $"{source.Name}.{p}" : source.Name,
+                    WorldTransform: source.WorldTransform,
+                    Vertices: vk.CreateVertexBuffer(
+                        new VertexBufferData(
+                            new VertexBufferDescription(mesh.Layout, mesh.VertexCount, GraphicsBufferUsage.Static),
+                            mesh.VertexBytes),
+                        $"{name}.vb"),
+                    Indices: mesh.Indices32 is { } staticWide
+                        ? vk.CreateIndexBuffer(staticWide, name: $"{name}.ib")
+                        : vk.CreateIndexBuffer(mesh.Indices, name: $"{name}.ib"),
+                    IndexCount: mesh.IndexCount,
+                    BaseColour: material is null
+                        ? new Vector3(0.75f)
+                        : new Vector3(
+                            material.BaseColorFactor.X, material.BaseColorFactor.Y, material.BaseColorFactor.Z),
+                    Metallic: material?.MetallicFactor ?? 0f,
+                    Roughness: material?.RoughnessFactor ?? 0.7f,
+                    Albedo: rig.UploadAlbedo(vk, material?.BaseColorTexture, white, uploaded)));
+            }
+        }
+
         for (var i = 0; i < imported.AttachmentsOrEmpty.Length; i++)
         {
             var source = imported.AttachmentsOrEmpty[i];

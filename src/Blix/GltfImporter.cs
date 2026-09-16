@@ -57,7 +57,6 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         // reason the format supports. A glTF skin is self-contained: its own joints, its own inverse
         // binds, named by each node that uses it. So they are simply collected, in the order they
         // are met, and the order carries no meaning beyond being stable.
-        var skipped = new List<GltfSkipped>();
         var skinOrder = new List<Skin>();
         var nodesBySkin = new Dictionary<Skin, List<Node>>();
         foreach (var node in model.LogicalNodes)
@@ -175,27 +174,30 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             }
         }
 
-        // A static mesh under no joint is neither skinned geometry nor an attachment, so nothing
-        // takes it. That is a defensible rule and was an invisible one: the four static primitives
-        // in tank.glb are the rest of the six it loses.
+        // <b>A static mesh under no joint is read too, and that was the last thing dropped.</b> It
+        // is neither skinned geometry nor equipment, so the importer had no place for it and named
+        // it in a skipped report instead — the four primitives of tank.glb's gun and turret. But a
+        // node with a mesh and no skin is an ordinary mesh in the scene; "not equipment" was this
+        // importer's rule, not the format's. Placed by the world matrix the node already carries.
         var attached = new HashSet<string>(attachments.Select(a => a.Name), StringComparer.Ordinal);
+        var staticParts = new List<GltfStaticPart>();
         foreach (var node in model.LogicalNodes)
         {
             if (node.Mesh is null || node.Skin is not null) continue;
             var name = node.Name ?? node.Mesh.Name ?? "?";
             if (attached.Contains(name)) continue;
-            skipped.Add(Describe(node, GltfSkipReason.UnparentedStatic));
-        }
 
-        // <b>One line, from the importer itself, not only from a tool that happens to ask.</b> A
-        // game loading a half-imported character should not have to run `blix check` to find out.
-        if (skipped.Count > 0)
-        {
-            var lost = skipped.Sum(x => x.Primitives);
-            Console.Error.WriteLine(
-                $"  {Path.GetFileName(context.SourcePath)}: {skipped.Count} mesh node(s), " +
-                $"{lost} primitive(s) NOT imported — " +
-                string.Join(", ", skipped.Select(x => $"{x.Name} ({x.Explanation})")));
+            var parts = new List<GltfPrimitive>();
+            for (var i = 0; i < node.Mesh.Primitives.Count; i++)
+            {
+                var prim = node.Mesh.Primitives[i];
+                var meshData = GltfStaticImporter.BuildStaticMeshData(
+                    $"{name}.{i}", prim, Matrix4x4.Identity, Matrix4x4.Identity, includeColour: true);
+                parts.Add(new GltfPrimitive(
+                    meshData, GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache)));
+            }
+
+            if (parts.Count > 0) staticParts.Add(new GltfStaticPart(name, node.WorldMatrix, parts.ToArray()));
         }
 
         // Filter animations to those that touch a joint; an animation targeting only non-skin nodes
@@ -290,7 +292,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
 
         return new GltfModel(
             primitives, bindings[0].Skeleton, animations.ToArray(), bindings[0].MeshNodeTransform,
-            attachments.ToArray(), skipped.ToArray(), ignored, bindings.ToArray());
+            attachments.ToArray(), staticParts.ToArray(), ignored, bindings.ToArray());
     }
 
     private static long SourceLength(string path)
@@ -338,19 +340,6 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
     /// instead, to be composed with the joint's animated transform at draw time.
     /// </para>
     /// </remarks>
-
-    private static GltfSkipped Describe(Node node, GltfSkipReason reason)
-    {
-        var mesh = node.Mesh!;
-        var vertices = 0;
-        foreach (var prim in mesh.Primitives)
-        {
-            vertices += prim.GetVertexAccessor("POSITION")?.Count ?? 0;
-        }
-
-        return new GltfSkipped(
-            node.Name ?? mesh.Name ?? "?", reason, mesh.Primitives.Count, vertices);
-    }
 
 
     private static GltfAttachment[] CollectAttachments(
