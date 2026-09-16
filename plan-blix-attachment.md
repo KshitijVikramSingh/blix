@@ -137,6 +137,15 @@ a mode reachable only through a checkbox is a mode nothing checks.
 **This is the stage the whole arc is for.** A knife that is one frame behind the hand, or attached to
 the wrong joint, or composed in the wrong order, is invisible in a test and obvious in a window.
 
+### W-E — acceptance, from the chair — **PASSED 2026-09-16**
+
+Checked from the chair across **every clip and every weapon combination**: nothing lags the hand,
+nothing detaches, the cape follows the chest. No fault found — which is worth recording precisely
+because four of the character arc's five stages had one that only a person watching could see, and
+planning for a fifth was the reason this stage existed.
+
+The original text follows.
+
 ### W-E — acceptance, from the chair
 
 The knife stays in the hand through **all 76 clips**, not just the rest pose and not just a walk. The
@@ -185,6 +194,6 @@ the transform and the transform is a two-line change to something already comput
 building stages because it is the instrument, and an instrument built before the thing it measures
 has nothing to show.
 
-The honest stopping point is after **W-D**: at that point the Rogue loads completely, draws
+**The arc is complete.** W-A through W-E are in. The honest stopping point is after **W-D**: at that point the Rogue loads completely, draws
 completely, and you can see which joint each piece hangs from. Whether anything else in the tree ever
 grows an attachment is a separate question, and the answer today is that nothing has.
