@@ -3558,6 +3558,27 @@ static ShaderInterface MinimalShader() => new(new[]
                 (a - b).Length() > 3.5f);
         }
 
+        // ── BB.3b clips against disagreeing skins are REFUSED, not guessed ──
+        //
+        // glTF animation channels target NODES and say nothing about skins; our AnimationClip stores
+        // bone INDICES against one skeleton. Those two facts only reconcile while every skin orders
+        // its joints the same way. The BB.2 fixture is exactly a file where they do not — skin A
+        // declares (tip, root, mid) and skin B declares (broot, bmid, btip) — so one set of clips
+        // built against the first would drive the second's bones wrongly and silently.
+        //
+        // Refused rather than approximated. The two-orders fixture has no animations, so the refusal
+        // is exercised on one that does.
+        var animated = new SharpGLTF.Scenes.SceneBuilder();
+        animated.AddSkinnedMesh(Weighted("x", 0), Matrix4x4.Identity, tipA, rootA, midA);
+        animated.AddSkinnedMesh(Weighted("y", 2), Matrix4x4.Identity, rootB, midB, tipB);
+        rootA.UseTranslation().UseTrackBuilder("Default").WithPoint(0, Vector3.Zero).WithPoint(1, Vector3.UnitY);
+        var animatedPath = Path.Combine(temp, "two-orders-animated.glb");
+        animated.ToGltf2().SaveGLB(animatedPath);
+
+        t.ExpectThrows<AssetImportException>(
+            "BB.3b skins that order joints differently refuse one clip set rather than mis-drive it",
+            () => new GltfImporter().Import(new AssetImportContext(AssetId.Parse("bb/anim"), animatedPath)));
+
         // ── BB.4 CONTROL: one skin is untouched ─────────────────────────────
         //
         // The whole change is additive or it is not. Six of the seven rigged assets in this tree have

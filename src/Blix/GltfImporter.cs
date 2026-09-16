@@ -208,6 +208,42 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         // the skins agree on joint order, which is the case that exists: tank.glb's three skins are
         // identical in joints and in order, differing only in bind translation. Recorded rather than
         // hidden — a file that breaks it is the thing that should force the next shape.
+        // <b>Checked rather than assumed, because the wrong answer here is silent.</b> A clip's
+        // tracks are bone INDICES against one skeleton. glTF animation channels target NODES and
+        // know nothing about skins, so a file whose skins order their joints differently needs a
+        // clip per skin — and building one set against skin 0 would animate the others' bones
+        // wrongly with nothing to show for it. Every skin is asked whether it resolves each shared
+        // joint to the same index; when they all agree, one set is correct for all of them.
+        // Only where there is something to drive. A file whose skins disagree and which carries no
+        // animation at all is perfectly readable, and refusing it would throw away geometry over a
+        // conflict that cannot arise — the first version of this check did exactly that.
+        var clipsAgree = true;
+        for (var s = 1; s < skinOrder.Count && clipsAgree && model.LogicalAnimations.Count > 0; s++)
+        {
+            var other = skinOrder[s];
+            if (other.JointsCount != skinOrder[0].JointsCount) { clipsAgree = false; break; }
+            for (var j = 0; j < other.JointsCount; j++)
+            {
+                if (ReferenceEquals(other.GetJoint(j).Joint, skinOrder[0].GetJoint(j).Joint)
+                    && remapsBySkin[s][j] == remapsBySkin[0][j])
+                {
+                    continue;
+                }
+
+                clipsAgree = false;
+                break;
+            }
+        }
+
+        if (!clipsAgree)
+        {
+            throw new AssetImportException(
+                context.SourcePath, null,
+                $"this file's {skinOrder.Count} skins order their joints differently, so one set of "
+                + "animation clips cannot drive them all — clip tracks are bone indices against a "
+                + "single skeleton. Reading the skins is supported; per-skin clips are not yet.");
+        }
+
         var animations = new List<AnimationClip>();
         foreach (var anim in model.LogicalAnimations)
         {
