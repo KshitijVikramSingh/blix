@@ -163,6 +163,7 @@ internal sealed class ViewerPanels
         ImGui.EndChild();
 
         DrawInstancePanel();
+        DrawAttachmentPanel();
         DrawRootMotionPanel();
         DrawBonePanel();
     }
@@ -289,6 +290,76 @@ internal sealed class ViewerPanels
         ImGui.SetNextItemWidth(-70f);
         if (ImGui.SliderFloat($"rate {label}", ref rate, -3f, 3f)) player.Rate = rate;
         ImGui.PopID();
+    }
+
+
+    /// <summary>What the rig hangs off its joints, and which of it to draw.</summary>
+    /// <remarks>
+    /// <b>This panel is the reason the arc exists.</b> The importer dropped these for as long as it
+    /// existed and nobody noticed, because a character with empty hands looks exactly like a
+    /// character — so the fix is not only that they load, it is that you can see the list and see
+    /// what happens when you tick one.
+    /// </remarks>
+    public void DrawAttachmentPanel()
+    {
+        var rig = app.Rig;
+        if (rig is null) return;
+
+        if (!ImGui.CollapsingHeader($"attachments ({rig.Attachments.Count})", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            return;
+        }
+
+        if (rig.Attachments.Count == 0)
+        {
+            // Said rather than left blank. An empty panel and a panel that is not there look the
+            // same, and "this rig has none" is a different fact from "this build cannot show them".
+            ImGui.TextDisabled("this rig hangs nothing off its joints");
+            return;
+        }
+
+        var visible = app.VisibleAttachments;
+
+        // <b>All / none, because the interesting states are at the ends.</b> None is the honest
+        // default and All is the picture that shows you what the asset actually contains — four
+        // weapons in one hand, which is a thing to see once and then never leave on.
+        if (ImGui.SmallButton("all"))
+        {
+            foreach (var a in rig.Attachments) visible.Add(a.Name);
+        }
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("none")) visible.Clear();
+
+        ImGui.SameLine();
+        ImGui.TextDisabled($"{visible.Count} shown");
+
+        foreach (var attachment in rig.Attachments)
+        {
+            var shown = visible.Contains(attachment.Name);
+            if (ImGui.Checkbox(attachment.Name, ref shown))
+            {
+                if (shown) visible.Add(attachment.Name);
+                else visible.Remove(attachment.Name);
+            }
+
+            // The joint is the part that is worth seeing beside the name: an attachment on the
+            // wrong bone is the failure this has, and it is invisible unless the bone is written
+            // down next to the thing hanging off it.
+            ImGui.SameLine();
+            ImGui.TextDisabled($"on {attachment.JointName} [{attachment.JointIndex}]");
+        }
+
+        // Several on one joint is ordinary — four of the Rogue's six share handslot.r — so the
+        // overlap a viewer sees with "all" on is expected rather than a bug being demonstrated.
+        var crowded = rig.Attachments
+            .GroupBy(a => a.JointName, StringComparer.Ordinal)
+            .Where(g => g.Count() > 1 && g.Count(x => visible.Contains(x.Name)) > 1)
+            .ToArray();
+        foreach (var g in crowded)
+        {
+            ImGui.TextDisabled($"  {g.Count(x => visible.Contains(x.Name))} shown on '{g.Key}' — they overlap");
+        }
     }
 
     public void DrawRootMotionPanel()

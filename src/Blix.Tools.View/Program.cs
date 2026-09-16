@@ -271,7 +271,18 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // joint, so drawing all of them is four meshes in the same place — a picture of nothing. A flag
     // rather than only a panel, for the same reason --mask is one: a mode reachable only through a
     // checkbox is a mode no bounded run and no capture can get to.
-    private readonly List<string> visibleAttachments = new();
+    private readonly HashSet<string> visibleAttachments = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Which attachments are drawn. Mutated by the panel and read when the view is rebuilt.
+    /// </summary>
+    /// <remarks>
+    /// <b>The viewer owns this, not the rig and not the session.</b> Which of four knives a
+    /// character holds is a decision about what you want to look at, and the engine has no opinion
+    /// — the same rule the mask follows, where the engine composes poses from weights and knows
+    /// nothing about who set them.
+    /// </remarks>
+    internal ISet<string> VisibleAttachments => visibleAttachments;
 
     internal StudioSelection Selection => selection;
 
