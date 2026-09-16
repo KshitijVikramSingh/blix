@@ -159,7 +159,7 @@ this — `AssetLoadLog`, and `GltfSkipped` for meshes the rigged importer declin
 "this file has a second UV set I did not read" is a small addition to an existing shape rather
 than a new one. **Not built yet; listed so it is a decision rather than an oversight.**
 
-### I-B — the viewer can express what the material already says — **RESHAPED ON MEASUREMENT**
+### I-B — the viewer can express what the material already says — **DONE (reshaped on measurement)**
 
 `GltfMaterial` carries `AlphaMode`, `AlphaCutoff` and `DoubleSided` and has done for a long time.
 `StudioRig.Part` and `StudioModel` carry none of them.
@@ -194,12 +194,20 @@ which is rung three of the studio ladder and needs no new mechanism. `AlphaMode`
 carried at the same time because they are free once the material fields are threaded — but they are
 carried, not demonstrated, and the plan should not claim otherwise.
 
-**Negative controls**
-- An opaque, single-sided asset is byte-identical.
-- The kit's MASK foliage is **also** byte-identical — the control that proves the 26 really are
-  inert rather than that the cutoff was wired backwards.
-- A double-sided asset gains its back faces; `core.glb` is the one asset in the tree that can
-  exercise BLEND at all.
+**Built:** `AlphaMode` / `AlphaCutoff` / `DoubleSided` carried on both `StudioModel.Part` and
+`StudioRig.Part`; a `skinnedDoubleSidedPipeline` (the same program and layout, `NoCulling`) beside
+the culling one, because face culling is pipeline state in Vulkan and cannot be pushed per draw;
+`RigView` picks per part. The caster pass already used `NoCulling`, so it needed nothing.
+
+**Negative controls — run**
+- The static path is **byte-identical** across the change (same grass capture hash before and
+  after), which is what confines this to the rig path. ✔
+- The peasant differs: 731 px (0.02%), max delta 203/255, **mean +40.4** — positive, so surfaces
+  are appearing rather than shading shifting — with **81% of the changed pixels in the head band**
+  where `MI_Hair_1` sits. A small effect from the default camera, and a real one. ✔
+- Not done: `core.glb` is the one asset in the tree that could exercise BLEND, and nothing here
+  drives it. `AlphaMode`/`AlphaCutoff` are **carried, not demonstrated** — stated so no one reads
+  this stage as having proven them.
 
 ### I-F — the viewer can supply the colour the asset does not have
 

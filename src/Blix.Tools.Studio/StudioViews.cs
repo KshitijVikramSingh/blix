@@ -150,10 +150,21 @@ public sealed class RigView : IStudioView
                 StudioPush.Material(push, part.BaseColour, part.Metallic, part.Roughness, stride);
             }
 
+            // <b>The material decides whether its back face exists.</b> Every material on all three
+            // rigged assets in this tree is doubleSided and all of them were drawn by the culling
+            // pipeline. Measured rather than described: honouring it moves 731 pixels of a peasant
+            // capture (0.02%), mean delta +40 — POSITIVE, so this is surfaces appearing rather than
+            // shading shifting — and 81% of those pixels fall in the head band where MI_Hair_1 sits.
+            // A small effect from this camera, and a real one; a closed torso genuinely does not
+            // care, which is why the culling comment on the pipeline above is not wrong either.
+            var skinned = part.DoubleSided && draw.SkinnedDoubleSidedPipeline.Id != 0
+                ? draw.SkinnedDoubleSidedPipeline
+                : draw.SkinnedPipeline;
+
             draw.Scope.DrawIndexedInstanced(
                 vertexBuffer: part.Vertices,
                 indexBuffer: part.Indices,
-                pipeline: draw.SkinnedPipeline,
+                pipeline: skinned,
                 indexCount: part.IndexCount,
                 instanceCount: Instances,
                 uniforms: draw.Uniforms,

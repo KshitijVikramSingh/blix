@@ -28,6 +28,12 @@ public enum StudioPass
 /// <param name="Textures">The shadow map in <see cref="StudioPass.Lit"/>; empty in the caster pass.</param>
 /// <param name="Pipeline">The stage's standard pipeline for this pass.</param>
 /// <param name="SkinnedPipeline">Its skinned twin, for a view that draws a rig.</param>
+/// <param name="SkinnedDoubleSidedPipeline">
+/// The skinned pipeline WITHOUT back-face culling, for a rig part whose material says
+/// <c>doubleSided</c>. Face culling is pipeline state in Vulkan, so this cannot be a push constant
+/// and a view that honours the material has to be handed both. Equal to
+/// <paramref name="SkinnedPipeline"/> in the caster pass, which does not cull either way.
+/// </param>
 /// <param name="White">A 1×1 white texture, for a draw with no albedo of its own.</param>
 public readonly record struct StudioDraw(
     RenderPassBuilder Scope,
@@ -36,7 +42,8 @@ public readonly record struct StudioDraw(
     ShaderTextureBinding[] Textures,
     PipelineHandle Pipeline,
     PipelineHandle SkinnedPipeline,
-    TextureHandle White);
+    TextureHandle White,
+    PipelineHandle SkinnedDoubleSidedPipeline = default);
 
 /// <summary>
 /// Something a tool puts on the stage.

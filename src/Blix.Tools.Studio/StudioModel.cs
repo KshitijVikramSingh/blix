@@ -1,4 +1,5 @@
 using System.Numerics;
+using Blix;
 using Blix.Assets;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
@@ -35,7 +36,23 @@ public sealed class StudioModel : IDisposable
         Vector3 BaseColour,
         float Metallic,
         float Roughness,
-        TextureHandle Albedo);
+        TextureHandle Albedo,
+        /// <summary>
+        /// What the material says about its own surface: <c>OPAQUE</c>/<c>MASK</c>/<c>BLEND</c>, the
+        /// cutout threshold, and whether the back face is part of the model.
+        /// </summary>
+        /// <remarks>
+        /// <b><see cref="GltfMaterial"/> has carried these for a long time and nothing on this stage
+        /// read them.</b> Of the three, only <c>DoubleSided</c> currently changes a picture in this
+        /// tree — measured, not assumed: all 26 MASK materials here have no base-colour texture and
+        /// <c>baseAlpha = 1.00</c> against a 0.20 cutoff, so their alpha is 1.0 everywhere and a
+        /// faithful cutout would discard nothing. The alpha pair is carried because it is free once
+        /// the material is threaded and because the next asset may mean it, NOT because it is
+        /// demonstrated here.
+        /// </remarks>
+        GltfAlphaMode AlphaMode = GltfAlphaMode.Opaque,
+        float AlphaCutoff = 0.5f,
+        bool DoubleSided = false);
 
     /// <summary>A node of the authored hierarchy, drawable or not.</summary>
     public readonly record struct Node(
@@ -157,7 +174,10 @@ public sealed class StudioModel : IDisposable
                             material.BaseColorFactor.X, material.BaseColorFactor.Y, material.BaseColorFactor.Z),
                     Metallic: material?.MetallicFactor ?? 0f,
                     Roughness: material?.RoughnessFactor ?? 0.7f,
-                    Albedo: model.UploadAlbedo(vk, material?.BaseColorTexture)));
+                    Albedo: model.UploadAlbedo(vk, material?.BaseColorTexture),
+                    AlphaMode: material?.AlphaMode ?? GltfAlphaMode.Opaque,
+                    AlphaCutoff: material?.AlphaCutoff ?? 0.5f,
+                    DoubleSided: material?.DoubleSided ?? false));
 
                 if (material?.BaseColorTexture is not null) model.TexturedPartCount++;
             }

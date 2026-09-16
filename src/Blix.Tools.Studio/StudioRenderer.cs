@@ -72,6 +72,11 @@ public sealed class StudioRenderer : IDisposable, ITunable
     private PipelineHandle shadowPipeline;
     private PipelineHandle presentPipeline;
     private PipelineHandle skinnedPipeline;
+
+    // The same program and layout as skinnedPipeline with the culling turned off, for a rig whose
+    // material says doubleSided. Two pipelines rather than one, because face culling is pipeline
+    // state in Vulkan and cannot be pushed per draw.
+    private PipelineHandle skinnedDoubleSidedPipeline;
     private PipelineHandle skinnedShadowPipeline;
 
     private VertexBufferHandle cubeVertices;
@@ -377,6 +382,21 @@ public sealed class StudioRenderer : IDisposable, ITunable
             new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(litPass)), "lab.skinned");
 
+        // <b>Its twin, for the materials that say they have two sides.</b> Every material on all
+        // three rigged assets in this tree is doubleSided — the Rogue's single material, the
+        // peasant's four including MI_Hair_1 at 646 verts, the ranger's three — and all of them were
+        // being drawn by the pipeline above, which culls. A closed body does not notice, so the
+        // comment above stays true for the case it describes; what it missed is that a rig is not
+        // only a closed body. See StudioViews.RigView for what honouring it actually moves.
+        skinnedDoubleSidedPipeline = vk.CreatePipeline(new PipelineDescription(
+            skinnedProgram,
+            VertexPosition3NormalTextureSkin4Tangent.Layout,
+            PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite,
+            RasterizerState.NoCulling,
+            new[] { BlendState.Disabled },
+            RenderTarget: graph.GetPassSurface(litPass)), "lab.skinned.doublesided");
+
         // The caster does NOT cull: a one-sided shadow from a back-face-culled caster loses the far
         // side of a limb, and a character's own silhouette is mostly far sides.
         skinnedShadowPipeline = vk.CreatePipeline(new PipelineDescription(
@@ -485,7 +505,9 @@ public sealed class StudioRenderer : IDisposable, ITunable
 
             var draw = new StudioDraw(
                 scope, StudioPass.Shadow, uniforms, Array.Empty<ShaderTextureBinding>(),
-                shadowPipeline, skinnedShadowPipeline, whiteTexture);
+                shadowPipeline, skinnedShadowPipeline, whiteTexture,
+                // The caster pass never culls, so both are the same handle here.
+                SkinnedDoubleSidedPipeline: skinnedShadowPipeline);
             foreach (var view in views) view.Draw(draw);
         });
 
@@ -508,7 +530,8 @@ public sealed class StudioRenderer : IDisposable, ITunable
             if (Ground) DrawGround(scope, litPipeline, uniforms, textures);
 
             var draw = new StudioDraw(
-                scope, StudioPass.Lit, uniforms, textures, litPipeline, skinnedPipeline, whiteTexture);
+                scope, StudioPass.Lit, uniforms, textures, litPipeline, skinnedPipeline, whiteTexture,
+                SkinnedDoubleSidedPipeline: skinnedDoubleSidedPipeline);
             foreach (var view in views) view.Draw(draw);
         });
 
@@ -536,7 +559,8 @@ public sealed class StudioRenderer : IDisposable, ITunable
                 // than a second renderer — and now that a view is an interface, a tool's own
                 // contribution appears in the panel for free, which it never did before.
                 var draw = new StudioDraw(
-                    scope, StudioPass.Lit, uniforms, textures, litPipeline, skinnedPipeline, whiteTexture);
+                    scope, StudioPass.Lit, uniforms, textures, litPipeline, skinnedPipeline, whiteTexture,
+                    SkinnedDoubleSidedPipeline: skinnedDoubleSidedPipeline);
                 foreach (var view in views) view.Draw(draw);
             });
         }
@@ -625,6 +649,7 @@ public sealed class StudioRenderer : IDisposable, ITunable
         device.DestroyPipeline(shadowPipeline);
         device.DestroyPipeline(presentPipeline);
         device.DestroyPipeline(skinnedPipeline);
+        device.DestroyPipeline(skinnedDoubleSidedPipeline);
         device.DestroyPipeline(skinnedShadowPipeline);
         device.DestroyShaderProgram(litProgram);
         device.DestroyShaderProgram(shadowProgram);
