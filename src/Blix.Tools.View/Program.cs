@@ -129,7 +129,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     private readonly int requestedInstances;
     private readonly PoseMode startMode;
     private StudioRig? rig;
-    private RigAnimation? session;
+    private RigInstances? session;
 
     private Matrix4x4 rigBase = Matrix4x4.Identity;
     private Matrix4x4 rigTransform = Matrix4x4.Identity;
@@ -259,7 +259,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
     internal StudioRig? Rig => rig;
 
-    internal RigAnimation? Session => session;
+    internal RigInstances? Session => session;
 
     // Declared state, rendered as flags at startup and watched for movement every frame. Every
     // member is Bespoke: this viewer already draws better controls than reflection could — a combo
@@ -443,7 +443,22 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
                 $"shader holds {StudioRig.MaxBones}. Raise the bound in studio_skinned.vert.");
         }
 
-        session = new RigAnimation(rig, requestedInstances) { Mode = startMode };
+        session = new RigInstances(rig, requestedInstances)
+        {
+            // <b>The viewer's own look, set by the viewer.</b> Each body runs 17% faster than the one
+            // before it, so bodies that start together visibly drift apart — the point being that a
+            // glance shows they are not frame-locked. This lived inside the animation's own Advance,
+            // where it was an aesthetic the shared type had no business holding and the capture tool
+            // could not opt out of. Conventions §6.
+            Step = (body, i, delta) =>
+            {
+                body.Subject.Clip = rig.Clips.Count > 0 ? rig.Clips[session!.ClipIndexFor(i)] : null;
+                body.Subject.Paused = session!.Driven.Subject.Paused;
+                body.Subject.Rate = session.Driven.Subject.Rate * (1f + (i * 0.17f));
+                body.Advance(delta);
+            },
+        };
+        session.Driven.Mode = startMode;
         // TWO targets. The session's knobs are Bespoke because this viewer draws better controls
         // for them; the SCENE's are not, so the stage's look is rendered by reflection — a Scene
         // panel this file does not write, and --sun-elevation it does not parse.
@@ -451,7 +466,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         foreach (var member in new[]
         {
             nameof(RigAnimation.Mode), nameof(RigAnimation.Weight), nameof(RigAnimation.MaskRoot),
-            nameof(RigAnimation.MaskFalloff), nameof(RigAnimation.Lockstep), nameof(RigAnimation.DriveRoot),
+            nameof(RigAnimation.MaskFalloff), nameof(RigInstances.Lockstep), nameof(RigAnimation.DriveRoot),
         })
         {
             tunables.Bespoke.Add(member);
@@ -505,16 +520,16 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // A mask before anyone asks for one, because the first thing anybody does in this mode is
         // pick a spine. The guess is named as a guess in RigAnimation and the combo corrects it in
         // one click. --mask-root has already been applied above, so it wins by simply being there.
-        var chosenRoot = session.MaskRoot.Length > 0
-            ? session.MaskRoot
+        var chosenRoot = session.Driven.MaskRoot.Length > 0
+            ? session.Driven.MaskRoot
             : RigAnimation.GuessUpperBodyRoot(rig.Skeleton);
 
-        var falloff = session.MaskFalloff > 0 ? session.MaskFalloff : 2;
+        var falloff = session.Driven.MaskFalloff > 0 ? session.Driven.MaskFalloff : 2;
         if (chosenRoot is null)
         {
             Console.WriteLine("  no bone matches the usual spine names — pick one in the mask panel");
         }
-        else if (!session.SetMask(chosenRoot, falloff))
+        else if (!session.Driven.SetMask(chosenRoot, falloff))
         {
             Console.WriteLine($"  no bone named '{chosenRoot}' — the mask is empty until one is picked");
         }
@@ -524,8 +539,8 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             // from a window. The capture has reported this since it was written; the viewer never
             // did, and a bounded run was the one place it mattered most.
             Console.WriteLine(
-                $"  mask from '{chosenRoot}' falloff {falloff}: reaches {session.Mask!.Reach()} of " +
-                $"{rig.Skeleton.BoneCount} bones, {session.Mask.Reach(0.999f)} fully");
+                $"  mask from '{chosenRoot}' falloff {falloff}: reaches {session.Driven.Mask!.Reach()} of " +
+                $"{rig.Skeleton.BoneCount} bones, {session.Driven.Mask.Reach(0.999f)} fully");
         }
 
         // Prefer a walk on A and an idle on B when the asset has them: a blend between two named
@@ -537,9 +552,9 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         panels.SecondaryClipIndex = secondClip is not null
             ? NamedClip(rig, secondClip)
             : PreferredClip(rig, new[] { "Running_A", "Running", "Run", "Idle", "Unarmed_Idle" }, 1);
-        if (rig.Clips.Count > 0) session.Subject.Clip = rig.Clips[panels.SubjectClipIndex];
-        if (rig.Clips.Count > 1) session.Secondary.Clip = rig.Clips[panels.SecondaryClipIndex];
-        session.Refresh();
+        if (rig.Clips.Count > 0) session.Driven.Subject.Clip = rig.Clips[panels.SubjectClipIndex];
+        if (rig.Clips.Count > 1) session.Driven.Secondary.Clip = rig.Clips[panels.SecondaryClipIndex];
+        session.Driven.Refresh();
 
 
         var extent = rig.LongestExtent;
@@ -633,18 +648,18 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // already carries the normalising scale, so a `* rigScale` here squared it — the Rogue
         // normalises by 1.372, so the body ran 1.88x too far and the trail agreed with it, which is
         // why two wrong things looked like one right one.
-        rigTransform = session.DriveRoot
-            ? Matrix4x4.CreateTranslation(session.RootTravel) * rigBase
+        rigTransform = session.Driven.DriveRoot
+            ? Matrix4x4.CreateTranslation(session.Driven.RootTravel) * rigBase
             : rigBase;
 
         // Bodies stand in a row across the camera's view, a stride apart, centred on the origin so
         // one body sits where one body always did. Where they stand is the lab's choice, which is
         // why the session takes it rather than inventing one.
         var spacing = MathF.Max(1.2f, rig.LongestExtent * rigScale * 0.75f);
-        session.PackInstances(rigTransform, spacing);
+        session.Pack(rigTransform, spacing);
 
         // Sampled in the space the trail is drawn in, so the line is where the body would be.
-        var where = Vector3.Transform(session.RootTravel, rigBase);
+        var where = Vector3.Transform(session.Driven.RootTravel, rigBase);
         if (rootPath.Count == 0 || Vector3.DistanceSquared(rootPath[^1], where) > 1e-6f)
         {
             rootPath.Add(where);
@@ -679,14 +694,14 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             // <b>The worlds come from the session, not from here.</b> They are already computed once
             // per pose for the skeleton gizmo; an attachment is the second reader of the same
             // number and recomputing them would be a second hierarchy walk for one knife.
-            var rigView = new RigView(rig, session?.Palettes.Count ?? 0)
+            var rigView = new RigView(rig, session?.PalettesFor(0).Count ?? 0)
             {
-                BoneWorlds = session?.BoneWorlds,
+                BoneWorlds = session?.Driven.BoneWorlds,
                 Placement = rigTransform,
                 // Every body wears its gear at ITS OWN pose. Before this the attachments were drawn
                 // once, at instance 0's, so eight peasants shared one knife hanging off the first
                 // one's hand. The delegate is evaluated at draw time on purpose — see RigView.
-                InstanceBoneWorlds = session is null ? null : session.InstanceBoneWorlds,
+                InstanceBoneWorlds = session is null ? null : session.BoneWorldsFor,
                 Placements = session?.Placements,
                 InstanceAttachments = session is null ? null : AttachmentsForInstance,
             };
@@ -841,10 +856,10 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             //
             // Scoped per instance so the debug names do not collide: `bone/17` means something
             // different under `i0` than under `i2`, and trails key off the name.
-            DrawInstanceSkeleton(debug, 0, session!.BoneWorlds, options);
-            for (var i = 0; i < session!.Echoes.Length && i + 1 < session.Placements.Count; i++)
+            DrawInstanceSkeleton(debug, 0, session!.Driven.BoneWorlds, options);
+            for (var i = 0; i < (session!.Count - 1) && i + 1 < session.Placements.Count; i++)
             {
-                DrawInstanceSkeleton(debug, i + 1, session.EchoBoneWorlds(i), options);
+                DrawInstanceSkeleton(debug, i + 1, session.BoneWorldsFor(i + 1), options);
             }
         }
 
@@ -877,12 +892,12 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             rig.MeshNodeTransform * session.Placements[instance],
             options,
             instance == 0 ? selection.Bone : -1,
-            instance == 0 && panels.ShowRestGhost ? session.RestWorlds : null,
+            instance == 0 && panels.ShowRestGhost ? session.Driven.RestWorlds : null,
             panels.DeformBonesOnly ? rig.DeformHierarchy : null,
             // Painted only in the mode where a mask means anything. In the others the skeleton's
             // colours already say something — which bone is selected — and two meanings on one
             // channel is how an overlay stops being read at all.
-            session.Mode == PoseMode.Masked ? session.Mask : null);
+            session.Driven.Mode == PoseMode.Masked ? session.Driven.Mask : null);
     }
 
 
@@ -895,7 +910,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
     private void ResetRootTravel()
     {
-        session?.ResetTravel();
+        session?.Driven.ResetTravel();
         rootPath.Clear();
     }
 
@@ -989,18 +1004,18 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         switch (key)
         {
             case Key.Space:
-                session.Subject.Paused = !session.Subject.Paused;
-                if (session.Mode != PoseMode.Single) session.Secondary.Paused = session.Subject.Paused;
+                session.Driven.Subject.Paused = !session.Driven.Subject.Paused;
+                if (session.Driven.Mode != PoseMode.Single) session.Driven.Secondary.Paused = session.Driven.Subject.Paused;
                 break;
             case Key.Left:
-                session.Subject.Step(-1.0 / 30.0);
-                session.Subject.Paused = true;
-                session.Refresh();
+                session.Driven.Subject.Step(-1.0 / 30.0);
+                session.Driven.Subject.Paused = true;
+                session.Driven.Refresh();
                 break;
             case Key.Right:
-                session.Subject.Step(1.0 / 30.0);
-                session.Subject.Paused = true;
-                session.Refresh();
+                session.Driven.Subject.Step(1.0 / 30.0);
+                session.Driven.Subject.Paused = true;
+                session.Driven.Refresh();
                 break;
         }
     }
@@ -1056,7 +1071,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             pointer,
             rig,
             SubjectPlacement,
-            session?.BoneWorlds ?? Array.Empty<Matrix4x4>(),
+            session?.Driven.BoneWorlds ?? Array.Empty<Matrix4x4>(),
             panels.DeformBonesOnly ? rig?.DeformHierarchy : null,
             panels.GizmoScale,
             model,

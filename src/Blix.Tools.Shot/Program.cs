@@ -202,6 +202,15 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private Vector3 rootTravel;
     private float rigDrawnHeight = 3f;
     private StudioRig? rig;
+    // <b>The same RigAnimation the viewer uses.</b> This tool had its own ClipPlayers, its own
+    // BonePaletteSets and its own instance packing, and that class's header claimed both lab
+    // executables used it. They did not, and the cost arrived when skins became plural: per-skin
+    // palette packing had to be written twice.
+    //
+    // What stays here is POLICY. The viewer drifts its echoes apart by rate because it is looked at
+    // over time; a capture is one instant, so it staggers them by phase instead, deterministically.
+    // Both set that on RigInstances.Step rather than forking the class.
+    private RigInstances? animation;
     private ClipPlayer? player;
     private readonly bool skeletonOnly;
     private readonly bool stageSelfTest;
@@ -260,28 +269,20 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private readonly string? maskRoot;
     private readonly int maskFalloff;
     private BoneMask? mask;
-    private BonePaletteSet? palettes;
 
     // One set per skin, the same shape RigAnimation carries. This tool keeps its own players rather
     // than a RigAnimation, so the per-skin packing is written twice -- noted in plan-blix-inlet.md
     // as duplication that should not have survived the extraction.
-    private BonePaletteSet[] palettesBySkin = Array.Empty<BonePaletteSet>();
+    private float rowSpacing;
     private readonly List<string> visibleAttachments = new();
     private Matrix4x4[] boneWorlds = Array.Empty<Matrix4x4>();
     private Matrix4x4 rigTransform = Matrix4x4.Identity;
     private readonly int instanceCount = 1;
-    private readonly List<Matrix4x4> instancePlacements = new();
-    private readonly List<Pose> instancePoses = new();
 
-    // A scratch of its own rather than reusing `boneWorlds`, which is instance 0's and is read by
-    // the skeleton overlay after the rig view is built. One buffer is still enough because RigView
-    // asks for one body at a time and is finished before asking for the next.
-    private Matrix4x4[] instanceWorlds = Array.Empty<Matrix4x4>();
     private readonly bool lockstep;
     private readonly bool viewport;
     private readonly int sequence;
     private int sequenceWritten;
-    private readonly List<ClipPlayer> sequencePlayers = new();
 
     // The same 17 ms --advance uses, and off-rate for the same reason: the Rogue's clips are
     // authored at 30 fps, so a sixtieth divides most of them and every loop seam would land exactly
@@ -386,7 +387,35 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         }
         ApplyStageKnobs();
 
-        player = new ClipPlayer(rig.Skeleton);
+        animation = new RigInstances(rig, instanceCount)
+        {
+            Lockstep = lockstep,
+
+            // <b>The capture's own policy.</b> A fixed fraction of each body's OWN clip duration, so
+            // the same arguments give the same phases — which is what makes a capture evidence
+            // rather than a snapshot of whenever it happened to run. The viewer wants visible drift
+            // instead; neither belongs in the shared type. Conventions §6.
+            // <b>Two jobs, told apart by the delta.</b> A zero delta is the initial placement: each
+            // body is SCRUBBED to a fixed fraction of its own clip, which is what makes a capture
+            // reproducible. A non-zero delta is a --frames-out sequence, where the bodies must
+            // ADVANCE — scrubbing again would pin every frame to the same phase and show the
+            // instancing frozen, which reads as a bug rather than as a still.
+            Step = (body, i, delta) =>
+            {
+                if (delta == 0.0)
+                {
+                    body.Subject.Clip = rig.Clips.Count > 0 ? rig.Clips[animation!.ClipIndexFor(i)] : null;
+                    body.Subject.ScrubTo(i / (double)instanceCount * body.Subject.Duration);
+                    body.Refresh();
+                    return;
+                }
+
+                body.Advance(delta);
+            },
+        };
+
+        for (var i = 0; i < animation.Count; i++) animation[i].DriveRoot = driveRoot;
+        player = animation.Driven.Subject;
 
         if (maskRoot is not null)
         {
@@ -405,14 +434,16 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                 Environment.Exit(1);
             }
         }
-        if (clipName is not null)
+        // <b>Set on every path, including the one that wants nothing.</b> RigAnimation starts its
+        // body on Clips[0] — a viewer convenience, so something is playing when the window opens —
+        // and a capture with no --clip wants the REST POSE. Inheriting the viewer's default silently
+        // changed what six of ten capture modes produced. Conventions §6: the default is policy, so
+        // the caller states it.
+        player.Clip = clipName is not null ? rig.Clip(clipName) : null;
+        if (clipName is not null && player.Clip is null)
         {
-            player.Clip = rig.Clip(clipName);
-            if (player.Clip is null)
-            {
-                Console.Error.WriteLine(
-                    $"No clip named '{clipName}' in {Path.GetFileName(rigPath)}; capturing the rest pose.");
-            }
+            Console.Error.WriteLine(
+                $"No clip named '{clipName}' in {Path.GetFileName(rigPath)}; capturing the rest pose.");
         }
 
         player.ScrubTo(clipTime);
@@ -449,7 +480,6 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         }
 
         boneWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
-        instanceWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
 
         for (var i = 0; i < args.Length - 1; i++)
         {
@@ -469,56 +499,22 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // <b>One palette per body, packed into one buffer at a known stride.</b> Each instance is the
         // same clip at a different phase, which is what makes the picture evidence: three bodies in
         // the same pose would prove only that three draws happened.
-        palettesBySkin = new BonePaletteSet[rig.Skins.Count];
-        for (var s = 0; s < palettesBySkin.Length; s++)
+        // <b>Packed by RigAnimation, not here.</b> One palette per body per skin at the stride the
+        // shader reads, the placement row, and the distinct-pose fingerprint were all reimplemented
+        // in this file. They are the same decisions the viewer makes, and writing them twice is how
+        // the per-skin packing came to be written twice.
+        rowSpacing = MathF.Max(1.2f, rig.LongestExtent * scale * 0.75f);
+        var spacing = rowSpacing;
+
+        // Body phases are set through RigInstances.Step, which Advance drives. A capture is one instant,
+        // so it is stepped once with a zero delta: the subject does not move and every echo lands on
+        // its declared phase.
+        animation.Advance(0.0);
+        animation.Pack(rigTransform, spacing);
+
+        for (var i = 0; i < animation.Count; i++)
         {
-            palettesBySkin[s] = new BonePaletteSet(rig.Skins[s].Skeleton.BoneCount, StudioRig.MaxInstances);
-        }
-
-        palettes = palettesBySkin[0];
-        var spacing = MathF.Max(1.2f, rig.LongestExtent * scale * 0.75f);
-        var half = (instanceCount - 1) * 0.5f;
-        for (var i = 0; i < instanceCount; i++)
-        {
-            var pose = rig.Skeleton.CreateRestPose();
-            var label = player.Clip?.Name ?? "(rest)";
-            if (i == 0)
-            {
-                pose.CopyFrom(player.Pose);
-                sequencePlayers.Add(player);
-            }
-            else if (lockstep)
-            {
-                // Same clip, same instant. These must come out identical apart from where they stand.
-                var echo = new ClipPlayer(rig.Skeleton, player.Clip);
-                echo.ScrubTo(player.Time);
-                if (driveRoot) RootMotion.Strip(rig.Skeleton, echo.Pose, echo.RestPose);
-                pose.CopyFrom(echo.Pose);
-                sequencePlayers.Add(echo);
-            }
-            else
-            {
-                // <b>A different CLIP, not merely a different phase.</b> Staggering one clip proves
-                // the phases are independent; it cannot prove the clips are, because there is only
-                // one. Taken in order from the rig's own list so the picture is reproducible.
-                var clip = rig.Clips.Count > 0 ? rig.Clips[ClipIndexFor(rig, player.Clip, i)] : null;
-                label = clip?.Name ?? "(rest)";
-                var echo = new ClipPlayer(rig.Skeleton, clip);
-                echo.ScrubTo(i / (double)instanceCount * echo.Duration);
-                if (driveRoot) RootMotion.Strip(rig.Skeleton, echo.Pose, echo.RestPose);
-                pose.CopyFrom(echo.Pose);
-                sequencePlayers.Add(echo);
-            }
-
-            var placement = Matrix4x4.CreateTranslation((i - half) * spacing, 0f, 0f) * rigTransform;
-            for (var s = 0; s < palettesBySkin.Length; s++)
-            {
-                palettesBySkin[s].Add(rig.Skins[s].Skeleton, pose, rig.Skins[s].MeshNodeTransform * placement);
-            }
-
-            instancePlacements.Add(placement);
-            instancePoses.Add(pose);
-            instanceClips.Add(label);
+            instanceClips.Add(animation[i].Subject.Clip?.Name ?? "(rest)");
         }
 
         rowWidth = (instanceCount - 1) * spacing;
@@ -533,30 +529,25 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // hashed, each at identity.
         if (instanceCount > 1)
         {
-            var bare = new BonePaletteSet(rig.Skeleton.BoneCount, instanceCount);
-            foreach (var p in instancePoses) bare.Add(rig.Skeleton, p, Matrix4x4.Identity);
-
-            var distinctPoses = 0;
-            var seen = new HashSet<ulong>();
-            for (var i = 0; i < bare.Count; i++)
-            {
-                if (seen.Add(bare.Fingerprint(i))) distinctPoses++;
-            }
+            // Counted by RigInstances, which does it the same way for the viewer. A control each
+            // tool implemented itself would not be one.
+            var distinctPoses = animation.DistinctPoses;
+            var bodies = animation.Count;
 
             var expectation = lockstep
                 ? distinctPoses == 1
                     ? "one pose in every slot, as the control requires"
                     : $"CONTROL FAILED — one clip at one instant produced {distinctPoses} poses"
-                : distinctPoses == bare.Count
+                : distinctPoses == bodies
                     ? "every body holds a different pose"
-                    : $"ALIASED — {bare.Count} bodies hold only {distinctPoses} distinct pose(s)";
+                    : $"ALIASED — {bodies} bodies hold only {distinctPoses} distinct pose(s)";
 
-            Console.WriteLine($"  {bare.Count} instance(s), {(lockstep ? "LOCKSTEP" : "varied")}: {expectation}");
-            for (var i = 0; i < bare.Count; i++)
+            Console.WriteLine($"  {bodies} instance(s), {(lockstep ? "LOCKSTEP" : "varied")}: {expectation}");
+            for (var i = 0; i < bodies; i++)
             {
                 Console.WriteLine(
-                    $"    [{i}] {instanceClips[i],-30} pose {bare.Fingerprint(i):x16}  " +
-                    $"drawn {palettes.Fingerprint(i):x16}");
+                    $"    [{i}] {instanceClips[i],-30} " +
+                    $"drawn {animation.PalettesFor(0).Fingerprint(i):x16}");
             }
         }
 
@@ -627,9 +618,9 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         var view = Matrix4x4.CreateLookAt(eye, target, Vector3.UnitY);
         viewProjection = view * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, aspect, 0.1f, 120f);
 
-        if (rig is not null && palettes is not null)
+        if (rig is not null && animation is not null)
         {
-            for (var s = 0; s < palettesBySkin.Length; s++) rig.UploadPalettes(palettesBySkin[s], s);
+            for (var s = 0; s < animation!.SkinCount; s++) rig.UploadPalettes(animation.PalettesFor(s), s);
         }
 
         // The panel camera looks from the opposite side, so a --viewport capture and a plain one of
@@ -644,7 +635,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         {
             // Same wiring as the viewer, because a capture that could not show an attachment would
             // make the one instrument that produces evidence blind to the thing being added.
-            var rigView = new RigView(rig, palettes?.Count ?? 0)
+            var rigView = new RigView(rig, animation?.Count ?? 0)
             {
                 BoneWorlds = boneWorlds,
                 Placement = rigTransform,
@@ -652,8 +643,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                 // --instances capture shows N bodies armed rather than N bodies and one weapon.
                 // This tool keeps its own players rather than a RigAnimation, so the delegate is built
                 // here from its instance poses instead of handed over.
-                InstanceBoneWorlds = instancePoses.Count == 0 ? null : InstanceWorldsFor,
-                Placements = instancePlacements,
+                InstanceBoneWorlds = animation is null ? null : animation.BoneWorldsFor,
+                Placements = animation?.Placements,
             };
             foreach (var name in visibleAttachments) rigView.VisibleAttachments.Add(name);
             views.Add(rigView);
@@ -704,38 +695,17 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     // The placements are rebuilt too, so a driven root moves the body between files.
     private void AdvanceSequence()
     {
-        if (rig is null || player is null || palettes is null) return;
+        if (rig is null || player is null || animation is null) return;
 
-        player.Advance(SequenceStep);
+        // Every body steps, not just the driven one: a sequence where only the subject moved would
+        // show the instancing frozen and read as a bug.
+        animation!.Advance(SequenceStep);
         rootTravel += Vector3.TransformNormal(player.RootDelta.Translation, rig.MeshNodeTransform);
 
-        foreach (var set in palettesBySkin) set.Reset();
-        for (var i = 0; i < instancePoses.Count; i++)
-        {
-            var pose = instancePoses[i];
-            if (i == 0)
-            {
-                pose.CopyFrom(player.Pose);
-            }
-            else
-            {
-                // Echoes advance on their own clocks, exactly as they do in the viewer — a sequence
-                // where only the subject moved would show the instancing frozen and read as a bug.
-                sequencePlayers[i].Advance(SequenceStep);
-                pose.CopyFrom(sequencePlayers[i].Pose);
-            }
+        var origin = driveRoot ? Matrix4x4.CreateTranslation(rootTravel) * rigTransform : rigTransform;
+        animation.Pack(origin, rowSpacing);
 
-            if (driveRoot) RootMotion.Strip(rig.Skeleton, pose, player.RestPose);
-            var placement = driveRoot && i == 0
-                ? Matrix4x4.CreateTranslation(rootTravel) * instancePlacements[i]
-                : instancePlacements[i];
-            for (var s = 0; s < palettesBySkin.Length; s++)
-            {
-                palettesBySkin[s].Add(rig.Skins[s].Skeleton, pose, rig.Skins[s].MeshNodeTransform * placement);
-            }
-        }
-
-        StudioRig.ComputeBoneWorlds(rig.Skeleton, instancePoses[0], boneWorlds);
+        StudioRig.ComputeBoneWorlds(rig.Skeleton, animation.Driven.Posed, boneWorlds);
     }
 
     private void CaptureSequenceFrame()
@@ -807,15 +777,15 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             // distinct. Three skeletons in three shapes is the conclusive form of the proof: three
             // meshes could agree with each other and still be one pose drawn thrice.
             var worlds = new Matrix4x4[rig.Skeleton.BoneCount];
-            for (var i = 0; i < instancePlacements.Count; i++)
+            for (var i = 0; i < animation!.Placements.Count; i++)
             {
                 using var instanceScope = debug.Scope($"i{i}");
-                StudioRig.ComputeBoneWorlds(rig.Skeleton, instancePoses[i], worlds);
+                StudioRig.ComputeBoneWorlds(rig.Skeleton, animation[i].Posed, worlds);
                 SkeletonGizmo.Draw(
                     debug,
                     rig.Skeleton,
                     worlds,
-                    rig.MeshNodeTransform * instancePlacements[i],
+                    rig.MeshNodeTransform * animation.Placements[i],
                     SkeletonGizmo.Options.Default,
                     selectedBone: -1,
                     restWorlds: null,
@@ -899,18 +869,6 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     // Rebuilt per call rather than cached, because Debug() runs a handful of times in a bounded run
     // and a 41-matrix walk is not worth a field. Cache it the day a capture has hundreds of bones.
-    /// <summary>One instance's bone worlds, into a shared scratch — valid until the next call.</summary>
-    /// <remarks>
-    /// Mirrors <c>RigAnimation.InstanceBoneWorlds</c>, and carries the same contract: RigView asks for
-    /// one body at a time at draw time and is finished with the answer before asking for the next.
-    /// Collecting these into an array would give every body the last one's pose.
-    /// </remarks>
-    private IReadOnlyList<Matrix4x4> InstanceWorldsFor(int instance)
-    {
-        var at = Math.Clamp(instance, 0, instancePoses.Count - 1);
-        StudioRig.ComputeBoneWorlds(rig!.Skeleton, instancePoses[at], instanceWorlds);
-        return instanceWorlds;
-    }
 
     private static Matrix4x4[] RestWorlds(StudioRig rig, ClipPlayer player)
     {

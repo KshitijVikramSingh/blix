@@ -270,6 +270,56 @@ throws; a view keeps its identity across frames).
 
 ---
 
+## 6. Mechanism in the engine, policy at the call site
+
+§5 says when to add policy: later than you think. This says where it goes once you
+genuinely need it — and it is the rule that had to be re-derived from scratch four
+times in a single day before anyone wrote it down.
+
+> **The engine owns the mechanism. The caller declares the policy.**
+
+The engine knows *how* to read a vertex channel, collect equipment, pose a skeleton,
+advance a clock. It does not know *whether this caller wants it*. Those are different
+questions, and a type that answers both forces every consumer to share one answer.
+
+Worked examples, all arrived at by argument rather than by rule:
+
+- `COLOR_0` is read by the importer (mechanism); `includeColour` says whether to, because
+  six applications pin a 32-byte vertex layout and one wants 36.
+- Attachments are collected by the importer (mechanism); which are *visible* is the
+  caller's, because four of the Rogue's six hang off one hand and a game shows one.
+- Every skin in a file is read (mechanism); which palette a part draws against is
+  carried per part, because the file has no opinion about that either.
+- The clock advances (mechanism); `RigAnimation.EchoStep` says how N bodies come to
+  differ, because the viewer wants visible drift and a capture wants reproducibility.
+
+**The failure signature is specific and worth memorising:**
+
+> If a second consumer's only way to differ is to *not use your type*, the policy is in
+> the wrong place.
+
+That is not hypothetical. `RigAnimation.Advance` stepped every extra body at
+`Subject.Rate * (1 + (i + 1) * 0.17)` — a decision about how obviously un-synchronised
+bodies should *look*, which is a viewer aesthetic. The capture tool needed determinism,
+had no way to say so, and kept its own copy of the whole class. The duplication then
+went unnoticed long enough that the class's own header claimed a second consumer it did
+not have, and per-skin palette packing had to be written twice.
+
+Two more of the same kind, both from the glTF importer:
+
+- **A workaround must never justify the limit that forced it.** The one-skin rule was
+  defended by a 689-line Blender merge that exists to satisfy the one-skin rule. A
+  policy baked into a mechanism will manufacture its own evidence.
+- **An authoring convention is not engine behaviour.** `COLOR_0` was applied as ambient
+  occlusion because every asset in this tree uses it that way. It is a base-colour
+  multiplier, and one reference model said so in a single run.
+
+**Enforced by:** `Blix.Test.Graphics` Section **AZ** (colour is opt-in; the default path
+is byte-identical) · Section **BB** (every skin read, each with its own remap) ·
+`GltfIgnored` (what the engine did not read, said out loud rather than decided quietly).
+
+---
+
 ## Where the surface stands
 
 Blix now reaches across the corners it set out to cover — rendering,

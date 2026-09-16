@@ -83,16 +83,16 @@ internal sealed class ViewerPanels
             $"{app.Rig.Skeleton.BoneCount} bones ({app.Rig.WeightedBoneCount} weighted, " +
             $"{app.Rig.DeformHierarchyCount} drawn) · {app.Rig.Clips.Count} clips · {app.Rig.Parts.Count} prims");
 
-        var mode = (int)app.Session.Mode;
+        var mode = (int)app.Session.Driven.Mode;
         if (ImGui.Combo("compose", ref mode, "single\0blend A to B\0additive B on A\0B masked onto A\0"))
         {
-            app.Session.Mode = (PoseMode)mode;
+            app.Session.Driven.Mode = (PoseMode)mode;
         }
 
-        if (app.Session.Mode != PoseMode.Single)
+        if (app.Session.Driven.Mode != PoseMode.Single)
         {
-            var weight = app.Session.Weight;
-            var label = app.Session.Mode switch
+            var weight = app.Session.Driven.Weight;
+            var label = app.Session.Driven.Mode switch
             {
                 PoseMode.Blend => "weight",
                 PoseMode.Masked => "layer weight",
@@ -100,14 +100,14 @@ internal sealed class ViewerPanels
             };
             if (ImGui.SliderFloat(label, ref weight, 0f, 1f))
             {
-                app.Session.Weight = weight;
+                app.Session.Driven.Weight = weight;
             }
         }
 
-        if (app.Session.Mode == PoseMode.Masked) DrawMask(app);
+        if (app.Session.Driven.Mode == PoseMode.Masked) DrawMask(app);
 
-        DrawTransport(app.Session.Subject, "A");
-        if (app.Session.Mode != PoseMode.Single) DrawTransport(app.Session.Secondary, "B");
+        DrawTransport(app.Session.Driven.Subject, "A");
+        if (app.Session.Driven.Mode != PoseMode.Single) DrawTransport(app.Session.Driven.Secondary, "B");
 
         ImGui.Separator();
         // ##-prefixed id, so ImGui draws no label. The visible "filter" label sat between the
@@ -121,8 +121,8 @@ internal sealed class ViewerPanels
         // Which player the list assigns to. A single list that always targets A would make picking
         // B's clip impossible in blend mode; two lists would double the height of the panel for one
         // extra bit of state.
-        var target = app.Session.Mode == PoseMode.Single ? 0 : ImGui.GetIO().KeyShift ? 1 : 0;
-        ImGui.TextDisabled(app.Session.Mode == PoseMode.Single
+        var target = app.Session.Driven.Mode == PoseMode.Single ? 0 : ImGui.GetIO().KeyShift ? 1 : 0;
+        ImGui.TextDisabled(app.Session.Driven.Mode == PoseMode.Single
             ? "click to play"
             : target == 0 ? "click -> A   (hold shift -> B)" : "click -> B");
 
@@ -137,8 +137,8 @@ internal sealed class ViewerPanels
                     continue;
                 }
 
-                var selected = i == clipIndexA || (app.Session.Mode != PoseMode.Single && i == clipIndexB);
-                var tag = i == clipIndexA ? "A" : i == clipIndexB && app.Session.Mode != PoseMode.Single ? "B" : " ";
+                var selected = i == clipIndexA || (app.Session.Driven.Mode != PoseMode.Single && i == clipIndexB);
+                var tag = i == clipIndexA ? "A" : i == clipIndexB && app.Session.Driven.Mode != PoseMode.Single ? "B" : " ";
 
                 // A zero-length clip is a POSE, not a fault — the Rogue ships seven of them. Marked
                 // rather than hidden: selecting one and seeing the body hold that shape is how you
@@ -149,12 +149,12 @@ internal sealed class ViewerPanels
                 if (target == 1)
                 {
                     clipIndexB = i;
-                    app.Session.Secondary.Clip = clip;
+                    app.Session.Driven.Secondary.Clip = clip;
                 }
                 else
                 {
                     clipIndexA = i;
-                    app.Session.Subject.Clip = clip;
+                    app.Session.Driven.Subject.Clip = clip;
                     app.ResetTravel();
                 }
             }
@@ -179,9 +179,9 @@ internal sealed class ViewerPanels
         if (app.Rig is null || app.Session is null) return;
         if (!ImGui.CollapsingHeader("instances", ImGuiTreeNodeFlags.DefaultOpen)) return;
 
-        ImGui.TextDisabled($"{app.Session.InstanceCount} of max {StudioRig.MaxInstances} · one draw, one palette buffer");
+        ImGui.TextDisabled($"{app.Session.Count} of max {StudioRig.MaxInstances} · one draw, one palette buffer");
 
-        if (app.Session.InstanceCount <= 1)
+        if (app.Session.Count <= 1)
         {
             ImGui.TextDisabled("pass --instances N to draw more");
             return;
@@ -192,7 +192,7 @@ internal sealed class ViewerPanels
 
         // Varied wants one distinct pose per body; lockstep wants exactly one in total. Stating the
         // expectation beside the count is what makes a reader able to tell a pass from a number.
-        var want = app.Session.Lockstep ? 1 : app.Session.InstanceCount;
+        var want = app.Session.Lockstep ? 1 : app.Session.Count;
         var ok = app.Session.DistinctPoses == want;
         ImGui.SameLine();
         if (ok) ImGui.TextDisabled($"{app.Session.DistinctPoses}/{want} distinct poses");
@@ -200,16 +200,16 @@ internal sealed class ViewerPanels
 
         if (ImGui.BeginChild("instancelist", new Vector2(0, 96), ImGuiChildFlags.Borders))
         {
-            ImGui.Text($"0  {app.Session.Subject.Clip?.Name ?? "(rest)"}");
+            ImGui.Text($"0  {app.Session.Driven.Subject.Clip?.Name ?? "(rest)"}");
             ImGui.SameLine(220f);
-            ImGui.TextDisabled($"t {app.Session.Subject.Time,5:0.00}  x{app.Session.Subject.Rate:0.00}");
+            ImGui.TextDisabled($"t {app.Session.Driven.Subject.Time,5:0.00}  x{app.Session.Driven.Subject.Rate:0.00}");
 
-            for (var i = 0; i < app.Session.Echoes.Length; i++)
+            for (var i = 0; i < (app.Session.Count - 1); i++)
             {
-                var echo = app.Session.Echoes[i];
-                ImGui.Text($"{i + 1}  {echo.Clip?.Name ?? "(rest)"}");
+                var other = app.Session[i + 1].Subject;
+                ImGui.Text($"{i + 1}  {other.Clip?.Name ?? "(rest)"}");
                 ImGui.SameLine(220f);
-                ImGui.TextDisabled($"t {echo.Time,5:0.00}  x{echo.Rate:0.00}");
+                ImGui.TextDisabled($"t {other.Time,5:0.00}  x{other.Rate:0.00}");
             }
         }
 
@@ -230,7 +230,7 @@ internal sealed class ViewerPanels
     /// </remarks>
     private void DrawMask(ViewerLoop app)
     {
-        var session = app.Session;
+        var session = app.Session?.Driven;
         if (session is null || app.Rig is null) return;
 
         var bones = app.Rig.Skeleton.Bones;
@@ -357,7 +357,7 @@ internal sealed class ViewerPanels
         // neighbour with a crossbow.</b> Bodies without an override are not listed and cost nothing;
         // the common case is everyone carrying the same thing, and a panel that demanded a row per
         // body would make the ordinary case the expensive one.
-        var bodies = app.Session?.InstanceCount ?? 1;
+        var bodies = app.Session?.Count ?? 1;
         if (bodies > 1)
         {
             ImGui.Separator();
@@ -447,7 +447,7 @@ internal sealed class ViewerPanels
         if (app.Session is null) return;
         if (!ImGui.CollapsingHeader("root motion")) return;
 
-        var subject = app.Session.Subject;
+        var subject = app.Session.Driven.Subject;
         var perCycle = subject.Clip is { } clip
             ? RootMotion.PerCycle(clip, subject.RootBone, subject.RestPose.Locals[subject.RootBone])
             : RootMotion.None;
@@ -458,16 +458,16 @@ internal sealed class ViewerPanels
         // delta is worth driving anything with.
         ImGui.Text($"per cycle  {perCycle.Translation.X:0.000}, {perCycle.Translation.Y:0.000}, {perCycle.Translation.Z:0.000}");
         ImGui.TextDisabled($"           {perCycle.Distance:0.000} m, {RigAnimation.DegreesOf(perCycle.Rotation):0.0}°");
-        var travel = app.Session.RootTravel;
+        var travel = app.Session.Driven.RootTravel;
         ImGui.Text($"travelled  {travel.X:0.000}, {travel.Y:0.000}, {travel.Z:0.000}");
         ImGui.TextDisabled(
-            $"           {travel.Length():0.000} m net, {RigAnimation.DegreesOf(app.Session.RootTurn):0.0}° net turn");
-        ImGui.TextDisabled($"           {app.Session.RootTurnPathDegrees:0.0}° of turning done to get there");
+            $"           {travel.Length():0.000} m net, {RigAnimation.DegreesOf(app.Session.Driven.RootTurn):0.0}° net turn");
+        ImGui.TextDisabled($"           {app.Session.Driven.RootTurnPathDegrees:0.0}° of turning done to get there");
 
-        var drive = app.Session.DriveRoot;
+        var drive = app.Session.Driven.DriveRoot;
         if (ImGui.Checkbox("drive the model", ref drive))
         {
-            app.Session.DriveRoot = drive;
+            app.Session.Driven.DriveRoot = drive;
         }
 
         ImGui.SameLine();
@@ -507,9 +507,9 @@ internal sealed class ViewerPanels
 
         if (app.Selection.Bone < 0 || app.Selection.Bone >= app.Rig.Skeleton.BoneCount) return;
 
-        var local = app.Session.Posed.Locals[app.Selection.Bone];
-        var rest = app.Session.Subject.RestPose.Locals[app.Selection.Bone];
-        var world = app.Session.BoneWorlds[app.Selection.Bone] * app.Rig.MeshNodeTransform * app.SubjectPlacementOf;
+        var local = app.Session.Driven.Posed.Locals[app.Selection.Bone];
+        var rest = app.Session.Driven.Subject.RestPose.Locals[app.Selection.Bone];
+        var world = app.Session.Driven.BoneWorlds[app.Selection.Bone] * app.Rig.MeshNodeTransform * app.SubjectPlacementOf;
 
         ImGui.TextDisabled($"bone {app.Selection.Bone} · parent {app.Rig.Skeleton.Bones[app.Selection.Bone].ParentIndex}");
         ImGui.Text($"local T {local.Translation.X:0.000}, {local.Translation.Y:0.000}, {local.Translation.Z:0.000}");

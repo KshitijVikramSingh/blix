@@ -424,6 +424,54 @@ public sealed class StudioRig : IDisposable
     /// </remarks>
     public void UploadPalettes(BonePaletteSet palettes) => UploadPalettes(palettes, 0);
 
+    /// <summary>
+    /// Packs N posed bodies into one palette set per skin, at the stride the shader reads.
+    /// </summary>
+    /// <remarks>
+    /// <b>Here because this is where the skins live.</b> A palette matrix is inverse-bind times
+    /// world, the inverse binds belong to the skin, and this type owns <see cref="Skins"/> — so the
+    /// loop over them belongs to it rather than to each caller. It was written twice before that was
+    /// true: once in the viewer's animation and once in the capture tool, and when skins became
+    /// plural both copies had to learn it separately.
+    /// </remarks>
+    /// <param name="poses">One per body, in instance order.</param>
+    /// <param name="placements">Where each body stands. Same length as <paramref name="poses"/>.</param>
+    /// <param name="into">One set per skin, reset by this call.</param>
+    public void PackPalettes(
+        IReadOnlyList<Pose> poses, IReadOnlyList<Matrix4x4> placements, IReadOnlyList<BonePaletteSet> into)
+    {
+        ArgumentNullException.ThrowIfNull(poses);
+        ArgumentNullException.ThrowIfNull(placements);
+        ArgumentNullException.ThrowIfNull(into);
+        if (poses.Count != placements.Count)
+        {
+            throw new ArgumentException(
+                $"{poses.Count} pose(s) and {placements.Count} placement(s); a body needs both.",
+                nameof(placements));
+        }
+
+        if (into.Count != Skins.Count)
+        {
+            throw new ArgumentException(
+                $"{into.Count} palette set(s) for {Skins.Count} skin(s). Each skin has its own inverse "
+                + "binds, so sharing one set would draw some bodies at another skin's bind pose.",
+                nameof(into));
+        }
+
+        foreach (var set in into) set.Reset();
+        for (var body = 0; body < poses.Count; body++)
+        {
+            for (var s = 0; s < Skins.Count; s++)
+            {
+                into[s].Add(Skins[s].Skeleton, poses[body], Skins[s].MeshNodeTransform * placements[body]);
+            }
+        }
+    }
+
+    /// <summary>One palette set per skin, sized for this rig.</summary>
+    public BonePaletteSet[] CreatePaletteSets(int instances) =>
+        Skins.Select(s => new BonePaletteSet(s.Skeleton.BoneCount, instances)).ToArray();
+
     /// <summary>Copies one skin's live instance palettes into that skin's frame buffer.</summary>
     /// <remarks>
     /// <b>Per skin, because a palette is inverse-bind times world and the inverse binds are the
