@@ -159,23 +159,78 @@ this — `AssetLoadLog`, and `GltfSkipped` for meshes the rigged importer declin
 "this file has a second UV set I did not read" is a small addition to an existing shape rather
 than a new one. **Not built yet; listed so it is a decision rather than an oversight.**
 
-### I-B — the viewer can express what the material already says
+### I-B — the viewer can express what the material already says — **RESHAPED ON MEASUREMENT**
 
 `GltfMaterial` carries `AlphaMode`, `AlphaCutoff` and `DoubleSided` and has done for a long time.
-`StudioRig.Part` and `StudioModel` carry none of them, so the stage draws every surface opaque.
+`StudioRig.Part` and `StudioModel` carry none of them.
 
-**26 materials in this tree are `MASK`, and all 26 are the nature kit's foliage.** So
-`view --model CommonTree_1.gltf` draws every leaf card as an opaque rectangle — the viewer cannot
-show the asset the way the asset says it should look, which is a peculiar thing for the tool whose
-job is looking at assets.
+**The original premise was wrong, and checking it before writing code is the only reason that was
+caught.** This section said 26 MASK materials meant `view --model CommonTree_1.gltf` drew every
+leaf card as an opaque rectangle. Measured:
 
-`doubleSided` is true on 96 materials and currently *accidentally* satisfied, because the stage's
-pipelines mostly use `NoCulling`. Accidentally correct is still worth making deliberate: the one
-pipeline that culls is the character pipeline, and a double-sided cape is exactly the case that
-would find it.
+| | measured |
+|---|---|
+| MASK materials | 26 — **all 26 with no base-colour texture and `baseAlpha = 1.00`**, `cutoff = 0.20` |
+| BLEND materials | 1 — `core.glb / Material.004`, the only one with a real texture alpha |
+| `doubleSided` | 96, of which **8 sit on SKINNED assets** |
 
-**Negative control**: an opaque asset is byte-identical; a cutout asset visibly gains holes, and
-setting `AlphaCutoff` to 0 and 1 moves them in the directions the numbers say.
+Alpha on those 26 is `baseColorFactor.w × texture.a` = `1.0 × 1.0` = **1.0 everywhere**, and
+`1.0 < 0.20` is never true. Implementing MASK faithfully would discard nothing and produce a
+byte-identical image. The leaf "cards" are not alpha-cut quads at all — `CommonTree_1` prim1 is
+**3,840 vertices of modelled leaf geometry**. The exporter stamped `MASK` on foliage as a default,
+with no alpha channel for it to act on. **So the MASK third of this stage is decided-no on
+measurement**, in the same way the skinned `.blixmesh` layout was.
+
+**What is live is the third this section dismissed as "accidentally satisfied".** Every material on
+all three rigged characters is `doubleSided` — `Rogue.glb` (1 material, 12 primitives),
+`villager_peasant.glb` (4, including **`MI_Hair_1`** at 646 verts) and `villager_ranger.glb` (3) —
+and a rig draws on `skinnedPipeline`, the one pipeline on this stage that culls back faces. On a
+closed body that is invisible and the culling comment is right about it. **Hair cards are not a
+closed body**, and that is a defect visible in the viewer today on the assets this arc has been
+looking at all session.
+
+So the stage is: carry `DoubleSided` through to the rig path and let it pick a non-culling pipeline,
+which is rung three of the studio ladder and needs no new mechanism. `AlphaMode`/`AlphaCutoff` are
+carried at the same time because they are free once the material fields are threaded — but they are
+carried, not demonstrated, and the plan should not claim otherwise.
+
+**Negative controls**
+- An opaque, single-sided asset is byte-identical.
+- The kit's MASK foliage is **also** byte-identical — the control that proves the 26 really are
+  inert rather than that the cutoff was wired backwards.
+- A double-sided asset gains its back faces; `core.glb` is the one asset in the tree that can
+  exercise BLEND at all.
+
+### I-F — the viewer can supply the colour the asset does not have
+
+**Measured while answering "is the grass supposed to be greyscale?" — yes, it is.** All 40 materials
+across the nature kit are `baseColorFactor = (1,1,1,1)` with **no texture**. The asset ships
+geometry, baked vertex AO, and a material NAME. Nothing else. `SettlementArt` is what turns
+`"Grass"` into `(0.110, 0.155, 0.060)` and `"Bark_NormalTree"` into `(0.085, 0.058, 0.038)`.
+
+So the viewer renders these correctly and still **cannot show what any kit asset looks like in the
+game**, which is a strange limitation for the tool whose job is looking at assets.
+
+`StudioModel.Part` drops the material name — it keeps `BaseColour`, which is the white the file
+supplied — so the viewer cannot currently even say which material a part uses. The stage:
+
+1. Carry `Name` through `Part` (one field; it is already in `GltfMaterial` at the call site).
+2. A materials panel listing the distinct names with a colour swatch each, defaulting to the
+   asset's own value.
+3. `ModelView`/`RigView` push the override in place of `part.BaseColour`.
+
+**The tint table stays in the game.** `SettlementArt` lives in RTSGame and the studio must not
+reference a game — but because the panel keys on material NAME, it shows the exact surface a game
+tints against while knowing nothing about any game. Audition a green, read off the RGB.
+
+Open: session-only or persisted, and where I-F sits against I-C/I-D.
+
+> **Chased later, noted so it is not lost:** `--debug` arms the diagnostics system
+> (`Window.cs:98` sets `State.Enabled`) but the overlay also needs `State.ShowOverlay`, toggled by
+> the backtick key (`Window.cs:307`). That part works. What is missing is the **controls tab inside
+> the debug panel** — the stage's `[Tune]` properties are reachable as CLI flags through
+> `ObjectTunables.Apply` and are drawn in the viewer's own `lab` window, but they do not appear as a
+> tab in the debug overlay where one would look for them.
 
 ### I-C — per-instance attachments
 
