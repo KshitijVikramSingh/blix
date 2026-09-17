@@ -985,17 +985,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     /// curve — and the whole value of a sequence is that its frames are comparable with each other
     /// and with everything else the tool has ever written.
     /// </remarks>
-    private bool warnedAboutTonemap;
-
     private bool WriteImage(string path, TextureHandle source)
     {
-        if (renderer.Look.TonemapMode != 0f && !warnedAboutTonemap)
-        {
-            warnedAboutTonemap = true;
-            Console.Error.WriteLine(
-                $"--tonemap-mode {renderer.Look.TonemapMode:0} applies on screen, NOT to this capture: " +
-                "the read-back path tonemaps with ACES only. The picture below is the ACES one.");
-        }
 
         // The viewport target is half the swapchain's size and holds the SECOND camera's picture.
         // Same format as the scene target — deliberately, so both take this one read-back path and
@@ -1015,18 +1006,19 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             var g = (float)BitConverter.ToHalf(pixels, src + 2);
             var b = (float)BitConverter.ToHalf(pixels, src + 4);
 
-            // The same curve the present shader runs — blix_acesFilm — applied here instead,
-            // then an sRGB encode because the swapchain's sRGB format does that in hardware
-            // and a PNG has to do it itself. If a capture ever disagrees with the screen,
-            // this pair is where to look first.
+            // The same curves the present shader runs — blix_tonemap, all four of them — applied
+            // here instead, then an sRGB encode because the swapchain's sRGB format does that in
+            // hardware and a PNG has to do it itself.
             //
-            // <b>ACES, always — which is why a non-ACES look cannot be captured yet.</b> The house
-            // style's tonemap is part of what a capture is supposed to certify, and this hardcodes
-            // one of the four curves blix_tonemap offers. Porting the other three to C# would be
-            // three more copies of a shader, each able to drift from it silently; the comment above
-            // is already the standing warning about the first copy. So the tool says so instead of
-            // writing a picture that quietly disagrees with the screen it claims to match.
-            (r, g, b) = (Aces(r * renderer.Look.Exposure), Aces(g * renderer.Look.Exposure), Aces(b * renderer.Look.Exposure));
+            // <b>It used to hardcode ACES, so --tonemap-mode moved the screen and left the capture
+            // alone.</b> A capture is what certifies the house style and the tonemap is part of it,
+            // so an instrument that cannot be asked about one of the things it exists to measure is
+            // the wrong instrument. Blix.Graphics.Images.Tonemap is the one CPU copy of those curves,
+            // and Test.Graphics section BD holds it answerable to the GLSL rather than trusting two
+            // files to stay in step.
+            var mapped = Tonemap.Apply(
+                new Vector3(r, g, b) * renderer.Look.Exposure, renderer.Look.TonemapMode);
+            (r, g, b) = (mapped.X, mapped.Y, mapped.Z);
 
             var dst = i * 4;
             rgba[dst] = ToSrgbByte(r);
@@ -1037,12 +1029,6 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
         PngWriter.WriteRgba8(path, rgba, width, height);
         return true;
-    }
-
-    private static float Aces(float x)
-    {
-        const float a = 2.51f, b = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
-        return Math.Clamp(x * ((a * x) + b) / ((x * ((c * x) + d)) + e), 0f, 1f);
     }
 
     private static byte ToSrgbByte(float linear)

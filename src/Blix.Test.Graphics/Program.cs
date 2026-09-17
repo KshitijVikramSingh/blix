@@ -4468,6 +4468,89 @@ static ShaderInterface MinimalShader() => new(new[]
     }
 }
 
+// ============================================================================
+// Section BD — the CPU tonemap is answerable to the GLSL one.
+// ============================================================================
+//
+// <b>Two implementations of one curve, in two languages, and only one of them is ever looked at.</b>
+// A capture is read back from the HDR scene target before the present pass runs, so the curve has to
+// be applied in C#; the screen gets it from blix_tonemap on the GPU. Nothing made the pair agree —
+// the capture tool's copy was hardcoded to ACES while the shader offered four curves, so
+// --tonemap-mode moved the screen and left every capture alone, and no test could notice because
+// both halves were internally consistent.
+//
+// This does not prove the two produce identical pixels; proving that needs a GPU harness that reads
+// back a known ramp, which is more machinery than the risk warrants. It proves the CONSTANTS and the
+// mode thresholds still appear in the shader, which is the drift that actually happens: somebody
+// tunes a coefficient in GLSL and the C# keeps the old one. Crude next to reflecting an interface out
+// of SPIR-V, same idea — make the second copy answerable to the first.
+{
+    var glslPath = Path.Combine(
+        AppContext.BaseDirectory, "..", "..", "..", "..", "Blix.Shaders", "tonemap.glsl");
+    var glsl = File.Exists(glslPath) ? File.ReadAllText(glslPath) : null;
+
+    // CONTROL: if the file cannot be found, every check below would pass vacuously. This is the
+    // guard conventions §5's corollary asks for — a green result is not evidence the check ran.
+    t.Expect("BD.0 CONTROL the shader source was actually read",
+        glsl is { Length: > 200 } && glsl.Contains("blix_tonemap", StringComparison.Ordinal),
+        glsl is null ? $"not found at {Path.GetFullPath(glslPath)}" : $"{glsl.Length} chars");
+
+    if (glsl is not null)
+    {
+        foreach (var (name, value) in new (string, float)[]
+        {
+            ("AcesA", Tonemap.AcesA), ("AcesB", Tonemap.AcesB), ("AcesC", Tonemap.AcesC),
+            ("AcesD", Tonemap.AcesD), ("AcesE", Tonemap.AcesE),
+            ("AgxMinEv", Tonemap.AgxMinEv), ("AgxMaxEv", Tonemap.AgxMaxEv),
+        })
+        {
+            var literal = value.ToString("0.######", System.Globalization.CultureInfo.InvariantCulture);
+            t.Expect($"BD.1 {name} = {literal} still appears in tonemap.glsl",
+                glsl.Contains(literal, StringComparison.Ordinal),
+                $"Tonemap.{name} is {literal}; tonemap.glsl no longer contains it");
+        }
+
+        // The selector's thresholds are a convention restated in both files, and restating is how
+        // the two come to disagree.
+        t.Expect("BD.2 the mode thresholds still read 0.5 / 1.5 / 2.5 in the shader",
+            glsl.Contains("mode < 0.5", StringComparison.Ordinal)
+            && glsl.Contains("mode < 1.5", StringComparison.Ordinal)
+            && glsl.Contains("mode < 2.5", StringComparison.Ordinal),
+            "blix_tonemap's selector changed shape");
+    }
+
+    // The curves themselves, pinned. Not a comparison against the GPU — a record of what this
+    // implementation does, so a change to it is deliberate rather than noticed later in a picture.
+    t.Expect("BD.3 ACES maps mid-grey to a lifted value and saturates high input",
+        MathF.Abs(Tonemap.Aces(new Vector3(0.18f)).X - 0.2669f) < 0.001f
+        && Tonemap.Aces(new Vector3(100f)).X > 0.99f,
+        $"0.18 -> {Tonemap.Aces(new Vector3(0.18f)).X:0.0000}, 100 -> {Tonemap.Aces(new Vector3(100f)).X:0.0000}");
+
+    t.Expect("BD.4 Reinhard is x/(1+x) and never reaches 1",
+        MathF.Abs(Tonemap.Reinhard(new Vector3(1f)).X - 0.5f) < 1e-6f
+        && Tonemap.Reinhard(new Vector3(1e6f)).X < 1f,
+        $"1 -> {Tonemap.Reinhard(new Vector3(1f)).X}");
+
+    t.Expect("BD.5 neutral only clamps",
+        Tonemap.Neutral(new Vector3(0.4f)).X == 0.4f && Tonemap.Neutral(new Vector3(3f)).X == 1f,
+        "neutral is not a pure clamp");
+
+    t.Expect("BD.6 AgX is monotonic and bounded",
+        Tonemap.Agx(new Vector3(0.05f)).X < Tonemap.Agx(new Vector3(0.5f)).X
+        && Tonemap.Agx(new Vector3(0.5f)).X < Tonemap.Agx(new Vector3(5f)).X
+        && Tonemap.Agx(new Vector3(1e6f)).X <= 1f,
+        $"{Tonemap.Agx(new Vector3(0.05f)).X:0.000} / {Tonemap.Agx(new Vector3(0.5f)).X:0.000} / {Tonemap.Agx(new Vector3(5f)).X:0.000}");
+
+    // <b>The selector must pick a DIFFERENT curve per mode.</b> The bug this section exists for was
+    // one curve answering for all four, and four modes that agree with each other is exactly what
+    // that looks like from the outside.
+    var hdr = new Vector3(0.6f, 0.35f, 0.12f);
+    var picked = new[] { 0f, 1f, 2f, 3f }.Select(m => Tonemap.Apply(hdr, m).X).ToArray();
+    t.Expect("BD.7 the four modes give four different answers",
+        picked.Distinct().Count() == 4,
+        string.Join(", ", picked.Select(v => v.ToString("0.0000"))));
+}
+
 t.PrintSummary();
 return t.Failed;
 

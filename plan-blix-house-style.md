@@ -395,6 +395,62 @@ run; after, five resizes each on the Rogue and the ranger, exit 0, zero DeviceLo
 That is the second time in two days that the honest instrument turned out to be *run it and look*,
 and the second time the user supplied the observation that made it findable.
 
+## Two cleanups, both closing gaps the work itself surfaced
+
+Neither came from an audit. The tonemap gap turned up while testing flags; the LUT's cost turned up
+because a bake felt slow. That is the method — observation, then understanding, then tooling — and it
+is worth saying because the alternative (enumerating what the instruments might be blind to) is not
+an answerable question.
+
+### `--tonemap-mode` reaches a capture
+
+A capture is read back from the HDR scene target *before* the present pass runs, which is what lets
+it hold real radiance and makes the curve an offline choice. The consequence is that the curve has to
+be applied in C# — and the one copy that existed was hardcoded to ACES, so the flag moved the screen
+and left every capture alone. **A capture is what certifies the house style, and the tonemap is part
+of it**, so the instrument could not be asked about one of the things it exists to measure.
+
+`Blix.Graphics.Images.Tonemap` is now the single CPU copy of all four curves, and the capture tool's
+private ACES is gone. All four modes now produce four different pictures; mode 0 is unchanged, so the
+baseline did not move.
+
+**The hazard is a second implementation of a thing that lives in GLSL, and a comment was already
+there saying so** — *"if a capture ever disagrees with the screen, this pair is where to look first"*.
+A comment is not a check. **Test.Graphics section BD** reads `tonemap.glsl` and fails if the C#
+constants or the mode thresholds have stopped appearing in it.
+
+It does not prove the two produce identical pixels — that needs a GPU harness reading back a known
+ramp, which is more machinery than the risk warrants. It proves the drift that actually happens:
+somebody tunes a coefficient in GLSL and the C# keeps the old one. Verified by fault injection rather
+than asserted — changing `2.51` to `2.52` in the shader turns BD.1 red with both sides named. BD.0 is
+the control that the file was read at all, because otherwise every check below it passes vacuously.
+
+663/663 now, up from 649.
+
+### The BRDF LUT is computed once and kept
+
+It is a pure function of its size and sample count — the Karis split-sum integration over (NdotV,
+roughness), depending on nothing else — so recomputing it per process is simply wrong, and caching it
+is always safe.
+
+`EnvironmentBaker.BakeBrdfLut` takes a **caller-supplied cache directory**, or null to compute every
+time. §6 again: the mechanism is "compute this once and keep it", and where a process may write is
+the caller's business, not an engine's guess on behalf of a game, a tool and a test alike. Every cache
+failure falls back to computing — a cache that can stop a renderer starting is worse than no cache —
+and the file is written beside and moved into place so a killed process leaves no half-table.
+
+| | cold | warm |
+| --- | --- | --- |
+| default (64) | 280.7 ms | **29.8 ms** |
+| 256 | 1412.2 ms | **31.1 ms** |
+
+Only the studio baked this at runtime; Sponza's LUT comes from its cooked probe. The lab baseline
+alone launches the capture tool twenty-three times, so this is about two seconds off every baseline
+run.
+
+**The size stays 64.** The cache removes the recurring cost, not the reason for the choice — 64 still
+differs from 256 by at most 1/255, so a 1.4-second cold run buys nothing visible.
+
 ## Then
 
 **Cascades** — the shadow is one 9 m orthographic box, the most visible quality gap on the thing you

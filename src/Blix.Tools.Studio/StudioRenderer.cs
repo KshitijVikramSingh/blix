@@ -857,7 +857,11 @@ public sealed class StudioRenderer : IDisposable
             },
             "lab.ibl");
 
-        brdfLutTexture = EnvironmentBaker.BakeBrdfLut(vk, Look.BrdfLutSize, "lab.ibl.brdf");
+        // Cached beside the binary. The table is the same numbers on every run, and the lab baseline
+        // alone launches this tool twenty-three times.
+        brdfLutTexture = EnvironmentBaker.BakeBrdfLut(
+            vk, Look.BrdfLutSize, "lab.ibl.brdf",
+            Path.Combine(AppContext.BaseDirectory, "brdf-cache"));
         watch.Stop();
         bakeMilliseconds = watch.Elapsed.TotalMilliseconds;
 

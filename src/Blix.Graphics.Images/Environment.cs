@@ -1,3 +1,4 @@
+using System.IO;
 using System.Numerics;
 using Blix.Graphics;
 
@@ -109,13 +110,79 @@ public static class EnvironmentBaker
     // Karis split-sum 2D BRDF LUT. R = scale, G = bias. Lit shader does
     // F * scale + bias to get the GGX-integrated specular term. Env-
     // independent, so call once and reuse across every probe rebake.
-    public static TextureHandle BakeBrdfLut(IGraphicsDevice device, int size = 256, string name = "brdf_lut")
+    /// <param name="cacheDirectory">
+    /// Where to keep the computed table between runs, or null to compute it every time.
+    /// </param>
+    /// <remarks>
+    /// <b>The table is a pure function of its size and sample count, so caching it is always safe —
+    /// and recomputing it per process is simply wrong.</b> It is the Karis split-sum integration over
+    /// (NdotV, roughness) and depends on nothing else: not the environment, not the sun, not the
+    /// model. Measured on one laptop it is O(n²) and not cheap — 32 → 25 ms, 64 → 84 ms, 128 → 407 ms,
+    /// 256 → 1451 ms — which at the default made it 96% of a procedural environment bake.
+    /// <para>
+    /// <b>The caller decides WHERE, or whether at all.</b> An engine that picks a directory has
+    /// picked it for a game, a tool and a test alike; the mechanism is "compute this once and keep
+    /// it", and where a process is allowed to write is the caller's business.
+    /// </para>
+    /// <para>
+    /// Every cache failure falls back to computing. A missing directory, a read-only volume, a
+    /// truncated file: none of them is a reason for a renderer not to start, and a cache that can
+    /// break the thing it accelerates is worse than no cache.
+    /// </para>
+    /// </remarks>
+    public static TextureHandle BakeBrdfLut(
+        IGraphicsDevice device, int size = 256, string name = "brdf_lut", string? cacheDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(device);
-        var bytes = PbrIblBaker.BakeBrdfLut(size);
+        var bytes = BrdfLutBytes(size, cacheDirectory);
         return device.CreateTexture2D(
             new TextureDescription(size, size, TextureFormat.Rgba8, SamplerDescription.LinearClamp),
             bytes, name);
+    }
+
+    private static byte[] BrdfLutBytes(int size, string? cacheDirectory)
+    {
+        // The sample count is the other half of what the table is a function of. It is not a
+        // parameter here today, but naming it in the file keeps a future change from silently
+        // reading a table baked at a different quality.
+        const int sampleCount = 1024;
+        var expected = size * size * 4;
+        var path = cacheDirectory is null
+            ? null
+            : Path.Combine(cacheDirectory, $"brdf_lut_{size}_{sampleCount}.bin");
+
+        if (path is not null)
+        {
+            try
+            {
+                // Length is the whole validation, and it is enough: the name carries every input,
+                // so a file of the right length under the right name cannot be the wrong table
+                // unless someone has written garbage into it deliberately.
+                var cached = File.Exists(path) ? File.ReadAllBytes(path) : null;
+                if (cached is not null && cached.Length == expected) return cached;
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        var bytes = PbrIblBaker.BakeBrdfLut(size, sampleCount);
+
+        if (path is not null)
+        {
+            try
+            {
+                Directory.CreateDirectory(cacheDirectory!);
+                // Written beside and moved into place, so a process killed mid-write leaves no
+                // half-file for the next run to read as a table.
+                var temp = path + ".partial";
+                File.WriteAllBytes(temp, bytes);
+                File.Move(temp, path, overwrite: true);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        return bytes;
     }
 
     // CPU-only bake. Runs the equirect-to-cube + diffuse irradiance +
