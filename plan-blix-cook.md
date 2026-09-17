@@ -253,6 +253,27 @@ vertices, the skeleton, and the clips — the Rogue carries 76 — which is a ne
 fifth column in this one. It has what neither K-F nor K-G's second half has: **a live consumer and a
 number**.
 
+## Re-read under conventions §8 — three of these were not blocked
+
+§8 says a rule against inventing is not a rule against finishing, and that a deferral must name
+what would END it in terms someone can check. Run against this plan's own parks:
+
+| parked as | actually | end condition, checkable |
+|---|---|---|
+| `.blixtex` / `.blixprobe` — "no consumer" | **proven, then orphaned by a drive.** `d376b39` records what they bought: *"Sponza Modern startup: ~6s → ~0.5s."* `568c1d4` moved the pack set to an external SSD seven days later for portability. The census 107 days on read that absence as absence of a requirement | **re-mount `BLIX_SPONZA_ASSETS` and re-run `blix check --cooked`.** Not "a consumer appears" |
+| **K-F — materials** | **half blocked, and the wrong half.** Materials are not textures: factors, alpha mode, alpha cutoff, double-sided, names and texCoord sets are cookable today and are part of what `SourceRequired` covers. Only the image BYTES need the grouping decision. The plan collapsed two questions into one park | **cook everything but the bytes**, and let the flag record what remains rather than all of it |
+| **K-G second half** — "a project declares a recipe" | **a test, not a design.** The substrate is already extracted and general: `[Recipe]`, `Blix.Cooked` with no dependencies, `BlixCook` in the build targets, four instances. Nothing has to be invented to try it | **one recipe declared outside `Blix.*`**, however small. It commits to nothing |
+| **D5 — grouping** | **genuinely open, and it survives §8.** Atlas, texture array, streaming pool and content-addressed store are DIFFERENT SHAPES, and §4's own worked example is exactly this: two nav systems were not unified because unifying different algorithms forces one shape onto two | **a measured scene whose texture bytes do not fit**, which is a number, not a request |
+
+And the same re-read applies once more, outside this plan: **resource identity**. Eight files carry
+a hand-rolled cache — `GltfShared`, `GltfStaticImporter`, `GltfImporter`, `GltfTextureLoader`,
+`StudioModel`, `StudioRig`, and Sponza twice — across three layers and two independent owners, and
+Sponza's `materialCache` and Blix's want the same decision. That is §4's test passing, not failing:
+*two consumers, the same decision, and naming it adds capability* — sharing across loads, which is
+what makes eviction possible at all. It is the cook arc's own opening sentence about the formats,
+said again about caches: **instances written by hand, none of which knows it is an instance of
+anything.**
+
 ## The decisions, as settled
 
 | | question | answer |

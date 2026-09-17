@@ -359,6 +359,52 @@ rather than from a sweep of the content.
 
 ---
 
+## 8. A rule against inventing is not a rule against finishing
+
+- **The failure has one signature: a citation used to stop *completing* something rather
+  than to stop *inventing* something.** §4 and §5 exist to prevent pre-empting a pattern —
+  naming an abstraction before two consumers want the same decision, adding policy before
+  anything disagrees. Neither says a capability may not exist until somebody asks for it,
+  and neither gates finishing a pattern that is already named and has instances.
+- **Once a pattern is named and instantiated, a further instance is a cost question, not a
+  permission question.** Weigh what it costs to build and to carry. "Nobody has asked" is
+  not an argument about a pattern that four things already are.
+- **A deferral must name what would END it, in terms someone can check.** "When a consumer
+  asks" is not checkable — consumers do not file requests, and the phrase survives forever
+  because nothing can disprove it. "When a second project declares a recipe", "when a scene
+  exceeds a budget", "when Sponza is re-measured" are checkable, and they expire.
+- **Three questions before citing a rule to defer. A "no" to any one means it does not apply:**
+  1. Am I preventing an *invention* — a shape nobody has built — or the next *instance* of a
+     shape already built?
+  2. Is the absence I am citing a fact about the **design**, or about **this checkout**?
+     Content on another drive, a demo nobody ran, an asset nobody downloaded: none of those is
+     a missing requirement. (§7 is the same idea for formats — the spec is the requirement,
+     not the contents of the tree.)
+  3. If I defer, does something stay **half** built? A half-built thing with a citation on it
+     costs more than finishing or deleting it, because the citation makes it look decided and
+     the next reader re-derives the same argument instead of the same question.
+
+- *Worked example, and it is ours.* **2026-05-24** (`d376b39`) landed `.blixtex`, `.blixprobe`
+  and `.blixmesh` together, and the commit records what they bought: *"Sponza Modern startup:
+  ~6s → ~0.5s."* The formats were proven. **2026-05-31** (`568c1d4`) moved Sponza's pack set to
+  an external SSD — a portability decision about a multi-GB download, with no design content at
+  all. **2026-09-15** (`2aa1faa`), 107 days later, the cook census counted *"0 external images…
+  the `.blixtex` sideload path cannot fire on anything in the repository"* and that absence was
+  read as **absence of a requirement**, which parked D5 and K-F behind it.
+  The rule was applied to an artifact of storage. Nothing about the design had changed since the
+  day it was proven; what changed was which drive the content sat on.
+- *Second example, same shape.* `AssetLoadReport` was declared **2026-05-25** naming the four
+  states a load can be in, and had **zero emitters until 2026-09-16** — 114 days during which the
+  emptiness was written up as a finding rather than treated as a thing to finish. It took one
+  stage (K-E) once anyone tried.
+
+**Enforced by:** a deferral in any `plan-*.md` naming a checkable end condition rather than a
+consumer · `git log` for the two examples above (`d376b39`, `568c1d4`, `2aa1faa`) · and by §4's
+own text, whose test is *"do two consumers want the same decision, and does naming it add
+capability?"* — a question about abstraction, not about permission.
+
+---
+
 ## Where the surface stands
 
 Blix now reaches across the corners it set out to cover — rendering,
