@@ -96,6 +96,10 @@ public sealed partial class VulkanGraphicsDevice
     {
         TextureFormat.Rgba8 => 4,
         TextureFormat.Rgba16F => 8,
+        // Packed HDR: one 32-bit word holding 11/11/10 bits of float. The caller unpacks; this only
+        // has to say how wide a pixel is. Without it a renderer using this as its scene target —
+        // which is the point of the format — cannot be captured at all.
+        TextureFormat.R11G11B10F => 4,
         _ => 0,
     };
 }
