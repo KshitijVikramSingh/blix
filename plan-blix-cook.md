@@ -390,8 +390,29 @@ category that quietly falls back.
 | Runner | 10 / 12 | **12 / 12** |
 | Bulwark | 7 / 8 | **8 / 8** |
 
-The one remaining slow load is `Villager.obj`, which no cook glob claims — a declaration gap, not a
-format one.
+**Every load in RTSGame's tree is now cooked — 150 of 150.** The last one was `Villager.obj`, and
+what it needed was not a wider glob. It is loaded through `ObjImporter` with
+`RecenterToOrigin = false` while the recipe hardcoded the kit's default, so cooking it would have
+produced a file the loader's settings guard correctly refuses: *"sibling exists but was not cooked
+with recenter=0"*. Centring is the CALLER's decision, so it became an option — read from the
+`BlixCook` item's `Options`, which `Directory.Build.targets` has threaded to recipes since K-D and
+which **nothing had used until now**. A mechanism with no consumer is a mechanism nobody has checked.
+
+Two more things fell out of cooking one 120 KB file:
+
+- **`omsh` was overstating its debt.** It declared `SourceRequired | SourceRequiredForImagesOnly` on
+  every file, and this kit's `.mtl` libraries contain no `map_` line at all — so each cooked mesh
+  claimed its source was needed for image bytes that do not exist. The same overstatement K-F was
+  written to remove, reappearing in the one recipe that is not Blix's. It now reads the material
+  library and answers `CookedFlags.None` when nothing is owed, conservatively (an unreadable or
+  missing library answers "owed", because denying a debt that exists ships an artifact that quietly
+  lost a texture).
+- **The judge was asking the wrong question confidently.** `check --cooked` routes `.obj` through
+  `WavefrontParts`, which centres by default — so it judged a correctly cooked, uncentred Villager
+  against a setting no consumer of that file uses, and called it slow. It now loads with the
+  settings the cooked file was STAMPED with. The blind spot that leaves is stated in the code: a
+  file cooked for settings nobody wants reads as cooked here, which the loader's guard still catches
+  for every real consumer.
 
 **Three things were measured rather than assumed, and each changed the design.**
 

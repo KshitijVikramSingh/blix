@@ -614,6 +614,17 @@ public static class Program
                         guarded is { Mode: AssetLoadMode.Source }
                         && guarded.Warning?.Contains("recenter=0", StringComparison.Ordinal) == true,
                         guarded?.Warning ?? "no report");
+
+                    // <b>A cooked OBJ whose material library names no texture owes NOTHING.</b>
+                    // This kit's .mtl files carry colour and no map_ line at all, and the recipe
+                    // declared SourceRequired | SourceRequiredForImagesOnly on every file anyway —
+                    // claiming its source was needed for image bytes that do not exist. The same
+                    // overstatement K-F removed from the mesh cook, in the one recipe that is not
+                    // Blix's, and the reason a flag nobody checks drifts.
+                    var objHeader = CookedFile.TryReadHeader(Path.ChangeExtension(objAsset, ".blixmesh"));
+                    t.Expect("a cooked OBJ with no textures declares nothing owed",
+                        objHeader?.Stamp.Flags == CookedFlags.None,
+                        $"flags = {objHeader?.Stamp.Flags.ToString() ?? "no header"}");
                 }
                 finally
                 {

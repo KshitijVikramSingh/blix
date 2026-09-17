@@ -160,7 +160,21 @@ public static class Program
     {
         if (Path.GetExtension(source).Equals(".obj", StringComparison.OrdinalIgnoreCase))
         {
-            WavefrontParts.Import(source);
+            // <b>Loaded with the settings the cooked file was made for, not with this reader's
+            // defaults.</b> An OBJ has two readers here and they disagree about centring:
+            // WavefrontParts centres, ObjImporter can be told not to. Hardcoding one meant judging
+            // Villager.obj — cooked UNCENTRED because that is what its consumer asks for — against
+            // a setting no consumer of that file uses, and reporting a correctly cooked asset as
+            // slow. An instrument that answers the wrong question confidently is worse than one
+            // that answers none.
+            //
+            // <b>The blind spot this leaves, stated:</b> a file cooked with settings NOBODY wants
+            // reads as cooked here. That is narrow — the loader's guard still refuses it for every
+            // real consumer, which is where it matters — and it is the price of the judge not
+            // pretending to know which reader a game uses.
+            var stamped = CookedFile.TryReadHeader(Path.ChangeExtension(source, ".blixmesh"));
+            var recenter = stamped?.Stamp.Parameters.Contains("recenter=0", StringComparison.Ordinal) != true;
+            WavefrontParts.Import(source, recenter);
             return;
         }
 

@@ -45,7 +45,8 @@ public static class ObjMeshRecipe
     /// <summary>Bumped when the written bytes change for an unchanged source.</summary>
     // v3: the material table (.blixmesh v5) — each part's colour travels with the geometry.
     // v4: `recenter` is stamped, because the loader now refuses a file cooked with the other value.
-    public const int Version = 4;
+    // v5: `recenter` is an OPTION, and the flags stop claiming a debt this kit does not owe.
+    public const int Version = 5;
 
     /// <summary>What <c>blix cook</c> calls, and what the index finds without loading this assembly.</summary>
     [Recipe("omsh",
@@ -76,7 +77,17 @@ public static class ObjMeshRecipe
         // this recipe consume its own previous output and re-cook that. Caught here only because a
         // format version changed in the same commit; at a matching version it would have looked
         // like it worked.
-        var parts = WavefrontParts.ImportSource(request.SourcePath);
+        // <b>recenter is the CALLER's, because two consumers in this tree disagree about it.</b>
+        // WavefrontParts centres by default and SettlementArt loads Villager.obj through
+        // ObjImporter with RecenterToOrigin = false, so a recipe that hardcodes one of them can
+        // only ever cook for one of them — the other gets its cooked file refused by the loader's
+        // settings guard, which is a worse outcome than not cooking it at all.
+        //
+        // It arrives through the BlixCook item's Options, which Directory.Build.targets has
+        // threaded to recipes since K-D and which nothing had used. A mechanism with no consumer
+        // is a mechanism nobody has checked.
+        var recenter = request.Flag("recenter", fallback: true);
+        var parts = WavefrontParts.ImportSource(request.SourcePath, recenter);
         if (parts.Count == 0) return CookOutcome.Skipped("no parts in this .obj");
 
         // BlixMeshFile carries ONE layout for every primitive, so a file whose parts disagree
@@ -142,8 +153,19 @@ public static class ObjMeshRecipe
             // WavefrontParts centres by default and ObjImporter can be told not to, so a cooked
             // file is only valid for the setting it was made with. Stamping it is what lets the
             // loader refuse rather than silently hand back geometry shifted by half a bounding box.
-            $"layout={layout.Stride}B parts={primitives.Length} recenter=1",
-            CookedFlags.SourceRequired | CookedFlags.SourceRequiredForImagesOnly);
+            $"layout={layout.Stride}B parts={primitives.Length} recenter={(recenter ? 1 : 0)}",
+            // <b>Nothing is owed when the material library names no texture.</b> This declared
+            // SourceRequired | SourceRequiredForImagesOnly unconditionally, on a kit whose .mtl
+            // files contain no map_ line at all — so every cooked file claimed its source was
+            // needed for image bytes that do not exist. That is exactly the overstatement K-F was
+            // written to remove, reappearing in the one recipe that is not Blix's.
+            //
+            // Checked rather than assumed, because a .mtl that DOES name a texture is a real case
+            // and WavefrontParts does not surface it: the cooked form would then be genuinely
+            // incomplete, and saying so is the flag's whole job.
+            ReferencesTextures(request.SourcePath)
+                ? CookedFlags.SourceRequired | CookedFlags.SourceRequiredForImagesOnly
+                : CookedFlags.None);
 
         BlixMeshWriter.Write(
             request.OutputPath, new BlixMeshFile(primitives, materials), stamp);
@@ -151,5 +173,60 @@ public static class ObjMeshRecipe
         return CookOutcome.Written(
             $"{primitives.Length} parts, {primitives.Sum(p => p.VertexCount)} vertices, " +
             $"{primitives.Sum(p => p.Lods[0].IndexCount) / 3} triangles, {layout.Stride}B layout");
+    }
+
+    /// <summary>True when any material library this OBJ names references a texture map.</summary>
+    /// <remarks>
+    /// <b>Reads the .mtl rather than the parts, because the parts cannot answer it.</b>
+    /// <see cref="WavefrontParts"/> surfaces a material's NAME and its diffuse COLOUR and nothing
+    /// else, so a cooked file built from it silently drops any map_Kd the author wrote. Whether
+    /// that happened is the difference between a cooked mesh that stands alone and one that still
+    /// needs its source, which is precisely what the flags exist to record.
+    /// <para>
+    /// Unreadable or missing libraries answer TRUE — the conservative direction. Claiming a debt
+    /// that turns out not to exist costs a load report line; denying one that does exist ships an
+    /// artifact that quietly lost a texture.
+    /// </para>
+    /// </remarks>
+    private static bool ReferencesTextures(string objPath)
+    {
+        var dir = Path.GetDirectoryName(Path.GetFullPath(objPath)) ?? ".";
+        var libraries = new List<string>();
+
+        try
+        {
+            foreach (var line in File.ReadLines(objPath))
+            {
+                if (!line.StartsWith("mtllib ", StringComparison.Ordinal)) continue;
+                foreach (var name in line[7..].Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    libraries.Add(Path.Combine(dir, name.Trim()));
+                }
+            }
+        }
+        catch (IOException)
+        {
+            return true;
+        }
+
+        if (libraries.Count == 0) return false;
+
+        foreach (var library in libraries)
+        {
+            if (!File.Exists(library)) return true;
+            try
+            {
+                foreach (var line in File.ReadLines(library))
+                {
+                    if (line.TrimStart().StartsWith("map_", StringComparison.OrdinalIgnoreCase)) return true;
+                }
+            }
+            catch (IOException)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

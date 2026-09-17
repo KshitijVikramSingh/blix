@@ -90,6 +90,12 @@
     <!-- The nature kit, through RTSGame's OWN recipe. The targets file says a project's
          recipe takes the same path as Blix's; this is that sentence under test. -->
     <BlixCook Include="Assets/models/nature/**/*.obj" Recipe="omsh" Cooked=".blixmesh" />
+    <!-- The villager is cooked UNCENTRED, because SettlementArt loads it through
+         ObjImporter with RecenterToOrigin = false. Cooking it with the kit's default
+         would produce a file the loader's settings guard correctly refuses — geometry
+         shifted by half a bounding box is not a faster answer to the same question. -->
+    <BlixCook Include="Assets/models/Villager.obj" Recipe="omsh" Cooked=".blixmesh"
+              Options="recenter=0" />
     <CookMesh Include="Assets/models/**/*.gltf" />
     <CookMesh Include="Assets/models/**/*.glb" />
     <CookFont Include="Assets/fonts/*.font.json" />
