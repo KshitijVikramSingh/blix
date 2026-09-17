@@ -235,12 +235,34 @@ public sealed partial class VulkanGraphicsDevice
         {
             KhrSurface.GetPhysicalDeviceSurfacePresentModes(PhysicalDevice, Surface, &pmCount, p);
         }
+        // <b>MAILBOX first, then IMMEDIATE, and the second one is why this was broken.</b> Only
+        // MAILBOX was considered, so on any surface that does not offer it — MoltenVK generally
+        // offers FIFO and IMMEDIATE — turning vsync off silently left FIFO in place. Nothing
+        // reported it, and every frame time measured on this machine came back a multiple of the
+        // refresh interval: 33.3, 50.0, 66.6, 83.3. A profiling switch that quietly does nothing is
+        // worse than one that is missing, because the numbers look like measurements.
+        //
+        // MAILBOX is preferred where it exists (uncapped, no tearing); IMMEDIATE tears, which is an
+        // acceptable trade for the one thing this flag exists to do.
         var chosenPresent = PresentModeKHR.FifoKhr;
         if (!vsyncEnabled)
         {
             foreach (var pm in presentModes)
             {
                 if (pm == PresentModeKHR.MailboxKhr) { chosenPresent = pm; break; }
+            }
+            if (chosenPresent == PresentModeKHR.FifoKhr)
+            {
+                foreach (var pm in presentModes)
+                {
+                    if (pm == PresentModeKHR.ImmediateKhr) { chosenPresent = pm; break; }
+                }
+            }
+            if (chosenPresent == PresentModeKHR.FifoKhr)
+            {
+                Console.WriteLine(
+                    "[blix] vsync off requested but neither MAILBOX nor IMMEDIATE is available; " +
+                    "staying on FIFO. Frame times will be quantised to the refresh interval.");
             }
         }
 
