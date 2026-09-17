@@ -141,6 +141,7 @@ internal sealed partial class SponzaLoop
         // Reuses present.vert: both are fullscreen triangles synthesised from gl_VertexIndex.
         var gtaoInterface = Reflect("present.vert", "gtao.frag");
         var gtaoDenoiseInterface = Reflect("present.vert", "gtao_denoise.frag");
+        var hiZInterface = Reflect("present.vert", "hiz_build.frag");
         var shadowOpaqueInterface = Reflect("shadow.vert", "shadow.frag");
         var shadowMaskInterface = Reflect("shadow_mask.vert", "shadow_mask.frag");
 
@@ -199,6 +200,23 @@ internal sealed partial class SponzaLoop
             .ResolveDepth(depthResolveHandle)     // free-ish: rides the pass's depth store
             .Shader(litInterface)
             .Handle;
+
+        // The Hi-Z pyramid, immediately after the pre-pass that resolves the depth it reduces.
+        // Level 0 is half the framebuffer — the same grid GTAO already works on, so its consumers
+        // need no extra rescaling — and each level halves again.
+        for (var level = 0; level < HiZLevels; level++)
+        {
+            hiZHandles[level] = graph.ColorTarget(
+                $"hi-z{level}", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f / (1 << level)));
+        }
+        for (var level = 0; level < HiZLevels; level++)
+        {
+            var builder = graph.GraphicsPass($"hi-z{level}")
+                .Target(hiZHandles[level], LoadOp.Clear, StoreOp.Store);
+            // Level 0 reduces the resolved scene depth; every level after reduces its predecessor.
+            builder = level == 0 ? builder.Read(depthResolveHandle) : builder.Read(hiZHandles[level - 1]);
+            hiZPassHandles[level] = builder.Shader(hiZInterface).Handle;
+        }
 
         // Ambient visibility, between the pre-pass that gives it depth and the lit pass that
         // consumes it. Declared here because graph order IS declaration order.
@@ -361,6 +379,15 @@ internal sealed partial class SponzaLoop
         gtaoPipeline = Pipeline(gtaoProgram, VertexPosition3NormalTexture.Layout,
             DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled }, gtaoPassHandle, "gtao");
+
+        var hiZSpv = File.ReadAllBytes(Path.Combine(shaderDir, "hiz_build.frag.spv"));
+        hiZProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, hiZSpv, hiZInterface, "hiz_build");
+        for (var level = 0; level < HiZLevels; level++)
+        {
+            hiZPipelines[level] = Pipeline(hiZProgram, VertexPosition3NormalTexture.Layout,
+                DepthState.Disabled, RasterizerState.NoCulling,
+                new[] { BlendState.Disabled }, hiZPassHandles[level], $"hiz{level}");
+        }
 
         var gtaoDenoiseSpv = File.ReadAllBytes(Path.Combine(shaderDir, "gtao_denoise.frag.spv"));
         gtaoDenoiseProgram = vk.CreateShaderProgramFromSpv(

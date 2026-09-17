@@ -308,6 +308,38 @@ internal sealed partial class SponzaLoop
             }
         });
 
+        // Hi-Z pyramid: level 0 reduces the resolved depth, each level after reduces its parent.
+        {
+            Matrix4x4.Invert(cameraProjection, out var hiZInvProjection);
+            for (var level = 0; level < HiZLevels; level++)
+            {
+                var srcW = level == 0 ? frame.Width : Math.Max(1, frame.Width >> level);
+                var srcH = level == 0 ? frame.Height : Math.Max(1, frame.Height >> level);
+                var dstW = Math.Max(1, frame.Width >> (level + 1));
+                var dstH = Math.Max(1, frame.Height >> (level + 1));
+                var source = level == 0
+                    ? graph.GetDepthTexture(depthResolveHandle)
+                    : graph.GetColorTexture(hiZHandles[level - 1]);
+                var uniforms = new ShaderUniform[]
+                {
+                    new("uInvProjection", new Matrix4x4Uniform(hiZInvProjection)),
+                    new("uSizes", new Vector4Uniform(new Vector4(srcW, srcH, dstW, dstH))),
+                    new("uMode",  new Vector4Uniform(new Vector4(level == 0 ? 1f : 0f, 0f, 0f, 0f))),
+                };
+                var levelIndex = level;
+                var skipHiZ = abMode == "hiz" && AbOffPhase;
+                graph.Pass(hiZPassHandles[level], scope =>
+                {
+                    if (skipHiZ) return;
+                    fullscreen.Draw(
+                        scope, hiZPipelines[levelIndex],
+                        new[] { new ShaderTextureBinding("uSource", source, Slot: 1) },
+                        pushConstants: null,
+                        uniforms: uniforms);
+                });
+            }
+        }
+
         // Ambient visibility. Reads the 1x depth the pre-pass just resolved, writes bent normal +
         // visibility for the lit pass. When disabled the pass still runs and clears to white-ish —
         // a stale buffer would be worse than a cleared one, and "disabled" must mean "the term is
@@ -434,6 +466,7 @@ internal sealed partial class SponzaLoop
             && framePeriodCount >= 60 && framesRendered >= shotFrame)
         {
             shotWritten = true;
+            VerifyHiZ();
             WriteAmbientShot(path);
             // <b>The RAW buffer as well, because the denoised one cannot answer questions about the
             // search.</b> Every reading taken off the denoised target is a depth-weighted average of
@@ -477,6 +510,92 @@ internal sealed partial class SponzaLoop
         Console.WriteLine($"[VulkanSponza]   {path} + {Path.GetFileName(visPath)}  ({width}x{height}, pre-denoise)");
     }
 
+    /// <summary>Checks each pyramid level really is the min/max of the one above it.</summary>
+    /// <remarks>
+    /// <b>A pyramid that produces plausible pixels and the wrong reduction is the worst case.</b>
+    /// Occlusion culling built on a max channel that is not actually the maximum drops geometry that
+    /// is visible, and the symptom is objects vanishing at certain camera angles — a bug that looks
+    /// like culling logic and is not. So the level-to-level relationship is checked arithmetically
+    /// here, on the real buffers, rather than trusted because the image looked like a depth buffer.
+    ///
+    /// Recomputed on the CPU from level i to predict level i+1, then compared. The tolerance is
+    /// half-float slack, not a fudge: the GPU reduced in fp16 and so must this comparison.
+    /// </remarks>
+    private void VerifyHiZ()
+    {
+        Console.WriteLine("[VulkanSponza] Hi-Z pyramid:");
+        float[]? parent = null;
+        int parentW = 0, parentH = 0;
+        for (var level = 0; level < HiZLevels; level++)
+        {
+            var pixels = vk.ReadTexture(
+                graph.GetColorTexture(hiZHandles[level]), out var w, out var h, out var format);
+            if (format != TextureFormat.Rgba16F) { Console.WriteLine("  unexpected format"); return; }
+
+            var lo = new float[w * h];
+            var hi = new float[w * h];
+            for (var i = 0; i < w * h; i++)
+            {
+                lo[i] = (float)BitConverter.ToHalf(pixels, i * 8);
+                hi[i] = (float)BitConverter.ToHalf(pixels, i * 8 + 2);
+            }
+
+            var finite = lo.Where(v => v > 0 && !float.IsInfinity(v)).ToArray();
+            var nearest = finite.Length > 0 ? finite.Min() : 0f;
+            var farthest = hi.Where(v => !float.IsInfinity(v)).DefaultIfEmpty(0f).Max();
+
+            var verdict = "";
+            if (parent is not null)
+            {
+                // <b>Conservativeness, not equality — and the difference is the whole point.</b>
+                // This first asserted that a level EQUALS the 2x2 reduction of its parent, and
+                // levels 2 and 4 failed: 405 rows reduce to 202, so a footprint of exactly two
+                // SKIPS a row. The shader spans ceil() instead and overlaps, which is why it passed
+                // through the even levels and not the odd ones.
+                //
+                // Equality was the wrong invariant to demand. What a consumer needs is that the
+                // pyramid never UNDER-states: min no larger than the true min, max no smaller than
+                // the true max. An overlapping footprint satisfies that and a truncating one does
+                // not, so the check that would have blessed the dangerous version is the one that
+                // was failing the safe one.
+                var spanX = Math.Max(1, parentW / w);
+                var spanY = Math.Max(1, parentH / h);
+                double worstLo = 0, worstHi = 0;
+                var tight = true;
+                for (var y = 0; y < h; y++)
+                for (var x = 0; x < w; x++)
+                {
+                    float expectLo = float.MaxValue, expectHi = float.MinValue;
+                    for (var sy = 0; sy < spanY; sy++)
+                    for (var sx = 0; sx < spanX; sx++)
+                    {
+                        var px = Math.Min(parentW - 1, x * spanX + sx);
+                        var py = Math.Min(parentH - 1, y * spanY + sy);
+                        expectLo = MathF.Min(expectLo, parent[(py * parentW + px) * 2]);
+                        expectHi = MathF.Max(expectHi, parent[(py * parentW + px) * 2 + 1]);
+                    }
+                    var scale = MathF.Max(1f, MathF.Abs(expectHi));
+                    // Violation only when the level is LESS conservative than its parent's window.
+                    worstLo = Math.Max(worstLo, (lo[y * w + x] - expectLo) / scale);
+                    worstHi = Math.Max(worstHi, (expectHi - hi[y * w + x]) / scale);
+                    if (lo[y * w + x] < expectLo - 1e-3f || hi[y * w + x] > expectHi + 1e-3f) tight = false;
+                }
+                var ok = worstLo < 0.01 && worstHi < 0.01;
+                var fit = tight ? "tight" : "overlapping";
+                verdict = ok
+                    ? $"  conservative OK, {fit}"
+                    : $"  NOT CONSERVATIVE (min over by {worstLo:0.000}, max under by {worstHi:0.000})";
+            }
+
+            Console.WriteLine(
+                $"  level {level}: {w,5}x{h,-4} nearest {nearest,7:0.00} m  farthest {farthest,8:0.00} m{verdict}");
+
+            parent = new float[w * h * 2];
+            for (var i = 0; i < w * h; i++) { parent[i * 2] = lo[i]; parent[i * 2 + 1] = hi[i]; }
+            parentW = w; parentH = h;
+        }
+    }
+
     /// <summary>Frame-period statistics over the captured window, as a distribution rather than a number.</summary>
     /// <remarks>
     /// Median and quartiles, not a mean: this laptop throws occasional frames two and three times
@@ -495,6 +614,7 @@ internal sealed partial class SponzaLoop
             "shadow" => "sun shadows",
             "gtao"   => "ambient visibility (GTAO)",
             "prepass"=> "the depth pre-pass",
+            "hiz"    => "the Hi-Z pyramid",
             _        => "post-load shading",
         };
         Report($"ON  : with {term}", framePeriodsMs, framePeriodCount);

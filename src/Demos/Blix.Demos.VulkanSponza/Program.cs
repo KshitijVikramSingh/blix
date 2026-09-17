@@ -115,6 +115,15 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private Matrix4x4 cameraProjection;
     private GraphResourceHandle depthResolveHandle;   // 1x scene depth, sampleable
     private GraphResourceHandle ambientHandle;        // rgb = bent normal (world), a = visibility
+    // --- Hi-Z depth pyramid -----------------------------------------------
+    // Six levels from half the framebuffer down, each the min/max linear view depth of its parent's
+    // footprint. Separate targets rather than mips of one image — see hiz_build.frag for why.
+    private const int HiZLevels = 6;
+    private readonly GraphResourceHandle[] hiZHandles = new GraphResourceHandle[HiZLevels];
+    private readonly PassHandle[] hiZPassHandles = new PassHandle[HiZLevels];
+    private ShaderProgramHandle hiZProgram;
+    private readonly PipelineHandle[] hiZPipelines = new PipelineHandle[HiZLevels];
+
     private GraphResourceHandle ambientDenoisedHandle; // what the lit pass actually samples
     private PassHandle gtaoPassHandle;
     private PassHandle gtaoDenoisePassHandle;
