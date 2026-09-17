@@ -70,7 +70,7 @@ internal sealed partial class SponzaLoop
             -cp * MathF.Cos(camYaw)));
         var view = Matrix4x4.CreateLookAt(cameraPosition, cameraPosition + cameraForward, Vector3.UnitY);
         // Sponza atrium spans tens of metres; far plane needs to be generous.
-        var proj = GraphicsMatrices.CreatePerspectiveVulkan(fovYRadians, aspect, 0.1f, 200f);
+        var proj = GraphicsMatrices.CreatePerspectiveVulkan(fovYRadians, aspect, CameraNearPlane, CameraFarPlane);
         // Kept apart as well as combined: GTAO reconstructs VIEW space from depth, which needs the
         // projection alone, and returns a bent normal in world space, which needs the view alone.
         cameraView = view;

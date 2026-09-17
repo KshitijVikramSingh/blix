@@ -111,6 +111,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // GTAO has to read depth. The resolve rides along with the pass's store rather than costing a
     // second geometry pass, which is what makes a screen-space occlusion term affordable in a
     // FORWARD renderer with MSAA — the combination that usually forces a G-buffer.
+    // Named, because three places now need to agree about them: the projection, the Hi-Z
+    // linearisation, and GTAO's background test.
+    private const float CameraNearPlane = 0.1f;
+    private const float CameraFarPlane = 200f;
     private Matrix4x4 cameraView;
     private Matrix4x4 cameraProjection;
     private GraphResourceHandle depthResolveHandle;   // 1x scene depth, sampleable

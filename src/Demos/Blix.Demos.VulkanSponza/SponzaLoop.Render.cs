@@ -363,16 +363,21 @@ internal sealed partial class SponzaLoop
                 new("uParams",        new Vector4Uniform(new Vector4(
                     ambient.Enabled && !(abMode == "gtao" && AbOffPhase) ? ambient.RadiusMetres : 0f,
                     projectionScale, aoDebug, 0f))),
+                // The view ray, in NDC units. The negated Y is Vulkan's flip, taken from the
+                // projection rather than rediscovered in the shader — the same flip whose omission
+                // in the slice basis made the whole floor read as fully occluded.
+                new("uRay",           new Vector4Uniform(new Vector4(
+                    MathF.Tan(fovYRadians * 0.5f) * aspect, -MathF.Tan(fovYRadians * 0.5f),
+                    CameraFarPlane * 0.98f, 0f))),
             };
+            var hiZBindings = new ShaderTextureBinding[HiZLevels];
+            for (var level = 0; level < HiZLevels; level++)
+            {
+                hiZBindings[level] = new ShaderTextureBinding(
+                    $"uHiZ[{level}]", graph.GetColorTexture(hiZHandles[level]), Slot: 1, ArrayIndex: level);
+            }
             graph.Pass(gtaoPassHandle, scope => fullscreen.Draw(
-                scope, gtaoPipeline,
-                new[]
-                {
-                    new ShaderTextureBinding(
-                        "uSceneDepth", graph.GetDepthTexture(depthResolveHandle), Slot: 1),
-                },
-                pushConstants: null,
-                uniforms: gtaoUniforms));
+                scope, gtaoPipeline, hiZBindings, pushConstants: null, uniforms: gtaoUniforms));
 
             var denoiseUniforms = new ShaderUniform[]
             {

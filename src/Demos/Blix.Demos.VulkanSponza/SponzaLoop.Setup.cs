@@ -220,11 +220,12 @@ internal sealed partial class SponzaLoop
 
         // Ambient visibility, between the pre-pass that gives it depth and the lit pass that
         // consumes it. Declared here because graph order IS declaration order.
-        gtaoPassHandle = graph.GraphicsPass("gtao")
-            .Target(ambientHandle, LoadOp.Clear, StoreOp.Store)
-            .Read(depthResolveHandle)
-            .Shader(gtaoInterface)
-            .Handle;
+        var gtaoBuilder = graph.GraphicsPass("gtao")
+            .Target(ambientHandle, LoadOp.Clear, StoreOp.Store);
+        // Reads every pyramid level: which one a tap lands on depends on how far it steps, so all
+        // of them are inputs and the graph orders the whole chain ahead of this pass.
+        for (var level = 0; level < HiZLevels; level++) gtaoBuilder = gtaoBuilder.Read(hiZHandles[level]);
+        gtaoPassHandle = gtaoBuilder.Shader(gtaoInterface).Handle;
 
         // Spatial denoise. A separate pass rather than a wider kernel inside GTAO: the estimate and
         // its reconstruction are different jobs, and only one of them has to run the horizon search.

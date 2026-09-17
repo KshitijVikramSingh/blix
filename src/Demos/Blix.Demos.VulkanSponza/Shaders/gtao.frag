@@ -35,9 +35,23 @@ layout(set = 0, binding = 0) uniform Gtao {
     // x = world-space radius of the search, y = projection scale (pixels per view-space unit at
     // unit depth), z = debug channel (0 off), w unused.
     vec4  uParams;
+    // xy = view-ray scale: multiply NDC by this and append -1 to get the direction whose product
+    // with LINEAR depth is the view-space position. y carries the sign of Vulkan's Y-flip, so the
+    // reconstruction cannot forget it the way the slice basis once did. z = the distance at or
+    // beyond which a texel is background. w unused.
+    vec4  uRay;
 } g;
 
-layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
+// The Hi-Z pyramid, six levels, each carrying min/max LINEAR view depth. GTAO reads .r — the
+// NEAREST surface in a region is its strongest occluder, and over-stating occlusion is the safe
+// direction for a visibility term.
+//
+// Six named lookups behind a branch rather than a computed index, for the same portability reason
+// shadow.glsl gives for its three cascades: indexing a sampler array with a runtime value needs
+// shaderSampledImageArrayDynamicIndexing, which is not guaranteed.
+#define HIZ_LEVELS 6
+#define uRayXY() (g.uRay.xy)
+layout(set = 0, binding = 1) uniform sampler2D uHiZ[HIZ_LEVELS];
 
 #define PI     3.14159265359
 #define HALF_PI 1.57079632679
@@ -67,23 +81,32 @@ const int STEPS  = 6;
 // The principled fix is a depth mip chain, sampling a coarser level as the step radius grows, so a
 // wide search costs the same as a narrow one. That is the Hi-Z pyramid, and it is the next pillar
 // rather than a detail to smuggle in here.
-#define MAX_RADIUS_PIXELS 48.0
+// <b>Raised from 48 now that the pyramid pays for width.</b> The cap existed because a wide search
+// meant more scattered fetches into one full-resolution image — measured at 175 ms/frame before it
+// went in. Sampling a coarser level as the step grows makes a distant tap cost the same as a near
+// one, so the limit can go back to being about what occlusion MEANS rather than what it costs.
+#define MAX_RADIUS_PIXELS 256.0
 
-// View-space position of a pixel. The inverse projection carries the Vulkan clip
-// conventions (z in [0,1], the Y flip baked into the camera's projection), so the
-// reconstruction needs no hand-applied flip — the same reasoning froxel.comp uses.
-vec3 viewPosition(vec2 uv) {
-    // <b>texelFetch, not texture: a bilinearly filtered DEPTH is a number no surface has.</b> The
-    // graph hands out LinearClamp samplers, so every tap was averaging up to four depths — and the
-    // average of a near sample and a far one is a position floating in the air between them. It is
-    // worst exactly where this shader is weakest, on grazing surfaces at distance, because that is
-    // where neighbouring texels differ most in depth.
-    ivec2 size = textureSize(uSceneDepth, 0);
-    ivec2 texel = clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1);
-    float depth = texelFetch(uSceneDepth, texel, 0).r;
-    vec4 clip = vec4(uv * 2.0 - 1.0, depth, 1.0);
-    vec4 view = g.uInvProjection * clip;
-    return view.xyz / view.w;
+// Nearest linear view depth at a uv, from a chosen pyramid level.
+float hiZDepth(int level, vec2 uv) {
+    if (level <= 0) return textureLod(uHiZ[0], uv, 0.0).r;
+    if (level == 1) return textureLod(uHiZ[1], uv, 0.0).r;
+    if (level == 2) return textureLod(uHiZ[2], uv, 0.0).r;
+    if (level == 3) return textureLod(uHiZ[3], uv, 0.0).r;
+    if (level == 4) return textureLod(uHiZ[4], uv, 0.0).r;
+    return textureLod(uHiZ[HIZ_LEVELS - 1], uv, 0.0).r;
+}
+
+// View-space position, as a ray times a length.
+//
+// <b>No matrix, and no depth buffer.</b> This was an inverse-projection multiply per tap against a
+// nonlinear depth buffer — a matrix product to undo a division, done 128 times a pixel. The pyramid
+// already holds LINEAR depth, so a position is the pixel's view ray scaled by it: two multiplies.
+// The ray is linear in NDC for a perspective projection, so uRay.xy carries it whole, Y-flip
+// included.
+vec3 viewPositionAt(vec2 uv, int level) {
+    float z = hiZDepth(level, uv);
+    return vec3((uv * 2.0 - 1.0) * uRayXY(), -1.0) * z;
 }
 
 // The geometric normal, from the depth of the four neighbours.
@@ -105,10 +128,10 @@ vec3 viewPosition(vec2 uv) {
 // means an edge runs through them and the nearer side is the honest answer.
 vec3 reconstructNormal(vec2 uv, vec3 P) {
     vec2 texel = g.uTarget.zw;
-    vec3 right = viewPosition(uv + vec2(texel.x, 0.0)) - P;
-    vec3 left  = P - viewPosition(uv - vec2(texel.x, 0.0));
-    vec3 down  = viewPosition(uv + vec2(0.0, texel.y)) - P;
-    vec3 up    = P - viewPosition(uv - vec2(0.0, texel.y));
+    vec3 right = viewPositionAt(uv + vec2(texel.x, 0.0), 0) - P;
+    vec3 left  = P - viewPositionAt(uv - vec2(texel.x, 0.0), 0);
+    vec3 down  = viewPositionAt(uv + vec2(0.0, texel.y), 0) - P;
+    vec3 up    = P - viewPositionAt(uv - vec2(0.0, texel.y), 0);
 
     // Relative, because a 1 cm depth step is an edge at 1 m and noise at 100 m.
     float tolerance = 0.02 * abs(P.z);
@@ -129,12 +152,14 @@ void main() {
     // Sky: the pre-pass clears depth to 1 and does not draw the skybox, so an untouched texel
     // is background. Tested on the raw depth rather than on a reconstructed distance — the
     // cleared value is exact, and a distance threshold near a 200 m far plane is not.
-    if (texture(uSceneDepth, vUv).r >= 1.0) {
+    // Background: the pyramid reports the far plane where nothing was drawn. Tested as a distance
+    // now rather than against a raw depth of exactly 1, because the value here is metres.
+    if (hiZDepth(0, vUv) >= g.uRay.z) {
         outAmbient = vec4(normalize((g.uInvView * vec4(0.0, 0.0, 1.0, 0.0)).xyz), 1.0);
         return;
     }
 
-    vec3 P = viewPosition(vUv);
+    vec3 P = viewPositionAt(vUv, 0);
     vec3 N = reconstructNormal(vUv, P);
     vec3 V = normalize(-P);
 
@@ -215,8 +240,13 @@ void main() {
             float stepPixels = max(fraction * fraction * radiusPixels, float(t) + 1.0);
             vec2 offset = direction * stepPixels * g.uTarget.zw;
 
-            vec3 s1 = viewPosition(vUv - offset) - P;
-            vec3 s2 = viewPosition(vUv + offset) - P;
+            // The level whose texels are about as wide as this step is long. A step of one texel
+            // reads level 0; every doubling of the stride moves one level coarser, so the number of
+            // texels a search touches stays roughly constant however wide it gets.
+            int level = clamp(int(floor(log2(max(stepPixels, 1.0)))), 0, HIZ_LEVELS - 1);
+
+            vec3 s1 = viewPositionAt(vUv - offset, level) - P;
+            vec3 s2 = viewPositionAt(vUv + offset, level) - P;
 
             float d1 = length(s1);
             float d2 = length(s2);
