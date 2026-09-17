@@ -46,7 +46,12 @@ public static class BlixTex
     public const string ShippedRecipe = "gtex";
 
     /// <summary>The texture cook's own version — see BlixMesh.MeshRecipeVersion for why.</summary>
-    public const uint ShippedRecipeVersion = 1;
+    // v2: normal maps cook to BC5 rather than BC7. NOT smaller — BC5, BC7 and BC6h are all 16
+    // bytes per 4x4 block, as TextureFormatExtensions.MipByteCount says in one line. What changes
+    // is how those bits are spent: BC5 gives two channels a BC4-style endpoint pair each, where
+    // BC7 divides one block across three or four. A tangent-space normal only needs XY, so this is
+    // strictly more precision for the same bytes. Bumping this re-cooks every texture in the tree.
+    public const uint ShippedRecipeVersion = 2;
     public const uint Version3 = 3;
     public const uint KindTexture2D = 1;
     public const int HeaderSize = 28;

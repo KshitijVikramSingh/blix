@@ -72,8 +72,12 @@ void main() {
     vec3 Ngeom = normalize(vNormal);
     // Tangent-space normal from the map, scaled by normalScale (uMatParams.z).
     // Flat maps + scale 0 both reduce to the geometric normal.
-    vec3 tn = texture(uNormalMap, vUv).xyz * 2.0 - 1.0;
-    tn.xy *= pc.uMatParams.z;
+    // <b>Z is reconstructed, not sampled.</b> Cooked normal maps are BC5 — two channels, blue
+    // dropped — so the sampled .z is meaningless. Deriving it from the unit-length constraint is
+    // also correct for an RGBA8 normal map, whose stored Z already equals sqrt(1 - x² - y²), so
+    // this one line reads both paths and needs no flag to tell them apart.
+    vec2 tnxy = (texture(uNormalMap, vUv).xy * 2.0 - 1.0) * pc.uMatParams.z;
+    vec3 tn = vec3(tnxy, sqrt(max(0.0, 1.0 - dot(tnxy, tnxy))));
     float tn2 = dot(tn, tn);
     vec3 tnN = tn2 > 1e-12 ? tn * inversesqrt(tn2) : vec3(0.0, 0.0, 1.0);
     vec3 N = perturbNormal(Ngeom, vWorldPos, vUv, tnN);

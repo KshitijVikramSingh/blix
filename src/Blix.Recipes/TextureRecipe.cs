@@ -153,16 +153,37 @@ public static class TextureRecipe
     {
         TextureRole.BaseColor          => (TextureFormat.Bc7Srgb, BlixTex.Flags.Srgb),
         TextureRole.Emissive           => (TextureFormat.Bc7Srgb, BlixTex.Flags.Srgb),
-        TextureRole.Normal             => (TextureFormat.Bc7Unorm, BlixTex.Flags.NormalMap),
+        // <b>BC5 for normals, and it buys PRECISION rather than bytes.</b> That distinction was got
+        // wrong out loud on the way here, so it is written down: BC5, BC7 and BC6h are all 16 bytes
+        // per 4x4 block — the engine's own MipByteCount says so in one line — and switching a 4K
+        // normal map between them moves nothing on disk. What moves is how the block is spent. BC5
+        // gives two channels a BC4-style endpoint pair each; BC7 divides the same 128 bits across
+        // three or four. A tangent-space normal is unit length, so Z is not information at all —
+        // it is sqrt(1 - x² - y²) — and the two channels that ARE information get the whole block.
+        //
+        // The size lever is elsewhere and is not this: a single-channel BC4 is 8 bytes per block,
+        // and resolution is a bigger one still. Neither is a normal-map question.
+        //
+        // The shader side of this landed long before the cook did, and each side's comment was
+        // waiting on the other: lit.frag has said "Cooked normals are BC5 (2-channel RG, blue
+        // dropped)" and reconstructed Z for some time, while this line said BC5 "requires shader
+        // changes that haven't landed yet". Nothing was blocked; nobody checked.
+        //
+        // Reconstruction is correct for BOTH paths, which is what makes this need no branch and no
+        // flag: an RGBA8 normal map's stored Z already equals sqrt(1 - x² - y²), so a shader that
+        // derives it reads source and cooked identically.
+        TextureRole.Normal             => (TextureFormat.Bc5Unorm, BlixTex.Flags.NormalMap),
         TextureRole.MetallicRoughness  => (TextureFormat.Bc7Unorm, BlixTex.Flags.None),
         TextureRole.Linear             => (TextureFormat.Bc7Unorm, BlixTex.Flags.None),
         _                              => (TextureFormat.Bc7Unorm, BlixTex.Flags.None),
     };
 
-    // BC5 is the textbook normal-map format (two-channel RG, reconstruct Z in
-    // shader) but it requires shader changes that haven't landed yet. Until
-    // then we use BC7 Unorm for normals: same 8 bpp + four-channel storage,
-    // no shader change needed.
+    // Metallic-roughness stays BC7, and for a sharper reason than inertia. Its two useful channels
+    // are G and B, while BC5's two arrive as R and G — so cooking it to BC5 means REMAPPING, after
+    // which a cooked MR texture and a source PNG no longer mean the same thing at the same swizzle
+    // and every shader sampling one needs to know which it got. Normals need no such divergence,
+    // because reconstructing Z is correct for both. That is what makes normals the textbook case
+    // and MR a separate decision with its own flag, not a line to change beside this one.
     private static CompressionFormat ToBcFormat(TextureFormat fmt) => fmt switch
     {
         TextureFormat.Bc7Srgb  => CompressionFormat.Bc7,  // sRGB selection lives on the GL internal format side
