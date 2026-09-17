@@ -71,7 +71,12 @@ public static class ObjMeshRecipe
         // recenter is left at its default because the CONSUMER leaves it at its default. A cook
         // that centres differently from the load it replaces moves every model a few centimetres
         // and does it only on machines that have cooked.
-        var parts = WavefrontParts.Import(request.SourcePath);
+        // <b>ImportSource, not Import — a recipe must never read through the cooked path.</b>
+        // WavefrontParts prefers a .blixmesh sibling now, which is right for a game and would have
+        // this recipe consume its own previous output and re-cook that. Caught here only because a
+        // format version changed in the same commit; at a matching version it would have looked
+        // like it worked.
+        var parts = WavefrontParts.ImportSource(request.SourcePath);
         if (parts.Count == 0) return CookOutcome.Skipped("no parts in this .obj");
 
         // BlixMeshFile carries ONE layout for every primitive, so a file whose parts disagree

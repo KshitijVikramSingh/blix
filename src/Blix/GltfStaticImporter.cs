@@ -43,68 +43,105 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         return AssetImportException.Refusing(context.SourcePath, () => ImportCore(context));
     }
 
+    /// <summary>Loads a cooked mesh and nothing else — no glTF is opened, and none need exist.</summary>
+    /// <remarks>
+    /// <b>The payoff of the image table.</b> Geometry and materials came from the cooked file
+    /// already; what was missing was where each material's pixels live, and that number used to be
+    /// a glTF logical image index — resolvable only by reopening the source. With the table it is a
+    /// row naming a relative resource, so the source can be deleted and the asset still loads.
+    /// <para>
+    /// <b>The texture cache is keyed by ROW here</b>, and <c>MaterialFromCooked</c> looks textures
+    /// up by the same number, so neither side needs to know a glTF index ever existed.
+    /// </para>
+    /// </remarks>
+    private GltfModel ImportCooked(string requestedPath, string blixmeshPath)
+    {
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
+        var cooked = BlixMeshReader.Read(blixmeshPath);
+        var cookedDir = Path.GetDirectoryName(Path.GetFullPath(blixmeshPath)) ?? string.Empty;
+
+        var textureCache = new Dictionary<int, GltfTexture>();
+        var materialCache = new Dictionary<int, GltfMaterial>();
+        GltfShared.LoadImagesFromTable(cooked.ImageTable, cooked.MaterialTable, cookedDir, textureCache);
+
+        // The texture coordinate is the only Float2 in either cooked layout, so the UV offset is
+        // matched by FORMAT rather than by attribute location — location 3 is the texture
+        // coordinate in the 48-byte tangent layout and the tangent in nothing, and looking it up
+        // that way meant a cooked mesh without tangents could not be loaded at all.
+        var uvAttr = cooked.Layout.Attributes.First(a => a.Format == VertexAttributeFormat.Float2);
+
+        var primitives = new List<GltfPrimitive>(cooked.Primitives.Count);
+        foreach (var p in cooked.Primitives)
+        {
+            // Heal degenerate UVs in cooked files too — in-place is fine, the buffer is ours once
+            // BlixMeshReader returns it. Lets asset-level UV corruption be fixed without re-cooking.
+            SanitizePackedUVs(
+                p.VertexBytes, p.VertexCount, stride: cooked.Layout.Stride,
+                uvOffset: uvAttr.Offset, p.Name);
+
+            var lod0 = p.Lods[0];
+            var lods = new MeshLod[p.Lods.Count];
+            for (var l = 0; l < p.Lods.Count; l++)
+            {
+                lods[l] = new MeshLod(p.Lods[l].Indices16, p.Lods[l].Indices32, p.Lods[l].Error);
+            }
+
+            primitives.Add(new GltfPrimitive(
+                new MeshData(
+                    p.Name, p.VertexBytes, lod0.Indices16 ?? Array.Empty<ushort>(),
+                    cooked.Layout, p.Bounds, Indices32: lod0.Indices32, Lods: lods),
+                GltfShared.MaterialFromCooked(
+                    cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache)));
+        }
+
+        if (AssetLoadLog.Enabled)
+        {
+            // <b>Keyed by what the CALLER asked for, not by the file that answered.</b> A report
+            // exists to say what one requested load did; keying it by the artifact that happened to
+            // satisfy it makes an asset's history unsearchable by its own name — and made every
+            // instrument that looks a load up by the path it passed in go blind at once.
+            AssetLoadLog.Report(new AssetLoadReport(
+                SourcePath: requestedPath,
+                CookedPath: blixmeshPath,
+                Mode: AssetLoadMode.Cooked,
+                Bytes: SafeLength(blixmeshPath),
+                LoadMs: loadWatch.Elapsed.TotalMilliseconds,
+                Recipe: cooked.Cooked?.Stamp.Recipe));
+        }
+
+        return new GltfModel(
+            primitives.ToArray(),
+            new Skeleton(Array.Empty<Bone>()),
+            Array.Empty<AnimationClip>(),
+            Matrix4x4.Identity);
+    }
+
     private GltfModel ImportCore(AssetImportContext context)
     {
-        // When a cooked .blixmesh sibling exists, the runtime only needs the
-        // material descriptors + image URIs from the .gltf -- not the .bin
-        // buffer data that SharpGLTF's default ModelRoot.Load eagerly reads
-        // and validates against (for ~95% of a big scene's parse time).
-        // ReadContext.Create + ValidationMode.Skip + a callback that returns
-        // empty bytes for non-.gltf resources skips the buffer reads
-        // entirely: 4500ms -> 11ms on Sponza main. Per-accessor reads would
-        // fail under this model, but BlixMeshReader.Read replaces them.
-        var blixmeshPath = Path.ChangeExtension(context.SourcePath, ".blixmesh");
-        var useCookedMesh = File.Exists(blixmeshPath);
+        // <b>A cooked .blixmesh is opened on its own, with no glTF anywhere.</b> As of v6 it names
+        // everything a load needs — geometry, materials, and where every image's pixels are — so the
+        // source is not consulted, not parsed, and need not exist. That is the difference between a
+        // cook that is an optimisation and one that produces a shippable artifact.
+        //
+        // <b>This replaced a "lite model" read</b> that opened the glTF with validation off and a
+        // resource callback returning empty bytes for every non-container file, to get material and
+        // image metadata out of the JSON without paying for buffers (4500 ms -> 11 ms on Sponza).
+        // It was a good trick and it is now unnecessary: the metadata it went there for is in the
+        // cooked file. Deleted rather than kept beside the new path, because two ways to load the
+        // same asset is how the two drift.
+        //
+        // A .blixmesh may also be named DIRECTLY, which is what makes "open a cooked asset" a
+        // coherent request for the first time.
+        var direct = Path.GetExtension(context.SourcePath)
+            .Equals(".blixmesh", StringComparison.OrdinalIgnoreCase);
+        var blixmeshPath = direct
+            ? context.SourcePath
+            : Path.ChangeExtension(context.SourcePath, ".blixmesh");
+        if (File.Exists(blixmeshPath)) return ImportCooked(context.SourcePath, blixmeshPath);
 
-        // <b>The decision this whole arc is about, finally said out loud.</b> Which branch is taken
-        // here has always been invisible: the check is File.Exists and there is no return value,
-        // log line or field that says which way it went, so "is this asset on the fast path" was
-        // not a question anything could ask. The stopwatch is started unconditionally because it is
-        // three instructions and the alternative is a branch in a hot path to save them.
         var loadWatch = System.Diagnostics.Stopwatch.StartNew();
-        var gltfFullPath = Path.GetFullPath(context.SourcePath);
-        var gltfDirInfo = Path.GetDirectoryName(gltfFullPath) ?? string.Empty;
-        var gltfFileName = Path.GetFileName(gltfFullPath);
-        ModelRoot model;
-        if (useCookedMesh)
-        {
-            var settings = new ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip };
-            ArraySegment<byte> Reader(string assetName)
-            {
-                // SharpGLTF asks for the CONTAINER first; supply it. Then it asks for any external
-                // .bin / image files; return empty so the parser stops short of reading them.
-                // Material and image metadata survives because it all lives in the JSON.
-                //
-                // <b>Matched by path, not by extension, and that distinction was a real bug.</b>
-                // This tested `extension == ".gltf"`, so a cooked .glb got an empty buffer for its
-                // own container and died with "JSon is empty". It went unnoticed because the path
-                // was written for Sponza, which is .gltf plus external .bin, and the only cooked
-                // .glb in the tree was loaded through the rigged importer, which has no cooked
-                // path at all. It surfaced the moment asset coverage became complete and
-                // TankArena's four .glb files got siblings.
-                //
-                // For a .glb the saving is smaller by nature — the buffer is inside the container,
-                // so reading the JSON means reading the file — but the geometry still comes from
-                // the .blixmesh rather than from accessor interpretation, which is the larger half.
-                var full = Path.Combine(gltfDirInfo, assetName);
-                if (string.Equals(Path.GetFullPath(full), gltfFullPath, StringComparison.Ordinal)
-                    || Path.GetExtension(full) is { } ext
-                       && (ext.Equals(".gltf", StringComparison.OrdinalIgnoreCase)
-                           || ext.Equals(".glb", StringComparison.OrdinalIgnoreCase)))
-                {
-                    return new ArraySegment<byte>(File.ReadAllBytes(full));
-                }
-                return ArraySegment<byte>.Empty;
-            }
-            model = AssetImportException.Refusing(context.SourcePath, () =>
-                SharpGLTF.Schema2.ReadContext.Create(Reader)
-                    .WithSettingsFrom(settings)
-                    .ReadSchema2(gltfFileName));
-        }
-        else
-        {
-            model = AssetImportException.Refusing(context.SourcePath, () => ModelRoot.Load(context.SourcePath));
-        }
+        var model = AssetImportException.Refusing(
+            context.SourcePath, () => ModelRoot.Load(context.SourcePath));
 
         var textureCache = new Dictionary<int, GltfTexture>();
         var materialCache = new Dictionary<int, GltfMaterial>();
@@ -120,74 +157,21 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         var gltfDir = Path.GetDirectoryName(Path.GetFullPath(context.SourcePath)) ?? string.Empty;
         GltfShared.PreDecodeImages(model, textureCache, gltfDir);
 
-        // Cooked-mesh fast path. The blixmesh sibling was detected above
-        // (used to short-circuit ModelRoot.Load's buffer reads); now read
-        // its cooked vertex + index bytes instead of walking glTF accessors.
-        // Material resolution still uses the lite (JSON-only) model.
-        if (useCookedMesh)
+        foreach (var node in model.LogicalNodes)
         {
-            var cooked = BlixMeshReader.Read(blixmeshPath);
-            foreach (var p in cooked.Primitives)
-            {
-                // Heal degenerate UVs in cooked files too (in-place mutation
-                // is fine, we own the buffer after BlixMeshReader returns it).
-                // Lets us fix asset-level UV corruption without re-running the
-                // cook step.
-                // UV offset comes from the cooked layout (32-byte → 24,
-                // 48-byte tangent → 40), not hardcoded.
-                //
-                // <b>Found by the first cooked mesh in this engine without tangents.</b> This looked the UV
-                // up by location 3, which is the texture coordinate in the 48-byte tangent layout and the
-                // <em>tangent</em> in nothing — in the 32-byte layout the texture coordinate is location 2
-                // and there is no location 3 at all, so First threw and a cooked non-tangent mesh could not
-                // be loaded. Every cooked asset so far came from VulkanSponza, which cooks with --tangents,
-                // so the path had never been walked. Matched by format instead: the texture coordinate is
-                // the only Float2 in either layout.
-                var uvAttr = cooked.Layout.Attributes.First(
-                    a => a.Format == VertexAttributeFormat.Float2);
-                SanitizePackedUVs(p.VertexBytes, p.VertexCount, stride: cooked.Layout.Stride, uvOffset: uvAttr.Offset, p.Name);
-                // LOD0 is the default index buffer; the full chain rides along
-                // in Lods for the demo's distance-based selection.
-                var lod0 = p.Lods[0];
-                var lods = new MeshLod[p.Lods.Count];
-                for (var l = 0; l < p.Lods.Count; l++)
-                    lods[l] = new MeshLod(p.Lods[l].Indices16, p.Lods[l].Indices32, p.Lods[l].Error);
-                var meshData = new MeshData(
-                    p.Name,
-                    p.VertexBytes,
-                    lod0.Indices16 ?? Array.Empty<ushort>(),
-                    cooked.Layout,
-                    p.Bounds,
-                    Indices32: lod0.Indices32,
-                    Lods: lods);
-                // <b>From the COOKED table, not from model.LogicalMaterials.</b> That line is the
-                // one stage K-F was about: a cooked mesh used to re-parse every material out of the
-                // sibling glTF on each load, so "cooked" covered geometry and nothing else. The
-                // source is still opened — for image BYTES, which is the one thing the table
-                // deliberately does not carry.
-                var material = GltfShared.MaterialFromCooked(
-                    cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache);
-                primitives.Add(new GltfPrimitive(meshData, material));
-            }
-        }
-        else
-        {
-            foreach (var node in model.LogicalNodes)
-            {
-                if (node.Mesh is null) continue;
-                // F-016: engine is now row-vector form throughout — same as SharpGLTF.
-                // No transpose needed; just use the world matrix directly.
-                var world = node.WorldMatrix;
-                var normalMatrix = ComputeNormalMatrix(world);
+            if (node.Mesh is null) continue;
+            // F-016: engine is now row-vector form throughout — same as SharpGLTF.
+            // No transpose needed; just use the world matrix directly.
+            var world = node.WorldMatrix;
+            var normalMatrix = ComputeNormalMatrix(world);
 
-                for (var i = 0; i < node.Mesh.Primitives.Count; i++)
-                {
-                    var prim = node.Mesh.Primitives[i];
-                    var meshName = $"{node.Mesh.Name ?? node.Name ?? "gltf_mesh"}.{i}";
-                    var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix, context.FlipTextureV, context.IncludeTangents, context.IncludeColour);
-                    var material = GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache);
-                    primitives.Add(new GltfPrimitive(meshData, material));
-                }
+            for (var i = 0; i < node.Mesh.Primitives.Count; i++)
+            {
+                var prim = node.Mesh.Primitives[i];
+                var meshName = $"{node.Mesh.Name ?? node.Name ?? "gltf_mesh"}.{i}";
+                var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix, context.FlipTextureV, context.IncludeTangents, context.IncludeColour);
+                var material = GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache);
+                primitives.Add(new GltfPrimitive(meshData, material));
             }
         }
 
@@ -202,15 +186,13 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         // Reported before returning, so the cost covers the whole load rather than one phase of it.
         if (AssetLoadLog.Enabled)
         {
-            var cookedStamp = useCookedMesh ? CookedFile.TryReadHeader(blixmeshPath) : null;
             AssetLoadLog.Report(new AssetLoadReport(
                 SourcePath: context.SourcePath,
-                CookedPath: useCookedMesh ? blixmeshPath : null,
-                Mode: useCookedMesh ? AssetLoadMode.Cooked : AssetLoadMode.Source,
-                Bytes: SafeLength(useCookedMesh ? blixmeshPath : context.SourcePath),
+                CookedPath: null,
+                Mode: AssetLoadMode.Source,
+                Bytes: SafeLength(context.SourcePath),
                 LoadMs: loadWatch.Elapsed.TotalMilliseconds,
-                Recipe: cookedStamp?.Stamp.Recipe,
-                Warning: useCookedMesh ? null : "no .blixmesh sibling — glTF accessors were walked"));
+                Warning: "no .blixmesh sibling — glTF accessors were walked"));
         }
 
         return new GltfModel(

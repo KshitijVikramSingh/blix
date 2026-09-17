@@ -343,13 +343,91 @@ public static class Program
             }
         }
 
-        // ── and the flag says which half is still owed ──────────────────────
-        // SourceRequired alone could not distinguish "re-parses everything" from "wants pixels",
-        // so the stage that narrowed the debt has to prove the narrowing reached the file.
-        var cookedHeader = CookedFile.TryReadHeader(Path.ChangeExtension(cookedAsset ?? "x", ".blixmesh"));
-        t.ExpectTrue("the cooked mesh still declares its source required", cookedHeader?.Stamp.SourceRequired == true);
-        t.ExpectTrue("and narrows that to image bytes alone",
-            (cookedHeader?.Stamp.Flags & CookedFlags.SourceRequiredForImagesOnly) != 0);
+        // ── and the debt is gone, which is the flag's whole point ───────────
+        // SourceRequired was set on every .blixmesh from K-A onward. K-F narrowed it to image bytes;
+        // the image table removed the last reason to open the source at all. A flag that could only
+        // ever be true was never telling anyone anything, so the proof it can be FALSE is the proof
+        // the arc landed.
+        var meshPath = Path.ChangeExtension(cookedAsset ?? "x", ".blixmesh");
+        var cookedHeader = CookedFile.TryReadHeader(meshPath);
+        t.Expect("a cooked mesh with every image cooked owes nothing",
+            cookedHeader?.Stamp.Flags == CookedFlags.None,
+            $"flags = {cookedHeader?.Stamp.Flags.ToString() ?? "no header"}");
+
+        // ── and it loads with the source deleted, which is the real claim ───
+        // <b>Every other check here runs beside the source file.</b> "Ships on its own" is not
+        // implied by any of them: the loader could still be quietly reaching for a sibling, and
+        // nothing that runs in a complete tree would notice. So the cooked mesh and its extracted
+        // textures are copied somewhere the glTF does not exist, and loaded there.
+        if (cookedAsset is not null && File.Exists(meshPath))
+        {
+            var aloneDir = Path.Combine(Path.GetTempPath(), "blix-alone-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(aloneDir);
+            try
+            {
+                var meshCopy = Path.Combine(aloneDir, Path.GetFileName(meshPath));
+                File.Copy(meshPath, meshCopy);
+
+                // Whatever the cook extracted out of the container travels with it.
+                var extracted = Path.ChangeExtension(meshPath, null) + BlixMesh.ExtractedImageFolder;
+                if (Directory.Exists(extracted))
+                {
+                    var into = Path.Combine(aloneDir, Path.GetFileName(extracted));
+                    Directory.CreateDirectory(into);
+                    foreach (var f in Directory.EnumerateFiles(extracted))
+                    {
+                        File.Copy(f, Path.Combine(into, Path.GetFileName(f)));
+                    }
+                }
+
+                t.ExpectTrue("no source file travelled with it",
+                    !Directory.EnumerateFiles(aloneDir, "*.gl*", SearchOption.AllDirectories).Any());
+
+                var alone = new Blix.GltfStaticImporter()
+                    .Import(new AssetImportContext(AssetId.Parse("t/alone"), meshCopy));
+
+                // The same asset loaded the ordinary way, in its own tree, to compare against.
+                var besideSource = new Blix.GltfStaticImporter()
+                    .Import(new AssetImportContext(AssetId.Parse("t/beside"), cookedAsset));
+
+                t.Expect("a cooked mesh loads with no source anywhere",
+                    alone.Primitives.Length == besideSource.Primitives.Length,
+                    $"alone {alone.Primitives.Length}, beside-source {besideSource.Primitives.Length}");
+
+                // Same surfaces, not merely the same count — a load that silently lost its textures
+                // would pass a count check and draw grey.
+                var aloneMismatch = new List<string>();
+                var withTexture = 0;
+                for (var i = 0; i < Math.Min(alone.Primitives.Length, besideSource.Primitives.Length); i++)
+                {
+                    var x = alone.Primitives[i].Material;
+                    var y = besideSource.Primitives[i].Material;
+                    if (x is null || y is null)
+                    {
+                        if (!ReferenceEquals(x, y)) aloneMismatch.Add($"[{i}] material presence");
+                        continue;
+                    }
+
+                    if (x.Name != y.Name) aloneMismatch.Add($"[{i}] name {x.Name} vs {y.Name}");
+                    if (x.BaseColorFactor != y.BaseColorFactor) aloneMismatch.Add($"[{i}] base colour");
+                    if (x.AlphaMode != y.AlphaMode) aloneMismatch.Add($"[{i}] alpha mode");
+                    if ((x.BaseColorTexture is null) != (y.BaseColorTexture is null))
+                        aloneMismatch.Add($"[{i}] base colour texture presence");
+                    if (x.BaseColorTexture is not null) withTexture++;
+                }
+
+                t.Expect("with its materials intact", aloneMismatch.Count == 0,
+                    string.Join("; ", aloneMismatch.Take(5)));
+                // Without this the material comparison above passes on an asset with no textures,
+                // which is exactly the case the image table exists for.
+                t.Expect("and its textures resolved from the cooked tree", withTexture > 0,
+                    $"{withTexture} primitives carried a base colour texture");
+            }
+            finally
+            {
+                try { Directory.Delete(aloneDir, recursive: true); } catch (IOException) { }
+            }
+        }
 
         // ── the OBJ path: cooked and source agree, and the settings guard holds ──
         // <b>Closing the gap `blix check --cooked` had over .obj.</b> The judge used to answer

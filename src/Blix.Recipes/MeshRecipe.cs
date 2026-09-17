@@ -58,7 +58,9 @@ public static class MeshRecipe
     // v2: the material table (.blixmesh v5). Bumping this re-cooks every mesh in the tree, which
     // is the point — a v4 file has no table and the reader refuses it by name rather than reading
     // a material count out of whatever followed the last primitive.
-    public const uint MeshRecipeVersion = 2;
+    // v3: the image table (.blixmesh v6). Material channels index it instead of naming a glTF
+    // logical image, which is what removes the source from the load path entirely.
+    public const uint MeshRecipeVersion = 3;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false, bool includeTangents = false,
@@ -125,18 +127,243 @@ public static class MeshRecipe
             $"split={splitTriBudget} splitFoliage={(splitFoliage ? 1 : 0)} " +
             $"simplify={(simplify is null ? "none" : "yes")}";
 
-        // SourceRequired still, and now it says WHY. Materials are cooked in full — factors, alpha
-        // mode and cutoff, double-sidedness, names, texCoord sets, per-channel image references —
-        // so the only thing left in the glTF that a load cannot do without is the image BYTES.
-        // Those are a separate artifact whose addressing is a project's decision, so the source
-        // stays required for exactly one reason, and the flag names it instead of implying
-        // everything.
+        var (images, imageRows) = CookImages(model, gltfPath, outPath);
+
+        // <b>The flag can finally be FALSE, and this is the debt stage K-A wrote down.</b> A
+        // .blixmesh used to declare its source permanently required because every material was
+        // re-parsed from the glTF on each load; K-F cooked the materials and narrowed the debt to
+        // image bytes; the image table removes the last reason to open the source at all. So when
+        // every image resolves to a cooked artifact, nothing is owed — the first artifact in this
+        // tree that can be shipped, moved or opened on its own.
+        //
+        // When some image is still an uncooked PNG, the thing wanted is that IMAGE and not the
+        // glTF, and the narrow flag says so rather than implying the source is needed whole.
+        var everyImageCooked = images.All(
+            i => i.Resource.EndsWith(".blixtex", StringComparison.OrdinalIgnoreCase));
+
         var stamp = CookStamp.Of(
             BlixMesh.ShippedRecipe, MeshRecipeVersion, gltfPath, outPath, parameters,
-            CookedFlags.SourceRequired | CookedFlags.SourceRequiredForImagesOnly);
+            everyImageCooked
+                ? CookedFlags.None
+                : CookedFlags.SourceRequired | CookedFlags.SourceRequiredForImagesOnly);
 
-        BlixMeshWriter.Write(outPath, new BlixMeshFile(layout, primitives, CookMaterials(model)), stamp);
+        BlixMeshWriter.Write(
+            outPath,
+            new BlixMeshFile(layout, primitives, CookMaterials(model, imageRows), images),
+            stamp);
         return primitives.Count;
+    }
+
+    /// <summary>
+    /// The relative URIs of the external images this asset's materials actually reference.
+    /// </summary>
+    /// <remarks>
+    /// <b>For cooking what an asset USES rather than what a folder CONTAINS.</b> Main Sponza ships
+    /// 137 texture files and its own glTF names 72 of them; sweeping the directory spends a quarter
+    /// of the time and a quarter of the bytes on images nothing will ever sample. Following
+    /// references is what makes a cooked tree smaller than the source tree rather than larger.
+    /// <para>
+    /// Embedded images are not listed: they have no URI to cook from, and the mesh cook extracts
+    /// and cooks them itself as it builds the image table.
+    /// </para>
+    /// </remarks>
+    public static IReadOnlyList<string> ReferencedImageUris(string gltfPath)
+    {
+        ArgumentNullException.ThrowIfNull(gltfPath);
+
+        var model = ModelRoot.Load(gltfPath);
+        var gltfDir = Path.GetDirectoryName(Path.GetFullPath(gltfPath)) ?? ".";
+        var uris = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var material in model.LogicalMaterials)
+        {
+            foreach (var channelName in ImageChannels)
+            {
+                var image = material.FindChannel(channelName)?.Texture?.PrimaryImage;
+                if (image?.Content.SourcePath is not { } uri) continue;
+                if (uri.StartsWith("data:", StringComparison.Ordinal)) continue;
+
+                var relative = RelativeImagePath(gltfDir, uri);
+                if (seen.Add(relative)) uris.Add(relative);
+            }
+        }
+
+        return uris;
+    }
+
+    /// <summary>
+    /// Every image the source's materials reference, and where each one's pixels ended up.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is what lets the cooked file be loaded with no source present.</b> The table records
+    /// a LOCATION the recipe knows to be true, rather than a rule the loader applies later — see the
+    /// note in <c>BlixMesh</c> on why deriving a location by swapping a URI's extension was a
+    /// grouping policy in disguise.
+    /// <para>
+    /// <b>Embedded images stop being a special case here, and that is the whole trick.</b> A glTF
+    /// with its pixels inline has no path to record, so the cook EXTRACTS each one, cooks it beside
+    /// the mesh, and writes a row that looks like every other row. Everything above this method
+    /// sees one shape.
+    /// </para>
+    /// <para>
+    /// Only images the MATERIALS reach are recorded. A glTF may carry images no channel samples, and
+    /// a directory may carry many more — main Sponza ships 137 texture files of which its own glTF
+    /// names 72 — so following references rather than sweeping is worth a quarter of the bytes
+    /// before any format decision is made.
+    /// </para>
+    /// </remarks>
+    private static (IReadOnlyList<BlixMeshImage> Images, Dictionary<int, int> Rows) CookImages(
+        ModelRoot model, string gltfPath, string outPath)
+    {
+        var images = new List<BlixMeshImage>();
+        var rows = new Dictionary<int, int>();
+        var sourceDir = Path.GetDirectoryName(Path.GetFullPath(gltfPath)) ?? ".";
+        var outDir = Path.GetDirectoryName(Path.GetFullPath(outPath)) ?? ".";
+        var extractDir = Path.Combine(
+            outDir, Path.GetFileNameWithoutExtension(outPath) + BlixMesh.ExtractedImageFolder);
+
+        foreach (var material in model.LogicalMaterials)
+        {
+            foreach (var channelName in ImageChannels)
+            {
+                var image = material.FindChannel(channelName)?.Texture?.PrimaryImage;
+                if (image is null || rows.ContainsKey(image.LogicalIndex)) continue;
+
+                var bytes = image.Content.Content;
+                var hash = ContentHash(bytes.Span);
+                var name = image.Name
+                    ?? (image.Content.SourcePath is { } uri ? Path.GetFileNameWithoutExtension(uri) : null)
+                    ?? $"image_{image.LogicalIndex}";
+
+                rows[image.LogicalIndex] = images.Count;
+                images.Add(new BlixMeshImage(name, hash, Shippable(Resource(image, bytes, name), gltfPath)));
+            }
+        }
+
+        return (images, rows);
+
+        string Resource(SharpGLTF.Schema2.Image image, ReadOnlyMemory<byte> bytes, string name)
+        {
+            // External: the file is already on disk beside the glTF. Prefer the cooked artifact
+            // when one is there — the asset driver cooks textures BEFORE the mesh precisely so that
+            // this check sees them — and otherwise name the source image, which is still a location
+            // the loader can open without the glTF.
+            if (image.Content.SourcePath is { } uri && !uri.StartsWith("data:", StringComparison.Ordinal))
+            {
+                var relative = RelativeImagePath(sourceDir, uri);
+                var cooked = Path.ChangeExtension(relative, ".blixtex");
+
+                // <b>Checked against the OUTPUT directory, because that is where the loader will
+                // look.</b> Resource is relative to the cooked mesh, so for an in-place cook this is
+                // the same directory as the source and the distinction is invisible; for a cook into
+                // a separate tree it is the whole difference between a path that resolves and one
+                // that points back at a folder the user is about to delete.
+                return File.Exists(Path.Combine(outDir, cooked)) ? cooked : relative;
+            }
+
+            // Embedded: invent a location and put the pixels there.
+            Directory.CreateDirectory(extractDir);
+            var stem = Sanitise(name);
+            var raw = Path.Combine(extractDir, stem + ExtensionFor(bytes.Span));
+            File.WriteAllBytes(raw, bytes.ToArray());
+
+            var cookedPath = Path.ChangeExtension(raw, ".blixtex");
+            try
+            {
+                TextureRecipe.CookOne(raw, cookedPath, out _, out _);
+                // The intermediate is scaffolding, not an artifact. Leaving it would double the
+                // bytes and put a second, uncooked copy of every embedded image on disk.
+                File.Delete(raw);
+                return ToRelative(cookedPath);
+            }
+            catch (Exception e) when (e is IOException or NotSupportedException or InvalidDataException)
+            {
+                // A format the texture cook will not take is recorded as its raw self rather than
+                // dropped: the mesh still loads, the image still resolves, and `blix check --cooked`
+                // reports it on the slow path where a person can see it.
+                return ToRelative(raw);
+            }
+        }
+
+        string ToRelative(string full) =>
+            Path.GetRelativePath(outDir, full).Replace(Path.DirectorySeparatorChar, '/');
+    }
+
+    /// <summary>The channels whose images are recorded — the same five the loader pre-decodes.</summary>
+    private static readonly string[] ImageChannels =
+        { "BaseColor", "Normal", "MetallicRoughness", "Occlusion", "Emissive" };
+
+    /// <summary>
+    /// An image reference as a path RELATIVE to the asset, whatever form the parser handed back.
+    /// </summary>
+    /// <remarks>
+    /// <b>SharpGLTF resolves <c>Image.Content.SourcePath</c> to an ABSOLUTE path, and that cost real
+    /// damage.</b> The value was used directly as a relative reference, so
+    /// <c>Path.Combine(outDir, it)</c> silently discarded <c>outDir</c> — .NET's documented
+    /// behaviour for a rooted second argument — and an out-of-place cook wrote its cooked textures
+    /// back into the SOURCE folder while reporting that it had written them to the output. Both the
+    /// "did I cook this?" check and the recorded location then agreed with each other and with
+    /// nothing else, which is why the mesh cheerfully declared itself self-contained.
+    /// <para>
+    /// Normalised through the asset's own directory so a relative URI, an absolute path and an
+    /// escaped one all arrive as the same forward-slashed relative string.
+    /// </para>
+    /// </remarks>
+    private static string RelativeImagePath(string assetDir, string sourcePath)
+    {
+        var unescaped = Uri.UnescapeDataString(sourcePath);
+        var full = Path.GetFullPath(Path.Combine(assetDir, unescaped));
+        return Path.GetRelativePath(assetDir, full).Replace(Path.DirectorySeparatorChar, '/');
+    }
+
+    /// <summary>
+    /// Refuses a location that would take a reader outside the cooked tree.
+    /// </summary>
+    /// <remarks>
+    /// A cooked artifact exists to be moved and shipped, so a row pointing at an absolute path or
+    /// climbing out with <c>..</c> is not a slightly-wrong file — it is a file that works on this
+    /// machine and nowhere else. Thrown rather than logged: this is a bug in a recipe, and the
+    /// previous version of it wrote 85 MB into a folder it had been asked not to touch.
+    /// </remarks>
+    private static string Shippable(string resource, string gltfPath)
+    {
+        if (Path.IsPathRooted(resource) || resource.StartsWith("../", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"{gltfPath}: image resource '{resource}' leaves the cooked tree — a cooked asset "
+                + "must reference only what travels with it.");
+        }
+
+        return resource;
+    }
+
+    /// <summary>FNV-1a over the source bytes: identity that survives a rename and equates copies.</summary>
+    private static ulong ContentHash(ReadOnlySpan<byte> bytes)
+    {
+        var hash = 14695981039346656037UL;
+        foreach (var b in bytes)
+        {
+            hash ^= b;
+            hash *= 1099511628211UL;
+        }
+
+        return hash;
+    }
+
+    /// <summary>Sniffs a container so an extracted image lands with an extension the cook accepts.</summary>
+    private static string ExtensionFor(ReadOnlySpan<byte> bytes) =>
+        bytes.Length >= 8 && bytes[0] == 0x89 && bytes[1] == 0x50 ? ".png" : ".jpg";
+
+    private static string Sanitise(string name)
+    {
+        var chars = name.ToCharArray();
+        for (var i = 0; i < chars.Length; i++)
+        {
+            if (Array.IndexOf(Path.GetInvalidFileNameChars(), chars[i]) >= 0) chars[i] = '_';
+        }
+
+        return new string(chars);
     }
 
     /// <summary>
@@ -155,7 +382,7 @@ public static class MeshRecipe
     /// which shows up as an asset that renders differently on machines that have cooked it.
     /// </para>
     /// </remarks>
-    private static IReadOnlyList<BlixMeshMaterial> CookMaterials(ModelRoot model)
+    private static IReadOnlyList<BlixMeshMaterial> CookMaterials(ModelRoot model, IReadOnlyDictionary<int, int> imageRows)
     {
         var cooked = new BlixMeshMaterial[model.LogicalMaterials.Count];
         for (var i = 0; i < cooked.Length; i++)
@@ -201,13 +428,19 @@ public static class MeshRecipe
 
         return cooked;
 
-        // The loader keys its decoded-texture cache by PrimaryImage.LogicalIndex, so that is the
-        // number recorded — not the texture index, which is one indirection further out and would
-        // need the glTF open to resolve.
-        static int ImageIndex(MaterialChannel? channel) =>
-            channel?.Texture?.PrimaryImage?.LogicalIndex ?? BlixMesh.NoImage;
+        // <b>A ROW IN THIS FILE'S OWN IMAGE TABLE, not a glTF logical image index.</b> The old
+        // number could only be resolved by reopening the glTF, which is precisely why a "cooked"
+        // mesh still pinned its source. Mapped through imageRows so the cooked file is readable
+        // with nothing else present.
+        int ImageIndex(MaterialChannel? channel)
+        {
+            var logical = channel?.Texture?.PrimaryImage?.LogicalIndex;
+            return logical is not null && imageRows.TryGetValue(logical.Value, out var row)
+                ? row
+                : BlixMesh.NoImage;
+        }
 
-        static float Parameter(MaterialChannel? channel, string name, float fallback)
+        float Parameter(MaterialChannel? channel, string name, float fallback)
         {
             if (channel is null) return fallback;
             foreach (var p in channel.Value.Parameters)

@@ -301,6 +301,70 @@ Result: `GREEN every load resolved to a cooked artifact` over the kit, and over 
 `Assets` tree the remaining red is exactly the two known categories plus one uncooked file —
 skinned glTF, embedded image bytes, and `Villager.obj`, which no glob claims.
 
+### K-H — the cooked set stands alone — **DONE**
+
+The arc's own end state, and the one D5 was parked in front of: a cooked tree you can ship, move or
+open with no source file anywhere. It arrived when 19 GB of Intel/Khronos New Sponza showed up — the
+"real PBR content" the park said would design the format.
+
+**What it measured, before anything was designed.** `blix check --cooked` on main Sponza:
+
+| main_sponza | source | cooked |
+|---|---|---|
+| load | 6,056 ms | **132 ms** |
+| CPU on source paths | 55,510 ms | **0** |
+| textures on disk | 2,615 MB PNG | 2,880 MB `.blixtex` |
+
+**46× faster and 10% BIGGER**, because BC7 is fixed-rate and PNG is entropy-coded. So "smaller"
+could never have come from the texture format, and the park's framing — that cooking waited on a
+texture-packing decision — was pointed at the wrong thing twice over.
+
+**The design: separate identity from location from grouping.** All three were one number.
+
+| | was | is |
+|---|---|---|
+| identity | a glTF logical image index | `Name` + `ContentHash` in the cooked file |
+| location | swap the extension on the source URI | `Resource`, written by the recipe |
+| grouping | *never named* — 1:1 implied by that swap | a consequence of what a recipe writes |
+
+That third row is the whole finding. "Grouping is a project's decision, so we cannot pick one" was
+stated while the tree had already picked one, silently, in a loader rule. Now the shipped recipe
+writes 1:1 siblings **as data**; a project wanting atlases writes rows its own resolver understands
+and the engine never learns the difference. Grouping stayed the consumer's without being parked.
+
+- **`.blixmesh` v6** carries the image table; material channels index it.
+- **Embedded images stop being a special case** — the cook extracts them to `<stem>.textures/`,
+  cooks them, and writes a row that looks like every other row.
+- **`GltfStaticImporter` loads a `.blixmesh` standalone**, and accepts one by path, so *"open a
+  cooked asset"* is a coherent request for the first time. The old "lite model" read — glTF with
+  validation off and empty buffers, 4500 ms → 11 ms — was deleted, not kept beside it.
+- **`blix cook asset <gltf> --out <dir>`** cooks an asset and exactly the images it references.
+- **`CookedFlags.None`** is reachable. The flag was set on every `.blixmesh` from K-A onward; a flag
+  that can only be true says nothing.
+
+**The result, which is what "clear my Downloads" means:** main_sponza **6.3 GB → 1.6 GB**, one
+`.blixmesh` and 72 `.blixtex`, loading **GREEN in 107 ms with no glTF and no `.bin` in the tree**.
+The reduction is not the format — it is never cooking the 14 GB of `.max`/`.fbx`/`.usd` nothing
+loads, and following references instead of sweeping a directory (137 files on disk, 72 referenced).
+
+**Two bugs found by doing it, both worth keeping.** `WavefrontParts` gained a cooked-sibling
+preference and `ObjMeshRecipe` read through it — **a recipe consuming its own previous output**,
+which is the exact hazard that recipe's own comment warned about, caught only because a format
+version changed in the same commit. And `Image.Content.SourcePath` resolves ABSOLUTE, so
+`Path.Combine(outDir, it)` discarded `outDir` and an out-of-place cook wrote 85 MB back into the
+source folder while reporting it had written to the output. Both the "did I cook this?" check and
+the recorded location agreed with each other and with nothing else, which is why the mesh cheerfully
+declared itself self-contained. `Shippable()` now refuses a row that leaves the cooked tree.
+
+**Cooked artifacts left the repository.** 75 `.blixmesh` and 4 `.blixfont` were tracked; once a
+cooked mesh carried its images too, RTSGame's two villagers alone turned 67 MB of `.glb` into 118 MB
+of `.blixtex`. They are gitignored now, which also *fixes* the fresh clone rather than shrinking it:
+an incremental target cannot skip an output that does not exist. Proved by deleting all 94 cooked
+files and rebuilding — all 94 came back, suites and baseline unchanged.
+
+**Still out of scope, by decision:** BC5 for normals and metallic-roughness (halves the texture
+bytes, needs a shader change) and skinned `.blixmesh`, each its own arc.
+
 ---
 
 ## The skinned gap, measured — and it is not in the stages above

@@ -277,6 +277,111 @@ internal static class GltfShared
     /// earlier and more usefully than an exception here would.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Loads every image a cooked mesh names, from the cooked mesh's own table — no glTF involved.
+    /// </summary>
+    /// <remarks>
+    /// <b>The counterpart to <see cref="PreDecodeImages"/>, and the reason a cooked asset can be
+    /// loaded with its source deleted.</b> That method walks a <c>ModelRoot</c> to discover which
+    /// images the materials use and where they live; this reads both off the cooked file, which is
+    /// what the image table was added to record.
+    /// <para>
+    /// <b>The cache is keyed by ROW, matching what a cooked material channel now holds.</b>
+    /// <see cref="MaterialFromCooked"/> looks its textures up by that same number, so the two agree
+    /// without either of them knowing a glTF logical index exists.
+    /// </para>
+    /// <para>
+    /// A row whose resource is a <c>.blixtex</c> is opened lazily — header and mip table only,
+    /// pixels stay on disk. A row still naming its source image is decoded, and reported on the slow
+    /// path so <c>blix check --cooked</c> can say so. Metallic-roughness images are routed through
+    /// the channel-aware decoder exactly as the glTF path routes them, because a one-channel
+    /// roughness PNG expanded by the ordinary loader reads as matte metal.
+    /// </para>
+    /// </remarks>
+    internal static void LoadImagesFromTable(
+        IReadOnlyList<BlixMeshImage> images,
+        IReadOnlyList<BlixMeshMaterial> materials,
+        string cookedDir,
+        Dictionary<int, GltfTexture> textureCache)
+    {
+        if (images.Count == 0) return;
+
+        var metallicRoughnessRows = new HashSet<int>();
+        foreach (var m in materials)
+        {
+            if (m.MetallicRoughnessImage >= 0) metallicRoughnessRows.Add(m.MetallicRoughnessImage);
+        }
+
+        var cooked = 0;
+        var cookedWatch = System.Diagnostics.Stopwatch.StartNew();
+        var decodedCount = 0;
+
+        for (var row = 0; row < images.Count; row++)
+        {
+            var entry = images[row];
+            var path = Path.GetFullPath(Path.Combine(cookedDir, entry.Resource));
+            var one = System.Diagnostics.Stopwatch.StartNew();
+
+            if (!File.Exists(path))
+            {
+                // Reported rather than thrown: one missing texture should not stop an asset from
+                // loading, and a model drawn with a channel missing is a thing a person can see and
+                // act on. The row still says what was wanted, which is more than the old path could
+                // say once the glTF was gone.
+                if (AssetLoadLog.Enabled)
+                {
+                    AssetLoadLog.Report(new AssetLoadReport(
+                        SourcePath: entry.Resource, CookedPath: null, Mode: AssetLoadMode.Source,
+                        Bytes: 0, LoadMs: 0,
+                        Warning: $"image '{entry.Name}' is missing — the cooked mesh names {entry.Resource}"));
+                }
+
+                continue;
+            }
+
+            if (path.EndsWith(".blixtex", StringComparison.OrdinalIgnoreCase))
+            {
+                textureCache[row] = new GltfTexture(entry.Name, BlixTexReader.ReadHandle(path));
+                cooked++;
+                if (AssetLoadLog.Enabled)
+                {
+                    AssetLoadLog.Report(new AssetLoadReport(
+                        SourcePath: entry.Resource, CookedPath: path, Mode: AssetLoadMode.Cooked,
+                        Bytes: FileLength(path), LoadMs: one.Elapsed.TotalMilliseconds,
+                        Recipe: CookedFile.TryReadHeader(path)?.Stamp.Recipe));
+                }
+
+                continue;
+            }
+
+            using (var stream = File.OpenRead(path))
+            {
+                var d = metallicRoughnessRows.Contains(row)
+                    ? ImageLoader.LoadMetallicRoughness(stream)
+                    : ImageLoader.LoadRgba32(stream);
+                textureCache[row] = GltfTexture.Rgba8Single(entry.Name, d.Pixels, d.Width, d.Height);
+            }
+
+            decodedCount++;
+            if (AssetLoadLog.Enabled)
+            {
+                AssetLoadLog.Report(new AssetLoadReport(
+                    SourcePath: entry.Resource, CookedPath: null, Mode: AssetLoadMode.Source,
+                    Bytes: FileLength(path), LoadMs: one.Elapsed.TotalMilliseconds,
+                    Warning: "no .blixtex for this image — decoded from source"));
+            }
+        }
+
+        cookedWatch.Stop();
+        if (cooked > 0)
+        {
+            Console.WriteLine(
+                $"  indexed {cooked} cooked .blixtex images in {cookedWatch.ElapsedMilliseconds} ms (lazy)");
+        }
+
+        if (decodedCount > 0) Console.WriteLine($"  decoded {decodedCount} images from source");
+    }
+
     internal static GltfMaterial? MaterialFromCooked(
         IReadOnlyList<BlixMeshMaterial> materials,
         int index,

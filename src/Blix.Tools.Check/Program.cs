@@ -127,8 +127,14 @@ public static class Program
     /// nothing else produced "nothing here that this judges" — the same sentence an empty directory
     /// produces. RTSGame's nature kit sat cooked and unjudged behind that sentence. An extension
     /// this cannot load is a real answer; an extension it silently skips is not.
+    /// <para>
+    /// <b><c>.blixmesh</c> is here because a cooked asset is now a thing you can open.</b> A tree
+    /// holding only cooked artifacts — which is what a shippable tree IS — would otherwise be judged
+    /// as empty, so the one shape the whole arc exists to produce would be the one shape the
+    /// instrument could not see.
+    /// </para>
     /// </remarks>
-    private static readonly string[] Judged = { ".gltf", ".glb", ".obj" };
+    private static readonly string[] Judged = { ".gltf", ".glb", ".obj", ".blixmesh" };
 
     /// <summary>Loads one source the way a game would, so the report says what a game would get.</summary>
     /// <remarks>
@@ -155,6 +161,15 @@ public static class Program
         if (Path.GetExtension(source).Equals(".obj", StringComparison.OrdinalIgnoreCase))
         {
             WavefrontParts.Import(source);
+            return;
+        }
+
+        // A cooked mesh opens through the same importer, which reads it standalone and never looks
+        // for a glTF. Judged alongside its source when both are present, which is not double
+        // counting: they are two different loads and the point is that they agree.
+        if (Path.GetExtension(source).Equals(".blixmesh", StringComparison.OrdinalIgnoreCase))
+        {
+            new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("check/cooked"), source));
             return;
         }
 

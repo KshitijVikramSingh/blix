@@ -37,7 +37,13 @@ namespace Blix.Assets;
 //     indexCount[4]
 //     indexBytes[indexCount * 2 or 4]
 //
-//   Then, after the last primitive, the material table:
+//   Then, after the last primitive, the material table; then the image table:
+//     imageCount[4]
+//     For each image, sequentially:
+//       nameLen[4] name[nameLen]         UTF-8, for a person and for diagnostics
+//       contentHash[8]                   u64 of the SOURCE image bytes
+//       resourceLen[4] resource[...]     UTF-8 relative reference, forward slashes
+//
 //     materialCount[4]
 //     For each material, sequentially:
 //       nameLen[4] name[nameLen]      UTF-8
@@ -76,6 +82,39 @@ namespace Blix.Assets;
 //
 // materialIndex on a primitive indexes THIS table, and the table is written in
 // the source's own material order, so the number means what it always meant.
+//
+// ── The image table (v6), and the three things it separates ────────────────
+//
+// A material channel's image field is a ROW in this file's own image table. It
+// used to be a glTF logical image index, which is a number that means nothing
+// without the glTF open -- so a "cooked" mesh still pinned its source for the
+// sole purpose of asking where the pixels were.
+//
+// Three things were tangled in that one number, and the table exists to pull
+// them apart:
+//
+//   IDENTITY  which image is this?      -> Name + ContentHash, stable across
+//                                          renames, and equal for two copies of
+//                                          the same bytes.
+//   LOCATION  where are its pixels?     -> Resource, a relative reference the
+//                                          RECIPE writes.
+//   GROUPING  how are many images       -> not here at all. It is a consequence
+//             packed into artifacts?       of what a recipe writes into Resource.
+//
+// That last line is the point. Before this, "one cooked artifact per source
+// image" was not a decision anyone had written down -- it was implied by a
+// loader rule that swapped a source URI's extension, which is a grouping policy
+// wearing a path's clothing. Cooking materials was then parked behind "textures
+// need a grouping decision" while the tree quietly had one.
+//
+// Now the shipped recipe writes 1:1 siblings, as before, but as DATA. A project
+// that wants atlases, arrays, shared palettes or a streaming pool writes rows
+// naming whatever its own resolver understands; the engine's default resolver
+// knows only "a relative path to a .blixtex" and never has to learn the rest.
+//
+// An EMBEDDED image is not a special case here. The cook extracts it, writes a
+// .blixtex under `<stem>.textures/`, and fills in a row that looks like every
+// other row. Embedded and external stop differing above the recipe.
 public static class BlixMesh
 {
     public const uint Magic = 0x4D584C42; // "BLXM" little-endian
@@ -98,14 +137,28 @@ public static class BlixMesh
     // except image bytes (see the header note). No back-read path, by the same
     // rule as v3: re-cook to migrate, which the build does by itself because the
     // recipe assembly is one of the cook target's Inputs.
-    public const uint Version5 = 5;
+    // v6: an IMAGE TABLE follows the materials, and a material channel's image
+    // field becomes a row in it rather than a glTF logical image index. That is
+    // what lets a cooked mesh be loaded with no source file present at all --
+    // see the header note on identity, location and grouping.
+    public const uint Version6 = 6;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
 
     public const int NoMaterial = -1;
 
-    /// <summary>A material channel with no texture, as distinct from one whose image is missing.</summary>
+    /// <summary>
+    /// A material channel with no texture, as distinct from one whose image cannot be found.
+    /// </summary>
     public const int NoImage = -1;
+
+    /// <summary>The image table's own file name inside a cooked asset's texture folder.</summary>
+    /// <remarks>
+    /// Where an EXTRACTED image goes: a glTF with its pixels embedded has no path to reuse, so the
+    /// cook invents one and writes it into the table. Beside the mesh in a folder of its own rather
+    /// than loose next to it, because one asset can carry a hundred of them.
+    /// </remarks>
+    public const string ExtractedImageFolder = ".textures";
 
     /// <summary>Alpha modes, matching glTF's own order so the byte is the spec's value.</summary>
     public const byte AlphaOpaque = 0;
@@ -143,6 +196,24 @@ public sealed record BlixMeshLod(ushort[]? Indices16, uint[]? Indices32, float E
 /// -1 means the channel has no texture, which is different from an index that resolves to nothing.
 /// </para>
 /// </remarks>
+/// <summary>One image a material references: what it is, and where its pixels were put.</summary>
+/// <remarks>
+/// <b><paramref name="Resource"/> is written by the recipe, not derived by the loader.</b> That is
+/// the whole of how grouping stays the consumer's: the shipped recipe writes one cooked artifact per
+/// source image and records its relative path, and a recipe that packs differently records something
+/// its own resolver understands. Nothing in the engine infers a location from a name.
+/// </remarks>
+/// <param name="Name">Human-meaningful and stable; for diagnostics and for a resolver to key on.</param>
+/// <param name="ContentHash">
+/// Of the SOURCE image bytes. Two rows with the same hash are the same picture however they were
+/// named or wherever they were put, which is what makes dedup and cache reuse decidable without
+/// reading pixels.
+/// </param>
+/// <param name="Resource">
+/// Relative to the cooked mesh, with forward slashes, so it means the same thing on every machine.
+/// </param>
+public sealed record BlixMeshImage(string Name, ulong ContentHash, string Resource);
+
 public sealed record BlixMeshMaterial(
     string Name,
     Vector4 BaseColorFactor,
@@ -175,6 +246,10 @@ public sealed record BlixMeshPrimitive(
 /// The preamble, when this came off disk. Null when it was built in memory on the way to being
 /// written — a file knows its own provenance, a thing about to become one does not yet.
 /// </param>
+/// <param name="Images">
+/// Every image the materials reference, and where the cook put each one. A material channel's image
+/// field is an index into THIS list. Empty means the materials reference no textures at all.
+/// </param>
 /// <param name="Materials">
 /// The source's materials, in its own order, so a primitive's MaterialIndex addresses this table.
 /// Empty is legal and means exactly what it says — an <c>.obj</c> with no <c>.mtl</c>, or a recipe
@@ -184,10 +259,14 @@ public sealed record BlixMeshFile(
     VertexLayout Layout,
     IReadOnlyList<BlixMeshPrimitive> Primitives,
     IReadOnlyList<BlixMeshMaterial>? Materials = null,
+    IReadOnlyList<BlixMeshImage>? Images = null,
     CookedHeader? Cooked = null)
 {
     /// <summary>Never null: a file with no material table reads as an empty one.</summary>
     public IReadOnlyList<BlixMeshMaterial> MaterialTable => Materials ?? Array.Empty<BlixMeshMaterial>();
+
+    /// <summary>Never null: a file with no image table reads as an empty one.</summary>
+    public IReadOnlyList<BlixMeshImage> ImageTable => Images ?? Array.Empty<BlixMeshImage>();
 }
 
 public static class BlixMeshWriter
@@ -204,7 +283,7 @@ public static class BlixMeshWriter
         var layoutId = BlixMesh.LayoutIdForStride(file.Layout.Stride);
 
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version5, stamp);
+        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version6, stamp);
         using var bw = new BinaryWriter(fs);
 
         bw.Write(layoutId);
@@ -277,6 +356,19 @@ public static class BlixMeshWriter
             bw.Write(m.OcclusionImage);
             bw.Write(m.EmissiveImage);
         }
+
+        var images = file.ImageTable;
+        bw.Write(images.Count);
+        foreach (var img in images)
+        {
+            var nameBytes = System.Text.Encoding.UTF8.GetBytes(img.Name);
+            bw.Write(nameBytes.Length);
+            bw.Write(nameBytes);
+            bw.Write(img.ContentHash);
+            var resourceBytes = System.Text.Encoding.UTF8.GetBytes(img.Resource);
+            bw.Write(resourceBytes.Length);
+            bw.Write(resourceBytes);
+        }
     }
 }
 
@@ -293,7 +385,7 @@ public static class BlixMeshReader
         ArgumentNullException.ThrowIfNull(path);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version5, path, ".blixmesh");
+        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version6, path, ".blixmesh");
         return AssetImportException.Refusing(path, () => ReadBody(fs, path, header), ".blixmesh");
     }
 
@@ -391,6 +483,18 @@ public static class BlixMeshReader
                 EmissiveImage: br.ReadInt32());
         }
 
-        return new BlixMeshFile(layout, primitives, materials, header);
+        var imageCount = br.ReadInt32();
+        var images = new BlixMeshImage[imageCount];
+        for (var i = 0; i < imageCount; i++)
+        {
+            var nameLen = br.ReadInt32();
+            var name = System.Text.Encoding.UTF8.GetString(br.ReadBytes(nameLen));
+            var hash = br.ReadUInt64();
+            var resourceLen = br.ReadInt32();
+            var resource = System.Text.Encoding.UTF8.GetString(br.ReadBytes(resourceLen));
+            images[i] = new BlixMeshImage(name, hash, resource);
+        }
+
+        return new BlixMeshFile(layout, primitives, materials, images, header);
     }
 }

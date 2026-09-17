@@ -55,6 +55,7 @@ public static class Program
             "textures" => CookTextures(args),
             "probe" => CookProbe(args),
             "mesh" => CookMesh(args),
+            "asset" => CookAsset(args),
             "list" => ListRecipes(),
             "run" => RunRecipe(args),
             "status" => Status(args),
@@ -63,6 +64,101 @@ public static class Program
             _ => UnknownVerb(args[0]),
         };
     }
+
+    /// <summary>
+    /// Cooks one asset and exactly the images it references, into a tree of its own.
+    /// </summary>
+    /// <remarks>
+    /// <b>The driver that makes a cooked tree self-contained AND smaller than its source.</b> The
+    /// other drivers sweep a directory, which is right when the directory IS the unit of work and
+    /// wrong for an asset: main Sponza ships 137 texture files and names 72, so a sweep pays a
+    /// quarter of its time and bytes for images nothing samples.
+    /// <para>
+    /// <b>Textures first, then the mesh, and the order is load-bearing.</b> The mesh cook records
+    /// where each image's pixels are by looking for a cooked artifact at the place the loader will
+    /// look. Cooking the mesh first would have it record source PNGs — correct, and useless for
+    /// shipping, because those live in the tree the user is trying to delete.
+    /// </para>
+    /// <para>
+    /// Grouping stays the consumer's: this writes one cooked artifact per source image and records
+    /// the relative path, which is a POLICY expressed as data. A project that wants atlases writes
+    /// its own driver and its own rows, and the engine's resolver never learns the difference.
+    /// </para>
+    /// </remarks>
+    static int CookAsset(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine("Usage: blix cook asset <gltf-or-glb> --out <dir> [mesh flags]");
+            return 2;
+        }
+
+        var source = args[1];
+        if (!File.Exists(source))
+        {
+            Console.Error.WriteLine($"No file at {source}.");
+            return 2;
+        }
+
+        var outDir = ValueOf(args, "--out");
+        if (outDir is null)
+        {
+            Console.Error.WriteLine(
+                "blix cook asset needs --out <dir>: it writes a tree you can ship, which is not the "
+                + "tree you authored in.");
+            return 2;
+        }
+
+        var sourceDir = Path.GetDirectoryName(Path.GetFullPath(source)) ?? ".";
+        Directory.CreateDirectory(outDir);
+
+        var uris = Blix.Recipes.MeshRecipe.ReferencedImageUris(source);
+        Console.WriteLine($"  {uris.Count} referenced image(s)");
+
+        long sourceBytes = 0, cookedBytes = 0;
+        var sw = Stopwatch.StartNew();
+        Parallel.ForEach(uris, uri =>
+        {
+            var from = Path.Combine(sourceDir, uri);
+            if (!File.Exists(from))
+            {
+                Console.Error.WriteLine($"  missing: {uri}");
+                return;
+            }
+
+            var to = Path.Combine(outDir, Path.ChangeExtension(uri, ".blixtex"));
+            Directory.CreateDirectory(Path.GetDirectoryName(to)!);
+            Blix.Recipes.TextureRecipe.CookOne(from, to, out var inLen, out var outLen);
+            Interlocked.Add(ref sourceBytes, inLen);
+            Interlocked.Add(ref cookedBytes, outLen);
+        });
+
+        Console.WriteLine(
+            $"  textures: {sourceBytes / 1048576.0:F1} MB -> {cookedBytes / 1048576.0:F1} MB in {sw.Elapsed.TotalSeconds:F0}s");
+
+        var meshOut = Path.Combine(outDir, Path.GetFileNameWithoutExtension(source) + ".blixmesh");
+        var count = Blix.Recipes.MeshRecipe.CookToBlixMesh(
+            source, meshOut,
+            flipTextureV: HasFlag(args, "--flip-v"),
+            includeTangents: HasFlag(args, "--tangents"));
+
+        var header = Blix.Cooked.CookedFile.TryReadHeader(meshOut);
+        Console.WriteLine($"  mesh: {count} primitive(s) -> {meshOut}");
+        Console.WriteLine(
+            header?.Stamp.Flags == Blix.Cooked.CookedFlags.None
+                ? "  this tree stands alone — no source file is needed to load it."
+                : "  the source is still needed; run `blix check --cooked` on the output to see why.");
+
+        return 0;
+    }
+
+    static string? ValueOf(string[] args, string name)
+    {
+        var i = Array.IndexOf(args, name);
+        return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
+    }
+
+    static bool HasFlag(string[] args, string name) => Array.IndexOf(args, name) >= 0;
 
     static void PrintUsage()
 {
@@ -176,7 +272,7 @@ public static class Program
             var srcTime = File.GetLastWriteTimeUtc(src);
             var outTime = File.GetLastWriteTimeUtc(outPath);
             var existing = CookedFile.TryReadHeader(outPath);
-            var currentFormat = existing is { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version5 };
+            var currentFormat = existing is { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version6 };
             if (outTime > srcTime && currentFormat)
             {
                 Console.WriteLine($"  up-to-date: {outPath}");
@@ -185,7 +281,7 @@ public static class Program
 
             if (!currentFormat)
             {
-                Console.WriteLine($"  re-cooking (format is not {nameof(BlixMesh)} v{BlixMesh.Version5}): {outPath}");
+                Console.WriteLine($"  re-cooking (format is not {nameof(BlixMesh)} v{BlixMesh.Version6}): {outPath}");
             }
         }
         var sw = Stopwatch.StartNew();

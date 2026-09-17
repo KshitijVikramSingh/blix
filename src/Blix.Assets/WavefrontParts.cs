@@ -91,7 +91,21 @@ public static class WavefrontParts
             return null;
         }
 
-        var file = BlixMeshReader.Read(cookedPath);
+        BlixMeshFile file;
+        try
+        {
+            file = BlixMeshReader.Read(cookedPath);
+        }
+        catch (AssetImportException stale)
+        {
+            // <b>Reported, not thrown.</b> A cooked artifact written by an older format is a reason
+            // to parse the OBJ, not a reason to take a game down — and because the reason travels
+            // out through the load report, `blix check --cooked` names the file rather than leaving
+            // it quietly slow.
+            why = $"{stale.Message} — the OBJ was parsed";
+            return null;
+        }
+
         var wanted = $"recenter={(recenter ? 1 : 0)}";
         if (file.Cooked?.Stamp.Parameters.Contains(wanted, StringComparison.Ordinal) != true)
         {
@@ -135,7 +149,17 @@ public static class WavefrontParts
         catch (IOException) { return 0; }
     }
 
-    private static IReadOnlyList<Part> ImportSource(string objPath, bool recenter)
+    /// <summary>
+    /// Parses the OBJ, ignoring any cooked artifact beside it.
+    /// </summary>
+    /// <remarks>
+    /// <b>What a RECIPE must call, and the reason this is public.</b> <see cref="Import"/> prefers a
+    /// cooked sibling, which is right for a game and catastrophic for a cook: a recipe reading
+    /// through it would consume its own previous output and re-cook that — the one mistake a recipe
+    /// can make that still looks like it worked. It was caught only because a format version
+    /// happened to change in the same commit; at a matching version it would have been silent.
+    /// </remarks>
+    public static IReadOnlyList<Part> ImportSource(string objPath, bool recenter = true)
     {
         var positions = new List<Vector3>();
         var normals = new List<Vector3>();

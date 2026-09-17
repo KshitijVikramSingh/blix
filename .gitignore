@@ -32,3 +32,25 @@ third_party/gltf-corpus/
 # The lab baseline: 68 hashed artifacts, re-recordable in a minute by
 # tools/lab-baseline.sh record. A control is a thing you re-derive, not a thing you commit.
 .baseline/
+
+# Cooked artifacts are DERIVED, so they are not committed — the rule .baseline/
+# already follows: a thing you can re-derive in a minute is not a thing to carry
+# in history.
+#
+# This was not always true. 75 .blixmesh and 4 .blixfont were tracked, and the
+# cook arc made keeping them untenable: once a cooked mesh carried its own image
+# table it also had to carry the images, and cooking the ones embedded in a .glb
+# extracts and re-encodes them — BC7 is fixed-rate where the source was entropy-
+# coded, so RTSGame's two villagers alone turned 67 MB of .glb into 118 MB of
+# .blixtex. Committing that would have grown the repository by more than the
+# assets it was storing.
+#
+# Not committing them also fixes a fresh clone rather than merely shrinking it.
+# The cook target is incremental on Inputs/Outputs, and a committed output whose
+# checkout timestamp is not reliably older than its input is a build that may or
+# may not re-cook. An output that does not exist cannot be skipped.
+*.blixmesh
+*.blixtex
+*.blixprobe
+*.blixfont
+*.textures/
