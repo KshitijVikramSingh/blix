@@ -377,9 +377,18 @@ internal sealed partial class SponzaLoop
     private void LoadIbl(string assetsRoot)
     {
         string[] probeCandidates = { "autumn_field_4k.blixprobe", "rogland_overcast_4k.blixprobe", "sky_hdr.blixprobe" };
+        var probeDir = Path.Combine(assetsRoot, "textures");
         var probePath = probeCandidates
-            .Select(p => Path.Combine(assetsRoot, "textures", p))
-            .FirstOrDefault(File.Exists);
+            .Select(p => Path.Combine(probeDir, p))
+            .FirstOrDefault(File.Exists)
+            // <b>Then ANY probe in the directory, because a named list silently ignores one you
+            // cooked.</b> The three names above are a real preference — the first has a sun to align
+            // the directional light to, the second deliberately has none — so they keep priority.
+            // What they should not do is send a person back to the procedural sky while a perfectly
+            // good .blixprobe sits beside them under a name nobody hardcoded.
+            ?? (Directory.Exists(probeDir)
+                ? Directory.EnumerateFiles(probeDir, "*.blixprobe").OrderBy(f => f, StringComparer.Ordinal).FirstOrDefault()
+                : null);
         if (probePath is null)
         {
             Console.WriteLine("[VulkanSponza] IBL: no cooked probe (run tools/setup-sponza-modern.sh / blix-cook probe); using procedural sky.");

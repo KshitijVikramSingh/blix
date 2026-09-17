@@ -85,7 +85,9 @@ mkdir -p "$COOKED/textures"
 for hdr in "$SRC"/textures/*.hdr; do
     [[ -f "$hdr" ]] || continue
     echo "── probe  ($(basename "$hdr"))"
-    dotnet "$COOK" probe "$hdr" --out "$COOKED/textures"
+    # --out MIRRORS the source's relative path, so the target is the tree root and
+    # not its textures/ dir — passing the latter produced textures/textures/.
+    dotnet "$COOK" probe "$hdr" --out "$COOKED"
 done
 
 echo
