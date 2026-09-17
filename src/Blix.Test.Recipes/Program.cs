@@ -676,6 +676,52 @@ public static class Program
         t.Expect("distinct outputs are not a collision",
             !Blix.Tools.Cook.Program.FindOutputCollisions(fineBatch).Any(), "reported one anyway");
 
+        // ── a texture's identity is the same across independent loads ───────
+        // <b>Every upload cache in this tree is keyed by the OBJECT, so nothing can be shared.</b>
+        // GltfTexture is a class with no value equality — its own comment says the cost "nothing
+        // relied on" — so two imports of one file produce two instances and upload the same pixels
+        // twice, by construction. Three owners hand-roll that key: the engine's GltfTextureLoader,
+        // the studio, and VulkanSponza.
+        //
+        // ResourceId is the fix's foundation, and the only thing worth asserting about it is that
+        // two loads AGREE. An identity that differs per load is not an identity; it is the object
+        // reference again, spelled as a string.
+        var idAsset = FindFile("Rogue.glb");
+        if (idAsset is null)
+        {
+            t.Fail("an asset with textures is findable", "no Rogue.glb under the repo");
+        }
+        else
+        {
+            var firstLoad = new Blix.GltfImporter()
+                .Import(new AssetImportContext(AssetId.Parse("t/id-1"), idAsset));
+            var secondLoad = new Blix.GltfImporter()
+                .Import(new AssetImportContext(AssetId.Parse("t/id-2"), idAsset));
+
+            static string[] Ids(Blix.GltfModel m) => m.Primitives
+                .Select(p => p.Material?.BaseColorTexture)
+                .Where(x => x is not null)
+                .Select(x => x!.ResourceId)
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(x => x, StringComparer.Ordinal)
+                .ToArray();
+
+            var first = Ids(firstLoad);
+            var second = Ids(secondLoad);
+
+            t.Expect("a textured load yields identities at all", first.Length > 0, $"{first.Length}");
+            t.ExpectTrue("none of them is empty", first.All(x => x.Length > 0));
+            t.Expect("two independent loads agree on every identity",
+                first.SequenceEqual(second, StringComparer.Ordinal),
+                $"[{string.Join(", ", first)}] vs [{string.Join(", ", second)}]");
+
+            // And the objects do NOT compare equal — which is the defect the identity exists to
+            // route around, asserted so the two facts stay visibly separate.
+            var a = firstLoad.Primitives.Select(p => p.Material?.BaseColorTexture).First(x => x is not null);
+            var b = secondLoad.Primitives.Select(p => p.Material?.BaseColorTexture).First(x => x is not null);
+            t.ExpectTrue("while the objects themselves are still distinct", !ReferenceEquals(a, b));
+        }
+
         t.PrintSummary();
         return t.Failed;
     }

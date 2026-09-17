@@ -250,7 +250,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         // static importer; see GltfStaticImporter.PreDecodeImages for rationale.
         var textureCache = new Dictionary<int, GltfTexture>();
         var gltfDir = Path.GetDirectoryName(Path.GetFullPath(context.SourcePath)) ?? string.Empty;
-        GltfShared.PreDecodeImages(model, textureCache, gltfDir);
+        GltfShared.PreDecodeImages(model, textureCache, gltfDir, context.SourcePath);
         var materialCache = new Dictionary<int, GltfMaterial>();
         var primitivesList = new List<GltfPrimitive>();
         var bindings = new List<GltfSkinBinding>();

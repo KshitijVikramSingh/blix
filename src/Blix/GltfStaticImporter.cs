@@ -226,7 +226,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         // siblings (see tools/Blix.Tools.Cook + BlixTex format) skip the
         // decode entirely; PreDecodeImages prefers them when present.
         var gltfDir = Path.GetDirectoryName(Path.GetFullPath(context.SourcePath)) ?? string.Empty;
-        GltfShared.PreDecodeImages(model, textureCache, gltfDir);
+        GltfShared.PreDecodeImages(model, textureCache, gltfDir, context.SourcePath);
 
         foreach (var node in model.LogicalNodes)
         {
@@ -301,7 +301,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         var gltfDir = Path.GetDirectoryName(Path.GetFullPath(context.SourcePath)) ?? string.Empty;
         var textureCache = new Dictionary<int, GltfTexture>();
         var materialCache = new Dictionary<int, GltfMaterial>();
-        GltfShared.PreDecodeImages(model, textureCache, gltfDir);
+        GltfShared.PreDecodeImages(model, textureCache, gltfDir, context.SourcePath);
 
         var glNodes = model.LogicalNodes.ToList();
         var indexOf = new Dictionary<Node, int>(glNodes.Count);

@@ -53,7 +53,8 @@ internal static class GltfShared
     internal static void PreDecodeImages(
         ModelRoot model,
         Dictionary<int, GltfTexture> textureCache,
-        string gltfDir)
+        string gltfDir,
+        string containerPath = "")
     {
         var imageRefs = new HashSet<int>();
         // Track which images are used as MetallicRoughness so we can route
@@ -115,8 +116,10 @@ internal static class GltfShared
             // bytes per texture.
             var one = System.Diagnostics.Stopwatch.StartNew();
             var handle = BlixTexReader.ReadHandle(path);
-            textureCache[idx] = new GltfTexture(
-                Path.GetFileNameWithoutExtension(path), handle);
+            textureCache[idx] = new GltfTexture(Path.GetFileNameWithoutExtension(path), handle)
+            {
+                ResourceId = Path.GetFullPath(path),
+            };
 
             if (AssetLoadLog.Enabled)
             {
@@ -150,7 +153,8 @@ internal static class GltfShared
                 : ImageLoader.LoadRgba32(stream);
             decoded[image.LogicalIndex] = GltfTexture.Rgba8Single(
                 image.Name ?? $"image_{image.LogicalIndex}",
-                d.Pixels, d.Width, d.Height);
+                d.Pixels, d.Width, d.Height,
+                ImageIdentity(image, containerPath, gltfDir));
 
             // <b>The silent one.</b> A texture that decodes from PNG on every load, because no
             // .blixtex sibling was found, is indistinguishable from one that did not — and for an
@@ -341,7 +345,10 @@ internal static class GltfShared
 
             if (path.EndsWith(".blixtex", StringComparison.OrdinalIgnoreCase))
             {
-                textureCache[row] = new GltfTexture(entry.Name, BlixTexReader.ReadHandle(path));
+                textureCache[row] = new GltfTexture(entry.Name, BlixTexReader.ReadHandle(path))
+                {
+                    ResourceId = path,
+                };
                 cooked++;
                 if (AssetLoadLog.Enabled)
                 {
@@ -359,7 +366,7 @@ internal static class GltfShared
                 var d = metallicRoughnessRows.Contains(row)
                     ? ImageLoader.LoadMetallicRoughness(stream)
                     : ImageLoader.LoadRgba32(stream);
-                textureCache[row] = GltfTexture.Rgba8Single(entry.Name, d.Pixels, d.Width, d.Height);
+                textureCache[row] = GltfTexture.Rgba8Single(entry.Name, d.Pixels, d.Width, d.Height, path);
             }
 
             decodedCount++;
@@ -380,6 +387,33 @@ internal static class GltfShared
         }
 
         if (decodedCount > 0) Console.WriteLine($"  decoded {decodedCount} images from source");
+    }
+
+    /// <summary>What a glTF image's pixels ARE, as a string two loads agree on.</summary>
+    /// <remarks>
+    /// An external image is its own resolved path. An image embedded in a .glb has no path, so it
+    /// is named by its container and index — which is exactly as stable, and is why this is a
+    /// string rather than a path type.
+    /// </remarks>
+    private static string ImageIdentity(SharpGLTF.Schema2.Image image, string containerPath, string? gltfDir)
+    {
+        var uri = image.Content.SourcePath;
+        if (!string.IsNullOrEmpty(uri) && !uri.StartsWith("data:", StringComparison.Ordinal))
+        {
+            var unescaped = Uri.UnescapeDataString(uri);
+            return Path.GetFullPath(gltfDir is null ? unescaped : Path.Combine(gltfDir, unescaped));
+        }
+
+        // <b>Embedded: named by its CONTAINER and index, not by the directory.</b> Two .glb files
+        // side by side both have an image 0, and a dir-scoped name would equate them — which is the
+        // one thing an identity must never do.
+        //
+        // An empty container path yields an identity nobody else can reproduce, so such a texture is
+        // simply never shared. That is the honest outcome: a caller that did not say where the
+        // pixels came from has not given us an identity, and inventing one would be worse.
+        return containerPath.Length == 0
+            ? string.Empty
+            : $"{Path.GetFullPath(containerPath)}#{image.LogicalIndex}";
     }
 
     internal static GltfMaterial? MaterialFromCooked(
@@ -544,7 +578,8 @@ internal static class GltfShared
 
         var result = GltfTexture.Rgba8Single(
             image.Name ?? texture.Name ?? $"image_{image.LogicalIndex}",
-            decoded.Pixels, decoded.Width, decoded.Height);
+            decoded.Pixels, decoded.Width, decoded.Height,
+            ImageIdentity(image, containerPath: string.Empty, gltfDir: null));
         textureCache[image.LogicalIndex] = result;
         return result;
     }

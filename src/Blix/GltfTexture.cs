@@ -29,6 +29,34 @@ namespace Blix;
 public sealed class GltfTexture
 {
     public string Name { get; }
+
+    /// <summary>
+    /// What these pixels ARE — stable across loads, and equal for two loads of the same source.
+    /// </summary>
+    /// <remarks>
+    /// <b>Every cache of uploaded textures in this tree is keyed by the OBJECT, which is why none of
+    /// them can share anything.</b> This type is a class with no value equality — its own comment
+    /// says so — so two imports of one file produce two instances and upload the same pixels twice,
+    /// by construction. Three owners hand-roll that same broken key: the engine's
+    /// <see cref="GltfTextureLoader"/>, the studio, and VulkanSponza.
+    /// <para>
+    /// A resolved absolute path, or <c>&lt;container&gt;#&lt;imageIndex&gt;</c> for an image embedded
+    /// in a .glb, which has no path of its own. Cheap on every path we have and equal wherever the
+    /// pixels are, which is the whole requirement.
+    /// </para>
+    /// <para>
+    /// <b>Not a content hash, deliberately.</b> A hash would additionally equate two identically
+    /// valued files under different names — a strictly stronger identity, which the cook already
+    /// computes as <c>BlixMeshImage.ContentHash</c>. Nothing is asking for that, and paying a read
+    /// of every image to get it is a cost with no consumer. The stronger identity can replace this
+    /// one later without any caller noticing, which is the point of it being a string.
+    /// </para>
+    /// <para>
+    /// Empty means "unidentifiable" — a texture built from bytes with no origin. Such a texture is
+    /// never shared, because an identity nobody can reproduce is not an identity.
+    /// </para>
+    /// </remarks>
+    public string ResourceId { get; init; } = string.Empty;
     public TextureFormat Format { get; }
     public int Width { get; }
     public int Height { get; }
@@ -67,8 +95,8 @@ public sealed class GltfTexture
     // Convenience for the legacy single-mip Rgba8 shape. Used by the
     // source-PNG decode path; cooked-load callers use the constructor
     // directly with the BlixTex's full mip chain.
-    public static GltfTexture Rgba8Single(string name, byte[] pixels, int width, int height)
-        => new(name, TextureFormat.Rgba8, width, height, new[] { pixels });
+    public static GltfTexture Rgba8Single(string name, byte[] pixels, int width, int height, string resourceId = "")
+        => new(name, TextureFormat.Rgba8, width, height, new[] { pixels }) { ResourceId = resourceId };
 
     // Drops the CPU pixel-data references so the garbage collector can
     // reclaim the ~85MB-per-4K-texture working set the rest of the app
