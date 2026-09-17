@@ -137,10 +137,31 @@ public static class Program
             $"  textures: {sourceBytes / 1048576.0:F1} MB -> {cookedBytes / 1048576.0:F1} MB in {sw.Elapsed.TotalSeconds:F0}s");
 
         var meshOut = Path.Combine(outDir, Path.GetFileNameWithoutExtension(source) + ".blixmesh");
+        // <b>The same simplifier `cook mesh` uses, which this path was silently missing.</b> It
+        // called CookToBlixMesh without a `simplify:` argument, so the parameter defaulted to null
+        // and every mesh cooked through `cook asset` shipped with LOD0 and nothing else. The stamp
+        // said so — simplify=none — and nothing read the stamp.
+        //
+        // The cost was invisible in the cook and expensive at runtime: VulkanSponza's whole
+        // screen-space-error LOD system had nothing to select between, so its overlay read
+        // lod-maxlevels 1 and lod-hist 401/0/0/0 even at an eight-pixel error budget, and 12.8M
+        // triangles were submitted at full detail twice a frame.
+        //
+        // This is the second time this exact bug has been fixed. The comment above the call in
+        // CookMesh records the first: the simplifier used to be a lambda in this file, "which is how
+        // the uniform [Recipe] path ended up with no decimation at all". That fix taught the recipe
+        // path and `cook mesh` to share one simplifier, and left `cook asset` behind.
+        var splitBudget = 0;
+        var splitIdx = Array.FindIndex(args, x => x.Equals("--split", StringComparison.OrdinalIgnoreCase));
+        if (splitIdx >= 0 && splitIdx + 1 < args.Length && int.TryParse(args[splitIdx + 1], out var sb))
+            splitBudget = sb;
         var count = Blix.Recipes.MeshRecipe.CookToBlixMesh(
             source, meshOut,
             flipTextureV: HasFlag(args, "--flip-v"),
-            includeTangents: HasFlag(args, "--tangents"));
+            includeTangents: HasFlag(args, "--tangents"),
+            simplify: Blix.Recipes.MeshRecipe.DefaultSimplifier(splitBudget > 0),
+            splitTriBudget: splitBudget,
+            splitFoliage: !HasFlag(args, "--no-split-foliage"));
 
         var header = Blix.Cooked.CookedFile.TryReadHeader(meshOut);
         Console.WriteLine($"  mesh: {count} primitive(s) -> {meshOut}");
