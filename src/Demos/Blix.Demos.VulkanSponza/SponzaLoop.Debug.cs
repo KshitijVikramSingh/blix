@@ -77,12 +77,6 @@ internal sealed partial class SponzaLoop
                         if (TryResolveMargin(p, out var a, out var ix)) a[ix] = next;
                 }
             }
-            foreach (var p in selection)
-            {
-                if (p == primarySelection) continue;
-                if (sceneSelection.TryGetBounds(p, out var b))
-                    debug.Draw.Aabb($"sel/{p}", b.Min, b.Max, MultiSelectColor);
-            }
         }
 
         using (debug.Scope("Cascades"))
@@ -158,6 +152,18 @@ internal sealed partial class SponzaLoop
         for (var c = 0; c < CascadeCount; c++)
         {
             debug.Draw.Frustum($"cascade/{c}", cascadeViewProj[c], cascadeTints[c]);
+        }
+
+        // <b>The multi-select highlight, which used to draw from the selection block above and
+        // therefore from OUTSIDE any view.</b> That threw "Debug primitives were emitted outside any
+        // view" and took the process with it — but only ever on the SECOND selection, because the
+        // loop skips the primary and a single selection leaves nothing to draw. One Cmd-click was
+        // the difference between working and an unhandled exception.
+        foreach (var p in selection)
+        {
+            if (p == primarySelection) continue;
+            if (sceneSelection.TryGetBounds(p, out var b))
+                debug.Draw.Aabb($"sel/{p}", b.Min, b.Max, MultiSelectColor);
         }
     }
 }
