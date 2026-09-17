@@ -69,6 +69,18 @@ public static class MeshRecipe
         ArgumentNullException.ThrowIfNull(gltfPath);
         ArgumentNullException.ThrowIfNull(outPath);
 
+        // <b>A rigged glTF cooks as a rig, through the same recipe.</b> It is one recipe rather than
+        // two because BlixRecipes.For refuses to guess when two recipes accept the same extension —
+        // a second .gltf recipe would leave `blix cook` unable to choose — and because "is this
+        // rigged?" is a property of the FILE, not a thing a caller should have to know before
+        // asking for it cooked.
+        //
+        // Routed by the rigged importer's own refusal, exactly as `blix check --cooked` routes it:
+        // it declines by name when no node carries both a mesh and a skin. Asking it first and
+        // letting the refusal decide beats sniffing the JSON for a "skins" array, because the
+        // question is not "does this file mention a skin" but "can this importer use it".
+        if (TryCookRig(gltfPath, outPath, out var rigPrimitiveCount)) return rigPrimitiveCount;
+
         var layout = includeTangents
             ? VertexPosition3NormalTangentTexture.Layout
             : VertexPosition3NormalTexture.Layout;
@@ -103,6 +115,7 @@ public static class MeshRecipe
                 {
                     primitives.Add(new BlixMeshPrimitive(
                         Name: chunk.Name,
+                        Layout: layout,
                         MaterialIndex: materialIndex,
                         Bounds: chunk.Bounds,
                         VertexCount: chunk.VertexCount,
@@ -149,10 +162,132 @@ public static class MeshRecipe
 
         BlixMeshWriter.Write(
             outPath,
-            new BlixMeshFile(layout, primitives, CookMaterials(model, imageRows), images),
+            new BlixMeshFile(primitives, CookMaterials(model, imageRows), images),
             stamp);
         return primitives.Count;
     }
+
+    /// <summary>
+    /// Cooks a rigged glTF — skinned vertices, skins and clips — or returns false if it is not one.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the last category of asset in this tree with no cooked form.</b>
+    /// <c>blix check --cooked</c> said so on every rigged file: "a rigged glTF has no cooked form —
+    /// .blixmesh holds no skinned vertex layout". Measured, the four RTSGame villagers spent ~890 ms
+    /// of their ~1,950 ms on geometry and skin, which is about half a second off every launch and is
+    /// behind nothing.
+    /// <para>
+    /// The vertices come from <see cref="GltfImporter"/> rather than being rebuilt here, and that is
+    /// deliberate: joint remapping and weight normalisation are subtle, the importer already does
+    /// them, and a cook that reimplemented them would be a second opinion whose disagreements would
+    /// show up as a character loading differently once cooked.
+    /// </para>
+    /// </remarks>
+    private static bool TryCookRig(string gltfPath, string outPath, out int primitiveCount)
+    {
+        primitiveCount = 0;
+
+        GltfModel rig;
+        try
+        {
+            rig = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("cook/rig"), gltfPath));
+        }
+        catch (AssetImportException noRig) when (noRig.Message.Contains("no rig here", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var skins = rig.SkinsOrEmpty;
+        if (skins.Length == 0) return false;
+
+        var model = ModelRoot.Load(gltfPath);
+        var (images, imageRows) = CookImages(model, gltfPath, outPath);
+
+        var primitives = rig.Primitives.Select(CookPrimitive).ToArray();
+
+        var cookedSkins = skins.Select(skin => new BlixMeshSkin(
+            skin.Skeleton.Bones
+                .Select(b => new BlixMeshBone(b.Name, b.ParentIndex, b.InverseBindPose))
+                .ToArray(),
+            skin.MeshNodeTransform)).ToArray();
+
+        var clips = rig.Animations.Select(CookClip).ToArray();
+
+        // <b>Attachments and static parts cook too, and making that possible is why a primitive
+        // owns its layout.</b> Both are built through the STATIC path, so their vertices are a
+        // different width from the skinned ones beside them. While a .blixmesh carried one layout
+        // per file, the only honest options were to drop them — a cooked Rogue whose cape and two
+        // knives had quietly vanished — or to refuse to cook any rig that had them, which left the
+        // half-cooked category this stage exists to remove. Of the tree's eight rigged assets
+        // exactly one has attachments, so refusing would have looked fine and consolidated nothing.
+        var attachments = rig.AttachmentsOrEmpty.Select(a => new BlixMeshAttachment(
+            a.Name, a.JointName, a.JointIndex, a.SkinIndex, a.LocalTransform,
+            a.Primitives.Select(CookPrimitive).ToArray())).ToArray();
+
+        var staticParts = rig.StaticPartsOrEmpty.Select(sp => new BlixMeshStaticPart(
+            sp.Name, sp.WorldTransform, sp.Primitives.Select(CookPrimitive).ToArray())).ToArray();
+
+        var everyImageCooked = images.All(
+            i => i.Resource.EndsWith(".blixtex", StringComparison.OrdinalIgnoreCase));
+
+        var parameters =
+            $"rig=1 skins={cookedSkins.Length} bones={cookedSkins.Sum(s => s.Bones.Length)} "
+            + $"clips={clips.Length} attachments={attachments.Length} staticParts={staticParts.Length}";
+
+        var stamp = CookStamp.Of(
+            BlixMesh.ShippedRecipe, MeshRecipeVersion, gltfPath, outPath, parameters,
+            everyImageCooked
+                ? CookedFlags.None
+                : CookedFlags.SourceRequired | CookedFlags.SourceRequiredForImagesOnly);
+
+        BlixMeshWriter.Write(
+            outPath,
+            new BlixMeshFile(
+                primitives, CookMaterials(model, imageRows), images, cookedSkins, clips,
+                attachments, staticParts),
+            stamp);
+
+        primitiveCount = primitives.Length;
+        return true;
+    }
+
+    /// <summary>One imported primitive as the format stores it, layout and skin included.</summary>
+    private static BlixMeshPrimitive CookPrimitive(GltfPrimitive p) => new(
+        Name: p.Mesh.Name,
+        Layout: p.Mesh.Layout,
+        MaterialIndex: p.MaterialIndex,
+        Bounds: p.Mesh.Bounds,
+        VertexCount: p.Mesh.VertexCount,
+        VertexBytes: p.Mesh.VertexBytes,
+        IndexFormat: p.Mesh.IndexFormat,
+        Lods: new[] { new BlixMeshLod(p.Mesh.Indices, p.Mesh.Indices32) },
+        SkinIndex: p.SkinIndex);
+
+    /// <summary>One animation, as keyframes.</summary>
+    /// <remarks>
+    /// <b>Keyframes rather than curve objects, because keyframes are what the source had.</b> The
+    /// glTF importer builds exactly two curve types — <c>KeyframeVector3Curve</c> and
+    /// <c>KeyframeQuaternionCurve</c> — each from a plain array of (time, value). Writing those
+    /// arrays back is lossless; writing a serialised "curve" would be inventing a representation
+    /// for something that is already one.
+    /// </remarks>
+    private static BlixMeshClip CookClip(AnimationClip clip) => new(
+        clip.Name,
+        clip.Tracks.Select(t => new BlixMeshTrack(
+            t.BoneIndex,
+            VectorKeys(t.Translation),
+            QuaternionKeys(t.Rotation),
+            VectorKeys(t.Scale))).ToArray());
+
+    private static BlixMeshVectorKey[] VectorKeys(IFiniteCurve<Vector3>? curve) =>
+        curve is KeyframeVector3Curve k
+            ? k.Keyframes.Select(x => new BlixMeshVectorKey((float)x.Time, x.Value)).ToArray()
+            : Array.Empty<BlixMeshVectorKey>();
+
+    private static BlixMeshQuaternionKey[] QuaternionKeys(IFiniteCurve<Quaternion>? curve) =>
+        curve is KeyframeQuaternionCurve k
+            ? k.Keyframes.Select(x => new BlixMeshQuaternionKey((float)x.Time, x.Value)).ToArray()
+            : Array.Empty<BlixMeshQuaternionKey>();
 
     /// <summary>
     /// The relative URIs of the external images this asset's materials actually reference.
@@ -230,6 +365,22 @@ public static class MeshRecipe
                 var image = material.FindChannel(channelName)?.Texture?.PrimaryImage;
                 if (image is null || rows.ContainsKey(image.LogicalIndex)) continue;
 
+                // <b>The channel IS the role, so it is passed rather than re-sniffed.</b> An
+                // extracted image's name is one this cook invents, and TextureRecipe's classifier
+                // reads names: Rogue's base colour came out "rogue_texture", matched nothing, and
+                // cooked linear instead of sRGB. The character rendered blown out and nothing
+                // errored.
+                var role = channelName switch
+                {
+                    "BaseColor" => TextureRole.BaseColor,
+                    "Normal" => TextureRole.Normal,
+                    "MetallicRoughness" => TextureRole.MetallicRoughness,
+                    "Emissive" => TextureRole.Emissive,
+                    // Occlusion is single-channel linear data. It is not MetallicRoughness, whose
+                    // loader zeroes a channel to build the ORM layout.
+                    _ => TextureRole.Linear,
+                };
+
                 var bytes = image.Content.Content;
                 var hash = ContentHash(bytes.Span);
                 var name = image.Name
@@ -237,13 +388,13 @@ public static class MeshRecipe
                     ?? $"image_{image.LogicalIndex}";
 
                 rows[image.LogicalIndex] = images.Count;
-                images.Add(new BlixMeshImage(name, hash, Shippable(Resource(image, bytes, name), gltfPath)));
+                images.Add(new BlixMeshImage(name, hash, Shippable(Resource(image, bytes, name, role), gltfPath)));
             }
         }
 
         return (images, rows);
 
-        string Resource(SharpGLTF.Schema2.Image image, ReadOnlyMemory<byte> bytes, string name)
+        string Resource(SharpGLTF.Schema2.Image image, ReadOnlyMemory<byte> bytes, string name, TextureRole role)
         {
             // External: the file is already on disk beside the glTF. Prefer the cooked artifact
             // when one is there — the asset driver cooks textures BEFORE the mesh precisely so that
@@ -271,7 +422,7 @@ public static class MeshRecipe
             var cookedPath = Path.ChangeExtension(raw, ".blixtex");
             try
             {
-                TextureRecipe.CookOne(raw, cookedPath, out _, out _);
+                TextureRecipe.CookOne(raw, cookedPath, out _, out _, role);
                 // The intermediate is scaffolding, not an artifact. Leaving it would double the
                 // bytes and put a second, uncooked copy of every embedded image on disk.
                 File.Delete(raw);

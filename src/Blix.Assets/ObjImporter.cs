@@ -107,7 +107,7 @@ public sealed class ObjImporter : IAssetImporter<MeshData>
         var lod0 = p.Lods[0];
         return new MeshData(
             p.Name, p.VertexBytes, lod0.Indices16 ?? Array.Empty<ushort>(),
-            file.Layout, p.Bounds, Indices32: lod0.Indices32);
+            p.Layout, p.Bounds, Indices32: lod0.Indices32);
     }
 
     private static long SafeLength(string path)

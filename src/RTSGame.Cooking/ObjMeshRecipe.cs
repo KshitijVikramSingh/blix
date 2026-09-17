@@ -127,6 +127,7 @@ public static class ObjMeshRecipe
             // <b>The part's MATERIAL name, not the mesh's.</b> It is what the reader matches on to
             // find the colour in the sibling .mtl, so it is the one string that has to survive.
             Name: part.Material,
+            Layout: part.Mesh.Layout,
             // Its own entry in the table above — positional, so this is the part's own index.
             MaterialIndex: i,
             Bounds: part.Mesh.Bounds,
@@ -145,7 +146,7 @@ public static class ObjMeshRecipe
             CookedFlags.SourceRequired | CookedFlags.SourceRequiredForImagesOnly);
 
         BlixMeshWriter.Write(
-            request.OutputPath, new BlixMeshFile(layout, primitives, materials), stamp);
+            request.OutputPath, new BlixMeshFile(primitives, materials), stamp);
 
         return CookOutcome.Written(
             $"{primitives.Length} parts, {primitives.Sum(p => p.VertexCount)} vertices, " +

@@ -54,9 +54,129 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         return AssetImportException.Refusing(context.SourcePath, () => ImportCore(context));
     }
 
+    /// <summary>Rebuilds a rig from its cooked form — skins, clips, attachments and all.</summary>
+    /// <remarks>
+    /// <b>Everything the importer would have produced, read rather than derived.</b> The bones come
+    /// back as they were written, the clips as the keyframe arrays they always were, and the
+    /// attachments and static parts with their own vertex layouts — which is what the per-primitive
+    /// layout migration was for. Nothing here reconstructs or re-derives: a cooked rig that needed
+    /// the glTF for any part of itself would not be a cooked rig.
+    /// </remarks>
+    private GltfModel ImportCookedRig(AssetImportContext context, string rigPath, BlixMeshFile cooked)
+    {
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
+        var cookedDir = Path.GetDirectoryName(Path.GetFullPath(rigPath)) ?? string.Empty;
+
+        var textureCache = new Dictionary<int, GltfTexture>();
+        var materialCache = new Dictionary<int, GltfMaterial>();
+        GltfShared.LoadImagesFromTable(cooked.ImageTable, cooked.MaterialTable, cookedDir, textureCache);
+
+        GltfPrimitive Rebuild(BlixMeshPrimitive p)
+        {
+            var lod0 = p.Lods[0];
+            return new GltfPrimitive(
+                new MeshData(
+                    p.Name, p.VertexBytes, lod0.Indices16 ?? Array.Empty<ushort>(),
+                    p.Layout, p.Bounds, Indices32: lod0.Indices32),
+                GltfShared.MaterialFromCooked(cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache),
+                SkinIndex: p.SkinIndex,
+                MaterialIndex: p.MaterialIndex);
+        }
+
+        var bindings = cooked.SkinTable
+            .Select(skin => new GltfSkinBinding(
+                new Skeleton(skin.Bones
+                    .Select(b => new Bone(b.Name, b.ParentIndex, b.InverseBindPose))
+                    .ToArray()),
+                skin.MeshNodeTransform))
+            .ToArray();
+
+        var animations = cooked.ClipTable.Select(RebuildClip).ToArray();
+
+        var attachments = cooked.AttachmentTable
+            .Select(a => new GltfAttachment(
+                a.Name, a.JointName, a.JointIndex, a.LocalTransform,
+                a.Primitives.Select(Rebuild).ToArray(), a.SkinIndex))
+            .ToArray();
+
+        var staticParts = cooked.StaticPartTable
+            .Select(sp => new GltfStaticPart(
+                sp.Name, sp.WorldTransform, sp.Primitives.Select(Rebuild).ToArray()))
+            .ToArray();
+
+        if (AssetLoadLog.Enabled)
+        {
+            AssetLoadLog.Report(new AssetLoadReport(
+                SourcePath: context.SourcePath,
+                CookedPath: rigPath,
+                Mode: AssetLoadMode.Cooked,
+                Bytes: SourceLength(rigPath),
+                LoadMs: loadWatch.Elapsed.TotalMilliseconds,
+                Recipe: cooked.Cooked?.Stamp.Recipe));
+        }
+
+        return new GltfModel(
+            cooked.Primitives.Select(Rebuild).ToArray(),
+            bindings[0].Skeleton, animations, bindings[0].MeshNodeTransform,
+            attachments, staticParts, Array.Empty<GltfIgnored>(), bindings);
+    }
+
+    /// <summary>
+    /// One clip, from the keyframes it was cooked as.
+    /// </summary>
+    /// <remarks>
+    /// An empty channel array means the channel was absent, which is why it maps back to a null
+    /// curve rather than an empty one — <c>KeyframeVector3Curve</c> refuses to exist with no keys,
+    /// and rightly: a curve with nothing to evaluate is not a curve.
+    /// </remarks>
+    private static AnimationClip RebuildClip(BlixMeshClip clip) => new(
+        clip.Name,
+        clip.Tracks.Select(t => new BoneTrack
+        {
+            BoneIndex = t.BoneIndex,
+            Translation = t.Translation.Length == 0
+                ? null
+                : new KeyframeVector3Curve(
+                    t.Translation.Select(k => new Keyframe<Vector3>(k.Time, k.Value)).ToArray()),
+            Rotation = t.Rotation.Length == 0
+                ? null
+                : new KeyframeQuaternionCurve(
+                    t.Rotation.Select(k => new Keyframe<Quaternion>(k.Time, k.Value)).ToArray()),
+            Scale = t.Scale.Length == 0
+                ? null
+                : new KeyframeVector3Curve(
+                    t.Scale.Select(k => new Keyframe<Vector3>(k.Time, k.Value)).ToArray()),
+        }).ToArray());
+
     private GltfModel ImportCore(AssetImportContext context)
     {
         // <b>Started here so the report covers the whole load, including the image pre-decode.</b>
+        // <b>A cooked rig is loaded whole, with no glTF opened.</b> This was the last category of
+        // asset in this tree with no cooked form — `blix check --cooked` said so on every rigged
+        // file — and the win is consolidation rather than milliseconds: one cooked form now covers
+        // every mesh asset, with no category that quietly falls back.
+        var directRig = Path.GetExtension(context.SourcePath)
+            .Equals(".blixmesh", StringComparison.OrdinalIgnoreCase);
+        var rigPath = directRig
+            ? context.SourcePath
+            : Path.ChangeExtension(context.SourcePath, ".blixmesh");
+        if (File.Exists(rigPath))
+        {
+            var cookedRig = BlixMeshReader.Read(rigPath);
+
+            // A .blixmesh with no skins is a STATIC cook sitting beside a rigged source — which is
+            // the normal state of any file the static cook reached first. It is not this importer's
+            // to read, and saying so beats loading a character with no skeleton.
+            if (cookedRig.IsRigged) return ImportCookedRig(context, rigPath, cookedRig);
+            if (directRig)
+            {
+                throw new AssetImportException(
+                    context.SourcePath, null,
+                    "this .blixmesh carries no skin, so there is no rig in it — " +
+                    "load it as a static model instead (GltfStaticImporter)");
+            }
+        }
+
         var loadWatch = System.Diagnostics.Stopwatch.StartNew();
 
         var model = AssetImportException.Refusing(context.SourcePath, () => ModelRoot.Load(context.SourcePath));
@@ -159,7 +279,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                     var meshName = $"{mesh.Name ?? "gltf_mesh"}.{i}";
                     var meshData = BuildMeshData(meshName, prim, skinRemap);
                     var material = GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache);
-                    primitivesList.Add(new GltfPrimitive(meshData, material, SkinIndex: s));
+                    primitivesList.Add(new GltfPrimitive(
+                        meshData, material, SkinIndex: s, MaterialIndex: prim.Material?.LogicalIndex ?? -1));
                 }
             }
         }
@@ -204,7 +325,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                 var meshData = GltfStaticImporter.BuildStaticMeshData(
                     $"{name}.{i}", prim, Matrix4x4.Identity, Matrix4x4.Identity, includeColour: true);
                 parts.Add(new GltfPrimitive(
-                    meshData, GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache)));
+                    meshData, GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache),
+                    MaterialIndex: prim.Material?.LogicalIndex ?? -1));
             }
 
             if (parts.Count > 0) staticParts.Add(new GltfStaticPart(name, node.WorldMatrix, parts.ToArray()));
@@ -395,7 +517,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                 var meshData = GltfStaticImporter.BuildStaticMeshData(
                     name, prim, Matrix4x4.Identity, Matrix4x4.Identity, includeColour: true);
                 primitives.Add(new GltfPrimitive(
-                    meshData, GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache)));
+                    meshData, GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache),
+                    MaterialIndex: prim.Material?.LogicalIndex ?? -1));
             }
 
             if (primitives.Count == 0) continue;

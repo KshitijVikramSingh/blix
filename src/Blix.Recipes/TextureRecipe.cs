@@ -29,7 +29,26 @@ public enum TextureRole { BaseColor, Normal, Emissive, MetallicRoughness, Linear
 /// </remarks>
 public static class TextureRecipe
 {
-    public static void CookOne(string source, string destination, out long sourceLen, out long destLen)
+    /// <param name="role">
+    /// The role to cook as, when the CALLER knows it. Null means classify by filename.
+    /// </param>
+    /// <remarks>
+    /// <b>An explicit role exists because filename sniffing silently destroyed a texture.</b>
+    /// Classification reads the file's NAME, which works for an authored tree where a base colour
+    /// map is called "*_BaseColor.png". It fails completely for an image extracted out of a .glb,
+    /// whose name this cook invents: Rogue's base colour arrived as "rogue_texture", matched no
+    /// rule, fell through to Linear, and was written Bc7Unorm instead of Bc7Srgb. Nothing errored.
+    /// The character simply rendered blown out, and the lab baseline caught it as a 9% pixel change
+    /// with a mean delta of 90 — which a person spotted as "blown out" before any of this was
+    /// measured.
+    /// <para>
+    /// The mesh cook always knows the role, because it finds each image ON a material channel. A
+    /// heuristic is the right answer when nothing knows better and the wrong one when something
+    /// does.
+    /// </para>
+    /// </remarks>
+    public static void CookOne(
+        string source, string destination, out long sourceLen, out long destLen, TextureRole? role = null)
     {
         var verbose = Environment.GetEnvironmentVariable("BLIX_COOK_VERBOSE") != null;
         // Cook format selection. BC7 is 4x smaller than Rgba8 on disk + in GPU
@@ -55,18 +74,18 @@ public static class TextureRecipe
         using (var stream = File.OpenRead(source))
         {
             var decodeSw = Stopwatch.StartNew();
-            var role = ClassifyRole(source);
+            var resolvedRole = role ?? ClassifyRole(source);
             // MR textures need channel-aware loading: 1-channel grayscale
             // PNGs (Modern Sponza's "*_Roughness.png") get expanded by stb to
             // (Y, Y, Y, 255), which the shader would then read as
             // metallic = roughness. LoadMetallicRoughness detects the
             // grayscale source and zeroes the B channel so the cooked
             // .blixtex stores (255, Y, 0, 255) -- the canonical ORM layout.
-            var image = role == TextureRole.MetallicRoughness
+            var image = resolvedRole == TextureRole.MetallicRoughness
                 ? ImageLoader.LoadMetallicRoughness(stream)
                 : ImageLoader.LoadRgba32(stream);
             if (verbose) Console.WriteLine($"\r    decoded {name} {image.Width}x{image.Height} in {decodeSw.ElapsedMilliseconds} ms");
-            var (bcFormat, flags) = PickFormat(role);
+            var (bcFormat, flags) = PickFormat(resolvedRole);
             var format = bcMode ? bcFormat : TextureFormat.Rgba8;
 
             var mipSw = Stopwatch.StartNew();

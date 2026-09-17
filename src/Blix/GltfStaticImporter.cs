@@ -58,6 +58,12 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         var stamp = CookedFile.TryReadHeader(blixmeshPath)?.Stamp;
         if (stamp is null) return null;
 
+        // <b>A RIG's stamp records skins, bones and clips — not flipV or tangents.</b> Those are
+        // settings of the static cook, and comparing them against a rig stamp compares nothing and
+        // therefore fails always. The rigged loader has its own route; this check has no opinion
+        // about files it is not for.
+        if (!stamp.Value.Parameters.Contains("flipV=", StringComparison.Ordinal)) return null;
+
         var want = $"flipV={(context.FlipTextureV ? 1 : 0)} tangents={(context.IncludeTangents ? 1 : 0)}";
         if (stamp.Value.Parameters.Contains(want, StringComparison.Ordinal)) return null;
 
@@ -86,19 +92,19 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         var materialCache = new Dictionary<int, GltfMaterial>();
         GltfShared.LoadImagesFromTable(cooked.ImageTable, cooked.MaterialTable, cookedDir, textureCache);
 
-        // The texture coordinate is the only Float2 in either cooked layout, so the UV offset is
-        // matched by FORMAT rather than by attribute location — location 3 is the texture
-        // coordinate in the 48-byte tangent layout and the tangent in nothing, and looking it up
-        // that way meant a cooked mesh without tangents could not be loaded at all.
-        var uvAttr = cooked.Layout.Attributes.First(a => a.Format == VertexAttributeFormat.Float2);
-
         var primitives = new List<GltfPrimitive>(cooked.Primitives.Count);
         foreach (var p in cooked.Primitives)
         {
             // Heal degenerate UVs in cooked files too — in-place is fine, the buffer is ours once
             // BlixMeshReader returns it. Lets asset-level UV corruption be fixed without re-cooking.
+            // The texture coordinate is the only Float2 in any cooked layout, so the UV offset is
+            // matched by FORMAT rather than by attribute location — location 3 is the texture
+            // coordinate in the 48-byte tangent layout and the tangent in nothing, and looking it
+            // up that way meant a cooked mesh without tangents could not be loaded at all. Resolved
+            // per primitive now that each carries its own layout.
+            var uvAttr = p.Layout.Attributes.First(a => a.Format == VertexAttributeFormat.Float2);
             SanitizePackedUVs(
-                p.VertexBytes, p.VertexCount, stride: cooked.Layout.Stride,
+                p.VertexBytes, p.VertexCount, stride: p.Layout.Stride,
                 uvOffset: uvAttr.Offset, p.Name);
 
             var lod0 = p.Lods[0];
@@ -111,7 +117,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             primitives.Add(new GltfPrimitive(
                 new MeshData(
                     p.Name, p.VertexBytes, lod0.Indices16 ?? Array.Empty<ushort>(),
-                    cooked.Layout, p.Bounds, Indices32: lod0.Indices32, Lods: lods),
+                    p.Layout, p.Bounds, Indices32: lod0.Indices32, Lods: lods),
                 GltfShared.MaterialFromCooked(
                     cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache)));
         }
@@ -172,17 +178,36 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             //
             // A cooked artifact is only valid for the settings it was made with. The recipe stamps
             // them; this refuses what does not match, and says which two disagreed.
-            var mismatch = SettingsMismatch(blixmeshPath, context);
-            if (mismatch is null) return ImportCooked(context.SourcePath, blixmeshPath);
-
-            if (direct)
+            // A rigged cooked file holds skinned vertices this importer cannot draw. Refused by
+            // name when asked for directly; when it is merely a sibling, the glTF is walked, which
+            // is what a caller asking the STATIC importer for a rigged asset has always got.
+            if (BlixMeshReader.Read(blixmeshPath).IsRigged)
             {
-                // Named directly, so there is no source to fall back to. Refusing by name beats
-                // drawing something wrong.
-                throw new AssetImportException(context.SourcePath, null, mismatch);
-            }
+                if (direct)
+                {
+                    throw new AssetImportException(
+                        context.SourcePath, null,
+                        "this .blixmesh holds a rig, so the static importer is the wrong one for it — "
+                        + "load it through GltfImporter");
+                }
 
-            cookedMismatch = mismatch;
+                cookedMismatch = "the .blixmesh sibling holds a rig — the glTF was walked as static geometry";
+            }
+            else if (SettingsMismatch(blixmeshPath, context) is { } mismatch)
+            {
+                if (direct)
+                {
+                    // Named directly, so there is no source to fall back to. Refusing by name beats
+                    // drawing something wrong.
+                    throw new AssetImportException(context.SourcePath, null, mismatch);
+                }
+
+                cookedMismatch = mismatch;
+            }
+            else
+            {
+                return ImportCooked(context.SourcePath, blixmeshPath);
+            }
         }
 
         var loadWatch = System.Diagnostics.Stopwatch.StartNew();

@@ -164,12 +164,16 @@ public static class Program
             return;
         }
 
-        // A cooked mesh opens through the same importer, which reads it standalone and never looks
-        // for a glTF. Judged alongside its source when both are present, which is not double
+        // A cooked mesh opens standalone through whichever importer matches what it HOLDS, and the
+        // file answers that itself — a skin table or none. Routing it by guess sent every cooked rig
+        // to the static importer, which refused it by name and reported a red on an asset that was
+        // cooked correctly. Judged alongside its source when both are present, which is not double
         // counting: they are two different loads and the point is that they agree.
         if (Path.GetExtension(source).Equals(".blixmesh", StringComparison.OrdinalIgnoreCase))
         {
-            new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("check/cooked"), source));
+            var id = AssetId.Parse("check/cooked");
+            if (BlixMeshReader.Read(source).IsRigged) new GltfImporter().Import(new AssetImportContext(id, source));
+            else new GltfStaticImporter().Import(new AssetImportContext(id, source));
             return;
         }
 

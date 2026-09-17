@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using Blix;
 using Blix.Assets;
 using Blix.Graphics;
+using Blix.Graphics.Images;
 using Blix.Graphics.Vulkan;
 
 namespace Blix.Tools.Studio;
@@ -575,13 +576,46 @@ public sealed class StudioRig : IDisposable
         if (texture is null) return white;
         if (uploaded.TryGetValue(texture, out var existing)) return existing;
 
-        var mip0 = texture.MipBytes is { Count: > 0 } mips ? mips[0] : null;
-        if (mip0 is null) return white;
+        // <b>A cooked texture arrives LAZY and MIPPED, and this read knew neither shape.</b>
+        // GltfTexture carries its pixels one of two ways: MipBytes in RAM (the PNG-decode path) or
+        // a BlixTexLazyHandle with the bytes still on disk (the cooked .blixtex path, which exists
+        // so a pack does not hold every mip of every texture in memory at import). This looked only
+        // at MipBytes and fell through to `white` — silently.
+        //
+        // It went unnoticed for as long as rigs had no cooked form, because the studio's rig only
+        // ever met the eager path. The first cooked rig rendered a blown-out white character with
+        // every assertion in the suite passing: the importer DID hand over a material carrying a
+        // texture, so a cooked-versus-source material comparison saw two textures and agreed. The
+        // loss was here, one layer below what any test was looking at.
+        var mips = texture.MipBytes is { Count: > 0 } eager
+            ? eager
+            : texture.LazyHandle is { } lazy
+                ? Enumerable.Range(0, lazy.MipCount).Select(i => BlixTexReader.ReadMip(lazy, i)).ToArray()
+                : null;
 
-        var handle = vk.CreateTexture2D(
-            new TextureDescription(texture.Width, texture.Height, texture.Format, SamplerDescription.LinearRepeat),
-            mip0,
-            $"lab.rig.albedo.{texture.Name}");
+        if (mips is null || mips.Count == 0)
+        {
+            // Reported rather than silently white. A texture that exists and cannot be read is a
+            // bug somewhere, and a white stand-in is exactly what hides it.
+            Console.WriteLine($"[lab] albedo '{texture.Name}' has no readable mips — drawing white.");
+            return white;
+        }
+
+        // <b>A pre-built chain uploads verbatim; a single mip is generated from.</b> CreateTexture2D
+        // downsamples by blitting, which a BC format cannot do — MoltenVK refuses it outright with
+        // "MTLPixelFormatBC7_RGBAUnorm_sRGB is not color renderable", during upload rather than
+        // during a draw. A cooked texture already carries every level, which is what the cook is
+        // for, so the chain is handed over whole.
+        var handle = mips.Count > 1
+            ? vk.CreateTexture2DMipped(
+                new TextureDescription(texture.Width, texture.Height, texture.Format, SamplerDescription.LinearRepeat),
+                mips,
+                $"lab.rig.albedo.{texture.Name}")
+            : vk.CreateTexture2D(
+                new TextureDescription(texture.Width, texture.Height, texture.Format, SamplerDescription.LinearRepeat),
+                mips[0],
+                $"lab.rig.albedo.{texture.Name}");
+
         uploaded[texture] = handle;
         ownedTextures.Add(handle);
         images.Add(new Image(

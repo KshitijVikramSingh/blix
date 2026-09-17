@@ -134,7 +134,7 @@ public static class WavefrontParts
                     p.Name,
                     p.VertexBytes,
                     lod0.Indices16 ?? Array.Empty<ushort>(),
-                    file.Layout,
+                    p.Layout,
                     p.Bounds,
                     Indices32: lod0.Indices32),
                 material?.BaseColorFactor ?? Vector4.One);

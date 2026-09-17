@@ -110,16 +110,17 @@ public static class Program
             BlixRecipes.For(typeof(MeshRecipe).Assembly, "a/b/c.glb")!.OutputFor("a/b/c.glb")
                 .EndsWith("c.blixmesh", StringComparison.Ordinal));
 
-        // ── the rigged path reports, and reports that it cannot be cooked ───
-        // <b>K-E wired the static importer and the font loader and left this one silent.</b> So
-        // `blix check --cooked` — which used to load everything statically — could not see the way
-        // a game actually loads a character, and the most expensive assets in the tree were
-        // measured on a path no game takes.
+        // ── a rigged glTF has a cooked form, and it is equivalent ──────────
+        // <b>This block used to assert the opposite, and that is the point of it.</b> It read "it
+        // always reports Source, and that is a statement rather than a gap: .blixmesh carries two
+        // vertex layouts and neither holds skin weights". That was true and is no longer: the
+        // format carries a skin table, a clip table, and per-primitive layouts so a rig's
+        // attachments travel with it.
         //
-        // It always reports Source, and that is a statement rather than a gap: .blixmesh carries
-        // two vertex layouts and neither holds skin weights, so a rigged glTF has nothing to
-        // prefer. A load that is slow because nobody cooked it and one that is slow because it
-        // CANNOT be cooked are different problems, and the warning has to say which.
+        // Reporting Cooked is the weak half of the claim. The strong half is that the cooked rig is
+        // the SAME rig — same bones in the same order, same clips, same attachments — because a
+        // cooked character that loads fast and animates differently is worse than one that loads
+        // slowly.
         var rig = FindFile("Rogue.glb");
         if (rig is null)
         {
@@ -128,31 +129,125 @@ public static class Program
         else
         {
             var wasLogging = AssetLoadLog.Enabled;
+            var rigTemp = Path.Combine(Path.GetTempPath(), "blix-rig-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(rigTemp);
             try
             {
                 AssetLoadLog.Start();
-                new Blix.GltfImporter().Import(new AssetImportContext(AssetId.Parse("t/rig"), rig));
+                var viaCookedRig = new Blix.GltfImporter()
+                    .Import(new AssetImportContext(AssetId.Parse("t/rig"), rig));
                 var rigReports = AssetLoadLog.Drain();
 
                 var meshReport = rigReports.SingleOrDefault(r => r.SourcePath == rig);
                 t.ExpectTrue("a rigged load is reported at all", meshReport is not null);
-                t.Expect("and reports Source", meshReport!.Mode == AssetLoadMode.Source, $"got {meshReport.Mode}");
-                t.ExpectTrue("saying a rigged glTF has no cooked form, not that nobody cooked it",
-                    meshReport.Warning?.Contains("no cooked form", StringComparison.Ordinal) == true);
+                t.Expect("and now reports Cooked", meshReport!.Mode == AssetLoadMode.Cooked, $"got {meshReport.Mode}");
                 t.ExpectTrue("with a cost attached", meshReport.LoadMs > 0 && meshReport.Bytes > 0);
 
-                // The same file through the static importer DOES have a cooked form — which is the
-                // asymmetry this check exists to keep visible until it is gone.
+                // The source leg: the same .glb with no cooked sibling beside it.
+                var loneRig = Path.Combine(rigTemp, Path.GetFileName(rig));
+                File.Copy(rig, loneRig);
+                var viaSourceRig = new Blix.GltfImporter()
+                    .Import(new AssetImportContext(AssetId.Parse("t/rig-source"), loneRig));
+
+                t.Expect("cooked and source agree on bone count",
+                    viaCookedRig.Skeleton.BoneCount == viaSourceRig.Skeleton.BoneCount,
+                    $"cooked {viaCookedRig.Skeleton.BoneCount}, source {viaSourceRig.Skeleton.BoneCount}");
+                t.Expect("and on clip count",
+                    viaCookedRig.Animations.Length == viaSourceRig.Animations.Length,
+                    $"cooked {viaCookedRig.Animations.Length}, source {viaSourceRig.Animations.Length}");
+                t.Expect("and on attachment count",
+                    viaCookedRig.AttachmentsOrEmpty.Length == viaSourceRig.AttachmentsOrEmpty.Length,
+                    $"cooked {viaCookedRig.AttachmentsOrEmpty.Length}, source {viaSourceRig.AttachmentsOrEmpty.Length}");
+                // Without this the three counts above can all pass on an asset with no attachments,
+                // which is the case the per-primitive layout migration was made for.
+                t.Expect("on an asset that actually has attachments",
+                    viaSourceRig.AttachmentsOrEmpty.Length > 0,
+                    $"{viaSourceRig.AttachmentsOrEmpty.Length} attachments");
+
+                var rigMismatch = new List<string>();
+                for (var i = 0; i < Math.Min(viaCookedRig.Skeleton.BoneCount, viaSourceRig.Skeleton.BoneCount); i++)
+                {
+                    var a = viaCookedRig.Skeleton.Bones[i];
+                    var b = viaSourceRig.Skeleton.Bones[i];
+                    if (a.Name != b.Name) rigMismatch.Add($"bone[{i}] {a.Name} vs {b.Name}");
+                    if (a.ParentIndex != b.ParentIndex) rigMismatch.Add($"bone[{i}] parent {a.ParentIndex} vs {b.ParentIndex}");
+                    if (a.InverseBindPose != b.InverseBindPose) rigMismatch.Add($"bone[{i}] inverse bind differs");
+                }
+
+                t.Expect("bones match name, parent and inverse bind", rigMismatch.Count == 0,
+                    string.Join("; ", rigMismatch.Take(4)));
+
+                var clipMismatch = new List<string>();
+                for (var i = 0; i < Math.Min(viaCookedRig.Animations.Length, viaSourceRig.Animations.Length); i++)
+                {
+                    var a = viaCookedRig.Animations[i];
+                    var b = viaSourceRig.Animations[i];
+                    if (a.Name != b.Name) clipMismatch.Add($"clip[{i}] {a.Name} vs {b.Name}");
+                    if (Math.Abs(a.Duration - b.Duration) > 1e-6) clipMismatch.Add($"clip '{a.Name}' duration {a.Duration} vs {b.Duration}");
+                    if (a.Tracks.Length != b.Tracks.Length) clipMismatch.Add($"clip '{a.Name}' tracks {a.Tracks.Length} vs {b.Tracks.Length}");
+                }
+
+                t.Expect("clips match name, duration and track count", clipMismatch.Count == 0,
+                    string.Join("; ", clipMismatch.Take(4)));
+
+                // Vertex bytes, because equal counts are not equal geometry.
+                var vertexMismatch = 0;
+                for (var i = 0; i < Math.Min(viaCookedRig.Primitives.Length, viaSourceRig.Primitives.Length); i++)
+                {
+                    if (!viaCookedRig.Primitives[i].Mesh.VertexBytes.AsSpan()
+                            .SequenceEqual(viaSourceRig.Primitives[i].Mesh.VertexBytes))
+                    {
+                        vertexMismatch++;
+                    }
+                }
+
+                t.Expect("skinned vertices are byte-identical", vertexMismatch == 0,
+                    $"{vertexMismatch} primitive(s) differ");
+
+                // <b>Materials, because equal geometry drawn with a different surface is a
+                // different picture.</b> Left out of the first version of this control, and a cooked
+                // Rogue rendered visibly brighter than the source one with every other assertion
+                // here passing — the character was being drawn without its albedo.
+                var matMismatch = new List<string>();
+                var withAlbedo = 0;
+                for (var i = 0; i < Math.Min(viaCookedRig.Primitives.Length, viaSourceRig.Primitives.Length); i++)
+                {
+                    var x = viaCookedRig.Primitives[i].Material;
+                    var y = viaSourceRig.Primitives[i].Material;
+                    if (x is null || y is null)
+                    {
+                        if (!ReferenceEquals(x, y)) matMismatch.Add($"[{i}] material presence {x is not null} vs {y is not null}");
+                        continue;
+                    }
+
+                    if (x.BaseColorFactor != y.BaseColorFactor) matMismatch.Add($"[{i}] base colour {x.BaseColorFactor} vs {y.BaseColorFactor}");
+                    if ((x.BaseColorTexture is null) != (y.BaseColorTexture is null))
+                        matMismatch.Add($"[{i}] albedo presence {x.BaseColorTexture is not null} vs {y.BaseColorTexture is not null}");
+                    if (x.MetallicFactor != y.MetallicFactor) matMismatch.Add($"[{i}] metallic {x.MetallicFactor} vs {y.MetallicFactor}");
+                    if (x.RoughnessFactor != y.RoughnessFactor) matMismatch.Add($"[{i}] roughness {x.RoughnessFactor} vs {y.RoughnessFactor}");
+                    if (y.BaseColorTexture is not null) withAlbedo++;
+                }
+
+                t.Expect("materials match on the rigged path", matMismatch.Count == 0,
+                    string.Join("; ", matMismatch.Take(5)));
+                t.Expect("on primitives that actually carry an albedo", withAlbedo > 0,
+                    $"{withAlbedo} of {viaSourceRig.Primitives.Length}");
+
+                // <b>And the static importer declines it by name.</b> A rigged cooked file holds
+                // skinned vertices it cannot draw; silently drawing them at the wrong stride is the
+                // failure this whole session kept meeting.
                 AssetLoadLog.Start();
                 new Blix.GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("t/static"), rig));
                 var staticReport = AssetLoadLog.Drain().SingleOrDefault(r => r.SourcePath == rig);
-                t.ExpectTrue("the same asset loaded statically reports Cooked",
-                    staticReport is { Mode: AssetLoadMode.Cooked });
+                t.ExpectTrue("the static importer walks the glTF rather than reading a rig",
+                    staticReport is { Mode: AssetLoadMode.Source }
+                    && staticReport.Warning?.Contains("holds a rig", StringComparison.Ordinal) == true);
             }
             finally
             {
                 AssetLoadLog.Enabled = wasLogging;
                 AssetLoadLog.Drain();
+                try { Directory.Delete(rigTemp, recursive: true); } catch (IOException) { }
             }
         }
 
@@ -383,12 +478,16 @@ public static class Program
                 t.ExpectTrue("no source file travelled with it",
                     !Directory.EnumerateFiles(aloneDir, "*.gl*", SearchOption.AllDirectories).Any());
 
-                var alone = new Blix.GltfStaticImporter()
-                    .Import(new AssetImportContext(AssetId.Parse("t/alone"), meshCopy));
+                // Routed by what the cooked file HOLDS, which is the same rule the judge uses.
+                var rigged = BlixMeshReader.Read(meshCopy).IsRigged;
+                var alone = rigged
+                    ? new Blix.GltfImporter().Import(new AssetImportContext(AssetId.Parse("t/alone"), meshCopy))
+                    : new Blix.GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("t/alone"), meshCopy));
 
                 // The same asset loaded the ordinary way, in its own tree, to compare against.
-                var besideSource = new Blix.GltfStaticImporter()
-                    .Import(new AssetImportContext(AssetId.Parse("t/beside"), cookedAsset));
+                var besideSource = rigged
+                    ? new Blix.GltfImporter().Import(new AssetImportContext(AssetId.Parse("t/beside"), cookedAsset))
+                    : new Blix.GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("t/beside"), cookedAsset));
 
                 t.Expect("a cooked mesh loads with no source anywhere",
                     alone.Primitives.Length == besideSource.Primitives.Length,

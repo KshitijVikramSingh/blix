@@ -367,33 +367,61 @@ bytes, needs a shader change) and skinned `.blixmesh`, each its own arc.
 
 ---
 
-## The skinned gap, measured — and it is not in the stages above
+## The skinned gap — **CLOSED**
 
-`blix check --cooked` says it on every rigged asset: **"a rigged glTF has no cooked form —
-.blixmesh holds no skinned vertex layout."** The word *skinned* appears nowhere else in this plan.
-Whole tree: **62 assets, 77 loads, 54 cooked, 23 on the slow path, 3,507 ms of CPU on source paths.**
+`blix check --cooked` used to say it on every rigged asset: **"a rigged glTF has no cooked form —
+.blixmesh holds no skinned vertex layout."** It was the last category of asset in this tree with no
+fast path, and the plan called it *"an arc, not a stage… a new format rather than a fifth column in
+this one"*.
 
-The slow path has TWO causes and this plan only analysed one. Measured by stripping every texture
-reference out of a copy and re-running the check, so the remainder is geometry and skin alone:
+**It was a fifth column.** `.blixmesh` already carried materials and images — neither of them mesh
+data — and both arrived as tables appended after the primitives. A skin table and a clip table are
+the same move. One format also keeps one RECIPE per source extension, which is not cosmetic:
+`BlixRecipes.For` refuses to guess when two recipes accept the same extension, so a second `.gltf`
+recipe would have left `blix cook` unable to choose. `gmsh` now routes on the rigged importer's own
+refusal — the same signal `check --cooked` routes on — and cooks a rig when the file has one.
 
-| | full load | geometry + skin only | decode share |
-|---|---|---|---|
-| `villager_peasant` | 824 ms | **405 ms** | ~50% |
-| `villager_ranger` | 803 ms | **197 ms** | ~75% |
-| `villager_dressed` | 163 ms | **212 ms** | none — it ships no images |
-| `villager_universal` | 78 ms | ~78 ms | none |
+**The win is consolidation, not milliseconds.** One cooked form covers every mesh asset, with no
+category that quietly falls back.
 
-**~890 ms of the four villagers' ~1,950 ms is geometry and skin**, and that half is not behind D5 at
-all. At the 2.5x cooking gives the kit props it is roughly half a second off every launch.
+| | before | after |
+|---|---|---|
+| RTSGame `Assets/models` | 121 cooked, 15 slow | **148 cooked, 1 slow** |
+| Runner | 10 / 12 | **12 / 12** |
+| Bulwark | 7 / 8 | **8 / 8** |
 
-Two corrections fall out. The importer's own note — *"605 ms of PNG decode each"* — is too strong:
-two of the four ship no images. And the first reading of this table, that geometry was obviously the
-big unblocked win, was also too strong before the measurement existed.
+The one remaining slow load is `Villager.obj`, which no cook glob claims — a declaration gap, not a
+format one.
 
-**It is an arc, not a stage.** A cooked rig is not a `layoutId` addition: it needs the skinned
-vertices, the skeleton, and the clips — the Rogue carries 76 — which is a new format rather than a
-fifth column in this one. It has what neither K-F nor K-G's second half has: **a live consumer and a
-number**.
+**Three things were measured rather than assumed, and each changed the design.**
+
+- **`tank.glb` declares three skins.** The first cut carried a single skeleton. The rigged importer
+  already knew better — every primitive carries a `SkinIndex`, and its comment records that choosing
+  one skin and discarding the rest was a real bug once. A cooked form that could hold only one would
+  have reintroduced it inside a file, where it is far harder to see. So the format carries a skin
+  table.
+- **Only `Rogue.glb` has attachments** — six of them, and no rigged asset in the tree has static
+  parts. Attachments are built through the STATIC path, so their vertices are a different width from
+  the skinned ones beside them, and `.blixmesh` carried one layout per FILE. The first answer was to
+  refuse to cook any rig with attachments, justified by the measurement that every asset with a
+  measured cost had none. That answer optimised for time and left exactly the half-cooked category
+  this arc exists to remove, so **layout moved onto the primitive** and attachments cook too.
+- **The clip representation needed nothing invented.** The glTF importer builds exactly two curve
+  types, each from a plain array of (time, value). Writing those arrays back is lossless.
+
+**And three bugs, each of which rendered something wrong while every test passed.**
+
+| symptom | cause |
+|---|---|
+| Rogue drew **blown out white** | `StudioRig.UploadAlbedo` read `MipBytes` only and fell through to a white stand-in — silently. A cooked texture arrives LAZY, with its bytes still on disk. The studio had never met one, because rigs had no cooked form |
+| upload died: *"BC7…sRGB is not color renderable"* | the same upload passed ONE mip and let the GPU blit-downsample the rest. BC formats cannot be blit-downsampled — `CreateTexture2DMipped` exists for exactly this and says so in its own comment. A cooked texture already carries every level |
+| the extracted texture cooked **linear, not sRGB** | `TextureRecipe` classifies role by FILENAME, and the name of an image extracted from a `.glb` is one the cook invents. Rogue's base colour arrived as `rogue_texture`, matched no rule and fell through to Linear. The mesh cook always knows the role — it finds each image ON a material channel — so it passes it now |
+
+**The material comparison that would have caught the first one was missing**, and adding it did not
+catch it either: the importer *did* hand over a material carrying a texture, so a cooked-versus-source
+comparison saw two textures and agreed. The loss was one layer below what any test was looking at,
+between a texture that exists and a texture that is uploaded. What found it was a person looking at
+the picture and saying it was blown out.
 
 ## Re-read under conventions §8 — three of these were not blocked
 
