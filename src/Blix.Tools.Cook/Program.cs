@@ -306,8 +306,7 @@ public static class Program
 // about meshes, textures or probes and work on whatever recipes the assembly declares. A recipe
 // added tomorrow is listed, runnable and counted by them on the day it exists.
 
-    static Blix.Cooked.FoundRecipe[] Recipes() =>
-    Blix.Cooked.BlixRecipes.Find(typeof(Blix.Recipes.MeshRecipe).Assembly);
+    static Blix.Cooked.FoundRecipe[] Recipes() => RecipeCatalog.All();
 
     static int ListRecipes()
 {
@@ -335,7 +334,7 @@ public static class Program
     var recipe = Recipes().FirstOrDefault(r => r.Id == args[1]);
     if (recipe is null)
     {
-        Console.Error.WriteLine($"No recipe '{args[1]}'. Known: {string.Join(", ", Recipes().Select(r => r.Id))}");
+        Console.Error.WriteLine("blix cook run: " + RecipeCatalog.UnknownRecipe(args[1]));
         return 2;
     }
 
@@ -496,7 +495,7 @@ public static class Program
         var recipe = recipes.FirstOrDefault(r => r.Id == id);
         if (recipe is null)
         {
-            Console.Error.WriteLine($"blix cook batch: no recipe '{id}'. Known: {string.Join(", ", recipes.Select(r => r.Id))}");
+            Console.Error.WriteLine("blix cook batch: " + RecipeCatalog.UnknownRecipe(id));
             return 1;
         }
 

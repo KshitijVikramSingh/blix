@@ -2,6 +2,19 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Blix\Blix.csproj" />
+    <!-- Declaring a recipe costs one project and one reference — see
+         RTSGame.Cooking/ObjMeshRecipe.cs, the first recipe outside Blix.* and the test of
+         exactly that claim. Build-time only: RTSGame.Cooking must be COMPILED before this
+         project cooks, because a recipe cannot be produced by the build that consumes it. -->
+    <ProjectReference Include="..\RTSGame.Cooking\RTSGame.Cooking.csproj"
+                      ReferenceOutputAssembly="false" PrivateAssets="all" Private="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Bumping ObjMeshRecipe.Version has to re-cook what it wrote, and $(BlixCookDll)
+         cannot see that happen — it only moves when Blix's own cook is rebuilt. -->
+    <BlixCookRecipeAssembly
+        Include="$(MSBuildThisFileDirectory)../RTSGame.Cooking/bin/$(Configuration)/net8.0/RTSGame.Cooking.dll" />
     <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
     <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
@@ -74,6 +87,9 @@
 
   <!-- What this project cooks, declared so coverage cannot drift. -->
   <ItemGroup>
+    <!-- The nature kit, through RTSGame's OWN recipe. The targets file says a project's
+         recipe takes the same path as Blix's; this is that sentence under test. -->
+    <BlixCook Include="Assets/models/nature/**/*.obj" Recipe="omsh" Cooked=".blixmesh" />
     <CookMesh Include="Assets/models/**/*.gltf" />
     <CookMesh Include="Assets/models/**/*.glb" />
     <CookFont Include="Assets/fonts/*.font.json" />

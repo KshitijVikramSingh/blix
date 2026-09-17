@@ -200,9 +200,9 @@ It is what decides whether cooking is an optimisation or a pipeline — until it
 ship without sources, the cooked tree is not a distributable artifact, and *"open a cooked asset"*
 stays an incoherent request.
 
-### K-G — a second owner, which is the proof — **HALF DONE, and the other half is consumer-blocked**
+### K-G — a second owner, which is the proof — **DONE**
 
-A project declares a recipe and it costs the recipe. The named candidate is the **font atlas**: it
+A project declares a recipe and it costs the recipe. The named candidate was the **font atlas**: it
 is already declared recipe-shaped in `.font.json`, the work already happens (at load, every time),
 and it is owned by four projects rather than by Blix. If it cannot become a recipe cheaply, the
 substrate is not real and we have written three formats a fourth time.
@@ -210,18 +210,46 @@ substrate is not real and we have written three formats a fourth time.
 **The font atlas became a recipe, and nobody marked it.** `FontRecipe` is declared, `fnt1` is in the
 index, `BlixFont` is in `Blix.Assets`, four projects each carry a cooked `.blixfont` beside their
 `.font.json`, and `FontImporter` prefers the baked one. `Blix.Test.Recipes` covers it. **A fourth
-format cost a recipe** — that half is proved.
+format cost a recipe** — that half was always proved.
 
-**The other half is not, and cannot be proved honestly today.** The claim above is that *a PROJECT*
-declares a recipe. All four recipes live in `Blix.Recipes`; nothing outside Blix has declared one.
-Checked for a real candidate rather than assumed: the nature kit's `.obj`/`.mtl` looked like one and
-is not — `.obj` is handled by `Blix.Assets/ObjImporter`, so an `.obj` recipe would be a FIFTH BLIX
-recipe, and the fourteen files total 372 KB with no measurable cost.
+**The second half — a PROJECT declaring one — is now proved too.** `RTSGame.Cooking` declares
+`omsh`, cooking the nature kit's thirteen `.obj` files to `.blixmesh`. It was parked as
+"consumer-blocked" on the reasoning that `.obj` is handled by `Blix.Assets/ObjImporter`, so an
+`.obj` recipe would be a FIFTH BLIX recipe. That reasoning confused the CAPABILITY with the
+DECISION: parsing Wavefront is Blix's and untouched; deciding that *these thirteen files* become
+`.blixmesh` is the game's, and is the only thing the recipe contains. Re-read under conventions §8,
+the park does not survive — the pattern was defined, the substrate extracted, and what was missing
+was a declaration nobody had written.
 
-So **no project in this tree owns a source format**, and proving it would mean inventing one — which
-is the move this arc was written against. K-G's second half is in the same position as `.blixtex`:
-waiting on a consumer, not on effort. The mechanism is ready and untested — `Blix.Cooked` has no
-dependencies and `Directory.Build.targets` takes `BlixCook` directly.
+**What it cost, and it was not the recipe.** One file and one project reference is what the claim
+predicted. Three things had to be fixed for that claim to be true rather than nearly true, and each
+was a promise the tree had already made and not kept:
+
+| What broke | Why | Fix |
+|---|---|---|
+| `blix cook batch: no recipe 'omsh'` | `Recipes()` resolved every id against `typeof(MeshRecipe).Assembly` — **one hardwired assembly**, while `Directory.Build.targets` said "Blix's recipes and a project's take the same path" and the generated index already carried `omsh` | `RecipeCatalog` discovers recipes through `*.blixapps.json`, the way `Blix.Cli` discovers apps. Nothing to register |
+| Clean build failed, second build passed | A recipe is build-time code and must be **compiled before the build that runs it**; `BlixCookAssets` runs before its own project's compile. With the recipe inside `RTSGame` it worked on every machine that had built once and failed on every fresh clone | The recipe lives in a project its consumer REFERENCES, exactly as `Blix.Recipes` is a library. `UnknownRecipe` now names this cause |
+| Recipe still not found | The catalog rooted its walk at the nearest `blix.project` marker, copying `Blix.Cli` — and `src/RTSGame/blix.project` scoped the search to RTSGame, hiding `RTSGame.Cooking` one directory away | Root at the repository. The marker answers a NAMING question; this is a BUILD-GRAPH question, and the build graph is not bounded by a marker |
+
+And one defect in the recipe itself, which is the more useful finding: the first version imported
+each `.obj` as ONE merged mesh, producing thirteen cooked files **no consumer could use**.
+`SettlementArt` reads this kit through `WavefrontParts` and colours each part by its material name,
+so a merged mesh discards the only structure the reader wants. A cooked form has to be
+*substitutable* for the source; "smaller and faster but a different shape" is not. It now writes one
+primitive per part, keeping the material name — the same contract `gmsh` keeps, where `.blixmesh`
+replaces the slow part and the sibling file still carries the material.
+
+Also closed while here: `@(BlixCookRecipeAssembly)` joins `$(BlixCookDll)` in the cook target's
+`Inputs`. `$(BlixCookDll)` only moves when *Blix's* cook is rebuilt, so a project bumping its own
+recipe version would have kept every stale file it had written. Verified both ways — the version
+bump re-cooked all thirteen, and the next build cooked nothing.
+
+**What is still open, stated rather than parked.** `blix cook status` reports 13/13 cooked because
+it asks the recipe catalog what consumes what. `blix check --cooked` still says *"nothing here that
+this judges"*, because it routes every file through `GltfImporter`/`GltfStaticImporter` by hand and
+`ObjImporter` emits no `AssetLoadReport` at all. So the kit is cooked and **nothing loads the cooked
+form yet**. That is two concrete pieces of work — importer routing in the judge, and a cooked-preferring
+path in `ObjImporter` — not a blocked one.
 
 ---
 
@@ -262,7 +290,7 @@ what would END it in terms someone can check. Run against this plan's own parks:
 |---|---|---|
 | `.blixtex` / `.blixprobe` — "no consumer" | **proven, then orphaned by a drive.** `d376b39` records what they bought: *"Sponza Modern startup: ~6s → ~0.5s."* `568c1d4` moved the pack set to an external SSD seven days later for portability. The census 107 days on read that absence as absence of a requirement | **re-mount `BLIX_SPONZA_ASSETS` and re-run `blix check --cooked`.** Not "a consumer appears" |
 | **K-F — materials** | **half blocked, and the wrong half.** Materials are not textures: factors, alpha mode, alpha cutoff, double-sided, names and texCoord sets are cookable today and are part of what `SourceRequired` covers. Only the image BYTES need the grouping decision. The plan collapsed two questions into one park | **cook everything but the bytes**, and let the flag record what remains rather than all of it |
-| **K-G second half** — "a project declares a recipe" | **a test, not a design.** The substrate is already extracted and general: `[Recipe]`, `Blix.Cooked` with no dependencies, `BlixCook` in the build targets, four instances. Nothing has to be invented to try it | **one recipe declared outside `Blix.*`**, however small. It commits to nothing |
+| **K-G second half** — "a project declares a recipe" | ~~a test, not a design~~ — **DONE.** `RTSGame.Cooking` declares `omsh`; it cost one file and one project reference, plus three fixes to promises the tree had already made | ~~one recipe declared outside `Blix.*`~~ — met |
 | **D5 — grouping** | **genuinely open, and it survives §8.** Atlas, texture array, streaming pool and content-addressed store are DIFFERENT SHAPES, and §4's own worked example is exactly this: two nav systems were not unified because unifying different algorithms forces one shape onto two | **a measured scene whose texture bytes do not fit**, which is a number, not a request |
 
 And the same re-read applies once more, outside this plan: **resource identity**. Eight files carry

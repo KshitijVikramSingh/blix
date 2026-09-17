@@ -200,6 +200,13 @@
        out of date. Demonstrated by bumping MeshRecipeVersion and watching all
        three of Runner's assets re-cook, and revert when it was put back.
 
+       @(BlixCookRecipeAssembly) is the same protection for a recipe a PROJECT owns,
+       and a project that declares one needs it: $(BlixCookDll) moves only when Blix's
+       own cook is rebuilt, so bumping a project's own recipe version would otherwise
+       leave every stale file it had already written in place. Such a project lists the
+       assembly holding its recipe:
+         <BlixCookRecipeAssembly Include="../RTSGame.Cooking/bin/$(Configuration)/net8.0/RTSGame.Cooking.dll" />
+
        Caveat, because it is a real one: this invokes a PRE-BUILT cook, the same
        way the shader and app-index targets do. Building one project alone uses
        whatever cook binary is on disk, so a recipe change takes effect once the
@@ -208,7 +215,7 @@
   <Target Name="BlixCookAssets"
           Condition="'@(BlixCook)' != '' AND '$(BlixCookCustomTarget)' != 'true' AND Exists('$(BlixCookDll)')"
           BeforeTargets="AssignTargetPaths"
-          Inputs="@(BlixCook);$(BlixCookDll)"
+          Inputs="@(BlixCook);$(BlixCookDll);@(BlixCookRecipeAssembly)"
           Outputs="@(BlixCook -> '%(RootDir)%(Directory)%(Filename)%(Cooked)')">
     <PropertyGroup>
       <BlixCookList>$(IntermediateOutputPath)blixcook.txt</BlixCookList>
