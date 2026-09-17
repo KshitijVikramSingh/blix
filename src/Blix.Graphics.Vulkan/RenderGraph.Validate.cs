@@ -114,6 +114,14 @@ internal static class RenderGraphValidation
             {
                 foreach (var t in gpass.ColorTargets) declaredEarlier.Add(t.View.Resource.Id);
                 if (gpass.Depth is { } d) declaredEarlier.Add(d.View.Resource.Id);
+                // <b>A resolve target is written by this pass too.</b> Omitting them made the
+                // validator reject the only arrangement resolves exist for: a pass renders
+                // multisampled and resolves to 1x SO THAT a later pass can sample it, and a later
+                // pass that samples it was then told its producer did not exist. The hole went
+                // unnoticed because every existing resolve was consumed by a present pass recorded
+                // straight on the command list, outside the graph and so outside this check.
+                foreach (var r in gpass.ResolveTargets) declaredEarlier.Add(r.Resource.Id);
+                if (gpass.DepthResolveTarget is { } dr) declaredEarlier.Add(dr.Resource.Id);
             }
             else if (graph.ComputePasses.TryGetValue(passId, out var cpassOut))
             {
