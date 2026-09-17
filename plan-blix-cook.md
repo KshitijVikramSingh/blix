@@ -200,14 +200,58 @@ It is what decides whether cooking is an optimisation or a pipeline — until it
 ship without sources, the cooked tree is not a distributable artifact, and *"open a cooked asset"*
 stays an incoherent request.
 
-### K-G — a second owner, which is the proof
+### K-G — a second owner, which is the proof — **HALF DONE, and the other half is consumer-blocked**
 
 A project declares a recipe and it costs the recipe. The named candidate is the **font atlas**: it
 is already declared recipe-shaped in `.font.json`, the work already happens (at load, every time),
 and it is owned by four projects rather than by Blix. If it cannot become a recipe cheaply, the
 substrate is not real and we have written three formats a fourth time.
 
+**The font atlas became a recipe, and nobody marked it.** `FontRecipe` is declared, `fnt1` is in the
+index, `BlixFont` is in `Blix.Assets`, four projects each carry a cooked `.blixfont` beside their
+`.font.json`, and `FontImporter` prefers the baked one. `Blix.Test.Recipes` covers it. **A fourth
+format cost a recipe** — that half is proved.
+
+**The other half is not, and cannot be proved honestly today.** The claim above is that *a PROJECT*
+declares a recipe. All four recipes live in `Blix.Recipes`; nothing outside Blix has declared one.
+Checked for a real candidate rather than assumed: the nature kit's `.obj`/`.mtl` looked like one and
+is not — `.obj` is handled by `Blix.Assets/ObjImporter`, so an `.obj` recipe would be a FIFTH BLIX
+recipe, and the fourteen files total 372 KB with no measurable cost.
+
+So **no project in this tree owns a source format**, and proving it would mean inventing one — which
+is the move this arc was written against. K-G's second half is in the same position as `.blixtex`:
+waiting on a consumer, not on effort. The mechanism is ready and untested — `Blix.Cooked` has no
+dependencies and `Directory.Build.targets` takes `BlixCook` directly.
+
 ---
+
+## The skinned gap, measured — and it is not in the stages above
+
+`blix check --cooked` says it on every rigged asset: **"a rigged glTF has no cooked form —
+.blixmesh holds no skinned vertex layout."** The word *skinned* appears nowhere else in this plan.
+Whole tree: **62 assets, 77 loads, 54 cooked, 23 on the slow path, 3,507 ms of CPU on source paths.**
+
+The slow path has TWO causes and this plan only analysed one. Measured by stripping every texture
+reference out of a copy and re-running the check, so the remainder is geometry and skin alone:
+
+| | full load | geometry + skin only | decode share |
+|---|---|---|---|
+| `villager_peasant` | 824 ms | **405 ms** | ~50% |
+| `villager_ranger` | 803 ms | **197 ms** | ~75% |
+| `villager_dressed` | 163 ms | **212 ms** | none — it ships no images |
+| `villager_universal` | 78 ms | ~78 ms | none |
+
+**~890 ms of the four villagers' ~1,950 ms is geometry and skin**, and that half is not behind D5 at
+all. At the 2.5x cooking gives the kit props it is roughly half a second off every launch.
+
+Two corrections fall out. The importer's own note — *"605 ms of PNG decode each"* — is too strong:
+two of the four ship no images. And the first reading of this table, that geometry was obviously the
+big unblocked win, was also too strong before the measurement existed.
+
+**It is an arc, not a stage.** A cooked rig is not a `layoutId` addition: it needs the skinned
+vertices, the skeleton, and the clips — the Rogue carries 76 — which is a new format rather than a
+fifth column in this one. It has what neither K-F nor K-G's second half has: **a live consumer and a
+number**.
 
 ## The decisions, as settled
 
