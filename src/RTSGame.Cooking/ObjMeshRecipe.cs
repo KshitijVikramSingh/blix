@@ -32,8 +32,10 @@ namespace RTSGame.Cooking;
 /// </para>
 /// <para>
 /// <b>SourceRequired, and honestly so.</b> The <c>.mtl</c> beside an <c>.obj</c> carries the
-/// material colours, and this cook replaces geometry only — each primitive keeps its material
-/// NAME so a reader can find the colour, and nothing more — so the source stays a runtime
+/// material colours, and those are cooked: each part becomes a primitive and a material carrying
+/// its name and base colour. What stays in the source is what <c>WavefrontParts</c> does not
+/// surface — texture images above all — so the flag is narrowed to
+/// <c>SourceRequiredForImagesOnly</c> rather than cleared — so the source stays a runtime
 /// dependency for the same reason the glTF recipe's does, and the flag says so where a tool can
 /// see it rather than where a reader has to infer it.
 /// </para>
@@ -41,7 +43,8 @@ namespace RTSGame.Cooking;
 public static class ObjMeshRecipe
 {
     /// <summary>Bumped when the written bytes change for an unchanged source.</summary>
-    public const int Version = 2;
+    // v3: the material table (.blixmesh v5) — each part's colour travels with the geometry.
+    public const int Version = 3;
 
     /// <summary>What <c>blix cook</c> calls, and what the index finds without loading this assembly.</summary>
     [Recipe("omsh",
@@ -88,15 +91,38 @@ public static class ObjMeshRecipe
             }
         }
 
-        var primitives = parts.Select(part => new BlixMeshPrimitive(
+        // <b>One material per part, carrying the colour out of the .mtl.</b> This is the half of
+        // the kit its only consumer actually reads: SettlementArt classifies each part by its
+        // material colour and name. Cooking the geometry and leaving the colour in a sibling file
+        // would have produced an artifact that is faster and still not substitutable for the source.
+        //
+        // Materials are indexed 1:1 with parts rather than deduplicated by name. Two parts sharing
+        // a material is possible and the table would be one entry shorter; keeping the mapping
+        // positional keeps MaterialIndex readable straight off the primitive without a second
+        // lookup, and these files have one or two parts.
+        var materials = parts.Select((part, i) => new BlixMeshMaterial(
+            Name: part.Material,
+            BaseColorFactor: part.Color,
+            BaseColorTexCoord: 0,
+            // Wavefront has no PBR metallic-roughness model, so these are the glTF defaults for a
+            // material that declares nothing rather than a guess at what the author meant. The kit
+            // is shaded as foliage by the consumer, which supplies its own surface class.
+            MetallicFactor: 0f,
+            RoughnessFactor: 1f,
+            OcclusionStrength: 1f,
+            EmissiveFactor: System.Numerics.Vector3.Zero,
+            EmissiveStrength: 1f,
+            AlphaMode: BlixMesh.AlphaOpaque,
+            AlphaCutoff: 0.5f,
+            DoubleSided: false,
+            TransmissionFactor: 0f)).ToArray();
+
+        var primitives = parts.Select((part, i) => new BlixMeshPrimitive(
             // <b>The part's MATERIAL name, not the mesh's.</b> It is what the reader matches on to
             // find the colour in the sibling .mtl, so it is the one string that has to survive.
             Name: part.Material,
-            // No material table in a .blixmesh — the format's own header says so, and the runtime
-            // reads factors from the sibling file. -1 says "none here" rather than pointing at an
-            // index that means nothing. Giving .obj a material table is K-F's question, not this
-            // recipe's to answer unilaterally.
-            MaterialIndex: BlixMesh.NoMaterial,
+            // Its own entry in the table above — positional, so this is the part's own index.
+            MaterialIndex: i,
             Bounds: part.Mesh.Bounds,
             VertexCount: part.Mesh.VertexCount,
             VertexBytes: part.Mesh.VertexBytes,
@@ -105,9 +131,11 @@ public static class ObjMeshRecipe
 
         var stamp = CookStamp.Of(
             "omsh", Version, request.SourcePath, request.OutputPath,
-            $"layout={layout.Stride}B parts={primitives.Length}", CookedFlags.SourceRequired);
+            $"layout={layout.Stride}B parts={primitives.Length}",
+            CookedFlags.SourceRequired | CookedFlags.SourceRequiredForImagesOnly);
 
-        BlixMeshWriter.Write(request.OutputPath, new BlixMeshFile(layout, primitives), stamp);
+        BlixMeshWriter.Write(
+            request.OutputPath, new BlixMeshFile(layout, primitives, materials), stamp);
 
         return CookOutcome.Written(
             $"{primitives.Length} parts, {primitives.Sum(p => p.VertexCount)} vertices, " +

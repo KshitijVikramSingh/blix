@@ -160,10 +160,13 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                     p.Bounds,
                     Indices32: lod0.Indices32,
                     Lods: lods);
-                var gltfMat = p.MaterialIndex >= 0 && p.MaterialIndex < model.LogicalMaterials.Count
-                    ? model.LogicalMaterials[p.MaterialIndex]
-                    : null;
-                var material = GltfShared.ExtractMaterial(gltfMat, materialCache, textureCache);
+                // <b>From the COOKED table, not from model.LogicalMaterials.</b> That line is the
+                // one stage K-F was about: a cooked mesh used to re-parse every material out of the
+                // sibling glTF on each load, so "cooked" covered geometry and nothing else. The
+                // source is still opened — for image BYTES, which is the one thing the table
+                // deliberately does not carry.
+                var material = GltfShared.MaterialFromCooked(
+                    cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache);
                 primitives.Add(new GltfPrimitive(meshData, material));
             }
         }

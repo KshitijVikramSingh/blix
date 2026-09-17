@@ -245,6 +245,112 @@ public static class Program
             try { Directory.Delete(fontTemp, recursive: true); } catch (IOException) { }
         }
 
+        // ── K-F: a cooked load and a source load describe the same surface ──
+        // <b>The control the whole stage rests on.</b> .blixmesh v5 carries every material property
+        // except image bytes, and the loader now reads them from the file instead of re-walking the
+        // glTF. That is only an improvement if the two paths agree: a property the cook silently
+        // drops is one that disappears the moment an asset is cooked, which shows up as an asset
+        // rendering differently on machines that have built — the worst shape a bug can take,
+        // because the tree that reproduces it is the tree that works.
+        //
+        // Both halves are loaded from real shipped assets rather than a synthetic material, because
+        // a synthetic one tests the writer against the reader and nothing against glTF.
+        var cookedAsset = FindFile("Rogue.glb");
+        if (cookedAsset is null)
+        {
+            t.Fail("an asset with a cooked sibling is findable", "no Rogue.glb under the repo");
+        }
+        else if (!File.Exists(Path.ChangeExtension(cookedAsset, ".blixmesh")))
+        {
+            t.Fail("the asset has a .blixmesh sibling", $"none beside {cookedAsset}");
+        }
+        else
+        {
+            // The source leg is the SAME file with no cooked sibling beside it — copied out rather
+            // than the cooked one deleted, so a failure here cannot damage the tree.
+            var temp = Path.Combine(Path.GetTempPath(), "blix-kf-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(temp);
+            try
+            {
+                var lone = Path.Combine(temp, Path.GetFileName(cookedAsset));
+                File.Copy(cookedAsset, lone);
+
+                var viaCooked = new Blix.GltfStaticImporter()
+                    .Import(new AssetImportContext(AssetId.Parse("t/kf-cooked"), cookedAsset));
+                var viaSource = new Blix.GltfStaticImporter()
+                    .Import(new AssetImportContext(AssetId.Parse("t/kf-source"), lone));
+
+                t.Expect("both paths return the same primitive count",
+                    viaCooked.Primitives.Length == viaSource.Primitives.Length,
+                    $"cooked {viaCooked.Primitives.Length}, source {viaSource.Primitives.Length}");
+
+                var pairs = Math.Min(viaCooked.Primitives.Length, viaSource.Primitives.Length);
+                var mismatches = new List<string>();
+                var compared = 0;
+                for (var i = 0; i < pairs; i++)
+                {
+                    var a = viaCooked.Primitives[i].Material;
+                    var b = viaSource.Primitives[i].Material;
+                    if (a is null || b is null)
+                    {
+                        if (!ReferenceEquals(a, b)) mismatches.Add($"[{i}] one path has no material");
+                        continue;
+                    }
+
+                    compared++;
+                    void Same(string field, bool ok, object got, object want)
+                    {
+                        if (!ok) mismatches.Add($"[{i}] {field}: cooked {got}, source {want}");
+                    }
+
+                    Same("Name", a.Name == b.Name, a.Name, b.Name);
+                    Same("BaseColorFactor", a.BaseColorFactor == b.BaseColorFactor, a.BaseColorFactor, b.BaseColorFactor);
+                    Same("BaseColorTexCoord", a.BaseColorTexCoord == b.BaseColorTexCoord, a.BaseColorTexCoord, b.BaseColorTexCoord);
+                    Same("MetallicFactor", a.MetallicFactor == b.MetallicFactor, a.MetallicFactor, b.MetallicFactor);
+                    Same("RoughnessFactor", a.RoughnessFactor == b.RoughnessFactor, a.RoughnessFactor, b.RoughnessFactor);
+                    Same("OcclusionStrength", a.OcclusionStrength == b.OcclusionStrength, a.OcclusionStrength, b.OcclusionStrength);
+                    Same("EmissiveFactor", a.EmissiveFactor == b.EmissiveFactor, a.EmissiveFactor, b.EmissiveFactor);
+                    Same("EmissiveStrength", a.EmissiveStrength == b.EmissiveStrength, a.EmissiveStrength, b.EmissiveStrength);
+                    Same("AlphaMode", a.AlphaMode == b.AlphaMode, a.AlphaMode, b.AlphaMode);
+                    Same("AlphaCutoff", a.AlphaCutoff == b.AlphaCutoff, a.AlphaCutoff, b.AlphaCutoff);
+                    Same("DoubleSided", a.DoubleSided == b.DoubleSided, a.DoubleSided, b.DoubleSided);
+                    Same("TransmissionFactor", a.TransmissionFactor == b.TransmissionFactor, a.TransmissionFactor, b.TransmissionFactor);
+
+                    // The IMAGES are deliberately not compared byte for byte — they come from the
+                    // same source on both paths. What is checked is that each channel agrees about
+                    // whether it HAS one, which is what a dropped image reference would break.
+                    Same("BaseColorTexture presence", (a.BaseColorTexture is null) == (b.BaseColorTexture is null),
+                        a.BaseColorTexture is not null, b.BaseColorTexture is not null);
+                    Same("NormalTexture presence", (a.NormalTexture is null) == (b.NormalTexture is null),
+                        a.NormalTexture is not null, b.NormalTexture is not null);
+                    Same("MetallicRoughnessTexture presence", (a.MetallicRoughnessTexture is null) == (b.MetallicRoughnessTexture is null),
+                        a.MetallicRoughnessTexture is not null, b.MetallicRoughnessTexture is not null);
+                    Same("OcclusionTexture presence", (a.OcclusionTexture is null) == (b.OcclusionTexture is null),
+                        a.OcclusionTexture is not null, b.OcclusionTexture is not null);
+                    Same("EmissiveTexture presence", (a.EmissiveTexture is null) == (b.EmissiveTexture is null),
+                        a.EmissiveTexture is not null, b.EmissiveTexture is not null);
+                }
+
+                // Without this the loop above passes on an asset whose materials are all null,
+                // which is a test that cannot fail.
+                t.Expect("materials were actually compared", compared > 0, $"compared {compared}");
+                t.Expect("cooked and source materials agree on every field",
+                    mismatches.Count == 0, string.Join("; ", mismatches.Take(5)));
+            }
+            finally
+            {
+                try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
+            }
+        }
+
+        // ── and the flag says which half is still owed ──────────────────────
+        // SourceRequired alone could not distinguish "re-parses everything" from "wants pixels",
+        // so the stage that narrowed the debt has to prove the narrowing reached the file.
+        var cookedHeader = CookedFile.TryReadHeader(Path.ChangeExtension(cookedAsset ?? "x", ".blixmesh"));
+        t.ExpectTrue("the cooked mesh still declares its source required", cookedHeader?.Stamp.SourceRequired == true);
+        t.ExpectTrue("and narrows that to image bytes alone",
+            (cookedHeader?.Stamp.Flags & CookedFlags.SourceRequiredForImagesOnly) != 0);
+
         t.PrintSummary();
         return t.Failed;
     }

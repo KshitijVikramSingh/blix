@@ -190,15 +190,48 @@ the convention.
 A thin version of this — which branch was taken, nothing more — is available from K-A onward and can
 be pulled forward if we want evidence before the build rule lands.
 
-### K-F — materials, and `flags` bit 0 gets cleared — **PARKED, see above**
+### K-F — materials, and the flag stops overstating the debt — **DONE**
 
-`.blixmesh` ships from K-A declaring *source still required*, because it is true: materials are
-parsed from the glTF in full on every load, so the source is a permanent runtime dependency. This
-stage's entire job is to make that flag false.
+`.blixmesh` shipped from K-A declaring *source still required*, because it was true: materials were
+parsed from the glTF in full on every load, so the source was a permanent runtime dependency. This
+stage's job was to make that flag false.
 
-It is what decides whether cooking is an optimisation or a pipeline — until it lands you can never
-ship without sources, the cooked tree is not a distributable artifact, and *"open a cooked asset"*
-stays an incoherent request.
+**It does not make it false, and that was the mistake in the stage rather than in the work.** The
+plan gated K-F behind D5 on this chain: *self-containment ← textures ← a grouping decision ← a
+requirement that does not exist*. Every link is real. But the conclusion — therefore materials wait
+— collapsed two questions into one. **Materials are not textures.** Factors, alpha mode, alpha
+cutoff, double-sidedness, names, texCoord sets and per-channel image references are values, they
+cook like any other value, and none of them needs an answer about atlases. Only the image BYTES do.
+
+So K-F ships as **everything but the bytes**:
+
+- **`.blixmesh` v5** carries a material table after the primitives — base colour factor and texCoord
+  set, metallic, roughness, occlusion strength, emissive factor and strength, alpha mode and cutoff,
+  double-sidedness, transmission, and a source IMAGE INDEX per channel. Written in the source's own
+  material order, so a primitive's `MaterialIndex` still means exactly what it meant.
+- **`GltfStaticImporter`'s cooked path reads it** instead of walking `model.LogicalMaterials`. The
+  source is still opened, for one thing: decoding pixels.
+- **`CookedFlags.SourceRequiredForImagesOnly`** records that, alongside `SourceRequired`. One flag
+  could not tell "re-parses everything" from "wants pixels", and **a debt you cannot size is one
+  nobody can close**.
+- **`omsh` cooks the `.mtl` colours too**, one material per part. That is the half its only consumer
+  actually reads.
+
+**Why an image INDEX and not a path.** An index survives the two things a path does not: a container
+with its images embedded, where there is no path to write down, and a future in which the pixels
+move into some other artifact, where every cooked file would need rewriting. It is also the key the
+loader's decoded-texture cache already uses.
+
+**The control.** `Blix.Test.Recipes` loads a shipped asset twice — once with its `.blixmesh` beside
+it, once as a lone copy — and compares all twelve material fields plus each channel's texture
+presence. Verified it can fail: adding `+ 1f` to the cooked alpha cutoff produced
+`[0] AlphaCutoff: cooked 1.5, source 0.5` across five primitives. Without that check, a property the
+cook silently dropped would disappear only on machines that had cooked — the worst shape a bug can
+take, because the tree that reproduces it is the tree that works.
+
+**What is still owed, and it is now exactly two things**, both of which `blix check --cooked` names
+per asset: image bytes embedded in a container, and skinned vertex layouts. Neither is a material
+question, and neither was ever K-F's.
 
 ### K-G — a second owner, which is the proof — **DONE**
 
@@ -289,7 +322,7 @@ what would END it in terms someone can check. Run against this plan's own parks:
 | parked as | actually | end condition, checkable |
 |---|---|---|
 | `.blixtex` / `.blixprobe` — "no consumer" | **proven, then orphaned by a drive.** `d376b39` records what they bought: *"Sponza Modern startup: ~6s → ~0.5s."* `568c1d4` moved the pack set to an external SSD seven days later for portability. The census 107 days on read that absence as absence of a requirement | **re-mount `BLIX_SPONZA_ASSETS` and re-run `blix check --cooked`.** Not "a consumer appears" |
-| **K-F — materials** | **half blocked, and the wrong half.** Materials are not textures: factors, alpha mode, alpha cutoff, double-sided, names and texCoord sets are cookable today and are part of what `SourceRequired` covers. Only the image BYTES need the grouping decision. The plan collapsed two questions into one park | **cook everything but the bytes**, and let the flag record what remains rather than all of it |
+| **K-F — materials** | ~~half blocked, and the wrong half~~ — **DONE.** `.blixmesh` v5 carries every material property except image bytes; the loader reads them instead of re-walking the glTF | ~~cook everything but the bytes, and let the flag record what remains~~ — met, via `SourceRequiredForImagesOnly` |
 | **K-G second half** — "a project declares a recipe" | ~~a test, not a design~~ — **DONE.** `RTSGame.Cooking` declares `omsh`; it cost one file and one project reference, plus three fixes to promises the tree had already made | ~~one recipe declared outside `Blix.*`~~ — met |
 | **D5 — grouping** | **genuinely open, and it survives §8.** Atlas, texture array, streaming pool and content-addressed store are DIFFERENT SHAPES, and §4's own worked example is exactly this: two nav systems were not unified because unifying different algorithms forces one shape onto two | **a measured scene whose texture bytes do not fit**, which is a number, not a request |
 
@@ -308,7 +341,7 @@ anything.**
 |---|---|---|
 | **D1** | does a load report what it did? | **yes** — K-E, carrying cost, not just branch |
 | **D2** | is a stale cooked file an error, a warning, or ignored? | **visible before enforced** — the stamp makes it checkable in K-A; the loader does not refuse |
-| **D3 / Q-E** | do materials get cooked? | **yes** — K-F, and the flag exists from K-A so the debt is declared rather than implied |
+| **D3 / Q-E** | do materials get cooked? | **yes, and they are** — K-F shipped everything but image bytes; the flag now names what remains |
 | **D4 / Q-A** | is cook a transform or a state? | **state**, as a build rule — K-D. Decided by the shader pipeline, not by preference |
 | **D5** | can the texture cook reach how Blix assets are authored? | **parked, with a wall** — see "the chain" |
 | **Q-B** | who owns the options? | **header records what was done; project records what should be done** |

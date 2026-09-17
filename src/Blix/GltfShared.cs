@@ -259,6 +259,65 @@ internal static class GltfShared
             .ToArray();
     }
 
+    /// <summary>
+    /// Builds a material out of a COOKED table rather than out of the glTF, resolving each channel's
+    /// image through the cache the pre-decode pass already filled.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is what stage K-F actually buys, and it is worth stating precisely.</b> Before it,
+    /// a cooked mesh still walked <c>model.LogicalMaterials</c> on every load — so "cooked" meant
+    /// geometry only, and every factor, alpha mode and texture reference was re-parsed out of the
+    /// source each time. Now the values come from the file and the SOURCE is opened for one thing:
+    /// image bytes. That is the difference the <c>SourceRequiredForImagesOnly</c> flag records.
+    /// <para>
+    /// An image index that is not in the cache resolves to null rather than throwing, and the two
+    /// passes agree by construction — <see cref="PreDecodeImages"/> walks
+    /// <see cref="PreDecodeChannels"/>, which is the same five channels the cook records. A miss
+    /// would mean the cooked table and the source have drifted, which the stamp exists to catch
+    /// earlier and more usefully than an exception here would.
+    /// </para>
+    /// </remarks>
+    internal static GltfMaterial? MaterialFromCooked(
+        IReadOnlyList<BlixMeshMaterial> materials,
+        int index,
+        Dictionary<int, GltfMaterial> materialCache,
+        Dictionary<int, GltfTexture> textureCache)
+    {
+        if (index < 0 || index >= materials.Count) return null;
+        if (materialCache.TryGetValue(index, out var cached)) return cached;
+
+        var m = materials[index];
+        var result = new GltfMaterial(
+            m.Name,
+            m.BaseColorFactor,
+            Texture(m.BaseColorImage),
+            m.BaseColorTexCoord,
+            Texture(m.NormalImage),
+            Texture(m.MetallicRoughnessImage),
+            m.MetallicFactor,
+            m.RoughnessFactor,
+            Texture(m.OcclusionImage),
+            m.OcclusionStrength,
+            Texture(m.EmissiveImage),
+            m.EmissiveFactor,
+            m.EmissiveStrength,
+            m.AlphaMode switch
+            {
+                BlixMesh.AlphaMask => GltfAlphaMode.Mask,
+                BlixMesh.AlphaBlend => GltfAlphaMode.Blend,
+                _ => GltfAlphaMode.Opaque,
+            },
+            m.AlphaCutoff,
+            m.DoubleSided,
+            m.TransmissionFactor);
+
+        materialCache[index] = result;
+        return result;
+
+        GltfTexture? Texture(int image) =>
+            image >= 0 && textureCache.TryGetValue(image, out var t) ? t : null;
+    }
+
     internal static GltfMaterial? ExtractMaterial(
         SharpGLTF.Schema2.Material? material,
         Dictionary<int, GltfMaterial> materialCache,

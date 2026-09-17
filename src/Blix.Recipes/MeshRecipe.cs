@@ -55,7 +55,10 @@ public static class MeshRecipe
     /// the same source and settings. Recorded in every file it writes, so a re-cook can be told
     /// from a rewrite.
     /// </summary>
-    public const uint MeshRecipeVersion = 1;
+    // v2: the material table (.blixmesh v5). Bumping this re-cooks every mesh in the tree, which
+    // is the point — a v4 file has no table and the reader refuses it by name rather than reading
+    // a material count out of whatever followed the last primitive.
+    public const uint MeshRecipeVersion = 2;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false, bool includeTangents = false,
@@ -122,15 +125,98 @@ public static class MeshRecipe
             $"split={splitTriBudget} splitFoliage={(splitFoliage ? 1 : 0)} " +
             $"simplify={(simplify is null ? "none" : "yes")}";
 
-        // SourceRequired, and it is not a formality: this cook replaces geometry only. Every
-        // material factor, texture reference and alpha mode is still parsed out of the sibling
-        // glTF on every load, so the source is a permanent runtime dependency and the flag says so
-        // where a tool can see it. Stage K-F is finished when this stops being set.
+        // SourceRequired still, and now it says WHY. Materials are cooked in full — factors, alpha
+        // mode and cutoff, double-sidedness, names, texCoord sets, per-channel image references —
+        // so the only thing left in the glTF that a load cannot do without is the image BYTES.
+        // Those are a separate artifact whose addressing is a project's decision, so the source
+        // stays required for exactly one reason, and the flag names it instead of implying
+        // everything.
         var stamp = CookStamp.Of(
-            BlixMesh.ShippedRecipe, MeshRecipeVersion, gltfPath, outPath, parameters, CookedFlags.SourceRequired);
+            BlixMesh.ShippedRecipe, MeshRecipeVersion, gltfPath, outPath, parameters,
+            CookedFlags.SourceRequired | CookedFlags.SourceRequiredForImagesOnly);
 
-        BlixMeshWriter.Write(outPath, new BlixMeshFile(layout, primitives), stamp);
+        BlixMeshWriter.Write(outPath, new BlixMeshFile(layout, primitives, CookMaterials(model)), stamp);
         return primitives.Count;
+    }
+
+    /// <summary>
+    /// Every material the source declares, in its own order, with image references in place of
+    /// image bytes.
+    /// </summary>
+    /// <remarks>
+    /// <b>In the source's order and in full, including materials no primitive uses.</b> A
+    /// primitive's MaterialIndex is a glTF logical-material index and was one before this table
+    /// existed, so writing a compacted table would silently change what that number means in every
+    /// file already on disk. The table is small — a name and twenty-odd scalars each — and an index
+    /// that still means what it says is worth more than the bytes.
+    /// <para>
+    /// This reads the same channels <c>GltfShared.ExtractMaterial</c> does and must keep reading
+    /// them: a property the cook drops is one the loader stops seeing the moment a mesh is cooked,
+    /// which shows up as an asset that renders differently on machines that have cooked it.
+    /// </para>
+    /// </remarks>
+    private static IReadOnlyList<BlixMeshMaterial> CookMaterials(ModelRoot model)
+    {
+        var cooked = new BlixMeshMaterial[model.LogicalMaterials.Count];
+        for (var i = 0; i < cooked.Length; i++)
+        {
+            var m = model.LogicalMaterials[i];
+
+            var baseColor = m.FindChannel("BaseColor");
+            var normal = m.FindChannel("Normal");
+            var mr = m.FindChannel("MetallicRoughness");
+            var occlusion = m.FindChannel("Occlusion");
+            var emissive = m.FindChannel("Emissive");
+            var transmission = m.FindChannel("Transmission");
+
+            var emissiveColour = emissive.HasValue ? emissive.Value.Color : Vector4.Zero;
+
+            cooked[i] = new BlixMeshMaterial(
+                Name: m.Name ?? $"material_{i}",
+                BaseColorFactor: baseColor.HasValue ? baseColor.Value.Color : Vector4.One,
+                BaseColorTexCoord: baseColor.HasValue ? baseColor.Value.TextureCoordinate : 0,
+                // Defaults are the glTF spec's for an absent channel, not zero: a material with no
+                // MetallicRoughness channel is metallic 1 / rough 1, and writing 0 would quietly
+                // turn every such surface into a mirror.
+                MetallicFactor: Parameter(mr, "MetallicFactor", 1f),
+                RoughnessFactor: Parameter(mr, "RoughnessFactor", 1f),
+                OcclusionStrength: Parameter(occlusion, "Strength", 1f),
+                EmissiveFactor: new Vector3(emissiveColour.X, emissiveColour.Y, emissiveColour.Z),
+                EmissiveStrength: Parameter(emissive, "EmissiveStrength", 1f),
+                AlphaMode: m.Alpha switch
+                {
+                    SharpGLTF.Schema2.AlphaMode.MASK => BlixMesh.AlphaMask,
+                    SharpGLTF.Schema2.AlphaMode.BLEND => BlixMesh.AlphaBlend,
+                    _ => BlixMesh.AlphaOpaque,
+                },
+                AlphaCutoff: m.AlphaCutoff,
+                DoubleSided: m.DoubleSided,
+                TransmissionFactor: Parameter(transmission, "TransmissionFactor", 0f),
+                BaseColorImage: ImageIndex(baseColor),
+                NormalImage: ImageIndex(normal),
+                MetallicRoughnessImage: ImageIndex(mr),
+                OcclusionImage: ImageIndex(occlusion),
+                EmissiveImage: ImageIndex(emissive));
+        }
+
+        return cooked;
+
+        // The loader keys its decoded-texture cache by PrimaryImage.LogicalIndex, so that is the
+        // number recorded — not the texture index, which is one indirection further out and would
+        // need the glTF open to resolve.
+        static int ImageIndex(MaterialChannel? channel) =>
+            channel?.Texture?.PrimaryImage?.LogicalIndex ?? BlixMesh.NoImage;
+
+        static float Parameter(MaterialChannel? channel, string name, float fallback)
+        {
+            if (channel is null) return fallback;
+            foreach (var p in channel.Value.Parameters)
+            {
+                if (p.Name == name) return (float)Convert.ToDouble(p.Value);
+            }
+
+            return fallback;
+        }
     }
 
     // LOD0 (full) + decimated levels via the injected simplifier. All levels

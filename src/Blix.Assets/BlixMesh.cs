@@ -37,15 +37,45 @@ namespace Blix.Assets;
 //     indexCount[4]
 //     indexBytes[indexCount * 2 or 4]
 //
+//   Then, after the last primitive, the material table:
+//     materialCount[4]
+//     For each material, sequentially:
+//       nameLen[4] name[nameLen]      UTF-8
+//       baseColorFactor[16]           4 floats, linear
+//       baseColorTexCoord[4]          which TEXCOORD set base colour samples
+//       metallicFactor[4] roughnessFactor[4]
+//       occlusionStrength[4]
+//       emissiveFactor[12]            3 floats, linear
+//       emissiveStrength[4]           KHR_materials_emissive_strength
+//       alphaMode[1]                  0 OPAQUE, 1 MASK, 2 BLEND
+//       alphaCutoff[4]
+//       doubleSided[1]
+//       transmissionFactor[4]         KHR_materials_transmission
+//       baseColorImage[4] normalImage[4] metallicRoughnessImage[4]
+//       occlusionImage[4] emissiveImage[4]
+//                                     source IMAGE index per channel, -1 = none
+//
 // No offset/length table for primitives -- the runtime always walks all
 // primitives in submission order anyway, and a sequential read avoids the
 // "seek per primitive" cache miss the table would introduce.
 //
-// Materials are NOT cooked here. The runtime still parses the sibling
-// .gltf for material descriptors (factors, texture refs, alpha mode) via
-// SharpGLTF; .blixmesh just replaces the slow part (buffer interpretation +
-// vertex packing). materialIndex links a cooked primitive back to a glTF
-// LogicalMaterial.
+// Materials ARE cooked here as of v5 -- every property except the image
+// BYTES. That split is the whole of stage K-F, and it is the split the arc
+// had collapsed: factors, alpha mode, alpha cutoff, double-sidedness, names
+// and texCoord sets are properties of a material and cook like any other
+// value, while the pixels are a separate artifact whose ADDRESSING (one file
+// per source? an atlas? an array? a streaming pool?) is a project's decision
+// and not this format's. Parking the first behind the second meant a cooked
+// mesh could not describe its own surface for want of a decision about
+// texture packing.
+//
+// So each channel records the source IMAGE INDEX rather than pixels, and the
+// loader resolves those against images it decodes from the source. The source
+// therefore stays required -- but required for ONE named reason instead of
+// for everything, which is what CookedFlags.SourceRequiredForImagesOnly says.
+//
+// materialIndex on a primitive indexes THIS table, and the table is written in
+// the source's own material order, so the number means what it always meant.
 public static class BlixMesh
 {
     public const uint Magic = 0x4D584C42; // "BLXM" little-endian
@@ -64,11 +94,23 @@ public static class BlixMesh
     // v4: the shared cooked preamble replaces the private magic+version pair, so
     // provenance and settings travel with the file and a tool can read them
     // without knowing this format at all.
-    public const uint Version4 = 4;
+    // v5: a material table follows the primitives -- every material property
+    // except image bytes (see the header note). No back-read path, by the same
+    // rule as v3: re-cook to migrate, which the build does by itself because the
+    // recipe assembly is one of the cook target's Inputs.
+    public const uint Version5 = 5;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
 
     public const int NoMaterial = -1;
+
+    /// <summary>A material channel with no texture, as distinct from one whose image is missing.</summary>
+    public const int NoImage = -1;
+
+    /// <summary>Alpha modes, matching glTF's own order so the byte is the spec's value.</summary>
+    public const byte AlphaOpaque = 0;
+    public const byte AlphaMask = 1;
+    public const byte AlphaBlend = 2;
     public const byte IndexFormatU16 = 0;
     public const byte IndexFormatU32 = 1;
 
@@ -90,6 +132,36 @@ public sealed record BlixMeshLod(ushort[]? Indices16, uint[]? Indices32, float E
     public int IndexCount => Indices32?.Length ?? Indices16!.Length;
 }
 
+/// <summary>A cooked material: every glTF material property except the image bytes.</summary>
+/// <remarks>
+/// <b>The image channels are source IMAGE indices, not paths and not pixels.</b> An index is what
+/// survives the two things a path does not — a container with its images embedded, where there is no
+/// path to write down, and a future in which the pixels move into some other artifact, where a path
+/// would have to be rewritten in every cooked file. It is also what the loader already keys its
+/// decoded-texture cache by, so resolving one costs a dictionary lookup.
+/// <para>
+/// -1 means the channel has no texture, which is different from an index that resolves to nothing.
+/// </para>
+/// </remarks>
+public sealed record BlixMeshMaterial(
+    string Name,
+    Vector4 BaseColorFactor,
+    int BaseColorTexCoord,
+    float MetallicFactor,
+    float RoughnessFactor,
+    float OcclusionStrength,
+    Vector3 EmissiveFactor,
+    float EmissiveStrength,
+    byte AlphaMode,
+    float AlphaCutoff,
+    bool DoubleSided,
+    float TransmissionFactor,
+    int BaseColorImage = BlixMesh.NoImage,
+    int NormalImage = BlixMesh.NoImage,
+    int MetallicRoughnessImage = BlixMesh.NoImage,
+    int OcclusionImage = BlixMesh.NoImage,
+    int EmissiveImage = BlixMesh.NoImage);
+
 public sealed record BlixMeshPrimitive(
     string Name,
     int MaterialIndex,
@@ -103,10 +175,20 @@ public sealed record BlixMeshPrimitive(
 /// The preamble, when this came off disk. Null when it was built in memory on the way to being
 /// written — a file knows its own provenance, a thing about to become one does not yet.
 /// </param>
+/// <param name="Materials">
+/// The source's materials, in its own order, so a primitive's MaterialIndex addresses this table.
+/// Empty is legal and means exactly what it says — an <c>.obj</c> with no <c>.mtl</c>, or a recipe
+/// that has nothing to record — never "look in the source instead".
+/// </param>
 public sealed record BlixMeshFile(
     VertexLayout Layout,
     IReadOnlyList<BlixMeshPrimitive> Primitives,
-    CookedHeader? Cooked = null);
+    IReadOnlyList<BlixMeshMaterial>? Materials = null,
+    CookedHeader? Cooked = null)
+{
+    /// <summary>Never null: a file with no material table reads as an empty one.</summary>
+    public IReadOnlyList<BlixMeshMaterial> MaterialTable => Materials ?? Array.Empty<BlixMeshMaterial>();
+}
 
 public static class BlixMeshWriter
 {
@@ -122,7 +204,7 @@ public static class BlixMeshWriter
         var layoutId = BlixMesh.LayoutIdForStride(file.Layout.Stride);
 
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version4, stamp);
+        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version5, stamp);
         using var bw = new BinaryWriter(fs);
 
         bw.Write(layoutId);
@@ -165,6 +247,36 @@ public static class BlixMeshWriter
                 }
             }
         }
+
+        // The material table, after every primitive. Appended rather than placed up front so that a
+        // reader walking primitives sequentially — which is what the runtime does — keeps doing
+        // exactly that, and so the one structure whose size depends on the source's material count
+        // sits where growing it moves nothing else.
+        var materials = file.MaterialTable;
+        bw.Write(materials.Count);
+        foreach (var m in materials)
+        {
+            var nameBytes = System.Text.Encoding.UTF8.GetBytes(m.Name);
+            bw.Write(nameBytes.Length);
+            bw.Write(nameBytes);
+            bw.Write(m.BaseColorFactor.X); bw.Write(m.BaseColorFactor.Y);
+            bw.Write(m.BaseColorFactor.Z); bw.Write(m.BaseColorFactor.W);
+            bw.Write(m.BaseColorTexCoord);
+            bw.Write(m.MetallicFactor);
+            bw.Write(m.RoughnessFactor);
+            bw.Write(m.OcclusionStrength);
+            bw.Write(m.EmissiveFactor.X); bw.Write(m.EmissiveFactor.Y); bw.Write(m.EmissiveFactor.Z);
+            bw.Write(m.EmissiveStrength);
+            bw.Write(m.AlphaMode);
+            bw.Write(m.AlphaCutoff);
+            bw.Write(m.DoubleSided);
+            bw.Write(m.TransmissionFactor);
+            bw.Write(m.BaseColorImage);
+            bw.Write(m.NormalImage);
+            bw.Write(m.MetallicRoughnessImage);
+            bw.Write(m.OcclusionImage);
+            bw.Write(m.EmissiveImage);
+        }
     }
 }
 
@@ -181,7 +293,7 @@ public static class BlixMeshReader
         ArgumentNullException.ThrowIfNull(path);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version4, path, ".blixmesh");
+        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version5, path, ".blixmesh");
         return AssetImportException.Refusing(path, () => ReadBody(fs, path, header), ".blixmesh");
     }
 
@@ -252,6 +364,33 @@ public static class BlixMeshReader
                 Lods: lods);
         }
 
-        return new BlixMeshFile(layout, primitives, header);
+        var materialCount = br.ReadInt32();
+        var materials = new BlixMeshMaterial[materialCount];
+        for (var i = 0; i < materialCount; i++)
+        {
+            var nameLen = br.ReadInt32();
+            var name = System.Text.Encoding.UTF8.GetString(br.ReadBytes(nameLen));
+            var baseColor = new Vector4(br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
+            var baseColorTexCoord = br.ReadInt32();
+            var metallic = br.ReadSingle();
+            var roughness = br.ReadSingle();
+            var occlusionStrength = br.ReadSingle();
+            var emissive = new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
+            var emissiveStrength = br.ReadSingle();
+            var alphaMode = br.ReadByte();
+            var alphaCutoff = br.ReadSingle();
+            var doubleSided = br.ReadBoolean();
+            var transmission = br.ReadSingle();
+            materials[i] = new BlixMeshMaterial(
+                name, baseColor, baseColorTexCoord, metallic, roughness, occlusionStrength,
+                emissive, emissiveStrength, alphaMode, alphaCutoff, doubleSided, transmission,
+                BaseColorImage: br.ReadInt32(),
+                NormalImage: br.ReadInt32(),
+                MetallicRoughnessImage: br.ReadInt32(),
+                OcclusionImage: br.ReadInt32(),
+                EmissiveImage: br.ReadInt32());
+        }
+
+        return new BlixMeshFile(layout, primitives, materials, header);
     }
 }

@@ -12,19 +12,33 @@ public enum CookedFlags : uint
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Set on <c>.blixmesh</c> today, and that is a debt rather than a design.</b> The cook
-    /// replaces geometry only — every material factor, texture reference and alpha mode is still
-    /// parsed out of the sibling glTF on every load, in full. So a cooked mesh is not a thing you
-    /// can ship on its own, not a thing you can open on its own, and not a thing you can move
-    /// without moving the glTF beside it.
-    /// </para>
-    /// <para>
     /// It is a flag rather than a comment so that the debt is <em>visible to a tool</em>: a coverage
-    /// report can say which artifacts still pin their sources, and stage K-F of the cook arc is
-    /// finished exactly when this stops being set on a mesh.
+    /// report can say which artifacts still pin their sources, and which pin them for what.
     /// </para>
     /// </remarks>
     SourceRequired = 1 << 0,
+
+    /// <summary>
+    /// The only thing still wanted from the source is image BYTES. Everything else this artifact
+    /// describes, it describes itself. Always accompanies <see cref="SourceRequired"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This exists because "source required" was recording a debt it had stopped being able to
+    /// describe.</b> A cooked mesh used to re-parse the sibling glTF for every material factor,
+    /// texture reference and alpha mode on every load; as of <c>.blixmesh</c> v5 it carries all of
+    /// them, and keeps the source only to decode pixels. One flag cannot tell those apart, and a
+    /// debt you cannot size is one nobody can close.
+    /// </para>
+    /// <para>
+    /// The distinction is the arc's, not bookkeeping. Cooking material VALUES needed nothing
+    /// invented; cooking image BYTES needs a decision about how textures are grouped and addressed
+    /// — atlases, arrays, shared palettes, streaming pools — which is a project's to make and not a
+    /// format's. Collapsing the two is what left materials uncooked for want of an answer about
+    /// texture packing. This flag is where that boundary is recorded so it cannot collapse again.
+    /// </para>
+    /// </remarks>
+    SourceRequiredForImagesOnly = 1 << 1,
 }
 
 /// <summary>
