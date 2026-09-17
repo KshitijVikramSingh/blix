@@ -78,6 +78,7 @@ public sealed partial class VulkanGraphicsDevice
     private QueryPool gpuTimingPool;
     private float timestampPeriodNs;
     private bool timestampsSupported;
+    private bool reportedTimingStatus;
     private List<PendingPassTiming>[] pendingTimingsPerSlot = Array.Empty<List<PendingPassTiming>>();
 
     private struct PendingPassTiming
@@ -924,26 +925,47 @@ public sealed partial class VulkanGraphicsDevice
         var pending = pendingTimingsPerSlot[slot];
         if (pending.Count == 0) return;
 
-        // WaitBit because MoltenVK resolves timestamps asynchronously after
-        // the fence signals; the wait is microseconds in practice.
-        var slotQueryBase = (uint)(slot * (int)QueriesPerFrameSlot);
+        // <b>Only the queries this frame actually WROTE, which is what made this work at all.</b>
+        // The reset covers all QueriesPerFrameSlot of the slot, but a frame writes two per timed
+        // pass and leaves the rest untouched — and a query that was never written never becomes
+        // available. Asking for the whole slot therefore returned NotReady every single time, on
+        // every frame, forever: ResultWaitBit waits for availability, and an unwritten query has
+        // none to wait for. The timings were then dropped by the retry cap, so the device measured
+        // every pass and reported nothing, on this machine and any other.
+        //
+        // The pending entries know their own indices, so the written span is exactly [first, last].
+        uint first = uint.MaxValue;
+        uint last = 0;
+        foreach (var t in pending)
+        {
+            if (t.StartIndex < first) first = t.StartIndex;
+            if (t.EndIndex > last) last = t.EndIndex;
+        }
+        var queryCount = last - first + 1;
         var results = stackalloc ulong[(int)QueriesPerFrameSlot];
         var status = Vk.GetQueryPoolResults(
-            Device, gpuTimingPool, slotQueryBase, QueriesPerFrameSlot,
-            (nuint)(QueriesPerFrameSlot * sizeof(ulong)),
+            Device, gpuTimingPool, first, queryCount,
+            (nuint)(queryCount * sizeof(ulong)),
             results, sizeof(ulong),
             QueryResultFlags.Result64Bit | QueryResultFlags.ResultWaitBit);
         if (status != Result.Success)
         {
             // NotReady on MoltenVK — retry next cycle, cap to bound growth.
+            if (!reportedTimingStatus)
+            {
+                reportedTimingStatus = true;
+                Console.WriteLine(
+                    $"[blix] GPU pass timings not resolving: vkGetQueryPoolResults -> {status}. " +
+                    "Per-pass GPU ms will be empty.");
+            }
             if (pending.Count > MaxPendingPerSlot) pending.Clear();
             return;
         }
 
         foreach (var t in pending)
         {
-            var startTicks = results[t.StartIndex - slotQueryBase];
-            var endTicks = results[t.EndIndex - slotQueryBase];
+            var startTicks = results[t.StartIndex - first];
+            var endTicks = results[t.EndIndex - first];
             var deltaTicks = endTicks - startTicks;
             var deltaMs = deltaTicks * timestampPeriodNs / 1_000_000.0;
             pendingGpuTimings.Add(new VkGpuPassTiming(t.PassName, deltaMs, t.IssuedFrame));
