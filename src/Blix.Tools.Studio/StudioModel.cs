@@ -56,7 +56,16 @@ public sealed class StudioModel : IDisposable
         float BaseAlpha = 1f,
         GltfAlphaMode AlphaMode = GltfAlphaMode.Opaque,
         float AlphaCutoff = 0.5f,
-        bool DoubleSided = false);
+        bool DoubleSided = false,
+        /// <summary>The material's own name, which is often the only colour information a kit ships.</summary>
+        /// <remarks>
+        /// <b>Dropped until now, and the drop was the whole reason this tool could not show a kit
+        /// asset as a game draws it.</b> All 40 materials across the nature kit are
+        /// <c>baseColorFactor = (1,1,1,1)</c> with no texture: the file carries geometry, baked
+        /// vertex occlusion, and a NAME. Something else turns "Grass" into a green. Carrying the name
+        /// is what lets a caller supply that something without this type knowing what a game is.
+        /// </remarks>
+        string MaterialName = "");
 
     /// <summary>A node of the authored hierarchy, drawable or not.</summary>
     public readonly record struct Node(
@@ -183,7 +192,8 @@ public sealed class StudioModel : IDisposable
                     BaseAlpha: material?.BaseColorFactor.W ?? 1f,
                     AlphaMode: material?.AlphaMode ?? GltfAlphaMode.Opaque,
                     AlphaCutoff: material?.AlphaCutoff ?? 0.5f,
-                    DoubleSided: material?.DoubleSided ?? false));
+                    DoubleSided: material?.DoubleSided ?? false,
+                    MaterialName: material?.Name ?? string.Empty));
 
                 if (material?.BaseColorTexture is not null) model.TexturedPartCount++;
             }

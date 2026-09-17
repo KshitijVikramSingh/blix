@@ -112,6 +112,11 @@ public static class Program
         // extensions fails it immediately.
         var stageSelfTest = args.Contains("--stage-selftest");
 
+        // <b>--tint Name=R,G,B, repeatable.</b> The viewer's materials panel is where a colour is
+        // AUDITIONED; this is how the answer gets into a capture, so a kit asset can be shown as a
+        // game draws it in something diffable rather than only in a window someone was looking at.
+        // ArgValue returns the first match, which is wrong for a flag that is meant to be given once
+        // per material — so this scans.
         var maskRoot = ArgValue(args, "--mask-root");
         var maskFalloff = int.TryParse(ArgValue(args, "--mask-falloff"), out var mf) ? Math.Max(0, mf) : 0;
 
@@ -134,10 +139,29 @@ public static class Program
             options = options with { ExitAfterFrames = sequence + 4 };
         }
 
+        var tints = new StudioTints();
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] != "--tint") continue;
+            var spec = args[i + 1];
+            var eq = spec.IndexOf('=');
+            var rgb = eq < 0 ? Array.Empty<string>() : spec[(eq + 1)..].Split(',');
+            if (eq <= 0 || rgb.Length != 3
+                || !float.TryParse(rgb[0], out var tr)
+                || !float.TryParse(rgb[1], out var tg)
+                || !float.TryParse(rgb[2], out var tb))
+            {
+                Console.Error.WriteLine($"--tint takes Name=R,G,B with three numbers — not '{spec}'.");
+                return 1;
+            }
+
+            tints.Set(spec[..eq], new Vector3(tr, tg, tb));
+        }
+
         var loop = new CaptureLoop(
             output, options.ExitAfterFrames, modelPath, rigPath, clipName, clipTime, xray, advance,
             driveRoot, instances, lockstep, viewport, sequence, maskRoot, maskFalloff, skeletonOnly,
-            zoom, stageSelfTest, args);
+            zoom, stageSelfTest, args, tints);
         using (var window = new Window(loop, options))
         {
             window.Run();
@@ -220,6 +244,9 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     // Kept whole so the stage's declared knobs can be applied to the scene once it exists. This
     // tool parses its own flags in Main; the stage's it does not parse at all.
     private readonly string[] args = Array.Empty<string>();
+
+    /// <summary>Material colour overrides from --tint, or null to draw what the file said.</summary>
+    private readonly StudioTints? tints;
     private int extensionRecords;
 
     internal int ExtensionRecords => extensionRecords;
@@ -335,9 +362,11 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         bool skeletonOnly = false,
         float zoom = 1f,
         bool stageSelfTest = false,
-        string[]? args = null)
+        string[]? args = null,
+        StudioTints? tints = null)
     {
         this.args = args ?? Array.Empty<string>();
+        this.tints = tints;
         this.skeletonOnly = skeletonOnly;
         this.stageSelfTest = stageSelfTest;
         this.zoom = zoom;
@@ -686,13 +715,14 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                         * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, aspect, 0.1f, 120f);
 
         var views = new List<IStudioView>();
-        if (model is not null) views.Add(new ModelView(model, modelTransform));
+        if (model is not null) views.Add(new ModelView(model, modelTransform) { Tints = tints });
         if (!skeletonOnly && rig is not null)
         {
             // Same wiring as the viewer, because a capture that could not show an attachment would
             // make the one instrument that produces evidence blind to the thing being added.
             var rigView = new RigView(rig, animation?.Count ?? 0)
             {
+                Tints = tints,
                 BoneWorlds = boneWorlds,
                 Placement = rigTransform,
                 // Same wiring as the viewer: each body carries its gear at its own pose, so an

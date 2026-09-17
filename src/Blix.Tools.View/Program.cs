@@ -102,6 +102,15 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 {
     private readonly StudioRenderer renderer = new();
     private readonly List<IStudioView> views = new();
+
+    /// <summary>
+    /// Colours this session is auditioning, by material name. Session-only — see <see cref="StudioTints"/>.
+    /// </summary>
+    /// <remarks>
+    /// Lives on the loop rather than on a view because the views are rebuilt every frame, and a table
+    /// that died with them would forget the colour between one frame and the next.
+    /// </remarks>
+    public StudioTints Tints { get; } = new();
     private readonly string? modelPath;
     private StudioModel? model;
     private Matrix4x4 modelTransform = Matrix4x4.Identity;
@@ -725,7 +734,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // What this tool puts on the stage. Rebuilt per frame rather than cached, because the
         // instance count follows the session and a stale RigView would draw last frame's crowd.
         views.Clear();
-        if (model is not null) views.Add(new ModelView(model, modelTransform));
+        if (model is not null) views.Add(new ModelView(model, modelTransform) { Tints = Tints });
         if (rig is not null)
         {
             // <b>The worlds come from the session, not from here.</b> They are already computed once
@@ -741,6 +750,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
                 InstanceBoneWorlds = session is null ? null : session.BoneWorldsFor,
                 Placements = session?.Placements,
                 InstanceAttachments = session is null ? null : AttachmentsForInstance,
+                Tints = Tints,
             };
             foreach (var name in visibleAttachments) rigView.VisibleAttachments.Add(name);
             views.Add(rigView);

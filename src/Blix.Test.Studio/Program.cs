@@ -1,3 +1,4 @@
+using System.Numerics;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 using Blix.Tools.Studio;
@@ -131,6 +132,46 @@ public static class Program
             MathF.Abs(look.SunDirection.Y - MathF.Sin(elevation)) < 1e-5f
             && MathF.Abs(look.SunDirection.Length() - 1f) < 1e-5f,
             $"{look.SunDirection} vs elevation {look.SunElevation:0.000}°");
+
+        // ── the tint table, which is how a kit asset gets a colour it does not ship ──────────
+        //
+        // <b>Keyed on the material NAME, which is the whole reason a game stays out of this.</b> The
+        // 29 files in RTSGame's kit carry an empty pbrMetallicRoughness — no factor, no texture — and
+        // twelve material names between them. SettlementArt turns those names into colours and lives
+        // in a game the studio must never reference; keying on the name shows the exact surface that
+        // table keys on while knowing nothing about it.
+        var tints = new StudioTints();
+        var asAuthored = new Vector3(1f, 1f, 1f);
+
+        t.Expect("an empty table draws what the file said",
+            tints.Resolve("Grass", asAuthored) == asAuthored && tints.Count == 0,
+            $"{tints.Resolve("Grass", asAuthored)}");
+
+        tints.Set("Grass", new Vector3(0.110f, 0.155f, 0.060f));
+        t.Expect("an override replaces the asset's colour for that material only",
+            tints.Resolve("Grass", asAuthored) == new Vector3(0.110f, 0.155f, 0.060f)
+            && tints.Resolve("Bark_NormalTree", asAuthored) == asAuthored,
+            $"grass {tints.Resolve("Grass", asAuthored)}, bark {tints.Resolve("Bark_NormalTree", asAuthored)}");
+
+        // <b>An unnamed material must not become a key.</b> A single entry under "" would tint every
+        // nameless material in the file together, which reads as a bug in the panel rather than as a
+        // property of the asset.
+        tints.Set(string.Empty, new Vector3(1f, 0f, 0f));
+        t.Expect("a nameless material is not storable",
+            tints.Count == 1 && tints.Resolve(string.Empty, asAuthored) == asAuthored,
+            $"{tints.Count} entries");
+
+        tints.Clear("Grass");
+        t.Expect("clearing returns that material to the file's colour",
+            tints.Resolve("Grass", asAuthored) == asAuthored && tints.Count == 0,
+            $"{tints.Count} entries");
+
+        tints.Set("A", Vector3.One);
+        tints.Set("B", Vector3.Zero);
+        tints.ClearAll();
+        t.Expect("reset all empties the table",
+            tints.Count == 0 && !tints.Has("A") && !tints.Has("B"),
+            $"{tints.Count} entries");
 
         t.PrintSummary();
         return t.Failed == 0 ? 0 : 1;

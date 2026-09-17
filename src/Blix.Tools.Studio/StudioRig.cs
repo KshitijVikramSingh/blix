@@ -83,7 +83,9 @@ public sealed class StudioRig : IDisposable
         float BaseAlpha = 1f,
         GltfAlphaMode AlphaMode = GltfAlphaMode.Opaque,
         float AlphaCutoff = 0.5f,
-        bool DoubleSided = false);
+        bool DoubleSided = false,
+        /// <summary>The material's own name — see <see cref="StudioModel.Part.MaterialName"/>.</summary>
+        string MaterialName = "");
 
     /// <summary>
     /// A static mesh carried by a joint — a knife in a hand, a cape on a chest.
@@ -105,7 +107,9 @@ public sealed class StudioRig : IDisposable
         Vector3 BaseColour,
         float Metallic,
         float Roughness,
-        TextureHandle Albedo);
+        TextureHandle Albedo,
+        /// <summary>The material's own name — see <see cref="StudioModel.Part.MaterialName"/>.</summary>
+        string MaterialName = "");
 
     /// <summary>One image the asset actually ships, with enough to label it in a panel.</summary>
     public readonly record struct Image(string Name, TextureHandle Texture, int Width, int Height);
@@ -157,7 +161,9 @@ public sealed class StudioRig : IDisposable
         Vector3 BaseColour,
         float Metallic,
         float Roughness,
-        TextureHandle Albedo);
+        TextureHandle Albedo,
+        /// <summary>The material's own name — see <see cref="StudioModel.Part.MaterialName"/>.</summary>
+        string MaterialName = "");
 
     public IReadOnlyList<StaticPart> StaticParts => staticParts;
 
@@ -314,7 +320,8 @@ public sealed class StudioRig : IDisposable
                 BaseAlpha: material?.BaseColorFactor.W ?? 1f,
                 AlphaMode: material?.AlphaMode ?? GltfAlphaMode.Opaque,
                 AlphaCutoff: material?.AlphaCutoff ?? 0.5f,
-                DoubleSided: material?.DoubleSided ?? false));
+                DoubleSided: material?.DoubleSided ?? false,
+                MaterialName: material?.Name ?? string.Empty));
         }
 
         // <b>Attachments upload beside the parts and are bounded out of the rest bounds.</b> A
@@ -347,7 +354,8 @@ public sealed class StudioRig : IDisposable
                             material.BaseColorFactor.X, material.BaseColorFactor.Y, material.BaseColorFactor.Z),
                     Metallic: material?.MetallicFactor ?? 0f,
                     Roughness: material?.RoughnessFactor ?? 0.7f,
-                    Albedo: rig.UploadAlbedo(vk, material?.BaseColorTexture, white, uploaded)));
+                    Albedo: rig.UploadAlbedo(vk, material?.BaseColorTexture, white, uploaded),
+                    MaterialName: material?.Name ?? string.Empty));
             }
         }
 
@@ -379,7 +387,8 @@ public sealed class StudioRig : IDisposable
                             material.BaseColorFactor.X, material.BaseColorFactor.Y, material.BaseColorFactor.Z),
                     Metallic: material?.MetallicFactor ?? 0f,
                     Roughness: material?.RoughnessFactor ?? 0.7f,
-                    Albedo: rig.UploadAlbedo(vk, material?.BaseColorTexture, white, uploaded)));
+                    Albedo: rig.UploadAlbedo(vk, material?.BaseColorTexture, white, uploaded),
+                    MaterialName: material?.Name ?? string.Empty));
             }
         }
 

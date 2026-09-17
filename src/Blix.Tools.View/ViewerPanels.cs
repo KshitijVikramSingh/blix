@@ -657,6 +657,11 @@ internal sealed class ViewerPanels
             DrawNodeList();
         }
 
+        if (ImGui.CollapsingHeader("materials", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            DrawMaterialPanel();
+        }
+
         DrawImagePanel();
         DrawViewportPanel();
 
@@ -774,4 +779,96 @@ internal sealed class ViewerPanels
         ImGui.Image(app.ShadowMapId, new Vector2(shadowSide, shadowSide));
         ImGui.End();
     }
+
+    /// <summary>
+    /// Every material the asset names, with the colour it is being drawn in.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The panel exists because a kit asset ships a name and no colour.</b> All 40 materials
+    /// across this tree's nature kit are <c>baseColorFactor = (1,1,1,1)</c> with no texture, so this
+    /// viewer rendered them faithfully and still could not show what any of them looks like in a
+    /// game. Something downstream turns "Grass" into a green; this is where you find out which
+    /// green, by trying one.
+    /// </para>
+    /// <para>
+    /// <b>It knows nothing about any game.</b> RTSGame's SettlementArt holds the real table and the
+    /// studio must not reference a game — but the NAME is the surface that table keys on, so listing
+    /// names and taking colours shows exactly that surface. Audition a green, read the RGB off the
+    /// swatch, go and write it down where the table lives.
+    /// </para>
+    /// <para>
+    /// Gathered per frame rather than cached. It is a few dozen strings against a model that is
+    /// reloaded by a keystroke, and a cache here is a thing that can show the previous asset's
+    /// materials — which is the failure this panel would be least able to explain.
+    /// </para>
+    /// </remarks>
+    private void DrawMaterialPanel()
+    {
+        materials.Clear();
+        if (app.Model is { } model)
+        {
+            foreach (var part in model.Parts) Note(part.MaterialName, part.BaseColour);
+        }
+
+        if (app.Rig is { } rig)
+        {
+            foreach (var part in rig.Parts) Note(part.MaterialName, part.BaseColour);
+            foreach (var a in rig.Attachments) Note(a.MaterialName, a.BaseColour);
+            foreach (var sp in rig.StaticParts) Note(sp.MaterialName, sp.BaseColour);
+        }
+
+        if (materials.Count == 0)
+        {
+            ImGui.TextDisabled("this asset names no materials");
+            return;
+        }
+
+        var tints = app.Tints;
+        ImGui.TextDisabled($"{materials.Count} material(s) · {tints.Count} overridden");
+        ImGui.SameLine();
+        if (ImGui.SmallButton("reset all")) tints.ClearAll();
+
+        if (ImGui.BeginChild("materiallist", new Vector2(0, 190), ImGuiChildFlags.Borders))
+        {
+            foreach (var (name, assetColour) in materials)
+            {
+                var colour = tints.Resolve(name, assetColour);
+                // ColorEdit3 writes through, so the override is set the moment it changes rather
+                // than on some apply button — the point is to watch the model while dragging.
+                if (ImGui.ColorEdit3(name, ref colour, ImGuiColorEditFlags.NoInputs)) tints.Set(name, colour);
+
+                if (tints.Has(name))
+                {
+                    ImGui.SameLine();
+                    // The RGB is the deliverable. It is going into a table in another repository
+                    // path by hand, so it has to be readable, not just visible.
+                    ImGui.TextDisabled($"{colour.X:0.000}, {colour.Y:0.000}, {colour.Z:0.000}");
+                    ImGui.SameLine();
+                    if (ImGui.SmallButton($"reset##{name}")) tints.Clear(name);
+                }
+                else
+                {
+                    ImGui.SameLine();
+                    ImGui.TextDisabled("(as authored)");
+                }
+            }
+        }
+
+        ImGui.EndChild();
+
+        void Note(string name, Vector3 assetColour)
+        {
+            if (name.Length == 0) return;
+            foreach (var (existing, _) in materials)
+            {
+                if (string.Equals(existing, name, StringComparison.Ordinal)) return;
+            }
+
+            materials.Add((name, assetColour));
+        }
+    }
+
+    private readonly List<(string Name, Vector3 AssetColour)> materials = new();
+
 }

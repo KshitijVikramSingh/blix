@@ -50,6 +50,17 @@ public sealed class ModelView : IStudioView
         Transform = transform == default ? Matrix4x4.Identity : transform;
     }
 
+    /// <summary>Colour overrides by material name, or null to draw what the file said.</summary>
+    /// <remarks>
+    /// <b>Optional, and null is the honest default.</b> A view that always consults a tint table
+    /// would make every caller construct one to say "no thanks", and a capture of an asset should
+    /// show the asset. See <see cref="StudioTints"/> for why the table is keyed on the name.
+    /// </remarks>
+    public StudioTints? Tints { get; set; }
+
+    private Vector3 Colour(string materialName, Vector3 assetColour) =>
+        Tints?.Resolve(materialName, assetColour) ?? assetColour;
+
     public StudioModel Model { get; }
 
     public Matrix4x4 Transform { get; set; }
@@ -77,7 +88,7 @@ public sealed class ModelView : IStudioView
             var cutoff = StudioAlpha.CutoffFor(part.AlphaMode, part.AlphaCutoff);
             StudioPush.Matrix(node.WorldTransform * Transform, push);
             if (casterOnly) StudioPush.CasterCutout(push, cutoff, part.BaseAlpha, part.AlbedoUvSet);
-            else StudioPush.Material(push, part.BaseColour, part.Metallic, part.Roughness,
+            else StudioPush.Material(push, Colour(part.MaterialName, part.BaseColour), part.Metallic, part.Roughness,
                      alphaCutoff: cutoff, baseAlpha: part.BaseAlpha, albedoUvSet: part.AlbedoUvSet);
 
             // A FRESH texture array per part. Push payloads are copied at record time; texture
@@ -125,6 +136,17 @@ public sealed class RigView : IStudioView
         Rig = rig ?? throw new ArgumentNullException(nameof(rig));
         Instances = instances;
     }
+
+    /// <summary>Colour overrides by material name, or null to draw what the file said.</summary>
+    /// <remarks>
+    /// <b>Optional, and null is the honest default.</b> A view that always consults a tint table
+    /// would make every caller construct one to say "no thanks", and a capture of an asset should
+    /// show the asset. See <see cref="StudioTints"/> for why the table is keyed on the name.
+    /// </remarks>
+    public StudioTints? Tints { get; set; }
+
+    private Vector3 Colour(string materialName, Vector3 assetColour) =>
+        Tints?.Resolve(materialName, assetColour) ?? assetColour;
 
     public StudioRig Rig { get; }
 
@@ -254,7 +276,7 @@ public sealed class RigView : IStudioView
                 push = lit;
                 StudioPush.Matrix(Matrix4x4.Identity, push);
                 StudioPush.Material(
-                    push, part.BaseColour, part.Metallic, part.Roughness, stride,
+                    push, Colour(part.MaterialName, part.BaseColour), part.Metallic, part.Roughness, stride,
                     alphaCutoff: StudioAlpha.CutoffFor(part.AlphaMode, part.AlphaCutoff),
                     baseAlpha: part.BaseAlpha, albedoUvSet: part.AlbedoUvSet);
             }
@@ -313,7 +335,7 @@ public sealed class RigView : IStudioView
             // No joint, so no joint world: the node's own world matrix and the body's placement.
             StudioPush.Matrix(part.WorldTransform * Placement, push);
             if (casterOnly) StudioPush.CasterCutout(push, 0f, 1f);
-            else StudioPush.Material(push, part.BaseColour, part.Metallic, part.Roughness);
+            else StudioPush.Material(push, Colour(part.MaterialName, part.BaseColour), part.Metallic, part.Roughness);
 
             draw.Scope.DrawIndexed(
                 vertexBuffer: part.Vertices,
@@ -375,7 +397,7 @@ public sealed class RigView : IStudioView
 
             StudioPush.Matrix(model, attachPush);
             if (casterOnly) StudioPush.CasterCutout(attachPush, 0f, 1f);
-            else StudioPush.Material(attachPush, attachment.BaseColour, attachment.Metallic, attachment.Roughness);
+            else StudioPush.Material(attachPush, Colour(attachment.MaterialName, attachment.BaseColour), attachment.Metallic, attachment.Roughness);
 
             draw.Scope.DrawIndexed(
                 vertexBuffer: attachment.Vertices,

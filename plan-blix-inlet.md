@@ -353,7 +353,7 @@ render the same" is a real assertion rather than a coincidence of everything bei
 licensing — Khronos sample assets carry per-model licences (a mix of CC0 and CC-BY), so they need a
 `CREDITS.md` entry the way the poly.pizza assets do. The generator's output is Apache-2.0.
 
-### I-F — the viewer can supply the colour the asset does not have
+### I-F — the viewer can supply the colour the asset does not have — **DONE**
 
 **Measured while answering "is the grass supposed to be greyscale?" — yes, it is.** All 40 materials
 across the nature kit are `baseColorFactor = (1,1,1,1)` with **no texture**. The asset ships
@@ -375,7 +375,40 @@ supplied — so the viewer cannot currently even say which material a part uses.
 reference a game — but because the panel keys on material NAME, it shows the exact surface a game
 tints against while knowing nothing about any game. Audition a green, read off the RGB.
 
-Open: session-only or persisted, and where I-F sits against I-C/I-D.
+**Settled: session-only.** Persisting would make this a store of colours, and the game's table
+already is one — a second store that can disagree with the first is worse than none. What is
+auditioned here is a number to go and write down where the table lives.
+
+**Done, in the three steps the stage named.**
+
+1. `MaterialName` is carried through all four part records — `StudioModel.Part`, and the rig's
+   `Part`, `Attachment` and `StaticPart`. It was already on `GltfMaterial` at every call site.
+2. `StudioTints` is the mechanism: a colour per material name, `Resolve(name, assetColour)` so no
+   view has to write the "or the one from the file" branch four times. The materials panel lists the
+   distinct names with a swatch each, defaulting to what the file said, and prints the RGB beside any
+   it is overriding — because the RGB is the deliverable, going into a table somewhere else by hand.
+3. All four colour pushes route through it, and both views take an optional `Tints`. Null is the
+   default and null means draw the asset, so a capture of an asset still shows the asset.
+
+**The premise was re-measured rather than carried forward, and the first place I looked was wrong.**
+The nature kit is `.obj`/`.mtl` and those DO carry colours (`Kd 0.069954 0.121857 0.047888` for
+"Green"). The assets this is for are `src/RTSGame/Assets/models/kit/` — **29 glTF files with an empty
+`pbrMetallicRoughness`**, so no factor and no texture, carrying **12 distinct material names** between
+them: `Grass`, `Bark_NormalTree`, `Leaves_Pine`, `PathRocks`… exactly the keys `SettlementArt` tints
+against.
+
+**`--tint Name=R,G,B` on the capture tool, repeatable.** The panel is where a colour is auditioned;
+this is how the answer reaches something diffable, so "what a kit asset looks like in the game" is a
+picture that can be compared rather than a window somebody was looking at. Verified on `Pine_1.gltf`:
+as-authored is a white tree, and `--tint Bark_NormalTree=0.085,0.058,0.038 --tint
+Leaves_Pine=0.094,0.179,0.012` is a green pine with brown bark — from a viewer that references no
+game.
+
+`Blix.Test.Studio` 20/20, five of them on the table's own behaviour including the one that matters:
+an unnamed material must not become a key, or a single entry under `""` would tint every nameless
+material together and read as a bug in the panel.
+
+
 
 > **Chased later, noted so it is not lost:** `--debug` arms the diagnostics system
 > (`Window.cs:98` sets `State.Enabled`) but the overlay also needs `State.ShowOverlay`, toggled by
