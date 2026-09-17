@@ -355,10 +355,10 @@ internal sealed partial class SponzaLoop
             host.RequestClose();
             return false;
         }
-        var found = Directory.EnumerateFiles(mainPackDir, "*.gltf", SearchOption.TopDirectoryOnly).FirstOrDefault();
+        var found = FirstAsset(mainPackDir);
         if (found is null)
         {
-            Console.WriteLine($"[VulkanSponza] No .gltf file in {mainPackDir}. Re-run tools/setup-sponza-modern.sh.");
+            Console.WriteLine($"[VulkanSponza] No .blixmesh or .gltf in {mainPackDir}. Re-run tools/setup-sponza-modern.sh.");
             host.RequestClose();
             return false;
         }
@@ -417,9 +417,26 @@ internal sealed partial class SponzaLoop
     {
         var packDir = Path.Combine(assetsRoot, packDirName);
         if (!Directory.Exists(packDir)) return;
-        var gltf = Directory.EnumerateFiles(packDir, "*.gltf", SearchOption.TopDirectoryOnly).FirstOrDefault();
-        if (gltf is not null) packs.Add((packDirName, gltf, assetId));
+        var asset = FirstAsset(packDir);
+        if (asset is not null) packs.Add((packDirName, asset, assetId));
     }
+
+    /// <summary>The pack's model file: a cooked <c>.blixmesh</c> when there is one, else the glTF.</summary>
+    /// <remarks>
+    /// <b>Cooked FIRST, and that ordering is the point rather than an optimisation.</b> A cooked
+    /// mesh now carries its own materials and an image table saying where every texture lives, so a
+    /// pack directory holding nothing but a <c>.blixmesh</c> and its <c>.blixtex</c> files is a
+    /// complete, loadable pack. Globbing for <c>*.gltf</c> first would have found nothing in exactly
+    /// the layout the cook exists to produce — 6.3 GB of main Sponza becomes 1.6 GB, and the glTF
+    /// and its 133 MB buffer are not part of it.
+    /// <para>
+    /// The glTF fallback stays for an uncooked checkout, which is still a supported way to run this.
+    /// The importer takes either path and reports which one it took.
+    /// </para>
+    /// </remarks>
+    private static string? FirstAsset(string packDir) =>
+        Directory.EnumerateFiles(packDir, "*.blixmesh", SearchOption.TopDirectoryOnly).FirstOrDefault()
+        ?? Directory.EnumerateFiles(packDir, "*.gltf", SearchOption.TopDirectoryOnly).FirstOrDefault();
 
     // Procedural-sky IBL fallback (no cooked .blixprobe). The synthesis lives in
     // the demo-owned ProceduralSky helper; this just binds the result.

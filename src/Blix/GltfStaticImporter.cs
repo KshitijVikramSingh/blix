@@ -43,6 +43,28 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         return AssetImportException.Refusing(context.SourcePath, () => ImportCore(context));
     }
 
+    /// <summary>
+    /// Null when the cooked mesh was made with the settings this caller wants; else why not.
+    /// </summary>
+    /// <remarks>
+    /// Only the settings that change the VERTICES are compared. <c>flipV</c> moves texture
+    /// coordinates and <c>tangents</c> changes the stride and the attribute set — a mesh cooked
+    /// with either the other way is not a slower answer to the question, it is a different one.
+    /// The remaining stamped parameters (split, foliage, simplify) change how geometry is divided
+    /// or decimated, which every consumer takes as it comes.
+    /// </remarks>
+    private static string? SettingsMismatch(string blixmeshPath, AssetImportContext context)
+    {
+        var stamp = CookedFile.TryReadHeader(blixmeshPath)?.Stamp;
+        if (stamp is null) return null;
+
+        var want = $"flipV={(context.FlipTextureV ? 1 : 0)} tangents={(context.IncludeTangents ? 1 : 0)}";
+        if (stamp.Value.Parameters.Contains(want, StringComparison.Ordinal)) return null;
+
+        return $"a .blixmesh sibling exists but was cooked with '{stamp.Value.Parameters}' and this "
+             + $"load wants '{want}' — the glTF was walked instead. Re-cook with matching flags.";
+    }
+
     /// <summary>Loads a cooked mesh and nothing else — no glTF is opened, and none need exist.</summary>
     /// <remarks>
     /// <b>The payoff of the image table.</b> Geometry and materials came from the cooked file
@@ -132,12 +154,36 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         //
         // A .blixmesh may also be named DIRECTLY, which is what makes "open a cooked asset" a
         // coherent request for the first time.
+        string? cookedMismatch = null;
         var direct = Path.GetExtension(context.SourcePath)
             .Equals(".blixmesh", StringComparison.OrdinalIgnoreCase);
         var blixmeshPath = direct
             ? context.SourcePath
             : Path.ChangeExtension(context.SourcePath, ".blixmesh");
-        if (File.Exists(blixmeshPath)) return ImportCooked(context.SourcePath, blixmeshPath);
+        if (File.Exists(blixmeshPath))
+        {
+            // <b>The SETTINGS are checked, not only the file's existence, and this is what that
+            // check is worth.</b> VulkanSponza imports with flipTextureV and includeTangents both
+            // true — a 48-byte vertex with a tangent — while its cook script never passed either
+            // flag, so the cooked mesh was 32-byte and V-unflipped. Nothing compared them. The GPU
+            // read 48-byte strides out of a 32-byte buffer and drew the whole scene as a fan of
+            // grey triangles; every count in the log was correct, which is why it looked like a
+            // lighting problem.
+            //
+            // A cooked artifact is only valid for the settings it was made with. The recipe stamps
+            // them; this refuses what does not match, and says which two disagreed.
+            var mismatch = SettingsMismatch(blixmeshPath, context);
+            if (mismatch is null) return ImportCooked(context.SourcePath, blixmeshPath);
+
+            if (direct)
+            {
+                // Named directly, so there is no source to fall back to. Refusing by name beats
+                // drawing something wrong.
+                throw new AssetImportException(context.SourcePath, null, mismatch);
+            }
+
+            cookedMismatch = mismatch;
+        }
 
         var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         var model = AssetImportException.Refusing(
@@ -192,7 +238,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 Mode: AssetLoadMode.Source,
                 Bytes: SafeLength(context.SourcePath),
                 LoadMs: loadWatch.Elapsed.TotalMilliseconds,
-                Warning: "no .blixmesh sibling — glTF accessors were walked"));
+                Warning: cookedMismatch ?? "no .blixmesh sibling — glTF accessors were walked"));
         }
 
         return new GltfModel(
