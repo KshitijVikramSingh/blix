@@ -722,6 +722,45 @@ public static class Program
             t.ExpectTrue("while the objects themselves are still distinct", !ReferenceEquals(a, b));
         }
 
+        // ── the registry shares by identity, and only where it should ───────
+        // <b>No GPU here, and none needed.</b> What is worth asserting is the KEYING — that two
+        // objects with one identity upload once, that one identity at two formats uploads twice,
+        // and that an unidentified texture is never shared with anything. The upload itself is a
+        // delegate, so counting how often it runs is the whole test.
+        var uploads = 0;
+        var registry = new Blix.TextureRegistry();
+        Blix.Graphics.TextureHandle Fake() { uploads++; return default; }
+
+        var pixels = new byte[] { 1, 2, 3, 4 };
+        var sameA = Blix.GltfTexture.Rgba8Single("a", pixels, 1, 1, "/assets/x.png");
+        var sameB = Blix.GltfTexture.Rgba8Single("a-again", pixels, 1, 1, "/assets/x.png");
+
+        registry.GetOrAdd(sameA, Blix.Graphics.TextureFormat.Rgba8Srgb, Fake);
+        registry.GetOrAdd(sameB, Blix.Graphics.TextureFormat.Rgba8Srgb, Fake);
+        t.Expect("two objects with one identity upload once", uploads == 1, $"{uploads} uploads");
+        t.Expect("and the saving is reported", registry.SharedUploads == 1, $"{registry.SharedUploads}");
+
+        // The same picture as a normal map is a DIFFERENT GPU texture — sRGB versus linear. Keying
+        // on identity alone would hand a shader the wrong colour space.
+        registry.GetOrAdd(sameB, Blix.Graphics.TextureFormat.Rgba8, Fake);
+        t.Expect("one identity at two formats uploads twice", uploads == 2, $"{uploads} uploads");
+
+        // Unidentified textures keep the old behaviour exactly: deduplicated per object, never
+        // shared with anything else, and never counted as resident bytes.
+        var anonA = Blix.GltfTexture.Rgba8Single("anon", pixels, 1, 1);
+        var anonB = Blix.GltfTexture.Rgba8Single("anon", pixels, 1, 1);
+        registry.GetOrAdd(anonA, Blix.Graphics.TextureFormat.Rgba8Srgb, Fake);
+        registry.GetOrAdd(anonA, Blix.Graphics.TextureFormat.Rgba8Srgb, Fake);
+        registry.GetOrAdd(anonB, Blix.Graphics.TextureFormat.Rgba8Srgb, Fake);
+        t.Expect("an unidentified texture dedups by object but shares with nobody",
+            uploads == 4, $"{uploads} uploads");
+        t.Expect("and is counted as unidentified", registry.UnidentifiedCount == 2,
+            $"{registry.UnidentifiedCount}");
+
+        // The residency number D5-c needs, covering the identified entries only.
+        t.Expect("resident bytes cover the identified textures", registry.ResidentBytes > 0,
+            $"{registry.ResidentBytes} bytes");
+
         t.PrintSummary();
         return t.Failed;
     }

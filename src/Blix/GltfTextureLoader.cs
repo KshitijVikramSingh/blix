@@ -32,11 +32,16 @@ public sealed class GltfTextureLoader
     private readonly IGraphicsDevice device;
     private readonly ResourceUploader uploader;
 
-    private readonly Dictionary<GltfTexture, TextureHandle> albedoCache = new();
-    private readonly Dictionary<GltfTexture, TextureHandle> normalCache = new();
-    private readonly Dictionary<GltfTexture, TextureHandle> mrCache = new();
-    private readonly Dictionary<GltfTexture, TextureHandle> emissiveCache = new();
-    private readonly Dictionary<GltfTexture, TextureHandle> aoCache = new();
+    // <b>One registry where there were five dictionaries, and it is not a tidy-up.</b> The five
+    // were per CHANNEL because each channel uploads at its own format — albedo sRGB, normal linear —
+    // and that distinction is real, so it survives as half the registry's key. What did not survive
+    // is the other half: they were keyed by the GltfTexture OBJECT, and that type has no value
+    // equality, so two loads of one file uploaded the same pixels twice and nothing could be shared
+    // or counted. See TextureRegistry.
+    private readonly TextureRegistry registry;
+
+    /// <summary>What this loader has resident — distinct textures, their bytes, and uploads avoided.</summary>
+    public TextureRegistry Registry => registry;
 
     private readonly TextureHandle fallbackAlbedo;   // 1×1 white sRGB  → BaseColorFactor drives
     private readonly TextureHandle flatNormal;       // 1×1 (128,128,255) linear → tangent "up"
@@ -44,10 +49,21 @@ public sealed class GltfTextureLoader
     private readonly TextureHandle defaultMr;        // 1×1 white linear → factors pass through
     private readonly TextureHandle defaultAo;        // 1×1 white linear → no occlusion
 
-    public GltfTextureLoader(IGraphicsDevice device)
+    /// <param name="shared">
+    /// A registry to share with other owners, or null to keep one of this loader's own.
+    /// </param>
+    /// <remarks>
+    /// <b>Sharing is a parameter rather than a default, because who shares with whom is the
+    /// caller's to decide.</b> A loader given its own registry behaves exactly as this class always
+    /// did, only keyed properly; two loaders handed the SAME registry upload one copy of a texture
+    /// they both want. Making it implicit would decide a lifetime on the caller's behalf, and the
+    /// lifetime is the only interesting part.
+    /// </remarks>
+    public GltfTextureLoader(IGraphicsDevice device, TextureRegistry? shared = null)
     {
         ArgumentNullException.ThrowIfNull(device);
         this.device = device;
+        registry = shared ?? new TextureRegistry();
         uploader = new ResourceUploader(device);
 
         fallbackAlbedo = device.CreateTexture2D(
@@ -76,22 +92,26 @@ public sealed class GltfTextureLoader
     // Resolve a material's five textures to GPU handles (defaults where absent),
     // deduped + streamed. Same material/texture instance returns cached handles.
     public MaterialTextures Load(GltfMaterial? material) => new(
-        Resolve(material?.BaseColorTexture, albedoCache, fallbackAlbedo, TextureFormat.Rgba8Srgb, "albedo"),
-        Resolve(material?.NormalTexture, normalCache, flatNormal, TextureFormat.Rgba8, "normal"),
-        Resolve(material?.MetallicRoughnessTexture, mrCache, defaultMr, TextureFormat.Rgba8, "mr"),
-        Resolve(material?.EmissiveTexture, emissiveCache, blackEmissive, TextureFormat.Rgba8Srgb, "emissive"),
-        Resolve(material?.OcclusionTexture, aoCache, defaultAo, TextureFormat.Rgba8, "ao"));
+        Resolve(material?.BaseColorTexture, fallbackAlbedo, TextureFormat.Rgba8Srgb, "albedo"),
+        Resolve(material?.NormalTexture, flatNormal, TextureFormat.Rgba8, "normal"),
+        Resolve(material?.MetallicRoughnessTexture, defaultMr, TextureFormat.Rgba8, "mr"),
+        Resolve(material?.EmissiveTexture, blackEmissive, TextureFormat.Rgba8Srgb, "emissive"),
+        Resolve(material?.OcclusionTexture, defaultAo, TextureFormat.Rgba8, "ao"));
 
     private TextureHandle Resolve(
         GltfTexture? tex,
-        Dictionary<GltfTexture, TextureHandle> cache,
         TextureHandle fallback,
         TextureFormat uploadFormat,
         string channelTag)
     {
         if (tex is null) return fallback;
-        if (cache.TryGetValue(tex, out var cached)) return cached;
 
+        return registry.GetOrAdd(tex, uploadFormat, () => Upload(tex, uploadFormat, channelTag, fallback));
+    }
+
+    private TextureHandle Upload(
+        GltfTexture tex, TextureFormat uploadFormat, string channelTag, TextureHandle fallback)
+    {
         var label = $"gltf.{channelTag}.{tex.Name}";
         TextureHandle handle;
         if (tex.LazyHandle is { } lazy)
@@ -121,10 +141,12 @@ public sealed class GltfTextureLoader
         }
         else
         {
-            cache[tex] = fallback;
+            // No pixels at all — the channel's neutral stand-in. Registered under this texture's
+            // key like any other result, so a second material naming the same empty texture does
+            // not re-derive it.
             return fallback;
         }
-        cache[tex] = handle;
+
         return handle;
     }
 }
