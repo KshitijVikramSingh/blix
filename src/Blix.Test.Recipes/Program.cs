@@ -791,6 +791,118 @@ public static class Program
                     .Where(x => !string.IsNullOrEmpty(x)).Distinct(StringComparer.Ordinal).Count());
         }
 
+        // ── a cooked mesh opens as a node hierarchy, and the un-bake is exact ──
+        // <b>The cook bakes each node's world transform into its vertices</b>, which is most of what
+        // the flat load path buys — and it threw the hierarchy away, so the studio's model view,
+        // which is entirely node-shaped, could not open the one form a project ships.
+        //
+        // A node table fixes that without unbaking anything at cook time: the primitive records its
+        // node, so a consumer that wants node-local geometry applies the inverse itself. What is
+        // worth asserting is that the inverse RECOVERS the original — a hierarchy that came back
+        // with subtly different vertices would be worse than none.
+        var nodeAsset = FindFile("MultiUVTest.gltf");
+        if (nodeAsset is null)
+        {
+            t.Fail("a corpus asset with a hierarchy is findable",
+                "no MultiUVTest.gltf — run tools/fetch-gltf-corpus.sh");
+        }
+        else
+        {
+            var nodeTemp = Path.Combine(Path.GetTempPath(), "blix-nodes-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(nodeTemp);
+            try
+            {
+                foreach (var f in Directory.EnumerateFiles(Path.GetDirectoryName(nodeAsset)!))
+                {
+                    File.Copy(f, Path.Combine(nodeTemp, Path.GetFileName(f)));
+                }
+
+                var gltf = Path.Combine(nodeTemp, Path.GetFileName(nodeAsset));
+                MeshRecipe.CookToBlixMesh(gltf, Path.ChangeExtension(gltf, ".blixmesh"));
+
+                var importer = new Blix.GltfStaticImporter();
+                var fromSource = importer.ImportNodes(
+                    new AssetImportContext(AssetId.Parse("t/n-src"), gltf, includeColour: true));
+                var fromCooked = importer.ImportNodes(
+                    new AssetImportContext(
+                        AssetId.Parse("t/n-cooked"), Path.ChangeExtension(gltf, ".blixmesh"),
+                        includeColour: true));
+
+                t.Expect("a cooked mesh yields the same node count",
+                    fromCooked.Nodes.Length == fromSource.Nodes.Length,
+                    $"cooked {fromCooked.Nodes.Length}, source {fromSource.Nodes.Length}");
+
+                // <b>Matched by NAME, not by index, and that is not a weakening.</b> The cook
+                // topo-sorts — every parent before its children, which is the invariant the format
+                // promises and its reader enforces — while the source keeps glTF's own order, and
+                // this very asset lists a child before its parent. Both are valid hierarchies of the
+                // same shape; demanding one order would be asserting an accident.
+                var sourceByName = fromSource.Nodes.ToDictionary(n => n.Name, StringComparer.Ordinal);
+                var nodeMismatch = new List<string>();
+                var comparedVerts = 0;
+
+                for (var i = 0; i < fromCooked.Nodes.Length; i++)
+                {
+                    var a = fromCooked.Nodes[i];
+                    if (!sourceByName.TryGetValue(a.Name, out var b))
+                    {
+                        nodeMismatch.Add($"'{a.Name}' exists only in the cooked file");
+                        continue;
+                    }
+
+                    // The parent is compared by NAME too, since the indices differ by construction.
+                    var aParent = a.ParentIndex < 0 ? null : fromCooked.Nodes[a.ParentIndex].Name;
+                    var bParent = b.ParentIndex < 0 ? null : fromSource.Nodes[b.ParentIndex].Name;
+                    if (aParent != bParent) nodeMismatch.Add($"'{a.Name}' parent {aParent} vs {bParent}");
+                    if (a.LocalTransform != b.LocalTransform) nodeMismatch.Add($"'{a.Name}' local transform");
+
+                    // And the promise the ORDER does make: a parent is always already placed.
+                    if (a.ParentIndex >= i) nodeMismatch.Add($"'{a.Name}' parent {a.ParentIndex} is not before {i}");
+
+                    if (a.Primitives.Length != b.Primitives.Length)
+                    {
+                        nodeMismatch.Add($"'{a.Name}' primitive count {a.Primitives.Length} vs {b.Primitives.Length}");
+                        continue;
+                    }
+
+                    for (var pi = 0; pi < a.Primitives.Length; pi++)
+                    {
+                        // <b>The layout has to match too, or the GPU reads garbage.</b> A cooked file
+                        // is 32-byte position/normal/uv; the studio's stage declares the 44-byte
+                        // colour layout. Handing it the first drew the model as a cloud of shards —
+                        // the same stride mismatch that once drew Sponza as grey triangles.
+                        if (a.Primitives[pi].Mesh.Layout.Stride != b.Primitives[pi].Mesh.Layout.Stride)
+                        {
+                            nodeMismatch.Add(
+                                $"'{a.Name}' stride {a.Primitives[pi].Mesh.Layout.Stride} vs {b.Primitives[pi].Mesh.Layout.Stride}");
+                            continue;
+                        }
+
+                        comparedVerts += a.Primitives[pi].Mesh.VertexCount;
+                        var av = a.Primitives[pi].Mesh.VertexBytes;
+                        var bv = b.Primitives[pi].Mesh.VertexBytes;
+                        if (av.Length != bv.Length) { nodeMismatch.Add($"'{a.Name}' vertex bytes length"); continue; }
+
+                        // Not byte equality: the un-bake is float arithmetic, so the test is that it
+                        // lands within rounding of where the source path put it.
+                        var af = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(av);
+                        var bf = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(bv);
+                        var worst = 0f;
+                        for (var f = 0; f < af.Length; f++) worst = Math.Max(worst, Math.Abs(af[f] - bf[f]));
+                        if (worst > 1e-4f) nodeMismatch.Add($"'{a.Name}' vertex delta {worst}");
+                    }
+                }
+
+                t.Expect("its nodes match parent, transform and geometry by name",
+                    nodeMismatch.Count == 0, string.Join("; ", nodeMismatch.Take(4)));
+                t.Expect("on vertices that actually exist", comparedVerts > 0, $"{comparedVerts}");
+            }
+            finally
+            {
+                try { Directory.Delete(nodeTemp, recursive: true); } catch (IOException) { }
+            }
+        }
+
         t.PrintSummary();
         return t.Failed;
     }
@@ -804,10 +916,21 @@ public static class Program
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "src"))) dir = dir.Parent;
-        return dir is null
-            ? null
-            : Directory.EnumerateFiles(Path.Combine(dir.FullName, "src"), name, SearchOption.AllDirectories)
+        if (dir is null) return null;
+
+        // src/ first, then third_party/ — the conformance corpus lives there and is fetched rather
+        // than committed, so a test that wants one must look outside the source tree.
+        foreach (var root in new[] { "src", "third_party" })
+        {
+            var where = Path.Combine(dir.FullName, root);
+            if (!Directory.Exists(where)) continue;
+
+            var found = Directory.EnumerateFiles(where, name, SearchOption.AllDirectories)
                 .FirstOrDefault(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
                                   && !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal));
+            if (found is not null) return found;
+        }
+
+        return null;
     }
 }

@@ -85,6 +85,18 @@ public static class MeshRecipe
             ? VertexPosition3NormalTangentTexture.Layout
             : VertexPosition3NormalTexture.Layout;
         var model = ModelRoot.Load(gltfPath);
+
+        // <b>The hierarchy is recorded, not discarded, even though the vertices are baked.</b> The
+        // cook folds each node's world transform into its positions, which is a large part of what
+        // the flat load path buys — but it also threw away the authored structure, and the studio's
+        // model view is built on exactly that: names, parents, pivots, per-part selection. It could
+        // not open a cooked model at all.
+        //
+        // Every node is written, including ones carrying no geometry: a parent that holds only a
+        // transform is still what its children are relative to, and pruning it breaks the
+        // composition it exists for.
+        var nodes = CookNodes(model, out var nodeOfLogical);
+
         var primitives = new List<BlixMeshPrimitive>();
         foreach (var node in model.LogicalNodes)
         {
@@ -116,6 +128,7 @@ public static class MeshRecipe
                     primitives.Add(new BlixMeshPrimitive(
                         Name: chunk.Name,
                         Layout: layout,
+                        NodeIndex: nodeOfLogical[node.LogicalIndex],
                         MaterialIndex: materialIndex,
                         Bounds: chunk.Bounds,
                         VertexCount: chunk.VertexCount,
@@ -162,7 +175,7 @@ public static class MeshRecipe
 
         BlixMeshWriter.Write(
             outPath,
-            new BlixMeshFile(primitives, CookMaterials(model, imageRows), images),
+            new BlixMeshFile(primitives, CookMaterials(model, imageRows), images, Nodes: nodes),
             stamp);
         return primitives.Count;
     }
@@ -190,7 +203,9 @@ public static class MeshRecipe
         GltfModel rig;
         try
         {
-            rig = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("cook/rig"), gltfPath));
+            // ImportSource, not Import — a recipe must never read through the cooked path, or it
+            // consumes its own previous output. See that method for why this is the second time.
+            rig = new GltfImporter().ImportSource(new AssetImportContext(AssetId.Parse("cook/rig"), gltfPath));
         }
         catch (AssetImportException noRig) when (noRig.Message.Contains("no rig here", StringComparison.Ordinal))
         {
@@ -249,6 +264,42 @@ public static class MeshRecipe
 
         primitiveCount = primitives.Length;
         return true;
+    }
+
+    /// <summary>
+    /// The authored node hierarchy, in an order where every parent precedes its children.
+    /// </summary>
+    /// <remarks>
+    /// <b>Re-ordered rather than written as found.</b> glTF does not promise parents come first, and
+    /// a consumer composing world matrices in one forward pass needs them to — which is the same
+    /// invariant <c>Skeleton</c> enforces on bones, for the same reason. The reader refuses a file
+    /// that violates it, naming the node, so a re-order that went wrong cannot pass quietly.
+    /// </remarks>
+    private static IReadOnlyList<BlixMeshNode> CookNodes(ModelRoot model, out int[] nodeOfLogical)
+    {
+        var map = new int[model.LogicalNodes.Count];
+        Array.Fill(map, -1);
+
+        var ordered = new List<Node>();
+        var placed = new HashSet<int>();
+
+        void Place(Node node)
+        {
+            if (!placed.Add(node.LogicalIndex)) return;
+            if (node.VisualParent is { } parent) Place(parent);
+            map[node.LogicalIndex] = ordered.Count;
+            ordered.Add(node);
+        }
+
+        foreach (var node in model.LogicalNodes) Place(node);
+
+        nodeOfLogical = map;
+        return ordered
+            .Select(n => new BlixMeshNode(
+                n.Name ?? $"node_{n.LogicalIndex}",
+                n.VisualParent is { } p ? map[p.LogicalIndex] : -1,
+                n.LocalMatrix))
+            .ToList();
     }
 
     /// <summary>One imported primitive as the format stores it, layout and skin included.</summary>

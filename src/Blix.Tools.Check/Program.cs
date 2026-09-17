@@ -302,17 +302,43 @@ public static class Program
         }
 
         var problems = 0;
-        var imported = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("probe"), path));
+
+        // <b>Routed by the rigged importer's own refusal, not by assumption.</b> This called the
+        // RIGGED importer unconditionally, so `check --model` on any static asset — the knight, a
+        // prop, anything without a skin — exited by name with "there is no rig here". The tool's own
+        // help gives the mistake away: it describes --model as checking "clip lengths, skeleton,
+        // mesh-node transform", which is a rig's vocabulary. It was written for rigs and named for
+        // models.
+        //
+        // The same routing `check --cooked` already uses: ask the rigged one, let its refusal choose
+        // the static one. A checker that refuses half the assets it is named after teaches a reader
+        // to stop running it.
+        GltfModel imported;
+        var rigged = true;
+        try
+        {
+            imported = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("probe"), path));
+        }
+        catch (AssetImportException noRig) when (noRig.Message.Contains("no rig here", StringComparison.Ordinal))
+        {
+            rigged = false;
+            imported = new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("probe"), path));
+        }
 
         Console.WriteLine($"{Path.GetFileName(path)}");
         Console.WriteLine(
             $"  {imported.Primitives.Length} primitive(s), " +
-            $"{imported.Skeleton.BoneCount} bone(s), {imported.Animations.Length} clip(s)");
-        Console.WriteLine(
-            imported.MeshNodeTransform.IsIdentity
-                ? "  mesh-node transform: identity"
-                : "  mesh-node transform: NOT identity — the asset orients itself at a parent node, " +
-                  "so uModel must compose with it");
+            (rigged
+                ? $"{imported.Skeleton.BoneCount} bone(s), {imported.Animations.Length} clip(s)"
+                : "static — no skin, so no bones or clips to check"));
+        if (rigged)
+        {
+            Console.WriteLine(
+                imported.MeshNodeTransform.IsIdentity
+                    ? "  mesh-node transform: identity"
+                    : "  mesh-node transform: NOT identity — the asset orients itself at a parent node, " +
+                      "so uModel must compose with it");
+        }
 
         foreach (var clip in imported.Animations.OrderBy(c => c.Name, StringComparer.Ordinal))
         {

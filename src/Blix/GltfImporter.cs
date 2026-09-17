@@ -51,7 +51,28 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         // an unhandled exception and took the process down with a stack trace. The generator's
         // Mesh_NoPosition is exactly that asset: valid glTF JSON, an invalid mesh. A reader whose
         // conformance checks abort instead of refusing has no usable negative behaviour to assert.
-        return AssetImportException.Refusing(context.SourcePath, () => ImportCore(context));
+        return AssetImportException.Refusing(context.SourcePath, () => ImportCore(context, preferCooked: true));
+    }
+
+    /// <summary>
+    /// Imports the glTF itself, ignoring any cooked artifact beside it.
+    /// </summary>
+    /// <remarks>
+    /// <b>What a RECIPE must call.</b> <see cref="Import"/> prefers a cooked sibling, which is right
+    /// for a game and catastrophic for a cook: the mesh recipe reads a rig through this importer, so
+    /// with the cooked path in the way it consumes its own previous output and re-cooks that.
+    /// <para>
+    /// This is the second time that trap has been sprung in this format's history — WavefrontParts
+    /// gained a cooked path and ObjMeshRecipe read straight through it — and both times it surfaced
+    /// only because a format version changed in the same commit and made the stale read loud. At a
+    /// matching version both would have looked like they worked. The pattern is the danger: giving a
+    /// reader a cooked path silently changes what every writer built on that reader is reading.
+    /// </para>
+    /// </remarks>
+    public GltfModel ImportSource(AssetImportContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return AssetImportException.Refusing(context.SourcePath, () => ImportCore(context, preferCooked: false));
     }
 
     /// <summary>Rebuilds a rig from its cooked form — skins, clips, attachments and all.</summary>
@@ -148,7 +169,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                     t.Scale.Select(k => new Keyframe<Vector3>(k.Time, k.Value)).ToArray()),
         }).ToArray());
 
-    private GltfModel ImportCore(AssetImportContext context)
+    private GltfModel ImportCore(AssetImportContext context, bool preferCooked)
     {
         // <b>Started here so the report covers the whole load, including the image pre-decode.</b>
         // <b>A cooked rig is loaded whole, with no glTF opened.</b> This was the last category of
@@ -160,7 +181,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         var rigPath = directRig
             ? context.SourcePath
             : Path.ChangeExtension(context.SourcePath, ".blixmesh");
-        if (File.Exists(rigPath))
+        if (preferCooked && File.Exists(rigPath))
         {
             var cookedRig = BlixMeshReader.Read(rigPath);
 
