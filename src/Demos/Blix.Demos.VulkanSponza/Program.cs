@@ -46,8 +46,27 @@ public static class Program
 {
     public static void Main()
     {
+        // --win W H: the single most informative perf switch this demo has. Fragment and bandwidth
+        // cost scale with pixels; geometry cost does not. Halving each side quarters the first and
+        // leaves the second alone, so one paired run says which wall the frame is against — a
+        // question no amount of per-pass timing can answer on a tile-based GPU, where the
+        // timestamps bracket encoder submission rather than execution.
+        var args = Environment.GetCommandLineArgs();
+        var width = 1440;
+        var height = 810;
+        for (var i = 0; i < args.Length - 2; i++)
+        {
+            if (args[i] != "--win") continue;
+            if (int.TryParse(args[i + 1], out var w) && int.TryParse(args[i + 2], out var h)
+                && w >= 160 && h >= 120)
+            {
+                width = w;
+                height = h;
+            }
+        }
+
         var loop = new SponzaLoop();
-        using var window = new Window(loop, new WindowOptions("Blix — Vulkan Sponza", 1440, 810));
+        using var window = new Window(loop, new WindowOptions("Blix — Vulkan Sponza", width, height));
         window.Run();
     }
 }
@@ -68,7 +87,16 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // the GPU wall is triangle/binning cost, not fragment/MSAA), so 2× bought no
     // frame time and we keep 4× for edge quality. R11G11B10F already quarters the
     // scene-colour tile vs the old 4×/Rgba16F, recovering the memory/bandwidth.
-    private const int MsaaSamples = 4;
+    // 4 by default.
+    //
+    // <b>--msaa1 is INCOMPLETE and currently loses the device — do not trust a number from it.</b>
+    // The lit pass takes a no-resolve path at one sample and alpha-to-coverage is gated off (it is
+    // meaningless without samples to cover), and it still faults in vkQueueWaitIdle with
+    // ErrorDeviceLost. Something else in the frame assumes four samples and has not been found.
+    // Left in place because the question it exists to answer is worth answering: the tree's note
+    // says MSAA 4->2 left frame time flat, and that was measured before the renderer grew a depth
+    // pre-pass, LOD and indirect draws. Nobody has re-checked it since.
+    private int MsaaSamples = 4;
     private PassHandle litPassHandle;
 
     // Depth pre-pass: renders non-blend geometry depth-only into depthHandle
@@ -76,6 +104,26 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // pixels (kills Sponza overdraw). Reuses lit.vert (invariant gl_Position)
     // so the lit pass's LessEqual test matches the pre-pass depth exactly.
     private PassHandle depthPrepassHandle;
+
+    // --- Ambient visibility (GTAO) ----------------------------------------
+    // The pre-pass already rasterises every non-blend drawable into the 4x MSAA depth. It now also
+    // RESOLVES that depth to a 1x target, because a multisampled attachment is not sampleable and
+    // GTAO has to read depth. The resolve rides along with the pass's store rather than costing a
+    // second geometry pass, which is what makes a screen-space occlusion term affordable in a
+    // FORWARD renderer with MSAA — the combination that usually forces a G-buffer.
+    private Matrix4x4 cameraView;
+    private Matrix4x4 cameraProjection;
+    private GraphResourceHandle depthResolveHandle;   // 1x scene depth, sampleable
+    private GraphResourceHandle ambientHandle;        // rgb = bent normal (world), a = visibility
+    private GraphResourceHandle ambientDenoisedHandle; // what the lit pass actually samples
+    private PassHandle gtaoPassHandle;
+    private PassHandle gtaoDenoisePassHandle;
+    private ShaderProgramHandle gtaoProgram;
+    private PipelineHandle gtaoPipeline;
+    private ShaderProgramHandle gtaoDenoiseProgram;
+    private PipelineHandle gtaoDenoisePipeline;
+    private readonly AmbientSettings ambient = new();
+
     private ShaderProgramHandle prepassOpaqueProgram;
     private ShaderProgramHandle prepassMaskProgram;
     private PipelineHandle prepassOpaquePipeline;
@@ -98,6 +146,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private ShaderProgramHandle litProgram;
     private PipelineHandle opaqueSolidPipeline;
     private PipelineHandle opaqueDoubleSidedPipeline;
+    // Depth-WRITING twins of the opaque lit pipelines, for --ab prepass. The normal pair tests
+    // LessEqual and does not write, because the pre-pass already laid the complete depth down; with
+    // the pre-pass skipped the lit pass has to establish depth itself or it draws in submission
+    // order over a cleared buffer.
+    private PipelineHandle opaqueSolidPipelineWrites;
+    private PipelineHandle opaqueDoubleSidedPipelineWrites;
     private PipelineHandle blendSolidPipeline;
     private PipelineHandle blendDoubleSidedPipeline;
 
@@ -131,6 +185,62 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private readonly FogSettings fog = new();
     private readonly ShadowsSettings shadows = new();
     private readonly RenderSettings render = new();
+    // --- Headless capture -------------------------------------------------
+    // <b>Sponza could not show anyone a picture of itself.</b> Blix.Tools.Shot renders the LAB, so
+    // every question about this scene came down to booting it headed and asking a person to look —
+    // which works for "does that read right" and not at all for "what number is in that buffer".
+    // The first intermediate target this renderer ever had (ambient visibility) is also the first
+    // one nobody could inspect, and the two facts met on the same afternoon.
+    private string? shotPath;
+    private int shotFrame = 240;        // long enough for the streamed textures to land
+    private int framesRendered;
+    // Frame periods for the capture's statistics. A tail of five frames cannot tell a 10 ms effect
+    // from this machine's own spread, which is the mistake the first two perf matrices made.
+    private readonly double[] framePeriodsMs = new double[600];
+    private int framePeriodCount;
+    private long lastFrameStamp;
+
+    // <b>The same frame, shaded two ways, seconds apart in one process.</b> While textures stream the
+    // scene draws through flat.frag — same geometry, same 401 draws, same depth pre-pass, no
+    // materials, no IBL, no shadows, no fog. Then it flips to the full path. That is a controlled
+    // experiment the renderer has been running at every startup since it was written, and nobody
+    // was recording it: identical thermal state, identical submission, one variable.
+    //
+    // It is worth more than any of the cross-process A/Bs attempted today, all of which were
+    // swamped by thermal drift between runs.
+    private readonly double[] flatPeriodsMs = new double[600];
+    private int flatPeriodCount;
+    private bool shotWritten;
+
+    // --no-mask: force every cutout material's alphaCutoff to zero. Nothing then routes to a MASK
+    // pipeline, so no pass samples albedo just to discover a fragment is air — not the camera pass,
+    // not the depth pre-pass, not any shadow cascade. The picture is wrong on purpose (leaves become
+    // solid cards); the point is the frame time beside it.
+    private bool forceOpaqueMask;
+
+    // --no-vsync: uncap the presentation so the frame timer reports work rather than refresh.
+    private bool startUnsynced;
+
+    // --ab-flat: after loading, alternate between the FLAT path and the full lit path every
+    // AbPeriodFrames frames, bucketing frame times separately.
+    //
+    // <b>Interleaved, because this machine cannot be measured any other way.</b> Every cross-process
+    // A/B attempted on it was swamped by thermal drift: a resolution sweep came out monotonically
+    // SLOWER as pixels decreased, purely because the later runs were hotter, and an AO pair came out
+    // with the sign reversed. Alternating inside one process puts both arms on the same thermal
+    // ramp, interleaved finely enough that drift affects them equally.
+    // "" = off. "flat" swaps the whole lit path for flat.frag; "shadow" zeroes uShadowStrength;
+    // "gtao" zeroes the search radius. The last two are uniform-driven, so they alternate without
+    // touching pipelines — which is what makes a fine interleave possible at all.
+    private string abMode = "";
+    private bool abFlat;
+    private const int AbPeriodFrames = 120;
+    private bool AbOffPhase => abMode.Length > 0 && (framesRendered / AbPeriodFrames) % 2 == 1;
+    private bool AbFlatPhase => abFlat && AbOffPhase;
+
+    // --ao-debug N: make the GTAO pass write an intermediate instead of the bent normal. See gtao.frag.
+    private float aoDebug;
+
     private bool fogStress;             // --fog-stress: auto-toggle fog to exercise the on/off barrier transitions under validation
     private int fogStressFrame;
 
@@ -171,7 +281,13 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // cascade's world-space texel size ÷ ortho depth range (≈ BiasTexels
     // shadow texels of slope-independent offset). The fragment shader adds a
     // grazing-angle slope term on top.
-    private readonly float[] cascadeDepthBias = new float[CascadeCount];
+    /// <summary>One shadow texel in WORLD units, per cascade — derived from the cascade fit.</summary>
+    /// <remarks>
+    /// Replaces cascadeDepthBias. The shared shadow path offsets its sample along the surface
+    /// normal by a multiple of this, which is a length the fit already knows; the depth bias it
+    /// replaces was that length turned into an NDC constant and then scaled by two tuned numbers.
+    /// </remarks>
+    private readonly float[] cascadeTexelWorld = new float[CascadeCount];
     // Per-cascade shadow-caster survivor counts after frustum culling,
     // surfaced live in the diagnostics overlay (see Debug()).
     private readonly int[] cascadeDrawCounts = new int[CascadeCount];
@@ -381,7 +497,15 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private Vector3 sunDirection = Vector3.Normalize(new Vector3(0.35f, -0.85f, 0.25f));
     private float sunYaw;
     private float sunPitch;
-    private readonly Vector3 ambientColor = new(0.42f, 0.50f, 0.62f);  // unused; kept for layout compat
+    /// <summary>
+    /// The sun's irradiance, as MEASURED from the probe. Not a knob.
+    /// </summary>
+    /// <remarks>
+    /// Fallback for the procedural sky, which has no measured sun. A real probe overwrites it, and
+    /// the fallback's job is only to keep the demo lit when there is no HDR to measure — it is the
+    /// one place a number is still chosen rather than derived, and it says so.
+    /// </remarks>
+    private Vector3 sunIrradiance = new(9.42f, 9.42f, 9.42f);
 
     // Shader-uniform tunables (sun/ambient intensity, metallic/normal/shadow
     // thresholds, cascade-viz) are declared with //@tune in lit.frag and
@@ -444,6 +568,19 @@ internal sealed class ShadowsSettings
     [Tune]            public bool Enabled = true;
     [Tune(0f, 6f)]    public float BiasTexels = 1.5f;
     [Tune(10f, 120f)] public float SunDistance = 40f;
+}
+
+// Ambient-visibility tunables (overlay "Ambient" group).
+//
+// <b>One number, and it is a length.</b> The radius is the distance over which one surface is
+// considered to shade another — a property of the scene's scale, like fog far, not a dial for
+// taste. There is deliberately no strength, no power curve and no bias: GTAO's integral already
+// answers "how much sky does this point see", and a knob on top of it exists only to disagree with
+// the answer. This lighting model just deleted five of those.
+internal sealed class AmbientSettings
+{
+    [Tune]            public bool Enabled = true;
+    [Tune(0.1f, 4f)]  public float RadiusMetres = 0.8f;
 }
 
 // Misc render tunables (overlay "Render" group). Vsync stays a manual toggle —

@@ -303,6 +303,10 @@ internal sealed partial class SponzaLoop
             : gm?.AlphaMode == GltfAlphaMode.Mask ? (gm?.AlphaCutoff ?? 0.5f)
             : gm?.AlphaMode == GltfAlphaMode.Blend ? 0.5f
             : 0.0f;
+        // Measurement switch: a zero cutoff makes PickPipeline choose Opaque everywhere, which is
+        // what takes the alpha sample out of the shadow casters and the pre-pass as well as the lit
+        // pass. See --no-mask.
+        if (forceOpaqueMask) alphaCutoff = 0f;
         baseColorAlpha = baseColorFactor.W;
         var normalScale = 1.0f;
         var roughness = gm?.RoughnessFactor ?? 0.8f;

@@ -66,6 +66,12 @@ internal sealed partial class SponzaLoop
             var eye = center - L * (shadows.SunDistance + radius);
             var lightView = Matrix4x4.CreateLookAt(eye, center, sunUp);
             var texelSize = (2f * radius) / ShadowMapSizes[c];
+
+            // <b>Kept, because the shadow lookup needs it and used to guess it.</b> This number was
+            // computed for texel-snapping and thrown away, while the shader offset its samples by
+            // uCascadeBias * (1 + slope * uSlopeScale) — four hand-tuned constants standing in for
+            // the one derived quantity that was already sitting here.
+            cascadeTexelWorld[c] = texelSize;
             var centreLight = Vector3.Transform(center, lightView);
             centreLight.X = MathF.Round(centreLight.X / texelSize) * texelSize;
             centreLight.Y = MathF.Round(centreLight.Y / texelSize) * texelSize;
@@ -78,11 +84,6 @@ internal sealed partial class SponzaLoop
             var ortho = GraphicsMatrices.CreateOrthographicVulkan(2f * radius, 2f * radius, 0.1f, farPlane);
             cascadeViewProj[c] = lightView2 * ortho;
 
-            // Base depth bias = BiasTexels shadow-texels of world offset,
-            // converted to this cascade's NDC depth units (ortho z is linear,
-            // so world→NDC depth scale is 1/farPlane). Keeps the bias visually
-            // constant across cascades despite their very different extents.
-            cascadeDepthBias[c] = (shadows.BiasTexels * texelSize) / farPlane;
         }
     }
 }

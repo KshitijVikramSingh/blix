@@ -679,8 +679,13 @@ public sealed class StudioRenderer : IDisposable
                 new("uCascadeVP0", new Matrix4x4Uniform(cascadeViewProjection[0])),
                 new("uCascadeVP1", new Matrix4x4Uniform(cascadeViewProjection[1])),
                 new("uCascadeVP2", new Matrix4x4Uniform(cascadeViewProjection[2])),
+                // WORLD metres per shadow texel, per cascade — each box's own side over the map side.
+                // This used to be 1/ShadowMapSize three times, a UV quantity standing in for a length,
+                // and the acne offset it fed was three millimetres wide as a result.
                 new("uCascadeTexels", new Vector4Uniform(new Vector4(
-                    1f / Look.ShadowMapSize, 1f / Look.ShadowMapSize, 1f / Look.ShadowMapSize,
+                    cascadeSide[0] / Look.ShadowMapSize,
+                    cascadeSide[1] / Look.ShadowMapSize,
+                    cascadeSide[2] / Look.ShadowMapSize,
                     Look.ShowCascades ? 1f : 0f))),
                 new("uCameraPosition", new Vector4Uniform(new Vector4(cameraPosition, 1f))),
                 new("uSunDirection", new Vector4Uniform(new Vector4(Look.SunDirection, 0f))),
@@ -714,8 +719,13 @@ public sealed class StudioRenderer : IDisposable
                     new("uCascadeVP0", new Matrix4x4Uniform(cascadeViewProjection[0])),
                 new("uCascadeVP1", new Matrix4x4Uniform(cascadeViewProjection[1])),
                 new("uCascadeVP2", new Matrix4x4Uniform(cascadeViewProjection[2])),
+                // WORLD metres per shadow texel, per cascade — each box's own side over the map side.
+                // This used to be 1/ShadowMapSize three times, a UV quantity standing in for a length,
+                // and the acne offset it fed was three millimetres wide as a result.
                 new("uCascadeTexels", new Vector4Uniform(new Vector4(
-                    1f / Look.ShadowMapSize, 1f / Look.ShadowMapSize, 1f / Look.ShadowMapSize,
+                    cascadeSide[0] / Look.ShadowMapSize,
+                    cascadeSide[1] / Look.ShadowMapSize,
+                    cascadeSide[2] / Look.ShadowMapSize,
                     Look.ShowCascades ? 1f : 0f))),
                     new("uCameraPosition", new Vector4Uniform(new Vector4(viewportCameraPosition, 1f))),
                     new("uSunDirection", new Vector4Uniform(new Vector4(Look.SunDirection, 0f))),

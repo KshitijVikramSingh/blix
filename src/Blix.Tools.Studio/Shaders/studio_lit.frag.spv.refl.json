@@ -6,7 +6,7 @@
         }
     ],
     "types" : {
-        "_701" : {
+        "_749" : {
             "name" : "Frame",
             "members" : [
                 {
@@ -70,7 +70,7 @@
                 }
             ]
         },
-        "_774" : {
+        "_810" : {
             "name" : "Push",
             "members" : [
                 {
@@ -177,7 +177,7 @@
     ],
     "ubos" : [
         {
-            "type" : "_701",
+            "type" : "_749",
             "name" : "Frame",
             "block_size" : 368,
             "set" : 0,
@@ -186,8 +186,8 @@
     ],
     "push_constants" : [
         {
-            "type" : "_774",
-            "name" : "_776",
+            "type" : "_810",
+            "name" : "_812",
             "push_constant" : true
         }
     ]

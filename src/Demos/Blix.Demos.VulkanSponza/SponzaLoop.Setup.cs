@@ -44,6 +44,37 @@ internal sealed partial class SponzaLoop
         // exercises the compute storage-image layout transitions across the
         // disabled↔enabled boundary (the highest-risk sync path).
         if (cmdArgs.Contains("--fog-stress")) { fogStress = true; fog.Enabled = true; }
+        // --no-ao: keep both ambient passes in the graph but give the search a zero radius, so a
+        // paired run attributes the HORIZON SEARCH specifically rather than the whole feature.
+        if (cmdArgs.Contains("--no-ao")) ambient.Enabled = false;
+        if (cmdArgs.Contains("--no-mask")) forceOpaqueMask = true;
+        if (cmdArgs.Contains("--msaa1")) MsaaSamples = 1;
+        if (cmdArgs.Contains("--ab-flat")) { abFlat = true; abMode = "flat"; }
+        for (var i = 0; i < cmdArgs.Length - 1; i++)
+        {
+            if (cmdArgs[i] != "--ab") continue;
+            abMode = cmdArgs[i + 1];
+            abFlat = abMode == "flat";
+        }
+        for (var i = 0; i < cmdArgs.Length - 1; i++)
+        {
+            if (cmdArgs[i] == "--ao-debug" && float.TryParse(cmdArgs[i + 1], out var aoDebugValue)) aoDebug = aoDebugValue;
+            if (cmdArgs[i] == "--ao-radius" && float.TryParse(cmdArgs[i + 1], out var aoRadius)) ambient.RadiusMetres = aoRadius;
+        }
+        // <b>Required for any timing run, and its absence invalidated a whole measurement batch.</b>
+        // With FIFO present the frame timer measures when the swapchain let go, not what the work
+        // cost: every result lands on a multiple of the refresh interval, so 34 ms of work and 49 ms
+        // of work both report 50. A matrix taken under vsync produced "removing work made it
+        // slower", which is the shape that gave it away.
+        if (cmdArgs.Contains("--no-vsync")) { startUnsynced = true; vk.VsyncEnabled = false; }
+        // --shot <path>: render --shot-frames frames, write the ambient-visibility buffer and the
+        // tonemapped scene beside it, and close. Headless in the sense that matters — nobody has
+        // to be watching.
+        for (var i = 0; i < cmdArgs.Length - 1; i++)
+        {
+            if (cmdArgs[i] == "--shot") shotPath = cmdArgs[i + 1];
+            if (cmdArgs[i] == "--shot-frames" && int.TryParse(cmdArgs[i + 1], out var sf)) shotFrame = sf;
+        }
 
         // Seed sun yaw/pitch from the default direction so the Sun controls
         // start matching the baked look.
@@ -107,6 +138,9 @@ internal sealed partial class SponzaLoop
         var litInterface = Reflect("lit.vert", "lit.frag");
         var skyInterface = Reflect("skybox.vert", "skybox.frag");
         var presentInterface = Reflect("present.vert", "present.frag");
+        // Reuses present.vert: both are fullscreen triangles synthesised from gl_VertexIndex.
+        var gtaoInterface = Reflect("present.vert", "gtao.frag");
+        var gtaoDenoiseInterface = Reflect("present.vert", "gtao_denoise.frag");
         var shadowOpaqueInterface = Reflect("shadow.vert", "shadow.frag");
         var shadowMaskInterface = Reflect("shadow_mask.vert", "shadow_mask.frag");
 
@@ -116,7 +150,7 @@ internal sealed partial class SponzaLoop
         // from it by name.
         tunePanel = new ShaderTunablePanel(ShaderTunables.Scan(
             File.ReadAllText(Path.Combine(shaderDir, "lit.frag"))));
-        tuneObjects = new ObjectTunables(fog, shadows, render);
+        tuneObjects = new ObjectTunables(fog, shadows, render, ambient);
 
         // One graphics pass per cascade, each writing its own depth target.
         // Both shadow programs are render-pass-compatible with these passes.
@@ -146,16 +180,55 @@ internal sealed partial class SponzaLoop
         // litInterface (lit.vert needs set 0 + the model push; the trivial
         // fragments use a subset), so the lit material descriptor set binds to
         // the mask variant unchanged.
+        // 1x depth for GTAO to sample, and the ambient-visibility target it writes.
+        // Rgba16F because .xyz is a bent normal — a direction needs signed components, and an
+        // 8-bit one quantises the IBL lookup into visible facets on a smooth curved surface.
+        depthResolveHandle = graph.DepthTarget("scene-depth-1x", fullSize);
+        // <b>HALF resolution, and the measurement is what decided it.</b> At full res the horizon
+        // search alone measured ~50 ms against a 49.8 ms baseline for the whole rest of the frame —
+        // it doubled the picture's cost. Quartering the pixels quarters that. The argument against
+        // half res was that it needs a bilateral upsample and reconstruction should not creep in,
+        // and that argument was wrong: the denoise below is already a spatial filter, and the house
+        // rule bans TEMPORAL reconstruction, which neither of these is.
+        ambientHandle = graph.ColorTarget(
+            "ambient-visibility", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f));
+        ambientDenoisedHandle = graph.ColorTarget("ambient-visibility-denoised", TextureFormat.Rgba16F, fullSize);
+
         depthPrepassHandle = graph.GraphicsPass("depth-prepass")
             .Depth(depthHandle, LoadOp.Clear, StoreOp.Store)
+            .ResolveDepth(depthResolveHandle)     // free-ish: rides the pass's depth store
             .Shader(litInterface)
             .Handle;
 
-        var litPass = graph.GraphicsPass("lit-scene")
-            .Target(hdrMsaaHandle, LoadOp.Clear, StoreOp.Store)   // render 4× MSAA
-            .ResolveColor(hdrHandle)                              // resolve to 1× for present
-            .Depth(depthHandle, LoadOp.Load, StoreOp.Store)       // load the pre-pass depth
-            .Shader(litInterface, skyInterface);
+        // Ambient visibility, between the pre-pass that gives it depth and the lit pass that
+        // consumes it. Declared here because graph order IS declaration order.
+        gtaoPassHandle = graph.GraphicsPass("gtao")
+            .Target(ambientHandle, LoadOp.Clear, StoreOp.Store)
+            .Read(depthResolveHandle)
+            .Shader(gtaoInterface)
+            .Handle;
+
+        // Spatial denoise. A separate pass rather than a wider kernel inside GTAO: the estimate and
+        // its reconstruction are different jobs, and only one of them has to run the horizon search.
+        gtaoDenoisePassHandle = graph.GraphicsPass("gtao-denoise")
+            .Target(ambientDenoisedHandle, LoadOp.Clear, StoreOp.Store)
+            .Read(ambientHandle)
+            .Read(depthResolveHandle)
+            .Shader(gtaoDenoiseInterface)
+            .Handle;
+
+        // At one sample there is nothing to resolve, and asking for a resolve anyway is invalid —
+        // so the single-sample path renders straight into the target present reads.
+        var litPass = MsaaSamples > 1
+            ? graph.GraphicsPass("lit-scene")
+                .Target(hdrMsaaHandle, LoadOp.Clear, StoreOp.Store)   // render 4× MSAA
+                .ResolveColor(hdrHandle)                              // resolve to 1× for present
+                .Depth(depthHandle, LoadOp.Load, StoreOp.Store)       // load the pre-pass depth
+                .Shader(litInterface, skyInterface)
+            : graph.GraphicsPass("lit-scene")
+                .Target(hdrHandle, LoadOp.Clear, StoreOp.Store)
+                .Depth(depthHandle, LoadOp.Load, StoreOp.Store)
+                .Shader(litInterface, skyInterface);
         // Declare the cascade depth targets as inputs so the graph orders the
         // shadow passes before the lit pass and transitions them to
         // shader-read layout.
@@ -163,6 +236,7 @@ internal sealed partial class SponzaLoop
         {
             litPass = litPass.Read(cascadeHandles[c]);
         }
+        litPass = litPass.Read(ambientDenoisedHandle);
         litPassHandle = litPass.Handle;
         graph.Compile();
 
@@ -181,10 +255,18 @@ internal sealed partial class SponzaLoop
         // leaf edges under MSAA; solid opaque outputs coverage 1.0 → no effect.
         opaqueSolidPipeline = Pipeline(litProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualNoWrite, RasterizerState.BackFaceCulling,
-            new[] { BlendState.Disabled }, litPassHandle, "lit.opaque", alphaToCoverage: true);
+            new[] { BlendState.Disabled }, litPassHandle, "lit.opaque", alphaToCoverage: MsaaSamples > 1);
+        opaqueSolidPipelineWrites = Pipeline(litProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualWrite, RasterizerState.BackFaceCulling,
+            new[] { BlendState.Disabled }, litPassHandle, "lit.opaque.writes",
+            alphaToCoverage: MsaaSamples > 1);
+        opaqueDoubleSidedPipelineWrites = Pipeline(litProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualWrite, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled }, litPassHandle, "lit.opaque.doubleSided.writes",
+            alphaToCoverage: MsaaSamples > 1);
         opaqueDoubleSidedPipeline = Pipeline(litProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
-            new[] { BlendState.Disabled }, litPassHandle, "lit.opaque.doubleSided", alphaToCoverage: true);
+            new[] { BlendState.Disabled }, litPassHandle, "lit.opaque.doubleSided", alphaToCoverage: MsaaSamples > 1);
 
         // Blend: depth-test (so windows don't draw behind walls) but no
         // depth-write (so successive translucent fragments don't z-fight),
@@ -268,6 +350,25 @@ internal sealed partial class SponzaLoop
             RasterizerState.NoCulling,
             BlendState.Disabled), "present");
 
+        var gtaoFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "gtao.frag.spv"));
+        gtaoProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, gtaoFragSpv, gtaoInterface, "gtao");
+        // <b>Through Pipeline(), so it carries graph.GetPassSurface(gtaoPassHandle).</b> Built the
+        // way the PRESENT pipeline is built — vk.CreatePipeline with no RenderTarget — it compiled,
+        // bound, and drew its triangle, and the target came back every pixel zero: present is
+        // recorded straight on the command list against the swapchain, so its pipeline needs no
+        // pass surface, and copying that shape into a GRAPH pass silently produces a pipeline
+        // compatible with the wrong render pass.
+        gtaoPipeline = Pipeline(gtaoProgram, VertexPosition3NormalTexture.Layout,
+            DepthState.Disabled, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled }, gtaoPassHandle, "gtao");
+
+        var gtaoDenoiseSpv = File.ReadAllBytes(Path.Combine(shaderDir, "gtao_denoise.frag.spv"));
+        gtaoDenoiseProgram = vk.CreateShaderProgramFromSpv(
+            presentVertSpv, gtaoDenoiseSpv, gtaoDenoiseInterface, "gtao_denoise");
+        gtaoDenoisePipeline = Pipeline(gtaoDenoiseProgram, VertexPosition3NormalTexture.Layout,
+            DepthState.Disabled, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled }, gtaoDenoisePassHandle, "gtao_denoise");
+
         // Fullscreen triangle for the sky + present passes (positions synthesised
         // from gl_VertexIndex in the vertex shader — the buffer is never sampled).
         fullscreen = new FullscreenPass(vk, "present.dummy");
@@ -293,6 +394,7 @@ internal sealed partial class SponzaLoop
             new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1]), Slot: 3, ArrayIndex: 1),
             new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2]), Slot: 3, ArrayIndex: 2),
             new ShaderTextureBinding("uFroxelGrid",           froxelGridTexture, Slot: 4),
+            new ShaderTextureBinding("uAmbientVisibility", graph.GetColorTexture(ambientDenoisedHandle), Slot: 5),
         };
 
         // Froxel compute set-0 image bindings (constant handles): the storage
@@ -412,6 +514,22 @@ internal sealed partial class SponzaLoop
                 sunPitch = MathF.Asin(Math.Clamp(sunDirection.Y, -1f, 1f));
                 sunYaw = MathF.Atan2(sunDirection.X, -sunDirection.Z);
                 Console.WriteLine($"[VulkanSponza]   sun aligned to probe: {sunDirection}");
+            }
+
+            // <b>And its brightness comes from the same measurement.</b> The probe reports the
+            // irradiance the sun actually delivers in the HDR's units, and the bake removed that
+            // disc from the diffuse and specular integrals — so the sun arrives once, in the same
+            // units as the sky. The scale that used to sit between them is not tuned to a better
+            // value here; it no longer exists.
+            if (baked.Probe.SunIrradiance is { } measured)
+            {
+                sunIrradiance = measured;
+                Console.WriteLine($"[VulkanSponza]   sun irradiance measured: {measured}");
+            }
+            else
+            {
+                Console.WriteLine(
+                    "[VulkanSponza]   probe carries no measured sun — re-cook it; using the fallback irradiance.");
             }
         }
         catch (Exception ex)

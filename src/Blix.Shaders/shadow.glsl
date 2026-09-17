@@ -130,11 +130,24 @@ vec3 blix_shadow_normal_offset(vec3 world, vec3 normal, float ndotl, float texel
 // the count a #define variant would make it the first axis of a shader permutation matrix, for
 // a number nobody has wanted to change.
 //
-//   texelSizes  1.0 / map side, per cascade. Separate because the three maps need not be the
-//               same size, and the PCF radius is measured in texels.
+//   texelWorld  one shadow texel in WORLD UNITS, per cascade — the light ortho's extent divided by
+//               its map side. Per cascade because the boxes differ in size by an order of magnitude,
+//               which is the whole point of having three of them.
 //   chosen      which cascade answered, or -1 when no cascade contains the fragment. For a debug
 //               tint, and for finding out that a scene is spending three passes on one cascade's
 //               work.
+//
+// <b>The normal offset happens HERE, not at the call site, and that is the fix for a bug both
+// callers had.</b> The offset is sized in world units and the PCF radius is sized in UV, and the
+// cascade that answers sets both — which nobody knows until selection has run. So every caller
+// offset the position first, using cascade 0's number because it was the only one it could pick,
+// and passed the same vec3 on for the kernel. Sponza's held metres, so its 2-texel kernel became a
+// ~100-texel smear; the studio's held 1/2048, so its offset was three millimetres and did nothing.
+// One name meaning two things, and each caller got one of its two uses right.
+//
+// Selection has to run before either number is known, so the offset is applied per candidate inside
+// the loop and the UV texel comes from textureSize() — a quantity the sampler already carries and no
+// caller can get wrong.
 //
 // <b>Selection is by CONTAINMENT, not by view depth, and that is not the textbook choice.</b> The
 // usual scheme slices the view frustum by depth and picks by `dot(world - eye, forward)`. It assumes
@@ -159,24 +172,74 @@ float blix_cascade_contains(mat4 vp, vec3 world, out vec4 coord) {
     return 1.0;
 }
 
+// How many shadow texels the sample is pushed along the surface normal. Fixed, because it is
+// measured in the one unit that already tracks how wrong a texel can be.
+#define BLIX_SHADOW_OFFSET_TEXELS 4.0
+
 float blix_sun_shadow_cascaded(
         sampler2D map0, sampler2D map1, sampler2D map2,
         mat4 vp0, mat4 vp1, mat4 vp2,
-        vec3 texelSizes,
-        vec3 world, float ndotl, float radiusTexels, vec2 pixel,
+        vec3 texelWorld,
+        vec3 world, vec3 normal, float ndotl, float radiusTexels, vec2 pixel,
+        out int chosen) {
+    vec4 coord;
+    vec3 at;
+
+    at = blix_shadow_normal_offset(world, normal, ndotl, texelWorld.x, BLIX_SHADOW_OFFSET_TEXELS);
+    if (blix_cascade_contains(vp0, at, coord) > 0.5) {
+        chosen = 0;
+        return blix_sun_shadow_soft(
+            map0, coord, ndotl, 1.0 / float(textureSize(map0, 0).x), radiusTexels, pixel);
+    }
+    at = blix_shadow_normal_offset(world, normal, ndotl, texelWorld.y, BLIX_SHADOW_OFFSET_TEXELS);
+    if (blix_cascade_contains(vp1, at, coord) > 0.5) {
+        chosen = 1;
+        return blix_sun_shadow_soft(
+            map1, coord, ndotl, 1.0 / float(textureSize(map1, 0).x), radiusTexels, pixel);
+    }
+    at = blix_shadow_normal_offset(world, normal, ndotl, texelWorld.z, BLIX_SHADOW_OFFSET_TEXELS);
+    if (blix_cascade_contains(vp2, at, coord) > 0.5) {
+        chosen = 2;
+        return blix_sun_shadow_soft(
+            map2, coord, ndotl, 1.0 / float(textureSize(map2, 0).x), radiusTexels, pixel);
+    }
+    chosen = -1;
+    return 1.0;
+}
+
+// The same cascade choice, for a consumer that cannot use the filtered lookup above.
+//
+// <b>This exists because SELECTION is the thing that has to be shared, and sampling is not.</b> A
+// volumetric froxel has no surface: no normal to offset along, no grazing angle to scale a bias by,
+// and no budget for sixteen taps at grid-resolution^3. So it cannot call
+// blix_sun_shadow_cascaded — but if it answers "which cascade is this point in" with its own rule,
+// the fog and the surfaces disagree about where a cascade ends, and a shaft of light steps at a
+// boundary the geometry does not step at. That is exactly the bug this replaced: froxel.comp picked
+// by view depth under a comment claiming it matched the lit pass, which had moved to containment.
+//
+// It shares blix_cascade_contains verbatim, EDGE margin included. The margin is there for a filter
+// kernel this variant does not have, so it is fractionally conservative here — and that is the
+// point: agreeing exactly with the surfaces matters more than reclaiming two percent of a cascade.
+//
+// `ndotl` scales the depth bias for a surface that might shadow itself. A point in a volume has no
+// self to shadow, so a volume consumer passes 1.0 and gets the floor.
+float blix_sun_shadow_cascaded_hard(
+        sampler2D map0, sampler2D map1, sampler2D map2,
+        mat4 vp0, mat4 vp1, mat4 vp2,
+        vec3 world, float ndotl,
         out int chosen) {
     vec4 coord;
     if (blix_cascade_contains(vp0, world, coord) > 0.5) {
         chosen = 0;
-        return blix_sun_shadow_soft(map0, coord, ndotl, texelSizes.x, radiusTexels, pixel);
+        return blix_sun_shadow(map0, coord, ndotl);
     }
     if (blix_cascade_contains(vp1, world, coord) > 0.5) {
         chosen = 1;
-        return blix_sun_shadow_soft(map1, coord, ndotl, texelSizes.y, radiusTexels, pixel);
+        return blix_sun_shadow(map1, coord, ndotl);
     }
     if (blix_cascade_contains(vp2, world, coord) > 0.5) {
         chosen = 2;
-        return blix_sun_shadow_soft(map2, coord, ndotl, texelSizes.z, radiusTexels, pixel);
+        return blix_sun_shadow(map2, coord, ndotl);
     }
     chosen = -1;
     return 1.0;

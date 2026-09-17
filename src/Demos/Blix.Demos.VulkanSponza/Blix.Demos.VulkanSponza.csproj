@@ -90,6 +90,8 @@
     <GlslShader Include="Shaders\skybox.frag" />
     <GlslShader Include="Shaders\present.vert" />
     <GlslShader Include="Shaders\present.frag" />
+    <GlslShader Include="Shaders\gtao.frag" />
+    <GlslShader Include="Shaders\gtao_denoise.frag" />
     <GlslShader Include="Shaders\froxel.comp" />
   </ItemGroup>
 

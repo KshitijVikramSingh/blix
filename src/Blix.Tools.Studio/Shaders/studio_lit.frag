@@ -105,17 +105,16 @@ void main()
 
     float ndotl = max(dot(N, L), 0.0);
 
-    // Push the sample point off the surface along the normal before projecting into light space —
-    // the engine's own remedy for shadow acne, sized in shadow texels. Sized from the NEAR cascade,
-    // which is the tightest box and therefore the smallest offset that works; using the far
-    // cascade's texel here would peter-pan everything close to the camera.
-    vec3 biased = blix_shadow_normal_offset(vWorld, N, ndotl, uCascadeTexels.x * 4.0, 1.5);
+    // The acne offset is the shared path's now. It used to happen here, sized from uCascadeTexels.x
+    // — which on this side held 1/2048, a UV quantity, so the offset it produced was about three
+    // millimetres and did nothing at all. The uniform carries world metres per texel now, which is
+    // what the offset always wanted, and the kernel's UV texel comes from textureSize().
     int cascade;
     float shadow = blix_sun_shadow_cascaded(
         uCascade0, uCascade1, uCascade2,
         uCascadeVP0, uCascadeVP1, uCascadeVP2,
         uCascadeTexels.xyz,
-        biased, ndotl, 1.5, gl_FragCoord.xy,
+        vWorld, N, ndotl, 1.5, gl_FragCoord.xy,
         cascade);
 
     float metallic = clamp(uMaterial.x, 0.0, 1.0);

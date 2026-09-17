@@ -100,6 +100,12 @@ internal sealed partial class SponzaLoop
 
         debug.Values.Value("shadow-map", $"{ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}");
         debug.Values.Value("splits-m", $"{cascadeSplits[1]:0}/{cascadeSplits[2]:0}/{cascadeSplits[3]:0}");
+        // One shadow texel in WORLD units, per cascade — the quantity the map size and the splits
+        // jointly imply, and the one that sets both the acne offset and the filter width. It was
+        // computed every frame and never shown, so a cascade whose texel had grown to a third of a
+        // metre looked, in the overlay, exactly like one whose texel was two centimetres.
+        debug.Values.Value("cascade-texel-m",
+            $"{cascadeTexelWorld[0]:0.000}/{cascadeTexelWorld[1]:0.000}/{cascadeTexelWorld[2]:0.000}");
         // Per-cascade caster counts after frustum cull (one frame stale — set
         // during the previous OnRender's graph.Execute).
         debug.Values.Value("cascade-casters", $"{cascadeDrawCounts[0]}/{cascadeDrawCounts[1]}/{cascadeDrawCounts[2]} of {opaqueDrawables.Count}");

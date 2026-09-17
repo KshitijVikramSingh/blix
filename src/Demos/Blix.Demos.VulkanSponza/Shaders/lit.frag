@@ -1,5 +1,13 @@
 #version 450
 
+// <b>The shadow lookup is the engine's, not this demo's.</b> shadow.glsl said the problem out loud
+// before this change was made: "there are already three PCF implementations in this tree (here,
+// Sponza's, VulkanLit's) and the way to stop there being a fourth is for the cascade layer not to
+// need one." Sponza's was the second of the three, and it was the weakest — a square tap grid, a
+// hand-tuned radius, and a depth bias scaled by two tuned constants where the shared one offsets
+// along the normal by a length the cascade fit already computes.
+#include "shadow.glsl"
+
 // Lit fragment shader — Cook-Torrance split-sum IBL on top of a Lambert N·L
 // sun term, with cascaded shadows, a Fresnel-glass branch, and froxel-fog
 // composite.
@@ -10,6 +18,7 @@
 //   set 1 binding 2 : sampler2D   uBrdfLut         (split-sum BRDF integration)
 //   set 1 binding 3 : sampler2D   uCascadeShadowMaps[3]
 //   set 1 binding 4 : sampler3D   uFroxelGrid      (volumetric fog)
+//   set 1 binding 5 : sampler2D   uAmbientVisibility (GTAO: bent normal + visibility)
 //   set 2 binding 0 : per-material UBO (BaseColorFactor, EmissiveFactor,
 //                                       MaterialParams = alphaCutoff/normalScale/
 //                                       roughness/metallic, MaterialParams2 = transmission)
@@ -24,37 +33,40 @@
 layout(set = 0, binding = 0) uniform Frame {
     mat4  uViewProjection;
     vec3  uSunDirection;
-    //@tune 0..16 = 9.42
-    float uSunIntensity;
-    vec3  uAmbientColor;   // unused; kept for layout compat
-    //@tune 0..4 = 1.6
-    float uIblIntensity;
+    float uSunPad;
+    // <b>The sun's irradiance, MEASURED from the probe — not a knob.</b> It replaces
+    // uSunIntensity, whose default was 9.42 because that is 3*PI, chosen by its own comment to
+    // "match the old look". The probe now reports what the sun in the HDR actually delivers, in the
+    // HDR's own units, and the bake removes that disc from the diffuse and specular integrals — so
+    // the sun arrives exactly once and in the same units as the sky it came from.
+    //
+    // uIblIntensity is gone with it, and for the same reason. A scale between sun and sky only
+    // needs tuning while the two are in different units; measured from one capture they are not.
+    // The artistic knob for overall brightness is exposure, which already exists.
+    vec3  uSunIrradiance;
+    float uIblPad;
     vec3  uCameraPos;
     float uEnvMipCount;
-    vec3  uCameraForward;          // unit camera forward (for view-depth cascade pick)
     float uShadowStrength;         // 0 = sun shadows off, 1 = on
+    vec3  _cascadePad;
     mat4  uCascadeViewProj[3];     // light view-proj per cascade
-    vec4  uCascadeSplits;          // .xyz = far view-depth bound of cascades 0,1,2
-    vec4  uCascadeBias;            // .xyz = per-cascade base depth bias (NDC units)
+    // .xyz = one shadow texel in WORLD units per cascade. Derived from the cascade fit — the same
+    // number it already used to texel-snap the ortho footprint — where this slot previously held a
+    // per-cascade NDC depth bias that was that length converted and then tuned twice over.
+    vec4  uCascadeTexels;
     vec4  uFog;                    // x=screenW, y=screenH, z=fogFar, w=enabled(0/1)
     // Live-tunable shader params. Un-packed from the former uShaderParams /
     // uShadowParams / uIblParams vec4s into named members so each carries its
     // own //@tune range+default and the diagnostics overlay can auto-bind and
     // label it (see docs/renderer.md "SPIR-V reflection" + the tune scanner).
-    //@tune 0..1 = 0.5
-    float uMetallicThreshold;
-    //@tune 0..2 = 1.0
-    float uNormalStrength;
-    //@tune 0..12 = 3.0
-    float uSlopeScale;
-    //@tune 0..0.6 = 0.12
-    float uGlassMinOpacity;
-    //@tune 0..1 = 0.6
-    float uIndirectShadowBase;
-    //@tune 0..1 = 0.4
-    float uIndirectShadowRange;
     //@tune 0..1 = 0
     float uVisualizeCascades;
+    // 1 = visibility as greyscale, 2 = bent normal as RGB. A term you cannot look at on its own is
+    // a term you tune by staring at the final image, which is how the five deleted knobs happened.
+    // Note it still goes through exposure + tonemap in the present pass, so read it for STRUCTURE
+    // (where the corners darken, where the normals bend) rather than as calibrated values.
+    //@tune 0..2 = 0
+    float uVisualizeAmbient;
 } frame;
 
 layout(set = 1, binding = 0) uniform samplerCube uIrradiance;
@@ -69,6 +81,8 @@ layout(set = 1, binding = 3) uniform sampler2D   uCascadeShadowMaps[3];
 // Froxel volumetric fog grid: (xy) = screen UV, z = world distance / fogFar.
 // .rgb = integrated in-scattering to that distance, .a = transmittance.
 layout(set = 1, binding = 4) uniform sampler3D   uFroxelGrid;
+// Ambient visibility from the GTAO pass: .xyz = bent normal (WORLD space), .a = visibility.
+layout(set = 1, binding = 5) uniform sampler2D   uAmbientVisibility;
 
 layout(set = 2, binding = 0) uniform Material {
     vec4 uBaseColorFactor;
@@ -138,86 +152,22 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
 }
 
 // --- Cascaded sun shadows -----------------------------------------------
-// Rotated Vogel-disk PCF: 8 evenly-spread taps on a unit disk, rotated per
-// pixel by an interleaved-gradient-noise angle. The per-pixel rotation turns
-// the old hard 3×3 grid into a fine dither the eye reads as a smooth penumbra
-// (and hides the low-res 512² far cascade). 8 taps keeps it near the previous
-// 9-tap cost; 16 was ~3× the lit-pass time. current/d are Vulkan NDC depth in
-// [0,1]; the ortho projection is linear in z so a constant bias is a constant
-// world-space offset.
-const int   PCF_TAPS   = 8;
-const float PCF_RADIUS = 2.5;   // texels; larger = softer penumbra
+// Deleted, all of it: a Vogel-disc PCF with a tuned radius, an interleaved-gradient rotation, a
+// constant-index cascade dispatch, and a depth bias scaled by uCascadeBias and uSlopeScale. Every
+// one of those exists in shadow.glsl, better — the shared version's disc is the same idea with a
+// derived radius, and its bias is small on purpose because blix_shadow_normal_offset has already
+// moved the sample off the surface it belongs to.
+//
+// <b>The selection changed with it, and that is a real behaviour change rather than a refactor.</b>
+// This picked a cascade by view depth — dot(world - eye, forward) against uCascadeSplits. The
+// shared path picks by CONTAINMENT: whichever cascade's box actually holds the fragment. At equal
+// view depth a fragment at the edge of a wide frustum is genuinely further from the eye than one at
+// its centre, so depth selection can put neighbours in different cascades and draw an arc across
+// the picture. Containment cannot.
 
-// Interleaved gradient noise (Jimenez) -> a [0,1) value per pixel.
-float interleavedGradientNoise(vec2 p) {
-    return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
-}
-
-float pcfCascade(sampler2D map, vec2 uv, float current, float bias) {
-    vec2 texel = 1.0 / vec2(textureSize(map, 0));
-    float phi = interleavedGradientNoise(gl_FragCoord.xy) * 6.28318530718;
-    float sum = 0.0;
-    for (int i = 0; i < PCF_TAPS; i++) {
-        // Vogel (sunflower) disk: even coverage, no precomputed table.
-        float r = sqrt((float(i) + 0.5) / float(PCF_TAPS));
-        float theta = float(i) * 2.39996323 + phi;   // golden angle
-        vec2 off = r * vec2(cos(theta), sin(theta)) * texel * PCF_RADIUS;
-        float d = texture(map, uv + off).r;
-        sum += (current - bias > d) ? 0.0 : 1.0;
-    }
-    return sum / float(PCF_TAPS);
-}
-
-// Constant-index dispatch (see binding-3 comment): non-uniform dynamic
-// sampler-array indexing isn't portable, so branch on the cascade index.
-float samplePickedCascade(int idx, vec2 uv, float current, float bias) {
-    if (idx == 0)      return pcfCascade(uCascadeShadowMaps[0], uv, current, bias);
-    else if (idx == 1) return pcfCascade(uCascadeShadowMaps[1], uv, current, bias);
-    else               return pcfCascade(uCascadeShadowMaps[2], uv, current, bias);
-}
-
-// Returns 1.0 = lit, 0.0 = shadowed. cascadeOut reports which cascade was
-// sampled (-1 = none/out of range) for the debug visualisation.
-float sunShadowFactor(float NdotL, out int cascadeOut) {
-    cascadeOut = -1;
-    if (frame.uShadowStrength <= 0.0) return 1.0;
-
-    // Linear view-space depth = projection of (frag - eye) onto camera fwd.
-    float viewDepth = dot(vWorldPos - frame.uCameraPos, frame.uCameraForward);
-
-    // First cascade whose far bound contains this fragment.
-    int idx = -1;
-    for (int i = 0; i < CASCADE_COUNT; i++) {
-        if (viewDepth <= frame.uCascadeSplits[i]) { idx = i; break; }
-    }
-    if (idx < 0) return 1.0;   // beyond the last cascade — leave fully lit
-
-    vec4 proj = frame.uCascadeViewProj[idx] * vec4(vWorldPos, 1.0);
-    vec3 ndc = proj.xyz / proj.w;
-    vec2 uv = ndc.xy * 0.5 + 0.5;
-    float current = ndc.z;
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 ||
-        current < 0.0 || current > 1.0) {
-        return 1.0;
-    }
-    cascadeOut = idx;
-
-    // Depth bias. The base term is computed on the CPU per cascade from that
-    // cascade's actual world-space texel size ÷ ortho depth range, so it's
-    // geometrically grounded rather than a magic constant — it stays constant
-    // in NDC across cascades even though each covers a very different world
-    // extent. The slope term widens it toward grazing angles (where a single
-    // shadow texel spans more depth across the surface → more self-shadow
-    // acne). Capped so steep grazing surfaces don't peter-pan.
-    float slope = clamp(1.0 - NdotL, 0.0, 1.0);
-    float bias = frame.uCascadeBias[idx] * (1.0 + slope * frame.uSlopeScale);
-    return samplePickedCascade(idx, uv, current, bias);
-}
-
-const vec3 kCascadeTint[3] = vec3[3](
-    vec3(1.0, 0.35, 0.35),   // cascade 0 — red
-    vec3(0.35, 1.0, 0.35),   // cascade 1 — green
-    vec3(0.4, 0.5, 1.0));    // cascade 2 — blue
+// The cascade tint is shadow.glsl's blix_cascade_tint — a fourth copy of three colours is
+// still a fourth copy, and the shared one also names "beyond the last cascade" in magenta, which
+// a still picture otherwise cannot tell from "lit".    // cascade 2 — blue
 
 void main() {
     // UVs arrive in the correct top-down origin already: the Sponza assets are
@@ -257,7 +207,9 @@ void main() {
     // dropped), so the sampled .z is meaningless — derive it from the
     // unit-length constraint. This is also correct for RGBA8 normal maps
     // (their stored Z ≈ sqrt(1 - x² - y²)), so it works for both paths.
-    float normalScale = mat.uMaterialParams.y * frame.uNormalStrength;
+    // glTF's own per-material normalScale, with no global multiplier on top. The global was a
+    // second control over one quantity, and the material already says what it wants.
+    float normalScale = mat.uMaterialParams.y;
     vec2 nxy = (texture(uNormalMap, uv).xy * 2.0 - 1.0) * normalScale;
     float nz = sqrt(max(0.0, 1.0 - dot(nxy, nxy)));
     // Default normal map is flat (0,0,1), so untextured materials keep N.
@@ -273,14 +225,11 @@ void main() {
     // Metalness noise-gate (asset conformance, not a global look hack).
     // Sponza Modern leaves a stray ~0.35 metalness on dielectric stone/brick
     // (its metallic channel doubled as a specular-intensity dial under the
-    // authoring pipeline); read as real glTF metalness it mixes albedo into F0
-    // and dulls the diffuse. The gate treats metalness below uMetallicThreshold
-    // as noise -> 0, but passes values at/above through UNCHANGED — unlike the
-    // old binary step() it no longer slams genuine partial metals to fully
-    // metal. Threshold 0 trusts the glTF verbatim (the standard); the default
-    // (0.5) keeps Sponza's stone clean. Live-tunable: Material -> Metallic
-    // threshold.
-    metallic = metallic >= frame.uMetallicThreshold ? metallic : 0.0;
+    // <b>No metallic gate.</b> A threshold snapping metalness to zero was compensating for authored
+    // MR values, in the fragment shader, on every pixel, forever — a data question answered in the
+    // hottest place it could be. If an asset's metalness is wrong, that is the asset's or the cook's
+    // to fix, where it is fixed once.
+
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
     vec3 V = normalize(frame.uCameraPos - vWorldPos);
@@ -299,14 +248,13 @@ void main() {
     float transmission = mat.uMaterialParams2.x;
     if (transmission > 0.0) {
         float lod = roughness * (frame.uEnvMipCount - 1.0);
-        vec3 envRefl = textureLod(uPrefilteredEnv, R, lod).rgb * frame.uIblIntensity;
+        vec3 envRefl = textureLod(uPrefilteredEnv, R, lod).rgb;
         float fresnel = 0.04 + 0.96 * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
+        // <b>No opacity floor.</b> Clean glass IS ~96% transparent head-on, and lifting it was
+        // faking the presence that refraction and absorption would give for free. The panes will
+        // read as nearly absent until there is a transmission pass; that is the honest picture of
+        // what this model currently computes.
         float glassAlpha = mix(albedo4.a, fresnel, transmission);
-        // Physically clean glass is ~96% transparent head-on, which reads as
-        // "no glass at all". Lift it by a tunable floor (uGlassMinOpacity) so
-        // the panes keep a faint reflective sheen straight-on. Grazing angles
-        // already saturate to opaque, so this only affects the head-on view.
-        glassAlpha = max(glassAlpha, frame.uGlassMinOpacity);
         outColor = vec4(envRefl, glassAlpha);
         return;
     }
@@ -317,8 +265,22 @@ void main() {
     float NdotL = max(dot(N, L), 0.0);
     float NdotH = max(dot(N, H), 0.0);
     float VdotH = max(dot(V, H), 0.0);
-    int shadowCascade;
-    float sunShadow = sunShadowFactor(NdotL, shadowCascade);
+    // <b>The sample is moved off its own surface before it is projected, by the shared path.</b> It
+    // used to happen here, with cascade 0's texel size, because that is the only one a call site can
+    // pick before selection has run — and the same vec3 of METRES then went on to size a kernel
+    // measured in UV, making a 2-texel filter into a ~100-texel smear. Both halves are the chosen
+    // cascade's business, so both now live where the cascade is chosen.
+    int shadowCascade = -1;
+    float sunShadow = 1.0;
+    if (frame.uShadowStrength > 0.0) {
+        sunShadow = blix_sun_shadow_cascaded(
+            uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2],
+            frame.uCascadeViewProj[0], frame.uCascadeViewProj[1], frame.uCascadeViewProj[2],
+            frame.uCascadeTexels.xyz,
+            vWorldPos, N, NdotL, 2.0, gl_FragCoord.xy,
+            shadowCascade);
+        sunShadow = mix(1.0, sunShadow, frame.uShadowStrength);
+    }
 
     // GGX microfacet highlight from the sun. Without this the sun produces
     // no glint on metal/polished stone, and metals read flat and chalky.
@@ -327,14 +289,13 @@ void main() {
     vec3  Fsun = fresnelSchlick(VdotH, F0);
     vec3 sunSpecular = (Dsun * Gsun * Fsun) / max(4.0 * NdotV * NdotL, 1e-3);
 
-    // Energy split: diffuse keeps only the non-reflected fraction (1 - F)
-    // and vanishes on metals (1 - metallic); /PI normalizes the Lambert lobe.
-    // uSunIntensity is pre-scaled by PI on the CPU so the diffuse magnitude
-    // matches the old `albedo * NdotL * uSunIntensity` look — the specular
-    // is the additive gain.
+    // Energy split: diffuse keeps only the non-reflected fraction (1 - F) and vanishes on metals
+    // (1 - metallic); /PI normalizes the Lambert lobe. uSunIrradiance is the irradiance the probe
+    // measured, so this line is the rendering equation for a directional light rather than a shape
+    // scaled until it looked right.
     vec3 kDsun = (vec3(1.0) - Fsun) * (1.0 - metallic);
     vec3 direct = (kDsun * albedo / PI + sunSpecular)
-                  * NdotL * frame.uSunIntensity * sunShadow;
+                  * NdotL * frame.uSunIrradiance * sunShadow;
 
     // --- IBL: split-sum diffuse + specular ------------------------------
     // Diffuse: irradiance cube × albedo, modulated by (1 - F) and (1 - metallic)
@@ -343,7 +304,25 @@ void main() {
     vec3 kS = F;
     vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);
 
-    vec3 irradiance = texture(uIrradiance, N).rgb;
+    // --- Ambient visibility ---------------------------------------------
+    // <b>The term that was missing, and the reason five knobs could be deleted without one.</b>
+    // The GTAO pass answers, from depth alone, how much of the sky this point can see and which
+    // way the opening faces.
+    //
+    // Skipped for TRANSMISSIVE surfaces, and not as a special case: glass is the only thing that
+    // goes through the blend pipelines, so it is the only thing the depth pre-pass did not write.
+    // Sampling this buffer from glass would read the visibility of whatever is BEHIND it. The test
+    // is uMaterialParams2.x because that is literally the predicate the scene sorts on
+    // (isBlend = EffectiveTransmission(material) > 0), so the two cannot drift apart.
+    vec4 ambientVis = texture(uAmbientVisibility, gl_FragCoord.xy / frame.uFog.xy);
+    bool opaqueSurface = mat.uMaterialParams2.x <= 0.0;
+    float visibility = opaqueSurface ? ambientVis.a : 1.0;
+    // The bent normal is where the unoccluded sky actually is. Gathering irradiance along it
+    // instead of along N is what makes a surface in a corner pick up the light from the opening
+    // rather than an average that includes the wall it is pressed against.
+    vec3 gatherN = opaqueSurface ? normalize(ambientVis.xyz) : N;
+
+    vec3 irradiance = texture(uIrradiance, gatherN).rgb;
     vec3 diffuseIBL = irradiance * albedo;
 
     // Specular: prefiltered env at LOD = roughness × (mipCount - 1), times
@@ -353,13 +332,26 @@ void main() {
     vec2 envBrdf = texture(uBrdfLut, vec2(NdotV, roughness)).rg;
     vec3 specularIBL = prefiltered * (F * envBrdf.x + envBrdf.y);
 
-    // AO attenuates the indirect contribution only (per glTF spec). The sun
-    // shadow also dims indirect light — fragments the sun can't see receive
-    // less bounce too — mirroring the GL demo's 0.60 + 0.40*shadow so
-    // shadowed areas don't read flat from full-strength ambient. Base/range
-    // are live-tunable via uIndirectShadowBase / uIndirectShadowRange.
-    float indirectShadow = frame.uIndirectShadowBase + frame.uIndirectShadowRange * sunShadow;
-    vec3 ambient = (kD * diffuseIBL + specularIBL) * frame.uIblIntensity * ao * indirectShadow;
+    // AO attenuates the indirect contribution only, per the glTF spec.
+    //
+    // <b>The sun shadow no longer dims indirect light.</b> It used to, as 0.60 + 0.40*sunShadow,
+    // and that is wrong in kind rather than degree: sun visibility is not ambient visibility. A
+    // crevice facing away from the sun but open to the sky was darkened; one in full sun but
+    // enclosed was not. It was standing in for ambient occlusion using the only occlusion signal to
+    // hand.
+    //
+    // It was standing in for ambient occlusion using the only occlusion signal to hand — and the
+    // real one now exists above, so this line multiplies by MEASURED visibility rather than by a
+    // constant plus a fraction of the sun's shadow.
+    //
+    // Specular gets its own occlusion, derived rather than dialled: a rough surface gathers over a
+    // wide cone and is occluded nearly as much as the diffuse lobe, while a mirror gathers along
+    // one ray that the visibility average says little about. Lagarde's approximation is that
+    // relationship written down, and it takes roughness and visibility as its only inputs.
+    float specularVisibility = clamp(
+        pow(max(NdotV + visibility, 0.0), exp2(-16.0 * roughness - 1.0)) - 1.0 + visibility,
+        0.0, 1.0);
+    vec3 ambient = (kD * diffuseIBL * visibility + specularIBL * specularVisibility) * ao;
 
     // --- Emissive ------------------------------------------------------
     vec3 emissive = texture(uEmissive, uv).rgb * mat.uEmissiveFactor.rgb * mat.uEmissiveFactor.a;
@@ -368,8 +360,12 @@ void main() {
 
     // Debug: tint by which cascade shadowed this fragment (red/green/blue,
     // near→far). Helps confirm split placement + texel-snap stability.
-    if (frame.uVisualizeCascades > 0.5 && shadowCascade >= 0) {
-        color = mix(color, kCascadeTint[shadowCascade] * (0.5 + 0.5 * NdotL * sunShadow), 0.4);
+    if (frame.uVisualizeAmbient > 0.5) {
+        color = frame.uVisualizeAmbient < 1.5 ? vec3(visibility) : (gatherN * 0.5 + 0.5);
+    }
+
+    if (frame.uVisualizeCascades > 0.5) {
+        color = mix(color, blix_cascade_tint(shadowCascade) * (0.5 + 0.5 * NdotL * sunShadow), 0.4);
     }
 
     // --- Froxel fog composite -------------------------------------------
