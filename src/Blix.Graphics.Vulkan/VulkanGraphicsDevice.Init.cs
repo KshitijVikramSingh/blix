@@ -40,6 +40,30 @@ public sealed partial class VulkanGraphicsDevice
     internal SurfaceKHR Surface { get; private set; }
 
     private DebugUtilsMessengerEXT debugMessenger;
+
+    /// <summary>
+    /// The messenger's callback, ROOTED for as long as Vulkan holds a pointer to it.
+    /// </summary>
+    /// <remarks>
+    /// <b>A delegate handed to native code and then dropped is a dangling function pointer.</b> This
+    /// was built inline in the create-info — <c>PfnUserCallback = new PfnDebugUtilsMessengerCallbackEXT(...)</c>
+    /// — so the only reference died with that local, the GC was free to collect the reverse-P/Invoke
+    /// thunk, and the validation layer went on holding its address. The next message it emitted
+    /// called into a collected thunk.
+    /// <para>
+    /// The signature is an intermittent SIGSEGV with no managed stack, in TEARDOWN, whose macOS crash
+    /// report reads <c>UMEntryThunk::Decode</c> under <c>GetDelegateForFunctionPointerInternal</c> —
+    /// native calling back into managed through a pointer that is no longer one. Teardown because
+    /// that is when validation has the most to say, and intermittent because it is GC timing.
+    /// </para>
+    /// <para>
+    /// <b>Not reproduced on demand, and that is stated rather than implied.</b> Forcing a collection
+    /// after the messenger is attached does not fault, because these runs are validation-clean and
+    /// the callback is never invoked at all. What is certain is that the lifetime was wrong; the
+    /// crash reports are consistent with it and nothing else here hands native code a delegate.
+    /// </para>
+    /// </remarks>
+    private PfnDebugUtilsMessengerCallbackEXT debugCallback;
     private ExtDebugUtils? debugUtils;
     private bool validationEnabled;
 
@@ -136,6 +160,10 @@ public sealed partial class VulkanGraphicsDevice
         if (!Vk.TryGetInstanceExtension(Instance, out ExtDebugUtils du)) return;
         debugUtils = du;
 
+        // Built into the FIELD first. Inline in the initialiser, its only reference is the local
+        // create-info, which the GC may reclaim the moment this method returns.
+        debugCallback = new PfnDebugUtilsMessengerCallbackEXT(DebugCallback);
+
         var ci = new DebugUtilsMessengerCreateInfoEXT
         {
             SType = StructureType.DebugUtilsMessengerCreateInfoExt,
@@ -144,7 +172,7 @@ public sealed partial class VulkanGraphicsDevice
             MessageType = DebugUtilsMessageTypeFlagsEXT.GeneralBitExt
                         | DebugUtilsMessageTypeFlagsEXT.ValidationBitExt
                         | DebugUtilsMessageTypeFlagsEXT.PerformanceBitExt,
-            PfnUserCallback = new PfnDebugUtilsMessengerCallbackEXT(DebugCallback),
+            PfnUserCallback = debugCallback,
         };
 
         DebugUtilsMessengerEXT messenger;
@@ -428,6 +456,10 @@ public sealed partial class VulkanGraphicsDevice
         if (debugMessenger.Handle != 0 && debugUtils is not null)
         {
             debugUtils.DestroyDebugUtilsMessenger(Instance, debugMessenger, null);
+            debugMessenger = default;
+            // Only now is it safe for the callback to go: until the messenger is destroyed, the
+            // layer can still call it.
+            GC.KeepAlive(debugCallback);
         }
         if (Instance.Handle != 0) Vk.DestroyInstance(Instance, null);
         Vk.Dispose();

@@ -28,12 +28,17 @@ var pointCube  = graph.DepthCube("point.shadow", faceSize: 1024);  // .Face(0..5
 
 `GraphSize` is either `FixedGraphSize(w, h)` or `MatchSwapchainGraphSize(scale)` (resizes with the window).
 
+**A multisampled attachment is not sampleable.** `ResolveColor` has always been the way to get a 1× colour image out of an MSAA pass; `ResolveDepth` is the same for depth, and exists because a pass can multisample its depth and still need it readable afterwards — the studio's present pass writes `gl_FragDepth` from the scene's depth so debug gizmos depth-test against the scene. Depth resolve is a structure chained onto `VkSubpassDescription2`, so **a pass that asks for it is built with `vkCreateRenderPass2`**; every pass that does not keeps the original path unchanged. The resolve mode is `SAMPLE_ZERO` — averaging depth across a silhouette produces a surface that is not there.
+
+`VulkanGraphicsDevice.MaxMsaaSamples` reports the highest count colour *and* depth can both do, since a render pass requires them to agree. Over-asking is a native Metal assertion, not a Vulkan error, so callers clamp to it.
+
 **Declare passes** with the fluent builder, then `Compile`:
 
 ```csharp
 var litPass = graph.GraphicsPass("lit")
     .Target(sceneColor, LoadOp.Clear, StoreOp.Store)
     .ResolveColor(presentColor)          // MSAA resolve destination
+    .ResolveDepth(presentDepth)          // 1x depth, for anything that SAMPLES it
     .Depth(sceneDepth, LoadOp.Clear, StoreOp.Store)
     .Read(sunShadow)                     // sampled as a texture this pass
     .Shader(litInterface, skyInterface)  // shaders this pass supports
@@ -119,20 +124,24 @@ All techniques run on Vulkan; the shader files below are the source of truth.
 | Technique | Where it lives |
 | --- | --- |
 | PBR (metallic-roughness) | `lit.frag` + `pbr.glsl` (VulkanLit, VulkanSponza) |
-| IBL — diffuse irradiance | irradiance cube sampled in `lit.frag` |
-| IBL — specular (split-sum) | `uPrefilteredEnv` + `uBrdfLut` in `lit.frag` (`specularIBL = prefiltered · (F0·lut.x + lut.y)`) |
+| IBL — the ambient term | **`blix_iblAmbient` in `Blix.Shaders/ibl.glsl`** — diffuse irradiance + split-sum specular in one call, taking the prefilter LOD ceiling as a PARAMETER from the bake rather than a constant. Used by the studio stage; VulkanLit and VulkanSponza still carry their own copies (each has a complete parallel lit-shader library, so converting either is its own job) |
+| IBL — procedural source | `ProceduralEnvironmentSource(sunDirection)` bakes a sky from a sun with **no environment asset**, which is what lets a tool that opens any model anywhere have IBL at all. Note the specular half is box-filtered mips, not a true GGX prefilter |
+| BRDF LUT | `EnvironmentBaker.BakeBrdfLut(device, size, name, cacheDirectory)` — a pure function of size and sample count, so it is computed once and kept. O(n²): 32→25 ms, 64→84 ms, 128→407 ms, 256→1451 ms |
 | HDR IBL bake | `EquirectangularToCubemap` + `PbrIblBaker`; cooked into `.blixprobe` (`BlixProbe`) — irradiance + GGX-prefiltered specular + BRDF LUT |
-| Cascade shadow maps (3-cascade) | `shadow.vert/.frag`; `lit.frag` samples the cascade array (VulkanSponza) |
+| Cascade shadow maps (3-cascade) | `shadow.vert/.frag`; `lit.frag` samples the cascade array (VulkanSponza, RTSGame — each with its own fit) |
+| Cascade selection, shared | **`blix_sun_shadow_cascaded` in `Blix.Shaders/shadow.glsl`** — SELECTION only, sampling via the existing `blix_sun_shadow_soft`. Three cascades, fixed: dynamically indexing a sampler array needs `shaderSampledImageArrayDynamicIndexing`, which is not guaranteed, so portable implementations branch on a constant index. Picks by CONTAINMENT rather than view depth |
+| Cascade fit, shared | `GraphicsMatrices.FrustumSliceCorners` / `FitCascadeViewProjection` / `CascadeSplits` — bounding sphere (rotation-invariant, so the box does not crawl), texel-snapped **on the light's own axes** |
 | Point cubemap shadows | `point_shadow.vert/.frag` (linear distance), sampled as `samplerCube` (VulkanLit) |
 | Spot shadows | perspective shadow + `shadows.glsl` compare (VulkanLit) |
 | PCF filtering | `shadows.glsl` (VulkanLit); rotated-Vogel PCF (VulkanSponza) |
 | Alpha-cutout shadow casters | `depth_prepass_mask.frag` (alpha threshold + alpha-to-coverage) |
-| Tonemap | `tonemap.glsl` — ACES (with an AgX grade option) |
+| Tonemap | `tonemap.glsl` — four curves (ACES, AgX, Reinhard, neutral) behind `blix_tonemap(hdr, mode)`. **`Blix.Graphics.Images.Tonemap` is the CPU twin**, for captures read back before the present pass runs; `Blix.Test.Graphics` section BD holds the two answerable to each other |
 | Fullscreen pass | `FullscreenPass` (`Blix.Render`) — dummy-VB + `gl_VertexIndex` triangle + `DrawIndexed(3)`; caller brings pipeline/textures/push (present, bloom, sky, CRT, invert) |
 | Bloom | `PostChain` of `bloom_bright.frag` → `bloom_blur.frag` (H then V) over `bloom.glsl`; composite + tonemap stay in the caller's present pass (VulkanLit, VulkanParticles) |
 | Fullscreen effect chain | `PostChain` (`Blix.Render`) — linear image→image passes over auto-managed intermediate targets; declares targets+passes, caller supplies pipelines, yields an output texture |
 | Froxel volumetric fog | `froxel.comp` compute pass, froxel grid (VulkanSponza, `--fog`) |
-| Depth pre-pass | `depth_prepass.frag` / `depth_prepass_mask.frag` (VulkanSponza) |
+| Depth pre-pass | `depth_prepass.frag` / `depth_prepass_mask.frag` (VulkanSponza). The studio stage has one too, **off by default**: correct either way (captures are byte-identical) but the benefit was not measurable on a stage that draws a handful of objects, while the cost was |
+| MSAA | a second colour target at `samples: n` plus `ResolveColor`; depth matches the colour's sample count and resolves via `ResolveDepth` when anything samples it |
 | Glass / transmissive | Fresnel + alpha-blend pipeline in `lit.frag` (no refraction) |
 | GPU-driven indirect draw | `DrawIndexedIndirect`, per-material multi-draw (VulkanSponza) |
 | Per-frame transient vertices | `AllocVertices` → `TransientVertexSlice`, ring of host-visible buffers bound by offset (SpriteBatch, VkLineDrawer, ParticleBatch) |
@@ -143,6 +152,31 @@ All techniques run on Vulkan; the shader files below are the source of truth.
 | Geometry bundling | `MeshBundler` packs primitives into one shared `(VB, IB)`; draws are sub-ranges |
 
 **Not ported from the GL renderer.** Screen-space reflections (SSR), dual-filter (Kawase) bloom, and the MRT material G-buffer that fed SSR were GL-only techniques and did not survive the OpenGL sunset. Bloom on Vulkan is the separable-Gaussian chain above; reflections come from prefiltered-environment IBL, not SSR.
+
+## Where the engine is allowed to have an opinion
+
+Nothing in `Blix.*` says how bright a sun is, and nothing has to. The techniques above are
+capabilities and vocabulary; **what to do with them is a separate question, and it has one home.**
+
+`Blix.Tools.Studio.StudioLook` holds the answers — sun angle and intensity, ambient, exposure,
+tonemap, shadow radius and reach, cascade split, MSAA, IBL. **The defaults of that type ARE Blix's
+reference look**, `blix view` takes them without being asked, and a game takes none of them, some of
+them, or all of them. Keeping it there rather than in the engine is what stops "the default
+renderer" existing for everyone to fight; keeping it *somewhere* is what stops every consumer
+re-answering "how bright is the sun" from scratch.
+
+**The technique never moves into the stage.** A capability belongs to the engine and its shading
+vocabulary to `Blix.Shaders`; the stage owns only the COMPOSITION — which of them are on, at what
+settings. That is why the NdotV fix went into the shared `pbr.glsl` rather than into a studio shader,
+and why `blix_iblAmbient` is shared vocabulary rather than studio code.
+
+Two kinds of setting, and the difference is load-bearing. Most are read every frame: move the slider,
+see it. A few are `[Tune(Structural = true)]` — read once when the pipelines and targets are BUILT,
+and never again. Those are flags rather than sliders, and the debug panel shows them among the
+read-only values, because a control that changes nothing is worse than one that does not exist.
+
+See `plan-blix-house-style.md` for how each default was arrived at; several are the opposite of the
+sophisticated-looking choice, and the measurements are recorded there.
 
 ## Fullscreen passes and post-process
 

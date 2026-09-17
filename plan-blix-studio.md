@@ -104,7 +104,14 @@ plane — so the rig viewer writes no draw at all and the map generator writes e
 
 ---
 
-## Stage S-A — the rename, because `Lab` names nothing
+## Stage S-A — the rename, because `Lab` names nothing — **DONE**
+
+Every type in `Blix.Tools.Studio` carries the name; no `Lab*` type remains. Two predictions in the
+list below turned out differently and are worth recording rather than quietly dropping:
+`SkeletonGizmo` ended up ENGINE-side in `Blix/Gizmos` rather than on the stage, which is the better
+home — a skeleton overlay is not stage furniture; and `StudioScene` never existed, because the look
+it was going to carry became `StudioLook` by a different route (see S-C).
+
 
 `Lab` was a folder name for experiments that were not games or demos. It is stamped on the eight
 types that carry the actual taste, and it tells a reader nothing true.
@@ -119,12 +126,26 @@ It sits under `Blix.Tools.` deliberately. A game referencing `Blix.Tools.Studio`
 exactly the right signal — *I am using the tool setup on purpose* — and that slight awkwardness is
 the convention doing its job.
 
-## Stage S-B — open the stage
+## Stage S-B — open the stage — **DONE**
+
+`IStudioView` is the contributor seam, and rung four — a tool declaring a pass of its own — is real
+and EXERCISED: `--stage-selftest` declares a pass, asserts the stage recorded it, and exits non-zero
+when it did not. A hook nothing calls is a hook that rots.
+
 
 The renderer stops naming its subjects and starts taking contributors. Passes become things a tool
 can add to (rung 4) rather than a fixed five.
 
-## Stage S-C — the knobs, and the symmetry
+## Stage S-C — the knobs, and the symmetry — **DONE, by another road**
+
+**It landed as `StudioLook`, not as `StudioScene`, and for a different reason than this stage gave.**
+The stage predicted the substrate would use its own `[Tune]` capability for symmetry's sake. What
+actually forced it was the house-style arc asking where Blix is allowed to have a visual opinion —
+see `plan-blix-house-style.md`. The result is the one this stage wanted (18 declared knobs,
+`ITunable`, the stage recomposing on a sun change exactly as a session does on a weight change) and
+it arrived carrying more than this stage asked for: `Structural`, for values read when the graph is
+built, because a slider on a sample count is a slider that changes nothing.
+
 
 `StudioScene` declares its look with `[Tune]` and implements `ITunable`, so the stage recomposes on
 a sun-angle change exactly as a session recomposes on a weight change — **the first time the
@@ -145,12 +166,21 @@ rest: *only the viewer picks — the capture has no pointer and the probe has no
 The widget reports rather than calling back. It sets `Clicked`; the caller casts its own ray through
 its own view declaration into its own selection.
 
-## Stage S-E — the rig and animation tool, on it
+## Stage S-E — the rig and animation tool, on it — **DONE**
+
+`Blix.Tools.View` is that tool and it is on the stage. Everything the arc predicted about it is now
+true and then some: clips, masks, instances, attachments, root motion, unread channels, materials.
+
 
 The first real consumer, and the reason for all of the above. It is the subject where we already
 know the panels, the checks, and what a capture is worth.
 
-## Stage S-F — Runner, deliberately
+## Stage S-F — Runner, deliberately — **OPEN**
+
+Checked rather than assumed: `Blix.Demos.Runner` does not reference `Blix.Tools.Studio`. This is the
+one stage of the arc still to do, and it is the statement one — a game on the studio setup, which is
+the claim that the setup is not tool-only.
+
 
 One game on the studio setup, as a statement rather than a cleanup.
 

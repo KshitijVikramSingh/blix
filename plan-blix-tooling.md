@@ -156,7 +156,13 @@ creep into. One of each:
 | one app, one assembly | the character probe | convention alone is enough | **done** — undeclared, still runnable |
 | headless tool | the test suites | `blix run` is how verification is invoked | **done** — all five, plus the RTS gate |
 | headed application | the toolchain viewer | a window changes nothing about addressing | **done** — `view`, `shot`, `room`, `room-shot` |
-| Blix's own | the cooker | Blix's tools are not special | **open** — top-level statements, needs a class first |
+| Blix's own | the cooker | Blix's tools are not special | **done** — `Blix.Tools.Cook.Program`, `[BlixApp("cook")]` |
+
+**Stage B is closed.** The cooker was the last cell, and the row's point was the whole of why it
+mattered: a launcher layer whose own cooker is the one thing it cannot address is a layer with an
+exception in it. Top-level statements have no method to hang an attribute on; every other tool here
+already declared a `Program` class, so the cooker now matches them and nothing about how it works
+changed.
 
 **The character lab is the case that forces the folder question**: it is four sibling directories
 under `src/`, and a project is one folder. Moving it is what makes `blix.project` mean something.

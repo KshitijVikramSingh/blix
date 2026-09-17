@@ -1,12 +1,12 @@
-using Blix.Cooked;
-using Blix.Assets;
-using System.Diagnostics;
-using System.Numerics;
 using BCnEncoder.Encoder;
 using BCnEncoder.Shared;
-using Blix.Graphics;
+using Blix.Assets;
+using Blix.Cooked;
 using Blix.Graphics.Images;
+using Blix.Graphics;
 using Microsoft.Toolkit.HighPerformance;
+using System.Diagnostics;
+using System.Numerics;
 
 // Blix asset cooker (CLI).
 //
@@ -20,26 +20,51 @@ using Microsoft.Toolkit.HighPerformance;
 // Runtime reads .blixtex with no decode + no compression cost; the cost
 // is paid here, once.
 
-if (args.Length < 1)
-{
-    PrintUsage();
-    return 1;
-}
+using Blix.Core;
 
-return args[0] switch
-{
-    "textures" => CookTextures(args),
-    "probe" => CookProbe(args),
-    "mesh" => CookMesh(args),
-    "list" => ListRecipes(),
-    "run" => RunRecipe(args),
-    "status" => Status(args),
-    "batch" => Batch(args),
-    "help" or "-h" or "--help" => Help(),
-    _ => UnknownVerb(args[0]),
-};
+namespace Blix.Tools.Cook;
 
-static void PrintUsage()
+/// <summary>Blix's asset cooker, addressable as <c>blix run cook</c>.</summary>
+/// <remarks>
+/// <b>A class rather than top-level statements, which is the whole of what this change was.</b> It
+/// was the last open cell in the tooling arc's Stage B table, and the row's point is why it
+/// mattered: <i>"Blix's tools are not special."</i> A launcher layer whose own cooker is the one
+/// thing it cannot address is a layer with an exception in it, and an exception is where the next
+/// one goes. Top-level statements have no method to hang an attribute on; every other tool here
+/// already declares a Program class, so this now matches them.
+/// <para>
+/// Nothing about how the cooker WORKS changed. The verbs, the helpers and their behaviour are the
+/// same code, one indent level in.
+/// </para>
+/// </remarks>
+public static class Program
+{
+    [BlixApp("cook", Summary = "run Blix's cooking recipes")]
+    public static int Main(string[] args)
+    {
+        ArgumentNullException.ThrowIfNull(args);
+
+        if (args.Length < 1)
+        {
+            PrintUsage();
+            return 1;
+        }
+
+        return args[0] switch
+        {
+            "textures" => CookTextures(args),
+            "probe" => CookProbe(args),
+            "mesh" => CookMesh(args),
+            "list" => ListRecipes(),
+            "run" => RunRecipe(args),
+            "status" => Status(args),
+            "batch" => Batch(args),
+            "help" or "-h" or "--help" => Help(),
+            _ => UnknownVerb(args[0]),
+        };
+    }
+
+    static void PrintUsage()
 {
     Console.WriteLine("blix cook — run Blix's cooking recipes.");
     Console.WriteLine();
@@ -68,7 +93,7 @@ static void PrintUsage()
     Console.WriteLine("                             prove the native simplifier and BC7 encoder load");
 }
 
-static int CookMesh(string[] args)
+    static int CookMesh(string[] args)
 {
     var (outDir, a) = ExtractOutDir(args);
     if (a.Length < 2)
@@ -206,7 +231,7 @@ static int CookMesh(string[] args)
 // give the model's size + forward axis. Read the values off this, hard-code the
 // pivots, and the model drops onto the rig with no blind dialing (see how
 // Blix.Demos.TankArena consumes the Quaternius tank).
-static int CookProbe(string[] args)
+    static int CookProbe(string[] args)
 {
     var (outDir, args2) = ExtractOutDir(args);
     if (args2.Length < 2)
@@ -260,13 +285,13 @@ static int CookProbe(string[] args)
     return 0;
 }
 
-static int Help()
+    static int Help()
 {
     PrintUsage();
     return 0;
 }
 
-static int UnknownVerb(string verb)
+    static int UnknownVerb(string verb)
 {
     Console.Error.WriteLine($"Unknown verb '{verb}'.");
     PrintUsage();
@@ -281,10 +306,10 @@ static int UnknownVerb(string verb)
 // about meshes, textures or probes and work on whatever recipes the assembly declares. A recipe
 // added tomorrow is listed, runnable and counted by them on the day it exists.
 
-static Blix.Cooked.FoundRecipe[] Recipes() =>
+    static Blix.Cooked.FoundRecipe[] Recipes() =>
     Blix.Cooked.BlixRecipes.Find(typeof(Blix.Recipes.MeshRecipe).Assembly);
 
-static int ListRecipes()
+    static int ListRecipes()
 {
     foreach (var r in Recipes())
     {
@@ -299,7 +324,7 @@ static int ListRecipes()
 // The uniform path. `mesh`, `textures` and `probe` stay because each carries real driver knowledge
 // this does not have -- out-of-place trees, parallelism, a native simplifier -- and folding those
 // in would make this a build system, which is policy. This is the entry a build rule uses.
-static int RunRecipe(string[] args)
+    static int RunRecipe(string[] args)
 {
     if (args.Length < 3)
     {
@@ -352,7 +377,7 @@ static int RunRecipe(string[] args)
 // and same importer -- and there was no way to find that out short of listing files by hand. Every
 // column below is read from the cooked artifacts' own preambles, so this knows nothing about any
 // particular format.
-static int Status(string[] args)
+    static int Status(string[] args)
 {
     var root = args.Length > 1 ? args[1] : ".";
     if (!Directory.Exists(root))
@@ -440,7 +465,7 @@ static int Status(string[] args)
 // this walks it.
 //
 // Each line is TAB-separated: recipeId, source, output, options (k=v, space separated).
-static int Batch(string[] args)
+    static int Batch(string[] args)
 {
     if (args.Length < 2)
     {
@@ -523,7 +548,7 @@ static int Batch(string[] args)
 // sources (the re-cook set) — e.g. sponza/ (cooked) vs sponza-src/ (raw).
 // Returns the output root (created) and `args` with `--out <dir>` removed, so
 // each verb's own argument parser doesn't trip over the flag or its value.
-static (string? OutDir, string[] Remaining) ExtractOutDir(string[] args)
+    static (string? OutDir, string[] Remaining) ExtractOutDir(string[] args)
 {
     var i = Array.FindIndex(args, a => a.Equals("--out", StringComparison.OrdinalIgnoreCase));
     if (i < 0) return (null, args);
@@ -541,7 +566,7 @@ static (string? OutDir, string[] Remaining) ExtractOutDir(string[] args)
 // Resolve a cooked output path. In-place (outDir null/empty): a sibling of
 // `source` with `newExt`. Out-of-place: mirror source's path relative to
 // `inRoot` under `outDir`, with `newExt`; the destination directory is created.
-static string ResolveDest(string source, string inRoot, string? outDir, string newExt)
+    static string ResolveDest(string source, string inRoot, string? outDir, string newExt)
 {
     if (string.IsNullOrEmpty(outDir))
         return Path.ChangeExtension(source, newExt);
@@ -551,7 +576,7 @@ static string ResolveDest(string source, string inRoot, string? outDir, string n
     return dest;
 }
 
-static int CookTextures(string[] args)
+    static int CookTextures(string[] args)
 {
     var (outDir, a) = ExtractOutDir(args);
     if (a.Length < 2)
@@ -696,11 +721,11 @@ static int CookTextures(string[] args)
     static string Mb(long bytes) => (bytes / 1024.0 / 1024.0).ToString("0.0");
 }
 
-static string FormatDuration(double seconds)
+    static string FormatDuration(double seconds)
 {
     if (seconds < 60) return $"{seconds:0}s";
     var minutes = (int)(seconds / 60);
     var remaining = (int)(seconds - minutes * 60);
     return $"{minutes}m{remaining:00}s";
 }
-
+}

@@ -454,7 +454,14 @@ grown their own copy — but `Blix.Tools.Shot` still keeps its own `ClipPlayer`s
 and does not reference `RigAnimation` at all. The wiring here is therefore duplicated in both tools
 rather than shared. Not addressed; recorded so the header stops being believed.
 
-### I-D — read every skin the file declares
+### I-D — read every skin the file declares — **DONE**
+
+**Marked late.** It shipped with the arc — no "primary skin" concept survives anywhere, nodes are
+grouped by the skin that drives them, and each gets its own remap, frame and palette. Verified again
+on 2026-09-17 by booting it: `tank.glb` reports **45 bones, 4 clips, 7 primitives, 10,104 vertices**,
+where before it took one skin and dropped six named primitives. `GltfSkipped.cs` is deleted; there
+is nothing left that skips.
+
 
 Today the importer picks the first node carrying both a mesh and a skin, calls that skin primary,
 and drops every skinned node referencing a different one. `tank.glb` is the asset: eleven primitives
