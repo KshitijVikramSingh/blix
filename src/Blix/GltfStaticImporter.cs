@@ -119,7 +119,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                     p.Name, p.VertexBytes, lod0.Indices16 ?? Array.Empty<ushort>(),
                     p.Layout, p.Bounds, Indices32: lod0.Indices32, Lods: lods),
                 GltfShared.MaterialFromCooked(
-                    cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache)));
+                    cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache, blixmeshPath)));
         }
 
         if (AssetLoadLog.Enabled)
@@ -241,7 +241,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 var prim = node.Mesh.Primitives[i];
                 var meshName = $"{node.Mesh.Name ?? node.Name ?? "gltf_mesh"}.{i}";
                 var meshData = BuildStaticMeshData(meshName, prim, world, normalMatrix, context.FlipTextureV, context.IncludeTangents, context.IncludeColour);
-                var material = GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache);
+                var material = GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache, context.SourcePath);
                 primitives.Add(new GltfPrimitive(meshData, material));
             }
         }
@@ -323,7 +323,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                     var name = $"{node.Name ?? mesh.Name ?? "node"}.{j}";
                     // Identity world + normal matrix → vertices stay in node-local space.
                     var meshData = BuildStaticMeshData(name, prim, Matrix4x4.Identity, Matrix4x4.Identity, context.FlipTextureV, context.IncludeTangents, context.IncludeColour);
-                    prims[j] = new GltfPrimitive(meshData, GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache));
+                    prims[j] = new GltfPrimitive(meshData, GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache, context.SourcePath));
                 }
             }
 

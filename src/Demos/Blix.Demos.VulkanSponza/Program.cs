@@ -406,7 +406,15 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
 
     // Material handle cached by glTF material (and a slot for the null/untextured
     // fallback) so de-batched per-primitive drawables don't build duplicates.
-    private readonly Dictionary<GltfMaterial, (MaterialHandle Mat, TextureHandle Albedo, float Cutoff, float Alpha)> materialCache = new();
+    // <b>Keyed by the material's IDENTITY, not by the object.</b> GltfMaterial is a record whose
+    // reference was the key here, so two imports of one file would build two GPU materials for one
+    // material — inert only because this demo loads each of its four packs exactly once.
+    //
+    // The identity is shared with the engine; the STORAGE is not, and that asymmetry is deliberate.
+    // A texture has one canonical GPU form, so TextureRegistry can hold it for everyone. A material
+    // does not: the UBO layout is this game's, and the value below is a Sponza-shaped tuple. A
+    // generic registry over that would be a type parameter pretending to be a shared decision.
+    private readonly Dictionary<string, (MaterialHandle Mat, TextureHandle Albedo, float Cutoff, float Alpha)> materialCache = new(StringComparer.Ordinal);
     private (MaterialHandle Mat, TextureHandle Albedo, float Cutoff, float Alpha)? noMaterialCache;
     public void Dispose() => fullscreen?.Dispose();
 

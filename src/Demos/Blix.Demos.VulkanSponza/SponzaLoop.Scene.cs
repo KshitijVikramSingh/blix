@@ -246,7 +246,9 @@ internal sealed partial class SponzaLoop
 
     private MaterialHandle GetMaterial(GltfMaterial? gm, out TextureHandle albedo, out float alphaCutoff, out float baseColorAlpha)
     {
-        if (gm is not null && materialCache.TryGetValue(gm, out var c))
+        // An unidentifiable material is never cached — an identity nobody can reproduce is not one,
+        // and a shared empty key would merge two unrelated materials into whichever built first.
+        if (gm is not null && gm.ResourceId.Length > 0 && materialCache.TryGetValue(gm.ResourceId, out var c))
         {
             (albedo, alphaCutoff, baseColorAlpha) = (c.Albedo, c.Cutoff, c.Alpha);
             return c.Mat;
@@ -258,7 +260,8 @@ internal sealed partial class SponzaLoop
         }
         var mat = BuildMaterial(gm, out albedo, out alphaCutoff, out baseColorAlpha);
         var entry = (mat, albedo, alphaCutoff, baseColorAlpha);
-        if (gm is not null) materialCache[gm] = entry; else noMaterialCache = entry;
+        if (gm is not null && gm.ResourceId.Length > 0) materialCache[gm.ResourceId] = entry;
+        else if (gm is null) noMaterialCache = entry;
         return mat;
     }
 

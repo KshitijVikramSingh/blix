@@ -78,7 +78,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                 new MeshData(
                     p.Name, p.VertexBytes, lod0.Indices16 ?? Array.Empty<ushort>(),
                     p.Layout, p.Bounds, Indices32: lod0.Indices32),
-                GltfShared.MaterialFromCooked(cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache),
+                GltfShared.MaterialFromCooked(cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache, rigPath),
                 SkinIndex: p.SkinIndex,
                 MaterialIndex: p.MaterialIndex);
         }
@@ -278,7 +278,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                     var prim = mesh.Primitives[i];
                     var meshName = $"{mesh.Name ?? "gltf_mesh"}.{i}";
                     var meshData = BuildMeshData(meshName, prim, skinRemap);
-                    var material = GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache);
+                    var material = GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache, context.SourcePath);
                     primitivesList.Add(new GltfPrimitive(
                         meshData, material, SkinIndex: s, MaterialIndex: prim.Material?.LogicalIndex ?? -1));
                 }
@@ -298,7 +298,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         for (var s = 0; s < skinOrder.Count; s++)
         {
             foreach (var found in CollectAttachments(
-                         model, skinOrder[s], remapsBySkin[s], materialCache, textureCache))
+                         model, skinOrder[s], remapsBySkin[s], materialCache, textureCache, context.SourcePath))
             {
                 if (!claimed.Add(found.Name)) continue;
                 attachments.Add(found with { SkinIndex = s });
@@ -325,7 +325,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                 var meshData = GltfStaticImporter.BuildStaticMeshData(
                     $"{name}.{i}", prim, Matrix4x4.Identity, Matrix4x4.Identity, includeColour: true);
                 parts.Add(new GltfPrimitive(
-                    meshData, GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache),
+                    meshData, GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache, context.SourcePath),
                     MaterialIndex: prim.Material?.LogicalIndex ?? -1));
             }
 
@@ -479,7 +479,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         Skin skin,
         int[] oldToNew,
         Dictionary<int, GltfMaterial> materialCache,
-        Dictionary<int, GltfTexture> textureCache)
+        Dictionary<int, GltfTexture> textureCache,
+        string containerPath)
     {
         var jointToSkinIndex = new Dictionary<Node, int>();
         for (var i = 0; i < skin.Joints.Count; i++) jointToSkinIndex[skin.Joints[i]] = i;
@@ -517,7 +518,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                 var meshData = GltfStaticImporter.BuildStaticMeshData(
                     name, prim, Matrix4x4.Identity, Matrix4x4.Identity, includeColour: true);
                 primitives.Add(new GltfPrimitive(
-                    meshData, GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache),
+                    meshData, GltfShared.ExtractMaterial(prim.Material, materialCache, textureCache, containerPath),
                     MaterialIndex: prim.Material?.LogicalIndex ?? -1));
             }
 

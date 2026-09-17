@@ -389,6 +389,14 @@ internal static class GltfShared
         if (decodedCount > 0) Console.WriteLine($"  decoded {decodedCount} images from source");
     }
 
+    /// <summary>What a material IS, as a string two loads agree on.</summary>
+    /// <remarks>
+    /// Empty when the caller cannot say which file it came from — never shared, for the same reason
+    /// an unnamed texture is not: an identity nobody can reproduce is not an identity.
+    /// </remarks>
+    private static string MaterialIdentity(string containerPath, int index) =>
+        containerPath.Length == 0 ? string.Empty : $"{Path.GetFullPath(containerPath)}#material{index}";
+
     /// <summary>What a glTF image's pixels ARE, as a string two loads agree on.</summary>
     /// <remarks>
     /// An external image is its own resolved path. An image embedded in a .glb has no path, so it
@@ -420,13 +428,15 @@ internal static class GltfShared
         IReadOnlyList<BlixMeshMaterial> materials,
         int index,
         Dictionary<int, GltfMaterial> materialCache,
-        Dictionary<int, GltfTexture> textureCache)
+        Dictionary<int, GltfTexture> textureCache,
+        string cookedPath = "")
     {
         if (index < 0 || index >= materials.Count) return null;
         if (materialCache.TryGetValue(index, out var cached)) return cached;
 
         var m = materials[index];
         var result = new GltfMaterial(
+            MaterialIdentity(cookedPath, index),
             m.Name,
             m.BaseColorFactor,
             Texture(m.BaseColorImage),
@@ -460,7 +470,8 @@ internal static class GltfShared
     internal static GltfMaterial? ExtractMaterial(
         SharpGLTF.Schema2.Material? material,
         Dictionary<int, GltfMaterial> materialCache,
-        Dictionary<int, GltfTexture> textureCache)
+        Dictionary<int, GltfTexture> textureCache,
+        string containerPath = "")
     {
         if (material is null) return null;
         if (materialCache.TryGetValue(material.LogicalIndex, out var cached)) return cached;
@@ -543,6 +554,7 @@ internal static class GltfShared
         }
 
         var result = new GltfMaterial(
+            MaterialIdentity(containerPath, material.LogicalIndex),
             material.Name ?? $"material_{material.LogicalIndex}",
             baseColorFactor,
             baseColorTexture,

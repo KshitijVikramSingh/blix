@@ -761,6 +761,36 @@ public static class Program
         t.Expect("resident bytes cover the identified textures", registry.ResidentBytes > 0,
             $"{registry.ResidentBytes} bytes");
 
+        // ── materials get the identity too, but not the registry ────────────
+        // <b>The split is the point.</b> A texture has one canonical GPU form, so a shared registry
+        // can hold it for everyone. A material does not — the UBO layout is the game's — so Sponza
+        // keeps its own storage and shares only the key. Asserted the same way: two loads agree.
+        if (idAsset is not null)
+        {
+            var matA = new Blix.GltfImporter()
+                .Import(new AssetImportContext(AssetId.Parse("t/mat-1"), idAsset));
+            var matB = new Blix.GltfImporter()
+                .Import(new AssetImportContext(AssetId.Parse("t/mat-2"), idAsset));
+
+            static string[] MaterialIds(Blix.GltfModel m) => m.Primitives
+                .Select(p => p.Material)
+                .Where(x => x is not null)
+                .Select(x => x!.ResourceId)
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(x => x, StringComparer.Ordinal)
+                .ToArray();
+
+            var idsA = MaterialIds(matA);
+            t.Expect("a load yields material identities", idsA.Length > 0, $"{idsA.Length}");
+            t.ExpectTrue("none of them is empty", idsA.All(x => x.Length > 0));
+            t.Expect("two loads agree on every material identity",
+                idsA.SequenceEqual(MaterialIds(matB), StringComparer.Ordinal),
+                $"[{string.Join(", ", idsA)}]");
+            t.ExpectTrue("and they are distinct per material",
+                idsA.Length == matA.Primitives.Select(p => p.Material?.ResourceId)
+                    .Where(x => !string.IsNullOrEmpty(x)).Distinct(StringComparer.Ordinal).Count());
+        }
+
         t.PrintSummary();
         return t.Failed;
     }
