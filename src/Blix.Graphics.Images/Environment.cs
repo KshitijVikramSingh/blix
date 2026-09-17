@@ -77,6 +77,21 @@ public sealed class EnvironmentProbe
     // directional light with the visible sun. Null for procedural sources
     // (the procedural sky already takes its sun direction from the profile).
     public Vector3? SunDirectionFromEquirect { get; init; }
+
+    /// <summary>
+    /// The sun's irradiance in the source's own units, when it was measured and removed.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is what makes a directional light and this probe commensurable.</b> Both come out of
+    /// one capture, so a light built from this number needs no scale factor against the IBL — and a
+    /// scale factor nobody can derive is precisely the hand-tuned knob it replaces.
+    /// <para>
+    /// Non-null implies the disc was removed from the diffuse and specular integrals, so a consumer
+    /// that ignores this value is not merely missing the sun — it is rendering a sky that has had
+    /// the sun taken out of it.
+    /// </para>
+    /// </remarks>
+    public Vector3? SunIrradiance { get; init; }
 }
 
 // Full IBL bundle returned by the cooked-probe load path: the on-GPU
@@ -202,13 +217,19 @@ public static class EnvironmentBaker
                 nameof(profile));
         }
 
+        // The visible sky keeps its sun; the lighting integrals below do not. See
+        // HdrSunFinder.WithoutSun — a renderer that adds a directional light for this same sun
+        // would otherwise deliver its energy twice, which no intensity can balance.
         var envPixels = EquirectangularToCubemap.Convert(hdr.Equirect, profile.EnvCubeFaceSize);
-        var sun = HdrSunFinder.FindSunDirection(hdr.Equirect);
+        var measured = HdrSunFinder.FindSun(hdr.Equirect);
+        var sun = measured?.Direction;
+        var lighting = measured is { } found ? HdrSunFinder.WithoutSun(hdr.Equirect, found) : hdr.Equirect;
+
         var irrPixels = PbrIblBaker.BakeDiffuseIrradiance(
-            hdr.Equirect, profile.IrradianceFaceSize,
+            lighting, profile.IrradianceFaceSize,
             sampleClampMagnitude: profile.SampleClampMagnitude);
         var prefilter = PbrIblBaker.BakeSpecularPrefilteredMips(
-            hdr.Equirect, profile.SpecularPrefilterBaseSize,
+            lighting, profile.SpecularPrefilterBaseSize,
             profile.SpecularPrefilterMipCount,
             sampleClampMagnitude: profile.SampleClampMagnitude);
         var brdfLut = PbrIblBaker.BakeBrdfLut(brdfLutSize);
@@ -220,6 +241,7 @@ public static class EnvironmentBaker
             PrefilterMipCount: profile.SpecularPrefilterMipCount,
             BrdfLutSize: brdfLutSize,
             SunDirection: sun,
+            SunIrradiance: measured?.Irradiance,
             EnvCube: envPixels,
             IrradianceCube: irrPixels,
             PrefilteredSpecular: prefilter,
@@ -268,6 +290,7 @@ public static class EnvironmentBaker
             PrefilteredSpecular = prefilterCube,
             PrefilteredSpecularMipCount = data.PrefilterMipCount,
             SunDirectionFromEquirect = data.SunDirection,
+            SunIrradiance = data.SunIrradiance,
         };
         return new BakedEnvironment(probe, brdfLut);
     }
@@ -282,10 +305,16 @@ public static class EnvironmentBaker
 
         var envMipCount = (int)MathF.Floor(MathF.Log2(profile.EnvCubeFaceSize)) + 1;
 
-        var sunDir = HdrSunFinder.FindSunDirection(hdr.Equirect);
+        // <b>The sun is measured, then taken out of the LIGHTING integrals only.</b> The env cube
+        // above keeps it — that is the sky people see and mirrors reflect. What follows must not,
+        // or its energy arrives twice: once through the irradiance and prefilter, and again through
+        // whatever directional light the renderer aims along SunDirectionFromEquirect.
+        var sun = HdrSunFinder.FindSun(hdr.Equirect);
+        var sunDir = sun?.Direction;
+        var lighting = sun is { } found ? HdrSunFinder.WithoutSun(hdr.Equirect, found) : hdr.Equirect;
 
         var irradiancePixels = PbrIblBaker.BakeDiffuseIrradiance(
-            hdr.Equirect, profile.IrradianceFaceSize,
+            lighting, profile.IrradianceFaceSize,
             sampleClampMagnitude: profile.SampleClampMagnitude);
         var irradianceCube = device.CreateTextureCubeHdr(
             profile.IrradianceFaceSize, irradiancePixels,
@@ -293,7 +322,7 @@ public static class EnvironmentBaker
             name: $"{namePrefix}.env_irradiance");
 
         var prefilteredMips = PbrIblBaker.BakeSpecularPrefilteredMips(
-            hdr.Equirect, profile.SpecularPrefilterBaseSize,
+            lighting, profile.SpecularPrefilterBaseSize,
             profile.SpecularPrefilterMipCount,
             sampleClampMagnitude: profile.SampleClampMagnitude);
         var prefilteredCube = device.CreateTextureCubeHdrMipped(
@@ -309,6 +338,7 @@ public static class EnvironmentBaker
             PrefilteredSpecular = prefilteredCube,
             PrefilteredSpecularMipCount = profile.SpecularPrefilterMipCount,
             SunDirectionFromEquirect = sunDir,
+            SunIrradiance = sun?.Irradiance,
         };
     }
 

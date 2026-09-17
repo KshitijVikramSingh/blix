@@ -43,8 +43,12 @@ public static class BlixProbe
     // This format already recorded five of its six cook parameters in its own
     // header -- the one of the three that had worked out it should be
     // reproducible -- and the preamble generalises that to all of them.
-    public const uint Version2 = 2;
-    public const int HeaderSize = 36;
+    // v3: the sun's IRRADIANCE rides with its direction. Without it a consumer knows where the sun
+    // is and not how bright, so it reaches for a hand-tuned intensity — and since v3 also removes
+    // the sun's disc from the diffuse and specular integrals, a reader that ignores this number is
+    // rendering a sky with the sun taken out of it.
+    public const uint Version3 = 3;
+    public const int HeaderSize = 48;
 
     /// <summary>The recipe id the shipped probe cook stamps.</summary>
     public const string ShippedRecipe = "gpro";
@@ -57,6 +61,9 @@ public static class BlixProbe
     {
         None = 0,
         HasSunDirection = 1 << 0,
+
+        /// <summary>The disc was removed from the lighting integrals and its irradiance recorded.</summary>
+        HasSunIrradiance = 1 << 1,
     }
 }
 
@@ -67,6 +74,7 @@ public sealed record BlixProbeData(
     int PrefilterMipCount,
     int BrdfLutSize,
     Vector3? SunDirection,
+    Vector3? SunIrradiance,
     Half[] EnvCube,
     Half[] IrradianceCube,
     Half[][] PrefilteredSpecular,
@@ -87,11 +95,12 @@ public static class BlixProbeWriter
         }
 
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        CookPreamble.Write(fs, BlixProbe.Magic, BlixProbe.Version2, stamp);
+        CookPreamble.Write(fs, BlixProbe.Magic, BlixProbe.Version3, stamp);
         using var bw = new BinaryWriter(fs);
 
         var flags = BlixProbe.Flags.None;
         if (data.SunDirection.HasValue) flags |= BlixProbe.Flags.HasSunDirection;
+        if (data.SunIrradiance.HasValue) flags |= BlixProbe.Flags.HasSunIrradiance;
 
         bw.Write((uint)flags);
         bw.Write(data.EnvFaceSize);
@@ -103,6 +112,10 @@ public static class BlixProbeWriter
         bw.Write(sun.X);
         bw.Write(sun.Y);
         bw.Write(sun.Z);
+        var irradiance = data.SunIrradiance ?? Vector3.Zero;
+        bw.Write(irradiance.X);
+        bw.Write(irradiance.Y);
+        bw.Write(irradiance.Z);
 
         WriteHalves(bw, data.EnvCube);
         WriteHalves(bw, data.IrradianceCube);
@@ -127,7 +140,7 @@ public static class BlixProbeReader
         ArgumentNullException.ThrowIfNull(path);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        CookPreamble.Read(fs, path).Require(BlixProbe.Magic, BlixProbe.Version2, path, ".blixprobe");
+        CookPreamble.Read(fs, path).Require(BlixProbe.Magic, BlixProbe.Version3, path, ".blixprobe");
         return AssetImportException.Refusing(path, () => ReadBody(fs, path), ".blixprobe");
     }
 
@@ -142,6 +155,7 @@ public static class BlixProbeReader
         var prefilterMipCount = br.ReadInt32();
         var brdfLutSize = br.ReadInt32();
         var sun = new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
+        var sunIrradiance = new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
 
         var envCube = ReadHalves(br, 4 * 6 * envFace * envFace);
         var irrCube = ReadHalves(br, 4 * 6 * irrFace * irrFace);
@@ -165,6 +179,7 @@ public static class BlixProbeReader
             PrefilterMipCount: prefilterMipCount,
             BrdfLutSize: brdfLutSize,
             SunDirection: flags.HasFlag(BlixProbe.Flags.HasSunDirection) ? sun : null,
+            SunIrradiance: flags.HasFlag(BlixProbe.Flags.HasSunIrradiance) ? sunIrradiance : null,
             EnvCube: envCube,
             IrradianceCube: irrCube,
             PrefilteredSpecular: prefilter,

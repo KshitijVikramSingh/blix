@@ -11,8 +11,156 @@ namespace Blix.Graphics.Images;
 //
 // Co-located with the IBL baker because both consume HdrImageData via the
 // equirect spherical mapping.
+/// <summary>What the sun in an HDR actually is: where it points, and how much light it delivers.</summary>
+/// <param name="Direction">FROM the sun INTO the scene, matching the engine's light convention.</param>
+/// <param name="Irradiance">
+/// Per-channel irradiance on a surface facing the sun, in the HDR's own units — the integral of
+/// radiance over the sun's solid angle.
+/// </param>
+/// <param name="CosAngularRadius">
+/// The cosine of the disc's angular radius, which is what lets the bake remove it.
+/// </param>
+public readonly record struct HdrSun(
+    System.Numerics.Vector3 Direction,
+    System.Numerics.Vector3 Irradiance,
+    float CosAngularRadius);
+
 public static class HdrSunFinder
 {
+    /// <summary>
+    /// The sun's direction AND the energy it carries, in the source's own units.
+    /// </summary>
+    /// <remarks>
+    /// <b>The brightness was already computed here and thrown away.</b> Only the direction came
+    /// back, so a renderer wanting a directional light to match the sky had no number to use and
+    /// reached for a hand-tuned one — VulkanSponza's was 9.42, which is 3π, chosen to "match the old
+    /// look" by its own comment.
+    /// <para>
+    /// <b>Measuring it is what makes the sun and the sky commensurable.</b> Both come out of one
+    /// capture in one set of units, so a directional light built from this needs no scale factor
+    /// against the IBL baked from the same file — and a scale factor nobody can derive is exactly
+    /// the knob this replaces.
+    /// </para>
+    /// <para>
+    /// Irradiance rather than radiance, because that is what a directional light delivers: the
+    /// integral of radiance over the disc's solid angle. A single pixel's radiance would be a number
+    /// that changes with the HDR's resolution, which is not a property of the sun.
+    /// </para>
+    /// </remarks>
+    public static HdrSun? FindSun(HdrImageData src)
+    {
+        ArgumentNullException.ThrowIfNull(src);
+
+        if (FindSunDirection(src) is not { } direction) return null;
+
+        // The disc is every pixel within a small angle of the peak, which is how a sun is found
+        // without assuming its size: HDRIs differ, and a fixed pixel radius would take a sliver of a
+        // large sun and a chunk of sky around a small one.
+        const float AngularRadius = 0.03f;          // ~1.7°, a little over the real sun's 0.53°
+        var cosRadius = MathF.Cos(AngularRadius);
+
+        // Solid angle of one equirect texel: dω = (2π/W)(π/H)·sin(phi). The sin term is why a naive
+        // pixel sum over-weights the poles, where texels cover almost no sky.
+        var dPhi = MathF.PI / src.Height;
+        var dTheta = 2.0f * MathF.PI / src.Width;
+
+        var irradiance = System.Numerics.Vector3.Zero;
+        for (var y = 0; y < src.Height; y++)
+        {
+            var phi = (y + 0.5f) / src.Height * MathF.PI;
+            var sinPhi = MathF.Sin(phi);
+            var solidAngle = dTheta * dPhi * sinPhi;
+            if (solidAngle <= 0.0f) continue;
+
+            for (var x = 0; x < src.Width; x++)
+            {
+                var toPixel = -EquirectDirection((x + 0.5f) / src.Width, (y + 0.5f) / src.Height);
+                var cosine = System.Numerics.Vector3.Dot(toPixel, direction);
+                if (cosine < cosRadius) continue;
+
+                var i = (y * src.Width + x) * 4;
+                // Weighted by cos(theta) as well as solid angle: irradiance is what lands on a
+                // surface facing the sun, not the raw radiance sum.
+                var w = solidAngle * cosine;
+                irradiance += new System.Numerics.Vector3(
+                    src.Pixels[i] * w, src.Pixels[i + 1] * w, src.Pixels[i + 2] * w);
+            }
+        }
+
+        return new HdrSun(direction, irradiance, cosRadius);
+    }
+
+    /// <summary>
+    /// The same sky with the sun's disc replaced by the sky immediately around it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because otherwise the sun is counted twice.</b> The irradiance and prefiltered-specular
+    /// integrals include every pixel of the source, sun included — and a renderer that also adds a
+    /// directional light for that same sun delivers its energy through two paths at once. No choice
+    /// of intensity can balance that, which is exactly why both of VulkanSponza's intensity knobs
+    /// had to be found by eye.
+    /// <para>
+    /// The VISIBLE sky keeps its sun; only the lighting integrals lose it. A skybox with a hole
+    /// where the sun should be is wrong in a way anyone can see, and a mirror reflecting that hole
+    /// is worse.
+    /// </para>
+    /// <para>
+    /// Filled with the mean radiance of the annulus just outside the disc rather than with black.
+    /// Zeroing it would replace "sun counted twice" with "a dark spot in every reflection", trading
+    /// one visible error for another; the surrounding sky is what would be there if the sun were not.
+    /// </para>
+    /// </remarks>
+    public static HdrImageData WithoutSun(HdrImageData src, HdrSun sun)
+    {
+        ArgumentNullException.ThrowIfNull(src);
+
+        // The annulus: just outside the disc, out to twice its angular radius. Wide enough to
+        // average over sky rather than over the sun's own bloom, narrow enough to stay local.
+        var cosOuter = MathF.Cos(MathF.Acos(sun.CosAngularRadius) * 2.0f);
+
+        var fill = System.Numerics.Vector3.Zero;
+        var fillCount = 0;
+        var inside = new List<int>();
+
+        for (var y = 0; y < src.Height; y++)
+        {
+            for (var x = 0; x < src.Width; x++)
+            {
+                var toPixel = -EquirectDirection((x + 0.5f) / src.Width, (y + 0.5f) / src.Height);
+                var cosine = System.Numerics.Vector3.Dot(toPixel, sun.Direction);
+                var i = (y * src.Width + x) * 4;
+
+                if (cosine >= sun.CosAngularRadius) { inside.Add(i); continue; }
+                if (cosine < cosOuter) continue;
+
+                fill += new System.Numerics.Vector3(src.Pixels[i], src.Pixels[i + 1], src.Pixels[i + 2]);
+                fillCount++;
+            }
+        }
+
+        if (inside.Count == 0) return src;
+
+        var mean = fillCount > 0 ? fill / fillCount : System.Numerics.Vector3.Zero;
+        var pixels = (float[])src.Pixels.Clone();
+        foreach (var i in inside)
+        {
+            pixels[i] = mean.X; pixels[i + 1] = mean.Y; pixels[i + 2] = mean.Z;
+        }
+
+        return src with { Pixels = pixels };
+    }
+
+    /// <summary>The world direction an equirect pixel looks toward.</summary>
+    internal static System.Numerics.Vector3 EquirectDirection(float u, float v)
+    {
+        var theta = (u - 0.5f) * 2.0f * MathF.PI;
+        var phi = v * MathF.PI;
+        var cy = MathF.Cos(phi);
+        var horiz = MathF.Sqrt(MathF.Max(1.0f - cy * cy, 0.0f));
+        return System.Numerics.Vector3.Normalize(
+            new System.Numerics.Vector3(horiz * MathF.Cos(theta), cy, horiz * MathF.Sin(theta)));
+    }
+
     public static System.Numerics.Vector3? FindSunDirection(HdrImageData src)
     {
         ArgumentNullException.ThrowIfNull(src);
