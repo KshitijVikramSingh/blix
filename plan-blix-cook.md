@@ -454,7 +454,7 @@ what would END it in terms someone can check. Run against this plan's own parks:
 | `.blixtex` / `.blixprobe` — "no consumer" | **proven, then orphaned by a drive.** `d376b39` records what they bought: *"Sponza Modern startup: ~6s → ~0.5s."* `568c1d4` moved the pack set to an external SSD seven days later for portability. The census 107 days on read that absence as absence of a requirement | **re-mount `BLIX_SPONZA_ASSETS` and re-run `blix check --cooked`.** Not "a consumer appears" |
 | **K-F — materials** | ~~half blocked, and the wrong half~~ — **DONE.** `.blixmesh` v5 carries every material property except image bytes; the loader reads them instead of re-walking the glTF | ~~cook everything but the bytes, and let the flag record what remains~~ — met, via `SourceRequiredForImagesOnly` |
 | **K-G second half** — "a project declares a recipe" | ~~a test, not a design~~ — **DONE.** `RTSGame.Cooking` declares `omsh`; it cost one file and one project reference, plus three fixes to promises the tree had already made | ~~one recipe declared outside `Blix.*`~~ — met |
-| **D5 — grouping** | **genuinely open, and it survives §8.** Atlas, texture array, streaming pool and content-addressed store are DIFFERENT SHAPES, and §4's own worked example is exactly this: two nav systems were not unified because unifying different algorithms forces one shape onto two | **a measured scene whose texture bytes do not fit**, which is a number, not a request |
+| **D5 — grouping** | **survives §8 as three questions, not one.** Atlas, texture array and streaming pool are DIFFERENT SHAPES — §4's own worked example, where two nav systems were not unified because unifying different algorithms forces one shape onto two. But one end condition for three shapes is no end condition, and *"texture bytes do not fit"* never said what they do not fit | **split into D5-a / D5-b / D5-c**, each naming a thing to measure — binds, split batches, resident bytes |
 
 And the same re-read applies once more, outside this plan: **resource identity**. Eight files carry
 a hand-rolled cache — `GltfShared`, `GltfStaticImporter`, `GltfImporter`, `GltfTextureLoader`,
@@ -473,17 +473,26 @@ anything.**
 | **D2** | is a stale cooked file an error, a warning, or ignored? | **visible before enforced** — the stamp makes it checkable in K-A; the loader does not refuse |
 | **D3 / Q-E** | do materials get cooked? | **yes, and they are** — K-F shipped everything but image bytes; the flag now names what remains |
 | **D4 / Q-A** | is cook a transform or a state? | **state**, as a build rule — K-D. Decided by the shader pipeline, not by preference |
-| **D5** | can the texture cook reach how Blix assets are authored? | **parked, with a wall** — see "the chain" |
+| **D5-a** | does per-texture binding cost us draws? (**atlas**) | **open** — ends when descriptor-set changes or draw calls per frame exceed budget *because* each texture is its own resource |
+| **D5-b** | do instanced draws split on texture? (**texture array**) | **open** — ends when an instanced batch is broken by texture, countable as batches that would otherwise be one |
+| **D5-c** | do resident textures exceed the GPU? (**streaming pool**) | **open** — ends when resident texture bytes exceed the budget on a machine someone runs |
 | **Q-B** | who owns the options? | **header records what was done; project records what should be done** |
 | **Q-C** | does cooking stay invisible at load? | **engine reports, check asserts** — K-E |
 | **Q-D** | what is cooking for? | whatever a project needs. Three economics, and the report distinguishes them |
 | **Q-F** | is cook one tool or three? | **a host for recipes** — K-C |
 
-**D5 is deferred deliberately.** Every asset in the tree embeds its textures, and a sideloaded
-`.blixtex` needs a file URI, so the texture cook is unreachable by construction for how Blix content
-is authored. The two answers — an unpack step, or textures cooked *into* a container rather than
-beside one — both want the format family settled first, and neither has a consumer asking. It is
-recorded here so it is deferred rather than forgotten.
+**D5 was one name over three questions, which is why it was never actionable.** It asked "can the
+texture cook reach how Blix assets are authored?" and its end condition read *"a measured scene whose
+texture bytes do not fit"* — which does not say what they do not fit. §8 requires a deferral to name
+what would end it in terms someone can check, and that does not qualify. Worse, this plan already
+said atlas, texture array and streaming pool are DIFFERENT SHAPES; if they are, they cannot share one
+end condition. Split above into D5-a, D5-b and D5-c, each with a thing to measure.
+
+**Its original premise is also gone.** It read: *"Every asset in the tree embeds its textures, and a
+sideloaded `.blixtex` needs a file URI, so the texture cook is unreachable by construction."* K-H
+removed that — the cook extracts embedded images and cooks them, which is how the knight's ten
+textures were cooked at all. D5's three questions are still open; the wall they were parked behind is
+not there any more.
 
 ---
 
@@ -532,10 +541,12 @@ measured cost is four character assets.
 So this is a wall rather than a queue, and pushing on it means inventing the requirement that
 justifies the design — which is the failure mode this whole arc was written against.
 
-### What that makes K-F and D5
+### What that made K-F and D5
 
-**Both parked, with the reason recorded rather than rediscovered.** Neither is "not done yet"; both
-are blocked on a decision that has nothing to decide it. The day a project's numbers hurt — real PBR
+**K-F shipped; D5 split.** K-F turned out not to be blocked at all — it had collapsed two questions
+into one, and cooking material VALUES needed no answer about texture packing. D5 was three questions
+under one name. What follows is the reasoning as it stood, kept because the wall it describes was
+real for textures even though it was never K-F's. The day a project's numbers hurt — real PBR
 content, or shipping without sources — the requirement will design the format, and
 `blix check --cooked` is the instrument that will say when that day arrives, per project, in
 milliseconds.

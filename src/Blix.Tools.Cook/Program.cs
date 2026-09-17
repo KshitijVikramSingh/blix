@@ -152,6 +152,47 @@ public static class Program
         return 0;
     }
 
+    /// <summary>Every output path claimed by more than one line, described for a person.</summary>
+    /// <remarks>
+    /// A pure function over the batch lines so it can be tested without a build, a recipe or a
+    /// disk: the thing worth asserting is that two claims on one path are caught, not that the cook
+    /// can read a file.
+    /// </remarks>
+    public static IEnumerable<string> FindOutputCollisions(IEnumerable<string> lines)
+    {
+        ArgumentNullException.ThrowIfNull(lines);
+
+        var claims = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var line in lines)
+        {
+            if (line.Length == 0) continue;
+            var parts = line.Split('\t');
+            if (parts.Length < 3) continue;
+
+            var describedAs = parts.Length > 3 && parts[3].Length > 0
+                ? $"{parts[1]} ({parts[0]}, {parts[3]})"
+                : $"{parts[1]} ({parts[0]})";
+
+            if (!claims.TryGetValue(parts[2], out var claimants))
+            {
+                claims[parts[2]] = claimants = new List<string>();
+            }
+
+            claimants.Add(describedAs);
+        }
+
+        foreach (var (output, claimants) in claims)
+        {
+            if (claimants.Count < 2) continue;
+            yield return
+                $"{claimants.Count} declarations write '{output}':" + Environment.NewLine
+                + string.Join(Environment.NewLine, claimants.Select(c => "         " + c))
+                + Environment.NewLine
+                + "       A cooked path is derived from the source's name, so these overwrite each "
+                + "other and the last one wins. Cook them to different sources, or declare one.";
+        }
+    }
+
     static string? ValueOf(string[] args, string name)
     {
         var i = Array.IndexOf(args, name);
@@ -574,10 +615,30 @@ public static class Program
         return 2;
     }
 
+    var lines = File.ReadAllLines(args[1]);
+
+    // <b>Two declarations that write one file is an error, not a race.</b> The build rule derives a
+    // cooked path from the source's name alone, so two BlixCook items for one source — differing
+    // only in Options — both cook and the second silently overwrites the first. Demonstrated:
+    // declaring Villager.obj at recenter=0 and recenter=1 produced two "cooked omsh" lines, one
+    // Villager.blixmesh, no warning, and the survivor was whichever came last. The consumer whose
+    // settings lost then has its cooked file refused by the loader's guard and walks the source
+    // forever — correct, slow, and traceable to nothing.
+    //
+    // Refused rather than disambiguated, which is this tree's standing answer to ambiguity:
+    // BlixRecipes.For returns null rather than guessing when two recipes accept one extension, and
+    // the app indexer refuses two recipes sharing an id. Naming the settings in the path would be a
+    // design — one with no consumer asking for it — and picking a winner silently is what this is.
+    foreach (var collision in FindOutputCollisions(lines))
+    {
+        Console.Error.WriteLine($"blix cook batch: {collision}");
+        return 1;
+    }
+
     var recipes = Recipes();
     int cooked = 0, skipped = 0;
 
-    foreach (var line in File.ReadAllLines(args[1]))
+    foreach (var line in lines)
     {
         if (line.Length == 0) continue;
         var parts = line.Split('\t');

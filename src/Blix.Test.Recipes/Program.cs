@@ -638,6 +638,44 @@ public static class Program
             }
         }
 
+        // ── two declarations for one output are refused ─────────────────────
+        // <b>A cooked path is derived from the source's NAME, so settings are not in it.</b> Two
+        // BlixCook items for one source differing only in Options therefore both cook and both
+        // write the same file — demonstrated by declaring Villager.obj at recenter=0 and recenter=1
+        // and watching two "cooked omsh" lines produce one artifact, no warning, last one winning.
+        // The consumer whose settings lost then has its cooked file refused by the loader's guard
+        // and walks the source forever, traceable to nothing.
+        //
+        // Refusing is this tree's standing answer to ambiguity — BlixRecipes.For returns null
+        // rather than guessing between two recipes that accept one extension — and it is the answer
+        // that needs no design. Putting settings in the path would be one, and nothing is asking.
+        var tab = "\t";
+        var collidingBatch = new[]
+        {
+            $"omsh{tab}/a/Villager.obj{tab}/a/Villager.blixmesh{tab}recenter=0",
+            $"omsh{tab}/a/Villager.obj{tab}/a/Villager.blixmesh{tab}recenter=1",
+        };
+        var collisions = Blix.Tools.Cook.Program.FindOutputCollisions(collidingBatch).ToArray();
+        t.Expect("two declarations writing one file are caught", collisions.Length == 1,
+            $"{collisions.Length} collision(s)");
+        t.ExpectTrue("and the message names the output",
+            collisions.Length == 1 && collisions[0].Contains("/a/Villager.blixmesh", StringComparison.Ordinal));
+        t.ExpectTrue("and both claimants, with what differs",
+            collisions.Length == 1
+            && collisions[0].Contains("recenter=0", StringComparison.Ordinal)
+            && collisions[0].Contains("recenter=1", StringComparison.Ordinal));
+
+        // The control: distinct outputs are not a collision, or the check would refuse every build.
+        var fineBatch = new[]
+        {
+            $"omsh{tab}/a/Villager.obj{tab}/a/Villager.blixmesh{tab}recenter=0",
+            $"omsh{tab}/a/Bush_1.obj{tab}/a/Bush_1.blixmesh{tab}recenter=1",
+            string.Empty,
+            "malformed line with no tabs",
+        };
+        t.Expect("distinct outputs are not a collision",
+            !Blix.Tools.Cook.Program.FindOutputCollisions(fineBatch).Any(), "reported one anyway");
+
         t.PrintSummary();
         return t.Failed;
     }

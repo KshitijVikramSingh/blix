@@ -11,6 +11,10 @@
     <ProjectReference Include="..\Blix.Verify\Blix.Verify.csproj" />
     <ProjectReference Include="..\Blix.Cooked\Blix.Cooked.csproj" />
     <ProjectReference Include="..\Blix.Recipes\Blix.Recipes.csproj" />
+    <!-- The cook host, for one pure function: the batch collision check. Referencing the
+         tool rather than moving the check into Blix.Cooked keeps it where the knowledge
+         is — the batch line's shape is the build rule's, not a recipe's. -->
+    <ProjectReference Include="..\Blix.Tools.Cook\Blix.Tools.Cook.csproj" />
   </ItemGroup>
 
 </Project>
