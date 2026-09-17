@@ -286,7 +286,9 @@ public sealed class StudioRig : IDisposable
             new byte[] { 255, 255, 255, 255 }, "lab.rig.white");
         rig.ownedTextures.Add(white);
 
-        var uploaded = new Dictionary<GltfTexture, TextureHandle>();
+        // Keyed by what a texture IS. Was a Dictionary<GltfTexture, TextureHandle>, which keys on
+        // an object with no value equality — see TextureRegistry for why that cannot share.
+        var uploaded = new TextureRegistry();
         for (var i = 0; i < imported.Primitives.Length; i++)
         {
             var primitive = imported.Primitives[i];
@@ -571,10 +573,9 @@ public sealed class StudioRig : IDisposable
         VulkanGraphicsDevice vk,
         GltfTexture? texture,
         TextureHandle white,
-        Dictionary<GltfTexture, TextureHandle> uploaded)
+        TextureRegistry uploaded)
     {
         if (texture is null) return white;
-        if (uploaded.TryGetValue(texture, out var existing)) return existing;
 
         // <b>A cooked texture arrives LAZY and MIPPED, and this read knew neither shape.</b>
         // GltfTexture carries its pixels one of two ways: MipBytes in RAM (the PNG-decode path) or
@@ -606,22 +607,20 @@ public sealed class StudioRig : IDisposable
         // "MTLPixelFormatBC7_RGBAUnorm_sRGB is not color renderable", during upload rather than
         // during a draw. A cooked texture already carries every level, which is what the cook is
         // for, so the chain is handed over whole.
-        var handle = mips.Count > 1
-            ? vk.CreateTexture2DMipped(
-                new TextureDescription(texture.Width, texture.Height, texture.Format, SamplerDescription.LinearRepeat),
-                mips,
-                $"lab.rig.albedo.{texture.Name}")
-            : vk.CreateTexture2D(
-                new TextureDescription(texture.Width, texture.Height, texture.Format, SamplerDescription.LinearRepeat),
-                mips[0],
-                $"lab.rig.albedo.{texture.Name}");
+        return uploaded.GetOrAdd(texture, texture.Format, () =>
+        {
+            var description = new TextureDescription(
+                texture.Width, texture.Height, texture.Format, SamplerDescription.LinearRepeat);
+            var handle = mips.Count > 1
+                ? vk.CreateTexture2DMipped(description, mips, $"lab.rig.albedo.{texture.Name}")
+                : vk.CreateTexture2D(description, mips[0], $"lab.rig.albedo.{texture.Name}");
 
-        uploaded[texture] = handle;
-        ownedTextures.Add(handle);
-        images.Add(new Image(
-            string.IsNullOrEmpty(texture.Name) ? $"albedo {images.Count}" : texture.Name,
-            handle, texture.Width, texture.Height));
-        return handle;
+            ownedTextures.Add(handle);
+            images.Add(new Image(
+                string.IsNullOrEmpty(texture.Name) ? $"albedo {images.Count}" : texture.Name,
+                handle, texture.Width, texture.Height));
+            return handle;
+        });
     }
 
     /// <summary>Which bones some vertex actually weights, read off the vertex data. No device needed.</summary>

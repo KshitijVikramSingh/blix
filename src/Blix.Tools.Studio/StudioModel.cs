@@ -1,5 +1,6 @@
 using System.Numerics;
 using Blix;
+using Blix.Graphics.Images;
 using Blix.Assets;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
@@ -85,7 +86,11 @@ public sealed class StudioModel : IDisposable
     private VulkanGraphicsDevice device = null!;
     private readonly List<TextureHandle> ownedTextures = new();
     private readonly List<Image> images = new();
-    private readonly Dictionary<GltfTexture, TextureHandle> uploaded = new();
+    // <b>Keyed by what a texture IS, not by which object asked.</b> This was a
+    // Dictionary<GltfTexture, TextureHandle>, and GltfTexture has no value equality — so two loads
+    // of one file uploaded the same pixels twice and nothing could be counted. One of three places
+    // that hand-rolled the same broken key; see TextureRegistry.
+    private readonly TextureRegistry uploaded = new();
     private TextureHandle white;
     private readonly List<Part> parts = new();
     private readonly List<Node> nodes = new();
@@ -105,7 +110,7 @@ public sealed class StudioModel : IDisposable
     public string SourcePath { get; private set; } = string.Empty;
 
     /// <summary>How many distinct base-colour textures were uploaded. Zero means every part is untextured.</summary>
-    public int TextureCount => uploaded.Count;
+    public int TextureCount => uploaded.ResidentCount;
 
     /// <summary>Parts whose material carries a real base-colour texture rather than the white stand-in.</summary>
     public int TexturedPartCount { get; private set; }
@@ -228,23 +233,43 @@ public sealed class StudioModel : IDisposable
     private TextureHandle UploadAlbedo(VulkanGraphicsDevice vk, GltfTexture? texture)
     {
         if (texture is null) return white;
-        if (uploaded.TryGetValue(texture, out var existing)) return existing;
 
-        // Top mip only. A lab wants the picture, not the streaming pipeline — the cooked
-        // .blixtex path and progressive upload live in VulkanSponza, which earned them.
-        var mip0 = texture.MipBytes is { Count: > 0 } mips ? mips[0] : null;
-        if (mip0 is null) return white;
+        // <b>A cooked texture arrives LAZY, with its bytes still on disk.</b> This read MipBytes
+        // and fell through to `white` when it was null — silently — under a comment saying the
+        // cooked path "lives in VulkanSponza, which earned them". That reads as a missing
+        // optimisation and behaves as a missing texture: a model whose albedo was cooked drew
+        // blank. StudioRig had the identical defect and was fixed when a person looked at a
+        // character and said it was blown out; leaving it in the twin is how the twin becomes the
+        // one nobody checks.
+        //
+        // The whole chain uploads, not just mip 0: CreateTexture2D downsamples by blitting, which a
+        // BC format cannot do — MoltenVK refuses it outright, during upload rather than a draw.
+        var mips = texture.MipBytes is { Count: > 0 } eager
+            ? eager
+            : texture.LazyHandle is { } lazy
+                ? Enumerable.Range(0, lazy.MipCount).Select(i => BlixTexReader.ReadMip(lazy, i)).ToArray()
+                : null;
 
-        var handle = vk.CreateTexture2D(
-            new TextureDescription(texture.Width, texture.Height, texture.Format, SamplerDescription.LinearRepeat),
-            mip0,
-            $"lab.albedo.{texture.Name}");
-        uploaded[texture] = handle;
-        ownedTextures.Add(handle);
-        images.Add(new Image(
-            string.IsNullOrEmpty(texture.Name) ? $"albedo {images.Count}" : texture.Name,
-            handle, texture.Width, texture.Height));
-        return handle;
+        if (mips is null || mips.Count == 0)
+        {
+            Console.WriteLine($"[lab] albedo '{texture.Name}' has no readable mips — drawing white.");
+            return white;
+        }
+
+        return uploaded.GetOrAdd(texture, texture.Format, () =>
+        {
+            var description = new TextureDescription(
+                texture.Width, texture.Height, texture.Format, SamplerDescription.LinearRepeat);
+            var handle = mips.Count > 1
+                ? vk.CreateTexture2DMipped(description, mips, $"lab.albedo.{texture.Name}")
+                : vk.CreateTexture2D(description, mips[0], $"lab.albedo.{texture.Name}");
+
+            ownedTextures.Add(handle);
+            images.Add(new Image(
+                string.IsNullOrEmpty(texture.Name) ? $"albedo {images.Count}" : texture.Name,
+                handle, texture.Width, texture.Height));
+            return handle;
+        });
     }
 
     // World-space bounds of one primitive. Walks positions rather than trusting an authored
