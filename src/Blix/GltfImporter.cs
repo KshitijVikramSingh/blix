@@ -736,14 +736,21 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             max = Vector3.Max(max, p);
 
             var n = normals?[v] ?? new Vector3(0.0f, 1.0f, 0.0f);
-            // glTF stores UV with origin top-left (Y-down per spec); the engine's
-            // existing texture pipeline flips images on load to put PNG's top
-            // row at GL UV.y=1 (matching the Y-up convention OBJ UVs author for).
-            // Flip the glTF UV.y at the import boundary so the imported vertex
-            // stream lives in the same UV convention as everything else — shader
-            // stays format-agnostic.
-            var rawUv = uvs?[v] ?? Vector2.Zero;
-            var uv = new Vector2(rawUv.X, 1.0f - rawUv.Y);
+            // <b>No flip. glTF's UV origin is top-left, the image decoder now returns rows
+            // top-down, and Vulkan samples top-left — so the three already agree.</b>
+            //
+            // This used to read `1.0f - rawUv.Y`, under a comment explaining that it existed to
+            // compensate the texture pipeline flipping images on load "to put PNG's top row at GL
+            // UV.y=1". That was a faithful description of a real chain, and every link of it was a
+            // workaround for the first: ImageLoader flipped for OpenGL, so the rigged importer
+            // flipped its UVs back, while the static importer left it to each caller via
+            // flipTextureV — which exactly one consumer remembered to pass. Three different
+            // compensations for one decoder flag, and an asset rendered correctly only if its path
+            // happened to carry an even number of them.
+            //
+            // Removing the flag removed the reason for all three. Verified against Khronos's
+            // TextureCoordinateTest, which renders "Top Left" upright at the top-left.
+            var uv = uvs?[v] ?? Vector2.Zero;
 
             // Remap joint indices through the topo-sort. Each slot is a float that
             // we cast to int, look up, and store back as float (the vertex shader

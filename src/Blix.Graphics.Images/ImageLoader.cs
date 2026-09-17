@@ -11,9 +11,21 @@ public static class ImageLoader
             throw new FileNotFoundException($"Image file not found: {path}", path);
         }
 
-        // stb defaults to bottom-up; OpenGL UV origin is bottom-left, so we want
-        // image rows top-to-bottom to match the engine's UV convention (top-left = (0, 0)).
-        StbImage.stbi_set_flip_vertically_on_load(1);
+        // <b>No flip. glTF puts UV (0,0) at the TOP-LEFT and so does Vulkan, and stb already
+        // returns rows top-down — so the correct setting is the one that does nothing.</b>
+        //
+        // This read `1` and carried the comment "OpenGL UV origin is bottom-left", which was true
+        // of a backend this engine no longer has: the GL sunset left the flip behind, and the flag
+        // it cites makes rows BOTTOM-up, the opposite of what the comment claimed to want. Every
+        // decoded image was therefore stored upside down, and `flipTextureV` — which negates V at
+        // import — became the thing a consumer had to remember to pass to cancel it. Exactly one
+        // did (VulkanSponza), so Sponza looked right and everything else rendered mirrored.
+        //
+        // Caught by Khronos's TextureCoordinateTest, which exists to answer this and rendered its
+        // "top left" quad at the bottom with the lettering reversed. Nobody had looked, because
+        // this tree's textured assets are mostly palette kits and roughly symmetric atlases; the
+        // first freshly converted asset with an oriented texture made it obvious.
+        StbImage.stbi_set_flip_vertically_on_load(0);
 
         using var stream = File.OpenRead(path);
         var result = ImageResult.FromStream(stream, ColorComponents.RedGreenBlueAlpha);
@@ -36,7 +48,7 @@ public static class ImageLoader
     public static ImageData LoadRgba32(Stream stream)
     {
         ArgumentNullException.ThrowIfNull(stream);
-        StbImage.stbi_set_flip_vertically_on_load(1);
+        StbImage.stbi_set_flip_vertically_on_load(0);
         var result = ImageResult.FromStream(stream, ColorComponents.RedGreenBlueAlpha);
         if (result.Width <= 0 || result.Height <= 0 || result.Data is null)
         {
@@ -71,7 +83,7 @@ public static class ImageLoader
     public static ImageData LoadMetallicRoughness(Stream stream)
     {
         ArgumentNullException.ThrowIfNull(stream);
-        StbImage.stbi_set_flip_vertically_on_load(1);
+        StbImage.stbi_set_flip_vertically_on_load(0);
         var result = ImageResult.FromStream(stream, ColorComponents.RedGreenBlueAlpha);
         if (result.Width <= 0 || result.Height <= 0 || result.Data is null)
         {
@@ -111,7 +123,7 @@ public static class ImageLoader
     // HDR (Radiance .hdr / RGBE) loader. Returns linear float RGBA per pixel; the
     // alpha channel is always 1.0 since .hdr is RGB-only. Pixels are in the
     // image's natural top-to-bottom order (v=0 = sky for equirect HDRIs).
-    // Unlike LoadRgba32 we do NOT y-flip on load -- equirect math
+    // No y-flip, for the same reason nothing else here flips any more -- equirect math
     // (phi = acos(y), v = phi/pi) assumes the canonical layout where the
     // first scanline is the upward pole. Flipping here would put the ground
     // above the camera and the sky below.
@@ -125,9 +137,6 @@ public static class ImageLoader
         StbImage.stbi_set_flip_vertically_on_load(0);
         using var stream = File.OpenRead(path);
         var result = ImageResultFloat.FromStream(stream, ColorComponents.RedGreenBlueAlpha);
-        // Restore the flip-on-load flag for callers that follow (LoadRgba32
-        // relies on it being set; the global flag is sticky across calls).
-        StbImage.stbi_set_flip_vertically_on_load(1);
         if (result.Width <= 0 || result.Height <= 0 || result.Data is null)
         {
             throw new InvalidDataException($"HDR file is not a valid decodable image: {path}");

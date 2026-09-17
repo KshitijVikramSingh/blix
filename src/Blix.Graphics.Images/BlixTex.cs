@@ -51,7 +51,9 @@ public static class BlixTex
     // is how those bits are spent: BC5 gives two channels a BC4-style endpoint pair each, where
     // BC7 divides one block across three or four. A tangent-space normal only needs XY, so this is
     // strictly more precision for the same bytes. Bumping this re-cooks every texture in the tree.
-    public const uint ShippedRecipeVersion = 2;
+    // v3: images are no longer flipped on decode. The loader had carried a GL-era y-flip, so every
+    // cooked texture held upside-down pixels; removing it changes the bytes of every .blixtex.
+    public const uint ShippedRecipeVersion = 3;
     public const uint Version3 = 3;
     public const uint KindTexture2D = 1;
     public const int HeaderSize = 28;

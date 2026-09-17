@@ -14,14 +14,16 @@
 # Run from anywhere.
 #
 # ── The flags are not optional ──────────────────────────────────────────────
-# VulkanSponza imports with flipTextureV and includeTangents both TRUE, so its
-# meshes must be cooked that way. They were not, for as long as this script has
-# existed: `cook mesh` was called bare, producing a 32-byte V-unflipped vertex
-# where the demo's pipelines all declare a 48-byte tangent layout. Nothing
-# compared the two, so the GPU read 48-byte strides out of a 32-byte buffer and
-# drew the scene as a fan of grey triangles while every count in the log stayed
-# correct. The loader now refuses a mismatch by name; these flags are what makes
-# it not have to.
+# VulkanSponza imports with includeTangents TRUE, so its meshes must be cooked
+# that way. They were not, for as long as this script has existed: `cook mesh`
+# was called bare, producing a 32-byte vertex where the demo's pipelines all
+# declare a 48-byte tangent layout. Nothing compared the two, so the GPU read
+# 48-byte strides out of a 32-byte buffer and drew the scene as a fan of grey
+# triangles while every count in the log stayed correct. The loader now refuses a
+# mismatch by name; this flag is what makes it not have to.
+#
+# --flip-v used to be here too, and is gone with the loader's y-flip: Sponza was
+# the one consumer cancelling a flip the image decoder should never have applied.
 #
 # ── Why `cook asset` and not `cook textures` + `cook mesh` ──────────────────
 # Those two sweep a DIRECTORY. Main Sponza ships 137 texture files and its own
@@ -66,7 +68,7 @@ cook_pack() {
             return 0
         fi
         echo "── $dest  ($(basename "$gltf"))"
-        dotnet "$COOK" asset "$gltf" --out "$COOKED/$dest" --tangents --flip-v
+        dotnet "$COOK" asset "$gltf" --out "$COOKED/$dest" --tangents
         return 0
     done
     echo "  $dest: not present in $SRC — skipped"

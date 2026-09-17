@@ -28,7 +28,7 @@ internal sealed partial class SponzaLoop
             try
             {
                 var model = new GltfStaticImporter().Import(
-                    new AssetImportContext(AssetId.Parse(p.AssetId), p.Path, flipTextureV: true, includeTangents: true));
+                    new AssetImportContext(AssetId.Parse(p.AssetId), p.Path, includeTangents: true));
                 parsed[i] = (p.Name, model);
             }
             catch (Exception ex)
