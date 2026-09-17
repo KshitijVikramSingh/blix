@@ -57,10 +57,20 @@ public sealed partial class VulkanGraphicsDevice
     /// that is when validation has the most to say, and intermittent because it is GC timing.
     /// </para>
     /// <para>
-    /// <b>Not reproduced on demand, and that is stated rather than implied.</b> Forcing a collection
-    /// after the messenger is attached does not fault, because these runs are validation-clean and
-    /// the callback is never invoked at all. What is certain is that the lifetime was wrong; the
-    /// crash reports are consistent with it and nothing else here hands native code a delegate.
+    /// <b>This is hygiene, and it is NOT established as the cause of the crash it was written for.</b>
+    /// A fuller crash report arrived afterwards and argues against it: the pointer handed to
+    /// GetDelegateForFunctionPointer is <c>0xb</c> — eleven — and <c>0xd</c> in another. A collected
+    /// thunk would be null or a freed address; a small integer is a NUMBER passed where a POINTER
+    /// belongs, which is a different fault. The report also shows the main thread inside Main with a
+    /// 2.28-second process lifetime, which is teardown after a bounded capture, and nothing in this
+    /// repository calls GetDelegateForFunctionPointer at all — so the call is inside a library that
+    /// Window.Dispose drives: Silk.NET's windowing, its input, OpenAL, or the ImGui renderer.
+    /// </para>
+    /// <para>
+    /// Rooting a delegate handed to native code is correct regardless, and it was wrong before. It is
+    /// recorded as a fix for a real lifetime bug and not as a fix for that crash, because the
+    /// evidence does not support the second claim. See BLIX_TEARDOWN_TRACE in Blix.Runtime.Silk's
+    /// Window.Dispose for what will name the step next time it happens.
     /// </para>
     /// </remarks>
     private PfnDebugUtilsMessengerCallbackEXT debugCallback;

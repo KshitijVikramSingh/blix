@@ -487,19 +487,39 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         // renderers — they own pipelines/buffers the last frame may still reference,
         // and destroying those in-use trips validation. (graphicsDevice.Dispose
         // waits idle too, but only after these are already gone.)
+        // <b>BLIX_TEARDOWN_TRACE names the step, because a SIGSEGV here names nothing.</b> An
+        // intermittent crash in this method leaves a macOS report whose managed frames are
+        // unsymbolised, and its only other evidence is which line of output came last — which is
+        // "Exiting after N frames" for every step below alike. Off unless asked for; the cost of
+        // asking is one environment variable, and the answer is the step's name.
+        var trace = Environment.GetEnvironmentVariable("BLIX_TEARDOWN_TRACE") is { Length: > 0 };
+        void Step(string name)
+        {
+            if (trace) Console.Error.WriteLine($"[teardown] {name}");
+        }
+
+        Step("wait-idle");
         graphicsDevice?.WaitIdle();
+        Step("imgui");
         imguiRenderer?.Dispose();
+        Step("line-drawer");
         lineDrawer?.Dispose();
         // The game loop may own GPU resources outside the device's auto-freed
         // tables (e.g. a RenderGraph's render passes + offscreen images). Dispose
         // it here — after WaitIdle so the GPU is done with them, before the device
         // is torn down so the frees still have a live device. Closing/OnUnload is
         // too early: it can fire mid-frame before the final submit.
+        Step("game-loop");
         (gameLoop as IDisposable)?.Dispose();
+        Step("audio");
         audioDevice?.Dispose();
+        Step("input");
         input?.Dispose();
+        Step("graphics-device");
         graphicsDevice?.Dispose();
+        Step("window");
         window.Dispose();
+        Step("done");
     }
 
     // Walk the frame's accumulated debug.Draw.* commands, expand them into

@@ -92,10 +92,16 @@ filter() {
         -e 's#/private/tmp/[^ ]*/##g' \
         -e 's#/var/folders/[^ ]*/##g' \
         -e 's/[0-9]+(\.[0-9]+)? ?ms/<ms>/g' \
+        -e '/^\[teardown\]/d' \
         -e '/^Graphics:/d' -e '/^OpenAL:/d' -e '/^Audio:/d' \
         -e '/Build succeeded/d' -e '/Warning\(s\)/d' -e '/Error\(s\)/d' -e '/Time Elapsed/d' \
         -e '/^ *$/d'
 }
+
+# <b>The teardown trace is ON here and filtered out of what gets hashed.</b> A mode that exits 139
+# has historically left nothing but "Exiting after N frames" to go on; with this the raw output names
+# the teardown step, and the raw is KEPT whenever a mode's exit code is not what was expected.
+export BLIX_TEARDOWN_TRACE=1
 
 RUN="$DIR"
 if [ "$ACTION" = check ]; then
@@ -132,13 +138,16 @@ while IFS="$(printf '\t')" read -r name args why; do
     code=$?
     set -e
     filter "$RUN" < "$RUN/$name.raw" > "$RUN/$name.log"
-    rm -f "$RUN/$name.raw"
     echo "$code" > "$RUN/$name.exit"
 
     if [ "$code" != "$want" ]; then
         echo "  FAIL $name — exit $code, expected $want"
+        # The raw survives a failure, trace and all. It is the only record of where a crash was.
+        echo "        raw output kept at $RUN/$name.raw"
+        grep '^\[teardown\]' "$RUN/$name.raw" | tail -3 | sed 's/^/        /'
         sed -n '1,4p' "$RUN/$name.log" | sed 's/^/        /'
     else
+        rm -f "$RUN/$name.raw"
         echo "  ok   $name"
     fi
 done < <(modes)
