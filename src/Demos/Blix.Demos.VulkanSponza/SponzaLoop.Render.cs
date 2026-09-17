@@ -472,6 +472,7 @@ internal sealed partial class SponzaLoop
         {
             shotWritten = true;
             VerifyHiZ();
+            OcclusionCensus();
             WriteAmbientShot(path);
             // <b>The RAW buffer as well, because the denoised one cannot answer questions about the
             // search.</b> Every reading taken off the denoised target is a depth-weighted average of
@@ -513,6 +514,98 @@ internal sealed partial class SponzaLoop
         var visPath = Path.ChangeExtension(path, null) + ".vis.png";
         PngWriter.WriteRgba8(visPath, vis, width, height);
         Console.WriteLine($"[VulkanSponza]   {path} + {Path.GetFileName(visPath)}  ({width}x{height}, pre-denoise)");
+    }
+
+    /// <summary>How much of the submitted scene is hidden behind other geometry, right now.</summary>
+    /// <remarks>
+    /// <b>The measurement that decides whether GPU-driven culling is worth building.</b> Doing the
+    /// test for real needs a compute shader writing visibility into the indirect buffer, which this
+    /// engine cannot express yet: DispatchCommand carries no material, so a dispatch cannot bind a
+    /// storage buffer; indirect buffers are created without StorageBufferBit; and the graph infers
+    /// image barriers but not buffer ones. That is a substantial arc, and the honest thing is to
+    /// find out what it would buy BEFORE building it.
+    ///
+    /// So the same test runs here on the CPU, once, off a synchronous readback that would be far too
+    /// expensive per frame but costs nothing in a capture. It is the real test: project each
+    /// drawable's world AABB, take the pyramid level where its screen rect spans a few texels, and
+    /// ask whether the NEAREST point of the box is behind the FARTHEST depth recorded across that
+    /// rect. That is the conservative occlusion query, and it is what the max channel exists for.
+    ///
+    /// Reported as a share of TRIANGLES as well as of objects, because 401 drawables are not equal:
+    /// culling 200 tiny ones is worth less than culling the two that carry a million triangles each.
+    /// </remarks>
+    private void OcclusionCensus()
+    {
+        // A level whose texels are coarse enough that a handful covers a typical object.
+        const int Level = 3;
+        var pixels = vk.ReadTexture(
+            graph.GetColorTexture(hiZHandles[Level]), out var w, out var h, out var format);
+        if (format != TextureFormat.Rgba16F) return;
+
+        var farthest = new float[w * h];
+        for (var i = 0; i < w * h; i++) farthest[i] = (float)BitConverter.ToHalf(pixels, i * 8 + 2);
+
+        var occluded = 0;
+        long occludedTris = 0, totalTris = 0;
+        var offscreen = 0;
+
+        foreach (var d in opaqueDrawables)
+        {
+            var tris = d.LodIndexCounts[0] / 3;
+            totalTris += tris;
+
+            // Project the eight corners; track the screen rect and the NEAREST view depth.
+            float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
+            var nearest = float.MaxValue;
+            var anyInFront = false;
+            for (var c = 0; c < 8; c++)
+            {
+                var corner = new Vector3(
+                    (c & 1) == 0 ? d.Bounds.Min.X : d.Bounds.Max.X,
+                    (c & 2) == 0 ? d.Bounds.Min.Y : d.Bounds.Max.Y,
+                    (c & 4) == 0 ? d.Bounds.Min.Z : d.Bounds.Max.Z);
+                var view = Vector3.Transform(corner, cameraView);
+                var depth = -view.Z;
+                if (depth <= CameraNearPlane) { anyInFront = true; continue; }
+                nearest = MathF.Min(nearest, depth);
+                anyInFront = true;
+
+                var clip = Vector4.Transform(new Vector4(corner, 1f), viewProj);
+                var ndcX = clip.X / clip.W;
+                var ndcY = clip.Y / clip.W;
+                minX = MathF.Min(minX, ndcX); maxX = MathF.Max(maxX, ndcX);
+                minY = MathF.Min(minY, ndcY); maxY = MathF.Max(maxY, ndcY);
+            }
+
+            if (!anyInFront || nearest == float.MaxValue) { offscreen++; continue; }
+            // Entirely outside the frustum sideways — the frustum cull's job, not this census's.
+            if (maxX < -1f || minX > 1f || maxY < -1f || minY > 1f) { offscreen++; continue; }
+
+            var x0 = Math.Clamp((int)MathF.Floor((minX * 0.5f + 0.5f) * w), 0, w - 1);
+            var x1 = Math.Clamp((int)MathF.Ceiling((maxX * 0.5f + 0.5f) * w), 0, w - 1);
+            var y0 = Math.Clamp((int)MathF.Floor((minY * 0.5f + 0.5f) * h), 0, h - 1);
+            var y1 = Math.Clamp((int)MathF.Ceiling((maxY * 0.5f + 0.5f) * h), 0, h - 1);
+
+            // Farthest recorded depth anywhere the object covers. If even that is nearer than the
+            // object's closest point, nothing the object could draw would survive the depth test.
+            var deepest = 0f;
+            for (var y = y0; y <= y1; y++)
+            for (var x = x0; x <= x1; x++)
+                deepest = MathF.Max(deepest, farthest[y * w + x]);
+
+            if (nearest > deepest)
+            {
+                occluded++;
+                occludedTris += tris;
+            }
+        }
+
+        var shown = opaqueDrawables.Count - offscreen;
+        Console.WriteLine(
+            $"[VulkanSponza] occlusion census (Hi-Z level {Level}, {w}x{h}): " +
+            $"{occluded}/{shown} on-screen drawables fully hidden, " +
+            $"{occludedTris / 1000.0:0.0}k of {totalTris / 1000.0:0.0}k triangles " +
+            $"({(totalTris > 0 ? 100.0 * occludedTris / totalTris : 0):0.0}%), {offscreen} off-screen");
     }
 
     /// <summary>Checks each pyramid level really is the min/max of the one above it.</summary>

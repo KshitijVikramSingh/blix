@@ -49,6 +49,24 @@ internal sealed partial class SponzaLoop
         if (cmdArgs.Contains("--no-ao")) ambient.Enabled = false;
         if (cmdArgs.Contains("--no-mask")) forceOpaqueMask = true;
         if (cmdArgs.Contains("--msaa1")) MsaaSamples = 1;
+        // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every
+        // census speaks only for wherever the camera happens to start, which for a question like
+        // "how much of this scene is occluded" is the difference between a measurement and an
+        // anecdote.
+        for (var i = 0; i < cmdArgs.Length - 1; i++)
+        {
+            if (cmdArgs[i] != "--cam") continue;
+            var parts = cmdArgs[i + 1].Split(',');
+            if (parts.Length >= 5
+                && float.TryParse(parts[0], out var cx) && float.TryParse(parts[1], out var cy)
+                && float.TryParse(parts[2], out var cz) && float.TryParse(parts[3], out var cyaw)
+                && float.TryParse(parts[4], out var cpitch))
+            {
+                cameraPosition = new Vector3(cx, cy, cz);
+                camYaw = cyaw * MathF.PI / 180f;
+                camPitch = cpitch * MathF.PI / 180f;
+            }
+        }
         if (cmdArgs.Contains("--ab-flat")) { abFlat = true; abMode = "flat"; }
         for (var i = 0; i < cmdArgs.Length - 1; i++)
         {
