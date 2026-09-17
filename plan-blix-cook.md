@@ -277,12 +277,29 @@ Also closed while here: `@(BlixCookRecipeAssembly)` joins `$(BlixCookDll)` in th
 recipe version would have kept every stale file it had written. Verified both ways — the version
 bump re-cooked all thirteen, and the next build cooked nothing.
 
-**What is still open, stated rather than parked.** `blix cook status` reports 13/13 cooked because
-it asks the recipe catalog what consumes what. `blix check --cooked` still says *"nothing here that
-this judges"*, because it routes every file through `GltfImporter`/`GltfStaticImporter` by hand and
-`ObjImporter` emits no `AssetLoadReport` at all. So the kit is cooked and **nothing loads the cooked
-form yet**. That is two concrete pieces of work — importer routing in the judge, and a cooked-preferring
-path in `ObjImporter` — not a blocked one.
+**And the instrument can now see it — closed.** `blix cook status` reported 13/13 straight away
+because it asks the recipe catalog what consumes what; `blix check --cooked` answered *"nothing under
+… that this judges"* over the same directory, which is **the sentence an empty directory produces**.
+The kit was cooked and nothing loaded the cooked form. Three things fixed that:
+
+- **`WavefrontParts.Import` prefers a cooked sibling and reports.** Parts come from the primitives
+  and their colours from the material table, which is what K-F put there.
+- **`ObjImporter` reports too**, and takes a cooked file only when it holds ONE part — it returns a
+  single mesh, and merging parts would be a second, different flattening of the same source. When it
+  refuses it says so and names the reader that can.
+- **The judge routes by extension** through a `Judged` table instead of a hardwired `.gltf`/`.glb`
+  pair. An extension it cannot load is a real answer; one it silently skips is not.
+
+**Both readers check the SETTINGS, not just the file's existence** — the only place in the tree that
+does, and it is not gold-plating. `WavefrontParts` centres a model by default and `SettlementArt`
+loads `Villager.obj` through `ObjImporter` with `RecenterToOrigin = false`; a cook glob widened by
+one directory would hand that consumer geometry shifted by half a bounding box, on machines that had
+cooked and nowhere else. The recipe stamps `recenter=1`; a reader wanting the other value parses the
+OBJ and says why.
+
+Result: `GREEN every load resolved to a cooked artifact` over the kit, and over RTSGame's whole
+`Assets` tree the remaining red is exactly the two known categories plus one uncooked file —
+skinned glTF, embedded image bytes, and `Villager.obj`, which no glob claims.
 
 ---
 

@@ -121,6 +121,53 @@ public static class Program
     /// which it should, because that is the larger cost of the two.
     /// </para>
     /// </remarks>
+    /// <summary>The source kinds this judge knows how to load. Anything else is not its business.</summary>
+    /// <remarks>
+    /// <b><c>.obj</c> was missing and the omission was invisible</b>, because a directory holding
+    /// nothing else produced "nothing here that this judges" — the same sentence an empty directory
+    /// produces. RTSGame's nature kit sat cooked and unjudged behind that sentence. An extension
+    /// this cannot load is a real answer; an extension it silently skips is not.
+    /// </remarks>
+    private static readonly string[] Judged = { ".gltf", ".glb", ".obj" };
+
+    /// <summary>Loads one source the way a game would, so the report says what a game would get.</summary>
+    /// <remarks>
+    /// <b>Loaded the way it would actually be used, not the way that is convenient.</b> This judged
+    /// everything through the STATIC glTF importer once, which meant a rigged character was measured
+    /// on a path no game takes — and the rigged path is the one with no cooked form at all, so the
+    /// judge reported the cheaper half of the truth about the most expensive assets in the tree.
+    /// <para>
+    /// For glTF, which importer wants a file is not guessed from its extension: the rigged one
+    /// refuses, by name, when no node carries both a mesh and a skin. So ask it first and let its
+    /// refusal route the file. That refusal exists because a judge crashed on it once; it is also
+    /// the cleanest way to ask "is this a rig?" without parsing the file twice ourselves.
+    /// </para>
+    /// <para>
+    /// For OBJ the routing is a choice rather than a question the file can answer, and it goes to
+    /// <see cref="WavefrontParts"/>: both readers report, but only that one can consume a cooked
+    /// file with more than one part, so it is the reader the cooked format is shaped for. An asset
+    /// a game loads through <c>ObjImporter</c> instead still reports for itself at load time — this
+    /// only decides what the SWEEP asks.
+    /// </para>
+    /// </remarks>
+    private static void LoadAsUsed(string source)
+    {
+        if (Path.GetExtension(source).Equals(".obj", StringComparison.OrdinalIgnoreCase))
+        {
+            WavefrontParts.Import(source);
+            return;
+        }
+
+        try
+        {
+            new GltfImporter().Import(new AssetImportContext(AssetId.Parse("check/rig"), source));
+        }
+        catch (AssetImportException noSkin) when (noSkin.Message.Contains("no rig here", StringComparison.Ordinal))
+        {
+            new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("check/cooked"), source));
+        }
+    }
+
     private static int JudgeCooked(string root)
     {
         if (!Directory.Exists(root))
@@ -130,9 +177,7 @@ public static class Program
         }
 
         var sources = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
-            .Where(f => Path.GetExtension(f) is { } e
-                && (e.Equals(".gltf", StringComparison.OrdinalIgnoreCase)
-                    || e.Equals(".glb", StringComparison.OrdinalIgnoreCase)))
+            .Where(f => Judged.Contains(Path.GetExtension(f), StringComparer.OrdinalIgnoreCase))
             .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
                      && !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
             .OrderBy(f => f, StringComparer.Ordinal)
@@ -150,25 +195,7 @@ public static class Program
         {
             try
             {
-                // <b>Loaded the way it would actually be used, not the way that is convenient.</b>
-                // This judged everything through the STATIC importer, which meant a rigged
-                // character was measured on a path no game takes — and the rigged path is the one
-                // with no cooked form at all, so the judge reported the cheaper half of the truth
-                // about the most expensive assets in the tree.
-                //
-                // Which importer wants a file is not guessed from its extension: the rigged one
-                // refuses, by name, when there is no node carrying both a mesh and a skin. So ask
-                // it first and let its refusal route the file. That refusal exists because a judge
-                // crashed on it once; it turns out to also be the cleanest way to ask "is this a
-                // rig?" without parsing the file twice ourselves.
-                try
-                {
-                    new GltfImporter().Import(new AssetImportContext(AssetId.Parse("check/rig"), source));
-                }
-                catch (AssetImportException noSkin) when (noSkin.Message.Contains("no rig here", StringComparison.Ordinal))
-                {
-                    new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("check/cooked"), source));
-                }
+                LoadAsUsed(source);
             }
             catch (AssetImportException bad)
             {

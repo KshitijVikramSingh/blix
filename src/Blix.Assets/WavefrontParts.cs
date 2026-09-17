@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Numerics;
+using Blix.Cooked;
 using Blix.Geometry;
 using Blix.Graphics;
 
@@ -40,6 +42,100 @@ public static class WavefrontParts
     /// to be gathered before any of them can be built.
     /// </remarks>
     public static IReadOnlyList<Part> Import(string objPath, bool recenter = true)
+    {
+        ArgumentNullException.ThrowIfNull(objPath);
+
+        var watch = Stopwatch.StartNew();
+        var cookedPath = Path.ChangeExtension(objPath, ".blixmesh");
+        var cooked = TryReadCooked(cookedPath, recenter, out var why);
+
+        var result = cooked ?? ImportSource(objPath, recenter);
+
+        // <b>Reported, because a load nobody reports is a load no instrument can judge.</b> Before
+        // this, `blix check --cooked` answered "nothing here that this judges" over a directory of
+        // .obj files whether they were cooked or not — the sweep was not blind to the FILES, it was
+        // blind to the LOAD, because no .obj reader had ever said what it did.
+        if (AssetLoadLog.Enabled)
+        {
+            AssetLoadLog.Report(new AssetLoadReport(
+                SourcePath: objPath,
+                CookedPath: cooked is not null ? cookedPath : null,
+                Mode: cooked is not null ? AssetLoadMode.Cooked : AssetLoadMode.Source,
+                Bytes: SafeLength(cooked is not null ? cookedPath : objPath),
+                LoadMs: watch.Elapsed.TotalMilliseconds,
+                Recipe: cooked is not null ? CookedFile.TryReadHeader(cookedPath)?.Stamp.Recipe : null,
+                Warning: why));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// The cooked parts, or null with <paramref name="why"/> saying what stopped it.
+    /// </summary>
+    /// <remarks>
+    /// <b>The settings are checked, not just the file's existence.</b> Every other cooked-sibling
+    /// check in this tree is <c>File.Exists</c> and gets away with it because the recipe and the
+    /// loader happen to agree; here they demonstrably need not. This reader centres a model by
+    /// default and <c>SettlementArt</c> loads <c>Villager.obj</c> through <c>ObjImporter</c> with
+    /// <c>RecenterToOrigin = false</c> — so a cook whose glob widened by one directory would hand
+    /// that consumer geometry shifted by half a bounding box, on machines that had cooked and
+    /// nowhere else. The recipe stamps what it used; this refuses what does not match.
+    /// </remarks>
+    private static IReadOnlyList<Part>? TryReadCooked(string cookedPath, bool recenter, out string? why)
+    {
+        why = null;
+        if (!File.Exists(cookedPath))
+        {
+            why = "no .blixmesh sibling — the OBJ was parsed";
+            return null;
+        }
+
+        var file = BlixMeshReader.Read(cookedPath);
+        var wanted = $"recenter={(recenter ? 1 : 0)}";
+        if (file.Cooked?.Stamp.Parameters.Contains(wanted, StringComparison.Ordinal) != true)
+        {
+            why = $"a .blixmesh sibling exists but was not cooked with {wanted} — the OBJ was parsed";
+            return null;
+        }
+
+        var parts = new Part[file.Primitives.Count];
+        var materials = file.MaterialTable;
+        for (var i = 0; i < parts.Length; i++)
+        {
+            var p = file.Primitives[i];
+            var lod0 = p.Lods[0];
+
+            // A primitive whose material index is out of range takes white rather than throwing:
+            // the colour is the part's dressing, and a cooked file that has lost its table is still
+            // geometry a person can look at. The material NAME falls back to the primitive's, which
+            // the recipe writes as the material name anyway.
+            var material = p.MaterialIndex >= 0 && p.MaterialIndex < materials.Count
+                ? materials[p.MaterialIndex]
+                : null;
+
+            parts[i] = new Part(
+                material?.Name ?? p.Name,
+                new MeshData(
+                    p.Name,
+                    p.VertexBytes,
+                    lod0.Indices16 ?? Array.Empty<ushort>(),
+                    file.Layout,
+                    p.Bounds,
+                    Indices32: lod0.Indices32),
+                material?.BaseColorFactor ?? Vector4.One);
+        }
+
+        return parts;
+    }
+
+    private static long SafeLength(string path)
+    {
+        try { return new FileInfo(path).Length; }
+        catch (IOException) { return 0; }
+    }
+
+    private static IReadOnlyList<Part> ImportSource(string objPath, bool recenter)
     {
         var positions = new List<Vector3>();
         var normals = new List<Vector3>();

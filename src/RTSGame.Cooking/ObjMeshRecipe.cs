@@ -44,7 +44,8 @@ public static class ObjMeshRecipe
 {
     /// <summary>Bumped when the written bytes change for an unchanged source.</summary>
     // v3: the material table (.blixmesh v5) — each part's colour travels with the geometry.
-    public const int Version = 3;
+    // v4: `recenter` is stamped, because the loader now refuses a file cooked with the other value.
+    public const int Version = 4;
 
     /// <summary>What <c>blix cook</c> calls, and what the index finds without loading this assembly.</summary>
     [Recipe("omsh",
@@ -131,7 +132,11 @@ public static class ObjMeshRecipe
 
         var stamp = CookStamp.Of(
             "omsh", Version, request.SourcePath, request.OutputPath,
-            $"layout={layout.Stride}B parts={primitives.Length}",
+            // recenter is recorded because it CHANGES THE VERTICES and the reader checks it:
+            // WavefrontParts centres by default and ObjImporter can be told not to, so a cooked
+            // file is only valid for the setting it was made with. Stamping it is what lets the
+            // loader refuse rather than silently hand back geometry shifted by half a bounding box.
+            $"layout={layout.Stride}B parts={primitives.Length} recenter=1",
             CookedFlags.SourceRequired | CookedFlags.SourceRequiredForImagesOnly);
 
         BlixMeshWriter.Write(

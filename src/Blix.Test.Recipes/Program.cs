@@ -351,6 +351,105 @@ public static class Program
         t.ExpectTrue("and narrows that to image bytes alone",
             (cookedHeader?.Stamp.Flags & CookedFlags.SourceRequiredForImagesOnly) != 0);
 
+        // ── the OBJ path: cooked and source agree, and the settings guard holds ──
+        // <b>Closing the gap `blix check --cooked` had over .obj.</b> The judge used to answer
+        // "nothing here that this judges" over a directory of them — the same sentence an EMPTY
+        // directory produces — because no .obj reader reported what it did. Reporting is only
+        // worth having if the cooked path it reports is the same geometry, so both halves are
+        // checked here rather than the report alone.
+        var objAsset = FindFile("Bush_1.obj");
+        if (objAsset is null)
+        {
+            t.Fail("a cooked .obj is findable", "no Bush_1.obj under the repo");
+        }
+        else
+        {
+            var objTemp = Path.Combine(Path.GetTempPath(), "blix-obj-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(objTemp);
+            try
+            {
+                // The source leg needs the .mtl beside it or the colours come back as defaults and
+                // the comparison would be measuring the copy, not the cook.
+                var loneObj = Path.Combine(objTemp, Path.GetFileName(objAsset));
+                File.Copy(objAsset, loneObj);
+                var mtl = Path.ChangeExtension(objAsset, ".mtl");
+                if (File.Exists(mtl)) File.Copy(mtl, Path.ChangeExtension(loneObj, ".mtl"));
+
+                var partsCooked = WavefrontParts.Import(objAsset);
+                var partsSource = WavefrontParts.Import(loneObj);
+
+                t.Expect("cooked and source OBJ yield the same part count",
+                    partsCooked.Count == partsSource.Count,
+                    $"cooked {partsCooked.Count}, source {partsSource.Count}");
+
+                var objMismatches = new List<string>();
+                for (var i = 0; i < Math.Min(partsCooked.Count, partsSource.Count); i++)
+                {
+                    var a = partsCooked[i];
+                    var b = partsSource[i];
+                    if (a.Material != b.Material) objMismatches.Add($"[{i}] material {a.Material} vs {b.Material}");
+                    if (a.Color != b.Color) objMismatches.Add($"[{i}] colour {a.Color} vs {b.Color}");
+                    if (a.Mesh.VertexCount != b.Mesh.VertexCount) objMismatches.Add($"[{i}] vertices {a.Mesh.VertexCount} vs {b.Mesh.VertexCount}");
+                    if (a.Mesh.IndexCount != b.Mesh.IndexCount) objMismatches.Add($"[{i}] indices {a.Mesh.IndexCount} vs {b.Mesh.IndexCount}");
+                    if (a.Mesh.Bounds.Min != b.Mesh.Bounds.Min || a.Mesh.Bounds.Max != b.Mesh.Bounds.Max)
+                        objMismatches.Add($"[{i}] bounds {a.Mesh.Bounds.Min}..{a.Mesh.Bounds.Max} vs {b.Mesh.Bounds.Min}..{b.Mesh.Bounds.Max}");
+                    // Byte equality, not just counts and bounds. RTSGame's settlement art now comes
+                    // off these cooked files, so "the same number of vertices in the same box" is not
+                    // enough — a reordered or re-packed vertex stream passes that and draws
+                    // differently. The cook runs this same parser, so anything but equality here is
+                    // the writer or the reader losing information.
+                    if (!a.Mesh.VertexBytes.AsSpan().SequenceEqual(b.Mesh.VertexBytes))
+                        objMismatches.Add($"[{i}] vertex bytes differ");
+                    if (!a.Mesh.Indices.AsSpan().SequenceEqual(b.Mesh.Indices))
+                        objMismatches.Add($"[{i}] indices differ");
+                }
+
+                t.Expect("a cooked OBJ part-for-part matches the parsed one",
+                    objMismatches.Count == 0, string.Join("; ", objMismatches.Take(5)));
+
+                // And the reports say which path each took, which is the whole of what the judge reads.
+                var wasOnObj = AssetLoadLog.Enabled;
+                try
+                {
+                    AssetLoadLog.Start();
+                    WavefrontParts.Import(objAsset);
+                    WavefrontParts.Import(loneObj);
+                    var objReports = AssetLoadLog.Drain();
+
+                    t.Expect("the cooked OBJ reports Cooked",
+                        objReports.SingleOrDefault(r => r.SourcePath == objAsset) is { Mode: AssetLoadMode.Cooked },
+                        "no Cooked report");
+                    var lonely = objReports.SingleOrDefault(r => r.SourcePath == loneObj);
+                    t.Expect("and one with no sibling reports Source, saying why",
+                        lonely is { Mode: AssetLoadMode.Source }
+                        && lonely.Warning?.Contains("no .blixmesh sibling", StringComparison.Ordinal) == true,
+                        lonely?.Warning ?? "no report");
+
+                    // <b>The settings guard.</b> The cook stamps recenter=1; this reader is asked
+                    // for the opposite. A loader that ignored the stamp would hand back geometry
+                    // shifted by half a bounding box — on machines that had cooked and nowhere
+                    // else, which is the shape of bug the whole stamp exists to prevent.
+                    AssetLoadLog.Start();
+                    new ObjImporter { RecenterToOrigin = false }
+                        .Import(new AssetImportContext(AssetId.Parse("t/obj-uncentred"), objAsset));
+                    var guarded = AssetLoadLog.Drain().SingleOrDefault(r => r.SourcePath == objAsset);
+                    t.Expect("a reader wanting other settings refuses the cooked file",
+                        guarded is { Mode: AssetLoadMode.Source }
+                        && guarded.Warning?.Contains("recenter=0", StringComparison.Ordinal) == true,
+                        guarded?.Warning ?? "no report");
+                }
+                finally
+                {
+                    AssetLoadLog.Enabled = wasOnObj;
+                    AssetLoadLog.Drain();
+                }
+            }
+            finally
+            {
+                try { Directory.Delete(objTemp, recursive: true); } catch (IOException) { }
+            }
+        }
+
         t.PrintSummary();
         return t.Failed;
     }

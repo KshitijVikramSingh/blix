@@ -29,14 +29,91 @@ public sealed class ObjImporter : IAssetImporter<MeshData>
             throw new FileNotFoundException($"OBJ file not found: {context.SourcePath}", context.SourcePath);
         }
 
-        try
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var cookedPath = Path.ChangeExtension(context.SourcePath, ".blixmesh");
+        var cooked = TryReadCooked(cookedPath, out var why);
+
+        MeshData result;
+        if (cooked is not null)
         {
-            return ImportCore(context);
+            result = cooked;
         }
-        catch (ObjFormatException ex)
+        else
         {
-            throw new AssetImportException(context.SourcePath, ex.LineNumber, ex.Message, ex);
+            try
+            {
+                result = ImportCore(context);
+            }
+            catch (ObjFormatException ex)
+            {
+                throw new AssetImportException(context.SourcePath, ex.LineNumber, ex.Message, ex);
+            }
         }
+
+        if (AssetLoadLog.Enabled)
+        {
+            AssetLoadLog.Report(new AssetLoadReport(
+                SourcePath: context.SourcePath,
+                CookedPath: cooked is not null ? cookedPath : null,
+                Mode: cooked is not null ? AssetLoadMode.Cooked : AssetLoadMode.Source,
+                Bytes: SafeLength(cooked is not null ? cookedPath : context.SourcePath),
+                LoadMs: watch.Elapsed.TotalMilliseconds,
+                Recipe: cooked is not null ? CookedFile.TryReadHeader(cookedPath)?.Stamp.Recipe : null,
+                Warning: why));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// The cooked mesh when one is usable HERE, or null with <paramref name="why"/> saying why not.
+    /// </summary>
+    /// <remarks>
+    /// <b>This reader returns one mesh and the cooked format holds parts, so a multi-part file is
+    /// refused rather than merged.</b> Merging would be a second, different flattening of the same
+    /// source — <see cref="WavefrontParts"/> exists precisely because this one drops <c>usemtl</c>
+    /// — and a loader that quietly produces a shape neither the source nor the cook describes is
+    /// worse than one that parses the OBJ again and says so.
+    /// <para>
+    /// <see cref="RecenterToOrigin"/> is checked too, because it moves every vertex. See the note
+    /// on <c>WavefrontParts.TryReadCooked</c> for the failure that guards against.
+    /// </para>
+    /// </remarks>
+    private MeshData? TryReadCooked(string cookedPath, out string? why)
+    {
+        why = null;
+        if (!File.Exists(cookedPath))
+        {
+            why = "no .blixmesh sibling — the OBJ was parsed";
+            return null;
+        }
+
+        var file = BlixMeshReader.Read(cookedPath);
+        var wanted = $"recenter={(RecenterToOrigin ? 1 : 0)}";
+        if (file.Cooked?.Stamp.Parameters.Contains(wanted, StringComparison.Ordinal) != true)
+        {
+            why = $"a .blixmesh sibling exists but was not cooked with {wanted} — the OBJ was parsed";
+            return null;
+        }
+
+        if (file.Primitives.Count != 1)
+        {
+            why = $"the cooked mesh has {file.Primitives.Count} parts and this reader returns one — "
+                + "load it through WavefrontParts to use the cooked form";
+            return null;
+        }
+
+        var p = file.Primitives[0];
+        var lod0 = p.Lods[0];
+        return new MeshData(
+            p.Name, p.VertexBytes, lod0.Indices16 ?? Array.Empty<ushort>(),
+            file.Layout, p.Bounds, Indices32: lod0.Indices32);
+    }
+
+    private static long SafeLength(string path)
+    {
+        try { return new FileInfo(path).Length; }
+        catch (IOException) { return 0; }
     }
 
     private readonly record struct FaceVertex(int Position, int TexCoord, int Normal);
