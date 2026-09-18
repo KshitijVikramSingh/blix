@@ -332,8 +332,10 @@ internal sealed partial class SponzaLoop
         if (bounceReady && skyVisibilityEnabled && !skipInject) bounceWrite ^= 1;
         if (bounceReady && skyBounceBinding >= 0)
         {
-            passBindings[skyBounceBinding] = new ShaderTextureBinding(
-                "uSkyBounce", bounceTextures[bounceWrite ^ 1], Slot: 7);
+            var read = bounceTextures[bounceWrite ^ 1];
+            passBindings[skyBounceBinding + 0] = new ShaderTextureBinding("uSkyBounceR", read[0], Slot: 7);
+            passBindings[skyBounceBinding + 1] = new ShaderTextureBinding("uSkyBounceG", read[1], Slot: 11);
+            passBindings[skyBounceBinding + 2] = new ShaderTextureBinding("uSkyBounceB", read[2], Slot: 12);
         }
 
         // Sun bounce into the probe grid. Cheap enough to redo every frame at this probe count, and
@@ -502,9 +504,13 @@ internal sealed partial class SponzaLoop
                     uniforms: probeUniforms,
                     textures: new[]
                     {
-                        new ShaderTextureBinding("uSkyBounce",
-                            bounceReady ? bounceTextures[bounceWrite ^ 1] : skyVisibilityTexture, Slot: 0),
+                        new ShaderTextureBinding("uSkyBounceR",
+                            bounceReady ? bounceTextures[bounceWrite ^ 1][0] : skyVisibilityTexture, Slot: 0),
                         new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 1),
+                        new ShaderTextureBinding("uSkyBounceG",
+                            bounceReady ? bounceTextures[bounceWrite ^ 1][1] : skyVisibilityTexture, Slot: 2),
+                        new ShaderTextureBinding("uSkyBounceB",
+                            bounceReady ? bounceTextures[bounceWrite ^ 1][2] : skyVisibilityTexture, Slot: 3),
                     },
                     // null, not an empty array: an empty array still counts as "push constants supplied", and
                     // this shader declares no ranges.
@@ -906,13 +912,17 @@ internal sealed partial class SponzaLoop
     /// <summary>The injection pass's textures for this frame: write one, read the other.</summary>
     private ShaderTextureBinding[] BounceBindings() => new[]
     {
-        new ShaderTextureBinding("uBounce", bounceTextures[bounceWrite], Slot: 1),
+        new ShaderTextureBinding("uBounceR", bounceTextures[bounceWrite][0], Slot: 1),
+        new ShaderTextureBinding("uBounceG", bounceTextures[bounceWrite][1], Slot: 8),
+        new ShaderTextureBinding("uBounceB", bounceTextures[bounceWrite][2], Slot: 9),
         new ShaderTextureBinding("uOccupancy", occupancyTexture, Slot: 2),
         new ShaderTextureBinding("uAlbedo", albX > 0 ? albedoTexture : occupancyTexture, Slot: 5),
         new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 3),
         // Last frame's solution, which is what turns a rotation of sweeps into successive bounces
         // AND what lets this dispatch run without the lit pass waiting on it.
-        new ShaderTextureBinding("uBouncePrev", bounceTextures[bounceWrite ^ 1], Slot: 4),
+        new ShaderTextureBinding("uBouncePrevR", bounceTextures[bounceWrite ^ 1][0], Slot: 4),
+        new ShaderTextureBinding("uBouncePrevG", bounceTextures[bounceWrite ^ 1][1], Slot: 6),
+        new ShaderTextureBinding("uBouncePrevB", bounceTextures[bounceWrite ^ 1][2], Slot: 7),
     };
 
     /// <summary>Prints resolved GPU milliseconds per pass, heaviest first.</summary>

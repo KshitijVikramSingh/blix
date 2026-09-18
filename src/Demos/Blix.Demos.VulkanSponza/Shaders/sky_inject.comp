@@ -64,16 +64,49 @@ layout(set = 0, binding = 0) uniform Inject {
 
 // Read-write rather than write-only: a probe not scheduled this frame must KEEP its value, and
 // keeping it means not writing it.
-layout(set = 0, binding = 1, rgba16f) uniform image3D uBounce;
+// <b>Three volumes, one per colour channel, each holding that channel's (L0, L1x, L1y, L1z).</b>
+// The layout mirrors the sky-visibility volume exactly, because it is the same question — how do you
+// store a directional field at a probe — and this side used to answer it differently: one RGB, no
+// direction at all. A probe rendered as a flat disc in the debug view, every point on its surface
+// the same value, and a teal curtain metres away tinted a whole cypress because each leaf received
+// the identical average whether it faced the curtain or away from it.
+//
+// Colour in L1 and not only in L0: a monochrome direction lobe would be cheaper by a third and
+// would reproduce precisely the failure this exists to fix, since the complaint is that COLOURED
+// bleed has no direction.
+layout(set = 0, binding = 1, rgba16f) uniform image3D uBounceR;
+layout(set = 0, binding = 8, rgba16f) uniform image3D uBounceG;
+layout(set = 0, binding = 9, rgba16f) uniform image3D uBounceB;
 layout(set = 0, binding = 2) uniform sampler3D uOccupancy;
 layout(set = 0, binding = 3) uniform sampler3D uSkyVisibility;
 // The SAME texture uBounce writes, bound for filtered reading. A surface re-radiates what has
 // already been deposited on it, so each sweep carries the light one bounce further.
-layout(set = 0, binding = 4) uniform sampler3D uBouncePrev;
+layout(set = 0, binding = 4) uniform sampler3D uBouncePrevR;
+layout(set = 0, binding = 6) uniform sampler3D uBouncePrevG;
+layout(set = 0, binding = 7) uniform sampler3D uBouncePrevB;
+
+#define PI 3.14159265359
+#define BLIX_SH_Y0 0.282095
+#define BLIX_SH_Y1 0.488603
+
+// Cosine-convolved evaluation: the irradiance arriving at a surface facing n. The same expression
+// the visibility volume uses, minus its final /PI — that divide turns irradiance into a fraction,
+// which is what a visibility term wants and a radiance term must not have.
+vec3 blixShIrradiance(vec4 shR, vec4 shG, vec4 shB, vec3 n) {
+    vec3 l0 = vec3(shR.x, shG.x, shB.x);
+    vec3 l1x = vec3(shR.y, shG.y, shB.y);
+    vec3 l1y = vec3(shR.z, shG.z, shB.z);
+    vec3 l1z = vec3(shR.w, shG.w, shB.w);
+    vec3 directional = l1x * n.x + l1y * n.y + l1z * n.z;
+    return max(PI * BLIX_SH_Y0 * l0 + (2.0 * PI / 3.0) * BLIX_SH_Y1 * directional, vec3(0.0));
+}
+
+vec3 blixSampleBounce(sampler3D r, sampler3D g, sampler3D b, vec3 uvw, vec3 n) {
+    return blixShIrradiance(texture(r, uvw), texture(g, uvw), texture(b, uvw), n);
+}
 // Surface colour per cell, coarser than the occupancy it accompanies and gamma-2.0 encoded.
 layout(set = 0, binding = 5) uniform sampler3D uAlbedo;
 
-#define PI 3.14159265359
 
 // The grid stores DENSITY, not occupancy. The baker writes 1.0 for an opaque triangle and
 // CutoutOpacity for an alpha-cutout one, precisely so that a canopy attenuates instead of walling,
@@ -165,6 +198,8 @@ vec3 transmittance(vec3 origin, vec3 dir, float maxCells) {
 // hits. An opaque wall still ends the walk on its first cell — t drops to zero there — so this
 // costs nothing wherever the old version was already right. A canopy now contributes each leaf the
 // ray crosses, weighted by how much light is still travelling when it arrives.
+// Returns the contribution as radiance; the caller projects it onto SH using the ray's direction,
+// which is the direction that light arrived FROM and the whole reason this became directional.
 vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize) {
     vec3 dims = u.uOccupancyDims.xyz;
     vec3 cell = u.uBoundsSpan.xyz / dims;
@@ -200,8 +235,12 @@ vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize) {
 
             // Sampled just off the face, so the lookup is not taken inside the geometry it stands on.
             vec3 prevUv = (hitPos + n * cellSize * 1.5 - u.uBoundsMin.xyz) / u.uBoundsSpan.xyz;
+            // <b>Evaluated along the hit surface's OWN normal.</b> The directionless version could
+            // only ask "how much light is around here"; a surface re-radiates what reaches the side
+            // it faces, and now it can be asked that.
             vec3 incident = u.uSunIrradiance.rgb * sunReach
-                          + PI * texture(uBouncePrev, clamp(prevUv, vec3(0.0), vec3(1.0))).rgb;
+                          + blixSampleBounce(uBouncePrevR, uBouncePrevG, uBouncePrevB,
+                                             clamp(prevUv, vec3(0.0), vec3(1.0)), n);
 
             // Lambertian outgoing radiance, now in the surface's OWN colour. uBoundsSpan.w stops
             // being the scene's albedo and becomes a plain strength multiplier over it.
@@ -247,7 +286,9 @@ void main() {
         // same parity every time. Each probe was therefore only ever written into ONE of the two
         // buffers and stayed zero in the other, and the shader that reads them alternates between
         // the two every frame. Half the field, flickering against the other half.
-        imageStore(uBounce, probe, texelFetch(uBouncePrev, probe, 0));
+        imageStore(uBounceR, probe, texelFetch(uBouncePrevR, probe, 0));
+        imageStore(uBounceG, probe, texelFetch(uBouncePrevG, probe, 0));
+        imageStore(uBounceB, probe, texelFetch(uBouncePrevB, probe, 0));
         return;
     }
 
@@ -257,12 +298,23 @@ void main() {
     float maxCells = max(u.uOccupancyDims.x, max(u.uOccupancyDims.y, u.uOccupancyDims.z));
     float cellSize = length(u.uBoundsSpan.xyz / u.uOccupancyDims.xyz);
 
-    vec3 bounce = vec3(0.0);
-    for (int i = 0; i < rays; ++i)
-        bounce += gather(origin, fibonacci(i, rays), maxCells, toSun, cellSize);
+    // Projected onto L0 + L1 as it accumulates. The 4*PI/N below is the Monte Carlo weight for a
+    // uniform sphere and the basis constants are the real ones — the same projection the sky
+    // visibility bake performs, so the two volumes can be read by the same evaluation.
+    vec3 l0 = vec3(0.0);
+    vec3 l1x = vec3(0.0), l1y = vec3(0.0), l1z = vec3(0.0);
+    for (int i = 0; i < rays; ++i) {
+        vec3 d = fibonacci(i, rays);
+        vec3 c = gather(origin, d, maxCells, toSun, cellSize);
+        l0  += BLIX_SH_Y0 * c;
+        l1x += BLIX_SH_Y1 * c * d.x;
+        l1y += BLIX_SH_Y1 * c * d.y;
+        l1z += BLIX_SH_Y1 * c * d.z;
+    }
+    float w = 4.0 * PI / float(rays);
+    l0 *= w; l1x *= w; l1y *= w; l1z *= w;
 
-    // A plain average over the sampled directions, because what is stored is average radiance.
-    // Scaling by the sphere's 4*PI here is what made the loop diverge.
-    bounce /= float(rays);
-    imageStore(uBounce, probe, vec4(bounce, 1.0));
+    imageStore(uBounceR, probe, vec4(l0.r, l1x.r, l1y.r, l1z.r));
+    imageStore(uBounceG, probe, vec4(l0.g, l1x.g, l1y.g, l1z.g));
+    imageStore(uBounceB, probe, vec4(l0.b, l1x.b, l1y.b, l1z.b));
 }

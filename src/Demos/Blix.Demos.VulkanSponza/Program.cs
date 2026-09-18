@@ -190,7 +190,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     //
     // So the lit pass reads what the previous frame solved. The probe grid is already amortised over
     // eight frames, so one more frame of latency is beneath what the amortisation itself introduces.
-    private readonly TextureHandle[] bounceTextures = new TextureHandle[2];
+    // [buffer][channel] — two ping-pong sets of three volumes, one per colour channel, each holding
+    // that channel's L0 and L1. 41,472 probes x 8 bytes x 3 x 2 is about 2 MB.
+    private readonly TextureHandle[][] bounceTextures =
+    {
+        new TextureHandle[3], new TextureHandle[3],
+    };
     private int bounceWrite;
     private int skyBounceBinding = -1;   // where uSkyBounce sits in passBindings
     private ShaderProgramHandle injectProgram;

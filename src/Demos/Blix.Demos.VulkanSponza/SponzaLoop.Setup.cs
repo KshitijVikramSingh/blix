@@ -504,7 +504,9 @@ internal sealed partial class SponzaLoop
             new ShaderTextureBinding("uAmbientVisibility", graph.GetColorTexture(ambientDenoisedHandle), Slot: 5),
             new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 6),
             // Bound per frame in OnRender, which flips between the pair; this is the initial one.
-            new ShaderTextureBinding("uSkyBounce", bounceReady ? bounceTextures[0] : skyVisibilityTexture, Slot: 7),
+            new ShaderTextureBinding("uSkyBounceR", bounceReady ? bounceTextures[0][0] : skyVisibilityTexture, Slot: 7),
+            new ShaderTextureBinding("uSkyBounceG", bounceReady ? bounceTextures[0][1] : skyVisibilityTexture, Slot: 11),
+            new ShaderTextureBinding("uSkyBounceB", bounceReady ? bounceTextures[0][2] : skyVisibilityTexture, Slot: 12),
             // Bound to SOMETHING valid always — a descriptor set with a hole is a device loss, not a
             // dark curtain. uSheenMipCount being zero is what tells the shader not to read them.
             new ShaderTextureBinding("uSheenEnv", sheenMipCount > 0 ? sheenEnvTexture : envCubeTexture, Slot: 8),
@@ -514,7 +516,7 @@ internal sealed partial class SponzaLoop
 
         // The one binding that is not constant: the lit pass reads whichever of the bounce pair the
         // injection is not writing, so its slot is rewritten each frame.
-        skyBounceBinding = Array.FindIndex(passBindings, b => b.Name == "uSkyBounce");
+        skyBounceBinding = Array.FindIndex(passBindings, b => b.Name == "uSkyBounceR");
 
         // Froxel compute set-0 image bindings (constant handles): the storage
         // grid it writes (binding 1) + the cascade shadow maps it samples
@@ -760,9 +762,10 @@ internal sealed partial class SponzaLoop
                             $"[VulkanSponza]   albedo {albX}x{albY}x{albZ} ({volume.Albedo!.Length / 1024.0 / 1024.0:0.00} MB), so the bounce carries surface colour.");
                     }
                     for (var i = 0; i < bounceTextures.Length; i++)
-                        bounceTextures[i] = vk.CreateStorageTexture3D(
+                    for (var c = 0; c < 3; c++)
+                        bounceTextures[i][c] = vk.CreateStorageTexture3D(
                             probeX, probeY, probeZ, TextureFormat.Rgba16F,
-                            SamplerDescription.LinearClamp, $"sponza.bounce{i}");
+                            SamplerDescription.LinearClamp, $"sponza.bounce{i}.{"rgb"[c]}");
                     bounceReady = true;
                     Console.WriteLine(
                         $"[VulkanSponza]   occupancy {occX}x{occY}x{occZ} shipped; sun bounce injected at runtime.");

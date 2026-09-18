@@ -134,7 +134,12 @@ layout(set = 1, binding = 5) uniform sampler2D   uAmbientVisibility;
 layout(set = 1, binding = 6) uniform sampler3D   uSkyVisibility;
 // Sun bounce, injected each frame over the same voxel grid. RGB irradiance, no direction: the
 // visibility volume supplies the shape, this supplies the colour and the level.
-layout(set = 1, binding = 7) uniform sampler3D   uSkyBounce;
+// One volume per colour channel, each holding that channel's (L0, L1x, L1y, L1z). Directional, so
+// a surface receives what reaches the side it FACES — the previous single RGB gave every surface at
+// a point the same answer, which is why a teal curtain metres away tinted a whole tree.
+layout(set = 1, binding = 7)  uniform sampler3D uSkyBounceR;
+layout(set = 1, binding = 11) uniform sampler3D uSkyBounceG;
+layout(set = 1, binding = 12) uniform sampler3D uSkyBounceB;
 // The environment convolved with CHARLIE rather than GGX, and the Charlie lobe's directional
 // albedo. Separate from uPrefilteredEnv on purpose: a GGX cube in sheen's place renders something
 // dimmer and rimless and entirely plausible, which is the failure this whole arc keeps closing.
@@ -554,7 +559,19 @@ void main() {
         // in different units. The volume stores average incident RADIANCE, so irradiance is PI times
         // it — and the /PI that briefly sat here is the radiance conversion, which belongs in the
         // injection pass where a surface re-emits, not here where one receives.
-        vec3 incident = PI * texture(uSkyBounce, clamp(probeUv, vec3(0.0), vec3(1.0))).rgb;
+        // Cosine-convolved L1 evaluation along the gather normal: the same expression the sky
+        // visibility uses, minus its final /PI, which is the divide that turns irradiance into a
+        // fraction. This term is irradiance and must keep it.
+        vec3 uvw = clamp(probeUv, vec3(0.0), vec3(1.0));
+        vec4 shR = texture(uSkyBounceR, uvw);
+        vec4 shG = texture(uSkyBounceG, uvw);
+        vec4 shB = texture(uSkyBounceB, uvw);
+        const float SY0 = 0.282095, SY1 = 0.488603;
+        vec3 shL0 = vec3(shR.x, shG.x, shB.x);
+        vec3 shDir = vec3(shR.y, shG.y, shB.y) * gatherN.x
+                   + vec3(shR.z, shG.z, shB.z) * gatherN.y
+                   + vec3(shR.w, shG.w, shB.w) * gatherN.z;
+        vec3 incident = max(PI * SY0 * shL0 + (2.0 * PI / 3.0) * SY1 * shDir, vec3(0.0));
         vizBounceRaw = incident;
         bounce = incident * albedo * (1.0 - metallic) * ao * visibility;
     }

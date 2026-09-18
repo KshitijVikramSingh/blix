@@ -21,8 +21,10 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4 uProbeMode;    // x: 0 = bounce, 1 = sky visibility; y = exposure
 } f;
 
-layout(set = 1, binding = 0) uniform sampler3D uSkyBounce;
+layout(set = 1, binding = 0) uniform sampler3D uSkyBounceR;
 layout(set = 1, binding = 1) uniform sampler3D uSkyVisibility;
+layout(set = 1, binding = 2) uniform sampler3D uSkyBounceG;
+layout(set = 1, binding = 3) uniform sampler3D uSkyBounceB;
 
 layout(location = 0) in vec3 vProbeCentre;
 layout(location = 1) in vec2 vQuad;
@@ -42,9 +44,17 @@ void main() {
 
     vec3 c;
     if (f.uProbeMode.x < 0.5) {
-        // Average incident radiance. Directionless today — every N gives the same answer, which is
-        // exactly the thing worth seeing.
-        c = PI * texture(uSkyBounce, vProbeUvw).rgb;
+        // L1 spherical harmonics, evaluated along this point's own normal — so a probe SHADES, and
+        // a flat disc now means something is wrong rather than something is missing.
+        vec4 shR = texture(uSkyBounceR, vProbeUvw);
+        vec4 shG = texture(uSkyBounceG, vProbeUvw);
+        vec4 shB = texture(uSkyBounceB, vProbeUvw);
+        const float SY0 = 0.282095, SY1 = 0.488603;
+        vec3 l0 = vec3(shR.x, shG.x, shB.x);
+        vec3 dir = vec3(shR.y, shG.y, shB.y) * N.x
+                 + vec3(shR.z, shG.z, shB.z) * N.y
+                 + vec3(shR.w, shG.w, shB.w) * N.z;
+        c = max(PI * SY0 * l0 + (2.0 * PI / 3.0) * SY1 * dir, vec3(0.0));
     } else {
         // L1 spherical harmonics, cosine-convolved: the same evaluation lit.frag does.
         vec4 sh = texture(uSkyVisibility, vProbeUvw);
