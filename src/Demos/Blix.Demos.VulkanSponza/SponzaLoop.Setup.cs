@@ -218,6 +218,11 @@ internal sealed partial class SponzaLoop
         var injectInterface = Reflect("sky_inject.comp");
         injectPassHandle = graph.ComputePass("sky-inject").Shader(injectInterface).Handle;
 
+        // After the depth pre-pass, because it reads what that pass wrote. Its marks are consumed by
+        // the NEXT frame's injection — one frame of latency on a field that refreshes over 32.
+        usageInterface = Reflect("probe_usage.comp");
+        probeUsagePassHandle = graph.ComputePass("probe-usage").Shader(usageInterface).Handle;
+
         var froxelInterface = Reflect("froxel.comp");
         var froxelPass = graph.ComputePass("froxel-fog").Shader(froxelInterface);
         for (var c = 0; c < CascadeCount; c++)
@@ -478,6 +483,10 @@ internal sealed partial class SponzaLoop
             injectPipeline = vk.CreateComputePipeline(injectProgram, "sky_inject");
             // Rebuilt each frame around the write/read pair; see BounceBindings.
             injectBindings = BounceBindings();
+
+            var usageSpv = File.ReadAllBytes(Path.Combine(shaderDir, "probe_usage.comp.spv"));
+            var usageProgram = vk.CreateComputeShaderProgramFromSpv(usageSpv, usageInterface, "probe_usage");
+            probeUsagePipeline = vk.CreateComputePipeline(usageProgram, "probe_usage");
         }
 
         // --- Froxel fog compute program + grid ---------------------------
@@ -768,6 +777,9 @@ internal sealed partial class SponzaLoop
                         bounceTextures[i] = vk.CreateStorageTexture2D(
                             atlasW, atlasH, TextureFormat.Rgba16F,
                             SamplerDescription.LinearClamp, $"sponza.bounce{i}");
+                    probeUsageTexture = vk.CreateStorageTexture3D(
+                        bounceX, bounceY, bounceZ, TextureFormat.Rgba16F,
+                        SamplerDescription.LinearClamp, "sponza.probeUsage");
                     Console.WriteLine(
                         $"[VulkanSponza]   bounce probes {bounceX}x{bounceY}x{bounceZ} = " +
                         $"{bounceX * bounceY * bounceZ:N0}, octahedral atlas {atlasW}x{atlasH} " +

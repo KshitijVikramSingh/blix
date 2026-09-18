@@ -127,6 +127,8 @@ internal sealed partial class SponzaLoop
                 injectRays    = debug.Controls.Float("Rays / probe", injectRays, 8f, 64f);
                 injectPeriod  = debug.Controls.Float("Refresh period", injectPeriod, 4f, 64f);
                 injectTranslucency = debug.Controls.Float("Translucency", injectTranslucency, 0f, 1f);
+                // 0 = never sleep, which is the honest A/B against everything before this.
+                probeSleepFrames = MathF.Round(debug.Controls.Float("Sleep after (frames)", probeSleepFrames, 0f, 600f));
             }
 
             // The two cloth numbers were guesses written into a patch file, and a patch is cooked —

@@ -143,6 +143,16 @@ layout(set = 1, binding = 6) uniform sampler3D   uSkyVisibility;
 // thirty-six samples rather than L1's four, which is the difference between knowing a curtain is
 // over there and knowing how much of the sky it covers.
 layout(set = 1, binding = 7) uniform sampler2D uSkyBounce;
+// <b>No storage image here, and the reason is measured.</b> Marking probes from the fragment stage
+// is the obvious way to learn which ones shading reads — and on this tile-based GPU merely
+// DECLARING an image3D in this shader cost 8x the frame: 35 ms became 290 ms. Not the write, the
+// declaration: disabling every store left it at 289 ms, and deleting the binding restored 35 ms.
+// A TBDR tiler cannot keep its guarantees about a fragment shader that might scatter to memory, so
+// it stops trying, and the image resolves visibly block by block.
+//
+// The information is still wanted and still only exists at render time — it just has to be derived
+// somewhere that can afford to write. Reading the depth buffer in a compute pass gives the same
+// answer, which probes sit near visible geometry, from a stage where scattering is free.
 // The environment convolved with CHARLIE rather than GGX, and the Charlie lobe's directional
 // albedo. Separate from uPrefilteredEnv on purpose: a GGX cube in sheen's place renders something
 // dimmer and rimless and entirely plausible, which is the failure this whole arc keeps closing.

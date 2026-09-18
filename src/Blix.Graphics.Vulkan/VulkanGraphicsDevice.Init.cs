@@ -36,6 +36,9 @@ public sealed partial class VulkanGraphicsDevice
     // device creation when supported). Gates the per-material indirect path.
     internal bool MultiDrawIndirectSupported { get; private set; }
 
+    /// <summary>Whether a fragment shader may write storage images — see where it is enabled.</summary>
+    public bool FragmentStoresSupported { get; private set; }
+
     internal KhrSurface KhrSurface { get; private set; } = null!;
     internal SurfaceKHR Surface { get; private set; }
 
@@ -344,10 +347,22 @@ public sealed partial class VulkanGraphicsDevice
         // multiDrawIndirect: one vkCmdDrawIndexedIndirect issuing drawCount>1
         // sub-draws from a buffer — the basis of the per-material indirect path.
         MultiDrawIndirectSupported = supportedFeatures.MultiDrawIndirect;
+
+        // fragmentStoresAndAtomics: a FRAGMENT shader may write a storage image or buffer. Off by
+        // default in Vulkan because it costs the driver some freedom to reorder, and the whole
+        // pipeline until now only ever read in the fragment stage.
+        //
+        // It is enabled for feedback: shading is the only stage that knows which probes it actually
+        // sampled, and that fact cannot be derived anywhere else. Measured on Sponza, no bake-time
+        // test can separate a probe inside the model's shell from one in the arcade — they are
+        // geometrically identical, and what distinguishes them is that nothing renders against one
+        // of them. A fragment marking what it read is the only place that truth exists.
+        FragmentStoresSupported = supportedFeatures.FragmentStoresAndAtomics;
         var features = new PhysicalDeviceFeatures
         {
             SamplerAnisotropy = AnisotropySupported,
             MultiDrawIndirect = MultiDrawIndirectSupported,
+            FragmentStoresAndAtomics = FragmentStoresSupported,
         };
         var ci = new DeviceCreateInfo
         {

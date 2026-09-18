@@ -112,7 +112,9 @@ internal sealed partial class SponzaLoop
             new("uCameraPos",        new Vector3Uniform(cameraPosition)),
             new("uEnvMipCount",      new FloatUniform(iblPrefilterMips)),
             new("uSheenMipCount",    new FloatUniform(sheenMipCount)),
-            new("uBounceDims",       new Vector4Uniform(new Vector4(bounceX, bounceY, bounceZ, 0f))),
+            // w marks whether shading should write usage at all — off while the volume is not ready.
+            new("uBounceDims", new Vector4Uniform(new Vector4(
+                bounceX, bounceY, bounceZ, bounceReady && probeSleepFrames > 0f ? 1f : 0f))),
             // x < 0 means "use what the material carries"; the overlay sets it to find a value.
             new("uClothOverride",    new Vector4Uniform(clothOverride
                 ? new Vector4(sheenRoughness, diffuseTransmit, 0f, 0f)
@@ -352,7 +354,9 @@ internal sealed partial class SponzaLoop
                 new("uAlbedoDims", new Vector4Uniform(new Vector4(albX, albY, albZ, injectTranslucency))),
                 new("uSunDirection",  new Vector4Uniform(new Vector4(sunDirection, 0f))),
                 new("uSunIrradiance", new Vector4Uniform(new Vector4(sunIrradiance, 0f))),
-                new("uSchedule",      new Vector4Uniform(new Vector4(framesRendered, MathF.Round(injectPeriod), 0f, 0f))),
+                new("uSchedule", new Vector4Uniform(new Vector4(
+                    framesRendered, MathF.Round(injectPeriod),
+                    probeSleepFrames > 0f ? 1f / probeSleepFrames : 0f, 0f))),
             };
             graph.Dispatch(injectPassHandle, new DispatchCommand(
                 injectPipeline,
@@ -360,6 +364,32 @@ internal sealed partial class SponzaLoop
                 // are the 64 rays, shared between all 36 texels of that probe's tile.
                 bounceX * bounceY * bounceZ, 1, 1,
                 injectUniforms, BounceBindings()));
+        }
+
+        // Which probes this frame needs, from the depth the pre-pass just wrote. Marks are read by
+        // the NEXT frame's injection; see probe_usage.comp for why this is not done in lit.frag.
+        if (bounceReady && skyVisibilityEnabled && probeSleepFrames > 0f)
+        {
+            Matrix4x4.Invert(viewProj, out var invViewProj);
+            var usageUniforms = new ShaderUniform[]
+            {
+                new("uInvViewProj", new Matrix4x4Uniform(invViewProj)),
+                new("uBoundsMin",   new Vector4Uniform(new Vector4(skyVolumeMin, 0f))),
+                new("uBoundsSpan",  new Vector4Uniform(new Vector4(skyVolumeSpan, 0f))),
+                new("uProbeDims",   new Vector4Uniform(new Vector4(bounceX, bounceY, bounceZ, 0f))),
+                new("uDepthSize",   new Vector4Uniform(new Vector4(
+                    frame.Width, frame.Height, 1f / frame.Width, 1f / frame.Height))),
+            };
+            var usageBindings = new[]
+            {
+                new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth), Slot: 1),
+                new ShaderTextureBinding("uProbeUsage", probeUsageTexture, Slot: 2),
+            };
+            // One invocation per 8x8 pixel block; the shader strides by 8 again inside.
+            var groupsX = (frame.Width / 8 + 7) / 8;
+            var groupsY = (frame.Height / 8 + 7) / 8;
+            graph.Dispatch(probeUsagePassHandle, new DispatchCommand(
+                probeUsagePipeline, groupsX, groupsY, 1, usageUniforms, usageBindings));
         }
 
         // Hi-Z pyramid: level 0 reduces the resolved depth, each level after reduces its parent.
@@ -922,6 +952,7 @@ internal sealed partial class SponzaLoop
         new ShaderTextureBinding("uAtlas", bounceTextures[bounceWrite], Slot: 1),
         new ShaderTextureBinding("uOccupancy", occupancyTexture, Slot: 2),
         new ShaderTextureBinding("uAlbedo", albX > 0 ? albedoTexture : occupancyTexture, Slot: 5),
+        new ShaderTextureBinding("uProbeUsage", probeUsageTexture, Slot: 10),
         new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 3),
         // Last frame's solution, which is what turns a rotation of sweeps into successive bounces
         // AND what lets this dispatch run without the lit pass waiting on it.

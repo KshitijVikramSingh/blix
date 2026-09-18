@@ -71,6 +71,7 @@ layout(set = 0, binding = 0) uniform Inject {
     // of the image and the sun moves slowly, so solving every probe every frame spends 19 ms to
     // re-derive a field that barely changed — measured, it doubled the frame. Each probe is
     // refreshed on its own turn instead.
+    // x = frame counter, y = sweep length, z = usage decay per frame (0 disables sleeping).
     vec4 uSchedule;
     // xyz albedo grid dims (0 = none shipped), w = translucency.
     vec4 uAlbedoDims;
@@ -94,6 +95,11 @@ layout(set = 0, binding = 4) uniform sampler2D uAtlasPrev;
 layout(set = 0, binding = 2) uniform sampler3D uOccupancy;
 layout(set = 0, binding = 3) uniform sampler3D uSkyVisibility;
 layout(set = 0, binding = 5) uniform sampler3D uAlbedo;
+// <b>Which probes shading actually read, written by the fragment stage.</b> No bake-time test can
+// tell a probe inside the model's shell from one in the arcade — measured, they are geometrically
+// identical and the occupancy grid is not even watertight. What separates them is that nothing
+// renders against one of them, and that is a fact only the fragment shader holds.
+layout(set = 0, binding = 10, rgba16f) uniform image3D uProbeUsage;
 
 #define PI 3.14159265359
 // What the previous sweep left at a point, for a surface facing n. One bilinear fetch inside that
@@ -292,14 +298,24 @@ void main() {
     // Is this probe's turn? A scatter over the three axes rather than whole slices, so the ones
     // refreshed together are spread through the volume and a sun change arrives evenly rather than
     // sweeping across the scene as a visible plane.
+    // <b>A probe nobody sampled is one nobody wanted lighting from.</b> Shading marks what it
+    // reads; this decays that mark and stops solving once it reaches zero. The tile is still
+    // carried forward, so a sleeping probe keeps its answer and wakes on its next turn rather than
+    // flashing black — the sleep condition is cheap and the WAKE condition is the one that has to
+    // be right.
+    float usage = imageLoad(uProbeUsage, probe).r;
+    float decay = u.uSchedule.z;
+    bool asleep = decay > 0.0 && usage <= 0.02;
+
     int period = int(u.uSchedule.y);
     int slot = (probe.x * 5 + probe.y * 11 + probe.z * 17) % period;
-    if (slot != int(u.uSchedule.x) % period) {
+    if (asleep || slot != int(u.uSchedule.x) % period) {
         // Carry the tile forward. The write target alternates with frame parity and a probe's turn
         // comes round every `period` frames — an even period, so the same parity every time. A probe
         // that simply returned was therefore only ever written into ONE of the two atlases and
         // stayed empty in the other, which reads as the light swinging about between frames.
         imageStore(uAtlas, tile + texel, texelFetch(uAtlasPrev, tile + texel, 0));
+        if (lane == 0) imageStore(uProbeUsage, probe, vec4(max(usage - decay, 0.0)));
         return;
     }
 
@@ -340,4 +356,5 @@ void main() {
     ivec2 src = blix_octBorderSource(texel, BLIX_OCT_TILE);
     vec3 value = sTexel[(src.y - 1) * BLIX_OCT_INTERIOR + (src.x - 1)];
     imageStore(uAtlas, tile + texel, vec4(value, 1.0));
+    if (lane == 0) imageStore(uProbeUsage, probe, vec4(max(usage - decay, 0.0)));
 }

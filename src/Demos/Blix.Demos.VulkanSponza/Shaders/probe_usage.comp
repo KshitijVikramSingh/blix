@@ -1,0 +1,62 @@
+#version 450
+
+// Which probes the frame actually needs, derived from the depth buffer.
+//
+// <b>The obvious place to learn this is the fragment shader, and on this GPU it cannot be.</b>
+// Marking probes where shading samples them is exact and direct — and merely DECLARING an image3D
+// in lit.frag cost 8x the frame here: 35 ms became 290 ms. Not the store, the declaration. A
+// tile-based deferred tiler cannot keep its guarantees about a fragment shader that might scatter
+// to memory, so it stops trying, and the image resolves visibly block by block.
+//
+// Depth answers the same question from a stage where scattering is free. Every probe near a surface
+// the frame drew is a probe the frame will read, and the depth buffer IS the set of surfaces the
+// frame drew. It is arguably the better source: it sees what was rendered rather than what one
+// shader happened to sample.
+//
+// Sampled sparsely on purpose. This is not reconstructing an image; it is marking cells of a grid
+// whose spacing is over a metre, so one sample per 8x8 block of pixels lands many samples in every
+// probe that matters.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform Usage {
+    mat4 uInvViewProj;    // clip -> world
+    vec4 uBoundsMin;      // xyz probe volume min
+    vec4 uBoundsSpan;     // xyz probe volume span
+    vec4 uProbeDims;      // xyz probe counts
+    vec4 uDepthSize;      // xy depth extent in pixels, zw = 1/extent
+} u;
+
+layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
+layout(set = 0, binding = 2, rgba16f) uniform image3D uProbeUsage;
+
+void main() {
+    // One sample per 8x8 pixels — see the header for why sparse is right rather than merely cheap.
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy) * 8;
+    if (pixel.x >= int(u.uDepthSize.x) || pixel.y >= int(u.uDepthSize.y)) return;
+
+    float depth = texelFetch(uSceneDepth, pixel, 0).r;
+    // 1.0 is the far plane: nothing was drawn here, so no surface wants a probe.
+    if (depth >= 0.9999) return;
+
+    vec2 ndc = (vec2(pixel) + 0.5) * u.uDepthSize.zw * 2.0 - 1.0;
+    vec4 clip = vec4(ndc, depth, 1.0);
+    vec4 world = u.uInvViewProj * clip;
+    if (abs(world.w) < 1e-6) return;
+    vec3 p = world.xyz / world.w;
+
+    vec3 grid = (p - u.uBoundsMin.xyz) / u.uBoundsSpan.xyz * u.uProbeDims.xyz - 0.5;
+    ivec3 dims = ivec3(u.uProbeDims.xyz);
+    ivec3 base = ivec3(floor(grid));
+
+    // The 2x2x2 block a surface here could read. The reader takes the nearest probe today, but a
+    // camera in motion crosses cell boundaries between the mark and the use, and a probe woken one
+    // frame late is a probe that shows its previous answer.
+    for (int z = 0; z <= 1; ++z)
+    for (int y = 0; y <= 1; ++y)
+    for (int x = 0; x <= 1; ++x) {
+        ivec3 c = clamp(base + ivec3(x, y, z), ivec3(0), dims - 1);
+        // Every writer stores the same 1.0, so the race between them has one outcome.
+        imageStore(uProbeUsage, c, vec4(1.0));
+    }
+}

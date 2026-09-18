@@ -203,6 +203,23 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     /// is an eighth of the marching — and the marching is what this pass costs.
     /// </remarks>
     private int bounceX, bounceY, bounceZ;
+
+    // Which probes shading read, and how fast an unread one forgets. 0 frames disables sleeping
+    // entirely, which is the A/B: every probe solved every sweep, as before.
+    private TextureHandle probeUsageTexture;
+    private PassHandle probeUsagePassHandle;
+    private ShaderInterface usageInterface = null!;
+    private PipelineHandle probeUsagePipeline;
+    // <b>Off by default, because the win is real in the pass and not in the frame.</b> The marker
+    // works: sky-inject 1.45 -> 0.82 ms for 0.18 ms of its own, with the image identical to
+    // 0.13/255. And the FRAME gets slower — consistently, across reps, while the GPU pass timers
+    // insist it should not. The cost is in synchronisation those timers do not see: a compute pass
+    // consuming the depth the pre-pass just wrote forces a barrier mid-frame, and on a tile-based
+    // GPU that breaks pass merging. The same family as the fragment-store finding one layer up.
+    //
+    // Measuring it properly needs --ab, which interleaves arms inside one process — this laptop
+    // drifts far enough between sequential runs that sleep=0 alone moved 24.8 to 34.3 ms.
+    private float probeSleepFrames;
     private const int OctTile = 8;
     private int bounceWrite;
     private int skyBounceBinding = -1;   // where uSkyBounce sits in passBindings
