@@ -74,6 +74,18 @@ public static class SkyVisibilityBaker
         public SkyCell At(int x, int y, int z) => Cells[(z * SizeY + y) * SizeX + x];
     }
 
+    /// <summary>
+    /// How opaque one voxel of alpha-tested geometry is to sky.
+    /// </summary>
+    /// <remarks>
+    /// The one number here that is judged rather than derived. A leaf card is opaque where it has a
+    /// leaf and clear where it does not, and the grid has no idea which — resolving that would mean
+    /// sampling the albedo's alpha during voxelisation, which is where this should eventually go.
+    /// A third per voxel means roughly three overlapping cards before a canopy reads as closed,
+    /// which is about right for a cypress and errs toward letting light through.
+    /// </remarks>
+    private const float CutoutOpacity = 0.34f;
+
     /// <summary>A world-space box. Local so the baker does not drag Blix.Geometry into the cook.</summary>
     public readonly record struct Bounds3Lite(Vector3 Min, Vector3 Max);
 
@@ -87,15 +99,29 @@ public static class SkyVisibilityBaker
         IReadOnlyList<string> meshPaths, int occupancy = 256, int probes = 48, int rays = 64,
         Action<string>? log = null)
     {
-        var tris = new List<(Vector3 A, Vector3 B, Vector3 C)>();
+        // <b>Opacity per triangle, because a canopy is not a wall.</b> The grid was boolean, so a
+        // cypress voxelised as solid as masonry and the column of air it stands in — which is the
+        // middle of the courtyard, and where the camera looks — baked as fully enclosed. Excluding
+        // foliage is the opposite error: a dense canopy really does take most of the sky.
+        //
+        // What a leaf card actually does is ATTENUATE, so the grid stores density and a ray
+        // accumulates transmittance through it. Stone stays opaque; alpha-tested geometry
+        // contributes a fraction, and enough overlapping leaf cards still add up to darkness.
+        var tris = new List<(Vector3 A, Vector3 B, Vector3 C, float Opacity)>();
         var min = new Vector3(float.MaxValue);
         var max = new Vector3(float.MinValue);
 
         foreach (var path in meshPaths)
         {
             var file = BlixMeshReader.Read(path);
+            var materials = file.MaterialTable;
             foreach (var prim in file.Primitives)
             {
+                // glTF alpha modes: 0 OPAQUE, 1 MASK, 2 BLEND. Anything not opaque is a surface the
+                // renderer lets light through, so the grid should too.
+                var mode = prim.MaterialIndex >= 0 && prim.MaterialIndex < materials.Count
+                    ? materials[prim.MaterialIndex].AlphaMode : (byte)0;
+                var opacity = mode == 0 ? 1f : CutoutOpacity;
                 var stride = prim.Layout.Stride;
                 var positions = new Vector3[prim.VertexCount];
                 for (var v = 0; v < prim.VertexCount; v++)
@@ -116,10 +142,10 @@ public static class SkyVisibilityBaker
                 var lod = prim.Lods[^1];
                 if (lod.Indices32 is { } i32)
                     for (var i = 0; i + 2 < i32.Length; i += 3)
-                        tris.Add((positions[i32[i]], positions[i32[i + 1]], positions[i32[i + 2]]));
+                        tris.Add((positions[i32[i]], positions[i32[i + 1]], positions[i32[i + 2]], opacity));
                 else if (lod.Indices16 is { } i16)
                     for (var i = 0; i + 2 < i16.Length; i += 3)
-                        tris.Add((positions[i16[i]], positions[i16[i + 1]], positions[i16[i + 2]]));
+                        tris.Add((positions[i16[i]], positions[i16[i + 1]], positions[i16[i + 2]], opacity));
             }
         }
 
@@ -135,7 +161,7 @@ public static class SkyVisibilityBaker
         var longest = MathF.Max(span.X, MathF.Max(span.Y, span.Z));
         int Dim(float extent, int res) => Math.Max(2, (int)MathF.Ceiling(res * extent / longest));
         var (ox, oy, oz) = (Dim(span.X, occupancy), Dim(span.Y, occupancy), Dim(span.Z, occupancy));
-        var solid = new bool[ox * oy * oz];
+        var density = new float[ox * oy * oz];
         var cell = new Vector3(span.X / ox, span.Y / oy, span.Z / oz);
 
         // Voxelise by sampling each triangle's SURFACE, densely enough that no cell it crosses is
@@ -152,7 +178,7 @@ public static class SkyVisibilityBaker
         // is the safe direction: a pinhole in a wall leaks a little light, where a filled courtyard
         // deletes all of it.
         var cellDiag = cell.Length();
-        foreach (var (a, b, c) in tris)
+        foreach (var (a, b, c, opacity) in tris)
         {
             var area = Vector3.Cross(b - a, c - a).Length() * 0.5f;
             // Two samples per cell-width along each edge direction, so a triangle crossing a cell
@@ -172,13 +198,18 @@ public static class SkyVisibilityBaker
                 var x = Math.Clamp((int)((p.X - min.X) / cell.X), 0, ox - 1);
                 var y = Math.Clamp((int)((p.Y - min.Y) / cell.Y), 0, oy - 1);
                 var z = Math.Clamp((int)((p.Z - min.Z) / cell.Z), 0, oz - 1);
-                solid[(z * oy + y) * ox + x] = true;
+                var voxel = (z * oy + y) * ox + x;
+                // Opaque saturates immediately; cutout accumulates, so overlapping leaf cards build
+                // up density the way overlapping foliage builds up shade.
+                density[voxel] = MathF.Min(1f, MathF.Max(density[voxel], opacity));
             }
         }
 
-        var filled = solid.Count(s => s);
+        var opaqueCells = density.Count(d => d >= 0.99f);
+        var partialCells = density.Count(d => d > 0.01f && d < 0.99f);
         log?.Invoke($"  voxelised {tris.Count:N0} triangles (coarsest LOD) into {ox}x{oy}x{oz}, " +
-                    $"{100.0 * filled / solid.Length:0.0}% solid");
+                    $"{100.0 * opaqueCells / density.Length:0.0}% opaque, " +
+                    $"{100.0 * partialCells / density.Length:0.0}% partial (foliage)");
 
         var (px, py, pz) = (Dim(span.X, probes), Dim(span.Y, probes), Dim(span.Z, probes));
         var cells = new SkyCell[px * py * pz];
@@ -199,9 +230,12 @@ public static class SkyVisibilityBaker
                 var l1 = Vector3.Zero;
                 foreach (var dir in directions)
                 {
-                    if (Occluded(origin, dir, min, cell, ox, oy, oz, solid)) continue;
-                    l0 += Y0;
-                    l1 += Y1 * dir;
+                    // Transmittance, not a yes/no. A ray through a canopy arrives carrying what got
+                    // past the leaves, which is the difference between a tree and a chimney.
+                    var t = Transmittance(origin, dir, min, cell, ox, oy, oz, density);
+                    if (t <= 0.001f) continue;
+                    l0 += Y0 * t;
+                    l1 += Y1 * t * dir;
                 }
                 var w = 4f * MathF.PI / directions.Length;
                 cells[(z * py + y) * px + x] = new SkyCell(l0 * w, l1 * w);
@@ -248,7 +282,7 @@ public static class SkyVisibilityBaker
             var origin = min + new Vector3(
                 (x + 0.5f) * span.X / px, (y + 0.5f) * span.Y / py, (z + 0.5f) * span.Z / pz);
             var v = (origin - min) / cell;
-            var solidHere = solid[
+            var solidHere = 0.99f <= density[
                 (Math.Clamp((int)v.Z, 0, oz - 1) * oy + Math.Clamp((int)v.Y, 0, oy - 1)) * ox
                 + Math.Clamp((int)v.X, 0, ox - 1)];
             valid[(z * py + y) * px + x] = !solidHere;
@@ -291,8 +325,9 @@ public static class SkyVisibilityBaker
         log?.Invoke($"  filled {buried} probes buried in geometry ({100.0 * buried / cells.Length:0.0}%)");
 
         // The grid goes out with the probes: the runtime marches it to inject the sun's bounce.
-        var occBytes = new byte[solid.Length];
-        for (var i = 0; i < solid.Length; i++) occBytes[i] = solid[i] ? (byte)255 : (byte)0;
+        var occBytes = new byte[density.Length];
+        for (var i = 0; i < density.Length; i++)
+            occBytes[i] = (byte)Math.Clamp((int)MathF.Round(density[i] * 255f), 0, 255);
         return new Volume(new Bounds3Lite(min, max), px, py, pz, cells, ox, oy, oz, occBytes);
     }
 
@@ -334,23 +369,20 @@ public static class SkyVisibilityBaker
         return false;
     }
 
-    // Amanatides-Woo DDA through the occupancy grid. Returns true if the ray hits before leaving.
-    private static bool Occluded(
-        Vector3 origin, Vector3 dir, Vector3 min, Vector3 cell, int nx, int ny, int nz, bool[] solid)
+    // Amanatides-Woo DDA accumulating transmittance. 1 = nothing in the way, 0 = fully blocked.
+    private static float Transmittance(
+        Vector3 origin, Vector3 dir, Vector3 min, Vector3 cell, int nx, int ny, int nz, float[] density)
     {
         var p = (origin - min) / cell;
         var x = Math.Clamp((int)p.X, 0, nx - 1);
         var y = Math.Clamp((int)p.Y, 0, ny - 1);
         var z = Math.Clamp((int)p.Z, 0, nz - 1);
-
         var stepX = dir.X > 0 ? 1 : -1;
         var stepY = dir.Y > 0 ? 1 : -1;
         var stepZ = dir.Z > 0 ? 1 : -1;
-
         float Next(float pos, int step, float d) =>
             MathF.Abs(d) < 1e-9f ? float.MaxValue
             : (step > 0 ? (MathF.Floor(pos) + 1 - pos) : (pos - MathF.Floor(pos))) / MathF.Abs(d);
-
         var tMaxX = Next(p.X, stepX, dir.X);
         var tMaxY = Next(p.Y, stepY, dir.Y);
         var tMaxZ = Next(p.Z, stepZ, dir.Z);
@@ -358,17 +390,19 @@ public static class SkyVisibilityBaker
         var tDeltaY = MathF.Abs(dir.Y) < 1e-9f ? float.MaxValue : 1f / MathF.Abs(dir.Y);
         var tDeltaZ = MathF.Abs(dir.Z) < 1e-9f ? float.MaxValue : 1f / MathF.Abs(dir.Z);
 
-        // Skip the cell the probe sits in: a probe inside geometry would otherwise report zero sky
-        // and paint a black cell into the middle of a lit room.
+        var transmittance = 1f;
         var first = true;
         while (true)
         {
-            if (!first && solid[(z * ny + y) * nx + x]) return true;
+            if (!first)
+            {
+                transmittance *= 1f - density[(z * ny + y) * nx + x];
+                if (transmittance <= 0.001f) return 0f;
+            }
             first = false;
-
-            if (tMaxX < tMaxY && tMaxX < tMaxZ) { x += stepX; tMaxX += tDeltaX; if (x < 0 || x >= nx) return false; }
-            else if (tMaxY < tMaxZ)             { y += stepY; tMaxY += tDeltaY; if (y < 0 || y >= ny) return false; }
-            else                                { z += stepZ; tMaxZ += tDeltaZ; if (z < 0 || z >= nz) return false; }
+            if (tMaxX < tMaxY && tMaxX < tMaxZ) { x += stepX; tMaxX += tDeltaX; if (x < 0 || x >= nx) return transmittance; }
+            else if (tMaxY < tMaxZ)             { y += stepY; tMaxY += tDeltaY; if (y < 0 || y >= ny) return transmittance; }
+            else                                { z += stepZ; tMaxZ += tDeltaZ; if (z < 0 || z >= nz) return transmittance; }
         }
     }
 

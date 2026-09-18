@@ -16,8 +16,30 @@
 // march runs toward the sun: unoccluded means the surface is lit, and it re-radiates. Storing an
 // albedo and a normal per voxel would be 24 MB to say something this derives for free.
 //
+// ── Multi-bounce, because one is not enough for a courtyard ─────────────────
+// A point three metres up in Sponza's courtyard sees about three of ninety-six ray directions as
+// sky — measured, and matching the analytic solid angle of a 21-degree cone between sixteen-metre
+// walls. Light down there has bounced several times by the time it arrives, so a single bounce off
+// walls that are themselves nearly enclosed cannot fill it.
+//
+// So a hit surface re-radiates the sun it catches PLUS whatever the previous sweep already left
+// there. Reading the texture this pass writes is deliberate: probes refresh on a rotation, so a
+// read almost always sees a settled neighbour, and each full sweep advances the solution by one
+// bounce. Albedo multiplies in every time, so the series converges rather than runs away.
+//
+// ── What the probe stores, and why the units matter ─────────────────────────
+// Average incident RADIANCE over the sphere, not irradiance. The distinction decides whether the
+// feedback loop converges: with each ray contributing albedo/PI and the sum then scaled by 4*PI/N,
+// the gain per bounce came to albedo*4 = 1.4, and a gain above one is a runaway. Measured, it lit
+// the scene to four times its original brightness.
+//
+// Kept as radiance the accounting is simply: a surface's incident irradiance is PI times the
+// average radiance reaching it, its outgoing radiance is albedo times that over PI, and the probe
+// averages what arrives. The albedo is then the whole per-bounce gain, so the series converges for
+// any physical material. The consumer multiplies by PI to get irradiance back.
+//
 // ── L0 only ─────────────────────────────────────────────────────────────────
-// RGB irradiance, no direction. Bounce is the low-frequency half of the image and a directional
+// RGB radiance, no direction. Bounce is the low-frequency half of the image and a directional
 // bounce is four times the storage for a term that is about to be added to a cosine lobe anyway.
 // The visibility volume beside it IS directional, so the SHAPE of the ambient still comes from
 // geometry; this supplies its colour and level.
@@ -43,6 +65,9 @@ layout(set = 0, binding = 0) uniform Inject {
 layout(set = 0, binding = 1, rgba16f) uniform image3D uBounce;
 layout(set = 0, binding = 2) uniform sampler3D uOccupancy;
 layout(set = 0, binding = 3) uniform sampler3D uSkyVisibility;
+// The SAME texture uBounce writes, bound for filtered reading. A surface re-radiates what has
+// already been deposited on it, so each sweep carries the light one bounce further.
+layout(set = 0, binding = 4) uniform sampler3D uBouncePrev;
 
 #define PI 3.14159265359
 
@@ -112,19 +137,29 @@ void main() {
         vec3 hitPos, hitNormal;
         if (!march(origin, dir, maxCells, hitPos, hitNormal)) continue;   // escaped: that is sky, already baked
 
+        // Not an early exit any more: a surface facing away from the sun still re-radiates the
+        // indirect light already on it, and in a courtyard that is most of them.
         float ndotl = max(dot(hitNormal, toSun), 0.0);
-        if (ndotl <= 0.0) continue;
 
         // Is that surface actually in sunlight? One more march, from just off the face.
-        vec3 lift = hitNormal * (length(u.uBoundsSpan.xyz / u.uOccupancyDims.xyz) * 1.5);
+        float cellSize = length(u.uBoundsSpan.xyz / u.uOccupancyDims.xyz);
         vec3 shadowHit, shadowNormal;
-        if (march(hitPos + lift, toSun, maxCells, shadowHit, shadowNormal)) continue;
+        bool sunlit = !march(hitPos + hitNormal * cellSize * 1.5, toSun, maxCells, shadowHit, shadowNormal);
+        if (!sunlit) ndotl = 0.0;
 
-        // Lambertian re-radiation toward this probe.
-        bounce += u.uSunIrradiance.rgb * ndotl * u.uBoundsSpan.w / PI;
+        // Irradiance arriving at that surface: the sun it catches, plus PI times the average
+        // radiance earlier sweeps left there. Sampled just off the face, so the lookup is not taken
+        // inside the geometry it is standing on.
+        vec3 prevUv = (hitPos + hitNormal * cellSize * 1.5 - u.uBoundsMin.xyz) / u.uBoundsSpan.xyz;
+        vec3 incident = u.uSunIrradiance.rgb * ndotl
+                      + PI * texture(uBouncePrev, clamp(prevUv, vec3(0.0), vec3(1.0))).rgb;
+
+        // Lambertian outgoing radiance. Albedo is the entire per-bounce gain from here.
+        bounce += u.uBoundsSpan.w * incident / PI;
     }
 
-    // The probe integrates over the sphere; 4*pi/N is the Monte Carlo weight.
-    bounce *= 4.0 * PI / float(rays);
+    // A plain average over the sampled directions, because what is stored is average radiance.
+    // Scaling by the sphere's 4*PI here is what made the loop diverge.
+    bounce /= float(rays);
     imageStore(uBounce, probe, vec4(bounce, 1.0));
 }

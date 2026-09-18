@@ -457,8 +457,15 @@ void main() {
     vec3 bounce = vec3(0.0);
     if (frame.uBounceStrength > 0.0) {
         vec3 probeUv = (vWorldPos + N * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz;
-        bounce = texture(uSkyBounce, clamp(probeUv, vec3(0.0), vec3(1.0))).rgb
-               * albedo * (1.0 - metallic) * ao * visibility;
+        // The volume stores average incident RADIANCE; irradiance is PI times it. Getting this
+        // conversion wrong is invisible in a single pass and fatal once the pass feeds itself.
+        // <b>Reflected exactly the way diffuseIBL is, because they are the same kind of quantity.</b>
+        // That line is irradiance x albedo; this must be too, or the two halves of the ambient are
+        // in different units. The volume stores average incident RADIANCE, so irradiance is PI times
+        // it — and the /PI that briefly sat here is the radiance conversion, which belongs in the
+        // injection pass where a surface re-emits, not here where one receives.
+        vec3 incident = PI * texture(uSkyBounce, clamp(probeUv, vec3(0.0), vec3(1.0))).rgb;
+        bounce = incident * albedo * (1.0 - metallic) * ao * visibility;
     }
 
     vec3 ambient = (kD * diffuseIBL * visibility + specularIBL * specularVisibility) * ao + bounce;

@@ -437,6 +437,9 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uBounce", bounceTexture, Slot: 1),
                 new ShaderTextureBinding("uOccupancy", occupancyTexture, Slot: 2),
                 new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 3),
+                // The same image as uBounce, bound for filtered reading: the pass feeds on its own
+                // previous result, which is what turns a rotation of sweeps into successive bounces.
+                new ShaderTextureBinding("uBouncePrev", bounceTexture, Slot: 4),
             };
         }
 
