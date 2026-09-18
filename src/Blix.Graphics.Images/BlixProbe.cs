@@ -48,6 +48,12 @@ public static class BlixProbe
     // the sun's disc from the diffuse and specular integrals, a reader that ignores this number is
     // rendering a sky with the sun taken out of it.
     public const uint Version3 = 3;
+    // v4: the sheen half of the lighting model — a second prefiltered cube convolved with the
+    // CHARLIE distribution, and the Charlie lobe's directional-albedo table. A GGX cube blurred
+    // differently is not sheen: GGX distributes microfacets about the normal and cloth is fibres
+    // standing away from it, so using the specular cube deletes the grazing rim that is the whole
+    // visual signature of fabric. No back-read; re-cook, as every bump here has.
+    public const uint Version4 = 4;
     public const int HeaderSize = 48;
 
     /// <summary>The recipe id the shipped probe cook stamps.</summary>
@@ -78,7 +84,20 @@ public sealed record BlixProbeData(
     Half[] EnvCube,
     Half[] IrradianceCube,
     Half[][] PrefilteredSpecular,
-    byte[] BrdfLut);
+    byte[] BrdfLut,
+
+    /// <summary>Face size of the Charlie-prefiltered cube, and how many roughness mips it has.</summary>
+    int SheenFaceSize = 0,
+    int SheenMipCount = 0,
+
+    /// <summary>Side of the square sheen directional-albedo table, E(NdotV, roughness) in R.</summary>
+    int SheenLutSize = 0,
+
+    /// <summary>The environment convolved with Charlie, one mip per sheen roughness.</summary>
+    Half[][]? PrefilteredSheen = null,
+
+    /// <summary>E(NdotV, roughness): what fraction of arriving light the sheen lobe carries.</summary>
+    byte[]? SheenLut = null);
 
 public static class BlixProbeWriter
 {
@@ -95,7 +114,7 @@ public static class BlixProbeWriter
         }
 
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        CookPreamble.Write(fs, BlixProbe.Magic, BlixProbe.Version3, stamp);
+        CookPreamble.Write(fs, BlixProbe.Magic, BlixProbe.Version4, stamp);
         using var bw = new BinaryWriter(fs);
 
         var flags = BlixProbe.Flags.None;
@@ -124,6 +143,12 @@ public static class BlixProbeWriter
             WriteHalves(bw, mip);
         }
         bw.Write(data.BrdfLut);
+
+        bw.Write(data.SheenFaceSize);
+        bw.Write(data.SheenMipCount);
+        bw.Write(data.SheenLutSize);
+        foreach (var mip in data.PrefilteredSheen ?? Array.Empty<Half[]>()) WriteHalves(bw, mip);
+        if (data.SheenLut is { } sheenLut) bw.Write(sheenLut);
     }
 
     private static void WriteHalves(BinaryWriter bw, Half[] data)
@@ -140,7 +165,7 @@ public static class BlixProbeReader
         ArgumentNullException.ThrowIfNull(path);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        CookPreamble.Read(fs, path).Require(BlixProbe.Magic, BlixProbe.Version3, path, ".blixprobe");
+        CookPreamble.Read(fs, path).Require(BlixProbe.Magic, BlixProbe.Version4, path, ".blixprobe");
         return AssetImportException.Refusing(path, () => ReadBody(fs, path), ".blixprobe");
     }
 
@@ -172,6 +197,31 @@ public static class BlixProbeReader
                 $"'{path}' truncated reading BRDF LUT: got {brdfLut.Length} bytes, expected {brdfLutSize * brdfLutSize * 4}.");
         }
 
+        var sheenFace = br.ReadInt32();
+        var sheenMips = br.ReadInt32();
+        var sheenLutSize = br.ReadInt32();
+        Half[][]? prefilteredSheen = null;
+        if (sheenMips > 0)
+        {
+            prefilteredSheen = new Half[sheenMips][];
+            for (var k = 0; k < sheenMips; k++)
+            {
+                var size = Math.Max(1, sheenFace >> k);
+                prefilteredSheen[k] = ReadHalves(br, 4 * 6 * size * size);
+            }
+        }
+        byte[]? sheenLut = null;
+        if (sheenLutSize > 0)
+        {
+            sheenLut = br.ReadBytes(sheenLutSize * sheenLutSize * 4);
+            if (sheenLut.Length != sheenLutSize * sheenLutSize * 4)
+            {
+                throw new InvalidDataException(
+                    $"'{path}' truncated reading sheen LUT: got {sheenLut.Length} bytes, " +
+                    $"expected {sheenLutSize * sheenLutSize * 4}.");
+            }
+        }
+
         return new BlixProbeData(
             EnvFaceSize: envFace,
             IrradianceFaceSize: irrFace,
@@ -183,7 +233,12 @@ public static class BlixProbeReader
             EnvCube: envCube,
             IrradianceCube: irrCube,
             PrefilteredSpecular: prefilter,
-            BrdfLut: brdfLut);
+            BrdfLut: brdfLut,
+            SheenFaceSize: sheenFace,
+            SheenMipCount: sheenMips,
+            SheenLutSize: sheenLutSize,
+            PrefilteredSheen: prefilteredSheen,
+            SheenLut: sheenLut);
     }
 
     private static Half[] ReadHalves(BinaryReader br, int count)

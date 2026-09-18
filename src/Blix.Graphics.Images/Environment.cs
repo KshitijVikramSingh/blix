@@ -100,7 +100,20 @@ public sealed class EnvironmentProbe
 // called Bake + BakeBrdfLut sequentially.
 public sealed record BakedEnvironment(
     EnvironmentProbe Probe,
-    TextureHandle BrdfLut);
+    TextureHandle BrdfLut,
+
+    /// <summary>The Charlie-prefiltered environment, or null when the probe carries no sheen half.</summary>
+    /// <remarks>
+    /// Nullable rather than falling back to the specular cube. A consumer handed the GGX cube in
+    /// sheen's place would render something — dimmer, rimless, and plausible — which is the failure
+    /// mode this whole session has been closing: a wrong answer that looks like an answer. Null says
+    /// "this probe cannot do sheen", and a consumer decides what that means.
+    /// </remarks>
+    TextureHandle? SheenPrefiltered = null,
+    int SheenMipCount = 0,
+
+    /// <summary>E(NdotV, roughness) for the Charlie lobe, R channel.</summary>
+    TextureHandle? SheenLut = null);
 
 public static class EnvironmentBaker
 {
@@ -234,6 +247,17 @@ public static class EnvironmentBaker
             sampleClampMagnitude: profile.SampleClampMagnitude);
         var brdfLut = PbrIblBaker.BakeBrdfLut(brdfLutSize);
 
+        // <b>Its own cube, not the specular one at a different mip.</b> Charlie puts its energy at
+        // the horizon where GGX puts it about the normal, so convolving with the wrong lobe removes
+        // the grazing rim that is the entire reason sheen exists. Smaller than the specular chain
+        // because a sheen lobe is broad even at its tightest — there is no mirror mip to preserve.
+        var sheenBase = Math.Max(16, profile.SpecularPrefilterBaseSize / 2);
+        var sheenMips = Math.Max(1, profile.SpecularPrefilterMipCount - 1);
+        var sheenPrefilter = PbrIblBaker.BakeSheenPrefilteredMips(
+            lighting, sheenBase, sheenMips,
+            sampleClampMagnitude: profile.SampleClampMagnitude);
+        var sheenLut = PbrIblBaker.BakeSheenLut(SheenLutSide);
+
         return new BlixProbeData(
             EnvFaceSize: profile.EnvCubeFaceSize,
             IrradianceFaceSize: profile.IrradianceFaceSize,
@@ -245,8 +269,23 @@ public static class EnvironmentBaker
             EnvCube: envPixels,
             IrradianceCube: irrPixels,
             PrefilteredSpecular: prefilter,
-            BrdfLut: brdfLut);
+            BrdfLut: brdfLut,
+            SheenFaceSize: sheenBase,
+            SheenMipCount: sheenMips,
+            SheenLutSize: SheenLutSide,
+            PrefilteredSheen: sheenPrefilter,
+            SheenLut: sheenLut);
     }
+
+    /// <summary>
+    /// Side of the sheen directional-albedo table.
+    /// </summary>
+    /// <remarks>
+    /// 32 rather than the BRDF LUT's 256: E is a smooth, monotone-ish surface with no sharp feature
+    /// anywhere in its domain, and it is read through a bilinear sampler. 4 KB against 256 KB for a
+    /// quantity whose useful precision is bounded by the 8 bits it is stored in.
+    /// </remarks>
+    private const int SheenLutSide = 32;
 
     // Upload a previously-cooked BlixProbeData blob into a BakedEnvironment.
     // No HDR sampling, no integration -- pure memcpy from CPU arrays to GPU
@@ -282,6 +321,21 @@ public static class EnvironmentBaker
             data.BrdfLut,
             name: $"{namePrefix}.brdf_lut");
 
+        TextureHandle? sheenCube = null;
+        TextureHandle? sheenLutTex = null;
+        if (data.PrefilteredSheen is { Length: > 0 } sheenMips && data.SheenLut is { Length: > 0 } sheenLutBytes)
+        {
+            sheenCube = device.CreateTextureCubeHdrMipped(
+                data.SheenFaceSize, sheenMips,
+                SamplerDescription.LinearClampMipmap,
+                name: $"{namePrefix}.env_sheen");
+            sheenLutTex = device.CreateTexture2D(
+                new TextureDescription(data.SheenLutSize, data.SheenLutSize,
+                    TextureFormat.Rgba8, SamplerDescription.LinearClamp),
+                sheenLutBytes,
+                name: $"{namePrefix}.sheen_lut");
+        }
+
         var probe = new EnvironmentProbe
         {
             EnvCubemap = envCube,
@@ -292,7 +346,7 @@ public static class EnvironmentBaker
             SunDirectionFromEquirect = data.SunDirection,
             SunIrradiance = data.SunIrradiance,
         };
-        return new BakedEnvironment(probe, brdfLut);
+        return new BakedEnvironment(probe, brdfLut, sheenCube, data.SheenMipCount, sheenLutTex);
     }
 
     private static EnvironmentProbe BakeFromHdr(IGraphicsDevice device, EnvironmentProfile profile, HdrEnvironmentSource hdr, string namePrefix)

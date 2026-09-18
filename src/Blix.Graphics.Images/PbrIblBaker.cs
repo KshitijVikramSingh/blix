@@ -459,6 +459,177 @@ public static class PbrIblBaker
         return output;
     }
 
+    // --- Sheen: the Charlie lobe's own prefilter and albedo table ---------
+    //
+    // <b>A second prefiltered cube, because sheen is not GGX blurred differently.</b> GGX
+    // distributes microfacets about the normal; cloth is fibres standing AWAY from it, so the
+    // Charlie lobe puts its energy at the horizon. Convolving the environment with the wrong
+    // distribution does not make cloth look slightly off — it deletes the grazing rim that is the
+    // entire visual signature of fabric.
+
+    /// <summary>Prefilters the environment with the Charlie distribution, one mip per roughness.</summary>
+    public static Half[][] BakeSheenPrefilteredMips(
+        HdrImageData equirect, int baseFaceSize, int mipCount, float sampleClampMagnitude = 50.0f)
+    {
+        ArgumentNullException.ThrowIfNull(equirect);
+        if (baseFaceSize <= 0) throw new ArgumentOutOfRangeException(nameof(baseFaceSize));
+        if (mipCount <= 0) throw new ArgumentOutOfRangeException(nameof(mipCount));
+
+        var mips = new Half[mipCount][];
+        for (var mip = 0; mip < mipCount; mip++)
+        {
+            var mipSize = Math.Max(1, baseFaceSize >> mip);
+            var roughness = mipCount <= 1 ? 0.0f : (float)mip / (mipCount - 1);
+            // Unlike GGX there is no mirror case at mip 0: Charlie at roughness 0 is still a lobe,
+            // just a very tight one at the horizon, so every mip integrates.
+            var sampleCount = 64 + mip * 64;
+            mips[mip] = BakeSheenMip(equirect, mipSize, Math.Max(roughness, 0.07f), sampleCount, sampleClampMagnitude);
+        }
+        return mips;
+    }
+
+    private static Half[] BakeSheenMip(
+        HdrImageData equirect, int faceSize, float roughness, int sampleCount, float sampleClampMagnitude)
+    {
+        var pixelsPerFace = faceSize * faceSize * 4;
+        var output = new Half[pixelsPerFace * 6];
+
+        Parallel.For(0, 6, face =>
+        {
+            var faceOffset = face * pixelsPerFace;
+            for (var j = 0; j < faceSize; j++)
+            {
+                var v = (j + 0.5f) / faceSize;
+                for (var i = 0; i < faceSize; i++)
+                {
+                    var u = (i + 0.5f) / faceSize;
+                    var N = Vector3.Normalize(CubeDirection(face, u, v));
+                    var V = N;   // the same split-sum assumption the GGX prefilter makes
+
+                    // <b>Sample the INCOMING direction, not a half-vector to reflect about.</b> The
+                    // GGX prefilter samples H and takes L = reflect(-V, H), and that is exactly
+                    // wrong here: Charlie puts H at the HORIZON, so dot(V,H) is near zero, the
+                    // reflection sends L to about -N, and every sample lands below the surface.
+                    // Mirroring the specular loop produced a cube that was black in every RGB
+                    // channel — which at a glance reads as "sheen IBL is subtle" rather than
+                    // "sheen IBL is not running", and would have been believed.
+                    var tangentZ = MathF.Abs(N.Z) < 0.999f ? new Vector3(0, 0, 1) : new Vector3(1, 0, 0);
+                    var tangent = Vector3.Normalize(Vector3.Cross(tangentZ, N));
+                    var bitangent = Vector3.Cross(N, tangent);
+
+                    var prefilter = Vector3.Zero;
+                    var weight = 0.0f;
+                    for (var s = 0; s < sampleCount; s++)
+                    {
+                        var xi = Hammersley(s, sampleCount);
+                        // Cosine-distributed L over the hemisphere about N.
+                        var cosTheta = MathF.Sqrt(Math.Max(0.0f, 1.0f - xi.Y));
+                        var sinTheta = MathF.Sqrt(Math.Max(0.0f, 1.0f - cosTheta * cosTheta));
+                        var phi = 2.0f * MathF.PI * xi.X;
+                        var lLocal = new Vector3(sinTheta * MathF.Cos(phi), sinTheta * MathF.Sin(phi), cosTheta);
+                        var L = Vector3.Normalize(tangent * lLocal.X + bitangent * lLocal.Y + N * lLocal.Z);
+
+                        var NdotL = Math.Max(Vector3.Dot(N, L), 0.0f);
+                        if (NdotL <= 0.0f) continue;
+                        var H = Vector3.Normalize(L + V);
+                        var NdotH = Math.Max(Vector3.Dot(N, H), 0.0f);
+                        var NdotV = Math.Max(Vector3.Dot(N, V), 0.0f);
+
+                        // The lobe itself is the weight, which is what makes this a convolution
+                        // with Charlie rather than a cosine blur wearing its name.
+                        var w = CharlieDistribution(NdotH, roughness) * AshikhminVisibility(NdotL, NdotV) * NdotL;
+                        if (w <= 0.0f) continue;
+
+                        var li = SampleEquirect(equirect, L);
+                        li = Vector3.Min(li, new Vector3(sampleClampMagnitude));
+                        prefilter += li * w;
+                        weight += w;
+                    }
+                    if (weight > 0.0f) prefilter /= weight;
+
+                    var idx = faceOffset + (j * faceSize + i) * 4;
+                    output[idx + 0] = (Half)prefilter.X;
+                    output[idx + 1] = (Half)prefilter.Y;
+                    output[idx + 2] = (Half)prefilter.Z;
+                    output[idx + 3] = (Half)1.0f;
+                }
+            }
+        });
+        return output;
+    }
+
+    /// <summary>
+    /// The Charlie lobe's directional albedo E(NdotV, roughness), as an RGBA8 table in R.
+    /// </summary>
+    /// <remarks>
+    /// <b>Computed rather than fitted, and that is a decision with a scar.</b> An analytic
+    /// approximation to this integral was written into the shader library first. It compiled, it
+    /// stayed inside [0,1] across the whole domain, and it disagreed with the integrated lobe by two
+    /// orders of magnitude at low roughness — 0.4694 against 0.0001 at roughness 0.1, NdotV 0.6 — in
+    /// the direction that darkens cloth which should be untouched. A fit that returns plausible
+    /// numbers looks correct from everywhere except the integral it claims to approximate. This
+    /// cannot be wrong in that way: it IS the integral.
+    /// <para>
+    /// Uniform hemisphere sampling rather than importance sampling: the integrand already contains
+    /// the distribution, so importance-sampling it would cancel the very term being measured.
+    /// </para>
+    /// </remarks>
+    public static byte[] BakeSheenLut(int size, int sampleCount = 1024)
+    {
+        if (size <= 0) throw new ArgumentOutOfRangeException(nameof(size));
+        if (sampleCount <= 0) throw new ArgumentOutOfRangeException(nameof(sampleCount));
+
+        var output = new byte[size * size * 4];
+        Parallel.For(0, size, j =>
+        {
+            var roughness = (j + 0.5f) / size;      // Y axis = sheen roughness
+            for (var i = 0; i < size; i++)
+            {
+                var NdotV = (i + 0.5f) / size;
+                var V = new Vector3(MathF.Sqrt(1.0f - NdotV * NdotV), 0.0f, NdotV);
+
+                var sum = 0.0f;
+                for (var s = 0; s < sampleCount; s++)
+                {
+                    var xi = Hammersley(s, sampleCount);
+                    // Uniform on the hemisphere: pdf = 1/(2*pi), so the estimator carries 2*pi/N.
+                    var cosTheta = xi.Y;
+                    var sinTheta = MathF.Sqrt(Math.Max(0.0f, 1.0f - cosTheta * cosTheta));
+                    var phi = 2.0f * MathF.PI * xi.X;
+                    var L = new Vector3(sinTheta * MathF.Cos(phi), sinTheta * MathF.Sin(phi), cosTheta);
+
+                    var H = Vector3.Normalize(L + V);
+                    var NdotL = Math.Max(L.Z, 0.0f);
+                    var NdotH = Math.Max(H.Z, 0.0f);
+                    if (NdotL <= 0.0f) continue;
+                    sum += CharlieDistribution(NdotH, roughness) * AshikhminVisibility(NdotL, NdotV) * NdotL;
+                }
+                var e = sum * (2.0f * MathF.PI) / sampleCount;
+
+                var idx = (j * size + i) * 4;
+                output[idx + 0] = (byte)Math.Clamp(e * 255.0f, 0.0f, 255.0f);
+                output[idx + 1] = 0;
+                output[idx + 2] = 0;
+                output[idx + 3] = 255;
+            }
+        });
+        return output;
+    }
+
+    // The same two terms sheen.glsl evaluates, kept in step with it by name so a change to one is
+    // an obvious prompt to check the other. A LUT baked from a different lobe than the shader uses
+    // is a disagreement no picture makes obvious.
+    private static float CharlieDistribution(float NdotH, float roughness)
+    {
+        var alpha = Math.Max(roughness * roughness, 1e-4f);
+        var invAlpha = 1.0f / alpha;
+        var sin2 = Math.Max(1.0f - NdotH * NdotH, 1e-7f);
+        return (2.0f + invAlpha) * MathF.Pow(sin2, invAlpha * 0.5f) / (2.0f * MathF.PI);
+    }
+
+    private static float AshikhminVisibility(float NdotL, float NdotV) =>
+        Math.Clamp(1.0f / (4.0f * (NdotL + NdotV - NdotL * NdotV)), 0.0f, 1.0f);
+
     // --- GGX sampling helpers --------------------------------------------
 
     // Importance-sample a GGX(roughness) distribution in the tangent frame

@@ -103,6 +103,18 @@ for hdr in "$SRC"/textures/*.hdr; do
     dotnet "$COOK" probe "$hdr" --out "$COOKED"
 done
 
+# <b>The probe the demo actually LEADS with, and the rotation that earns it.</b> kloppenheim is not
+# in textures/ — it ships inside main_sponza — so the loop above never reached it, and for a while
+# the only record of how it was made was a command in somebody's shell history. It was chosen
+# because its sun sits at elevation 74.5 against the scene's authored 73.1, where goegap's is 46.4;
+# --yaw brings the azimuth onto -22.7 as well, which a roll of an equirect can do without tilting
+# the horizon. Roughly 1.4 degrees out in total, against 27 for any of the alternatives.
+KLOPPENHEIM="$SRC/main_sponza/textures/kloppenheim_05_4k.hdr"
+if [[ -f "$KLOPPENHEIM" ]]; then
+    echo "── probe  (kloppenheim_05_4k.hdr, --yaw=-31.43)"
+    dotnet "$COOK" probe "$KLOPPENHEIM" --yaw=-31.43 --out "$COOKED"
+fi
+
 echo
 echo "Cooked tree: $(du -sh "$COOKED" | cut -f1)   (sources: $(du -sh "$SRC" | cut -f1))"
 echo "Run with:  BLIX_SPONZA_ASSETS=$COOKED tools/run-vulkan-sponza.sh"
