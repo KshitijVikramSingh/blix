@@ -123,11 +123,11 @@ internal sealed partial class SponzaLoop
                 new Vector4(frame.Width, frame.Height, fog.Far, fog.Enabled ? 1f : 0f))),
             new("uVizChannel",       new FloatUniform(vizChannel)),
             new("uSkyMin",           new Vector4Uniform(new Vector4(
-                skyVolumeMin, skyVolumeLoaded && skyVisibilityEnabled ? 1f : 0f))),
+                skyVolumeMin, skyVolumeLoaded && skyVisibilityEnabled && !skipSkySample ? 1f : 0f))),
             // w: how far along the normal the probe lookup is pushed. About one cell, so a surface
             // asks the cell in FRONT of it rather than the one it is embedded in.
             new("uSkyScale",         new Vector4Uniform(new Vector4(skyVolumeInvSpan, 0.6f))),
-            new("uBounceStrength",   new FloatUniform(bounceReady && skyVisibilityEnabled ? 1f : 0f)),
+            new("uBounceStrength",   new FloatUniform(bounceReady && skyVisibilityEnabled && !skipSkySample ? 1f : 0f)),
             // One component per --ab shading mode, live only during that mode's off-phase.
             new("uAbFlags",          new Vector4Uniform(new Vector4(
                 AbOffPhase && abMode == "textures" ? 1f : 0f,
@@ -321,9 +321,19 @@ internal sealed partial class SponzaLoop
             }
         });
 
+        // Flip before dispatching: the pass writes one texture while every reader — the lit pass,
+        // and the pass's own multi-bounce feedback — takes the other, which is what keeps the
+        // compute off the fragment stage's critical path.
+        if (bounceReady && skyVisibilityEnabled && !skipInject) bounceWrite ^= 1;
+        if (bounceReady && skyBounceBinding >= 0)
+        {
+            passBindings[skyBounceBinding] = new ShaderTextureBinding(
+                "uSkyBounce", bounceTextures[bounceWrite ^ 1], Slot: 7);
+        }
+
         // Sun bounce into the probe grid. Cheap enough to redo every frame at this probe count, and
         // redoing it is the point: the whole reason it is not baked is that it must follow the sun.
-        if (bounceReady && skyVisibilityEnabled)
+        if (bounceReady && skyVisibilityEnabled && !skipInject)
         {
             var injectUniforms = new ShaderUniform[]
             {
@@ -338,7 +348,7 @@ internal sealed partial class SponzaLoop
             graph.Dispatch(injectPassHandle, new DispatchCommand(
                 injectPipeline,
                 (probeX + 3) / 4, (probeY + 3) / 4, (probeZ + 3) / 4,
-                injectUniforms, injectBindings));
+                injectUniforms, BounceBindings()));
         }
 
         // Hi-Z pyramid: level 0 reduces the resolved depth, each level after reduces its parent.
@@ -853,6 +863,17 @@ internal sealed partial class SponzaLoop
             : (1.055f * MathF.Pow(linear, 1f / 2.4f)) - 0.055f;
         return (byte)Math.Clamp((int)MathF.Round(encoded * 255f), 0, 255);
     }
+
+    /// <summary>The injection pass's textures for this frame: write one, read the other.</summary>
+    private ShaderTextureBinding[] BounceBindings() => new[]
+    {
+        new ShaderTextureBinding("uBounce", bounceTextures[bounceWrite], Slot: 1),
+        new ShaderTextureBinding("uOccupancy", occupancyTexture, Slot: 2),
+        new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 3),
+        // Last frame's solution, which is what turns a rotation of sweeps into successive bounces
+        // AND what lets this dispatch run without the lit pass waiting on it.
+        new ShaderTextureBinding("uBouncePrev", bounceTextures[bounceWrite ^ 1], Slot: 4),
+    };
 
     /// <summary>Prints resolved GPU milliseconds per pass, heaviest first.</summary>
     /// <remarks>

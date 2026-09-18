@@ -173,7 +173,17 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
 
     // Runtime sun-bounce injection over the shipped voxel grid.
     private TextureHandle occupancyTexture;
-    private TextureHandle bounceTexture;
+    // <b>Two, and the reason is a barrier rather than a buffer.</b> Measured: the injection
+    // dispatch alone costs nothing (21.09 ms against a 21.08 ms baseline) and the lit pass's two 3D
+    // fetches alone cost nothing (20.97 ms) — but together they cost 15 ms. Independent costs do not
+    // do that; a DEPENDENCY does. Sampling in the same frame the compute wrote forces a barrier, and
+    // the compute stops overlapping with the rest of the frame.
+    //
+    // So the lit pass reads what the previous frame solved. The probe grid is already amortised over
+    // eight frames, so one more frame of latency is beneath what the amortisation itself introduces.
+    private readonly TextureHandle[] bounceTextures = new TextureHandle[2];
+    private int bounceWrite;
+    private int skyBounceBinding = -1;   // where uSkyBounce sits in passBindings
     private ShaderProgramHandle injectProgram;
     private PipelineHandle injectPipeline;
     private PassHandle injectPassHandle;
@@ -182,9 +192,26 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private Vector3 skyVolumeSpan;
     private bool bounceReady;
     private const int InjectRays = 64;
-    // Frames for a full refresh of the probe grid. Eight at 50 fps is a sixth of a second for the
-    // bounce to follow a sun that a person is dragging — below the point where the lag reads as lag.
-    private const int InjectPeriod = 8;
+    // Frames for a full refresh of the probe grid, chosen by sweeping it against both cost and the
+    // converged image:
+    //
+    //     period   8   36.15 ms   scene mean 0.0348
+    //     period  16   30.72 ms   scene mean 0.0348
+    //     period  32   28.21 ms   scene mean 0.0349
+    //     period  64   25.62 ms   scene mean 0.0323
+    //
+    // Thirty-two is where the output stops changing and the cost has not yet stopped falling: the
+    // same picture as eight, eight milliseconds cheaper, a full refresh in about 0.6 s at 50 fps. At
+    // sixty-four the steady state starts to drift, which is the multi-bounce feedback no longer
+    // keeping up with its own convergence.
+    private const int InjectPeriod = 32;
+
+    // Splitting the sky path's cost between its two halves: the compute that solves the bounce, and
+    // the two 3D fetches every lit fragment then makes. Amortising the dispatch 8x recovered only 4
+    // of 19 ms, which says most of the cost is not the solving — but "says" is not "measured", and
+    // every time this session a guess about where cost lives has been wrong.
+    private bool skipInject;    // --sky-no-inject
+    private bool skipSkySample; // --sky-no-sample
 
     private ShaderProgramHandle prepassOpaqueProgram;
     private ShaderProgramHandle prepassMaskProgram;

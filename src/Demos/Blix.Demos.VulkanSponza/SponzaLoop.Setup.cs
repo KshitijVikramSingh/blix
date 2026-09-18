@@ -49,6 +49,8 @@ internal sealed partial class SponzaLoop
         if (cmdArgs.Contains("--no-ao")) ambient.Enabled = false;
         if (cmdArgs.Contains("--no-shadow")) shadows.Enabled = false;
         if (cmdArgs.Contains("--ao-fullres")) aoScale = 1f;
+        if (cmdArgs.Contains("--sky-no-inject")) skipInject = true;
+        if (cmdArgs.Contains("--sky-no-sample")) skipSkySample = true;
         if (cmdArgs.Contains("--sky"))
         {
             skyVisibilityEnabled = true;
@@ -443,15 +445,8 @@ internal sealed partial class SponzaLoop
             var injectSpv = File.ReadAllBytes(Path.Combine(shaderDir, "sky_inject.comp.spv"));
             injectProgram = vk.CreateComputeShaderProgramFromSpv(injectSpv, injectInterface, "sky_inject");
             injectPipeline = vk.CreateComputePipeline(injectProgram, "sky_inject");
-            injectBindings = new[]
-            {
-                new ShaderTextureBinding("uBounce", bounceTexture, Slot: 1),
-                new ShaderTextureBinding("uOccupancy", occupancyTexture, Slot: 2),
-                new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 3),
-                // The same image as uBounce, bound for filtered reading: the pass feeds on its own
-                // previous result, which is what turns a rotation of sweeps into successive bounces.
-                new ShaderTextureBinding("uBouncePrev", bounceTexture, Slot: 4),
-            };
+            // Rebuilt each frame around the write/read pair; see BounceBindings.
+            injectBindings = BounceBindings();
         }
 
         // --- Froxel fog compute program + grid ---------------------------
@@ -477,8 +472,13 @@ internal sealed partial class SponzaLoop
             new ShaderTextureBinding("uFroxelGrid",           froxelGridTexture, Slot: 4),
             new ShaderTextureBinding("uAmbientVisibility", graph.GetColorTexture(ambientDenoisedHandle), Slot: 5),
             new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 6),
-            new ShaderTextureBinding("uSkyBounce", bounceReady ? bounceTexture : skyVisibilityTexture, Slot: 7),
+            // Bound per frame in OnRender, which flips between the pair; this is the initial one.
+            new ShaderTextureBinding("uSkyBounce", bounceReady ? bounceTextures[0] : skyVisibilityTexture, Slot: 7),
         };
+
+        // The one binding that is not constant: the lit pass reads whichever of the bounce pair the
+        // injection is not writing, so its slot is rewritten each frame.
+        skyBounceBinding = Array.FindIndex(passBindings, b => b.Name == "uSkyBounce");
 
         // Froxel compute set-0 image bindings (constant handles): the storage
         // grid it writes (binding 1) + the cascade shadow maps it samples
@@ -695,9 +695,10 @@ internal sealed partial class SponzaLoop
                     occupancyTexture = vk.CreateTexture3D(
                         occX, occY, occZ, TextureFormat.R8,
                         SamplerDescription.LinearClamp, volume.Occupancy!, "sponza.occupancy");
-                    bounceTexture = vk.CreateStorageTexture3D(
-                        probeX, probeY, probeZ, TextureFormat.Rgba16F,
-                        SamplerDescription.LinearClamp, "sponza.bounce");
+                    for (var i = 0; i < bounceTextures.Length; i++)
+                        bounceTextures[i] = vk.CreateStorageTexture3D(
+                            probeX, probeY, probeZ, TextureFormat.Rgba16F,
+                            SamplerDescription.LinearClamp, $"sponza.bounce{i}");
                     bounceReady = true;
                     Console.WriteLine(
                         $"[VulkanSponza]   occupancy {occX}x{occY}x{occZ} shipped; sun bounce injected at runtime.");
