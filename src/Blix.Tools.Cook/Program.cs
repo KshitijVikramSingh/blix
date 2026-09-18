@@ -56,6 +56,7 @@ public static class Program
             "probe" => CookProbe(args),
             "mesh" => CookMesh(args),
             "asset" => CookAsset(args),
+            "sky" => CookSky(args),
             "list" => ListRecipes(),
             "run" => RunRecipe(args),
             "status" => Status(args),
@@ -85,6 +86,55 @@ public static class Program
     /// its own driver and its own rows, and the engine's resolver never learns the difference.
     /// </para>
     /// </remarks>
+    // blix cook sky <dir-of-blixmesh> [--occupancy N] [--probes N] [--rays N]
+    //
+    // Bakes how much sky each point in a scene can see. Prints a profile rather than writing a file
+    // for now: the first question is whether the numbers are physics, and a format that stores
+    // wrong numbers is worse than no format.
+    static int CookSky(string[] args)
+    {
+        if (args.Length < 2) { Console.Error.WriteLine("Usage: blix cook sky <dir>"); return 2; }
+        var root = args[1];
+        var meshes = Directory.Exists(root)
+            ? Directory.GetFiles(root, "*.blixmesh", SearchOption.AllDirectories)
+            : new[] { root };
+        if (meshes.Length == 0) { Console.Error.WriteLine($"No .blixmesh under {root}."); return 2; }
+
+        Console.WriteLine($"Baking sky visibility from {meshes.Length} cooked mesh(es)");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var vol = Blix.Recipes.SkyVisibilityBaker.Bake(
+            meshes,
+            occupancy: IntFlag(args, "--occupancy", 256),
+            probes: IntFlag(args, "--probes", 48),
+            rays: IntFlag(args, "--rays", 64),
+            log: Console.WriteLine);
+        Console.WriteLine($"  baked in {sw.Elapsed.TotalSeconds:0.0}s");
+
+        var b = vol.Bounds;
+        Console.WriteLine($"  bounds {b.Min} .. {b.Max}");
+
+        // The profile that says whether this is physics: visibility should rise monotonically with
+        // height, be near 1 above the roofline, and be markedly lower inside than out.
+        Console.WriteLine("  sky visibility by height, for an UP-facing surface (mean over the layer):");
+        for (var y = 0; y < vol.SizeY; y++)
+        {
+            double sum = 0;
+            for (var z = 0; z < vol.SizeZ; z++)
+            for (var x = 0; x < vol.SizeX; x++)
+                sum += vol.At(x, y, z).Visibility(System.Numerics.Vector3.UnitY);
+            var world = b.Min.Y + (y + 0.5f) * (b.Max.Y - b.Min.Y) / vol.SizeY;
+            if (y % Math.Max(1, vol.SizeY / 12) == 0 || y == vol.SizeY - 1)
+                Console.WriteLine($"    y={world,7:0.0} m  visibility {sum / (vol.SizeX * vol.SizeZ):0.000}");
+        }
+        return 0;
+    }
+
+    static int IntFlag(string[] a, string name, int fallback)
+    {
+        var i = Array.FindIndex(a, x => x.Equals(name, StringComparison.OrdinalIgnoreCase));
+        return i >= 0 && i + 1 < a.Length && int.TryParse(a[i + 1], out var v) ? v : fallback;
+    }
+
     static int CookAsset(string[] args)
     {
         if (args.Length < 2)

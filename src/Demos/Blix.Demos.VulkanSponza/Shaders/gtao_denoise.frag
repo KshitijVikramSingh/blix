@@ -48,6 +48,22 @@ float viewDepth(vec2 uv) {
     return -(view.z / view.w);
 }
 
+// ── A lever this pass does not yet pull ──────────────────────────────────────
+// The kernel is a fixed 3x3 with a depth-similarity weight, and that is exactly wrong for
+// alpha-cutout foliage. A canopy fills the depth buffer with thousands of tiny disconnected
+// silhouettes, so nearly every neighbour fails the depth test and those pixels keep their RAW
+// per-pixel noise — measured at full resolution, canopy speckle rose 74% while stone was unchanged,
+// which is the "flowing leaf edges" a viewer sees in motion. Half resolution hides it by averaging
+// leaves away below the texel, which is why half res is the default.
+//
+// The signal to fix it is already built and already bound: the Hi-Z pyramid carries max MINUS min
+// per region, which is depth COMPLEXITY — large in a canopy, small on cloth, stone and floor. A
+// kernel that widened where complexity is high would gather more neighbours precisely where it is
+// currently starving, without bleeding across the clean silhouettes where it currently behaves.
+//
+// Not built, because half resolution makes the problem moot and the term is not the frame's cost.
+// It becomes worth building when ambient visibility runs at full resolution — and that is the
+// checkable condition: full-res AO whose canopy speckle stays within ~10% of the half-res figure.
 void main() {
     vec4  centre = texture(uAmbientRaw, vUv);
     float centreDepth = viewDepth(vUv);
