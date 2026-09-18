@@ -109,6 +109,7 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  uSkyMin;
     // xyz = 1 / (max - min), w = how far along the normal to push the lookup, in metres.
     vec4  uSkyScale;
+    float uBounceStrength;
 } frame;
 
 layout(set = 1, binding = 0) uniform samplerCube uIrradiance;
@@ -128,6 +129,9 @@ layout(set = 1, binding = 5) uniform sampler2D   uAmbientVisibility;
 // Baked sky visibility as L1 spherical harmonics, one Rgba16F texel per probe cell. Geometry, not
 // lighting: what escapes the building, which no sun position changes.
 layout(set = 1, binding = 6) uniform sampler3D   uSkyVisibility;
+// Sun bounce, injected each frame over the same voxel grid. RGB irradiance, no direction: the
+// visibility volume supplies the shape, this supplies the colour and the level.
+layout(set = 1, binding = 7) uniform sampler3D   uSkyBounce;
 
 layout(set = 2, binding = 0) uniform Material {
     vec4 uBaseColorFactor;
@@ -446,7 +450,18 @@ void main() {
     float specularVisibility = clamp(
         pow(max(NdotV + visibility, 0.0), exp2(-16.0 * roughness - 1.0)) - 1.0 + visibility,
         0.0, 1.0);
-    vec3 ambient = (kD * diffuseIBL * visibility + specularIBL * specularVisibility) * ao;
+    // <b>ADDED, not multiplied — which is the distinction the first attempt got wrong.</b> Sky
+    // visibility scales the sky a surface can see; bounced sunlight is light arriving from
+    // elsewhere and belongs in the sum. Folding it into the visibility SH made an up-facing floor
+    // evaluate negative, because two directional fields multiplied double-count direction.
+    vec3 bounce = vec3(0.0);
+    if (frame.uBounceStrength > 0.0) {
+        vec3 probeUv = (vWorldPos + N * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz;
+        bounce = texture(uSkyBounce, clamp(probeUv, vec3(0.0), vec3(1.0))).rgb
+               * albedo * (1.0 - metallic) * ao * visibility;
+    }
+
+    vec3 ambient = (kD * diffuseIBL * visibility + specularIBL * specularVisibility) * ao + bounce;
 
     // --- Emissive ------------------------------------------------------
     vec3 emissive = texture(uEmissive, uv).rgb * mat.uEmissiveFactor.rgb * mat.uEmissiveFactor.a;

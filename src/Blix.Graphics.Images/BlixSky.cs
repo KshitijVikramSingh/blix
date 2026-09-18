@@ -20,8 +20,25 @@ namespace Blix.Graphics.Images;
 /// </para>
 /// </remarks>
 public sealed record BlixSkyVolume(
-    Vector3 Min, Vector3 Max, int SizeX, int SizeY, int SizeZ, float[] Coefficients)
+    Vector3 Min, Vector3 Max, int SizeX, int SizeY, int SizeZ, float[] Coefficients,
+    int OccupancyX = 0, int OccupancyY = 0, int OccupancyZ = 0, byte[]? Occupancy = null)
 {
+    /// <summary>
+    /// The occupancy grid the visibility was traced through, shipped alongside it.
+    /// </summary>
+    /// <remarks>
+    /// <b>Because the bounce has to be solved at runtime, and it needs the same geometry.</b> What
+    /// lights a courtyard is the sun off its walls, which no sun-independent bake can carry — so the
+    /// probes' visibility is baked and the bounce is injected each frame by marching this grid with
+    /// the current sun. Shipping the grid is what makes "bake geometry, solve lighting dynamically"
+    /// an arrangement rather than a slogan: the expensive, sun-invariant half is precomputed and the
+    /// cheap, sun-dependent half is not.
+    ///
+    /// One byte per voxel rather than one bit. A bitmask is eight times smaller and cannot be a
+    /// sampled 3D texture, and the consumer is a shader.
+    /// </remarks>
+    public bool HasOccupancy => Occupancy is { Length: > 0 };
+
     /// <summary>Four floats per cell: L0, then L1 x/y/z.</summary>
     public const int FloatsPerCell = 4;
 
@@ -38,6 +55,8 @@ public sealed record BlixSkyVolume(
         w.Write(v.Min.X); w.Write(v.Min.Y); w.Write(v.Min.Z);
         w.Write(v.Max.X); w.Write(v.Max.Y); w.Write(v.Max.Z);
         foreach (var f in v.Coefficients) w.Write(f);
+        w.Write(v.OccupancyX); w.Write(v.OccupancyY); w.Write(v.OccupancyZ);
+        if (v.Occupancy is { } occ) w.Write(occ);
     }
 
     public static BlixSkyVolume Read(string path)
@@ -51,7 +70,9 @@ public sealed record BlixSkyVolume(
         var max = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
         var coeffs = new float[sx * sy * sz * FloatsPerCell];
         for (var i = 0; i < coeffs.Length; i++) coeffs[i] = r.ReadSingle();
-        return new BlixSkyVolume(min, max, sx, sy, sz, coeffs);
+        int ox = r.ReadInt32(), oy = r.ReadInt32(), oz = r.ReadInt32();
+        var occ = ox * oy * oz > 0 ? r.ReadBytes(ox * oy * oz) : null;
+        return new BlixSkyVolume(min, max, sx, sy, sz, coeffs, ox, oy, oz, occ);
     }
 
     /// <summary>The volume as Rgba16F bytes, in the order a 3D texture upload wants.</summary>

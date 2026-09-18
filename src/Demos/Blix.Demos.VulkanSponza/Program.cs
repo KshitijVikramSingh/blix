@@ -150,6 +150,21 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // sun-independent bake can carry that. On by default this makes Sponza darker and worse.
     private bool skyVisibilityEnabled;
 
+    // Runtime sun-bounce injection over the shipped voxel grid.
+    private TextureHandle occupancyTexture;
+    private TextureHandle bounceTexture;
+    private ShaderProgramHandle injectProgram;
+    private PipelineHandle injectPipeline;
+    private PassHandle injectPassHandle;
+    private ShaderTextureBinding[] injectBindings = Array.Empty<ShaderTextureBinding>();
+    private int probeX, probeY, probeZ, occX, occY, occZ;
+    private Vector3 skyVolumeSpan;
+    private bool bounceReady;
+    private const int InjectRays = 64;
+    // Frames for a full refresh of the probe grid. Eight at 50 fps is a sixth of a second for the
+    // bounce to follow a sun that a person is dragging — below the point where the lag reads as lag.
+    private const int InjectPeriod = 8;
+
     private ShaderProgramHandle prepassOpaqueProgram;
     private ShaderProgramHandle prepassMaskProgram;
     private PipelineHandle prepassOpaquePipeline;
@@ -617,6 +632,12 @@ internal sealed class AmbientSettings
 {
     [Tune]            public bool Enabled = true;
     [Tune(0.1f, 4f)]  public float RadiusMetres = 0.8f;
+
+    // <b>The one number the bounce invents.</b> Everything else in the injection derives from
+    // geometry and the measured sun; this stands in for a per-voxel albedo the grid does not carry.
+    // Sponza's stone sits around 0.3-0.4 and its cloth lower, so 0.35 is the scene's average rather
+    // than a dial for taste — and when the grid learns material, this stops being a constant.
+    [Tune(0f, 1f)]    public float BounceAlbedo = 0.35f;
 }
 
 // Misc render tunables (overlay "Render" group). Vsync stays a manual toggle —

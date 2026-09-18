@@ -68,7 +68,8 @@ public static class SkyVisibilityBaker
     }
 
     public sealed record Volume(
-        Bounds3Lite Bounds, int SizeX, int SizeY, int SizeZ, SkyCell[] Cells)
+        Bounds3Lite Bounds, int SizeX, int SizeY, int SizeZ, SkyCell[] Cells,
+        int OccupancyX = 0, int OccupancyY = 0, int OccupancyZ = 0, byte[]? Occupancy = null)
     {
         public SkyCell At(int x, int y, int z) => Cells[(z * SizeY + y) * SizeX + x];
     }
@@ -289,7 +290,10 @@ public static class SkyVisibilityBaker
         }
         log?.Invoke($"  filled {buried} probes buried in geometry ({100.0 * buried / cells.Length:0.0}%)");
 
-        return new Volume(new Bounds3Lite(min, max), px, py, pz, cells);
+        // The grid goes out with the probes: the runtime marches it to inject the sun's bounce.
+        var occBytes = new byte[solid.Length];
+        for (var i = 0; i < solid.Length; i++) occBytes[i] = solid[i] ? (byte)255 : (byte)0;
+        return new Volume(new Bounds3Lite(min, max), px, py, pz, cells, ox, oy, oz, occBytes);
     }
 
     // As Occluded, but reports WHERE it stopped, so a second pass can ask what that surface sees.

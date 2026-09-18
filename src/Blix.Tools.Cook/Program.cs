@@ -127,7 +127,8 @@ public static class Program
             }
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
             Blix.Graphics.Images.BlixSkyVolume.Write(outPath, new Blix.Graphics.Images.BlixSkyVolume(
-                b.Min, b.Max, vol.SizeX, vol.SizeY, vol.SizeZ, coeffs));
+                b.Min, b.Max, vol.SizeX, vol.SizeY, vol.SizeZ, coeffs,
+                vol.OccupancyX, vol.OccupancyY, vol.OccupancyZ, vol.Occupancy));
             Console.WriteLine($"  wrote {outPath} ({new FileInfo(outPath).Length / 1024.0:0.0} KB)");
         }
 

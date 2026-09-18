@@ -127,6 +127,7 @@ internal sealed partial class SponzaLoop
             // w: how far along the normal the probe lookup is pushed. About one cell, so a surface
             // asks the cell in FRONT of it rather than the one it is embedded in.
             new("uSkyScale",         new Vector4Uniform(new Vector4(skyVolumeInvSpan, 0.6f))),
+            new("uBounceStrength",   new FloatUniform(bounceReady && skyVisibilityEnabled ? 1f : 0f)),
             // One component per --ab shading mode, live only during that mode's off-phase.
             new("uAbFlags",          new Vector4Uniform(new Vector4(
                 AbOffPhase && abMode == "textures" ? 1f : 0f,
@@ -319,6 +320,26 @@ internal sealed partial class SponzaLoop
                     pushConstants: identityPush);
             }
         });
+
+        // Sun bounce into the probe grid. Cheap enough to redo every frame at this probe count, and
+        // redoing it is the point: the whole reason it is not baked is that it must follow the sun.
+        if (bounceReady && skyVisibilityEnabled)
+        {
+            var injectUniforms = new ShaderUniform[]
+            {
+                new("uBoundsMin",  new Vector4Uniform(new Vector4(skyVolumeMin, 0f))),
+                new("uBoundsSpan", new Vector4Uniform(new Vector4(skyVolumeSpan, ambient.BounceAlbedo))),
+                new("uProbeDims",  new Vector4Uniform(new Vector4(probeX, probeY, probeZ, InjectRays))),
+                new("uOccupancyDims", new Vector4Uniform(new Vector4(occX, occY, occZ, 0f))),
+                new("uSunDirection",  new Vector4Uniform(new Vector4(sunDirection, 0f))),
+                new("uSunIrradiance", new Vector4Uniform(new Vector4(sunIrradiance, 0f))),
+                new("uSchedule",      new Vector4Uniform(new Vector4(framesRendered, InjectPeriod, 0f, 0f))),
+            };
+            graph.Dispatch(injectPassHandle, new DispatchCommand(
+                injectPipeline,
+                (probeX + 3) / 4, (probeY + 3) / 4, (probeZ + 3) / 4,
+                injectUniforms, injectBindings));
+        }
 
         // Hi-Z pyramid: level 0 reduces the resolved depth, each level after reduces its parent.
         {

@@ -1,0 +1,130 @@
+#version 450
+
+// Injects the CURRENT sun's first bounce into the probe grid, by marching the same voxel geometry
+// the visibility bake traced.
+//
+// ── Why this is a pass and not a bake ────────────────────────────────────────
+// Baked sky visibility told the floor it sees 0.15 of the sky where the renderer had been giving it
+// 0.85 — correct, and on its own it made the courtyard black. What actually lights a courtyard is
+// sunlight off its own lit walls, and the sun arrives at irradiance 17 against an ambient of well
+// under one. That term cannot be baked: move the sun and every lit wall changes. So the geometry is
+// precomputed and the lighting is solved here, which is the split the roadmap asked for.
+//
+// ── No per-voxel material, and none needed ───────────────────────────────────
+// A ray that hits takes the voxel FACE it entered through as the surface normal — exact for an
+// axis-aligned voxel, and the DDA already knows which axis it last stepped. From that hit a second
+// march runs toward the sun: unoccluded means the surface is lit, and it re-radiates. Storing an
+// albedo and a normal per voxel would be 24 MB to say something this derives for free.
+//
+// ── L0 only ─────────────────────────────────────────────────────────────────
+// RGB irradiance, no direction. Bounce is the low-frequency half of the image and a directional
+// bounce is four times the storage for a term that is about to be added to a cosine lobe anyway.
+// The visibility volume beside it IS directional, so the SHAPE of the ambient still comes from
+// geometry; this supplies its colour and level.
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(set = 0, binding = 0) uniform Inject {
+    vec4 uBoundsMin;      // xyz world min of the probe/occupancy volume, w unused
+    vec4 uBoundsSpan;     // xyz world span, w = bounce albedo
+    vec4 uProbeDims;      // xyz probe grid dims, w = rays per probe
+    vec4 uOccupancyDims;  // xyz occupancy dims, w unused
+    vec4 uSunDirection;   // xyz direction the sun TRAVELS, w unused
+    vec4 uSunIrradiance;  // rgb measured irradiance, w unused
+    // x = frame counter, y = how many frames a full sweep takes. Bounce is the low-frequency half
+    // of the image and the sun moves slowly, so solving every probe every frame spends 19 ms to
+    // re-derive a field that barely changed — measured, it doubled the frame. Each probe is
+    // refreshed on its own turn instead.
+    vec4 uSchedule;
+} u;
+
+// Read-write rather than write-only: a probe not scheduled this frame must KEEP its value, and
+// keeping it means not writing it.
+layout(set = 0, binding = 1, rgba16f) uniform image3D uBounce;
+layout(set = 0, binding = 2) uniform sampler3D uOccupancy;
+layout(set = 0, binding = 3) uniform sampler3D uSkyVisibility;
+
+#define PI 3.14159265359
+
+bool solidAt(ivec3 c) {
+    return texelFetch(uOccupancy, clamp(c, ivec3(0), ivec3(u.uOccupancyDims.xyz) - 1), 0).r > 0.5;
+}
+
+// March the occupancy grid. Returns true on a hit, with the world position and the face normal of
+// the voxel that stopped it.
+bool march(vec3 origin, vec3 dir, float maxCells, out vec3 hitPos, out vec3 hitNormal) {
+    vec3 dims = u.uOccupancyDims.xyz;
+    vec3 cell = u.uBoundsSpan.xyz / dims;
+    vec3 p = (origin - u.uBoundsMin.xyz) / cell;
+    ivec3 c = clamp(ivec3(floor(p)), ivec3(0), ivec3(dims) - 1);
+    ivec3 step = ivec3(sign(dir));
+    vec3 inv = 1.0 / max(abs(dir), vec3(1e-9));
+    vec3 tMax = vec3(
+        (step.x > 0 ? (float(c.x) + 1.0 - p.x) : (p.x - float(c.x))) * inv.x,
+        (step.y > 0 ? (float(c.y) + 1.0 - p.y) : (p.y - float(c.y))) * inv.y,
+        (step.z > 0 ? (float(c.z) + 1.0 - p.z) : (p.z - float(c.z))) * inv.z);
+
+    for (int i = 0; i < int(maxCells); ++i) {
+        int axis;
+        if (tMax.x < tMax.y && tMax.x < tMax.z) { c.x += step.x; tMax.x += inv.x; axis = 0; }
+        else if (tMax.y < tMax.z)               { c.y += step.y; tMax.y += inv.y; axis = 1; }
+        else                                    { c.z += step.z; tMax.z += inv.z; axis = 2; }
+
+        if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, ivec3(dims)))) return false;
+        if (solidAt(c)) {
+            hitPos = u.uBoundsMin.xyz + (vec3(c) + 0.5) * cell;
+            // The face we came through: opposite the axis we stepped along.
+            hitNormal = vec3(0.0);
+            hitNormal[axis] = float(-step[axis]);
+            return true;
+        }
+    }
+    return false;
+}
+
+vec3 fibonacci(int i, int count) {
+    float y = 1.0 - 2.0 * (float(i) + 0.5) / float(count);
+    float r = sqrt(max(0.0, 1.0 - y * y));
+    float theta = 2.39996323 * float(i);
+    return vec3(cos(theta) * r, y, sin(theta) * r);
+}
+
+void main() {
+    ivec3 probe = ivec3(gl_GlobalInvocationID);
+    ivec3 dims = ivec3(u.uProbeDims.xyz);
+    if (any(greaterThanEqual(probe, dims))) return;
+
+    // Is this probe's turn? A scatter over the three axes rather than whole slices, so the ones
+    // refreshed together are spread through the volume and a sun change arrives evenly rather than
+    // sweeping across the scene as a visible plane.
+    int period = int(u.uSchedule.y);
+    int slot = (probe.x * 5 + probe.y * 11 + probe.z * 17) % period;
+    if (slot != int(u.uSchedule.x) % period) return;
+
+    vec3 origin = u.uBoundsMin.xyz + (vec3(probe) + 0.5) * u.uBoundsSpan.xyz / vec3(dims);
+    vec3 toSun = -normalize(u.uSunDirection.xyz);
+    int rays = int(u.uProbeDims.w);
+    float maxCells = max(u.uOccupancyDims.x, max(u.uOccupancyDims.y, u.uOccupancyDims.z));
+
+    vec3 bounce = vec3(0.0);
+    for (int i = 0; i < rays; ++i) {
+        vec3 dir = fibonacci(i, rays);
+        vec3 hitPos, hitNormal;
+        if (!march(origin, dir, maxCells, hitPos, hitNormal)) continue;   // escaped: that is sky, already baked
+
+        float ndotl = max(dot(hitNormal, toSun), 0.0);
+        if (ndotl <= 0.0) continue;
+
+        // Is that surface actually in sunlight? One more march, from just off the face.
+        vec3 lift = hitNormal * (length(u.uBoundsSpan.xyz / u.uOccupancyDims.xyz) * 1.5);
+        vec3 shadowHit, shadowNormal;
+        if (march(hitPos + lift, toSun, maxCells, shadowHit, shadowNormal)) continue;
+
+        // Lambertian re-radiation toward this probe.
+        bounce += u.uSunIrradiance.rgb * ndotl * u.uBoundsSpan.w / PI;
+    }
+
+    // The probe integrates over the sphere; 4*pi/N is the Monte Carlo weight.
+    bounce *= 4.0 * PI / float(rays);
+    imageStore(uBounce, probe, vec4(bounce, 1.0));
+}

@@ -94,6 +94,7 @@
     <GlslShader Include="Shaders\gtao.frag" />
     <GlslShader Include="Shaders\gtao_denoise.frag" />
     <GlslShader Include="Shaders\froxel.comp" />
+    <GlslShader Include="Shaders\sky_inject.comp" />
   </ItemGroup>
 
   <ItemGroup>

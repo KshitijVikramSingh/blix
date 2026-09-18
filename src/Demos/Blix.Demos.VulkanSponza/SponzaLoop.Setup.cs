@@ -191,6 +191,9 @@ internal sealed partial class SponzaLoop
         // shadow maps are rendered (it samples them) and before the lit pass
         // composites its result. Reflected interface: UBO (set 0 binding 0),
         // the storage grid (binding 1), the cascade shadow maps (binding 2).
+        var injectInterface = Reflect("sky_inject.comp");
+        injectPassHandle = graph.ComputePass("sky-inject").Shader(injectInterface).Handle;
+
         var froxelInterface = Reflect("froxel.comp");
         var froxelPass = graph.ComputePass("froxel-fog").Shader(froxelInterface);
         for (var c = 0; c < CascadeCount; c++)
@@ -424,6 +427,19 @@ internal sealed partial class SponzaLoop
         // from gl_VertexIndex in the vertex shader — the buffer is never sampled).
         fullscreen = new FullscreenPass(vk, "present.dummy");
 
+        if (bounceReady)
+        {
+            var injectSpv = File.ReadAllBytes(Path.Combine(shaderDir, "sky_inject.comp.spv"));
+            injectProgram = vk.CreateComputeShaderProgramFromSpv(injectSpv, injectInterface, "sky_inject");
+            injectPipeline = vk.CreateComputePipeline(injectProgram, "sky_inject");
+            injectBindings = new[]
+            {
+                new ShaderTextureBinding("uBounce", bounceTexture, Slot: 1),
+                new ShaderTextureBinding("uOccupancy", occupancyTexture, Slot: 2),
+                new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 3),
+            };
+        }
+
         // --- Froxel fog compute program + grid ---------------------------
         var froxelSpv = File.ReadAllBytes(Path.Combine(shaderDir, "froxel.comp.spv"));
         froxelProgram = vk.CreateComputeShaderProgramFromSpv(froxelSpv, froxelInterface, "froxel");
@@ -447,6 +463,7 @@ internal sealed partial class SponzaLoop
             new ShaderTextureBinding("uFroxelGrid",           froxelGridTexture, Slot: 4),
             new ShaderTextureBinding("uAmbientVisibility", graph.GetColorTexture(ambientDenoisedHandle), Slot: 5),
             new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 6),
+            new ShaderTextureBinding("uSkyBounce", bounceReady ? bounceTexture : skyVisibilityTexture, Slot: 7),
         };
 
         // Froxel compute set-0 image bindings (constant handles): the storage
@@ -653,8 +670,24 @@ internal sealed partial class SponzaLoop
                     SamplerDescription.LinearClamp, volume.ToRgba16F(), "sponza.skyvis");
                 skyVolumeMin = volume.Min;
                 var span = volume.Max - volume.Min;
+                skyVolumeSpan = span;
                 skyVolumeInvSpan = new Vector3(1f / span.X, 1f / span.Y, 1f / span.Z);
                 skyVolumeLoaded = true;
+                probeX = volume.SizeX; probeY = volume.SizeY; probeZ = volume.SizeZ;
+
+                if (volume.HasOccupancy)
+                {
+                    occX = volume.OccupancyX; occY = volume.OccupancyY; occZ = volume.OccupancyZ;
+                    occupancyTexture = vk.CreateTexture3D(
+                        occX, occY, occZ, TextureFormat.R8,
+                        SamplerDescription.LinearClamp, volume.Occupancy!, "sponza.occupancy");
+                    bounceTexture = vk.CreateStorageTexture3D(
+                        probeX, probeY, probeZ, TextureFormat.Rgba16F,
+                        SamplerDescription.LinearClamp, "sponza.bounce");
+                    bounceReady = true;
+                    Console.WriteLine(
+                        $"[VulkanSponza]   occupancy {occX}x{occY}x{occZ} shipped; sun bounce injected at runtime.");
+                }
                 Console.WriteLine(
                     $"[VulkanSponza] sky visibility: {Path.GetFileName(path)} " +
                     $"{volume.SizeX}x{volume.SizeY}x{volume.SizeZ} probes, " +
