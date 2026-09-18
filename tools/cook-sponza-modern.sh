@@ -122,6 +122,24 @@ if [[ -f "$KLOPPENHEIM" ]]; then
     dotnet "$COOK" probe "$KLOPPENHEIM" --yaw=-31.43 --env-face=1024 --out "$COOKED"
 fi
 
+# <b>The sky-visibility volume, which no script cooked until now.</b> It was baked by hand once and
+# the invocation survived only in a shell history — so nothing re-made it when the bakers changed,
+# and finding out how it had been produced meant matching the shipped dimensions against CookSky's
+# defaults. A cooked artifact nobody can reproduce is a cooked artifact nobody can fix.
+#
+# LAST, because it reads the .blixtex files above for per-material albedo: bake it before the
+# textures and every surface bounces the previous cook's colour.
+#
+# --rays 512, up from the default 64. Measured against a 4096-ray ground truth: the ray count does
+# NOT much improve the average error (0.0163 -> 0.0156), because what is left is the L2 expansion's
+# own inability to describe a narrow sky opening seen from the bottom of an arcaded well. What it
+# fixes is the ZEROS — 2,326 cells that read exactly 0.000 at 64 rays read a real value at 512, and
+# a cell reading zero hands the surfaces around it NO skylight at all. In Sponza's atrium those
+# surfaces then take 100% of their ambient light from the bounce instead of 73%, which is how a
+# green tree ends up painting a wall. The bake costs 1.4 seconds either way.
+echo "── sky    (visibility volume, 512 rays)"
+dotnet "$COOK" sky "$COOKED" --occupancy 256 --probes 48 --rays 512 --out "$COOKED/sponza.blixsky"
+
 echo
 echo "Cooked tree: $(du -sh "$COOKED" | cut -f1)   (sources: $(du -sh "$SRC" | cut -f1))"
 echo "Run with:  BLIX_SPONZA_ASSETS=$COOKED tools/run-vulkan-sponza.sh"
