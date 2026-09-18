@@ -6,6 +6,27 @@
 // need one." Sponza's was the second of the three, and it was the weakest — a square tap grid, a
 // hand-tuned radius, and a depth bias scaled by two tuned constants where the shared one offsets
 // along the normal by a length the cascade fit already computes.
+// Tap count for the sun's percentage-closer filter, before shadow.glsl picks its default of 16.
+//
+// <b>FOUR, and sixteen was buying nothing.</b> The sun shadow measured 1.216x of this frame at
+// sixteen taps and 1.031x at four — about eighteen per cent of the whole picture — and the two
+// outputs differ on 0.00% of pixels above 2/255, with a maximum difference of 21/255 on one pixel
+// in a hundred thousand.
+//
+// The reason is the disc, not the sampling. radiusTexels is 2 and a cascade-0 texel is around 8 mm
+// of world, so the filter spans roughly 1.6 cm — a couple of screen pixels. Sixteen samples over
+// two texels is oversampling by a large factor, and what comes out is very nearly a hard edge
+// either way. Widening the disc does not rescue it: at 6 and 12 texels the image still changes on
+// 0.01% of pixels, because this scene's shadow BOUNDARIES are a sliver of the frame. The shadow
+// itself is doing real work — turning it off changes 24-50% of pixels by more than 16/255 — but as
+// an in-or-out answer, which four taps give as well as sixteen.
+//
+// <b>This is a property of this sun, not a law.</b> The direction comes from the probe and sits
+// high, about 46 degrees, so the atrium is mostly interior shade with sunlight on the upper walls.
+// A low sun raking long shadows across the floor would put penumbra everywhere the eye goes, and
+// then the taps would be worth their price again. The measurement is written down here so that
+// changing the sun prompts re-checking the number rather than inheriting it.
+#define BLIX_SHADOW_PCF_TAPS 4
 #include "shadow.glsl"
 
 // Lit fragment shader — Cook-Torrance split-sum IBL on top of a Lambert N·L
@@ -67,6 +88,15 @@ layout(set = 0, binding = 0) uniform Frame {
     // (where the corners darken, where the normals bend) rather than as calibrated values.
     //@tune 0..2 = 0
     float uVisualizeAmbient;
+    // Measurement switches, one per --ab mode. Each removes one term from the fragment so a paired
+    // interleaved run can price it:
+    //   x  collapse every material UV to a constant, so the five material samples all hit one
+    //      cached texel. The sample INSTRUCTIONS remain — this prices BANDWIDTH, not instruction
+    //      count, which is the distinction the whole question turns on.
+    //   y  skip the GGX/Smith/Fresnel specular lobe, leaving Lambert. Prices ALU.
+    //   z  skip the three IBL lookups and the split-sum, using a flat ambient. Prices IBL whole.
+    //   w  skip the normal map sample and the tangent-space transform.
+    vec4  uAbFlags;
 } frame;
 
 layout(set = 1, binding = 0) uniform samplerCube uIrradiance;
@@ -174,6 +204,12 @@ void main() {
     // imported with AssetImportContext.FlipTextureV, which bakes the V-flip
     // into the vertex buffer at load. Nothing to do here.
     vec2 uv = vUv;
+    // <b>Collapsed to a constant rather than branched around.</b> A uniform-conditional texture read
+    // is still a texture read as far as the compiler is concerned, and it may hoist it regardless;
+    // pointing every fragment at the same texel keeps the instruction and removes the traffic, which
+    // is exactly the variable being isolated. Derivatives go to zero with it, so the sample also
+    // pins to mip 0 and stays in cache.
+    uv = mix(uv, vec2(0.5), frame.uAbFlags.x);
 
     // --- Albedo + alpha test --------------------------------------------
     vec4 sampled = texture(uAlbedo, uv);
@@ -210,7 +246,7 @@ void main() {
     // glTF's own per-material normalScale, with no global multiplier on top. The global was a
     // second control over one quantity, and the material already says what it wants.
     float normalScale = mat.uMaterialParams.y;
-    vec2 nxy = (texture(uNormalMap, uv).xy * 2.0 - 1.0) * normalScale;
+    vec2 nxy = (texture(uNormalMap, uv).xy * 2.0 - 1.0) * normalScale * (1.0 - frame.uAbFlags.w);
     float nz = sqrt(max(0.0, 1.0 - dot(nxy, nxy)));
     // Default normal map is flat (0,0,1), so untextured materials keep N.
     N = normalize(mat3(T, B, N) * vec3(nxy, nz));
@@ -272,7 +308,15 @@ void main() {
     // cascade's business, so both now live where the cascade is chosen.
     int shadowCascade = -1;
     float sunShadow = 1.0;
-    if (frame.uShadowStrength > 0.0) {
+    // <b>NdotL > 0, because a surface facing away from the sun is already shadowed by its own
+    // orientation.</b> The taps were being paid for a value that the direct term then multiplies by
+    // a zero NdotL — sixteen filtered depth comparisons whose result could not reach the image.
+    // Priced at 1.3-1.4x of the frame, the sun shadow is the largest single shading term here, so
+    // the fragments that cannot use it are worth not charging.
+    //
+    // The cascade index stays -1 for those fragments, so --visualize-cascades paints them as
+    // "beyond the last cascade". That is a debug view reading a fragment that asked no question.
+    if (frame.uShadowStrength > 0.0 && NdotL > 0.0) {
         sunShadow = blix_sun_shadow_cascaded(
             uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2],
             frame.uCascadeViewProj[0], frame.uCascadeViewProj[1], frame.uCascadeViewProj[2],
@@ -284,10 +328,14 @@ void main() {
 
     // GGX microfacet highlight from the sun. Without this the sun produces
     // no glint on metal/polished stone, and metals read flat and chalky.
-    float Dsun = distributionGGX(NdotH, roughness);
-    float Gsun = geometrySmith(NdotV, NdotL, roughness);
-    vec3  Fsun = fresnelSchlick(VdotH, F0);
-    vec3 sunSpecular = (Dsun * Gsun * Fsun) / max(4.0 * NdotV * NdotL, 1e-3);
+    vec3 sunSpecular = vec3(0.0);
+    vec3 Fsun = vec3(0.0);
+    if (frame.uAbFlags.y < 0.5) {
+        float Dsun = distributionGGX(NdotH, roughness);
+        float Gsun = geometrySmith(NdotV, NdotL, roughness);
+        Fsun = fresnelSchlick(VdotH, F0);
+        sunSpecular = (Dsun * Gsun * Fsun) / max(4.0 * NdotV * NdotL, 1e-3);
+    }
 
     // Energy split: diffuse keeps only the non-reflected fraction (1 - F) and vanishes on metals
     // (1 - metallic); /PI normalizes the Lambert lobe. uSunIrradiance is the irradiance the probe
@@ -322,15 +370,18 @@ void main() {
     // rather than an average that includes the wall it is pressed against.
     vec3 gatherN = opaqueSurface ? normalize(ambientVis.xyz) : N;
 
-    vec3 irradiance = texture(uIrradiance, gatherN).rgb;
+    vec3 irradiance = frame.uAbFlags.z > 0.5 ? vec3(0.2) : texture(uIrradiance, gatherN).rgb;
     vec3 diffuseIBL = irradiance * albedo;
 
     // Specular: prefiltered env at LOD = roughness × (mipCount - 1), times
     // the BRDF LUT integration (split-sum approximation of the specular term).
-    float lod = roughness * (frame.uEnvMipCount - 1.0);
-    vec3 prefiltered = textureLod(uPrefilteredEnv, R, lod).rgb;
-    vec2 envBrdf = texture(uBrdfLut, vec2(NdotV, roughness)).rg;
-    vec3 specularIBL = prefiltered * (F * envBrdf.x + envBrdf.y);
+    vec3 specularIBL = vec3(0.0);
+    if (frame.uAbFlags.z < 0.5) {
+        float lod = roughness * (frame.uEnvMipCount - 1.0);
+        vec3 prefiltered = textureLod(uPrefilteredEnv, R, lod).rgb;
+        vec2 envBrdf = texture(uBrdfLut, vec2(NdotV, roughness)).rg;
+        specularIBL = prefiltered * (F * envBrdf.x + envBrdf.y);
+    }
 
     // AO attenuates the indirect contribution only, per the glTF spec.
     //

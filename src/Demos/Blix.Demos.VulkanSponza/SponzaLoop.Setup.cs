@@ -47,6 +47,7 @@ internal sealed partial class SponzaLoop
         // --no-ao: keep both ambient passes in the graph but give the search a zero radius, so a
         // paired run attributes the HORIZON SEARCH specifically rather than the whole feature.
         if (cmdArgs.Contains("--no-ao")) ambient.Enabled = false;
+        if (cmdArgs.Contains("--no-shadow")) shadows.Enabled = false;
         if (cmdArgs.Contains("--no-mask")) forceOpaqueMask = true;
         if (cmdArgs.Contains("--msaa1")) MsaaSamples = 1;
         // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every

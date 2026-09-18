@@ -23,6 +23,10 @@ float blix_sun_shadow(sampler2D shadowMap, vec4 coord, float ndotl) {
     return (current - bias > closest) ? 0.0 : 1.0;
 }
 
+#ifndef BLIX_SHADOW_PCF_TAPS
+#define BLIX_SHADOW_PCF_TAPS 16
+#endif
+
 // Percentage-closer filtered directional shadow. Same contract as the single-tap
 // version above — 1 = lit, 0 = shadowed — but averages a 4x4 grid of comparisons
 // spread over `radiusTexels` of the map, so the answer is a fraction rather than a
@@ -72,7 +76,15 @@ float blix_sun_shadow_soft(
     // A Vogel disc rather than a square: sqrt spacing on the golden angle puts the samples at even density
     // over a circle, so a penumbra is round. A square kernel makes a round shadow's edge subtly square, and
     // on a low sun with long shadows that is exactly where the eye is looking.
-    const int taps = 16;
+    // <b>Sixteen by default, overridable by the includer.</b> A define rather than a parameter
+    // because the loop bound has to stay a compile-time constant to unroll, and an un-unrolled
+    // sixteen-iteration loop with a dependent texture fetch is worse than any tap count it saves.
+    //
+    // It is worth having a dial here at all because the sun shadow measured 1.3-1.4x of Sponza's
+    // whole frame — the largest single shading term in that renderer, larger than IBL and ambient
+    // visibility together. What a tap buys is penumbra smoothness, which is a look decision, so the
+    // number belongs to the consumer rather than to this file.
+    const int taps = BLIX_SHADOW_PCF_TAPS;
     float lit = 0.0;
     for (int i = 0; i < taps; ++i) {
         float radius = sqrt((float(i) + 0.5) / float(taps));

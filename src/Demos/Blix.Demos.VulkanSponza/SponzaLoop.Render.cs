@@ -121,6 +121,12 @@ internal sealed partial class SponzaLoop
                 new Vector4(cascadeTexelWorld[0], cascadeTexelWorld[1], cascadeTexelWorld[2], 0f))),
             new("uFog",              new Vector4Uniform(
                 new Vector4(frame.Width, frame.Height, fog.Far, fog.Enabled ? 1f : 0f))),
+            // One component per --ab shading mode, live only during that mode's off-phase.
+            new("uAbFlags",          new Vector4Uniform(new Vector4(
+                AbOffPhase && abMode == "textures" ? 1f : 0f,
+                AbOffPhase && abMode == "pbr"      ? 1f : 0f,
+                AbOffPhase && abMode == "ibl"      ? 1f : 0f,
+                AbOffPhase && abMode == "normal"   ? 1f : 0f))),
         };
         // The remaining //@tune uniforms (shadow slope scale, uVisualizeCascades) are appended by
         // name from the overlay panel — reflection lands each at its offset. The intensity and
@@ -467,8 +473,15 @@ internal sealed partial class SponzaLoop
         // loading path never wrote — which came back as uninitialised half-floats, i.e. NaN, and
         // looked for all the world like a shader that had started producing NaN.
         // framePeriodCount only advances on fully-lit frames, so it is the honest clock here.
+        // <b>Counted in POST-LOAD frames, because that is what the measurement is made of.</b> It
+        // counted every frame including the hundreds spent streaming textures, so an --ab run with
+        // --shot-frames 1200 gave each arm only 60-90 samples out of a 600-frame buffer — and the
+        // resulting numbers wobbled by 2x between runs while looking like measurements. With the
+        // deadline in post-load frames the buffers fill, and the ratio between arms stabilises to
+        // within a few per cent.
+        var measuredFrames = framePeriodCount + flatPeriodCount;
         if (shotPath is { } path && !shotWritten && fullyLoaded && !AbOffPhase
-            && framePeriodCount >= 60 && framesRendered >= shotFrame)
+            && framePeriodCount >= 60 && measuredFrames >= shotFrame)
         {
             shotWritten = true;
             VerifyHiZ();
@@ -713,6 +726,10 @@ internal sealed partial class SponzaLoop
             "gtao"   => "ambient visibility (GTAO)",
             "prepass"=> "the depth pre-pass",
             "hiz"    => "the Hi-Z pyramid",
+            "textures"=> "material texture bandwidth",
+            "pbr"    => "the GGX specular lobe",
+            "ibl"    => "image-based lighting",
+            "normal" => "normal mapping",
             _        => "post-load shading",
         };
         Report($"ON  : with {term}", framePeriodsMs, framePeriodCount);
@@ -722,9 +739,14 @@ internal sealed partial class SponzaLoop
         var flat = Median(flatPeriodsMs, flatPeriodCount);
         if (lit > 0 && flat > 0)
         {
+            // <b>The ratio first, because it is the part that reproduces.</b> Across three runs of
+            // one configuration the absolute cost ranged 3.29-4.94 ms while the ratio held within
+            // 0.04 — the milliseconds are a product of whatever thermal state the process found, the
+            // ratio is a property of the renderer.
             Console.WriteLine(
-                $"[VulkanSponza] {term} costs {lit - flat:0.00} ms/frame " +
-                $"({lit / flat:0.0}x), same geometry, same process, same thermal state");
+                $"[VulkanSponza] {term}: {lit / flat:0.000}x of frame " +
+                $"({lit - flat:0.00} ms at this run's {lit:0.0} ms median), " +
+                "same geometry, same process, same thermal state");
         }
 
         static double Median(double[] buf, int count)
