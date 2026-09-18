@@ -188,7 +188,11 @@ public static class BlixMesh
     // v8: a NODE table, and every primitive names the node it came from. Vertices stay
     // world-baked — the cook's whole value for the flat path — and the table is what lets a
     // consumer that wants the authored hierarchy have it anyway. See the header note.
-    public const uint Version8 = 8;
+    // v9: every material carries the KHR_materials_* block. The importer was reading two of the
+    // thirteen extensions SharpGLTF surfaces and dropping eleven at the boundary, so a cooked file
+    // could not carry what the engine had begun to read. Same rule as every bump before it: no
+    // back-read, re-cook to migrate, which the build does by itself.
+    public const uint Version9 = 9;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
     public const uint LayoutPosition3NormalTextureSkin4Tangent = 3; // 80-byte, rigged
@@ -298,7 +302,70 @@ public sealed record BlixMeshMaterial(
     int NormalImage = BlixMesh.NoImage,
     int MetallicRoughnessImage = BlixMesh.NoImage,
     int OcclusionImage = BlixMesh.NoImage,
-    int EmissiveImage = BlixMesh.NoImage);
+    int EmissiveImage = BlixMesh.NoImage,
+
+    /// <summary>Every <c>KHR_materials_*</c> property, as cooked. Null on a file older than v9.</summary>
+    BlixMaterialExtensions? Extensions = null)
+{
+    /// <summary>The extensions, never null — an absent block reads as every spec default.</summary>
+    public BlixMaterialExtensions Ext => Extensions ?? BlixMaterialExtensions.None;
+}
+
+/// <summary>
+/// The cooked mirror of <c>GltfMaterialExtensions</c>: every <c>KHR_materials_*</c> property.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A format type rather than the engine one, for the same reason <see cref="BlixMeshMaterial"/> is
+/// not <c>GltfMaterial</c>: the runtime types live in <c>Blix</c>, which references this assembly.
+/// The visible difference is textures — the engine carries a resolved <c>GltfTexture</c>, a file
+/// carries an INDEX into the image table, because a file cannot hold a decoded image and a path is
+/// the thing that survives being written down.
+/// </para>
+/// <para>
+/// Defaults are the SPEC's, not zero: IOR 1.5, attenuation distance infinite, specular strength 1.
+/// Absence of an extension means "the base BRDF", and a file that wrote zeros would be authoring a
+/// different material rather than declining to say anything.
+/// </para>
+/// </remarks>
+public sealed record BlixMaterialExtensions(
+    float TransmissionFactor, int TransmissionImage,
+    float DiffuseTransmissionFactor, Vector3 DiffuseTransmissionColorFactor,
+    int DiffuseTransmissionImage, int DiffuseTransmissionColorImage,
+    Vector3 SheenColorFactor, float SheenRoughnessFactor,
+    int SheenColorImage, int SheenRoughnessImage,
+    float ThicknessFactor, float AttenuationDistance, Vector3 AttenuationColor, int ThicknessImage,
+    float SpecularFactor, Vector3 SpecularColorFactor, int SpecularImage, int SpecularColorImage,
+    float IndexOfRefraction,
+    float ClearcoatFactor, float ClearcoatRoughnessFactor, float ClearcoatNormalScale,
+    int ClearcoatImage, int ClearcoatRoughnessImage, int ClearcoatNormalImage,
+    float IridescenceFactor, float IridescenceIor,
+    float IridescenceThicknessMinimum, float IridescenceThicknessMaximum,
+    int IridescenceImage, int IridescenceThicknessImage,
+    float AnisotropyStrength, float AnisotropyRotation, int AnisotropyImage,
+    float Dispersion, bool Unlit)
+{
+    /// <summary>Every field at its glTF-specified default: the material that declares no extension.</summary>
+    public static readonly BlixMaterialExtensions None = new(
+        TransmissionFactor: 0f, TransmissionImage: BlixMesh.NoImage,
+        DiffuseTransmissionFactor: 0f, DiffuseTransmissionColorFactor: Vector3.One,
+        DiffuseTransmissionImage: BlixMesh.NoImage, DiffuseTransmissionColorImage: BlixMesh.NoImage,
+        SheenColorFactor: Vector3.Zero, SheenRoughnessFactor: 0f,
+        SheenColorImage: BlixMesh.NoImage, SheenRoughnessImage: BlixMesh.NoImage,
+        ThicknessFactor: 0f, AttenuationDistance: float.PositiveInfinity, AttenuationColor: Vector3.One,
+        ThicknessImage: BlixMesh.NoImage,
+        SpecularFactor: 1f, SpecularColorFactor: Vector3.One,
+        SpecularImage: BlixMesh.NoImage, SpecularColorImage: BlixMesh.NoImage,
+        IndexOfRefraction: 1.5f,
+        ClearcoatFactor: 0f, ClearcoatRoughnessFactor: 0f, ClearcoatNormalScale: 1f,
+        ClearcoatImage: BlixMesh.NoImage, ClearcoatRoughnessImage: BlixMesh.NoImage,
+        ClearcoatNormalImage: BlixMesh.NoImage,
+        IridescenceFactor: 0f, IridescenceIor: 1.3f,
+        IridescenceThicknessMinimum: 100f, IridescenceThicknessMaximum: 400f,
+        IridescenceImage: BlixMesh.NoImage, IridescenceThicknessImage: BlixMesh.NoImage,
+        AnisotropyStrength: 0f, AnisotropyRotation: 0f, AnisotropyImage: BlixMesh.NoImage,
+        Dispersion: 0f, Unlit: false);
+}
 
 /// <summary>One bone of a cooked skeleton — the format's mirror of the runtime <c>Bone</c>.</summary>
 /// <remarks>
@@ -559,7 +626,7 @@ public static class BlixMeshWriter
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(file);
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version8, stamp);
+        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version9, stamp);
         using var bw = new BinaryWriter(fs);
 
         bw.Write(file.Primitives.Count);
@@ -589,6 +656,25 @@ public static class BlixMeshWriter
             bw.Write(m.MetallicRoughnessImage);
             bw.Write(m.OcclusionImage);
             bw.Write(m.EmissiveImage);
+
+            var x = m.Ext;
+            bw.Write(x.TransmissionFactor); bw.Write(x.TransmissionImage);
+            bw.Write(x.DiffuseTransmissionFactor); bw.Write(x.DiffuseTransmissionColorFactor.X); bw.Write(x.DiffuseTransmissionColorFactor.Y); bw.Write(x.DiffuseTransmissionColorFactor.Z);
+            bw.Write(x.DiffuseTransmissionImage); bw.Write(x.DiffuseTransmissionColorImage);
+            bw.Write(x.SheenColorFactor.X); bw.Write(x.SheenColorFactor.Y); bw.Write(x.SheenColorFactor.Z); bw.Write(x.SheenRoughnessFactor);
+            bw.Write(x.SheenColorImage); bw.Write(x.SheenRoughnessImage);
+            bw.Write(x.ThicknessFactor); bw.Write(x.AttenuationDistance);
+            bw.Write(x.AttenuationColor.X); bw.Write(x.AttenuationColor.Y); bw.Write(x.AttenuationColor.Z); bw.Write(x.ThicknessImage);
+            bw.Write(x.SpecularFactor); bw.Write(x.SpecularColorFactor.X); bw.Write(x.SpecularColorFactor.Y); bw.Write(x.SpecularColorFactor.Z);
+            bw.Write(x.SpecularImage); bw.Write(x.SpecularColorImage);
+            bw.Write(x.IndexOfRefraction);
+            bw.Write(x.ClearcoatFactor); bw.Write(x.ClearcoatRoughnessFactor); bw.Write(x.ClearcoatNormalScale);
+            bw.Write(x.ClearcoatImage); bw.Write(x.ClearcoatRoughnessImage); bw.Write(x.ClearcoatNormalImage);
+            bw.Write(x.IridescenceFactor); bw.Write(x.IridescenceIor);
+            bw.Write(x.IridescenceThicknessMinimum); bw.Write(x.IridescenceThicknessMaximum);
+            bw.Write(x.IridescenceImage); bw.Write(x.IridescenceThicknessImage);
+            bw.Write(x.AnisotropyStrength); bw.Write(x.AnisotropyRotation); bw.Write(x.AnisotropyImage);
+            bw.Write(x.Dispersion); bw.Write(x.Unlit);
         }
 
         var images = file.ImageTable;
@@ -677,6 +763,7 @@ public static class BlixMeshWriter
         bw.Write(bytes);
     }
 
+
     private static void WritePrimitive(BinaryWriter bw, BlixMeshPrimitive p)
     {
         var nameBytes = System.Text.Encoding.UTF8.GetBytes(p.Name);
@@ -750,6 +837,38 @@ public static class BlixMeshWriter
 
 public static class BlixMeshReader
 {
+    /// <summary>Reads the v9 <c>KHR_materials_*</c> block, in the order the writer emits it.</summary>
+    /// <remarks>
+    /// Positional and exact. There is no length prefix and no field tags, because the format does not
+    /// do optional data — it bumps its version and re-cooks, as it has from v2 to v9 — and a reader
+    /// that guessed would turn a format change into silently wrong materials rather than a refusal.
+    /// </remarks>
+    private static BlixMaterialExtensions ReadExtensions(BinaryReader br)
+    {
+        Vector3 V3() => new(br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
+        return new BlixMaterialExtensions(
+            TransmissionFactor: br.ReadSingle(), TransmissionImage: br.ReadInt32(),
+            DiffuseTransmissionFactor: br.ReadSingle(), DiffuseTransmissionColorFactor: V3(),
+            DiffuseTransmissionImage: br.ReadInt32(), DiffuseTransmissionColorImage: br.ReadInt32(),
+            SheenColorFactor: V3(), SheenRoughnessFactor: br.ReadSingle(),
+            SheenColorImage: br.ReadInt32(), SheenRoughnessImage: br.ReadInt32(),
+            ThicknessFactor: br.ReadSingle(), AttenuationDistance: br.ReadSingle(),
+            AttenuationColor: V3(), ThicknessImage: br.ReadInt32(),
+            SpecularFactor: br.ReadSingle(), SpecularColorFactor: V3(),
+            SpecularImage: br.ReadInt32(), SpecularColorImage: br.ReadInt32(),
+            IndexOfRefraction: br.ReadSingle(),
+            ClearcoatFactor: br.ReadSingle(), ClearcoatRoughnessFactor: br.ReadSingle(),
+            ClearcoatNormalScale: br.ReadSingle(),
+            ClearcoatImage: br.ReadInt32(), ClearcoatRoughnessImage: br.ReadInt32(),
+            ClearcoatNormalImage: br.ReadInt32(),
+            IridescenceFactor: br.ReadSingle(), IridescenceIor: br.ReadSingle(),
+            IridescenceThicknessMinimum: br.ReadSingle(), IridescenceThicknessMaximum: br.ReadSingle(),
+            IridescenceImage: br.ReadInt32(), IridescenceThicknessImage: br.ReadInt32(),
+            AnisotropyStrength: br.ReadSingle(), AnisotropyRotation: br.ReadSingle(),
+            AnisotropyImage: br.ReadInt32(),
+            Dispersion: br.ReadSingle(), Unlit: br.ReadBoolean());
+    }
+
     /// <summary>Reads a cooked mesh, refusing anything that is not one by name.</summary>
     /// <remarks>
     /// Everything past the preamble is wrapped, so a truncated or corrupt body arrives as the
@@ -761,7 +880,7 @@ public static class BlixMeshReader
         ArgumentNullException.ThrowIfNull(path);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version8, path, ".blixmesh");
+        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version9, path, ".blixmesh");
         return AssetImportException.Refusing(path, () => ReadBody(fs, path, header), ".blixmesh");
     }
 
@@ -803,7 +922,8 @@ public static class BlixMeshReader
                 NormalImage: br.ReadInt32(),
                 MetallicRoughnessImage: br.ReadInt32(),
                 OcclusionImage: br.ReadInt32(),
-                EmissiveImage: br.ReadInt32());
+                EmissiveImage: br.ReadInt32(),
+                Extensions: ReadExtensions(br));
         }
 
         var imageCount = br.ReadInt32();

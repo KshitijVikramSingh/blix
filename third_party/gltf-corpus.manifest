@@ -44,6 +44,21 @@ sample TextureCoordinateTest    # Which texCoord set each texture names, drawn s
 sample BoxInterleaved           # Interleaved POSITION/NORMAL in one buffer view.
 sample OrientationTest          # Node transform composition. A sign error here reads as "the model is fine, the scene is wrong".
 
+# ── Material extensions. Added when the importer went from reading 2 of the 13 that ──
+# SharpGLTF surfaces to reading all of them. Before this the corpus declared NOTHING that
+# exercised a KHR_materials_* extension, which is the §7 failure in its purest form: the
+# engine's capability was being set by an accident of what had been downloaded, and the
+# sentence "no asset needs it" would have been true and meaningless.
+sample SheenChair               # KHR_materials_sheen with both channels textured. The fabric lobe metallic-roughness cannot express, and the reason a curtain reads as cloth.
+sample DiffuseTransmissionTeacup # KHR_materials_diffuse_transmission: light SCATTERED through a thin surface. The extension a leaf and a curtain actually want, as opposed to clear-pane transmission.
+sample TransmissionTest         # KHR_materials_transmission across a factor sweep, which is the one extension the importer already read — kept so it stays read.
+sample DragonAttenuation        # KHR_materials_volume: thickness and attenuation, which the spec says are meaningless without transmission. The pair, so the dependency is exercised rather than assumed.
+sample ClearCoatTest            # KHR_materials_clearcoat, including the clearcoat NORMAL channel — a second normal map on one material, which is where a reader that assumes one goes wrong.
+sample IridescenceLamp          # KHR_materials_iridescence: factor, IOR, and a thickness RANGE rather than a scalar.
+sample AnisotropyBarnLamp       # KHR_materials_anisotropy: strength and rotation.
+sample SpecularTest             # KHR_materials_specular: dielectric F0 strength and tint without lying about metalness.
+sample UnlitTest                # KHR_materials_unlit, which is a whole shading model rather than a parameter — the standing check that a flag is not read as a factor.
+
 # ── Khronos glTF-Asset-Generator — permutation matrices. Each group DECLARES its ──
 # expected result, so "all N render the same" is a real assertion rather than a hope.
 # Pair every such claim with a control that the renders are not uniformly blank:

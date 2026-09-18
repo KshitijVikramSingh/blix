@@ -404,7 +404,7 @@ public static class Program
             var srcTime = File.GetLastWriteTimeUtc(src);
             var outTime = File.GetLastWriteTimeUtc(outPath);
             var existing = CookedFile.TryReadHeader(outPath);
-            var currentFormat = existing is { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version8 };
+            var currentFormat = existing is { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version9 };
             if (outTime > srcTime && currentFormat)
             {
                 Console.WriteLine($"  up-to-date: {outPath}");
@@ -413,7 +413,7 @@ public static class Program
 
             if (!currentFormat)
             {
-                Console.WriteLine($"  re-cooking (format is not {nameof(BlixMesh)} v{BlixMesh.Version8}): {outPath}");
+                Console.WriteLine($"  re-cooking (format is not {nameof(BlixMesh)} v{BlixMesh.Version9}): {outPath}");
             }
         }
         var sw = Stopwatch.StartNew();

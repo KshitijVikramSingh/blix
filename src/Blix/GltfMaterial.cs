@@ -84,11 +84,141 @@ public sealed record GltfMaterial(
     // renderer routes transmission>0 materials through the blend pipeline and
     // shades them as Fresnel glass. Default 0 (no extension). Appended last so
     // existing positional constructors keep compiling.
-    float TransmissionFactor = 0f);
+    float TransmissionFactor = 0f,
+
+    /// <summary>Every <c>KHR_materials_*</c> property the spec defines. Defaults to <see cref="GltfMaterialExtensions.None"/>.</summary>
+    /// <remarks>
+    /// TransmissionFactor above is kept as its own member rather than folded in, because it predates
+    /// this and the pipeline sorts on it; it mirrors <c>Extensions.TransmissionFactor</c>.
+    /// </remarks>
+    GltfMaterialExtensions? Extensions = null)
+{
+    /// <summary>The extensions, never null — an absent block reads as every spec default.</summary>
+    /// <remarks>
+    /// Nullable on the record so the two construction sites that predate it keep compiling, and a
+    /// cooked material that has not been re-cooked yet says "no extensions" rather than crashing.
+    /// Consumers read THIS, so neither of those cases becomes a null check at the call site.
+    /// </remarks>
+    public GltfMaterialExtensions Ext => Extensions ?? GltfMaterialExtensions.None;
+}
 
 public enum GltfAlphaMode
 {
     Opaque = 0,
     Mask,
     Blend,
+}
+
+/// <summary>
+/// The <c>KHR_materials_*</c> extensions, as the specification defines them.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Read because the spec defines them, not because an asset in the tree asks.</b> Conventions §7:
+/// for a format Blix reads, the specification is the requirement and owning an asset that exercises
+/// it is a download, not a precondition. SharpGLTF 1.0.6 surfaces thirteen of these and the importer
+/// consumed two — transmission and emissive strength — so eleven spec-defined material properties
+/// were being parsed by the library and dropped on the floor at our boundary.
+/// </para>
+/// <para>
+/// <b>A group rather than thirty more members on the material.</b> These all belong to one family,
+/// they arrive together from one API, and keeping them together leaves GltfMaterial at the width it
+/// has. Every field is REQUIRED with a spec default, because the alternative — an optional block —
+/// is an optionality mechanism this codebase does not have and does not need: .blixmesh has bumped
+/// its version and re-cooked from v2 to v8, and the build re-cooks by itself.
+/// </para>
+/// <para>
+/// <b>What is here is the parameters; what is NOT here is what to do with them.</b> How sheen
+/// shades, whether transmission refracts against a scene-colour copy or stays Fresnel-only, what a
+/// voxel baker does with diffuse transmission — those are §6 policy and live at the call site. This
+/// type's whole job is that the numbers survive the format boundary (§3) so a consumer can decide.
+/// </para>
+/// </remarks>
+public sealed record GltfMaterialExtensions(
+    // KHR_materials_transmission — light refracted THROUGH a thin surface: glass, a window.
+    float TransmissionFactor,
+    GltfTexture? TransmissionTexture,
+
+    // KHR_materials_diffuse_transmission — light SCATTERED through a thin surface. This is the one
+    // a leaf and a curtain want: not a clear pane, a sheet that glows when lit from behind.
+    float DiffuseTransmissionFactor,
+    Vector3 DiffuseTransmissionColorFactor,
+    GltfTexture? DiffuseTransmissionTexture,
+    GltfTexture? DiffuseTransmissionColorTexture,
+
+    // KHR_materials_sheen — the retroreflective rim fabric has and the metallic-roughness lobe
+    // cannot express. Velvet, and the reason a curtain reads as cloth rather than painted board.
+    Vector3 SheenColorFactor,
+    float SheenRoughnessFactor,
+    GltfTexture? SheenColorTexture,
+    GltfTexture? SheenRoughnessTexture,
+
+    // KHR_materials_volume — what happens INSIDE a transmissive body. Meaningless without
+    // transmission, per the spec, which is why the two are separate extensions.
+    float ThicknessFactor,
+    float AttenuationDistance,
+    Vector3 AttenuationColor,
+    GltfTexture? ThicknessTexture,
+
+    // KHR_materials_specular — dielectric F0 strength and tint, without lying about metalness.
+    float SpecularFactor,
+    Vector3 SpecularColorFactor,
+    GltfTexture? SpecularTexture,
+    GltfTexture? SpecularColorTexture,
+
+    // KHR_materials_ior — 1.5 is the glTF default and the value the base BRDF assumes.
+    float IndexOfRefraction,
+
+    // KHR_materials_clearcoat — a second, smoother specular layer over the first: car paint, lacquer.
+    float ClearcoatFactor,
+    float ClearcoatRoughnessFactor,
+    float ClearcoatNormalScale,
+    GltfTexture? ClearcoatTexture,
+    GltfTexture? ClearcoatRoughnessTexture,
+    GltfTexture? ClearcoatNormalTexture,
+
+    // KHR_materials_iridescence — thin-film interference: soap, beetle shell, oil.
+    float IridescenceFactor,
+    float IridescenceIor,
+    float IridescenceThicknessMinimum,
+    float IridescenceThicknessMaximum,
+    GltfTexture? IridescenceTexture,
+    GltfTexture? IridescenceThicknessTexture,
+
+    // KHR_materials_anisotropy — a directional specular lobe: brushed metal, hair.
+    float AnisotropyStrength,
+    float AnisotropyRotation,
+    GltfTexture? AnisotropyTexture,
+
+    // KHR_materials_dispersion — wavelength-dependent IOR. Needs transmission to mean anything.
+    float Dispersion,
+
+    // KHR_materials_unlit — "shade this as base colour and stop". A whole model, not a parameter.
+    bool Unlit)
+{
+    /// <summary>Every field at its glTF-specified default: the material that declares no extension.</summary>
+    /// <remarks>
+    /// The defaults are the SPEC's, not zero-for-everything. IOR is 1.5 and attenuation distance is
+    /// infinite because that is what the absence of those extensions means; writing 0 would be a
+    /// different material, not a neutral one.
+    /// </remarks>
+    public static readonly GltfMaterialExtensions None = new(
+        TransmissionFactor: 0f, TransmissionTexture: null,
+        DiffuseTransmissionFactor: 0f, DiffuseTransmissionColorFactor: Vector3.One,
+        DiffuseTransmissionTexture: null, DiffuseTransmissionColorTexture: null,
+        SheenColorFactor: Vector3.Zero, SheenRoughnessFactor: 0f,
+        SheenColorTexture: null, SheenRoughnessTexture: null,
+        ThicknessFactor: 0f, AttenuationDistance: float.PositiveInfinity, AttenuationColor: Vector3.One,
+        ThicknessTexture: null,
+        SpecularFactor: 1f, SpecularColorFactor: Vector3.One,
+        SpecularTexture: null, SpecularColorTexture: null,
+        IndexOfRefraction: 1.5f,
+        ClearcoatFactor: 0f, ClearcoatRoughnessFactor: 0f, ClearcoatNormalScale: 1f,
+        ClearcoatTexture: null, ClearcoatRoughnessTexture: null, ClearcoatNormalTexture: null,
+        IridescenceFactor: 0f, IridescenceIor: 1.3f,
+        IridescenceThicknessMinimum: 100f, IridescenceThicknessMaximum: 400f,
+        IridescenceTexture: null, IridescenceThicknessTexture: null,
+        AnisotropyStrength: 0f, AnisotropyRotation: 0f, AnisotropyTexture: null,
+        Dispersion: 0f,
+        Unlit: false);
 }

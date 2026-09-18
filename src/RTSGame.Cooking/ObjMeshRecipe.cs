@@ -132,7 +132,9 @@ public static class ObjMeshRecipe
             AlphaMode: BlixMesh.AlphaOpaque,
             AlphaCutoff: 0.5f,
             DoubleSided: false,
-            TransmissionFactor: 0f)).ToArray();
+            TransmissionFactor: 0f,
+            // A .mtl has no KHR_materials_* anything, so every field takes its spec default.
+            Extensions: BlixMaterialExtensions.None)).ToArray();
 
         var primitives = parts.Select((part, i) => new BlixMeshPrimitive(
             // <b>The part's MATERIAL name, not the mesh's.</b> It is what the reader matches on to

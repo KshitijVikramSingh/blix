@@ -99,7 +99,57 @@ public static class Program
             Console.WriteLine("        It is an optimisation, not a replacement — the source must travel with it.");
         }
 
+        // A cooked mesh's materials, for the same reason the raw path reports them: a cooked file
+        // that silently defaults every extension while the raw file reads them is indistinguishable
+        // from a working one until something renders wrong. Printing both makes the round trip
+        // checkable by eye and by diff.
+        if (header.Magic == Blix.Assets.BlixMesh.Magic)
+        {
+            try
+            {
+                var mesh = Blix.Assets.BlixMeshReader.Read(path);
+                ReportCookedExtensions(mesh);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  (materials unreadable: {ex.Message})");
+            }
+        }
+
         return 0;
+    }
+
+    /// <summary>The cooked mirror of <see cref="ReportMaterialExtensions"/>, off a .blixmesh.</summary>
+    private static void ReportCookedExtensions(Blix.Assets.BlixMeshFile mesh)
+    {
+        var rows = new List<string>();
+        foreach (var m in mesh.MaterialTable)
+        {
+            var e = m.Ext;
+            var parts = new List<string>();
+            if (e.TransmissionFactor > 0f) parts.Add($"transmission {e.TransmissionFactor:0.##}");
+            if (e.DiffuseTransmissionFactor > 0f)
+                parts.Add($"diffuse-transmission {e.DiffuseTransmissionFactor:0.##} rgb({e.DiffuseTransmissionColorFactor.X:0.##},{e.DiffuseTransmissionColorFactor.Y:0.##},{e.DiffuseTransmissionColorFactor.Z:0.##})");
+            if (e.SheenColorFactor != System.Numerics.Vector3.Zero)
+                parts.Add($"sheen rgb({e.SheenColorFactor.X:0.##},{e.SheenColorFactor.Y:0.##},{e.SheenColorFactor.Z:0.##}) rough {e.SheenRoughnessFactor:0.##}");
+            if (e.ThicknessFactor > 0f)
+            {
+                var atten = e.AttenuationDistance >= float.MaxValue || float.IsPositiveInfinity(e.AttenuationDistance)
+                    ? "none" : $"{e.AttenuationDistance:0.##}";
+                parts.Add($"volume thickness {e.ThicknessFactor:0.##} atten {atten}");
+            }
+            if (e.ClearcoatFactor > 0f) parts.Add($"clearcoat {e.ClearcoatFactor:0.##} rough {e.ClearcoatRoughnessFactor:0.##}");
+            if (e.IridescenceFactor > 0f) parts.Add($"iridescence {e.IridescenceFactor:0.##} ior {e.IridescenceIor:0.##}");
+            if (e.AnisotropyStrength > 0f) parts.Add($"anisotropy {e.AnisotropyStrength:0.##} rot {e.AnisotropyRotation:0.##}");
+            if (Math.Abs(e.SpecularFactor - 1f) > 1e-4f) parts.Add($"specular {e.SpecularFactor:0.##}");
+            if (Math.Abs(e.IndexOfRefraction - 1.5f) > 1e-4f) parts.Add($"ior {e.IndexOfRefraction:0.##}");
+            if (e.Dispersion > 0f) parts.Add($"dispersion {e.Dispersion:0.##}");
+            if (e.Unlit) parts.Add("unlit");
+            if (parts.Count > 0) rows.Add($"    {m.Name,-28} {string.Join(" · ", parts)}");
+        }
+        if (rows.Count == 0) return;
+        Console.WriteLine("  material extensions (KHR_materials_*):");
+        foreach (var r in rows) Console.WriteLine(r);
     }
 
     private static int InspectGltf(string[] args)
@@ -183,6 +233,54 @@ public static class Program
             Console.WriteLine(
                 $"{indent}      bounds X[{min.X:0.##}, {max.X:0.##}]  Y[{min.Y:0.##}, {max.Y:0.##}]  Z[{min.Z:0.##}, {max.Z:0.##}]");
         }
+
+        ReportMaterialExtensions(nodes);
         return 0;
+    }
+
+    /// <summary>Prints the KHR_materials_* properties each material declares, and nothing it does not.</summary>
+    /// <remarks>
+    /// <b>Conventions §3: the runtime has to be able to EXPLAIN what it loaded.</b> Until the
+    /// importer read these, "does Blix see the sheen on this chair" had no answer short of running
+    /// a renderer and squinting — which is how eleven spec-defined properties sat unparsed without
+    /// anyone noticing. A material that declares nothing prints nothing, so this stays quiet on the
+    /// assets that have no extensions and is the whole report on the ones that do.
+    /// </remarks>
+    private static void ReportMaterialExtensions(IReadOnlyList<Blix.GltfNode> nodes)
+    {
+        var seen = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var n in nodes)
+        foreach (var prim in n.Primitives)
+        {
+            var m = prim.Material;
+            if (m is null || seen.ContainsKey(m.Name)) continue;
+            var e = m.Ext;
+            var parts = new List<string>();
+            if (e.TransmissionFactor > 0f) parts.Add($"transmission {e.TransmissionFactor:0.##}");
+            if (e.DiffuseTransmissionFactor > 0f)
+                parts.Add($"diffuse-transmission {e.DiffuseTransmissionFactor:0.##} rgb({e.DiffuseTransmissionColorFactor.X:0.##},{e.DiffuseTransmissionColorFactor.Y:0.##},{e.DiffuseTransmissionColorFactor.Z:0.##})");
+            if (e.SheenColorFactor != System.Numerics.Vector3.Zero)
+                parts.Add($"sheen rgb({e.SheenColorFactor.X:0.##},{e.SheenColorFactor.Y:0.##},{e.SheenColorFactor.Z:0.##}) rough {e.SheenRoughnessFactor:0.##}");
+            if (e.ThicknessFactor > 0f)
+            {
+                // float.MaxValue is how a glTF says "no attenuation" — the spec's default is
+                // infinite distance, and printing it as 3.4e38 makes a correct read look like a bug.
+                var atten = e.AttenuationDistance >= float.MaxValue || float.IsPositiveInfinity(e.AttenuationDistance)
+                    ? "none" : $"{e.AttenuationDistance:0.##}";
+                parts.Add($"volume thickness {e.ThicknessFactor:0.##} atten {atten}");
+            }
+            if (e.ClearcoatFactor > 0f) parts.Add($"clearcoat {e.ClearcoatFactor:0.##} rough {e.ClearcoatRoughnessFactor:0.##}");
+            if (e.IridescenceFactor > 0f) parts.Add($"iridescence {e.IridescenceFactor:0.##} ior {e.IridescenceIor:0.##}");
+            if (e.AnisotropyStrength > 0f) parts.Add($"anisotropy {e.AnisotropyStrength:0.##} rot {e.AnisotropyRotation:0.##}");
+            if (Math.Abs(e.SpecularFactor - 1f) > 1e-4f) parts.Add($"specular {e.SpecularFactor:0.##}");
+            if (Math.Abs(e.IndexOfRefraction - 1.5f) > 1e-4f) parts.Add($"ior {e.IndexOfRefraction:0.##}");
+            if (e.Dispersion > 0f) parts.Add($"dispersion {e.Dispersion:0.##}");
+            if (e.Unlit) parts.Add("unlit");
+            if (parts.Count > 0) seen[m.Name] = parts;
+        }
+        if (seen.Count == 0) return;
+        Console.WriteLine("  material extensions (KHR_materials_*):");
+        foreach (var (name, parts) in seen)
+            Console.WriteLine($"    {name,-28} {string.Join(" · ", parts)}");
     }
 }

@@ -458,7 +458,12 @@ internal static class GltfShared
             },
             m.AlphaCutoff,
             m.DoubleSided,
-            m.TransmissionFactor);
+            m.TransmissionFactor,
+            // The cooked block back into the engine's, image INDICES resolved to textures. Without
+            // this the cooked path would silently carry every extension as its default while the
+            // raw-glTF path read them — the exact producer/consumer split that made glass 96%
+            // transparent on screen and a solid wall to the lighting.
+            CookedExtensions(m.Ext, Texture));
 
         materialCache[index] = result;
         return result;
@@ -466,6 +471,48 @@ internal static class GltfShared
         GltfTexture? Texture(int image) =>
             image >= 0 && textureCache.TryGetValue(image, out var t) ? t : null;
     }
+
+
+    /// <summary>The cooked <c>KHR_materials_*</c> block as the engine's, with images resolved.</summary>
+    private static GltfMaterialExtensions CookedExtensions(
+        Blix.Assets.BlixMaterialExtensions x,
+        Func<int, GltfTexture?> texture) => new(
+            TransmissionFactor: x.TransmissionFactor,
+            TransmissionTexture: texture(x.TransmissionImage),
+            DiffuseTransmissionFactor: x.DiffuseTransmissionFactor,
+            DiffuseTransmissionColorFactor: x.DiffuseTransmissionColorFactor,
+            DiffuseTransmissionTexture: texture(x.DiffuseTransmissionImage),
+            DiffuseTransmissionColorTexture: texture(x.DiffuseTransmissionColorImage),
+            SheenColorFactor: x.SheenColorFactor,
+            SheenRoughnessFactor: x.SheenRoughnessFactor,
+            SheenColorTexture: texture(x.SheenColorImage),
+            SheenRoughnessTexture: texture(x.SheenRoughnessImage),
+            ThicknessFactor: x.ThicknessFactor,
+            AttenuationDistance: x.AttenuationDistance,
+            AttenuationColor: x.AttenuationColor,
+            ThicknessTexture: texture(x.ThicknessImage),
+            SpecularFactor: x.SpecularFactor,
+            SpecularColorFactor: x.SpecularColorFactor,
+            SpecularTexture: texture(x.SpecularImage),
+            SpecularColorTexture: texture(x.SpecularColorImage),
+            IndexOfRefraction: x.IndexOfRefraction,
+            ClearcoatFactor: x.ClearcoatFactor,
+            ClearcoatRoughnessFactor: x.ClearcoatRoughnessFactor,
+            ClearcoatNormalScale: x.ClearcoatNormalScale,
+            ClearcoatTexture: texture(x.ClearcoatImage),
+            ClearcoatRoughnessTexture: texture(x.ClearcoatRoughnessImage),
+            ClearcoatNormalTexture: texture(x.ClearcoatNormalImage),
+            IridescenceFactor: x.IridescenceFactor,
+            IridescenceIor: x.IridescenceIor,
+            IridescenceThicknessMinimum: x.IridescenceThicknessMinimum,
+            IridescenceThicknessMaximum: x.IridescenceThicknessMaximum,
+            IridescenceTexture: texture(x.IridescenceImage),
+            IridescenceThicknessTexture: texture(x.IridescenceThicknessImage),
+            AnisotropyStrength: x.AnisotropyStrength,
+            AnisotropyRotation: x.AnisotropyRotation,
+            AnisotropyTexture: texture(x.AnisotropyImage),
+            Dispersion: x.Dispersion,
+            Unlit: x.Unlit);
 
     internal static GltfMaterial? ExtractMaterial(
         SharpGLTF.Schema2.Material? material,
@@ -541,17 +588,18 @@ internal static class GltfShared
             _                                  => GltfAlphaMode.Opaque,
         };
 
-        // KHR_materials_transmission: SharpGLTF surfaces it as a "Transmission"
-        // channel with a "TransmissionFactor" parameter. Absent => 0 (opaque).
-        var transmission = 0.0f;
-        var transmissionChannel = material.FindChannel("Transmission");
-        if (transmissionChannel.HasValue)
-        {
-            foreach (var p in transmissionChannel.Value.Parameters)
-            {
-                if (p.Name == "TransmissionFactor") transmission = (float)Convert.ToDouble(p.Value);
-            }
-        }
+        // <b>Every KHR_materials_* property the spec defines, not the two we happened to consume.</b>
+        // Conventions §7: the specification is the requirement, and owning an asset that exercises it
+        // is a download rather than a precondition. SharpGLTF surfaces thirteen of these; this
+        // boundary was letting eleven through unread, which is the engine's capability being set by
+        // an accident of what was downloaded.
+        //
+        // Read by CHANNEL and PARAMETER NAME, which is SharpGLTF's own vocabulary for them, so a
+        // material that declares nothing simply yields no channel and every field keeps its spec
+        // default. Those defaults are not zero across the board — IOR is 1.5, attenuation distance
+        // is infinite — because absence means "the base model", not "the parameter set to nothing".
+        var ext = ExtractMaterialExtensions(material, textureCache);
+        var transmission = ext.TransmissionFactor;
 
         var result = new GltfMaterial(
             MaterialIdentity(containerPath, material.LogicalIndex),
@@ -571,10 +619,98 @@ internal static class GltfShared
             alphaMode,
             material.AlphaCutoff,
             material.DoubleSided,
-            transmission);
+            transmission,
+            ext);
         materialCache[material.LogicalIndex] = result;
         return result;
     }
+
+    /// <summary>Reads every <c>KHR_materials_*</c> property SharpGLTF surfaces, by channel and parameter name.</summary>
+    /// <remarks>
+    /// <b>Absence is not zero.</b> A material that declares no extension yields no channel, and each
+    /// field then keeps the value the SPEC says that absence means — IOR 1.5, attenuation distance
+    /// infinite, specular strength 1 — because those describe the base BRDF rather than a parameter
+    /// turned off. Writing zeros here would silently author a different material for every asset in
+    /// existence that declines to mention these.
+    /// </remarks>
+    private static GltfMaterialExtensions ExtractMaterialExtensions(
+        SharpGLTF.Schema2.Material material,
+        Dictionary<int, GltfTexture> textureCache)
+    {
+        var e = GltfMaterialExtensions.None;
+
+        float Param(string channel, string name, float fallback)
+        {
+            var c = material.FindChannel(channel);
+            if (!c.HasValue) return fallback;
+            foreach (var p in c.Value.Parameters)
+                if (p.Name == name) return (float)Convert.ToDouble(p.Value);
+            return fallback;
+        }
+        Vector3 Rgb(string channel, Vector3 fallback)
+        {
+            var c = material.FindChannel(channel);
+            if (!c.HasValue) return fallback;
+            var col = c.Value.Color;
+            return new Vector3(col.X, col.Y, col.Z);
+        }
+        GltfTexture? Tex(string channel)
+        {
+            var c = material.FindChannel(channel);
+            return c.HasValue ? ExtractTexture(c.Value.Texture, textureCache) : null;
+        }
+
+        return e with
+        {
+            TransmissionFactor = Param("Transmission", "TransmissionFactor", e.TransmissionFactor),
+            TransmissionTexture = Tex("Transmission"),
+
+            DiffuseTransmissionFactor =
+                Param("DiffuseTransmissionFactor", "DiffuseTransmissionFactor", e.DiffuseTransmissionFactor),
+            DiffuseTransmissionColorFactor = Rgb("DiffuseTransmissionColor", e.DiffuseTransmissionColorFactor),
+            DiffuseTransmissionTexture = Tex("DiffuseTransmissionFactor"),
+            DiffuseTransmissionColorTexture = Tex("DiffuseTransmissionColor"),
+
+            SheenColorFactor = Rgb("SheenColor", e.SheenColorFactor),
+            SheenRoughnessFactor = Param("SheenRoughness", "RoughnessFactor", e.SheenRoughnessFactor),
+            SheenColorTexture = Tex("SheenColor"),
+            SheenRoughnessTexture = Tex("SheenRoughness"),
+
+            ThicknessFactor = Param("VolumeThickness", "ThicknessFactor", e.ThicknessFactor),
+            AttenuationDistance = Param("VolumeAttenuation", "AttenuationDistance", e.AttenuationDistance),
+            AttenuationColor = Rgb("VolumeAttenuation", e.AttenuationColor),
+            ThicknessTexture = Tex("VolumeThickness"),
+
+            SpecularFactor = Param("SpecularFactor", "SpecularFactor", e.SpecularFactor),
+            SpecularColorFactor = Rgb("SpecularColor", e.SpecularColorFactor),
+            SpecularTexture = Tex("SpecularFactor"),
+            SpecularColorTexture = Tex("SpecularColor"),
+
+            IndexOfRefraction = material.IndexOfRefraction is var ior && ior > 0f ? ior : e.IndexOfRefraction,
+
+            ClearcoatFactor = Param("ClearCoat", "ClearCoatFactor", e.ClearcoatFactor),
+            ClearcoatRoughnessFactor = Param("ClearCoatRoughness", "RoughnessFactor", e.ClearcoatRoughnessFactor),
+            ClearcoatNormalScale = Param("ClearCoatNormal", "NormalScale", e.ClearcoatNormalScale),
+            ClearcoatTexture = Tex("ClearCoat"),
+            ClearcoatRoughnessTexture = Tex("ClearCoatRoughness"),
+            ClearcoatNormalTexture = Tex("ClearCoatNormal"),
+
+            IridescenceFactor = Param("Iridescence", "IridescenceFactor", e.IridescenceFactor),
+            IridescenceIor = Param("Iridescence", "IndexOfRefraction", e.IridescenceIor),
+            IridescenceThicknessMinimum = Param("IridescenceThickness", "Minimum", e.IridescenceThicknessMinimum),
+            IridescenceThicknessMaximum = Param("IridescenceThickness", "Maximum", e.IridescenceThicknessMaximum),
+            IridescenceTexture = Tex("Iridescence"),
+            IridescenceThicknessTexture = Tex("IridescenceThickness"),
+
+            AnisotropyStrength = Param("Anisotropy", "AnisotropyStrength", e.AnisotropyStrength),
+            AnisotropyRotation = Param("Anisotropy", "AnisotropyRotation", e.AnisotropyRotation),
+            AnisotropyTexture = Tex("Anisotropy"),
+
+            Dispersion = material.Dispersion,
+            Unlit = material.Unlit,
+        };
+    }
+
     internal static GltfTexture? ExtractTexture(
         SharpGLTF.Schema2.Texture? texture,
         Dictionary<int, GltfTexture> textureCache)

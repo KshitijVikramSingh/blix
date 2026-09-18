@@ -60,7 +60,12 @@ public static class MeshRecipe
     // a material count out of whatever followed the last primitive.
     // v3: the image table (.blixmesh v6). Material channels index it instead of naming a glTF
     // logical image, which is what removes the source from the load path entirely.
-    public const uint MeshRecipeVersion = 3;
+    // v4: every KHR_materials_* property (.blixmesh v9). The cook was reading two of the thirteen
+    // extensions SharpGLTF surfaces, so a cooked material could not carry what the raw importer had
+    // begun to read — and a cooked path that silently defaults every extension while the raw path
+    // reads them is the same producer/consumer split that let glass be transparent on screen and a
+    // solid wall to the lighting.
+    public const uint MeshRecipeVersion = 4;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false, bool includeTangents = false,
@@ -621,6 +626,7 @@ public static class MeshRecipe
                 AlphaCutoff: m.AlphaCutoff,
                 DoubleSided: m.DoubleSided,
                 TransmissionFactor: Parameter(transmission, "TransmissionFactor", 0f),
+                Extensions: CookExtensions(m, ImageIndex),
                 BaseColorImage: ImageIndex(baseColor),
                 NormalImage: ImageIndex(normal),
                 MetallicRoughnessImage: ImageIndex(mr),
@@ -888,4 +894,75 @@ public static class MeshRecipe
             simplify: DefaultSimplifier(splitTriBudget > 0),
             splitTriBudget: splitTriBudget,
             splitFoliage: splitFoliage);
+
+    /// <summary>Cooks every <c>KHR_materials_*</c> property a material declares.</summary>
+    /// <remarks>
+    /// Read by channel and parameter name, so a material that declares nothing yields no channel and
+    /// each field keeps the value the SPEC says absence means — IOR 1.5, attenuation distance
+    /// infinite, specular strength 1. Zeroing those would author a different material for every
+    /// asset in existence that declines to mention them.
+    /// </remarks>
+    private static BlixMaterialExtensions CookExtensions(
+        SharpGLTF.Schema2.Material m,
+        Func<MaterialChannel?, int> imageIndex)
+    {
+        var d = BlixMaterialExtensions.None;
+        float P(string channel, string name, float fallback)
+        {
+            var c = m.FindChannel(channel);
+            if (!c.HasValue) return fallback;
+            foreach (var prm in c.Value.Parameters)
+                if (prm.Name == name) return (float)Convert.ToDouble(prm.Value);
+            return fallback;
+        }
+        Vector3 C(string channel, Vector3 fallback)
+        {
+            var c = m.FindChannel(channel);
+            if (!c.HasValue) return fallback;
+            var v = c.Value.Color;
+            return new Vector3(v.X, v.Y, v.Z);
+        }
+        int I(string channel) => imageIndex(m.FindChannel(channel));
+
+        return d with
+        {
+            TransmissionFactor = P("Transmission", "TransmissionFactor", d.TransmissionFactor),
+            TransmissionImage = I("Transmission"),
+            DiffuseTransmissionFactor =
+                P("DiffuseTransmissionFactor", "DiffuseTransmissionFactor", d.DiffuseTransmissionFactor),
+            DiffuseTransmissionColorFactor = C("DiffuseTransmissionColor", d.DiffuseTransmissionColorFactor),
+            DiffuseTransmissionImage = I("DiffuseTransmissionFactor"),
+            DiffuseTransmissionColorImage = I("DiffuseTransmissionColor"),
+            SheenColorFactor = C("SheenColor", d.SheenColorFactor),
+            SheenRoughnessFactor = P("SheenRoughness", "RoughnessFactor", d.SheenRoughnessFactor),
+            SheenColorImage = I("SheenColor"),
+            SheenRoughnessImage = I("SheenRoughness"),
+            ThicknessFactor = P("VolumeThickness", "ThicknessFactor", d.ThicknessFactor),
+            AttenuationDistance = P("VolumeAttenuation", "AttenuationDistance", d.AttenuationDistance),
+            AttenuationColor = C("VolumeAttenuation", d.AttenuationColor),
+            ThicknessImage = I("VolumeThickness"),
+            SpecularFactor = P("SpecularFactor", "SpecularFactor", d.SpecularFactor),
+            SpecularColorFactor = C("SpecularColor", d.SpecularColorFactor),
+            SpecularImage = I("SpecularFactor"),
+            SpecularColorImage = I("SpecularColor"),
+            IndexOfRefraction = m.IndexOfRefraction > 0f ? m.IndexOfRefraction : d.IndexOfRefraction,
+            ClearcoatFactor = P("ClearCoat", "ClearCoatFactor", d.ClearcoatFactor),
+            ClearcoatRoughnessFactor = P("ClearCoatRoughness", "RoughnessFactor", d.ClearcoatRoughnessFactor),
+            ClearcoatNormalScale = P("ClearCoatNormal", "NormalScale", d.ClearcoatNormalScale),
+            ClearcoatImage = I("ClearCoat"),
+            ClearcoatRoughnessImage = I("ClearCoatRoughness"),
+            ClearcoatNormalImage = I("ClearCoatNormal"),
+            IridescenceFactor = P("Iridescence", "IridescenceFactor", d.IridescenceFactor),
+            IridescenceIor = P("Iridescence", "IndexOfRefraction", d.IridescenceIor),
+            IridescenceThicknessMinimum = P("IridescenceThickness", "Minimum", d.IridescenceThicknessMinimum),
+            IridescenceThicknessMaximum = P("IridescenceThickness", "Maximum", d.IridescenceThicknessMaximum),
+            IridescenceImage = I("Iridescence"),
+            IridescenceThicknessImage = I("IridescenceThickness"),
+            AnisotropyStrength = P("Anisotropy", "AnisotropyStrength", d.AnisotropyStrength),
+            AnisotropyRotation = P("Anisotropy", "AnisotropyRotation", d.AnisotropyRotation),
+            AnisotropyImage = I("Anisotropy"),
+            Dispersion = m.Dispersion,
+            Unlit = m.Unlit,
+        };
+    }
 }
