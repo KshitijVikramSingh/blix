@@ -407,6 +407,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
         "Probe UV", "Raw probe L0",
         "Bounce radiance (raw)", "Bounce contribution", "Direct sun only",
         "GTAO visibility", "Texture AO", "Occlusion product",
+        "Probe confidence (red = fallback)",
     };
 
     // Live overrides for the two cloth numbers, so they can be found by eye and then written back

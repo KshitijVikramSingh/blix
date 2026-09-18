@@ -51,9 +51,19 @@ internal sealed partial class SponzaLoop
         if (cmdArgs.Contains("--ao-fullres")) aoScale = 1f;
         if (cmdArgs.Contains("--sky-no-inject")) skipInject = true;
         if (cmdArgs.Contains("--sky-no-sample")) skipSkySample = true;
-        if (cmdArgs.Contains("--sky"))
+        // <b>ON by default, and it was off — which meant the demo's own lighting model was opt-in.</b>
+        // With this false, uSkyMin.w and uBounceStrength both write 0, so blixSkyVisibility() returns
+        // 1.0 for every surface and the bounce block never executes: every wall sees a full
+        // unoccluded sky and nothing bounces. That is a different renderer, and nothing on screen or
+        // in the log said which one was running. It cost a session — boots judged for brightness,
+        // probe views read as empty, and an --ab arm that toggled two terms already off in both
+        // arms and duly reported them free.
+        //
+        // The flag now turns it OFF. --sky is still accepted so existing invocations keep working,
+        // and it is a no-op.
+        skyVisibilityEnabled = !cmdArgs.Contains("--no-sky");
+        if (skyVisibilityEnabled)
         {
-            skyVisibilityEnabled = true;
             // <b>The exposure that suits this lighting model, not a brightening of the old one.</b>
             // 0.5 was chosen against an ambient that handed every surface a full sky. Once a floor
             // receives the 3% of sky it can actually see plus what bounces down to it, the scene
@@ -803,6 +813,15 @@ internal sealed partial class SponzaLoop
                     $"[VulkanSponza] sky visibility: {Path.GetFileName(path)} " +
                     $"{volume.SizeX}x{volume.SizeY}x{volume.SizeZ} probes, " +
                     $"min {volume.Min} span {span} invSpan {skyVolumeInvSpan}");
+                // <b>The gate, not just the load.</b> This line reported that the volume was READ,
+                // which is true whether or not a shader will ever sample it — so it read identically
+                // in the configuration where every surface sees a full sky. What a reader needs to
+                // know is whether the term is live.
+                Console.WriteLine(
+                    skyVisibilityEnabled && !skipSkySample
+                        ? "[VulkanSponza]   sampled: sky visibility LIVE, bounce LIVE."
+                        : $"[VulkanSponza]   sampled: NOT SAMPLED — every surface sees a full sky and " +
+                          $"nothing bounces (skyVisibility={skyVisibilityEnabled}, skipSample={skipSkySample}).");
                 // What the CPU thinks an up-facing surface sees, at two known places, so the
                 // shader's answer can be compared against something rather than eyeballed.
                 foreach (var (label, at) in new[]
@@ -815,11 +834,27 @@ internal sealed partial class SponzaLoop
                     var cx = Math.Clamp((int)(t.X * volume.SizeX), 0, volume.SizeX - 1);
                     var cy = Math.Clamp((int)(t.Y * volume.SizeY), 0, volume.SizeY - 1);
                     var cz = Math.Clamp((int)(t.Z * volume.SizeZ), 0, volume.SizeZ - 1);
-                    var o = ((cz * volume.SizeY + cy) * volume.SizeX + cx) * 4;
+                    // <b>The cell stride is FloatsPerCell, and hardcoding 4 made this read every
+                    // third cell.</b> It was 4 when a cell held L0 plus three L1 terms; the L2 band
+                    // took it to 12 and this line did not follow, so the probe reported a point 18 m
+                    // in open air as seeing 0.9% of the sky. An instrument that disagrees with the
+                    // renderer by a factor of ten is worse than no instrument, because it gets
+                    // quoted. Derived from the format now, so the two cannot drift again.
+                    var o = ((cz * volume.SizeY + cy) * volume.SizeX + cx) * BlixSkyVolume.FloatsPerCell;
                     var l0 = volume.Coefficients[o];
                     var l1 = new Vector3(volume.Coefficients[o + 1], volume.Coefficients[o + 2], volume.Coefficients[o + 3]);
-                    const float Y0 = 0.282095f, Y1 = 0.488603f;
-                    var vis = (MathF.PI * Y0 * l0 + (2f * MathF.PI / 3f) * Y1 * Vector3.Dot(l1, Vector3.UnitY)) / MathF.PI;
+                    // The same cosine-convolved L2 evaluation the shader runs (sky_visibility.glsl),
+                    // against +Y. Stopping at L1 here would have made the CPU and GPU answers differ
+                    // by the exact band the last commit added, which is the one worth checking.
+                    // dir = +Y, so of the five L2 terms only the two that survive dir.x = dir.z = 0
+                    // contribute: the zonal (3z^2 - 1) collapses to -1 and (x^2 - y^2) to -1. Writing
+                    // the whole basis out and substituting would be the same number with four more
+                    // ways to mistype it.
+                    const float Y0 = 0.282095f, Y1 = 0.488603f, Y20C = 0.315392f, Y22C = 0.546274f;
+                    var band2 = -Y20C * volume.Coefficients[o + 6] - Y22C * volume.Coefficients[o + 8];
+                    var vis = (MathF.PI * Y0 * l0
+                               + (2f * MathF.PI / 3f) * Y1 * Vector3.Dot(l1, Vector3.UnitY)
+                               + (MathF.PI / 4f) * band2) / MathF.PI;
                     Console.WriteLine($"[VulkanSponza]   {label,-13} uv {t} -> L0 {l0:0.000} vis(up) {vis:0.000}");
                 }
                 return;

@@ -43,10 +43,16 @@ vec3 blix_probePosition(ivec3 probe, ivec3 dims, vec3 boundsMin, vec3 boundsSpan
 
 /// Irradiance at `worldPos` for a surface facing `n`, blended over the eight surrounding probes and
 /// weighted so that probes which cannot see the point contribute nothing.
-vec3 blix_probeIrradiance(
+/// The same lookup, reporting how much of the eight-probe blend actually survived the visibility
+/// test. `confidence` is the summed weight: 1 where all eight probes agree they can see the point,
+/// small where most were rejected, and exactly 0 where every one was — the case the fallback below
+/// covers. Nothing about the returned colour says which of those happened, and the difference
+/// matters: a fallback result carries NO occlusion, because the whole point of the fallback is that
+/// the test rejected everything. A surface lit by it is lit by an unweighted nearest probe.
+vec3 blix_probeIrradianceEx(
     sampler2D irradianceAtlas, sampler2D depthAtlas,
     ivec3 dims, vec3 boundsMin, vec3 boundsSpan,
-    vec3 worldPos, vec3 n)
+    vec3 worldPos, vec3 n, out float confidence)
 {
     // <b>A surface must not reject its own probes, and without this bias it does.</b> The visibility
     // test asks a probe how far its geometry is in this direction — and for a point sitting ON a
@@ -115,8 +121,20 @@ vec3 blix_probeIrradiance(
     // was the first answer here and it is wrong in the one place it fires: a point the volume cannot
     // describe is not a point with no light on it. Falling back to the nearest probe unweighted is
     // approximate and bounded; black is neither.
+    confidence = weightSum;
     if (weightSum > 1e-5) return sum / weightSum;
     ivec3 nearest = clamp(ivec3(floor(grid + 0.5)), ivec3(0), dims - 1);
     return texture(irradianceAtlas, blix_probeUv(nearest, dims, n)).rgb;
+}
+
+/// The lookup without the diagnostic, for call sites that do not want to carry the out parameter.
+vec3 blix_probeIrradiance(
+    sampler2D irradianceAtlas, sampler2D depthAtlas,
+    ivec3 dims, vec3 boundsMin, vec3 boundsSpan,
+    vec3 worldPos, vec3 n)
+{
+    float ignored;
+    return blix_probeIrradianceEx(irradianceAtlas, depthAtlas, dims, boundsMin, boundsSpan,
+                                  worldPos, n, ignored);
 }
 

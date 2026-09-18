@@ -30,6 +30,7 @@
 #include "shadow.glsl"
 #include "sheen.glsl"
 #include "probe_volume.glsl"
+#include "sky_visibility.glsl"
 
 // Lit fragment shader — Cook-Torrance split-sum IBL on top of a Lambert N·L
 // sun term, with cascaded shadows, a Fresnel-glass branch, and froxel-fog
@@ -94,6 +95,22 @@ layout(set = 0, binding = 0) uniform Frame {
     // (where the corners darken, where the normals bend) rather than as calibrated values.
     //@tune 0..2 = 0
     float uVisualizeAmbient;
+    // <b>The two halves of "specular", separated because --ab pbr moved both at once.</b> That arm
+    // zeroes the GGX sun lobe, and zeroing it also zeroes Fsun — which appears again in
+    // kDsun = (1 - Fsun)(1 - metallic), so the DIFFUSE sun term gets brighter at the same moment
+    // the glint disappears. About 4% head-on where F0 is 0.04, and far more at grazing angles where
+    // Fresnel approaches 1 and the split takes nearly all the diffuse away. Reported from the chair
+    // as that arm reading the best lit of the seven, which it cannot be attributed to until the two
+    // effects move independently.
+    //
+    //   uSunSpecular    scales the GGX highlight alone. 0 removes the glint, diffuse unchanged.
+    //@tune 0..2 = 1
+    float uSunSpecular;
+    //   uFresnelDiffuse how much of the Fresnel reflectance is taken OUT of diffuse, sun and IBL
+    //                   alike. 1 is the energy split as written; 0 keeps the full Lambert lobe and
+    //                   lets the specular sit on top of it.
+    //@tune 0..1 = 1
+    float uFresnelDiffuse;
     // Measurement switches, one per --ab mode. Each removes one term from the fragment so a paired
     // interleaved run can price it:
     //   x  collapse every material UV to a constant, so the five material samples all hit one
@@ -103,6 +120,9 @@ layout(set = 0, binding = 0) uniform Frame {
     //   z  skip the three IBL lookups and the split-sum, using a flat ambient. Prices IBL whole.
     //   w  skip the normal map sample and the tangent-space transform.
     vec4  uAbFlags;
+    //   x  skip the probe bounce lookup AND the baked sky-visibility evaluation. Prices the two
+    //      terms that read the probe volumes, which is the pair a half-res pass would move.
+    vec4  uAbFlags2;
     // --viz N: write one of the shading inputs instead of the lit colour. The normal path is the
     // hardest thing here to be sure about by reading code — a double-sided sheet whose back face
     // lights from the wrong hemisphere looks exactly like a material problem — so it is worth being
@@ -266,27 +286,10 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
 // the skybox on it. The lookup needs only a position and a direction, so there is no reason it had
 // to live where it did.
 float blixSkyVisibility(vec3 worldPos, vec3 dir) {
-    if (frame.uSkyMin.w <= 0.5) return 1.0;
-    vec3 probeUv = clamp((worldPos + dir * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz,
-                         vec3(0.0), vec3(1.0));
-    vec4 sh0 = texture(uSkyVisibility,  probeUv);
-    vec4 sh1 = texture(uSkyVisibility1, probeUv);
-    float l2p2 = texture(uSkyVisibility2, probeUv).x;
-
-    // Cosine-convolved L2 evaluation (Ramamoorthi & Hanrahan): band coefficients pi, 2pi/3, pi/4.
-    // <b>The quadratic band is what makes a cone expressible.</b> L0 is direction-independent, so
-    // under L1 alone a vault ceiling inherited the arcade opening's brightness and read as
-    // sky-facing — one linear lobe cannot subtract a bright opening from a surface pointing away
-    // from it. The same deficit at the other end lost a courtyard floor's narrow zenith cone.
-    const float Y0 = 0.282095, Y1 = 0.488603, Y2 = 1.092548, Y20C = 0.315392, Y22C = 0.546274;
-    float band2 = Y2 * sh1.x * dir.x * dir.y
-                + Y2 * sh1.y * dir.y * dir.z
-                + Y20C * sh1.z * (3.0 * dir.z * dir.z - 1.0)
-                + Y2 * sh1.w * dir.x * dir.z
-                + Y22C * l2p2 * (dir.x * dir.x - dir.y * dir.y);
-    return clamp((PI * Y0 * sh0.x
-                  + (2.0 * PI / 3.0) * Y1 * dot(sh0.yzw, dir)
-                  + (PI / 4.0) * band2) / PI, 0.0, 1.0);
+    if (frame.uSkyMin.w <= 0.5 || frame.uAbFlags2.x > 0.5) return 1.0;
+    return blix_skyVisibility(uSkyVisibility, uSkyVisibility1, uSkyVisibility2,
+                              frame.uSkyMin.xyz, frame.uSkyScale.xyz, frame.uSkyScale.w,
+                              worldPos, dir);
 }
 
 void main() {
@@ -449,14 +452,14 @@ void main() {
         float Dsun = distributionGGX(NdotH, roughness);
         float Gsun = geometrySmith(NdotV, NdotL, roughness);
         Fsun = fresnelSchlick(VdotH, F0);
-        sunSpecular = (Dsun * Gsun * Fsun) / max(4.0 * NdotV * NdotL, 1e-3);
+        sunSpecular = (Dsun * Gsun * Fsun) / max(4.0 * NdotV * NdotL, 1e-3) * frame.uSunSpecular;
     }
 
     // Energy split: diffuse keeps only the non-reflected fraction (1 - F) and vanishes on metals
     // (1 - metallic); /PI normalizes the Lambert lobe. uSunIrradiance is the irradiance the probe
     // measured, so this line is the rendering equation for a directional light rather than a shape
     // scaled until it looked right.
-    vec3 kDsun = (vec3(1.0) - Fsun) * (1.0 - metallic);
+    vec3 kDsun = (vec3(1.0) - Fsun * frame.uFresnelDiffuse) * (1.0 - metallic);
 
     // --- Cloth: the two things metallic-roughness cannot say -------------
     // Sheen is a retroreflective rim at grazing angles; diffuse transmission is light entering the
@@ -505,7 +508,7 @@ void main() {
     // (metallics have no diffuse contribution).
     vec3 F = fresnelSchlickRoughness(NdotV, F0, roughness);
     vec3 kS = F;
-    vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);
+    vec3 kD = (vec3(1.0) - kS * frame.uFresnelDiffuse) * (1.0 - metallic);
 
     // --- Ambient visibility ---------------------------------------------
     // <b>The term that was missing, and the reason five knobs could be deleted without one.</b>
@@ -597,7 +600,8 @@ void main() {
     // evaluate negative, because two directional fields multiplied double-count direction.
     vec3 bounce = vec3(0.0);
     vec3 vizBounceRaw = vec3(0.0);
-    if (frame.uBounceStrength > 0.0) {
+    float probeConfidence = 0.0;
+    if (frame.uBounceStrength > 0.0 && frame.uAbFlags2.x < 0.5) {
         vec3 probeUv = (vWorldPos + N * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz;
         // The volume stores average incident RADIANCE; irradiance is PI times it. Getting this
         // conversion wrong is invisible in a single pass and fatal once the pass feeds itself.
@@ -610,9 +614,9 @@ void main() {
         // nearest-probe fetch had no visibility term at all, so a wall took its light from whatever
         // probe happened to be closest — including one on the far side of itself. That leak is why
         // colour bled through walls from curtains and a tree they do not face.
-        vec3 incident = blix_probeIrradiance(
+        vec3 incident = blix_probeIrradianceEx(
             uSkyBounce, uSkyBounceDepth, ivec3(frame.uBounceDims.xyz),
-            frame.uSkyMin.xyz, 1.0 / frame.uSkyScale.xyz, vWorldPos, gatherN);
+            frame.uSkyMin.xyz, 1.0 / frame.uSkyScale.xyz, vWorldPos, gatherN, probeConfidence);
         vizBounceRaw = incident;
         bounce = incident * albedo * (1.0 - metallic) * ao * visibility;
     }
@@ -680,7 +684,25 @@ void main() {
             // had looked at, because nothing displayed it.
             frame.uVizChannel < 13.5 ? vec3(visibility) :
             frame.uVizChannel < 14.5 ? vec3(ao) :
-                                       vec3(skyVisibility * visibility * ao);
+            frame.uVizChannel < 15.5 ? vec3(skyVisibility * visibility * ao) :
+            // <b>16: how much of the eight-probe blend survived the visibility test.</b> Green is a
+            // full blend; darkening green is a partial one; RED is the fallback — every probe
+            // rejected, so the surface is lit by an unweighted nearest probe with NO occlusion term
+            // at all. That state is invisible in the final image, which is the problem: it looks
+            // like light rather than like a reconstruction failure, and a large red area would mean
+            // the bounce is painting flat fill wherever the Chebyshev test gives up.
+            //
+            // <b>BLUE is the term being switched off, and it is a separate colour for a reason.</b>
+            // The first version of this channel painted red whenever the confidence was zero, which
+            // is also what an unexecuted bounce block leaves behind — so a whole scene running
+            // without --sky read as "every probe rejected" instead of "this feature is not on". One
+            // glance cost an hour. A diagnostic must distinguish a measured zero from an absent
+            // measurement.
+                                       (frame.uBounceStrength <= 0.0
+                                            ? vec3(0.0, 0.1, 1.0)
+                                            : probeConfidence <= 1e-5
+                                                ? vec3(1.0, 0.0, 0.0)
+                                                : vec3(0.0, clamp(probeConfidence, 0.0, 1.0), 0.0));
         // Straight out, no exposure and no tonemap — these are directions and flags, and a film
         // curve on a direction is a way to misread it.
         outColor = vec4(c, coverage);
