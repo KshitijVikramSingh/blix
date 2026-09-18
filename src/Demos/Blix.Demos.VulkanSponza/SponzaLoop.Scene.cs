@@ -314,6 +314,12 @@ internal sealed partial class SponzaLoop
         var roughness = gm?.RoughnessFactor ?? 0.8f;
         var metallic = gm?.MetallicFactor ?? 0.0f;
         var transmission = gm?.TransmissionFactor ?? 0f;
+        // The two cloth terms, from the extensions the importer now reads and the patch authored.
+        var ext = gm?.Ext ?? Blix.GltfMaterialExtensions.None;
+        var sheen = ext.SheenColorFactor;
+        var sheenRoughness = ext.SheenRoughnessFactor;
+        var diffuseTransmission = ext.DiffuseTransmissionFactor;
+        var diffuseTransmissionColor = ext.DiffuseTransmissionColorFactor;
 
         return vk.CreateMaterial(litProgram, name: "sponza.material")
             .SetUniform(binding: 0, "uBaseColorFactor", baseColorFactor)
@@ -322,7 +328,11 @@ internal sealed partial class SponzaLoop
             .SetUniform(binding: 0, "uMaterialParams",
                 new Vector4(alphaCutoff, normalScale, roughness, metallic))
             .SetUniform(binding: 0, "uMaterialParams2",
-                new Vector4(transmission, 0f, 0f, 0f))
+                new Vector4(transmission, sheenRoughness, diffuseTransmission, 0f))
+            .SetUniform(binding: 0, "uSheenColor", new Vector4(sheen.X, sheen.Y, sheen.Z, 0f))
+            .SetUniform(binding: 0, "uDiffuseTransmissionColor",
+                new Vector4(diffuseTransmissionColor.X, diffuseTransmissionColor.Y,
+                            diffuseTransmissionColor.Z, 0f))
             .SetTexture(binding: 1, tex.Albedo)
             .SetTexture(binding: 2, tex.Normal)
             .SetTexture(binding: 3, tex.Emissive)

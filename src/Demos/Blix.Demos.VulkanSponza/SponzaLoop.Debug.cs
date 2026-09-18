@@ -96,7 +96,11 @@ internal sealed partial class SponzaLoop
         using (debug.Scope("Render"))
         {
             vk.VsyncEnabled = debug.Controls.Toggle("Vsync", vk.VsyncEnabled);
-            vizChannel = MathF.Round(debug.Controls.Float("Viz channel", vizChannel, 0f, 9f));
+            // <b>Named, because a number is not a control.</b> Ten channels behind a 0..9 slider
+            // meant the only way to know what 7 was involved reading the shader, which makes the
+            // person at the keyboard — the one who can actually see the image — the one least able
+            // to use the instrument. Controls.Enum has existed the whole time.
+            vizChannel = debug.Controls.Enum("Show", (int)MathF.Round(vizChannel), VizChannelNames);
         }
 
         // The indirect solve's cost is rays x probes x march, divided by period, and every one of
@@ -111,6 +115,17 @@ internal sealed partial class SponzaLoop
                 injectRays    = debug.Controls.Float("Rays / probe", injectRays, 8f, 64f);
                 injectPeriod  = debug.Controls.Float("Refresh period", injectPeriod, 4f, 64f);
                 injectTranslucency = debug.Controls.Float("Translucency", injectTranslucency, 0f, 1f);
+            }
+
+            // The two cloth numbers were guesses written into a patch file, and a patch is cooked —
+            // so judging them meant a re-cook per attempt, which is not judging. These override the
+            // cooked values live for every sheened material at once, to FIND the number; the found
+            // number then goes back into the patch, where it belongs.
+            using (debug.Scope("Cloth"))
+            {
+                clothOverride   = debug.Controls.Toggle("Override the patch", clothOverride);
+                sheenRoughness  = debug.Controls.Float("Sheen roughness", sheenRoughness, 0.05f, 1f);
+                diffuseTransmit = debug.Controls.Float("Diffuse transmission", diffuseTransmit, 0f, 1f);
                 debug.Values.Value("probe-refresh", $"{MathF.Round(injectRays)} rays every {MathF.Round(injectPeriod)}f");
             }
         }

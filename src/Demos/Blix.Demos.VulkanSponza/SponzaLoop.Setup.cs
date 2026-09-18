@@ -483,6 +483,11 @@ internal sealed partial class SponzaLoop
             new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 6),
             // Bound per frame in OnRender, which flips between the pair; this is the initial one.
             new ShaderTextureBinding("uSkyBounce", bounceReady ? bounceTextures[0] : skyVisibilityTexture, Slot: 7),
+            // Bound to SOMETHING valid always — a descriptor set with a hole is a device loss, not a
+            // dark curtain. uSheenMipCount being zero is what tells the shader not to read them.
+            new ShaderTextureBinding("uSheenEnv", sheenMipCount > 0 ? sheenEnvTexture : envCubeTexture, Slot: 8),
+            new ShaderTextureBinding("uSheenLut", sheenMipCount > 0 ? sheenLutTexture : brdfLutTexture, Slot: 9),
+            new ShaderTextureBinding("uEnvCube", skyCubeTexture, Slot: 10),
         };
 
         // The one binding that is not constant: the lit pass reads whichever of the bounce pair the
@@ -598,6 +603,16 @@ internal sealed partial class SponzaLoop
         {
             var baked = EnvironmentBaker.UploadCookedProbe(vk, BlixProbeReader.Read(probePath), "sponza.ibl");
             envCubeTexture = baked.Probe.PrefilteredSpecular;
+            skyCubeTexture = baked.Probe.EnvCubemap;
+            // Null when the probe is older than v4. Falling back to the specular cube would render
+            // a dimmer, rimless something that looks like weak sheen rather than like absent sheen.
+            if (baked.SheenPrefiltered is { } sheenCube && baked.SheenLut is { } sheenLut)
+            {
+                sheenEnvTexture = sheenCube;
+                sheenLutTexture = sheenLut;
+                sheenMipCount = baked.SheenMipCount;
+                Console.WriteLine($"[VulkanSponza]   sheen: Charlie-prefiltered env, {baked.SheenMipCount} mips + albedo LUT.");
+            }
             irradianceCubeTexture = baked.Probe.DiffuseIrradiance;
             brdfLutTexture = baked.BrdfLut;
             iblPrefilterMips = baked.Probe.PrefilteredSpecularMipCount;
@@ -668,6 +683,7 @@ internal sealed partial class SponzaLoop
     {
         var sky = ProceduralSky.Bake(vk, SkyBakeSunDirection);
         envCubeTexture = sky.EnvCube;
+        skyCubeTexture = sky.EnvCube;
         irradianceCubeTexture = sky.Irradiance;
         brdfLutTexture = sky.BrdfLut;
         iblPrefilterMips = sky.PrefilterMips;

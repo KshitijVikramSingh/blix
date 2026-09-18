@@ -177,6 +177,11 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // surface is there and nothing about it, so every bounce carried the sun's hue and Sponza's
     // curtains bled no colour at all.
     private TextureHandle albedoTexture;
+    // The sheen half of the probe. Zero mips means the probe predates .blixprobe v4 and the shader
+    // is told so rather than handed the specular cube, which would render a plausible non-answer.
+    private TextureHandle sheenEnvTexture;
+    private TextureHandle sheenLutTexture;
+    private float sheenMipCount;
     // <b>Two, and the reason is a barrier rather than a buffer.</b> Measured: the injection
     // dispatch alone costs nothing (21.09 ms against a 21.08 ms baseline) and the lit pass's two 3D
     // fetches alone cost nothing (20.97 ms) — but together they cost 15 ms. Independent costs do not
@@ -341,6 +346,21 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // --viz N: write a shading input instead of the lit colour. See lit.frag's uVizChannel.
     private float vizChannel;
 
+    /// <summary>What each viz channel shows, in the order lit.frag tests them.</summary>
+    private static readonly string[] VizChannelNames =
+    {
+        "Lit scene", "Geometric normal", "Shading normal", "Tangent-space normal",
+        "Front/back facing", "Tangent", "Bitangent", "Sky visibility",
+        "Probe UV", "Raw probe L0",
+        "Bounce radiance (raw)", "Bounce contribution", "Direct sun only",
+    };
+
+    // Live overrides for the two cloth numbers, so they can be found by eye and then written back
+    // into the patch. Off by default: the cooked value is the real one.
+    private bool clothOverride;
+    private float sheenRoughness = 0.3f;
+    private float diffuseTransmit = 0.35f;
+
     // --ao-fullres: run ambient visibility at framebuffer resolution instead of half. Half res is
     // the right default for a low-frequency term, but a crease a few centimetres wide is not low
     // frequency, and at half res plus a 3x3 bilateral it spans about one texel before being blurred
@@ -420,6 +440,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     //   brdfLut           split-sum BRDF integration (R = F0 scale, G = F0 bias)
     // Bound at set 1 (per-pass), so every draw in the lit pass samples them.
     private TextureHandle envCubeTexture;
+    // <b>The SKY, as opposed to the sky convolved for specular.</b> envCubeTexture above holds the
+    // prefiltered chain on the cooked path — its name has been lying — so the background was being
+    // drawn from a 128px roughness-0 convolution while the sharp 256px cube the cook ships went
+    // unread. The procedural fallback bound the real cube, which is why this only ever looked wrong
+    // with a probe: a soft, out-of-focus sky seen through a window.
+    private TextureHandle skyCubeTexture;
     private TextureHandle irradianceCubeTexture;
     private TextureHandle brdfLutTexture;
     // Mip count of whatever's bound to uPrefilteredEnv — the procedural env
@@ -615,6 +641,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // --sun-from-probe restores the old behaviour: take the sun from the HDR the IBL was baked
     // from, so the visible sky sun and the cast shadows line up and the authored angle is ignored.
     private bool alignSunToProbe;
+
     private float sunYaw;
     private float sunPitch;
     /// <summary>

@@ -111,6 +111,11 @@ internal sealed partial class SponzaLoop
             new("uSunIrradiance",    new Vector3Uniform(sunIrradiance)),
             new("uCameraPos",        new Vector3Uniform(cameraPosition)),
             new("uEnvMipCount",      new FloatUniform(iblPrefilterMips)),
+            new("uSheenMipCount",    new FloatUniform(sheenMipCount)),
+            // x < 0 means "use what the material carries"; the overlay sets it to find a value.
+            new("uClothOverride",    new Vector4Uniform(clothOverride
+                ? new Vector4(sheenRoughness, diffuseTransmit, 0f, 0f)
+                : new Vector4(-1f, -1f, 0f, 0f))),
             new("uShadowStrength",   new FloatUniform(
                 shadows.Enabled && !(abMode == "shadow" && AbOffPhase) ? 1f : 0f)),
             new("uCascadeViewProj",  new Matrix4x4ArrayUniform(cascadeViewProj)),

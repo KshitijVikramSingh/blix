@@ -112,7 +112,11 @@ done
 KLOPPENHEIM="$SRC/main_sponza/textures/kloppenheim_05_4k.hdr"
 if [[ -f "$KLOPPENHEIM" ]]; then
     echo "── probe  (kloppenheim_05_4k.hdr, --yaw=-31.43)"
-    dotnet "$COOK" probe "$KLOPPENHEIM" --yaw=-31.43 --out "$COOKED"
+    # --env-face=1024 because the source equirect is 4096x2048, so a 90-degree cube face maps to
+    # about 1024 texels: below that the background sky is a downsample of authored detail, and the
+    # eye catches it wherever a window frames the sky against a hard edge. The prefiltered chains
+    # stay at their own sizes — they are convolutions and do not want the resolution.
+    dotnet "$COOK" probe "$KLOPPENHEIM" --yaw=-31.43 --env-face=1024 --out "$COOKED"
 fi
 
 echo

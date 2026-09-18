@@ -28,6 +28,7 @@
 // changing the sun prompts re-checking the number rather than inheriting it.
 #define BLIX_SHADOW_PCF_TAPS 4
 #include "shadow.glsl"
+#include "sheen.glsl"
 
 // Lit fragment shader — Cook-Torrance split-sum IBL on top of a Lambert N·L
 // sun term, with cascaded shadows, a Fresnel-glass branch, and froxel-fog
@@ -68,6 +69,8 @@ layout(set = 0, binding = 0) uniform Frame {
     float uIblPad;
     vec3  uCameraPos;
     float uEnvMipCount;
+    float uSheenMipCount;
+    vec4  uClothOverride;  // x=sheenRoughness, y=diffuseTransmission; x<0 = use the material's
     float uShadowStrength;         // 0 = sun shadows off, 1 = on
     vec3  _cascadePad;
     mat4  uCascadeViewProj[3];     // light view-proj per cascade
@@ -132,12 +135,22 @@ layout(set = 1, binding = 6) uniform sampler3D   uSkyVisibility;
 // Sun bounce, injected each frame over the same voxel grid. RGB irradiance, no direction: the
 // visibility volume supplies the shape, this supplies the colour and the level.
 layout(set = 1, binding = 7) uniform sampler3D   uSkyBounce;
+// The environment convolved with CHARLIE rather than GGX, and the Charlie lobe's directional
+// albedo. Separate from uPrefilteredEnv on purpose: a GGX cube in sheen's place renders something
+// dimmer and rimless and entirely plausible, which is the failure this whole arc keeps closing.
+layout(set = 1, binding = 8) uniform samplerCube uSheenEnv;
+layout(set = 1, binding = 9) uniform sampler2D   uSheenLut;
+// Declared to keep set 1 layout-compatible with the skybox pipeline in the same pass; the lit
+// shader reads the prefiltered chain, not the raw sky.
+layout(set = 1, binding = 10) uniform samplerCube uEnvCube;
 
 layout(set = 2, binding = 0) uniform Material {
     vec4 uBaseColorFactor;
     vec4 uEmissiveFactor;
     vec4 uMaterialParams;  // x=alphaCutoff, y=normalScale, z=roughness, w=metallic
-    vec4 uMaterialParams2; // x=transmission (KHR_materials_transmission)
+    vec4 uMaterialParams2; // x=transmission, y=sheenRoughness, z=diffuseTransmission
+    vec4 uSheenColor;              // KHR_materials_sheen colour factor
+    vec4 uDiffuseTransmissionColor;// KHR_materials_diffuse_transmission colour
 } mat;
 
 layout(set = 2, binding = 1) uniform sampler2D uAlbedo;
@@ -217,6 +230,19 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
 // The cascade tint is shadow.glsl's blix_cascade_tint — a fourth copy of three colours is
 // still a fourth copy, and the shared one also names "beyond the last cascade" in magenta, which
 // a still picture otherwise cannot tell from "lit".    // cascade 2 — blue
+
+// <b>Hoisted, because glass was the one surface that skipped every occlusion term.</b> The
+// transmissive branch returns before ambient visibility, before this, and before the debug views —
+// so a pane reflected an unoccluded outdoor sky from inside a closed room, and viz channel 7 drew
+// the skybox on it. The lookup needs only a position and a direction, so there is no reason it had
+// to live where it did.
+float blixSkyVisibility(vec3 worldPos, vec3 dir) {
+    if (frame.uSkyMin.w <= 0.5) return 1.0;
+    vec3 probeUv = (worldPos + dir * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz;
+    vec4 sh = texture(uSkyVisibility, clamp(probeUv, vec3(0.0), vec3(1.0)));
+    const float Y0 = 0.282095, Y1 = 0.488603;
+    return clamp((PI * Y0 * sh.x + (2.0 * PI / 3.0) * Y1 * dot(sh.yzw, dir)) / PI, 0.0, 1.0);
+}
 
 void main() {
     // UVs arrive in the correct top-down origin already: the Sponza assets are
@@ -305,13 +331,26 @@ void main() {
     float transmission = mat.uMaterialParams2.x;
     if (transmission > 0.0) {
         float lod = roughness * (frame.uEnvMipCount - 1.0);
-        vec3 envRefl = textureLod(uPrefilteredEnv, R, lod).rgb;
+        // Occluded like every other indirect term. Evaluated along R rather than N because a
+        // reflection gathers from where it points, and a window deep inside a room points at a wall.
+        vec3 envRefl = textureLod(uPrefilteredEnv, R, lod).rgb * blixSkyVisibility(vWorldPos, R);
         float fresnel = 0.04 + 0.96 * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
         // <b>No opacity floor.</b> Clean glass IS ~96% transparent head-on, and lifting it was
         // faking the presence that refraction and absorption would give for free. The panes will
         // read as nearly absent until there is a transmission pass; that is the honest picture of
         // what this model currently computes.
         float glassAlpha = mix(albedo4.a, fresnel, transmission);
+        // The debug views have to reach glass too. They did not, because this branch returns first
+        // — so every channel drew a lit pane over whatever it was meant to be showing, and the one
+        // surface worth interrogating was the one the instrument could not see.
+        if (frame.uVizChannel > 0.5) {
+            float vis = blixSkyVisibility(vWorldPos, R);
+            vec3 c = frame.uVizChannel < 1.5 ? vizGeometricN * 0.5 + 0.5 :
+                     frame.uVizChannel < 2.5 ? N * 0.5 + 0.5 :
+                     frame.uVizChannel < 7.5 ? vec3(vis) : vec3(vis);
+            outColor = vec4(c, 1.0);
+            return;
+        }
         outColor = vec4(envRefl, glassAlpha);
         return;
     }
@@ -335,14 +374,24 @@ void main() {
     // Priced at 1.3-1.4x of the frame, the sun shadow is the largest single shading term here, so
     // the fragments that cannot use it are worth not charging.
     //
+    // <b>And then diffuse transmission made that premise false.</b> A transmitting surface uses the
+    // sun on the side facing AWAY — dot(-N, L) — which is precisely where NdotL is zero, so the
+    // gate skipped the lookup on exactly the fragments that needed it and sunShadow kept its
+    // initial 1.0. Every back-facing curtain fragment received full unshadowed sun through it, and
+    // the curtains held their colour in deep shade as though lit from within. The saving is still
+    // real and still taken; what the gate asks is now "can ANY term here use a shadow", which for
+    // an opaque material is the same question it was before.
+    //
     // The cascade index stays -1 for those fragments, so --visualize-cascades paints them as
     // "beyond the last cascade". That is a debug view reading a fragment that asked no question.
-    if (frame.uShadowStrength > 0.0 && NdotL > 0.0) {
+    float backNdotL = max(dot(-N, L), 0.0);
+    float shadowNeed = max(NdotL, mat.uMaterialParams2.z > 0.0 ? backNdotL : 0.0);
+    if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0) {
         sunShadow = blix_sun_shadow_cascaded(
             uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2],
             frame.uCascadeViewProj[0], frame.uCascadeViewProj[1], frame.uCascadeViewProj[2],
             frame.uCascadeTexels.xyz,
-            vWorldPos, N, NdotL, 2.0, gl_FragCoord.xy,
+            vWorldPos, N, shadowNeed, 2.0, gl_FragCoord.xy,
             shadowCascade);
         sunShadow = mix(1.0, sunShadow, frame.uShadowStrength);
     }
@@ -363,8 +412,48 @@ void main() {
     // measured, so this line is the rendering equation for a directional light rather than a shape
     // scaled until it looked right.
     vec3 kDsun = (vec3(1.0) - Fsun) * (1.0 - metallic);
-    vec3 direct = (kDsun * albedo / PI + sunSpecular)
-                  * NdotL * frame.uSunIrradiance * sunShadow;
+
+    // --- Cloth: the two things metallic-roughness cannot say -------------
+    // Sheen is a retroreflective rim at grazing angles; diffuse transmission is light entering the
+    // back of a single layer and scattering out the front. A curtain wants both, and the glTF spec
+    // keeps them as separate extensions because they are separate physics — one you see, one you
+    // see THROUGH.
+    vec3  sheenColor     = mat.uSheenColor.rgb;
+    float sheenRoughness = clamp(frame.uClothOverride.x >= 0.0 ? frame.uClothOverride.x
+                                                                : mat.uMaterialParams2.y, 0.0, 1.0);
+    // Only where the material already HAS the term: the override is for finding a value, not for
+    // making stone translucent.
+    float diffTrans      = mat.uMaterialParams2.z > 0.0 && frame.uClothOverride.y >= 0.0
+                         ? clamp(frame.uClothOverride.y, 0.0, 1.0)
+                         : clamp(mat.uMaterialParams2.z, 0.0, 1.0);
+    // A probe older than v4 has no Charlie cube, so sheen is off rather than approximated.
+    bool  hasSheen       = dot(sheenColor, vec3(1.0)) > 0.0 && frame.uSheenMipCount > 0.0;
+
+    // How much light the sheen layer takes, so the base layer beneath can be darkened by it.
+    // Without this, sheen is added energy and cloth ends up brighter than the light falling on it.
+    float sheenAlbedo  = hasSheen ? blix_sheenAlbedo(uSheenLut, NdotV, sheenRoughness) : 0.0;
+    float sheenScale   = hasSheen ? blix_sheenScaling(sheenColor, sheenAlbedo) : 1.0;
+    // And what leaves through the back did not leave through the front.
+    float transScale   = blix_diffuseTransmissionScaling(diffTrans);
+
+    vec3 sunSheen = vec3(0.0);
+    if (hasSheen) {
+        sunSheen = blix_sheenBrdf(sheenColor, sheenRoughness, NdotH, NdotL, NdotV)
+                 * NdotL * frame.uSunIrradiance * sunShadow;
+    }
+
+    // The sun through the cloth. Its own shadow term is deliberately the SAME sunShadow: a curtain
+    // in shade transmits nothing, and a curtain in sun glows whichever side you are on.
+    vec3 sunTransmission = vec3(0.0);
+    if (diffTrans > 0.0) {
+        sunTransmission = blix_diffuseTransmission(
+            N, L, frame.uSunIrradiance * sunShadow,
+            mat.uDiffuseTransmissionColor.rgb * albedo, diffTrans);
+    }
+
+    vec3 direct = (kDsun * albedo / PI * transScale + sunSpecular)
+                  * NdotL * frame.uSunIrradiance * sunShadow
+                  + (sunSheen + sunTransmission) * sheenScale;
 
     // --- IBL: split-sum diffuse + specular ------------------------------
     // Diffuse: irradiance cube × albedo, modulated by (1 - F) and (1 - metallic)
@@ -455,6 +544,7 @@ void main() {
     // elsewhere and belongs in the sum. Folding it into the visibility SH made an up-facing floor
     // evaluate negative, because two directional fields multiplied double-count direction.
     vec3 bounce = vec3(0.0);
+    vec3 vizBounceRaw = vec3(0.0);
     if (frame.uBounceStrength > 0.0) {
         vec3 probeUv = (vWorldPos + N * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz;
         // The volume stores average incident RADIANCE; irradiance is PI times it. Getting this
@@ -465,10 +555,35 @@ void main() {
         // it — and the /PI that briefly sat here is the radiance conversion, which belongs in the
         // injection pass where a surface re-emits, not here where one receives.
         vec3 incident = PI * texture(uSkyBounce, clamp(probeUv, vec3(0.0), vec3(1.0))).rgb;
+        vizBounceRaw = incident;
         bounce = incident * albedo * (1.0 - metallic) * ao * visibility;
     }
 
-    vec3 ambient = (kD * diffuseIBL * visibility + specularIBL * specularVisibility) * ao + bounce;
+    // Sheen's own prefiltered environment, at the sheen roughness rather than the base one, times
+    // the same directional albedo that pays for it. Occluded like every other indirect term.
+    vec3 sheenIBL = vec3(0.0);
+    if (hasSheen && frame.uAbFlags.z < 0.5) {
+        float sheenLod = sheenRoughness * max(frame.uSheenMipCount - 1.0, 0.0);
+        vec3 sheenEnv = textureLod(uSheenEnv, R, sheenLod).rgb;
+        sheenIBL = sheenEnv * sheenColor * sheenAlbedo * skyVisibility * visibility * ao;
+    }
+
+    // The ambient half of transmission: irradiance gathered along -N, which is the sky on the side
+    // the surface is not facing. A curtain with a bright courtyard behind it glows without any
+    // direct sun on it at all, and that is most of what makes cloth read as thin.
+    vec3 transmittedIBL = vec3(0.0);
+    if (diffTrans > 0.0) {
+        // Occluded like every other indirect term. `visibility` is measured along the FRONT normal
+        // — the back side's own value is not something a screen-space pass can know — so this is an
+        // approximation, and the honest direction: a curtain in a dark corner is dark on both sides.
+        vec3 backIrradiance = texture(uIrradiance, -gatherN).rgb * skyVisibility;
+        transmittedIBL = blix_diffuseTransmissionAmbient(
+            backIrradiance, mat.uDiffuseTransmissionColor.rgb * albedo, diffTrans) * ao * visibility;
+    }
+
+    vec3 ambient = ((kD * diffuseIBL * transScale * visibility + specularIBL * specularVisibility) * ao
+                    + bounce * transScale) * sheenScale
+                 + sheenIBL + transmittedIBL;
 
     // --- Emissive ------------------------------------------------------
     vec3 emissive = texture(uEmissive, uv).rgb * mat.uEmissiveFactor.rgb * mat.uEmissiveFactor.a;
@@ -490,7 +605,17 @@ void main() {
             // value a fully open sphere produces. Between them these say whether a near-zero result
             // is a bad coordinate, a bad uniform, or a bad texel.
             frame.uVizChannel < 8.5 ? clamp(vizProbeUv, vec3(0.0), vec3(1.0)) :
-                                      vec3(clamp(vizSh.x / (4.0 * PI * 0.282095), 0.0, 1.0));
+            frame.uVizChannel < 9.5 ? vec3(clamp(vizSh.x / (4.0 * PI * 0.282095), 0.0, 1.0)) :
+            // <b>The bounce, on its own and unscaled by anything it is later multiplied into.</b>
+            // "There is almost no light bouncing" is a claim about a quantity nothing displayed:
+            // the injected field only ever reached the eye after albedo, AO and ambient visibility
+            // had each taken a share, so a weak result and a correct-but-attenuated one looked the
+            // same. 10 is the radiance the probe volume holds here; 11 is what it contributes after
+            // the surface takes its share; 12 is the direct sun alone, for scale — read 10 against
+            // 12 and the ratio IS the bounce's strength, which is the number in dispute.
+            frame.uVizChannel < 10.5 ? vizBounceRaw :
+            frame.uVizChannel < 11.5 ? bounce :
+                                       direct;
         // Straight out, no exposure and no tonemap — these are directions and flags, and a film
         // curve on a direction is a way to misread it.
         outColor = vec4(c, coverage);
