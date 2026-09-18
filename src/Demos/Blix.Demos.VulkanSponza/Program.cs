@@ -269,6 +269,19 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private ShaderProgramHandle presentProgram;
     private PipelineHandle presentPipeline;
     private FullscreenPass fullscreen = null!;
+    // Its own dummy pair rather than FullscreenPass's: that one indexes three vertices for a
+    // triangle and a probe impostor needs four for a quad. Contents are never read — the vertex
+    // shader synthesises corners from gl_VertexIndex, same trick, one more corner.
+    private VertexBufferHandle probeVb;
+    private IndexBufferHandle probeIb;
+    private ShaderProgramHandle probeProgram;
+    private PipelineHandle probePipeline;
+
+    // The probe view. Off by default — it draws a sphere per probe, and there are 41,472 of them.
+    private bool showProbes;
+    private float probeRadius = 0.08f;
+    private float probeField;      // 0 = bounce, 1 = sky visibility
+    private float probeExposure = 1f;
 
     // --- Froxel volumetric fog --------------------------------------------
     // A compute pass fills a view-aligned 3D grid with sun in-scattering and

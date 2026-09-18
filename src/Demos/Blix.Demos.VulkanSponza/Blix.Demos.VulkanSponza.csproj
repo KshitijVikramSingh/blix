@@ -88,6 +88,8 @@
     <GlslShader Include="Shaders\depth_prepass_mask.frag" />
     <GlslShader Include="Shaders\skybox.vert" />
     <GlslShader Include="Shaders\skybox.frag" />
+    <GlslShader Include="Shaders\probe_debug.vert" />
+    <GlslShader Include="Shaders\probe_debug.frag" />
     <GlslShader Include="Shaders\present.vert" />
     <GlslShader Include="Shaders\present.frag" />
     <GlslShader Include="Shaders\hiz_build.frag" />

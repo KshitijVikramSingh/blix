@@ -109,6 +109,18 @@ internal sealed partial class SponzaLoop
         // readings were never on screen at the same time. They are controls now.
         if (skyVisibilityEnabled)
         {
+            // <b>What one probe holds, with nothing multiplied into it.</b> An indirect term reaches
+            // the eye only after albedo, AO and visibility have each taken a share, so "the bounce
+            // looks weak" and "the bounce IS weak" were indistinguishable from the image alone.
+            using (debug.Scope("Probes"))
+            {
+                showProbes    = debug.Controls.Toggle("Show probes", showProbes);
+                probeRadius   = debug.Controls.Float("Radius (m)", probeRadius, 0.02f, 0.4f);
+                probeExposure = debug.Controls.Float("Exposure", probeExposure, 0.1f, 20f);
+                probeField    = debug.Controls.Enum("Field", (int)probeField,
+                    new[] { "Bounce radiance", "Sky visibility" });
+            }
+
             using (debug.Scope("Indirect"))
             {
                 injectDensity = debug.Controls.Toggle("Density march", injectDensity);

@@ -72,6 +72,9 @@ internal sealed partial class SponzaLoop
         if (cmdArgs.Contains("--no-mask")) forceOpaqueMask = true;
         if (cmdArgs.Contains("--msaa1")) MsaaSamples = 1;
         if (cmdArgs.Contains("--sun-from-probe")) alignSunToProbe = true;
+        // Lets the probe view be exercised without a human reaching for a checkbox — which is how
+        // it shipped a crash the first time: it compiled, it ran, and nothing had drawn it.
+        if (cmdArgs.Contains("--show-probes")) showProbes = true;
         // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every
         // census speaks only for wherever the camera happens to start, which for a question like
         // "how much of this scene is occluded" is the difference between a measurement and an
@@ -180,6 +183,7 @@ internal sealed partial class SponzaLoop
 
         var litInterface = Reflect("lit.vert", "lit.frag");
         var skyInterface = Reflect("skybox.vert", "skybox.frag");
+        var probeInterface = Reflect("probe_debug.vert", "probe_debug.frag");
         var presentInterface = Reflect("present.vert", "present.frag");
         // Reuses present.vert: both are fullscreen triangles synthesised from gl_VertexIndex.
         var gtaoInterface = Reflect("present.vert", "gtao.frag");
@@ -354,6 +358,19 @@ internal sealed partial class SponzaLoop
         var skyVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "skybox.vert.spv"));
         var skyFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "skybox.frag.spv"));
         skyProgram = vk.CreateShaderProgramFromSpv(skyVertSpv, skyFragSpv, skyInterface, "skybox");
+
+        // One quad per probe, positions synthesised: the vertex buffer exists to satisfy the draw
+        // and its contents are never read, exactly as FullscreenPass does for its triangle.
+        var probeVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "probe_debug.vert.spv"));
+        var probeFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "probe_debug.frag.spv"));
+        probeProgram = vk.CreateShaderProgramFromSpv(probeVertSpv, probeFragSpv, probeInterface, "probe_debug");
+        var probeDummy = new VertexPosition3NormalTexture[4];
+        for (var i = 0; i < 4; i++)
+            probeDummy[i] = new VertexPosition3NormalTexture(
+                new GraphicsVector3(0, 0, 0), new GraphicsVector3(0, 0, 1), new GraphicsVector2(0, 0));
+        probeVb = vk.CreateVertexBuffer(
+            VertexPosition3NormalTexture.CreateBufferData(probeDummy), "probe.vb");
+        probeIb = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2, 2, 1, 3 }, name: "probe.ib");
         skyPipeline = Pipeline(skyProgram,
             VertexPosition3NormalTexture.Layout, // ignored — sky vert synthesises positions
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
@@ -448,6 +465,11 @@ internal sealed partial class SponzaLoop
         // Fullscreen triangle for the sky + present passes (positions synthesised
         // from gl_VertexIndex in the vertex shader — the buffer is never sampled).
         fullscreen = new FullscreenPass(vk, "present.dummy");
+        // Depth-tested so probes sit in the scene rather than over it, and no depth WRITE so they
+        // never occlude the geometry whose lighting they are there to explain.
+        probePipeline = Pipeline(probeProgram, VertexPosition3NormalTexture.Layout,
+            DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled }, litPassHandle, "probe_debug");
 
         if (bounceReady)
         {

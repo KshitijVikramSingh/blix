@@ -231,7 +231,12 @@ public sealed class RenderPassBuilder
         int instanceCount,
         IReadOnlyList<ShaderUniform> uniforms,
         IReadOnlyList<ShaderTextureBinding> textures,
-        MaterialHandle perDrawMaterial,
+        // <b>Nullable, because instancing does not imply a per-instance BUFFER.</b> Every caller so
+        // far drove its instances from a material-backed buffer and passed that material, so the
+        // parameter was required — and a draw whose instances come from gl_InstanceIndex alone then
+        // had nothing valid to pass. `default` is not nothing: it is a handle with id 0, which
+        // survives the `is { }` test and dies looking itself up in the material table.
+        MaterialHandle? perDrawMaterial,
         byte[] pushConstants,
         MaterialHandle? material = null)
     {

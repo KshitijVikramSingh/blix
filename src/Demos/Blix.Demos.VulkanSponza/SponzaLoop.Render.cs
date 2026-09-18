@@ -480,6 +480,37 @@ internal sealed partial class SponzaLoop
                     material: g.Material,
                     pushConstants: identityPush);
             }
+            // The probe view, before the sky so the sky can still fill where nothing was drawn, and
+            // before blend so glass composites over it like any other geometry.
+            if (showProbes && skyVolumeLoaded)
+            {
+                var probeUniforms = new ShaderUniform[]
+                {
+                    new("uViewProj",  new Matrix4x4Uniform(viewProj)),
+                    new("uCameraPos", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
+                    new("uProbeMin",  new Vector4Uniform(new Vector4(skyVolumeMin, probeRadius))),
+                    new("uProbeSpan", new Vector4Uniform(new Vector4(skyVolumeSpan, 0f))),
+                    new("uProbeDims", new Vector4Uniform(new Vector4(probeX, probeY, probeZ, 0f))),
+                    new("uProbeMode", new Vector4Uniform(new Vector4(probeField, probeExposure, 0f, 0f))),
+                };
+                scope.DrawIndexedInstanced(
+                    probeVb, probeIb, probePipeline,
+                    indexCount: 6, instanceCount: probeX * probeY * probeZ,
+                    // Its OWN bindings: the probe shader declares uSkyBounce/uSkyVisibility at set 1
+                    // slots 0 and 1, where the lit pass's list puts them at 7 and 6. Handing over a
+                    // list built for a different shader binds by slot, not by name.
+                    uniforms: probeUniforms,
+                    textures: new[]
+                    {
+                        new ShaderTextureBinding("uSkyBounce",
+                            bounceReady ? bounceTextures[bounceWrite ^ 1] : skyVisibilityTexture, Slot: 0),
+                        new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 1),
+                    },
+                    // null, not an empty array: an empty array still counts as "push constants supplied", and
+                    // this shader declares no ranges.
+                    perDrawMaterial: null, pushConstants: null!);
+            }
+
             // Sky after opaque, before blend. Fullscreen triangle; positions are
             // synthesised in skybox.vert, so it binds set-0 perFrame + textures only.
             fullscreen.Draw(scope, skyPipeline, passBindings, uniforms: perFrame);
