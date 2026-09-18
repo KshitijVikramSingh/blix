@@ -118,7 +118,7 @@ internal sealed partial class SponzaLoop
                 probeRadius   = debug.Controls.Float("Radius (m)", probeRadius, 0.02f, 0.4f);
                 probeExposure = debug.Controls.Float("Exposure", probeExposure, 0.1f, 20f);
                 probeField    = debug.Controls.Enum("Field", (int)probeField,
-                    new[] { "Bounce radiance", "Sky visibility" });
+                    new[] { "Bounce radiance", "Sky visibility", "Usefulness" });
             }
 
             using (debug.Scope("Indirect"))

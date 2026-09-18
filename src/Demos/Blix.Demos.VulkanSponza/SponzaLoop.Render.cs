@@ -493,18 +493,21 @@ internal sealed partial class SponzaLoop
                     new("uCameraPos", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
                     new("uProbeMin",  new Vector4Uniform(new Vector4(skyVolumeMin, probeRadius))),
                     new("uProbeSpan", new Vector4Uniform(new Vector4(skyVolumeSpan, 0f))),
-                    new("uProbeDims", new Vector4Uniform(probeField < 0.5f
-                        ? new Vector4(bounceX, bounceY, bounceZ, 0f)
-                        : new Vector4(probeX, probeY, probeZ, 0f))),
+                    // Field 1 is sky visibility, which lives on the dense VISIBILITY grid; 0 and 2
+                    // are the bounce and its usefulness, which live on the coarser bounce grid.
+                    new("uProbeDims", new Vector4Uniform(probeField > 0.5f && probeField < 1.5f
+                        ? new Vector4(probeX, probeY, probeZ, 0f)
+                        : new Vector4(bounceX, bounceY, bounceZ, 0f))),
+
                     new("uProbeMode", new Vector4Uniform(new Vector4(probeField, probeExposure, 0f, 0f))),
                     new("uBounceDims", new Vector4Uniform(new Vector4(bounceX, bounceY, bounceZ, 0f))),
                 };
                 scope.DrawIndexedInstanced(
                     probeVb, probeIb, probePipeline,
                     indexCount: 6,
-                    instanceCount: probeField < 0.5f
-                        ? bounceX * bounceY * bounceZ
-                        : probeX * probeY * probeZ,
+                    instanceCount: probeField > 0.5f && probeField < 1.5f
+                        ? probeX * probeY * probeZ
+                        : bounceX * bounceY * bounceZ,
                     // Its OWN bindings: the probe shader declares uSkyBounce/uSkyVisibility at set 1
                     // slots 0 and 1, where the lit pass's list puts them at 7 and 6. Handing over a
                     // list built for a different shader binds by slot, not by name.
@@ -514,6 +517,7 @@ internal sealed partial class SponzaLoop
                         new ShaderTextureBinding("uSkyBounce",
                             bounceReady ? bounceTextures[bounceWrite ^ 1] : brdfLutTexture, Slot: 0),
                         new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 1),
+                        new ShaderTextureBinding("uOccupancy", occupancyTexture, Slot: 2),
                     },
                     // null, not an empty array: an empty array still counts as "push constants supplied", and
                     // this shader declares no ranges.
