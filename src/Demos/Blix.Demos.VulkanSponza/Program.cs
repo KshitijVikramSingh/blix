@@ -413,8 +413,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // Live overrides for the two cloth numbers, so they can be found by eye and then written back
     // into the patch. Off by default: the cooked value is the real one.
     private bool clothOverride;
-    private float sheenRoughness = 0.3f;
-    private float diffuseTransmit = 0.35f;
+    // Seeded from what the patch now ships, so flipping the override on does not jump the image.
+    private float sheenRoughness = 1.0f;
+    private float diffuseTransmit = 0.0f;
 
     // --ao-fullres: run ambient visibility at framebuffer resolution instead of half. Half res is
     // the right default for a low-frequency term, but a crease a few centimetres wide is not low

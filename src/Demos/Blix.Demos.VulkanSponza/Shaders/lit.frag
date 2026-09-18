@@ -112,11 +112,20 @@ layout(set = 0, binding = 0) uniform Frame {
     //
     // 1 = today's bent normal, 0 = the shading normal. One dial each, so which field carries it can
     // be found by looking rather than by rebuilding once per guess.
-    //@tune 0..1 = 1
+    // <b>0, judged by eye.</b> The cube is the sky's colour and the bent normal steers it toward
+    // openings; on this scene that read worse than gathering about the shading normal.
+    //@tune 0..1 = 0
     float uBentForCube;
+    // <b>1: this one keeps the bend.</b> Sky visibility is the term the bent normal was introduced
+    // for -- a surface in a corner should see the opening's share of sky, not its wall's -- and it is
+    // the only one of the three that still reads better bent.
     //@tune 0..1 = 1
     float uBentForSkyVis;
-    //@tune 0..1 = 1
+    // <b>0, judged by eye, and the measurement agrees with the eye here.</b> The probe volume is the
+    // least forgiving index of the three -- 29% of neighbouring probes differ by more than 2x -- so
+    // steering it with a screen-space direction turns that contrast into structure. It is not the
+    // green streak (that survives this at 0) but it does read better.
+    //@tune 0..1 = 0
     float uBentForBounce;
     // <b>The two remaining halves of what --ab prepass's off-phase actually switches.</b> That arm
     // leaves GTAO reading a cleared depth buffer, so it emits its background answer for every pixel:
