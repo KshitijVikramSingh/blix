@@ -727,6 +727,26 @@ internal sealed partial class SponzaLoop
             Buffer.BlockCopy(floats, 0, bytes, 16, floats.Length * 4);
             File.WriteAllBytes(dumpPath, bytes);
             Console.WriteLine($"  dumped depth atlas {w}x{h} to {dumpPath}");
+
+            // The irradiance atlas beside it, same layout: the two are only meaningful together,
+            // because every question about the blend is "what weight, times what colour".
+            var irr = vk.ReadTexture(bounceTextures[bounceWrite ^ 1], out var iw, out var ih, out _);
+            var ifl = new float[iw * ih * 3];
+            for (var i = 0; i < iw * ih; i++)
+            {
+                ifl[i * 3]     = (float)BitConverter.ToHalf(irr, i * 8);
+                ifl[i * 3 + 1] = (float)BitConverter.ToHalf(irr, i * 8 + 2);
+                ifl[i * 3 + 2] = (float)BitConverter.ToHalf(irr, i * 8 + 4);
+            }
+            var ib = new byte[16 + ifl.Length * 4];
+            BitConverter.TryWriteBytes(ib.AsSpan(0, 4), iw);
+            BitConverter.TryWriteBytes(ib.AsSpan(4, 4), ih);
+            BitConverter.TryWriteBytes(ib.AsSpan(8, 4), bounceX);
+            BitConverter.TryWriteBytes(ib.AsSpan(12, 4), bounceY);
+            Buffer.BlockCopy(ifl, 0, ib, 16, ifl.Length * 4);
+            var irrPath = Path.ChangeExtension(dumpPath, null) + ".irr.bin";
+            File.WriteAllBytes(irrPath, ib);
+            Console.WriteLine($"  dumped irradiance atlas {iw}x{ih} to {irrPath}");
         }
         for (var y = 0; y < bounceY; y++)
         {
