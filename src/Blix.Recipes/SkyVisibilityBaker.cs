@@ -1,5 +1,7 @@
 using System.Numerics;
 using Blix.Assets;
+using Blix.Graphics;
+using Blix.Graphics.Images;
 
 namespace Blix.Recipes;
 
@@ -69,7 +71,11 @@ public static class SkyVisibilityBaker
 
     public sealed record Volume(
         Bounds3Lite Bounds, int SizeX, int SizeY, int SizeZ, SkyCell[] Cells,
-        int OccupancyX = 0, int OccupancyY = 0, int OccupancyZ = 0, byte[]? Occupancy = null)
+        int OccupancyX = 0, int OccupancyY = 0, int OccupancyZ = 0, byte[]? Occupancy = null,
+        // Coarser than occupancy on purpose — see the albedo parameter on Bake. RGBA8, one texel
+        // per cell, gamma-2.0 encoded (sqrt of linear) so the dark saturated channels of a red
+        // curtain survive eight bits. The shader squares it back.
+        int AlbedoX = 0, int AlbedoY = 0, int AlbedoZ = 0, byte[]? Albedo = null)
     {
         public SkyCell At(int x, int y, int z) => Cells[(z * SizeY + y) * SizeX + x];
     }
@@ -86,6 +92,129 @@ public static class SkyVisibilityBaker
     /// </remarks>
     private const float CutoutOpacity = 0.34f;
 
+
+    /// <summary>One linear RGB per material: the mean of its base-colour texture, times its factor.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The factor alone is worthless here.</b> Every material in Sponza ships
+    /// <c>baseColorFactor = (1,1,1)</c> and keeps its colour in the texture — curtain_01/02/03
+    /// included — so a bake that read only the factor would produce a uniformly white grid and no
+    /// colour bleeding at all. That is the measurement that decided this function exists.
+    /// </para>
+    /// <para>
+    /// The mean comes from the smallest mip that still fills a block, because a mip chain IS a box
+    /// filter run to completion: the cook already computed this average and it costs one 4x4 BC7
+    /// block to read back, against decoding seventy 4K images to recompute it.
+    /// </para>
+    /// <para>
+    /// Averaged in LINEAR space. Base colour is authored sRGB, and a mean taken over encoded values
+    /// reads systematically bright — worst precisely on the dark saturated channels this is for.
+    /// </para>
+    /// </remarks>
+    private static Vector3 MaterialAlbedo(
+        BlixMeshFile file, int materialIndex, string meshPath,
+        Dictionary<int, Vector3> cache, Action<string>? log)
+    {
+        if (cache.TryGetValue(materialIndex, out var hit)) return hit;
+
+        var materials = file.MaterialTable;
+        if (materialIndex < 0 || materialIndex >= materials.Count)
+            return cache[materialIndex] = new Vector3(0.5f);
+
+        var mat = materials[materialIndex];
+        var factor = new Vector3(mat.BaseColorFactor.X, mat.BaseColorFactor.Y, mat.BaseColorFactor.Z);
+        var images = file.ImageTable;
+        var tint = Vector3.One;
+
+        if (mat.BaseColorImage >= 0 && mat.BaseColorImage < images.Count)
+        {
+            var texPath = Path.Combine(
+                Path.GetDirectoryName(Path.GetFullPath(meshPath)) ?? string.Empty,
+                images[mat.BaseColorImage].Resource);
+            try
+            {
+                tint = AverageOfSmallestMip(texPath);
+            }
+            catch (Exception ex)
+            {
+                // Named rather than swallowed: a material silently falling back to its white factor
+                // is invisible in the output and looks exactly like "colour bleeding does not work".
+                log?.Invoke($"  albedo: {mat.Name} fell back to its factor ({Path.GetFileName(texPath)}: {ex.Message})");
+            }
+        }
+
+        var result = factor * tint;
+        log?.Invoke($"  albedo: {mat.Name,-30} ({result.X:0.000}, {result.Y:0.000}, {result.Z:0.000})");
+        return cache[materialIndex] = result;
+    }
+
+    /// <summary>Mean linear colour of a cooked texture, read from its smallest usable mip.</summary>
+    private static Vector3 AverageOfSmallestMip(string texPath)
+    {
+        var tex = BlixTexReader.Read(texPath);
+        // Walk back to the smallest mip still at least one 4x4 block, so a BC decode has a whole
+        // block to work with. One level up from the 1x1 tail costs nothing and avoids the edge case.
+        // <b>Not the smallest mip — a small one.</b> The tail of the chain is useless for cutout
+        // geometry: mip generation averages a leaf's colour with the transparent black around it,
+        // so by 4x4 the leaf's own colour is gone and dividing by alpha only partly recovers it
+        // (LeafSpring read 0.003, then 0.009 with alpha weighting, against IvyLeaf's 0.168 green).
+        // At ~32 texels a side the leaves and the gaps are still separable, an alpha THRESHOLD can
+        // reject the gaps outright, and it is still a thousandth of the full image.
+        int W(int l) => Math.Max(1, tex.Width >> l);
+        int H(int l) => Math.Max(1, tex.Height >> l);
+        var level = tex.MipBytes.Count - 1;
+        while (level > 0 && (W(level) < 32 || H(level) < 32)) level--;
+
+        var bytes = tex.MipBytes[level];
+        var (w, h) = (W(level), H(level));
+        // <b>Weighted by alpha, which is not a detail.</b> A cutout texture is black wherever it is
+        // transparent, so a flat mean over a leaf card returns the colour of the empty space around
+        // the leaf. Measured: LeafSpring came back (0.003, 0.004, 0.001) — the cypress would have
+        // bounced nothing at all. What a leaf card's colour means is the colour of the part that is
+        // there, and alpha is the mask that says which part that is.
+        var sum = Vector3.Zero;
+        var weight = 0f;
+
+        if (tex.Format is TextureFormat.Rgba8 or TextureFormat.Rgba8Srgb)
+        {
+            var srgb = tex.Format == TextureFormat.Rgba8Srgb;
+            for (var i = 0; i + 3 < bytes.Length; i += 4)
+            {
+                if (bytes[i + 3] < 128) continue;   // a gap between leaves, not a surface
+                sum += new Vector3(Decode(bytes[i], srgb), Decode(bytes[i + 1], srgb), Decode(bytes[i + 2], srgb));
+                weight += 1f;
+            }
+        }
+        else
+        {
+            var decoded = new BCnEncoder.Decoder.BcDecoder()
+                .DecodeRaw(bytes, w, h, ToBcFormat(tex.Format));
+            var srgb = tex.Format == TextureFormat.Bc7Srgb;
+            foreach (var px in decoded)
+            {
+                if (px.a < 128) continue;          // a gap between leaves, not a surface
+                sum += new Vector3(Decode(px.r, srgb), Decode(px.g, srgb), Decode(px.b, srgb));
+                weight += 1f;
+            }
+        }
+        // Fully transparent everywhere leaves nothing to average; the factor alone then stands.
+        return weight < 1e-3f ? Vector3.One : sum / weight;
+
+        static float Decode(byte v, bool srgb)
+        {
+            var c = v / 255f;
+            if (!srgb) return c;
+            return c <= 0.04045f ? c / 12.92f : MathF.Pow((c + 0.055f) / 1.055f, 2.4f);
+        }
+    }
+
+    private static BCnEncoder.Shared.CompressionFormat ToBcFormat(TextureFormat fmt) => fmt switch
+    {
+        TextureFormat.Bc7Srgb or TextureFormat.Bc7Unorm => BCnEncoder.Shared.CompressionFormat.Bc7,
+        TextureFormat.Bc5Unorm => BCnEncoder.Shared.CompressionFormat.Bc5,
+        _ => throw new NotSupportedException($"no CPU decode for {fmt}"),
+    };
+
     /// <summary>A world-space box. Local so the baker does not drag Blix.Geometry into the cook.</summary>
     public readonly record struct Bounds3Lite(Vector3 Min, Vector3 Max);
 
@@ -95,9 +224,19 @@ public static class SkyVisibilityBaker
     /// <param name="occupancy">Occupancy resolution on the longest axis. Sets what counts as a wall.</param>
     /// <param name="probes">Probe resolution on the longest axis. Sets how finely visibility varies.</param>
     /// <param name="rays">Rays per probe. Variance falls as 1/sqrt(rays), so this buys smoothness.</param>
+    /// <param name="albedo">
+    /// Albedo resolution on the longest axis; 0 means half the occupancy resolution.
+    /// </param>
+    /// <remarks>
+    /// Half, because surface colour is low-frequency but not arbitrarily so. At occupancy 256 over
+    /// Sponza's ~30 m the cell is 12 cm and a curtain is about 50 cm wide; a quarter-resolution grid
+    /// makes each curtain a single cell and loses the thing this is for. Half is 3 MB against the
+    /// 25 MB a full-resolution RGB grid would cost — which is the figure the injection shader's
+    /// header already weighed and rejected.
+    /// </remarks>
     public static Volume Bake(
         IReadOnlyList<string> meshPaths, int occupancy = 256, int probes = 48, int rays = 64,
-        Action<string>? log = null)
+        Action<string>? log = null, int albedo = 0)
     {
         // <b>Opacity per triangle, because a canopy is not a wall.</b> The grid was boolean, so a
         // cypress voxelised as solid as masonry and the column of air it stands in — which is the
@@ -107,7 +246,7 @@ public static class SkyVisibilityBaker
         // What a leaf card actually does is ATTENUATE, so the grid stores density and a ray
         // accumulates transmittance through it. Stone stays opaque; alpha-tested geometry
         // contributes a fraction, and enough overlapping leaf cards still add up to darkness.
-        var tris = new List<(Vector3 A, Vector3 B, Vector3 C, float Opacity)>();
+        var tris = new List<(Vector3 A, Vector3 B, Vector3 C, float Opacity, Vector3 Albedo)>();
         var min = new Vector3(float.MaxValue);
         var max = new Vector3(float.MinValue);
 
@@ -115,6 +254,7 @@ public static class SkyVisibilityBaker
         {
             var file = BlixMeshReader.Read(path);
             var materials = file.MaterialTable;
+            var albedoCache = new Dictionary<int, Vector3>();
             foreach (var prim in file.Primitives)
             {
                 // glTF alpha modes: 0 OPAQUE, 1 MASK, 2 BLEND. Anything not opaque is a surface the
@@ -122,6 +262,7 @@ public static class SkyVisibilityBaker
                 var mode = prim.MaterialIndex >= 0 && prim.MaterialIndex < materials.Count
                     ? materials[prim.MaterialIndex].AlphaMode : (byte)0;
                 var opacity = mode == 0 ? 1f : CutoutOpacity;
+                var albedoRgb = MaterialAlbedo(file, prim.MaterialIndex, path, albedoCache, log);
                 var stride = prim.Layout.Stride;
                 var positions = new Vector3[prim.VertexCount];
                 for (var v = 0; v < prim.VertexCount; v++)
@@ -142,10 +283,10 @@ public static class SkyVisibilityBaker
                 var lod = prim.Lods[^1];
                 if (lod.Indices32 is { } i32)
                     for (var i = 0; i + 2 < i32.Length; i += 3)
-                        tris.Add((positions[i32[i]], positions[i32[i + 1]], positions[i32[i + 2]], opacity));
+                        tris.Add((positions[i32[i]], positions[i32[i + 1]], positions[i32[i + 2]], opacity, albedoRgb));
                 else if (lod.Indices16 is { } i16)
                     for (var i = 0; i + 2 < i16.Length; i += 3)
-                        tris.Add((positions[i16[i]], positions[i16[i + 1]], positions[i16[i + 2]], opacity));
+                        tris.Add((positions[i16[i]], positions[i16[i + 1]], positions[i16[i + 2]], opacity, albedoRgb));
             }
         }
 
@@ -164,6 +305,14 @@ public static class SkyVisibilityBaker
         var density = new float[ox * oy * oz];
         var cell = new Vector3(span.X / ox, span.Y / oy, span.Z / oz);
 
+        var albedoRes = albedo > 0 ? albedo : Math.Max(2, occupancy / 2);
+        var (ax, ay, az) = (Dim(span.X, albedoRes), Dim(span.Y, albedoRes), Dim(span.Z, albedoRes));
+        // Summed, then divided by the count — an AVERAGE, not a max. A cell straddling stone and
+        // curtain should read as the mix; taking whichever triangle was sampled last would make the
+        // colour of a boundary cell depend on mesh ordering.
+        var albedoSum = new Vector3[ax * ay * az];
+        var albedoCount = new int[ax * ay * az];
+
         // Voxelise by sampling each triangle's SURFACE, densely enough that no cell it crosses is
         // missed.
         //
@@ -178,7 +327,7 @@ public static class SkyVisibilityBaker
         // is the safe direction: a pinhole in a wall leaks a little light, where a filled courtyard
         // deletes all of it.
         var cellDiag = cell.Length();
-        foreach (var (a, b, c, opacity) in tris)
+        foreach (var (a, b, c, opacity, albedoRgb) in tris)
         {
             var area = Vector3.Cross(b - a, c - a).Length() * 0.5f;
             // Two samples per cell-width along each edge direction, so a triangle crossing a cell
@@ -202,8 +351,34 @@ public static class SkyVisibilityBaker
                 // Opaque saturates immediately; cutout accumulates, so overlapping leaf cards build
                 // up density the way overlapping foliage builds up shade.
                 density[voxel] = MathF.Min(1f, MathF.Max(density[voxel], opacity));
+
+                // Same samples, coarser grid. Sample density already tracks triangle area, so a
+                // plain count weights each cell's colour by how much surface actually sits in it.
+                var avoxel = (Math.Clamp((int)((p.Z - min.Z) / span.Z * az), 0, az - 1) * ay
+                            + Math.Clamp((int)((p.Y - min.Y) / span.Y * ay), 0, ay - 1)) * ax
+                            + Math.Clamp((int)((p.X - min.X) / span.X * ax), 0, ax - 1);
+                albedoSum[avoxel] += albedoRgb;
+                albedoCount[avoxel]++;
             }
         }
+
+        // Gamma-2.0 on the way out: eight linear bits put almost no codes below 0.05, which is
+        // exactly where a saturated curtain's absorbing channels live. sqrt costs one instruction
+        // here and one multiply in the shader, and it is format-independent — no 3D sRGB view needed.
+        var albedoBytes = new byte[ax * ay * az * 4];
+        var coloured = 0;
+        for (var i = 0; i < albedoSum.Length; i++)
+        {
+            if (albedoCount[i] == 0) continue;
+            coloured++;
+            var c3 = albedoSum[i] / albedoCount[i];
+            albedoBytes[i * 4 + 0] = (byte)Math.Clamp((int)MathF.Round(MathF.Sqrt(Math.Clamp(c3.X, 0f, 1f)) * 255f), 0, 255);
+            albedoBytes[i * 4 + 1] = (byte)Math.Clamp((int)MathF.Round(MathF.Sqrt(Math.Clamp(c3.Y, 0f, 1f)) * 255f), 0, 255);
+            albedoBytes[i * 4 + 2] = (byte)Math.Clamp((int)MathF.Round(MathF.Sqrt(Math.Clamp(c3.Z, 0f, 1f)) * 255f), 0, 255);
+            albedoBytes[i * 4 + 3] = 255;
+        }
+        log?.Invoke($"  albedo grid {ax}x{ay}x{az} ({albedoBytes.Length / 1024.0 / 1024.0:0.00} MB), " +
+                    $"{100.0 * coloured / albedoSum.Length:0.0}% of cells carry a surface");
 
         var opaqueCells = density.Count(d => d >= 0.99f);
         var partialCells = density.Count(d => d > 0.01f && d < 0.99f);
@@ -328,7 +503,8 @@ public static class SkyVisibilityBaker
         var occBytes = new byte[density.Length];
         for (var i = 0; i < density.Length; i++)
             occBytes[i] = (byte)Math.Clamp((int)MathF.Round(density[i] * 255f), 0, 255);
-        return new Volume(new Bounds3Lite(min, max), px, py, pz, cells, ox, oy, oz, occBytes);
+        return new Volume(new Bounds3Lite(min, max), px, py, pz, cells, ox, oy, oz, occBytes,
+                          ax, ay, az, albedoBytes);
     }
 
     // As Occluded, but reports WHERE it stopped, so a second pass can ask what that surface sees.

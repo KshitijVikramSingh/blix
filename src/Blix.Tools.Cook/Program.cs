@@ -86,7 +86,7 @@ public static class Program
     /// its own driver and its own rows, and the engine's resolver never learns the difference.
     /// </para>
     /// </remarks>
-    // blix cook sky <dir-of-blixmesh> [--occupancy N] [--probes N] [--rays N]
+    // blix cook sky <dir-of-blixmesh> [--occupancy N] [--probes N] [--rays N] [--albedo N]
     //
     // Bakes how much sky each point in a scene can see. Prints a profile rather than writing a file
     // for now: the first question is whether the numbers are physics, and a format that stores
@@ -107,6 +107,7 @@ public static class Program
             occupancy: IntFlag(args, "--occupancy", 256),
             probes: IntFlag(args, "--probes", 48),
             rays: IntFlag(args, "--rays", 64),
+            albedo: IntFlag(args, "--albedo", 0),
             log: Console.WriteLine);
         Console.WriteLine($"  baked in {sw.Elapsed.TotalSeconds:0.0}s");
 
@@ -128,7 +129,8 @@ public static class Program
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
             Blix.Graphics.Images.BlixSkyVolume.Write(outPath, new Blix.Graphics.Images.BlixSkyVolume(
                 b.Min, b.Max, vol.SizeX, vol.SizeY, vol.SizeZ, coeffs,
-                vol.OccupancyX, vol.OccupancyY, vol.OccupancyZ, vol.Occupancy));
+                vol.OccupancyX, vol.OccupancyY, vol.OccupancyZ, vol.Occupancy,
+                vol.AlbedoX, vol.AlbedoY, vol.AlbedoZ, vol.Albedo));
             Console.WriteLine($"  wrote {outPath} ({new FileInfo(outPath).Length / 1024.0:0.0} KB)");
         }
 
@@ -473,6 +475,12 @@ public static class Program
 
     int envFace = 256, irrFace = 32, prefilterBase = 128, prefilterMips = 5, brdfSize = 256;
     float clamp = 50.0f;
+    // --yaw turns the sky about the vertical before anything reads it, so the sun DETECTION, the
+    // cube conversion and the irradiance all see the same rotated sky and stay consistent. It is
+    // there so an authored sun and a photographed one can be brought together by moving the sky,
+    // which is free, rather than by moving the light, which is a decision someone made on purpose.
+    // Only yaw: elevation has no roll that leaves the horizon level.
+    float yawDegrees = 0f;
     foreach (var a in args2.Skip(2))
     {
         if (a.StartsWith("--env-face=")) envFace = int.Parse(a.AsSpan("--env-face=".Length));
@@ -481,6 +489,7 @@ public static class Program
         else if (a.StartsWith("--prefilter-mips=")) prefilterMips = int.Parse(a.AsSpan("--prefilter-mips=".Length));
         else if (a.StartsWith("--brdf-size=")) brdfSize = int.Parse(a.AsSpan("--brdf-size=".Length));
         else if (a.StartsWith("--clamp=")) clamp = float.Parse(a.AsSpan("--clamp=".Length));
+        else if (a.StartsWith("--yaw=")) yawDegrees = float.Parse(a.AsSpan("--yaw=".Length));
         else { Console.Error.WriteLine($"Unknown option: {a}"); return 1; }
     }
 
@@ -501,11 +510,11 @@ public static class Program
         outPath = Path.Combine(destDir, Path.GetFileNameWithoutExtension(hdrPath) + ".blixprobe");
     }
     Console.WriteLine($"Cooking probe: {hdrPath} -> {outPath}");
-    Console.WriteLine($"  env={envFace} irr={irrFace} prefilter={prefilterBase}/{prefilterMips} brdf={brdfSize} clamp={clamp}");
+    Console.WriteLine($"  env={envFace} irr={irrFace} prefilter={prefilterBase}/{prefilterMips} brdf={brdfSize} clamp={clamp} yaw={yawDegrees}");
 
     var sw = Stopwatch.StartNew();
     var size = Blix.Recipes.ProbeRecipe.CookOne(
-        hdrPath, outPath, envFace, irrFace, prefilterBase, prefilterMips, brdfSize, clamp);
+        hdrPath, outPath, envFace, irrFace, prefilterBase, prefilterMips, brdfSize, clamp, yawDegrees);
     Console.WriteLine($"  wrote {outPath} ({size / 1024.0 / 1024.0:0.00} MB) in {sw.ElapsedMilliseconds} ms");
     return 0;
 }
