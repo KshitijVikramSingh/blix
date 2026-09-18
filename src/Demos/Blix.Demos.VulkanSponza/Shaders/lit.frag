@@ -71,6 +71,7 @@ layout(set = 0, binding = 0) uniform Frame {
     vec3  uCameraPos;
     float uEnvMipCount;
     float uSheenMipCount;
+    vec4  uSkyDims;        // xyz visibility probe counts
     vec4  uBounceDims;     // xyz bounce probe counts
     vec4  uClothOverride;  // x=sheenRoughness, y=diffuseTransmission; x<0 = use the material's
     float uShadowStrength;         // 0 = sun shadows off, 1 = on
@@ -133,7 +134,16 @@ layout(set = 1, binding = 4) uniform sampler3D   uFroxelGrid;
 layout(set = 1, binding = 5) uniform sampler2D   uAmbientVisibility;
 // Baked sky visibility as L1 spherical harmonics, one Rgba16F texel per probe cell. Geometry, not
 // lighting: what escapes the building, which no sun position changes.
-layout(set = 1, binding = 6) uniform sampler3D   uSkyVisibility;
+// <b>L1 spherical harmonics in a small 3D texture, and an octahedral atlas was tried and
+// reverted.</b> The atlas reconstructs better — a courtyard floor reads 0.063 against L1's 0.041,
+// where the raw transmittance is 0.057 — and it doubled the frame, 35.9 ms to 70.8 ms, on a single
+// fetch before any blending. Four floats in 331 KB get hardware trilinear with perfect locality;
+// an atlas costs an octahedral encode and a scattered texel at every one of this shader's call
+// sites. The same change was right for the bounce and wrong here, which is about how often and how
+// coherently each volume is read rather than about what either holds.
+layout(set = 1, binding = 6)  uniform sampler3D uSkyVisibility;   // L0, L1 x/y/z
+layout(set = 1, binding = 14) uniform sampler3D uSkyVisibility1;  // L2 -2,-1,0,+1
+layout(set = 1, binding = 15) uniform sampler3D uSkyVisibility2;  // L2 +2
 // Sun bounce, injected each frame over the same voxel grid. RGB irradiance, no direction: the
 // visibility volume supplies the shape, this supplies the colour and the level.
 // One volume per colour channel, each holding that channel's (L0, L1x, L1y, L1z). Directional, so
@@ -257,10 +267,26 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
 // to live where it did.
 float blixSkyVisibility(vec3 worldPos, vec3 dir) {
     if (frame.uSkyMin.w <= 0.5) return 1.0;
-    vec3 probeUv = (worldPos + dir * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz;
-    vec4 sh = texture(uSkyVisibility, clamp(probeUv, vec3(0.0), vec3(1.0)));
-    const float Y0 = 0.282095, Y1 = 0.488603;
-    return clamp((PI * Y0 * sh.x + (2.0 * PI / 3.0) * Y1 * dot(sh.yzw, dir)) / PI, 0.0, 1.0);
+    vec3 probeUv = clamp((worldPos + dir * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz,
+                         vec3(0.0), vec3(1.0));
+    vec4 sh0 = texture(uSkyVisibility,  probeUv);
+    vec4 sh1 = texture(uSkyVisibility1, probeUv);
+    float l2p2 = texture(uSkyVisibility2, probeUv).x;
+
+    // Cosine-convolved L2 evaluation (Ramamoorthi & Hanrahan): band coefficients pi, 2pi/3, pi/4.
+    // <b>The quadratic band is what makes a cone expressible.</b> L0 is direction-independent, so
+    // under L1 alone a vault ceiling inherited the arcade opening's brightness and read as
+    // sky-facing — one linear lobe cannot subtract a bright opening from a surface pointing away
+    // from it. The same deficit at the other end lost a courtyard floor's narrow zenith cone.
+    const float Y0 = 0.282095, Y1 = 0.488603, Y2 = 1.092548, Y20C = 0.315392, Y22C = 0.546274;
+    float band2 = Y2 * sh1.x * dir.x * dir.y
+                + Y2 * sh1.y * dir.y * dir.z
+                + Y20C * sh1.z * (3.0 * dir.z * dir.z - 1.0)
+                + Y2 * sh1.w * dir.x * dir.z
+                + Y22C * l2p2 * (dir.x * dir.x - dir.y * dir.y);
+    return clamp((PI * Y0 * sh0.x
+                  + (2.0 * PI / 3.0) * Y1 * dot(sh0.yzw, dir)
+                  + (PI / 4.0) * band2) / PI, 0.0, 1.0);
 }
 
 void main() {
@@ -525,13 +551,11 @@ void main() {
     vec4 vizSh = vec4(0.0);
     if (frame.uSkyMin.w > 0.5) {
         vec3 probeUv = (vWorldPos + N * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz;
-        vec4 sh = texture(uSkyVisibility, clamp(probeUv, vec3(0.0), vec3(1.0)));
         vizProbeUv = probeUv;
-        vizSh = sh;
-        // Cosine-convolved L1 evaluation: the same constants the irradiance probe is built with.
-        const float Y0 = 0.282095, Y1 = 0.488603;
-        skyVisibility = clamp(
-            (PI * Y0 * sh.x + (2.0 * PI / 3.0) * Y1 * dot(sh.yzw, gatherN)) / PI, 0.0, 1.0);
+        // One call, the same one glass and everything else uses. Two copies of this evaluation is
+        // how the volume and its readers drifted apart before.
+        skyVisibility = blixSkyVisibility(vWorldPos, gatherN);
+        vizSh = vec4(skyVisibility);
     }
 
     vec3 diffuseIBL = irradiance * albedo * skyVisibility;
@@ -649,7 +673,14 @@ void main() {
             // 12 and the ratio IS the bounce's strength, which is the number in dispute.
             frame.uVizChannel < 10.5 ? vizBounceRaw :
             frame.uVizChannel < 11.5 ? bounce :
-                                       direct;
+            frame.uVizChannel < 12.5 ? direct :
+            // <b>The occlusion stack, one term at a time and then multiplied.</b> Ambient is
+            // irradiance x albedo x skyVisibility x GTAO x textureAO — three occlusion terms in a
+            // row, each defensible alone. Whether their product is defensible is a question nobody
+            // had looked at, because nothing displayed it.
+            frame.uVizChannel < 13.5 ? vec3(visibility) :
+            frame.uVizChannel < 14.5 ? vec3(ao) :
+                                       vec3(skyVisibility * visibility * ao);
         // Straight out, no exposure and no tonemap — these are directions and flags, and a film
         // curve on a direction is a way to misread it.
         outColor = vec4(c, coverage);

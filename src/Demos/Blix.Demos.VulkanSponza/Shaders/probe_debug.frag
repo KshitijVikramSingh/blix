@@ -10,7 +10,7 @@
 // direction, where the visibility volume beside it stores L1 spherical harmonics. A directionless
 // probe renders as a flat disc — no shading across the sphere at all — and a directional one does
 // not. Whatever the field is doing, the sphere cannot hide it.
-#include "octahedral.glsl"
+#include "probe_volume.glsl"
 #define PI 3.14159265359
 
 layout(set = 0, binding = 0) uniform Frame {

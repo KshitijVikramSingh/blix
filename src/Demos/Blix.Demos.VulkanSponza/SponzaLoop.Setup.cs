@@ -71,6 +71,7 @@ internal sealed partial class SponzaLoop
         }
         if (cmdArgs.Contains("--no-mask")) forceOpaqueMask = true;
         if (cmdArgs.Contains("--msaa1")) MsaaSamples = 1;
+        if (cmdArgs.Contains("--msaa2")) MsaaSamples = 2;
         if (cmdArgs.Contains("--sun-from-probe")) alignSunToProbe = true;
         // Lets the probe view be exercised without a human reaching for a checkbox — which is how
         // it shipped a crash the first time: it compiled, it ran, and nothing had drawn it.
@@ -511,7 +512,9 @@ internal sealed partial class SponzaLoop
             new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2]), Slot: 3, ArrayIndex: 2),
             new ShaderTextureBinding("uFroxelGrid",           froxelGridTexture, Slot: 4),
             new ShaderTextureBinding("uAmbientVisibility", graph.GetColorTexture(ambientDenoisedHandle), Slot: 5),
-            new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 6),
+            new ShaderTextureBinding("uSkyVisibility",  skyVisibilityTextures[0], Slot: 6),
+            new ShaderTextureBinding("uSkyVisibility1", skyVisibilityTextures[1], Slot: 14),
+            new ShaderTextureBinding("uSkyVisibility2", skyVisibilityTextures[2], Slot: 15),
             // Bound per frame in OnRender, which flips between the pair; this is the initial one.
             new ShaderTextureBinding("uSkyBounce", bounceReady ? bounceTextures[0] : brdfLutTexture, Slot: 7),
             new ShaderTextureBinding("uSkyBounceDepth", bounceReady ? bounceDepthTextures[0] : brdfLutTexture, Slot: 13),
@@ -741,9 +744,11 @@ internal sealed partial class SponzaLoop
             try
             {
                 var volume = Blix.Graphics.Images.BlixSkyVolume.Read(path);
-                skyVisibilityTexture = vk.CreateTexture3D(
-                    volume.SizeX, volume.SizeY, volume.SizeZ, TextureFormat.Rgba16F,
-                    SamplerDescription.LinearClamp, volume.ToRgba16F(), "sponza.skyvis");
+                for (var t = 0; t < 3; t++)
+                    skyVisibilityTextures[t] = vk.CreateTexture3D(
+                        volume.SizeX, volume.SizeY, volume.SizeZ, TextureFormat.Rgba16F,
+                        SamplerDescription.LinearClamp, volume.ToRgba16F(t), $"sponza.skyvis{t}");
+                skyVisibilityTexture = skyVisibilityTextures[0];
                 skyVolumeMin = volume.Min;
                 var span = volume.Max - volume.Min;
                 skyVolumeSpan = span;

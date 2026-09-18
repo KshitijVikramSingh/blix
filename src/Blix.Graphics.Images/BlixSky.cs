@@ -61,13 +61,23 @@ public sealed record BlixSkyVolume(
     /// </remarks>
     public bool HasAlbedo => Albedo is { Length: > 0 };
 
-    /// <summary>Four floats per cell: L0, then L1 x/y/z.</summary>
-    public const int FloatsPerCell = 4;
+    /// <summary>Nine floats per cell: L0, L1 x/y/z, then the five L2 coefficients.</summary>
+    /// <remarks>
+    /// <b>Twelve on disk, because the runtime reads them as three RGBA texels.</b> Nine does not
+    /// divide into four, and the three wasted slots buy hardware trilinear filtering on a small 3D
+    /// texture — which is the entire reason this is spherical harmonics and not an octahedral atlas.
+    /// That was measured: the atlas reconstructs better and doubled the frame.
+    /// </remarks>
+    public const int FloatsPerCell = 12;
 
     private const ulong Magic = 0x594B53_58494C42UL; // "BLIXSKY"
     // v2 added the albedo grid after the occupancy block. No back-read: the bake takes 1.6 s and
     // nothing ships older files, so re-cooking is cheaper than carrying a migration.
-    private const int Version = 2;
+    // v3: L2 spherical harmonics, nine coefficients where there were four. L1 cannot express
+    // "bright in that cone, dark elsewhere", which is both of this scene's visibility failures — a
+    // vault ceiling inheriting an opening's direction-independent L0 and reading as sky-facing, and
+    // a courtyard floor losing the narrow zenith cone that is all the light it gets.
+    private const int Version = 3;
 
     public static void Write(string path, BlixSkyVolume v)
     {
@@ -104,11 +114,24 @@ public sealed record BlixSkyVolume(
     }
 
     /// <summary>The volume as Rgba16F bytes, in the order a 3D texture upload wants.</summary>
-    public byte[] ToRgba16F()
+    /// <summary>One of the three RGBA16F volumes the nine coefficients are split across.</summary>
+    /// <remarks>
+    /// Split rather than interleaved because a 3D texture holds four channels, and the shader wants
+    /// three filtered fetches rather than one fetch and a lot of address arithmetic.
+    /// Texture 0 carries L0 and L1; texture 1 the first four L2 terms; texture 2 the last, with
+    /// three slots spare.
+    /// </remarks>
+    public byte[] ToRgba16F(int texture)
     {
-        var bytes = new byte[SizeX * SizeY * SizeZ * FloatsPerCell * 2];
-        for (var i = 0; i < SizeX * SizeY * SizeZ * FloatsPerCell; i++)
-            BitConverter.TryWriteBytes(bytes.AsSpan(i * 2, 2), (Half)Coefficients[i]);
+        var cells = SizeX * SizeY * SizeZ;
+        var bytes = new byte[cells * 4 * 2];
+        for (var c = 0; c < cells; c++)
+        for (var k = 0; k < 4; k++)
+        {
+            var src = c * FloatsPerCell + texture * 4 + k;
+            var value = src < (c + 1) * FloatsPerCell ? Coefficients[src] : 0f;
+            BitConverter.TryWriteBytes(bytes.AsSpan((c * 4 + k) * 2, 2), (Half)value);
+        }
         return bytes;
     }
 }

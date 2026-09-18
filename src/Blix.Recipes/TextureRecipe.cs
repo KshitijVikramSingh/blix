@@ -238,6 +238,44 @@ public static class TextureRecipe
 
     // CPU mip chain via box filter (average of 2x2 pixels). Stops when the
     // smaller dimension hits `minDim`. Returns mip 0 (the original) first.
+
+    /// <summary>Scales each mip's alpha so the fraction above the cutoff matches the base level.</summary>
+    /// <remarks>
+    /// Textures with no partial alpha are untouched: if every texel is 0 or 255 the coverage already
+    /// matches at every level and the search returns a scale of 1.
+    /// </remarks>
+    private static void RescaleAlphaForCoverage(List<(byte[] Pixels, int Width, int Height)> mips)
+    {
+        const int cutoff = 128;
+        static double Coverage(byte[] px, double scale)
+        {
+            var n = 0;
+            for (var i = 3; i < px.Length; i += 4)
+                if (px[i] * scale >= cutoff) n++;
+            return n / (double)(px.Length / 4);
+        }
+
+        var target = Coverage(mips[0].Pixels, 1.0);
+        if (target <= 0.0) return;
+
+        for (var m = 1; m < mips.Count; m++)
+        {
+            var px = mips[m].Pixels;
+            if (Math.Abs(Coverage(px, 1.0) - target) < 0.001) continue;
+
+            // Coverage rises monotonically with the scale, so bisect it.
+            double lo = 0.0, hi = 64.0, scale = 1.0;
+            for (var it = 0; it < 24; it++)
+            {
+                scale = 0.5 * (lo + hi);
+                if (Coverage(px, scale) < target) lo = scale; else hi = scale;
+            }
+            if (Math.Abs(scale - 1.0) < 0.01) continue;
+            for (var i = 3; i < px.Length; i += 4)
+                px[i] = (byte)Math.Clamp((int)Math.Round(px[i] * scale), 0, 255);
+        }
+    }
+
     private static List<(byte[] Pixels, int Width, int Height)> GenerateMipsBoxFilter(
         byte[] basePixels, int baseW, int baseH, int minDim)
     {
@@ -297,6 +335,20 @@ public static class TextureRecipe
             w = nw;
             h = nh;
         }
+        // <b>Coverage, not mean alpha, is what a cutout material is.</b> A box filter conserves the
+        // average perfectly — measured on the cypress, mean alpha is 0.063 at every level — and
+        // destroys the thing that matters: the fraction of texels ABOVE the cutoff falls 6.33% to
+        // 1.56% by mip 9 and to zero by mip 10. A few opaque texels become many translucent ones.
+        //
+        // With alphaToCoverage that turns distant foliage into a uniform 6%-opaque haze, so the sky
+        // shows through the whole canopy rather than between the leaves — which is the blue tint on
+        // the tree, reported from the chair and finally explained by turning MSAA off, since that
+        // also disables alphaToCoverage. With a binary alpha test instead, the same collapse makes
+        // distant foliage vanish. Both are wrong, differently.
+        //
+        // Castano's remedy: scale each mip's alpha so its coverage matches mip 0's. Bisection
+        // because coverage is monotone in the scale but has no closed form.
+        RescaleAlphaForCoverage(mips);
         return mips;
     }
 

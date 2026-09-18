@@ -49,6 +49,8 @@ internal sealed partial class SponzaLoop
             var deg = 180f / MathF.PI;
             sunYaw   = debug.Controls.Float("Yaw (deg)", sunYaw * deg, -180f, 180f) / deg;
             sunPitch = debug.Controls.Float("Pitch (deg)", sunPitch * deg, -89f, -1f) / deg;
+            sunStrength = debug.Controls.Float("Strength (x measured)", sunStrength, 0f, 8f);
+            debug.Values.Value("sun-irradiance", $"{EffectiveSunIrradiance.X:0.00} ({sunIrradiance.X:0.00} measured)");
             UpdateSunDirection();
         }
         // Shadows + Render scopes are now [Tune]-tagged settings objects

@@ -48,6 +48,18 @@ vec3 blix_probeIrradiance(
     ivec3 dims, vec3 boundsMin, vec3 boundsSpan,
     vec3 worldPos, vec3 n)
 {
+    // <b>A surface must not reject its own probes, and without this bias it does.</b> The visibility
+    // test asks a probe how far its geometry is in this direction — and for a point sitting ON a
+    // wall, the nearest geometry that way IS that wall. The point is then further from the probe
+    // than the probe's own depth says, every one of the eight fails, and the fallback returns black.
+    // It shows up exactly where the test is most needed: surfaces tucked under arches and against
+    // walls, which go dark instead of picking up bounced sun.
+    //
+    // A quarter of a cell is the usual figure: enough to clear a surface, far short of moving the
+    // sample into the next room.
+    vec3 cellSize = boundsSpan / vec3(dims);
+    worldPos += n * (0.25 * max(max(cellSize.x, cellSize.y), cellSize.z));
+
     vec3 grid = clamp((worldPos - boundsMin) / boundsSpan, vec3(0.0), vec3(1.0)) * vec3(dims) - 0.5;
     ivec3 base = ivec3(floor(grid));
     vec3 frac = clamp(grid - vec3(base), vec3(0.0), vec3(1.0));
@@ -68,10 +80,18 @@ vec3 blix_probeIrradiance(
         float dist = length(toProbe);
         vec3 dir = dist > 1e-5 ? toProbe / dist : n;
 
-        // <b>Backface rejection.</b> A probe behind the surface has nothing to tell it, and this is
-        // the cheap half of the test — smoothed rather than binary so a surface turning past a
-        // probe does not pop.
-        weight *= max(dot(dir, n), 0.0) * 0.5 + 0.5;
+        // <b>Backface rejection, SQUARED so that it actually rejects.</b> The first form here was
+        // max(dot, 0) * 0.5 + 0.5, which ranges 0.5 to 1 and therefore never culls anything — a
+        // probe directly behind the surface still got half a vote, and every one of the sixteen
+        // texture fetches below ran for all eight probes. Squaring the half-angle term takes a
+        // probe at dot = -1 to exactly zero, which is both the correct weight and the thing that
+        // lets the loop skip its fetches.
+        float facing = dot(dir, n) * 0.5 + 0.5;
+        weight *= facing * facing;
+
+        // Skipped BEFORE the fetches, not after. The early-out was below them, so it saved the
+        // arithmetic and paid for the bandwidth anyway.
+        if (weight <= 1e-4) continue;
 
         // <b>Chebyshev visibility.</b> The probe's depth map, read in the direction of the shading
         // point, says how far its geometry is that way. If the point is further than that, a wall
@@ -86,12 +106,17 @@ vec3 blix_probeIrradiance(
             weight *= max(chebyshev * chebyshev * chebyshev, 0.0);
         }
 
-        if (weight <= 1e-5) continue;
+        if (weight <= 1e-4) continue;
         sum += texture(irradianceAtlas, blix_probeUv(probe, dims, n)).rgb * weight;
         weightSum += weight;
     }
 
-    // Every probe rejected: the point is enclosed in a way the volume cannot describe, and zero is
-    // a more honest answer than an unweighted average of the probes that just failed the test.
-    return weightSum > 1e-5 ? sum / weightSum : vec3(0.0);
+    // <b>Every probe rejected is a reconstruction failure, not a measurement of darkness.</b> Zero
+    // was the first answer here and it is wrong in the one place it fires: a point the volume cannot
+    // describe is not a point with no light on it. Falling back to the nearest probe unweighted is
+    // approximate and bounded; black is neither.
+    if (weightSum > 1e-5) return sum / weightSum;
+    ivec3 nearest = clamp(ivec3(floor(grid + 0.5)), ivec3(0), dims - 1);
+    return texture(irradianceAtlas, blix_probeUv(nearest, dims, n)).rgb;
 }
+

@@ -57,7 +57,11 @@ public static class BlixTex
     // transparent gaps around it took three quarters of its colour from whatever was left in them,
     // which walked the cypress's green/blue ratio from 5.14 at mip 0 to 3.08 at the tail. Opaque
     // textures are byte-identical — with alpha 255 everywhere the weights are equal.
-    public const uint ShippedRecipeVersion = 4;
+    // v5: mip alpha rescaled so cutout COVERAGE is preserved, not just mean alpha. A box filter
+    // conserves the average and destroys the fraction above the cutoff — 6.33% to 0% by the tail on
+    // the cypress — which under alphaToCoverage turns distant foliage into a uniform haze the sky
+    // shows through, and under a binary alpha test makes it vanish.
+    public const uint ShippedRecipeVersion = 5;
     public const uint Version3 = 3;
     public const uint KindTexture2D = 1;
     public const int HeaderSize = 28;

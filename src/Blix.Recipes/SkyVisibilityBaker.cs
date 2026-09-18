@@ -56,15 +56,42 @@ public static class SkyVisibilityBaker
     /// representation the irradiance probe already uses — so the convolution constants below are
     /// the standard ones rather than anything invented here.
     /// </remarks>
-    public readonly record struct SkyCell(float L0, Vector3 L1)
+    /// <summary>
+    /// One cell: the visibility function projected onto L2 spherical harmonics — nine coefficients.
+    /// </summary>
+    /// <remarks>
+    /// <b>L1 could not say "bright in that cone and dark everywhere else", and both of this arc's
+    /// visibility failures were that sentence.</b> L0 is direction-independent, so near an arcade
+    /// opening every surface inherits it — including a vault CEILING, which then reads as sky-facing
+    /// and leaks light into a room it points away from. One linear lobe cannot subtract a bright
+    /// opening from a surface facing away from it. And in the other direction, a courtyard floor
+    /// sees a narrow cone directly overhead that L1 smears into a broad lobe, losing the peak: 0.041
+    /// where the raw transmittance is 0.057 and the correct answer is above it.
+    ///
+    /// The quadratic band is what represents a cone. An octahedral map represents it better still
+    /// and was tried and reverted — it doubled the frame, because nine floats live in three small 3D
+    /// textures that the hardware filters with perfect locality, while an atlas costs an octahedral
+    /// encode and a scattered texel at every call site.
+    /// </remarks>
+    public readonly record struct SkyCell(
+        float L0,
+        Vector3 L1,
+        float L2m2, float L2m1, float L20, float L2p1, float L2p2)
     {
-        // Cosine-convolved evaluation: what fraction of the hemisphere around `n` escapes.
-        // A0 = pi and A1 = 2pi/3 are the Lambertian convolution coefficients; the 1/pi returns a
-        // fraction rather than an irradiance.
+        // Cosine-convolved evaluation (Ramamoorthi & Hanrahan 2001): the band coefficients are
+        // pi, 2pi/3 and pi/4, and the trailing 1/pi turns irradiance into the fraction a visibility
+        // term wants.
         public float Visibility(Vector3 n)
         {
-            const float Y0 = 0.282095f, Y1 = 0.488603f;
-            var v = (MathF.PI * Y0 * L0 + (2f * MathF.PI / 3f) * Y1 * Vector3.Dot(L1, n)) / MathF.PI;
+            const float Y0 = 0.282095f, Y1 = 0.488603f, Y2 = 1.092548f, Y20c = 0.315392f, Y22c = 0.546274f;
+            const float A0 = MathF.PI, A1 = 2f * MathF.PI / 3f, A2 = MathF.PI / 4f;
+            var band2 =
+                Y2 * L2m2 * n.X * n.Y +
+                Y2 * L2m1 * n.Y * n.Z +
+                Y20c * L20 * (3f * n.Z * n.Z - 1f) +
+                Y2 * L2p1 * n.X * n.Z +
+                Y22c * L2p2 * (n.X * n.X - n.Y * n.Y);
+            var v = (A0 * Y0 * L0 + A1 * Y1 * Vector3.Dot(L1, n) + A2 * band2) / MathF.PI;
             return Math.Clamp(v, 0f, 1f);
         }
     }
@@ -214,6 +241,7 @@ public static class SkyVisibilityBaker
         TextureFormat.Bc5Unorm => BCnEncoder.Shared.CompressionFormat.Bc5,
         _ => throw new NotSupportedException($"no CPU decode for {fmt}"),
     };
+
 
     /// <summary>A world-space box. Local so the baker does not drag Blix.Geometry into the cook.</summary>
     public readonly record struct Bounds3Lite(Vector3 Min, Vector3 Max);
@@ -398,11 +426,13 @@ public static class SkyVisibilityBaker
                 var origin = min + new Vector3(
                     (x + 0.5f) * span.X / px, (y + 0.5f) * span.Y / py, (z + 0.5f) * span.Z / pz);
 
-                // Project the binary visibility function onto L0 + L1. The 4*pi/N is the Monte
-                // Carlo weight for a uniform sphere; the basis constants are the real ones.
-                const float Y0 = 0.282095f, Y1 = 0.488603f;
+                // Project onto L0 + L1 + L2. The 4*pi/N is the Monte Carlo weight for a uniform
+                // sphere; the basis constants are the real ones.
+                const float Y0 = 0.282095f, Y1 = 0.488603f, Y2 = 1.092548f;
+                const float Y20c = 0.315392f, Y22c = 0.546274f;
                 var l0 = 0f;
                 var l1 = Vector3.Zero;
+                float l2m2 = 0f, l2m1 = 0f, l20 = 0f, l2p1 = 0f, l2p2 = 0f;
                 foreach (var dir in directions)
                 {
                     // Transmittance, not a yes/no. A ray through a canopy arrives carrying what got
@@ -411,9 +441,30 @@ public static class SkyVisibilityBaker
                     if (t <= 0.001f) continue;
                     l0 += Y0 * t;
                     l1 += Y1 * t * dir;
+                    l2m2 += Y2 * t * dir.X * dir.Y;
+                    l2m1 += Y2 * t * dir.Y * dir.Z;
+                    l20 += Y20c * t * (3f * dir.Z * dir.Z - 1f);
+                    l2p1 += Y2 * t * dir.X * dir.Z;
+                    l2p2 += Y22c * t * (dir.X * dir.X - dir.Y * dir.Y);
                 }
                 var w = 4f * MathF.PI / directions.Length;
-                cells[(z * py + y) * px + x] = new SkyCell(l0 * w, l1 * w);
+
+                // <b>Windowed, because L2 rings.</b> Reconstructing a sharp function from a few
+                // bands overshoots at the discontinuities — Gibbs — and visibility is about as sharp
+                // as a function gets: one either sees the sky or does not. The overshoot lands ABOVE
+                // the true value, so it reads as bright patches on faces that should be dark, which
+                // is exactly what L2 produced before this. L1 rings too and shows it less, having
+                // nothing sharp enough to ring with.
+                //
+                // sinc(l / (L + 1)) is Sloan's window: it costs some of the very sharpness the
+                // second band was added for, which is the trade — a slightly soft cone beats a cone
+                // with bright fringes around it.
+                const float W1 = 0.8270f;   // sinc(1/3)
+                const float W2 = 0.4135f;   // sinc(2/3)
+                cells[(z * py + y) * px + x] = new SkyCell(
+                    l0 * w,
+                    l1 * (w * W1),
+                    l2m2 * w * W2, l2m1 * w * W2, l20 * w * W2, l2p1 * w * W2, l2p2 * w * W2);
             }
         });
 
@@ -476,6 +527,7 @@ public static class SkyVisibilityBaker
                 if (valid[i]) continue;
                 var acc0 = 0f;
                 var acc1 = Vector3.Zero;
+                float a2m2 = 0f, a2m1 = 0f, a20 = 0f, a2p1 = 0f, a2p2 = 0f;
                 var n = 0;
                 for (var dz = -1; dz <= 1; dz++)
                 for (var dy = -1; dy <= 1; dy++)
@@ -487,10 +539,13 @@ public static class SkyVisibilityBaker
                     if (!valid[j]) continue;
                     acc0 += cells[j].L0;
                     acc1 += cells[j].L1;
+                    a2m2 += cells[j].L2m2; a2m1 += cells[j].L2m1; a20 += cells[j].L20;
+                    a2p1 += cells[j].L2p1; a2p2 += cells[j].L2p2;
                     n++;
                 }
                 if (n == 0) continue;
-                cells[i] = new SkyCell(acc0 / n, acc1 / n);
+                cells[i] = new SkyCell(acc0 / n, acc1 / n,
+                    a2m2 / n, a2m1 / n, a20 / n, a2p1 / n, a2p2 / n);
                 next[i] = true;
                 filledThisPass++;
             }

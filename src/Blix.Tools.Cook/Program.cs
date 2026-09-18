@@ -117,14 +117,16 @@ public static class Program
         var outPath = ValueOf(args, "--out");
         if (outPath is not null)
         {
-            var coeffs = new float[vol.SizeX * vol.SizeY * vol.SizeZ * 4];
+            var coeffs = new float[vol.SizeX * vol.SizeY * vol.SizeZ * Blix.Graphics.Images.BlixSkyVolume.FloatsPerCell];
             for (var z = 0; z < vol.SizeZ; z++)
             for (var y = 0; y < vol.SizeY; y++)
             for (var x = 0; x < vol.SizeX; x++)
             {
                 var c = vol.At(x, y, z);
-                var o = ((z * vol.SizeY + y) * vol.SizeX + x) * 4;
+                var o = ((z * vol.SizeY + y) * vol.SizeX + x) * Blix.Graphics.Images.BlixSkyVolume.FloatsPerCell;
                 coeffs[o] = c.L0; coeffs[o + 1] = c.L1.X; coeffs[o + 2] = c.L1.Y; coeffs[o + 3] = c.L1.Z;
+                coeffs[o + 4] = c.L2m2; coeffs[o + 5] = c.L2m1; coeffs[o + 6] = c.L20; coeffs[o + 7] = c.L2p1;
+                coeffs[o + 8] = c.L2p2;
             }
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
             Blix.Graphics.Images.BlixSkyVolume.Write(outPath, new Blix.Graphics.Images.BlixSkyVolume(

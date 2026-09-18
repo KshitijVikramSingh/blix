@@ -101,7 +101,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // --msaa1 drops to a single sample. It used to lose the device; the cause was the depth
     // pre-pass resolving unconditionally, which is invalid with nothing to resolve. See
     // SampleableSceneDepth.
-    private int MsaaSamples = 4;
+    // <b>2x, not 4x.</b> Measured across two opposite orderings to cancel the thermal drift that
+    // makes every sequential comparison on this machine a lie: 4x costs roughly 17 ms more, while 2x
+    // sits level with MSAA off. And 2x tracks 4x visually — mean 23.92 against 24.08, edge energy
+    // 11.69 against 11.34 — where OFF breaks away from both, because alphaToCoverage is enabled only
+    // above one sample and Sponza's foliage is mostly alpha coverage.
+    private int MsaaSamples = 2;
     private PassHandle litPassHandle;
 
     // Depth pre-pass: renders non-blend geometry depth-only into depthHandle
@@ -159,6 +164,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private readonly AmbientSettings ambient = new();
 
     // Baked sky visibility (.blixsky), uploaded as an Rgba16F 3D texture of L1 coefficients.
+    // Three volumes for nine L2 coefficients: L0+L1, four L2 terms, and the last with slots spare.
+    private readonly TextureHandle[] skyVisibilityTextures = new TextureHandle[3];
     private TextureHandle skyVisibilityTexture;
     private Vector3 skyVolumeMin;
     private Vector3 skyVolumeInvSpan;
@@ -399,6 +406,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
         "Front/back facing", "Tangent", "Bitangent", "Sky visibility",
         "Probe UV", "Raw probe L0",
         "Bounce radiance (raw)", "Bounce contribution", "Direct sun only",
+        "GTAO visibility", "Texture AO", "Occlusion product",
     };
 
     // Live overrides for the two cloth numbers, so they can be found by eye and then written back
@@ -436,7 +444,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private static readonly int[] ShadowMapSizes = { 2048, 2048, 1024 };
     // View-space depth boundaries: cascade i covers (Splits[i], Splits[i+1]).
     // [1..3] (the cascade far distances) are live-tunable from the overlay.
-    private readonly float[] cascadeSplits = { 0.1f, 6f, 22f, 60f };
+    // <b>Cascade 0 reaches 14 m, not 6.</b> At 6 m the switch to cascade 1 happened close enough to
+    // the camera that the resolution step was visible as choppy shadow edges on anything mid-range.
+    // 2048 texels over 14 m is 7 mm each, which is still finer than the geometry has detail.
+    private readonly float[] cascadeSplits = { 0.1f, 14f, 30f, 60f };
     // Per-cascade frustum culling of shadow casters (overlay toggle + margin).
     private bool cullEnabled = true;
     private float cullMargin = 0.5f;
@@ -699,6 +710,25 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     /// one place a number is still chosen rather than derived, and it says so.
     /// </remarks>
     private Vector3 sunIrradiance = new(9.42f, 9.42f, 9.42f);
+
+    /// <summary>Multiplier on the MEASURED sun irradiance. 1.0 is what the probe reported.</summary>
+    /// <remarks>
+    /// <b>A knob the units arc deliberately deleted, coming back with a different meaning.</b> What
+    /// was removed were intensity dials that stood in for a measurement nobody had taken — the sun's
+    /// brightness was whatever made the image look right. It is measured now, off the HDR the IBL is
+    /// baked from, so this multiplies a known quantity instead of replacing it: 1.0 is the
+    /// measurement, and anything else is a scene decision somebody can read and argue with. The same
+    /// shape as BounceStrength, and for the same reason.
+    /// <para>
+    /// It scales the sun everywhere at once — the raster's direct term, the shadowed sun inside the
+    /// probe injection, and therefore the bounce as well. A sun that is brighter for the eye and not
+    /// for the indirect solve would be a lie the second bounce would expose.
+    /// </para>
+    /// </remarks>
+    private float sunStrength = 1f;
+
+    /// <summary>The sun as everything downstream should see it.</summary>
+    private Vector3 EffectiveSunIrradiance => sunIrradiance * sunStrength;
 
     // Shader-uniform tunables (sun/ambient intensity, metallic/normal/shadow
     // thresholds, cascade-viz) are declared with //@tune in lit.frag and

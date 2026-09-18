@@ -108,10 +108,11 @@ internal sealed partial class SponzaLoop
         {
             new("uViewProjection",   new Matrix4x4Uniform(viewProj)),
             new("uSunDirection",     new Vector3Uniform(sunDirection)),
-            new("uSunIrradiance",    new Vector3Uniform(sunIrradiance)),
+            new("uSunIrradiance",    new Vector3Uniform(EffectiveSunIrradiance)),
             new("uCameraPos",        new Vector3Uniform(cameraPosition)),
             new("uEnvMipCount",      new FloatUniform(iblPrefilterMips)),
             new("uSheenMipCount",    new FloatUniform(sheenMipCount)),
+            new("uSkyDims",          new Vector4Uniform(new Vector4(probeX, probeY, probeZ, 0f))),
             // w marks whether shading should write usage at all — off while the volume is not ready.
             new("uBounceDims", new Vector4Uniform(new Vector4(
                 bounceX, bounceY, bounceZ, bounceReady && probeSleepFrames > 0f ? 1f : 0f))),
@@ -283,7 +284,7 @@ internal sealed partial class SponzaLoop
                 new("uCamPos",        new Vector4Uniform(new Vector4(cameraPosition, fog.Far))),
                 new("uCamForward",    new Vector4Uniform(new Vector4(cameraForward, fog.Density))),
                 // The froxel pass scatters the same sun, so it takes the same measured irradiance.
-                new("uSunDir",        new Vector4Uniform(new Vector4(sunDirection, sunIrradiance.X))),
+                new("uSunDir",        new Vector4Uniform(new Vector4(sunDirection, EffectiveSunIrradiance.X))),
                 new("uSunColor",      new Vector4Uniform(new Vector4(1f, 1f, 1f, fog.Scatter))),
                 new("uFogParams",     new Vector4Uniform(new Vector4(fog.PhaseG, fog.Ambient, 0f, 0f))),
                 // No splits: the fog picks its cascade by containment through the shared lookup,
@@ -355,7 +356,7 @@ internal sealed partial class SponzaLoop
                 // side wearing its colour. Zero on opaque cells in the shader, or walls would leak.
                 new("uAlbedoDims", new Vector4Uniform(new Vector4(albX, albY, albZ, injectTranslucency))),
                 new("uSunDirection",  new Vector4Uniform(new Vector4(sunDirection, 0f))),
-                new("uSunIrradiance", new Vector4Uniform(new Vector4(sunIrradiance, 0f))),
+                new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
                 new("uSchedule", new Vector4Uniform(new Vector4(
                     framesRendered, MathF.Round(injectPeriod),
                     probeSleepFrames > 0f ? 1f / probeSleepFrames : 0f, 0f))),
