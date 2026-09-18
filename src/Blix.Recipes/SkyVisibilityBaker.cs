@@ -137,23 +137,42 @@ public static class SkyVisibilityBaker
         var solid = new bool[ox * oy * oz];
         var cell = new Vector3(span.X / ox, span.Y / oy, span.Z / oz);
 
-        // Voxelise by marking each triangle's AABB cells that the triangle plane passes near. Not a
-        // conservative rasteriser: at this cell size a triangle spans few cells and the error is a
-        // voxel either way, which is below what the probes resolve.
+        // Voxelise by sampling each triangle's SURFACE, densely enough that no cell it crosses is
+        // missed.
+        //
+        // <b>Filling each triangle's bounding box instead is what made the first bake useless, and
+        // the comment here excused it: "at this cell size a triangle spans few cells".</b> That is
+        // true of a leaf and false of a floor slab, and Sponza is built from large quads. Their
+        // AABBs are big boxes, filling one marks the whole volume solid, and the courtyard — open to
+        // the sky in life — baked as the inside of a brick. Open air two metres above the floor
+        // reported sky visibility 0.006.
+        //
+        // Surface sampling has the opposite failure, missing a cell a triangle only clips, and that
+        // is the safe direction: a pinhole in a wall leaks a little light, where a filled courtyard
+        // deletes all of it.
+        var cellDiag = cell.Length();
         foreach (var (a, b, c) in tris)
         {
-            var lo = Vector3.Min(a, Vector3.Min(b, c));
-            var hi = Vector3.Max(a, Vector3.Max(b, c));
-            var x0 = Math.Clamp((int)((lo.X - min.X) / cell.X), 0, ox - 1);
-            var x1 = Math.Clamp((int)((hi.X - min.X) / cell.X), 0, ox - 1);
-            var y0 = Math.Clamp((int)((lo.Y - min.Y) / cell.Y), 0, oy - 1);
-            var y1 = Math.Clamp((int)((hi.Y - min.Y) / cell.Y), 0, oy - 1);
-            var z0 = Math.Clamp((int)((lo.Z - min.Z) / cell.Z), 0, oz - 1);
-            var z1 = Math.Clamp((int)((hi.Z - min.Z) / cell.Z), 0, oz - 1);
-            for (var z = z0; z <= z1; z++)
-            for (var y = y0; y <= y1; y++)
-            for (var x = x0; x <= x1; x++)
+            var area = Vector3.Cross(b - a, c - a).Length() * 0.5f;
+            // Two samples per cell-width along each edge direction, so a triangle crossing a cell
+            // puts at least one sample in it.
+            // <b>The cap has to clear the biggest triangle in the scene, not a typical one.</b> At 64
+            // a large floor quad got about 2,100 samples across roughly 4,600 cells, so the floor
+            // voxelised with holes — and the bake reported more sky escaping DOWNWARD than upward
+            // from inside the arcade, which is impossible for a building with a floor. That negative
+            // L1.y is what a leaking surface looks like from the far end of the pipeline.
+            var steps = Math.Clamp((int)MathF.Ceiling(MathF.Sqrt(area) * 2f / cellDiag), 1, 1024);
+            for (var i = 0; i <= steps; i++)
+            for (var j = 0; j <= steps - i; j++)
+            {
+                var u = i / (float)steps;
+                var v = j / (float)steps;
+                var p = a + (b - a) * u + (c - a) * v;
+                var x = Math.Clamp((int)((p.X - min.X) / cell.X), 0, ox - 1);
+                var y = Math.Clamp((int)((p.Y - min.Y) / cell.Y), 0, oy - 1);
+                var z = Math.Clamp((int)((p.Z - min.Z) / cell.Z), 0, oz - 1);
                 solid[(z * oy + y) * ox + x] = true;
+            }
         }
 
         var filled = solid.Count(s => s);
@@ -188,8 +207,127 @@ public static class SkyVisibilityBaker
             }
         });
 
-        log?.Invoke($"  traced {px}x{py}x{pz} probes x {rays} rays");
+        log?.Invoke($"  traced {px}x{py}x{pz} probes x {rays} rays (direct sky)");
+
+        // --- Why there is no bounce pass here -------------------------------
+        // <b>There was one, and it made this volume mean two things at once.</b> Rays that hit were
+        // given the visibility of the surface they struck, times an albedo. The result is not
+        // visibility any more — it is incoming radiance — and the shader multiplies sky irradiance
+        // by this SH, which already carries the sky's own directional distribution. Multiplying two
+        // directional fields double-counts direction, and it showed: inside the arcade the bounced
+        // field pointed DOWNWARD, correctly, because the brightest nearby surface is the floor. An
+        // up-facing floor then evaluated NEGATIVE and clamped to black.
+        //
+        // Visibility multiplies. Radiance adds. They are different quantities and they need
+        // different storage, and the bounce that actually matters cannot live here anyway: it is the
+        // SUN's, at irradiance 17, and a sun-independent bake cannot carry it. Sky-only bounce was
+        // measured at this scene and lifts interior visibility 0.15 -> 0.19, which is not the
+        // missing light.
+        //
+        // So this file stores visibility, the one thing that is purely geometry and stays true as
+        // the sun moves. The bounce belongs to a runtime pass that injects the current sun into the
+        // same voxel grid.
+
+        // --- Probes buried in geometry ---------------------------------------
+        // <b>A probe whose centre is inside a wall sees nothing, and every surface near that wall
+        // samples it.</b> This is what made the first wired-up version black rather than dim: the
+        // cell under Sponza's floor reported exactly zero, and the floor is what reads it. Pushing
+        // the lookup along the normal does not rescue it — the offset would have to exceed a cell,
+        // and a cell here is 0.77 m.
+        //
+        // So invalid cells are filled from their valid neighbours, repeatedly, until the interior of
+        // solid geometry carries whatever the space around it carries. A buried probe has no right
+        // answer; what it needs is to stop poisoning the surfaces that interpolate through it.
+        var valid = new bool[cells.Length];
+        var buried = 0;
+        for (var z = 0; z < pz; z++)
+        for (var y = 0; y < py; y++)
+        for (var x = 0; x < px; x++)
+        {
+            var origin = min + new Vector3(
+                (x + 0.5f) * span.X / px, (y + 0.5f) * span.Y / py, (z + 0.5f) * span.Z / pz);
+            var v = (origin - min) / cell;
+            var solidHere = solid[
+                (Math.Clamp((int)v.Z, 0, oz - 1) * oy + Math.Clamp((int)v.Y, 0, oy - 1)) * ox
+                + Math.Clamp((int)v.X, 0, ox - 1)];
+            valid[(z * py + y) * px + x] = !solidHere;
+            if (solidHere) buried++;
+        }
+
+        for (var pass = 0; pass < 8; pass++)
+        {
+            var filledThisPass = 0;
+            var next = (bool[])valid.Clone();
+            for (var z = 0; z < pz; z++)
+            for (var y = 0; y < py; y++)
+            for (var x = 0; x < px; x++)
+            {
+                var i = (z * py + y) * px + x;
+                if (valid[i]) continue;
+                var acc0 = 0f;
+                var acc1 = Vector3.Zero;
+                var n = 0;
+                for (var dz = -1; dz <= 1; dz++)
+                for (var dy = -1; dy <= 1; dy++)
+                for (var dx = -1; dx <= 1; dx++)
+                {
+                    int nx2 = x + dx, ny2 = y + dy, nz2 = z + dz;
+                    if (nx2 < 0 || ny2 < 0 || nz2 < 0 || nx2 >= px || ny2 >= py || nz2 >= pz) continue;
+                    var j = (nz2 * py + ny2) * px + nx2;
+                    if (!valid[j]) continue;
+                    acc0 += cells[j].L0;
+                    acc1 += cells[j].L1;
+                    n++;
+                }
+                if (n == 0) continue;
+                cells[i] = new SkyCell(acc0 / n, acc1 / n);
+                next[i] = true;
+                filledThisPass++;
+            }
+            valid = next;
+            if (filledThisPass == 0) break;
+        }
+        log?.Invoke($"  filled {buried} probes buried in geometry ({100.0 * buried / cells.Length:0.0}%)");
+
         return new Volume(new Bounds3Lite(min, max), px, py, pz, cells);
+    }
+
+    // As Occluded, but reports WHERE it stopped, so a second pass can ask what that surface sees.
+    private static bool Trace(
+        Vector3 origin, Vector3 dir, Vector3 min, Vector3 cell, int nx, int ny, int nz, bool[] solid,
+        out Vector3 hit)
+    {
+        var p = (origin - min) / cell;
+        var x = Math.Clamp((int)p.X, 0, nx - 1);
+        var y = Math.Clamp((int)p.Y, 0, ny - 1);
+        var z = Math.Clamp((int)p.Z, 0, nz - 1);
+        var stepX = dir.X > 0 ? 1 : -1;
+        var stepY = dir.Y > 0 ? 1 : -1;
+        var stepZ = dir.Z > 0 ? 1 : -1;
+        float Next(float pos, int step, float d) =>
+            MathF.Abs(d) < 1e-9f ? float.MaxValue
+            : (step > 0 ? (MathF.Floor(pos) + 1 - pos) : (pos - MathF.Floor(pos))) / MathF.Abs(d);
+        var tMaxX = Next(p.X, stepX, dir.X);
+        var tMaxY = Next(p.Y, stepY, dir.Y);
+        var tMaxZ = Next(p.Z, stepZ, dir.Z);
+        var tDeltaX = MathF.Abs(dir.X) < 1e-9f ? float.MaxValue : 1f / MathF.Abs(dir.X);
+        var tDeltaY = MathF.Abs(dir.Y) < 1e-9f ? float.MaxValue : 1f / MathF.Abs(dir.Y);
+        var tDeltaZ = MathF.Abs(dir.Z) < 1e-9f ? float.MaxValue : 1f / MathF.Abs(dir.Z);
+        var first = true;
+        while (true)
+        {
+            if (!first && solid[(z * ny + y) * nx + x])
+            {
+                hit = min + new Vector3((x + 0.5f) * cell.X, (y + 0.5f) * cell.Y, (z + 0.5f) * cell.Z);
+                return true;
+            }
+            first = false;
+            if (tMaxX < tMaxY && tMaxX < tMaxZ) { x += stepX; tMaxX += tDeltaX; if (x < 0 || x >= nx) break; }
+            else if (tMaxY < tMaxZ)             { y += stepY; tMaxY += tDeltaY; if (y < 0 || y >= ny) break; }
+            else                                { z += stepZ; tMaxZ += tDeltaZ; if (z < 0 || z >= nz) break; }
+        }
+        hit = default;
+        return false;
     }
 
     // Amanatides-Woo DDA through the occupancy grid. Returns true if the ray hits before leaving.

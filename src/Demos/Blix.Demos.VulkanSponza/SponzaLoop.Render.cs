@@ -122,6 +122,11 @@ internal sealed partial class SponzaLoop
             new("uFog",              new Vector4Uniform(
                 new Vector4(frame.Width, frame.Height, fog.Far, fog.Enabled ? 1f : 0f))),
             new("uVizChannel",       new FloatUniform(vizChannel)),
+            new("uSkyMin",           new Vector4Uniform(new Vector4(
+                skyVolumeMin, skyVolumeLoaded && skyVisibilityEnabled ? 1f : 0f))),
+            // w: how far along the normal the probe lookup is pushed. About one cell, so a surface
+            // asks the cell in FRONT of it rather than the one it is embedded in.
+            new("uSkyScale",         new Vector4Uniform(new Vector4(skyVolumeInvSpan, 0.6f))),
             // One component per --ab shading mode, live only during that mode's off-phase.
             new("uAbFlags",          new Vector4Uniform(new Vector4(
                 AbOffPhase && abMode == "textures" ? 1f : 0f,

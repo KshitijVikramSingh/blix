@@ -49,6 +49,7 @@ internal sealed partial class SponzaLoop
         if (cmdArgs.Contains("--no-ao")) ambient.Enabled = false;
         if (cmdArgs.Contains("--no-shadow")) shadows.Enabled = false;
         if (cmdArgs.Contains("--ao-fullres")) aoScale = 1f;
+        if (cmdArgs.Contains("--sky")) skyVisibilityEnabled = true;
         if (cmdArgs.Contains("--no-mask")) forceOpaqueMask = true;
         if (cmdArgs.Contains("--msaa1")) MsaaSamples = 1;
         // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every
@@ -117,6 +118,7 @@ internal sealed partial class SponzaLoop
 
         if (!TryLocateSponza(out var assetsRoot, out var gltfPath)) return;
         LoadIbl(assetsRoot);
+        LoadSkyVisibility(assetsRoot);
 
         // --- Render graph ------------------------------------------------
         graph = new RenderGraph(vk);
@@ -444,6 +446,7 @@ internal sealed partial class SponzaLoop
             new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2]), Slot: 3, ArrayIndex: 2),
             new ShaderTextureBinding("uFroxelGrid",           froxelGridTexture, Slot: 4),
             new ShaderTextureBinding("uAmbientVisibility", graph.GetColorTexture(ambientDenoisedHandle), Slot: 5),
+            new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 6),
         };
 
         // Froxel compute set-0 image bindings (constant handles): the storage
@@ -623,5 +626,72 @@ internal sealed partial class SponzaLoop
         irradianceCubeTexture = sky.Irradiance;
         brdfLutTexture = sky.BrdfLut;
         iblPrefilterMips = sky.PrefilterMips;
+    }
+
+    /// <summary>Loads the baked sky-visibility volume, if the pack ships one.</summary>
+    /// <remarks>
+    /// <b>Optional, and a scene without one looks exactly as it did.</b> The shader gates on
+    /// uSkyMin.w, so a missing volume means every surface sees a full sky — the behaviour that was
+    /// there before this existed. A renderer that refuses to start because an optional bake is
+    /// absent has turned an improvement into a dependency.
+    ///
+    /// Still bound when absent: a descriptor with no texture is a validation error, so a 1x1x1
+    /// volume of "sees everything" stands in. That keeps the binding table uniform rather than
+    /// making every consumer branch on whether the slot exists.
+    /// </remarks>
+    private void LoadSkyVisibility(string assetsRoot)
+    {
+        var path = Directory.EnumerateFiles(assetsRoot, "*.blixsky", SearchOption.AllDirectories)
+            .FirstOrDefault();
+        if (path is not null)
+        {
+            try
+            {
+                var volume = Blix.Graphics.Images.BlixSkyVolume.Read(path);
+                skyVisibilityTexture = vk.CreateTexture3D(
+                    volume.SizeX, volume.SizeY, volume.SizeZ, TextureFormat.Rgba16F,
+                    SamplerDescription.LinearClamp, volume.ToRgba16F(), "sponza.skyvis");
+                skyVolumeMin = volume.Min;
+                var span = volume.Max - volume.Min;
+                skyVolumeInvSpan = new Vector3(1f / span.X, 1f / span.Y, 1f / span.Z);
+                skyVolumeLoaded = true;
+                Console.WriteLine(
+                    $"[VulkanSponza] sky visibility: {Path.GetFileName(path)} " +
+                    $"{volume.SizeX}x{volume.SizeY}x{volume.SizeZ} probes, " +
+                    $"min {volume.Min} span {span} invSpan {skyVolumeInvSpan}");
+                // What the CPU thinks an up-facing surface sees, at two known places, so the
+                // shader's answer can be compared against something rather than eyeballed.
+                foreach (var (label, at) in new[]
+                {
+                    ("atrium floor", new Vector3(0f, 0.5f, 0f)),
+                    ("above roof",   new Vector3(0f, 18f, 0f)),
+                })
+                {
+                    var t = (at - volume.Min) * skyVolumeInvSpan;
+                    var cx = Math.Clamp((int)(t.X * volume.SizeX), 0, volume.SizeX - 1);
+                    var cy = Math.Clamp((int)(t.Y * volume.SizeY), 0, volume.SizeY - 1);
+                    var cz = Math.Clamp((int)(t.Z * volume.SizeZ), 0, volume.SizeZ - 1);
+                    var o = ((cz * volume.SizeY + cy) * volume.SizeX + cx) * 4;
+                    var l0 = volume.Coefficients[o];
+                    var l1 = new Vector3(volume.Coefficients[o + 1], volume.Coefficients[o + 2], volume.Coefficients[o + 3]);
+                    const float Y0 = 0.282095f, Y1 = 0.488603f;
+                    var vis = (MathF.PI * Y0 * l0 + (2f * MathF.PI / 3f) * Y1 * Vector3.Dot(l1, Vector3.UnitY)) / MathF.PI;
+                    Console.WriteLine($"[VulkanSponza]   {label,-13} uv {t} -> L0 {l0:0.000} vis(up) {vis:0.000}");
+                }
+                return;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[VulkanSponza] sky visibility: {Path.GetFileName(path)} unreadable — {ex.Message}");
+            }
+        }
+
+        var open = new byte[4 * 2];
+        // L0 for a fully open sphere: integral of Y0 over the sphere = 4*pi*0.282095.
+        BitConverter.TryWriteBytes(open.AsSpan(0, 2), (Half)(4f * MathF.PI * 0.282095f));
+        skyVisibilityTexture = vk.CreateTexture3D(
+            1, 1, 1, TextureFormat.Rgba16F, SamplerDescription.LinearClamp, open, "sponza.skyvis.open");
+        skyVolumeLoaded = false;
+        Console.WriteLine("[VulkanSponza] sky visibility: none found — every surface sees a full sky.");
     }
 }

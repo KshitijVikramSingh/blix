@@ -137,6 +137,19 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private PipelineHandle gtaoDenoisePipeline;
     private readonly AmbientSettings ambient = new();
 
+    // Baked sky visibility (.blixsky), uploaded as an Rgba16F 3D texture of L1 coefficients.
+    private TextureHandle skyVisibilityTexture;
+    private Vector3 skyVolumeMin;
+    private Vector3 skyVolumeInvSpan;
+    private bool skyVolumeLoaded;
+
+    // --sky. <b>Off by default, because the baked half is correct and the picture is not.</b>
+    // Visibility is verified against the analytic upper hemisphere and the enclosure it reports is
+    // real, but multiplying sky irradiance by it removes light that nothing yet replaces: the term
+    // that fills a courtyard is the SUN bouncing off its lit walls, at irradiance 17, and no
+    // sun-independent bake can carry that. On by default this makes Sponza darker and worse.
+    private bool skyVisibilityEnabled;
+
     private ShaderProgramHandle prepassOpaqueProgram;
     private ShaderProgramHandle prepassMaskProgram;
     private PipelineHandle prepassOpaquePipeline;

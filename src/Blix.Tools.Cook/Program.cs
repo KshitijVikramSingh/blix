@@ -113,6 +113,24 @@ public static class Program
         var b = vol.Bounds;
         Console.WriteLine($"  bounds {b.Min} .. {b.Max}");
 
+        var outPath = ValueOf(args, "--out");
+        if (outPath is not null)
+        {
+            var coeffs = new float[vol.SizeX * vol.SizeY * vol.SizeZ * 4];
+            for (var z = 0; z < vol.SizeZ; z++)
+            for (var y = 0; y < vol.SizeY; y++)
+            for (var x = 0; x < vol.SizeX; x++)
+            {
+                var c = vol.At(x, y, z);
+                var o = ((z * vol.SizeY + y) * vol.SizeX + x) * 4;
+                coeffs[o] = c.L0; coeffs[o + 1] = c.L1.X; coeffs[o + 2] = c.L1.Y; coeffs[o + 3] = c.L1.Z;
+            }
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
+            Blix.Graphics.Images.BlixSkyVolume.Write(outPath, new Blix.Graphics.Images.BlixSkyVolume(
+                b.Min, b.Max, vol.SizeX, vol.SizeY, vol.SizeZ, coeffs));
+            Console.WriteLine($"  wrote {outPath} ({new FileInfo(outPath).Length / 1024.0:0.0} KB)");
+        }
+
         // The profile that says whether this is physics: visibility should rise monotonically with
         // height, be near 1 above the roofline, and be markedly lower inside than out.
         Console.WriteLine("  sky visibility by height, for an UP-facing surface (mean over the layer):");

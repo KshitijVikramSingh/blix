@@ -105,6 +105,10 @@ layout(set = 0, binding = 0) uniform Frame {
     //   3 tangent-space normal-map value                    4 front/back facing
     //   5 world tangent                                     6 world bitangent
     float uVizChannel;
+    // xyz = world-space min of the sky volume, w = 1 when the volume is loaded.
+    vec4  uSkyMin;
+    // xyz = 1 / (max - min), w = how far along the normal to push the lookup, in metres.
+    vec4  uSkyScale;
 } frame;
 
 layout(set = 1, binding = 0) uniform samplerCube uIrradiance;
@@ -121,6 +125,9 @@ layout(set = 1, binding = 3) uniform sampler2D   uCascadeShadowMaps[3];
 layout(set = 1, binding = 4) uniform sampler3D   uFroxelGrid;
 // Ambient visibility from the GTAO pass: .xyz = bent normal (WORLD space), .a = visibility.
 layout(set = 1, binding = 5) uniform sampler2D   uAmbientVisibility;
+// Baked sky visibility as L1 spherical harmonics, one Rgba16F texel per probe cell. Geometry, not
+// lighting: what escapes the building, which no sun position changes.
+layout(set = 1, binding = 6) uniform sampler3D   uSkyVisibility;
 
 layout(set = 2, binding = 0) uniform Material {
     vec4 uBaseColorFactor;
@@ -381,7 +388,32 @@ void main() {
     vec3 gatherN = opaqueSurface ? normalize(ambientVis.xyz) : N;
 
     vec3 irradiance = frame.uAbFlags.z > 0.5 ? vec3(0.2) : texture(uIrradiance, gatherN).rgb;
-    vec3 diffuseIBL = irradiance * albedo;
+
+    // --- Baked sky visibility -------------------------------------------
+    // <b>What this surface can SEE, which nothing in this renderer previously knew.</b> The
+    // screen-space term above has a sub-metre radius: it answers whether a leaf is near this stone,
+    // not whether the stone is at the bottom of a courtyard. Measured, the atrium floor receives
+    // about 0.15 of the sky and the shader was giving it 0.85.
+    //
+    // Sampled a little along the NORMAL, because a probe cell straddling a wall holds both sides of
+    // it and a lookup taken exactly at the surface reads the enclosure on the wrong side. It is the
+    // same failure as shadow acne — a query about a surface, taken on that surface — and the same
+    // remedy.
+    float skyVisibility = 1.0;
+    vec3 vizProbeUv = vec3(0.0);
+    vec4 vizSh = vec4(0.0);
+    if (frame.uSkyMin.w > 0.5) {
+        vec3 probeUv = (vWorldPos + N * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz;
+        vec4 sh = texture(uSkyVisibility, clamp(probeUv, vec3(0.0), vec3(1.0)));
+        vizProbeUv = probeUv;
+        vizSh = sh;
+        // Cosine-convolved L1 evaluation: the same constants the irradiance probe is built with.
+        const float Y0 = 0.282095, Y1 = 0.488603;
+        skyVisibility = clamp(
+            (PI * Y0 * sh.x + (2.0 * PI / 3.0) * Y1 * dot(sh.yzw, gatherN)) / PI, 0.0, 1.0);
+    }
+
+    vec3 diffuseIBL = irradiance * albedo * skyVisibility;
 
     // Specular: prefiltered env at LOD = roughness × (mipCount - 1), times
     // the BRDF LUT integration (split-sum approximation of the specular term).
@@ -390,7 +422,9 @@ void main() {
         float lod = roughness * (frame.uEnvMipCount - 1.0);
         vec3 prefiltered = textureLod(uPrefilteredEnv, R, lod).rgb;
         vec2 envBrdf = texture(uBrdfLut, vec2(NdotV, roughness)).rg;
-        specularIBL = prefiltered * (F * envBrdf.x + envBrdf.y);
+        // The reflected sky is the same sky. Not occluding it leaves a courtyard floor with a
+        // mirror of an open horizon it cannot see.
+        specularIBL = prefiltered * (F * envBrdf.x + envBrdf.y) * skyVisibility;
     }
 
     // AO attenuates the indirect contribution only, per the glTF spec.
@@ -428,7 +462,13 @@ void main() {
             frame.uVizChannel < 3.5 ? vizTangentN * 0.5 + 0.5 :
             frame.uVizChannel < 4.5 ? (gl_FrontFacing ? vec3(0.1, 0.8, 0.2) : vec3(0.9, 0.15, 0.1)) :
             frame.uVizChannel < 5.5 ? T * 0.5 + 0.5 :
-                                      B * 0.5 + 0.5;
+            frame.uVizChannel < 6.5 ? B * 0.5 + 0.5 :
+            frame.uVizChannel < 7.5 ? vec3(skyVisibility) :
+            // 8 = the probe lookup coordinate, 9 = the raw L0 it read back, scaled to [0,1] by the
+            // value a fully open sphere produces. Between them these say whether a near-zero result
+            // is a bad coordinate, a bad uniform, or a bad texel.
+            frame.uVizChannel < 8.5 ? clamp(vizProbeUv, vec3(0.0), vec3(1.0)) :
+                                      vec3(clamp(vizSh.x / (4.0 * PI * 0.282095), 0.0, 1.0));
         // Straight out, no exposure and no tonemap — these are directions and flags, and a film
         // curve on a direction is a way to misread it.
         outColor = vec4(c, coverage);
