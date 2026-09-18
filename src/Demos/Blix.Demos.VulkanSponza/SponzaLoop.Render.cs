@@ -717,7 +717,7 @@ internal sealed partial class SponzaLoop
             for (var i = 0; i < w * h; i++)
             {
                 floats[i * 2]     = (float)BitConverter.ToHalf(pixels, i * 8);       // mean
-                floats[i * 2 + 1] = (float)BitConverter.ToHalf(pixels, i * 8 + 2);   // mean square
+                floats[i * 2 + 1] = (float)BitConverter.ToHalf(pixels, i * 8 + 2);   // variance
             }
             var bytes = new byte[16 + floats.Length * 4];
             BitConverter.TryWriteBytes(bytes.AsSpan(0, 4), w);

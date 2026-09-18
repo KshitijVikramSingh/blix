@@ -110,10 +110,13 @@ vec3 blix_probeIrradianceEx(
         // the probe alone can identify. The flag is kept because reading it back is how that was
         // settled (SponzaLoop's ProbeReachCensus, and the probe view's Reachable field); it is not
         // kept as a shading input, because it did not earn one.
+        // .r mean distance, .g VARIANCE — already differenced by the injector, where the moments
+        // are exact. Forming it here from a second moment meant differencing two bilinearly filtered
+        // values, which cancels catastrophically and put visible bands on flat stone.
         vec2 moments = texture(depthAtlas, blix_probeUv(probe, dims, -dir)).rg;
         float mean = moments.x;
         if (dist > mean) {
-            float variance = max(moments.y - mean * mean, 1e-5);
+            float variance = max(moments.y, 1e-5);
             float d = dist - mean;
             float chebyshev = variance / (variance + d * d);
             // Cubed, as the paper has it: the raw ratio falls off far too gently to close a leak.
