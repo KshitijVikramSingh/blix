@@ -97,6 +97,14 @@ layout(set = 0, binding = 0) uniform Frame {
     //   z  skip the three IBL lookups and the split-sum, using a flat ambient. Prices IBL whole.
     //   w  skip the normal map sample and the tangent-space transform.
     vec4  uAbFlags;
+    // --viz N: write one of the shading inputs instead of the lit colour. The normal path is the
+    // hardest thing here to be sure about by reading code — a double-sided sheet whose back face
+    // lights from the wrong hemisphere looks exactly like a material problem — so it is worth being
+    // able to LOOK at the inputs rather than reason about them.
+    //   1 geometric normal (world, after the facing flip)   2 shading normal (after the map)
+    //   3 tangent-space normal-map value                    4 front/back facing
+    //   5 world tangent                                     6 world bitangent
+    float uVizChannel;
 } frame;
 
 layout(set = 1, binding = 0) uniform samplerCube uIrradiance;
@@ -246,7 +254,9 @@ void main() {
     // glTF's own per-material normalScale, with no global multiplier on top. The global was a
     // second control over one quantity, and the material already says what it wants.
     float normalScale = mat.uMaterialParams.y;
+    vec3 vizGeometricN = N;
     vec2 nxy = (texture(uNormalMap, uv).xy * 2.0 - 1.0) * normalScale * (1.0 - frame.uAbFlags.w);
+    vec3 vizTangentN = vec3(nxy, sqrt(max(1.0 - dot(nxy, nxy), 0.0)));
     float nz = sqrt(max(0.0, 1.0 - dot(nxy, nxy)));
     // Default normal map is flat (0,0,1), so untextured materials keep N.
     N = normalize(mat3(T, B, N) * vec3(nxy, nz));
@@ -411,6 +421,20 @@ void main() {
 
     // Debug: tint by which cascade shadowed this fragment (red/green/blue,
     // near→far). Helps confirm split placement + texel-snap stability.
+    if (frame.uVizChannel > 0.5) {
+        vec3 c =
+            frame.uVizChannel < 1.5 ? vizGeometricN * 0.5 + 0.5 :
+            frame.uVizChannel < 2.5 ? N * 0.5 + 0.5 :
+            frame.uVizChannel < 3.5 ? vizTangentN * 0.5 + 0.5 :
+            frame.uVizChannel < 4.5 ? (gl_FrontFacing ? vec3(0.1, 0.8, 0.2) : vec3(0.9, 0.15, 0.1)) :
+            frame.uVizChannel < 5.5 ? T * 0.5 + 0.5 :
+                                      B * 0.5 + 0.5;
+        // Straight out, no exposure and no tonemap — these are directions and flags, and a film
+        // curve on a direction is a way to misread it.
+        outColor = vec4(c, coverage);
+        return;
+    }
+
     if (frame.uVisualizeAmbient > 0.5) {
         color = frame.uVisualizeAmbient < 1.5 ? vec3(visibility) : (gatherN * 0.5 + 0.5);
     }

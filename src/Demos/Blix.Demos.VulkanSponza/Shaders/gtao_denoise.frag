@@ -75,6 +75,12 @@ void main() {
             float dz = (sampleDepth - centreDepth) / tolerance;
             float depthWeight = exp2(-dz * dz);
             // Spatial falloff as well, so the kernel has no hard edge of its own.
+            //
+            // <b>0.5, and tightening it does not buy detail.</b> Swept to 1.5 and 4.0 chasing curtain
+            // folds: high-frequency content on the cloth rose 0.00800 -> 0.01693, but it rose on flat
+            // stone by the same factor, leaving the signal-to-noise ratio flat at 1.44 / 1.39 / 1.45.
+            // Sharpening a filter amplifies what is under it; it does not separate structure from
+            // noise. Full-resolution AO is worse by the same measure (1.11) for four times the cost.
             float spatialWeight = exp2(-0.5 * float(x * x + y * y));
             float weight = depthWeight * spatialWeight;
 

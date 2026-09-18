@@ -48,6 +48,7 @@ internal sealed partial class SponzaLoop
         // paired run attributes the HORIZON SEARCH specifically rather than the whole feature.
         if (cmdArgs.Contains("--no-ao")) ambient.Enabled = false;
         if (cmdArgs.Contains("--no-shadow")) shadows.Enabled = false;
+        if (cmdArgs.Contains("--ao-fullres")) aoScale = 1f;
         if (cmdArgs.Contains("--no-mask")) forceOpaqueMask = true;
         if (cmdArgs.Contains("--msaa1")) MsaaSamples = 1;
         // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every
@@ -78,6 +79,7 @@ internal sealed partial class SponzaLoop
         for (var i = 0; i < cmdArgs.Length - 1; i++)
         {
             if (cmdArgs[i] == "--ao-debug" && float.TryParse(cmdArgs[i + 1], out var aoDebugValue)) aoDebug = aoDebugValue;
+            if (cmdArgs[i] == "--viz" && float.TryParse(cmdArgs[i + 1], out var vizValue)) vizChannel = vizValue;
             if (cmdArgs[i] == "--ao-radius" && float.TryParse(cmdArgs[i + 1], out var aoRadius)) ambient.RadiusMetres = aoRadius;
         }
         // <b>Required for any timing run, and its absence invalidated a whole measurement batch.</b>
@@ -211,7 +213,7 @@ internal sealed partial class SponzaLoop
         // and that argument was wrong: the denoise below is already a spatial filter, and the house
         // rule bans TEMPORAL reconstruction, which neither of these is.
         ambientHandle = graph.ColorTarget(
-            "ambient-visibility", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f));
+            "ambient-visibility", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(aoScale));
         ambientDenoisedHandle = graph.ColorTarget("ambient-visibility-denoised", TextureFormat.Rgba16F, fullSize);
 
         depthPrepassHandle = graph.GraphicsPass("depth-prepass")

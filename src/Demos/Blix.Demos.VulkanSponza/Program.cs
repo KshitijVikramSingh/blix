@@ -251,6 +251,16 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private bool AbOffPhase => abMode.Length > 0 && (framesRendered / AbPeriodFrames) % 2 == 1;
     private bool AbFlatPhase => abFlat && AbOffPhase;
 
+    // --viz N: write a shading input instead of the lit colour. See lit.frag's uVizChannel.
+    private float vizChannel;
+
+    // --ao-fullres: run ambient visibility at framebuffer resolution instead of half. Half res is
+    // the right default for a low-frequency term, but a crease a few centimetres wide is not low
+    // frequency, and at half res plus a 3x3 bilateral it spans about one texel before being blurred
+    // with its neighbours. This exists to find out whether fold detail is lost to RESOLUTION rather
+    // than to the search radius.
+    private float aoScale = 0.5f;
+
     // --ao-debug N: make the GTAO pass write an intermediate instead of the bent normal. See gtao.frag.
     private float aoDebug;
 

@@ -121,6 +121,7 @@ internal sealed partial class SponzaLoop
                 new Vector4(cascadeTexelWorld[0], cascadeTexelWorld[1], cascadeTexelWorld[2], 0f))),
             new("uFog",              new Vector4Uniform(
                 new Vector4(frame.Width, frame.Height, fog.Far, fog.Enabled ? 1f : 0f))),
+            new("uVizChannel",       new FloatUniform(vizChannel)),
             // One component per --ab shading mode, live only during that mode's off-phase.
             new("uAbFlags",          new Vector4Uniform(new Vector4(
                 AbOffPhase && abMode == "textures" ? 1f : 0f,
@@ -357,8 +358,8 @@ internal sealed partial class SponzaLoop
             // texel size it steps by and the scale that turns metres into pixels — is in ITS pixels,
             // not the screen's. Getting this wrong does not fail loudly; it silently halves or
             // doubles the radius, which reads as "the AO looks a bit off" and nothing more.
-            var aoWidth = Math.Max(1, frame.Width / 2);
-            var aoHeight = Math.Max(1, frame.Height / 2);
+            var aoWidth = Math.Max(1, (int)(frame.Width * aoScale));
+            var aoHeight = Math.Max(1, (int)(frame.Height * aoScale));
             var projectionScale = aoHeight * 0.5f / MathF.Tan(fovYRadians * 0.5f);
             var gtaoUniforms = new ShaderUniform[]
             {
