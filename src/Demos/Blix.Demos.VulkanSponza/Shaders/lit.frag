@@ -29,7 +29,7 @@
 #define BLIX_SHADOW_PCF_TAPS 4
 #include "shadow.glsl"
 #include "sheen.glsl"
-#include "octahedral.glsl"
+#include "probe_volume.glsl"
 
 // Lit fragment shader — Cook-Torrance split-sum IBL on top of a Lambert N·L
 // sun term, with cascaded shadows, a Fresnel-glass branch, and froxel-fog
@@ -143,6 +143,7 @@ layout(set = 1, binding = 6) uniform sampler3D   uSkyVisibility;
 // thirty-six samples rather than L1's four, which is the difference between knowing a curtain is
 // over there and knowing how much of the sky it covers.
 layout(set = 1, binding = 7) uniform sampler2D uSkyBounce;
+layout(set = 1, binding = 13) uniform sampler2D uSkyBounceDepth;
 // <b>No storage image here, and the reason is measured.</b> Marking probes from the fragment stage
 // is the obvious way to learn which ones shading reads — and on this tile-based GPU merely
 // DECLARING an image3D in this shader cost 8x the frame: 35 ms became 290 ms. Not the write, the
@@ -581,15 +582,13 @@ void main() {
         // in different units. The volume stores average incident RADIANCE, so irradiance is PI times
         // it — and the /PI that briefly sat here is the radiance conversion, which belongs in the
         // injection pass where a surface re-emits, not here where one receives.
-        // The atlas stores IRRADIANCE per direction, so this is one fetch and no conversion — the
-        // PI that used to sit here lives in the injection, where the cosine average is formed.
-        ivec3 bdims = ivec3(frame.uBounceDims.xyz);
-        vec3 bgrid = clamp(probeUv, vec3(0.0), vec3(1.0)) * vec3(bdims) - 0.5;
-        ivec3 bp = clamp(ivec3(floor(bgrid + 0.5)), ivec3(0), bdims - 1);
-        vec2 oct = blix_octEncode(normalize(gatherN)) * 0.5 + 0.5;
-        vec2 btile = vec2(bp.x, bp.y + bp.z * bdims.y) * 8.0;
-        vec2 batlas = vec2(bdims.x, bdims.y * bdims.z) * 8.0;
-        vec3 incident = texture(uSkyBounce, (btile + 1.0 + oct * 6.0) / batlas).rgb;
+        // <b>Eight probes, weighted by whether each can actually SEE this point.</b> The previous
+        // nearest-probe fetch had no visibility term at all, so a wall took its light from whatever
+        // probe happened to be closest — including one on the far side of itself. That leak is why
+        // colour bled through walls from curtains and a tree they do not face.
+        vec3 incident = blix_probeIrradiance(
+            uSkyBounce, uSkyBounceDepth, ivec3(frame.uBounceDims.xyz),
+            frame.uSkyMin.xyz, 1.0 / frame.uSkyScale.xyz, vWorldPos, gatherN);
         vizBounceRaw = incident;
         bounce = incident * albedo * (1.0 - metallic) * ao * visibility;
     }

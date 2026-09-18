@@ -514,6 +514,7 @@ internal sealed partial class SponzaLoop
             new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 6),
             // Bound per frame in OnRender, which flips between the pair; this is the initial one.
             new ShaderTextureBinding("uSkyBounce", bounceReady ? bounceTextures[0] : brdfLutTexture, Slot: 7),
+            new ShaderTextureBinding("uSkyBounceDepth", bounceReady ? bounceDepthTextures[0] : brdfLutTexture, Slot: 13),
             // Bound to SOMETHING valid always — a descriptor set with a hole is a device loss, not a
             // dark curtain. uSheenMipCount being zero is what tells the shader not to read them.
             new ShaderTextureBinding("uSheenEnv", sheenMipCount > 0 ? sheenEnvTexture : envCubeTexture, Slot: 8),
@@ -774,9 +775,14 @@ internal sealed partial class SponzaLoop
                     var atlasW = bounceX * OctTile;
                     var atlasH = bounceY * bounceZ * OctTile;
                     for (var i = 0; i < bounceTextures.Length; i++)
+                    {
                         bounceTextures[i] = vk.CreateStorageTexture2D(
                             atlasW, atlasH, TextureFormat.Rgba16F,
                             SamplerDescription.LinearClamp, $"sponza.bounce{i}");
+                        bounceDepthTextures[i] = vk.CreateStorageTexture2D(
+                            atlasW, atlasH, TextureFormat.Rgba16F,
+                            SamplerDescription.LinearClamp, $"sponza.bounceDepth{i}");
+                    }
                     probeUsageTexture = vk.CreateStorageTexture3D(
                         bounceX, bounceY, bounceZ, TextureFormat.Rgba16F,
                         SamplerDescription.LinearClamp, "sponza.probeUsage");

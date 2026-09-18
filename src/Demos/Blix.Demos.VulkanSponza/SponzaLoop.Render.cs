@@ -337,6 +337,8 @@ internal sealed partial class SponzaLoop
         {
             passBindings[skyBounceBinding] = new ShaderTextureBinding(
                 "uSkyBounce", bounceTextures[bounceWrite ^ 1], Slot: 7);
+            passBindings[skyBounceBinding + 1] = new ShaderTextureBinding(
+                "uSkyBounceDepth", bounceDepthTextures[bounceWrite ^ 1], Slot: 13);
         }
 
         // Sun bounce into the probe grid. Cheap enough to redo every frame at this probe count, and
@@ -950,6 +952,8 @@ internal sealed partial class SponzaLoop
     private ShaderTextureBinding[] BounceBindings() => new[]
     {
         new ShaderTextureBinding("uAtlas", bounceTextures[bounceWrite], Slot: 1),
+        new ShaderTextureBinding("uDepthAtlas", bounceDepthTextures[bounceWrite], Slot: 11),
+        new ShaderTextureBinding("uDepthAtlasPrev", bounceDepthTextures[bounceWrite ^ 1], Slot: 12),
         new ShaderTextureBinding("uOccupancy", occupancyTexture, Slot: 2),
         new ShaderTextureBinding("uAlbedo", albX > 0 ? albedoTexture : occupancyTexture, Slot: 5),
         new ShaderTextureBinding("uProbeUsage", probeUsageTexture, Slot: 10),

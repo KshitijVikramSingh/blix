@@ -192,6 +192,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // eight frames, so one more frame of latency is beneath what the amortisation itself introduces.
     // Two ping-pong octahedral atlases: one 8x8 tile per probe, 6x6 interior plus a border ring.
     private readonly TextureHandle[] bounceTextures = new TextureHandle[2];
+    // The visibility half: mean and mean-square distance per direction, same tile layout. Without
+    // it the volume has no way to know a probe sits behind a wall from a shading point's view.
+    private readonly TextureHandle[] bounceDepthTextures = new TextureHandle[2];
 
     /// <summary>
     /// Probe counts for the BOUNCE, which are no longer the sky visibility's.
