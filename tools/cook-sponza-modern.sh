@@ -57,8 +57,13 @@ echo "Cooking '$SRC' -> '$COOKED'"
 # Each pack: the directory the demo expects, then the source names it may have.
 # Two names because the Khronos downloads and the demo's layout disagree, and
 # renaming 19 GB to satisfy a glob is not a thing to ask of anyone.
+# Second argument is the pack's material patch, or '-' for none. NAMED rather than discovered:
+# a patch that applies because a file happens to sit beside the source is an invisible input, and
+# a declared one that has gone missing should stop the cook rather than quietly not apply. One per
+# pack because a rule matching nothing is an error and Sponza is four separate glTFs — a shared
+# file would fail every curtain rule against the main pack.
 cook_pack() {
-    dest="$1"; shift
+    dest="$1"; patch="$2"; shift 2
     for candidate in "$@"; do
         dir="$SRC/$candidate"
         [[ -d "$dir" ]] || continue
@@ -67,17 +72,25 @@ cook_pack() {
             echo "  $dest: no .gltf in $dir — skipped"
             return 0
         fi
+        patch_args=()
+        if [[ "$patch" != "-" ]]; then
+            if [[ ! -f "$dir/$patch" ]]; then
+                echo "  $dest: declares patch '$patch' and it is not in $dir" >&2
+                exit 1
+            fi
+            patch_args=(--patch "$dir/$patch")
+        fi
         echo "── $dest  ($(basename "$gltf"))"
-        dotnet "$COOK" asset "$gltf" --out "$COOKED/$dest" --tangents
+        dotnet "$COOK" asset "$gltf" --out "$COOKED/$dest" --tangents "${patch_args[@]}"
         return 0
     done
     echo "  $dest: not present in $SRC — skipped"
 }
 
-cook_pack main_sponza main_sponza
-cook_pack curtains    pkg_a_curtains curtains
-cook_pack ivy         pkg_b_ivy      pkg_b_ivy1 ivy
-cook_pack trees       pkg_c_trees    trees
+cook_pack main_sponza main_sponza.blixpatch main_sponza
+cook_pack curtains    curtains.blixpatch    pkg_a_curtains curtains
+cook_pack ivy         -                     pkg_b_ivy      pkg_b_ivy1 ivy
+cook_pack trees       -                     pkg_c_trees    trees
 
 # The sky probe is separate: it is not referenced by any glTF, so no asset cook
 # reaches it. Optional — the demo bakes a procedural sky when it is absent.

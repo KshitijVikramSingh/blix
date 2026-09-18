@@ -226,12 +226,47 @@ public static class Program
         var splitIdx = Array.FindIndex(args, x => x.Equals("--split", StringComparison.OrdinalIgnoreCase));
         if (splitIdx >= 0 && splitIdx + 1 < args.Length && int.TryParse(args[splitIdx + 1], out var sb))
             splitBudget = sb;
-        var count = Blix.Recipes.MeshRecipe.CookShipped(
-            source, meshOut,
-            flipTextureV: HasFlag(args, "--flip-v"),
-            includeTangents: HasFlag(args, "--tangents"),
-            splitTriBudget: splitBudget,
-            splitFoliage: !HasFlag(args, "--no-split-foliage"));
+        // --patch here as well as on `mesh`, because this is the verb every shipped driver
+        // actually calls — and a mechanism available only on the path nobody uses is the shape of
+        // the simplifier bug this same method was fixed for twice.
+        Blix.Recipes.MaterialPatch? assetPatch = null;
+        var apIdx = Array.FindIndex(args, x => x.Equals("--patch", StringComparison.OrdinalIgnoreCase));
+        if (apIdx >= 0)
+        {
+            if (apIdx + 1 >= args.Length)
+            {
+                Console.Error.WriteLine("--patch needs a file path.");
+                return 1;
+            }
+            try
+            {
+                assetPatch = Blix.Recipes.MaterialPatch.Load(args[apIdx + 1]);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or FileNotFoundException)
+            {
+                Console.Error.WriteLine($"patch: {ex.Message}");
+                return 1;
+            }
+            Console.WriteLine($"  patch {assetPatch.FileName}@{assetPatch.ContentHash}: {assetPatch.Rules.Count} rule(s)");
+        }
+
+        int count;
+        try
+        {
+            count = Blix.Recipes.MeshRecipe.CookShipped(
+                source, meshOut,
+                flipTextureV: HasFlag(args, "--flip-v"),
+                includeTangents: HasFlag(args, "--tangents"),
+                splitTriBudget: splitBudget,
+                splitFoliage: !HasFlag(args, "--no-split-foliage"),
+                patch: assetPatch,
+                log: Console.WriteLine);
+        }
+        catch (InvalidDataException ex)
+        {
+            Console.Error.WriteLine($"patch: {ex.Message}");
+            return 1;
+        }
 
         var header = Blix.Cooked.CookedFile.TryReadHeader(meshOut);
         Console.WriteLine($"  mesh: {count} primitive(s) -> {meshOut}");
@@ -326,7 +361,7 @@ public static class Program
     var (outDir, a) = ExtractOutDir(args);
     if (a.Length < 2)
     {
-        Console.Error.WriteLine("Usage: blix-cook mesh <gltf-or-directory> [--out <dir>] [--flip-v] [--tangents] [--split N]");
+        Console.Error.WriteLine("Usage: blix-cook mesh <gltf-or-directory> [--out <dir>] [--flip-v] [--tangents] [--split N] [--patch <file>]");
         return 1;
     }
     var target = a[1];
@@ -345,6 +380,32 @@ public static class Program
     var splitIdx = Array.FindIndex(a, x => x.Equals("--split", StringComparison.OrdinalIgnoreCase));
     if (splitIdx >= 0 && splitIdx + 1 < a.Length && int.TryParse(a[splitIdx + 1], out var sb))
         splitBudget = sb;
+    // --patch <file>: what this scene needs the asset to say that its author did not. EXPLICIT
+    // rather than found by convention beside the source: a patch that applies because a file
+    // happens to exist is an invisible input, and this session lost an afternoon to exactly that
+    // when a probe's rotation lived only in a shell command nobody had written down.
+    var patchIdx = Array.FindIndex(a, x => x.Equals("--patch", StringComparison.OrdinalIgnoreCase));
+    Blix.Recipes.MaterialPatch? patch = null;
+    if (patchIdx >= 0)
+    {
+        if (patchIdx + 1 >= a.Length)
+        {
+            Console.Error.WriteLine("--patch needs a file path.");
+            return 1;
+        }
+        try
+        {
+            patch = Blix.Recipes.MaterialPatch.Load(a[patchIdx + 1]);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or FileNotFoundException)
+        {
+            // A refused patch is the mechanism working, so it reports like a diagnosis and not like
+            // a crash: one line naming the file, the line and what it could not find.
+            Console.Error.WriteLine($"patch: {ex.Message}");
+            return 1;
+        }
+        Console.WriteLine($"  patch {patch.FileName}@{patch.ContentHash}: {patch.Rules.Count} rule(s)");
+    }
     var splitFoliage = !a.Any(x => x.Equals("--no-split-foliage", StringComparison.OrdinalIgnoreCase));
 
     string[] sources;
@@ -435,8 +496,21 @@ public static class Program
         // correct behaviour, since what a canopy looks like from further away is fewer, larger masses.
         // The recipe's own simplifier, not a second copy of it here. It used to be a lambda in
         // this file, which is how the uniform [Recipe] path ended up with no decimation at all.
-        var count = Blix.Recipes.MeshRecipe.CookShipped(src, outPath, flipV, tangents,
-            splitTriBudget: splitBudget, splitFoliage: splitFoliage);
+        int count;
+        try
+        {
+            count = Blix.Recipes.MeshRecipe.CookShipped(src, outPath, flipV, tangents,
+                splitTriBudget: splitBudget, splitFoliage: splitFoliage,
+                patch: patch, log: Console.WriteLine);
+        }
+        catch (InvalidDataException ex)
+        {
+            // A rule that matched nothing, or matched a different number than it asserted. Refusing
+            // to cook IS the feature — a heuristic that stops matching renders the wrong thing
+            // forever, and this stops and says which selector and what was there instead.
+            Console.Error.WriteLine($"patch: {ex.Message}");
+            return 1;
+        }
         var size = new FileInfo(outPath).Length;
         // Quick LOD readout: levels + triangle reduction on the largest primitive.
         var file = Blix.Assets.BlixMeshReader.Read(outPath);

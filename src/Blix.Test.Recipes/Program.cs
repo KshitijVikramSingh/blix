@@ -965,7 +965,72 @@ public static class Program
             }
         }
 
+        // ── Material patches ────────────────────────────────────────────────
+        // The load-bearing behaviour is REFUSAL. A patch and the name heuristic it replaced both
+        // key on a material name; what separates them is that a rule matching nothing stops the
+        // cook instead of silently rendering the wrong thing forever. That, and the expected-count
+        // assertion, are the two things worth a test — and both caught real mistakes on their first
+        // use: the count guard refused a hand-written *stone*{3} against an asset that has 7.
+        var patchDir = Path.Combine(Path.GetTempPath(), "blix-patch-test-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(patchDir);
+        try
+        {
+            var table = new[]
+            {
+                new BlixMeshMaterial("glass", System.Numerics.Vector4.One, 0, 0f, 1f, 1f,
+                    System.Numerics.Vector3.Zero, 1f, BlixMesh.AlphaOpaque, 0.5f, false, 0f),
+                new BlixMeshMaterial("stone_wall_01", System.Numerics.Vector4.One, 0, 0.35f, 1f, 1f,
+                    System.Numerics.Vector3.Zero, 1f, BlixMesh.AlphaOpaque, 0.5f, false, 0f),
+                new BlixMeshMaterial("stone_trims_01", System.Numerics.Vector4.One, 0, 0.35f, 1f, 1f,
+                    System.Numerics.Vector3.Zero, 1f, BlixMesh.AlphaOpaque, 0.5f, false, 0f),
+            };
+
+            string Write(string name, string body)
+            {
+                var f = Path.Combine(patchDir, name);
+                File.WriteAllText(f, body);
+                return f;
+            }
+
+            var applied = MaterialPatch.Load(Write("ok.blixpatch",
+                "material glass transmission=1.0 ior=1.5\nmaterial stone_*{2} metallic=0.0\n")).Apply(table);
+            t.Expect("a patch applies a scalar to the material it names",
+                Math.Abs(applied[0].Ext.TransmissionFactor - 1.0f) < 1e-6f,
+                $"{applied[0].Ext.TransmissionFactor}");
+            t.Expect("and an extension field the asset never authored",
+                Math.Abs(applied[0].Ext.IndexOfRefraction - 1.5f) < 1e-6f,
+                $"{applied[0].Ext.IndexOfRefraction}");
+            t.ExpectTrue("a glob reaches every material it matches",
+                applied[1].MetallicFactor == 0f && applied[2].MetallicFactor == 0f);
+            t.ExpectTrue("and leaves the ones it does not alone", applied[0].MetallicFactor == 0f);
+
+            var missed = Throws(() => MaterialPatch.Load(Write("miss.blixpatch",
+                "material curtain_01 sheen=1,0,0\n")).Apply(table));
+            t.ExpectTrue("a rule that matches NOTHING fails the cook", missed is not null);
+            t.ExpectTrue("and the refusal names what was there instead",
+                missed?.Contains("stone_wall_01", StringComparison.Ordinal) == true);
+
+            var miscount = Throws(() => MaterialPatch.Load(Write("count.blixpatch",
+                "material stone_*{3} metallic=0.0\n")).Apply(table));
+            t.ExpectTrue("an expected count that does not hold fails the cook", miscount is not null);
+
+            var stale = MaterialPatch.Load(Write("pin.blixpatch", "source deadbeef\nmaterial glass ior=1.5\n"));
+            t.ExpectTrue("a source pin that no longer matches fails the cook",
+                Throws(() => stale.RequireSource("cafe1234")) is not null);
+            t.ExpectTrue("and the same pin passes against the source it was written for",
+                Throws(() => stale.RequireSource("deadbeef")) is null);
+
+            t.ExpectTrue("an unknown key is refused rather than ignored",
+                Throws(() => MaterialPatch.Load(Write("bad.blixpatch", "material glass nonsense=1\n")).Apply(table)) is not null);
+        }
+        finally
+        {
+            Directory.Delete(patchDir, recursive: true);
+        }
+
+
         t.PrintSummary();
+
         return t.Failed;
     }
 
@@ -994,5 +1059,12 @@ public static class Program
         }
 
         return null;
+    }
+
+    /// <summary>Runs an action and returns the exception message, or null if it did not throw.</summary>
+    private static string? Throws(Action a)
+    {
+        try { a(); return null; }
+        catch (Exception ex) { return ex.Message; }
     }
 }

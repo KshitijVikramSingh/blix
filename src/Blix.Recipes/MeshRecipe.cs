@@ -69,7 +69,8 @@ public static class MeshRecipe
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false, bool includeTangents = false,
-        SimplifyFn? simplify = null, int splitTriBudget = 0, bool splitFoliage = true)
+        SimplifyFn? simplify = null, int splitTriBudget = 0, bool splitFoliage = true,
+        MaterialPatch? patch = null, Action<string>? log = null)
     {
         ArgumentNullException.ThrowIfNull(gltfPath);
         ArgumentNullException.ThrowIfNull(outPath);
@@ -84,7 +85,7 @@ public static class MeshRecipe
         // it declines by name when no node carries both a mesh and a skin. Asking it first and
         // letting the refusal decide beats sniffing the JSON for a "skins" array, because the
         // question is not "does this file mention a skin" but "can this importer use it".
-        if (TryCookRig(gltfPath, outPath, out var rigPrimitiveCount)) return rigPrimitiveCount;
+        if (TryCookRig(gltfPath, outPath, out var rigPrimitiveCount, patch, log)) return rigPrimitiveCount;
 
         var layout = includeTangents
             ? VertexPosition3NormalTangentTexture.Layout
@@ -156,7 +157,11 @@ public static class MeshRecipe
         var parameters =
             $"flipV={(flipTextureV ? 1 : 0)} tangents={(includeTangents ? 1 : 0)} " +
             $"split={splitTriBudget} splitFoliage={(splitFoliage ? 1 : 0)} " +
-            $"simplify={(simplify is null ? "none" : "yes")}";
+            $"simplify={(simplify is null ? "none" : "yes")}" +
+            // Recorded, so `blix inspect` can answer "where did this material's sheen come from"
+            // without anyone reading a shader. An artifact that was patched and cannot say so is
+            // the same unexplainable state the heuristic left behind.
+            (patch is null ? "" : $" {patch.StampFragment}");
 
         var (images, imageRows) = CookImages(model, gltfPath, outPath);
 
@@ -180,7 +185,7 @@ public static class MeshRecipe
 
         BlixMeshWriter.Write(
             outPath,
-            new BlixMeshFile(primitives, CookMaterials(model, imageRows), images, Nodes: nodes),
+            new BlixMeshFile(primitives, CookMaterials(model, imageRows, patch, log), images, Nodes: nodes),
             stamp);
         return primitives.Count;
     }
@@ -201,7 +206,9 @@ public static class MeshRecipe
     /// show up as a character loading differently once cooked.
     /// </para>
     /// </remarks>
-    private static bool TryCookRig(string gltfPath, string outPath, out int primitiveCount)
+    private static bool TryCookRig(
+        string gltfPath, string outPath, out int primitiveCount,
+        MaterialPatch? patch = null, Action<string>? log = null)
     {
         primitiveCount = 0;
 
@@ -252,7 +259,8 @@ public static class MeshRecipe
 
         var parameters =
             $"rig=1 skins={cookedSkins.Length} bones={cookedSkins.Sum(s => s.Bones.Length)} "
-            + $"clips={clips.Length} attachments={attachments.Length} staticParts={staticParts.Length}";
+            + $"clips={clips.Length} attachments={attachments.Length} staticParts={staticParts.Length}"
+            + (patch is null ? "" : $" {patch.StampFragment}");
 
         var stamp = CookStamp.Of(
             BlixMesh.ShippedRecipe, MeshRecipeVersion, gltfPath, outPath, parameters,
@@ -263,7 +271,7 @@ public static class MeshRecipe
         BlixMeshWriter.Write(
             outPath,
             new BlixMeshFile(
-                primitives, CookMaterials(model, imageRows), images, cookedSkins, clips,
+                primitives, CookMaterials(model, imageRows, patch, log), images, cookedSkins, clips,
                 attachments, staticParts),
             stamp);
 
@@ -589,7 +597,9 @@ public static class MeshRecipe
     /// which shows up as an asset that renders differently on machines that have cooked it.
     /// </para>
     /// </remarks>
-    private static IReadOnlyList<BlixMeshMaterial> CookMaterials(ModelRoot model, IReadOnlyDictionary<int, int> imageRows)
+    private static IReadOnlyList<BlixMeshMaterial> CookMaterials(
+        ModelRoot model, IReadOnlyDictionary<int, int> imageRows,
+        MaterialPatch? patch = null, Action<string>? log = null)
     {
         var cooked = new BlixMeshMaterial[model.LogicalMaterials.Count];
         for (var i = 0; i < cooked.Length; i++)
@@ -634,7 +644,12 @@ public static class MeshRecipe
                 EmissiveImage: ImageIndex(emissive));
         }
 
-        return cooked;
+        // Applied here, once, on the cooked table — so a patched property is indistinguishable at
+        // load from one the asset authored, and every consumer (renderer, voxel baker, inspect)
+        // reads the same number. Patching at load instead would mean each consumer applying it, and
+        // the ones that forgot would disagree with the ones that did, which is the exact split this
+        // whole mechanism exists to end.
+        return patch is null ? cooked : patch.Apply(cooked, log);
 
         // <b>A ROW IN THIS FILE'S OWN IMAGE TABLE, not a glTF logical image index.</b> The old
         // number could only be resolved by reopening the glTF, which is precisely why a "cooked"
@@ -886,14 +901,17 @@ public static class MeshRecipe
     public static int CookShipped(
         string sourcePath, string outputPath,
         bool flipTextureV = false, bool includeTangents = false,
-        int splitTriBudget = 0, bool splitFoliage = true) =>
+        int splitTriBudget = 0, bool splitFoliage = true,
+        MaterialPatch? patch = null, Action<string>? log = null) =>
         CookToBlixMesh(
             sourcePath, outputPath,
             flipTextureV: flipTextureV,
             includeTangents: includeTangents,
             simplify: DefaultSimplifier(splitTriBudget > 0),
             splitTriBudget: splitTriBudget,
-            splitFoliage: splitFoliage);
+            splitFoliage: splitFoliage,
+            patch: patch,
+            log: log);
 
     /// <summary>Cooks every <c>KHR_materials_*</c> property a material declares.</summary>
     /// <remarks>
