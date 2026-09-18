@@ -26,6 +26,9 @@ layout(set = 0, binding = 0) uniform Frame {
 layout(set = 1, binding = 0) uniform sampler2D uSkyBounce;
 layout(set = 1, binding = 1) uniform sampler3D uSkyVisibility;
 layout(set = 1, binding = 2) uniform sampler3D uOccupancy;
+// The depth atlas, whose .b the injector writes as reachability. The probe view never bound it,
+// which is why it could only ever show what the injector STORED and never what a surface RECEIVES.
+layout(set = 1, binding = 3) uniform sampler2D uSkyBounceDepth;
 
 layout(location = 0) in vec3 vProbeCentre;
 layout(location = 1) in vec2 vQuad;
@@ -44,7 +47,31 @@ void main() {
     vec3 N = normalize(right * vQuad.x + up * vQuad.y + toEye * sqrt(max(1.0 - r2, 0.0)));
 
     vec3 c;
-    if (f.uProbeMode.x > 1.5) {
+    if (f.uProbeMode.x > 2.5) {
+        // <b>Reachability: what the BLEND does with this probe, not what the atlas holds.</b> The
+        // three fields below all read stored values, so a probe rejected by every surface in the
+        // scene still painted itself bright and looked like a culprit. This reads the flag the
+        // injector writes into the depth atlas's spare channel — the same value blix_probeIrradiance
+        // tests — so "is this probe lighting anything" finally has a picture.
+        //
+        // RED: marked unreachable, contributes nothing to any surface. GREY: live, and its radiance
+        // is shown dimmed behind so a live probe still reads as itself.
+        ivec3 bd = ivec3(f.uBounceDims.xyz);
+        ivec3 bp = clamp(ivec3(vProbeUvw * vec3(bd)), ivec3(0), bd - 1);
+        vec2 oct = blix_octEncode(N) * 0.5 + 0.5;
+        vec2 tile = vec2(bp.x, bp.y + bp.z * bd.y) * 8.0;
+        vec2 atlas = vec2(bd.x, bd.y * bd.z) * 8.0;
+        vec2 uv = (tile + 1.0 + oct * 6.0) / atlas;
+        float reach = texture(uSkyBounceDepth, uv).b;
+        // <b>Flat, and NOT tinted by radiance.</b> The first version added the probe's own colour
+        // to a grey base, so every live probe in a lit scene saturated to white and the field could
+        // not be read at all -- a binary answer rendered as a continuous one. Bounce radiance is a
+        // field of its own; this one has exactly two states and should look like it.
+        c = reach < 0.5 ? vec3(0.85, 0.06, 0.06)    // rejected: lights nothing
+                        : vec3(0.10, 0.55, 0.85);   // live
+        c *= 1.0 / max(f.uProbeMode.y, 1e-3);       // undo the exposure multiply; this is a flag
+
+    } else if (f.uProbeMode.x > 1.5) {
         // <b>What this probe is FOR, if anything.</b> A uniform grid over a bounding box obviously
         // wastes probes, and how many is a question people answer by looking at a cloud of spheres
         // and guessing. Measured on Sponza it is 2.9% inside solid geometry and 7.5% further than

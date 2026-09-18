@@ -553,6 +553,8 @@ internal sealed partial class SponzaLoop
                             bounceReady ? bounceTextures[bounceWrite ^ 1] : brdfLutTexture, Slot: 0),
                         new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 1),
                         new ShaderTextureBinding("uOccupancy", occupancyTexture, Slot: 2),
+                        new ShaderTextureBinding("uSkyBounceDepth",
+                            bounceReady ? bounceDepthTextures[bounceWrite ^ 1] : brdfLutTexture, Slot: 3),
                     },
                     // null, not an empty array: an empty array still counts as "push constants supplied", and
                     // this shader declares no ranges.
@@ -610,6 +612,7 @@ internal sealed partial class SponzaLoop
             shotWritten = true;
             VerifyHiZ();
             OcclusionCensus();
+            ProbeReachCensus();
             WriteAmbientShot(path);
             // <b>The RAW buffer as well, because the denoised one cannot answer questions about the
             // search.</b> Every reading taken off the denoised target is a depth-weighted average of
@@ -671,6 +674,67 @@ internal sealed partial class SponzaLoop
     /// Reported as a share of TRIANGLES as well as of objects, because 401 drawables are not equal:
     /// culling 200 tiny ones is worth less than culling the two that carry a million triangles each.
     /// </remarks>
+    /// <summary>What the injector actually wrote into the reachability channel, per probe.</summary>
+    /// <remarks>
+    /// <b>Because modelling the shader on the CPU disagreed with the picture, twice.</b> An offline
+    /// replica of the march predicted 75-100% of the probes inside the cypress reachable at every
+    /// height; the probe view showed the lower half rejected. One of the two is wrong and no amount
+    /// of reasoning settles which — so this reads the channel back off the GPU and reports it by
+    /// height, which is the axis the disagreement is on.
+    /// </remarks>
+    private void ProbeReachCensus()
+    {
+        if (!bounceReady) return;
+        var pixels = vk.ReadTexture(
+            bounceDepthTextures[bounceWrite ^ 1], out var w, out var h, out var format);
+        if (format != TextureFormat.Rgba16F) { Console.WriteLine("[VulkanSponza] probe reach: unexpected format"); return; }
+
+        Console.WriteLine("[VulkanSponza] probe reachability, as written by the injector:");
+        var liveByY = new int[bounceY];
+        var totalByY = new int[bounceY];
+        var live = 0;
+        for (var z = 0; z < bounceZ; z++)
+        for (var y = 0; y < bounceY; y++)
+        for (var x = 0; x < bounceX; x++)
+        {
+            // The tile's first INTERIOR texel; the border ring is copied from the interior and the
+            // flag is constant across the tile, so any interior texel answers for the probe.
+            var tx = x * OctTile + 1;
+            var ty = (y + z * bounceY) * OctTile + 1;
+            var reach = (float)BitConverter.ToHalf(pixels, ((ty * w) + tx) * 8 + 4);   // .b
+            totalByY[y]++;
+            if (reach >= 0.5f) { liveByY[y]++; live++; }
+        }
+        var total = bounceX * bounceY * bounceZ;
+        Console.WriteLine($"  live {live:N0} of {total:N0} ({100.0 * live / total:0.0}%), rejected {total - live:N0}");
+        // <b>The whole atlas, as floats, because the visibility test cannot be judged from a
+        // summary.</b> Every claim made about Chebyshev so far came from a CPU replica of the depth
+        // map; the map itself is right here and the replica is a guess about it. Dumping mean and
+        // mean-square per texel lets the leak be computed against what the GPU actually holds.
+        if (Environment.GetEnvironmentVariable("BLIX_DUMP_PROBE_DEPTH") is { Length: > 0 } dumpPath)
+        {
+            var floats = new float[w * h * 2];
+            for (var i = 0; i < w * h; i++)
+            {
+                floats[i * 2]     = (float)BitConverter.ToHalf(pixels, i * 8);       // mean
+                floats[i * 2 + 1] = (float)BitConverter.ToHalf(pixels, i * 8 + 2);   // mean square
+            }
+            var bytes = new byte[16 + floats.Length * 4];
+            BitConverter.TryWriteBytes(bytes.AsSpan(0, 4), w);
+            BitConverter.TryWriteBytes(bytes.AsSpan(4, 4), h);
+            BitConverter.TryWriteBytes(bytes.AsSpan(8, 4), bounceX);
+            BitConverter.TryWriteBytes(bytes.AsSpan(12, 4), bounceY);
+            Buffer.BlockCopy(floats, 0, bytes, 16, floats.Length * 4);
+            File.WriteAllBytes(dumpPath, bytes);
+            Console.WriteLine($"  dumped depth atlas {w}x{h} to {dumpPath}");
+        }
+        for (var y = 0; y < bounceY; y++)
+        {
+            var wy = skyVolumeMin.Y + (y + 0.5f) * skyVolumeSpan.Y / bounceY;
+            Console.WriteLine($"    y={wy,7:0.00} m  live {liveByY[y],4}/{totalByY[y],-4} ({100.0 * liveByY[y] / totalByY[y]:0}%)");
+        }
+    }
+
     private void OcclusionCensus()
     {
         // A level whose texels are coarse enough that a handful covers a typical object.

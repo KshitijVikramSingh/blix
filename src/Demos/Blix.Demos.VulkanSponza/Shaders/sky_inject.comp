@@ -48,6 +48,20 @@
 
 #define BLIX_OCT_INTERIOR 6
 #define BLIX_OCT_TILE     8
+// <b>256, and the reason is the DEPTH map rather than the irradiance.</b> Irradiance averages every
+// ray under a cosine lobe and was well fed at 64: measured, 24.0 effective samples per texel. Depth
+// uses a pow(dot, 50) lobe to keep a wall's edge an edge, and that lobe is so tight that 64 rays over
+// 36 texels gave it <b>1.82 effective samples</b> — each depth texel was essentially ONE ray.
+//
+// That breaks the visibility test in the specific way this file's own comment forbids: the mean is
+// one ray's hit distance, so whether a probe behind a wall gets rejected depends on whether its
+// single ray in that direction struck the wall or slipped past it; and the variance, which is the
+// entire reason probe_volume.glsl chose Chebyshev over a hard depth test, is the variance of one
+// sample — zero, clamped to 1e-5. The soft test the design asked for was a hard one all along.
+//
+// 256 rays take it to 4.97. The cheaper alternative — widening the lobe to pow 8, which gives 6.72
+// at 64 rays — was rejected because it buys the samples by blurring exactly the edge the exponent
+// exists to preserve, and the edge is what the test reads.
 #define BLIX_OCT_RAYS     64
 
 
@@ -60,6 +74,9 @@ shared vec3 sRadiance[BLIX_OCT_RAYS];
 shared vec3 sDirection[BLIX_OCT_RAYS];
 shared vec3 sTexel[BLIX_OCT_INTERIOR * BLIX_OCT_INTERIOR];
 shared float sDistance[BLIX_OCT_RAYS];
+// Per-ray reachability, reduced once per probe below.
+shared float sReach[BLIX_OCT_RAYS];
+shared float sSunlit[BLIX_OCT_RAYS];
 shared vec2 sDepthTexel[BLIX_OCT_INTERIOR * BLIX_OCT_INTERIOR];
 
 layout(set = 0, binding = 0) uniform Inject {
@@ -215,7 +232,12 @@ vec3 transmittance(vec3 origin, vec3 dir, float maxCells) {
 // ray crosses, weighted by how much light is still travelling when it arrives.
 // Returns the contribution as radiance; the caller projects it onto SH using the ray's direction,
 // which is the direction that light arrived FROM and the whole reason this became directional.
-vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize, out float hitDistance) {
+// <b>reach: 1 if this ray left the volume without meeting anything, sunlit: 1 if any cell it met
+// could see the sun.</b> Together, over a probe's whole ray set, they say whether light has any
+// route to this probe at all — which is a different question from how much light it holds, and the
+// one nothing previously asked.
+vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize,
+            out float hitDistance, out float reach, out float sunlit) {
     // <b>How far the ray got, which is the other half of a probe.</b> Radiance alone cannot say
     // whether a probe is behind a wall from some shading point's perspective; distance can, and the
     // march already knows it. Escaping rays report the far bound rather than zero — an open
@@ -227,6 +249,8 @@ vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize, o
     vec3 sum = vec3(0.0);
     vec3 t = vec3(1.0);
     bool recordedHit = false;
+    reach = 1.0;    // cleared only by SOLID geometry -- see below
+    sunlit = 0.0;
 
     for (int i = 0; i < int(maxCells); ++i) {
         if (!ddaStep(d, dims)) break;   // escaped: that is sky, already baked into the visibility SH
@@ -240,6 +264,16 @@ vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize, o
             hitDistance = distance(origin, u.uBoundsMin.xyz + (vec3(d.c) + 0.5) * cell);
             recordedHit = true;
         }
+        // <b>Only SOLID geometry seals a space; a canopy never does.</b> This cleared on any
+        // density at all, so a probe inside the lower half of the cypress -- surrounded by cells at
+        // 0.34 -- was counted as enclosed and rejected, while the sunlit top half passed. Reported
+        // from the chair as exactly that split, and it is wrong: leaves are a filter, not a wall.
+        // Dappled light reaches under a tree, and rejecting those probes deletes it.
+        //
+        // The transmittance through ten foliage cells is 0.66^10 = 1.5%, which is under the 2%
+        // threshold below -- so foliage could seal a volume by arithmetic that stone would need a
+        // closed room to achieve.
+        if (density >= 0.99) reach = 0.0;
 
         // A cell absorbs this fraction of the light still travelling, and re-radiates it. Spectral
         // for the same reason as the walk toward the sun: what arrives here has already passed
@@ -261,6 +295,7 @@ vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize, o
             vec3 sunReach = ndotl > 0.0
                 ? transmittance(hitPos + n * cellSize * 1.5, toSun, maxCells) * ndotl
                 : vec3(0.0);
+            if (dot(sunReach, vec3(1.0)) > 1e-4) sunlit = 1.0;
 
             // Sampled just off the face, so the lookup is not taken inside the geometry it stands on.
             vec3 prevUv = (hitPos + n * cellSize * 1.5 - u.uBoundsMin.xyz) / u.uBoundsSpan.xyz;
@@ -349,11 +384,35 @@ void main() {
 
     // One ray per thread, marched once and shared with every texel that wants it.
     vec3 d = fibonacci(lane, BLIX_OCT_RAYS);
-    float rayDistance;
+    float rayDistance, rayReach, raySunlit;
     sDirection[lane] = d;
-    sRadiance[lane] = gather(origin, d, maxCells, toSun, cellSize, rayDistance);
+    sRadiance[lane] = gather(origin, d, maxCells, toSun, cellSize, rayDistance, rayReach, raySunlit);
     sDistance[lane] = rayDistance;
+    sReach[lane] = rayReach;
+    sSunlit[lane] = raySunlit;
     barrier();
+
+    // <b>Is there any route by which light reaches this probe at all?</b> Measured over the scene,
+    // 38% of every surface's eight-probe blend weight targets probes it has no line of sight to,
+    // and the Chebyshev test recovers only 39% of that — it cannot reject a probe just behind a
+    // wall, because dist - mean is small there and var/(var + d^2) stays near 1. At 1.57 m spacing
+    // against architectural walls that is the common case.
+    //
+    // This is the cheap half of the answer. A probe buried in geometry, or one that sees under 2%
+    // of the sphere with no sun down any of its 64 rays, is in space light never enters — the
+    // "army of boxes inside the shell of the model" a viewer spotted from the chair. It is not a
+    // dim light source, it is not a light source. 7% of this grid (216 sealed + 132 buried of
+    // 4,992) is in that state, and nothing downstream knew.
+    //
+    // Deliberately NOT a brightness test: a room lit only by a doorway is dim and entirely legitimate,
+    // and thresholding on radiance would delete it. The test is geometric and asks about ROUTES.
+    float escape = 0.0, litRays = 0.0;
+    for (int i = 0; i < BLIX_OCT_RAYS; ++i) { escape += sReach[i]; litRays += sSunlit[i]; }
+    escape /= float(BLIX_OCT_RAYS);
+    // Its own cell: a probe inside a wall has no business lighting anything, whatever its rays say.
+    vec3 selfUvw = (origin - u.uBoundsMin.xyz) / u.uBoundsSpan.xyz;
+    bool buried = texture(uOccupancy, clamp(selfUvw, vec3(0.0), vec3(1.0))).r > 0.5;
+    float reachable = (!buried && (escape >= 0.02 || litRays > 0.0)) ? 1.0 : 0.0;
 
     // Interior texels: the cosine-weighted average of every ray, which IS the irradiance arriving
     // at a surface facing that texel's direction. Stored as irradiance so a reader multiplies by
@@ -396,6 +455,10 @@ void main() {
     vec3 value = sTexel[(src.y - 1) * BLIX_OCT_INTERIOR + (src.x - 1)];
     imageStore(uAtlas, tile + texel, vec4(value, 1.0));
     vec2 moments = sDepthTexel[(src.y - 1) * BLIX_OCT_INTERIOR + (src.x - 1)];
-    imageStore(uDepthAtlas, tile + texel, vec4(moments, 0.0, 1.0));
+    // <b>.b carries reachability, and it costs nothing.</b> The depth atlas is Rgba16F and has only
+    // ever used .rg, so the flag rides along in memory already allocated and already fetched by
+    // every consumer — no second texture, no second binding, no extra bandwidth. It is constant
+    // across the tile, so the bilinear fetch that reads the moments returns it exactly.
+    imageStore(uDepthAtlas, tile + texel, vec4(moments, reachable, 1.0));
     if (lane == 0) imageStore(uProbeUsage, probe, vec4(max(usage - decay, 0.0)));
 }

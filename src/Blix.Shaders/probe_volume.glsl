@@ -102,6 +102,14 @@ vec3 blix_probeIrradianceEx(
         // <b>Chebyshev visibility.</b> The probe's depth map, read in the direction of the shading
         // point, says how far its geometry is that way. If the point is further than that, a wall
         // stands between them.
+        // <b>.b carries a reachability flag the injector writes, and this deliberately ignores it.</b>
+        // Rejecting probes that light cannot reach is an obvious idea and it was built and measured:
+        // it moved the share of blend weight landing on probes a surface cannot see from 27.1% to
+        // 26.0%, while removing 13% of all bounce weight. The probes that leak are not the sealed
+        // ones — they are ordinary, well-lit probes on the far side of a wall, which no property of
+        // the probe alone can identify. The flag is kept because reading it back is how that was
+        // settled (SponzaLoop's ProbeReachCensus, and the probe view's Reachable field); it is not
+        // kept as a shading input, because it did not earn one.
         vec2 moments = texture(depthAtlas, blix_probeUv(probe, dims, -dir)).rg;
         float mean = moments.x;
         if (dist > mean) {
