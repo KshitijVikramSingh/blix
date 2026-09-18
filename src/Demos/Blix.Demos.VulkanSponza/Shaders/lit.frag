@@ -382,7 +382,7 @@ void main() {
     // goes through the blend pipelines, so it is the only thing the depth pre-pass did not write.
     // Sampling this buffer from glass would read the visibility of whatever is BEHIND it. The test
     // is uMaterialParams2.x because that is literally the predicate the scene sorts on
-    // (isBlend = EffectiveTransmission(material) > 0), so the two cannot drift apart.
+    // (isBlend = material.TransmissionFactor > 0), so the two cannot drift apart.
     vec4 ambientVis = texture(uAmbientVisibility, gl_FragCoord.xy / frame.uFog.xy);
     bool opaqueSurface = mat.uMaterialParams2.x <= 0.0;
     float visibility = opaqueSurface ? ambientVis.a : 1.0;

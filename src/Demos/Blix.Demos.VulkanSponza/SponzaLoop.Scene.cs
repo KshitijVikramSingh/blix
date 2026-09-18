@@ -138,15 +138,14 @@ internal sealed partial class SponzaLoop
         {
             var pm = prim.Material;
             var mesh = prim.Mesh;
-            // Glass/transmissive routes to the blend pipeline regardless of its
-            // declared alpha mode (see EffectiveTransmission).
-            // Only genuinely transmissive materials (glass) need alpha blending.
+            // Only genuinely transmissive materials need alpha blending, and "genuinely" now means
+            // the asset says so.
             // Cutout foliage authored as BLEND (the cypress, etc.) is treated as
             // MASK so it lands in the opaque bucket → written by the depth
             // pre-pass → early-Z. That kills the layered double-sided foliage
             // overdraw that makes the hero tree fragment-bound at Retina res.
             // Its alphaCutoff (set in BuildMaterial) drives the shader discard.
-            var isBlend = EffectiveTransmission(pm) > 0f;
+            var isBlend = (pm?.TransmissionFactor ?? 0f) > 0f;
             var material = GetMaterial(pm, out var albedo, out var alphaCutoff, out var baseColorAlpha);
             var alphaMode = isBlend ? GltfAlphaMode.Blend
                 : alphaCutoff > 0f ? GltfAlphaMode.Mask
@@ -265,20 +264,24 @@ internal sealed partial class SponzaLoop
         return mat;
     }
 
-    // Transmission for a material, with a demo-level fallback. Intel Sponza
-    // authors its glass as an opaque, perfectly-smooth dielectric with NO
-    // KHR_materials_transmission — so it renders near-black (4% head-on
-    // Fresnel) with only grazing reflections. The asset is missing the
-    // metadata, so we tag known glass materials by name and let the generic
-    // Fresnel-glass path in lit.frag take over. (Same spirit as the metallic-
-    // threshold patch: a demo-level conformance fix over an asset quirk, not a
-    // renderer default.) Real assets that ship the extension use it directly.
-    private static float EffectiveTransmission(GltfMaterial? m)
-    {
-        if (m is null) return 0f;
-        if (m.TransmissionFactor > 0f) return m.TransmissionFactor;
-        return m.Name.ToLowerInvariant().Contains("glass") ? 1.0f : 0f;
-    }
+    // <b>Deleted: a name-matched transmission fallback.</b> It said the asset was "missing the
+    // metadata". The asset is not missing anything — Intel Sponza declares
+    // extensionsUsed: ["KHR_lights_punctual"] and authors glass as
+    // baseColorFactor [0,0,0,1], metallic 0, roughness 0. Alpha is 1.0. That is a positive
+    // statement that the surface is an opaque, perfectly smooth, black dielectric, not an omission
+    // to be inferred around, and a substring match on the material NAME overrode it.
+    //
+    // It also bought less than it appeared to. A black metallic-0 dielectric already renders as
+    // glass under plain PBR: F0 = 0.04 head-on ramping to ~1 at grazing IS the Fresnel curve the
+    // special case hand-coded. The only thing the fallback added was transmission — seeing through
+    // the pane — and that is exactly the part the asset declines to claim.
+    //
+    // And it cost: the renderer was told to ignore the asset while SkyVisibilityBaker, reading the
+    // same glTF alpha mode, was not. Glass was 96% transparent on screen and a solid black wall to
+    // every lighting computation. Measured, opening it moves 1.9% of probes (max 1.11 on an L0 whose
+    // mean is 0.93) and the scene mean by 0.15%. Transmission now comes from TransmissionFactor
+    // alone; an asset that wants see-through glass authors KHR_materials_transmission and both
+    // consumers read the same number.
 
     // One engine Material per glTF material. BaseColorFactor / EmissiveFactor /
     // MaterialParams (alphaCutoff, normalScale, roughness, metallic) UBO + the
@@ -295,11 +298,10 @@ internal sealed partial class SponzaLoop
         var baseColorFactor = gm?.BaseColorFactor ?? Vector4.One;
         var emissiveFactor = gm is null ? Vector3.Zero : gm.EmissiveFactor;
         var emissiveStrength = gm?.EmissiveStrength ?? 1.0f;
-        // Cutout cutoff. MASK uses its authored cutoff. Non-glass BLEND (foliage
-        // authored as blend) is treated as cutout at 0.5 so it can depth-write +
-        // early-Z instead of overdrawing. Glass (transmissive) keeps 0 → no
-        // discard, true alpha blend.
-        alphaCutoff = EffectiveTransmission(gm) > 0f ? 0.0f
+        // Cutout cutoff. MASK uses its authored cutoff. Non-transmissive BLEND (foliage authored
+        // as blend) is treated as cutout at 0.5 so it can depth-write + early-Z instead of
+        // overdrawing. Transmissive keeps 0 → no discard, true alpha blend.
+        alphaCutoff = (gm?.TransmissionFactor ?? 0f) > 0f ? 0.0f
             : gm?.AlphaMode == GltfAlphaMode.Mask ? (gm?.AlphaCutoff ?? 0.5f)
             : gm?.AlphaMode == GltfAlphaMode.Blend ? 0.5f
             : 0.0f;
@@ -311,7 +313,7 @@ internal sealed partial class SponzaLoop
         var normalScale = 1.0f;
         var roughness = gm?.RoughnessFactor ?? 0.8f;
         var metallic = gm?.MetallicFactor ?? 0.0f;
-        var transmission = EffectiveTransmission(gm);
+        var transmission = gm?.TransmissionFactor ?? 0f;
 
         return vk.CreateMaterial(litProgram, name: "sponza.material")
             .SetUniform(binding: 0, "uBaseColorFactor", baseColorFactor)
