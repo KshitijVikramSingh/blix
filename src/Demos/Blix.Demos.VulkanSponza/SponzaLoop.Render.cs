@@ -110,6 +110,11 @@ internal sealed partial class SponzaLoop
             new("uSunDirection",     new Vector3Uniform(sunDirection)),
             new("uSunIrradiance",    new Vector3Uniform(EffectiveSunIrradiance)),
             new("uCameraPos",        new Vector3Uniform(cameraPosition)),
+            // Forward from yaw/pitch, matching the view matrix the camera is built from.
+            new("uCameraForward",    new Vector4Uniform(new Vector4(Vector3.Normalize(new Vector3(
+                MathF.Sin(camYaw) * MathF.Cos(camPitch),
+                MathF.Sin(camPitch),
+                -MathF.Cos(camYaw) * MathF.Cos(camPitch))), 0f))),
             new("uEnvMipCount",      new FloatUniform(iblPrefilterMips)),
             new("uSheenMipCount",    new FloatUniform(sheenMipCount)),
             new("uSkyDims",          new Vector4Uniform(new Vector4(probeX, probeY, probeZ, 0f))),
@@ -335,7 +340,13 @@ internal sealed partial class SponzaLoop
         // Flip before dispatching: the pass writes one texture while every reader — the lit pass,
         // and the pass's own multi-bounce feedback — takes the other, which is what keeps the
         // compute off the fragment stage's critical path.
-        if (bounceReady && skyVisibilityEnabled && !skipInject) bounceWrite ^= 1;
+        // <b>--ab inject prices the injection compute pass.</b> Nothing did, and it is now the
+        // heaviest thing the sky path does: 256 rays per probe rather than 64, marched through the
+        // occupancy grid with a nested sun walk per hit. Skipping it leaves the atlases exactly as
+        // they were, so the lit pass still reads a valid field and the arms differ by the DISPATCH
+        // alone, which is the quantity in question.
+        var skipInjectNow = skipInject || (abMode == "inject" && AbOffPhase);
+        if (bounceReady && skyVisibilityEnabled && !skipInjectNow) bounceWrite ^= 1;
         if (bounceReady && skyBounceBinding >= 0)
         {
             passBindings[skyBounceBinding] = new ShaderTextureBinding(
@@ -346,7 +357,7 @@ internal sealed partial class SponzaLoop
 
         // Sun bounce into the probe grid. Cheap enough to redo every frame at this probe count, and
         // redoing it is the point: the whole reason it is not baked is that it must follow the sun.
-        if (bounceReady && skyVisibilityEnabled && !skipInject)
+        if (bounceReady && skyVisibilityEnabled && !skipInjectNow)
         {
             var injectUniforms = new ShaderUniform[]
             {
@@ -939,6 +950,7 @@ internal sealed partial class SponzaLoop
             "ibl"    => "image-based lighting",
             "normal" => "normal mapping",
             "indirect"=> "the probe-volume terms (bounce + baked sky visibility)",
+            "inject"  => "the bounce injection dispatch",
             _        => "post-load shading",
         };
         Report($"ON  : with {term}", framePeriodsMs, framePeriodCount);

@@ -71,6 +71,10 @@ layout(set = 0, binding = 0) uniform Frame {
     float uIblPad;
     vec3  uCameraPos;
     float uEnvMipCount;
+    // The camera's forward axis in world space. Only uGatherConstant reads it: it is the exact
+    // vector gtao.frag emits for a background texel, so setting that dial to 1 reproduces the
+    // --ab prepass off-phase's gather direction rather than approximating it with a literal.
+    vec4  uCameraForward;
     float uSheenMipCount;
     vec4  uSkyDims;        // xyz visibility probe counts
     vec4  uBounceDims;     // xyz bounce probe counts
@@ -95,6 +99,40 @@ layout(set = 0, binding = 0) uniform Frame {
     // (where the corners darken, where the normals bend) rather than as calibrated values.
     //@tune 0..2 = 0
     float uVisualizeAmbient;
+    // <b>How much of the bent normal each consumer gets.</b> gatherN feeds three different fields
+    // and they are not equally forgiving of a direction that wobbles: the irradiance CUBE is smooth,
+    // the L2 sky-visibility VOLUME is not, and the probe volume is the least forgiving of the three
+    // (29% of neighbouring probes differ by more than 2x).
+    //
+    // Isolated by accident: --ab prepass's off-phase leaves GTAO reading a CLEARED depth buffer, so
+    // every pixel takes gtao.frag's background early-out and gatherN becomes ONE CONSTANT DIRECTION
+    // for the whole screen. Both the green volume and the wall streak vanish. --ab gtao's off-phase
+    // gives an unbent but still per-pixel direction and fixes neither — so it is the direction
+    // VARYING that carries them, not the bending and not the occlusion.
+    //
+    // 1 = today's bent normal, 0 = the shading normal. One dial each, so which field carries it can
+    // be found by looking rather than by rebuilding once per guess.
+    //@tune 0..1 = 1
+    float uBentForCube;
+    //@tune 0..1 = 1
+    float uBentForSkyVis;
+    //@tune 0..1 = 1
+    float uBentForBounce;
+    // <b>The two remaining halves of what --ab prepass's off-phase actually switches.</b> That arm
+    // leaves GTAO reading a cleared depth buffer, so it emits its background answer for every pixel:
+    // one CONSTANT world direction, and visibility exactly 1.0. Both symptoms vanish there, and
+    // neither the three dials above (direction -> shading normal) nor --ab gtao (radius 0) reproduce
+    // it. So the carrier is one of these two, and they have never been separable until now.
+    //
+    // uGatherConstant 1 replaces gatherN with a single screen-wide direction — NOT the shading
+    // normal, which still varies per pixel, but literally the same vector everywhere, which is the
+    // state that fixes it.
+    //@tune 0..1 = 0
+    float uGatherConstant;
+    // uForceFullVis 1 pins ambient visibility to 1.0 without touching anything else, so "no
+    // occlusion" can be tested apart from "no direction".
+    //@tune 0..1 = 0
+    float uForceFullVis;
     // <b>The two halves of "specular", separated because --ab pbr moved both at once.</b> That arm
     // zeroes the GGX sun lobe, and zeroing it also zeroes Fsun — which appears again in
     // kDsun = (1 - Fsun)(1 - metallic), so the DIFFUSE sun term gets brighter at the same moment
@@ -522,7 +560,7 @@ void main() {
     // (isBlend = material.TransmissionFactor > 0), so the two cannot drift apart.
     vec4 ambientVis = texture(uAmbientVisibility, gl_FragCoord.xy / frame.uFog.xy);
     bool opaqueSurface = mat.uMaterialParams2.x <= 0.0;
-    float visibility = opaqueSurface ? ambientVis.a : 1.0;
+    float visibility = mix(opaqueSurface ? ambientVis.a : 1.0, 1.0, frame.uForceFullVis);
     // The bent normal is where the unoccluded sky actually is. Gathering irradiance along it
     // instead of along N is what makes a surface in a corner pick up the light from the opening
     // rather than an average that includes the wall it is pressed against.
@@ -537,7 +575,13 @@ void main() {
     // map entirely. Reported from the chair as back-facing leaves shifting blue.
     if (dot(gatherN, N) < 0.0) gatherN = N;
 
-    vec3 irradiance = frame.uAbFlags.z > 0.5 ? vec3(0.2) : texture(uIrradiance, gatherN).rgb;
+    // The same constant gtao.frag writes for a background texel: the camera's view axis in world
+    // space. Applied BEFORE the per-consumer dials so it reproduces the arm exactly.
+    gatherN = normalize(mix(gatherN, normalize(frame.uCameraForward.xyz), frame.uGatherConstant));
+    vec3 cubeN   = normalize(mix(N, gatherN, frame.uBentForCube));
+    vec3 skyVisN = normalize(mix(N, gatherN, frame.uBentForSkyVis));
+    vec3 bounceN = normalize(mix(N, gatherN, frame.uBentForBounce));
+    vec3 irradiance = frame.uAbFlags.z > 0.5 ? vec3(0.2) : texture(uIrradiance, cubeN).rgb;
 
     // --- Baked sky visibility -------------------------------------------
     // <b>What this surface can SEE, which nothing in this renderer previously knew.</b> The
@@ -557,7 +601,7 @@ void main() {
         vizProbeUv = probeUv;
         // One call, the same one glass and everything else uses. Two copies of this evaluation is
         // how the volume and its readers drifted apart before.
-        skyVisibility = blixSkyVisibility(vWorldPos, gatherN);
+        skyVisibility = blixSkyVisibility(vWorldPos, skyVisN);
         vizSh = vec4(skyVisibility);
     }
 
@@ -616,7 +660,7 @@ void main() {
         // colour bled through walls from curtains and a tree they do not face.
         vec3 incident = blix_probeIrradianceEx(
             uSkyBounce, uSkyBounceDepth, ivec3(frame.uBounceDims.xyz),
-            frame.uSkyMin.xyz, 1.0 / frame.uSkyScale.xyz, vWorldPos, gatherN, probeConfidence);
+            frame.uSkyMin.xyz, 1.0 / frame.uSkyScale.xyz, vWorldPos, bounceN, probeConfidence);
         vizBounceRaw = incident;
         bounce = incident * albedo * (1.0 - metallic) * ao * visibility;
     }
@@ -638,7 +682,7 @@ void main() {
         // Occluded like every other indirect term. `visibility` is measured along the FRONT normal
         // — the back side's own value is not something a screen-space pass can know — so this is an
         // approximation, and the honest direction: a curtain in a dark corner is dark on both sides.
-        vec3 backIrradiance = texture(uIrradiance, -gatherN).rgb * skyVisibility;
+        vec3 backIrradiance = texture(uIrradiance, -cubeN).rgb * skyVisibility;
         transmittedIBL = blix_diffuseTransmissionAmbient(
             backIrradiance, mat.uDiffuseTransmissionColor.rgb * albedo, diffTrans) * ao * visibility;
     }
