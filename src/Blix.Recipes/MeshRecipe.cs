@@ -848,16 +848,44 @@ public static class MeshRecipe
     public static CookOutcome Cook(CookRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var split = request.Number("split");
-        var count = CookToBlixMesh(
+        var count = CookShipped(
             request.SourcePath,
             request.OutputPath,
             flipTextureV: request.Flag("flipV"),
             includeTangents: request.Flag("tangents"),
-            simplify: DefaultSimplifier(split > 0),
-            splitTriBudget: split,
+            splitTriBudget: request.Number("split"),
             splitFoliage: request.Flag("splitFoliage", true));
 
         return CookOutcome.Written($"{count} primitive(s)");
     }
+
+    /// <summary>
+    /// Cook a glTF the way a SHIPPED asset is cooked. The only entry any driver should call.
+    /// </summary>
+    /// <remarks>
+    /// <b>This exists because the same bug has now shipped twice.</b> Three callers each assembled
+    /// the arguments to <see cref="CookToBlixMesh"/> themselves, and `simplify` defaults to null —
+    /// so forgetting it is silent, produces a valid file, and costs every LOD in it. The first time,
+    /// the simplifier was a lambda inside the cook driver and the uniform [Recipe] path ended up
+    /// with no decimation at all. That fix taught the recipe and `cook mesh` to share one
+    /// simplifier and left `cook asset` behind — which is the command the Sponza pipeline uses, so
+    /// 12.8M triangles shipped at full detail and the renderer's LOD selection had nothing to
+    /// choose between. Fixing it was worth 29% of the frame.
+    ///
+    /// The lesson is not "remember the argument". It is that a default of null on a parameter whose
+    /// absence is invisible will be forgotten by somebody, and the answer is for there to be one
+    /// place that cannot forget. Drivers now pick the SOURCE and the OPTIONS; they do not get to
+    /// decide whether a shipped asset has LODs.
+    /// </remarks>
+    public static int CookShipped(
+        string sourcePath, string outputPath,
+        bool flipTextureV = false, bool includeTangents = false,
+        int splitTriBudget = 0, bool splitFoliage = true) =>
+        CookToBlixMesh(
+            sourcePath, outputPath,
+            flipTextureV: flipTextureV,
+            includeTangents: includeTangents,
+            simplify: DefaultSimplifier(splitTriBudget > 0),
+            splitTriBudget: splitTriBudget,
+            splitFoliage: splitFoliage);
 }

@@ -903,6 +903,68 @@ public static class Program
             }
         }
 
+        // ── Every path that cooks a SHIPPED mesh supplies a simplifier ──────
+        //
+        // The same bug has shipped twice: a caller assembled CookToBlixMesh's arguments itself and
+        // omitted `simplify`, which defaults to null. Nothing throws, a valid file is written, and
+        // every LOD in it is gone. The first time it was the uniform [Recipe] path; that fix routed
+        // the recipe and `cook mesh` through one simplifier and missed `cook asset` — the command
+        // the Sponza pipeline uses. 12.8M triangles shipped at full detail, the renderer's LOD
+        // selection had nothing to choose between, and fixing it was worth 29% of the frame.
+        //
+        // <b>Asserted on the STAMP rather than on a triangle count, deliberately.</b> Whether a
+        // given mesh decimates depends on the mesh — a rigged figure or a canopy of disconnected
+        // cards may legitimately produce one level — so a count makes the test hostage to whichever
+        // asset happens to be lying around. Whether a simplifier was SUPPLIED is the thing that
+        // broke, it is the thing every driver must not get wrong, and the cooked file records it.
+        // The negative control is what makes that reading mean something.
+        // A STATIC asset. Rogue.glb was the obvious pick and is the wrong one: a rigged glTF takes
+        // the rig branch, which writes "rig=1 skins=..." and never calls BuildLods at all. Skinned
+        // meshes get no LOD chain by design and their stamp does not mention a simplifier, so they
+        // cannot answer this question either way.
+        var lodSource = FindFile("OrientationTest.glb");
+        if (lodSource is null)
+        {
+            // The conformance corpus is fetched, not committed, so its absence is a fact about the
+            // checkout rather than a defect. Saying so beats a red line nobody can act on.
+            Console.WriteLine("  --   static-glTF LOD checks skipped: corpus not fetched");
+        }
+        else
+        {
+            var lodTemp = Path.Combine(Path.GetTempPath(), "blix-lod-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(lodTemp);
+            try
+            {
+                string StampOf(string path) => CookedFile.TryReadHeader(path)?.Stamp.Parameters ?? "";
+
+                var viaShipped = Path.Combine(lodTemp, "shipped.blixmesh");
+                MeshRecipe.CookShipped(lodSource, viaShipped, includeTangents: true);
+                var shippedStamp = StampOf(viaShipped);
+                t.ExpectTrue("a shipped cook supplies a simplifier",
+                    shippedStamp.Contains("simplify=yes", StringComparison.Ordinal));
+
+                // The uniform path a build rule invokes must agree with the typed one. They are the
+                // two ways an asset reaches a shipped tree, and they diverged once already.
+                var viaRecipe = Path.Combine(lodTemp, "recipe.blixmesh");
+                MeshRecipe.Cook(new CookRequest(lodSource, viaRecipe,
+                    new Dictionary<string, string> { ["tangents"] = "true" }));
+                t.Expect("and the uniform [Recipe] path stamps identically",
+                    StampOf(viaRecipe) == shippedStamp, $"'{StampOf(viaRecipe)}' vs '{shippedStamp}'");
+
+                // The negative control: without one, the stamp must say so. Otherwise the assertion
+                // above passes for a file that has no chain at all, which is exactly the failure
+                // this suite exists to catch.
+                var viaNone = Path.Combine(lodTemp, "none.blixmesh");
+                MeshRecipe.CookToBlixMesh(lodSource, viaNone, includeTangents: true);
+                t.ExpectTrue("and a cook WITHOUT one is distinguishable",
+                    StampOf(viaNone).Contains("simplify=none", StringComparison.Ordinal));
+            }
+            finally
+            {
+                try { Directory.Delete(lodTemp, recursive: true); } catch (IOException) { }
+            }
+        }
+
         t.PrintSummary();
         return t.Failed;
     }

@@ -224,11 +224,10 @@ public static class Program
         var splitIdx = Array.FindIndex(args, x => x.Equals("--split", StringComparison.OrdinalIgnoreCase));
         if (splitIdx >= 0 && splitIdx + 1 < args.Length && int.TryParse(args[splitIdx + 1], out var sb))
             splitBudget = sb;
-        var count = Blix.Recipes.MeshRecipe.CookToBlixMesh(
+        var count = Blix.Recipes.MeshRecipe.CookShipped(
             source, meshOut,
             flipTextureV: HasFlag(args, "--flip-v"),
             includeTangents: HasFlag(args, "--tangents"),
-            simplify: Blix.Recipes.MeshRecipe.DefaultSimplifier(splitBudget > 0),
             splitTriBudget: splitBudget,
             splitFoliage: !HasFlag(args, "--no-split-foliage"));
 
@@ -434,8 +433,7 @@ public static class Program
         // correct behaviour, since what a canopy looks like from further away is fewer, larger masses.
         // The recipe's own simplifier, not a second copy of it here. It used to be a lambda in
         // this file, which is how the uniform [Recipe] path ended up with no decimation at all.
-        var count = Blix.Recipes.MeshRecipe.CookToBlixMesh(src, outPath, flipV, tangents,
-            simplify: Blix.Recipes.MeshRecipe.DefaultSimplifier(splitBudget > 0),
+        var count = Blix.Recipes.MeshRecipe.CookShipped(src, outPath, flipV, tangents,
             splitTriBudget: splitBudget, splitFoliage: splitFoliage);
         var size = new FileInfo(outPath).Length;
         // Quick LOD readout: levels + triangle reduction on the largest primitive.
