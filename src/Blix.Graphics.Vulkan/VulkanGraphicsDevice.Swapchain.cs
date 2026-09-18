@@ -619,10 +619,38 @@ public sealed partial class VulkanGraphicsDevice
         foreach (var pass in commandList.Passes)
         {
             // Compute pass: dispatch outside any render pass (the prior pass
-            // already ended its render pass). No framebuffer / clears / timing.
+            // already ended its render pass). No framebuffer and no clears — but timed like every
+            // other pass. It was not, and the consequence was concrete: the one dispatch in
+            // Sponza's tree, the indirect-light injection, was the single pass whose cost could not
+            // be read off a frame, so it got measured by rebuilding constants between processes
+            // instead. A pass that reports nothing is a pass that gets guessed at.
             if (pass.Description.Compute)
             {
+                var cStart = nextQueryIndex;
+                var cEnd = nextQueryIndex + 1;
+                var canTimeCompute = timestampsSupported && nextQueryIndex + 1 < slotQueryBase + QueriesPerFrameSlot;
+                if (canTimeCompute) nextQueryIndex += 2;
+
+                currentPassName = pass.Name;
+                // ComputeShaderBit is the compute encoder's boundary the way
+                // ColorAttachmentOutputBit is the render encoder's — same reason, same caveat:
+                // on MoltenVK these bracket the ENCODER, not the shader's execution.
+                if (canTimeCompute)
+                    Vk.CmdWriteTimestamp(f.CommandBuffer, PipelineStageFlags.ComputeShaderBit, gpuTimingPool, cStart);
+
                 TranslateComputePass(f.CommandBuffer, pass, currentFrame);
+
+                if (canTimeCompute)
+                {
+                    Vk.CmdWriteTimestamp(f.CommandBuffer, PipelineStageFlags.ComputeShaderBit, gpuTimingPool, cEnd);
+                    pendingTimingsPerSlot[currentFrame].Add(new PendingPassTiming
+                    {
+                        PassName = pass.Name,
+                        StartIndex = cStart,
+                        EndIndex = cEnd,
+                        IssuedFrame = currentGpuFrameNumber,
+                    });
+                }
                 continue;
             }
 
