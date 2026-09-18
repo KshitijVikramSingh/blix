@@ -338,12 +338,15 @@ internal sealed partial class SponzaLoop
             var injectUniforms = new ShaderUniform[]
             {
                 new("uBoundsMin",  new Vector4Uniform(new Vector4(skyVolumeMin, 0f))),
-                new("uBoundsSpan", new Vector4Uniform(new Vector4(skyVolumeSpan, ambient.BounceAlbedo))),
-                new("uProbeDims",  new Vector4Uniform(new Vector4(probeX, probeY, probeZ, InjectRays))),
-                new("uOccupancyDims", new Vector4Uniform(new Vector4(occX, occY, occZ, 0f))),
+                new("uBoundsSpan", new Vector4Uniform(new Vector4(skyVolumeSpan, ambient.BounceStrength))),
+                new("uProbeDims",  new Vector4Uniform(new Vector4(probeX, probeY, probeZ, MathF.Round(injectRays)))),
+                new("uOccupancyDims", new Vector4Uniform(new Vector4(occX, occY, occZ, injectDensity ? 1f : 0f))),
+                // w carries translucency: how much of what a partial cell absorbs comes out the far
+                // side wearing its colour. Zero on opaque cells in the shader, or walls would leak.
+                new("uAlbedoDims", new Vector4Uniform(new Vector4(albX, albY, albZ, injectTranslucency))),
                 new("uSunDirection",  new Vector4Uniform(new Vector4(sunDirection, 0f))),
                 new("uSunIrradiance", new Vector4Uniform(new Vector4(sunIrradiance, 0f))),
-                new("uSchedule",      new Vector4Uniform(new Vector4(framesRendered, InjectPeriod, 0f, 0f))),
+                new("uSchedule",      new Vector4Uniform(new Vector4(framesRendered, MathF.Round(injectPeriod), 0f, 0f))),
             };
             graph.Dispatch(injectPassHandle, new DispatchCommand(
                 injectPipeline,
@@ -869,6 +872,7 @@ internal sealed partial class SponzaLoop
     {
         new ShaderTextureBinding("uBounce", bounceTextures[bounceWrite], Slot: 1),
         new ShaderTextureBinding("uOccupancy", occupancyTexture, Slot: 2),
+        new ShaderTextureBinding("uAlbedo", albX > 0 ? albedoTexture : occupancyTexture, Slot: 5),
         new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 3),
         // Last frame's solution, which is what turns a rotation of sweeps into successive bounces
         // AND what lets this dispatch run without the lit pass waiting on it.

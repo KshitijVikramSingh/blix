@@ -59,10 +59,19 @@ internal sealed partial class SponzaLoop
             // receives the 3% of sky it can actually see plus what bounces down to it, the scene
             // carries less light and the camera is the right place to account for that — which is
             // the whole reason the units arc kept exposure and deleted the intensity knobs.
-            render.Exposure = 0.65f;
+            //
+            // 0.65 -> 1.0 when the bounce started carrying real per-surface albedo. Sponza's
+            // measured albedos average about 0.2, against the 0.35 scalar that preceded them, so
+            // there is materially less indirect light in the room than there used to be. The fix
+            // was expected to be a bounce multiplier around 2; it was judged by eye to be exposure
+            // instead, with the bounce left at exactly what the surfaces give. That is the better
+            // of the two: one of these knobs is a camera and the other would have been a lie about
+            // what stone reflects.
+            render.Exposure = 1.0f;
         }
         if (cmdArgs.Contains("--no-mask")) forceOpaqueMask = true;
         if (cmdArgs.Contains("--msaa1")) MsaaSamples = 1;
+        if (cmdArgs.Contains("--sun-from-probe")) alignSunToProbe = true;
         // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every
         // census speaks only for wherever the camera happens to start, which for a question like
         // "how much of this scene is occluded" is the difference between a measurement and an
@@ -561,7 +570,12 @@ internal sealed partial class SponzaLoop
     // sun, so we only align when the probe actually has one.
     private void LoadIbl(string assetsRoot)
     {
-        string[] probeCandidates = { "autumn_field_4k.blixprobe", "rogland_overcast_4k.blixprobe", "sky_hdr.blixprobe" };
+        // kloppenheim leads because it is the one cooked TO this scene's authored sun: its own sun
+        // sits at elevation 74.5 against the authored 73.1, and it was re-cooked with --yaw=-31.43
+        // to bring the azimuth onto -22.7 as well. Roughly 1.4 degrees out in total, against the
+        // 27 that any of the others are. The rest stay as candidates rather than being deleted —
+        // they are what a differently-lit Sponza would reach for.
+        string[] probeCandidates = { "kloppenheim_05_4k.blixprobe", "autumn_field_4k.blixprobe", "rogland_overcast_4k.blixprobe", "sky_hdr.blixprobe" };
         var probeDir = Path.Combine(assetsRoot, "textures");
         var probePath = probeCandidates
             .Select(p => Path.Combine(probeDir, p))
@@ -591,7 +605,7 @@ internal sealed partial class SponzaLoop
             // Align the directional sun (key light + shadow caster) to the probe's
             // detected sun so cast shadows match the visible sky sun. FROM-sun-
             // into-scene convention, matching sunDirection.
-            if (baked.Probe.SunDirectionFromEquirect is { } hdrSun)
+            if (alignSunToProbe && baked.Probe.SunDirectionFromEquirect is { } hdrSun)
             {
                 sunDirection = Vector3.Normalize(hdrSun);
                 sunPitch = MathF.Asin(Math.Clamp(sunDirection.Y, -1f, 1f));
@@ -695,6 +709,18 @@ internal sealed partial class SponzaLoop
                     occupancyTexture = vk.CreateTexture3D(
                         occX, occY, occZ, TextureFormat.R8,
                         SamplerDescription.LinearClamp, volume.Occupancy!, "sponza.occupancy");
+                    // Falls back to the occupancy texture's slot being filled by SOMETHING valid
+                    // rather than going unbound: a missing albedo grid means an older .blixsky, and
+                    // the shader's uAlbedoDims.w tells it to use the flat scalar instead.
+                    if (volume.HasAlbedo)
+                    {
+                        albX = volume.AlbedoX; albY = volume.AlbedoY; albZ = volume.AlbedoZ;
+                        albedoTexture = vk.CreateTexture3D(
+                            albX, albY, albZ, TextureFormat.Rgba8,
+                            SamplerDescription.LinearClamp, volume.Albedo!, "sponza.albedo");
+                        Console.WriteLine(
+                            $"[VulkanSponza]   albedo {albX}x{albY}x{albZ} ({volume.Albedo!.Length / 1024.0 / 1024.0:0.00} MB), so the bounce carries surface colour.");
+                    }
                     for (var i = 0; i < bounceTextures.Length; i++)
                         bounceTextures[i] = vk.CreateStorageTexture3D(
                             probeX, probeY, probeZ, TextureFormat.Rgba16F,

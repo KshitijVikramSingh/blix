@@ -173,6 +173,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
 
     // Runtime sun-bounce injection over the shipped voxel grid.
     private TextureHandle occupancyTexture;
+    // What colour each cell is, at half the occupancy resolution. Without it the injection knows a
+    // surface is there and nothing about it, so every bounce carried the sun's hue and Sponza's
+    // curtains bled no colour at all.
+    private TextureHandle albedoTexture;
     // <b>Two, and the reason is a barrier rather than a buffer.</b> Measured: the injection
     // dispatch alone costs nothing (21.09 ms against a 21.08 ms baseline) and the lit pass's two 3D
     // fetches alone cost nothing (20.97 ms) — but together they cost 15 ms. Independent costs do not
@@ -188,10 +192,13 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private PipelineHandle injectPipeline;
     private PassHandle injectPassHandle;
     private ShaderTextureBinding[] injectBindings = Array.Empty<ShaderTextureBinding>();
-    private int probeX, probeY, probeZ, occX, occY, occZ;
+    private int probeX, probeY, probeZ, occX, occY, occZ, albX, albY, albZ;
     private Vector3 skyVolumeSpan;
     private bool bounceReady;
-    private const int InjectRays = 64;
+    private float injectRays = 64f;
+    // 0 reads the grid as the boolean it never was; 1 reads the density the baker writes. A live
+    // A/B, because sweeping this across processes is what let the two sides disagree unnoticed.
+    private bool injectDensity = true;
     // Frames for a full refresh of the probe grid, chosen by sweeping it against both cost and the
     // converged image:
     //
@@ -204,7 +211,11 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // same picture as eight, eight milliseconds cheaper, a full refresh in about 0.6 s at 50 fps. At
     // sixty-four the steady state starts to drift, which is the multi-bounce feedback no longer
     // keeping up with its own convergence.
-    private const int InjectPeriod = 32;
+    private float injectPeriod = 32f;
+    // Global rather than per-material: glTF carries KHR_materials_transmission, and Sponza authors
+    // it nowhere — every material reports TransmissionFactor 0, so a baked per-material value would
+    // be zero everywhere and buy nothing until someone authors it.
+    private float injectTranslucency = 0.5f;
 
     // Splitting the sky path's cost between its two halves: the compute that solves the bounce, and
     // the two 3D fetches every lit fragment then makes. Amortising the dispatch 8x recovered only 4
@@ -593,7 +604,17 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // scope). Initialised in OnLoad from the default direction below. Note the
     // IBL cubes are baked once with SkyBakeSunDirection, so live sun changes
     // relight the direct sun + shadows but not the indirect IBL.
-    private Vector3 sunDirection = Vector3.Normalize(new Vector3(0.35f, -0.85f, 0.25f));
+    // Authored, not derived: this is the sun the scene was actually tuned under (yaw -22.7 deg,
+    // pitch -73.1 deg), read back off a live session rather than guessed. The cooked probe reports
+    // its own sun and used to overwrite this at load — see alignSunToProbe, which keeps that path
+    // available. The cost of authoring it is that the baked environment's sun disc sits where the
+    // HDR put it, ~27 deg away, so IBL specular no longer agrees with the cast shadows; the sun's
+    // irradiance and its shadows do still agree with each other, which is the pair that shows.
+    private Vector3 sunDirection = Vector3.Normalize(new Vector3(-0.1120f, -0.9568f, -0.2682f));
+
+    // --sun-from-probe restores the old behaviour: take the sun from the HDR the IBL was baked
+    // from, so the visible sky sun and the cast shadows line up and the authored angle is ignored.
+    private bool alignSunToProbe;
     private float sunYaw;
     private float sunPitch;
     /// <summary>
@@ -685,7 +706,12 @@ internal sealed class AmbientSettings
     // geometry and the measured sun; this stands in for a per-voxel albedo the grid does not carry.
     // Sponza's stone sits around 0.3-0.4 and its cloth lower, so 0.35 is the scene's average rather
     // than a dial for taste — and when the grid learns material, this stops being a constant.
-    [Tune(0f, 1f)]    public float BounceAlbedo = 0.35f;
+    // <b>Not an albedo any more, and the rename is the point.</b> Surface colour now comes from
+    // the baked albedo grid, so this multiplies a physical quantity instead of standing in for one.
+    // 1.0 means "exactly the bounce the measured albedos give"; Sponza's average out around 0.2,
+    // which is a good deal less indirect light than the old 0.35 scalar was handing every surface.
+    // Above 1 is then a legible artistic decision rather than a fudge with a misleading name.
+    [Tune(0f, 4f)]    public float BounceStrength = 1.0f;
 }
 
 // Misc render tunables (overlay "Render" group). Vsync stays a manual toggle —

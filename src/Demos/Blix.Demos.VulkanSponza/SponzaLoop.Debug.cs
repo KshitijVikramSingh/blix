@@ -96,6 +96,23 @@ internal sealed partial class SponzaLoop
         using (debug.Scope("Render"))
         {
             vk.VsyncEnabled = debug.Controls.Toggle("Vsync", vk.VsyncEnabled);
+            vizChannel = MathF.Round(debug.Controls.Float("Viz channel", vizChannel, 0f, 9f));
+        }
+
+        // The indirect solve's cost is rays x probes x march, divided by period, and every one of
+        // those was a compile-time constant measured by rebuilding between runs. That is how the
+        // grid's density grade stayed thrown away on this side for as long as it did: the two
+        // readings were never on screen at the same time. They are controls now.
+        if (skyVisibilityEnabled)
+        {
+            using (debug.Scope("Indirect"))
+            {
+                injectDensity = debug.Controls.Toggle("Density march", injectDensity);
+                injectRays    = debug.Controls.Float("Rays / probe", injectRays, 8f, 64f);
+                injectPeriod  = debug.Controls.Float("Refresh period", injectPeriod, 4f, 64f);
+                injectTranslucency = debug.Controls.Float("Translucency", injectTranslucency, 0f, 1f);
+                debug.Values.Value("probe-refresh", $"{MathF.Round(injectRays)} rays every {MathF.Round(injectPeriod)}f");
+            }
         }
 
         debug.Values.Value("shadow-map", $"{ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}");

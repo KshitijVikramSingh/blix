@@ -58,6 +58,8 @@ layout(set = 0, binding = 0) uniform Inject {
     // re-derive a field that barely changed — measured, it doubled the frame. Each probe is
     // refreshed on its own turn instead.
     vec4 uSchedule;
+    // xyz albedo grid dims (0 = none shipped), w = translucency.
+    vec4 uAlbedoDims;
 } u;
 
 // Read-write rather than write-only: a probe not scheduled this frame must KEEP its value, and
@@ -68,43 +70,156 @@ layout(set = 0, binding = 3) uniform sampler3D uSkyVisibility;
 // The SAME texture uBounce writes, bound for filtered reading. A surface re-radiates what has
 // already been deposited on it, so each sweep carries the light one bounce further.
 layout(set = 0, binding = 4) uniform sampler3D uBouncePrev;
+// Surface colour per cell, coarser than the occupancy it accompanies and gamma-2.0 encoded.
+layout(set = 0, binding = 5) uniform sampler3D uAlbedo;
 
 #define PI 3.14159265359
 
-bool solidAt(ivec3 c) {
-    return texelFetch(uOccupancy, clamp(c, ivec3(0), ivec3(u.uOccupancyDims.xyz) - 1), 0).r > 0.5;
+// The grid stores DENSITY, not occupancy. The baker writes 1.0 for an opaque triangle and
+// CutoutOpacity for an alpha-cutout one, precisely so that a canopy attenuates instead of walling,
+// and its own Transmittance() reads it that way. Reading it back here through a `> 0.5` test threw
+// that grade away and made every leaf INVISIBLE to this march: rays passed clean through the tree,
+// escaped, and reported sky — which lit the inside of the canopy as though it were open air. Same
+// texture, same decision, now taken the same way on both sides of it.
+float densityAt(ivec3 c) {
+    float d = texelFetch(uOccupancy, clamp(c, ivec3(0), ivec3(u.uOccupancyDims.xyz) - 1), 0).r;
+    // uOccupancyDims.w = 0 restores the old boolean read, so the two can be compared by turning a
+    // control rather than by rebuilding. An opaque cell reads 1.0 either way; only foliage differs.
+    return u.uOccupancyDims.w > 0.5 ? d : (d > 0.5 ? 1.0 : 0.0);
 }
 
-// March the occupancy grid. Returns true on a hit, with the world position and the face normal of
-// the voxel that stopped it.
-bool march(vec3 origin, vec3 dir, float maxCells, out vec3 hitPos, out vec3 hitNormal) {
+// What the surface in this cell is coloured, linear. Filtered rather than fetched: the grid is
+// half the occupancy resolution, so a nearest read would step in visible blocks across a wall that
+// the density grid resolves smoothly. Squared on the way in — the byte holds sqrt(linear), which is
+// what keeps a curtain's absorbing channels from quantising to a handful of codes.
+vec3 albedoAt(vec3 worldPos) {
+    if (u.uAlbedoDims.x < 1.0) return vec3(1.0);   // older .blixsky: the scalar alone, as before
+    vec3 uvw = (worldPos - u.uBoundsMin.xyz) / u.uBoundsSpan.xyz;
+    vec3 c = texture(uAlbedo, clamp(uvw, vec3(0.0), vec3(1.0))).rgb;
+    return c * c;
+}
+
+// The DDA itself is shared, because the two walks below differ only in what they do per cell, and
+// a second hand-inlined copy of this is how the two sides drifted apart in the first place.
+struct Dda {
+    ivec3 c;
+    ivec3 step;
+    vec3 tMax;
+    vec3 inv;
+    int axis;
+};
+
+Dda ddaInit(vec3 origin, vec3 dir, vec3 dims, vec3 cell) {
+    Dda d;
+    vec3 p = (origin - u.uBoundsMin.xyz) / cell;
+    d.c = clamp(ivec3(floor(p)), ivec3(0), ivec3(dims) - 1);
+    d.step = ivec3(sign(dir));
+    d.inv = 1.0 / max(abs(dir), vec3(1e-9));
+    d.tMax = vec3(
+        (d.step.x > 0 ? (float(d.c.x) + 1.0 - p.x) : (p.x - float(d.c.x))) * d.inv.x,
+        (d.step.y > 0 ? (float(d.c.y) + 1.0 - p.y) : (p.y - float(d.c.y))) * d.inv.y,
+        (d.step.z > 0 ? (float(d.c.z) + 1.0 - p.z) : (p.z - float(d.c.z))) * d.inv.z);
+    d.axis = 0;
+    return d;
+}
+
+// Returns false once the walk has left the grid, which is the one case that means "sky".
+bool ddaStep(inout Dda d, vec3 dims) {
+    if (d.tMax.x < d.tMax.y && d.tMax.x < d.tMax.z) { d.c.x += d.step.x; d.tMax.x += d.inv.x; d.axis = 0; }
+    else if (d.tMax.y < d.tMax.z)                   { d.c.y += d.step.y; d.tMax.y += d.inv.y; d.axis = 1; }
+    else                                            { d.c.z += d.step.z; d.tMax.z += d.inv.z; d.axis = 2; }
+    return !(any(lessThan(d.c, ivec3(0))) || any(greaterThanEqual(d.c, ivec3(dims))));
+}
+
+// How much sunlight survives the walk toward the sun. The boolean version asked "did anything stop
+// the ray", which for a leaf card is the wrong question — letting light through is half of what a
+// canopy does.
+// Spectral, not scalar, and that is the whole point of it. A leaf does not dim sunlight evenly —
+// it absorbs red and passes green — so a float here can only ever deliver grey light to the ground
+// under a tree. Light reaching the far side of a cell is the part that went through the gaps
+// (untinted, 1 - density) plus the part that went through the material itself, wearing its colour.
+vec3 transmittance(vec3 origin, vec3 dir, float maxCells) {
     vec3 dims = u.uOccupancyDims.xyz;
     vec3 cell = u.uBoundsSpan.xyz / dims;
-    vec3 p = (origin - u.uBoundsMin.xyz) / cell;
-    ivec3 c = clamp(ivec3(floor(p)), ivec3(0), ivec3(dims) - 1);
-    ivec3 step = ivec3(sign(dir));
-    vec3 inv = 1.0 / max(abs(dir), vec3(1e-9));
-    vec3 tMax = vec3(
-        (step.x > 0 ? (float(c.x) + 1.0 - p.x) : (p.x - float(c.x))) * inv.x,
-        (step.y > 0 ? (float(c.y) + 1.0 - p.y) : (p.y - float(c.y))) * inv.y,
-        (step.z > 0 ? (float(c.z) + 1.0 - p.z) : (p.z - float(c.z))) * inv.z);
+    Dda d = ddaInit(origin, dir, dims, cell);
+    vec3 t = vec3(1.0);
+    for (int i = 0; i < int(maxCells); ++i) {
+        if (!ddaStep(d, dims)) break;   // left the grid: the rest of the way is open sky
+        float density = densityAt(d.c);
+        if (density <= 0.01) continue;
+        // An OPAQUE cell transmits nothing, whatever colour it is. Without this gate a wall at
+        // density 1 would pass albedo * translucency and the sun would come through stone.
+        float trans = density >= 0.99 ? 0.0 : u.uAlbedoDims.w;
+        vec3 through = vec3(1.0 - density);
+        if (trans > 0.0) {
+            vec3 hit = u.uBoundsMin.xyz + (vec3(d.c) + 0.5) * cell;
+            through += density * albedoAt(hit) * trans;
+        }
+        t *= through;
+        if (dot(t, vec3(1.0)) < 0.03) return vec3(0.0);
+    }
+    return t;
+}
+
+// Walk one direction and accumulate what it passes, rather than stopping at the first thing it
+// hits. An opaque wall still ends the walk on its first cell — t drops to zero there — so this
+// costs nothing wherever the old version was already right. A canopy now contributes each leaf the
+// ray crosses, weighted by how much light is still travelling when it arrives.
+vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize) {
+    vec3 dims = u.uOccupancyDims.xyz;
+    vec3 cell = u.uBoundsSpan.xyz / dims;
+    Dda d = ddaInit(origin, dir, dims, cell);
+    vec3 sum = vec3(0.0);
+    vec3 t = vec3(1.0);
 
     for (int i = 0; i < int(maxCells); ++i) {
-        int axis;
-        if (tMax.x < tMax.y && tMax.x < tMax.z) { c.x += step.x; tMax.x += inv.x; axis = 0; }
-        else if (tMax.y < tMax.z)               { c.y += step.y; tMax.y += inv.y; axis = 1; }
-        else                                    { c.z += step.z; tMax.z += inv.z; axis = 2; }
+        if (!ddaStep(d, dims)) break;   // escaped: that is sky, already baked into the visibility SH
+        float density = densityAt(d.c);
+        if (density <= 0.01) continue;
 
-        if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, ivec3(dims)))) return false;
-        if (solidAt(c)) {
-            hitPos = u.uBoundsMin.xyz + (vec3(c) + 0.5) * cell;
+        // A cell absorbs this fraction of the light still travelling, and re-radiates it. Spectral
+        // for the same reason as the walk toward the sun: what arrives here has already passed
+        // through whatever stands between, and that may have been a leaf.
+        vec3 weight = t * density;
+        float trans = density >= 0.99 ? 0.0 : u.uAlbedoDims.w;
+
+        // Below this a cell moves the answer by less than the 32-frame rotation's own noise, and
+        // each one that clears the bar costs a second march. This bound is why foliage stays cheap.
+        if (dot(weight, vec3(1.0)) > 0.06) {
+            vec3 hitPos = u.uBoundsMin.xyz + (vec3(d.c) + 0.5) * cell;
             // The face we came through: opposite the axis we stepped along.
-            hitNormal = vec3(0.0);
-            hitNormal[axis] = float(-step[axis]);
-            return true;
+            vec3 n = vec3(0.0);
+            n[d.axis] = float(-d.step[d.axis]);
+
+            // A surface facing away from the sun catches none of it, and asking the grid about a
+            // ray whose answer is already zero was the old loop's one plain waste.
+            float ndotl = max(dot(n, toSun), 0.0);
+            vec3 sunReach = ndotl > 0.0
+                ? transmittance(hitPos + n * cellSize * 1.5, toSun, maxCells) * ndotl
+                : vec3(0.0);
+
+            // Sampled just off the face, so the lookup is not taken inside the geometry it stands on.
+            vec3 prevUv = (hitPos + n * cellSize * 1.5 - u.uBoundsMin.xyz) / u.uBoundsSpan.xyz;
+            vec3 incident = u.uSunIrradiance.rgb * sunReach
+                          + PI * texture(uBouncePrev, clamp(prevUv, vec3(0.0), vec3(1.0))).rgb;
+
+            // Lambertian outgoing radiance, now in the surface's OWN colour. uBoundsSpan.w stops
+            // being the scene's albedo and becomes a plain strength multiplier over it.
+            sum += weight * u.uBoundsSpan.w * albedoAt(hitPos) * incident / PI;
         }
+
+        // Tinted for the same reason the sun walk is: what continues past a red curtain is red.
+        {
+            vec3 through = vec3(1.0 - density);
+            if (trans > 0.0) {
+                vec3 here = u.uBoundsMin.xyz + (vec3(d.c) + 0.5) * cell;
+                through += density * albedoAt(here) * trans;
+            }
+            t *= through;
+        }
+        if (dot(t, vec3(1.0)) < 0.03) break;
     }
-    return false;
+    return sum;
 }
 
 vec3 fibonacci(int i, int count) {
@@ -124,39 +239,27 @@ void main() {
     // sweeping across the scene as a visible plane.
     int period = int(u.uSchedule.y);
     int slot = (probe.x * 5 + probe.y * 11 + probe.z * 17) % period;
-    if (slot != int(u.uSchedule.x) % period) return;
+    if (slot != int(u.uSchedule.x) % period) {
+        // Carry the value forward instead of returning. Returning kept the probe's value in a
+        // SINGLE buffer, which is what this once was; against a ping-pong it is wrong, and wrong in
+        // a way that looks like the light swinging about. The write target alternates with frame
+        // parity, and a probe's turn comes round every `period` frames — an even period, so the
+        // same parity every time. Each probe was therefore only ever written into ONE of the two
+        // buffers and stayed zero in the other, and the shader that reads them alternates between
+        // the two every frame. Half the field, flickering against the other half.
+        imageStore(uBounce, probe, texelFetch(uBouncePrev, probe, 0));
+        return;
+    }
 
     vec3 origin = u.uBoundsMin.xyz + (vec3(probe) + 0.5) * u.uBoundsSpan.xyz / vec3(dims);
     vec3 toSun = -normalize(u.uSunDirection.xyz);
     int rays = int(u.uProbeDims.w);
     float maxCells = max(u.uOccupancyDims.x, max(u.uOccupancyDims.y, u.uOccupancyDims.z));
+    float cellSize = length(u.uBoundsSpan.xyz / u.uOccupancyDims.xyz);
 
     vec3 bounce = vec3(0.0);
-    for (int i = 0; i < rays; ++i) {
-        vec3 dir = fibonacci(i, rays);
-        vec3 hitPos, hitNormal;
-        if (!march(origin, dir, maxCells, hitPos, hitNormal)) continue;   // escaped: that is sky, already baked
-
-        // Not an early exit any more: a surface facing away from the sun still re-radiates the
-        // indirect light already on it, and in a courtyard that is most of them.
-        float ndotl = max(dot(hitNormal, toSun), 0.0);
-
-        // Is that surface actually in sunlight? One more march, from just off the face.
-        float cellSize = length(u.uBoundsSpan.xyz / u.uOccupancyDims.xyz);
-        vec3 shadowHit, shadowNormal;
-        bool sunlit = !march(hitPos + hitNormal * cellSize * 1.5, toSun, maxCells, shadowHit, shadowNormal);
-        if (!sunlit) ndotl = 0.0;
-
-        // Irradiance arriving at that surface: the sun it catches, plus PI times the average
-        // radiance earlier sweeps left there. Sampled just off the face, so the lookup is not taken
-        // inside the geometry it is standing on.
-        vec3 prevUv = (hitPos + hitNormal * cellSize * 1.5 - u.uBoundsMin.xyz) / u.uBoundsSpan.xyz;
-        vec3 incident = u.uSunIrradiance.rgb * ndotl
-                      + PI * texture(uBouncePrev, clamp(prevUv, vec3(0.0), vec3(1.0))).rgb;
-
-        // Lambertian outgoing radiance. Albedo is the entire per-bounce gain from here.
-        bounce += u.uBoundsSpan.w * incident / PI;
-    }
+    for (int i = 0; i < rays; ++i)
+        bounce += gather(origin, fibonacci(i, rays), maxCells, toSun, cellSize);
 
     // A plain average over the sampled directions, because what is stored is average radiance.
     // Scaling by the sphere's 4*PI here is what made the loop diverge.
