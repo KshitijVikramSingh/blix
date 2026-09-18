@@ -49,7 +49,16 @@ internal sealed partial class SponzaLoop
         if (cmdArgs.Contains("--no-ao")) ambient.Enabled = false;
         if (cmdArgs.Contains("--no-shadow")) shadows.Enabled = false;
         if (cmdArgs.Contains("--ao-fullres")) aoScale = 1f;
-        if (cmdArgs.Contains("--sky")) skyVisibilityEnabled = true;
+        if (cmdArgs.Contains("--sky"))
+        {
+            skyVisibilityEnabled = true;
+            // <b>The exposure that suits this lighting model, not a brightening of the old one.</b>
+            // 0.5 was chosen against an ambient that handed every surface a full sky. Once a floor
+            // receives the 3% of sky it can actually see plus what bounces down to it, the scene
+            // carries less light and the camera is the right place to account for that — which is
+            // the whole reason the units arc kept exposure and deleted the intensity knobs.
+            render.Exposure = 0.65f;
+        }
         if (cmdArgs.Contains("--no-mask")) forceOpaqueMask = true;
         if (cmdArgs.Contains("--msaa1")) MsaaSamples = 1;
         // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every
