@@ -83,19 +83,24 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private GraphResourceHandle hdrHandle;       // 1× resolve target (present samples this)
     private GraphResourceHandle hdrMsaaHandle;   // MSAA colour the lit pass renders into
     private GraphResourceHandle depthHandle;     // MSAA depth (matches hdrMsaa)
-    // 4× MSAA. Measured geometry-bound (cutting MSAA 4→2 left frame time flat —
-    // the GPU wall is triangle/binning cost, not fragment/MSAA), so 2× bought no
-    // frame time and we keep 4× for edge quality. R11G11B10F already quarters the
-    // scene-colour tile vs the old 4×/Rgba16F, recovering the memory/bandwidth.
+    // 4x MSAA, and it costs about 3.5 ms of a 21 ms frame — roughly 18%, measured in paired
+    // alternating runs (4x: 20.80/21.08, 1x: 16.93/17.78).
+    //
+    // <b>The note that used to sit here said the opposite and was believed all session.</b> It read
+    // "measured geometry-bound (cutting MSAA 4->2 left frame time flat — the GPU wall is
+    // triangle/binning cost, not fragment/MSAA)". That measurement predates the depth pre-pass, the
+    // LOD chains and the indirect path, and it could not be re-checked because --msaa1 lost the
+    // device: the pre-pass resolved its depth unconditionally, which is right at 4x and invalid at
+    // 1x. A claim nobody could test is how a stale number survives three arcs.
+    //
+    // Kept at 4x deliberately rather than by default: this renderer's whole thesis is stable
+    // silhouettes without temporal reconstruction, and 18% is what that costs when the alternative
+    // is TAA. R11G11B10F already quarters the scene-colour tile against the old Rgba16F.
     // 4 by default.
     //
-    // <b>--msaa1 is INCOMPLETE and currently loses the device — do not trust a number from it.</b>
-    // The lit pass takes a no-resolve path at one sample and alpha-to-coverage is gated off (it is
-    // meaningless without samples to cover), and it still faults in vkQueueWaitIdle with
-    // ErrorDeviceLost. Something else in the frame assumes four samples and has not been found.
-    // Left in place because the question it exists to answer is worth answering: the tree's note
-    // says MSAA 4->2 left frame time flat, and that was measured before the renderer grew a depth
-    // pre-pass, LOD and indirect draws. Nobody has re-checked it since.
+    // --msaa1 drops to a single sample. It used to lose the device; the cause was the depth
+    // pre-pass resolving unconditionally, which is invalid with nothing to resolve. See
+    // SampleableSceneDepth.
     private int MsaaSamples = 4;
     private PassHandle litPassHandle;
 
@@ -117,7 +122,23 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private const float CameraFarPlane = 200f;
     private Matrix4x4 cameraView;
     private Matrix4x4 cameraProjection;
-    private GraphResourceHandle depthResolveHandle;   // 1x scene depth, sampleable
+    private GraphResourceHandle depthResolveHandle;   // 1x resolve of the MSAA depth
+
+    /// <summary>The scene depth something can SAMPLE: the resolve under MSAA, else the target itself.</summary>
+    /// <remarks>
+    /// <b>Resolving a single-sample attachment is invalid, and doing it anyway lost the device.</b>
+    /// The pre-pass called ResolveDepth unconditionally, which is right at 4x and meaningless at 1x
+    /// — --msaa1 faulted in vkQueueWaitIdle with ErrorDeviceLost and the flag sat documented as
+    /// broken. At one sample the depth target is already 1x and already sampleable, so there is
+    /// nothing to resolve and nothing to allocate.
+    ///
+    /// The studio has had exactly this property for the same reason, under the same name. Two
+    /// renderers needing the same decision is the usual sign it should be shared, and the shape of
+    /// it — a target plus the question "what can read this" — is what a render graph ought to answer
+    /// on its own rather than each consumer tracking a resolve by hand.
+    /// </remarks>
+    private GraphResourceHandle SampleableSceneDepth =>
+        MsaaSamples > 1 ? depthResolveHandle : depthHandle;
     private GraphResourceHandle ambientHandle;        // rgb = bent normal (world), a = visibility
     // --- Hi-Z depth pyramid -----------------------------------------------
     // Six levels from half the framebuffer down, each the min/max linear view depth of its parent's

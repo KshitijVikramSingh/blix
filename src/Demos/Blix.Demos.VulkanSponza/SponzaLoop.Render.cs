@@ -351,7 +351,7 @@ internal sealed partial class SponzaLoop
                 var dstW = Math.Max(1, frame.Width >> (level + 1));
                 var dstH = Math.Max(1, frame.Height >> (level + 1));
                 var source = level == 0
-                    ? graph.GetDepthTexture(depthResolveHandle)
+                    ? graph.GetDepthTexture(SampleableSceneDepth)
                     : graph.GetColorTexture(hiZHandles[level - 1]);
                 var uniforms = new ShaderUniform[]
                 {
@@ -426,7 +426,7 @@ internal sealed partial class SponzaLoop
                 {
                     new ShaderTextureBinding("uAmbientRaw", graph.GetColorTexture(ambientHandle), Slot: 1),
                     new ShaderTextureBinding(
-                        "uSceneDepth", graph.GetDepthTexture(depthResolveHandle), Slot: 2),
+                        "uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth), Slot: 2),
                 },
                 pushConstants: null,
                 uniforms: denoiseUniforms));

@@ -219,7 +219,8 @@ internal sealed partial class SponzaLoop
         // 1x depth for GTAO to sample, and the ambient-visibility target it writes.
         // Rgba16F because .xyz is a bent normal — a direction needs signed components, and an
         // 8-bit one quantises the IBL lookup into visible facets on a smooth curved surface.
-        depthResolveHandle = graph.DepthTarget("scene-depth-1x", fullSize);
+        // Only under MSAA: at one sample the depth target is already what a reader wants.
+        if (MsaaSamples > 1) depthResolveHandle = graph.DepthTarget("scene-depth-1x", fullSize);
         // <b>HALF resolution, and the measurement is what decided it.</b> At full res the horizon
         // search alone measured ~50 ms against a 49.8 ms baseline for the whole rest of the frame —
         // it doubled the picture's cost. Quartering the pixels quarters that. The argument against
@@ -230,11 +231,12 @@ internal sealed partial class SponzaLoop
             "ambient-visibility", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(aoScale));
         ambientDenoisedHandle = graph.ColorTarget("ambient-visibility-denoised", TextureFormat.Rgba16F, fullSize);
 
-        depthPrepassHandle = graph.GraphicsPass("depth-prepass")
+        var prepassBuilder = graph.GraphicsPass("depth-prepass")
             .Depth(depthHandle, LoadOp.Clear, StoreOp.Store)
-            .ResolveDepth(depthResolveHandle)     // free-ish: rides the pass's depth store
-            .Shader(litInterface)
-            .Handle;
+            .Shader(litInterface);
+        // Rides the pass's depth store when there is something to resolve.
+        if (MsaaSamples > 1) prepassBuilder = prepassBuilder.ResolveDepth(depthResolveHandle);
+        depthPrepassHandle = prepassBuilder.Handle;
 
         // The Hi-Z pyramid, immediately after the pre-pass that resolves the depth it reduces.
         // Level 0 is half the framebuffer — the same grid GTAO already works on, so its consumers
@@ -249,7 +251,7 @@ internal sealed partial class SponzaLoop
             var builder = graph.GraphicsPass($"hi-z{level}")
                 .Target(hiZHandles[level], LoadOp.Clear, StoreOp.Store);
             // Level 0 reduces the resolved scene depth; every level after reduces its predecessor.
-            builder = level == 0 ? builder.Read(depthResolveHandle) : builder.Read(hiZHandles[level - 1]);
+            builder = level == 0 ? builder.Read(SampleableSceneDepth) : builder.Read(hiZHandles[level - 1]);
             hiZPassHandles[level] = builder.Shader(hiZInterface).Handle;
         }
 
@@ -267,7 +269,7 @@ internal sealed partial class SponzaLoop
         gtaoDenoisePassHandle = graph.GraphicsPass("gtao-denoise")
             .Target(ambientDenoisedHandle, LoadOp.Clear, StoreOp.Store)
             .Read(ambientHandle)
-            .Read(depthResolveHandle)
+            .Read(SampleableSceneDepth)
             .Shader(gtaoDenoiseInterface)
             .Handle;
 
