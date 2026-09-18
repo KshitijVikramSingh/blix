@@ -30,12 +30,17 @@ public static class ProbeRecipe
         int prefilterBase,
         int prefilterMips,
         int brdfSize,
-        float clamp)
+        float clamp,
+        float yawDegrees = 0f)
     {
         ArgumentNullException.ThrowIfNull(hdrPath);
         ArgumentNullException.ThrowIfNull(outPath);
 
-        var hdr = ImageLoader.LoadRgba32F(hdrPath);
+        // Turned BEFORE anything reads it, so the sun finder, the cube conversion and the
+        // irradiance integral all see one sky. Rotating after the bake would leave the recorded sun
+        // direction pointing at where the sun used to be, which is the disagreement this is here to
+        // end rather than to introduce.
+        var hdr = EquirectYaw.Rotate(ImageLoader.LoadRgba32F(hdrPath), yawDegrees);
         var profile = new EnvironmentProfile
         {
             Source = new HdrEnvironmentSource(hdr),
@@ -53,7 +58,8 @@ public static class ProbeRecipe
         var stamp = CookStamp.Of(
             BlixProbe.ShippedRecipe, BlixProbe.ShippedRecipeVersion, hdrPath, outPath,
             $"env={envFace} irr={irrFace} prefilterBase={prefilterBase} prefilterMips={prefilterMips} " +
-            $"brdf={brdfSize} clamp={clamp.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+            $"brdf={brdfSize} clamp={clamp.ToString(System.Globalization.CultureInfo.InvariantCulture)} " +
+            $"yaw={yawDegrees.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
 
         BlixProbeWriter.Write(outPath, data, stamp);
         return new FileInfo(outPath).Length;
