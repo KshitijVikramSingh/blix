@@ -10,6 +10,7 @@
 // direction, where the visibility volume beside it stores L1 spherical harmonics. A directionless
 // probe renders as a flat disc — no shading across the sphere at all — and a directional one does
 // not. Whatever the field is doing, the sphere cannot hide it.
+#include "octahedral.glsl"
 #define PI 3.14159265359
 
 layout(set = 0, binding = 0) uniform Frame {
@@ -19,12 +20,11 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4 uProbeSpan;
     vec4 uProbeDims;
     vec4 uProbeMode;    // x: 0 = bounce, 1 = sky visibility; y = exposure
+    vec4 uBounceDims;   // xyz bounce probe counts
 } f;
 
-layout(set = 1, binding = 0) uniform sampler3D uSkyBounceR;
+layout(set = 1, binding = 0) uniform sampler2D uSkyBounce;
 layout(set = 1, binding = 1) uniform sampler3D uSkyVisibility;
-layout(set = 1, binding = 2) uniform sampler3D uSkyBounceG;
-layout(set = 1, binding = 3) uniform sampler3D uSkyBounceB;
 
 layout(location = 0) in vec3 vProbeCentre;
 layout(location = 1) in vec2 vQuad;
@@ -44,17 +44,14 @@ void main() {
 
     vec3 c;
     if (f.uProbeMode.x < 0.5) {
-        // L1 spherical harmonics, evaluated along this point's own normal — so a probe SHADES, and
-        // a flat disc now means something is wrong rather than something is missing.
-        vec4 shR = texture(uSkyBounceR, vProbeUvw);
-        vec4 shG = texture(uSkyBounceG, vProbeUvw);
-        vec4 shB = texture(uSkyBounceB, vProbeUvw);
-        const float SY0 = 0.282095, SY1 = 0.488603;
-        vec3 l0 = vec3(shR.x, shG.x, shB.x);
-        vec3 dir = vec3(shR.y, shG.y, shB.y) * N.x
-                 + vec3(shR.z, shG.z, shB.z) * N.y
-                 + vec3(shR.w, shG.w, shB.w) * N.z;
-        c = max(PI * SY0 * l0 + (2.0 * PI / 3.0) * SY1 * dir, vec3(0.0));
+        // The probe's own octahedral tile, sampled along this point's normal. A sphere is then a
+        // direct picture of the tile: whatever structure the map holds, the sphere shows.
+        ivec3 bd = ivec3(f.uBounceDims.xyz);
+        ivec3 bp = clamp(ivec3(vProbeUvw * vec3(bd)), ivec3(0), bd - 1);
+        vec2 oct = blix_octEncode(N) * 0.5 + 0.5;
+        vec2 tile = vec2(bp.x, bp.y + bp.z * bd.y) * 8.0;
+        vec2 atlas = vec2(bd.x, bd.y * bd.z) * 8.0;
+        c = texture(uSkyBounce, (tile + 1.0 + oct * 6.0) / atlas).rgb;
     } else {
         // L1 spherical harmonics, cosine-convolved: the same evaluation lit.frag does.
         vec4 sh = texture(uSkyVisibility, vProbeUvw);

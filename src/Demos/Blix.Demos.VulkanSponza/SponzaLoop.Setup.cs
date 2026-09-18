@@ -504,9 +504,7 @@ internal sealed partial class SponzaLoop
             new ShaderTextureBinding("uAmbientVisibility", graph.GetColorTexture(ambientDenoisedHandle), Slot: 5),
             new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 6),
             // Bound per frame in OnRender, which flips between the pair; this is the initial one.
-            new ShaderTextureBinding("uSkyBounceR", bounceReady ? bounceTextures[0][0] : skyVisibilityTexture, Slot: 7),
-            new ShaderTextureBinding("uSkyBounceG", bounceReady ? bounceTextures[0][1] : skyVisibilityTexture, Slot: 11),
-            new ShaderTextureBinding("uSkyBounceB", bounceReady ? bounceTextures[0][2] : skyVisibilityTexture, Slot: 12),
+            new ShaderTextureBinding("uSkyBounce", bounceReady ? bounceTextures[0] : brdfLutTexture, Slot: 7),
             // Bound to SOMETHING valid always — a descriptor set with a hole is a device loss, not a
             // dark curtain. uSheenMipCount being zero is what tells the shader not to read them.
             new ShaderTextureBinding("uSheenEnv", sheenMipCount > 0 ? sheenEnvTexture : envCubeTexture, Slot: 8),
@@ -516,7 +514,7 @@ internal sealed partial class SponzaLoop
 
         // The one binding that is not constant: the lit pass reads whichever of the bounce pair the
         // injection is not writing, so its slot is rewritten each frame.
-        skyBounceBinding = Array.FindIndex(passBindings, b => b.Name == "uSkyBounceR");
+        skyBounceBinding = Array.FindIndex(passBindings, b => b.Name == "uSkyBounce");
 
         // Froxel compute set-0 image bindings (constant handles): the storage
         // grid it writes (binding 1) + the cascade shadow maps it samples
@@ -761,11 +759,19 @@ internal sealed partial class SponzaLoop
                         Console.WriteLine(
                             $"[VulkanSponza]   albedo {albX}x{albY}x{albZ} ({volume.Albedo!.Length / 1024.0 / 1024.0:0.00} MB), so the bounce carries surface colour.");
                     }
+                    bounceX = Math.Max(2, probeX / 2);
+                    bounceY = Math.Max(2, probeY / 2);
+                    bounceZ = Math.Max(2, probeZ / 2);
+                    var atlasW = bounceX * OctTile;
+                    var atlasH = bounceY * bounceZ * OctTile;
                     for (var i = 0; i < bounceTextures.Length; i++)
-                    for (var c = 0; c < 3; c++)
-                        bounceTextures[i][c] = vk.CreateStorageTexture3D(
-                            probeX, probeY, probeZ, TextureFormat.Rgba16F,
-                            SamplerDescription.LinearClamp, $"sponza.bounce{i}.{"rgb"[c]}");
+                        bounceTextures[i] = vk.CreateStorageTexture2D(
+                            atlasW, atlasH, TextureFormat.Rgba16F,
+                            SamplerDescription.LinearClamp, $"sponza.bounce{i}");
+                    Console.WriteLine(
+                        $"[VulkanSponza]   bounce probes {bounceX}x{bounceY}x{bounceZ} = " +
+                        $"{bounceX * bounceY * bounceZ:N0}, octahedral atlas {atlasW}x{atlasH} " +
+                        $"({2.0 * atlasW * atlasH * 8 / 1024 / 1024:0.00} MB for both buffers)");
                     bounceReady = true;
                     Console.WriteLine(
                         $"[VulkanSponza]   occupancy {occX}x{occY}x{occZ} shipped; sun bounce injected at runtime.");

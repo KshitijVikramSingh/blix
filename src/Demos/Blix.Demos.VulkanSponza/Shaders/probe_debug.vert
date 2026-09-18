@@ -11,6 +11,8 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4 uProbeMin;     // xyz volume min, w probe radius in metres
     vec4 uProbeSpan;    // xyz volume span, w unused
     vec4 uProbeDims;    // xyz probe counts, w unused
+    vec4 uProbeMode;
+    vec4 uBounceDims;
 } f;
 
 layout(location = 0) out vec3 vProbeCentre;

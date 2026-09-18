@@ -53,7 +53,11 @@ public static class BlixTex
     // strictly more precision for the same bytes. Bumping this re-cooks every texture in the tree.
     // v3: images are no longer flipped on decode. The loader had carried a GL-era y-flip, so every
     // cooked texture held upside-down pixels; removing it changes the bytes of every .blixtex.
-    public const uint ShippedRecipeVersion = 3;
+    // v4: mip RGB is weighted by alpha instead of box-filtered flat. A leaf blended with the
+    // transparent gaps around it took three quarters of its colour from whatever was left in them,
+    // which walked the cypress's green/blue ratio from 5.14 at mip 0 to 3.08 at the tail. Opaque
+    // textures are byte-identical — with alpha 255 everywhere the weights are equal.
+    public const uint ShippedRecipeVersion = 4;
     public const uint Version3 = 3;
     public const uint KindTexture2D = 1;
     public const int HeaderSize = 28;

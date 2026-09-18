@@ -44,7 +44,21 @@
 // The visibility volume beside it IS directional, so the SHAPE of the ambient still comes from
 // geometry; this supplies its colour and level.
 
-layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+#include "octahedral.glsl"
+
+#define BLIX_OCT_INTERIOR 6
+#define BLIX_OCT_TILE     8
+#define BLIX_OCT_RAYS     64
+
+
+// One workgroup per probe; one thread per ray, then one thread per tile texel. The rays are
+// marched once into shared memory and every texel reads all of them, which is what makes a
+// 36-texel map cost one set of marches rather than thirty-six.
+layout(local_size_x = BLIX_OCT_RAYS) in;
+
+shared vec3 sRadiance[BLIX_OCT_RAYS];
+shared vec3 sDirection[BLIX_OCT_RAYS];
+shared vec3 sTexel[BLIX_OCT_INTERIOR * BLIX_OCT_INTERIOR];
 
 layout(set = 0, binding = 0) uniform Inject {
     vec4 uBoundsMin;      // xyz world min of the probe/occupancy volume, w unused
@@ -62,51 +76,40 @@ layout(set = 0, binding = 0) uniform Inject {
     vec4 uAlbedoDims;
 } u;
 
-// Read-write rather than write-only: a probe not scheduled this frame must KEEP its value, and
-// keeping it means not writing it.
-// <b>Three volumes, one per colour channel, each holding that channel's (L0, L1x, L1y, L1z).</b>
-// The layout mirrors the sky-visibility volume exactly, because it is the same question — how do you
-// store a directional field at a probe — and this side used to answer it differently: one RGB, no
-// direction at all. A probe rendered as a flat disc in the debug view, every point on its surface
-// the same value, and a teal curtain metres away tinted a whole cypress because each leaf received
-// the identical average whether it faced the curtain or away from it.
+// <b>An octahedral atlas, not four coefficients.</b> L1 is one smooth lobe over the sphere, so a
+// source subtending twenty degrees and one subtending ninety give the same SHAPE at different
+// magnitudes — measured on the cypress, teal curtains metres away washed its lower half because L1
+// could say they were there and not how wide they were. A map discretises instead of projecting, so
+// sharpness becomes resolution rather than basis order.
 //
-// Colour in L1 and not only in L0: a monochrome direction lobe would be cheaper by a third and
-// would reproduce precisely the failure this exists to fix, since the complaint is that COLOURED
-// bleed has no direction.
-layout(set = 0, binding = 1, rgba16f) uniform image3D uBounceR;
-layout(set = 0, binding = 8, rgba16f) uniform image3D uBounceG;
-layout(set = 0, binding = 9, rgba16f) uniform image3D uBounceB;
+// One tile per probe, 8x8 with a one-texel border ring around a 6x6 interior. The border is not
+// decoration: tiles are sampled bilinearly, and across an octahedral fold the neighbour is the texel
+// diagonally opposite rather than the one beside it. Without it every probe carries a seam that
+// moves with the camera.
+//
+// Tiles are laid out x across, (y + z * dimY) down — so a probe's neighbours in x are adjacent in
+// memory, which is the axis a trilinear fetch walks first.
+layout(set = 0, binding = 1, rgba16f) uniform image2D uAtlas;
+layout(set = 0, binding = 4) uniform sampler2D uAtlasPrev;
 layout(set = 0, binding = 2) uniform sampler3D uOccupancy;
 layout(set = 0, binding = 3) uniform sampler3D uSkyVisibility;
-// The SAME texture uBounce writes, bound for filtered reading. A surface re-radiates what has
-// already been deposited on it, so each sweep carries the light one bounce further.
-layout(set = 0, binding = 4) uniform sampler3D uBouncePrevR;
-layout(set = 0, binding = 6) uniform sampler3D uBouncePrevG;
-layout(set = 0, binding = 7) uniform sampler3D uBouncePrevB;
-
-#define PI 3.14159265359
-#define BLIX_SH_Y0 0.282095
-#define BLIX_SH_Y1 0.488603
-
-// Cosine-convolved evaluation: the irradiance arriving at a surface facing n. The same expression
-// the visibility volume uses, minus its final /PI — that divide turns irradiance into a fraction,
-// which is what a visibility term wants and a radiance term must not have.
-vec3 blixShIrradiance(vec4 shR, vec4 shG, vec4 shB, vec3 n) {
-    vec3 l0 = vec3(shR.x, shG.x, shB.x);
-    vec3 l1x = vec3(shR.y, shG.y, shB.y);
-    vec3 l1y = vec3(shR.z, shG.z, shB.z);
-    vec3 l1z = vec3(shR.w, shG.w, shB.w);
-    vec3 directional = l1x * n.x + l1y * n.y + l1z * n.z;
-    return max(PI * BLIX_SH_Y0 * l0 + (2.0 * PI / 3.0) * BLIX_SH_Y1 * directional, vec3(0.0));
-}
-
-vec3 blixSampleBounce(sampler3D r, sampler3D g, sampler3D b, vec3 uvw, vec3 n) {
-    return blixShIrradiance(texture(r, uvw), texture(g, uvw), texture(b, uvw), n);
-}
-// Surface colour per cell, coarser than the occupancy it accompanies and gamma-2.0 encoded.
 layout(set = 0, binding = 5) uniform sampler3D uAlbedo;
 
+#define PI 3.14159265359
+// What the previous sweep left at a point, for a surface facing n. One bilinear fetch inside that
+// probe's tile — the border ring is what makes this fetch safe at the octahedron's fold.
+vec3 blixSampleAtlas(vec3 worldPos, vec3 n) {
+    ivec3 dims = ivec3(u.uProbeDims.xyz);
+    vec3 grid = clamp((worldPos - u.uBoundsMin.xyz) / u.uBoundsSpan.xyz, vec3(0.0), vec3(1.0))
+              * vec3(dims) - 0.5;
+    ivec3 p = clamp(ivec3(floor(grid + 0.5)), ivec3(0), dims - 1);
+
+    vec2 oct = blix_octEncode(normalize(n)) * 0.5 + 0.5;          // [0,1] across the interior
+    vec2 tile = vec2(p.x, p.y + p.z * dims.y) * float(BLIX_OCT_TILE);
+    vec2 texel = tile + 1.0 + oct * float(BLIX_OCT_INTERIOR);      // +1 skips the border ring
+    vec2 atlasSize = vec2(dims.x, dims.y * dims.z) * float(BLIX_OCT_TILE);
+    return texture(uAtlasPrev, texel / atlasSize).rgb;
+}
 
 // The grid stores DENSITY, not occupancy. The baker writes 1.0 for an opaque triangle and
 // CutoutOpacity for an alpha-cutout one, precisely so that a canopy attenuates instead of walling,
@@ -238,9 +241,10 @@ vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize) {
             // <b>Evaluated along the hit surface's OWN normal.</b> The directionless version could
             // only ask "how much light is around here"; a surface re-radiates what reaches the side
             // it faces, and now it can be asked that.
+            // Evaluated along the hit surface's OWN normal: a surface re-radiates what reaches the
+            // side it faces, and the atlas can finally be asked that at full directional resolution.
             vec3 incident = u.uSunIrradiance.rgb * sunReach
-                          + blixSampleBounce(uBouncePrevR, uBouncePrevG, uBouncePrevB,
-                                             clamp(prevUv, vec3(0.0), vec3(1.0)), n);
+                          + blixSampleAtlas(hitPos + n * cellSize * 1.5, n);
 
             // Lambertian outgoing radiance, now in the surface's OWN colour. uBoundsSpan.w stops
             // being the scene's albedo and becomes a plain strength multiplier over it.
@@ -268,10 +272,22 @@ vec3 fibonacci(int i, int count) {
     return vec3(cos(theta) * r, y, sin(theta) * r);
 }
 
+// Where probe (x,y,z)'s tile starts in the atlas.
+ivec2 blixTileOrigin(ivec3 probe, ivec3 dims) {
+    return ivec2(probe.x, probe.y + probe.z * dims.y) * BLIX_OCT_TILE;
+}
+
 void main() {
-    ivec3 probe = ivec3(gl_GlobalInvocationID);
     ivec3 dims = ivec3(u.uProbeDims.xyz);
-    if (any(greaterThanEqual(probe, dims))) return;
+    int probeIndex = int(gl_WorkGroupID.x);
+    ivec3 probe = ivec3(probeIndex % dims.x,
+                        (probeIndex / dims.x) % dims.y,
+                        probeIndex / (dims.x * dims.y));
+    if (probe.z >= dims.z) return;
+
+    int lane = int(gl_LocalInvocationIndex);
+    ivec2 tile = blixTileOrigin(probe, dims);
+    ivec2 texel = ivec2(lane % BLIX_OCT_TILE, lane / BLIX_OCT_TILE);
 
     // Is this probe's turn? A scatter over the three axes rather than whole slices, so the ones
     // refreshed together are spread through the volume and a sun change arrives evenly rather than
@@ -279,42 +295,49 @@ void main() {
     int period = int(u.uSchedule.y);
     int slot = (probe.x * 5 + probe.y * 11 + probe.z * 17) % period;
     if (slot != int(u.uSchedule.x) % period) {
-        // Carry the value forward instead of returning. Returning kept the probe's value in a
-        // SINGLE buffer, which is what this once was; against a ping-pong it is wrong, and wrong in
-        // a way that looks like the light swinging about. The write target alternates with frame
-        // parity, and a probe's turn comes round every `period` frames — an even period, so the
-        // same parity every time. Each probe was therefore only ever written into ONE of the two
-        // buffers and stayed zero in the other, and the shader that reads them alternates between
-        // the two every frame. Half the field, flickering against the other half.
-        imageStore(uBounceR, probe, texelFetch(uBouncePrevR, probe, 0));
-        imageStore(uBounceG, probe, texelFetch(uBouncePrevG, probe, 0));
-        imageStore(uBounceB, probe, texelFetch(uBouncePrevB, probe, 0));
+        // Carry the tile forward. The write target alternates with frame parity and a probe's turn
+        // comes round every `period` frames — an even period, so the same parity every time. A probe
+        // that simply returned was therefore only ever written into ONE of the two atlases and
+        // stayed empty in the other, which reads as the light swinging about between frames.
+        imageStore(uAtlas, tile + texel, texelFetch(uAtlasPrev, tile + texel, 0));
         return;
     }
 
     vec3 origin = u.uBoundsMin.xyz + (vec3(probe) + 0.5) * u.uBoundsSpan.xyz / vec3(dims);
     vec3 toSun = -normalize(u.uSunDirection.xyz);
-    int rays = int(u.uProbeDims.w);
     float maxCells = max(u.uOccupancyDims.x, max(u.uOccupancyDims.y, u.uOccupancyDims.z));
     float cellSize = length(u.uBoundsSpan.xyz / u.uOccupancyDims.xyz);
 
-    // Projected onto L0 + L1 as it accumulates. The 4*PI/N below is the Monte Carlo weight for a
-    // uniform sphere and the basis constants are the real ones — the same projection the sky
-    // visibility bake performs, so the two volumes can be read by the same evaluation.
-    vec3 l0 = vec3(0.0);
-    vec3 l1x = vec3(0.0), l1y = vec3(0.0), l1z = vec3(0.0);
-    for (int i = 0; i < rays; ++i) {
-        vec3 d = fibonacci(i, rays);
-        vec3 c = gather(origin, d, maxCells, toSun, cellSize);
-        l0  += BLIX_SH_Y0 * c;
-        l1x += BLIX_SH_Y1 * c * d.x;
-        l1y += BLIX_SH_Y1 * c * d.y;
-        l1z += BLIX_SH_Y1 * c * d.z;
-    }
-    float w = 4.0 * PI / float(rays);
-    l0 *= w; l1x *= w; l1y *= w; l1z *= w;
+    // One ray per thread, marched once and shared with every texel that wants it.
+    vec3 d = fibonacci(lane, BLIX_OCT_RAYS);
+    sDirection[lane] = d;
+    sRadiance[lane] = gather(origin, d, maxCells, toSun, cellSize);
+    barrier();
 
-    imageStore(uBounceR, probe, vec4(l0.r, l1x.r, l1y.r, l1z.r));
-    imageStore(uBounceG, probe, vec4(l0.g, l1x.g, l1y.g, l1z.g));
-    imageStore(uBounceB, probe, vec4(l0.b, l1x.b, l1y.b, l1z.b));
+    // Interior texels: the cosine-weighted average of every ray, which IS the irradiance arriving
+    // at a surface facing that texel's direction. Stored as irradiance so a reader multiplies by
+    // albedo and nothing else — the PI that used to sit at the read site lives here now.
+    const int interiorCount = BLIX_OCT_INTERIOR * BLIX_OCT_INTERIOR;
+    if (lane < interiorCount) {
+        ivec2 c = ivec2(lane % BLIX_OCT_INTERIOR, lane / BLIX_OCT_INTERIOR);
+        vec2 uv = ((vec2(c) + 0.5) / float(BLIX_OCT_INTERIOR)) * 2.0 - 1.0;
+        vec3 texelDir = blix_octDecode(uv);
+
+        vec3 sum = vec3(0.0);
+        float weight = 0.0;
+        for (int i = 0; i < BLIX_OCT_RAYS; ++i) {
+            float w = max(dot(texelDir, sDirection[i]), 0.0);
+            if (w <= 0.0) continue;
+            sum += sRadiance[i] * w;
+            weight += w;
+        }
+        sTexel[lane] = weight > 0.0 ? sum * (PI / weight) : vec3(0.0);
+    }
+    barrier();
+
+    // Every texel of the tile, interior and border alike, from shared memory — so the border never
+    // reads an image the same dispatch is still writing.
+    ivec2 src = blix_octBorderSource(texel, BLIX_OCT_TILE);
+    vec3 value = sTexel[(src.y - 1) * BLIX_OCT_INTERIOR + (src.x - 1)];
+    imageStore(uAtlas, tile + texel, vec4(value, 1.0));
 }

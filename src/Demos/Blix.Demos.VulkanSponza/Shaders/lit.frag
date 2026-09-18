@@ -29,6 +29,7 @@
 #define BLIX_SHADOW_PCF_TAPS 4
 #include "shadow.glsl"
 #include "sheen.glsl"
+#include "octahedral.glsl"
 
 // Lit fragment shader — Cook-Torrance split-sum IBL on top of a Lambert N·L
 // sun term, with cascaded shadows, a Fresnel-glass branch, and froxel-fog
@@ -70,6 +71,7 @@ layout(set = 0, binding = 0) uniform Frame {
     vec3  uCameraPos;
     float uEnvMipCount;
     float uSheenMipCount;
+    vec4  uBounceDims;     // xyz bounce probe counts
     vec4  uClothOverride;  // x=sheenRoughness, y=diffuseTransmission; x<0 = use the material's
     float uShadowStrength;         // 0 = sun shadows off, 1 = on
     vec3  _cascadePad;
@@ -137,9 +139,10 @@ layout(set = 1, binding = 6) uniform sampler3D   uSkyVisibility;
 // One volume per colour channel, each holding that channel's (L0, L1x, L1y, L1z). Directional, so
 // a surface receives what reaches the side it FACES — the previous single RGB gave every surface at
 // a point the same answer, which is why a teal curtain metres away tinted a whole tree.
-layout(set = 1, binding = 7)  uniform sampler3D uSkyBounceR;
-layout(set = 1, binding = 11) uniform sampler3D uSkyBounceG;
-layout(set = 1, binding = 12) uniform sampler3D uSkyBounceB;
+// An octahedral atlas: one 8x8 tile per probe, 6x6 interior plus a border ring. Directional at
+// thirty-six samples rather than L1's four, which is the difference between knowing a curtain is
+// over there and knowing how much of the sky it covers.
+layout(set = 1, binding = 7) uniform sampler2D uSkyBounce;
 // The environment convolved with CHARLIE rather than GGX, and the Charlie lobe's directional
 // albedo. Separate from uPrefilteredEnv on purpose: a GGX cube in sheen's place renders something
 // dimmer and rimless and entirely plausible, which is the failure this whole arc keeps closing.
@@ -484,6 +487,15 @@ void main() {
     // instead of along N is what makes a surface in a corner pick up the light from the opening
     // rather than an average that includes the wall it is pressed against.
     vec3 gatherN = opaqueSurface ? normalize(ambientVis.xyz) : N;
+    // <b>A bent normal is a refinement of N, never a replacement for it.</b> GTAO derives it in
+    // screen space from depth, which cannot tell which side of a leaf card is being shaded — so on
+    // the back face of two-sided geometry it points into the hemisphere the surface does NOT face,
+    // and the fragment gathers its indirect light from the wrong side of itself.
+    //
+    // Harmless while the bounce was one direction-free RGB, mild under L1's single smooth lobe, and
+    // plainly wrong at thirty-six directional samples: it fetches a different part of the probe's
+    // map entirely. Reported from the chair as back-facing leaves shifting blue.
+    if (dot(gatherN, N) < 0.0) gatherN = N;
 
     vec3 irradiance = frame.uAbFlags.z > 0.5 ? vec3(0.2) : texture(uIrradiance, gatherN).rgb;
 
@@ -559,19 +571,15 @@ void main() {
         // in different units. The volume stores average incident RADIANCE, so irradiance is PI times
         // it — and the /PI that briefly sat here is the radiance conversion, which belongs in the
         // injection pass where a surface re-emits, not here where one receives.
-        // Cosine-convolved L1 evaluation along the gather normal: the same expression the sky
-        // visibility uses, minus its final /PI, which is the divide that turns irradiance into a
-        // fraction. This term is irradiance and must keep it.
-        vec3 uvw = clamp(probeUv, vec3(0.0), vec3(1.0));
-        vec4 shR = texture(uSkyBounceR, uvw);
-        vec4 shG = texture(uSkyBounceG, uvw);
-        vec4 shB = texture(uSkyBounceB, uvw);
-        const float SY0 = 0.282095, SY1 = 0.488603;
-        vec3 shL0 = vec3(shR.x, shG.x, shB.x);
-        vec3 shDir = vec3(shR.y, shG.y, shB.y) * gatherN.x
-                   + vec3(shR.z, shG.z, shB.z) * gatherN.y
-                   + vec3(shR.w, shG.w, shB.w) * gatherN.z;
-        vec3 incident = max(PI * SY0 * shL0 + (2.0 * PI / 3.0) * SY1 * shDir, vec3(0.0));
+        // The atlas stores IRRADIANCE per direction, so this is one fetch and no conversion — the
+        // PI that used to sit here lives in the injection, where the cosine average is formed.
+        ivec3 bdims = ivec3(frame.uBounceDims.xyz);
+        vec3 bgrid = clamp(probeUv, vec3(0.0), vec3(1.0)) * vec3(bdims) - 0.5;
+        ivec3 bp = clamp(ivec3(floor(bgrid + 0.5)), ivec3(0), bdims - 1);
+        vec2 oct = blix_octEncode(normalize(gatherN)) * 0.5 + 0.5;
+        vec2 btile = vec2(bp.x, bp.y + bp.z * bdims.y) * 8.0;
+        vec2 batlas = vec2(bdims.x, bdims.y * bdims.z) * 8.0;
+        vec3 incident = texture(uSkyBounce, (btile + 1.0 + oct * 6.0) / batlas).rgb;
         vizBounceRaw = incident;
         bounce = incident * albedo * (1.0 - metallic) * ao * visibility;
     }

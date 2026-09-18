@@ -81,7 +81,10 @@ cook_pack() {
             patch_args=(--patch "$dir/$patch")
         fi
         echo "── $dest  ($(basename "$gltf"))"
-        dotnet "$COOK" asset "$gltf" --out "$COOKED/$dest" --tangents "${patch_args[@]}"
+        # ${x[@]+"${x[@]}"} rather than "${x[@]}": macOS ships bash 3.2, where expanding an EMPTY
+        # array under `set -u` is an unbound-variable error. It failed only for the packs with no
+        # patch — so main_sponza and curtains cooked, ivy and trees silently did not.
+        dotnet "$COOK" asset "$gltf" --out "$COOKED/$dest" --tangents ${patch_args[@]+"${patch_args[@]}"}
         return 0
     done
     echo "  $dest: not present in $SRC — skipped"

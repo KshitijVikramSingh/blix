@@ -190,12 +190,20 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     //
     // So the lit pass reads what the previous frame solved. The probe grid is already amortised over
     // eight frames, so one more frame of latency is beneath what the amortisation itself introduces.
-    // [buffer][channel] — two ping-pong sets of three volumes, one per colour channel, each holding
-    // that channel's L0 and L1. 41,472 probes x 8 bytes x 3 x 2 is about 2 MB.
-    private readonly TextureHandle[][] bounceTextures =
-    {
-        new TextureHandle[3], new TextureHandle[3],
-    };
+    // Two ping-pong octahedral atlases: one 8x8 tile per probe, 6x6 interior plus a border ring.
+    private readonly TextureHandle[] bounceTextures = new TextureHandle[2];
+
+    /// <summary>
+    /// Probe counts for the BOUNCE, which are no longer the sky visibility's.
+    /// </summary>
+    /// <remarks>
+    /// <b>An octahedral probe carries thirty-six directional samples where L1 carried four, so it
+    /// wants far fewer probes.</b> Keeping 41,472 of them would spend the entire gain on solving a
+    /// field at a spacing its own resolution no longer needs. Half the visibility grid on each axis
+    /// is an eighth of the marching — and the marching is what this pass costs.
+    /// </remarks>
+    private int bounceX, bounceY, bounceZ;
+    private const int OctTile = 8;
     private int bounceWrite;
     private int skyBounceBinding = -1;   // where uSkyBounce sits in passBindings
     private ShaderProgramHandle injectProgram;

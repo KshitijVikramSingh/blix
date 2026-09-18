@@ -261,14 +261,35 @@ public static class TextureRecipe
                     var sy = y * 2;
                     var sx1 = Math.Min(sx + 1, w - 1);
                     var sy1 = Math.Min(sy + 1, h - 1);
-                    for (var c = 0; c < 4; c++)
+                    // <b>RGB weighted by alpha; alpha averaged plainly.</b> A flat box filter
+                    // averages colour across texels that are not there: a leaf texel at alpha 255
+                    // blended with three transparent ones takes three quarters of its colour from
+                    // whatever the artist happened to leave in the gaps. Measured on the cypress,
+                    // that walks the leaf's green/blue ratio from 5.14 at mip 0 down to 3.08 at the
+                    // tail — foliage quietly desaturating with distance, which then compounds with
+                    // shade replacing warm sun with blue sky and reads, from the chair, as the tree
+                    // turning blue.
+                    //
+                    // Opaque textures are unaffected by construction: with alpha 255 everywhere the
+                    // weights are equal and this IS the box filter.
+                    var i0 = (sy * srcW + sx) * 4;
+                    var i1 = (sy * srcW + sx1) * 4;
+                    var i2 = (sy1 * srcW + sx) * 4;
+                    var i3 = (sy1 * srcW + sx1) * 4;
+                    int a0 = current[i0 + 3], a1 = current[i1 + 3];
+                    int a2 = current[i2 + 3], a3 = current[i3 + 3];
+                    var alphaSum = a0 + a1 + a2 + a3;
+                    for (var c = 0; c < 3; c++)
                     {
-                        var a = current[(sy * srcW + sx) * 4 + c];
-                        var b = current[(sy * srcW + sx1) * 4 + c];
-                        var d = current[(sy1 * srcW + sx) * 4 + c];
-                        var e = current[(sy1 * srcW + sx1) * 4 + c];
-                        next[(y * nw + x) * 4 + c] = (byte)((a + b + d + e + 2) / 4);
+                        var weighted = alphaSum > 0
+                            ? (current[i0 + c] * a0 + current[i1 + c] * a1
+                             + current[i2 + c] * a2 + current[i3 + c] * a3 + alphaSum / 2) / alphaSum
+                            // Fully transparent everywhere: no colour is "there" to preserve, so the
+                            // plain average keeps whatever the source held rather than inventing black.
+                            : (current[i0 + c] + current[i1 + c] + current[i2 + c] + current[i3 + c] + 2) / 4;
+                        next[(y * nw + x) * 4 + c] = (byte)weighted;
                     }
+                    next[(y * nw + x) * 4 + 3] = (byte)((alphaSum + 2) / 4);
                 }
             }
             mips.Add((next, nw, nh));
