@@ -390,6 +390,17 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // "" = off. "flat" swaps the whole lit path for flat.frag; "shadow" zeroes uShadowStrength;
     // "gtao" zeroes the search radius. The last two are uniform-driven, so they alternate without
     // touching pipelines — which is what makes a fine interleave possible at all.
+    // --no-prepass: drop the depth pre-pass for good, not as an A/B phase.
+    //
+    // <b>It is not an optimisation being removed, it is a dependency, and that is the finding.</b>
+    // GTAO and the Hi-Z pyramid both need depth BEFORE shading, and only a pre-pass can give them
+    // that -- so removing it removes screen-space ambient occlusion with it. Which turns out to be
+    // the interesting part: judged from the chair, that image reads BETTER (the green volume around
+    // the cypress and the streak on the wall both go), and --ab prepass measured the pair at 0.802x
+    // of frame, about 12.6 ms. The baked sky-visibility volume is the honest occlusion term anyway --
+    // measured, volumetric, and it knows a courtyard is a well; GTAO is a sub-metre screen-space
+    // approximation sitting on top of it.
+    private bool noPrepass;
     private string abMode = "";
     private bool abFlat;
     private const int AbPeriodFrames = 120;

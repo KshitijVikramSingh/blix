@@ -317,7 +317,7 @@ internal sealed partial class SponzaLoop
         // discard + the mask pipeline; opaque needs only set 0 + model push.
         // --ab prepass off-phase: record the pass (it still clears depth) but draw nothing into it,
         // so the lit pass below establishes depth itself through the writing pipelines.
-        var skipPrepass = abMode == "prepass" && AbOffPhase;
+        var skipPrepass = noPrepass || (abMode == "prepass" && AbOffPhase);
         graph.Pass(depthPrepassHandle, scope =>
         {
             if (skipPrepass) return;

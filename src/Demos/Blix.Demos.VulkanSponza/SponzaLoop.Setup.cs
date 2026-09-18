@@ -49,6 +49,7 @@ internal sealed partial class SponzaLoop
         if (cmdArgs.Contains("--no-ao")) ambient.Enabled = false;
         if (cmdArgs.Contains("--no-shadow")) shadows.Enabled = false;
         if (cmdArgs.Contains("--ao-fullres")) aoScale = 1f;
+        if (cmdArgs.Contains("--no-prepass")) noPrepass = true;
         if (cmdArgs.Contains("--sky-no-inject")) skipInject = true;
         if (cmdArgs.Contains("--sky-no-sample")) skipSkySample = true;
         // <b>ON by default, and it was off — which meant the demo's own lighting model was opt-in.</b>
