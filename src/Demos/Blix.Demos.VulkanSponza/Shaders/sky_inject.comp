@@ -65,6 +65,9 @@
 // exists to preserve, and the edge is what the test reads.
 #define BLIX_OCT_RAYS     256
 
+// How far one solve moves a stored tile toward its new answer. 1.0 is the hard replace this had.
+#define SOLVE_CONVERGE 0.4
+
 
 // One workgroup per probe; one thread per ray, then one thread per tile texel. The rays are
 // marched once into shared memory and every texel reads all of them, which is what makes a
@@ -92,7 +95,7 @@ layout(set = 0, binding = 0) uniform Inject {
     // re-derive a field that barely changed — measured, it doubled the frame. Each probe is
     // refreshed on its own turn instead.
     // x = frame counter, y = sweep length, z = usage decay per frame (0 disables sleeping).
-    vec4 uSchedule;
+    vec4 uSchedule;   // w: 1 when the atlases alternate and a skipped probe must carry its tile
     // xyz albedo grid dims (0 = none shipped), w = translucency.
     vec4 uAlbedoDims;
 } u;
@@ -405,12 +408,19 @@ void main() {
 
     int period = int(u.uSchedule.y);
     int slot = (probe.x * 5 + probe.y * 11 + probe.z * 17) % period;
+
+    // <b>There was a wake stride here and it gated nothing.</b> It tested `asleep && !eligible`
+    // and returned — but the very next test returns for `asleep` alone, so an eligible sleeping
+    // probe took the second exit and behaved identically. Waking never passed through it: a probe
+    // wakes when probe_usage marks it, which clears `asleep` before either test is reached. Deleted
+    // rather than repaired, because the pop it was aimed at turned out to be the hard replace below.
     if (asleep || slot != int(u.uSchedule.x) % period) {
-        // Carry the tile forward. The write target alternates with frame parity and a probe's turn
-        // comes round every `period` frames — an even period, so the same parity every time. A probe
-        // that simply returned was therefore only ever written into ONE of the two atlases and
-        // stayed empty in the other, which reads as the light swinging about between frames.
-        if (ownsTexel) {
+        // <b>Nothing to carry when there is only one atlas.</b> The copy below exists solely because
+        // the pair alternates: a probe that simply returned was written into ONE of the two buffers
+        // and stayed empty in the other, which read as the light swinging about between frames. With
+        // a single atlas its last answer is already where every reader will look, and this becomes
+        // the cheapest branch in the shader instead of the most expensive one in the pass.
+        if (u.uSchedule.w > 0.5 && ownsTexel) {
             imageStore(uAtlas, tile + texel, texelFetch(uAtlasPrev, tile + texel, 0));
             imageStore(uDepthAtlas, tile + texel, texelFetch(uDepthAtlasPrev, tile + texel, 0));
         }
@@ -511,7 +521,20 @@ void main() {
     if (!ownsTexel) return;
     ivec2 src = blix_octBorderSource(texel, BLIX_OCT_TILE);
     vec3 value = sTexel[(src.y - 1) * BLIX_OCT_INTERIOR + (src.x - 1)];
-    imageStore(uAtlas, tile + texel, vec4(value, 1.0));
+    // <b>Converge, do not replace.</b> A solve used to overwrite the tile outright, which is
+    // invisible for a probe that solves every `period` frames in a scene that has not changed — and
+    // a hard step for one that has been asleep, because its stored answer is however old the sleep
+    // was. Blending toward the new solution turns that step into a ramp of a few solves. The scene
+    // is static and the sun moves by hand, so the lag this introduces for an awake probe costs
+    // nothing; the smoothness it buys a waking one is the whole point.
+    // <b>Converge from an answer, never from nothing.</b> Blending toward the new solution turns a
+    // waking probe's jump into a ramp — but a probe that has NEVER solved holds the cleared tile,
+    // and ramping from that is a fade up out of black, which is a worse artifact than the pop it
+    // was meant to fix. The stored alpha is the marker: solves write 1.0, the clear leaves 0, so
+    // the first solve of a probe's life takes its answer outright.
+    vec4 previous = texelFetch(uAtlasPrev, tile + texel, 0);
+    float converge = previous.a > 0.5 ? SOLVE_CONVERGE : 1.0;
+    imageStore(uAtlas, tile + texel, vec4(mix(previous.rgb, value, converge), 1.0));
     vec2 moments = sDepthTexel[(src.y - 1) * BLIX_OCT_INTERIOR + (src.x - 1)];
     // <b>.b carries reachability, and it costs nothing.</b> The depth atlas is Rgba16F and has only
     // ever used .rg, so the flag rides along in memory already allocated and already fetched by

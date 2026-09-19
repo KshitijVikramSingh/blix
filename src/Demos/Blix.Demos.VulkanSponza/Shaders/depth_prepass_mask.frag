@@ -36,5 +36,17 @@ void main() {
     // spare component of a block it already declares beats duplicating a std140 layout to reach
     // one float.
     float coverage = clamp((a - mat.uMaterialParams.x) / max(fwidth(a), 1e-5) + 0.5, 0.0, 1.0);
-    gl_SampleMask[0] = blix_coverageMask(coverage, int(mat.uMaterialParams2.w), blix_layerHash(vWorldPos));
+    float policy = mat.uMaterialParams2.w;
+    int samples = int(policy);
+    if (policy > 0.0 && policy < 1.5) {
+        // Single sample: the lit pass resolves coverage with a hashed discard, so this must make
+        // the SAME decision or the pre-pass writes depth for a fragment the lit pass throws away
+        // and the canopy fills with holes of solid depth.
+        if (!blix_hashedAlphaKeeps(coverage, blix_layerHash(vWorldPos))) discard;
+        gl_SampleMask[0] = 1;
+    } else if (samples < 2) {
+        gl_SampleMask[0] = 1;   // one sample, plain binary: the discard above is the whole test
+    } else {
+        gl_SampleMask[0] = blix_coverageMask(coverage, samples, blix_layerHash(vWorldPos));
+    }
 }

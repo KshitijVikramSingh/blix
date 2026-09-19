@@ -20,7 +20,7 @@
 layout(set = 0, binding = 0) uniform Frame {
     mat4 uViewProjection;
     layout(offset = 96)  vec3 uCameraPos;
-    layout(offset = 432) vec4 uFog;   // x=screenW, y=screenH, z=fogFar, w=enabled(0/1)
+    layout(offset = 416) vec4 uFog;   // x=screenW, y=screenH, z=fogFar, w=enabled(0/1)
 } frame;
 
 // Vertex inputs are declared (matching the pipeline's VertexPosition3-

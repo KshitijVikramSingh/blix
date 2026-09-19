@@ -21,6 +21,28 @@
 // same pixel the same permutation, which is the pathology rather than the cure; and it would swim
 // under camera motion. Quantised world position gives each card a stable, distinct stream.
 
+/// Hashed alpha test: keep the fragment with probability `coverage`, decided by `hash`.
+///
+/// <b>What a single-sample target has instead of a sample mask.</b> With one sample there is no
+/// mask to decorrelate — blix_coverageMask rounds to one bit, so a leaf edge is a hard binary
+/// decision and every partial pixel is fully in or fully out. Statically that is merely a crisp
+/// silhouette; in motion each boundary pixel flips between the two with nothing in between, and
+/// that crawl is the worst signal a temporal filter can be handed.
+///
+/// Comparing against a hash restores the coverage as a probability: a 20%-covered fragment survives
+/// a fifth of the time, so a stack of leaves composites to the right density on average. This is
+/// Wyman & McGuire's hashed alpha testing, and the same decorrelation argument as the mask above —
+/// the difference is only that the randomness lands in whether the fragment exists rather than in
+/// which samples it owns.
+///
+/// <b>The hash must be STABLE in world space, not per frame.</b> A per-frame hash would converge
+/// under temporal accumulation and dissolve without it, which makes the look depend on a filter
+/// that may not be there. A stable one gives a fixed stochastic silhouette that does not crawl on
+/// its own, and leaves a temporal stage free to quieten it rather than responsible for it.
+bool blix_hashedAlphaKeeps(float coverage, float hash) {
+    return coverage >= hash;
+}
+
 /// A sample mask with exactly `round(coverage * samples)` bits set, chosen by `hash`.
 ///
 /// Reservoir-style selection: bit i is taken with probability remaining/(samples - i), which yields
