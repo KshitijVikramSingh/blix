@@ -45,6 +45,7 @@
 // geometry; this supplies its colour and level.
 
 #include "probe_volume.glsl"
+#include "sky_visibility.glsl"
 
 #define BLIX_OCT_INTERIOR 6
 #define BLIX_OCT_TILE     8
@@ -85,7 +86,7 @@ layout(set = 0, binding = 0) uniform Inject {
     vec4 uProbeDims;      // xyz probe grid dims, w = rays per probe
     vec4 uOccupancyDims;  // xyz occupancy dims, w unused
     vec4 uSunDirection;   // xyz direction the sun TRAVELS, w unused
-    vec4 uSunIrradiance;  // rgb measured irradiance, w unused
+    vec4 uSunIrradiance;  // rgb measured irradiance, w = 1 when the sky-visibility volume is loaded
     // x = frame counter, y = how many frames a full sweep takes. Bounce is the low-frequency half
     // of the image and the sun moves slowly, so solving every probe every frame spends 19 ms to
     // re-derive a field that barely changed — measured, it doubled the frame. Each probe is
@@ -116,7 +117,18 @@ layout(set = 0, binding = 4) uniform sampler2D uAtlasPrev;
 layout(set = 0, binding = 11, rgba16f) uniform image2D uDepthAtlas;
 layout(set = 0, binding = 12) uniform sampler2D uDepthAtlasPrev;
 layout(set = 0, binding = 2) uniform sampler3D uOccupancy;
+// <b>The sky, as a SOURCE in the transport chain rather than only a term at the end.</b> These
+// were bound and unused: uSkyVisibility was declared here and never read once. The bounce solve
+// took its energy from `sun * sunReach + previousBounce`, so the only thing that could start a
+// chain was a SUNLIT surface. That is enough to bring a courtyard alive and not nearly enough for
+// an arcade: a corridor that sees little sun is lit almost entirely by sky arriving through an
+// opening and then bouncing twice more off warm stone, and none of that existed. The interiors
+// were not failing to sample their light, they had never been given any.
 layout(set = 0, binding = 3) uniform sampler3D uSkyVisibility;
+layout(set = 0, binding = 6) uniform sampler3D uSkyVisibility1;
+layout(set = 0, binding = 8) uniform sampler3D uSkyVisibility2;
+// The distant sky's cosine-convolved irradiance, the same cube the lit pass reads.
+layout(set = 0, binding = 9) uniform samplerCube uIrradiance;
 layout(set = 0, binding = 5) uniform sampler3D uAlbedo;
 // <b>Which probes shading actually read, written by the fragment stage.</b> No bake-time test can
 // tell a probe inside the model's shell from one in the arcade — measured, they are geometrically
@@ -304,10 +316,27 @@ vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize,
             // it faces, and now it can be asked that.
             // Evaluated along the hit surface's OWN normal: a surface re-radiates what reaches the
             // side it faces, and the atlas can finally be asked that at full directional resolution.
+            // <b>Three sources now: sun, sky, and the previous bounce.</b> The sky term is the
+            // distant irradiance cube along this surface's own normal, scaled by how much sky the
+            // baked volume says it can actually see from here — the same pair the lit pass uses,
+            // asked at the hit instead of at the camera. A wall under an arcade opening therefore
+            // re-radiates the sky it receives, and the corridor behind it gets a second and third
+            // bounce of that light rather than nothing.
+            //
+            // Queried at the already-offset position with no further push: hitPos is one and a half
+            // occupancy cells off the face, which is what the wall bias is for.
+            vec3 probePos = hitPos + n * cellSize * 1.5;
+            vec3 skyTerm = u.uSunIrradiance.w > 0.5
+                ? texture(uIrradiance, n).rgb
+                    * blix_skyVisibility(uSkyVisibility, uSkyVisibility1, uSkyVisibility2,
+                                         u.uBoundsMin.xyz, 1.0 / u.uBoundsSpan.xyz, 0.0,
+                                         probePos, n)
+                : vec3(0.0);
             vec3 incident = u.uSunIrradiance.rgb * sunReach
+                          + skyTerm
                           + blix_probeIrradiance(uAtlasPrev, uDepthAtlasPrev, ivec3(u.uProbeDims.xyz),
                                                  u.uBoundsMin.xyz, u.uBoundsSpan.xyz,
-                                                 hitPos + n * cellSize * 1.5, n);
+                                                 probePos, n);
 
             // Lambertian outgoing radiance, now in the surface's OWN colour. uBoundsSpan.w stops
             // being the scene's albedo and becomes a plain strength multiplier over it.

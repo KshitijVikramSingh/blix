@@ -383,7 +383,10 @@ internal sealed partial class SponzaLoop
                 // side wearing its colour. Zero on opaque cells in the shader, or walls would leak.
                 new("uAlbedoDims", new Vector4Uniform(new Vector4(albX, albY, albZ, injectTranslucency))),
                 new("uSunDirection",  new Vector4Uniform(new Vector4(sunDirection, 0f))),
-                new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 0f))),
+                // w: whether the sky-visibility volume is loaded, so the injector knows whether its
+                // sky SOURCE term can be evaluated at all.
+                new("uSunIrradiance", new Vector4Uniform(new Vector4(
+                    EffectiveSunIrradiance, skyVolumeLoaded ? 1f : 0f))),
                 new("uSchedule", new Vector4Uniform(new Vector4(
                     framesRendered, MathF.Round(injectPeriod),
                     probeSleepFrames > 0f ? 1f / probeSleepFrames : 0f, 0f))),
@@ -1071,7 +1074,14 @@ internal sealed partial class SponzaLoop
         new ShaderTextureBinding("uOccupancy", occupancyTexture, Slot: 2),
         new ShaderTextureBinding("uAlbedo", albX > 0 ? albedoTexture : occupancyTexture, Slot: 5),
         new ShaderTextureBinding("uProbeUsage", probeUsageTexture, Slot: 10),
-        new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 3),
+        // <b>All three bands plus the irradiance cube, because the injector now uses the sky as a
+        // SOURCE.</b> uSkyVisibility was bound here and never read by the shader; the bounce chain
+        // could only be started by a sunlit surface, so arcades and corridors had no energy put
+        // into them at all.
+        new ShaderTextureBinding("uSkyVisibility", skyVisibilityTextures[0], Slot: 3),
+        new ShaderTextureBinding("uSkyVisibility1", skyVisibilityTextures[1], Slot: 6),
+        new ShaderTextureBinding("uSkyVisibility2", skyVisibilityTextures[2], Slot: 8),
+        new ShaderTextureBinding("uIrradiance", irradianceCubeTexture, Slot: 9),
         // Last frame's solution, which is what turns a rotation of sweeps into successive bounces
         // AND what lets this dispatch run without the lit pass waiting on it.
         new ShaderTextureBinding("uAtlasPrev", bounceTextures[bounceWrite ^ 1], Slot: 4),
