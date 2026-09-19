@@ -17,11 +17,28 @@ layout(set = 1, binding = 3) uniform sampler2D   uCascadeShadowMaps[3];
 // eye has a hard frame to compare against.
 layout(set = 1, binding = 10) uniform samplerCube uEnvCube;
 
+// The froxel scattering grid, at the same set-1 slot the lit pass reads it from — the two
+// pipelines share this descriptor set, which is why the sky can sample it without any new binding.
+layout(set = 1, binding = 4) uniform sampler3D uFroxelGrid;
+
 layout(location = 0) in vec3 vWorldDir;
+layout(location = 1) in vec2 vScreenUv;
+layout(location = 2) in vec4 vFog;
 layout(location = 0) out vec4 outColor;
 
 void main() {
     vec3 dir = normalize(vWorldDir);
     vec3 sky = textureLod(uEnvCube, dir, 0.0).rgb;
+
+    // <b>The sky is the far end of every ray, so it is the most fogged thing in the frame.</b>
+    // The composite used to live only in the lit pass, so geometry receded into haze while the sky
+    // behind it stayed perfectly clear — the horizon gave the whole effect away as a filter over
+    // the objects rather than air in the scene. Sampling the grid at w = 1 applies the full
+    // integral out to fog far, which is what the medium does to anything at or past it.
+    if (vFog.w > 0.5) {
+        vec4 fog = texture(uFroxelGrid, vec3(vScreenUv, 1.0));
+        sky = sky * fog.a + fog.rgb;
+    }
+
     outColor = vec4(sky, 1.0);
 }

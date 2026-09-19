@@ -33,6 +33,7 @@
 #include "noise.glsl"
 #include "coverage.glsl"
 #include "sky_visibility.glsl"
+#include "froxel.glsl"
 
 // Lit fragment shader — Cook-Torrance split-sum IBL on top of a Lambert N·L
 // sun term, with cascaded shadows, a Fresnel-glass branch, and froxel-fog
@@ -871,7 +872,9 @@ void main() {
     if (frame.uFog.w > 0.5) {
         vec2 fuv = gl_FragCoord.xy / frame.uFog.xy;
         float dist = length(vWorldPos - frame.uCameraPos);
-        float w = clamp(dist / frame.uFog.z, 0.0, 1.0);
+        // The grid's slices are not uniform in distance, so neither is this lookup — the curve is
+        // shared with the compute pass rather than restated (see froxel.glsl).
+        float w = blix_froxelSliceCoord(dist, frame.uFog.z);
         vec4 fog = texture(uFroxelGrid, vec3(fuv, w));
         color = color * fog.a + fog.rgb;
     }

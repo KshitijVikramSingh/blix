@@ -4,45 +4,81 @@
 //
 // The grid is a view-aligned 3D texture: (x,y) = screen tiles, z = distance
 // slices from the camera out to uCamPos.w (fog far). One thread owns a screen
-// column (x,y) and marches z front-to-back, accumulating sun in-scattering
-// (shadow-aware, via the cascade maps) and Beer-Lambert transmittance. Each
-// slice stores the *integrated* result up to that distance, so the lit pass
-// samples one trilinear texel per fragment:
+// column (x,y) and marches z front-to-back, accumulating in-scattering
+// (shadow-aware sun, plus the scene's own indirect light) and Beer-Lambert
+// transmittance. Each slice stores the *integrated* result up to that distance,
+// so the lit pass samples one trilinear texel per fragment:
 //     litColor = litColor * fog.a + fog.rgb
 //
 // Reconstruction uses the camera's inverse view-projection (same matrix the
 // scene renders with), so the Vulkan clip-space Y flip is handled for free and
 // the grid aligns with gl_FragCoord in the lit shader.
 //
-// v1 simplifications (intentional — prove the pipeline first):
-//  - Slices are LINEAR in world distance. Logarithmic/exponential depth
-//    distribution gives better near-camera quality per slice; revisit once
-//    the pipeline is proven.
+// <b>The medium is lit by the scene, not by a constant.</b> The ambient in-scatter used to be one
+// number — the same value in a sealed room as in open sky — which is what made the fog read as a
+// lens filter over the picture rather than as air inside the building. It now scatters the two
+// fields this renderer already bakes: the sky, attenuated by the baked visibility volume, and the
+// probe volume's bounced light. Same correction as the bounce solve's: a transport term whose
+// source was a guess.
+//
+// <b>The medium has a shape.</b> Density used to be one scalar for the whole volume, which is a
+// perfectly even haze — and an even haze has no shafts in it, because a shaft is the sun picking
+// out where the air is thicker. It now falls off with height about the volume floor (air does) and
+// varies over a drifting noise field.
+//
+// Remaining simplifications, each one deliberate:
+//  - No temporal integration: no slice jitter, no reprojected history. This renderer's thesis is
+//    stable silhouettes WITHOUT temporal reconstruction — it pays 18% for 4x MSAA rather than take
+//    TAA — so the slice count and the distribution carry the smoothness instead. Adding a history
+//    buffer here would be the first temporal reconstruction in the frame, and that is a decision
+//    about the renderer, not about the fog.
 //  - Shadow lookup is a single cascade texel (no PCF) — cheap, because this runs
 //    per froxel rather than per fragment. The CHOICE of cascade is the shared
-//    one (blix_sun_shadow_cascaded_hard); only the tap is local. If the shafts
-//    shimmer or look harsh, widen the tap, not the selection.
-//  - Grid resolution is fixed; it should become a renderer quality preset
-//    (quarter/half/full) since the z-march cost scales with it.
+//    one (blix_sun_shadow_cascaded_hard); only the tap is local.
 
 #include "shadow.glsl"
+#include "sky_visibility.glsl"
+#include "probe_volume.glsl"
+#include "froxel.glsl"
+#include "noise.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform Froxel {
     mat4 uInvViewProj;
     vec4 uCamPos;        // xyz camera world pos, w = fog far distance
-    vec4 uCamForward;    // xyz camera forward, w = density
+    vec4 uCamForward;    // xyz camera forward, w = extinction coefficient (density)
     vec4 uSunDir;        // xyz direction into scene, w = sun intensity
-    vec4 uSunColor;      // rgb sun colour, w = scatter coefficient
-    vec4 uFogParams;     // x = phase g, y = ambient, z/w unused
+    vec4 uSunColor;      // rgb sun colour, w = scattering albedo
+    vec4 uFogParams;     // x = phase g, y = ambient fallback, z = indirect available (0/1), w = time
+    vec4 uBoundsMin;     // xyz sky/probe volume min
+    vec4 uBoundsSpan;    // xyz sky/probe volume span
+    vec4 uProbeDims;     // xyz bounce grid dimensions
+    vec4 uMedium;        // x = height scale (m), y = noise amount 0..1
     mat4 uCascadeVP[3];
 } f;
 
 layout(set = 0, binding = 1, rgba16f) uniform writeonly image3D uGrid;
 layout(set = 0, binding = 2) uniform sampler2D uCascadeShadowMaps[3];
+// Only the L0 band, because a volume point wants the spherical mean (see blix_skyVisibilityMean).
+layout(set = 0, binding = 3) uniform sampler3D  uSkyVisibility;
+layout(set = 0, binding = 4) uniform samplerCube uIrradiance;
+layout(set = 0, binding = 5) uniform sampler2D  uAtlas;
+layout(set = 0, binding = 6) uniform sampler2D  uDepthAtlas;
 
 const float PI = 3.14159265359;
+
+// Noise feature size as a fraction of fog far, and how fast the field drifts. Both are derived
+// rather than dialled: the features scale with the fog's reach so the look does not change when
+// the range does, and the drift is slow enough to read as air rather than as an animation.
+const float NOISE_FEATURES = 8.0;      // features across the fog's range
+const vec3  NOISE_DRIFT = vec3(0.4, 0.05, 0.25);   // metres/second
+
+// How many slices share one probe-volume lookup. The probe field is low-frequency by
+// construction — that premise is what a probe volume IS — so resampling it every slice pays for
+// resolution the data does not have. Eight probes and their visibility test per froxel is the
+// single most expensive thing in this loop.
+const int PROBE_STRIDE = 4;
 
 // Henyey-Greenstein phase function (g>0 forward-scatters toward the sun).
 float phaseHG(float cosT, float g)
@@ -50,6 +86,19 @@ float phaseHG(float cosT, float g)
     float g2 = g * g;
     float denom = 1.0 + g2 - 2.0 * g * cosT;
     return (1.0 - g2) / (4.0 * PI * max(pow(denom, 1.5), 1e-4));
+}
+
+// Extinction at a point, relative to the uniform coefficient: air thins with height, and what is
+// left of it is not evenly mixed.
+float mediumDensity(vec3 p, float groundY, float heightScale, float noiseAmount, float noiseScale, float t)
+{
+    float h = exp(-max(p.y - groundY, 0.0) / max(heightScale, 0.1));
+    if (noiseAmount <= 0.0) return h;
+    vec3 q = (p + NOISE_DRIFT * t) / noiseScale;
+    // Two octaves, not four: the field is being integrated along a ray through dozens of slices,
+    // which is itself a low-pass — detail finer than a slice is paid for and then averaged away.
+    float n = blix_vnoise3(q) * 0.65 + blix_vnoise3(q * 2.7) * 0.35;
+    return h * mix(1.0, n * 1.6, clamp(noiseAmount, 0.0, 1.0));
 }
 
 void main()
@@ -61,11 +110,16 @@ void main()
     int   numSlices = gsize.z;
     float fogFar    = f.uCamPos.w;
     vec3  camPos    = f.uCamPos.xyz;
-    float density   = f.uCamForward.w;
-    float scatter   = f.uSunColor.w;
     float g         = f.uFogParams.x;
-    float ambient   = f.uFogParams.y;
+    bool  giOn      = f.uFogParams.z > 0.5;
     vec3  sunInto   = normalize(f.uSunDir.xyz);
+
+    // <b>Extinction and scattering are two coefficients, not one.</b> They used to be multiplied
+    // together into a single `ext`, which meant turning the albedo down also thinned the air —
+    // a darker fog and a sparser fog were the same slider. Now density is what the medium removes
+    // from a ray and albedo is the share of that which scatters rather than absorbs.
+    float sigmaT = max(f.uCamForward.w, 1e-5);
+    float sigmaS = sigmaT * clamp(f.uSunColor.w, 0.0, 1.0);
 
     // Pixel-ray direction via inverse view-projection (handles the clip Y flip).
     vec2 uv  = (vec2(xy) + 0.5) / vec2(gsize.xy);
@@ -78,15 +132,41 @@ void main()
     // travelling toward the camera (-rayDir). Forward scatter (g>0) then peaks
     // when looking toward the sun, giving crepuscular shafts on the right side.
     float phase = phaseHG(-dot(rayDir, sunInto), g);
-    float dt = fogFar / float(numSlices);              // world step length
-    float ext = max(density * scatter, 1e-5);          // extinction coeff
+
+    // The sky's mean radiance, hoisted: it is the same for every froxel in the grid, because the
+    // environment does not vary along a ray — only the fraction of it a point can SEE does. The
+    // irradiance cube is a cosine convolution of the sky, so E(n)/pi is the mean radiance over the
+    // hemisphere about n, and the six axes average to the sphere.
+    vec3 skyRadiance = vec3(0.0);
+    vec3 invSpan = vec3(1.0) / max(f.uBoundsSpan.xyz, vec3(1e-4));
+    if (giOn) {
+        skyRadiance = (texture(uIrradiance, vec3( 1.0, 0.0, 0.0)).rgb
+                     + texture(uIrradiance, vec3(-1.0, 0.0, 0.0)).rgb
+                     + texture(uIrradiance, vec3( 0.0, 1.0, 0.0)).rgb
+                     + texture(uIrradiance, vec3( 0.0,-1.0, 0.0)).rgb
+                     + texture(uIrradiance, vec3( 0.0, 0.0, 1.0)).rgb
+                     + texture(uIrradiance, vec3( 0.0, 0.0,-1.0)).rgb) / (6.0 * PI);
+    }
 
     vec3  accum = vec3(0.0);
     float transmittance = 1.0;
+    vec3  bounce = vec3(0.0);       // held between PROBE_STRIDE slices
+    float noiseScale = fogFar / NOISE_FEATURES;
+    float groundY = f.uBoundsMin.y;
+
+    // <b>March between slice CENTRES, not across slice spans.</b> A trilinear fetch at coordinate
+    // t reads the texel whose centre is at t, so the value stored in slice z has to be the integral
+    // from the camera to that centre. Accumulating a whole slice and then storing put every texel
+    // half a slice too far out — invisible at uniform 1.25 m steps, and a real error once the near
+    // slices are centimetres and the far ones are metres.
+    float prevD = 0.0;
 
     for (int z = 0; z < numSlices; z++)
     {
-        float dist = (float(z) + 0.5) * dt;            // world distance along ray
+        float d  = blix_froxelSliceDistance((float(z) + 0.5) / float(numSlices), fogFar);
+        float dt = max(d - prevD, 1e-6);               // this segment's world length
+        float dist = 0.5 * (prevD + d);                // and where it is sampled
+        prevD = d;
         vec3 worldPos = camPos + rayDir * dist;
 
         // ndotl = 1.0: the bias it scales guards a surface against shadowing itself, and a point
@@ -97,12 +177,36 @@ void main()
             uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2],
             f.uCascadeVP[0], f.uCascadeVP[1], f.uCascadeVP[2],
             worldPos, 1.0, fogCascade);
-        vec3 sunLit = f.uSunColor.rgb * f.uSunDir.w * phase * vis;
-        vec3 stepScatter = (sunLit + ambient) * scatter * density;
 
-        // Energy-conserving slice integral of in-scattering under extinction.
-        float sliceT = exp(-ext * dt);
-        vec3 sliceIntegral = stepScatter * (1.0 - sliceT) / ext;
+        // In-scattered radiance: the phase function against the sun, plus an isotropic ambient
+        // term. Both are radiances, so both are simply multiplied by sigmaS — for an isotropic
+        // source the phase integrates to one over the sphere and drops out.
+        vec3 ambientRadiance = vec3(f.uFogParams.y);
+        if (giOn) {
+            if ((z % PROBE_STRIDE) == 0) {
+                // Bounced light arriving along the view ray. The probe blend is directional, and
+                // the direction that matters for in-scatter toward the eye is the one the light
+                // travels to get here.
+                bounce = blix_probeIrradiance(
+                    uAtlas, uDepthAtlas, ivec3(f.uProbeDims.xyz),
+                    f.uBoundsMin.xyz, f.uBoundsSpan.xyz, worldPos, -rayDir) / PI;
+            }
+            float skyVis = blix_skyVisibilityMean(uSkyVisibility, f.uBoundsMin.xyz, invSpan, worldPos);
+            ambientRadiance = skyRadiance * skyVis + bounce;
+        }
+
+        vec3 sunLit = f.uSunColor.rgb * f.uSunDir.w * phase * vis;
+
+        // Both coefficients scale with the local density, so the medium's shape shows up in what
+        // it scatters AND in what it blocks — a thick patch is bright and also casts its own
+        // shadow down the ray.
+        float rho = mediumDensity(worldPos, groundY, f.uMedium.x, f.uMedium.y, noiseScale, f.uFogParams.w);
+        float st = max(sigmaT * rho, 1e-6);
+        vec3 stepScatter = (sunLit + ambientRadiance) * (sigmaS * rho);
+
+        // Energy-conserving segment integral of in-scattering under extinction.
+        float sliceT = exp(-st * dt);
+        vec3 sliceIntegral = stepScatter * (1.0 - sliceT) / st;
         accum += transmittance * sliceIntegral;
         transmittance *= sliceT;
 

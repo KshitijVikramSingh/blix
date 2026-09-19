@@ -46,3 +46,16 @@ float blix_skyVisibility(
                   + (2.0 * BLIX_SKYVIS_PI / 3.0) * Y1 * dot(sh0.yzw, dir)
                   + (BLIX_SKYVIS_PI / 4.0) * band2) / BLIX_SKYVIS_PI, 0.0, 1.0);
 }
+
+/// Mean sky visibility over the WHOLE sphere, for a point inside a participating medium.
+///
+/// <b>A froxel has no normal, so the cosine form above does not apply to it.</b> What a point in
+/// air scatters toward the eye is sky arriving from every direction at once, not sky arriving over
+/// a hemisphere weighted by a surface it does not have. The spherical mean of an SH expansion is
+/// its L0 coefficient alone — every higher band integrates to zero over the sphere — so this costs
+/// one texel and one multiply, and needs neither of the other two band textures.
+float blix_skyVisibilityMean(sampler3D shA, vec3 boundsMin, vec3 invSpan, vec3 worldPos)
+{
+    vec3 uv = clamp((worldPos - boundsMin) * invSpan, vec3(0.0), vec3(1.0));
+    return clamp(texture(shA, uv).x * 0.282095, 0.0, 1.0);
+}
