@@ -22,7 +22,9 @@ internal sealed partial class SponzaLoop
     // frustum is given, culled objects get instanceCount 0 (drawn as a GPU no-op
     // — no compaction needed, so group offsets stay fixed). Written to the
     // current frame slot. Returns the visible count (for the diagnostic).
-    private int FillIndirect(List<Drawable> drawables, float[] lodMargins, IndirectBufferHandle buffer, Frustum? cull, float margin)
+    private int FillIndirect(
+        List<Drawable> drawables, float[] lodMargins, int[] lodState, IndirectBufferHandle buffer,
+        Frustum? cull, float margin, float worldErrorBudget = 0f)
     {
         // <b>An empty scene has no indirect buffer, and that used to be a crash.</b> When every
         // pack failed to load — stale cooked files after a format bump — the demo reported exactly
@@ -33,12 +35,23 @@ internal sealed partial class SponzaLoop
 
         var cmds = MemoryMarshal.Cast<byte, uint>(indirectScratch.AsSpan());
         var visible = 0;
+        // <b>--ab lod prices the whole LOD system in one arm.</b> Every list selects through this
+        // one function — the camera pass, the blend pass and all three shadow cascades — so the off
+        // phase is the renderer with NO level of detail rather than with a different budget.
+        // Zero is PickLod's own "full detail" case, so the off arm goes through the identical code
+        // path as a user dragging the budget to nothing, not a second selection rule beside it.
+        var errorPixels = abMode == "lod" ? LodArmPixels : render.LodErrorPixels;
         for (var i = 0; i < drawables.Count; i++)
         {
             var d = drawables[i];
             var vis = cull is not { } f || f.Intersects(d.Bounds, margin);
             // Per-primitive LOD margin (live-tunable) scales the global px budget.
-            var lod = d.PickLod(cameraPosition, LodErrorScale, render.LodErrorPixels * lodMargins[i]);
+            // A world budget means this list is being drawn into something orthographic, where
+            // camera pixels are not the unit of error. Nothing else about the fill changes.
+            var lod = worldErrorBudget > 0f
+                ? d.PickLodWorld(worldErrorBudget * lodMargins[i], lodState[i])
+                : d.PickLod(cameraPosition, LodErrorScale, errorPixels * lodMargins[i], lodState[i]);
+            lodState[i] = lod;
             var o = i * 5;
             cmds[o + 0] = (uint)d.LodIndexCounts[lod]; // indexCount
             cmds[o + 1] = vis ? 1u : 0u;               // instanceCount (0 = culled)
@@ -69,6 +82,11 @@ internal sealed partial class SponzaLoop
         if (lastFrameStamp != 0)
         {
             var periodMs = System.Diagnostics.Stopwatch.GetElapsedTime(lastFrameStamp, stamp).TotalMilliseconds;
+            // Smoothed for the overlay only — the A/B buckets below keep the raw period, because a
+            // distribution is the whole point of that instrument and a filter would flatten it.
+            lastFramePeriodMs = lastFramePeriodMs > 0.0
+                ? lastFramePeriodMs + (periodMs - lastFramePeriodMs) * 0.08
+                : periodMs;
             // In --ab-flat the buckets follow the phase, not the load state, so both arms are
             // post-load: no texture uploads in flight to charge to whichever arm they land in.
             var flatFrame = abMode.Length > 0 ? AbOffPhase : !fullyLoaded;
@@ -99,6 +117,8 @@ internal sealed partial class SponzaLoop
             RecordPresentPass(commandList);
             return;
         }
+
+        SampleGpuPassTimes();
 
         // Stress hook: flip fog every 90 frames to exercise the on/off barrier
         // transitions under validation (no effect without --fog-stress).
@@ -172,7 +192,7 @@ internal sealed partial class SponzaLoop
         // discard against the not-yet-uploaded albedo).
         if (!fullyLoaded || AbFlatPhase)
         {
-            FillIndirect(opaqueDrawables, opaqueLodMargins, opaqueIndirect, cull: null, margin: 0f);
+            FillIndirect(opaqueDrawables, opaqueLodMargins, opaqueLodState, opaqueIndirect, cull: null, margin: 0f);
             graph.Pass(depthPrepassHandle, scope =>
             {
                 foreach (var g in opaqueGroups)
@@ -238,13 +258,24 @@ internal sealed partial class SponzaLoop
             // Keyed on the caster COUNT as well, so streaming a pack in invalidates it. Cheap, and
             // it fails in the safe direction: a spurious redraw costs one pass, a missed one costs
             // every shadow in the frame.
-            if (vp == cachedCascadeViewProj[ci] && opaqueDrawables.Count == cachedCascadeCasters[ci])
+            // <b>And on the LOD budget, because that changes the GEOMETRY the casters are made of.</b>
+            // Dragging "Lod error pixels" with the camera still left every shadow map holding the
+            // meshes selected at the old budget, with nothing on screen to say so — and it would
+            // have quietly made --ab lod measure its off arm against cached shadows built by its
+            // on arm.
+            // The cascade's own budget, since that is what decides ITS geometry — it moves when the
+            // cascade refits, which is exactly when the cached map has to be rebuilt anyway.
+            var lodKey = abMode == "lod" && LodArmPixels <= 0f ? 0f : cascadeTexelWorld[ci] * ShadowLodTexels;
+            if (vp == cachedCascadeViewProj[ci]
+                && opaqueDrawables.Count == cachedCascadeCasters[ci]
+                && lodKey == cachedCascadeLod[ci])
             {
                 cascadeRendered[ci] = false;
                 continue;
             }
             cachedCascadeViewProj[ci] = vp;
             cachedCascadeCasters[ci] = opaqueDrawables.Count;
+            cachedCascadeLod[ci] = lodKey;
             cascadeRendered[ci] = true;
             // Frustum.FromViewProjection expects a column-vector clip matrix
             // (clip = M·world); our cascade VP is the System.Numerics
@@ -254,7 +285,18 @@ internal sealed partial class SponzaLoop
             // Fill this cascade's indirect buffer (per-cascade frustum cull → 0
             // instanceCount; same SSE LOD as the lit/pre-pass so shadow depth
             // matches the shaded silhouette). Then one indirect draw per group.
-            cascadeDrawCounts[ci] = FillIndirect(opaqueDrawables, opaqueLodMargins, cascadeIndirect[ci], cull ? cascadeFrustum : null, margin);
+            cascadeDrawCounts[ci] = FillIndirect(
+                opaqueDrawables, opaqueLodMargins, cascadeLodState[ci], cascadeIndirect[ci],
+                cull ? cascadeFrustum : null, margin,
+                // <b>The cascade's own texel, not the camera's pixel.</b> The comment that used to
+                // sit here said "same SSE LOD as the lit/pre-pass so shadow depth matches the shaded
+                // silhouette" — which is a requirement between the DEPTH PRE-PASS and the lit pass,
+                // where two passes rasterise the same triangles into the same buffer. A shadow map
+                // is its own render of its own geometry, compared against nothing.
+                //
+                // The --ab lod off arm is the exception: it means "no level of detail anywhere", and
+                // a cascade quietly keeping its own would make the arm measure less than it claims.
+                abMode == "lod" && LodArmPixels <= 0f ? 0f : cascadeTexelWorld[ci] * ShadowLodTexels);
             // Opaque casters all push the same bytes (identity model + this
             // cascade's VP); mask casters push per-material alpha params, so one
             // mask push per group (constant within a material).
@@ -298,16 +340,27 @@ internal sealed partial class SponzaLoop
         // are undefined/stale; "disabled" must mean "never sample").
         if (fog.Enabled)
         {
+            EnsureFroxelGrid(frame.Width, frame.Height);
             Matrix4x4.Invert(viewProj, out var invViewProj);
             var froxelUniforms = new ShaderUniform[]
             {
                 new("uInvViewProj",   new Matrix4x4Uniform(invViewProj)),
                 new("uCamPos",        new Vector4Uniform(new Vector4(cameraPosition, fog.Far))),
                 new("uCamForward",    new Vector4Uniform(new Vector4(cameraForward, fog.Density))),
-                // The froxel pass scatters the same sun, so it takes the same measured irradiance.
-                new("uSunDir",        new Vector4Uniform(new Vector4(sunDirection, EffectiveSunIrradiance.X))),
-                new("uSunColor",      new Vector4Uniform(new Vector4(1f, 1f, 1f, fog.Scatter))),
-                new("uFogParams",     new Vector4Uniform(new Vector4(fog.PhaseG, fog.Ambient, 0f, 0f))),
+                // The froxel pass scatters the same sun, so it takes the same measured irradiance
+                // — all three channels of it. It used to take the red channel as a scalar and a
+                // white colour, so a warm sun scattered grey light through the air.
+                new("uSunDir",        new Vector4Uniform(new Vector4(sunDirection, 1f))),
+                new("uSunColor",      new Vector4Uniform(new Vector4(EffectiveSunIrradiance, fog.Scatter))),
+                // z: whether the indirect fields are there to be scattered. Without them the
+                // medium falls back to the flat ambient floor, which is all it ever had.
+                new("uFogParams",     new Vector4Uniform(new Vector4(
+                    fog.PhaseG, fog.Ambient, fogIndirect ? 1f : 0f, (float)time.Total))),
+                new("uMedium",        new Vector4Uniform(new Vector4(
+                    fog.HeightFalloff, fog.Noise, 0f, 0f))),
+                new("uBoundsMin",     new Vector4Uniform(new Vector4(skyVolumeMin, 0f))),
+                new("uBoundsSpan",    new Vector4Uniform(new Vector4(skyVolumeSpan, 0f))),
+                new("uProbeDims",     new Vector4Uniform(new Vector4(bounceX, bounceY, bounceZ, 0f))),
                 // No splits: the fog picks its cascade by containment through the shared lookup,
                 // exactly as the lit pass does. It used to take the view-depth bounds and select on
                 // them, which silently stopped matching the surfaces when the lit pass moved.
@@ -315,15 +368,15 @@ internal sealed partial class SponzaLoop
             };
             graph.Dispatch(froxelPassHandle, new DispatchCommand(
                 froxelPipeline,
-                (FroxelGridX + 7) / 8, (FroxelGridY + 7) / 8, 1,
-                froxelUniforms, froxelBindings));
+                (froxelGridX + 7) / 8, (froxelGridY + 7) / 8, 1,
+                froxelUniforms, FroxelBindings()));
         }
 
         // Fill the camera opaque indirect commands once per frame (LOD by SSE, no
         // cull); both the depth pre-pass and the lit pass consume this buffer —
         // they draw the identical opaque set at identical LODs.
-        FillIndirect(opaqueDrawables, opaqueLodMargins, opaqueIndirect, cull: null, margin: 0f);
-        if (blendDrawables.Count > 0) FillIndirect(blendDrawables, blendLodMargins, blendIndirect, cull: null, margin: 0f);
+        FillIndirect(opaqueDrawables, opaqueLodMargins, opaqueLodState, opaqueIndirect, cull: null, margin: 0f);
+        if (blendDrawables.Count > 0) FillIndirect(blendDrawables, blendLodMargins, blendLodState, blendIndirect, cull: null, margin: 0f);
 
         // Depth pre-pass: same non-blend set as the lit pass (no cull, so the
         // depth the lit pass loads covers exactly what it shades), depth only.
@@ -650,6 +703,7 @@ internal sealed partial class SponzaLoop
             WriteAmbientRaw(Path.ChangeExtension(path, null) + ".raw.png");
             WriteSceneShot(Path.ChangeExtension(path, null) + ".scene.png");
             WritePassBreakdown();
+            WriteLodCensus();
             WriteFrameStats();
             host.RequestClose();
         }
@@ -968,6 +1022,9 @@ internal sealed partial class SponzaLoop
             "normal" => "normal mapping",
             "indirect"=> "the probe-volume terms (bounce + baked sky visibility)",
             "inject"  => "the bounce injection dispatch",
+            "lod"     => lodArmOff > 0f
+                ? string.Create(Inv, $"mesh LOD at {lodArmOn:0.##} px rather than {lodArmOff:0.##} px")
+                : "mesh level of detail",
             _        => "post-load shading",
         };
         Report($"ON  : with {term}", framePeriodsMs, framePeriodCount);
@@ -1066,6 +1123,55 @@ internal sealed partial class SponzaLoop
     }
 
     /// <summary>The injection pass's textures for this frame: write one, read the other.</summary>
+    // The grid follows the framebuffer, so a resize re-creates it. It is a descriptor in two live
+    // sets and cannot be swapped under work in flight — but a resize already stalls the pipeline,
+    // which makes this the cheapest correct place to pay for the idle. Texture ids are never
+    // reused, so the destroyed handle cannot come back and match something cached.
+    private void EnsureFroxelGrid(int width, int height)
+    {
+        var (x, y) = FroxelGridSize(width, height);
+        if (x == froxelGridX && y == froxelGridY) return;
+        vk.WaitIdle();
+        var previous = froxelGridTexture;
+        froxelGridX = x;
+        froxelGridY = y;
+        froxelGridTexture = vk.CreateStorageTexture3D(
+            x, y, FroxelGridZ, TextureFormat.Rgba16F, SamplerDescription.LinearClamp,
+            "sponza.froxel_grid");
+        vk.DestroyTexture(previous);
+        if (froxelGridBinding >= 0)
+        {
+            passBindings[froxelGridBinding] =
+                new ShaderTextureBinding("uFroxelGrid", froxelGridTexture, Slot: 4);
+        }
+        Console.WriteLine(
+            $"[VulkanSponza] froxel grid {x}x{y}x{FroxelGridZ} ({FroxelPixels} px/froxel at {width}x{height})");
+    }
+
+    // Whether the fog has real fields to scatter. Both halves must be there: the baked sky
+    // visibility volume decides how much sky a froxel sees, and the bounce atlas supplies what the
+    // scene sent back. Either one missing and the medium is back to a constant, so say so once
+    // here rather than testing three flags at the dispatch.
+    private bool fogIndirect =>
+        skyVolumeLoaded && skyVisibilityEnabled && bounceReady && !skipSkySample;
+
+    // Rebuilt per frame, because the bounce atlas alternates: recorded BEFORE the write index
+    // flips, so bounceTextures[bounceWrite] here is the solution the previous frame finished —
+    // the same texture the lit pass reads as bounceTextures[bounceWrite ^ 1] after the flip.
+    private ShaderTextureBinding[] FroxelBindings() => new[]
+    {
+        new ShaderTextureBinding("uGrid", froxelGridTexture, Slot: 1),
+        new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0]), Slot: 2, ArrayIndex: 0),
+        new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1]), Slot: 2, ArrayIndex: 1),
+        new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2]), Slot: 2, ArrayIndex: 2),
+        new ShaderTextureBinding("uSkyVisibility", skyVisibilityTextures[0], Slot: 3),
+        new ShaderTextureBinding("uIrradiance", irradianceCubeTexture, Slot: 4),
+        // Never a hole, even before the first solve: a descriptor set with a gap is a device loss,
+        // and uFogParams.z is what tells the shader not to read these.
+        new ShaderTextureBinding("uAtlas", bounceReady ? bounceTextures[bounceWrite] : brdfLutTexture, Slot: 5),
+        new ShaderTextureBinding("uDepthAtlas", bounceReady ? bounceDepthTextures[bounceWrite] : brdfLutTexture, Slot: 6),
+    };
+
     private ShaderTextureBinding[] BounceBindings() => new[]
     {
         new ShaderTextureBinding("uAtlas", bounceTextures[bounceWrite], Slot: 1),
@@ -1086,6 +1192,87 @@ internal sealed partial class SponzaLoop
         // AND what lets this dispatch run without the lit pass waiting on it.
         new ShaderTextureBinding("uAtlasPrev", bounceTextures[bounceWrite ^ 1], Slot: 4),
     };
+
+    // --- live GPU pass cost ----------------------------------------------
+    // <b>Cumulative totals cannot answer a question somebody is asking with a slider.</b>
+    // VulkanGraphicsDevice.GpuPassTotals is summed over the whole process, so a mean over it says
+    // what a pass has cost on average since launch — including the frames spent streaming textures.
+    // Move "Rays / probe" from 64 to 8 and that mean barely twitches for a minute. Differencing the
+    // totals against the previous frame's snapshot gives the cost of the frames since, and a light
+    // EMA over that settles in about a second, which is the timescale a hand on a dial works at.
+    private readonly Dictionary<string, (double Ms, long Samples)> gpuPassPrev = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, double> gpuPassMs = new(StringComparer.Ordinal);
+
+    private void SampleGpuPassTimes()
+    {
+        if (!vk.GpuTimestampsSupported) return;
+        foreach (var (name, current) in vk.GpuPassTotals)
+        {
+            var had = gpuPassPrev.TryGetValue(name, out var previous);
+            gpuPassPrev[name] = (current.TotalMs, current.Samples);
+            if (!had) continue;
+            var frames = current.Samples - previous.Samples;
+            if (frames <= 0) continue;
+            var perFrame = (current.TotalMs - previous.Ms) / frames;
+            gpuPassMs[name] = gpuPassMs.TryGetValue(name, out var ema)
+                ? ema + (perFrame - ema) * 0.08
+                : perFrame;
+        }
+    }
+
+    /// <summary>Windowed GPU milliseconds for one pass, or 0 before it has been resolved twice.</summary>
+    internal double GpuPassMs(string pass) => gpuPassMs.TryGetValue(pass, out var v) ? v : 0.0;
+
+    /// <summary>The heaviest passes by windowed cost, for the overlay's live breakdown.</summary>
+    internal IEnumerable<KeyValuePair<string, double>> GpuPassesByCost() =>
+        gpuPassMs.OrderByDescending(e => e.Value);
+
+    /// <summary>Sum of every pass's windowed cost. NOT the frame time — see WritePassBreakdown.</summary>
+    internal double GpuPassTotalMs() => gpuPassMs.Values.Sum();
+
+    /// <summary>What each LOD budget actually submits, counted rather than timed.</summary>
+    /// <remarks>
+    /// <b>The question "is a looser budget worth anything" is answerable without a stopwatch.</b>
+    /// A budget's whole effect is which index range each primitive draws from, so the triangles it
+    /// submits is an exact, noiseless function of it — no thermal drift, no interquartile range, no
+    /// paired runs. If two budgets submit the same geometry then no timing difference between them
+    /// can be real, and on this laptop a timing run is the less trustworthy of the two instruments
+    /// by a wide margin.
+    ///
+    /// The saturation column is the one that ends the argument: a primitive already at its OWN
+    /// coarsest level cannot be coarsened further by any budget, and with 4 m chunks most of them
+    /// have short chains — the simplifier stops at MinLodIndices, and a chunk of a few hundred
+    /// triangles reaches that in one or two steps.
+    /// </remarks>
+    private void WriteLodCensus()
+    {
+        if (opaqueDrawables.Count == 0) return;
+        Console.WriteLine("[VulkanSponza] LOD census at this camera (opaque only):");
+        Console.WriteLine("    budget      tris      vs 0px   at own coarsest   level histogram");
+        long baseline = 0;
+        foreach (var budget in new[] { 0f, 0.25f, 0.5f, 1f, 2f, 4f, 8f })
+        {
+            long indices = 0;
+            var saturated = 0;
+            var hist = new int[8];
+            for (var i = 0; i < opaqueDrawables.Count; i++)
+            {
+                var d = opaqueDrawables[i];
+                // No hysteresis here: the census asks what a budget SETTLES at, and the band is a
+                // property of how it is approached, not of where it arrives.
+                var level = d.PickLod(cameraPosition, LodErrorScale, budget * opaqueLodMargins[i], 0);
+                indices += d.LodIndexCounts[level];
+                if (level == d.LodIndexCounts.Length - 1) saturated++;
+                if (level < hist.Length) hist[level]++;
+            }
+            var tris = indices / 3;
+            if (budget == 0f) baseline = tris;
+            var ratio = baseline > 0 ? (double)tris / baseline : 1.0;
+            Console.WriteLine(string.Create(Inv,
+                $"    {budget,5:0.##}px  {tris,9:N0}   {ratio,6:0.0%}   {saturated * 100.0 / opaqueDrawables.Count,14:0.0}%   " +
+                $"{hist[0]}/{hist[1]}/{hist[2]}/{hist[3]}"));
+        }
+    }
 
     /// <summary>Prints resolved GPU milliseconds per pass, heaviest first.</summary>
     /// <remarks>

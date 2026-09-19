@@ -117,7 +117,16 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // (coverage goes binary), making the depth pre-pass admit a dilated silhouette made it worse
     // (more partial fragments), and every ambient viz channel rendered the same blue over foliage
     // because none of them were being written there at all.
-    private int MsaaSamples = 4;
+    //
+    // <b>OFF by default now, and the argument above is the price being paid.</b> The whole case for
+    // 4x was alpha-to-coverage quantisation over foliage, and at one sample there is no sample mask
+    // at all: alphaToCoverage is disabled with nothing to spread coverage across, the cutout falls
+    // back to a plain discard, and every leaf edge goes binary. The decorrelating hash that fixed
+    // the canopy (blix_coverageMask) has nothing to decorrelate either — one sample is one bit.
+    // So this trades the foliage silhouette and the whole 18% for the perf loop, deliberately and
+    // reversibly: --msaa2 and --msaa4 put it back, and the reasoning above is kept intact rather
+    // than rewritten, because it is the thing to re-read when the canopy looks wrong again.
+    private int MsaaSamples = 1;
     private PassHandle litPassHandle;
 
     // Depth pre-pass: renders non-blend geometry depth-only into depthHandle
@@ -240,6 +249,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     //
     // Measuring it properly needs --ab, which interleaves arms inside one process — this laptop
     // drifts far enough between sequential runs that sleep=0 alone moved 24.8 to 34.3 ms.
+    // Smoothed frame period, for the overlay's "share of frame" readouts. The A/B harness keeps
+    // its own unsmoothed samples.
+    private double lastFramePeriodMs;
     private float probeSleepFrames;
     private const int OctTile = 8;
     private int bounceWrite;
@@ -342,9 +354,25 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // Grid resolution. Each (x,y) thread marches all Z slices sampling the
     // cascades, so cost scales with X*Y*Z — this should become a renderer
     // quality preset (quarter/half/full) rather than a fixed size.
-    private const int FroxelGridX = 128;
-    private const int FroxelGridY = 72;
+    // <b>A froxel is a fixed number of PIXELS, not a fixed fraction of a resolution nobody set.</b>
+    // The grid was 128x72 whatever the window was — on this machine's Retina framebuffer that is
+    // twenty physical pixels across one froxel, which is why the fog read as chunks of weather
+    // rather than as air, and why the noise field and the shaft edges both landed under the
+    // sampling rate. Eight is the edge of a froxel in framebuffer pixels, so the fog's screen-space
+    // frequency is now a property of the renderer instead of an accident of the window size.
+    //
+    // The z count is the subdivision of the fog's RANGE and has nothing to do with the screen, so
+    // it stays a constant. Cost scales with the product: XY with the framebuffer, Z with this.
+    private const int FroxelPixels = 8;
     private const int FroxelGridZ = 48;
+    private int froxelGridX, froxelGridY;
+    private int froxelGridBinding = -1;
+
+    // The grid dimensions a framebuffer of this size asks for. Floored well above zero so a
+    // minimised or absurdly small window still has a grid to dispatch over.
+    private static (int X, int Y) FroxelGridSize(int width, int height) =>
+        (Math.Max(8, (width  + FroxelPixels - 1) / FroxelPixels),
+         Math.Max(8, (height + FroxelPixels - 1) / FroxelPixels));
     private ShaderProgramHandle froxelProgram;
     private PipelineHandle froxelPipeline;
     private TextureHandle froxelGridTexture;
@@ -424,6 +452,16 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private string abMode = "";
     private bool abFlat;
     private const int AbPeriodFrames = 120;
+    // <b>--ab lod with two budgets, because "is LOD worth it" and "is 1.0 px worth it over 0.3" are
+    // different questions and only the first had an instrument.</b> Comparing budgets across
+    // separate runs is exactly what this laptop's thermal drift destroys — the MSAA attempt went
+    // 43.85 to 61.91 ms over four runs with nothing changed. Two budgets alternating INSIDE one
+    // process is the only shape that survives here. Defaults reproduce the original arm: the
+    // configured budget against no LOD at all.
+    private float lodArmOn = -1f;
+    private float lodArmOff;
+    private float LodArmPixels => AbOffPhase ? lodArmOff : (lodArmOn >= 0f ? lodArmOn : render.LodErrorPixels);
+
     private bool AbOffPhase => abMode.Length > 0 && (framesRendered / AbPeriodFrames) % 2 == 1;
     private bool AbFlatPhase => abFlat && AbOffPhase;
 
@@ -515,6 +553,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private readonly int[] cascadeDrawCounts = new int[CascadeCount];
     /// <summary>Caster count each cascade was last rendered with — see the cache in OnRender.</summary>
     private readonly int[] cachedCascadeCasters = new int[CascadeCount];
+    // The LOD budget each cached cascade was built at; see the cache test in UpdateCascades.
+    private readonly float[] cachedCascadeLod = new float[CascadeCount];
     // Two shadow caster pipelines: opaque casters use a push-only program (no
     // descriptor sets → zero per-draw transient allocations), mask foliage uses
     // the alpha-cutout program (binds albedo). Routed per drawable by cutoff.
@@ -594,21 +634,80 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
         // detailed where it matters instead of coarsening on a far centre.
         // Identical across lit, depth-pre-pass, and shadow passes so depth stays
         // invariant. 1-LOD drawables (uncooked) always pick 0.
-        public int PickLod(Vector3 cameraPos, float errorScale, float errorPixels)
+        public int PickLod(Vector3 cameraPos, float errorScale, float errorPixels, int currentLevel)
         {
             if (LodIndexCounts.Length <= 1 || errorPixels <= 0f) return 0;
             var nearest = Vector3.Clamp(cameraPos, Bounds.Min, Bounds.Max);
             var d = MathF.Max((cameraPos - nearest).Length(), 0.01f);
             var pixelsPerWorld = errorScale / d;
-            var level = 0;
+            var wanted = 0;
             // Errors increase monotonically with level, so stop at the first
             // level that exceeds the budget — all coarser ones do too.
             for (var l = 1; l < LodIndexCounts.Length; l++)
             {
-                if (LodErrors[l] * pixelsPerWorld <= errorPixels) level = l;
+                if (LodErrors[l] * pixelsPerWorld <= errorPixels) wanted = l;
                 else break;
             }
-            return level;
+
+            // <b>A threshold with no memory oscillates on the threshold.</b> The test above is a
+            // hard comparison against a continuous distance, so a primitive parked near a boundary
+            // flips level on sub-millimetre camera movement — every frame, forever. That is the
+            // flicker on the pillars, and no budget setting removes it: moving the budget only
+            // moves where the boundary is, and there is always geometry sitting on it.
+            //
+            // The band is deliberately asymmetric toward quality. Refining happens the instant the
+            // finer level is asked for, because the cost of being briefly too detailed is some
+            // triangles. Coarsening waits until the coarser level is comfortably inside the budget
+            // rather than merely inside it, because the cost of being briefly too coarse is the
+            // artifact this exists to stop.
+            currentLevel = Math.Clamp(currentLevel, 0, LodIndexCounts.Length - 1);
+            if (wanted <= currentLevel) return wanted;
+            return SettleCoarser(currentLevel, wanted, errorPixels / LodHysteresis, pixelsPerWorld);
+        }
+
+        /// <summary>The coarsest level between here and `wanted` that clears the hysteresis band.</summary>
+        /// <remarks>
+        /// <b>Refusing the target is not the same as refusing to move.</b> This used to return the
+        /// current level whenever the wanted one failed the band — so a primitive entitled to level
+        /// two, but reaching for three, kept level zero. The LOD census caught it as an impossibility:
+        /// the count of primitives at full detail ROSE as the budget was loosened, 1031 to 1148,
+        /// which no threshold that only relaxes can do.
+        /// </remarks>
+        private int SettleCoarser(int from, int wanted, float bandedBudget, float pixelsPerWorld)
+        {
+            var settled = from;
+            for (var l = from + 1; l <= wanted; l++)
+            {
+                if (LodErrors[l] * pixelsPerWorld <= bandedBudget) settled = l;
+                else break;
+            }
+            return settled;
+        }
+
+        /// <summary>The coarsest level whose deviation stays under a WORLD-space bound.</summary>
+        /// <remarks>
+        /// <b>A shadow cascade does not measure error in camera pixels, and asking it to was
+        /// costing the whole caster redraw.</b> The camera's budget is a screen quantity because
+        /// perspective makes the same deviation matter less with distance. A cascade is orthographic
+        /// — its shadow-map texel is the same size in metres everywhere inside it — so the tolerance
+        /// there is distance-independent, and it is not a taste setting either: geometry that
+        /// deviates by less than a texel cannot move the shadow it casts. Casters were being held to
+        /// the accuracy of the shaded silhouette instead, which nothing was ever going to look at.
+        /// </remarks>
+        public int PickLodWorld(float worldError, int currentLevel)
+        {
+            if (LodIndexCounts.Length <= 1 || worldError <= 0f) return 0;
+            var wanted = 0;
+            for (var l = 1; l < LodIndexCounts.Length; l++)
+            {
+                if (LodErrors[l] <= worldError) wanted = l;
+                else break;
+            }
+            // Same asymmetry as above, for the same reason: a cascade refits as the camera moves,
+            // so its texel size changes and its thresholds move with it.
+            currentLevel = Math.Clamp(currentLevel, 0, LodIndexCounts.Length - 1);
+            if (wanted <= currentLevel) return wanted;
+            return SettleCoarser(currentLevel, wanted, worldError / LodHysteresis, pixelsPerWorld: 1f);
         }
     }
 
@@ -671,7 +770,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // the lit pass's set-1 IBL + shadow-cascade textures (all stable handles).
     private byte[] identityPush = null!;
     private ShaderTextureBinding[] passBindings = null!;
-    private ShaderTextureBinding[] froxelBindings = null!;
     // Mask shadow pushes differ per draw (alpha params), so they can't share one
     // buffer like opaque casters. Pool + reuse the byte[]s across frames instead
     // of allocating per draw: CmdPushConstants copies the bytes at record time,
@@ -701,6 +799,11 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // pixels-per-world at unit distance = viewportH / (2·tan(fovY/2)); PickLod
     // divides by the view distance. Recomputed lazily from the fields above.
     private float LodErrorScale => renderHeightPx * 0.5f / MathF.Tan(fovYRadians * 0.5f);
+    // How far inside the budget a coarser level has to be before it is taken. 1.0 restores the
+    // old memoryless behaviour exactly; 1.35 is roughly a sixth of a level's error step at the
+    // 2x-per-level decimation this cook produces, which is enough to clear the camera jitter that
+    // was driving the oscillation without noticeably delaying a real transition.
+    private const float LodHysteresis = 1.35f;
     private bool mouseLook;
     private float lastMouseX, lastMouseY;   // latest cursor pos (for click-to-pick)
     // Diagnostics selection: a contributor registered after consolidation so a
@@ -716,6 +819,20 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // ephemeral; edited via the Selection panel, consumed by PickLod.
     private float[] opaqueLodMargins = System.Array.Empty<float>();
     private float[] blendLodMargins = System.Array.Empty<float>();
+    // <b>The level each primitive is currently AT, which a screen-space-error test needs and did
+    // not have.</b> Shared by the camera, blend and cascade fills: all of them select at the same
+    // camera position under the same budget, so they must reach the same answer or the depth
+    // pre-pass and the lit pass stop matching. One array per drawable list is what guarantees that
+    // — the second and third callers in a frame re-confirm a decision rather than re-taking it.
+    private int[] opaqueLodState = System.Array.Empty<int>();
+    private int[] blendLodState = System.Array.Empty<int>();
+    // Cascades select on their own budget now (see PickLodWorld), so they cannot share the camera's
+    // state — and they cannot share each other's either, because each cascade has its own texel.
+    private int[][] cascadeLodState = System.Array.Empty<int[]>();
+    // How many shadow texels of geometric deviation a caster may have. Below one texel the error
+    // cannot move the shadow at all; a little over one is where it starts to be theoretically
+    // visible and still is not, because the PCF kernel is wider than that.
+    private const float ShadowLodTexels = 1.5f;
     private static readonly GraphicsColor MultiSelectColor = new(0.95f, 0.75f, 0.2f, 1f);
     private readonly HashSet<Key> heldKeys = new();
     private Matrix4x4 viewProj;
@@ -810,11 +927,22 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
 internal sealed class FogSettings
 {
     [Tune] public bool Enabled;                       // compute cost; off by default
-    [Tune(0f, 0.5f)]    public float Density = 0.018f; // extinction scale
-    [Tune(0f, 1f)]      public float Scatter = 0.6f;   // scattering albedo
+    [Tune(0f, 0.5f)]    public float Density = 0.018f; // extinction coefficient, per metre
+    [Tune(0f, 1f)]      public float Scatter = 0.6f;   // scattering albedo: the share of extinction that scatters
     [Tune(-0.9f, 0.9f)] public float PhaseG = 0.6f;    // Henyey-Greenstein anisotropy
-    [Tune(0f, 0.2f)]    public float Ambient = 0.005f; // ambient in-scatter floor
+    // <b>A fallback, not a look.</b> The medium's ambient in-scatter is the sky-visibility volume
+    // and the probe field; this value is what it scatters when neither has been baked, and turning
+    // it up with them loaded is disagreeing with a measurement.
+    [Tune(0f, 0.2f)]    public float Ambient = 0.005f;
     [Tune(10f, 150f)]   public float Far = 60f;        // grid far distance (metres)
+    // <b>A length, like the ambient radius.</b> The height over which the medium thins by a factor
+    // of e, measured from the volume floor. Air does this; a constant-density volume does not, and
+    // a constant-density volume is what makes fog read as a filter laid over the picture.
+    [Tune(2f, 100f)]    public float HeightFalloff = 14f;
+    // How much of the density comes from the drifting noise field rather than the smooth falloff.
+    // 0 is the old even haze. The feature size and drift speed are derived from the fog's range,
+    // not dialled — they are what keeps the look the same when the range changes.
+    [Tune(0f, 1f)]      public float Noise = 0.55f;
 }
 
 // Tonemap operators (overlay Render → Tonemap); the enum's int value indexes
@@ -861,7 +989,14 @@ internal sealed class RenderSettings
     [Tune(0.05f, 16f)] public float Exposure = 0.5f;
     [Tune]             public TonemapMode Tonemap = TonemapMode.AgX;
     [Tune(0.3f, 60f)]  public float MoveSpeed = 4.5f;
-    [Tune(0f, 8f)]     public float LodErrorPixels = 1.0f;
+    // <b>Two pixels, and the census is why rather than taste.</b> Submitted triangles fall about a
+    // fifth per doubling of this budget all the way out — the chain does not saturate until 8 px —
+    // but frame time stops following it long before that: 1 px to 2 px drops 22% of the geometry
+    // for 1.5 ms, and 2 px to 4 px drops another 17% for 0.56 ms, which is inside this laptop's
+    // noise. Past here the frame is not geometry-bound, so a tighter budget buys triangles that
+    // nothing is waiting on. Judge a change to it with lod-tris in the overlay, not the frame
+    // counter: the count is exact and the clock on this machine is not.
+    [Tune(0f, 8f)]     public float LodErrorPixels = 2.0f;
 }
 
 // Pickable scene primitives for the diagnostics overlay. Built after geometry

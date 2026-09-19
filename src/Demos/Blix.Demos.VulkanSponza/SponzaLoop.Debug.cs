@@ -14,6 +14,24 @@ namespace Blix.Demos.VulkanSponza;
 
 internal sealed partial class SponzaLoop
 {
+    private static readonly System.Globalization.CultureInfo Inv =
+        System.Globalization.CultureInfo.InvariantCulture;
+
+    // --- LOD visibility instrument ---------------------------------------
+    private bool showLodBoxes;
+    private int[] lodLevels = Array.Empty<int>();
+    private float[] lodPopAge = Array.Empty<float>();
+    private const float PopHoldSeconds = 1.5f;
+    private static readonly GraphicsColor PopColor = new(1f, 1f, 1f, 1f);
+    // Level 0 is never drawn, so the first entry only exists to keep the index honest.
+    private static readonly GraphicsColor[] LodTints =
+    {
+        new(0.4f, 1f, 0.4f, 0.6f),    // 0 — full detail (unused)
+        new(1f, 0.9f, 0.25f, 0.7f),   // 1
+        new(1f, 0.55f, 0.15f, 0.8f),  // 2
+        new(1f, 0.2f, 0.2f, 0.9f),    // 3+
+    };
+
     // Resolve a selectable path ("scene/<bucket>/<i>") to its LOD-margin array
     // slot. Returns false for unknown buckets / out-of-range indices.
     private bool TryResolveMargin(string path, out float[] arr, out int index)
@@ -37,9 +55,15 @@ internal sealed partial class SponzaLoop
     {
         // Cmd+C toggles this; Debug() runs unconditionally so it re-applies.
         debug.State.Enabled = overlayEnabled;
-        // Overlay off → emit nothing. The panels gate on State.Enabled, but the
-        // debug-line pass just renders whatever's queued, so we must skip the
-        // Draw emissions too or the cascade/sun gizmos linger when hidden.
+        // <b>The read-only half runs whether or not anybody is looking at it.</b> This used to be
+        // a bare early return, so with the panel hidden (Cmd+C) NOTHING was emitted — and an F12
+        // frame dump taken in that state came back with two values and zero controls. A dump whose
+        // whole job is to record the state that produced a frame was blank in exactly the case
+        // where the state could not be read off the screen instead.
+        //
+        // Controls and gizmos still stop: a control is an input, and the debug-line pass renders
+        // whatever is queued, so the cascade and sun gizmos would linger after hiding the overlay.
+        ReportValues(debug);
         if (!overlayEnabled) return;
 
         // Live tuning, grouped by scope. Controls are read-back: the returned
@@ -50,7 +74,6 @@ internal sealed partial class SponzaLoop
             sunYaw   = debug.Controls.Float("Yaw (deg)", sunYaw * deg, -180f, 180f) / deg;
             sunPitch = debug.Controls.Float("Pitch (deg)", sunPitch * deg, -89f, -1f) / deg;
             sunStrength = debug.Controls.Float("Strength (x measured)", sunStrength, 0f, 8f);
-            debug.Values.Value("sun-irradiance", $"{EffectiveSunIrradiance.X:0.00} ({sunIrradiance.X:0.00} measured)");
             UpdateSunDirection();
         }
         // Shadows + Render scopes are now [Tune]-tagged settings objects
@@ -103,6 +126,10 @@ internal sealed partial class SponzaLoop
             // person at the keyboard — the one who can actually see the image — the one least able
             // to use the instrument. Controls.Enum has existed the whole time.
             vizChannel = debug.Controls.Enum("Show", (int)MathF.Round(vizChannel), VizChannelNames);
+            // Outlines every opaque primitive NOT at full detail, tinted by how coarse it is, and
+            // flashes white the moment one switches level. The question this answers is not "how
+            // much does LOD save" — the A/B answers that — but "which piece of wall was it".
+            showLodBoxes = debug.Controls.Toggle("Show LOD levels", showLodBoxes);
         }
 
         // The indirect solve's cost is rays x probes x march, divided by period, and every one of
@@ -142,54 +169,8 @@ internal sealed partial class SponzaLoop
                 clothOverride   = debug.Controls.Toggle("Override the patch", clothOverride);
                 sheenRoughness  = debug.Controls.Float("Sheen roughness", sheenRoughness, 0.05f, 1f);
                 diffuseTransmit = debug.Controls.Float("Diffuse transmission", diffuseTransmit, 0f, 1f);
-                debug.Values.Value("probe-refresh", $"{MathF.Round(injectRays)} rays every {MathF.Round(injectPeriod)}f");
             }
         }
-
-        debug.Values.Value("shadow-map", $"{ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}");
-        debug.Values.Value("splits-m", $"{cascadeSplits[1]:0}/{cascadeSplits[2]:0}/{cascadeSplits[3]:0}");
-        // One shadow texel in WORLD units, per cascade — the quantity the map size and the splits
-        // jointly imply, and the one that sets both the acne offset and the filter width. It was
-        // computed every frame and never shown, so a cascade whose texel had grown to a third of a
-        // metre looked, in the overlay, exactly like one whose texel was two centimetres.
-        debug.Values.Value("cascade-texel-m",
-            $"{cascadeTexelWorld[0]:0.000}/{cascadeTexelWorld[1]:0.000}/{cascadeTexelWorld[2]:0.000}");
-        // Per-cascade caster counts after frustum cull (one frame stale — set
-        // during the previous OnRender's graph.Execute).
-        debug.Values.Value("cascade-casters", $"{cascadeDrawCounts[0]}/{cascadeDrawCounts[1]}/{cascadeDrawCounts[2]} of {opaqueDrawables.Count}");
-        // Shadow-map cache hits: R = re-rendered this frame, · = served cached.
-        debug.Values.Value("cascade-cache", $"{(cascadeRendered[0] ? 'R' : '·')}{(cascadeRendered[1] ? 'R' : '·')}{(cascadeRendered[2] ? 'R' : '·')}");
-        debug.Values.Value("blend-draws", blendDrawables.Count);
-        debug.Values.Value("cam-pos", cameraPosition);
-        // LOD diagnostic: max levels available + histogram of selected levels
-        // across opaque drawables at the current camera + pixel-error budget.
-        var maxLevels = 0;
-        var hist = new int[8];
-        for (var i = 0; i < opaqueDrawables.Count; i++)
-        {
-            var d = opaqueDrawables[i];
-            maxLevels = Math.Max(maxLevels, d.LodIndexCounts.Length);
-            var lv = d.PickLod(cameraPosition, LodErrorScale, render.LodErrorPixels * opaqueLodMargins[i]);
-            if (lv < hist.Length) hist[lv]++;
-        }
-        debug.Values.Value("lod-maxlevels", maxLevels);
-        debug.Values.Value("lod-hist", $"{hist[0]}/{hist[1]}/{hist[2]}/{hist[3]} (err={render.LodErrorPixels:0.0}px)");
-
-        // --- Perf instrumentation: weigh where the frame actually goes -------
-        // CPU-phase split of the bundled `execute` timer. encode is the only
-        // phase draw-COUNT moves (recording vkCmds → Metal encoder calls), so
-        // it's the number A (batching) / B (GPU-driven indirect) would change;
-        // wait is the GPU/vsync throttle (high = GPU-bound, can't be cut by
-        // batching); submit is queue submit + present enqueue.
-        //
-        // The other half — per-pass GPU ms — is surfaced by the runtime under
-        // the `gpu/passes` timer scope (Window drains ConsumeAvailableGpuTimings
-        // each frame); the periodic console sink prints it. We deliberately do
-        // NOT drain it here too — that would race the runtime and steal frames.
-        var cpu = vk.LastCpuFrameTiming;
-        debug.Values.Value("cpu-wait", $"{cpu.WaitMs:0.00}ms");
-        debug.Values.Value("cpu-encode", $"{cpu.EncodeMs:0.00}ms");
-        debug.Values.Value("cpu-submit", $"{cpu.SubmitPresentMs:0.00}ms");
 
         // Spatial gizmos: sun direction + the three cascade ortho boxes.
         // Every primitive below belongs to this view. Scoped rather than assigned: the old
@@ -219,5 +200,162 @@ internal sealed partial class SponzaLoop
             if (sceneSelection.TryGetBounds(p, out var b))
                 debug.Draw.Aabb($"sel/{p}", b.Min, b.Max, MultiSelectColor);
         }
+
+        // Level 0 is deliberately not drawn: at a sane budget most of the scene is at full detail,
+        // and outlining all of it would bury the handful of primitives the question is about.
+        if (showLodBoxes)
+        {
+            for (var i = 0; i < lodLevels.Length && i < opaqueDrawables.Count; i++)
+            {
+                var level = lodLevels[i];
+                var justPopped = lodPopAge[i] < PopHoldSeconds;
+                if (level == 0 && !justPopped) continue;
+                var bounds = opaqueDrawables[i].Bounds;
+                debug.Draw.Aabb($"lod/{i}", bounds.Min, bounds.Max,
+                    justPopped ? PopColor : LodTints[Math.Min(level, LodTints.Length - 1)]);
+            }
+        }
+    }
+
+    // Read-only state: emitted every frame, panel open or not, so an F12 dump always carries the
+    // configuration that produced the frame. Nothing here is an input — no Controls calls, no Draw
+    // calls — which is what makes it safe to run with the overlay hidden.
+    private void ReportValues(DebugContext debug)
+    {
+        using (debug.Scope("Sun"))
+        {
+            debug.Values.Value("sun-irradiance",
+                $"{EffectiveSunIrradiance.X:0.00} ({sunIrradiance.X:0.00} measured)");
+        }
+
+        using (debug.Scope("Indirect"))
+        {
+            // <b>The cost, reported beside the dials that move it.</b> Windowed rather than a
+            // lifetime mean, so a slider shows up here within about a second — see
+            // SampleGpuPassTimes.
+            var injectMs = GpuPassMs("sky-inject");
+            debug.Values.Value("inject-gpu", lastFramePeriodMs > 0.01
+                ? $"{injectMs:0.00} ms ({injectMs / lastFramePeriodMs * 100.0:0.0}% of a {lastFramePeriodMs:0.0} ms frame)"
+                : $"{injectMs:0.00} ms");
+
+            // What was actually commanded, which is not what the period suggests. EVERY probe's
+            // workgroup launches every frame; the period only decides which of them go on to march
+            // rays. The rest take the early-out — and the early-out is not free, because a probe
+            // that skips its turn still has to COPY its whole tile into the other atlas (the pair
+            // alternates every frame, so a probe that simply returned would be empty in one of
+            // them). That copy is the part of this pass nobody ordered: it scales with probe count
+            // and not with the refresh rate at all.
+            var probes = bounceX * bounceY * bounceZ;
+            const int tileTexels = 8 * 8;
+            var rays = (int)MathF.Round(injectRays);
+            var period = MathF.Max(1f, MathF.Round(injectPeriod));
+            var solving = Math.Max(1, (int)MathF.Round(probes / period));
+            // <b>Invariant, not current, culture.</b> These came out as "6,19,008" on a machine set
+            // to Indian digit grouping. A diagnostic is read against other diagnostics and pasted
+            // into notes; it does not get to change shape with the locale.
+            debug.Values.Value("inject-dispatch", string.Create(Inv,
+                $"{probes:N0} workgroups x {tileTexels} lanes"));
+            debug.Values.Value("inject-solving", string.Create(Inv,
+                $"{solving:N0} probes x {rays} rays = {solving * (long)rays:N0} rays"));
+            debug.Values.Value("inject-carry", string.Create(Inv,
+                $"{(probes - solving) * (long)tileTexels * 2:N0} texel copies (irradiance+depth), period-independent"));
+            debug.Values.Value("probe-refresh", $"{rays} rays every {period:0}f");
+        }
+
+        // <b>Live, because the console breakdown only prints when the process ends.</b> Every perf
+        // question this session has been answered after the fact, from a log, about a run that had
+        // already finished. These are the same timestamps the exit dump reads, windowed per frame.
+        // The caveat travels with them: on a tile-based GPU they bracket ENCODER submission, not the
+        // deferred tiled execution, so they do NOT sum to the frame period and a pass reading
+        // 0.004 ms has not been shown to be free.
+        using (debug.Scope("GPU passes"))
+        {
+            var passTotal = GpuPassTotalMs();
+            debug.Values.Value("encoded-total", $"{passTotal:0.00} ms (not the frame time)");
+            foreach (var (pass, ms) in GpuPassesByCost().Take(8))
+            {
+                debug.Values.Value(pass, $"{ms:0.000} ms");
+            }
+        }
+
+        debug.Values.Value("shadow-map", $"{ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}");
+        debug.Values.Value("splits-m", $"{cascadeSplits[1]:0}/{cascadeSplits[2]:0}/{cascadeSplits[3]:0}");
+        // One shadow texel in WORLD units, per cascade — the quantity the map size and the splits
+        // jointly imply, and the one that sets both the acne offset and the filter width. It was
+        // computed every frame and never shown, so a cascade whose texel had grown to a third of a
+        // metre looked, in the overlay, exactly like one whose texel was two centimetres.
+        debug.Values.Value("cascade-texel-m",
+            $"{cascadeTexelWorld[0]:0.000}/{cascadeTexelWorld[1]:0.000}/{cascadeTexelWorld[2]:0.000}");
+        // Per-cascade caster counts after frustum cull (one frame stale — set
+        // during the previous OnRender's graph.Execute).
+        debug.Values.Value("cascade-casters", $"{cascadeDrawCounts[0]}/{cascadeDrawCounts[1]}/{cascadeDrawCounts[2]} of {opaqueDrawables.Count}");
+        // Shadow-map cache hits: R = re-rendered this frame, · = served cached.
+        debug.Values.Value("cascade-cache", $"{(cascadeRendered[0] ? 'R' : '·')}{(cascadeRendered[1] ? 'R' : '·')}{(cascadeRendered[2] ? 'R' : '·')}");
+        debug.Values.Value("blend-draws", blendDrawables.Count);
+        debug.Values.Value("cam-pos", cameraPosition);
+        // LOD diagnostic: max levels available + histogram of selected levels
+        // across opaque drawables at the current camera + pixel-error budget.
+        //
+        // <b>And WHICH ones, and when they changed.</b> The histogram says four primitives coarsened
+        // and says nothing about where they are, so "LOD is visible on that wall as I walk past it"
+        // and "LOD is fine" produce the same three numbers. The level is recorded per drawable here
+        // and the gizmo pass below draws it, so the thing that popped can be pointed at.
+        if (lodLevels.Length != opaqueDrawables.Count)
+        {
+            lodLevels = new int[opaqueDrawables.Count];
+            lodPopAge = new float[opaqueDrawables.Count];
+            Array.Fill(lodPopAge, float.MaxValue);
+        }
+        var maxLevels = 0;
+        var hist = new int[8];
+        var popped = 0;
+        long submitted = 0;
+        long full = 0;
+        var dt = (float)(lastFramePeriodMs * 0.001);
+        for (var i = 0; i < opaqueDrawables.Count; i++)
+        {
+            var d = opaqueDrawables[i];
+            maxLevels = Math.Max(maxLevels, d.LodIndexCounts.Length);
+            // <b>Read, not re-picked.</b> Recomputing it here used to be harmless because the
+            // selection was a pure function of the camera; with hysteresis it is a function of
+            // history too, and a second evaluation would report a level the renderer never drew.
+            var lv = i < opaqueLodState.Length ? opaqueLodState[i] : 0;
+            if (lv < hist.Length) hist[lv]++;
+            if (lv != lodLevels[i]) { lodPopAge[i] = 0f; popped++; }
+            else lodPopAge[i] += dt;
+            lodLevels[i] = lv;
+            submitted += d.LodIndexCounts[Math.Min(lv, d.LodIndexCounts.Length - 1)];
+            full += d.LodIndexCounts[0];
+        }
+        // <b>The trade, in one line, while the hand is on the slider.</b> Frame time on this machine
+        // moves several milliseconds between two runs of the same thing, so dragging the budget and
+        // watching the frame counter cannot separate a real saving from thermal drift. The triangle
+        // count has no such problem: it is exactly what the budget decides, and it responds the
+        // instant the dial does.
+        debug.Values.Value("lod-tris", string.Create(Inv,
+            $"{submitted / 3:N0} of {full / 3:N0} ({(full > 0 ? submitted * 100.0 / full : 100.0):0.0}% of full detail)"));
+        // A switch lasts one frame and the eye catches it as a flicker with no location. Held for
+        // PopHoldSeconds so the box is still on the geometry when you look for it.
+        var holding = 0;
+        for (var i = 0; i < lodPopAge.Length; i++) if (lodPopAge[i] < PopHoldSeconds) holding++;
+        debug.Values.Value("lod-popped", $"{popped} this frame, {holding} within {PopHoldSeconds:0.0}s");
+        debug.Values.Value("lod-maxlevels", maxLevels);
+        debug.Values.Value("lod-hist", $"{hist[0]}/{hist[1]}/{hist[2]}/{hist[3]} (err={render.LodErrorPixels:0.0}px)");
+
+        // --- Perf instrumentation: weigh where the frame actually goes -------
+        // CPU-phase split of the bundled `execute` timer. encode is the only
+        // phase draw-COUNT moves (recording vkCmds → Metal encoder calls), so
+        // it's the number A (batching) / B (GPU-driven indirect) would change;
+        // wait is the GPU/vsync throttle (high = GPU-bound, can't be cut by
+        // batching); submit is queue submit + present enqueue.
+        //
+        // The other half — per-pass GPU ms — is surfaced by the runtime under
+        // the `gpu/passes` timer scope (Window drains ConsumeAvailableGpuTimings
+        // each frame); the periodic console sink prints it. We deliberately do
+        // NOT drain it here too — that would race the runtime and steal frames.
+        var cpu = vk.LastCpuFrameTiming;
+        debug.Values.Value("cpu-wait", $"{cpu.WaitMs:0.00}ms");
+        debug.Values.Value("cpu-encode", $"{cpu.EncodeMs:0.00}ms");
+        debug.Values.Value("cpu-submit", $"{cpu.SubmitPresentMs:0.00}ms");
     }
 }

@@ -86,6 +86,10 @@ internal sealed partial class SponzaLoop
         // Per-drawable LOD margins, default 1.0 (= use the global budget as-is).
         opaqueLodMargins = new float[opaqueDrawables.Count];
         blendLodMargins = new float[blendDrawables.Count];
+        opaqueLodState = new int[opaqueDrawables.Count];
+        cascadeLodState = new int[CascadeCount][];
+        for (var c = 0; c < CascadeCount; c++) cascadeLodState[c] = new int[opaqueDrawables.Count];
+        blendLodState = new int[blendDrawables.Count];
         System.Array.Fill(opaqueLodMargins, 1f);
         System.Array.Fill(blendLodMargins, 1f);
     }

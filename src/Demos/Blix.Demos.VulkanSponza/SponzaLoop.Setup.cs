@@ -143,6 +143,14 @@ internal sealed partial class SponzaLoop
             if (cmdArgs[i] == "--ao-debug" && float.TryParse(cmdArgs[i + 1], out var aoDebugValue)) aoDebug = aoDebugValue;
             if (cmdArgs[i] == "--viz" && float.TryParse(cmdArgs[i + 1], out var vizValue)) vizChannel = vizValue;
             if (cmdArgs[i] == "--ao-radius" && float.TryParse(cmdArgs[i + 1], out var aoRadius)) ambient.RadiusMetres = aoRadius;
+            // --lod-arms <onPx> <offPx>: the two budgets --ab lod alternates between.
+            if (cmdArgs[i] == "--lod-arms" && i + 2 < cmdArgs.Length
+                && float.TryParse(cmdArgs[i + 1], out var lodOn)
+                && float.TryParse(cmdArgs[i + 2], out var lodOff))
+            {
+                lodArmOn = lodOn;
+                lodArmOff = lodOff;
+            }
         }
         // <b>Required for any timing run, and its absence invalidated a whole measurement batch.</b>
         // With FIFO present the frame timer measures when the swapchain let go, not what the work
@@ -229,6 +237,17 @@ internal sealed partial class SponzaLoop
         var hiZInterface = Reflect("present.vert", "hiz_build.frag");
         var shadowOpaqueInterface = Reflect("shadow.vert", "shadow.frag");
         var shadowMaskInterface = Reflect("shadow_mask.vert", "shadow_mask.frag");
+
+        // <b>Every reader of the Frame block must agree where its members are.</b> Five shaders
+        // declare set 0 binding 0, each naming only the part it reads — legal, because std140
+        // offsets are positional, and the reason the skybox can reach uFog past the whole tune tail
+        // with one layout(offset=). What makes that safe is this check and nothing else: get the
+        // offset wrong by a vec4 and the sky fogs itself by the shadow strength, with no validation
+        // error and no crash. MergeStages only reconciles the stages WITHIN a program; two
+        // programs' idea of the same UBO is exactly what it cannot see.
+        // probe_debug is deliberately absent: it declares its OWN block at set 0 binding 0, on its
+        // own pipeline and its own buffer, which shares nothing with this one but the slot.
+        AssertFrameBlockAgrees(litInterface, ("skybox", skyInterface));
 
         // Scan lit.frag's //@tune decorators (shipped alongside the .spv) and
         // build the overlay's shader-variable panel. The panel owns the live
@@ -531,10 +550,23 @@ internal sealed partial class SponzaLoop
         var froxelSpv = File.ReadAllBytes(Path.Combine(shaderDir, "froxel.comp.spv"));
         froxelProgram = vk.CreateComputeShaderProgramFromSpv(froxelSpv, froxelInterface, "froxel");
         froxelPipeline = vk.CreateComputePipeline(froxelProgram, "froxel");
-        // View-aligned 3D scattering grid, sampled trilinearly by the lit pass.
+        // View-aligned 3D scattering grid, sampled trilinearly by the lit pass. Sized from a
+        // swapchain-matched graph target rather than from host.LogicalSize, because that is the
+        // logical size and the framebuffer behind it is 2x on a Retina display — the difference
+        // between eight pixels per froxel and sixteen.
+        if (!vk.TryGetTextureSize(graph.GetColorTexture(ambientDenoisedHandle), out var fbW, out var fbH))
+        {
+            throw new InvalidOperationException(
+                "VulkanSponza: the full-size ambient target has no dimensions, so the froxel grid " +
+                "cannot be sized against the framebuffer.");
+        }
+        (froxelGridX, froxelGridY) = FroxelGridSize(fbW, fbH);
         froxelGridTexture = vk.CreateStorageTexture3D(
-            FroxelGridX, FroxelGridY, FroxelGridZ,
+            froxelGridX, froxelGridY, FroxelGridZ,
             TextureFormat.Rgba16F, SamplerDescription.LinearClamp, "sponza.froxel_grid");
+        Console.WriteLine(
+            $"[VulkanSponza] froxel grid {froxelGridX}x{froxelGridY}x{FroxelGridZ} " +
+            $"({FroxelPixels} px/froxel at {fbW}x{fbH})");
 
         // Build the per-frame-constant buffers once (graph compiled + all
         // textures created by now). Reused every frame in OnRender.
@@ -565,17 +597,8 @@ internal sealed partial class SponzaLoop
         // The one binding that is not constant: the lit pass reads whichever of the bounce pair the
         // injection is not writing, so its slot is rewritten each frame.
         skyBounceBinding = Array.FindIndex(passBindings, b => b.Name == "uSkyBounce");
-
-        // Froxel compute set-0 image bindings (constant handles): the storage
-        // grid it writes (binding 1) + the cascade shadow maps it samples
-        // (binding 2, Count=3). The UBO (binding 0) is written per frame.
-        froxelBindings = new[]
-        {
-            new ShaderTextureBinding("uGrid", froxelGridTexture, Slot: 1),
-            new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0]), Slot: 2, ArrayIndex: 0),
-            new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1]), Slot: 2, ArrayIndex: 1),
-            new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2]), Slot: 2, ArrayIndex: 2),
-        };
+        // Same reason, different cause: the grid is re-created when the framebuffer changes size.
+        froxelGridBinding = Array.FindIndex(passBindings, b => b.Name == "uFroxelGrid");
 
         // --- Load Sponza geometry ---------------------------------------
         // Static-mesh importer (Sponza has no skinning): each glTF primitive
@@ -932,5 +955,44 @@ internal sealed partial class SponzaLoop
             1, 1, 1, TextureFormat.Rgba16F, SamplerDescription.LinearClamp, open, "sponza.skyvis.open");
         skyVolumeLoaded = false;
         Console.WriteLine("[VulkanSponza] sky visibility: none found — every surface sees a full sky.");
+    }
+
+    // The Frame block, as every program that declares it sees it. `authority` is the full
+    // declaration (lit's, which names everything); each other program names a subset, and any name
+    // they share has to sit at the same offset and be the same size. A disagreement is a silent
+    // mis-read of live data, so it stops the boot rather than shading one pass with another pass's
+    // uniforms.
+    private static void AssertFrameBlockAgrees(
+        ShaderInterface authority, params (string Name, ShaderInterface Iface)[] others)
+    {
+        UniformBlockLayout? Frame(ShaderInterface i) =>
+            i.Slots.FirstOrDefault(sl => sl is { Set: 0, Binding: 0 })?.BlockLayout;
+
+        var full = Frame(authority)
+            ?? throw new InvalidOperationException(
+                "VulkanSponza: the lit program does not declare the Frame block at set 0 binding 0.");
+
+        foreach (var (name, iface) in others)
+        {
+            var block = Frame(iface);
+            if (block is null) continue;   // a program that never reads the Frame block is fine
+            foreach (var member in block.Members)
+            {
+                var reference = full.Members.FirstOrDefault(m => m.Name == member.Name);
+                if (reference is null)
+                {
+                    throw new InvalidOperationException(
+                        $"VulkanSponza: {name} declares Frame member '{member.Name}', which lit.frag " +
+                        "does not — one of the two names is wrong, and std140 will not say which.");
+                }
+                if (reference.Offset != member.Offset || reference.Size != member.Size)
+                {
+                    throw new InvalidOperationException(
+                        $"VulkanSponza: {name}'s Frame.{member.Name} is at offset {member.Offset} " +
+                        $"size {member.Size}; lit.frag has it at offset {reference.Offset} size " +
+                        $"{reference.Size}. The two read the same bytes as different members.");
+                }
+            }
+        }
     }
 }
