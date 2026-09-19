@@ -78,6 +78,7 @@ internal sealed partial class SponzaLoop
         // forever. A toggle driven by a counter that the toggled-to branch stops advancing can only
         // ever fire once.
         framesRendered++;
+        if (orbit) ApplyOrbit();
         var stamp = System.Diagnostics.Stopwatch.GetTimestamp();
         if (lastFrameStamp != 0)
         {
@@ -130,18 +131,13 @@ internal sealed partial class SponzaLoop
             new("uSunDirection",     new Vector3Uniform(sunDirection)),
             new("uSunIrradiance",    new Vector3Uniform(EffectiveSunIrradiance)),
             new("uCameraPos",        new Vector3Uniform(cameraPosition)),
-            // Forward from yaw/pitch, matching the view matrix the camera is built from.
-            new("uCameraForward",    new Vector4Uniform(new Vector4(Vector3.Normalize(new Vector3(
-                MathF.Sin(camYaw) * MathF.Cos(camPitch),
-                MathF.Sin(camPitch),
-                -MathF.Cos(camYaw) * MathF.Cos(camPitch))), 0f))),
             new("uEnvMipCount",      new FloatUniform(iblPrefilterMips)),
             new("uSheenMipCount",    new FloatUniform(sheenMipCount)),
             new("uMsaaSamples",      new FloatUniform(MsaaSamples)),
             new("uSkyDims",          new Vector4Uniform(new Vector4(probeX, probeY, probeZ, 0f))),
             // w marks whether shading should write usage at all — off while the volume is not ready.
             new("uBounceDims", new Vector4Uniform(new Vector4(
-                bounceX, bounceY, bounceZ, bounceReady && probeSleepFrames > 0f ? 1f : 0f))),
+                bounceX, bounceY, bounceZ, bounceReady && ProbeSleepNow > 0f ? 1f : 0f))),
             // x < 0 means "use what the material carries"; the overlay sets it to find a value.
             new("uClothOverride",    new Vector4Uniform(clothOverride
                 ? new Vector4(sheenRoughness, diffuseTransmit, 0f, 0f)
@@ -372,11 +368,30 @@ internal sealed partial class SponzaLoop
                 froxelUniforms, FroxelBindings()));
         }
 
-        // Fill the camera opaque indirect commands once per frame (LOD by SSE, no
-        // cull); both the depth pre-pass and the lit pass consume this buffer —
-        // they draw the identical opaque set at identical LODs.
-        FillIndirect(opaqueDrawables, opaqueLodMargins, opaqueLodState, opaqueIndirect, cull: null, margin: 0f);
-        if (blendDrawables.Count > 0) FillIndirect(blendDrawables, blendLodMargins, blendLodState, blendIndirect, cull: null, margin: 0f);
+        // Fill the camera opaque indirect commands once per frame (LOD by SSE, frustum-culled);
+        // both the depth pre-pass and the lit pass consume this buffer — they draw the identical
+        // opaque set at identical LODs, and now the identical VISIBLE set.
+        //
+        // <b>The camera pass submitted the whole scene, every frame, in every direction.</b> Only
+        // the shadow cascades ever tested a frustum. That was a defensible omission at 424
+        // primitives, where each one spanned enough of the scene that a frustum test rejected almost
+        // nothing — and it silently stopped being true the moment the cook started splitting on
+        // extent. The census measures what was being thrown at the GPU to be clipped: 55% of
+        // submitted triangles off-screen at the default camera, and 96% on the measurement orbit,
+        // which is a camera standing inside a building looking at one wall of it.
+        //
+        // Culling here zeroes instanceCount rather than removing the command, exactly as the
+        // cascades do, so what is saved is vertex and binning work and not draw calls.
+        var cameraFrustum = cullEnabled && !(abMode == "cull" && AbOffPhase)
+            ? Frustum.FromViewProjection(Matrix4x4.Transpose(viewProj))
+            : (Frustum?)null;
+        //
+        // The margin is insurance, not tuning. A chunk whose bounds sit exactly on a frustum plane
+        // can fall either way on floating-point noise, and at the screen edge that reads as geometry
+        // blinking in and out as you turn. Half a metre of slack costs a fraction of a percent of
+        // the rejections and removes the whole class.
+        FillIndirect(opaqueDrawables, opaqueLodMargins, opaqueLodState, opaqueIndirect, cameraFrustum, margin: CameraCullMargin);
+        if (blendDrawables.Count > 0) FillIndirect(blendDrawables, blendLodMargins, blendLodState, blendIndirect, cameraFrustum, margin: CameraCullMargin);
 
         // Depth pre-pass: same non-blend set as the lit pass (no cull, so the
         // depth the lit pass loads covers exactly what it shades), depth only.
@@ -413,13 +428,13 @@ internal sealed partial class SponzaLoop
         // they were, so the lit pass still reads a valid field and the arms differ by the DISPATCH
         // alone, which is the quantity in question.
         var skipInjectNow = skipInject || (abMode == "inject" && AbOffPhase);
-        if (bounceReady && skyVisibilityEnabled && !skipInjectNow) bounceWrite ^= 1;
+        if (probePingPong && bounceReady && skyVisibilityEnabled && !skipInjectNow) bounceWrite ^= 1;
         if (bounceReady && skyBounceBinding >= 0)
         {
             passBindings[skyBounceBinding] = new ShaderTextureBinding(
-                "uSkyBounce", bounceTextures[bounceWrite ^ 1], Slot: 7);
+                "uSkyBounce", bounceTextures[BounceRead], Slot: 7);
             passBindings[skyBounceBinding + 1] = new ShaderTextureBinding(
-                "uSkyBounceDepth", bounceDepthTextures[bounceWrite ^ 1], Slot: 13);
+                "uSkyBounceDepth", bounceDepthTextures[BounceRead], Slot: 13);
         }
 
         // Sun bounce into the probe grid. Cheap enough to redo every frame at this probe count, and
@@ -442,7 +457,8 @@ internal sealed partial class SponzaLoop
                     EffectiveSunIrradiance, skyVolumeLoaded ? 1f : 0f))),
                 new("uSchedule", new Vector4Uniform(new Vector4(
                     framesRendered, MathF.Round(injectPeriod),
-                    probeSleepFrames > 0f ? 1f / probeSleepFrames : 0f, 0f))),
+                    ProbeSleepNow > 0f ? 1f / ProbeSleepNow : 0f,
+                    probePingPong ? 1f : 0f))),
             };
             graph.Dispatch(injectPassHandle, new DispatchCommand(
                 injectPipeline,
@@ -454,7 +470,7 @@ internal sealed partial class SponzaLoop
 
         // Which probes this frame needs, from the depth the pre-pass just wrote. Marks are read by
         // the NEXT frame's injection; see probe_usage.comp for why this is not done in lit.frag.
-        if (bounceReady && skyVisibilityEnabled && probeSleepFrames > 0f)
+        if (bounceReady && skyVisibilityEnabled && ProbeSleepNow > 0f)
         {
             Matrix4x4.Invert(viewProj, out var invViewProj);
             var usageUniforms = new ShaderUniform[]
@@ -631,11 +647,11 @@ internal sealed partial class SponzaLoop
                     textures: new[]
                     {
                         new ShaderTextureBinding("uSkyBounce",
-                            bounceReady ? bounceTextures[bounceWrite ^ 1] : brdfLutTexture, Slot: 0),
+                            bounceReady ? bounceTextures[BounceRead] : brdfLutTexture, Slot: 0),
                         new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 1),
                         new ShaderTextureBinding("uOccupancy", occupancyTexture, Slot: 2),
                         new ShaderTextureBinding("uSkyBounceDepth",
-                            bounceReady ? bounceDepthTextures[bounceWrite ^ 1] : brdfLutTexture, Slot: 3),
+                            bounceReady ? bounceDepthTextures[BounceRead] : brdfLutTexture, Slot: 3),
                     },
                     // null, not an empty array: an empty array still counts as "push constants supplied", and
                     // this shader declares no ranges.
@@ -768,7 +784,7 @@ internal sealed partial class SponzaLoop
     {
         if (!bounceReady) return;
         var pixels = vk.ReadTexture(
-            bounceDepthTextures[bounceWrite ^ 1], out var w, out var h, out var format);
+            bounceDepthTextures[BounceRead], out var w, out var h, out var format);
         if (format != TextureFormat.Rgba16F) { Console.WriteLine("[VulkanSponza] probe reach: unexpected format"); return; }
 
         Console.WriteLine("[VulkanSponza] probe reachability, as written by the injector:");
@@ -812,7 +828,7 @@ internal sealed partial class SponzaLoop
 
             // The irradiance atlas beside it, same layout: the two are only meaningful together,
             // because every question about the blend is "what weight, times what colour".
-            var irr = vk.ReadTexture(bounceTextures[bounceWrite ^ 1], out var iw, out var ih, out _);
+            var irr = vk.ReadTexture(bounceTextures[BounceRead], out var iw, out var ih, out _);
             var ifl = new float[iw * ih * 3];
             for (var i = 0; i < iw * ih; i++)
             {
@@ -1022,6 +1038,8 @@ internal sealed partial class SponzaLoop
             "normal" => "normal mapping",
             "indirect"=> "the probe-volume terms (bounce + baked sky visibility)",
             "inject"  => "the bounce injection dispatch",
+            "cull"    => "camera frustum culling",
+            "sleep"   => "probes sleeping when nothing samples them",
             "lod"     => lodArmOff > 0f
                 ? string.Create(Inv, $"mesh LOD at {lodArmOn:0.##} px rather than {lodArmOff:0.##} px")
                 : "mesh level of detail",
@@ -1041,7 +1059,12 @@ internal sealed partial class SponzaLoop
             Console.WriteLine(
                 $"[VulkanSponza] {term}: {lit / flat:0.000}x of frame " +
                 $"({lit - flat:0.00} ms at this run's {lit:0.0} ms median), " +
-                "same geometry, same process, same thermal state");
+                "same geometry, same process, same thermal state, " +
+                // <b>Said out loud, because a still-camera number reads exactly like a moving one.</b>
+                // Cascades serve from cache and LOD never switches with the camera parked, so a
+                // shadow or LOD figure taken that way is missing most of what it claims to price —
+                // and nothing in the printed line used to say which kind it was.
+                (orbit ? "camera on the measurement orbit" : "CAMERA STILL (cascades cached)"));
         }
 
         static double Median(double[] buf, int count)
@@ -1157,7 +1180,7 @@ internal sealed partial class SponzaLoop
 
     // Rebuilt per frame, because the bounce atlas alternates: recorded BEFORE the write index
     // flips, so bounceTextures[bounceWrite] here is the solution the previous frame finished —
-    // the same texture the lit pass reads as bounceTextures[bounceWrite ^ 1] after the flip.
+    // the same texture the lit pass reads as bounceTextures[BounceRead] after the flip.
     private ShaderTextureBinding[] FroxelBindings() => new[]
     {
         new ShaderTextureBinding("uGrid", froxelGridTexture, Slot: 1),
@@ -1176,7 +1199,7 @@ internal sealed partial class SponzaLoop
     {
         new ShaderTextureBinding("uAtlas", bounceTextures[bounceWrite], Slot: 1),
         new ShaderTextureBinding("uDepthAtlas", bounceDepthTextures[bounceWrite], Slot: 11),
-        new ShaderTextureBinding("uDepthAtlasPrev", bounceDepthTextures[bounceWrite ^ 1], Slot: 12),
+        new ShaderTextureBinding("uDepthAtlasPrev", bounceDepthTextures[BounceRead], Slot: 12),
         new ShaderTextureBinding("uOccupancy", occupancyTexture, Slot: 2),
         new ShaderTextureBinding("uAlbedo", albX > 0 ? albedoTexture : occupancyTexture, Slot: 5),
         new ShaderTextureBinding("uProbeUsage", probeUsageTexture, Slot: 10),
@@ -1190,7 +1213,7 @@ internal sealed partial class SponzaLoop
         new ShaderTextureBinding("uIrradiance", irradianceCubeTexture, Slot: 9),
         // Last frame's solution, which is what turns a rotation of sweeps into successive bounces
         // AND what lets this dispatch run without the lit pass waiting on it.
-        new ShaderTextureBinding("uAtlasPrev", bounceTextures[bounceWrite ^ 1], Slot: 4),
+        new ShaderTextureBinding("uAtlasPrev", bounceTextures[BounceRead], Slot: 4),
     };
 
     // --- live GPU pass cost ----------------------------------------------
@@ -1247,12 +1270,23 @@ internal sealed partial class SponzaLoop
     private void WriteLodCensus()
     {
         if (opaqueDrawables.Count == 0) return;
+        // <b>The two columns that decide what to do next, and they are counted rather than timed.</b>
+        // "chain-bound" is the share of submitted TRIANGLES sitting in primitives already at their
+        // own coarsest level — the ceiling on what a longer decimation chain could ever buy, which
+        // the per-PRIMITIVE saturation figure badly misreports because primitives are not the same
+        // size. "in frustum" is what survives the camera's own frustum, which the camera pass does
+        // not currently test at all: with 424 scene-spanning primitives a frustum test rejected
+        // almost nothing, and at 4 m chunks that stopped being true without anyone re-checking.
+        var frustum = Frustum.FromViewProjection(Matrix4x4.Transpose(viewProj));
         Console.WriteLine("[VulkanSponza] LOD census at this camera (opaque only):");
-        Console.WriteLine("    budget      tris      vs 0px   at own coarsest   level histogram");
+        Console.WriteLine(
+            "    budget      tris      vs 0px   chain-bound   in frustum   at own coarsest   histogram");
         long baseline = 0;
         foreach (var budget in new[] { 0f, 0.25f, 0.5f, 1f, 2f, 4f, 8f })
         {
             long indices = 0;
+            long chainBound = 0;
+            long visible = 0;
             var saturated = 0;
             var hist = new int[8];
             for (var i = 0; i < opaqueDrawables.Count; i++)
@@ -1261,15 +1295,20 @@ internal sealed partial class SponzaLoop
                 // No hysteresis here: the census asks what a budget SETTLES at, and the band is a
                 // property of how it is approached, not of where it arrives.
                 var level = d.PickLod(cameraPosition, LodErrorScale, budget * opaqueLodMargins[i], 0);
-                indices += d.LodIndexCounts[level];
-                if (level == d.LodIndexCounts.Length - 1) saturated++;
+                var count = d.LodIndexCounts[level];
+                indices += count;
+                if (level == d.LodIndexCounts.Length - 1) { saturated++; chainBound += count; }
+                if (frustum.Intersects(d.Bounds, 0f)) visible += count;
                 if (level < hist.Length) hist[level]++;
             }
             var tris = indices / 3;
             if (budget == 0f) baseline = tris;
             var ratio = baseline > 0 ? (double)tris / baseline : 1.0;
             Console.WriteLine(string.Create(Inv,
-                $"    {budget,5:0.##}px  {tris,9:N0}   {ratio,6:0.0%}   {saturated * 100.0 / opaqueDrawables.Count,14:0.0}%   " +
+                $"    {budget,5:0.##}px  {tris,9:N0}   {ratio,6:0.0%}   " +
+                $"{(indices > 0 ? chainBound * 100.0 / indices : 0),10:0.0}%   " +
+                $"{(indices > 0 ? visible * 100.0 / indices : 0),9:0.0}%   " +
+                $"{saturated * 100.0 / opaqueDrawables.Count,14:0.0}%   " +
                 $"{hist[0]}/{hist[1]}/{hist[2]}/{hist[3]}"));
         }
     }

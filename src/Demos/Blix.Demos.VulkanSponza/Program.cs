@@ -252,9 +252,47 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // Smoothed frame period, for the overlay's "share of frame" readouts. The A/B harness keeps
     // its own unsmoothed samples.
     private double lastFramePeriodMs;
+    // <b>How long a probe nobody has sampled keeps solving before it stops.</b> Shipped at 0 — never
+    // sleep — which is the honest baseline a feature should be measured against and a poor default
+    // to leave in place once it has been. The scene has 4,992 probes and a camera sees a fraction
+    // of them; the rest were re-solving every frame for nobody.
+    //
+    // 20 frames is a third of a second at 60 fps: long enough that a probe drifting in and out of
+    // view does not thrash, short enough that the field behind you stops costing anything quickly.
+    // The cost of sleeping is WAKE LATENCY, which only a moving camera can show — see --ab sleep.
+    /// <b>Back to 0 — never sleep — after being defaulted on and looked at.</b> It measured 1.81 ms
+    /// on the orbit, and it buys that by leaving every probe nobody has looked at with no answer at
+    /// all: the probe debug view showed rows of them black, which is not a rendering artifact but an
+    /// accurate picture of a field with holes in it. A probe volume whose value depends on where the
+    /// camera has been is a different object from one that is simply solved, and 1.8 ms is not
+    /// enough to become that.
     private float probeSleepFrames;
+    /// <summary>The sleep setting the --ab sleep arm restores in its off phase.</summary>
+    private float ProbeSleepNow => abMode == "sleep" && AbOffPhase ? 0f : probeSleepFrames;
     private const int OctTile = 8;
     private int bounceWrite;
+    /// <summary>--probe-carryless: one atlas, no per-frame carry. MEASURED AND REJECTED; see below.</summary>
+    /// <remarks>
+    /// <b>The carry looked like the biggest unclaimed saving in the pass and it is worth almost
+    /// nothing.</b> The atlases alternate each frame, so a probe that is not solving copies its 8x8
+    /// tile into the other buffer — 619k texel copies at the shipped density, 4.8M at eight times
+    /// it, in the irradiance atlas and the depth atlas both, and independent of the refresh period.
+    /// Counted as operations that is enormous. Costed as BANDWIDTH it is about 76 MB a frame against
+    /// this chip's ~120 GB/s: roughly two percent, which is another way of saying unmeasurable.
+    ///
+    /// Collapsing to a single atlas removes it entirely and measured 2.22 ms against the pair's
+    /// 1.61 ms for the same dispatch at 8x density — WORSE, inside noise but certainly not better,
+    /// with identical frame times. The plausible mechanism is that a single atlas makes the injector
+    /// sample the image it writes, and aliasing one texture as sampled and storage in a dispatch
+    /// defeats texture caching or forces conservative hazard handling. So the trade is a real data
+    /// race for no measured gain, and the pair stays.
+    ///
+    /// Kept as a flag rather than deleted because the measurement is worth being able to repeat, and
+    /// because the carry does become dominant if probe count ever outruns bandwidth.
+    /// </remarks>
+    private bool probeCarryless;
+    private bool probePingPong => !probeCarryless;
+    private int BounceRead => probePingPong ? (bounceWrite ^ 1) : bounceWrite;
     private int skyBounceBinding = -1;   // where uSkyBounce sits in passBindings
     private ShaderProgramHandle injectProgram;
     private PipelineHandle injectPipeline;
@@ -442,8 +480,27 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private bool noPrepass;
     /// <summary>--probe &lt;name&gt;: a cooked .blixprobe to prefer over the default list.</summary>
     private string? probeName;
-    /// <summary>--bounce-div N: bounce grid = visibility grid / N. 2 ships; 1 is eight times the probes.</summary>
-    private int bounceDiv = 2;
+    /// <summary>--bounce-div N: bounce grid = visibility grid / N. 1 ships — see below.</summary>
+    /// <remarks>
+    /// <b>Continuous, because the interesting densities are not integers.</b> As an int the only
+    /// step below 2 was 1, which is eight times the probes — a divisor is per-AXIS and probe count
+    /// is its cube. Anybody asking for "twice the probes" wants 2 / cbrt(2) = 1.587, and asking the
+    /// question at all should not require accepting an 8x jump in the injection dispatch.
+    /// </remarks>
+    /// <remarks>
+    /// <b>1 ships, which is the end of this axis rather than a point along it.</b> The bounce grid
+    /// now equals the cooked sky-visibility grid at 48x27x32 — 41,472 probes — and it cannot
+    /// usefully go finer, because probes sharing a visibility cell interpolate from data that does
+    /// not vary between them. Getting there costs about 2 ms and 40 MB of atlas, judged worth it by
+    /// eye against 1x and 4x with the same lighting and camera.
+    ///
+    /// What it does NOT fix is the banding aligned to the grid: an eight-probe trilinear blend is
+    /// C0, so there is a derivative discontinuity at every cell boundary, and density moves those
+    /// bands closer together without removing one. That artifact needs a different tool, and the
+    /// axis being exhausted is what makes cook-time probe placement the next question rather than a
+    /// later one.
+    /// </remarks>
+    private float bounceDiv = 1f;
     /// <summary>--sun-overhead: straight down, so the courtyard is lit while base lighting is worked on.</summary>
     private bool sunOverhead;
     private static readonly string[] DefaultProbeCandidates =
@@ -452,6 +509,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private string abMode = "";
     private bool abFlat;
     private const int AbPeriodFrames = 120;
+    /// <summary>--orbit: a closed camera path, one revolution per A/B phase. See ApplyOrbit.</summary>
+    private bool orbit;
+    private const int OrbitFrames = AbPeriodFrames;
     // <b>--ab lod with two budgets, because "is LOD worth it" and "is 1.0 px worth it over 0.3" are
     // different questions and only the first had an instrument.</b> Comparing budgets across
     // separate runs is exactly what this laptop's thermal drift destroys — the MSAA attempt went
@@ -833,6 +893,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // cannot move the shadow at all; a little over one is where it starts to be theoretically
     // visible and still is not, because the PCF kernel is wider than that.
     private const float ShadowLodTexels = 1.5f;
+    // Slack on the camera frustum test, in metres. See the call site in OnRender.
+    private const float CameraCullMargin = 0.5f;
+    /// <summary>--no-hashed-alpha: binary cutouts at one sample, the state before the hashed test.</summary>
+    private bool hashedAlpha = true;
     private static readonly GraphicsColor MultiSelectColor = new(0.95f, 0.75f, 0.2f, 1f);
     private readonly HashSet<Key> heldKeys = new();
     private Matrix4x4 viewProj;
@@ -986,7 +1050,13 @@ internal sealed class AmbientSettings
 // it's a device property, not a field.
 internal sealed class RenderSettings
 {
-    [Tune(0.05f, 16f)] public float Exposure = 0.5f;
+    // <b>Raised from 0.5, because three sessions in a row moved it and none of them moved it down.</b>
+    // Dumps recorded exposure at 1.65, 4.04 and 2.07 against a shipped 0.5, always paired with a sun
+    // strength of 2.2x to 5.2x — the scene arrives far darker than anybody wants to look at it. This
+    // is the display-side half of that gap and the safe half to change: it says how bright the image
+    // is presented, not how bright the sun IS. The other half is a claim about a measured irradiance
+    // and it needs an investigation, not a default.
+    [Tune(0.05f, 16f)] public float Exposure = 2.0f;
     [Tune]             public TonemapMode Tonemap = TonemapMode.AgX;
     [Tune(0.3f, 60f)]  public float MoveSpeed = 4.5f;
     // <b>Two pixels, and the census is why rather than taste.</b> Submitted triangles fall about a

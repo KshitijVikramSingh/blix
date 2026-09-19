@@ -335,7 +335,17 @@ internal sealed partial class SponzaLoop
                 // w carries the MSAA sample count, which the depth pre-pass's mask shader needs to
                 // build the same coverage mask the lit pass will -- it has no frame block bound, and
                 // a spare component here beats duplicating a std140 layout to reach one float.
-                new Vector4(transmission, sheenRoughness, diffuseTransmission, MsaaSamples))
+                //
+                // <b>And the single-sample cutout policy rides the same channel, for the same
+                // reason and a stronger one.</b> At one sample the lit pass resolves coverage with a
+                // hashed discard and the pre-pass must make the IDENTICAL decision, or it writes
+                // leaf depth where the lit pass drew nothing and the canopy fills with holes. A
+                // frame-uniform toggle could not do that job: the pre-pass cannot see the frame
+                // block, so a slider would desynchronise the two passes the moment it moved. Any
+                // negative value means "one sample, plain binary" -- the comparison --no-hashed-alpha
+                // exists to make -- and both shaders read it from this one number.
+                new Vector4(transmission, sheenRoughness, diffuseTransmission,
+                    MsaaSamples > 1 ? MsaaSamples : (hashedAlpha ? 1f : -1f)))
             .SetUniform(binding: 0, "uSheenColor", new Vector4(sheen.X, sheen.Y, sheen.Z, 0f))
             .SetUniform(binding: 0, "uDiffuseTransmissionColor",
                 new Vector4(diffuseTransmissionColor.X, diffuseTransmissionColor.Y,

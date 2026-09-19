@@ -36,9 +36,12 @@ internal sealed partial class SponzaLoop
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         renderHeightPx = host.LogicalSize.Height;
 
-        // Volumetric fog is off by default (it adds a per-frame compute pass);
-        // launch with --fog to start with it on, or toggle it in the overlay.
+        // <b>Fog is ON by default now.</b> It was off because it was a per-frame compute pass that
+        // added a wash to the picture; it has since become the scene's own sky and bounce scattered
+        // through a medium with a shape, it costs about 2 ms measured, and every dump taken since
+        // has had it enabled by hand. --no-fog turns it off, which is the flag worth having.
         var cmdArgs = Environment.GetCommandLineArgs();
+        fog.Enabled = !cmdArgs.Contains("--no-fog");
         if (cmdArgs.Contains("--fog")) fog.Enabled = true;
         // --fog-stress flips fog on/off every ~90 frames so a validation run
         // exercises the compute storage-image layout transitions across the
@@ -53,8 +56,12 @@ internal sealed partial class SponzaLoop
         for (var i = 0; i < cmdArgs.Length - 1; i++)
         {
             if (cmdArgs[i] == "--probe") probeName = cmdArgs[i + 1];
-            if (cmdArgs[i] == "--bounce-div" && int.TryParse(cmdArgs[i + 1], out var bd))
-                bounceDiv = Math.Clamp(bd, 1, 8);
+            if (cmdArgs[i] == "--bounce-div" && float.TryParse(cmdArgs[i + 1], out var bd))
+                bounceDiv = Math.Clamp(bd, 0.5f, 8f);
+            // The same axis stated the way it is usually wanted: a multiplier on probe COUNT.
+            // --bounce-x2 is --bounce-div 1.587 without anybody having to know that.
+            if (cmdArgs[i] == "--bounce-x" && float.TryParse(cmdArgs[i + 1], out var bx) && bx > 0f)
+                bounceDiv = 2f / MathF.Cbrt(bx);
         }
         if (cmdArgs.Contains("--sky-no-inject")) skipInject = true;
         if (cmdArgs.Contains("--sky-no-sample")) skipSkySample = true;
@@ -87,6 +94,9 @@ internal sealed partial class SponzaLoop
             render.Exposure = 1.0f;
         }
         if (cmdArgs.Contains("--no-mask")) forceOpaqueMask = true;
+        // The A/B for the single-sample canopy: hashed stochastic cutout against the plain binary
+        // one. Re-cooks nothing and rebuilds nothing — it changes one number in the material.
+        if (cmdArgs.Contains("--no-hashed-alpha")) hashedAlpha = false;
         if (cmdArgs.Contains("--msaa1")) MsaaSamples = 1;
         if (cmdArgs.Contains("--msaa2")) MsaaSamples = 2;
         // Present so the sample count can be swept from the command line in BOTH directions. Without
@@ -113,6 +123,10 @@ internal sealed partial class SponzaLoop
         // Lets the probe view be exercised without a human reaching for a checkbox — which is how
         // it shipped a crash the first time: it compiled, it ran, and nothing had drawn it.
         if (cmdArgs.Contains("--show-probes")) showProbes = true;
+        if (cmdArgs.Contains("--probe-carryless")) probeCarryless = true;
+        // --orbit: drive the camera on a fixed path so a measurement is of the renderer rather than
+        // of one photograph of it. Ignores --cam, which is the still counterpart.
+        if (cmdArgs.Contains("--orbit")) orbit = true;
         // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every
         // census speaks only for wherever the camera happens to start, which for a question like
         // "how much of this scene is occluded" is the difference between a measurement and an
@@ -867,9 +881,9 @@ internal sealed partial class SponzaLoop
                     // samples each. This flag walks part of that back so the trade can be measured
                     // rather than assumed: --bounce-div 1 puts the bounce on the visibility grid's
                     // own spacing, about 0.8 m, at eight times the probe count.
-                    bounceX = Math.Max(2, probeX / bounceDiv);
-                    bounceY = Math.Max(2, probeY / bounceDiv);
-                    bounceZ = Math.Max(2, probeZ / bounceDiv);
+                    bounceX = Math.Max(2, (int)MathF.Round(probeX / bounceDiv));
+                    bounceY = Math.Max(2, (int)MathF.Round(probeY / bounceDiv));
+                    bounceZ = Math.Max(2, (int)MathF.Round(probeZ / bounceDiv));
                     var atlasW = bounceX * OctTile;
                     var atlasH = bounceY * bounceZ * OctTile;
                     for (var i = 0; i < bounceTextures.Length; i++)

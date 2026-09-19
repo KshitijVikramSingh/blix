@@ -61,6 +61,43 @@ internal sealed partial class SponzaLoop
         UpdateCamera();
     }
 
+    /// <summary>Places the camera on a closed, frame-indexed path for measurement runs.</summary>
+    /// <remarks>
+    /// <b>A still camera hides three of the frame's largest costs, and every A/B run so far has had
+    /// one.</b> Shadow cascades serve from cache when the light matrix does not move, so the 3x
+    /// caster redraw — 5,420 primitives each — is never paid in EITHER arm of a --ab shadow run.
+    /// LOD never switches, so hysteresis and popping are untestable. The Hi-Z pyramid reduces a
+    /// depth buffer that does not change. A measurement taken like that is not of the renderer, it
+    /// is of one photograph of it.
+    ///
+    /// <b>The period is the A/B period, and that is not a coincidence.</b> --ab alternates arms
+    /// every AbPeriodFrames; if the path period were anything else, the two arms would sample
+    /// different stretches of it and the difference between them would be partly a difference of
+    /// viewpoint. Matched, phase K and phase K+1 traverse the identical positions in the identical
+    /// order, so the camera cancels exactly and what is left is the thing being toggled.
+    ///
+    /// Driven by the frame counter rather than elapsed time for the same reason: wall-clock would
+    /// make the path depend on how fast each arm ran, which is the quantity under test.
+    /// </remarks>
+    private void ApplyOrbit()
+    {
+        var t = (framesRendered % OrbitFrames) / (float)OrbitFrames;
+        var angle = t * MathF.Tau;
+        var centre = skyVolumeMin + skyVolumeSpan * 0.5f;
+        // Inside the building rather than around it: the arcade is where the overdraw, the cutout
+        // foliage and the cascade transitions all are, and an exterior orbit sees none of them.
+        var radius = MathF.Min(skyVolumeSpan.X, skyVolumeSpan.Z) * 0.28f;
+        cameraPosition = new Vector3(
+            centre.X + MathF.Cos(angle) * radius,
+            skyVolumeMin.Y + 3.2f,
+            centre.Z + MathF.Sin(angle) * radius);
+        // Look along the path rather than at the centre: a camera pointed at one spot for a whole
+        // revolution keeps the same geometry on screen and never re-fits a cascade the hard way.
+        camYaw = -angle + MathF.PI * 0.5f;
+        camPitch = -0.05f;
+        UpdateCamera();
+    }
+
     private void UpdateCamera()
     {
         var cp = MathF.Cos(camPitch);
