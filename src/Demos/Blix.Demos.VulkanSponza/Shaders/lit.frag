@@ -31,6 +31,7 @@
 #include "sheen.glsl"
 #include "probe_volume.glsl"
 #include "noise.glsl"
+#include "coverage.glsl"
 #include "sky_visibility.glsl"
 
 // Lit fragment shader — Cook-Torrance split-sum IBL on top of a Lambert N·L
@@ -130,20 +131,6 @@ layout(set = 0, binding = 0) uniform Frame {
     // green streak (that survives this at 0) but it does read better.
     //@tune 0..1 = 0
     float uBentForBounce;
-    // <b>How much to decorrelate the alpha-to-coverage sample mask between overlapping cards.</b>
-    // Alpha-to-coverage derives the mask from the alpha value DETERMINISTICALLY, so two leaf cards
-    // with the same alpha cover the same samples. Three cards at 30% coverage should accumulate to
-    // about 66% opacity; correlated, they stay at 30%. The canopy therefore cannot occlude itself
-    // and you see sky through depth that should be solid -- which is the blue, and is why raising
-    // the sample count from 2 to 4 changed nothing: finer quantisation decorrelates nothing.
-    //
-    // Bisected to here: with the viz channels writing alpha 1 they show no blue at all, while the
-    // lit path writing `coverage` does, on the same pixels with the same shading. That value is the
-    // only difference between them.
-    //
-    // 0 restores today's behaviour exactly, so the comparison is one slider.
-    //@tune 0..1 = 1
-    float uCoverageDecorrelate;
     // <b>How far the sky-visibility lookup is pushed along the normal, in metres.</b> It exists for
     // the same reason shadow bias does: a volume cell straddling a wall holds both sides of it, so a
     // query taken exactly on the surface reads the enclosure on the wrong side.
@@ -169,6 +156,15 @@ layout(set = 0, binding = 0) uniform Frame {
     // added that none of channels 12 and 17-20 can see, and that is a different hunt.
     //@tune 0..1 = 0
     float uForceOpaqueCutout;
+    // <b>1 = choose the multisample mask ourselves instead of letting alpha-to-coverage do it.</b>
+    // See coverage.glsl: A2C derives the mask from the alpha value, so overlapping leaves at the
+    // same alpha claim the same samples and coverage stops accumulating.
+    //@tune 0..1 = 1
+    float uCoverageMode;
+    // How decorrelated the choice is. 0 gives every layer the same permutation -- the pathology,
+    // reproduced through our own path so the A/B is one slider. 1 gives each its own.
+    //@tune 0..1 = 1
+    float uCoverageHash;
     // <b>The two remaining halves of what --ab prepass's off-phase actually switches.</b> That arm
     // leaves GTAO reading a cleared depth buffer, so it emits its background answer for every pixel:
     // one CONSTANT world direction, and visibility exactly 1.0. Both symptoms vanish there, and
@@ -410,19 +406,22 @@ void main() {
         // and it cost an hour. Only the MASK is jittered, after the silhouette is settled.
         if (coverage <= 0.0) discard;
 
-        // <b>A WORLD-space hash, so overlapping cards decorrelate and the pattern does not crawl.</b>
-        // Screen space would hand two cards at the same pixel the same offset, which is the problem
-        // rather than the fix. Hashing quantised world position gives each card its own and anchors
-        // the dither to the geometry when the camera moves. 16 per metre is finer than a needle.
-        //
-        // The offset is +/- half a coverage quantum, so expected coverage is unchanged and only
-        // WHICH samples get written moves -- same average opacity, different samples, so a card
-        // behind another lands on the samples the first left empty.
-        float layerHash = blix_hash31(floor(vWorldPos * 16.0));
-        float quantum = 1.0 / max(frame.uMsaaSamples, 1.0);
-        coverage = clamp(coverage + (layerHash - 0.5) * quantum * frame.uCoverageDecorrelate,
-                         0.0, 1.0);
         coverage = mix(coverage, 1.0, frame.uForceOpaqueCutout);
+
+        // <b>Choose the samples ourselves, so ten leaves do not all claim bucket zero.</b> Writing
+        // alpha 1 makes alpha-to-coverage produce a full mask, and gl_SampleMask below then governs
+        // alone -- same expected coverage, decorrelated ownership. uCoverageHash at 0 reproduces the
+        // correlated failure through this same path (every layer gets hash 0, so every layer picks
+        // the same bits), which makes the comparison one slider rather than two builds.
+        //
+        // The depth pre-pass computes the identical mask from the identical hash, so the samples
+        // this fragment does not own carry no leaf depth and the background draws there properly.
+        // They would otherwise keep the cleared colour, which is a second way the canopy goes flat.
+        if (frame.uCoverageMode > 0.5) {
+            float h = mix(0.0, blix_layerHash(vWorldPos), frame.uCoverageHash);
+            gl_SampleMask[0] = blix_coverageMask(coverage, int(mat.uMaterialParams2.w), h);
+            coverage = 1.0;
+        }
     }
     vec3 albedo = albedo4.rgb;
 

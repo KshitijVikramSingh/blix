@@ -1,5 +1,5 @@
-#pragma once
-
+#ifndef BLIX_NOISE_GLSL
+#define BLIX_NOISE_GLSL
 // #pragma once is owned by Blix's build-time preprocessor, which consumes the
 // directive before glslc sees the expanded source. world.frag reaches this both
 // directly and through veil.glsl; that diamond is the regression case that
@@ -108,3 +108,5 @@ float blix_fbm3(vec3 p)
     }
     return v;
 }
+
+#endif // BLIX_NOISE_GLSL

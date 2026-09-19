@@ -328,7 +328,10 @@ internal sealed partial class SponzaLoop
             .SetUniform(binding: 0, "uMaterialParams",
                 new Vector4(alphaCutoff, normalScale, roughness, metallic))
             .SetUniform(binding: 0, "uMaterialParams2",
-                new Vector4(transmission, sheenRoughness, diffuseTransmission, 0f))
+                // w carries the MSAA sample count, which the depth pre-pass's mask shader needs to
+                // build the same coverage mask the lit pass will -- it has no frame block bound, and
+                // a spare component here beats duplicating a std140 layout to reach one float.
+                new Vector4(transmission, sheenRoughness, diffuseTransmission, MsaaSamples))
             .SetUniform(binding: 0, "uSheenColor", new Vector4(sheen.X, sheen.Y, sheen.Z, 0f))
             .SetUniform(binding: 0, "uDiffuseTransmissionColor",
                 new Vector4(diffuseTransmissionColor.X, diffuseTransmissionColor.Y,
