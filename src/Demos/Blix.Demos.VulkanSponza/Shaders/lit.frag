@@ -378,6 +378,14 @@ float blixSkyVisibility(vec3 worldPos, vec3 dir, float push) {
 }
 
 void main() {
+    // <b>Written unconditionally, because a partial write is an undefined mask.</b> GLSL says that
+    // if a fragment shader STATICALLY assigns gl_SampleMask, its value is undefined for every
+    // invocation that does not assign it -- not "full", undefined. Writing it only in the cutout
+    // branch therefore handed every opaque fragment in the scene a garbage mask, and the building
+    // vanished, leaving a cypress floating in front of the skybox. Caught from the chair; I had
+    // looked straight past it in the screenshot that proved the coverage fix worked.
+    gl_SampleMask[0] = ~0;
+
     // UVs arrive in the correct top-down origin already: the Sponza assets are
     // imported with AssetImportContext.FlipTextureV, which bakes the V-flip
     // into the vertex buffer at load. Nothing to do here.
