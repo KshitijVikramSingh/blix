@@ -412,6 +412,11 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // measured, volumetric, and it knows a courtyard is a well; GTAO is a sub-metre screen-space
     // approximation sitting on top of it.
     private bool noPrepass;
+    /// <summary>--probe &lt;name&gt;: a cooked .blixprobe to prefer over the default list.</summary>
+    private string? probeName;
+    private static readonly string[] DefaultProbeCandidates =
+        { "pizzo_pernice_puresky_4k.blixprobe", "kloppenheim_05_4k.blixprobe",
+          "autumn_field_4k.blixprobe", "rogland_overcast_4k.blixprobe", "sky_hdr.blixprobe" };
     private string abMode = "";
     private bool abFlat;
     private const int AbPeriodFrames = 120;

@@ -50,6 +50,8 @@ internal sealed partial class SponzaLoop
         if (cmdArgs.Contains("--no-shadow")) shadows.Enabled = false;
         if (cmdArgs.Contains("--ao-fullres")) aoScale = 1f;
         if (cmdArgs.Contains("--no-prepass")) noPrepass = true;
+        for (var i = 0; i < cmdArgs.Length - 1; i++)
+            if (cmdArgs[i] == "--probe") probeName = cmdArgs[i + 1];
         if (cmdArgs.Contains("--sky-no-inject")) skipInject = true;
         if (cmdArgs.Contains("--sky-no-sample")) skipSkySample = true;
         // <b>ON by default, and it was off — which meant the demo's own lighting model was opt-in.</b>
@@ -87,7 +89,13 @@ internal sealed partial class SponzaLoop
         // it only the non-default could be asked for, so a paired run could not be ordered 4-2-2-4 —
         // and on this machine a single ordering is not a measurement.
         if (cmdArgs.Contains("--msaa4")) MsaaSamples = 4;
-        if (cmdArgs.Contains("--sun-from-probe")) alignSunToProbe = true;
+        // <b>The sky's own sun is the default now; --sun-authored opts out.</b> This was opt-in via
+        // --sun-from-probe, so the shipped behaviour was an authored direction that had been tuned
+        // by hand against ONE sky — and every other HDRI then lit the scene from a place its own sun
+        // is not, which shows as cast shadows disagreeing with the visible sun in the sky. A probe
+        // that has no detectable sun still returns null and the authored direction stands, so an
+        // overcast sky is unaffected.
+        if (!cmdArgs.Contains("--sun-authored")) alignSunToProbe = true;
         // Lets the probe view be exercised without a human reaching for a checkbox — which is how
         // it shipped a crash the first time: it compiled, it ran, and nothing had drawn it.
         if (cmdArgs.Contains("--show-probes")) showProbes = true;
@@ -625,12 +633,24 @@ internal sealed partial class SponzaLoop
     // sun, so we only align when the probe actually has one.
     private void LoadIbl(string assetsRoot)
     {
-        // kloppenheim leads because it is the one cooked TO this scene's authored sun: its own sun
-        // sits at elevation 74.5 against the authored 73.1, and it was re-cooked with --yaw=-31.43
-        // to bring the azimuth onto -22.7 as well. Roughly 1.4 degrees out in total, against the
-        // 27 that any of the others are. The rest stay as candidates rather than being deleted —
-        // they are what a differently-lit Sponza would reach for.
-        string[] probeCandidates = { "kloppenheim_05_4k.blixprobe", "autumn_field_4k.blixprobe", "rogland_overcast_4k.blixprobe", "sky_hdr.blixprobe" };
+        // <b>pizzo_pernice leads, and the ordering rule changed with it.</b> kloppenheim led because
+        // it was cooked TO an authored sun direction — rotated with --yaw=-31.43 so its disc landed
+        // where a hand-tuned directional light already pointed. That is backwards: it makes the sky
+        // serve the light instead of being it, and every other HDRI then lights the scene from a
+        // place its own sun is not. The sun direction now comes from whichever sky is loaded
+        // (--sun-authored opts out), so a probe no longer has to be turned to fit.
+        //
+        // Measured on this one: the sun finder puts it at elevation 53.0 deg, and integrating the
+        // raw equirect independently puts it at 53.1. Its irradiance round-trips to within 0.5% —
+        // cook records 5.69 perpendicular, direct integration gives 5.66 — so measuring the sun out
+        // of the sky and handing it back as a directional light loses nothing.
+        // <b>--probe <name> puts a sky ahead of the list without editing the list.</b> Trying a new
+        // HDRI meant changing a hardcoded preference, which is a code edit for what is entirely a
+        // choice of asset — and it made comparing two skies a rebuild rather than a flag.
+        string[] probeCandidates = probeName is { Length: > 0 }
+            ? new[] { probeName.EndsWith(".blixprobe", StringComparison.Ordinal) ? probeName : probeName + ".blixprobe" }
+                .Concat(DefaultProbeCandidates).ToArray()
+            : DefaultProbeCandidates;
         var probeDir = Path.Combine(assetsRoot, "textures");
         var probePath = probeCandidates
             .Select(p => Path.Combine(probeDir, p))
@@ -675,7 +695,10 @@ internal sealed partial class SponzaLoop
                 sunDirection = Vector3.Normalize(hdrSun);
                 sunPitch = MathF.Asin(Math.Clamp(sunDirection.Y, -1f, 1f));
                 sunYaw = MathF.Atan2(sunDirection.X, -sunDirection.Z);
-                Console.WriteLine($"[VulkanSponza]   sun aligned to probe: {sunDirection}");
+                Console.WriteLine(
+                    $"[VulkanSponza]   sun from the sky: {sunDirection} " +
+                    $"(elevation {MathF.Asin(Math.Clamp(sunDirection.Y, -1f, 1f)) * 180f / MathF.PI:0.0} deg, " +
+                    $"yaw {sunYaw * 180f / MathF.PI:0.0} deg)");
             }
 
             // <b>And its brightness comes from the same measurement.</b> The probe reports the

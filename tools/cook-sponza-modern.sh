@@ -103,7 +103,16 @@ for hdr in "$SRC"/textures/*.hdr; do
     echo "── probe  ($(basename "$hdr"))"
     # --out MIRRORS the source's relative path, so the target is the tree root and
     # not its textures/ dir — passing the latter produced textures/textures/.
-    dotnet "$COOK" probe "$hdr" --out "$COOKED"
+    #
+    # --env-face=1024 here and not only on the special case below. Every sky in this
+    # directory is a 4096x2048 equirect, so a 90-degree cube face maps to about 1024
+    # texels; below that the VISIBLE sky is a downsample of authored detail and the eye
+    # catches it wherever a window frames the sky against a hard edge. The flag used to
+    # live only on kloppenheim, so whichever sky the demo actually led with got the good
+    # treatment by coincidence of being named — a new lead sky was silently cooked at the
+    # default and shipped a 4.55 MB probe where the old one had 49.55 MB. The prefiltered
+    # chains keep their own sizes: they are convolutions and do not want the resolution.
+    dotnet "$COOK" probe "$hdr" --env-face=1024 --out "$COOKED"
 done
 
 # <b>The probe the demo actually LEADS with, and the rotation that earns it.</b> kloppenheim is not
