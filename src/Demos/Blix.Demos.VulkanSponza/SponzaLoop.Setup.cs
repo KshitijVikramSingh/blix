@@ -83,6 +83,10 @@ internal sealed partial class SponzaLoop
         if (cmdArgs.Contains("--no-mask")) forceOpaqueMask = true;
         if (cmdArgs.Contains("--msaa1")) MsaaSamples = 1;
         if (cmdArgs.Contains("--msaa2")) MsaaSamples = 2;
+        // Present so the sample count can be swept from the command line in BOTH directions. Without
+        // it only the non-default could be asked for, so a paired run could not be ordered 4-2-2-4 —
+        // and on this machine a single ordering is not a measurement.
+        if (cmdArgs.Contains("--msaa4")) MsaaSamples = 4;
         if (cmdArgs.Contains("--sun-from-probe")) alignSunToProbe = true;
         // Lets the probe view be exercised without a human reaching for a checkbox — which is how
         // it shipped a crash the first time: it compiled, it ran, and nothing had drawn it.

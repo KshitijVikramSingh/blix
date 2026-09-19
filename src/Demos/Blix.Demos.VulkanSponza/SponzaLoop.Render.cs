@@ -117,6 +117,7 @@ internal sealed partial class SponzaLoop
                 -MathF.Cos(camYaw) * MathF.Cos(camPitch))), 0f))),
             new("uEnvMipCount",      new FloatUniform(iblPrefilterMips)),
             new("uSheenMipCount",    new FloatUniform(sheenMipCount)),
+            new("uMsaaSamples",      new FloatUniform(MsaaSamples)),
             new("uSkyDims",          new Vector4Uniform(new Vector4(probeX, probeY, probeZ, 0f))),
             // w marks whether shading should write usage at all — off while the volume is not ready.
             new("uBounceDims", new Vector4Uniform(new Vector4(

@@ -30,6 +30,7 @@
 #include "shadow.glsl"
 #include "sheen.glsl"
 #include "probe_volume.glsl"
+#include "noise.glsl"
 #include "sky_visibility.glsl"
 
 // Lit fragment shader — Cook-Torrance split-sum IBL on top of a Lambert N·L
@@ -76,6 +77,8 @@ layout(set = 0, binding = 0) uniform Frame {
     // --ab prepass off-phase's gather direction rather than approximating it with a literal.
     vec4  uCameraForward;
     float uSheenMipCount;
+    // Sample count, so the coverage dither knows how big one quantum is.
+    float uMsaaSamples;
     vec4  uSkyDims;        // xyz visibility probe counts
     vec4  uBounceDims;     // xyz bounce probe counts
     vec4  uClothOverride;  // x=sheenRoughness, y=diffuseTransmission; x<0 = use the material's
@@ -127,6 +130,20 @@ layout(set = 0, binding = 0) uniform Frame {
     // green streak (that survives this at 0) but it does read better.
     //@tune 0..1 = 0
     float uBentForBounce;
+    // <b>How much to decorrelate the alpha-to-coverage sample mask between overlapping cards.</b>
+    // Alpha-to-coverage derives the mask from the alpha value DETERMINISTICALLY, so two leaf cards
+    // with the same alpha cover the same samples. Three cards at 30% coverage should accumulate to
+    // about 66% opacity; correlated, they stay at 30%. The canopy therefore cannot occlude itself
+    // and you see sky through depth that should be solid -- which is the blue, and is why raising
+    // the sample count from 2 to 4 changed nothing: finer quantisation decorrelates nothing.
+    //
+    // Bisected to here: with the viz channels writing alpha 1 they show no blue at all, while the
+    // lit path writing `coverage` does, on the same pixels with the same shading. That value is the
+    // only difference between them.
+    //
+    // 0 restores today's behaviour exactly, so the comparison is one slider.
+    //@tune 0..1 = 1
+    float uCoverageDecorrelate;
     // <b>The two remaining halves of what --ab prepass's off-phase actually switches.</b> That arm
     // leaves GTAO reading a cleared depth buffer, so it emits its background answer for every pixel:
     // one CONSTANT world direction, and visibility exactly 1.0. Both symptoms vanish there, and
@@ -363,7 +380,23 @@ void main() {
     float coverage = 1.0;
     if (alphaCutoff > 0.0) {
         coverage = clamp((albedo4.a - alphaCutoff) / max(fwidth(albedo4.a), 1e-5) + 0.5, 0.0, 1.0);
+        // <b>The discard is unchanged, deliberately.</b> The depth pre-pass decides which fragments
+        // exist with its own copy of this test and the two must agree -- they disagreed once tonight
+        // and it cost an hour. Only the MASK is jittered, after the silhouette is settled.
         if (coverage <= 0.0) discard;
+
+        // <b>A WORLD-space hash, so overlapping cards decorrelate and the pattern does not crawl.</b>
+        // Screen space would hand two cards at the same pixel the same offset, which is the problem
+        // rather than the fix. Hashing quantised world position gives each card its own and anchors
+        // the dither to the geometry when the camera moves. 16 per metre is finer than a needle.
+        //
+        // The offset is +/- half a coverage quantum, so expected coverage is unchanged and only
+        // WHICH samples get written moves -- same average opacity, different samples, so a card
+        // behind another lands on the samples the first left empty.
+        float layerHash = blix_hash31(floor(vWorldPos * 16.0));
+        float quantum = 1.0 / max(frame.uMsaaSamples, 1.0);
+        coverage = clamp(coverage + (layerHash - 0.5) * quantum * frame.uCoverageDecorrelate,
+                         0.0, 1.0);
     }
     vec3 albedo = albedo4.rgb;
 

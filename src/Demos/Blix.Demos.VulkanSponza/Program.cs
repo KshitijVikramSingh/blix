@@ -101,12 +101,23 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // --msaa1 drops to a single sample. It used to lose the device; the cause was the depth
     // pre-pass resolving unconditionally, which is invalid with nothing to resolve. See
     // SampleableSceneDepth.
-    // <b>2x, not 4x.</b> Measured across two opposite orderings to cancel the thermal drift that
-    // makes every sequential comparison on this machine a lie: 4x costs roughly 17 ms more, while 2x
-    // sits level with MSAA off. And 2x tracks 4x visually — mean 23.92 against 24.08, edge energy
-    // 11.69 against 11.34 — where OFF breaks away from both, because alphaToCoverage is enabled only
-    // above one sample and Sponza's foliage is mostly alpha coverage.
-    private int MsaaSamples = 2;
+    // <b>4x, and the reason is alpha-to-coverage QUANTISATION rather than edge quality.</b> This was
+    // 2x on a perf argument -- 4x costs roughly 17 ms more, while 2x sits level with MSAA off, and 2x
+    // tracked 4x on the metrics then available (mean 23.92 against 24.08, edge energy 11.69 against
+    // 11.34, where OFF breaks away from both).
+    //
+    // Those metrics were measuring the wrong thing. Alpha-to-coverage writes a sample MASK, so the
+    // number of samples is the number of coverage levels it can express: at 2 samples a leaf fragment
+    // can only be 0, 0.5 or 1 covered, and the rest of the pixel keeps whatever draws next -- the
+    // skybox. A leaf whose true coverage is 0.2 therefore composites as half sky, and so does one at
+    // 0.8. Every partial canopy pixel is dragged toward 50% sky. 4x gives five levels instead of
+    // three, which is not sharper edges, it is less wrong colour.
+    //
+    // Independently confirmed three ways before this change: --msaa1 removes the canopy blue entirely
+    // (coverage goes binary), making the depth pre-pass admit a dilated silhouette made it worse
+    // (more partial fragments), and every ambient viz channel rendered the same blue over foliage
+    // because none of them were being written there at all.
+    private int MsaaSamples = 4;
     private PassHandle litPassHandle;
 
     // Depth pre-pass: renders non-blend geometry depth-only into depthHandle
