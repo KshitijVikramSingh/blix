@@ -578,6 +578,12 @@ internal sealed partial class SponzaLoop
         froxelGridTexture = vk.CreateStorageTexture3D(
             froxelGridX, froxelGridY, FroxelGridZ,
             TextureFormat.Rgba16F, SamplerDescription.LinearClamp, "sponza.froxel_grid");
+        for (var i = 0; i < 2; i++)
+        {
+            fogScatterTextures[i] = vk.CreateStorageTexture3D(
+                froxelGridX, froxelGridY, FroxelGridZ,
+                TextureFormat.Rgba16F, SamplerDescription.LinearClamp, $"sponza.fog_scatter{i}");
+        }
         Console.WriteLine(
             $"[VulkanSponza] froxel grid {froxelGridX}x{froxelGridY}x{FroxelGridZ} " +
             $"({FroxelPixels} px/froxel at {fbW}x{fbH})");

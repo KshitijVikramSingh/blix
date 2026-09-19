@@ -47,6 +47,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 0) uniform Froxel {
     mat4 uInvViewProj;
     vec4 uCamPos;        // xyz camera world pos, w = fog far distance
+    vec4 uPrevCamPos;    // xyz last frame's camera world pos
     vec4 uCamForward;    // xyz camera forward, w = extinction coefficient (density)
     vec4 uSunDir;        // xyz direction into scene, w = sun intensity
     vec4 uSunColor;      // rgb sun colour, w = scattering albedo
@@ -55,6 +56,8 @@ layout(set = 0, binding = 0) uniform Froxel {
     vec4 uBoundsSpan;    // xyz sky/probe volume span
     vec4 uProbeDims;     // xyz bounce grid dimensions
     vec4 uMedium;        // x = height scale (m), y = noise amount 0..1
+    vec4 uTemporal;      // x = history weight 0..1, y = slice jitter 0..1, z = show history weight
+    mat4 uPrevViewProj;  // last frame's camera, for reprojecting the medium
     mat4 uCascadeVP[3];
 } f;
 
@@ -65,6 +68,14 @@ layout(set = 0, binding = 3) uniform sampler3D  uSkyVisibility;
 layout(set = 0, binding = 4) uniform samplerCube uIrradiance;
 layout(set = 0, binding = 5) uniform sampler2D  uAtlas;
 layout(set = 0, binding = 6) uniform sampler2D  uDepthAtlas;
+// <b>The medium, not the picture of it.</b> This holds per-froxel in-scattered radiance (rgb) and
+// extinction (a) BEFORE integration — the two quantities that belong to a point in the world rather
+// than to a ray from a particular camera. The integrated grid cannot be reprojected at all: each of
+// its slices is an integral from the camera outward, so the same world point carries a different
+// value the moment the camera moves. Keeping history here and integrating after the blend is the
+// whole architecture of this change.
+layout(set = 0, binding = 7) uniform sampler3D uScatterPrev;
+layout(set = 0, binding = 8, rgba16f) uniform writeonly image3D uScatter;
 
 const float PI = 3.14159265359;
 
@@ -165,7 +176,12 @@ void main()
     {
         float d  = blix_froxelSliceDistance((float(z) + 0.5) / float(numSlices), fogFar);
         float dt = max(d - prevD, 1e-6);               // this segment's world length
-        float dist = 0.5 * (prevD + d);                // and where it is sampled
+        // <b>Jittered within the segment, which is what makes history worth keeping.</b> Sampled at
+        // the midpoint every frame, a temporal blend averages the identical sample and buys nothing
+        // but noise reduction on a sample that was not noisy. Moving the sample each frame turns
+        // the blend into an actual integral over the segment — and since the shadow lookup is one
+        // hard tap per froxel, it is also what turns a hard shaft edge into a soft one.
+        float dist = mix(prevD, d, clamp(f.uTemporal.y, 0.0, 1.0));
         prevD = d;
         vec3 worldPos = camPos + rayDir * dist;
 
@@ -204,12 +220,55 @@ void main()
         float st = max(sigmaT * rho, 1e-6);
         vec3 stepScatter = (sunLit + ambientRadiance) * (sigmaS * rho);
 
+        // --- temporal blend, on the medium ---------------------------------
+        // Where this froxel's world position sat in last frame's grid. Both halves have to agree
+        // with how the grid is addressed now: the screen coordinate through the previous camera,
+        // and the slice coordinate through the SAME quadratic curve the lit pass inverts.
+        float historyWeight = 0.0;
+        vec4 history = vec4(0.0);
+        if (f.uTemporal.x > 0.0) {
+            vec4 clipPrev = f.uPrevViewProj * vec4(worldPos, 1.0);
+            if (clipPrev.w > 1e-4) {
+                vec3 ndcPrev = clipPrev.xyz / clipPrev.w;
+                vec2 uvPrev = ndcPrev.xy * 0.5 + 0.5;
+                float distPrev = length(worldPos - f.uPrevCamPos.xyz);
+                float tPrev = blix_froxelSliceCoord(distPrev, fogFar);
+                // <b>Rejected outright rather than clamped.</b> A clamp would fetch the nearest
+                // edge froxel and blend a stranger's medium into this one — which is exactly the
+                // smear this is supposed to avoid. Off the edge of the previous frame means there
+                // is no history for this point, and the honest answer is to use none.
+                bool inside = all(greaterThanEqual(uvPrev, vec2(0.0)))
+                           && all(lessThanEqual(uvPrev, vec2(1.0)))
+                           && tPrev > 0.0 && tPrev < 1.0;
+                if (inside) {
+                    history = texture(uScatterPrev, vec3(uvPrev, tPrev));
+                    historyWeight = clamp(f.uTemporal.x, 0.0, 1.0);
+                    // A froxel that has never been written carries zero extinction; blending toward
+                    // it would fade the medium out where the camera has just turned.
+                    if (history.a <= 0.0) historyWeight = 0.0;
+                }
+            }
+        }
+        vec4 current = vec4(stepScatter, st);
+        vec4 medium = mix(current, history, historyWeight);
+        imageStore(uScatter, ivec3(xy, z), medium);
+
+        stepScatter = medium.rgb;
+        st = max(medium.a, 1e-6);
+
         // Energy-conserving segment integral of in-scattering under extinction.
         float sliceT = exp(-st * dt);
         vec3 sliceIntegral = stepScatter * (1.0 - sliceT) / st;
         accum += transmittance * sliceIntegral;
         transmittance *= sliceT;
 
-        imageStore(uGrid, ivec3(xy, z), vec4(accum, transmittance));
+        // <b>The rejection, made visible.</b> White where history is being trusted, black where it
+        // was thrown away — the disocclusion edges, the screen border, and anything the camera has
+        // just turned onto. A temporal stage tuned without being able to see this is tuned blind.
+        if (f.uTemporal.z > 0.5) {
+            imageStore(uGrid, ivec3(xy, z), vec4(vec3(historyWeight), 0.0));
+        } else {
+            imageStore(uGrid, ivec3(xy, z), vec4(accum, transmittance));
+        }
     }
 }

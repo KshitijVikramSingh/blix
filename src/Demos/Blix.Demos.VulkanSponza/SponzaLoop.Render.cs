@@ -354,6 +354,14 @@ internal sealed partial class SponzaLoop
                     fog.PhaseG, fog.Ambient, fogIndirect ? 1f : 0f, (float)time.Total))),
                 new("uMedium",        new Vector4Uniform(new Vector4(
                     fog.HeightFalloff, fog.Noise, 0f, 0f))),
+                // <b>History is refused on the first frame after it could be wrong.</b> The pair
+                // starts uninitialised, and it also goes stale whenever the grid is re-created for
+                // a resize — blending into either is blending into whatever the allocator left.
+                new("uTemporal",      new Vector4Uniform(new Vector4(
+                    fogHistoryValid ? fog.Temporal : 0f, FogJitter(), fog.ShowHistory ? 1f : 0f, 0f))),
+                new("uPrevViewProj",  new Matrix4x4Uniform(fogHistoryValid ? prevFogViewProj : viewProj)),
+                new("uPrevCamPos",    new Vector4Uniform(new Vector4(
+                    fogHistoryValid ? prevFogCamPos : cameraPosition, 0f))),
                 new("uBoundsMin",     new Vector4Uniform(new Vector4(skyVolumeMin, 0f))),
                 new("uBoundsSpan",    new Vector4Uniform(new Vector4(skyVolumeSpan, 0f))),
                 new("uProbeDims",     new Vector4Uniform(new Vector4(bounceX, bounceY, bounceZ, 0f))),
@@ -366,6 +374,10 @@ internal sealed partial class SponzaLoop
                 froxelPipeline,
                 (froxelGridX + 7) / 8, (froxelGridY + 7) / 8, 1,
                 froxelUniforms, FroxelBindings()));
+            prevFogViewProj = viewProj;
+            prevFogCamPos = cameraPosition;
+            fogScatterWrite ^= 1;
+            fogHistoryValid = true;
         }
 
         // Fill the camera opaque indirect commands once per frame (LOD by SSE, frustum-culled);
@@ -1162,6 +1174,15 @@ internal sealed partial class SponzaLoop
             x, y, FroxelGridZ, TextureFormat.Rgba16F, SamplerDescription.LinearClamp,
             "sponza.froxel_grid");
         vk.DestroyTexture(previous);
+        for (var i = 0; i < 2; i++)
+        {
+            var staleScatter = fogScatterTextures[i];
+            fogScatterTextures[i] = vk.CreateStorageTexture3D(
+                x, y, FroxelGridZ, TextureFormat.Rgba16F, SamplerDescription.LinearClamp,
+                $"sponza.fog_scatter{i}");
+            vk.DestroyTexture(staleScatter);
+        }
+        fogHistoryValid = false;
         if (froxelGridBinding >= 0)
         {
             passBindings[froxelGridBinding] =
@@ -1170,6 +1191,11 @@ internal sealed partial class SponzaLoop
         Console.WriteLine(
             $"[VulkanSponza] froxel grid {x}x{y}x{FroxelGridZ} ({FroxelPixels} px/froxel at {width}x{height})");
     }
+
+    // A low-discrepancy offset in [0,1) for this frame's slice sample, so successive frames land at
+    // different depths inside the same segment. R2 rather than Halton: one multiply, no bit
+    // reversal, and a better-spread sequence than either for one dimension.
+    private float FogJitter() => (float)((framesRendered * 0.7548776662) % 1.0);
 
     // Whether the fog has real fields to scatter. Both halves must be there: the baked sky
     // visibility volume decides how much sky a froxel sees, and the bounce atlas supplies what the
@@ -1193,6 +1219,8 @@ internal sealed partial class SponzaLoop
         // and uFogParams.z is what tells the shader not to read these.
         new ShaderTextureBinding("uAtlas", bounceReady ? bounceTextures[bounceWrite] : brdfLutTexture, Slot: 5),
         new ShaderTextureBinding("uDepthAtlas", bounceReady ? bounceDepthTextures[bounceWrite] : brdfLutTexture, Slot: 6),
+        new ShaderTextureBinding("uScatterPrev", fogScatterTextures[fogScatterWrite ^ 1], Slot: 7),
+        new ShaderTextureBinding("uScatter", fogScatterTextures[fogScatterWrite], Slot: 8),
     };
 
     private ShaderTextureBinding[] BounceBindings() => new[]

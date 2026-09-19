@@ -260,13 +260,22 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // 20 frames is a third of a second at 60 fps: long enough that a probe drifting in and out of
     // view does not thrash, short enough that the field behind you stops costing anything quickly.
     // The cost of sleeping is WAKE LATENCY, which only a moving camera can show — see --ab sleep.
-    /// <b>Back to 0 — never sleep — after being defaulted on and looked at.</b> It measured 1.81 ms
-    /// on the orbit, and it buys that by leaving every probe nobody has looked at with no answer at
-    /// all: the probe debug view showed rows of them black, which is not a rendering artifact but an
-    /// accurate picture of a field with holes in it. A probe volume whose value depends on where the
-    /// camera has been is a different object from one that is simply solved, and 1.8 ms is not
-    /// enough to become that.
-    private float probeSleepFrames;
+    /// <b>16 frames, and the number that decides it is the probe count, not this one.</b>
+    ///
+    /// Injection costs rays per frame, which is probes x rays / period. Sleeping was measured at
+    /// 1.81 ms and very nearly dropped on that basis — a field with holes in it did not look worth
+    /// 1.8 ms, and the debug view's rows of black probes were an accurate picture of those holes.
+    /// But that measurement was taken at 5,376 probes, and the grid now ships at 41,472. Multiplying
+    /// the probe count by eight and changing neither of the other two terms multiplies the cost by
+    /// eight: sky-inject went from 2.96 ms to 26.26 ms with sleeping off, which is the entire frame
+    /// budget spent solving probes nobody is looking at.
+    ///
+    /// So the feature whose value looked marginal is the one that makes the density affordable, and
+    /// it looked marginal precisely because there were few probes to sleep. A quarter of a second at
+    /// 60 fps: long enough that a probe drifting in and out of view does not thrash, short enough
+    /// that the field behind you stops costing almost immediately. 0 still means never sleep, and
+    /// is the honest baseline any change to the injector should be measured against.
+    private float probeSleepFrames = 16f;
     /// <summary>The sleep setting the --ab sleep arm restores in its off phase.</summary>
     private float ProbeSleepNow => abMode == "sleep" && AbOffPhase ? 0f : probeSleepFrames;
     private const int OctTile = 8;
@@ -414,6 +423,15 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private ShaderProgramHandle froxelProgram;
     private PipelineHandle froxelPipeline;
     private TextureHandle froxelGridTexture;
+    // <b>History for the MEDIUM, ping-ponged.</b> rgb = in-scattered radiance, a = extinction, both
+    // per froxel and both pre-integration. See froxel.comp for why the integrated grid cannot carry
+    // history itself. A pair rather than one texture because this one really is read-while-written:
+    // the reprojected fetch lands wherever the camera moved, not on the texel being stored.
+    private readonly TextureHandle[] fogScatterTextures = new TextureHandle[2];
+    private int fogScatterWrite;
+    private Matrix4x4 prevFogViewProj = Matrix4x4.Identity;
+    private Vector3 prevFogCamPos;
+    private bool fogHistoryValid;
     private PassHandle froxelPassHandle;
     // Volumetric-fog tunables — [Tune]-tagged, auto-bound to the overlay "Fog"
     // group via ObjectTunables (see FogSettings).
@@ -1007,6 +1025,16 @@ internal sealed class FogSettings
     // 0 is the old even haze. The feature size and drift speed are derived from the fog's range,
     // not dialled — they are what keeps the look the same when the range changes.
     [Tune(0f, 1f)]      public float Noise = 0.55f;
+    // <b>How much of the medium comes from the previous frame.</b> Not a quality dial with a
+    // "better" end: it trades stability for latency, and the lower bound is not "worse", it is
+    // "only this frame". 0 disables the whole temporal path, which is the A/B and the fallback.
+    // 0.9 is about a ten-frame time constant — long enough to integrate the jittered slice samples
+    // into a soft shaft, short enough that dragging the sun does not leave a trail behind it.
+    [Tune(0f, 0.98f)]   public float Temporal = 0.9f;
+    // Shows the history WEIGHT instead of the fog: white where the previous frame is being trusted,
+    // black where it was rejected. Built with the feature rather than after it, because the last
+    // fog dial that could not be seen (Ambient) got tuned for ten minutes while doing nothing.
+    [Tune]              public bool ShowHistory;
 }
 
 // Tonemap operators (overlay Render → Tonemap); the enum's int value indexes
