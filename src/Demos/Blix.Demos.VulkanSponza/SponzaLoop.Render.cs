@@ -226,12 +226,25 @@ internal sealed partial class SponzaLoop
             // so its depth target still holds the right result — skip the pass
             // entirely (no begin-render-pass → contents persist in ShaderReadOnly,
             // which is exactly what the lit pass samples).
-            if (vp == cachedCascadeViewProj[ci])
+            // <b>The cache keyed on the matrix alone, and the scene can change without it.</b> A
+            // static camera leaves every cascade VP constant, so each rendered ONCE -- and that once
+            // happened while the packs were still streaming, with opaqueDrawables empty and
+            // FillIndirect returning zero draws. The depth target then held an empty shadow map for
+            // as long as nobody moved: no canopy self-shadowing, no contact shadows, a scene lit
+            // flat by an unshadowed sun. It showed as "sun-cascade0 (n=1)" in the pass breakdown
+            // next to gtao's n=697, and as "cascade-casters 0/0/0 of 0", both of which I read as
+            // instrument noise before reading them as the answer.
+            //
+            // Keyed on the caster COUNT as well, so streaming a pack in invalidates it. Cheap, and
+            // it fails in the safe direction: a spurious redraw costs one pass, a missed one costs
+            // every shadow in the frame.
+            if (vp == cachedCascadeViewProj[ci] && opaqueDrawables.Count == cachedCascadeCasters[ci])
             {
                 cascadeRendered[ci] = false;
                 continue;
             }
             cachedCascadeViewProj[ci] = vp;
+            cachedCascadeCasters[ci] = opaqueDrawables.Count;
             cascadeRendered[ci] = true;
             // Frustum.FromViewProjection expects a column-vector clip matrix
             // (clip = M·world); our cascade VP is the System.Numerics

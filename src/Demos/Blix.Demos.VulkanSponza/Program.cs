@@ -414,6 +414,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private bool noPrepass;
     /// <summary>--probe &lt;name&gt;: a cooked .blixprobe to prefer over the default list.</summary>
     private string? probeName;
+    /// <summary>--bounce-div N: bounce grid = visibility grid / N. 2 ships; 1 is eight times the probes.</summary>
+    private int bounceDiv = 2;
+    /// <summary>--sun-overhead: straight down, so the courtyard is lit while base lighting is worked on.</summary>
+    private bool sunOverhead;
     private static readonly string[] DefaultProbeCandidates =
         { "pizzo_pernice_puresky_4k.blixprobe", "kloppenheim_05_4k.blixprobe",
           "autumn_field_4k.blixprobe", "rogland_overcast_4k.blixprobe", "sky_hdr.blixprobe" };
@@ -509,6 +513,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // Per-cascade shadow-caster survivor counts after frustum culling,
     // surfaced live in the diagnostics overlay (see Debug()).
     private readonly int[] cascadeDrawCounts = new int[CascadeCount];
+    /// <summary>Caster count each cascade was last rendered with — see the cache in OnRender.</summary>
+    private readonly int[] cachedCascadeCasters = new int[CascadeCount];
     // Two shadow caster pipelines: opaque casters use a push-only program (no
     // descriptor sets → zero per-draw transient allocations), mask foliage uses
     // the alpha-cutout program (binds albedo). Routed per drawable by cutoff.

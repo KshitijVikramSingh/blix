@@ -144,6 +144,31 @@ layout(set = 0, binding = 0) uniform Frame {
     // 0 restores today's behaviour exactly, so the comparison is one slider.
     //@tune 0..1 = 1
     float uCoverageDecorrelate;
+    // <b>How far the sky-visibility lookup is pushed along the normal, in metres.</b> It exists for
+    // the same reason shadow bias does: a volume cell straddling a wall holds both sides of it, so a
+    // query taken exactly on the surface reads the enclosure on the wrong side.
+    //
+    // <b>For foliage it is precisely wrong.</b> A leaf is not embedded in an occluder, it IS one, and
+    // 0.6 m along a needle's normal leaves the canopy entirely — so every leaf asks how much sky is
+    // visible from half a metre outside the tree, and is told "most of it". That is the tree reading
+    // evenly lit top to bottom while the walls around it are dark.
+    //@tune 0..2 = 0.6
+    float uSkyNormalPush;
+    // The same push for CUTOUT surfaces specifically, so foliage can be taken off the wall's setting
+    // without changing it. 0 asks the volume where the leaf actually is.
+    //@tune 0..2 = 0.6
+    float uSkyNormalPushCutout;
+    // <b>1 makes cutout surfaces fully opaque, so the lit path can be compared with the viz
+    // channels.</b> Those write alpha 1 while the lit path writes `coverage`, which means over
+    // foliage they are not the same pixels: viz shows the nearest leaf solid, lit shows an average
+    // of ~10 semi-transparent layers and whatever lies beyond them. Every shading term can read
+    // dark in viz while the lit image glows, with no contradiction and nothing to point at.
+    //
+    // This removes that difference. If the tree goes dark at 1, the glow is compositing and the
+    // canopy's 6.3%-per-card opacity is the subject. If it still glows, a shading term is being
+    // added that none of channels 12 and 17-20 can see, and that is a different hunt.
+    //@tune 0..1 = 0
+    float uForceOpaqueCutout;
     // <b>The two remaining halves of what --ab prepass's off-phase actually switches.</b> That arm
     // leaves GTAO reading a cleared depth buffer, so it emits its background answer for every pixel:
     // one CONSTANT world direction, and visibility exactly 1.0. Both symptoms vanish there, and
@@ -349,10 +374,10 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
 // so a pane reflected an unoccluded outdoor sky from inside a closed room, and viz channel 7 drew
 // the skybox on it. The lookup needs only a position and a direction, so there is no reason it had
 // to live where it did.
-float blixSkyVisibility(vec3 worldPos, vec3 dir) {
+float blixSkyVisibility(vec3 worldPos, vec3 dir, float push) {
     if (frame.uSkyMin.w <= 0.5 || frame.uAbFlags2.x > 0.5) return 1.0;
     return blix_skyVisibility(uSkyVisibility, uSkyVisibility1, uSkyVisibility2,
-                              frame.uSkyMin.xyz, frame.uSkyScale.xyz, frame.uSkyScale.w,
+                              frame.uSkyMin.xyz, frame.uSkyScale.xyz, push,
                               worldPos, dir);
 }
 
@@ -397,6 +422,7 @@ void main() {
         float quantum = 1.0 / max(frame.uMsaaSamples, 1.0);
         coverage = clamp(coverage + (layerHash - 0.5) * quantum * frame.uCoverageDecorrelate,
                          0.0, 1.0);
+        coverage = mix(coverage, 1.0, frame.uForceOpaqueCutout);
     }
     vec3 albedo = albedo4.rgb;
 
@@ -461,7 +487,7 @@ void main() {
         float lod = roughness * (frame.uEnvMipCount - 1.0);
         // Occluded like every other indirect term. Evaluated along R rather than N because a
         // reflection gathers from where it points, and a window deep inside a room points at a wall.
-        vec3 envRefl = textureLod(uPrefilteredEnv, R, lod).rgb * blixSkyVisibility(vWorldPos, R);
+        vec3 envRefl = textureLod(uPrefilteredEnv, R, lod).rgb * blixSkyVisibility(vWorldPos, R, frame.uSkyNormalPush);
         float fresnel = 0.04 + 0.96 * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
         // <b>No opacity floor.</b> Clean glass IS ~96% transparent head-on, and lifting it was
         // faking the presence that refraction and absorption would give for free. The panes will
@@ -472,7 +498,7 @@ void main() {
         // — so every channel drew a lit pane over whatever it was meant to be showing, and the one
         // surface worth interrogating was the one the instrument could not see.
         if (frame.uVizChannel > 0.5) {
-            float vis = blixSkyVisibility(vWorldPos, R);
+            float vis = blixSkyVisibility(vWorldPos, R, frame.uSkyNormalPush);
             vec3 c = frame.uVizChannel < 1.5 ? vizGeometricN * 0.5 + 0.5 :
                      frame.uVizChannel < 2.5 ? N * 0.5 + 0.5 :
                      frame.uVizChannel < 7.5 ? vec3(vis) : vec3(vis);
@@ -643,7 +669,7 @@ void main() {
         vizProbeUv = probeUv;
         // One call, the same one glass and everything else uses. Two copies of this evaluation is
         // how the volume and its readers drifted apart before.
-        skyVisibility = blixSkyVisibility(vWorldPos, skyVisN);
+        skyVisibility = blixSkyVisibility(vWorldPos, skyVisN, alphaCutoff > 0.0 ? frame.uSkyNormalPushCutout : frame.uSkyNormalPush);
         vizSh = vec4(skyVisibility);
     }
 
@@ -735,7 +761,7 @@ void main() {
         // Diagnosed, then mis-fixed: the curtain patch set diffuseTransmission to 0 and recorded this
         // exact reasoning as the justification. Deleting the term because its occlusion was wrong is
         // hiding a symptom; the occlusion is what was wrong.
-        vec3 backIrradiance = texture(uIrradiance, -cubeN).rgb * blixSkyVisibility(vWorldPos, -N);
+        vec3 backIrradiance = texture(uIrradiance, -cubeN).rgb * blixSkyVisibility(vWorldPos, -N, alphaCutoff > 0.0 ? frame.uSkyNormalPushCutout : frame.uSkyNormalPush);
         transmittedIBL = blix_diffuseTransmissionAmbient(
             backIrradiance, mat.uDiffuseTransmissionColor.rgb * albedo, diffTrans) * ao * visibility;
     }

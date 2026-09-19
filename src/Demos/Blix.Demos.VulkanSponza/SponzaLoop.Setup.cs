@@ -51,7 +51,11 @@ internal sealed partial class SponzaLoop
         if (cmdArgs.Contains("--ao-fullres")) aoScale = 1f;
         if (cmdArgs.Contains("--no-prepass")) noPrepass = true;
         for (var i = 0; i < cmdArgs.Length - 1; i++)
+        {
             if (cmdArgs[i] == "--probe") probeName = cmdArgs[i + 1];
+            if (cmdArgs[i] == "--bounce-div" && int.TryParse(cmdArgs[i + 1], out var bd))
+                bounceDiv = Math.Clamp(bd, 1, 8);
+        }
         if (cmdArgs.Contains("--sky-no-inject")) skipInject = true;
         if (cmdArgs.Contains("--sky-no-sample")) skipSkySample = true;
         // <b>ON by default, and it was off — which meant the demo's own lighting model was opt-in.</b>
@@ -96,6 +100,16 @@ internal sealed partial class SponzaLoop
         // that has no detectable sun still returns null and the authored direction stands, so an
         // overcast sky is unaffected.
         if (!cmdArgs.Contains("--sun-authored")) alignSunToProbe = true;
+        // <b>--sun-overhead: straight down, for working on base lighting rather than on a sky.</b>
+        // Sponza is a courtyard, so the sun's ELEVATION decides how much of the scene is lit at all:
+        // measured on the direct-sun-only channel, this sky's own sun at 53 deg reaches 1.4% of the
+        // frame where the authored 73 deg reaches 9.3%. Judging ambient, bounce or materials while
+        // 98% of the picture is unlit means judging them by their failure modes. Overhead maximises
+        // what the sun can reach, so everything else is being compared against a lit scene.
+        //
+        // The shadow cascades already guard the degenerate up vector (|L.y| > 0.99 -> UnitZ), so
+        // exactly straight down is safe.
+        if (cmdArgs.Contains("--sun-overhead")) sunOverhead = true;
         // Lets the probe view be exercised without a human reaching for a checkbox — which is how
         // it shipped a crash the first time: it compiled, it ran, and nothing had drawn it.
         if (cmdArgs.Contains("--show-probes")) showProbes = true;
@@ -690,7 +704,14 @@ internal sealed partial class SponzaLoop
             // Align the directional sun (key light + shadow caster) to the probe's
             // detected sun so cast shadows match the visible sky sun. FROM-sun-
             // into-scene convention, matching sunDirection.
-            if (alignSunToProbe && baked.Probe.SunDirectionFromEquirect is { } hdrSun)
+            if (sunOverhead)
+            {
+                sunDirection = new Vector3(0f, -1f, 0f);
+                sunPitch = -MathF.PI / 2f;
+                sunYaw = 0f;
+                Console.WriteLine("[VulkanSponza]   sun forced overhead (--sun-overhead).");
+            }
+            else if (alignSunToProbe && baked.Probe.SunDirectionFromEquirect is { } hdrSun)
             {
                 sunDirection = Vector3.Normalize(hdrSun);
                 sunPitch = MathF.Asin(Math.Clamp(sunDirection.Y, -1f, 1f));
@@ -812,9 +833,20 @@ internal sealed partial class SponzaLoop
                         Console.WriteLine(
                             $"[VulkanSponza]   albedo {albX}x{albY}x{albZ} ({volume.Albedo!.Length / 1024.0 / 1024.0:0.00} MB), so the bounce carries surface colour.");
                     }
-                    bounceX = Math.Max(2, probeX / 2);
-                    bounceY = Math.Max(2, probeY / 2);
-                    bounceZ = Math.Max(2, probeZ / 2);
+                    // <b>Half the visibility grid, and --bounce-div makes that a question.</b> The
+                    // bounce field was measured to be far higher-frequency spatially than this
+                    // lattice can carry: over 14,072 neighbouring probe pairs at 1.57 m, 29% differ
+                    // by more than 2x, p90 is 5.15x and p99 is 25.7x. Nothing in the WEIGHTING can
+                    // reconstruct a signal that coarse, which is why crushing the cutoff, changing
+                    // the normalisation and storing variance all failed to touch the banding.
+                    //
+                    // Going octahedral traded space for angle -- 41k probes to 5k, with 36 angular
+                    // samples each. This flag walks part of that back so the trade can be measured
+                    // rather than assumed: --bounce-div 1 puts the bounce on the visibility grid's
+                    // own spacing, about 0.8 m, at eight times the probe count.
+                    bounceX = Math.Max(2, probeX / bounceDiv);
+                    bounceY = Math.Max(2, probeY / bounceDiv);
+                    bounceZ = Math.Max(2, probeZ / bounceDiv);
                     var atlasW = bounceX * OctTile;
                     var atlasH = bounceY * bounceZ * OctTile;
                     for (var i = 0; i < bounceTextures.Length; i++)
