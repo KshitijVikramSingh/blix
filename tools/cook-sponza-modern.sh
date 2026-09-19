@@ -66,9 +66,20 @@ if [[ ! -d "$SRC" ]]; then
     exit 1
 fi
 
+# <b>Built here, because a stale cook is a silent one.</b> This checked only that the assembly
+# EXISTED, and it pins the Debug configuration — so a session that changed the cook and built
+# Release re-cooked the whole tree with a binary from before the change, reported success, and
+# produced assets missing exactly the thing the change was for. The stamp inside the cooked file
+# was the only evidence, and nothing reads the stamp. Building takes a couple of seconds and
+# removes the failure mode entirely.
+COOK_PROJECT="$REPO/src/Blix.Tools.Cook/Blix.Tools.Cook.csproj"
 COOK="$REPO/src/Blix.Tools.Cook/bin/Debug/net8.0/Blix.Tools.Cook.dll"
+if ! dotnet build "$COOK_PROJECT" -c Debug -v quiet --nologo >/dev/null; then
+    echo "cook-sponza-modern: the cook does not build; nothing was cooked." >&2
+    exit 1
+fi
 if [[ ! -f "$COOK" ]]; then
-    echo "Build the cook first: dotnet build $REPO/src/Blix.Tools.Cook/Blix.Tools.Cook.csproj" >&2
+    echo "cook-sponza-modern: built, but $COOK is missing." >&2
     exit 1
 fi
 
@@ -109,7 +120,14 @@ cook_pack() {
         # ${x[@]+"${x[@]}"} rather than "${x[@]}": macOS ships bash 3.2, where expanding an EMPTY
         # array under `set -u` is an unbound-variable error. It failed only for the packs with no
         # patch — so main_sponza and curtains cooked, ivy and trees silently did not.
-        dotnet "$COOK" asset "$gltf" --out "$COOKED/$dest" --tangents ${patch_args[@]+"${patch_args[@]}"}
+        # <b>--split, because distance LOD is only as fine as the thing it selects over.</b> Without
+        # it a whole Sponza wall is one drawable at one level at one distance, so standing at its
+        # near end holds its far end at full detail. The triangle budget halves dense primitives;
+        # the extent rule (MeshRecipe.DefaultSplitMaxExtent, ~one arcade bay) is what reaches the
+        # sparse-but-enormous ones a triangle count never touches. It also turns LockBorder on in
+        # the simplifier, which is what keeps chunk seams watertight when neighbours pick different
+        # levels.
+        dotnet "$COOK" asset "$gltf" --out "$COOKED/$dest" --tangents --split 4096 ${patch_args[@]+"${patch_args[@]}"}
         cooked_any=1
         return 0
     done

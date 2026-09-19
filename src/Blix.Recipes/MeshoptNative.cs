@@ -34,6 +34,15 @@ public static unsafe class MeshoptNative
         nuint targetIndexCount, float targetError, uint options, float* resultError);
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    private static extern nuint meshopt_simplifyWithAttributes(
+        uint* destination, uint* indices, nuint indexCount,
+        float* vertexPositions, nuint vertexCount, nuint vertexPositionsStride,
+        float* vertexAttributes, nuint vertexAttributesStride,
+        float* attributeWeights, nuint attributeCount,
+        byte* vertexLock,
+        nuint targetIndexCount, float targetError, uint options, float* resultError);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     private static extern float meshopt_simplifyScale(
         float* vertexPositions, nuint vertexCount, nuint vertexPositionsStride);
 
@@ -60,6 +69,44 @@ public static unsafe class MeshoptNative
             count = meshopt_simplify(
                 d, idx, (nuint)indices.Length,
                 pos, (nuint)vertexCount, (nuint)(positionStrideFloats * sizeof(float)),
+                targetIndexCount, targetError, (uint)options, &err);
+        }
+        resultError = err;
+        Array.Resize(ref dest, (int)count);
+        return dest;
+    }
+
+    // <b>The same collapse, judged on appearance as well as shape.</b> meshopt_simplify sees only
+    // positions, so a collapse that barely moves the surface is free to shear the UVs across it —
+    // and a wall or a pillar whose texture slides as it changes level is a far more obvious artifact
+    // than the silhouette error the metric was actually bounding. Attributes are interleaved,
+    // `attributeCount` floats per vertex, each with its own weight.
+    //
+    // The returned error is then a COMBINED position-and-attribute deviation rather than a purely
+    // geometric one. That is the point — it is what lets selection see texture distortion at all —
+    // but it does mean a cooked error is no longer interchangeable with one from the old path, and
+    // a pixel budget chosen against the old numbers does not carry over.
+    public static uint[] SimplifyWithAttributes(
+        uint[] indices, float[] positions, int vertexCount, int positionStrideFloats,
+        float[] attributes, int attributeStrideFloats, float[] attributeWeights,
+        float targetRatio, float targetError, Options options, out float resultError)
+    {
+        var dest = new uint[indices.Length];
+        var targetIndexCount = (nuint)(((int)(indices.Length * targetRatio)) / 3 * 3);
+        float err;
+        nuint count;
+        fixed (uint* d = dest)
+        fixed (uint* idx = indices)
+        fixed (float* pos = positions)
+        fixed (float* attr = attributes)
+        fixed (float* w = attributeWeights)
+        {
+            count = meshopt_simplifyWithAttributes(
+                d, idx, (nuint)indices.Length,
+                pos, (nuint)vertexCount, (nuint)(positionStrideFloats * sizeof(float)),
+                attr, (nuint)(attributeStrideFloats * sizeof(float)),
+                w, (nuint)attributeWeights.Length,
+                null,
                 targetIndexCount, targetError, (uint)options, &err);
         }
         resultError = err;

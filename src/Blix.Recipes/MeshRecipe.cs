@@ -37,6 +37,26 @@ public static class MeshRecipe
     // chain stops early if a level doesn't reduce or falls below MinLodIndices.
     private static readonly float[] LodRatios = { 0.5f, 0.25f, 0.125f };
     private const int MinLodIndices = 96; // 32 triangles — below this, no point
+    // Splitting floor: below this a chunk is not halved again whatever its extent, because each
+    // split duplicates seam vertices and locks one more border against the simplifier.
+    private const int MinSplitTris = 128;
+    // <b>How long a chunk may be before distance stops meaning anything for it.</b> Selection uses
+    // the distance to the nearest point of a chunk's bounds, so a chunk longer than this has parts
+    // at wildly different distances answering to whichever end you stand near. Four metres is about
+    // one Sponza arcade bay — close enough that a chunk is at one distance, far enough that the
+    // scene does not shatter into thousands of drawables.
+    public const float DefaultSplitMaxExtent = 4f;
+
+    // Normal xyz + UV xy, the attributes a collapse is not allowed to wreck.
+    private const int AttributeFloats = 5;
+    // <b>Weights, and they are the one real judgement call in this file.</b> meshopt scores an edge
+    // collapse by position error plus the weighted attribute error, so these set how much UV shear
+    // a collapse may buy with a given amount of surface flatness. Normals are unit-length, so 0.5
+    // makes a full right-angle normal flip cost about as much as moving the surface half a unit of
+    // mesh extent. UVs run 0..1 across a texture, so 1.0 makes a collapse that slides the texture
+    // across the whole image as expensive as losing the shape entirely — which is the trade this
+    // was changed to make, because the sliding texture is the artifact that gets noticed.
+    private static readonly float[] AttributeWeights = { 0.5f, 0.5f, 0.5f, 1.0f, 1.0f };
 
     // Reduced index list + the world-space geometric error it introduced
     // (max deviation from the original surface, in mesh units). Error drives
@@ -44,11 +64,27 @@ public static class MeshRecipe
     // distance and switch when it's below a pixel threshold.
     public readonly record struct SimplifyResult(uint[] Indices, float WorldError);
 
-    // Simplify callback: (positions xyz tight float[3*vtx], indices, vertexCount,
-    // targetRatio) -> reduced index list + its world error, sharing the same
+    /// <summary>What a simplifier is given about a primitive.</summary>
+    /// <remarks>
+    /// Positions drove the whole decision on their own until they were shown not to be enough:
+    /// a collapse can leave the surface where it was and still shear the UVs across it, which is
+    /// what makes a pillar's texture slide as it changes level. <see cref="Attributes"/> is the
+    /// interleaved per-vertex data that must survive too — <see cref="AttributeStride"/> floats
+    /// each, one weight per float — and is empty for a caller that only cares about shape.
+    /// </remarks>
+    public readonly record struct SimplifyInput(
+        float[] Positions,
+        float[] Attributes,
+        int AttributeStride,
+        float[] AttributeWeights,
+        uint[] Indices,
+        int VertexCount,
+        float TargetRatio);
+
+    // Simplify callback: reduced index list + its world error, sharing the same
     // vertices. The cook tool supplies a meshoptimizer-backed implementation;
     // when null, the file is written LOD0-only (Blix has no simplifier of its own).
-    public delegate SimplifyResult SimplifyFn(float[] positions, uint[] indices, int vertexCount, float targetRatio);
+    public delegate SimplifyResult SimplifyFn(in SimplifyInput input);
 
     /// <summary>
     /// The mesh cook's own version, bumped whenever this method would produce different bytes from
@@ -70,6 +106,7 @@ public static class MeshRecipe
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false, bool includeTangents = false,
         SimplifyFn? simplify = null, int splitTriBudget = 0, bool splitFoliage = true,
+        float splitMaxExtent = DefaultSplitMaxExtent,
         MaterialPatch? patch = null, Action<string>? log = null)
     {
         ArgumentNullException.ThrowIfNull(gltfPath);
@@ -126,7 +163,7 @@ public static class MeshRecipe
                 var isFoliage = prim.Material is { Alpha: not SharpGLTF.Schema2.AlphaMode.OPAQUE };
                 var doSplit = splitTriBudget > 0 && (splitFoliage || !isFoliage);
                 var chunks = doSplit
-                    ? SplitPrimitive(meshData, layout.Stride, splitTriBudget)
+                    ? SplitPrimitive(meshData, layout.Stride, splitTriBudget, splitMaxExtent)
                     : new List<MeshData> { meshData };
 
                 foreach (var chunk in chunks)
@@ -156,7 +193,7 @@ public static class MeshRecipe
         // the easiest one to forget.
         var parameters =
             $"flipV={(flipTextureV ? 1 : 0)} tangents={(includeTangents ? 1 : 0)} " +
-            $"split={splitTriBudget} splitFoliage={(splitFoliage ? 1 : 0)} " +
+            $"split={splitTriBudget}@{splitMaxExtent:0.##}m splitFoliage={(splitFoliage ? 1 : 0)} " +
             $"simplify={(simplify is null ? "none" : "yes")}" +
             // Recorded, so `blix inspect` can answer "where did this material's sheen come from"
             // without anyone reading a shader. An artifact that was patched and cannot say so is
@@ -688,18 +725,33 @@ public static class MeshRecipe
         if (baseIndices.Length < MinLodIndices) return lods;
 
         var positions = new float[meshData.VertexCount * 3];
+        // Normal (3) + UV (2), interleaved, in the order the weights below expect. Both layouts
+        // this cook writes put the normal immediately after the position; only the UV moves, and
+        // the stride is what says which layout this is — 48 bytes with a tangent between them,
+        // 32 without. Reading the UV from the wrong offset would feed the simplifier the tangent's
+        // xy and quietly protect the wrong thing.
+        var uvFloatOffset = stride == 48 ? 10 : 6;
+        var attributes = new float[meshData.VertexCount * AttributeFloats];
         for (var v = 0; v < meshData.VertexCount; v++)
         {
             var o = v * stride;
             positions[v * 3 + 0] = BitConverter.ToSingle(meshData.VertexBytes, o);
             positions[v * 3 + 1] = BitConverter.ToSingle(meshData.VertexBytes, o + 4);
             positions[v * 3 + 2] = BitConverter.ToSingle(meshData.VertexBytes, o + 8);
+            var a = v * AttributeFloats;
+            attributes[a + 0] = BitConverter.ToSingle(meshData.VertexBytes, o + 12);
+            attributes[a + 1] = BitConverter.ToSingle(meshData.VertexBytes, o + 16);
+            attributes[a + 2] = BitConverter.ToSingle(meshData.VertexBytes, o + 20);
+            attributes[a + 3] = BitConverter.ToSingle(meshData.VertexBytes, o + uvFloatOffset * 4);
+            attributes[a + 4] = BitConverter.ToSingle(meshData.VertexBytes, o + uvFloatOffset * 4 + 4);
         }
 
         var prevCount = baseIndices.Length;
         foreach (var ratio in LodRatios)
         {
-            var result = simplify(positions, baseIndices, meshData.VertexCount, ratio);
+            var result = simplify(new SimplifyInput(
+                positions, attributes, AttributeFloats, AttributeWeights,
+                baseIndices, meshData.VertexCount, ratio));
             var reduced = result.Indices;
             if (reduced.Length < MinLodIndices || reduced.Length >= prevCount) break;
             prevCount = reduced.Length;
@@ -715,11 +767,53 @@ public static class MeshRecipe
     // vertices). Median split along the longest centroid axis. Seam vertices
     // are duplicated across chunks — with BuildLods' LockBorder this keeps chunk
     // boundaries watertight even when adjacent chunks pick different LOD levels.
-    private static List<MeshData> SplitPrimitive(MeshData mesh, int stride, int triBudget)
+    //
+    // <b>And under an EXTENT, which is the half this was missing.</b> A triangle budget splits
+    // dense primitives and leaves sparse ones whole, and a sparse primitive is exactly the one that
+    // hurts: a thirty-metre wall carrying a few hundred triangles is one drawable with one level of
+    // detail and one distance, so standing at one end of it holds the far end at full detail and no
+    // budget can coarsen the part you are not near. Distance-based selection is only as good as the
+    // granularity it selects over, and that granularity is a LENGTH.
+    private static List<MeshData> SplitPrimitive(MeshData mesh, int stride, int triBudget, float maxExtent)
     {
         var baseIdx = mesh.Indices32 ?? Array.ConvertAll(mesh.Indices, idx => (uint)idx);
         var triCount = baseIdx.Length / 3;
-        if (triCount <= triBudget) return new List<MeshData> { mesh };
+        if (triCount <= triBudget && ExtentOf(mesh, baseIdx, stride) <= maxExtent)
+        {
+            // Nothing to do only if BOTH hold.
+        }
+        else if (triCount <= MinSplitTris)
+        {
+            // A chunk this small cannot usefully be halved again — and every split duplicates its
+            // seam vertices and locks another border against the simplifier, so splitting past this
+            // point costs memory and decimation for granularity nothing will use.
+            return new List<MeshData> { mesh };
+        }
+        else
+        {
+            return SplitPrimitiveCore(mesh, stride, triBudget, maxExtent, baseIdx, triCount);
+        }
+        return new List<MeshData> { mesh };
+    }
+
+    // Longest edge of a primitive's world-space bounds.
+    private static float ExtentOf(MeshData mesh, uint[] baseIdx, int stride)
+    {
+        var min = new Vector3(float.MaxValue);
+        var max = new Vector3(float.MinValue);
+        foreach (var idx in baseIdx)
+        {
+            var pos = VertexPosition(mesh.VertexBytes, idx, stride);
+            min = Vector3.Min(min, pos);
+            max = Vector3.Max(max, pos);
+        }
+        var e = max - min;
+        return MathF.Max(e.X, MathF.Max(e.Y, e.Z));
+    }
+
+    private static List<MeshData> SplitPrimitiveCore(
+        MeshData mesh, int stride, int triBudget, float maxExtent, uint[] baseIdx, int triCount)
+    {
 
         var centroids = new Vector3[triCount];
         for (var t = 0; t < triCount; t++)
@@ -733,7 +827,7 @@ public static class MeshRecipe
         var leaves = new List<int[]>();
         var allTris = new int[triCount];
         for (var t = 0; t < triCount; t++) allTris[t] = t;
-        SplitTriangles(allTris, centroids, triBudget, leaves);
+        SplitTriangles(allTris, centroids, triBudget, maxExtent, leaves);
 
         var chunks = new List<MeshData>(leaves.Count);
         var chunkIdx = 0;
@@ -742,20 +836,27 @@ public static class MeshRecipe
         return chunks;
     }
 
-    private static void SplitTriangles(int[] tris, Vector3[] centroids, int budget, List<int[]> leaves)
+    private static void SplitTriangles(
+        int[] tris, Vector3[] centroids, int budget, float maxExtent, List<int[]> leaves)
     {
-        if (tris.Length <= budget) { leaves.Add(tris); return; }
         var min = new Vector3(float.MaxValue);
         var max = new Vector3(float.MinValue);
         foreach (var t in tris) { min = Vector3.Min(min, centroids[t]); max = Vector3.Max(max, centroids[t]); }
         var ext = max - min;
+        var longest = MathF.Max(ext.X, MathF.Max(ext.Y, ext.Z));
+        // Either criterion keeps the recursion going; MinSplitTris is the floor that stops it.
+        if ((tris.Length <= budget && longest <= maxExtent) || tris.Length <= MinSplitTris)
+        {
+            leaves.Add(tris);
+            return;
+        }
         var axis = ext.X >= ext.Y && ext.X >= ext.Z ? 0 : (ext.Y >= ext.Z ? 1 : 2);
         Array.Sort(tris, (p, q) => Axis(centroids[p], axis).CompareTo(Axis(centroids[q], axis)));
         var mid = tris.Length / 2;
         // Degenerate (centroids coincide along the split axis) — emit whole.
         if (mid == 0 || mid == tris.Length) { leaves.Add(tris); return; }
-        SplitTriangles(tris[..mid], centroids, budget, leaves);
-        SplitTriangles(tris[mid..], centroids, budget, leaves);
+        SplitTriangles(tris[..mid], centroids, budget, maxExtent, leaves);
+        SplitTriangles(tris[mid..], centroids, budget, maxExtent, leaves);
     }
 
     private static float Axis(Vector3 v, int a) => a == 0 ? v.X : (a == 1 ? v.Y : v.Z);
@@ -842,14 +943,20 @@ public static class MeshRecipe
         var options = MeshoptNative.Options.Prune;
         if (splitting) options |= MeshoptNative.Options.LockBorder;
 
-        return (positions, indices, vertexCount, ratio) =>
+        return (in SimplifyInput input) =>
         {
-            var reduced = MeshoptNative.Simplify(
-                indices, positions, vertexCount, 3, ratio, targetError: 1.0f, options, out var relError);
+            var reduced = input.Attributes.Length > 0
+                ? MeshoptNative.SimplifyWithAttributes(
+                    input.Indices, input.Positions, input.VertexCount, 3,
+                    input.Attributes, input.AttributeStride, input.AttributeWeights,
+                    input.TargetRatio, targetError: 1.0f, options, out var relError)
+                : MeshoptNative.Simplify(
+                    input.Indices, input.Positions, input.VertexCount, 3,
+                    input.TargetRatio, targetError: 1.0f, options, out relError);
 
             // meshopt's error is relative to the mesh extent; scale it to world units so the
             // runtime can project it to screen pixels.
-            var scale = MeshoptNative.SimplifyScale(positions, vertexCount, 3);
+            var scale = MeshoptNative.SimplifyScale(input.Positions, input.VertexCount, 3);
             return new SimplifyResult(reduced, relError * scale);
         };
     }
@@ -875,6 +982,7 @@ public static class MeshRecipe
             flipTextureV: request.Flag("flipV"),
             includeTangents: request.Flag("tangents"),
             splitTriBudget: request.Number("split"),
+            splitMaxExtent: request.Number("splitExtent") is var e && e > 0 ? e : DefaultSplitMaxExtent,
             splitFoliage: request.Flag("splitFoliage", true));
 
         return CookOutcome.Written($"{count} primitive(s)");
@@ -902,6 +1010,7 @@ public static class MeshRecipe
         string sourcePath, string outputPath,
         bool flipTextureV = false, bool includeTangents = false,
         int splitTriBudget = 0, bool splitFoliage = true,
+        float splitMaxExtent = DefaultSplitMaxExtent,
         MaterialPatch? patch = null, Action<string>? log = null) =>
         CookToBlixMesh(
             sourcePath, outputPath,
@@ -910,6 +1019,7 @@ public static class MeshRecipe
             simplify: DefaultSimplifier(splitTriBudget > 0),
             splitTriBudget: splitTriBudget,
             splitFoliage: splitFoliage,
+            splitMaxExtent: splitMaxExtent,
             patch: patch,
             log: log);
 
