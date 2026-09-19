@@ -688,10 +688,21 @@ void main() {
     // direct sun on it at all, and that is most of what makes cloth read as thin.
     vec3 transmittedIBL = vec3(0.0);
     if (diffTrans > 0.0) {
-        // Occluded like every other indirect term. `visibility` is measured along the FRONT normal
-        // — the back side's own value is not something a screen-space pass can know — so this is an
-        // approximation, and the honest direction: a curtain in a dark corner is dark on both sides.
-        vec3 backIrradiance = texture(uIrradiance, -cubeN).rgb * skyVisibility;
+        // <b>The BACK side's own sky visibility, queried along -N.</b> This reused the front face's
+        // `skyVisibility`, which is a different question with a different answer: a curtain whose
+        // front faces a 3%-sky wall and whose back faces an open courtyard was told it could see 3%
+        // of the sky from behind. That handed cloth a second light path scaled by the wrong occlusion,
+        // and in an atrium where the walls see 2.4-3.8% of the sky it routinely outweighed the
+        // properly shadowed front face.
+        //
+        // The baked volume CAN answer this, which is the point — it is a world-space field, so -N is
+        // as valid a query direction as N. Only the screen-space term (`visibility` below) genuinely
+        // cannot see the back side, and that one stays an approximation.
+        //
+        // Diagnosed, then mis-fixed: the curtain patch set diffuseTransmission to 0 and recorded this
+        // exact reasoning as the justification. Deleting the term because its occlusion was wrong is
+        // hiding a symptom; the occlusion is what was wrong.
+        vec3 backIrradiance = texture(uIrradiance, -cubeN).rgb * blixSkyVisibility(vWorldPos, -N);
         transmittedIBL = blix_diffuseTransmissionAmbient(
             backIrradiance, mat.uDiffuseTransmissionColor.rgb * albedo, diffTrans) * ao * visibility;
     }
@@ -751,14 +762,31 @@ void main() {
             // without --sky read as "every probe rejected" instead of "this feature is not on". One
             // glance cost an hour. A diagnostic must distinguish a measured zero from an absent
             // measurement.
-                                       (frame.uBounceStrength <= 0.0
+            frame.uVizChannel < 16.5 ? (frame.uBounceStrength <= 0.0
                                             ? vec3(0.0, 0.1, 1.0)
                                             : probeConfidence <= 1e-5
                                                 ? vec3(1.0, 0.0, 0.0)
-                                                : vec3(0.0, clamp(probeConfidence, 0.0, 1.0), 0.0));
+                                                : vec3(0.0, clamp(probeConfidence, 0.0, 1.0), 0.0)) :
+            // <b>17-20: the ambient sum, one term at a time.</b> "The shadowed leaves are blue" is a
+            // statement about a SUM, and the four things in it are lit very differently: the sky
+            // diffuse is albedo-tinted, the specular is not (it is ~4% of the sky whatever colour the
+            // surface is), the transmitted term is the new thin-sheet path, and the bounce carries
+            // whatever the probes hold. Any one of them can own a hue without the others moving, and
+            // reading which from the total is guesswork -- these are the same terms the final line
+            // adds up, exposed before they are added.
+            frame.uVizChannel < 17.5 ? kD * diffuseIBL * transScale * visibility * ao :
+            frame.uVizChannel < 18.5 ? specularIBL * specularVisibility * ao :
+            frame.uVizChannel < 19.5 ? transmittedIBL :
+                                       bounce * transScale;
         // Straight out, no exposure and no tonemap — these are directions and flags, and a film
         // curve on a direction is a way to misread it.
-        outColor = vec4(c, coverage);
+        // <b>Coverage 1, not the fragment's own — a diagnostic must not be alpha-to-coverage masked.</b>
+        // Writing `coverage` here hands the pipeline a partial sample mask, so the samples it drops
+        // keep whatever drew next, which for a canopy is the SKYBOX. Every viz channel then showed
+        // the same blue over foliage no matter what it was displaying, because none of them were
+        // displaying anything there -- that is how "the exact same blue in all of them" got noticed,
+        // and it is also the blue on the tree in the lit image.
+        outColor = vec4(c, 1.0);
         return;
     }
 

@@ -92,8 +92,8 @@ cook_pack() {
 
 cook_pack main_sponza main_sponza.blixpatch main_sponza
 cook_pack curtains    curtains.blixpatch    pkg_a_curtains curtains
-cook_pack ivy         -                     pkg_b_ivy      pkg_b_ivy1 ivy
-cook_pack trees       -                     pkg_c_trees    trees
+cook_pack ivy         ivy.blixpatch       pkg_b_ivy      pkg_b_ivy1 ivy
+cook_pack trees       trees.blixpatch     pkg_c_trees    trees
 
 # The sky probe is separate: it is not referenced by any glTF, so no asset cook
 # reaches it. Optional — the demo bakes a procedural sky when it is absent.
