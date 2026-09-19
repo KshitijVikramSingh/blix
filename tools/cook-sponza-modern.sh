@@ -8,8 +8,8 @@
 #          else COOKED itself. Accepts either the Khronos download names
 #          (main_sponza/ pkg_a_curtains/ pkg_b_ivy/ pkg_c_trees/) or the
 #          demo's own (main_sponza/ curtains/ ivy/ trees/).
-#   COOKED where the cooked tree goes. BLIX_SPONZA_ASSETS, else the in-repo
-#          Assets dir.
+#   COOKED where the cooked tree goes. BLIX_SPONZA_ASSETS, and there is no
+#          default — see the refusal below.
 #
 # Run from anywhere.
 #
@@ -35,7 +35,28 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-COOKED="${BLIX_SPONZA_ASSETS:-$REPO/src/Demos/Blix.Demos.SponzaModern/Assets}"
+# <b>No default destination, because the default was worse than a failure.</b> This fell back to
+# an in-repo Assets directory belonging to a demo the OpenGL sunset deleted. Run without the
+# variable, the script cooked NOTHING — every pack reported "no .gltf … skipped" — then baked a
+# sky-visibility volume from whatever stale .blixmesh files it found there, printed a cheerful
+# "Cooked tree: 2.4G", and exited 0. A cook that silently writes derived data into a dead tree and
+# calls it success is worse than one that stops, because the person running it has no reason to
+# look.
+if [[ -z "${BLIX_SPONZA_ASSETS:-}" ]]; then
+    cat >&2 <<'MSG'
+cook-sponza-modern: BLIX_SPONZA_ASSETS is not set.
+
+  It names the COOKED tree — where .blixmesh / .blixtex / .blixprobe / .blixsky are written.
+  The raw sources are taken from BLIX_SPONZA_SRC, defaulting to "<cooked>-src".
+
+  e.g.  BLIX_SPONZA_ASSETS=~/blix-assets/sponza tools/cook-sponza-modern.sh
+
+There is deliberately no default: the previous one pointed inside the repo and turned a missing
+variable into a successful-looking cook of nothing.
+MSG
+    exit 2
+fi
+COOKED="$BLIX_SPONZA_ASSETS"
 SRC="${BLIX_SPONZA_SRC:-${COOKED%/}-src}"
 [[ -d "$SRC" ]] || SRC="$COOKED"
 
@@ -62,6 +83,10 @@ echo "Cooking '$SRC' -> '$COOKED'"
 # a declared one that has gone missing should stop the cook rather than quietly not apply. One per
 # pack because a rule matching nothing is an error and Sponza is four separate glTFs — a shared
 # file would fail every curtain rule against the main pack.
+# <b>A pack that matches no directory is an error, not a note.</b> "skipped" scrolled past four
+# times in the misfire above and the run still exited 0.
+cooked_any=0
+
 cook_pack() {
     dest="$1"; patch="$2"; shift 2
     for candidate in "$@"; do
@@ -85,6 +110,7 @@ cook_pack() {
         # array under `set -u` is an unbound-variable error. It failed only for the packs with no
         # patch — so main_sponza and curtains cooked, ivy and trees silently did not.
         dotnet "$COOK" asset "$gltf" --out "$COOKED/$dest" --tangents ${patch_args[@]+"${patch_args[@]}"}
+        cooked_any=1
         return 0
     done
     echo "  $dest: not present in $SRC — skipped"
@@ -94,6 +120,11 @@ cook_pack main_sponza main_sponza.blixpatch main_sponza
 cook_pack curtains    curtains.blixpatch    pkg_a_curtains curtains
 cook_pack ivy         ivy.blixpatch       pkg_b_ivy      pkg_b_ivy1 ivy
 cook_pack trees       trees.blixpatch     pkg_c_trees    trees
+
+if [[ "$cooked_any" -eq 0 ]]; then
+    echo "cook-sponza-modern: no pack cooked — is $SRC the source tree?" >&2
+    exit 3
+fi
 
 # The sky probe is separate: it is not referenced by any glTF, so no asset cook
 # reaches it. Optional — the demo bakes a procedural sky when it is absent.
