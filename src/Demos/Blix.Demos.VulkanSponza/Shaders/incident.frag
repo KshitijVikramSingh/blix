@@ -28,23 +28,29 @@
 // canopy, whose depth buffer is thousands of disconnected silhouettes and whose reconstructed
 // normals are therefore nonsense — the same case gtao_denoise.frag already documents.
 //
-// <b>Measured, and the approximation that bites is the normal, not the upsample.</b> Against the
-// lit pass doing both terms itself, at the same viewpoint with the occupancy march on in both:
+// <b>What it costs, against the lit pass doing both terms itself.</b> Same viewpoint, occupancy
+// march on in both, noise floor 0.06 mean sRGB:
 //
-//   mean |difference|  6.81/255 sRGB,  p95 26,  p99 55
-//   32% of pixels differ by more than 8/255, 7.5% by more than 24
+//   both terms                         5.20 mean,  p95 21,  27.8% of pixels past 8/255
+//   sky visibility alone               2.73 mean,  p95 11,  12.1%
+//   (so the bounce carries the rest)
 //
-// Amplified, that difference is not a halo hugging silhouettes — which is what a bad bilateral
-// upsample looks like — it is the masonry's own NORMAL MAP, legible across every stone surface. The
-// inline path evaluates both terms in the normal-mapped N and this evaluates them in a geometric
-// one, so the ambient stops responding to surface relief and flat stone reads flatter.
+// <b>And the obvious fix was built, measured, and lost.</b> The story the difference image tells is
+// that the ambient stops responding to the masonry's normal map — this pass has only a geometric
+// normal from depth, where the lit pass has the mapped one. sh0 in sky_visibility.glsl IS
+// (L0, L1x, L1y, L1z), so carrying those four numbers in a second target and evaluating them at
+// full resolution in the shading normal costs one RGBA16F pair and drops only L2, which measures at
+// 0.36 mean — nearly nothing.
 //
-// The fix is not a better upsample, then: it is to stop collapsing the direction here. Sky
-// visibility is the cheap half — the volume fetch is the expense and the SH evaluation is a few
-// multiplies, so carrying L0+L1 through the field (exactly one RGBA16F) lets the lit pass evaluate
-// it with its own shading normal and recovers the relief for nothing. The bounce is the hard half,
-// because re-evaluating it at full resolution needs the blended octahedral tile rather than one
-// RGB. Not built; the saving below is what buys the right to spend time on it.
+// It made the sky term WORSE: 3.69 against 2.73. Interpolating coefficients across the coarse grid
+// and then evaluating is worse than interpolating the evaluated scalar, which is clamped to [0,1]
+// and low-dynamic-range where the coefficients are neither, and the L1 dot product amplifies what
+// the interpolation got wrong before the clamp truncates it asymmetrically.
+//
+// So the error here is not a direction error and no richer basis fixes it. It is a POSITION error:
+// the coarse pass asks the volume where the half-res texel centre landed, and on a surface running
+// away from the camera that is metres from where the fine pixel sits. The levers are the sampling
+// position and incidentScale, not the payload.
 //
 // What it saves, paired and interleaved on the measurement orbit:
 //

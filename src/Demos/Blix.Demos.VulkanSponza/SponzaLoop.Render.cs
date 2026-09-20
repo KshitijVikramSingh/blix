@@ -177,8 +177,14 @@ internal sealed partial class SponzaLoop
         // reduces nothing.
         if (render.Taa > 0f && frame.Width > 0 && frame.Height > 0)
         {
-            var jx = (Halton(framesRendered, 2) - 0.5f) * 2f / frame.Width;
-            var jy = (Halton(framesRendered, 3) - 0.5f) * 2f / frame.Height;
+            // <b>postLoadFrames, so a capture is reproducible.</b> Every temporal sequence in this
+            // frame — the TAA jitter, the fog's slice offset, GTAO's slice rotation, the injection
+            // phase — used framesRendered, which counts loading frames, so their phase at a --shot
+            // depended on how long texture streaming took. Two runs of the same command differed by
+            // 3.08 mean sRGB, and a set of image comparisons separated by 0.7 was taken inside that
+            // noise before anyone checked. The orbit had exactly this bug an hour earlier.
+            var jx = (Halton(postLoadFrames, 2) - 0.5f) * 2f / frame.Width;
+            var jy = (Halton(postLoadFrames, 3) - 0.5f) * 2f / frame.Height;
             viewProjJittered = viewProj * Matrix4x4.CreateTranslation(jx, jy, 0f);
         }
         else
@@ -594,7 +600,7 @@ internal sealed partial class SponzaLoop
                 new("uSunIrradiance", new Vector4Uniform(new Vector4(
                     EffectiveSunIrradiance, skyVolumeLoaded && !noSkyBounce ? 1f : 0f))),
                 new("uSchedule", new Vector4Uniform(new Vector4(
-                    framesRendered, MathF.Round(injectPeriod),
+                    postLoadFrames, MathF.Round(injectPeriod),
                     ProbeSleepNow > 0f ? 1f / ProbeSleepNow : 0f,
                     probePingPong ? 1f : 0f))),
             };
@@ -700,7 +706,7 @@ internal sealed partial class SponzaLoop
                     ambientHistoryValid ? ambient.Temporal : 0f,
                     // A golden-ratio walk over the slice span, so consecutive frames measure
                     // azimuths that are as far apart as a low-discrepancy sequence can put them.
-                    (float)((framesRendered * 0.6180339887) % 1.0) * MathF.PI,
+                    (float)((postLoadFrames * 0.6180339887) % 1.0) * MathF.PI,
                     ambient.ShowRejection ? 1f : 0f, ambient.Steps))),
                 new("uPrevViewProj",  new Matrix4x4Uniform(ambientHistoryValid ? prevAmbientViewProj : viewProj)),
             };
@@ -1471,7 +1477,7 @@ internal sealed partial class SponzaLoop
     // A low-discrepancy offset in [0,1) for this frame's slice sample, so successive frames land at
     // different depths inside the same segment. R2 rather than Halton: one multiply, no bit
     // reversal, and a better-spread sequence than either for one dimension.
-    private float FogJitter() => (float)((framesRendered * 0.7548776662) % 1.0);
+    private float FogJitter() => (float)((postLoadFrames * 0.7548776662) % 1.0);
 
     // How far a point in these bounds can travel along `dir` before it leaves the scene volume.
     // A slab test against the sky volume, which is the authored extent of everything that can cast

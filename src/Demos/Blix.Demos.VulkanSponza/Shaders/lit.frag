@@ -166,6 +166,18 @@ layout(set = 0, binding = 0) uniform Frame {
     // together: rejecting everything reports no leak and no light.
     //@tune 0..1 = 0
     float uProbeOcclusion;
+    // <b>Two diagnostics that stayed because they settled a question a picture could not.</b> The
+    // half-res incident field differs from the inline path by 7.54 mean sRGB, and the obvious story
+    // — that it loses the normal map's influence on the ambient — was wrong. These split it:
+    //
+    //   uSkyDropL2     drop L2 from the inline sky evaluation too. The band alone is worth 3.12.
+    //   uNoBounceTerm  zero the bounce in both paths. The SKY half alone is 5.26 of the 7.54, with
+    //                  the normal already matched — so what the field loses is sampling POSITION,
+    //                  not direction, and no directional basis fixes it.
+    //@tune 0..1 = 0
+    float uSkyDropL2;
+    //@tune 0..1 = 0
+    float uNoBounceTerm;
     // Measurement switches, one per --ab mode. Each removes one term from the fragment so a paired
     // interleaved run can price it:
     //   x  collapse every material UV to a constant, so the five material samples all hit one
@@ -696,7 +708,9 @@ void main() {
         skySample = blix_skyFetch(uSkyVisibility, uSkyVisibility1, uSkyVisibility2,
                                   frame.uSkyMin.xyz, frame.uSkyScale.xyz, vWorldPos);
         skySampleValid = true;
-        skyVisibility = blix_skyEvaluate(skySample, skyVisN);
+        skyVisibility = frame.uSkyDropL2 > 0.5
+            ? blix_skyEvaluateL1(skySample.sh0, skyVisN)
+            : blix_skyEvaluate(skySample, skyVisN);
         vizSh = vec4(skyVisibility);
     }
 
@@ -744,7 +758,7 @@ void main() {
     // that asks. The census needs that distinct from a measured zero, or every unlit pixel in the
     // frame votes "no leak" and the average is whatever fraction of the screen is sky.
     float vizProbeLeak = -1.0;
-    if (frame.uBounceStrength > 0.0 && frame.uAbFlags2.x < 0.5) {
+    if (frame.uBounceStrength > 0.0 && frame.uAbFlags2.x < 0.5 && frame.uNoBounceTerm < 0.5) {
         vec3 probeUv = (vWorldPos + N * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz;
         // The volume stores average incident RADIANCE; irradiance is PI times it. Getting this
         // conversion wrong is invisible in a single pass and fatal once the pass feeds itself.

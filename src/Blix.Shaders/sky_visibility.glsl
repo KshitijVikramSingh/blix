@@ -51,6 +51,24 @@ float blix_skyEvaluate(BlixSkySample s, vec3 dir)
                   + (BLIX_SKYVIS_PI / 4.0) * band2) / BLIX_SKYVIS_PI, 0.0, 1.0);
 }
 
+/// Bands 0 and 1 only, from the four coefficients that fit in one vec4.
+///
+/// <b>Kept for the diagnostic that priced L2, not for a caller.</b> sh0 IS (L0, L1x, L1y, L1z), so
+/// the obvious way to move this term to half resolution is to carry those four numbers and evaluate
+/// them at full resolution in the shading normal. That was built and measured and it lost — 3.69
+/// mean sRGB against 2.73 for evaluating coarsely — because interpolating coefficients and then
+/// evaluating is worse than interpolating the evaluated scalar, which is clamped and
+/// low-dynamic-range where the coefficients are neither. L2, the band it gives up to make room, is
+/// worth only 0.36. See incident.frag: the error is in WHERE the volume was sampled, not in which
+/// direction it was evaluated.
+float blix_skyEvaluateL1(vec4 sh0, vec3 dir)
+{
+    const float Y0 = 0.282095, Y1 = 0.488603;
+    return clamp((BLIX_SKYVIS_PI * Y0 * sh0.x
+                  + (2.0 * BLIX_SKYVIS_PI / 3.0) * Y1 * dot(sh0.yzw, dir)) / BLIX_SKYVIS_PI,
+                 0.0, 1.0);
+}
+
 /// Fraction of the sky visible from `worldPos` looking along `dir`, in [0,1].
 ///
 /// `normalPush` moves the lookup a little along `dir` before sampling: a cell straddling a wall
