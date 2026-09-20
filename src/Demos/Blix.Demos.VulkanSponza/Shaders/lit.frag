@@ -178,6 +178,12 @@ layout(set = 0, binding = 0) uniform Frame {
     float uSkyDropL2;
     //@tune 0..1 = 0
     float uNoBounceTerm;
+    // Diagnostic: make the inline ambient use the INTERPOLATED GEOMETRIC normal instead of the
+    // normal-mapped one. The half-res field's error is all normal (it does not change with
+    // resolution), and this splits that into the two halves that have different fixes: relief the
+    // field can never see, versus a depth reconstruction a prepass normal target would repair.
+    //@tune 0..1 = 0
+    float uAmbientGeoNormal;
     // Measurement switches, one per --ab mode. Each removes one term from the fragment so a paired
     // interleaved run can price it:
     //   x  collapse every material UV to a constant, so the five material samples all hit one
@@ -667,8 +673,8 @@ void main() {
     // bounce lookup", the answer came back no for each, and the dials stayed. gatherN survives
     // only as something to LOOK at (Visualize ambient 2), which is a different job from steering.
     vec3 cubeN   = N;
-    vec3 skyVisN = N;
-    vec3 bounceN = N;
+    vec3 skyVisN = frame.uAmbientGeoNormal > 0.5 ? vizGeometricN : N;
+    vec3 bounceN = frame.uAmbientGeoNormal > 0.5 ? vizGeometricN : N;
     vec3 irradiance = frame.uAbFlags.z > 0.5 ? vec3(0.2) : texture(uIrradiance, cubeN).rgb;
 
     // --- Baked sky visibility -------------------------------------------

@@ -57,6 +57,16 @@ internal sealed partial class SponzaLoop
         // open question.
         if (cmdArgs.Contains("--incident")) incidentField = true;
         if (cmdArgs.Contains("--incident-full")) { incidentField = true; incidentScale = 1f; }
+        for (var i = 0; i + 1 < cmdArgs.Length; i++)
+        {
+            // The resolution knob itself, because "half" is a guess and the error it costs is a
+            // function of how far the coarse texel centre sits from the fine pixel it answers for.
+            if (cmdArgs[i] == "--incident-scale" && float.TryParse(cmdArgs[i + 1], out var isc))
+            {
+                incidentField = true;
+                incidentScale = Math.Clamp(isc, 0.25f, 1f);
+            }
+        }
         if (cmdArgs.Contains("--no-prepass")) noPrepass = true;
         for (var i = 0; i < cmdArgs.Length - 1; i++)
         {
