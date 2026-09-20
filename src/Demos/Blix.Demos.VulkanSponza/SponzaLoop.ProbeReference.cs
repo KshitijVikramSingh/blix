@@ -51,10 +51,17 @@ internal sealed partial class SponzaLoop
         return new Vector3(r * r, g * g, b * b);
     }
 
-    // Marches the occupancy grid. Returns false if the ray leaves the volume without accumulating
-    // enough density to count as a surface — which is the same convention the injector uses, and the
-    // reason an escaping ray contributes nothing here either.
-    private bool MarchCpu(Vector3 origin, Vector3 dir, out Vector3 hitPos, out Vector3 hitNormal)
+    // Marches the occupancy grid to a scattering event.
+    //
+    // <b>Stochastic, and at the cell it ENTERS rather than the cell's centre.</b> Both were wrong in
+    // the first version and both bias directionally, which matters because the disagreement this
+    // reference found was itself directional. A partial cell is partially-occluding geometry, so the
+    // unbiased treatment is to interact there with probability equal to its density and pass through
+    // otherwise — the previous rule accumulated transmittance and declared a hit once it fell under
+    // a half, which turns a 0.3-density leaf cell into a guaranteed miss and three of them into a
+    // guaranteed hit. And reporting the voxel centre put every interaction up to half a cell further
+    // along the ray than it happened, always in the ray's own direction.
+    private bool MarchCpu(Vector3 origin, Vector3 dir, Random rng, out Vector3 hitPos, out Vector3 hitNormal)
     {
         hitPos = default;
         hitNormal = default;
@@ -76,40 +83,73 @@ internal sealed partial class SponzaLoop
             tMax[a] = (d[a] > 0 ? (1f - frac[a]) : frac[a]) * tDelta[a];
         }
         var dims = new[] { occCpuX, occCpuY, occCpuZ };
-        var transmittance = 1f;
-        for (var iter = 0; iter < 1024; iter++)
+        var tEnter = 0f;         // distance at which the ray entered the current cell
+        var enteredAxis = -1;    // and through which face
+        for (var iter = 0; iter < 2048; iter++)
         {
-            var axis = tMax[0] < tMax[1] ? (tMax[0] < tMax[2] ? 0 : 2) : (tMax[1] < tMax[2] ? 1 : 2);
             var density = OccupancyAt(c[0], c[1], c[2]);
-            if (density > 0f)
+            if (density > 0f && rng.NextDouble() < density)
             {
-                // Probabilistically opaque: a partial cell (foliage) stops the ray in proportion to
-                // its density, which is what the runtime's transmittance product does in aggregate.
-                transmittance *= 1f - density;
-                if (transmittance < 0.5f)
-                {
-                    var centre = skyVolumeMin + (new Vector3(c[0], c[1], c[2]) + new Vector3(0.5f)) * cellSize;
-                    hitPos = centre;
-                    var n = new float[3];
-                    n[axis] = -step[axis];
-                    hitNormal = new Vector3(n[0], n[1], n[2]);
-                    if (hitNormal.LengthSquared() < 1e-6f) hitNormal = -dir;
-                    return true;
-                }
+                hitPos = origin + dir * tEnter;
+                var n = new float[3];
+                if (enteredAxis >= 0) n[enteredAxis] = -step[enteredAxis];
+                hitNormal = new Vector3(n[0], n[1], n[2]);
+                if (hitNormal.LengthSquared() < 1e-6f) hitNormal = -dir;
+                return true;
             }
+            var axis = tMax[0] < tMax[1] ? (tMax[0] < tMax[2] ? 0 : 2) : (tMax[1] < tMax[2] ? 1 : 2);
+            if (step[axis] == 0) return false;
+            tEnter = tMax[axis];
+            enteredAxis = axis;
             c[axis] += step[axis];
-            if (step[axis] == 0 || (uint)c[axis] >= (uint)dims[axis]) return false;
+            if ((uint)c[axis] >= (uint)dims[axis]) return false;
             tMax[axis] += tDelta[axis];
         }
         return false;
     }
 
-    private float SunVisibilityCpu(Vector3 from, Vector3 toSun) =>
-        MarchCpu(from, toSun, out _, out _) ? 0f : 1f;
+    // <b>The expected transmittance, not a coin flip.</b> A shadow ray wants the FRACTION of light
+    // that survives, and the product of (1 - density) along the path is exactly that with none of
+    // the variance a stochastic answer would add. It also matches what a partial cell means: a leaf
+    // canopy at 0.3 per cell passes 70% of the sun, and the binary version this replaced called that
+    // either fully lit or fully shadowed depending on how many cells it happened to cross.
+    private float SunVisibilityCpu(Vector3 from, Vector3 toSun)
+    {
+        var cellSize = skyVolumeSpan / new Vector3(occCpuX, occCpuY, occCpuZ);
+        var t0 = (from - skyVolumeMin) / skyVolumeSpan;
+        var cell = new Vector3(t0.X * occCpuX, t0.Y * occCpuY, t0.Z * occCpuZ);
+        var c = new[] { (int)MathF.Floor(cell.X), (int)MathF.Floor(cell.Y), (int)MathF.Floor(cell.Z) };
+        var d = new[] { toSun.X, toSun.Y, toSun.Z };
+        var cs = new[] { cellSize.X, cellSize.Y, cellSize.Z };
+        var frac = new[] { cell.X - c[0], cell.Y - c[1], cell.Z - c[2] };
+        var step = new int[3];
+        var tMax = new float[3];
+        var tDelta = new float[3];
+        for (var a = 0; a < 3; a++)
+        {
+            if (MathF.Abs(d[a]) < 1e-8f) { step[a] = 0; tMax[a] = float.MaxValue; tDelta[a] = float.MaxValue; continue; }
+            step[a] = d[a] > 0 ? 1 : -1;
+            tDelta[a] = cs[a] / MathF.Abs(d[a]);
+            tMax[a] = (d[a] > 0 ? (1f - frac[a]) : frac[a]) * tDelta[a];
+        }
+        var dims = new[] { occCpuX, occCpuY, occCpuZ };
+        var transmittance = 1f;
+        for (var iter = 0; iter < 2048; iter++)
+        {
+            transmittance *= 1f - OccupancyAt(c[0], c[1], c[2]);
+            if (transmittance < 0.01f) return 0f;
+            var axis = tMax[0] < tMax[1] ? (tMax[0] < tMax[2] ? 0 : 2) : (tMax[1] < tMax[2] ? 1 : 2);
+            if (step[axis] == 0) return transmittance;
+            c[axis] += step[axis];
+            if ((uint)c[axis] >= (uint)dims[axis]) return transmittance;
+            tMax[axis] += tDelta[axis];
+        }
+        return transmittance;
+    }
 
     private Vector3 TraceRadianceCpu(Vector3 origin, Vector3 dir, int bounces, Random rng, Vector3 toSun, Vector3 sunIrr)
     {
-        if (!MarchCpu(origin, dir, out var hit, out var n)) return Vector3.Zero;
+        if (!MarchCpu(origin, dir, rng, out var hit, out var n)) return Vector3.Zero;
         var cellDiag = (skyVolumeSpan / new Vector3(occCpuX, occCpuY, occCpuZ)).Length();
         var off = hit + n * cellDiag * 1.5f;
         var albedo = AlbedoAtCpu(hit);
@@ -191,13 +231,17 @@ internal sealed partial class SponzaLoop
             var refLum = 0.2126 * reference.X + 0.7152 * reference.Y + 0.0722 * reference.Z;
 
             // What the field holds at the same probe: the mean over its tile.
+            // <b>The 6x6 interior, not the 8x8 tile.</b> The border ring is a duplicate of the edge
+            // texels, wrapped for filtering — averaging the whole tile counts those twice and tilts
+            // the mean toward whichever directions happen to sit on the octahedral seam. That is a
+            // directional bias in a comparison whose finding was directional.
             const int tile = 8;
             var x0 = px * tile;
             var y0 = (py + pz * bounceY) * tile;
             double got = 0;
             var n2 = 0;
-            for (var ty = 0; ty < tile; ty++)
-            for (var tx = 0; tx < tile; tx++)
+            for (var ty = 1; ty < tile - 1; ty++)
+            for (var tx = 1; tx < tile - 1; tx++)
             {
                 var ix = x0 + tx;
                 var iy = y0 + ty;
