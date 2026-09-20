@@ -655,6 +655,17 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // The LOD budget each cached cascade was built at; see the cache test in UpdateCascades.
     private readonly float[] cachedCascadeLod = new float[CascadeCount];
     private readonly Matrix4x4[] cachedCascadeCamera = new Matrix4x4[CascadeCount];
+    // --- cascade scheduling ---------------------------------------------------
+    // How much larger than its slice each cascade is fitted, and how many frames it may be reused.
+    // Cascade 0 is never reused: it carries contact shadows, it is the cheapest of the three to
+    // re-render, and padding it would cost exactly the sharpness it exists for.
+    private static readonly float[] CascadePad = { 0f, 0.20f, 0.45f };
+    private static readonly int[] CascadeInterval = { 1, 2, 4 };
+    private readonly Matrix4x4[] cascadeRenderViewProj = new Matrix4x4[CascadeCount];
+    private readonly Vector3[] cascadeFitCentre = new Vector3[CascadeCount];
+    private readonly int[] cascadeFittedFrame = new int[CascadeCount];
+    private readonly float[] cascadeTexelRendered = new float[CascadeCount];
+    private readonly bool[] cascadeDue = new bool[CascadeCount];
     // Triangles each fill submitted, so a pass's cost can be split between geometry and fill.
     private long fillIndirectTriangles;
     private readonly long[] cascadeTriangles = new long[CascadeCount];

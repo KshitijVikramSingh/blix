@@ -59,7 +59,13 @@ internal sealed partial class SponzaLoop
             center /= 8f;
             var radius = 0f;
             for (var i = 0; i < 8; i++) radius = MathF.Max(radius, Vector3.Distance(corners[i], center));
-            radius = MathF.Ceiling(radius);
+            // <b>Padded, so a cascade may be reused for frames after the one it was fitted to.</b>
+            // The far cascades cover 30 m and 60 m, where a shadow changes slowly and re-rendering
+            // every frame redraws thousands of casters to move almost nothing. Reuse needs slack:
+            // the map has to still cover the view a few frames later, and the only way to buy that
+            // is to fit a larger box than the slice needs. It is paid for in texel size, which is
+            // why cascade 0 gets none — it is the one whose sharpness is looked at.
+            radius = MathF.Ceiling(radius * (1f + CascadePad[c]));
 
             // Texel-snap the sphere centre in light space so the ortho footprint
             // lands on a stable grid (kills the shimmer under camera motion).
@@ -84,6 +90,31 @@ internal sealed partial class SponzaLoop
             var ortho = GraphicsMatrices.CreateOrthographicVulkan(2f * radius, 2f * radius, 0.1f, farPlane);
             cascadeViewProj[c] = lightView2 * ortho;
 
+            // <b>Due, or moved far enough that the padding no longer covers.</b> Interval alone
+            // would tear at the edges the moment the camera outran the slack; distance alone would
+            // never refresh a cascade under a rotating-but-stationary camera, whose slice sweeps
+            // through the scene while its centre barely moves. Both, and either one triggers.
+            var moved = Vector3.Distance(snapped, cascadeFitCentre[c]);
+            var slack = radius * CascadePad[c];
+            var due = (framesRendered - cascadeFittedFrame[c]) >= CascadeInterval[c];
+            if (cascadeFittedFrame[c] == 0 || due || moved > slack)
+            {
+                cascadeFitCentre[c] = snapped;
+                cascadeFittedFrame[c] = framesRendered;
+                cascadeRenderViewProj[c] = cascadeViewProj[c];
+                cascadeTexelRendered[c] = texelSize;
+                cascadeDue[c] = true;
+            }
+            else
+            {
+                cascadeDue[c] = false;
+            }
+            // <b>The lit pass samples the map that EXISTS, not the fit this frame computed.</b> A
+            // reused cascade was rendered with an older matrix, and sampling it with a newer one
+            // reads the right texture through the wrong transform — every shadow in that cascade
+            // displaced by however far the camera moved since.
+            cascadeViewProj[c] = cascadeRenderViewProj[c];
+            cascadeTexelWorld[c] = cascadeTexelRendered[c];
         }
     }
 }

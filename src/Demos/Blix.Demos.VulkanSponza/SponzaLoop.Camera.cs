@@ -25,7 +25,17 @@ internal sealed partial class SponzaLoop
         if (sceneLoaded && !fullyLoaded)
         {
             textureLoader.Drain(budgetMillis: 6.0);
-            if (textureLoader.PendingCount == 0) fullyLoaded = true;
+            if (textureLoader.PendingCount == 0)
+            {
+                fullyLoaded = true;
+                // Steady state starts here, so every measurement window does too: the streaming
+                // frames rendered a different (flat) path entirely, and counting them diluted the
+                // amortised cost of everything that only runs once the real path is live.
+                vk.ResetGpuIsolation();
+                triangleFrames = 0;
+                cameraTriangleSum = 0;
+                System.Array.Clear(cascadeTriangleSum);
+            }
         }
 
         var dt = (float)time.Delta;

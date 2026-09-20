@@ -89,6 +89,11 @@ public sealed partial class VulkanGraphicsDevice
     private bool gpuPassIsolation;
     private Fence isolationFence;
     private readonly Dictionary<string, (double TotalMs, long Samples)> gpuPassIsolated = new(StringComparer.Ordinal);
+    // <b>Frames, so a pass that SKIPS frames can be priced.</b> The per-execution mean is blind to
+    // scheduling by construction: run a cascade every fourth frame and it costs exactly what it did
+    // per run, while costing a quarter as much per frame. Amortising needs the denominator that
+    // counts the frames it did not run in, and only the device knows how many there were.
+    private long gpuIsolationFrames;
 
     /// <summary>Diagnostic: submit and fence-wait each pass separately for real GPU attribution.</summary>
     public bool GpuPassIsolation
@@ -99,6 +104,22 @@ public sealed partial class VulkanGraphicsDevice
 
     /// <summary>Isolated per-pass GPU milliseconds, cumulative. See GpuPassIsolation.</summary>
     public IReadOnlyDictionary<string, (double TotalMs, long Samples)> GpuPassIsolatedTotals => gpuPassIsolated;
+
+    /// <summary>Frames recorded while isolation was on — the denominator for an amortised cost.</summary>
+    public long GpuIsolationFrames => gpuIsolationFrames;
+
+    /// <summary>Discards everything isolation has measured so far and restarts the window.</summary>
+    /// <remarks>
+    /// <b>Because a frame that did not render the scene is not a frame the scene costs.</b> A demo
+    /// streams for hundreds of frames before its full path runs, and counting those in the
+    /// denominator divided every post-load pass by five — while the first execution of each, cold,
+    /// went into the per-run mean. A caller that knows when steady state begins calls this there.
+    /// </remarks>
+    public void ResetGpuIsolation()
+    {
+        gpuPassIsolated.Clear();
+        gpuIsolationFrames = 0;
+    }
 
     private QueryPool gpuTimingPool;
     private float timestampPeriodNs;
@@ -738,6 +759,7 @@ public sealed partial class VulkanGraphicsDevice
 
         // One stackalloc shared across passes (CA2014 — no per-iteration
         // alloc). 8 = 7 color + 1 depth; bump for wider MRT passes.
+        if (gpuPassIsolation) gpuIsolationFrames++;
         var clearValues = stackalloc ClearValue[8];
         var defaultPasses = 0;
         // Only the FIRST submission of the frame may wait on imageAvailable; the rest are ordered

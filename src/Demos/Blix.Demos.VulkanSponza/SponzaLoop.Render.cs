@@ -307,6 +307,13 @@ internal sealed partial class SponzaLoop
             // built for a view that no longer exists — shadows simply missing, with nothing to say
             // why. Same family as the two cache bugs already fixed here; caching is a claim about
             // what the result depends on, and this changed what it depends on.
+            // Not due this frame: the map from an earlier frame still covers, and the lit pass is
+            // already being handed the matrix it was rendered with.
+            if (!cascadeDue[ci])
+            {
+                cascadeRendered[ci] = false;
+                continue;
+            }
             if (vp == cachedCascadeViewProj[ci]
                 && opaqueDrawables.Count == cachedCascadeCasters[ci]
                 && lodKey == cachedCascadeLod[ci]
@@ -1640,17 +1647,28 @@ internal sealed partial class SponzaLoop
 
         if (vk.GpuPassIsolation)
         {
-            Console.WriteLine("[VulkanSponza] isolated GPU ms per pass (own command buffer, fence-waited):");
+            // <b>Two columns, because a scheduled pass separates them.</b> per-run is what an
+            // execution costs; per-frame is what the renderer pays, and they differ by exactly the
+            // fraction of frames the pass runs in. A cascade updated every fourth frame keeps its
+            // per-run cost and drops its per-frame cost fourfold, and only the second column can
+            // see that — which is why this exists before the scheduling does.
+            var frames = Math.Max(1, vk.GpuIsolationFrames);
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] isolated GPU ms per pass over {frames} frames (own command buffer, fence-waited):"));
+            Console.WriteLine("     per-run    per-frame   runs/frame  pass");
             double isoTotal = 0;
             foreach (var e in vk.GpuPassIsolatedTotals
                          .Where(e => e.Value.Samples > 0)
-                         .OrderByDescending(e => e.Value.TotalMs / e.Value.Samples))
+                         .OrderByDescending(e => e.Value.TotalMs / frames))
             {
-                var mean = e.Value.TotalMs / e.Value.Samples;
-                isoTotal += mean;
-                Console.WriteLine(string.Create(Inv, $"  {mean,8:0.000} ms  {e.Key}  (n={e.Value.Samples})"));
+                var perRun = e.Value.TotalMs / e.Value.Samples;
+                var perFrame = e.Value.TotalMs / frames;
+                isoTotal += perFrame;
+                Console.WriteLine(string.Create(Inv,
+                    $"  {perRun,8:0.000} ms  {perFrame,8:0.000} ms  {e.Value.Samples / (double)frames,9:0.00}   {e.Key}"));
             }
-            Console.WriteLine(string.Create(Inv, $"  {isoTotal,8:0.000} ms  TOTAL (exceeds the frame: isolation removes overlap)"));
+            Console.WriteLine(string.Create(Inv,
+                $"             {isoTotal,8:0.000} ms  TOTAL per frame (exceeds it: isolation removes overlap)"));
         }
 
         // <b>And what the alternative instrument would cost before it measured anything.</b>
