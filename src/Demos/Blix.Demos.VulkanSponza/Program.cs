@@ -81,6 +81,14 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
 
     // Graph resources + passes.
     private GraphResourceHandle hdrHandle;       // 1× resolve target (present samples this)
+    private readonly GraphResourceHandle[] taaHandles = new GraphResourceHandle[2];
+    private readonly PassHandle[] taaPassHandles = new PassHandle[2];
+    private readonly PipelineHandle[] taaPipelines = new PipelineHandle[2];
+    private int taaWrite;
+    private int taaWriteNext;
+    private Matrix4x4 prevTaaViewProj = Matrix4x4.Identity;
+    private bool taaHistoryValid;
+    private Matrix4x4 viewProjJittered = Matrix4x4.Identity;
     private GraphResourceHandle hdrMsaaHandle;   // MSAA colour the lit pass renders into
     private GraphResourceHandle depthHandle;     // MSAA depth (matches hdrMsaa)
     // 4x MSAA, and it costs about 3.5 ms of a 21 ms frame — roughly 18%, measured in paired
@@ -938,6 +946,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // 2x-per-level decimation this cook produces, which is enough to clear the camera jitter that
     // was driving the oscillation without noticeably delaying a real transition.
     private const float LodHysteresis = 1.35f;
+    /// <summary>What multiple of the global LOD budget alpha-cutout geometry starts at.</summary>
+    private static float FoliageLodMargin = 4f;
+    private Vector3 foliageCentre;
+    private bool foliageValid;
     private bool mouseLook;
     private float lastMouseX, lastMouseY;   // latest cursor pos (for click-to-pick)
     // Diagnostics selection: a contributor registered after consolidation so a
@@ -1169,6 +1181,14 @@ internal sealed class RenderSettings
     // nothing is waiting on. Judge a change to it with lod-tris in the overlay, not the frame
     // counter: the count is exact and the clock on this machine is not.
     [Tune(0f, 8f)]     public float LodErrorPixels = 2.0f;
+    // <b>How much of the image comes from previous frames. 0 is off, and off is the baseline.</b>
+    // This costs a full-screen resolve and buys stability, not milliseconds — the temporal work that
+    // bought time was the fog's slice count and GTAO's tap count, and both are already spent. The
+    // policy it implements is that the present frame owns the image and history only quietens it:
+    // rejected off-screen, clamped to the current neighbourhood everywhere else.
+    [Tune(0f, 0.97f)]  public float Taa = 0.7f;
+    // Bright where history was refused or clamped back. A still camera should show nearly nothing.
+    [Tune]             public bool ShowTaaRejection;
 }
 
 // Pickable scene primitives for the diagnostics overlay. Built after geometry

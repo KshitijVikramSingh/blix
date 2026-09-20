@@ -159,13 +159,36 @@ internal sealed partial class SponzaLoop
         // where its shadow could FALL, and that is the camera's frustum rather than the light's.
         cameraFrustumThisFrame = Frustum.FromViewProjection(Matrix4x4.Transpose(viewProj));
 
+        // <b>A clip-space translation, so the offset is exact without touching the projection.</b>
+        // Post-multiplying by a translation adds jitter * w to clip.xy, which is precisely a
+        // sub-pixel shift of the whole frustum — the alternative is editing the perspective matrix's
+        // terms and getting a sign convention wrong in a way nothing reports.
+        //
+        // Halton (2,3) rather than a random pair: successive frames need to land at points a
+        // low-discrepancy sequence spreads evenly over the pixel, which is the same argument the fog
+        // slice jitter and the GTAO slice rotation both rest on. Accumulating identical samples
+        // reduces nothing.
+        if (render.Taa > 0f && frame.Width > 0 && frame.Height > 0)
+        {
+            var jx = (Halton(framesRendered, 2) - 0.5f) * 2f / frame.Width;
+            var jy = (Halton(framesRendered, 3) - 0.5f) * 2f / frame.Height;
+            viewProjJittered = viewProj * Matrix4x4.CreateTranslation(jx, jy, 0f);
+        }
+        else
+        {
+            viewProjJittered = viewProj;
+        }
+
         // Stress hook: flip fog every 90 frames to exercise the on/off barrier
         // transitions under validation (no effect without --fog-stress).
         if (fogStress && (++fogStressFrame % 90 == 0)) fog.Enabled = !fog.Enabled;
 
         var perFrameList = new List<ShaderUniform>
         {
-            new("uViewProjection",   new Matrix4x4Uniform(viewProj)),
+            // <b>The JITTERED matrix, and only here.</b> Cascade fitting, frustum culling and LOD
+            // all keep the true one: a sub-pixel offset is meaningless to them and feeding it in
+            // would make a cascade refit, and a cache miss, every frame for nothing.
+            new("uViewProjection",   new Matrix4x4Uniform(viewProjJittered)),
             new("uSunDirection",     new Vector3Uniform(sunDirection)),
             new("uSunIrradiance",    new Vector3Uniform(EffectiveSunIrradiance)),
             new("uCameraPos",        new Vector3Uniform(cameraPosition)),
@@ -786,9 +809,12 @@ internal sealed partial class SponzaLoop
             }
         }, clearColor: new GraphicsColor(0.05f, 0.07f, 0.10f, 1f));
 
+        // Resolve before the graph executes, so the pass is recorded with the rest of the frame.
+        RecordTaaResolve();
         graph.Execute(commandList);
 
         RecordPresentPass(commandList);
+        taaWrite = taaWriteNext;
 
         // Capture only from the LIT arm — a flat-phase capture would be a picture of the control.
         // <b>fullyLoaded, or the capture can read a buffer no pass has written.</b> Moving the frame
@@ -1319,6 +1345,21 @@ internal sealed partial class SponzaLoop
         return t == float.MaxValue ? skyVolumeSpan.Length() : t;
     }
 
+    /// <summary>Halton low-discrepancy sequence, one dimension.</summary>
+    private static float Halton(int index, int radix)
+    {
+        var result = 0f;
+        var f = 1f / radix;
+        var i = index + 1;
+        while (i > 0)
+        {
+            result += f * (i % radix);
+            i /= radix;
+            f /= radix;
+        }
+        return result;
+    }
+
     // Whether the fog has real fields to scatter. Both halves must be there: the baked sky
     // visibility volume decides how much sky a froxel sees, and the bounce atlas supplies what the
     // scene sent back. Either one missing and the medium is back to a constant, so say so once
@@ -1729,9 +1770,43 @@ internal sealed partial class SponzaLoop
         Console.WriteLine($"[VulkanSponza]   {bentPath}");
     }
 
+    // <b>One of the two resolve passes, alternating.</b> Not recording the other is what makes its
+    // target this frame's history — the graph executes only what is recorded, so the unrecorded
+    // pass's image survives untouched from the frame before.
+    private void RecordTaaResolve()
+    {
+        if (render.Taa <= 0f) { taaHistoryValid = false; return; }
+        Matrix4x4.Invert(viewProjJittered, out var invJittered);
+        var uniforms = new ShaderUniform[]
+        {
+            new("uInvViewProjJittered", new Matrix4x4Uniform(invJittered)),
+            new("uPrevViewProj",        new Matrix4x4Uniform(taaHistoryValid ? prevTaaViewProj : viewProj)),
+            new("uParams",              new Vector4Uniform(new Vector4(
+                render.Taa, taaHistoryValid ? 1f : 0f, render.ShowTaaRejection ? 1f : 0f, 0f))),
+        };
+        var bindings = new[]
+        {
+            new ShaderTextureBinding("uCurrent", graph.GetColorTexture(hdrHandle), Slot: 1),
+            new ShaderTextureBinding("uHistory", graph.GetColorTexture(taaHandles[taaWrite ^ 1]), Slot: 2),
+            new ShaderTextureBinding("uDepth", graph.GetDepthTexture(SampleableSceneDepth), Slot: 3),
+        };
+        graph.Pass(taaPassHandles[taaWrite], scope => fullscreen.Draw(
+            scope, taaPipelines[taaWrite], bindings, pushConstants: null, uniforms: uniforms));
+        // The UNJITTERED matrix, because the resolved image this frame writes is what the next frame
+        // reprojects into — and that image is aligned to the un-jittered grid by construction.
+        prevTaaViewProj = viewProj;
+        taaHistoryValid = true;
+        // Flip AFTER recording, so present binds the target this frame wrote and the next frame
+        // reads it as history.
+        taaWriteNext = taaWrite ^ 1;
+    }
+
     private void RecordPresentPass(RenderCommandList commandList)
     {
-        var hdrTex = graph.GetColorTexture(hdrHandle);
+        // Present samples whatever was resolved this frame, or the raw HDR when TAA is off.
+        var hdrTex = render.Taa > 0f && taaHistoryValid
+            ? graph.GetColorTexture(taaHandles[taaWrite])
+            : graph.GetColorTexture(hdrHandle);
         var push = new byte[8];
         var exposure = render.Exposure;   // local: MemoryMarshal.Write needs an `in` ref
         MemoryMarshal.Write(push.AsSpan(0, 4), in exposure);

@@ -84,6 +84,8 @@ internal sealed partial class SponzaLoop
                 ambient.Slices = gs;
                 ambient.Steps = gt;
             }
+            if (cmdArgs[i] == "--foliage-lod" && float.TryParse(cmdArgs[i + 1], out var fl))
+                FoliageLodMargin = MathF.Max(0.1f, fl);
             if (cmdArgs[i] == "--shadow-lod" && float.TryParse(cmdArgs[i + 1], out var sl))
                 shadowLodTexels = MathF.Max(0.1f, sl);
             if (cmdArgs[i] == "--bounce-div" && float.TryParse(cmdArgs[i + 1], out var bd))
@@ -254,6 +256,12 @@ internal sealed partial class SponzaLoop
         // target only ever sampled .rgb by tonemap. No alpha (glass blends with
         // source alpha, which needs no dst-alpha channel).
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.R11G11B10F, fullSize);
+        // <b>Two, because a resolve cannot sample the target it writes.</b> Every other history in
+        // this renderer is read from a resource a LATER pass overwrites, which ReadHistory covers
+        // with one declaration. A temporal resolve is the exception: its input and its output are
+        // the same image one frame apart, so the pair has to exist and the passes have to alternate.
+        for (var i = 0; i < 2; i++)
+            taaHandles[i] = graph.ColorTarget($"taa{i}", TextureFormat.R11G11B10F, fullSize);
         // MSAA colour + depth the lit pass renders into; resolves to hdr.
         hdrMsaaHandle = graph.ColorTarget("hdr-msaa", TextureFormat.R11G11B10F, fullSize, samples: MsaaSamples);
         depthHandle = graph.DepthTarget("scene-depth", fullSize, samples: MsaaSamples);
@@ -433,6 +441,20 @@ internal sealed partial class SponzaLoop
         }
         litPass = litPass.Read(ambientDenoisedHandle);
         litPassHandle = litPass.Handle;
+
+        // One pass per parity. Only one is recorded each frame; the other's target is that frame's
+        // history, and ReadHistory is what lets a pass declare a read of it before it is rewritten.
+        var taaInterface = Reflect("present.vert", "taa.frag");
+        for (var i = 0; i < 2; i++)
+        {
+            taaPassHandles[i] = graph.GraphicsPass($"taa-resolve{i}")
+                .Target(taaHandles[i], LoadOp.Clear, StoreOp.Store)
+                .Read(hdrHandle)
+                .Read(SampleableSceneDepth)
+                .ReadHistory(taaHandles[i ^ 1])
+                .Shader(taaInterface)
+                .Handle;
+        }
         graph.Compile();
 
         // --- Shader programs + pipelines --------------------------------
@@ -577,6 +599,18 @@ internal sealed partial class SponzaLoop
             hiZPipelines[level] = Pipeline(hiZProgram, VertexPosition3NormalTexture.Layout,
                 DepthState.Disabled, RasterizerState.NoCulling,
                 new[] { BlendState.Disabled }, hiZPassHandles[level], $"hiz{level}");
+        }
+
+        // One program, two pipelines — each bound to its own pass surface, because a pipeline is
+        // compatible with the render pass it was built against and the two resolve passes target
+        // different images.
+        var taaSpv = File.ReadAllBytes(Path.Combine(shaderDir, "taa.frag.spv"));
+        var taaProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, taaSpv, taaInterface, "taa");
+        for (var i = 0; i < 2; i++)
+        {
+            taaPipelines[i] = Pipeline(taaProgram, VertexPosition3NormalTexture.Layout,
+                DepthState.Disabled, RasterizerState.NoCulling,
+                new[] { BlendState.Disabled }, taaPassHandles[i], $"taa{i}");
         }
 
         var gtaoDenoiseSpv = File.ReadAllBytes(Path.Combine(shaderDir, "gtao_denoise.frag.spv"));

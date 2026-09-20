@@ -92,6 +92,47 @@ internal sealed partial class SponzaLoop
         blendLodState = new int[blendDrawables.Count];
         System.Array.Fill(opaqueLodMargins, 1f);
         System.Array.Fill(blendLodMargins, 1f);
+
+        // <b>Foliage starts at four times the budget, selected by CUTOUT rather than by name.</b>
+        // A drawable with an alpha cutoff is a leaf card or an ivy sprig — geometry whose silhouette
+        // is already defined by a texture's alpha rather than by its triangles, so coarsening the
+        // mesh moves the shape far less than it would on a column or an arch. It is also the
+        // geometry that costs the most: removing the ivy and tree packs takes 9.85 ms off the frame.
+        //
+        // By material and not by asset name because names come from whatever the glTF author chose,
+        // and a selector that reads "tree" stops working the first time somebody cooks a different
+        // one. The cutoff is a property of what the surface IS.
+        var foliage = 0;
+        for (var i = 0; i < opaqueDrawables.Count; i++)
+        {
+            if (opaqueDrawables[i].AlphaCutoff <= 0f) continue;
+            opaqueLodMargins[i] = FoliageLodMargin;
+            foliage++;
+        }
+        for (var i = 0; i < blendDrawables.Count; i++)
+        {
+            if (blendDrawables[i].AlphaCutoff <= 0f) continue;
+            blendLodMargins[i] = FoliageLodMargin;
+        }
+        // <b>Where the foliage actually is, so a measurement run can be pointed at it.</b> The
+        // measurement orbit was placed by arithmetic on the volume bounds — centre of the box, 28%
+        // of the shorter span, 3.2 m off the floor, facing along the path — which put it in the dark
+        // base of the atrium with the tree never in frame. Every foliage number taken on it was
+        // therefore a number about stone. A path derived from the geometry it is meant to exercise
+        // cannot drift that way.
+        var sum = Vector3.Zero;
+        var n = 0;
+        foreach (var d in opaqueDrawables)
+        {
+            if (d.AlphaCutoff <= 0f) continue;
+            sum += (d.Bounds.Min + d.Bounds.Max) * 0.5f;
+            n++;
+        }
+        foliageCentre = n > 0 ? sum / n : Vector3.Zero;
+        foliageValid = n > 0;
+        Console.WriteLine(
+            $"[VulkanSponza]   {foliage:N0} cutout drawables start at {FoliageLodMargin:0.#}x the LOD budget"
+            + (foliageValid ? $", centred at {foliageCentre}." : "."));
     }
 
     // Per-primitive LOD0 triangle-size distribution across all opaque drawables.

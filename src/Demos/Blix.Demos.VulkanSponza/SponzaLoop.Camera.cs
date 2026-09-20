@@ -93,18 +93,27 @@ internal sealed partial class SponzaLoop
     {
         var t = (framesRendered % OrbitFrames) / (float)OrbitFrames;
         var angle = t * MathF.Tau;
-        var centre = skyVolumeMin + skyVolumeSpan * 0.5f;
+        // Orbit the foliage when there is any, because that is the content a measurement most often
+        // wants in frame and the one a bounds-derived path missed entirely.
+        var centre = foliageValid ? foliageCentre : skyVolumeMin + skyVolumeSpan * 0.5f;
         // Inside the building rather than around it: the arcade is where the overdraw, the cutout
         // foliage and the cascade transitions all are, and an exterior orbit sees none of them.
-        var radius = MathF.Min(skyVolumeSpan.X, skyVolumeSpan.Z) * 0.28f;
+        var radius = MathF.Min(skyVolumeSpan.X, skyVolumeSpan.Z) * 0.20f;
+        var eyeY = centre.Y * 0.55f + skyVolumeMin.Y * 0.45f;
         cameraPosition = new Vector3(
             centre.X + MathF.Cos(angle) * radius,
-            skyVolumeMin.Y + 3.2f,
+            eyeY,
             centre.Z + MathF.Sin(angle) * radius);
-        // Look along the path rather than at the centre: a camera pointed at one spot for a whole
-        // revolution keeps the same geometry on screen and never re-fits a cascade the hard way.
-        camYaw = -angle + MathF.PI * 0.5f;
-        camPitch = -0.05f;
+
+        // <b>Looking inward now, and the earlier reasoning for not doing so was wrong.</b> Facing
+        // along the path was meant to keep the cascades re-fitting the hard way — but it also kept
+        // the subject out of frame, and a path that exercises the shadow fit while measuring none of
+        // the content measures the wrong thing convincingly. An inward-facing orbit still sweeps the
+        // light frustum through the whole scene, because the camera POSITION is what a cascade is
+        // fitted around, and that still travels the full circle.
+        var toCentre = centre - cameraPosition;
+        camYaw = MathF.Atan2(toCentre.X, -toCentre.Z);
+        camPitch = MathF.Atan2(toCentre.Y, new Vector2(toCentre.X, toCentre.Z).Length());
         UpdateCamera();
     }
 
