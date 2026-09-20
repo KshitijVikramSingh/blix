@@ -47,6 +47,21 @@ public sealed class ShaderTunablePanel
     // (e.g. gating a debug gizmo on a visualize toggle). 0 if unknown.
     public float Value(string name) => values.TryGetValue(name, out var v) ? v : 0f;
 
+    /// <summary>Sets a tunable's value, for a caller that knows the name.</summary>
+    /// <remarks>
+    /// <b>So a shader dial can be driven by something other than a hand on a slider.</b> These are
+    /// live-tuning controls, which is exactly right while somebody is looking at the image and
+    /// exactly wrong for a measurement: an A/B run has no overlay, so a term that only exists as a
+    /// tunable cannot be measured at all. Returns false for a name the shader does not declare,
+    /// which is the difference between setting a dial and silently setting nothing.
+    /// </remarks>
+    public bool TrySetValue(string name, float value)
+    {
+        if (!values.ContainsKey(name)) return false;
+        values[name] = value;
+        return true;
+    }
+
     // Register a control per tunable, grouped by block. Call from
     // IDebuggable.Debug. Float → slider, enum → dropdown; edits read back in.
     public void BuildControls(DebugContext debug)

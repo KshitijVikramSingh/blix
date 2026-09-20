@@ -52,7 +52,7 @@ vec3 blix_probePosition(ivec3 probe, ivec3 dims, vec3 boundsMin, vec3 boundsSpan
 vec3 blix_probeIrradianceEx(
     sampler2D irradianceAtlas, sampler2D depthAtlas,
     ivec3 dims, vec3 boundsMin, vec3 boundsSpan,
-    vec3 worldPos, vec3 n, out float confidence)
+    vec3 worldPos, vec3 n, bool tetrahedral, out float confidence)
 {
     // <b>A surface must not reject its own probes, and without this bias it does.</b> The visibility
     // test asks a probe how far its geometry is in this direction — and for a point sitting ON a
@@ -73,13 +73,73 @@ vec3 blix_probeIrradianceEx(
     vec3 sum = vec3(0.0);
     float weightSum = 0.0;
 
-    for (int i = 0; i < 8; ++i) {
-        ivec3 offset = ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+    // <b>Four corners or eight, and on this machine that is a question about bytes.</b> A cube
+    // splits into six tetrahedra by Kuhn's triangulation: sort the fractional coordinates and the
+    // ordering names the tetrahedron, whose four barycentric weights are the successive differences
+    // of the sorted values. The reconstruction stays C0 across tetrahedron faces, so there are no
+    // seams — it is a different exact interpolation of the same lattice, not an approximation of
+    // trilinear.
+    //
+    // Worth trying because the lit pass measured its arithmetic as free and its fetches as the
+    // entire cost: the GGX lobe is 0.04 ms while this lookup's terms are 8.69. Halving the corners
+    // halves both the irradiance and the depth fetches and pays a few compares for it, and it
+    // measures exactly that — 1.302x of frame to 1.170x, a 2.95 ms saving.
+    //
+    // <b>It ships OFF, because it leaks, and the mechanism is worth stating exactly.</b> The first
+    // guess was that four candidates empty the surviving set more often and drop through to the
+    // unweighted nearest-probe fallback. That happens, and retrying the other four corners when the
+    // set comes back empty costs nothing measurable — the 2.95 ms survived the fix intact — and it
+    // did not stop the leak.
+    //
+    // The leak is in the NEARLY-empty case. With eight corners, six probes behind a wall and two
+    // survivors average to something diluted; with four, a tetrahedron holding three rejected and
+    // one survivor gives that one probe full weight. The Chebyshev test in this scene recovers only
+    // 39% of the blend weight that lands on probes with no line of sight, so this does not create
+    // leaks — it removes the dilution that was hiding the ones already there.
+    //
+    // Which makes this gated on the VISIBILITY TEST rather than on the interpolation. Against a
+    // test that rejected correctly, four corners would be as good as eight and 2.95 ms cheaper. The
+    // way to earn it is to fix the occlusion, not the reconstruction — and note that halving the
+    // PIXELS asking instead (a half-resolution incident-light pass) has none of this problem, since
+    // every query it does make is still the full eight-corner blend.
+    int corners = 8;
+    ivec3 tet[4];
+    vec4 tetW = vec4(0.0);
+    if (tetrahedral) {
+        corners = 4;
+        // Sorted-permutation barycentric: w = (1 - a, a - b, b - c, c) for fractions sorted a>=b>=c,
+        // with each successive vertex adding one to the axis whose fraction came next.
+        bvec3 o = bvec3(frac.x >= frac.y, frac.y >= frac.z, frac.x >= frac.z);
+        ivec3 ax;
+        if (o.x && o.y)                 ax = ivec3(0, 1, 2);
+        else if (o.x && !o.y && o.z)    ax = ivec3(0, 2, 1);
+        else if (!o.z)                  ax = ivec3(2, 0, 1);
+        else if (!o.x && o.y)           ax = ivec3(1, 0, 2);
+        else if (!o.x && !o.y && o.z)   ax = ivec3(1, 2, 0);
+        else                            ax = ivec3(2, 1, 0);
+        float f0 = frac[ax.x], f1 = frac[ax.y], f2 = frac[ax.z];
+        tetW = vec4(1.0 - f0, f0 - f1, f1 - f2, f2);
+        ivec3 acc = ivec3(0);
+        tet[0] = acc;
+        acc[ax.x] += 1; tet[1] = acc;
+        acc[ax.y] += 1; tet[2] = acc;
+        acc[ax.z] += 1; tet[3] = acc;
+    }
+
+    for (int i = 0; i < corners; ++i) {
+        ivec3 offset = tetrahedral
+            ? tet[i]
+            : ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
         ivec3 probe = clamp(base + offset, ivec3(0), dims - 1);
 
-        // Trilinear share of this corner.
-        vec3 t = mix(1.0 - frac, frac, vec3(offset));
-        float weight = t.x * t.y * t.z;
+        float weight;
+        if (tetrahedral) {
+            weight = tetW[i];
+        } else {
+            // Trilinear share of this corner.
+            vec3 t = mix(1.0 - frac, frac, vec3(offset));
+            weight = t.x * t.y * t.z;
+        }
 
         vec3 probePos = blix_probePosition(probe, dims, boundsMin, boundsSpan);
         vec3 toProbe = probePos - worldPos;
@@ -128,6 +188,43 @@ vec3 blix_probeIrradianceEx(
         weightSum += weight;
     }
 
+    // <b>When four candidates all fail, try the other four before giving up.</b> The tetrahedral
+    // set is half the cube's corners, so an empty result does not mean the point is unreachable —
+    // it means the half we happened to pick was. Dropping straight to the unweighted nearest probe
+    // from there is what put colour through interior walls: that fallback carries no occlusion at
+    // all, and halving the candidates made it fire far more often than trilinear ever did.
+    //
+    // Retrying the full eight makes the leak strictly no worse than the eight-corner blend, because
+    // the worst case IS the eight-corner blend. It costs eight fetches only where four found
+    // nothing, which is the rare case by construction — the typical pixel still pays four.
+    if (tetrahedral && weightSum <= 1e-5) {
+        for (int i = 0; i < 8; ++i) {
+            ivec3 offset = ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+            ivec3 probe = clamp(base + offset, ivec3(0), dims - 1);
+            vec3 t = mix(1.0 - frac, frac, vec3(offset));
+            float weight = t.x * t.y * t.z;
+
+            vec3 probePos = blix_probePosition(probe, dims, boundsMin, boundsSpan);
+            vec3 toProbe = probePos - worldPos;
+            float dist = length(toProbe);
+            vec3 dir = dist > 1e-5 ? toProbe / dist : n;
+            float facing = dot(dir, n) * 0.5 + 0.5;
+            weight *= facing * facing;
+            if (weight <= 1e-4) continue;
+
+            vec2 moments = texture(depthAtlas, blix_probeUv(probe, dims, -dir)).rg;
+            if (dist > moments.x) {
+                float variance = max(moments.y, 1e-5);
+                float d = dist - moments.x;
+                float chebyshev = variance / (variance + d * d);
+                weight *= max(chebyshev * chebyshev * chebyshev, 0.0);
+            }
+            if (weight <= 1e-4) continue;
+            sum += texture(irradianceAtlas, blix_probeUv(probe, dims, n)).rgb * weight;
+            weightSum += weight;
+        }
+    }
+
     // <b>Every probe rejected is a reconstruction failure, not a measurement of darkness.</b> Zero
     // was the first answer here and it is wrong in the one place it fires: a point the volume cannot
     // describe is not a point with no light on it. Falling back to the nearest probe unweighted is
@@ -136,6 +233,16 @@ vec3 blix_probeIrradianceEx(
     if (weightSum > 1e-5) return sum / weightSum;
     ivec3 nearest = clamp(ivec3(floor(grid + 0.5)), ivec3(0), dims - 1);
     return texture(irradianceAtlas, blix_probeUv(nearest, dims, n)).rgb;
+}
+
+/// Eight-corner form, for callers that have not been given the choice.
+vec3 blix_probeIrradianceEx(
+    sampler2D irradianceAtlas, sampler2D depthAtlas,
+    ivec3 dims, vec3 boundsMin, vec3 boundsSpan,
+    vec3 worldPos, vec3 n, out float confidence)
+{
+    return blix_probeIrradianceEx(irradianceAtlas, depthAtlas, dims, boundsMin, boundsSpan,
+                                  worldPos, n, false, confidence);
 }
 
 /// The lookup without the diagnostic, for call sites that do not want to carry the out parameter.

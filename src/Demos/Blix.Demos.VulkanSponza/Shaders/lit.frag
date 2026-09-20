@@ -155,6 +155,11 @@ layout(set = 0, binding = 0) uniform Frame {
     // added that none of channels 12 and 17-20 can see, and that is a different hunt.
     //@tune 0..1 = 0
     float uForceOpaqueCutout;
+    // Four-corner tetrahedral probe reconstruction instead of eight-corner trilinear. Halves this
+    // lookup's fetches and pays a few compares; watch for LEAKING rather than blurring, since
+    // fewer candidates means the visibility test empties the set more often.
+    //@tune 0..1 = 0
+    float uProbeTetrahedral;
     // Measurement switches, one per --ab mode. Each removes one term from the fragment so a paired
     // interleaved run can price it:
     //   x  collapse every material UV to a constant, so the five material samples all hit one
@@ -717,7 +722,8 @@ void main() {
         // colour bled through walls from curtains and a tree they do not face.
         vec3 incident = blix_probeIrradianceEx(
             uSkyBounce, uSkyBounceDepth, ivec3(frame.uBounceDims.xyz),
-            frame.uSkyMin.xyz, 1.0 / frame.uSkyScale.xyz, vWorldPos, bounceN, probeConfidence);
+            frame.uSkyMin.xyz, 1.0 / frame.uSkyScale.xyz, vWorldPos, bounceN,
+            frame.uProbeTetrahedral > 0.5, probeConfidence);
         vizBounceRaw = incident;
         bounce = incident * albedo * (1.0 - metallic) * ao * visibility;
     }

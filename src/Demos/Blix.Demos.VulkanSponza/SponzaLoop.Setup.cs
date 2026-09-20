@@ -322,6 +322,19 @@ internal sealed partial class SponzaLoop
             File.ReadAllText(Path.Combine(shaderDir, "lit.frag"))));
         tuneObjects = new ObjectTunables(fog, shadows, render, ambient);
 
+        // --tune <uName>=<value>, repeatable. A shader dial that can only be reached from the
+        // overlay cannot be measured, because an --ab run has no overlay.
+        var cmdArgsTune = Environment.GetCommandLineArgs();
+        for (var i = 0; i < cmdArgsTune.Length - 1; i++)
+        {
+            if (cmdArgsTune[i] != "--tune") continue;
+            var kv = cmdArgsTune[i + 1].Split('=');
+            if (kv.Length != 2 || !float.TryParse(kv[1], out var tv)) continue;
+            Console.WriteLine(tunePanel.TrySetValue(kv[0], tv)
+                ? $"[VulkanSponza] tune {kv[0]} = {tv}"
+                : $"[VulkanSponza] tune {kv[0]}: no such shader uniform — ignored.");
+        }
+
         // One graphics pass per cascade, each writing its own depth target.
         // Both shadow programs are render-pass-compatible with these passes.
         for (var c = 0; c < CascadeCount; c++)
