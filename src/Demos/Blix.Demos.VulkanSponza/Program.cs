@@ -185,6 +185,14 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private GraphResourceHandle ambientDenoisedHandle; // what the lit pass actually samples
     private PassHandle gtaoPassHandle;
     private PassHandle gtaoDenoisePassHandle;
+    // rgb = incident bounced radiance, a = baked sky visibility, at incidentScale.
+    private GraphResourceHandle incidentHandle;
+    private PassHandle incidentPassHandle;
+    private PipelineHandle incidentPipeline;
+    // What the lit pass actually samples: the coarse field reconstructed to full resolution.
+    private GraphResourceHandle incidentFullHandle;
+    private PassHandle incidentResolvePassHandle;
+    private PipelineHandle incidentResolvePipeline;
     private ShaderProgramHandle gtaoProgram;
     private PipelineHandle gtaoPipeline;
     private ShaderProgramHandle gtaoDenoiseProgram;
@@ -595,6 +603,14 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // with its neighbours. This exists to find out whether fold detail is lost to RESOLUTION rather
     // than to the search radius.
     private float aoScale = 0.5f;
+
+    // The incident-light field's resolution, as a fraction of the framebuffer. Half by default:
+    // the probe volume it reconstructs is coarser than that by a wide margin. 1 via --incident-full
+    // for the paired comparison.
+    private float incidentScale = 0.5f;
+    // 0 = the lit pass does the probe and sky-visibility lookups itself, as it always has.
+    // 1 = it reads them from the half-res field. The arm, not a setting to leave on a hunch.
+    private bool incidentField;
 
     // --ao-debug N: make the GTAO pass write an intermediate instead of the bent normal. See gtao.frag.
     private float aoDebug;

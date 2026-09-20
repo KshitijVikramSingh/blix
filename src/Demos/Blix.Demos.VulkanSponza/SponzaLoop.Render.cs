@@ -230,6 +230,12 @@ internal sealed partial class SponzaLoop
             // w gates the leak metric's march: 0 means no occupancy grid shipped and channel 21
             // has nothing to be the truth about.
             new("uOccupancyDims",    new Vector4Uniform(new Vector4(occX, occY, occZ, occX > 0 ? 1f : 0f))),
+            // z gates the read. Off in the --ab off phase alongside the passes that fill it, so the
+            // arm prices the whole substitution rather than half of it.
+            new("uIncident",         new Vector4Uniform(new Vector4(
+                Math.Max(1, (int)(frame.Width * incidentScale)),
+                Math.Max(1, (int)(frame.Height * incidentScale)),
+                incidentField && !(abMode == "incident" && AbOffPhase) ? 1f : 0f, 0f))),
             // One component per --ab shading mode, live only during that mode's off-phase.
             new("uAbFlags",          new Vector4Uniform(new Vector4(
                 AbOffPhase && abMode == "textures" ? 1f : 0f,
@@ -729,6 +735,71 @@ internal sealed partial class SponzaLoop
                 },
                 pushConstants: null,
                 uniforms: denoiseUniforms));
+        }
+
+        // The incident-light field. Recorded unconditionally so the graph's target is never stale,
+        // but skipped in the --ab off phase so the arm prices the PASS as well as the lit pass's
+        // saving — leaving it running in both arms would count the saving and not what pays for it.
+        if (incidentField && !(abMode == "incident" && AbOffPhase))
+        {
+            Matrix4x4.Invert(cameraProjection, out var incidentInvProj);
+            Matrix4x4.Invert(cameraView, out var incidentInvView);
+            var incW = Math.Max(1, (int)(frame.Width * incidentScale));
+            var incH = Math.Max(1, (int)(frame.Height * incidentScale));
+            var incidentUniforms = new ShaderUniform[]
+            {
+                new("uInvProjection", new Matrix4x4Uniform(incidentInvProj)),
+                new("uInvView",       new Matrix4x4Uniform(incidentInvView)),
+                new("uTarget",        new Vector4Uniform(new Vector4(
+                    incW, incH, 1f / incW, 1f / incH))),
+                new("uSkyMin",        new Vector4Uniform(new Vector4(
+                    skyVolumeMin, skyVolumeLoaded && skyVisibilityEnabled && !skipSkySample ? 1f : 0f))),
+                new("uSkyScale",      new Vector4Uniform(new Vector4(skyVolumeInvSpan, 0.6f))),
+                new("uBounceDims",    new Vector4Uniform(new Vector4(bounceX, bounceY, bounceZ, 0f))),
+                new("uOccupancyDims", new Vector4Uniform(new Vector4(
+                    // <b>Read off the same sliders the lit pass binds, not a second copy.</b> Two
+                    // passes now reconstruct the same field, and the surest way to spend an evening
+                    // is to have them disagree about which reconstruction or which visibility test
+                    // they are using while both look plausible.
+                    occX, occY, occZ, occX > 0 ? tunePanel.Value("uProbeOcclusion") : 0f))),
+                new("uParams",        new Vector4Uniform(new Vector4(
+                    bounceReady && skyVisibilityEnabled && !skipSkySample ? 1f : 0f,
+                    tunePanel.Value("uProbeTetrahedral"), 0f, 0f))),
+            };
+            graph.Pass(incidentPassHandle, scope => fullscreen.Draw(
+                scope, incidentPipeline,
+                new[]
+                {
+                    new ShaderTextureBinding(
+                        "uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth), Slot: 1),
+                    new ShaderTextureBinding("uSkyBounce",
+                        bounceReady ? bounceTextures[BounceRead] : brdfLutTexture, Slot: 2),
+                    new ShaderTextureBinding("uSkyBounceDepth",
+                        bounceReady ? bounceDepthTextures[BounceRead] : brdfLutTexture, Slot: 3),
+                    new ShaderTextureBinding("uSkyVisibility",  skyVisibilityTextures[0], Slot: 4),
+                    new ShaderTextureBinding("uSkyVisibility1", skyVisibilityTextures[1], Slot: 5),
+                    new ShaderTextureBinding("uSkyVisibility2", skyVisibilityTextures[2], Slot: 6),
+                    new ShaderTextureBinding("uOccupancy",
+                        occX > 0 ? occupancyTexture : skyVisibilityTextures[0], Slot: 7),
+                },
+                pushConstants: null,
+                uniforms: incidentUniforms));
+
+            graph.Pass(incidentResolvePassHandle, scope => fullscreen.Draw(
+                scope, incidentResolvePipeline,
+                new[]
+                {
+                    new ShaderTextureBinding("uIncidentRaw", graph.GetColorTexture(incidentHandle), Slot: 1),
+                    new ShaderTextureBinding(
+                        "uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth), Slot: 2),
+                },
+                pushConstants: null,
+                uniforms: new ShaderUniform[]
+                {
+                    new("uInvProjection", new Matrix4x4Uniform(incidentInvProj)),
+                    new("uSource", new Vector4Uniform(new Vector4(
+                        incW, incH, 1f / incW, 1f / incH))),
+                }));
         }
 
         graph.Pass(litPassHandle, scope =>

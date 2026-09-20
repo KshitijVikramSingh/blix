@@ -52,6 +52,11 @@ internal sealed partial class SponzaLoop
         if (cmdArgs.Contains("--no-ao")) ambient.Enabled = false;
         if (cmdArgs.Contains("--no-shadow")) shadows.Enabled = false;
         if (cmdArgs.Contains("--ao-fullres")) aoScale = 1f;
+        // The incident-light field is an ARM, not a default: it trades a reconstruction the lit pass
+        // does per pixel for one done per coarse texel, and what that costs in the canopy is the
+        // open question.
+        if (cmdArgs.Contains("--incident")) incidentField = true;
+        if (cmdArgs.Contains("--incident-full")) { incidentField = true; incidentScale = 1f; }
         if (cmdArgs.Contains("--no-prepass")) noPrepass = true;
         for (var i = 0; i < cmdArgs.Length - 1; i++)
         {
@@ -300,6 +305,8 @@ internal sealed partial class SponzaLoop
         var gtaoInterface = Reflect("present.vert", "gtao.frag");
         var gtaoDenoiseInterface = Reflect("present.vert", "gtao_denoise.frag");
         var hiZInterface = Reflect("present.vert", "hiz_build.frag");
+        var incidentInterface = Reflect("present.vert", "incident.frag");
+        var incidentResolveInterface = Reflect("present.vert", "incident_resolve.frag");
         var shadowOpaqueInterface = Reflect("shadow.vert", "shadow.frag");
         var shadowMaskInterface = Reflect("shadow_mask.vert", "shadow_mask.frag");
 
@@ -386,6 +393,14 @@ internal sealed partial class SponzaLoop
             "ambient-visibility", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(aoScale));
         ambientDenoisedHandle = graph.ColorTarget("ambient-visibility-denoised", TextureFormat.Rgba16F, fullSize);
 
+        // <b>The incident-light field, at the frequency of the volume rather than the display.</b>
+        // rgb = bounced radiance, a = baked sky visibility. Rgba16F for the same reason the ambient
+        // buffer is: this is HDR radiance, and an 8-bit one would band a smooth interior wash.
+        // incidentScale 1 restores full resolution for the A/B, without the pass moving.
+        incidentHandle = graph.ColorTarget(
+            "incident-light", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(incidentScale));
+        incidentFullHandle = graph.ColorTarget("incident-light-full", TextureFormat.Rgba16F, fullSize);
+
         var prepassBuilder = graph.GraphicsPass("depth-prepass")
             .Depth(depthHandle, LoadOp.Clear, StoreOp.Store)
             .Shader(litInterface);
@@ -433,6 +448,22 @@ internal sealed partial class SponzaLoop
             .Shader(gtaoDenoiseInterface)
             .Handle;
 
+        // Between the depth it unprojects and the lit pass that reads it. It also reads the bounce
+        // atlas the injection dispatch writes, but that is a compute dispatch outside the graph's
+        // ordering, exactly as the lit pass's own read of it is.
+        incidentPassHandle = graph.GraphicsPass("incident-light")
+            .Target(incidentHandle, LoadOp.Clear, StoreOp.Store)
+            .Read(SampleableSceneDepth)
+            .Shader(incidentInterface)
+            .Handle;
+
+        incidentResolvePassHandle = graph.GraphicsPass("incident-resolve")
+            .Target(incidentFullHandle, LoadOp.Clear, StoreOp.Store)
+            .Read(incidentHandle)
+            .Read(SampleableSceneDepth)
+            .Shader(incidentResolveInterface)
+            .Handle;
+
         // At one sample there is nothing to resolve, and asking for a resolve anyway is invalid —
         // so the single-sample path renders straight into the target present reads.
         var litPass = MsaaSamples > 1
@@ -453,6 +484,7 @@ internal sealed partial class SponzaLoop
             litPass = litPass.Read(cascadeHandles[c]);
         }
         litPass = litPass.Read(ambientDenoisedHandle);
+        litPass = litPass.Read(incidentFullHandle);
         litPassHandle = litPass.Handle;
 
         // One pass per parity. Only one is recorded each frame; the other's target is that frame's
@@ -633,6 +665,20 @@ internal sealed partial class SponzaLoop
             DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled }, gtaoDenoisePassHandle, "gtao_denoise");
 
+        var incidentSpv = File.ReadAllBytes(Path.Combine(shaderDir, "incident.frag.spv"));
+        var incidentProgram = vk.CreateShaderProgramFromSpv(
+            presentVertSpv, incidentSpv, incidentInterface, "incident");
+        incidentPipeline = Pipeline(incidentProgram, VertexPosition3NormalTexture.Layout,
+            DepthState.Disabled, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled }, incidentPassHandle, "incident");
+
+        var incidentResolveSpv = File.ReadAllBytes(Path.Combine(shaderDir, "incident_resolve.frag.spv"));
+        var incidentResolveProgram = vk.CreateShaderProgramFromSpv(
+            presentVertSpv, incidentResolveSpv, incidentResolveInterface, "incident_resolve");
+        incidentResolvePipeline = Pipeline(incidentResolveProgram, VertexPosition3NormalTexture.Layout,
+            DepthState.Disabled, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled }, incidentResolvePassHandle, "incident_resolve");
+
         // Fullscreen triangle for the sky + present passes (positions synthesised
         // from gl_VertexIndex in the vertex shader — the buffer is never sampled).
         fullscreen = new FullscreenPass(vk, "present.dummy");
@@ -712,6 +758,8 @@ internal sealed partial class SponzaLoop
             // flag that decides whether the shader may read it.
             new ShaderTextureBinding("uOccupancy",
                 occX > 0 ? occupancyTexture : skyVisibilityTextures[0], Slot: 16),
+            new ShaderTextureBinding(
+                "uIncidentField", graph.GetColorTexture(incidentFullHandle), Slot: 17),
         };
 
         // The one binding that is not constant: the lit pass reads whichever of the bounce pair the

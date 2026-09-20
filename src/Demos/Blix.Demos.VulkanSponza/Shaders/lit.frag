@@ -197,6 +197,9 @@ layout(set = 0, binding = 0) uniform Frame {
     // (viz channel 21), which marches it for ground-truth line of sight between a point and the
     // probes voting on it — the thing the Chebyshev test in probe_volume.glsl only approximates.
     vec4  uOccupancyDims;
+    // xy = the incident field's size in pixels, z = 1 when the lit pass should read it instead of
+    // reconstructing the probe volumes itself, w unused.
+    vec4  uIncident;
 } frame;
 
 layout(set = 1, binding = 0) uniform samplerCube uIrradiance;
@@ -257,6 +260,10 @@ layout(set = 1, binding = 10) uniform samplerCube uEnvCube;
 // The same density grid the injection pass marches, here as the leak metric's ground truth. It is
 // not in the lit path: nothing outside the `uVizChannel > 20.5` branch samples it.
 layout(set = 1, binding = 16) uniform sampler3D uOccupancy;
+
+// The half-resolution incident-light field: rgb = bounced radiance, a = baked sky visibility.
+// Read instead of recomputing when uIncident.w says the pass ran. See incident.frag.
+layout(set = 1, binding = 17) uniform sampler2D uIncidentField;
 
 layout(set = 2, binding = 0) uniform Material {
     vec4 uBaseColorFactor;
@@ -667,7 +674,17 @@ void main() {
     vec4 vizSh = vec4(0.0);
     BlixSkySample skySample;
     bool skySampleValid = false;
-    if (frame.uSkyMin.w > 0.5) {
+    // <b>One texel instead of two volume reconstructions.</b> The field carries both terms this
+    // block used to compute: .a is the sky visibility for this surface's geometric normal, .rgb the
+    // bounced radiance arriving at it. Everything the lit pass is uniquely able to say — albedo,
+    // the normal map, the specular lobe and its IBL, shadows — stays exactly where it was.
+    vec4 incidentField = frame.uIncident.z > 0.5
+        ? texture(uIncidentField, gl_FragCoord.xy / frame.uFog.xy)
+        : vec4(0.0);
+    if (frame.uIncident.z > 0.5) {
+        skyVisibility = frame.uSkyMin.w > 0.5 ? incidentField.a : 1.0;
+        vizSh = vec4(skyVisibility);
+    } else if (frame.uSkyMin.w > 0.5) {
         vec3 probeUv = (vWorldPos + N * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz;
         vizProbeUv = probeUv;
         // One call, the same one glass and everything else uses. Two copies of this evaluation is
@@ -740,12 +757,22 @@ void main() {
         // nearest-probe fetch had no visibility term at all, so a wall took its light from whatever
         // probe happened to be closest — including one on the far side of itself. That leak is why
         // colour bled through walls from curtains and a tree they do not face.
-        vec3 incident = blix_probeIrradianceEx(
-            uSkyBounce, uSkyBounceDepth, uOccupancy, ivec3(frame.uBounceDims.xyz),
-            ivec3(frame.uOccupancyDims.xyz), frame.uSkyMin.xyz, 1.0 / frame.uSkyScale.xyz,
-            vWorldPos, bounceN, frame.uProbeTetrahedral > 0.5,
-            frame.uOccupancyDims.w > 0.5 && frame.uAbFlags2.y < 0.5 ? frame.uProbeOcclusion : 0.0,
-            probeConfidence);
+        vec3 incident;
+        if (frame.uIncident.z > 0.5) {
+            incident = incidentField.rgb;
+            // The field carries no per-pixel confidence — it is one number per coarse texel and the
+            // upsample has already mixed four of them. Channel 16 and the leak census therefore read
+            // as fully confident here; that is honest rather than convenient, because the quantity
+            // they were measuring is no longer decided at this resolution.
+            probeConfidence = 1.0;
+        } else {
+            incident = blix_probeIrradianceEx(
+                uSkyBounce, uSkyBounceDepth, uOccupancy, ivec3(frame.uBounceDims.xyz),
+                ivec3(frame.uOccupancyDims.xyz), frame.uSkyMin.xyz, 1.0 / frame.uSkyScale.xyz,
+                vWorldPos, bounceN, frame.uProbeTetrahedral > 0.5,
+                frame.uOccupancyDims.w > 0.5 && frame.uAbFlags2.y < 0.5 ? frame.uProbeOcclusion : 0.0,
+                probeConfidence);
+        }
         vizBounceRaw = incident;
         bounce = incident * albedo * (1.0 - metallic) * ao * visibility;
         if (frame.uVizChannel > 20.5 && frame.uOccupancyDims.w > 0.5) {

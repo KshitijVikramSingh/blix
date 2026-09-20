@@ -93,6 +93,8 @@
     <GlslShader Include="Shaders\probe_debug.frag" />
     <GlslShader Include="Shaders\probe_usage.comp" />
     <GlslShader Include="Shaders\present.vert" />
+    <GlslShader Include="Shaders\incident.frag" />
+    <GlslShader Include="Shaders\incident_resolve.frag" />
     <GlslShader Include="Shaders\present.frag" />
     <GlslShader Include="Shaders\hiz_build.frag" />
     <GlslShader Include="Shaders\gtao.frag" />
