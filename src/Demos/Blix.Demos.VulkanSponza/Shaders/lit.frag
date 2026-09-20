@@ -617,12 +617,21 @@ void main() {
     float skyVisibility = 1.0;
     vec3 vizProbeUv = vec3(0.0);
     vec4 vizSh = vec4(0.0);
+    BlixSkySample skySample;
+    bool skySampleValid = false;
     if (frame.uSkyMin.w > 0.5) {
         vec3 probeUv = (vWorldPos + N * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz;
         vizProbeUv = probeUv;
         // One call, the same one glass and everything else uses. Two copies of this evaluation is
         // how the volume and its readers drifted apart before.
-        skyVisibility = blixSkyVisibility(vWorldPos, skyVisN, 0.0);
+        // Fetched once here and evaluated twice — the transmission branch below wants the sky on
+        // the other side of the same point, and with no normal push the two queries read identical
+        // texels. Three taps instead of six on exactly the pixels that were four times the price of
+        // an average one.
+        skySample = blix_skyFetch(uSkyVisibility, uSkyVisibility1, uSkyVisibility2,
+                                  frame.uSkyMin.xyz, frame.uSkyScale.xyz, vWorldPos);
+        skySampleValid = true;
+        skyVisibility = blix_skyEvaluate(skySample, skyVisN);
         vizSh = vec4(skyVisibility);
     }
 
@@ -714,7 +723,10 @@ void main() {
         // Diagnosed, then mis-fixed: the curtain patch set diffuseTransmission to 0 and recorded this
         // exact reasoning as the justification. Deleting the term because its occlusion was wrong is
         // hiding a symptom; the occlusion is what was wrong.
-        vec3 backIrradiance = texture(uIrradiance, -cubeN).rgb * blixSkyVisibility(vWorldPos, -N, 0.0);
+        float backVis = skySampleValid
+            ? blix_skyEvaluate(skySample, -N)
+            : blixSkyVisibility(vWorldPos, -N, 0.0);
+        vec3 backIrradiance = texture(uIrradiance, -cubeN).rgb * backVis;
         transmittedIBL = blix_diffuseTransmissionAmbient(
             backIrradiance, mat.uDiffuseTransmissionColor.rgb * albedo, diffTrans) * ao * visibility;
     }

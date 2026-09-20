@@ -16,6 +16,41 @@
 #define BLIX_SKYVIS_PI 3.14159265359
 #endif
 
+/// The nine coefficients at a point, fetched once.
+///
+/// <b>Because the fetch is the cost and the direction is not.</b> A query is three 3D-texture taps
+/// followed by about a dozen multiply-adds, and a surface that asks about two directions at the same
+/// POSITION — a thin sheet, wanting the sky on each side — was paying for six taps to use three.
+/// Splitting the lookup lets it fetch once and evaluate twice, which is exact rather than an
+/// approximation of the second answer from the first.
+struct BlixSkySample { vec4 sh0; vec4 sh1; float l2p2; };
+
+BlixSkySample blix_skyFetch(
+    sampler3D shA, sampler3D shB, sampler3D shC,
+    vec3 boundsMin, vec3 invSpan, vec3 worldPos)
+{
+    vec3 uv = clamp((worldPos - boundsMin) * invSpan, vec3(0.0), vec3(1.0));
+    BlixSkySample s;
+    s.sh0 = texture(shA, uv);
+    s.sh1 = texture(shB, uv);
+    s.l2p2 = texture(shC, uv).x;
+    return s;
+}
+
+/// Evaluates a fetched sample along `dir`; see blix_skyVisibility for the band constants.
+float blix_skyEvaluate(BlixSkySample s, vec3 dir)
+{
+    const float Y0 = 0.282095, Y1 = 0.488603, Y2 = 1.092548, Y20C = 0.315392, Y22C = 0.546274;
+    float band2 = Y2 * s.sh1.x * dir.x * dir.y
+                + Y2 * s.sh1.y * dir.y * dir.z
+                + Y20C * s.sh1.z * (3.0 * dir.z * dir.z - 1.0)
+                + Y2 * s.sh1.w * dir.x * dir.z
+                + Y22C * s.l2p2 * (dir.x * dir.x - dir.y * dir.y);
+    return clamp((BLIX_SKYVIS_PI * Y0 * s.sh0.x
+                  + (2.0 * BLIX_SKYVIS_PI / 3.0) * Y1 * dot(s.sh0.yzw, dir)
+                  + (BLIX_SKYVIS_PI / 4.0) * band2) / BLIX_SKYVIS_PI, 0.0, 1.0);
+}
+
 /// Fraction of the sky visible from `worldPos` looking along `dir`, in [0,1].
 ///
 /// `normalPush` moves the lookup a little along `dir` before sampling: a cell straddling a wall
