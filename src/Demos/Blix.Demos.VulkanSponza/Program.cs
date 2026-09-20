@@ -185,6 +185,14 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private GraphResourceHandle ambientDenoisedHandle; // what the lit pass actually samples
     private PassHandle gtaoPassHandle;
     private PassHandle gtaoDenoisePassHandle;
+    // The interpolated world normal, written by the depth pre-pass. What the incident field used
+    // to infer from the depth buffer, and could not for foliage, two-sided cloth or silhouettes.
+    private GraphResourceHandle prepassNormalHandle;
+    private GraphResourceHandle prepassNormalResolveHandle;
+    /// <summary>The normal target a reader should sample: resolved under MSAA, direct at one sample.</summary>
+    private GraphResourceHandle SampleablePrepassNormal =>
+        MsaaSamples > 1 ? prepassNormalResolveHandle : prepassNormalHandle;
+
     // rgb = incident bounced radiance, a = baked sky visibility, at incidentScale.
     private GraphResourceHandle incidentHandle;
     private PassHandle incidentPassHandle;

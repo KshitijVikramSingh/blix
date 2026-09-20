@@ -778,6 +778,8 @@ internal sealed partial class SponzaLoop
                 {
                     new ShaderTextureBinding(
                         "uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth), Slot: 1),
+                    new ShaderTextureBinding(
+                        "uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal), Slot: 8),
                     new ShaderTextureBinding("uSkyBounce",
                         bounceReady ? bounceTextures[BounceRead] : brdfLutTexture, Slot: 2),
                     new ShaderTextureBinding("uSkyBounceDepth",

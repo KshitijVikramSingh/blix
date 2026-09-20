@@ -18,12 +18,19 @@ layout(set = 2, binding = 0) uniform Material {
 } mat;
 layout(set = 2, binding = 1) uniform sampler2D uAlbedo;
 
+// See depth_prepass.frag for why this pass writes a normal at all.
+layout(location = 0) in vec3 vNormalWorld;
 layout(location = 1) in vec2 vUv;
 // World position, for the layer hash. lit.vert already writes it; a fragment stage may consume a
 // subset of what the vertex stage produces, so this costs nothing new.
 layout(location = 2) in vec3 vWorldPos;
 
+layout(location = 0) out vec4 outNormal;
+
 void main() {
+    vec3 n = normalize(vNormalWorld);
+    outNormal = vec4(gl_FrontFacing ? n : -n, 1.0);
+
     float a = texture(uAlbedo, vUv).a * mat.uBaseColorFactor.w;
     if (a < mat.uMaterialParams.x) discard;
 

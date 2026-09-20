@@ -19,14 +19,15 @@
 // Written as rgb = bounced incident radiance, a = sky visibility. One RGBA16F at half resolution
 // replaces two volume reconstructions per full-res pixel.
 //
-// <b>The normal is reconstructed from depth, and that is a real approximation.</b> Both terms are
-// directional — the probe atlas is evaluated in the surface normal's direction and the sky
-// visibility is an SH evaluated the same way — so the shading normal would be better. It is not
-// available: this pass runs before the lit pass and there is no G-buffer. The geometric normal is
-// defensible for a term whose angular content comes from an 8x8 octahedral tile, and the lit pass
-// keeps the normal-mapped detail for everything else. Where it will show first is the alpha-cutout
-// canopy, whose depth buffer is thousands of disconnected silhouettes and whose reconstructed
-// normals are therefore nonsense — the same case gtao_denoise.frag already documents.
+// <b>The normal comes from the depth pre-pass, which is the whole story of this pass's accuracy.</b>
+// Both terms are directional, and the first version inferred the normal from the depth buffer
+// because there was no G-buffer to ask. That measured 5.31 mean sRGB against the lit pass and did
+// not improve at full resolution — it was never a sampling-rate error. Splitting it showed the
+// normal MAP's entire contribution to the ambient is 0.90, so the missing 4.4 was the inference
+// failing wherever depth is not a smooth height field: the canopy, two-sided cloth, silhouettes.
+//
+// The pre-pass already rasterises all of it and already holds the interpolated normal, so it now
+// writes one. What is still approximated here is only the normal map, which is worth that 0.90.
 //
 // <b>What it costs, against the lit pass doing both terms itself.</b> Same viewpoint, occupancy
 // march on in both, noise floor 0.06 mean sRGB:
@@ -78,6 +79,10 @@ layout(set = 0, binding = 0) uniform Incident {
 } g;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
+// The interpolated world normal the depth pre-pass wrote. See depth_prepass.frag: reconstructing
+// this from depth measured 5.31 mean sRGB against the lit pass, and the normal map's entire
+// contribution to the ambient measured 0.90 — so the error was the inference, not the detail.
+layout(set = 0, binding = 8) uniform sampler2D uPrepassNormal;
 layout(set = 0, binding = 2) uniform sampler2D uSkyBounce;
 layout(set = 0, binding = 3) uniform sampler2D uSkyBounceDepth;
 layout(set = 0, binding = 4) uniform sampler3D uSkyVisibility;
@@ -92,26 +97,6 @@ vec3 viewPos(vec2 uv) {
     return view.xyz / view.w;
 }
 
-// <b>The nearer of the two neighbours on each axis, not a fixed pair.</b> A fixed forward
-// difference straddles every silhouette and invents a normal halfway between the two surfaces it
-// spans — which on a canopy edge points the probe lookup somewhere neither leaf nor background
-// faces. Picking whichever neighbour is closer in depth keeps the difference on ONE surface. Same
-// reasoning, and the same fix, as gtao.frag's reconstructNormal.
-vec3 reconstructViewNormal(vec2 uv, vec3 P) {
-    vec2 texel = g.uTarget.zw;
-    vec3 xr = viewPos(uv + vec2(texel.x, 0.0)) - P;
-    vec3 xl = P - viewPos(uv - vec2(texel.x, 0.0));
-    vec3 yu = viewPos(uv + vec2(0.0, texel.y)) - P;
-    vec3 yd = P - viewPos(uv - vec2(0.0, texel.y));
-    vec3 dx = abs(xr.z) < abs(xl.z) ? xr : xl;
-    vec3 dy = abs(yu.z) < abs(yd.z) ? yu : yd;
-    vec3 n = cross(dx, dy);
-    float len = length(n);
-    // Degenerate where the two differences are parallel — a flat run of identical depth at a
-    // silhouette, or the far plane. Facing the camera is the harmless answer there.
-    return len > 1e-8 ? n / len : vec3(0.0, 0.0, 1.0);
-}
-
 void main() {
     vec3 P = viewPos(vUv);
 
@@ -122,9 +107,15 @@ void main() {
         return;
     }
 
-    vec3 nView = reconstructViewNormal(vUv, P);
     vec3 worldPos = (g.uInvView * vec4(P, 1.0)).xyz;
-    vec3 N = normalize((g.uInvView * vec4(nView, 0.0)).xyz);
+    // Already world-space and already flipped for back faces, which is the half a depth buffer
+    // cannot supply at all: a two-sided curtain's far side needs the hemisphere it faces.
+    vec4 nSample = texture(uPrepassNormal, vUv);
+    // Length, not alpha: the resolve under MSAA averages directions, and a texel no geometry
+    // reached stays at the cleared zero. Either way the only safe answer is to face the camera.
+    vec3 N = dot(nSample.xyz, nSample.xyz) > 1e-6
+        ? normalize(nSample.xyz)
+        : normalize((g.uInvView * vec4(0.0, 0.0, 1.0, 0.0)).xyz);
 
     float skyVisibility = 1.0;
     if (g.uSkyMin.w > 0.5) {

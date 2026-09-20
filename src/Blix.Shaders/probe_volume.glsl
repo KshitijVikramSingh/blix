@@ -192,6 +192,17 @@ float blix_probeVote(sampler2D depthAtlas, sampler3D occupancy, ivec3 dims, ivec
     // the blend and it is the sixth that was arriving through walls, not an indiscriminate cull.
     // (A test that rejected everything would report the same perfect zero with confidence at 0.)
     //
+    // <b>And it changes the picture by 0.36 mean sRGB at sleep 0, 0.04 at the shipped sleep, against
+    // a bounce term worth 5.50.</b> Removing a sixth of the blend weight moves almost no light,
+    // because the probes it removes carry radiance close to the ones that remain — the field is
+    // smooth, and a normalised blend does not care which of two similar probes it asked.
+    //
+    // So this metric measures a MECHANISM and not an EFFECT, and the distinction was worth the cost
+    // of learning. "Share of blend weight landing on probes the point cannot see" is exactly the
+    // right way to ask whether the visibility test works, and no kind of evidence at all that the
+    // visible colour bleed has this cause. The bleed reported from the chair is still unexplained;
+    // what is now known is that it is not this, at this viewpoint.
+    //
     // <b>And it is unaffordable at full resolution.</b> 6.46 ms, against 2.95 ms for the whole
     // tetrahedral saving it unblocks. Four corners barely helps (6.07 ms) because emptying the set
     // more often fires the retry-all-eight path. There is no cheap knob either: see the note below

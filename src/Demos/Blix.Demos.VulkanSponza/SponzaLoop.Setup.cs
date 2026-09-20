@@ -411,9 +411,25 @@ internal sealed partial class SponzaLoop
             "incident-light", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(incidentScale));
         incidentFullHandle = graph.ColorTarget("incident-light-full", TextureFormat.Rgba16F, fullSize);
 
+        // <b>The pre-pass stopped being depth-only.</b> It already rasterises every surface whose
+        // normal the half-res incident field was guessing at from depth, and guessing measured
+        // 5.31 mean sRGB against the lit pass. Rgba16F rather than Rgba8 for the reason the ambient
+        // buffer gives: a direction quantised to 8 bits puts visible facets on smooth curvature.
+        prepassNormalHandle = graph.ColorTarget(
+            "prepass-normal", TextureFormat.Rgba16F, fullSize, samples: MsaaSamples);
+        if (MsaaSamples > 1)
+        {
+            prepassNormalResolveHandle = graph.ColorTarget(
+                "prepass-normal-1x", TextureFormat.Rgba16F, fullSize);
+        }
+
         var prepassBuilder = graph.GraphicsPass("depth-prepass")
+            .Target(prepassNormalHandle, LoadOp.Clear, StoreOp.Store)
             .Depth(depthHandle, LoadOp.Clear, StoreOp.Store)
             .Shader(litInterface);
+        // Same rule as the depth: at one sample the target IS what a reader wants, and asking for
+        // a resolve anyway is invalid.
+        if (MsaaSamples > 1) prepassBuilder = prepassBuilder.ResolveColor(prepassNormalResolveHandle);
         // Rides the pass's depth store when there is something to resolve.
         if (MsaaSamples > 1) prepassBuilder = prepassBuilder.ResolveDepth(depthResolveHandle);
         depthPrepassHandle = prepassBuilder.Handle;
@@ -464,6 +480,7 @@ internal sealed partial class SponzaLoop
         incidentPassHandle = graph.GraphicsPass("incident-light")
             .Target(incidentHandle, LoadOp.Clear, StoreOp.Store)
             .Read(SampleableSceneDepth)
+            .Read(SampleablePrepassNormal)
             .Shader(incidentInterface)
             .Handle;
 
@@ -616,13 +633,13 @@ internal sealed partial class SponzaLoop
         prepassOpaqueProgram = vk.CreateShaderProgramFromSpv(litVertSpv, prepassOpaqueFragSpv, litInterface, "depth_prepass");
         prepassOpaquePipeline = Pipeline(prepassOpaqueProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualWrite, RasterizerState.NoCulling,
-            Array.Empty<BlendState>(), depthPrepassHandle, "depth_prepass");
+            new[] { BlendState.Disabled }, depthPrepassHandle, "depth_prepass");
 
         var prepassMaskFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "depth_prepass_mask.frag.spv"));
         prepassMaskProgram = vk.CreateShaderProgramFromSpv(litVertSpv, prepassMaskFragSpv, litInterface, "depth_prepass_mask");
         prepassMaskPipeline = Pipeline(prepassMaskProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualWrite, RasterizerState.NoCulling,
-            Array.Empty<BlendState>(), depthPrepassHandle, "depth_prepass_mask");
+            new[] { BlendState.Disabled }, depthPrepassHandle, "depth_prepass_mask");
 
         var presentVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.vert.spv"));
         var presentFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.frag.spv"));
