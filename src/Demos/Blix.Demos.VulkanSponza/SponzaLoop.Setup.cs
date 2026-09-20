@@ -67,6 +67,8 @@ internal sealed partial class SponzaLoop
             // "the interior looks too dark" into two separable questions with one run each.
             if (cmdArgs[i] == "--sun-strength" && float.TryParse(cmdArgs[i + 1], out var ss))
                 sunStrength = MathF.Max(0f, ss);
+            if (cmdArgs[i] == "--ref-bounces" && int.TryParse(cmdArgs[i + 1], out var rb))
+                refBounces = Math.Clamp(rb, 1, 8);
             if (cmdArgs[i] == "--shadow-lod" && float.TryParse(cmdArgs[i + 1], out var sl))
                 shadowLodTexels = MathF.Max(0.1f, sl);
             if (cmdArgs[i] == "--bounce-div" && float.TryParse(cmdArgs[i + 1], out var bd))
@@ -141,6 +143,9 @@ internal sealed partial class SponzaLoop
         // its own, which measures real tile execution at the cost of all overlap — so the numbers
         // attribute the frame rather than decompose it, and they sum to more than it.
         if (cmdArgs.Contains("--gpu-isolate")) vk.GpuPassIsolation = true;
+        if (cmdArgs.Contains("--no-caster-cull")) shadowCasterCull = false;
+        if (cmdArgs.Contains("--probe-reference")) probeReference = true;
+        if (cmdArgs.Contains("--no-sky-bounce")) noSkyBounce = true;
         // --orbit: drive the camera on a fixed path so a measurement is of the renderer rather than
         // of one photograph of it. Ignores --cam, which is the still counterpart.
         if (cmdArgs.Contains("--orbit")) orbit = true;
@@ -893,6 +898,8 @@ internal sealed partial class SponzaLoop
                 if (volume.HasOccupancy)
                 {
                     occX = volume.OccupancyX; occY = volume.OccupancyY; occZ = volume.OccupancyZ;
+                    occupancyCpu = volume.Occupancy;
+                    occCpuX = occX; occCpuY = occY; occCpuZ = occZ;
                     occupancyTexture = vk.CreateTexture3D(
                         occX, occY, occZ, TextureFormat.R8,
                         SamplerDescription.LinearClamp, volume.Occupancy!, "sponza.occupancy");
@@ -902,6 +909,8 @@ internal sealed partial class SponzaLoop
                     if (volume.HasAlbedo)
                     {
                         albX = volume.AlbedoX; albY = volume.AlbedoY; albZ = volume.AlbedoZ;
+                        albedoCpu = volume.Albedo;
+                        albCpuX = albX; albCpuY = albY; albCpuZ = albZ;
                         albedoTexture = vk.CreateTexture3D(
                             albX, albY, albZ, TextureFormat.Rgba8,
                             SamplerDescription.LinearClamp, volume.Albedo!, "sponza.albedo");

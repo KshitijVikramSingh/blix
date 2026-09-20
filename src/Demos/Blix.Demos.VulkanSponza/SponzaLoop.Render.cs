@@ -24,7 +24,8 @@ internal sealed partial class SponzaLoop
     // current frame slot. Returns the visible count (for the diagnostic).
     private int FillIndirect(
         List<Drawable> drawables, float[] lodMargins, int[] lodState, IndirectBufferHandle buffer,
-        Frustum? cull, float margin, float worldErrorBudget = 0f)
+        Frustum? cull, float margin, float worldErrorBudget = 0f,
+        Frustum? receivers = null, Vector3 shadowSweep = default)
     {
         // <b>An empty scene has no indirect buffer, and that used to be a crash.</b> When every
         // pack failed to load — stale cooked files after a format bump — the demo reported exactly
@@ -51,6 +52,21 @@ internal sealed partial class SponzaLoop
         {
             var d = drawables[i];
             var vis = cull is not { } f || f.Intersects(d.Bounds, margin);
+            // <b>A caster only matters if its shadow can land somewhere the camera can see.</b>
+            // Culling against the cascade's own box asks "is this object lit", which in an
+            // overhead-sun scene is nearly everything — cascade-casters read 5406/5420/5420 of
+            // 5420, and the maps were taking 8.86M triangles against the camera's 166,557. The
+            // question worth asking is different: sweep the caster's bounds along the light
+            // direction, and if that volume misses the camera frustum then nothing it darkens is
+            // on screen. Conservative by construction, because the swept box contains the true
+            // shadow volume.
+            if (vis && receivers is { } rf)
+            {
+                var swept = new Bounds3(
+                    Vector3.Min(d.Bounds.Min, d.Bounds.Min + shadowSweep),
+                    Vector3.Max(d.Bounds.Max, d.Bounds.Max + shadowSweep));
+                vis = rf.Intersects(swept, margin);
+            }
             // Per-primitive LOD margin (live-tunable) scales the global px budget.
             // A world budget means this list is being drawn into something orthographic, where
             // camera pixels are not the unit of error. Nothing else about the fill changes.
@@ -126,6 +142,10 @@ internal sealed partial class SponzaLoop
         }
 
         SampleGpuPassTimes();
+
+        // Built once, before the cascades, because they need it too: a caster is culled against
+        // where its shadow could FALL, and that is the camera's frustum rather than the light's.
+        cameraFrustumThisFrame = Frustum.FromViewProjection(Matrix4x4.Transpose(viewProj));
 
         // Stress hook: flip fog every 90 frames to exercise the on/off barrier
         // transitions under validation (no effect without --fog-stress).
@@ -268,9 +288,17 @@ internal sealed partial class SponzaLoop
             // The cascade's own budget, since that is what decides ITS geometry — it moves when the
             // cascade refits, which is exactly when the cached map has to be rebuilt anyway.
             var lodKey = abMode == "lod" && LodArmPixels <= 0f ? 0f : cascadeTexelWorld[ci] * shadowLodTexels;
+            // <b>And on the CAMERA, now that the caster set depends on it.</b> A cascade is fitted to
+            // the camera's frustum slice and texel-snapped, so a small rotation can leave the light
+            // matrix bit-identical while the set of casters whose shadows can reach the screen has
+            // changed entirely. Keyed on the light matrix alone, the cache would then serve a map
+            // built for a view that no longer exists — shadows simply missing, with nothing to say
+            // why. Same family as the two cache bugs already fixed here; caching is a claim about
+            // what the result depends on, and this changed what it depends on.
             if (vp == cachedCascadeViewProj[ci]
                 && opaqueDrawables.Count == cachedCascadeCasters[ci]
-                && lodKey == cachedCascadeLod[ci])
+                && lodKey == cachedCascadeLod[ci]
+                && (!shadowCasterCull || viewProj == cachedCascadeCamera[ci]))
             {
                 cascadeRendered[ci] = false;
                 continue;
@@ -278,6 +306,7 @@ internal sealed partial class SponzaLoop
             cachedCascadeViewProj[ci] = vp;
             cachedCascadeCasters[ci] = opaqueDrawables.Count;
             cachedCascadeLod[ci] = lodKey;
+            cachedCascadeCamera[ci] = viewProj;
             cascadeRendered[ci] = true;
             // Frustum.FromViewProjection expects a column-vector clip matrix
             // (clip = M·world); our cascade VP is the System.Numerics
@@ -299,7 +328,11 @@ internal sealed partial class SponzaLoop
                 //
                 // The --ab lod off arm is the exception: it means "no level of detail anywhere", and
                 // a cascade quietly keeping its own would make the arm measure less than it claims.
-                abMode == "lod" && LodArmPixels <= 0f ? 0f : cascadeTexelWorld[ci] * shadowLodTexels);
+                abMode == "lod" && LodArmPixels <= 0f ? 0f : cascadeTexelWorld[ci] * shadowLodTexels,
+                // The sweep is this cascade's far distance: a shadow that has travelled further than
+                // the cascade covers has left it, and the next cascade owns that ground.
+                shadowCasterCull && !(abMode == "castercull" && AbOffPhase) ? cameraFrustumThisFrame : null,
+                sunDirection * cascadeSplits[ci + 1]);
             cascadeTriangles[ci] = fillIndirectTriangles;
             // Opaque casters all push the same bytes (identity model + this
             // cascade's VP); mask casters push per-material alpha params, so one
@@ -403,7 +436,7 @@ internal sealed partial class SponzaLoop
         // Culling here zeroes instanceCount rather than removing the command, exactly as the
         // cascades do, so what is saved is vertex and binning work and not draw calls.
         var cameraFrustum = cullEnabled && !(abMode == "cull" && AbOffPhase)
-            ? Frustum.FromViewProjection(Matrix4x4.Transpose(viewProj))
+            ? cameraFrustumThisFrame
             : (Frustum?)null;
         //
         // The margin is insurance, not tuning. A chunk whose bounds sit exactly on a frustum plane
@@ -474,8 +507,12 @@ internal sealed partial class SponzaLoop
                 new("uSunDirection",  new Vector4Uniform(new Vector4(sunDirection, 0f))),
                 // w: whether the sky-visibility volume is loaded, so the injector knows whether its
                 // sky SOURCE term can be evaluated at all.
+                // w gates the injector's SKY source term. --no-sky-bounce zeroes it while leaving the
+                // visibility volume loaded for the lit pass, so the field carries the sun's bounce
+                // alone — which is the only thing the CPU reference can reproduce faithfully, since
+                // the irradiance cube it would need lives on the GPU.
                 new("uSunIrradiance", new Vector4Uniform(new Vector4(
-                    EffectiveSunIrradiance, skyVolumeLoaded ? 1f : 0f))),
+                    EffectiveSunIrradiance, skyVolumeLoaded && !noSkyBounce ? 1f : 0f))),
                 new("uSchedule", new Vector4Uniform(new Vector4(
                     framesRendered, MathF.Round(injectPeriod),
                     ProbeSleepNow > 0f ? 1f / ProbeSleepNow : 0f,
@@ -742,6 +779,7 @@ internal sealed partial class SponzaLoop
             WritePassBreakdown();
             WriteLodCensus();
             WriteProbeCensus();
+            if (probeReference) WriteProbeReference(probeCount: 12, paths: 4096, bounces: refBounces);
             WriteFrameStats();
             host.RequestClose();
         }
@@ -1061,6 +1099,7 @@ internal sealed partial class SponzaLoop
             "indirect"=> "the probe-volume terms (bounce + baked sky visibility)",
             "inject"  => "the bounce injection dispatch",
             "cull"    => "camera frustum culling",
+            "castercull" => "shadow caster culling against the camera",
             "sleep"   => "probes sleeping when nothing samples them",
             "lod"     => lodArmOff > 0f
                 ? string.Create(Inv, $"mesh LOD at {lodArmOn:0.##} px rather than {lodArmOff:0.##} px")
@@ -1316,6 +1355,8 @@ internal sealed partial class SponzaLoop
         for (var i = 0; i < dw * dh; i++)
             closureFlat[i] = (float)BitConverter.ToHalf(depth, i * 8 + 6);
 
+        double sunlitSum = 0;
+        var sunlitCount = 0;
         var lum = new List<double>(w * h);
         var lumFlat = new double[w * h];
         double sum = 0;
@@ -1336,6 +1377,8 @@ internal sealed partial class SponzaLoop
         }
         for (var i = 0; i < w * h; i++)
         {
+            var a = (float)BitConverter.ToHalf(irr, i * 8 + 6);
+            if (a > 0.25) { sunlitSum += (a - 0.5) * 2.0; sunlitCount++; }
             double r = (float)BitConverter.ToHalf(irr, i * 8);
             double g = (float)BitConverter.ToHalf(irr, i * 8 + 2);
             double b = (float)BitConverter.ToHalf(irr, i * 8 + 4);
@@ -1357,6 +1400,8 @@ internal sealed partial class SponzaLoop
             $"    luminance  median {median:0.0000}   p25 {Pct(0.25):0.0000}   p75 {Pct(0.75):0.0000}   p95 {Pct(0.95):0.0000}   mean {sum / Math.Max(1, lum.Count):0.0000}"));
         Console.WriteLine(string.Create(Inv,
             $"    against    sun irradiance {sunLum:0.000}  ->  median is {median / Math.Max(sunLum, 1e-6) * 100.0:0.00}% of it"));
+        Console.WriteLine(string.Create(Inv,
+            $"    sunlit     {(sunlitCount > 0 ? sunlitSum / sunlitCount : 0) * 100.0:0.0}% of what the probes can see is in sun (mean over solved texels)"));
         Console.WriteLine(string.Create(Inv,
             $"    volume     mean sky visibility {meanSkyVisibility:0.000} (a surface seeing this much sky, under an albedo ~0.27 scene)"));
         // <b>Binned by how much sky the probe's own cell can see, which is the question.</b> A single

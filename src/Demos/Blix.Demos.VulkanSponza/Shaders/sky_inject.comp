@@ -488,6 +488,12 @@ void main() {
     vec3 selfUvw = (origin - u.uBoundsMin.xyz) / u.uBoundsSpan.xyz;
     bool buried = texture(uOccupancy, clamp(selfUvw, vec3(0.0), vec3(1.0))).r > 0.5;
     float reachable = (!buried && (escape >= 0.02 || litRays > 0.0)) ? 1.0 : 0.0;
+    // <b>What share of the surfaces this probe can see is in sun.</b> The census says the sun
+    // contributes LESS bounce to the field than the sky does, while being 7.6x brighter — which
+    // would mean almost nothing a probe sees is lit, however bright the sun is. `sunlit` is already
+    // computed per ray for the reachability test; summing it costs nothing and turns a suspicion
+    // about the sun-ward voxel march into a number.
+    float sunlitFraction = litRays / float(BLIX_OCT_RAYS);
 
     // Interior texels: the cosine-weighted average of every ray, which IS the irradiance arriving
     // at a surface facing that texel's direction. Stored as irradiance so a reader multiplies by
@@ -557,8 +563,14 @@ void main() {
     // was meant to fix. The stored alpha is the marker: solves write 1.0, the clear leaves 0, so
     // the first solve of a probe's life takes its answer outright.
     vec4 previous = texelFetch(uAtlasPrev, tile + texel, 0);
-    float converge = previous.a > 0.5 ? SOLVE_CONVERGE : 1.0;
-    imageStore(uAtlas, tile + texel, vec4(mix(previous.rgb, value, converge), 1.0));
+    // <b>Alpha carries two things, and the encoding is what lets it.</b> It was the has-ever-solved
+    // marker, needed so a first solve takes its answer outright instead of ramping up out of the
+    // cleared tile. Mapping the sunlit fraction into [0.5, 1] keeps every solved texel above 0.25
+    // and leaves the cleared value of 0 the only thing below it — so one channel answers "has this
+    // probe solved" and "how much sun did it see" without either question blurring the other.
+    float converge = previous.a > 0.25 ? SOLVE_CONVERGE : 1.0;
+    imageStore(uAtlas, tile + texel,
+               vec4(mix(previous.rgb, value, converge), 0.5 + 0.5 * sunlitFraction));
     vec2 moments = sDepthTexel[(src.y - 1) * BLIX_OCT_INTERIOR + (src.x - 1)];
     // <b>.b carries reachability, and it costs nothing.</b> The depth atlas is Rgba16F and has only
     // ever used .rg, so the flag rides along in memory already allocated and already fetched by
