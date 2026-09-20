@@ -68,6 +68,18 @@ internal sealed partial class SponzaLoop
 
         // Live tuning, grouped by scope. Controls are read-back: the returned
         // value feeds this frame's render (Debug() runs before OnRender).
+        using (debug.Scope("Camera"))
+        {
+            // <b>Pasteable straight back in as --cam, and that is the whole point.</b> Every number
+            // measured tonight came from the measurement orbit, because the orbit was the only
+            // viewpoint anything could be replayed at — so a defect seen from the chair and a
+            // measurement taken headless were never about the same pixels. Three wrong conclusions
+            // came out of that gap. An F12 dump now carries the viewpoint that produced the frame.
+            debug.Values.Value("--cam", string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                $"{cameraPosition.X:0.##},{cameraPosition.Y:0.##},{cameraPosition.Z:0.##}," +
+                $"{camYaw * 180f / MathF.PI:0.##},{camPitch * 180f / MathF.PI:0.##}"));
+        }
+
         using (debug.Scope("Sun"))
         {
             var deg = 180f / MathF.PI;
@@ -130,6 +142,15 @@ internal sealed partial class SponzaLoop
             // flashes white the moment one switches level. The question this answers is not "how
             // much does LOD save" — the A/B answers that — but "which piece of wall was it".
             showLodBoxes = debug.Controls.Toggle("Show LOD levels", showLodBoxes);
+            // <b>Live, because this one has to be judged by eye and not by a number.</b> The field
+            // and the inline path differ by 1.29 mean sRGB, which is small enough that a pair of
+            // screenshots taken minutes apart cannot settle it and twice already has not. Flipping
+            // it under a still camera puts both on the same retina a second apart.
+            //
+            // The resolution stays a launch flag (--incident-scale): the target's size is fixed
+            // when the graph compiles. The error barely moves with it anyway — 5.32 at half and
+            // 5.45 at full, back when the normal was the thing being measured.
+            incidentField = debug.Controls.Toggle("Half-res incident field", incidentField);
         }
 
         // The indirect solve's cost is rays x probes x march, divided by period, and every one of

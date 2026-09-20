@@ -488,6 +488,7 @@ internal sealed partial class SponzaLoop
             .Target(incidentFullHandle, LoadOp.Clear, StoreOp.Store)
             .Read(incidentHandle)
             .Read(SampleableSceneDepth)
+            .Read(SampleablePrepassNormal)
             .Shader(incidentResolveInterface)
             .Handle;
 

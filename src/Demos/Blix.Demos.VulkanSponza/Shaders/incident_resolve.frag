@@ -33,6 +33,17 @@ layout(set = 0, binding = 0) uniform Resolve {
 
 layout(set = 0, binding = 1) uniform sampler2D uIncidentRaw;
 layout(set = 0, binding = 2) uniform sampler2D uSceneDepth;
+// <b>The second guide, and the one the first version was missing.</b> Depth alone accepts a coarse
+// tap wherever depth is continuous — which at a corner, an arch springing from a wall, or any
+// grazing surface is precisely where the tap belongs to a DIFFERENT surface facing a different way.
+// Reported from the chair as probes and normals leaking at some angles, and the measurement agrees
+// emphatically: at that viewpoint the field cost 9.17 mean sRGB against 1.29 on the measurement
+// orbit, because the orbit looks at walls square-on and an arcade does not.
+//
+// The pre-pass already writes this at full resolution and it is already bound. Comparing the tap's
+// normal against this pixel's costs one fetch per tap and rejects exactly the taps that belong to
+// something else.
+layout(set = 0, binding = 4) uniform sampler2D uPrepassNormal;
 
 // View-space depth (positive, metres) — the scale the tolerance is relative to.
 float viewDepth(vec2 uv) {
@@ -43,6 +54,9 @@ float viewDepth(vec2 uv) {
 
 void main() {
     float centreDepth = viewDepth(vUv);
+    vec3 centreNormal = texture(uPrepassNormal, vUv).xyz;
+    float centreLen = length(centreNormal);
+    centreNormal = centreLen > 1e-3 ? centreNormal / centreLen : vec3(0.0);
 
     vec2 size = r.uSource.xy;
     vec2 texel = r.uSource.zw;
@@ -61,6 +75,18 @@ void main() {
         // hardware filtering would have.
         vec2 b = mix(1.0 - frac, frac, offset);
         float w = b.x * b.y / (1.0 + abs(viewDepth(at) - centreDepth) / tolerance);
+
+        // Smooth in the same way and for the same reason the depth term is: a hard accept draws the
+        // coarse grid wherever the threshold happens to fall. The eighth power keeps a flat wall's
+        // four taps at essentially full weight while a tap 30 degrees away keeps about a fifth.
+        vec3 tapNormal = texture(uPrepassNormal, at).xyz;
+        float tapLen = length(tapNormal);
+        if (centreLen > 1e-3 && tapLen > 1e-3) {
+            float align = max(dot(centreNormal, tapNormal / tapLen), 0.0);
+            float a2 = align * align;
+            w *= a2 * a2 * a2 * a2;
+        }
+
         sum += texture(uIncidentRaw, at) * w;
         weightSum += w;
     }

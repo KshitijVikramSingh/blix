@@ -166,14 +166,17 @@ layout(set = 0, binding = 0) uniform Frame {
     // together: rejecting everything reports no leak and no light.
     //@tune 0..1 = 0
     float uProbeOcclusion;
-    // <b>Two diagnostics that stayed because they settled a question a picture could not.</b> The
-    // half-res incident field differs from the inline path by 7.54 mean sRGB, and the obvious story
-    // — that it loses the normal map's influence on the ambient — was wrong. These split it:
+    // <b>SUSPECT — these three do not reach the GPU, and every split built on them is void.</b>
+    // Set uProbeTetrahedral and the bounce block's output moves by 1.97 mean sRGB; set
+    // uNoBounceTerm, which skips that same block entirely, and nothing moves at all. Both go
+    // through the same --tune path, both are accepted by name, and uVisualizeCascades (member 17)
+    // works at 84.5. Members 20 and 21 work; 22, 23 and 24 appear not to, which points at the
+    // Frame block's tail rather than at any of these declarations.
     //
-    //   uSkyDropL2     drop L2 from the inline sky evaluation too. The band alone is worth 3.12.
-    //   uNoBounceTerm  zero the bounce in both paths. The SKY half alone is 5.26 of the 7.54, with
-    //                  the normal already matched — so what the field loses is sampling POSITION,
-    //                  not direction, and no directional basis fixes it.
+    // Not yet found. Until it is, treat "relief alone", "sky term alone" and every figure derived
+    // from them in this file's history as unmeasured — they were read off a dial connected to
+    // nothing, and they are the reason the incident field's error was attributed first to the
+    // upsample, then to the payload, then to the normal.
     //@tune 0..1 = 0
     float uSkyDropL2;
     //@tune 0..1 = 0

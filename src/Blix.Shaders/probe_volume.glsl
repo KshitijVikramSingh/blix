@@ -57,8 +57,16 @@ vec3 blix_probePosition(ivec3 probe, ivec3 dims, vec3 boundsMin, vec3 boundsSpan
 /// The statistical test exists because that used to be unaffordable at coarse probe spacing; it is
 /// worth knowing what it costs and what it gets wrong now that it is not.
 ///
-/// Used by the leak metric below. Whether it should REPLACE the Chebyshev test rather than measure
-/// it is the obvious next question and is deliberately not answered here.
+/// <b>Soft, and the first version was not, which was visible as blotching.</b> It returned 1.0 on
+/// the first cell over 0.5, so a probe was either kept whole or deleted whole. As a shading point
+/// slides across a vault, each of the eight probes crosses that threshold at some point, and every
+/// crossing steps the normalised blend discontinuously — irregular patches on a smooth ceiling,
+/// reported from the chair the first time this was switched on over an arcade. The Chebyshev test
+/// it replaces never blotches for exactly this reason: it is a continuous falloff.
+///
+/// The grid stores DENSITY, not a boolean (see sky_inject.comp), so integrating it is also the more
+/// honest reading of what the baker wrote. Beer-Lambert over the segment, with the step LENGTH in
+/// the exponent so the result does not depend on how many steps the distance happened to earn.
 float blix_probeOccluded(sampler3D occupancy, ivec3 occDims, vec3 boundsMin, vec3 boundsSpan,
                          vec3 from, vec3 to)
 {
@@ -66,15 +74,22 @@ float blix_probeOccluded(sampler3D occupancy, ivec3 occDims, vec3 boundsMin, vec
     float len = length(d);
     if (len < 1e-4) return 0.0;
     vec3 cell = boundsSpan / vec3(occDims);
-    int steps = int(clamp(len / min(min(cell.x, cell.y), cell.z), 1.0, 24.0));
+    float minCell = min(min(cell.x, cell.y), cell.z);
+    int steps = int(clamp(len / minCell, 1.0, 24.0));
+    float ds = len / float(steps);
+
     // Endpoints excluded: the surface the point sits on, and the probe's own cell, are both allowed
     // to be solid without meaning the path between them is blocked.
+    float density = 0.0;
     for (int i = 1; i < steps; ++i) {
         vec3 p = from + d * (float(i) / float(steps));
         vec3 uvw = clamp((p - boundsMin) / boundsSpan, vec3(0.0), vec3(1.0));
-        if (texture(occupancy, uvw).r > 0.5) return 1.0;
+        density += texture(occupancy, uvw).r;
     }
-    return 0.0;
+
+    // Scaled so that one full-density cell attenuates by exp(-4) — opaque for any purpose here,
+    // while a cell the baker only partly filled attenuates in proportion.
+    return 1.0 - exp(-(4.0 / minCell) * ds * density);
 }
 
 /// The normal bias every probe query applies before it decides anything.
