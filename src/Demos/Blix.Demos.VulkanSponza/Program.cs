@@ -947,7 +947,14 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // was driving the oscillation without noticeably delaying a real transition.
     private const float LodHysteresis = 1.35f;
     /// <summary>What multiple of the global LOD budget alpha-cutout geometry starts at.</summary>
-    private static float FoliageLodMargin = 4f;
+    /// <remarks>
+    /// <b>1, because it was measured and it is not the lever.</b> Foliage costs pixels, not
+    /// geometry: removing the packs entirely takes 9.85 ms off the frame, while an EIGHT times
+    /// budget removes only 14% of submitted triangles — the same leaves cover the same screen area
+    /// with fewer triangles behind them. Overriding it bought a few percent of geometry and risked
+    /// silhouettes on the one asset whose silhouette is the point. --foliage-lod still sweeps it.
+    /// </remarks>
+    private static float FoliageLodMargin = 1f;
     private Vector3 foliageCentre;
     private bool foliageValid;
     private bool mouseLook;

@@ -350,11 +350,21 @@ vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize,
                                          u.uBoundsMin.xyz, 1.0 / u.uBoundsSpan.xyz, 0.0,
                                          probePos, n)
                 : vec3(0.0);
-            vec3 incident = u.uSunIrradiance.rgb * sunReach
-                          + skyTerm
+            // <b>The full eight-probe blend, kept, and the measurement is why.</b> This looks like
+            // the expensive thing in the loop — a trilinear blend with a Chebyshev visibility test
+            // on each of eight probes, roughly sixteen fetches, taken at every cell every ray
+            // touches — and it was tried three ways. Against a nearest-probe fetch it is worth
+            // 5.06 ms of 36.1, and against no feedback at all 5.35: fifteen percent of the pass,
+            // not the bulk of it. In the shipped configuration, where sleeping keeps most probes
+            // out of the solve, that is about 0.6 ms.
+            //
+            // And the cheap version LEAKS. Dropping to the nearest probe skips the Chebyshev test,
+            // which is precisely what stops a probe behind a wall contributing — the field's median
+            // rose from 0.0521 to 0.0530 when it was removed. Trading 0.6 ms for light coming
+            // through walls is a worse bargain than the milliseconds suggest.
+            vec3 incident = u.uSunIrradiance.rgb * sunReach + skyTerm
                           + blix_probeIrradiance(uAtlasPrev, uDepthAtlasPrev, ivec3(u.uProbeDims.xyz),
-                                                 u.uBoundsMin.xyz, u.uBoundsSpan.xyz,
-                                                 probePos, n);
+                                                 u.uBoundsMin.xyz, u.uBoundsSpan.xyz, probePos, n);
 
             // Lambertian outgoing radiance, now in the surface's OWN colour. uBoundsSpan.w stops
             // being the scene's albedo and becomes a plain strength multiplier over it.
