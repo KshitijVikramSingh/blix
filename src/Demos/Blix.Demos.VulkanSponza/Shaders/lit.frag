@@ -27,6 +27,33 @@
 // then the taps would be worth their price again. The measurement is written down here so that
 // changing the sun prompts re-checking the number rather than inheriting it.
 #define BLIX_SHADOW_PCF_TAPS 4
+// ── What this pass costs, measured ───────────────────────────────────────────
+// Each term ablated in-process on the measurement orbit (--ab <term>), ratios first because the
+// three runs sat at 28.8, 32.6 and 49.7 ms medians and the ratio is the part that reproduces:
+//
+//     probe-volume terms          1.312x   8.69 ms
+//     material texture bandwidth  1.150x   5.42 ms
+//     normal mapping              1.108x   3.97 ms
+//     image-based lighting        1.084x   3.77 ms
+//     ambient visibility (GTAO)   1.076x   2.30 ms
+//     sun shadows (sample + PCF)  1.052x   2.46 ms
+//     the GGX specular lobe       1.002x   0.04 ms
+//
+// They do not sum to the pass: each is what removing that term saves with everything else present,
+// so the table ranks levers rather than partitioning a budget.
+//
+// <b>The GGX lobe is 0.2% of frame and normal mapping is a hundred times more.</b> The term with
+// the reputation — distributions, geometry terms, Fresnel — is free, while a texture fetch and a
+// tangent-frame transform is not. This pass is bound by memory traffic and not by arithmetic, which
+// is the same reason every structural win in this renderer came from not doing work at all: LOD,
+// frustum culling, caster culling, probe sleeping, fewer fog slices, fewer GTAO taps.
+//
+// Taken on the orbit AFTER it was corrected. The previous path never had the foliage in frame and
+// did not merely scale this table down — it re-ordered it, reading IBL at 0.39 ms against 3.77 and
+// normal mapping at 0.84 against 3.97, because those scale with pixels shaded and it was looking at
+// a dark wall. Optimising from that version would have meant working on probe lookups and never
+// opening the two terms that together cost 7.7 ms.
+
 // <b>early_fragment_tests was tried here and reverted; the note is the point.</b> A shader that
 // can discard is late-Z by rule, so the cutout branch below costs the WHOLE lit pass its early
 // depth test — opaque geometry included. Forcing the test early is legal here, since this pass
