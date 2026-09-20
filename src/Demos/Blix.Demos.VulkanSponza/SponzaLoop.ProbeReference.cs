@@ -61,10 +61,13 @@ internal sealed partial class SponzaLoop
     // a half, which turns a 0.3-density leaf cell into a guaranteed miss and three of them into a
     // guaranteed hit. And reporting the voxel centre put every interaction up to half a cell further
     // along the ray than it happened, always in the ray's own direction.
-    private bool MarchCpu(Vector3 origin, Vector3 dir, Random rng, out Vector3 hitPos, out Vector3 hitNormal)
+    private bool MarchCpu(
+        Vector3 origin, Vector3 dir, Random rng,
+        out Vector3 hitPos, out Vector3 hitNormal, out Vector3 hitCell)
     {
         hitPos = default;
         hitNormal = default;
+        hitCell = default;
         var cellSize = skyVolumeSpan / new Vector3(occCpuX, occCpuY, occCpuZ);
         var t = (origin - skyVolumeMin) / skyVolumeSpan;
         var cell = new Vector3(t.X * occCpuX, t.Y * occCpuY, t.Z * occCpuZ);
@@ -91,6 +94,14 @@ internal sealed partial class SponzaLoop
             if (density > 0f && rng.NextDouble() < density)
             {
                 hitPos = origin + dir * tEnter;
+                // <b>Albedo comes from the CELL, not from the point of entry.</b> The entry point
+                // sits exactly on the boundary between this cell and the one before it, and now
+                // that the albedo grid matches the occupancy grid one to one, flooring it lands in
+                // the empty neighbour as often as not — which returns black and silently deletes
+                // the bounce. The runtime reads the cell centre; so must this. The entry point is
+                // still where the ray continues from, which is what it was introduced for.
+                hitCell = skyVolumeMin
+                        + (new Vector3(c[0], c[1], c[2]) + new Vector3(0.5f)) * cellSize;
                 var n = new float[3];
                 if (enteredAxis >= 0) n[enteredAxis] = -step[enteredAxis];
                 hitNormal = new Vector3(n[0], n[1], n[2]);
@@ -149,10 +160,10 @@ internal sealed partial class SponzaLoop
 
     private Vector3 TraceRadianceCpu(Vector3 origin, Vector3 dir, int bounces, Random rng, Vector3 toSun, Vector3 sunIrr)
     {
-        if (!MarchCpu(origin, dir, rng, out var hit, out var n)) return Vector3.Zero;
+        if (!MarchCpu(origin, dir, rng, out var hit, out var n, out var cell)) return Vector3.Zero;
         var cellDiag = (skyVolumeSpan / new Vector3(occCpuX, occCpuY, occCpuZ)).Length();
         var off = hit + n * cellDiag * 1.5f;
-        var albedo = AlbedoAtCpu(hit);
+        var albedo = AlbedoAtCpu(cell);
         var ndotl = MathF.Max(Vector3.Dot(n, toSun), 0f);
         var direct = ndotl > 0f ? sunIrr * (ndotl * SunVisibilityCpu(off, toSun)) : Vector3.Zero;
         var outgoing = albedo * direct / MathF.PI;
@@ -202,7 +213,14 @@ internal sealed partial class SponzaLoop
 
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] probe reference — CPU path trace, sun only, {paths} paths x {bounces} bounces:"));
-        Console.WriteLine("    probe (x,y,z)        world            reference    measured     ratio");
+        // <b>Closure and visibility beside the radiance, because they separate two explanations.</b>
+        // If the +Z probes disagree on closure too, the two marches are finding different geometry
+        // and the fault is in transport. If closure matches while radiance does not, the geometry is
+        // agreed and something about what the surfaces RADIATE differs — which is a much smaller
+        // search. The closure instrument already matched the cook's bake to 0.002 in aggregate; the
+        // question is whether it still does at these specific probes.
+        var depth = vk.ReadTexture(bounceDepthTextures[BounceRead], out var dw, out var dh, out _);
+        Console.WriteLine("    probe (x,y,z)        world            reference    measured     ratio   closure  expected  vis");
 
         var rng = new Random(12345);
         double refSum = 0, gotSum = 0;
@@ -256,9 +274,17 @@ internal sealed partial class SponzaLoop
             refSum += refLum;
             gotSum += got;
             compared++;
+            var probeIndex = (pz * bounceY + py) * bounceX + px;
+            var vis = probeIndex < cellSkyVisibility.Length ? cellSkyVisibility[probeIndex] : 0f;
+            var cx = px * tile;
+            var cy = (py + pz * bounceY) * tile;
+            var closure = (cx < dw && cy < dh)
+                ? (float)BitConverter.ToHalf(depth, (cy * dw + cx) * 8 + 6)
+                : 0f;
             Console.WriteLine(string.Create(Inv,
                 $"    ({px,3},{py,3},{pz,3})   ({origin.X,6:0.0},{origin.Y,5:0.0},{origin.Z,6:0.0})   "
-                + $"{refLum,9:0.0000}   {got,9:0.0000}   {(refLum > 1e-9 ? got / refLum : 0),6:0.00}x"));
+                + $"{refLum,9:0.0000}   {got,9:0.0000}   {(refLum > 1e-9 ? got / refLum : 0),6:0.00}x   "
+                + $"{closure,7:0.000}  {1.0 - vis,8:0.000}  {vis,5:0.00}"));
         }
         Console.WriteLine(string.Create(Inv,
             $"    TOTAL  reference {refSum / Math.Max(1, compared):0.0000}   measured {gotSum / Math.Max(1, compared):0.0000}   "
