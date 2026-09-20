@@ -363,8 +363,12 @@ vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize,
             // rose from 0.0521 to 0.0530 when it was removed. Trading 0.6 ms for light coming
             // through walls is a worse bargain than the milliseconds suggest.
             vec3 incident = u.uSunIrradiance.rgb * sunReach + skyTerm
-                          + blix_probeIrradiance(uAtlasPrev, uDepthAtlasPrev, ivec3(u.uProbeDims.xyz),
-                                                 u.uBoundsMin.xyz, u.uBoundsSpan.xyz, probePos, n);
+                          + blix_probeIrradiance(uAtlasPrev, uDepthAtlasPrev, uOccupancy,
+                                                 ivec3(u.uProbeDims.xyz), ivec3(u.uOccupancyDims.xyz),
+                                                 u.uBoundsMin.xyz, u.uBoundsSpan.xyz, probePos, n,
+                                                 // Held at 0 alongside the fog's, same reason: one
+                                                 // dial at a time or the result cannot be attributed.
+                                                 0.0);
 
             // Lambertian outgoing radiance, now in the surface's OWN colour. uBoundsSpan.w stops
             // being the scene's albedo and becomes a plain strength multiplier over it.

@@ -707,6 +707,11 @@ internal sealed partial class SponzaLoop
             new ShaderTextureBinding("uSheenEnv", sheenMipCount > 0 ? sheenEnvTexture : envCubeTexture, Slot: 8),
             new ShaderTextureBinding("uSheenLut", sheenMipCount > 0 ? sheenLutTexture : brdfLutTexture, Slot: 9),
             new ShaderTextureBinding("uEnvCube", skyCubeTexture, Slot: 10),
+            // Ground truth for the leak metric. Same no-holes rule as uSheenEnv above: bound to a
+            // valid 3D texture whether or not the volume shipped one, with uOccupancyDims.w the
+            // flag that decides whether the shader may read it.
+            new ShaderTextureBinding("uOccupancy",
+                occX > 0 ? occupancyTexture : skyVisibilityTextures[0], Slot: 16),
         };
 
         // The one binding that is not constant: the lit pass reads whichever of the bounce pair the

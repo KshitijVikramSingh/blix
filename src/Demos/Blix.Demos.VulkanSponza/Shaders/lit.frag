@@ -160,6 +160,12 @@ layout(set = 0, binding = 0) uniform Frame {
     // fewer candidates means the visibility test empties the set more often.
     //@tune 0..1 = 0
     float uProbeTetrahedral;
+    // How hard the probe blend trusts a marched line of sight through the occupancy grid over the
+    // Chebyshev depth-moment test. 0 is the shipped behaviour exactly, 1 rejects any probe the
+    // march says is behind geometry. Read the leak census (--viz 21) and the fallback rate
+    // together: rejecting everything reports no leak and no light.
+    //@tune 0..1 = 0
+    float uProbeOcclusion;
     // Measurement switches, one per --ab mode. Each removes one term from the fragment so a paired
     // interleaved run can price it:
     //   x  collapse every material UV to a constant, so the five material samples all hit one
@@ -171,6 +177,7 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  uAbFlags;
     //   x  skip the probe bounce lookup AND the baked sky-visibility evaluation. Prices the two
     //      terms that read the probe volumes, which is the pair a half-res pass would move.
+    //   y  drop the occupancy line-of-sight test back to Chebyshev alone. Prices the march.
     vec4  uAbFlags2;
     // --viz N: write one of the shading inputs instead of the lit colour. The normal path is the
     // hardest thing here to be sure about by reading code — a double-sided sheet whose back face
@@ -185,6 +192,11 @@ layout(set = 0, binding = 0) uniform Frame {
     // xyz = 1 / (max - min), w = how far along the normal to push the lookup, in metres.
     vec4  uSkyScale;
     float uBounceStrength;
+    vec3  _occPad;
+    // xyz = occupancy grid dims, w = 1 when the grid is bound. Read only by the leak metric
+    // (viz channel 21), which marches it for ground-truth line of sight between a point and the
+    // probes voting on it — the thing the Chebyshev test in probe_volume.glsl only approximates.
+    vec4  uOccupancyDims;
 } frame;
 
 layout(set = 1, binding = 0) uniform samplerCube uIrradiance;
@@ -241,6 +253,10 @@ layout(set = 1, binding = 9) uniform sampler2D   uSheenLut;
 // Declared to keep set 1 layout-compatible with the skybox pipeline in the same pass; the lit
 // shader reads the prefiltered chain, not the raw sky.
 layout(set = 1, binding = 10) uniform samplerCube uEnvCube;
+
+// The same density grid the injection pass marches, here as the leak metric's ground truth. It is
+// not in the lit path: nothing outside the `uVizChannel > 20.5` branch samples it.
+layout(set = 1, binding = 16) uniform sampler3D uOccupancy;
 
 layout(set = 2, binding = 0) uniform Material {
     vec4 uBaseColorFactor;
@@ -707,6 +723,10 @@ void main() {
     vec3 bounce = vec3(0.0);
     vec3 vizBounceRaw = vec3(0.0);
     float probeConfidence = 0.0;
+    // Negative means "not measured here" — no probe volume, no occupancy grid, or not the channel
+    // that asks. The census needs that distinct from a measured zero, or every unlit pixel in the
+    // frame votes "no leak" and the average is whatever fraction of the screen is sky.
+    float vizProbeLeak = -1.0;
     if (frame.uBounceStrength > 0.0 && frame.uAbFlags2.x < 0.5) {
         vec3 probeUv = (vWorldPos + N * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz;
         // The volume stores average incident RADIANCE; irradiance is PI times it. Getting this
@@ -721,11 +741,19 @@ void main() {
         // probe happened to be closest — including one on the far side of itself. That leak is why
         // colour bled through walls from curtains and a tree they do not face.
         vec3 incident = blix_probeIrradianceEx(
-            uSkyBounce, uSkyBounceDepth, ivec3(frame.uBounceDims.xyz),
-            frame.uSkyMin.xyz, 1.0 / frame.uSkyScale.xyz, vWorldPos, bounceN,
-            frame.uProbeTetrahedral > 0.5, probeConfidence);
+            uSkyBounce, uSkyBounceDepth, uOccupancy, ivec3(frame.uBounceDims.xyz),
+            ivec3(frame.uOccupancyDims.xyz), frame.uSkyMin.xyz, 1.0 / frame.uSkyScale.xyz,
+            vWorldPos, bounceN, frame.uProbeTetrahedral > 0.5,
+            frame.uOccupancyDims.w > 0.5 && frame.uAbFlags2.y < 0.5 ? frame.uProbeOcclusion : 0.0,
+            probeConfidence);
         vizBounceRaw = incident;
         bounce = incident * albedo * (1.0 - metallic) * ao * visibility;
+        if (frame.uVizChannel > 20.5 && frame.uOccupancyDims.w > 0.5) {
+            vizProbeLeak = blix_probeLeakFraction(
+                uSkyBounceDepth, uOccupancy, ivec3(frame.uBounceDims.xyz),
+                ivec3(frame.uOccupancyDims.xyz), frame.uSkyMin.xyz, 1.0 / frame.uSkyScale.xyz,
+                vWorldPos, bounceN, frame.uProbeTetrahedral > 0.5, frame.uProbeOcclusion);
+        }
     }
 
     // Sheen's own prefiltered environment, at the sheen roughness rather than the base one, times
@@ -834,7 +862,22 @@ void main() {
             frame.uVizChannel < 17.5 ? kD * diffuseIBL * transScale * visibility * ao :
             frame.uVizChannel < 18.5 ? specularIBL * specularVisibility * ao :
             frame.uVizChannel < 19.5 ? transmittedIBL :
-                                       bounce * transScale;
+            frame.uVizChannel < 20.5 ? bounce * transScale :
+            // <b>21: how much of this point's probe blend arrives through a wall.</b> Red is the
+            // leaked fraction, green marks the pixel as measured — which is what lets the census
+            // average over the surfaces that asked the probe volume a question, rather than over
+            // the whole frame including sky. The Chebyshev visibility test is a statistical stand-in
+            // for exactly this march; this is the march, so the two can be compared instead of the
+            // approximation being trusted.
+            // Green carries the blend's surviving weight as 0.5 + 0.5*confidence, so one capture
+            // answers both halves of the question. A visibility test is only as good as the light
+            // it leaves standing, and the cheap way to score zero leak is to reject every probe —
+            // which reads as confidence collapsing to zero while the leak reads perfect.
+                                       vec3(max(vizProbeLeak, 0.0),
+                                            vizProbeLeak >= 0.0
+                                                ? 0.5 + 0.5 * clamp(probeConfidence, 0.0, 1.0)
+                                                : 0.0,
+                                            0.0);
         // Straight out, no exposure and no tonemap — these are directions and flags, and a film
         // curve on a direction is a way to misread it.
         // <b>Coverage 1, not the fragment's own — a diagnostic must not be alpha-to-coverage masked.</b>

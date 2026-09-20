@@ -55,6 +55,10 @@ layout(set = 0, binding = 0) uniform Froxel {
     vec4 uBoundsMin;     // xyz sky/probe volume min
     vec4 uBoundsSpan;    // xyz sky/probe volume span
     vec4 uProbeDims;     // xyz bounce grid dimensions
+    // xyz occupancy grid dims, w = how hard the probe blend trusts a marched line of sight over
+    // Chebyshev's statistical stand-in. Held at 0 here on purpose: the lit pass owns that dial for
+    // now, and moving two passes at once makes the measurement unattributable.
+    vec4 uOccupancyDims;
     vec4 uMedium;        // x = height scale (m), y = noise amount 0..1
     vec4 uTemporal;      // x = history weight 0..1, y = slice jitter 0..1, z = show history weight
     mat4 uPrevViewProj;  // last frame's camera, for reprojecting the medium
@@ -76,6 +80,9 @@ layout(set = 0, binding = 6) uniform sampler2D  uDepthAtlas;
 // whole architecture of this change.
 layout(set = 0, binding = 7) uniform sampler3D uScatterPrev;
 layout(set = 0, binding = 8, rgba16f) uniform writeonly image3D uScatter;
+// The density grid, for the probe blend's line-of-sight test. Bound rather than passed a stand-in
+// texture so the argument means what it says even while uOccupancyDims.w holds it at zero.
+layout(set = 0, binding = 9) uniform sampler3D uOccupancy;
 
 const float PI = 3.14159265359;
 
@@ -204,8 +211,9 @@ void main()
                 // the direction that matters for in-scatter toward the eye is the one the light
                 // travels to get here.
                 bounce = blix_probeIrradiance(
-                    uAtlas, uDepthAtlas, ivec3(f.uProbeDims.xyz),
-                    f.uBoundsMin.xyz, f.uBoundsSpan.xyz, worldPos, -rayDir) / PI;
+                    uAtlas, uDepthAtlas, uOccupancy, ivec3(f.uProbeDims.xyz),
+                    ivec3(f.uOccupancyDims.xyz), f.uBoundsMin.xyz, f.uBoundsSpan.xyz,
+                    worldPos, -rayDir, f.uOccupancyDims.w) / PI;
             }
             float skyVis = blix_skyVisibilityMean(uSkyVisibility, f.uBoundsMin.xyz, invSpan, worldPos);
             ambientRadiance = skyRadiance * skyVis + bounce;

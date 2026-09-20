@@ -91,7 +91,13 @@ internal sealed partial class SponzaLoop
     /// </remarks>
     private void ApplyOrbit()
     {
-        var t = (framesRendered % OrbitFrames) / (float)OrbitFrames;
+        // <b>The measured clock, not the wall clock of rendered frames.</b> framesRendered counts
+        // loading frames, and how many of those there are depends on how long texture streaming
+        // took — so two runs capturing at the same --shot-frames sat at DIFFERENT points on the
+        // circle, and a paired comparison between them was comparing two camera positions as well
+        // as two settings. Both now ride postLoadFrames, so the same --shot-frames is the same
+        // viewpoint every time, however long the textures took to stream in.
+        var t = (postLoadFrames % OrbitFrames) / (float)OrbitFrames;
         var angle = t * MathF.Tau;
         // Orbit the foliage when there is any, because that is the content a measurement most often
         // wants in frame and the one a bounds-derived path missed entirely.

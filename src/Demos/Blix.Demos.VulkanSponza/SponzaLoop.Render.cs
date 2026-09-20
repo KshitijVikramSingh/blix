@@ -112,6 +112,13 @@ internal sealed partial class SponzaLoop
         // forever. A toggle driven by a counter that the toggled-to branch stops advancing can only
         // ever fire once.
         framesRendered++;
+        // <b>One clock for everything a measurement has to reproduce.</b> framesRendered counts
+        // loading frames and framePeriodCount+flatPeriodCount counts them too outside --ab (a
+        // non-ab run files every loading frame under flatPeriodCount), so both moved with how long
+        // texture streaming happened to take. The orbit rode one and the capture deadline rode the
+        // other, which meant two runs of the SAME command captured from two different points on
+        // the circle — and a paired comparison between them was reading a camera move as a result.
+        if (fullyLoaded) postLoadFrames++;
         if (orbit) ApplyOrbit();
         var stamp = System.Diagnostics.Stopwatch.GetTimestamp();
         if (lastFrameStamp != 0)
@@ -220,6 +227,9 @@ internal sealed partial class SponzaLoop
             // asks the cell in FRONT of it rather than the one it is embedded in.
             new("uSkyScale",         new Vector4Uniform(new Vector4(skyVolumeInvSpan, 0.6f))),
             new("uBounceStrength",   new FloatUniform(bounceReady && skyVisibilityEnabled && !skipSkySample ? 1f : 0f)),
+            // w gates the leak metric's march: 0 means no occupancy grid shipped and channel 21
+            // has nothing to be the truth about.
+            new("uOccupancyDims",    new Vector4Uniform(new Vector4(occX, occY, occZ, occX > 0 ? 1f : 0f))),
             // One component per --ab shading mode, live only during that mode's off-phase.
             new("uAbFlags",          new Vector4Uniform(new Vector4(
                 AbOffPhase && abMode == "textures" ? 1f : 0f,
@@ -227,7 +237,10 @@ internal sealed partial class SponzaLoop
                 AbOffPhase && abMode == "ibl"      ? 1f : 0f,
                 AbOffPhase && abMode == "normal"   ? 1f : 0f))),
             new("uAbFlags2",         new Vector4Uniform(new Vector4(
-                AbOffPhase && abMode == "indirect" ? 1f : 0f, 0f, 0f, 0f))),
+                AbOffPhase && abMode == "indirect" ? 1f : 0f,
+                //   y  drop the occupancy line-of-sight test back to Chebyshev alone, so the
+                //      march's cost can be priced against the leak it removes.
+                AbOffPhase && abMode == "occlusion" ? 1f : 0f, 0f, 0f))),
         };
         // The remaining //@tune uniforms (shadow slope scale, uVisualizeCascades) are appended by
         // name from the overlay panel — reflection lands each at its offset. The intensity and
@@ -448,6 +461,9 @@ internal sealed partial class SponzaLoop
                 new("uBoundsMin",     new Vector4Uniform(new Vector4(skyVolumeMin, 0f))),
                 new("uBoundsSpan",    new Vector4Uniform(new Vector4(skyVolumeSpan, 0f))),
                 new("uProbeDims",     new Vector4Uniform(new Vector4(bounceX, bounceY, bounceZ, 0f))),
+                // w = 0: the fog's probe blend keeps the Chebyshev-only visibility test while the
+                // lit pass's occlusion dial is being measured. One pass at a time.
+                new("uOccupancyDims", new Vector4Uniform(new Vector4(occX, occY, occZ, 0f))),
                 // No splits: the fog picks its cascade by containment through the shared lookup,
                 // exactly as the lit pass does. It used to take the view-depth bounds and select on
                 // them, which silently stopped matching the surfaces when the lit pass moved.
@@ -835,7 +851,7 @@ internal sealed partial class SponzaLoop
         // resulting numbers wobbled by 2x between runs while looking like measurements. With the
         // deadline in post-load frames the buffers fill, and the ratio between arms stabilises to
         // within a few per cent.
-        var measuredFrames = framePeriodCount + flatPeriodCount;
+        var measuredFrames = postLoadFrames;
         if (shotPath is { } path && !shotWritten && fullyLoaded && !AbOffPhase
             && framePeriodCount >= 60 && measuredFrames >= shotFrame)
         {
@@ -851,6 +867,7 @@ internal sealed partial class SponzaLoop
             // a probe of nine blended normals.
             WriteAmbientRaw(Path.ChangeExtension(path, null) + ".raw.png");
             WriteSceneShot(Path.ChangeExtension(path, null) + ".scene.png");
+            LeakCensus();
             WritePassBreakdown();
             WriteLodCensus();
             WriteProbeCensus();
@@ -858,6 +875,70 @@ internal sealed partial class SponzaLoop
             WriteFrameStats();
             host.RequestClose();
         }
+    }
+
+    /// <summary>
+    /// How much of the probe blend, over everything the camera can see, arrives through a wall.
+    /// </summary>
+    /// <remarks>
+    /// <b>The number that was being judged by eye.</b> Probe leaking has been diagnosed all evening
+    /// from screenshots — "colour bleeds from the back of the interior walls" — and a screenshot
+    /// cannot say whether a change made it better by a third or worse by a tenth. Channel 21 has
+    /// each shaded pixel march the occupancy grid to every probe voting on it and report the share
+    /// of blend weight that is voting from behind geometry; this averages that over the frame.
+    ///
+    /// The distribution matters more than the mean and that is why both are printed. A leak is
+    /// visible where it is CONCENTRATED — one wall taking a third of its bounce from the far side
+    /// reads as a coloured stain, while the same total weight spread thinly over the whole atrium
+    /// reads as nothing at all. A mean that falls while the tail grows is a change that made the
+    /// image worse, and only the tail says so.
+    ///
+    /// Requires --viz 21: outside that channel the march does not run, because eight marches of up
+    /// to 24 steps per pixel is not something to pay for in a frame nobody is measuring.
+    /// </remarks>
+    private void LeakCensus()
+    {
+        if (vizChannel < 20.5f || vizChannel > 21.5f) return;
+
+        var pixels = vk.ReadTexture(
+            graph.GetColorTexture(hdrHandle), out var width, out var height, out var format);
+        if (format != TextureFormat.R11G11B10F) return;
+
+        var measured = new List<float>(width * height / 4);
+        double sum = 0;
+        double confidenceSum = 0;
+        for (var i = 0; i < width * height; i++)
+        {
+            var packed = BitConverter.ToUInt32(pixels, i * 4);
+            // <b>Green AND a blue of exactly zero, because the skybox is also in this buffer.</b>
+            // The skybox pass never runs lit.frag, so it never writes the marker — but the sky it
+            // writes is bright, and its green channel sails past any "is this 1.0" test. Every sky
+            // pixel therefore counted as a measured surface reporting no leak, which is why the
+            // census reported all 4,665,600 pixels as probe-lit and diluted the mean with a third
+            // of a frame of guaranteed zeroes. Channel 21 writes blue 0 exactly and the sky cannot.
+            var green = UnpackFloat((packed >> 11) & 0x7FF, 6);
+            if (green < 0.49f) continue;
+            if (UnpackFloat((packed >> 22) & 0x3FF, 5) > 1e-4f) continue;
+            var leak = UnpackFloat(packed & 0x7FF, 6);
+            measured.Add(leak);
+            sum += leak;
+            confidenceSum += Math.Clamp((green - 0.5f) * 2f, 0f, 1f);
+        }
+
+        if (measured.Count == 0)
+        {
+            Console.WriteLine("[VulkanSponza] leak census: no pixel read the probe volume.");
+            return;
+        }
+
+        measured.Sort();
+        float Quantile(double q) => measured[Math.Clamp((int)(q * measured.Count), 0, measured.Count - 1)];
+        var over = (double)measured.Count(v => v > 0.25f) / measured.Count;
+        Console.WriteLine(
+            $"[VulkanSponza] leak census ({measured.Count:N0} probe-lit pixels of {width * height:N0}): " +
+            $"mean {sum / measured.Count:P1}, median {Quantile(0.5):P1}, p95 {Quantile(0.95):P1}, " +
+            $"p99 {Quantile(0.99):P1}, {over:P1} of pixels over 25%, " +
+            $"mean surviving weight {confidenceSum / measured.Count:P1}");
     }
 
     /// <summary>The ambient buffer before the denoise: rgb as written, alpha as visibility.</summary>
@@ -1384,6 +1465,8 @@ internal sealed partial class SponzaLoop
         new ShaderTextureBinding("uDepthAtlas", bounceReady ? bounceDepthTextures[bounceWrite] : brdfLutTexture, Slot: 6),
         new ShaderTextureBinding("uScatterPrev", fogScatterTextures[fogScatterWrite ^ 1], Slot: 7),
         new ShaderTextureBinding("uScatter", fogScatterTextures[fogScatterWrite], Slot: 8),
+        new ShaderTextureBinding("uOccupancy",
+            occX > 0 ? occupancyTexture : skyVisibilityTextures[0], Slot: 9),
     };
 
     private ShaderTextureBinding[] BounceBindings() => new[]

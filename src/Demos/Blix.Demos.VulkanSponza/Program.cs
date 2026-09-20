@@ -481,6 +481,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // swamped by thermal drift between runs.
     private readonly double[] flatPeriodsMs = new double[600];
     private int flatPeriodCount;
+
+    // Frames rendered since the scene finished loading. The reproducible clock: the orbit's angle
+    // and the --shot deadline both read it, so a capture is a function of the flag alone.
+    private int postLoadFrames;
     private bool shotWritten;
 
     // --no-mask: force every cutout material's alphaCutoff to zero. Nothing then routes to a MASK
@@ -575,6 +579,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
         "Probe confidence (red = fallback)",
         "Ambient: sky diffuse", "Ambient: sky specular",
         "Ambient: transmitted", "Ambient: bounce",
+        "Probe leak (red = weight through walls)",
     };
 
     // Live overrides for the two cloth numbers, so they can be found by eye and then written back
