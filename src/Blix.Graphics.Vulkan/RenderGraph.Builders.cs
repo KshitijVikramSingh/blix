@@ -105,6 +105,27 @@ public sealed class GraphicsPassBuilder
     public GraphicsPassBuilder Read(GraphResourceHandle handle) =>
         Read((TextureView)handle);
 
+    /// <summary>A read of what the PREVIOUS frame wrote into this resource.</summary>
+    /// <remarks>
+    /// <b>The one read that legitimately precedes its writer.</b> Temporal accumulation samples the
+    /// last frame's result and then overwrites it, so the pass that produces the data is declared
+    /// after the pass that consumes it and the ordering check would reject the pair. This declares
+    /// the read — the layout transition and the barrier are exactly as real as any other — and
+    /// exempts only the ordering assertion.
+    ///
+    /// Two obligations come with it, and neither is the graph's to enforce. The first frame reads
+    /// undefined contents, so a caller must gate the blend until it has written once. And the
+    /// resource must not be resized or re-created underneath the history without the caller
+    /// invalidating it, for the same reason.
+    /// </remarks>
+    public GraphicsPassBuilder ReadHistory(GraphResourceHandle handle)
+    {
+        EnsureMutable();
+        entry.Reads.Add((TextureView)handle);
+        entry.HistoryReads.Add(handle.Id);
+        return this;
+    }
+
     // Closed set of shaders this pass supports. Drawing with one not in
     // the list is rejected at draw time.
     public GraphicsPassBuilder Shader(params ShaderInterface[] shaders)
@@ -150,6 +171,15 @@ public sealed class ComputePassBuilder
     {
         EnsureMutable();
         entry.Reads.Add(view);
+        return this;
+    }
+
+    /// <summary>A read of what the PREVIOUS frame wrote; see GraphicsPassBuilder.ReadHistory.</summary>
+    public ComputePassBuilder ReadHistory(GraphResourceHandle handle)
+    {
+        EnsureMutable();
+        entry.Reads.Add((TextureView)handle);
+        entry.HistoryReads.Add(handle.Id);
         return this;
     }
 

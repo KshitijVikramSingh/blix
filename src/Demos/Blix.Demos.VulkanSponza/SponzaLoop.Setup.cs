@@ -69,6 +69,21 @@ internal sealed partial class SponzaLoop
                 sunStrength = MathF.Max(0f, ss);
             if (cmdArgs[i] == "--ref-bounces" && int.TryParse(cmdArgs[i + 1], out var rb))
                 refBounces = Math.Clamp(rb, 1, 8);
+            if (cmdArgs[i] == "--shadow-maps" && cmdArgs[i + 1].Split(',') is { Length: 3 } sm
+                && int.TryParse(sm[0], out var m0) && int.TryParse(sm[1], out var m1)
+                && int.TryParse(sm[2], out var m2))
+            {
+                ShadowMapSizes = new[]
+                {
+                    Math.Clamp(m0, 256, 4096), Math.Clamp(m1, 256, 4096), Math.Clamp(m2, 256, 4096),
+                };
+            }
+            if (cmdArgs[i] == "--gtao-taps" && cmdArgs[i + 1].Split('x') is { Length: 2 } tp
+                && float.TryParse(tp[0], out var gs) && float.TryParse(tp[1], out var gt))
+            {
+                ambient.Slices = gs;
+                ambient.Steps = gt;
+            }
             if (cmdArgs[i] == "--shadow-lod" && float.TryParse(cmdArgs[i + 1], out var sl))
                 shadowLodTexels = MathF.Max(0.1f, sl);
             if (cmdArgs[i] == "--bounce-div" && float.TryParse(cmdArgs[i + 1], out var bd))
@@ -146,6 +161,11 @@ internal sealed partial class SponzaLoop
         if (cmdArgs.Contains("--no-caster-cull")) shadowCasterCull = false;
         if (cmdArgs.Contains("--probe-reference")) probeReference = true;
         if (cmdArgs.Contains("--no-sky-bounce")) noSkyBounce = true;
+        for (var i = 0; i < cmdArgs.Length - 1; i++)
+        {
+            if (cmdArgs[i] == "--fog-slices" && int.TryParse(cmdArgs[i + 1], out var fs))
+                froxelGridZ = Math.Clamp(fs, 8, 128);
+        }
         // --orbit: drive the camera on a fixed path so a measurement is of the renderer rather than
         // of one photograph of it. Ignores --cam, which is the still counterpart.
         if (cmdArgs.Contains("--orbit")) orbit = true;
@@ -375,6 +395,11 @@ internal sealed partial class SponzaLoop
         // Reads every pyramid level: which one a tap lands on depends on how far it steps, so all
         // of them are inputs and the graph orders the whole chain ahead of this pass.
         for (var level = 0; level < HiZLevels; level++) gtaoBuilder = gtaoBuilder.Read(hiZHandles[level]);
+        // <b>Declared as a READ of the target the denoise writes later this frame.</b> Ordering is
+        // what makes that sound rather than circular: this pass is declared first, so it samples
+        // the previous frame's contents, and the denoise overwrites them afterwards. Without the
+        // declaration the graph would not know to transition the layout or order the two.
+        gtaoBuilder = gtaoBuilder.ReadHistory(ambientDenoisedHandle);
         gtaoPassHandle = gtaoBuilder.Shader(gtaoInterface).Handle;
 
         // Spatial denoise. A separate pass rather than a wider kernel inside GTAO: the estimate and
@@ -598,16 +623,16 @@ internal sealed partial class SponzaLoop
         }
         (froxelGridX, froxelGridY) = FroxelGridSize(fbW, fbH);
         froxelGridTexture = vk.CreateStorageTexture3D(
-            froxelGridX, froxelGridY, FroxelGridZ,
+            froxelGridX, froxelGridY, froxelGridZ,
             TextureFormat.Rgba16F, SamplerDescription.LinearClamp, "sponza.froxel_grid");
         for (var i = 0; i < 2; i++)
         {
             fogScatterTextures[i] = vk.CreateStorageTexture3D(
-                froxelGridX, froxelGridY, FroxelGridZ,
+                froxelGridX, froxelGridY, froxelGridZ,
                 TextureFormat.Rgba16F, SamplerDescription.LinearClamp, $"sponza.fog_scatter{i}");
         }
         Console.WriteLine(
-            $"[VulkanSponza] froxel grid {froxelGridX}x{froxelGridY}x{FroxelGridZ} " +
+            $"[VulkanSponza] froxel grid {froxelGridX}x{froxelGridY}x{froxelGridZ} " +
             $"({FroxelPixels} px/froxel at {fbW}x{fbH})");
 
         // Build the per-frame-constant buffers once (graph compiled + all

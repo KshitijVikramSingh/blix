@@ -25,7 +25,7 @@ internal sealed partial class SponzaLoop
     private int FillIndirect(
         List<Drawable> drawables, float[] lodMargins, int[] lodState, IndirectBufferHandle buffer,
         Frustum? cull, float margin, float worldErrorBudget = 0f,
-        Frustum? receivers = null, Vector3 shadowSweep = default)
+        Frustum? receivers = null, Vector3 shadowSweepDir = default)
     {
         // <b>An empty scene has no indirect buffer, and that used to be a crash.</b> When every
         // pack failed to load — stale cooked files after a format bump — the demo reported exactly
@@ -62,9 +62,21 @@ internal sealed partial class SponzaLoop
             // shadow volume.
             if (vis && receivers is { } rf)
             {
+                // <b>Swept until the shadow leaves the SCENE, not until it leaves the cascade.</b>
+                // The first version swept by the cascade's far distance, which is a statement about
+                // the camera and not about the light: a roofline caster at 17 m with the sun at 53
+                // degrees throws its shadow about 21 m before reaching the floor, so cascade 0's
+                // 14 m sweep cut it — while the shadow itself landed well inside cascade 0. The
+                // result was patches of missing shadow that came and went with the view angle and
+                // that nothing on screen could affect, because nothing on screen controlled it.
+                //
+                // The honest bound is where the swept box exits the scene bounds, which is tighter
+                // for a caster near the floor than for one under the roof — exactly the right shape,
+                // since a low caster genuinely cannot shadow much.
+                var sweep = shadowSweepDir * SceneExitDistance(d.Bounds, shadowSweepDir);
                 var swept = new Bounds3(
-                    Vector3.Min(d.Bounds.Min, d.Bounds.Min + shadowSweep),
-                    Vector3.Max(d.Bounds.Max, d.Bounds.Max + shadowSweep));
+                    Vector3.Min(d.Bounds.Min, d.Bounds.Min + sweep),
+                    Vector3.Max(d.Bounds.Max, d.Bounds.Max + sweep));
                 vis = rf.Intersects(swept, margin);
             }
             // Per-primitive LOD margin (live-tunable) scales the global px budget.
@@ -332,7 +344,7 @@ internal sealed partial class SponzaLoop
                 // The sweep is this cascade's far distance: a shadow that has travelled further than
                 // the cascade covers has left it, and the next cascade owns that ground.
                 shadowCasterCull && !(abMode == "castercull" && AbOffPhase) ? cameraFrustumThisFrame : null,
-                sunDirection * cascadeSplits[ci + 1]);
+                Vector3.Normalize(sunDirection));
             cascadeTriangles[ci] = fillIndirectTriangles;
             // Opaque casters all push the same bytes (identity model + this
             // cascade's VP); mask casters push per-material alpha params, so one
@@ -445,6 +457,22 @@ internal sealed partial class SponzaLoop
         // the rejections and removes the whole class.
         FillIndirect(opaqueDrawables, opaqueLodMargins, opaqueLodState, opaqueIndirect, cameraFrustum, margin: CameraCullMargin);
         cameraTriangles = fillIndirectTriangles;
+        // <b>Exactly one revolution, started at the top of one.</b> Averaging "however many frames
+        // happened" over a closed path averages whichever ARC the run covered — two runs of the
+        // same length reported 450,076 camera triangles and 590,138 with an identical camera, which
+        // made the counted instrument as run-dependent as the timing it replaced. Sampling is armed
+        // at a period boundary and stops after a full period, so the window is the same stretch of
+        // path every time and the mean belongs to the configuration.
+        // Any CONTIGUOUS period covers the whole closed path, so the window does not need to start
+        // at a period boundary — and requiring one was worse than not averaging at all: it armed at
+        // the first multiple of the period after loading finished, load time varies, and two runs
+        // collected 1 frame each because the boundary landed near the end of the run.
+        if (!orbit || triangleFrames < OrbitFrames)
+        {
+            for (var c = 0; c < CascadeCount; c++) cascadeTriangleSum[c] += cascadeTriangles[c];
+            cameraTriangleSum += fillIndirectTriangles;
+            triangleFrames++;
+        }
         if (blendDrawables.Count > 0) FillIndirect(blendDrawables, blendLodMargins, blendLodState, blendIndirect, cameraFrustum, margin: CameraCullMargin);
 
         // Depth pre-pass: same non-blend set as the lit pass (no cull, so the
@@ -606,22 +634,36 @@ internal sealed partial class SponzaLoop
                     aoWidth, aoHeight, 1f / aoWidth, 1f / aoHeight))),
                 new("uParams",        new Vector4Uniform(new Vector4(
                     ambient.Enabled && !(abMode == "gtao" && AbOffPhase) ? ambient.RadiusMetres : 0f,
-                    projectionScale, aoDebug, 0f))),
+                    projectionScale, aoDebug, ambient.Slices))),
                 // The view ray, in NDC units. The negated Y is Vulkan's flip, taken from the
                 // projection rather than rediscovered in the shader — the same flip whose omission
                 // in the slice basis made the whole floor read as fully occluded.
                 new("uRay",           new Vector4Uniform(new Vector4(
                     MathF.Tan(fovYRadians * 0.5f) * aspect, -MathF.Tan(fovYRadians * 0.5f),
                     CameraFarPlane * 0.98f, 0f))),
+                // History is refused on the first frame and whenever the target has just been
+                // re-created, for the same reason the fog's is: blending into an uninitialised
+                // buffer is blending into whatever the allocator left.
+                new("uTemporal",      new Vector4Uniform(new Vector4(
+                    ambientHistoryValid ? ambient.Temporal : 0f,
+                    // A golden-ratio walk over the slice span, so consecutive frames measure
+                    // azimuths that are as far apart as a low-discrepancy sequence can put them.
+                    (float)((framesRendered * 0.6180339887) % 1.0) * MathF.PI,
+                    ambient.ShowRejection ? 1f : 0f, ambient.Steps))),
+                new("uPrevViewProj",  new Matrix4x4Uniform(ambientHistoryValid ? prevAmbientViewProj : viewProj)),
             };
-            var hiZBindings = new ShaderTextureBinding[HiZLevels];
+            var hiZBindings = new ShaderTextureBinding[HiZLevels + 1];
             for (var level = 0; level < HiZLevels; level++)
             {
                 hiZBindings[level] = new ShaderTextureBinding(
                     $"uHiZ[{level}]", graph.GetColorTexture(hiZHandles[level]), Slot: 1, ArrayIndex: level);
             }
+            hiZBindings[HiZLevels] = new ShaderTextureBinding(
+                "uHistory", graph.GetColorTexture(ambientDenoisedHandle), Slot: 2);
             graph.Pass(gtaoPassHandle, scope => fullscreen.Draw(
                 scope, gtaoPipeline, hiZBindings, pushConstants: null, uniforms: gtaoUniforms));
+            prevAmbientViewProj = viewProj;
+            ambientHistoryValid = true;
 
             var denoiseUniforms = new ShaderUniform[]
             {
@@ -1220,14 +1262,14 @@ internal sealed partial class SponzaLoop
         froxelGridX = x;
         froxelGridY = y;
         froxelGridTexture = vk.CreateStorageTexture3D(
-            x, y, FroxelGridZ, TextureFormat.Rgba16F, SamplerDescription.LinearClamp,
+            x, y, froxelGridZ, TextureFormat.Rgba16F, SamplerDescription.LinearClamp,
             "sponza.froxel_grid");
         vk.DestroyTexture(previous);
         for (var i = 0; i < 2; i++)
         {
             var staleScatter = fogScatterTextures[i];
             fogScatterTextures[i] = vk.CreateStorageTexture3D(
-                x, y, FroxelGridZ, TextureFormat.Rgba16F, SamplerDescription.LinearClamp,
+                x, y, froxelGridZ, TextureFormat.Rgba16F, SamplerDescription.LinearClamp,
                 $"sponza.fog_scatter{i}");
             vk.DestroyTexture(staleScatter);
         }
@@ -1238,13 +1280,37 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uFroxelGrid", froxelGridTexture, Slot: 4);
         }
         Console.WriteLine(
-            $"[VulkanSponza] froxel grid {x}x{y}x{FroxelGridZ} ({FroxelPixels} px/froxel at {width}x{height})");
+            $"[VulkanSponza] froxel grid {x}x{y}x{froxelGridZ} ({FroxelPixels} px/froxel at {width}x{height})");
     }
 
     // A low-discrepancy offset in [0,1) for this frame's slice sample, so successive frames land at
     // different depths inside the same segment. R2 rather than Halton: one multiply, no bit
     // reversal, and a better-spread sequence than either for one dimension.
     private float FogJitter() => (float)((framesRendered * 0.7548776662) % 1.0);
+
+    // How far a point in these bounds can travel along `dir` before it leaves the scene volume.
+    // A slab test against the sky volume, which is the authored extent of everything that can cast
+    // or receive — past it there is nothing left to darken.
+    private float SceneExitDistance(Bounds3 bounds, Vector3 dir)
+    {
+        var min = skyVolumeMin;
+        var max = skyVolumeMin + skyVolumeSpan;
+        var t = float.MaxValue;
+        for (var a = 0; a < 3; a++)
+        {
+            var d = a == 0 ? dir.X : a == 1 ? dir.Y : dir.Z;
+            if (MathF.Abs(d) < 1e-5f) continue;
+            // The far corner in this axis is whichever the ray is heading toward.
+            var start = d > 0
+                ? (a == 0 ? bounds.Max.X : a == 1 ? bounds.Max.Y : bounds.Max.Z)
+                : (a == 0 ? bounds.Min.X : a == 1 ? bounds.Min.Y : bounds.Min.Z);
+            var wall = d > 0
+                ? (a == 0 ? max.X : a == 1 ? max.Y : max.Z)
+                : (a == 0 ? min.X : a == 1 ? min.Y : min.Z);
+            t = MathF.Min(t, MathF.Max((wall - start) / d, 0f));
+        }
+        return t == float.MaxValue ? skyVolumeSpan.Length() : t;
+    }
 
     // Whether the fog has real fields to scatter. Both halves must be there: the baked sky
     // visibility volume decides how much sky a froxel sees, and the bounce atlas supplies what the
@@ -1559,8 +1625,16 @@ internal sealed partial class SponzaLoop
             "  NOTE: on a tile-based GPU (Apple/MoltenVK) these bracket ENCODER submission, not the "
             + "deferred tiled execution, so they do not sum to the frame. Compare them to each other, "
             + "and use paired A/B runs (--no-ao and friends) for absolute cost.");
+        // <b>The MEAN over the run, not the last frame's snapshot.</b> A single frame's counts are
+        // taken at wherever the camera happened to stop, and on the orbit two runs of the same
+        // length landed far enough apart to report 165,007 camera triangles against 480,333 — which
+        // made a counted instrument as unreliable as the timing it was meant to replace. Averaged
+        // over every frame, the figure is a property of the configuration again.
+        var tf = Math.Max(1, triangleFrames);
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] triangles submitted: cascades {cascadeTriangles[0]:N0}/{cascadeTriangles[1]:N0}/{cascadeTriangles[2]:N0}, camera {cameraTriangles:N0}"));
+            $"[VulkanSponza] triangles submitted (mean of {tf} frames): cascades "
+            + $"{cascadeTriangleSum[0] / tf:N0}/{cascadeTriangleSum[1] / tf:N0}/{cascadeTriangleSum[2] / tf:N0}, "
+            + $"camera {cameraTriangleSum / tf:N0}"));
         Console.WriteLine(string.Create(Inv,
             $"  shadow maps {ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}, texel {cascadeTexelWorld[0]:0.000}/{cascadeTexelWorld[1]:0.000}/{cascadeTexelWorld[2]:0.000} m, budget {shadowLodTexels:0.0} texels"));
 

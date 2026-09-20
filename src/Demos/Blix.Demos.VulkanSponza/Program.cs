@@ -411,7 +411,17 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // The z count is the subdivision of the fog's RANGE and has nothing to do with the screen, so
     // it stays a constant. Cost scales with the product: XY with the framebuffer, Z with this.
     private const int FroxelPixels = 8;
-    private const int FroxelGridZ = 48;
+    /// <summary>--fog-slices N: depth slices in the froxel grid. See the note on the default.</summary>
+    /// <remarks>
+    /// <b>48 was compensating for having no history, and it no longer has to.</b> The slice count
+    /// was carrying the smoothness on its own: with the sample parked at each segment's midpoint
+    /// every frame, the only defence against banding along the ray was making the segments short.
+    /// The temporal path jitters that sample within its segment and integrates across frames, which
+    /// is the same smoothness bought by accumulation rather than by resolution — so the count can
+    /// come down and the cost with it. Set it back to 48 to compare, and Fog/Temporal 0 to see what
+    /// the count alone was doing.
+    /// </remarks>
+    private int froxelGridZ = 24;
     private int froxelGridX, froxelGridY;
     private int froxelGridBinding = -1;
 
@@ -592,7 +602,18 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // huge world area where per-texel detail matters least, so it's 1024². The
     // lit/froxel PCF reads textureSize() so it adapts to each map automatically;
     // only texel-snapping + bias need the per-cascade size (see UpdateCascades).
-    private static readonly int[] ShadowMapSizes = { 2048, 2048, 1024 };
+    /// <summary>--shadow-maps A,B,C: the three cascade resolutions. See the note on the default.</summary>
+    /// <remarks>
+    /// <b>Two costs move together here, which is what makes resolution worth revisiting.</b> A
+    /// cascade's world texel is its span over its size, and the caster budget is derived from that
+    /// texel — so halving a map both quarters the fill AND doubles the geometric error its casters
+    /// may carry, which coarsens their LOD. Isolation measured cascade 0 at 2.5x cascade 2 for
+    /// exactly these two reasons compounding.
+    ///
+    /// 2048 over 14 m is a 1.8 cm texel, and the surface filter is a 4-tap Vogel disc of 2 texels
+    /// radius — so the map resolves detail three times finer than anything that reads it.
+    /// </remarks>
+    private static int[] ShadowMapSizes = { 2048, 2048, 1024 };
     // View-space depth boundaries: cascade i covers (Splits[i], Splits[i+1]).
     // [1..3] (the cascade far distances) are live-tunable from the overlay.
     // <b>Cascade 0 reaches 14 m, not 6.</b> At 6 m the switch to cascade 1 happened close enough to
@@ -638,6 +659,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private long fillIndirectTriangles;
     private readonly long[] cascadeTriangles = new long[CascadeCount];
     private long cameraTriangles;
+    private readonly long[] cascadeTriangleSum = new long[CascadeCount];
+    private long cameraTriangleSum;
+    private long triangleFrames;
+    private bool triangleWindowOpen;
     /// <summary>--shadow-lod N: caster geometric error allowed, in shadow-map texels.</summary>
     private float shadowLodTexels = 1.5f;
     /// <summary>The camera frustum for this frame; the cascades cull their casters against it.</summary>
@@ -649,6 +674,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     /// <summary>--no-sky-bounce: the injector scatters the sun only, for the CPU reference to match.</summary>
     private bool noSkyBounce;
     private int refBounces = 3;
+    private Matrix4x4 prevAmbientViewProj = Matrix4x4.Identity;
+    private bool ambientHistoryValid;
     // Two shadow caster pipelines: opaque casters use a push-only program (no
     // descriptor sets → zero per-draw transient allocations), mask foliage uses
     // the alpha-cutout program (binds albedo). Routed per drawable by cutoff.
@@ -1092,6 +1119,20 @@ internal sealed class AmbientSettings
     // which is a good deal less indirect light than the old 0.35 scalar was handing every surface.
     // Above 1 is then a legible artistic decision rather than a fudge with a misleading name.
     [Tune(0f, 4f)]    public float BounceStrength = 1.0f;
+    // <b>How much of the visibility comes from previous frames.</b> GTAO is four slices per pixel,
+    // and the spatial denoise downstream was sized on the argument that each pixel only has to be
+    // unbiased rather than quiet. Accumulation extends that argument by one step — unbiased over
+    // TIME as well — which is what lets the slice and step counts come down. 0 disables it and is
+    // the honest baseline.
+    [Tune(0f, 0.97f)] public float Temporal = 0.9f;
+    // Replaces the visibility with where history was refused or clamped back: bright at
+    // disocclusions and the screen edge, black where the previous frame was trusted.
+    [Tune]            public bool ShowRejection;
+    // Horizon slices and steps along each. 4x6 = 24 taps was sized against the spatial denoise
+    // alone; with history integrating over frames as well, the honest question is how far these
+    // fall before the image moves, and that is a sweep rather than an opinion.
+    [Tune(1f, 8f)]    public float Slices = 4f;
+    [Tune(1f, 12f)]   public float Steps = 6f;
 }
 
 // Misc render tunables (overlay "Render" group). Vsync stays a manual toggle —

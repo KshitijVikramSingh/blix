@@ -88,6 +88,7 @@ internal static class RenderGraphValidation
             {
                 foreach (var read in gpass.Reads)
                 {
+                    if (gpass.HistoryReads.Contains(read.Resource.Id)) continue;
                     if (!declaredEarlier.Contains(read.Resource.Id))
                     {
                         var resourceName = LookupResourceName(graph, read.Resource.Id);
@@ -100,6 +101,7 @@ internal static class RenderGraphValidation
             {
                 foreach (var read in cpass.Reads)
                 {
+                    if (cpass.HistoryReads.Contains(read.Resource.Id)) continue;
                     if (!declaredEarlier.Contains(read.Resource.Id))
                     {
                         var resourceName = LookupResourceName(graph, read.Resource.Id);

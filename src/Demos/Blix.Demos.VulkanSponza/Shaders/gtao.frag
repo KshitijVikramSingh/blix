@@ -40,6 +40,9 @@ layout(set = 0, binding = 0) uniform Gtao {
     // reconstruction cannot forget it the way the slice basis once did. z = the distance at or
     // beyond which a texel is background. w unused.
     vec4  uRay;
+    // x = history weight 0..1, y = this frame's slice rotation offset, z = show rejection.
+    vec4  uTemporal;
+    mat4  uPrevViewProj;
 } g;
 
 // The Hi-Z pyramid, six levels, each carrying min/max LINEAR view depth. GTAO reads .r — the
@@ -52,6 +55,10 @@ layout(set = 0, binding = 0) uniform Gtao {
 #define HIZ_LEVELS 6
 #define uRayXY() (g.uRay.xy)
 layout(set = 0, binding = 1) uniform sampler2D uHiZ[HIZ_LEVELS];
+// <b>Last frame's DENOISED visibility, and no ping-pong needed to get it.</b> This pass is declared
+// before the denoise that writes that target, so when this samples it, it still holds the previous
+// frame's result. One declared read replaces a second target, a second pass and an alternation.
+layout(set = 0, binding = 2) uniform sampler2D uHistory;
 
 #define PI     3.14159265359
 #define HALF_PI 1.57079632679
@@ -68,8 +75,19 @@ layout(set = 0, binding = 1) uniform sampler2D uHiZ[HIZ_LEVELS];
 // neighbouring pixels rotate their slice sets differently, so nine neighbours already sample many
 // more than four directions between them. Steps are the radial resolution of a single horizon, and
 // no amount of neighbour-averaging recovers a horizon that was never found.
-const int SLICES = 4;
-const int STEPS  = 6;
+// <b>Constants again, and the sweep that chose them is why.</b> These were briefly uniform-driven
+// so --gtao-taps could find the knee, and that measurement carries a warning worth keeping: dynamic
+// loop bounds cost 3.4 ms on their own here, because they stop the compiler unrolling a tight loop
+// of dependent texture fetches. The ratios the sweep reported were sound (24 taps against 8) and
+// its absolutes were not. Anything that makes a hot loop configurable is measuring a different
+// shader from the one that ships.
+//
+// 2x4 rather than the old 4x6, because the count no longer carries the smoothness alone. It was
+// sized against the SPATIAL denoise — nine neighbours integrate what one pixel cannot — and history
+// extends that over frames as well; the sweep found 8 taps and 6 taps indistinguishable in cost,
+// which is the floor of the pass's fixed work rather than of its sampling.
+const int SLICES = 2;
+const int STEPS  = 4;
 
 // <b>A bandwidth limit, not a look control.</b> The world radius decides how far occlusion reaches;
 // this decides how far the SEARCH is allowed to wander in screen space before the cost stops being
@@ -177,10 +195,16 @@ void main() {
     // Interleaved gradient noise, the same rotation shadow.glsl uses and for the same
     // reason: eight slices at a shared angle lie down as eight visible bands, and turning
     // the set by a different angle at every pixel converts that structure into noise the
-    // eye reads as grain rather than as geometry. Spatial only — no frame counter — so
-    // the image is the same whether or not there was a frame before it.
+    // eye reads as grain rather than as geometry.
+    //
+    // <b>And by a different angle every FRAME, which is what makes history worth keeping.</b> This
+    // was spatial only, deliberately, so the image did not depend on the ones before it. With an
+    // accumulator the same reasoning inverts: rotating identically each frame means every frame
+    // re-measures the same four azimuths, and averaging them reduces nothing. Turning the set per
+    // frame makes successive frames independent estimates of the same integral — the same argument
+    // the froxel fog's slice jitter rests on, in the other domain.
     float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
-    float sliceRotation = ign * PI;          // slices span pi; each covers both directions
+    float sliceRotation = ign * PI + g.uTemporal.y;
     // <b>A different sequence, not a rescaling of the first.</b> The step offset was fract(ign*7),
     // which is a function of the rotation — so two pixels that turned their slices alike also
     // marched alike, and the pair of them agreed on an answer that a third pixel disagreed with in
@@ -189,6 +213,7 @@ void main() {
     float stepOffset = fract(dot(gl_FragCoord.xy, vec2(0.75487766624669276, 0.56984029099805327)));
 
     float visibility = 0.0;
+    float visibilitySq = 0.0;   // for the per-pixel spread the history is clamped against
     vec3  bentNormal = vec3(0.0);
     float projectedLengthSum = 0.0;
     float arcSum = 0.0;
@@ -269,7 +294,9 @@ void main() {
         // slice, solved, not a falloff curve fitted until it looked like shade.
         float arc = 0.25 * (-cos(2.0 * h1 - n) + cos(n) + 2.0 * h1 * sin(n))
                   + 0.25 * (-cos(2.0 * h2 - n) + cos(n) + 2.0 * h2 * sin(n));
-        visibility += projectedLength * arc;
+        float sliceVisibility = projectedLength * arc;
+        visibility += sliceVisibility;
+        visibilitySq += sliceVisibility * sliceVisibility;
         projectedLengthSum += projectedLength;
         arcSum += projectedLength * arc;
 
@@ -278,7 +305,37 @@ void main() {
         bentNormal += (V * cos(bent) + tangent * sin(bent)) * projectedLength;
     }
 
+    // <b>The slices are already four independent estimates, so the clamp is free.</b> A temporal
+    // blend needs to know how far history may stray before it is a different surface rather than a
+    // quieter one, and the usual answer is a neighbourhood min/max — which this pass cannot gather,
+    // because it computes one pixel and has no neighbours yet. It does have the spread of its own
+    // slices, which is an estimate of exactly the noise the accumulation exists to remove.
+    float sliceMean = visibility / float(SLICES);
+    float sliceVar = max(visibilitySq / float(SLICES) - sliceMean * sliceMean, 0.0);
+    float sliceSd = sqrt(sliceVar);
+
     visibility = clamp(visibility / float(SLICES), 0.0, 1.0);
+
+    // --- temporal ------------------------------------------------------------
+    float refused = 1.0;
+    if (g.uTemporal.x > 0.0) {
+        vec3 worldPos = (g.uInvView * vec4(P, 1.0)).xyz;
+        vec4 clipPrev = g.uPrevViewProj * vec4(worldPos, 1.0);
+        if (clipPrev.w > 1e-4) {
+            vec2 uvPrev = (clipPrev.xy / clipPrev.w) * 0.5 + 0.5;
+            if (all(greaterThanEqual(uvPrev, vec2(0.0))) && all(lessThanEqual(uvPrev, vec2(1.0)))) {
+                float history = texture(uHistory, uvPrev).a;
+                // Refused outright off-screen, and bounded by this pixel's own spread everywhere
+                // else — so a disocclusion, where history disagrees by far more than the estimator's
+                // noise, is pulled back to something this frame would have accepted rather than
+                // blended in whole. The present frame keeps the answer; history only makes it quiet.
+                float tol = max(sliceSd * 2.0, 0.02);
+                float bounded = clamp(history, visibility - tol, visibility + tol);
+                refused = abs(bounded - history) > 1e-4 ? 1.0 : 0.0;
+                visibility = mix(visibility, bounded, clamp(g.uTemporal.x, 0.0, 1.0));
+            }
+        }
+    }
 
     // If every slice was degenerate the sum is zero and normalize() would produce NaN,
     // which spreads through the IBL lookup and paints black pixels that no amount of
@@ -287,6 +344,8 @@ void main() {
     vec3 bentWorld = normalize((g.uInvView * vec4(bentView, 0.0)).xyz);
 
     outAmbient = vec4(bentWorld, visibility);
+    // Bright where history was refused or clamped back — the disocclusions and the screen edge.
+    if (g.uTemporal.z > 0.5) outAmbient = vec4(vec3(refused), visibility);
 
     // Debug channels, written into rgb so the capture's bent-normal PNG carries them. The point is
     // to see the INPUTS: once a surface is heavily occluded the bent normal is the bisector of

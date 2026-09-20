@@ -383,6 +383,14 @@ internal sealed class GraphicsPassEntry
     public List<ColorAttachmentBinding> ColorTargets { get; } = new();
     public DepthAttachmentBinding? Depth { get; set; }
     public List<TextureView> Reads { get; } = new();
+
+    // <b>Reads that are satisfied by the PREVIOUS frame, not this one.</b> A read edge normally has
+    // to follow the write that produces it, which is the check that catches a resource bound but
+    // never declared. A temporal pass inverts that by definition: it samples what the last frame
+    // left before this frame overwrites it, so the write it depends on is always "later" in
+    // declaration order and always already done. Recorded separately so the barrier and the layout
+    // transition still happen — the read is real — while the ordering check knows to skip it.
+    public HashSet<int> HistoryReads { get; } = new();
     public List<ShaderInterface> Shaders { get; } = new();
     // Single-sample resolve destinations for MSAA color targets, parallel to
     // ColorTargets (resolve i ← color i). Empty when the pass isn't MSAA.
@@ -406,6 +414,9 @@ internal sealed class ComputePassEntry
     public PassHandle Handle;
     public string Name = string.Empty;
     public List<TextureView> Reads { get; } = new();
+
+    /// <summary>Cross-frame reads; see the note on GraphicsPassEntry.HistoryReads.</summary>
+    public HashSet<int> HistoryReads { get; } = new();
     public List<TextureView> Writes { get; } = new();
     public ShaderInterface? Shader { get; set; }
 }
