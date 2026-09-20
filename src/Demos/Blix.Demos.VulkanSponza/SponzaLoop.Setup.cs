@@ -56,6 +56,17 @@ internal sealed partial class SponzaLoop
         for (var i = 0; i < cmdArgs.Length - 1; i++)
         {
             if (cmdArgs[i] == "--probe") probeName = cmdArgs[i + 1];
+            // The census has to be able to ask about the FIELD rather than about the sleep policy:
+            // with sleeping on, a probe the camera never looked at is zero, and a census of a still
+            // camera's frame is then mostly a count of what the camera did not face.
+            if (cmdArgs[i] == "--probe-sleep" && float.TryParse(cmdArgs[i + 1], out var ps))
+                probeSleepFrames = MathF.Max(0f, ps);
+            // <b>Zero isolates the sky.</b> The injector's two source terms are the sun and the sky;
+            // with the sun off, whatever the probe census then reports IS the sky term, and it can
+            // be compared against sky irradiance times the volume's own mean visibility. That turns
+            // "the interior looks too dark" into two separable questions with one run each.
+            if (cmdArgs[i] == "--sun-strength" && float.TryParse(cmdArgs[i + 1], out var ss))
+                sunStrength = MathF.Max(0f, ss);
             if (cmdArgs[i] == "--bounce-div" && float.TryParse(cmdArgs[i + 1], out var bd))
                 bounceDiv = Math.Clamp(bd, 0.5f, 8f);
             // The same axis stated the way it is usually wanted: a multiplier on probe COUNT.
@@ -857,6 +868,21 @@ internal sealed partial class SponzaLoop
                 skyVolumeInvSpan = new Vector3(1f / span.X, 1f / span.Y, 1f / span.Z);
                 skyVolumeLoaded = true;
                 probeX = volume.SizeX; probeY = volume.SizeY; probeZ = volume.SizeZ;
+
+                // Mean of the L0 band over the whole volume. Every higher band integrates to zero
+                // over the sphere, so this single coefficient IS the average fraction of sky a point
+                // in this scene can see — the number the probe census measures the bounce against.
+                var band0 = volume.ToRgba16F(0);
+                var cells = volume.SizeX * volume.SizeY * volume.SizeZ;
+                cellSkyVisibility = new float[cells];
+                double visSum = 0;
+                for (var c = 0; c < cells; c++)
+                {
+                    var v = (float)((float)BitConverter.ToHalf(band0, c * 8) * 0.282095);
+                    cellSkyVisibility[c] = v;
+                    visSum += v;
+                }
+                meanSkyVisibility = cells > 0 ? visSum / cells : 0;
 
                 if (volume.HasOccupancy)
                 {

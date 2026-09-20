@@ -946,6 +946,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     /// one place a number is still chosen rather than derived, and it says so.
     /// </remarks>
     private Vector3 sunIrradiance = new(9.42f, 9.42f, 9.42f);
+    /// <summary>Mean sky visibility over the baked volume, for the probe census to compare against.</summary>
+    private double meanSkyVisibility;
+    /// <summary>Per-cell sky visibility, kept so the probe census can bin the field by enclosure.</summary>
+    private float[] cellSkyVisibility = System.Array.Empty<float>();
 
     /// <summary>Multiplier on the MEASURED sun irradiance. 1.0 is what the probe reported.</summary>
     /// <remarks>
@@ -1031,9 +1035,9 @@ internal sealed class FogSettings
     // 0.9 is about a ten-frame time constant — long enough to integrate the jittered slice samples
     // into a soft shaft, short enough that dragging the sun does not leave a trail behind it.
     [Tune(0f, 0.98f)]   public float Temporal = 0.9f;
-    // Shows the history WEIGHT instead of the fog: white where the previous frame is being trusted,
-    // black where it was rejected. Built with the feature rather than after it, because the last
-    // fog dial that could not be seen (Ambient) got tuned for ten minutes while doing nothing.
+    // Replaces the fog with where its history was REFUSED — bright at disocclusions and at the edge
+    // the camera turned onto, black wherever the previous frame was trusted. Expect a black screen
+    // when standing still: that is the instrument working, not failing.
     [Tune]              public bool ShowHistory;
 }
 

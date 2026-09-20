@@ -732,6 +732,7 @@ internal sealed partial class SponzaLoop
             WriteSceneShot(Path.ChangeExtension(path, null) + ".scene.png");
             WritePassBreakdown();
             WriteLodCensus();
+            WriteProbeCensus();
             WriteFrameStats();
             host.RequestClose();
         }
@@ -1280,6 +1281,127 @@ internal sealed partial class SponzaLoop
 
     /// <summary>Sum of every pass's windowed cost. NOT the frame time — see WritePassBreakdown.</summary>
     internal double GpuPassTotalMs() => gpuPassMs.Values.Sum();
+
+    /// <summary>What the probe field actually holds, against what the inputs say it should.</summary>
+    /// <remarks>
+    /// <b>"The interior is too dark" is an arithmetic claim and nobody has ever checked it.</b> The
+    /// dark half of Sponza is lit by two things and both are measured quantities: the sky, times the
+    /// fraction of it a point can see, plus bounce from what the sun does reach. So the field has an
+    /// expected magnitude, and if it comes in far under that the answer is a transport bug rather
+    /// than a tonemap preference — which is the difference between fixing it and turning a dial that
+    /// says "x measured" to 3.4.
+    ///
+    /// The floor printed here is the SKY alone: sky irradiance times the mean visibility of the
+    /// volume. It is a floor and not a target, because every probe should additionally carry bounce.
+    /// A field sitting at or below it is carrying no bounce at all.
+    /// </remarks>
+    private void WriteProbeCensus()
+    {
+        if (!bounceReady) { Console.WriteLine("[VulkanSponza] probe census: no bounce field."); return; }
+        var irr = vk.ReadTexture(bounceTextures[BounceRead], out var w, out var h, out var format);
+        if (format != TextureFormat.Rgba16F) { Console.WriteLine("[VulkanSponza] probe census: unexpected atlas format."); return; }
+
+        // The depth atlas alongside it, for the ray closure the march parked in its alpha.
+        var depth = vk.ReadTexture(bounceDepthTextures[BounceRead], out var dw, out var dh, out _);
+        var closureFlat = new double[dw * dh];
+        for (var i = 0; i < dw * dh; i++)
+            closureFlat[i] = (float)BitConverter.ToHalf(depth, i * 8 + 6);
+
+        var lum = new List<double>(w * h);
+        var lumFlat = new double[w * h];
+        double sum = 0;
+        var black = 0;
+        const int tile = 8;
+        // Tile (px,py) for probe p, matching blix_probeTile: x = p.x, y = p.y + p.z * dims.y.
+        double lumByProbe(int probe, int t, int perProbe)
+        {
+            var px = probe % bounceX;
+            var py = (probe / bounceX) % bounceY;
+            var pz = probe / (bounceX * bounceY);
+            var x0 = px * tile;
+            var y0 = (py + pz * bounceY) * tile;
+            var tx = x0 + (t % tile);
+            var ty = y0 + (t / tile);
+            if (tx >= w || ty >= h) return 0;
+            return lumFlat[ty * w + tx];
+        }
+        for (var i = 0; i < w * h; i++)
+        {
+            double r = (float)BitConverter.ToHalf(irr, i * 8);
+            double g = (float)BitConverter.ToHalf(irr, i * 8 + 2);
+            double b = (float)BitConverter.ToHalf(irr, i * 8 + 4);
+            var y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            if (y <= 1e-6) black++;
+            lum.Add(y);
+            lumFlat[i] = y;
+            sum += y;
+        }
+        lum.Sort();
+        double Pct(double p) => lum.Count == 0 ? 0 : lum[Math.Clamp((int)(p * lum.Count), 0, lum.Count - 1)];
+
+        var sunLum = 0.2126 * EffectiveSunIrradiance.X + 0.7152 * EffectiveSunIrradiance.Y + 0.0722 * EffectiveSunIrradiance.Z;
+        var median = Pct(0.5);
+        Console.WriteLine("[VulkanSponza] probe census — irradiance the field is carrying:");
+        Console.WriteLine(string.Create(Inv,
+            $"    texels {lum.Count:N0} over {bounceX}x{bounceY}x{bounceZ} probes, {black * 100.0 / Math.Max(1, lum.Count):0.0}% exactly zero"));
+        Console.WriteLine(string.Create(Inv,
+            $"    luminance  median {median:0.0000}   p25 {Pct(0.25):0.0000}   p75 {Pct(0.75):0.0000}   p95 {Pct(0.95):0.0000}   mean {sum / Math.Max(1, lum.Count):0.0000}"));
+        Console.WriteLine(string.Create(Inv,
+            $"    against    sun irradiance {sunLum:0.000}  ->  median is {median / Math.Max(sunLum, 1e-6) * 100.0:0.00}% of it"));
+        Console.WriteLine(string.Create(Inv,
+            $"    volume     mean sky visibility {meanSkyVisibility:0.000} (a surface seeing this much sky, under an albedo ~0.27 scene)"));
+        // <b>Binned by how much sky the probe's own cell can see, which is the question.</b> A single
+        // median over the whole volume mixes a courtyard probe with one inside a wall and reports
+        // something true of neither. The bake measures enclosure per cell; this asks what the solve
+        // delivered as a function of it. Light failing to reach the enclosed bins is a transport
+        // problem; every bin being uniformly dim is a units problem; and they need opposite fixes.
+        if (cellSkyVisibility.Length == bounceX * bounceY * bounceZ)
+        {
+            // <b>And the mean height, because visibility alone does not say WHERE.</b> A bin at 50%
+            // sky could be a courtyard probe over a sunlit floor or an arcade-edge probe under the
+            // roofline, and those two have expectations an order of magnitude apart. Without this
+            // the deficit I read off the 40-60% bin rested on a guess about which it was.
+            var bins = new (double Sum, int Count, double Vis, double Y, double Closure)[5];
+            var perProbe = lum.Count / Math.Max(1, bounceX * bounceY * bounceZ);
+            for (var probe = 0; probe < bounceX * bounceY * bounceZ; probe++)
+            {
+                var vis = cellSkyVisibility[probe];
+                var bin = Math.Clamp((int)(vis * 5.0), 0, 4);
+                double probeSum = 0;
+                for (var t = 0; t < perProbe; t++) probeSum += lumByProbe(probe, t, perProbe);
+                bins[bin].Sum += probeSum / Math.Max(1, perProbe);
+                bins[bin].Count++;
+                bins[bin].Vis += vis;
+                var pz = probe / (bounceX * bounceY);
+                var py2 = (probe / bounceX) % bounceY;
+                bins[bin].Y += skyVolumeMin.Y + (py2 + 0.5f) * skyVolumeSpan.Y / bounceY;
+                // Closure is constant across a tile, so the tile's first texel is the whole answer.
+                var cx = (probe % bounceX) * tile;
+                var cy = ((probe / bounceX) % bounceY + (probe / (bounceX * bounceY)) * bounceY) * tile;
+                if (cx < dw && cy < dh) bins[bin].Closure += closureFlat[cy * dw + cx];
+            }
+            Console.WriteLine("    by enclosure (the cell's own sky visibility):");
+            for (var b = 0; b < 5; b++)
+            {
+                if (bins[b].Count == 0) continue;
+                Console.WriteLine(string.Create(Inv,
+                    $"      visibility {b * 20,3}-{(b + 1) * 20,3}%  n={bins[b].Count,6:N0}  " +
+                    $"mean visibility {bins[b].Vis / bins[b].Count:0.000}  " +
+                    $"mean y {bins[b].Y / bins[b].Count,6:0.0} m  " +
+                    $"irradiance {bins[b].Sum / bins[b].Count:0.0000}  " +
+                    // <b>The test.</b> A ray closes on geometry or escapes to sky, so the mean over
+                    // a probe's rays should be 1 minus the sky it can see. The bake computed that
+                    // visibility independently; a closure well under it is transport being dropped,
+                    // and a closure that matches means the field's scale is the scene's, not a bug.
+                    $"closure {bins[b].Closure / bins[b].Count:0.000} vs expected {1.0 - bins[b].Vis / bins[b].Count:0.000}"));
+            }
+        }
+        else
+        {
+            Console.WriteLine(
+                "    (no per-cell binning: the bounce grid is not 1:1 with the visibility volume)");
+        }
+    }
 
     /// <summary>What each LOD budget actually submits, counted rather than timed.</summary>
     /// <remarks>

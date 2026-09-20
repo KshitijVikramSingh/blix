@@ -262,11 +262,14 @@ void main()
         accum += transmittance * sliceIntegral;
         transmittance *= sliceT;
 
-        // <b>The rejection, made visible.</b> White where history is being trusted, black where it
-        // was thrown away — the disocclusion edges, the screen border, and anything the camera has
-        // just turned onto. A temporal stage tuned without being able to see this is tuned blind.
+        // <b>The REJECTION, made visible — bright where history was thrown away.</b> This showed the
+        // weight itself at first, which is the same number everywhere it is valid and therefore a
+        // white screen with nothing to read: the interesting state is the rare one. Normalised by
+        // the configured weight so full trust is black whatever the dial says, and so a still camera
+        // correctly shows nothing at all — there is no disocclusion when nothing moves.
         if (f.uTemporal.z > 0.5) {
-            imageStore(uGrid, ivec3(xy, z), vec4(vec3(historyWeight), 0.0));
+            float refused = 1.0 - historyWeight / max(f.uTemporal.x, 1e-3);
+            imageStore(uGrid, ivec3(xy, z), vec4(vec3(refused), 0.0));
         } else {
             imageStore(uGrid, ivec3(xy, z), vec4(accum, transmittance));
         }

@@ -77,6 +77,8 @@ layout(local_size_x = BLIX_OCT_RAYS) in;
 shared vec3 sRadiance[BLIX_OCT_RAYS];
 shared vec3 sDirection[BLIX_OCT_RAYS];
 shared vec3 sTexel[BLIX_OCT_INTERIOR * BLIX_OCT_INTERIOR];
+shared float sClosure[BLIX_OCT_RAYS];
+shared float sMeanClosure;
 shared float sDistance[BLIX_OCT_RAYS];
 // Per-ray reachability, reduced once per probe below.
 shared float sReach[BLIX_OCT_RAYS];
@@ -252,7 +254,16 @@ vec3 transmittance(vec3 origin, vec3 dir, float maxCells) {
 // route to this probe at all — which is a different question from how much light it holds, and the
 // one nothing previously asked.
 vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize,
-            out float hitDistance, out float reach, out float sunlit) {
+            out float hitDistance, out float reach, out float sunlit, out float closure) {
+    // <b>How much of this ray's unit of transport was handed to a surface.</b> A self-consistency
+    // number and the only kind this solve can check without an external reference: the march starts
+    // with a transmittance of one, spends `t * density` at every cell that re-radiates, and this is
+    // the total it spent. A ray ending in opaque geometry must close to 1; a ray that escapes to sky
+    // closes to 0, correctly, because the sky's direct contribution is the lit pass's IBL term and
+    // not the probe field's job. So the EXPECTED mean over a probe's rays is 1 - its sky visibility,
+    // and the bake computed that independently — two separate calculations of the same geometry,
+    // which is what makes disagreement between them evidence rather than opinion.
+    closure = 0.0;
     // <b>How far the ray got, which is the other half of a probe.</b> Radiance alone cannot say
     // whether a probe is behind a wall from some shading point's perspective; distance can, and the
     // march already knows it. Escaping rays report the far bound rather than zero — an open
@@ -294,6 +305,10 @@ vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize,
         // for the same reason as the walk toward the sun: what arrives here has already passed
         // through whatever stands between, and that may have been a leaf.
         vec3 weight = t * density;
+        // Counted before the 0.06 threshold below, on purpose: a cell skipped for being too faint
+        // to matter is still transport that happened, and hiding it here would make the instrument
+        // agree with the shortcut instead of measuring it.
+        closure += dot(weight, vec3(1.0)) / 3.0;
         float trans = density >= 0.99 ? 0.0 : u.uAlbedoDims.w;
 
         // Below this a cell moves the answer by less than the 32-frame rotation's own noise, and
@@ -435,12 +450,21 @@ void main() {
 
     // One ray per thread, marched once and shared with every texel that wants it.
     vec3 d = fibonacci(lane, BLIX_OCT_RAYS);
-    float rayDistance, rayReach, raySunlit;
+    float rayDistance, rayReach, raySunlit, rayClosure;
     sDirection[lane] = d;
-    sRadiance[lane] = gather(origin, d, maxCells, toSun, cellSize, rayDistance, rayReach, raySunlit);
+    sRadiance[lane] = gather(origin, d, maxCells, toSun, cellSize,
+                             rayDistance, rayReach, raySunlit, rayClosure);
     sDistance[lane] = rayDistance;
     sReach[lane] = rayReach;
     sSunlit[lane] = raySunlit;
+    sClosure[lane] = rayClosure;
+    barrier();
+
+    if (lane == 0) {
+        float c = 0.0;
+        for (int i = 0; i < BLIX_OCT_RAYS; ++i) c += sClosure[i];
+        sMeanClosure = c / float(BLIX_OCT_RAYS);
+    }
     barrier();
 
     // <b>Is there any route by which light reaches this probe at all?</b> Measured over the scene,
@@ -540,6 +564,9 @@ void main() {
     // ever used .rg, so the flag rides along in memory already allocated and already fetched by
     // every consumer — no second texture, no second binding, no extra bandwidth. It is constant
     // across the tile, so the bilinear fetch that reads the moments returns it exactly.
-    imageStore(uDepthAtlas, tile + texel, vec4(moments, reachable, 1.0));
+    // Alpha carries the mean ray closure. It is constant across the tile, like the reachability
+    // flag beside it, and the atlas is Rgba16F with .a never having been read — so the instrument
+    // costs no texture, no binding and no bandwidth that was not already moving.
+    imageStore(uDepthAtlas, tile + texel, vec4(moments, reachable, sMeanClosure));
     if (lane == 0) imageStore(uProbeUsage, probe, vec4(max(usage - decay, 0.0)));
 }
