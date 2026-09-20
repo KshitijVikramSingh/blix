@@ -153,7 +153,10 @@ internal sealed partial class SponzaLoop
             using (debug.Scope("Indirect"))
             {
                 injectDensity = debug.Controls.Toggle("Density march", injectDensity);
-                injectRays    = debug.Controls.Float("Rays / probe", injectRays, 8f, 64f);
+                // 256 is the ceiling — the workgroup is 256 lanes and each marches one ray. The
+                // range stopped at 64 because the value was inert; a dial that does nothing can
+                // have any range at all.
+                injectRays    = debug.Controls.Float("Rays / probe", injectRays, 8f, 256f);
                 injectPeriod  = debug.Controls.Float("Refresh period", injectPeriod, 4f, 64f);
                 injectTranslucency = debug.Controls.Float("Translucency", injectTranslucency, 0f, 1f);
                 // 0 = never sleep, which is the honest A/B against everything before this.
@@ -247,7 +250,7 @@ internal sealed partial class SponzaLoop
             // and not with the refresh rate at all.
             var probes = bounceX * bounceY * bounceZ;
             const int tileTexels = 8 * 8;
-            var rays = (int)MathF.Round(injectRays);
+            var rays = Math.Clamp((int)MathF.Round(injectRays), 8, 256);
             var period = MathF.Max(1f, MathF.Round(injectPeriod));
             var solving = Math.Max(1, (int)MathF.Round(probes / period));
             // <b>Invariant, not current, culture.</b> These came out as "6,19,008" on a machine set

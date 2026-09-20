@@ -196,7 +196,13 @@ fi
 # surfaces then take 100% of their ambient light from the bounce instead of 73%, which is how a
 # green tree ends up painting a wall. The bake costs 1.4 seconds either way.
 echo "── sky    (visibility volume, 512 rays)"
-dotnet "$COOK" sky "$COOKED" --occupancy 256 --probes 48 --rays 512 --out "$COOKED/sponza.blixsky"
+# <b>--albedo 256, matching the occupancy rather than defaulting to half of it.</b> The baker's
+# default halves it on the argument that surface colour is low-frequency — true of a wall and false
+# of the boundary between a wall and a curtain, which is where the eye looks. At half resolution a
+# cell straddling that boundary gets one colour for both, and the wall re-radiates the curtain's
+# red: the "leaking colour" visible in the bounce-radiance view. 3 MB becomes ~23 MB, which is half
+# of what the probe atlas already spends at this density.
+dotnet "$COOK" sky "$COOKED" --occupancy 256 --probes 48 --rays 512 --albedo 256 --out "$COOKED/sponza.blixsky"
 
 echo
 echo "Cooked tree: $(du -sh "$COOKED" | cut -f1)   (sources: $(du -sh "$SRC" | cut -f1))"

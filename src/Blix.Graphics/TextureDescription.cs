@@ -129,6 +129,21 @@ public sealed record SamplerDescription(
         TextureWrap.Repeat,
         GenerateMipmaps: false);
 
+    /// <summary>Nearest filtering, clamped — a voxel grid read as cells rather than as a field.</summary>
+    /// <remarks>
+    /// <b>For data whose cells mean something individually.</b> Interpolating a colour volume blends
+    /// a surface cell with its empty neighbours, and a shell one cell thick is mostly boundary — so
+    /// the finer the grid, the more of every tap is void. Sponza's bounce albedo hit exactly that:
+    /// matching it to the occupancy resolution made colour bleeding WORSE, because a hit that used
+    /// to land inside a fat cell now sits in a thin one surrounded by nothing.
+    /// </remarks>
+    public static SamplerDescription NearestClamp { get; } = new(
+        TextureFilter.Nearest,
+        TextureFilter.Nearest,
+        TextureWrap.ClampToEdge,
+        TextureWrap.ClampToEdge,
+        GenerateMipmaps: false);
+
     public static SamplerDescription LinearClamp { get; } = new(
         TextureFilter.Linear,
         TextureFilter.Linear,

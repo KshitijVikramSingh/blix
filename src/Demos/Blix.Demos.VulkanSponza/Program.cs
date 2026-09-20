@@ -310,7 +310,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private int probeX, probeY, probeZ, occX, occY, occZ, albX, albY, albZ;
     private Vector3 skyVolumeSpan;
     private bool bounceReady;
-    private float injectRays = 64f;
+    private float injectRays = 256f;
     // 0 reads the grid as the boolean it never was; 1 reads the density the baker writes. A live
     // A/B, because sweeping this across processes is what let the two sides disagree unnoticed.
     private bool injectDensity = true;
@@ -684,6 +684,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private bool probeReference;
     /// <summary>--no-sky-bounce: the injector scatters the sun only, for the CPU reference to match.</summary>
     private bool noSkyBounce;
+    /// <summary>--no-foliage: skip the ivy and tree packs, to price alpha-cutout overdraw.</summary>
+    private bool noFoliage;
     private int refBounces = 3;
     private Matrix4x4 prevAmbientViewProj = Matrix4x4.Identity;
     private bool ambientHistoryValid;

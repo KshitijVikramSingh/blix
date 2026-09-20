@@ -27,6 +27,23 @@
 // then the taps would be worth their price again. The measurement is written down here so that
 // changing the sun prompts re-checking the number rather than inheriting it.
 #define BLIX_SHADOW_PCF_TAPS 4
+// <b>early_fragment_tests was tried here and reverted; the note is the point.</b> A shader that
+// can discard is late-Z by rule, so the cutout branch below costs the WHOLE lit pass its early
+// depth test — opaque geometry included. Forcing the test early is legal here, since this pass
+// tests LessEqual against the pre-pass depth and writes none of its own, and it measured 3 ms.
+//
+// It also speckled the canopy with holes, and the reason is worth keeping: the pre-pass and this
+// pass agree about which cutout fragments exist only because they compute the same coverage, and
+// that coverage divides by fwidth(alpha). A derivative depends on which fragments in the quad are
+// live, which is not the same set in a depth-only pass as in this one — so the two can disagree by
+// a hair on a leaf edge. Late-Z was hiding that; early-Z turned each disagreement into a hole.
+//
+// The real finding from the attempt is that foliage is not an overdraw problem at all. Removing
+// the trees drops this pass 8.95 ms, and early-Z moved that to 8.52 — it recovered general
+// overdraw, roughly equally with and without foliage. The front leaf layer is simply expensive per
+// pixel: the thin-sheet path adds a second sky-visibility query and a back-side irradiance fetch
+// on top of ordinary PBR, at about 4x an average pixel's cost.
+
 #include "shadow.glsl"
 #include "sheen.glsl"
 #include "probe_volume.glsl"

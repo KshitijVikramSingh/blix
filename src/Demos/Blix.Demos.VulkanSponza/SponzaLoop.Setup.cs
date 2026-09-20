@@ -159,6 +159,7 @@ internal sealed partial class SponzaLoop
         // attribute the frame rather than decompose it, and they sum to more than it.
         if (cmdArgs.Contains("--gpu-isolate")) vk.GpuPassIsolation = true;
         if (cmdArgs.Contains("--no-caster-cull")) shadowCasterCull = false;
+        if (cmdArgs.Contains("--no-foliage")) noFoliage = true;
         if (cmdArgs.Contains("--probe-reference")) probeReference = true;
         if (cmdArgs.Contains("--no-sky-bounce")) noSkyBounce = true;
         for (var i = 0; i < cmdArgs.Length - 1; i++)
@@ -679,9 +680,18 @@ internal sealed partial class SponzaLoop
         {
             ("main", gltfPath, "models/sponza_main"),
         };
+        // <b>--no-foliage prices the cutouts, which no --ab arm can.</b> The arms toggle shading
+        // terms inside a draw; the cost of alpha-cutout geometry is that it DISCARDS, which turns
+        // off early-Z and makes every leaf card shade what is behind it — in the pre-pass, the lit
+        // pass and all three cascades. That is not a term to switch off, it is geometry not to
+        // load, and the measured baseline says it is worth roughly half the frame: 60 fps
+        // elsewhere, 30 with the tree in view, 20 moving.
         AddOptionalPackPath(packsToParse, assetsRoot, "curtains", "addons/curtains");
-        AddOptionalPackPath(packsToParse, assetsRoot, "ivy",      "addons/ivy");
-        AddOptionalPackPath(packsToParse, assetsRoot, "trees",    "addons/trees");
+        if (!noFoliage)
+        {
+            AddOptionalPackPath(packsToParse, assetsRoot, "ivy",   "addons/ivy");
+            AddOptionalPackPath(packsToParse, assetsRoot, "trees", "addons/trees");
+        }
         meshLoad.Start(() =>
         {
             var prims = new List<GltfPrimitive>();
@@ -936,9 +946,17 @@ internal sealed partial class SponzaLoop
                         albX = volume.AlbedoX; albY = volume.AlbedoY; albZ = volume.AlbedoZ;
                         albedoCpu = volume.Albedo;
                         albCpuX = albX; albCpuY = albY; albCpuZ = albZ;
+                        // <b>Nearest, now that this grid matches the occupancy grid one to one.</b>
+                        // The march reports the occupancy cell it struck, and that cell has exactly
+                        // one colour — there is nothing between cells to interpolate toward except
+                        // the empty space around the surface. Linear filtering was tolerable while
+                        // the grid was half resolution and its cells were fat; at full resolution
+                        // the surface is a one-cell shell filling 5% of the volume, so every tap
+                        // pulled in void and neighbouring materials, which made the colour bleeding
+                        // worse rather than better.
                         albedoTexture = vk.CreateTexture3D(
                             albX, albY, albZ, TextureFormat.Rgba8,
-                            SamplerDescription.LinearClamp, volume.Albedo!, "sponza.albedo");
+                            SamplerDescription.NearestClamp, volume.Albedo!, "sponza.albedo");
                         Console.WriteLine(
                             $"[VulkanSponza]   albedo {albX}x{albY}x{albZ} ({volume.Albedo!.Length / 1024.0 / 1024.0:0.00} MB), so the bounce carries surface colour.");
                     }
