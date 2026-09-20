@@ -290,6 +290,8 @@ internal sealed partial class SponzaLoop
         // during the previous OnRender's graph.Execute).
         debug.Values.Value("cascade-casters", $"{cascadeDrawCounts[0]}/{cascadeDrawCounts[1]}/{cascadeDrawCounts[2]} of {opaqueDrawables.Count}");
         // Shadow-map cache hits: R = re-rendered this frame, · = served cached.
+        debug.Values.Value("cascade-tris", string.Create(Inv,
+            $"{cascadeTriangles[0]:N0}/{cascadeTriangles[1]:N0}/{cascadeTriangles[2]:N0} vs camera {cameraTriangles:N0}"));
         debug.Values.Value("cascade-cache", $"{(cascadeRendered[0] ? 'R' : '·')}{(cascadeRendered[1] ? 'R' : '·')}{(cascadeRendered[2] ? 'R' : '·')}");
         debug.Values.Value("blend-draws", blendDrawables.Count);
         debug.Values.Value("cam-pos", cameraPosition);

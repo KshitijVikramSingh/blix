@@ -35,6 +35,12 @@ internal sealed partial class SponzaLoop
 
         var cmds = MemoryMarshal.Cast<byte, uint>(indirectScratch.AsSpan());
         var visible = 0;
+        // <b>What this fill actually handed the GPU, so a cascade's cost can be split.</b> Isolation
+        // says cascade 0 costs 6.3 ms and cascade 2 costs 2.6, and there are two candidate reasons —
+        // cascade 0 has four times the shadow-map texels to fill, and a texel eight times smaller,
+        // which through PickLodWorld buys it far finer geometry. Timing cannot separate those;
+        // counting the triangles can, and then only one of them needs a fix.
+        fillIndirectTriangles = 0;
         // <b>--ab lod prices the whole LOD system in one arm.</b> Every list selects through this
         // one function — the camera pass, the blend pass and all three shadow cascades — so the off
         // phase is the renderer with NO level of detail rather than with a different budget.
@@ -58,7 +64,7 @@ internal sealed partial class SponzaLoop
             cmds[o + 2] = (uint)d.LodFirstIndex[lod];  // firstIndex
             cmds[o + 3] = (uint)d.BaseVertex;          // vertexOffset
             cmds[o + 4] = 0;                           // firstInstance
-            if (vis) visible++;
+            if (vis) { visible++; fillIndirectTriangles += d.LodIndexCounts[lod] / 3; }
         }
         // Write exactly this list's prefix; the buffer is sized to its count,
         // and indirectScratch is sized for the largest (opaque) list.
@@ -261,7 +267,7 @@ internal sealed partial class SponzaLoop
             // on arm.
             // The cascade's own budget, since that is what decides ITS geometry — it moves when the
             // cascade refits, which is exactly when the cached map has to be rebuilt anyway.
-            var lodKey = abMode == "lod" && LodArmPixels <= 0f ? 0f : cascadeTexelWorld[ci] * ShadowLodTexels;
+            var lodKey = abMode == "lod" && LodArmPixels <= 0f ? 0f : cascadeTexelWorld[ci] * shadowLodTexels;
             if (vp == cachedCascadeViewProj[ci]
                 && opaqueDrawables.Count == cachedCascadeCasters[ci]
                 && lodKey == cachedCascadeLod[ci])
@@ -281,6 +287,7 @@ internal sealed partial class SponzaLoop
             // Fill this cascade's indirect buffer (per-cascade frustum cull → 0
             // instanceCount; same SSE LOD as the lit/pre-pass so shadow depth
             // matches the shaded silhouette). Then one indirect draw per group.
+            cascadeTriangles[ci] = 0;
             cascadeDrawCounts[ci] = FillIndirect(
                 opaqueDrawables, opaqueLodMargins, cascadeLodState[ci], cascadeIndirect[ci],
                 cull ? cascadeFrustum : null, margin,
@@ -292,7 +299,8 @@ internal sealed partial class SponzaLoop
                 //
                 // The --ab lod off arm is the exception: it means "no level of detail anywhere", and
                 // a cascade quietly keeping its own would make the arm measure less than it claims.
-                abMode == "lod" && LodArmPixels <= 0f ? 0f : cascadeTexelWorld[ci] * ShadowLodTexels);
+                abMode == "lod" && LodArmPixels <= 0f ? 0f : cascadeTexelWorld[ci] * shadowLodTexels);
+            cascadeTriangles[ci] = fillIndirectTriangles;
             // Opaque casters all push the same bytes (identity model + this
             // cascade's VP); mask casters push per-material alpha params, so one
             // mask push per group (constant within a material).
@@ -403,6 +411,7 @@ internal sealed partial class SponzaLoop
         // blinking in and out as you turn. Half a metre of slack costs a fraction of a percent of
         // the rejections and removes the whole class.
         FillIndirect(opaqueDrawables, opaqueLodMargins, opaqueLodState, opaqueIndirect, cameraFrustum, margin: CameraCullMargin);
+        cameraTriangles = fillIndirectTriangles;
         if (blendDrawables.Count > 0) FillIndirect(blendDrawables, blendLodMargins, blendLodState, blendIndirect, cameraFrustum, margin: CameraCullMargin);
 
         // Depth pre-pass: same non-blend set as the lit pass (no cull, so the
@@ -1505,6 +1514,30 @@ internal sealed partial class SponzaLoop
             "  NOTE: on a tile-based GPU (Apple/MoltenVK) these bracket ENCODER submission, not the "
             + "deferred tiled execution, so they do not sum to the frame. Compare them to each other, "
             + "and use paired A/B runs (--no-ao and friends) for absolute cost.");
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] triangles submitted: cascades {cascadeTriangles[0]:N0}/{cascadeTriangles[1]:N0}/{cascadeTriangles[2]:N0}, camera {cameraTriangles:N0}"));
+        Console.WriteLine(string.Create(Inv,
+            $"  shadow maps {ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}, texel {cascadeTexelWorld[0]:0.000}/{cascadeTexelWorld[1]:0.000}/{cascadeTexelWorld[2]:0.000} m, budget {shadowLodTexels:0.0} texels"));
+
+        if (vk.GpuPassIsolation)
+        {
+            Console.WriteLine("[VulkanSponza] isolated GPU ms per pass (own command buffer, fence-waited):");
+            double isoTotal = 0;
+            foreach (var e in vk.GpuPassIsolatedTotals
+                         .Where(e => e.Value.Samples > 0)
+                         .OrderByDescending(e => e.Value.TotalMs / e.Value.Samples))
+            {
+                var mean = e.Value.TotalMs / e.Value.Samples;
+                isoTotal += mean;
+                Console.WriteLine(string.Create(Inv, $"  {mean,8:0.000} ms  {e.Key}  (n={e.Value.Samples})"));
+            }
+            Console.WriteLine(string.Create(Inv, $"  {isoTotal,8:0.000} ms  TOTAL (exceeds the frame: isolation removes overlap)"));
+        }
+
+        // <b>And what the alternative instrument would cost before it measured anything.</b>
+        var floor = vk.MeasureSubmitFloorMs();
+        Console.WriteLine(string.Create(Inv,
+            $"  submit+fence floor: {floor:0.000} ms — the smallest pass a per-pass command buffer could resolve; anything under this is below that instrument's noise."));
     }
 
     /// <summary>Writes the ambient-visibility buffer as two PNGs: visibility, and bent normal.</summary>

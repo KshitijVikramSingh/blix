@@ -75,6 +75,31 @@ public sealed partial class VulkanGraphicsDevice
     // CPU timers (frame/build-commands/execute/swap) carry the perf story.
     private const uint QueriesPerFrameSlot = 64;
     private const int MaxPendingPerSlot = 32;
+    // --- per-pass isolation --------------------------------------------------
+    // <b>What the timestamps cannot see, bought by refusing to overlap.</b> vkCmdWriteTimestamp on
+    // MoltenVK brackets encoder submission, so every rasterising pass reports noise — depth-prepass
+    // claims 0.006 ms for thousands of draws. Giving a pass its own command buffer and timing
+    // submit-to-fence measures real execution, because Metal must finish that buffer's tile work
+    // before it signals. Measured floor for the mechanism itself: 0.021 ms (MeasureSubmitFloorMs).
+    //
+    // The price is that passes no longer overlap, so these numbers ATTRIBUTE rather than decompose:
+    // they sum to more than the frame, and a pass that normally hides behind another reads as more
+    // expensive than its marginal cost. Marginal cost is what the A/B arms are for. Off by default
+    // — it fences the CPU against the GPU at every pass boundary and roughly halves the frame rate.
+    private bool gpuPassIsolation;
+    private Fence isolationFence;
+    private readonly Dictionary<string, (double TotalMs, long Samples)> gpuPassIsolated = new(StringComparer.Ordinal);
+
+    /// <summary>Diagnostic: submit and fence-wait each pass separately for real GPU attribution.</summary>
+    public bool GpuPassIsolation
+    {
+        get => gpuPassIsolation;
+        set => gpuPassIsolation = value;
+    }
+
+    /// <summary>Isolated per-pass GPU milliseconds, cumulative. See GpuPassIsolation.</summary>
+    public IReadOnlyDictionary<string, (double TotalMs, long Samples)> GpuPassIsolatedTotals => gpuPassIsolated;
+
     private QueryPool gpuTimingPool;
     private float timestampPeriodNs;
     private bool timestampsSupported;
@@ -495,6 +520,95 @@ public sealed partial class VulkanGraphicsDevice
         }
     }
 
+    /// <summary>Median cost of an empty submit-and-fence-wait, in milliseconds.</summary>
+    /// <remarks>
+    /// <b>The noise floor of any per-pass isolation timing, measured before building one.</b>
+    /// Timestamps cannot see tile execution on this platform — the caveat above says so, and
+    /// lit-scene reporting 0.004 ms of a 33 ms frame is what that looks like. The way out is to give
+    /// a pass its own command buffer and time the submit-to-fence interval, because Metal has to
+    /// finish that buffer's tile work before it signals.
+    ///
+    /// That only works if the interval is dominated by the pass rather than by the submit. This
+    /// measures the empty case: allocate, begin, end, submit, wait. Whatever it returns is the
+    /// smallest pass cost such an instrument could resolve, and a pass under it cannot be measured
+    /// that way at all. Reported next to the pass table so nobody reads an isolated figure without
+    /// knowing what it is standing on.
+    /// </remarks>
+    public unsafe double MeasureSubmitFloorMs(int samples = 64)
+    {
+        if (samples < 1) samples = 1;
+        var fenceInfo = new FenceCreateInfo { SType = StructureType.FenceCreateInfo };
+        Fence fence;
+        ThrowIfNotSuccess(Vk.CreateFence(Device, in fenceInfo, null, &fence), "vkCreateFence(floor)");
+        var times = new double[samples];
+        try
+        {
+            for (var i = 0; i < samples; i++)
+            {
+                var cmd = BeginSingleTimeCommands();
+                ThrowIfNotSuccess(Vk.EndCommandBuffer(cmd), "vkEndCommandBuffer(floor)");
+                ThrowIfNotSuccess(Vk.ResetFences(Device, 1, &fence), "vkResetFences(floor)");
+                var si = new SubmitInfo
+                {
+                    SType = StructureType.SubmitInfo,
+                    CommandBufferCount = 1,
+                    PCommandBuffers = &cmd,
+                };
+                var t0 = Stopwatch.GetTimestamp();
+                ThrowIfNotSuccess(Vk.QueueSubmit(GraphicsQueue, 1, in si, fence), "vkQueueSubmit(floor)");
+                ThrowIfNotSuccess(
+                    Vk.WaitForFences(Device, 1, &fence, true, ulong.MaxValue), "vkWaitForFences(floor)");
+                times[i] = Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+                Vk.FreeCommandBuffers(Device, commandPool, 1, &cmd);
+            }
+        }
+        finally
+        {
+            Vk.DestroyFence(Device, fence, null);
+        }
+        Array.Sort(times);
+        return times[samples / 2];
+    }
+
+    // Ends the frame's command buffer, submits it alone, waits, times it, and reopens the same
+    // buffer for the next pass. Safe to reuse the buffer because the fence has signalled — and that
+    // same wait is what gives the next submission visibility of this one's writes, which is what
+    // makes splitting one buffer into many correct rather than merely plausible.
+    private unsafe void FlushIsolatedPass(CommandBuffer cmd, string passName, ref bool first, Semaphore imageAvail)
+    {
+        ThrowIfNotSuccess(Vk.EndCommandBuffer(cmd), "vkEndCommandBuffer(isolate)");
+        var local = cmd;
+        var sem = imageAvail;
+        var waitStage = PipelineStageFlags.ColorAttachmentOutputBit;
+        var fence = isolationFence;
+        ThrowIfNotSuccess(Vk.ResetFences(Device, 1, &fence), "vkResetFences(isolate)");
+        var submit = new SubmitInfo
+        {
+            SType = StructureType.SubmitInfo,
+            WaitSemaphoreCount = first ? 1u : 0u,
+            PWaitSemaphores = first ? &sem : null,
+            PWaitDstStageMask = first ? &waitStage : null,
+            CommandBufferCount = 1,
+            PCommandBuffers = &local,
+        };
+        var t0 = Stopwatch.GetTimestamp();
+        ThrowIfNotSuccess(Vk.QueueSubmit(GraphicsQueue, 1, in submit, fence), "vkQueueSubmit(isolate)");
+        ThrowIfNotSuccess(Vk.WaitForFences(Device, 1, &fence, true, ulong.MaxValue), "vkWaitForFences(isolate)");
+        var ms = Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+        first = false;
+
+        gpuPassIsolated.TryGetValue(passName, out var acc);
+        gpuPassIsolated[passName] = (acc.TotalMs + ms, acc.Samples + 1);
+
+        ThrowIfNotSuccess(Vk.ResetCommandBuffer(local, 0), "vkResetCommandBuffer(isolate)");
+        var bi = new CommandBufferBeginInfo
+        {
+            SType = StructureType.CommandBufferBeginInfo,
+            Flags = CommandBufferUsageFlags.OneTimeSubmitBit,
+        };
+        ThrowIfNotSuccess(Vk.BeginCommandBuffer(local, in bi), "vkBeginCommandBuffer(isolate)");
+    }
+
     private unsafe void CreateCommandPool()
     {
         var ci = new CommandPoolCreateInfo
@@ -544,6 +658,16 @@ public sealed partial class VulkanGraphicsDevice
                 ImageAvailable = ia,
                 InFlight = inf,
             };
+        }
+
+        // One fence for the isolation path, created unsignalled: it is reset before every use and
+        // never waited on unless a pass has just been submitted with it.
+        if (isolationFence.Handle == 0)
+        {
+            var isoInfo = new FenceCreateInfo { SType = StructureType.FenceCreateInfo };
+            Fence iso;
+            ThrowIfNotSuccess(Vk.CreateFence(Device, in isoInfo, null, &iso), "vkCreateFence(isolate)");
+            isolationFence = iso;
         }
     }
 
@@ -616,6 +740,10 @@ public sealed partial class VulkanGraphicsDevice
         // alloc). 8 = 7 color + 1 depth; bump for wider MRT passes.
         var clearValues = stackalloc ClearValue[8];
         var defaultPasses = 0;
+        // Only the FIRST submission of the frame may wait on imageAvailable; the rest are ordered
+        // behind it on the same queue and by their own fences. If isolation flushed at least once,
+        // the final submit must not wait on it again — a semaphore is consumed by the wait.
+        var isolationFirstSubmit = true;
         foreach (var pass in commandList.Passes)
         {
             // Compute pass: dispatch outside any render pass (the prior pass
@@ -651,6 +779,8 @@ public sealed partial class VulkanGraphicsDevice
                         IssuedFrame = currentGpuFrameNumber,
                     });
                 }
+                if (gpuPassIsolation)
+                    FlushIsolatedPass(f.CommandBuffer, pass.Name, ref isolationFirstSubmit, f.ImageAvailable);
                 continue;
             }
 
@@ -799,6 +929,8 @@ public sealed partial class VulkanGraphicsDevice
                     IssuedFrame = currentGpuFrameNumber,
                 });
             }
+            if (gpuPassIsolation)
+                FlushIsolatedPass(f.CommandBuffer, pass.Name, ref isolationFirstSubmit, f.ImageAvailable);
         }
         ThrowIfNotSuccess(Vk.EndCommandBuffer(f.CommandBuffer), "vkEndCommandBuffer");
         var swSubmit = Stopwatch.GetTimestamp();
@@ -811,12 +943,13 @@ public sealed partial class VulkanGraphicsDevice
         var imageAvail = f.ImageAvailable;
         var renderDone = perImageRenderFinished[imageIndex];
         var cmd = f.CommandBuffer;
+        var waitCount = (gpuPassIsolation && !isolationFirstSubmit) ? 0u : 1u;
         var submit = new SubmitInfo
         {
             SType = StructureType.SubmitInfo,
-            WaitSemaphoreCount = 1,
-            PWaitSemaphores = &imageAvail,
-            PWaitDstStageMask = &waitStage,
+            WaitSemaphoreCount = waitCount,
+            PWaitSemaphores = waitCount > 0 ? &imageAvail : null,
+            PWaitDstStageMask = waitCount > 0 ? &waitStage : null,
             CommandBufferCount = 1,
             PCommandBuffers = &cmd,
             SignalSemaphoreCount = 1,

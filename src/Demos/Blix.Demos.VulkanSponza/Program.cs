@@ -633,6 +633,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private readonly int[] cachedCascadeCasters = new int[CascadeCount];
     // The LOD budget each cached cascade was built at; see the cache test in UpdateCascades.
     private readonly float[] cachedCascadeLod = new float[CascadeCount];
+    // Triangles each fill submitted, so a pass's cost can be split between geometry and fill.
+    private long fillIndirectTriangles;
+    private readonly long[] cascadeTriangles = new long[CascadeCount];
+    private long cameraTriangles;
+    /// <summary>--shadow-lod N: caster geometric error allowed, in shadow-map texels.</summary>
+    private float shadowLodTexels = 1.5f;
     // Two shadow caster pipelines: opaque casters use a push-only program (no
     // descriptor sets → zero per-draw transient allocations), mask foliage uses
     // the alpha-cutout program (binds albedo). Routed per drawable by cutoff.
@@ -910,7 +916,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // How many shadow texels of geometric deviation a caster may have. Below one texel the error
     // cannot move the shadow at all; a little over one is where it starts to be theoretically
     // visible and still is not, because the PCF kernel is wider than that.
-    private const float ShadowLodTexels = 1.5f;
+
     // Slack on the camera frustum test, in metres. See the call site in OnRender.
     private const float CameraCullMargin = 0.5f;
     /// <summary>--no-hashed-alpha: binary cutouts at one sample, the state before the hashed test.</summary>

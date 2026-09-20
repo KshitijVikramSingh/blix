@@ -67,6 +67,8 @@ internal sealed partial class SponzaLoop
             // "the interior looks too dark" into two separable questions with one run each.
             if (cmdArgs[i] == "--sun-strength" && float.TryParse(cmdArgs[i + 1], out var ss))
                 sunStrength = MathF.Max(0f, ss);
+            if (cmdArgs[i] == "--shadow-lod" && float.TryParse(cmdArgs[i + 1], out var sl))
+                shadowLodTexels = MathF.Max(0.1f, sl);
             if (cmdArgs[i] == "--bounce-div" && float.TryParse(cmdArgs[i + 1], out var bd))
                 bounceDiv = Math.Clamp(bd, 0.5f, 8f);
             // The same axis stated the way it is usually wanted: a multiplier on probe COUNT.
@@ -135,6 +137,10 @@ internal sealed partial class SponzaLoop
         // it shipped a crash the first time: it compiled, it ran, and nothing had drawn it.
         if (cmdArgs.Contains("--show-probes")) showProbes = true;
         if (cmdArgs.Contains("--probe-carryless")) probeCarryless = true;
+        // <b>The instrument the pass timers could not be.</b> Submits and fence-waits every pass on
+        // its own, which measures real tile execution at the cost of all overlap — so the numbers
+        // attribute the frame rather than decompose it, and they sum to more than it.
+        if (cmdArgs.Contains("--gpu-isolate")) vk.GpuPassIsolation = true;
         // --orbit: drive the camera on a fixed path so a measurement is of the renderer rather than
         // of one photograph of it. Ignores --cam, which is the still counterpart.
         if (cmdArgs.Contains("--orbit")) orbit = true;
