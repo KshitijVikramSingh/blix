@@ -52,9 +52,8 @@ internal sealed partial class SponzaLoop
         if (cmdArgs.Contains("--no-ao")) ambient.Enabled = false;
         if (cmdArgs.Contains("--no-shadow")) shadows.Enabled = false;
         if (cmdArgs.Contains("--ao-fullres")) aoScale = 1f;
-        // The incident-light field is an ARM, not a default: it trades a reconstruction the lit pass
-        // does per pixel for one done per coarse texel, and what that costs in the canopy is the
-        // open question.
+        // The incident-light field ships on; --no-incident is the inline path it replaced.
+        if (cmdArgs.Contains("--no-incident")) incidentField = false;
         if (cmdArgs.Contains("--incident")) incidentField = true;
         if (cmdArgs.Contains("--incident-full")) { incidentField = true; incidentScale = 1f; }
         for (var i = 0; i + 1 < cmdArgs.Length; i++)

@@ -616,9 +616,11 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // the probe volume it reconstructs is coarser than that by a wide margin. 1 via --incident-full
     // for the paired comparison.
     private float incidentScale = 0.5f;
-    // 0 = the lit pass does the probe and sky-visibility lookups itself, as it always has.
-    // 1 = it reads them from the half-res field. The arm, not a setting to leave on a hunch.
-    private bool incidentField;
+    // <b>On by default: the lit pass reads both probe-volume terms from the half-res field.</b>
+    // -14.64 ms on the orbit, -29.99 ms with the occupancy march on, for 0.99 mean sRGB at the
+    // arcade camera it was judged from and 1.28 on the orbit. --no-incident restores the inline
+    // lookups, which is still how the field is priced (--ab incident) and compared.
+    private bool incidentField = true;
 
     // --ao-debug N: make the GTAO pass write an intermediate instead of the bent normal. See gtao.frag.
     private float aoDebug;

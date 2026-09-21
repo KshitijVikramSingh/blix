@@ -164,7 +164,12 @@ layout(set = 0, binding = 0) uniform Frame {
     // Chebyshev depth-moment test. 0 is the shipped behaviour exactly, 1 rejects any probe the
     // march says is behind geometry. Read the leak census (--viz 21) and the fallback rate
     // together: rejecting everything reports no leak and no light.
-    //@tune 0..1 = 0
+    //
+    // <b>Defaults to 1.</b> It takes the leak from 17.4% of blend weight to 0 while surviving
+    // weight falls only 24.4% to 21.0%, and it is worth 1.03 mean sRGB in an arcade against 0.34
+    // on the measurement orbit — the orbit sits in the open atrium and was the one camera least
+    // able to see it. Nearly free once the incident field is on: the march runs per coarse texel.
+    //@tune 0..1 = 1
     float uProbeOcclusion;
     // <b>These work, and the accusation that they did not was a bug in the test harness.</b> They
     // were declared dead on the evidence that uNoBounceTerm moved nothing while uProbeTetrahedral,
