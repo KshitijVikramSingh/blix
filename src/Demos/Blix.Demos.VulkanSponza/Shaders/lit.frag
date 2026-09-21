@@ -291,6 +291,9 @@ layout(set = 1, binding = 16) uniform sampler3D uOccupancy;
 // The half-resolution incident-light field: rgb = bounced radiance, a = baked sky visibility.
 // Read instead of recomputing when uIncident.w says the pass ran. See incident.frag.
 layout(set = 1, binding = 17) uniform sampler2D uIncidentField;
+// The pre-pass normal, bound here ONLY so viz channel 22 can show what the incident field reads.
+// Nothing in the lit path samples it: lit.frag has its own, better normal.
+layout(set = 1, binding = 18) uniform sampler2D uPrepassNormalViz;
 
 layout(set = 2, binding = 0) uniform Material {
     vec4 uBaseColorFactor;
@@ -919,6 +922,16 @@ void main() {
             frame.uVizChannel < 18.5 ? specularIBL * specularVisibility * ao :
             frame.uVizChannel < 19.5 ? transmittedIBL :
             frame.uVizChannel < 20.5 ? bounce * transScale :
+            // <b>22: the normal the half-res incident field reconstructs its ambient from.</b>
+            // "Normals leaking at some angles" is a claim about a quantity nothing displayed — the
+            // field's directional input is the pre-pass normal, not the shading normal, and where
+            // those disagree is where its ambient can be wrong in a way no amount of filtering
+            // fixes. Read it against channel 1 (the geometric normal) and channel 2 (the shading
+            // normal): 22 disagreeing with 1 is a pre-pass or resolve fault and mine to fix; 22
+            // agreeing with 1 while the artifact persists means the field is reading a correct
+            // normal and the fault is elsewhere.
+            frame.uVizChannel < 22.5 && frame.uVizChannel > 21.5
+                ? texture(uPrepassNormalViz, gl_FragCoord.xy / frame.uFog.xy).xyz * 0.5 + 0.5 :
             // <b>21: how much of this point's probe blend arrives through a wall.</b> Red is the
             // leaked fraction, green marks the pixel as measured — which is what lets the census
             // average over the surfaces that asked the probe volume a question, rather than over

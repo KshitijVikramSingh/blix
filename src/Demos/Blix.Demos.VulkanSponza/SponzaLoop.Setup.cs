@@ -109,6 +109,13 @@ internal sealed partial class SponzaLoop
             if (cmdArgs[i] == "--bounce-x" && float.TryParse(cmdArgs[i + 1], out var bx) && bx > 0f)
                 bounceDiv = 2f / MathF.Cbrt(bx);
         }
+        for (var i = 0; i + 1 < cmdArgs.Length; i++)
+        {
+            if (cmdArgs[i] == "--inject-feedback" && float.TryParse(cmdArgs[i + 1], out var ifb))
+                injectFeedback = Math.Clamp(ifb, 0f, 4f);
+            if (cmdArgs[i] == "--transport-occlusion" && float.TryParse(cmdArgs[i + 1], out var to))
+                transportOcclusion = Math.Clamp(to, 0f, 1f);
+        }
         if (cmdArgs.Contains("--sky-no-inject")) skipInject = true;
         if (cmdArgs.Contains("--sky-no-sample")) skipSkySample = true;
         // <b>ON by default, and it was off — which meant the demo's own lighting model was opt-in.</b>
@@ -787,6 +794,8 @@ internal sealed partial class SponzaLoop
                 occX > 0 ? occupancyTexture : skyVisibilityTextures[0], Slot: 16),
             new ShaderTextureBinding(
                 "uIncidentField", graph.GetColorTexture(incidentFullHandle), Slot: 17),
+            new ShaderTextureBinding(
+                "uPrepassNormalViz", graph.GetColorTexture(SampleablePrepassNormal), Slot: 18),
         };
 
         // The one binding that is not constant: the lit pass reads whichever of the bounce pair the

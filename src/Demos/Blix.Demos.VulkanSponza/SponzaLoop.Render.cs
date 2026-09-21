@@ -607,6 +607,8 @@ internal sealed partial class SponzaLoop
                 // probe to solve and for several rounds of multi-bounce to propagate through the
                 // ones no camera ever looks at.
                 new("uWarmup", new Vector4Uniform(new Vector4(injectPeriod * 8f, 0f, 0f, 0f))),
+                new("uTransport", new Vector4Uniform(new Vector4(
+                    injectFeedback, transportOcclusion, 0f, 0f))),
             };
             graph.Dispatch(injectPassHandle, new DispatchCommand(
                 injectPipeline,

@@ -100,6 +100,17 @@ layout(set = 0, binding = 0) uniform Inject {
     vec4 uSchedule;   // w: 1 when the atlases alternate and a skipped probe must carry its tile
     // x = post-load frames during which NOTHING sleeps. See the wake test below.
     vec4 uWarmup;
+    // <b>The transport solve's own dials, which shading's could not reach.</b>
+    //   x  multi-bounce feedback strength. 0 makes this a single-bounce solve, which is the
+    //      discriminator: energy that leaked into a probe through a bad visibility relationship is
+    //      re-injected every round and converges to a fixed point ABOVE the physical answer, so a
+    //      cast caused that way collapses at 0 and a cast caused by the sky or the first bounce
+    //      does not. Toggling shading-time occlusion cannot tell those apart, because by then the
+    //      leaked energy is a number baked into an atlas texel.
+    //   y  occupancy-march strength for the feedback lookup. This was hard-coded to 0 while the
+    //      shading path's march was being attributed, and then forgotten — so probe -> surface
+    //      visibility got the exact test while surface -> previous-probe kept the statistical one.
+    vec4 uTransport;
     // xyz albedo grid dims (0 = none shipped), w = translucency.
     vec4 uAlbedoDims;
 } u;
@@ -364,13 +375,18 @@ vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize,
             // which is precisely what stops a probe behind a wall contributing — the field's median
             // rose from 0.0521 to 0.0530 when it was removed. Trading 0.6 ms for light coming
             // through walls is a worse bargain than the milliseconds suggest.
-            vec3 incident = u.uSunIrradiance.rgb * sunReach + skyTerm
-                          + blix_probeIrradiance(uAtlasPrev, uDepthAtlasPrev, uOccupancy,
-                                                 ivec3(u.uProbeDims.xyz), ivec3(u.uOccupancyDims.xyz),
-                                                 u.uBoundsMin.xyz, u.uBoundsSpan.xyz, probePos, n,
-                                                 // Held at 0 alongside the fog's, same reason: one
-                                                 // dial at a time or the result cannot be attributed.
-                                                 0.0);
+            //
+            // <b>Transport dependency is not rendering dependency, and neither is transport
+            // visibility the same code path as shading visibility.</b> The occupancy strength here
+            // was 0 while shading's was being measured, which left the two halves of the same
+            // geometric question answered by two different tests.
+            vec3 feedback = u.uTransport.x > 0.0
+                ? u.uTransport.x * blix_probeIrradiance(
+                      uAtlasPrev, uDepthAtlasPrev, uOccupancy,
+                      ivec3(u.uProbeDims.xyz), ivec3(u.uOccupancyDims.xyz),
+                      u.uBoundsMin.xyz, u.uBoundsSpan.xyz, probePos, n, u.uTransport.y)
+                : vec3(0.0);
+            vec3 incident = u.uSunIrradiance.rgb * sunReach + skyTerm + feedback;
 
             // Lambertian outgoing radiance, now in the surface's OWN colour. uBoundsSpan.w stops
             // being the scene's albedo and becomes a plain strength multiplier over it.

@@ -596,6 +596,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
         "Ambient: sky diffuse", "Ambient: sky specular",
         "Ambient: transmitted", "Ambient: bounce",
         "Probe leak (red = weight through walls)",
+        "Pre-pass normal (what the incident field reads)",
     };
 
     // Live overrides for the two cloth numbers, so they can be found by eye and then written back
@@ -621,6 +622,13 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // arcade camera it was judged from and 1.28 on the orbit. --no-incident restores the inline
     // lookups, which is still how the field is priced (--ab incident) and compared.
     private bool incidentField = true;
+
+    // Multi-bounce feedback strength in the injection solve. 0 = single bounce, which is the
+    // discriminator for whether a colour cast is transport leakage accumulating over rounds.
+    private float injectFeedback = 1f;
+    // How hard the feedback lookup trusts a marched line of sight, matching shading's
+    // uProbeOcclusion. Was hard-coded to 0 in the shader.
+    private float transportOcclusion;
 
     // --ao-debug N: make the GTAO pass write an intermediate instead of the bent normal. See gtao.frag.
     private float aoDebug;
