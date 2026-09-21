@@ -124,14 +124,20 @@ float blix_sun_shadow_soft(
 // this corrects scales with texel size, so the offset does too — but the thing it must not do is
 // walk the sample off its own surface into a neighbour's shadow, and THAT limit is set by the
 // scene's geometry, which knows nothing about cascade resolution. In this tree cascade 2's texels
-// are 0.205 m, so at four texels a grazing surface was being moved 0.82 m before being asked
-// whether it was in shadow — most of a metre, in a corridor about three metres wide. A point on
-// one wall near a corner was pushed clean out of the other wall's shadow, and the sun arrived
-// along the seam: a hard bright line down every concave corner and along every floor-wall
-// junction, indoors, reported from the chair as "sunlight leaking from behind".
+// are 0.205 m, so at four texels a grazing surface is moved 0.82 m before being asked whether it
+// is in shadow — most of a metre, in a building whose corridors are about three metres wide.
 //
-// The cap costs the far cascade nothing real: 0.1 m is still five times cascade 0's texel, and
-// acne in cascade 2 is at a distance where one texel is already larger than the artifact.
+// <b>Defensive, and explicitly NOT the fix for anything observed.</b> It was added while hunting
+// indoor sun seams and it did not move them by a single pixel: the walls in question sit in
+// cascade 0, whose 0.018 m texels give a 0.072 m offset that was already under this cap, and the
+// direct-sun channel was byte-identical with the cap in and out. That artifact was shadow caster
+// culling dropping the occluding wall — see SceneExitDistance in SponzaLoop.Render.cs, where
+// measuring the sweep from the leading face clamped it to zero. The cap is kept because 0.82 m is
+// indefensible on its own terms and will bite once something is looked at from far enough away to
+// sit in cascade 2, not because it repaired a defect anybody saw.
+//
+// It costs the far cascade nothing real: 0.1 m is still five times cascade 0's texel, and acne in
+// cascade 2 is at a distance where one texel is already larger than the artifact.
 #ifndef BLIX_SHADOW_OFFSET_MAX_M
 #define BLIX_SHADOW_OFFSET_MAX_M 0.10
 #endif

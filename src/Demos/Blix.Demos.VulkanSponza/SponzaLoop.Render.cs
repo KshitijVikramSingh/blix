@@ -53,17 +53,17 @@ internal sealed partial class SponzaLoop
             var d = drawables[i];
             // <b>For a shadow cascade the question is not "is this caster inside the light's box"
             // but "can its shadow REACH the box", and those differ by everything standing between
-            // the box and the sun.</b> Culling a caster against the cascade's own ortho frustum
-            // discards exactly the occluders that sit behind the visible slice along the light
-            // direction — their shadow lands inside the cascade, but they were never drawn into it,
-            // so the sun arrives through them. Indoors that reads as a hard bright seam down every
-            // concave corner and along every floor-wall junction, which is how it was reported:
-            // "sunlight leaking from behind". Measured on the direct-sun channel in an arcade
-            // corridor, --no-caster-cull took it from 1.200 mean to 0.301.
-            //
-            // The swept volume is the honest test for both frustums, and it was already being
-            // computed for the receiver half. Conservative by construction: the swept box contains
+            // the box and the sun.</b> A caster outside the cascade's ortho frustum can still throw
+            // its shadow into it, so the swept volume is the honest test against that frustum too,
+            // not just against the camera's. Conservative by construction: the swept box contains
             // the true shadow volume, so anything it misses genuinely darkens nothing there.
+            //
+            // <b>Correct, and NOT the fix for the indoor sun seams.</b> It was written while
+            // hunting them and measured on its own: the direct-sun channel at the arcade camera
+            // read 1.200 mean before it and 1.200 after. What fixed those was SceneExitDistance
+            // below, which measured its sweep from the leading face and clamped to a zero sweep for
+            // any caster straddling the scene bounds — and while that was true this test had
+            // nothing to sweep, so it could not have helped. Kept on its own merits.
             var testBounds = d.Bounds;
             if (shadowSweepDir != Vector3.Zero)
             {
@@ -84,18 +84,12 @@ internal sealed partial class SponzaLoop
                     Vector3.Max(d.Bounds.Max, d.Bounds.Max + sweep));
             }
             var vis = cull is not { } f || f.Intersects(testBounds, margin);
-            // <b>A caster only matters if its shadow can land somewhere the camera can see.</b>
-            // Culling against the cascade's own box asks "is this object lit", which in an
-            // overhead-sun scene is nearly everything — cascade-casters read 5406/5420/5420 of
-            // 5420, and the maps were taking 8.86M triangles against the camera's 166,557. The
-            // question worth asking is different: sweep the caster's bounds along the light
-            // direction, and if that volume misses the camera frustum then nothing it darkens is
-            // on screen. Conservative by construction, because the swept box contains the true
-            // shadow volume.
             // <b>And a caster only matters if its shadow can land somewhere the camera can see.</b>
             // Culling against the cascade's own box asks "is this object lit", which in an
             // overhead-sun scene is nearly everything — cascade-casters read 5406/5420/5420 of
-            // 5420, and the maps were taking 8.86M triangles against the camera's 166,557.
+            // 5420, and the maps were taking 8.86M triangles against the camera's 166,557. The
+            // question worth asking is whether the SWEPT volume reaches the camera frustum: if it
+            // misses, nothing this caster darkens is on screen.
             if (vis && receivers is { } rf) vis = rf.Intersects(testBounds, margin);
 
             // Per-primitive LOD margin (live-tunable) scales the global px budget.
