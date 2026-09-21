@@ -603,6 +603,10 @@ internal sealed partial class SponzaLoop
                     postLoadFrames, MathF.Round(injectPeriod),
                     ProbeSleepNow > 0f ? 1f / ProbeSleepNow : 0f,
                     probePingPong ? 1f : 0f))),
+                // Eight injection periods before anything is allowed to sleep — enough for every
+                // probe to solve and for several rounds of multi-bounce to propagate through the
+                // ones no camera ever looks at.
+                new("uWarmup", new Vector4Uniform(new Vector4(injectPeriod * 8f, 0f, 0f, 0f))),
             };
             graph.Dispatch(injectPassHandle, new DispatchCommand(
                 injectPipeline,

@@ -98,6 +98,8 @@ layout(set = 0, binding = 0) uniform Inject {
     // refreshed on its own turn instead.
     // x = frame counter, y = sweep length, z = usage decay per frame (0 disables sleeping).
     vec4 uSchedule;   // w: 1 when the atlases alternate and a skipped probe must carry its tile
+    // x = post-load frames during which NOTHING sleeps. See the wake test below.
+    vec4 uWarmup;
     // xyz albedo grid dims (0 = none shipped), w = translucency.
     vec4 uAlbedoDims;
 } u;
@@ -433,7 +435,22 @@ void main() {
     // be right.
     float usage = imageLoad(uProbeUsage, probe).r;
     float decay = u.uSchedule.z;
-    bool asleep = decay > 0.0 && usage <= 0.02;
+
+    // <b>Nothing sleeps until the field exists.</b> The usage grid is created zero-filled, so every
+    // probe begins asleep and only the ones shading marks ever wake. With a camera that has been
+    // moving that is invisible — it sweeps and wakes probes as it goes — but park it and 99.5% of
+    // the volume is still zero after six hundred frames, and the bounce is simply absent. More
+    // frames never helped, because this was never convergence.
+    //
+    // <b>And the marked set is not sufficient even in principle.</b> Light reaching an arcade comes
+    // through the courtyard probes by multi-bounce, and those are exactly the probes a camera
+    // inside the arcade never marks. Sleeping is a steady-state optimisation and it was gating the
+    // steady state's existence: a conduit nobody looks at is still load-bearing.
+    //
+    // A warm-up of several injection periods lets the whole volume solve once and propagate, after
+    // which the usage marks are an honest statement about what still needs refreshing.
+    bool warm = u.uSchedule.x >= u.uWarmup.x;
+    bool asleep = warm && decay > 0.0 && usage <= 0.02;
 
     int period = int(u.uSchedule.y);
     int slot = (probe.x * 5 + probe.y * 11 + probe.z * 17) % period;

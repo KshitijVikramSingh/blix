@@ -166,17 +166,18 @@ layout(set = 0, binding = 0) uniform Frame {
     // together: rejecting everything reports no leak and no light.
     //@tune 0..1 = 0
     float uProbeOcclusion;
-    // <b>SUSPECT — these three do not reach the GPU, and every split built on them is void.</b>
-    // Set uProbeTetrahedral and the bounce block's output moves by 1.97 mean sRGB; set
-    // uNoBounceTerm, which skips that same block entirely, and nothing moves at all. Both go
-    // through the same --tune path, both are accepted by name, and uVisualizeCascades (member 17)
-    // works at 84.5. Members 20 and 21 work; 22, 23 and 24 appear not to, which points at the
-    // Frame block's tail rather than at any of these declarations.
+    // <b>These work, and the accusation that they did not was a bug in the test harness.</b> They
+    // were declared dead on the evidence that uNoBounceTerm moved nothing while uProbeTetrahedral,
+    // twelve bytes away in this block, moved 1.97 — and the reflection offsets, the merge and the
+    // by-name write path were all read through looking for the fault. It was none of them: a zsh
+    // shell function passed its flags as `$2` unquoted, zsh does not word-split that, and every
+    // multi-flag run in those batches silently became a plain run. Single-flag runs worked, which
+    // is what made the pattern look like a Frame-block tail.
     //
-    // Not yet found. Until it is, treat "relief alone", "sky term alone" and every figure derived
-    // from them in this file's history as unmeasured — they were read off a dial connected to
-    // nothing, and they are the reason the incident field's error was attributed first to the
-    // upsample, then to the payload, then to the normal.
+    // Checked properly against viz channel 11, uNoBounceTerm takes the bounce from 10.49 to 1.14.
+    //
+    // Second time word-splitting has done this here; the first cost four budget runs that all
+    // measured the same arm. A shell helper that forwards arguments takes "$@" after a shift.
     //@tune 0..1 = 0
     float uSkyDropL2;
     //@tune 0..1 = 0
