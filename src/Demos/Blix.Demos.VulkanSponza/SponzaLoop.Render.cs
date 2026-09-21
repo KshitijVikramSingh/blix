@@ -51,7 +51,39 @@ internal sealed partial class SponzaLoop
         for (var i = 0; i < drawables.Count; i++)
         {
             var d = drawables[i];
-            var vis = cull is not { } f || f.Intersects(d.Bounds, margin);
+            // <b>For a shadow cascade the question is not "is this caster inside the light's box"
+            // but "can its shadow REACH the box", and those differ by everything standing between
+            // the box and the sun.</b> Culling a caster against the cascade's own ortho frustum
+            // discards exactly the occluders that sit behind the visible slice along the light
+            // direction — their shadow lands inside the cascade, but they were never drawn into it,
+            // so the sun arrives through them. Indoors that reads as a hard bright seam down every
+            // concave corner and along every floor-wall junction, which is how it was reported:
+            // "sunlight leaking from behind". Measured on the direct-sun channel in an arcade
+            // corridor, --no-caster-cull took it from 1.200 mean to 0.301.
+            //
+            // The swept volume is the honest test for both frustums, and it was already being
+            // computed for the receiver half. Conservative by construction: the swept box contains
+            // the true shadow volume, so anything it misses genuinely darkens nothing there.
+            var testBounds = d.Bounds;
+            if (shadowSweepDir != Vector3.Zero)
+            {
+                // <b>Swept until the shadow leaves the SCENE, not until it leaves the cascade.</b>
+                // Sweeping by the cascade's far distance is a statement about the camera and not
+                // about the light: a roofline caster at 17 m with the sun at 53 degrees throws its
+                // shadow about 21 m before reaching the floor, so cascade 0's 14 m sweep cut it
+                // while the shadow landed well inside cascade 0. The result was patches of missing
+                // shadow that came and went with the view angle and that nothing on screen could
+                // affect, because nothing on screen controlled it.
+                //
+                // The honest bound is where the swept box exits the scene bounds, which is tighter
+                // for a caster near the floor than for one under the roof — exactly the right
+                // shape, since a low caster genuinely cannot shadow much.
+                var sweep = shadowSweepDir * SceneExitDistance(d.Bounds, shadowSweepDir);
+                testBounds = new Bounds3(
+                    Vector3.Min(d.Bounds.Min, d.Bounds.Min + sweep),
+                    Vector3.Max(d.Bounds.Max, d.Bounds.Max + sweep));
+            }
+            var vis = cull is not { } f || f.Intersects(testBounds, margin);
             // <b>A caster only matters if its shadow can land somewhere the camera can see.</b>
             // Culling against the cascade's own box asks "is this object lit", which in an
             // overhead-sun scene is nearly everything — cascade-casters read 5406/5420/5420 of
@@ -60,25 +92,12 @@ internal sealed partial class SponzaLoop
             // direction, and if that volume misses the camera frustum then nothing it darkens is
             // on screen. Conservative by construction, because the swept box contains the true
             // shadow volume.
-            if (vis && receivers is { } rf)
-            {
-                // <b>Swept until the shadow leaves the SCENE, not until it leaves the cascade.</b>
-                // The first version swept by the cascade's far distance, which is a statement about
-                // the camera and not about the light: a roofline caster at 17 m with the sun at 53
-                // degrees throws its shadow about 21 m before reaching the floor, so cascade 0's
-                // 14 m sweep cut it — while the shadow itself landed well inside cascade 0. The
-                // result was patches of missing shadow that came and went with the view angle and
-                // that nothing on screen could affect, because nothing on screen controlled it.
-                //
-                // The honest bound is where the swept box exits the scene bounds, which is tighter
-                // for a caster near the floor than for one under the roof — exactly the right shape,
-                // since a low caster genuinely cannot shadow much.
-                var sweep = shadowSweepDir * SceneExitDistance(d.Bounds, shadowSweepDir);
-                var swept = new Bounds3(
-                    Vector3.Min(d.Bounds.Min, d.Bounds.Min + sweep),
-                    Vector3.Max(d.Bounds.Max, d.Bounds.Max + sweep));
-                vis = rf.Intersects(swept, margin);
-            }
+            // <b>And a caster only matters if its shadow can land somewhere the camera can see.</b>
+            // Culling against the cascade's own box asks "is this object lit", which in an
+            // overhead-sun scene is nearly everything — cascade-casters read 5406/5420/5420 of
+            // 5420, and the maps were taking 8.86M triangles against the camera's 166,557.
+            if (vis && receivers is { } rf) vis = rf.Intersects(testBounds, margin);
+
             // Per-primitive LOD margin (live-tunable) scales the global px budget.
             // A world budget means this list is being drawn into something orthographic, where
             // camera pixels are not the unit of error. Nothing else about the fill changes.
@@ -1501,10 +1520,23 @@ internal sealed partial class SponzaLoop
         {
             var d = a == 0 ? dir.X : a == 1 ? dir.Y : dir.Z;
             if (MathF.Abs(d) < 1e-5f) continue;
-            // The far corner in this axis is whichever the ray is heading toward.
+            // <b>The TRAILING face, not the leading one, and the difference was a light leak.</b>
+            // Measuring from the leading corner asks "when does the front of this box leave the
+            // scene", which goes NEGATIVE the moment a caster pokes past the volume wall it is
+            // heading toward — and the clamp below then turned that into a sweep of exactly zero.
+            // A caster with no sweep is tested by its own bounds, so every occluder straddling the
+            // scene boundary was culled out of the shadow maps whenever it sat outside the camera
+            // frustum. Sponza's outer walls and floor do exactly that, which is why an interior
+            // corridor got a hard seam of direct sun down every concave corner: the wall casting
+            // that shadow had been culled, and the sun arrived through it.
+            //
+            // Measuring from the trailing face asks "when has the WHOLE box left", which is never
+            // negative for a caster that overlaps the scene at all, and is conservative: the swept
+            // volume then covers every receiver inside the scene that this caster could darken.
+            // Verified against a maximally-conservative full-diagonal sweep — identical images.
             var start = d > 0
-                ? (a == 0 ? bounds.Max.X : a == 1 ? bounds.Max.Y : bounds.Max.Z)
-                : (a == 0 ? bounds.Min.X : a == 1 ? bounds.Min.Y : bounds.Min.Z);
+                ? (a == 0 ? bounds.Min.X : a == 1 ? bounds.Min.Y : bounds.Min.Z)
+                : (a == 0 ? bounds.Max.X : a == 1 ? bounds.Max.Y : bounds.Max.Z);
             var wall = d > 0
                 ? (a == 0 ? max.X : a == 1 ? max.Y : max.Z)
                 : (a == 0 ? min.X : a == 1 ? min.Y : min.Z);

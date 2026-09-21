@@ -119,11 +119,29 @@ float blix_sun_shadow_soft(
 //
 // `texelWorld` is the world-space size of one shadow-map texel: the light's ortho
 // extent divided by the map's side.
+//
+// <b>And CAPPED in world units, because the two error terms do not scale together.</b> The acne
+// this corrects scales with texel size, so the offset does too — but the thing it must not do is
+// walk the sample off its own surface into a neighbour's shadow, and THAT limit is set by the
+// scene's geometry, which knows nothing about cascade resolution. In this tree cascade 2's texels
+// are 0.205 m, so at four texels a grazing surface was being moved 0.82 m before being asked
+// whether it was in shadow — most of a metre, in a corridor about three metres wide. A point on
+// one wall near a corner was pushed clean out of the other wall's shadow, and the sun arrived
+// along the seam: a hard bright line down every concave corner and along every floor-wall
+// junction, indoors, reported from the chair as "sunlight leaking from behind".
+//
+// The cap costs the far cascade nothing real: 0.1 m is still five times cascade 0's texel, and
+// acne in cascade 2 is at a distance where one texel is already larger than the artifact.
+#ifndef BLIX_SHADOW_OFFSET_MAX_M
+#define BLIX_SHADOW_OFFSET_MAX_M 0.10
+#endif
+
 vec3 blix_shadow_normal_offset(vec3 world, vec3 normal, float ndotl, float texelWorld, float texels) {
     float slope = clamp(1.0 - ndotl, 0.0, 1.0);
     // The square root keeps a little offset even on face-on surfaces, where a pure
     // linear falloff leaves nothing at all and the last of the acne survives.
-    return world + normal * (texelWorld * texels * (0.30 + 0.70 * sqrt(slope)));
+    float offset = texelWorld * texels * (0.30 + 0.70 * sqrt(slope));
+    return world + normal * min(offset, BLIX_SHADOW_OFFSET_MAX_M);
 }
 
 // --- Cascaded directional shadows -----------------------------------------
