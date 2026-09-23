@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launcher for Blix.Tools.View — the toolchain lab viewer.
+# Compatibility launcher for Blix.Tools.View — the model and rig viewer.
 #
 # Execs the apphost rather than `dotnet run`: Homebrew's $prefix/bin/dotnet is a
 # "#!/bin/bash" wrapper and /bin/bash is SIP-protected, so dyld strips DYLD_* from

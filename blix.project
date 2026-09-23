@@ -1,6 +1,6 @@
 # Blix's own project: the engine, its tools, and the suites that judge it.
 blix
 
-# What `blix test` runs here. The step run most often in a session — five
-# invocations and a person reading five outputs, until this line existed.
-test: Blix.Test.Graphics, Blix.Test.Diagnostics, Blix.Test.Physics2D, Blix.Test.Physics3D, Blix.Test.Apps, Blix.Test.Studio
+# What `blix test` runs here. One ordered gate replaces seven invocations and
+# seven outputs that a person would otherwise have to reconcile by hand.
+test: Blix.Test.Graphics, Blix.Test.Diagnostics, Blix.Test.Physics2D, Blix.Test.Physics3D, Blix.Test.Apps, Blix.Test.Studio, Blix.Test.Recipes

@@ -8,31 +8,18 @@ namespace Blix.Tools.Studio;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Why this exists at all, and why it is a construction-time thing.</b> A render graph's passes
-/// have to be declared before it compiles; after that the shape is fixed. So a tool that needs a
-/// pass of its own — a selection outline, an object-id buffer — has exactly one moment to say so,
-/// and without this its only option is to stop using the stage and write a renderer.
+/// Render-graph shape is fixed at compile time, so a tool declares selection, object-id, or other
+/// additional passes through this object while Studio is being constructed.
 /// </para>
 /// <para>
-/// <b>It APPENDS; it cannot insert.</b> A tool declares here, after the stage has declared its own
-/// passes, and <c>RenderGraph.Execute</c> walks declaration order — so an extension always runs
-/// after the lit pass and before presentation. A true depth PRE-pass is therefore not reachable
-/// this way, and that is recorded rather than worked around: an outline and an id buffer are both
-/// appends, they are the pressure tooling actually applies, and the first tool that genuinely needs
-/// something before the lit pass should force the next shape instead of a speculative insertion
-/// point being invented for it now.
+/// Extensions append after Studio's lit pass and before presentation because execution follows
+/// declaration order. This is deliberately not an insertion API; a pass that must precede Studio's
+/// lit pass requires a different composition boundary.
 /// </para>
 /// <para>
-/// It hands out the targets rather than hiding them, because a pass that cannot read the scene
-/// depth or write the scene colour is not much of a pass. What it does not hand out is
-/// <see cref="RenderGraph.Compile"/> — the stage compiles, once, when it is ready.
-/// </para>
-/// <para>
-/// <b>Declaring is all it does.</b> There is no per-frame hook here and there was one: a tool
-/// records its own pass through <see cref="StudioRenderer.Graph"/> whenever it likes, because
-/// Execute walks declaration order rather than call order. A one-shot delegate handing you a window
-/// is scoping; a per-frame delegate running your code is hosting, and only the second was ever the
-/// thing to be careful about.
+/// Targets and shader interfaces are exposed so the extension can declare a valid pass. Studio
+/// retains compilation and execution ownership; tools record their pass each frame through
+/// <see cref="StudioRenderer.Graph"/>.
 /// </para>
 /// </remarks>
 public sealed class StudioGraph
@@ -65,16 +52,7 @@ public sealed class StudioGraph
     /// <summary>The sun's depth map.</summary>
     public GraphResourceHandle ShadowDepth { get; }
 
-    /// <summary>
-    /// The stage's own shader interfaces, because a pass cannot be declared without one.
-    /// </summary>
-    /// <remarks>
-    /// <b>Found by the first thing that used this.</b> Rung four as first built handed out the graph
-    /// and the targets and kept these private — and a GraphicsPass with no <c>.Shader(...)</c> is
-    /// refused outright, so the hook was unusable by anything that did not already own a program.
-    /// A tool adding an overlay wants the ordinary lit interface far more often than one of its own,
-    /// and now it does not have to reflect a shader to say so.
-    /// </remarks>
+    /// <summary>The stage's lit interface, available to extensions that reuse its program contract.</summary>
     public ShaderInterface Lit { get; }
 
     /// <summary>The caster interface — a matrix and no materials.</summary>

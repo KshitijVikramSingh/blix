@@ -7,19 +7,11 @@ namespace Blix;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>The last thing the rigged importer used to throw away.</b> It took skinned nodes, adopted
-/// static nodes parented to a joint as <see cref="GltfAttachment"/>s, and dropped the rest with a
-/// recorded reason. <c>tank.glb</c> is the case: its gun and turret are four primitives sitting
-/// under the scene root at their own transforms, animated by nothing and weighted to nothing. They
-/// were named in the skipped report and left out of the model.
+/// A node with a mesh and no skin is ordinary static scene geometry. It is placed by the world
+/// matrix its node carries.
 /// </para>
 /// <para>
-/// <b>Nothing in glTF excludes them.</b> A node with a mesh and no skin is an ordinary mesh in the
-/// scene; "not equipment" was a rule this importer had rather than one the format has. So they are
-/// read, placed by the world matrix their node already carries.
-/// </para>
-/// <para>
-/// <b>Separate from <see cref="GltfAttachment"/> because the distinction is real.</b> An attachment
+/// This is separate from <see cref="GltfAttachment"/> because an attachment
 /// follows a joint and moves when the rig moves; this does not. Folding them together would need a
 /// joint index meaning "no joint", which is a contradiction sitting in a field name — and the
 /// viewer's attachment panel, where the meaningful act is choosing which weapon a hand holds, would

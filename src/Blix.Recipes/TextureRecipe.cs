@@ -10,10 +10,10 @@ namespace Blix.Recipes;
 
 /// <summary>What a texture is FOR, which is what decides how it is encoded.</summary>
 /// <remarks>
-/// Not a property of the image — a normal map and an albedo can be the same pixels — so it is
-/// inferred from the filename and is the one cook setting that is guessed rather than given. That
-/// guess is now recorded in the stamp, which is what makes a wrong one visible instead of
-/// mysterious.
+/// Role is usage metadata rather than a property of the pixels. Callers should provide it when a
+/// material channel supplies that knowledge; standalone recipe calls fall back to filename
+/// classification. The resolved role, format, flags, encoder, and quality are recorded in the
+/// stamp.
 /// </remarks>
 public enum TextureRole { BaseColor, Normal, Emissive, MetallicRoughness, Linear }
 
@@ -21,26 +21,46 @@ public enum TextureRole { BaseColor, Normal, Emissive, MetallicRoughness, Linear
 /// PNG/JPEG to <c>.blixtex</c>: mip chain, BCn encode by role, one file at a time.
 /// </summary>
 /// <remarks>
-/// <b>Moved out of the cook tool's <c>Program.cs</c> so that all three of Blix's recipes are the
-/// same kind of thing.</b> It was never engine code — unlike the mesh recipe — but it was welded to
-/// a CLI, so it could only be invoked by a person typing a directory. The split that matters is
-/// driver from recipe: walking a tree, printing progress and parallelising stay with the tool;
-/// turning one source file into one cooked file lives here, where a build rule can reach it.
+/// The recipe transforms one file. Tree traversal, parallel scheduling, and progress reporting are
+/// driver responsibilities.
 /// </remarks>
 public static class TextureRecipe
 {
+    private readonly record struct EncodingPlan(
+        TextureRole Role,
+        TextureFormat Format,
+        BlixTex.Flags Flags,
+        bool Compressed,
+        bool NativeBc7,
+        int NativeQuality,
+        string Backend,
+        string Quality)
+    {
+        public string StampPrefix =>
+            $"role={Role} format={Format} flags={Flags} encoder={Backend} quality={Quality}";
+    }
+
+    /// <summary>Whether a texture artifact matches today's recipe, source, role and encoder.</summary>
+    public static bool IsCurrent(string source, string destination, TextureRole? role = null)
+    {
+        var header = CookedFile.TryReadHeader(destination);
+        if (header is not { Magic: BlixTex.Magic, FormatVersion: BlixTex.Version3 }) return false;
+        if (!header.Value.Stamp.MatchesProducerAndSource(
+                BlixTex.ShippedRecipe, BlixTex.ShippedRecipeVersion, source))
+            return false;
+
+        var prefix = ResolveEncoding(source, role).StampPrefix + " mips=";
+        var parameters = header.Value.Stamp.Parameters;
+        if (!parameters.StartsWith(prefix, StringComparison.Ordinal)) return false;
+        return int.TryParse(parameters.AsSpan(prefix.Length), out var mipCount) && mipCount > 0;
+    }
+
     /// <param name="role">
     /// The role to cook as, when the CALLER knows it. Null means classify by filename.
     /// </param>
     /// <remarks>
-    /// <b>An explicit role exists because filename sniffing silently destroyed a texture.</b>
-    /// Classification reads the file's NAME, which works for an authored tree where a base colour
-    /// map is called "*_BaseColor.png". It fails completely for an image extracted out of a .glb,
-    /// whose name this cook invents: Rogue's base colour arrived as "rogue_texture", matched no
-    /// rule, fell through to Linear, and was written Bc7Unorm instead of Bc7Srgb. Nothing errored.
-    /// The character simply rendered blown out, and the lab baseline caught it as a 9% pixel change
-    /// with a mean delta of 90 — which a person spotted as "blown out" before any of this was
-    /// measured.
+    /// Filename classification is only a fallback. Extracted or generically named images can lose
+    /// their colour-space role, so callers that know the material channel must pass it explicitly.
     /// <para>
     /// The mesh cook always knows the role, because it finds each image ON a material channel. A
     /// heuristic is the right answer when nothing knows better and the wrong one when something
@@ -51,17 +71,7 @@ public static class TextureRecipe
         string source, string destination, out long sourceLen, out long destLen, TextureRole? role = null)
     {
         var verbose = Environment.GetEnvironmentVariable("BLIX_COOK_VERBOSE") != null;
-        // Cook format selection. BC7 is 4x smaller than Rgba8 on disk + in GPU
-        // memory and is the DEFAULT when the fast native encoder (Bc7Native, the
-        // vendored bc7enc) is available — it BC7-encodes a 4K texture in a second
-        // or so. Without the native lib we fall back to Rgba8 rather than the
-        // managed BCnEncoder.Net path (minutes per 4K texture). Override:
-        //   BLIX_COOK_FORMAT=bc7   force BC7 (managed fallback if no native lib)
-        //   BLIX_COOK_FORMAT=rgba8 force uncompressed Rgba8
-        var formatEnv = Environment.GetEnvironmentVariable("BLIX_COOK_FORMAT");
-        var bcMode = formatEnv is not null
-            ? formatEnv.Equals("bc7", StringComparison.OrdinalIgnoreCase)
-            : Blix.Recipes.Bc7Native.Available;
+        var plan = ResolveEncoding(source, role);
         var name = Path.GetFileName(source);
         sourceLen = new FileInfo(source).Length;
         using var probe = File.OpenRead(source);
@@ -74,48 +84,37 @@ public static class TextureRecipe
         using (var stream = File.OpenRead(source))
         {
             var decodeSw = Stopwatch.StartNew();
-            var resolvedRole = role ?? ClassifyRole(source);
-            // MR textures need channel-aware loading: 1-channel grayscale
-            // PNGs (Modern Sponza's "*_Roughness.png") get expanded by stb to
-            // (Y, Y, Y, 255), which the shader would then read as
-            // metallic = roughness. LoadMetallicRoughness detects the
-            // grayscale source and zeroes the B channel so the cooked
-            // .blixtex stores (255, Y, 0, 255) -- the canonical ORM layout.
-            var image = resolvedRole == TextureRole.MetallicRoughness
+            // Preserve the canonical ORM meaning for grayscale roughness sources. A generic RGBA
+            // expansion would copy roughness into B and make the same value read as metallic.
+            var image = plan.Role == TextureRole.MetallicRoughness
                 ? ImageLoader.LoadMetallicRoughness(stream)
                 : ImageLoader.LoadRgba32(stream);
             if (verbose) Console.WriteLine($"\r    decoded {name} {image.Width}x{image.Height} in {decodeSw.ElapsedMilliseconds} ms");
-            var (bcFormat, flags) = PickFormat(resolvedRole);
-            var format = bcMode ? bcFormat : TextureFormat.Rgba8;
 
             var mipSw = Stopwatch.StartNew();
             var mipsRgba = GenerateMipsBoxFilter(image.Pixels, image.Width, image.Height, minDim: 4);
             if (verbose) Console.WriteLine($"\r    mipped  {name} {mipsRgba.Count} levels in {mipSw.ElapsedMilliseconds} ms");
 
             byte[][] encodedMips;
-            if (bcMode && bcFormat is TextureFormat.Bc7Srgb or TextureFormat.Bc7Unorm && Blix.Recipes.Bc7Native.Available)
+            if (plan.NativeBc7)
             {
-                // Fast native BC7 (bc7enc). Perceptual YCbCr weighting for sRGB
-                // color maps; linear weighting for normal/data maps. Single-threaded
-                // per texture -- the outer Parallel.ForEach over textures already
-                // saturates cores.
-                var perceptual = (flags & BlixTex.Flags.Srgb) != 0;
-                var quality = Bc7Quality();
+                // Use perceptual weighting for sRGB colour and linear weighting for data. Encoding
+                // is single-threaded here because tree drivers parallelize across textures.
+                var perceptual = (plan.Flags & BlixTex.Flags.Srgb) != 0;
                 encodedMips = new byte[mipsRgba.Count][];
                 for (var i = 0; i < mipsRgba.Count; i++)
                 {
                     var (pixels, w, h) = mipsRgba[i];
                     var encodeSw = Stopwatch.StartNew();
-                    encodedMips[i] = Blix.Recipes.Bc7Native.EncodeImage(pixels, w, h, perceptual, quality, numThreads: 1);
-                    if (verbose) Console.WriteLine($"\r    bc7(native q{quality}) {name} mip{i} {w}x{h} -> {encodedMips[i].Length} bytes in {encodeSw.ElapsedMilliseconds} ms");
+                    encodedMips[i] = Blix.Recipes.Bc7Native.EncodeImage(
+                        pixels, w, h, perceptual, plan.NativeQuality, numThreads: 1);
+                    if (verbose) Console.WriteLine($"\r    bc7(native q{plan.NativeQuality}) {name} mip{i} {w}x{h} -> {encodedMips[i].Length} bytes in {encodeSw.ElapsedMilliseconds} ms");
                 }
             }
-            else if (bcMode)
+            else if (plan.Compressed)
             {
-                // Managed fallback (no native lib, or a non-BC7 target). Encoder-
-                // internal parallelism is OFF -- the outer Parallel.ForEach handles
-                // cores. Slow (minutes per 4K texture); only hit when Bc7Native is
-                // unavailable.
+                // Managed fallback for non-BC7 targets or an explicitly forced BC cook without the
+                // native encoder. Driver-level parallelism owns core saturation.
                 var encoder = new BcEncoder
                 {
                     Options = { IsParallel = false },
@@ -123,7 +122,7 @@ public static class TextureRecipe
                     {
                         GenerateMipMaps = false,
                         Quality = CompressionQuality.Fast,
-                        Format = ToBcFormat(bcFormat),
+                        Format = ToBcFormat(plan.Format),
                         FileFormat = OutputFileFormat.Dds,
                     },
                 };
@@ -140,22 +139,19 @@ public static class TextureRecipe
             {
                 // Rgba8 multi-mip: the mip data is the pre-filtered RGBA bytes
                 // as-is. No compression cost; runtime gets pre-baked mips
-                // instead of glGenerateMipmap-at-upload, which is still a
-                // measurable win on large textures.
+                // instead of generating the chain during GPU upload.
                 encodedMips = new byte[mipsRgba.Count][];
                 for (var i = 0; i < mipsRgba.Count; i++) encodedMips[i] = mipsRgba[i].Pixels;
             }
 
-            // The role is what picks BC7sRGB vs BC5 vs BC7Unorm vs Rgba8, so it is the setting that
-            // decides the bytes and it goes in the stamp. `flags` rides along because sRGB and
-            // normal-map are read back out of the file, and recording the input beside the output is
-            // what makes a mismatch visible rather than a mystery.
+            // Record the semantic input and the concrete backend. Two machines can resolve the
+            // same role to different bytes when native BC7 availability or quality differs.
             var texStamp = CookStamp.Of(
                 BlixTex.ShippedRecipe, BlixTex.ShippedRecipeVersion, source, destination,
-                $"format={format} flags={flags} mips={encodedMips.Length}");
+                $"{plan.StampPrefix} mips={encodedMips.Length}");
 
             BlixTexWriter.Write(destination, new BlixTexImage(
-                image.Width, image.Height, format, encodedMips, flags), texStamp);
+                image.Width, image.Height, plan.Format, encodedMips, plan.Flags), texStamp);
         }
         destLen = new FileInfo(destination).Length;
     }
@@ -167,42 +163,55 @@ public static class TextureRecipe
             ? Math.Clamp(q, 0, 2)
             : 1;
 
+    private static EncodingPlan ResolveEncoding(string source, TextureRole? role)
+    {
+        var resolvedRole = role ?? ClassifyRole(source);
+        var (bcFormat, flags) = PickFormat(resolvedRole);
+
+        // Prefer BC encoding when the native encoder is available. Falling back to RGBA8 avoids
+        // making the much slower managed encoder an accidental default. BLIX_COOK_FORMAT can force
+        // bc7 or rgba8 for controlled cooks.
+        var formatEnv = Environment.GetEnvironmentVariable("BLIX_COOK_FORMAT");
+        var compressed = formatEnv is not null
+            ? formatEnv.Equals("bc7", StringComparison.OrdinalIgnoreCase)
+            : Blix.Recipes.Bc7Native.Available;
+        if (!compressed)
+        {
+            return new EncodingPlan(
+                resolvedRole, TextureFormat.Rgba8, flags, false, false, 0, "raw", "none");
+        }
+
+        var native = (bcFormat is TextureFormat.Bc7Srgb or TextureFormat.Bc7Unorm)
+            && Blix.Recipes.Bc7Native.Available;
+        var nativeQuality = native ? Bc7Quality() : 0;
+        return new EncodingPlan(
+            resolvedRole,
+            bcFormat,
+            flags,
+            true,
+            native,
+            nativeQuality,
+            native ? "bc7-native" : "bcnencoder-managed",
+            native
+                ? nativeQuality.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : CompressionQuality.Fast.ToString());
+    }
+
     // Picks a BCn format + flags based on the heuristic role classification.
     private static (TextureFormat Format, BlixTex.Flags Flags) PickFormat(TextureRole role) => role switch
     {
         TextureRole.BaseColor          => (TextureFormat.Bc7Srgb, BlixTex.Flags.Srgb),
         TextureRole.Emissive           => (TextureFormat.Bc7Srgb, BlixTex.Flags.Srgb),
-        // <b>BC5 for normals, and it buys PRECISION rather than bytes.</b> That distinction was got
-        // wrong out loud on the way here, so it is written down: BC5, BC7 and BC6h are all 16 bytes
-        // per 4x4 block — the engine's own MipByteCount says so in one line — and switching a 4K
-        // normal map between them moves nothing on disk. What moves is how the block is spent. BC5
-        // gives two channels a BC4-style endpoint pair each; BC7 divides the same 128 bits across
-        // three or four. A tangent-space normal is unit length, so Z is not information at all —
-        // it is sqrt(1 - x² - y²) — and the two channels that ARE information get the whole block.
-        //
-        // The size lever is elsewhere and is not this: a single-channel BC4 is 8 bytes per block,
-        // and resolution is a bigger one still. Neither is a normal-map question.
-        //
-        // The shader side of this landed long before the cook did, and each side's comment was
-        // waiting on the other: lit.frag has said "Cooked normals are BC5 (2-channel RG, blue
-        // dropped)" and reconstructed Z for some time, while this line said BC5 "requires shader
-        // changes that haven't landed yet". Nothing was blocked; nobody checked.
-        //
-        // Reconstruction is correct for BOTH paths, which is what makes this need no branch and no
-        // flag: an RGBA8 normal map's stored Z already equals sqrt(1 - x² - y²), so a shader that
-        // derives it reads source and cooked identically.
+        // BC5 spends the same 128 bits per 4x4 block as BC7 on the two independent tangent-normal
+        // channels. Shaders reconstruct Z from X/Y for both source and cooked paths.
         TextureRole.Normal             => (TextureFormat.Bc5Unorm, BlixTex.Flags.NormalMap),
         TextureRole.MetallicRoughness  => (TextureFormat.Bc7Unorm, BlixTex.Flags.None),
         TextureRole.Linear             => (TextureFormat.Bc7Unorm, BlixTex.Flags.None),
         _                              => (TextureFormat.Bc7Unorm, BlixTex.Flags.None),
     };
 
-    // Metallic-roughness stays BC7, and for a sharper reason than inertia. Its two useful channels
-    // are G and B, while BC5's two arrive as R and G — so cooking it to BC5 means REMAPPING, after
-    // which a cooked MR texture and a source PNG no longer mean the same thing at the same swizzle
-    // and every shader sampling one needs to know which it got. Normals need no such divergence,
-    // because reconstructing Z is correct for both. That is what makes normals the textbook case
-    // and MR a separate decision with its own flag, not a line to change beside this one.
+    // Metallic-roughness stays BC7 because its useful channels are G and B. BC5 would require a
+    // remap to R/G and make source and cooked textures require different shader swizzles.
     private static CompressionFormat ToBcFormat(TextureFormat fmt) => fmt switch
     {
         TextureFormat.Bc7Srgb  => CompressionFormat.Bc7,  // sRGB selection lives on the GL internal format side
@@ -299,17 +308,9 @@ public static class TextureRecipe
                     var sy = y * 2;
                     var sx1 = Math.Min(sx + 1, w - 1);
                     var sy1 = Math.Min(sy + 1, h - 1);
-                    // <b>RGB weighted by alpha; alpha averaged plainly.</b> A flat box filter
-                    // averages colour across texels that are not there: a leaf texel at alpha 255
-                    // blended with three transparent ones takes three quarters of its colour from
-                    // whatever the artist happened to leave in the gaps. Measured on the cypress,
-                    // that walks the leaf's green/blue ratio from 5.14 at mip 0 down to 3.08 at the
-                    // tail — foliage quietly desaturating with distance, which then compounds with
-                    // shade replacing warm sun with blue sky and reads, from the chair, as the tree
-                    // turning blue.
-                    //
-                    // Opaque textures are unaffected by construction: with alpha 255 everywhere the
-                    // weights are equal and this IS the box filter.
+                    // Weight RGB by alpha so transparent padding does not tint cutout edges. Alpha
+                    // itself remains a plain box average. Opaque images reduce to the ordinary box
+                    // filter because every colour weight is equal.
                     var i0 = (sy * srcW + sx) * 4;
                     var i1 = (sy * srcW + sx1) * 4;
                     var i2 = (sy1 * srcW + sx) * 4;
@@ -335,19 +336,9 @@ public static class TextureRecipe
             w = nw;
             h = nh;
         }
-        // <b>Coverage, not mean alpha, is what a cutout material is.</b> A box filter conserves the
-        // average perfectly — measured on the cypress, mean alpha is 0.063 at every level — and
-        // destroys the thing that matters: the fraction of texels ABOVE the cutoff falls 6.33% to
-        // 1.56% by mip 9 and to zero by mip 10. A few opaque texels become many translucent ones.
-        //
-        // With alphaToCoverage that turns distant foliage into a uniform 6%-opaque haze, so the sky
-        // shows through the whole canopy rather than between the leaves — which is the blue tint on
-        // the tree, reported from the chair and finally explained by turning MSAA off, since that
-        // also disables alphaToCoverage. With a binary alpha test instead, the same collapse makes
-        // distant foliage vanish. Both are wrong, differently.
-        //
-        // Castano's remedy: scale each mip's alpha so its coverage matches mip 0's. Bisection
-        // because coverage is monotone in the scale but has no closed form.
+        // A box filter preserves mean alpha but can collapse the fraction above the cutout threshold,
+        // making distant foliage fade or disappear. Scale each mip to match base-level coverage;
+        // bisection works because coverage is monotone in that scale.
         RescaleAlphaForCoverage(mips);
         return mips;
     }
@@ -359,12 +350,8 @@ public static class TextureRecipe
             return TextureRole.BaseColor;
         if (name.Contains("emiss"))
             return TextureRole.Emissive;
-        // MR detection. Modern Sponza names them "<material>_Roughness.png" or
-        // "<material>_Roughness<material>_Metalness.png" (the concatenation
-        // pattern is how their exporter joins the two original maps). Check
-        // for roughness/metalness/metallic/metalrough as substrings -- comes
-        // BEFORE the normal check so "normal_roughness.png" doesn't get mis-
-        // classified as normal.
+        // Check data-channel names before normals so compound names such as normal_roughness retain
+        // their metallic/roughness interpretation.
         if (name.Contains("roughness") || name.Contains("metalness")
             || name.Contains("metallic") || name.Contains("metalrough")
             || name.Contains("metal_rough"))

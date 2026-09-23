@@ -1,5 +1,9 @@
 # Cook arc — plan
 
+> **Archived 2026-09-21 — completed beyond its stated K-E stopping point.**
+> Capacity-triggered texture-atlas, array, and residency questions remain future
+> decisions rather than unfinished stages. See `docs/plans.md` for status.
+
 > Blix does not ship three cooked formats. It ships **a way to declare one**, and currently has
 > three instances of it written by hand, none of which knows it is an instance of anything.
 
@@ -25,7 +29,8 @@ So the deliverable is not a finished cooker. It is a **recipe** being a thing yo
 
 ## What the measurement found
 
-Counted at `2aa1faa`; the full census is `docs/blix-assets.html`.
+Counted at `2aa1faa`; the full census is
+`docs/history/reports/blix-assets.html`.
 
 | | |
 |---|---|

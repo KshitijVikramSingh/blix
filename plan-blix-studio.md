@@ -1,5 +1,9 @@
 # Studio arc — plan
 
+> **Status 2026-09-21 — active decision.** S-A through S-E are complete. S-F's
+> proposed Runner migration should be accepted or retired explicitly against
+> Studio's current role as an optional reference pipeline for tools.
+
 > The bridge between **"here's Vulkan and Blix, go nuts"** and **"here's a basic 3D setup, hack your
 > tools together."** Nothing in the tree occupies that gap, which is why every tool so far started
 > by writing a renderer.
@@ -141,7 +145,7 @@ can add to (rung 4) rather than a fixed five.
 **It landed as `StudioLook`, not as `StudioScene`, and for a different reason than this stage gave.**
 The stage predicted the substrate would use its own `[Tune]` capability for symmetry's sake. What
 actually forced it was the house-style arc asking where Blix is allowed to have a visual opinion —
-see `plan-blix-house-style.md`. The result is the one this stage wanted (18 declared knobs,
+see `docs/history/plans/plan-blix-house-style.md`. The result is the one this stage wanted (18 declared knobs,
 `ITunable`, the stage recomposing on a sun change exactly as a session does on a weight change) and
 it arrived carrying more than this stage asked for: `Structural`, for values read when the graph is
 built, because a slider on a sample count is a slider that changes nothing.

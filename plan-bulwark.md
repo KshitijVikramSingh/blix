@@ -1,5 +1,9 @@
 # Bulwark — game #2 plan
 
+> **Status 2026-09-21 — active acceptance/polish.** The playable game and
+> skinned crowd are built; visual acceptance and the recorded content-variety
+> follow-ups remain open.
+
 > Working title. `Blix.Demos.Bulwark`. Branch `bulwark`.
 
 A tower-defense game, built as a **deliberate instrument** to pressure the engine

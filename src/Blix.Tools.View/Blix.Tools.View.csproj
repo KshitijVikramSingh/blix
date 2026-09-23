@@ -1,11 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!--
-    A thin entry point onto the lab. It declares NO shaders: they are compiled once by
-    Blix.Tools.Studio and arrive here through that project's content propagation,
-    alongside their reflection sidecars. A second executable — a probe, a capture tool —
-    is another file like this one, not another copy of the lab.
-  -->
+  <!-- Interactive entry point over the shared Studio scene and renderer. -->
   <ItemGroup>
     <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
     <ProjectReference Include="..\Blix\Blix.csproj" />

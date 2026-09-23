@@ -12,7 +12,7 @@ using Blix.Cooked;
 
 namespace Blix.Tools.Shot;
 
-// Renders the lab and writes what it rendered to a PNG.
+// Deterministically renders the shared Studio composition to a PNG or sequence.
 //
 // ── Why this exists ─────────────────────────────────────────────────────────
 //   Blix could not read a rendered image back. Not "had no screenshot key" —
@@ -20,14 +20,14 @@ namespace Blix.Tools.Shot;
 //   were not legal copy sources, and nothing in the backend ever copied an image
 //   to a buffer. The absence had already shaped the project. TankArena fits its
 //   tank model by eye through the overlay, with a comment saying "Screenshots
-//   don't work". And in the view and lab arcs, three rendering bugs — a second
+//   don't work". Across the view and Studio work, three rendering bugs — a second
 //   view drawn through the wrong camera, an off-screen pass whose output nothing
 //   sampled, seven objects stacked at the seventh's transform — were each caught
 //   because a person looked at a picture, while four green bounded runs, zero
 //   validation errors and healthy draw counts said nothing at all.
 //
 // ── What it captures ────────────────────────────────────────────────────────
-//   The HDR scene target, not the swapchain. That needs no change to the lab's
+//   The HDR scene target, not the swapchain. That needs no change to Studio's
 //   render path, and it means the tonemap is applied HERE — so a capture holds
 //   the real radiance and the curve is an offline choice rather than baked in.
 public static class Program
@@ -122,7 +122,7 @@ public static class Program
 
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
-            Title = "Blix — lab capture",
+            Title = "Blix — model and rig capture",
             Width = 1280,
             Height = 720,
         });
@@ -323,7 +323,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private BoneMask? mask;
 
     // One set per skin, the same shape RigAnimation carries. This tool keeps its own players rather
-    // than a RigAnimation, so the per-skin packing is written twice -- noted in plan-blix-inlet.md
+    // than a RigAnimation, so the per-skin packing is written twice -- noted in
+    // docs/history/plans/plan-blix-inlet.md
     // as duplication that should not have survived the extraction.
     private float rowSpacing;
     private readonly List<string> visibleAttachments = new();
@@ -421,7 +422,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // anything is standing on it.
         ApplyStageKnobs();
 
-        // The environment, reported. It lands in the capture's log, which is half of what the lab
+        // The environment, reported. It lands in the capture's log, which is half of what Studio
         // baseline hashes — so the house style's environment state is part of what a regression diff
         // shows, rather than something you have to go and ask about.
         // Cascade geometry, reported into the log the baseline hashes: a shadow's resolution is the
@@ -867,7 +868,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         }
 
         // The skeleton, through the SAME SkeletonGizmo the viewer uses. That shared call is the
-        // whole reason the lab is a library: a capture drawn by its own copy of the overlay could
+        // reason Studio is a library: a capture drawn by its own copy of the overlay could
         // disagree with the window, and a picture that disagrees with the thing it documents is
         // worse than no picture.
         if (rig is not null && player is not null)
@@ -921,7 +922,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             return;
         }
 
-        // One axis triad per node, at its composed-world pivot. The claim blix-cook inspect
+        // One axis triad per node, at its composed-world pivot. The claim blix inspect
         // prints, drawn where it can be checked.
         // A tenth of the model's on-screen size: small enough that 96 of them stay readable, large
         // enough to see which way a node's axes point, which is the whole question.

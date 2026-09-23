@@ -11,19 +11,11 @@ namespace Blix.Tools.Studio;
 /// An imported glTF, kept as its authored node hierarchy rather than one fused blob.
 /// </summary>
 /// <remarks>
-/// <b>The hierarchy is the point.</b> A fused mesh renders identically and answers none of the questions
-/// an asset actually raises — where is this part's pivot, what does the author think "forward" is, why does
-/// the turret rotate about a point six centimetres inside the hull. <c>ImportNodes</c> keeps every node in
-/// LOCAL space with a parent index, so the composed world transform is a walk up the chain, and that
-/// composed translation IS the rig pivot a game would drive.
+/// The hierarchy is inspectable data, not just a route to fused geometry. <c>ImportNodes</c> retains
+/// every local transform and parent index so tools can draw and inspect authored pivots and orientation.
 /// <para>
-/// <c>blix-cook inspect</c> already prints those numbers. This exists so they can be drawn next to the
-/// thing they describe — the pattern this project has paid for three times (TankArena's tank rig, the CC0
-/// sourcing workflow, the RTS villager) by dialling knobs in an overlay until the model sat right.
-/// </para>
-/// <para>
-/// Primitives arrive in <c>VertexPosition3NormalTexture</c> layout, which is what the lab's lit pipeline
-/// already takes — so a real asset needed no shader change to appear.
+/// Primitives use Studio's static lit layout, while node composition remains explicit and available
+/// to callers.
 /// </para>
 /// </remarks>
 public sealed class StudioModel : IDisposable
@@ -42,15 +34,8 @@ public sealed class StudioModel : IDisposable
         /// What the material says about its own surface: <c>OPAQUE</c>/<c>MASK</c>/<c>BLEND</c>, the
         /// cutout threshold, and whether the back face is part of the model.
         /// </summary>
-        /// <remarks>
-        /// <b><see cref="GltfMaterial"/> has carried these for a long time and nothing on this stage
-        /// read them.</b> Of the three, only <c>DoubleSided</c> currently changes a picture in this
-        /// tree — measured, not assumed: all 26 MASK materials here have no base-colour texture and
-        /// <c>baseAlpha = 1.00</c> against a 0.20 cutoff, so their alpha is 1.0 everywhere and a
-        /// faithful cutout would discard nothing. The alpha pair is carried because it is free once
-        /// the material is threaded and because the next asset may mean it, NOT because it is
-        /// demonstrated here.
-        /// </remarks>
+        /// <remarks>Studio preserves these authored facts even when a particular asset produces no
+        /// visible cutout or back-face difference.</remarks>
         /// <summary>Which TEXCOORD set this part's albedo samples — 0 for almost everything.</summary>
         int AlbedoUvSet = 0,
         /// <summary>The material's <c>baseColorFactor.a</c>, which the cutout test multiplies in.</summary>
@@ -59,13 +44,8 @@ public sealed class StudioModel : IDisposable
         float AlphaCutoff = 0.5f,
         bool DoubleSided = false,
         /// <summary>The material's own name, which is often the only colour information a kit ships.</summary>
-        /// <remarks>
-        /// <b>Dropped until now, and the drop was the whole reason this tool could not show a kit
-        /// asset as a game draws it.</b> All 40 materials across the nature kit are
-        /// <c>baseColorFactor = (1,1,1,1)</c> with no texture: the file carries geometry, baked
-        /// vertex occlusion, and a NAME. Something else turns "Grass" into a green. Carrying the name
-        /// is what lets a caller supply that something without this type knowing what a game is.
-        /// </remarks>
+        /// <remarks>Callers may use the name for application-owned tint policy when an asset carries
+        /// no intrinsic base colour.</remarks>
         string MaterialName = "");
 
     /// <summary>A node of the authored hierarchy, drawable or not.</summary>
@@ -86,10 +66,7 @@ public sealed class StudioModel : IDisposable
     private VulkanGraphicsDevice device = null!;
     private readonly List<TextureHandle> ownedTextures = new();
     private readonly List<Image> images = new();
-    // <b>Keyed by what a texture IS, not by which object asked.</b> This was a
-    // Dictionary<GltfTexture, TextureHandle>, and GltfTexture has no value equality — so two loads
-    // of one file uploaded the same pixels twice and nothing could be counted. One of three places
-    // that hand-rolled the same broken key; see TextureRegistry.
+    // TextureRegistry keys source identity rather than importer object identity.
     private readonly TextureRegistry uploaded = new();
     private TextureHandle white;
     private readonly List<Part> parts = new();
@@ -147,7 +124,7 @@ public sealed class StudioModel : IDisposable
         var world = new Matrix4x4[source.Length];
         for (var i = 0; i < source.Length; i++)
         {
-            // Row-vector compose: child = local * parent. The same walk blix-cook inspect does,
+            // Row-vector compose: child = local * parent. The same walk blix inspect does,
             // and the reason a part's pivot is its composed TRANSLATION rather than its local one.
             world[i] = source[i].LocalTransform;
             for (var p = source[i].ParentIndex; p >= 0; p = source[p].ParentIndex)
@@ -234,16 +211,9 @@ public sealed class StudioModel : IDisposable
     {
         if (texture is null) return white;
 
-        // <b>A cooked texture arrives LAZY, with its bytes still on disk.</b> This read MipBytes
-        // and fell through to `white` when it was null — silently — under a comment saying the
-        // cooked path "lives in VulkanSponza, which earned them". That reads as a missing
-        // optimisation and behaves as a missing texture: a model whose albedo was cooked drew
-        // blank. StudioRig had the identical defect and was fixed when a person looked at a
-        // character and said it was blown out; leaving it in the twin is how the twin becomes the
-        // one nobody checks.
-        //
-        // The whole chain uploads, not just mip 0: CreateTexture2D downsamples by blitting, which a
-        // BC format cannot do — MoltenVK refuses it outright, during upload rather than a draw.
+        // Source textures expose eager mips; cooked textures may keep their mip chain behind a lazy
+        // disk handle. Upload the authored chain verbatim because BC formats cannot be GPU-blitted
+        // to generate missing levels.
         var mips = texture.MipBytes is { Count: > 0 } eager
             ? eager
             : texture.LazyHandle is { } lazy
@@ -274,7 +244,7 @@ public sealed class StudioModel : IDisposable
 
     // World-space bounds of one primitive. Walks positions rather than trusting an authored
     // bounds field, because an asset that lies about its extents is exactly the sort of thing
-    // a lab exists to catch.
+    // a viewer exists to catch.
     private static void Accumulate(MeshData mesh, Matrix4x4 world, ref Vector3 min, ref Vector3 max)
     {
         var stride = mesh.Layout.Stride;

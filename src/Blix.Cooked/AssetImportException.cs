@@ -3,14 +3,7 @@ namespace Blix.Cooked;
 /// <summary>
 /// The engine declining a file: Blix cannot read this, and here is which file and why.
 /// </summary>
-/// <remarks>
-/// <b>Moved down from <c>Blix.Assets</c> by the cook arc, because it was stranded above two of the
-/// three things that needed it.</b> <c>Blix.Assets</c> sits a tier above
-/// <c>Blix.Graphics.Images</c>, which holds the <c>.blixtex</c> and <c>.blixprobe</c> readers — so
-/// those two could not refuse a corrupt file by name and had to throw whatever the parse threw,
-/// which is precisely the failure this type exists to prevent. A refusal type that only some
-/// readers can reach is not a single refusal type.
-/// </remarks>
+/// <remarks>Lives in Blix.Cooked so source importers and every cooked-format reader can share it.</remarks>
 public sealed class AssetImportException : Exception
 {
     public AssetImportException(string sourcePath, int? lineNumber, string message)
@@ -24,11 +17,7 @@ public sealed class AssetImportException : Exception
     /// Run a read, and turn anything it throws into a refusal that names the file.
     /// </summary>
     /// <remarks>
-    /// <b>Here rather than copied into each importer, because there are more importers than anyone
-    /// remembers.</b> GltfImporter was given this treatment and GltfStaticImporter was not, so
-    /// `blix view --rig bad.glb` reported cleanly while `--model bad.glb` still exited 134 through
-    /// the parser's own exception — the same bug, one file away, found only by handing every entry
-    /// point a broken file.
+    /// Centralizes exception normalization so every importer reports the same file-naming refusal.
     /// <para>
     /// The first line only. A parser writes for whoever maintains the parser: provenance, a byte
     /// position, a link to a validator. The sentence a person needs is the first one, and the rest

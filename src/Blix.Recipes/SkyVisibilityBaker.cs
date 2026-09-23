@@ -10,27 +10,20 @@ namespace Blix.Recipes;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>The renderer has no idea what a surface can see, and it shows.</b> Ambient light in the lit
-/// pass is the probe's sky irradiance times a screen-space occlusion term with a sub-metre radius.
-/// That term answers "is a leaf near this stone"; nothing answers "is this stone at the bottom of a
-/// courtyard". So an enclosed floor receives very nearly full sky, and the measurement says so
-/// plainly: pushing the screen-space radius from 0.8 m to 20 m cut visibility 13% and the floor's
-/// luminance 7%. It is not under-occluded. It is receiving sky it cannot see.
+/// Screen-space occlusion covers local contact, while this volume represents scene-scale access to
+/// the sky for courtyards, arcades, and other enclosed regions.
 /// </para>
 /// <para>
-/// <b>Geometry, not lighting — which is the whole reason to bake it.</b> What lands here is the
+/// The baked quantity is geometry, not lighting. It stores the
 /// fraction of the sphere that escapes the building, and the average direction of escape. Neither
 /// depends on where the sun is, what colour the sky is, or what time of day it is, so a bake stays
 /// correct while the lighting moves freely over it. A baked lightmap would buy more and cost the
 /// dynamic sun; this buys less and costs nothing.
 /// </para>
 /// <para>
-/// <b>An occupancy grid, not a triangle hierarchy.</b> Tracing rays against 12.8M triangles needs an
-/// acceleration structure this tree does not have, and the sums are hopeless anyway — tens of
-/// thousands of probes times tens of rays against millions of triangles. Voxelising once is linear
-/// in triangles, and a ray then becomes a few hundred integer steps through a bitmask. It is also
-/// the coarse world representation that a radiance cache would later want to march, so it is
-/// substrate rather than scaffolding.
+/// Geometry is voxelised once, then each probe ray marches the occupancy density grid. This avoids
+/// requiring a triangle acceleration structure and retains a coarse world representation that the
+/// runtime can also use for sun injection.
 /// </para>
 /// <para>
 /// The cost of the approximation is honest and worth stating: a voxel is solid or not, so a window
@@ -42,36 +35,12 @@ namespace Blix.Recipes;
 public static class SkyVisibilityBaker
 {
     /// <summary>
-    /// One cell: the visibility function projected onto L1 spherical harmonics.
-    /// </summary>
-    /// <remarks>
-    /// <b>A function, not a number, because a cell has no normal and a surface does.</b> The first
-    /// version stored a single sphere-visibility scalar, and its profile gave itself away: a probe
-    /// floating above the roofline reported 0.66, because two thirds of a SPHERE escapes when the
-    /// building blocks everything below. That is the correct answer to the wrong question. Ambient
-    /// light wants the cosine-weighted hemisphere around a surface normal, and the normal is not
-    /// known until a fragment asks.
-    ///
-    /// Four coefficients answer for any direction, cost one Rgba16F texel, and are the same
-    /// representation the irradiance probe already uses — so the convolution constants below are
-    /// the standard ones rather than anything invented here.
-    /// </remarks>
-    /// <summary>
     /// One cell: the visibility function projected onto L2 spherical harmonics — nine coefficients.
     /// </summary>
     /// <remarks>
-    /// <b>L1 could not say "bright in that cone and dark everywhere else", and both of this arc's
-    /// visibility failures were that sentence.</b> L0 is direction-independent, so near an arcade
-    /// opening every surface inherits it — including a vault CEILING, which then reads as sky-facing
-    /// and leaks light into a room it points away from. One linear lobe cannot subtract a bright
-    /// opening from a surface facing away from it. And in the other direction, a courtyard floor
-    /// sees a narrow cone directly overhead that L1 smears into a broad lobe, losing the peak: 0.041
-    /// where the raw transmittance is 0.057 and the correct answer is above it.
-    ///
-    /// The quadratic band is what represents a cone. An octahedral map represents it better still
-    /// and was tried and reverted — it doubled the frame, because nine floats live in three small 3D
-    /// textures that the hardware filters with perfect locality, while an atlas costs an octahedral
-    /// encode and a scattered texel at every call site.
+    /// Visibility is directional because the surface normal is known only when shading. L2 can
+    /// represent narrow openings and reject them for surfaces facing away. Nine coefficients fit
+    /// three filterable 3D textures and are cosine-convolved during evaluation.
     /// </remarks>
     public readonly record struct SkyCell(
         float L0,
@@ -123,15 +92,13 @@ public static class SkyVisibilityBaker
     /// <summary>One linear RGB per material: the mean of its base-colour texture, times its factor.</summary>
     /// <remarks>
     /// <para>
-    /// <b>The factor alone is worthless here.</b> Every material in Sponza ships
-    /// <c>baseColorFactor = (1,1,1)</c> and keeps its colour in the texture — curtain_01/02/03
-    /// included — so a bake that read only the factor would produce a uniformly white grid and no
-    /// colour bleeding at all. That is the measurement that decided this function exists.
+    /// The factor alone is insufficient when authored colour lives in the base-colour texture, so
+    /// the result multiplies both.
     /// </para>
     /// <para>
-    /// The mean comes from the smallest mip that still fills a block, because a mip chain IS a box
-    /// filter run to completion: the cook already computed this average and it costs one 4x4 BC7
-    /// block to read back, against decoding seventy 4K images to recompute it.
+    /// The mean comes from a small cooked mip, reusing the texture cook's filtering without decoding
+    /// the full source image. It remains large enough to distinguish cutout surfaces from their
+    /// transparent padding.
     /// </para>
     /// <para>
     /// Averaged in LINEAR space. Base colour is authored sRGB, and a mean taken over encoded values
@@ -175,18 +142,12 @@ public static class SkyVisibilityBaker
         return cache[materialIndex] = result;
     }
 
-    /// <summary>Mean linear colour of a cooked texture, read from its smallest usable mip.</summary>
+    /// <summary>Mean linear colour of a cooked texture, read from a small representative mip.</summary>
     private static Vector3 AverageOfSmallestMip(string texPath)
     {
         var tex = BlixTexReader.Read(texPath);
-        // Walk back to the smallest mip still at least one 4x4 block, so a BC decode has a whole
-        // block to work with. One level up from the 1x1 tail costs nothing and avoids the edge case.
-        // <b>Not the smallest mip — a small one.</b> The tail of the chain is useless for cutout
-        // geometry: mip generation averages a leaf's colour with the transparent black around it,
-        // so by 4x4 the leaf's own colour is gone and dividing by alpha only partly recovers it
-        // (LeafSpring read 0.003, then 0.009 with alpha weighting, against IvyLeaf's 0.168 green).
-        // At ~32 texels a side the leaves and the gaps are still separable, an alpha THRESHOLD can
-        // reject the gaps outright, and it is still a thousandth of the full image.
+        // Use a small mip rather than the chain tail. At roughly 32 texels per side, cutout surfaces
+        // and gaps remain separable by alpha while the read is still tiny relative to the source.
         int W(int l) => Math.Max(1, tex.Width >> l);
         int H(int l) => Math.Max(1, tex.Height >> l);
         var level = tex.MipBytes.Count - 1;
@@ -194,11 +155,7 @@ public static class SkyVisibilityBaker
 
         var bytes = tex.MipBytes[level];
         var (w, h) = (W(level), H(level));
-        // <b>Weighted by alpha, which is not a detail.</b> A cutout texture is black wherever it is
-        // transparent, so a flat mean over a leaf card returns the colour of the empty space around
-        // the leaf. Measured: LeafSpring came back (0.003, 0.004, 0.001) — the cypress would have
-        // bounced nothing at all. What a leaf card's colour means is the colour of the part that is
-        // there, and alpha is the mask that says which part that is.
+        // Average only surviving cutout texels; transparent padding is not surface colour.
         var sum = Vector3.Zero;
         var weight = 0f;
 
@@ -266,12 +223,8 @@ public static class SkyVisibilityBaker
         IReadOnlyList<string> meshPaths, int occupancy = 256, int probes = 48, int rays = 64,
         Action<string>? log = null, int albedo = 0)
     {
-        // <b>Opacity per triangle, because a canopy is not a wall.</b> The grid was boolean, so a
-        // cypress voxelised as solid as masonry and the column of air it stands in — which is the
-        // middle of the courtyard, and where the camera looks — baked as fully enclosed. Excluding
-        // foliage is the opposite error: a dense canopy really does take most of the sky.
-        //
-        // What a leaf card actually does is ATTENUATE, so the grid stores density and a ray
+        // Store opacity per triangle because cutout foliage attenuates rather than behaving like
+        // masonry. The grid stores density and a ray
         // accumulates transmittance through it. Stone stays opaque; alpha-tested geometry
         // contributes a fraction, and enough overlapping leaf cards still add up to darkness.
         var tris = new List<(Vector3 A, Vector3 B, Vector3 C, float Opacity, Vector3 Albedo)>();
@@ -344,14 +297,8 @@ public static class SkyVisibilityBaker
         // Voxelise by sampling each triangle's SURFACE, densely enough that no cell it crosses is
         // missed.
         //
-        // <b>Filling each triangle's bounding box instead is what made the first bake useless, and
-        // the comment here excused it: "at this cell size a triangle spans few cells".</b> That is
-        // true of a leaf and false of a floor slab, and Sponza is built from large quads. Their
-        // AABBs are big boxes, filling one marks the whole volume solid, and the courtyard — open to
-        // the sky in life — baked as the inside of a brick. Open air two metres above the floor
-        // reported sky visibility 0.006.
-        //
-        // Surface sampling has the opposite failure, missing a cell a triangle only clips, and that
+        // Filling triangle AABBs would turn large floor and wall quads into solid volumes. Surface
+        // sampling has the opposite failure, missing a cell a triangle only clips, and that
         // is the safe direction: a pinhole in a wall leaks a little light, where a filled courtyard
         // deletes all of it.
         var cellDiag = cell.Length();
@@ -360,11 +307,8 @@ public static class SkyVisibilityBaker
             var area = Vector3.Cross(b - a, c - a).Length() * 0.5f;
             // Two samples per cell-width along each edge direction, so a triangle crossing a cell
             // puts at least one sample in it.
-            // <b>The cap has to clear the biggest triangle in the scene, not a typical one.</b> At 64
-            // a large floor quad got about 2,100 samples across roughly 4,600 cells, so the floor
-            // voxelised with holes — and the bake reported more sky escaping DOWNWARD than upward
-            // from inside the arcade, which is impossible for a building with a floor. That negative
-            // L1.y is what a leaking surface looks like from the far end of the pipeline.
+            // The cap must accommodate the largest scene triangles; too few samples leave holes in
+            // broad floors and walls.
             var steps = Math.Clamp((int)MathF.Ceiling(MathF.Sqrt(area) * 2f / cellDiag), 1, 1024);
             for (var i = 0; i <= steps; i++)
             for (var j = 0; j <= steps - i; j++)
@@ -449,12 +393,11 @@ public static class SkyVisibilityBaker
                 }
                 var w = 4f * MathF.PI / directions.Length;
 
-                // <b>Windowed, because L2 rings.</b> Reconstructing a sharp function from a few
+                // Window the coefficients because reconstructing a sharp function from a few
                 // bands overshoots at the discontinuities — Gibbs — and visibility is about as sharp
                 // as a function gets: one either sees the sky or does not. The overshoot lands ABOVE
-                // the true value, so it reads as bright patches on faces that should be dark, which
-                // is exactly what L2 produced before this. L1 rings too and shows it less, having
-                // nothing sharp enough to ring with.
+                // the true value, so without a window it reads as bright patches on faces that
+                // should be dark. L1 rings less visibly because it represents less sharp detail.
                 //
                 // sinc(l / (L + 1)) is Sloan's window: it costs some of the very sharpness the
                 // second band was added for, which is the trade — a slightly soft cone beats a cone
@@ -470,33 +413,13 @@ public static class SkyVisibilityBaker
 
         log?.Invoke($"  traced {px}x{py}x{pz} probes x {rays} rays (direct sky)");
 
-        // --- Why there is no bounce pass here -------------------------------
-        // <b>There was one, and it made this volume mean two things at once.</b> Rays that hit were
-        // given the visibility of the surface they struck, times an albedo. The result is not
-        // visibility any more — it is incoming radiance — and the shader multiplies sky irradiance
-        // by this SH, which already carries the sky's own directional distribution. Multiplying two
-        // directional fields double-counts direction, and it showed: inside the arcade the bounced
-        // field pointed DOWNWARD, correctly, because the brightest nearby surface is the floor. An
-        // up-facing floor then evaluated NEGATIVE and clamped to black.
-        //
-        // Visibility multiplies. Radiance adds. They are different quantities and they need
-        // different storage, and the bounce that actually matters cannot live here anyway: it is the
-        // SUN's, at irradiance 17, and a sun-independent bake cannot carry it. Sky-only bounce was
-        // measured at this scene and lifts interior visibility 0.15 -> 0.19, which is not the
-        // missing light.
-        //
-        // So this file stores visibility, the one thing that is purely geometry and stays true as
-        // the sun moves. The bounce belongs to a runtime pass that injects the current sun into the
-        // same voxel grid.
+        // This file stores visibility only. Visibility multiplies incoming light; bounced radiance
+        // adds to it and belongs in separate storage. Dynamic sun bounce is injected at runtime by
+        // marching the occupancy/albedo grids emitted with this volume.
 
         // --- Probes buried in geometry ---------------------------------------
-        // <b>A probe whose centre is inside a wall sees nothing, and every surface near that wall
-        // samples it.</b> This is what made the first wired-up version black rather than dim: the
-        // cell under Sponza's floor reported exactly zero, and the floor is what reads it. Pushing
-        // the lookup along the normal does not rescue it — the offset would have to exceed a cell,
-        // and a cell here is 0.77 m.
-        //
-        // So invalid cells are filled from their valid neighbours, repeatedly, until the interior of
+        // A probe centred inside solid geometry has no useful visibility but may still participate
+        // in interpolation near a surface. Fill invalid cells from valid neighbours until the interior of
         // solid geometry carries whatever the space around it carries. A buried probe has no right
         // answer; what it needs is to stop poisoning the surfaces that interpolate through it.
         var valid = new bool[cells.Length];

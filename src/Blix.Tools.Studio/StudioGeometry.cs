@@ -3,10 +3,10 @@ using Blix.Graphics;
 namespace Blix.Tools.Studio;
 
 /// <summary>
-/// The lab's geometry, built in code.
+/// Studio's small reference geometry, built in code.
 /// </summary>
 /// <remarks>
-/// Blix has no primitive builders — no <c>CreateBox</c>, no <c>CreateSphere</c> — and this lab is not the
+/// Blix has no primitive builders — no <c>CreateBox</c>, no <c>CreateSphere</c> — and Studio is not the
 /// place to invent them. Every demo that needs a cube writes one, which is duplication the engine has so
 /// far declined to absorb because a primitive generator is a small API with a large number of opinions in
 /// it (winding, UV layout, smoothing, tangents). Noted here as a candidate: if a third consumer wants the

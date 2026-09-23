@@ -1,4 +1,6 @@
 using System.Numerics;
+using Blix;
+using Blix.Cooked;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 using Blix.Tools.Studio;
@@ -100,6 +102,7 @@ public static class Program
         }
 
         CheckPalette(t, shaderDirectory);
+        CheckRigCapacity(t);
 
         // Links the studio's own code, not only its build output: the stage's look is described
         // without a device anywhere in sight, which is the point of it being declared state rather
@@ -230,6 +233,45 @@ public static class Program
             casterBlock.TotalSize == block.TotalSize && casterSlot.Set == boneSlot.Set,
             $"caster is set {casterSlot.Set} x {casterBlock.TotalSize}B against the lit pass's " +
             $"set {boneSlot.Set} x {block.TotalSize}B — they share one material and must agree");
+    }
+
+    /// <summary>Studio, rather than the engine's asset checker, owns its fixed GPU palette budget.</summary>
+    private static void CheckRigCapacity(TestRunner t)
+    {
+        t.Expect("Studio's palette capacity is its per-rig bone and instance budget",
+            StudioRig.PaletteMatrixCapacity == StudioRig.MaxBones * StudioRig.MaxInstances,
+            $"{StudioRig.PaletteMatrixCapacity} matrices vs " +
+            $"{StudioRig.MaxBones} bones x {StudioRig.MaxInstances} instances");
+
+        StudioRig.ValidatePaletteCapacity(
+            "within.glb",
+            new[] { SkinWith(StudioRig.MaxBones) });
+        t.Pass("a rig exactly at Studio's bone limit is accepted");
+
+        t.ExpectThrows<AssetImportException>(
+            "Studio refuses an oversized rig before GPU allocation",
+            () => StudioRig.ValidatePaletteCapacity(
+                "oversized.glb",
+                new[] { SkinWith(StudioRig.MaxBones + 1) }),
+            $"at most {StudioRig.MaxBones} bones");
+
+        t.ExpectThrows<AssetImportException>(
+            "Studio checks every skin rather than only the primary one",
+            () => StudioRig.ValidatePaletteCapacity(
+                "multi-skin.glb",
+                new[] { SkinWith(1), SkinWith(StudioRig.MaxBones + 1) }),
+            "skin 1");
+    }
+
+    private static GltfSkinBinding SkinWith(int boneCount)
+    {
+        var bones = new Bone[boneCount];
+        for (var i = 0; i < bones.Length; i++)
+        {
+            bones[i] = new Bone($"bone{i}", i - 1, Matrix4x4.Identity);
+        }
+
+        return new GltfSkinBinding(new Skeleton(bones), Matrix4x4.Identity);
     }
 
     /// <summary>

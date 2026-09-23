@@ -11,15 +11,16 @@ namespace Blix;
 // Loads a .glb / .gltf file and decodes it into engine-shaped types: skinned
 // `GltfPrimitive[]` (each with vertex layout VertexPosition3NormalTextureSkin4Tangent
 // + a `GltfMaterial` carrying baseColor/normal/metallic-roughness textures), a
-// `Skeleton` with hierarchy-order bones, and one `AnimationClip` per glTF animation
-// that touches the skin's joints. Collects every skinned-mesh node that references
-// every skin it declares, so body+hair+clothing splits import as one bundle.
+// `GltfSkinBinding[]` with parent-first skeletons and placement transforms, and one
+// `AnimationClip` per glTF animation that touches the shared joint ordering. It also
+// preserves joint attachments and independent static parts from the same file.
 //
 // Current limits:
-// - One skin per file. Secondary skins are ignored.
+// - Multiple skins may share one clip set only when their joint ordering agrees.
 // - LINEAR interpolation only (STEP / CUBICSPLINE rejected at import).
 // - No morph-target weights.
-// - Indices wider than ushort throw.
+// - At most four skin influences are retained per vertex: the strongest four,
+//   renormalised. Mesh indices use UInt16 or UInt32 as required.
 //
 // Matrices need no conversion at the boundary: glTF / SharpGLTF deliver them in
 // System.Numerics row-vector form, which is exactly the engine's convention
@@ -32,11 +33,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
     /// Reads a rigged glTF, or refuses it by name.
     /// </summary>
     /// <exception cref="AssetImportException">
-    /// The file is not something Blix can read. <b>Every refusal comes out as this one type</b>,
-    /// carrying the path, because that is what lets a tool tell "your asset is bad" from "this tool
-    /// has a bug" — and a tool that cannot tell them apart either crashes on bad input or swallows
-    /// its own faults. Blix.Tools.Check did the first: a judge whose whole job is to survive a bad
-    /// asset exited 134 with a stack trace on one.
+    /// The file is not a supported rigged glTF. Import refusals carry the source path so tools can
+    /// distinguish invalid or unsupported content from faults in the tool itself.
     /// </exception>
     public GltfModel Import(AssetImportContext context)
     {
@@ -45,12 +43,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         {
             throw new AssetImportException(context.SourcePath, null, "no file there.");
         }
-        // <b>The refusal covers the IMPORT, not only the parse.</b> Wrapping ModelRoot.Load alone
-        // catches what SharpGLTF rejects and nothing this importer rejects itself — so a file the
-        // parser accepts and glTF's own rules do not, like a primitive with no POSITION, escaped as
-        // an unhandled exception and took the process down with a stack trace. The generator's
-        // Mesh_NoPosition is exactly that asset: valid glTF JSON, an invalid mesh. A reader whose
-        // conformance checks abort instead of refusing has no usable negative behaviour to assert.
+        // Normalize parser failures and the importer's own content refusals into the same
+        // path-bearing boundary for callers and diagnostic tools.
         return AssetImportException.Refusing(context.SourcePath, () => ImportCore(context, preferCooked: true));
     }
 
@@ -58,16 +52,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
     /// Imports the glTF itself, ignoring any cooked artifact beside it.
     /// </summary>
     /// <remarks>
-    /// <b>What a RECIPE must call.</b> <see cref="Import"/> prefers a cooked sibling, which is right
-    /// for a game and catastrophic for a cook: the mesh recipe reads a rig through this importer, so
-    /// with the cooked path in the way it consumes its own previous output and re-cooks that.
-    /// <para>
-    /// This is the second time that trap has been sprung in this format's history — WavefrontParts
-    /// gained a cooked path and ObjMeshRecipe read straight through it — and both times it surfaced
-    /// only because a format version changed in the same commit and made the stale read loud. At a
-    /// matching version both would have looked like they worked. The pattern is the danger: giving a
-    /// reader a cooked path silently changes what every writer built on that reader is reading.
-    /// </para>
+    /// Recipes must use this entry point so their output is derived from authored source rather
+    /// than from a pre-existing cooked sibling. Runtime callers normally use <see cref="Import"/>.
     /// </remarks>
     public GltfModel ImportSource(AssetImportContext context)
     {
@@ -77,11 +63,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
 
     /// <summary>Rebuilds a rig from its cooked form — skins, clips, attachments and all.</summary>
     /// <remarks>
-    /// <b>Everything the importer would have produced, read rather than derived.</b> The bones come
-    /// back as they were written, the clips as the keyframe arrays they always were, and the
-    /// attachments and static parts with their own vertex layouts — which is what the per-primitive
-    /// layout migration was for. Nothing here reconstructs or re-derives: a cooked rig that needed
-    /// the glTF for any part of itself would not be a cooked rig.
+    /// Bones, clips, attachments, static parts, materials, and image references are reconstructed
+    /// entirely from the cooked artifact; the source glTF is not opened.
     /// </remarks>
     private GltfModel ImportCookedRig(AssetImportContext context, string rigPath, BlixMeshFile cooked)
     {
@@ -171,11 +154,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
 
     private GltfModel ImportCore(AssetImportContext context, bool preferCooked)
     {
-        // <b>Started here so the report covers the whole load, including the image pre-decode.</b>
-        // <b>A cooked rig is loaded whole, with no glTF opened.</b> This was the last category of
-        // asset in this tree with no cooked form — `blix check --cooked` said so on every rigged
-        // file — and the win is consolidation rather than milliseconds: one cooked form now covers
-        // every mesh asset, with no category that quietly falls back.
+        // A rigged .blixmesh is self-contained and loads without opening the source glTF.
         var directRig = Path.GetExtension(context.SourcePath)
             .Equals(".blixmesh", StringComparison.OrdinalIgnoreCase);
         var rigPath = directRig
@@ -202,12 +181,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
 
         var model = AssetImportException.Refusing(context.SourcePath, () => ModelRoot.Load(context.SourcePath));
 
-        // <b>Group every skinned mesh node by the skin that drives it. No skin is privileged.</b>
-        // This used to pick the first node carrying both a mesh and a skin, call its skin "primary",
-        // and require every other skinned node to match it — which made one skin special for no
-        // reason the format supports. A glTF skin is self-contained: its own joints, its own inverse
-        // binds, named by each node that uses it. So they are simply collected, in the order they
-        // are met, and the order carries no meaning beyond being stable.
+        // Group skinned mesh nodes by their owning skin. Encounter order supplies a stable binding
+        // index but carries no semantic priority.
         var skinOrder = new List<Skin>();
         var nodesBySkin = new Dictionary<Skin, List<Node>>();
         foreach (var node in model.LogicalNodes)
@@ -225,23 +200,15 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
 
         if (skinOrder.Count == 0)
         {
-            // <b>A refusal, not a fault.</b> An unskinned glTF is a perfectly good file that this
-            // importer is the wrong one for — so it is the engine declining, and it says which
-            // importer does want it. As an InvalidOperationException it escaped every tool's catch
-            // and took the process down: `blix check --model` on any static prop exited through a
-            // stack trace, which is the exact failure Section AV exists to prevent, still open one
-            // importer away.
+            // Valid static glTF content is outside this importer's domain rather than a parser fault.
             throw new AssetImportException(
                 context.SourcePath, null,
                 "no node has both a mesh and a skin, so there is no rig here — " +
                 "load it as a static model instead (GltfStaticImporter)");
         }
 
-        // <b>The shared-world-matrix rule, narrowed to where it is actually true.</b> It used to
-        // apply across the whole file, which held only while one skin was mandatory. Nodes driven by
-        // the SAME skin must still agree: they feed one palette and one model matrix, so a
-        // divergence there is genuinely unsupported. Nodes on DIFFERENT skins may sit anywhere, and
-        // in tank.glb they do — the two tracks are ±3.97 along Z from the hull.
+        // Nodes driven by one skin share one palette and model matrix, so their world matrices must
+        // agree. Different skins retain independent placement transforms.
         //
         // Each skin's mesh-node transform is its group's. It is NOT baked into vertices: per the
         // glTF skinning spec the inverse binds map MESH-LOCAL vertices into joint space, so baking
@@ -281,11 +248,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             var owner = skinOrder[s];
             var group = nodesBySkin[owner];
 
-            // <b>Each skin orders its own joints, so each gets its own remap — every one built the
-            // same way.</b> Reusing another skin's would be the subtle version of the bug this stage
-            // removes: the indices stay in range and name the wrong bones, which reads as bad
-            // weighting rather than a bad import. Verified by BB.2, whose negative control sends
-            // skin 1's vertices to 'bmid' instead of 'btip'.
+            // Each skin gets its own source-to-parent-first joint remap; an index is meaningful
+            // only within the skin that supplied it.
             var (skinBones, skinRemap) = BuildSkeletonAndOrdering(owner);
             var skinRemaps = skinRemap;
             bindings.Add(new GltfSkinBinding(new Skeleton(skinBones), group[0].WorldMatrix));
@@ -307,13 +271,9 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         }
         var primitives = primitivesList.ToArray();
 
-        // <b>Attachments resolve against whichever skin owns the joint they hang from.</b> They
-        // used to be collected against the one chosen skin, which silently meant "equipment only
-        // counts if it hangs off the skin we happened to pick first". An attachment composes
-        // local × jointWorld × placement, and joint WORLDS are the same for any skin sharing that
-        // joint node — the inverse binds, which do differ, are not involved. So the skin index only
-        // decides which skeleton's bone array the index refers to, and the first skin containing the
-        // joint is a correct and stable answer.
+        // Resolve each attachment against the first skin containing its ancestor joint. The skin
+        // index selects the skeleton whose remapped bone index the attachment records; inverse bind
+        // matrices are not part of attachment placement.
         var attachments = new List<GltfAttachment>();
         var claimed = new HashSet<string>(StringComparer.Ordinal);
         for (var s = 0; s < skinOrder.Count; s++)
@@ -326,11 +286,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             }
         }
 
-        // <b>A static mesh under no joint is read too, and that was the last thing dropped.</b> It
-        // is neither skinned geometry nor equipment, so the importer had no place for it and named
-        // it in a skipped report instead — the four primitives of tank.glb's gun and turret. But a
-        // node with a mesh and no skin is an ordinary mesh in the scene; "not equipment" was this
-        // importer's rule, not the format's. Placed by the world matrix the node already carries.
+        // Preserve unskinned mesh nodes that are not joint attachments as independently placed
+        // static parts of the rigged model.
         var attached = new HashSet<string>(attachments.Select(a => a.Name), StringComparer.Ordinal);
         var staticParts = new List<GltfStaticPart>();
         foreach (var node in model.LogicalNodes)
@@ -356,22 +313,9 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         // Filter animations to those that touch a joint; an animation targeting only non-skin nodes
         // (scene camera, light) becomes an empty clip and gets dropped.
         //
-        // <b>Clips are built against skin 0's joint ordering, and that is the one place multi-skin
-        // is not yet finished.</b> An AnimationClip's tracks are bone INDICES, which only mean
-        // something against a particular skeleton — so a file whose skins order their joints
-        // differently would need a clip per skin, and this produces one set. It is correct wherever
-        // the skins agree on joint order, which is the case that exists: tank.glb's three skins are
-        // identical in joints and in order, differing only in bind translation. Recorded rather than
-        // hidden — a file that breaks it is the thing that should force the next shape.
-        // <b>Checked rather than assumed, because the wrong answer here is silent.</b> A clip's
-        // tracks are bone INDICES against one skeleton. glTF animation channels target NODES and
-        // know nothing about skins, so a file whose skins order their joints differently needs a
-        // clip per skin — and building one set against skin 0 would animate the others' bones
-        // wrongly with nothing to show for it. Every skin is asked whether it resolves each shared
-        // joint to the same index; when they all agree, one set is correct for all of them.
-        // Only where there is something to drive. A file whose skins disagree and which carries no
-        // animation at all is perfectly readable, and refusing it would throw away geometry over a
-        // conflict that cannot arise — the first version of this check did exactly that.
+        // AnimationClip tracks store bone indices, while glTF channels target nodes. One shared clip
+        // set is therefore valid only when every animated skin resolves each joint to the same
+        // parent-first index. Geometry-only multi-skin files do not need this restriction.
         var clipsAgree = true;
         for (var s = 1; s < skinOrder.Count && clipsAgree && model.LogicalAnimations.Count > 0; s++)
         {
@@ -409,30 +353,22 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             }
         }
 
-        // <b>The rigged path reports too, and its absence was a hole in the instrument.</b>
-        // K-E wired the static importer and the font loader and left this one silent, so
-        // `blix check --cooked` — which loads every asset STATICALLY — could not see the way a game
-        // actually loads a character. RTSGame's four villagers cost 605 ms of PNG decode each
-        // through here, and the tool that exists to report exactly that was blind to it.
-        //
-        // <b>It always says Source, and that is not a placeholder.</b> There is no cooked form of a
-        // rigged mesh at all: .blixmesh carries two vertex layouts and neither holds skin weights,
-        // so this path has nothing to prefer. Saying so in the report is the point — a load that is
-        // slow because nobody cooked it and a load that is slow because it CANNOT be cooked are
-        // different problems, and only one of them is anybody's fault.
-        var ignored = GltfShared.CollectIgnored(model);
+        // A rig may also carry coloured static parts and attachments. Audit each logical primitive
+        // against the layout that consumed it; Distinct inside CollectIgnored folds repeated nodes
+        // using the same primitive and layout.
+        var ignored = GltfShared.CollectIgnored(model.LogicalNodes
+            .Where(node => node.Mesh is not null)
+            .SelectMany(node => node.Mesh!.Primitives.Select(primitive =>
+                (primitive, node.Skin is null
+                    ? GltfShared.VertexFeatures.Colour
+                    : GltfShared.VertexFeatures.Skinning | GltfShared.VertexFeatures.Tangents))));
 
         if (AssetLoadLog.Enabled)
         {
-            // Two warnings can be true at once, and the attribute one is the louder of the pair
-            // when it fires: "this file has channels I did not read" is a different fact from "this
-            // file cannot be cooked", and folding them into one line would lose whichever came second.
-            var warning = "a rigged glTF has no cooked form — .blixmesh holds no skinned vertex layout";
-            if (ignored.Length > 0)
-            {
-                warning += "; ignored " + string.Join(", ",
+            var warning = ignored.Length == 0
+                ? null
+                : "ignored " + string.Join(", ",
                     ignored.Select(i => $"{i.Semantic} ({i.Primitives} prim) — {i.Explanation}"));
-            }
 
             AssetLoadLog.Report(new AssetLoadReport(
                 SourcePath: context.SourcePath,
@@ -474,20 +410,19 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Walks UP from each mesh node rather than down from each joint</b>, because a glTF is free
+    /// Walks up from each mesh node rather than down from each joint because a glTF may
     /// to put a group node between the joint and the mesh and the relationship is still an
     /// attachment. Walking down would need to know how deep to look; walking up terminates at the
     /// first joint or at the root, and there is nothing to guess.
     /// </para>
     /// <para>
-    /// <b>The joint index is remapped.</b> <see cref="BuildSkeletonAndOrdering"/> topologically
+    /// <see cref="BuildSkeletonAndOrdering"/> topologically
     /// sorts the skin's joints so parents precede children, so the skin's own index and the
     /// skeleton's are different numbers for the same bone on any rig that was not already sorted.
-    /// Recording the raw one would put the knife on whatever bone happened to land at that index —
-    /// a bug that looks like a content problem and survives every test that only counts.
+    /// Recording the raw skin index would therefore attach geometry to the wrong bone.
     /// </para>
     /// <para>
-    /// <b>Vertices are left in the node's own space.</b> The static builder bakes a world matrix
+    /// Vertices stay in the node's own space. The static builder bakes a world matrix
     /// into positions, which is right for a prop that never moves and wrong for one carried by a
     /// hand; identity goes in and the placement rides on <see cref="GltfAttachment.LocalTransform"/>
     /// instead, to be composed with the joint's animated transform at draw time.
@@ -531,11 +466,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             {
                 var prim = node.Mesh.Primitives[i];
                 var name = $"{node.Name ?? node.Mesh.Name ?? "attachment"}.{i}";
-                // <b>Colour unconditionally here, where the static importer makes it opt-in.</b>
-                // Not an inconsistency: an attachment has exactly ONE consumer in the tree — the
-                // studio's RigView, drawing it on the studio's static pipeline — where a static
-                // mesh has six, each with a pipeline of its own. With one consumer the layout can
-                // simply agree with it, and a flag would only be a thing to forget.
+                // Rig attachments always include colour because their current consumer, RigView,
+                // uses the coloured static layout. General static imports keep colour opt-in.
                 var meshData = GltfStaticImporter.BuildStaticMeshData(
                     name, prim, Matrix4x4.Identity, Matrix4x4.Identity, includeColour: true);
                 primitives.Add(new GltfPrimitive(
@@ -626,26 +558,24 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
     // Pack the mesh primitive's vertex streams into the engine's skinned vertex
     // layout. POSITION is required; NORMAL / TEXCOORD_0 default to safe values
     // (up-normal, (0, 0)) if absent. JOINTS_0 / WEIGHTS_0 are required — this is
-    // a skinned mesh importer; an unrigged mesh should use ObjImporter or a
-    // future GltfStaticMeshImporter.
+    // a skinned mesh importer; an unrigged glTF should use GltfStaticImporter.
     /// <summary>
     /// The four strongest influences on one vertex, renormalised, out of however many the file gives.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Four is a deliberate limit, and dropping the rest silently was not.</b> The vertex layout
+    /// Four is the vertex-layout limit. The layout
     /// carries four bone indices and four weights; widening it to eight costs 32 bytes on every
     /// skinned vertex in every asset, for influences that are almost always negligible. That is an
-    /// engineering trade — bandwidth against fidelity — and it is the kind §5 says to make
-    /// deliberately rather than by accident.
+    /// bandwidth/fidelity tradeoff applied to every skinned asset.
     /// </para>
     /// <para>
-    /// <b>The STRONGEST four, not the first four.</b> glTF does not require the sets to be sorted, so
+    /// The strongest four are retained. glTF does not require influence sets to be sorted, so
     /// "the first four" can discard the influence that actually shapes the vertex and keep three that
     /// barely move it.
     /// </para>
     /// <para>
-    /// <b>And renormalised, which is the part that fixes the visible fault.</b> Weights sum to 1
+    /// Retained weights are renormalised. Weights sum to 1
     /// across ALL sets, so keeping a subset leaves them summing to less, and a skinning matrix scaled
     /// by 0.8 drags its vertex a fifth of the way to the origin. Approximate deformation is a
     /// limitation; a collapsing mesh is a bug.
@@ -717,11 +647,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         var jointsArray = jointsAcc.AsVector4Array();
         var weightsArray = weightsAcc.AsVector4Array();
 
-        // <b>Every further influence set, because dropping them is a WRONG RESULT rather than a
-        // missing feature.</b> glTF allows JOINTS_1/WEIGHTS_1 and beyond; a vertex with eight
-        // influences has its weights summing to 1 across all eight, so reading only the first four
-        // leaves them summing to less — and a skinning matrix scaled by 0.8 drags that vertex toward
-        // the origin. Nothing counts down, nothing warns, the character simply deforms wrongly.
+        // Gather every complete JOINTS_n/WEIGHTS_n pair before selecting and renormalising the
+        // strongest four influences for the engine vertex layout.
         var extraJoints = new List<IList<Vector4>>();
         var extraWeights = new List<IList<Vector4>>();
         for (var set = 1; ; set++)
@@ -758,20 +685,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             max = Vector3.Max(max, p);
 
             var n = normals?[v] ?? new Vector3(0.0f, 1.0f, 0.0f);
-            // <b>No flip. glTF's UV origin is top-left, the image decoder now returns rows
-            // top-down, and Vulkan samples top-left — so the three already agree.</b>
-            //
-            // This used to read `1.0f - rawUv.Y`, under a comment explaining that it existed to
-            // compensate the texture pipeline flipping images on load "to put PNG's top row at GL
-            // UV.y=1". That was a faithful description of a real chain, and every link of it was a
-            // workaround for the first: ImageLoader flipped for OpenGL, so the rigged importer
-            // flipped its UVs back, while the static importer left it to each caller via
-            // flipTextureV — which exactly one consumer remembered to pass. Three different
-            // compensations for one decoder flag, and an asset rendered correctly only if its path
-            // happened to carry an even number of them.
-            //
-            // Removing the flag removed the reason for all three. Verified against Khronos's
-            // TextureCoordinateTest, which renders "Top Left" upright at the top-left.
+            // Preserve glTF UVs: glTF coordinates, decoded row order, and Vulkan sampling all use
+            // the same top-left image convention on this path.
             var uv = uvs?[v] ?? Vector2.Zero;
 
             // Remap joint indices through the topo-sort. Each slot is a float that
@@ -781,9 +696,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             Vector4 newIdx, w;
             if (extraJoints.Count == 0)
             {
-                // The ordinary path, untouched. Every asset in this tree takes it, and it must stay
-                // byte-for-byte what it was: reordering four influences that already fit would
-                // change every skinned vertex in the tree to no purpose.
+                // Preserve authored slot order when all influences already fit the layout.
                 var oldIdx = jointsArray[v];
                 newIdx = new Vector4(
                     oldToNew[(int)oldIdx.X],

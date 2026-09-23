@@ -110,6 +110,94 @@ public static class Program
             BlixRecipes.For(typeof(MeshRecipe).Assembly, "a/b/c.glb")!.OutputFor("a/b/c.glb")
                 .EndsWith("c.blixmesh", StringComparison.Ordinal));
 
+        // ── asset packaging keeps material-channel texture roles ───────────
+        // Image references retain the material role that controls encoding. One logical image used
+        // by incompatible channels cannot become one correctly described .blixtex, so the recipe
+        // refuses that ambiguity before parallel cooks can race or silently pick one role.
+        var referenceTemp = Path.Combine(Path.GetTempPath(), $"blix-references-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(referenceTemp);
+        try
+        {
+            var image = Path.Combine(referenceTemp, "shared.png");
+            var png = Convert.FromBase64String(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nWQAAAAASUVORK5CYII=");
+            File.WriteAllBytes(image, png);
+            File.WriteAllBytes(Path.Combine(referenceTemp, "normal.png"), png);
+            var gltf = Path.Combine(referenceTemp, "roles.gltf");
+            File.WriteAllText(gltf, """
+                {
+                  "asset": { "version": "2.0" },
+                  "images": [ { "uri": "shared.png" }, { "uri": "normal.png" } ],
+                  "textures": [ { "source": 0 }, { "source": 1 } ],
+                  "materials": [ {
+                    "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } },
+                    "normalTexture": { "index": 1 }
+                  } ]
+                }
+                """);
+
+            var references = MeshRecipe.ReferencedImages(gltf);
+            t.ExpectTrue("material reference discovery retains the base-colour role",
+                references.Contains(new MeshRecipe.ReferencedImage("shared.png", TextureRole.BaseColor)));
+            t.ExpectTrue("and retains the normal role",
+                references.Contains(new MeshRecipe.ReferencedImage("normal.png", TextureRole.Normal)));
+            t.Expect("while the URI-only compatibility view remains complete",
+                MeshRecipe.ReferencedImageUris(gltf).Count == 2,
+                $"{MeshRecipe.ReferencedImageUris(gltf).Count}");
+
+            var textureOut = Path.Combine(referenceTemp, "explicit-role.blixtex");
+            var oldFormat = Environment.GetEnvironmentVariable("BLIX_COOK_FORMAT");
+            try
+            {
+                Environment.SetEnvironmentVariable("BLIX_COOK_FORMAT", "rgba8");
+                TextureRecipe.CookOne(
+                    image, textureOut, out _, out _, TextureRole.Normal);
+                t.ExpectTrue("the exact texture source, role and encoder identity is current",
+                    TextureRecipe.IsCurrent(image, textureOut, TextureRole.Normal));
+                t.ExpectTrue("a different material role invalidates the texture artifact",
+                    !TextureRecipe.IsCurrent(image, textureOut, TextureRole.BaseColor));
+                Environment.SetEnvironmentVariable("BLIX_COOK_FORMAT", "bc7");
+                t.ExpectTrue("a different encoder environment invalidates the texture artifact",
+                    !TextureRecipe.IsCurrent(image, textureOut, TextureRole.Normal));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("BLIX_COOK_FORMAT", oldFormat);
+            }
+            var textureStamp = CookedFile.ReadHeader(textureOut).Stamp;
+            t.ExpectTrue("a texture stamp records its explicit material role",
+                textureStamp.Parameters.Contains("role=Normal", StringComparison.Ordinal));
+            t.ExpectTrue("and records the concrete encoder path and quality",
+                textureStamp.Parameters.Contains("encoder=raw quality=none", StringComparison.Ordinal));
+
+            var conflict = Path.Combine(referenceTemp, "conflict.gltf");
+            File.WriteAllText(conflict, """
+                {
+                  "asset": { "version": "2.0" },
+                  "images": [ { "uri": "shared.png" } ],
+                  "textures": [ { "source": 0 } ],
+                  "materials": [ {
+                    "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } },
+                    "normalTexture": { "index": 0 }
+                  } ]
+                }
+                """);
+            t.ExpectThrows<InvalidDataException>(
+                "one logical image cannot claim incompatible material roles",
+                () => MeshRecipe.ReferencedImages(conflict));
+
+            var packaged = Path.Combine(referenceTemp, "out");
+            t.Expect("cook asset refuses one destination with incompatible roles",
+                Blix.Tools.Cook.Program.Main(new[] { "asset", conflict, "--out", packaged }) == 1,
+                "driver accepted the ambiguous image");
+            t.ExpectTrue("and refuses it before writing a texture",
+                !File.Exists(Path.Combine(packaged, "shared.blixtex")));
+        }
+        finally
+        {
+            try { Directory.Delete(referenceTemp, recursive: true); } catch (IOException) { }
+        }
+
         // ── a rigged glTF has a cooked form, and it is equivalent ──────────
         // <b>This block used to assert the opposite, and that is the point of it.</b> It read "it
         // always reports Source, and that is a statement rather than a gap: .blixmesh carries two
@@ -148,6 +236,12 @@ public static class Program
                 File.Copy(rig, loneRig);
                 var viaSourceRig = new Blix.GltfImporter()
                     .Import(new AssetImportContext(AssetId.Parse("t/rig-source"), loneRig));
+
+                t.ExpectThrows<InvalidDataException>(
+                    "a rigged cook refuses static-only tangent policy",
+                    () => MeshRecipe.CookShipped(
+                        loneRig, Path.Combine(rigTemp, "invalid-options.blixmesh"),
+                        includeTangents: true));
 
                 t.Expect("cooked and source agree on bone count",
                     viaCookedRig.Skeleton.BoneCount == viaSourceRig.Skeleton.BoneCount,
@@ -528,6 +622,39 @@ public static class Program
             }
         }
 
+        // ── the mesh driver writes cooked artifacts, not an authored-source mirror ─────────────
+        // `mesh --out` originally copied the glTF because the first .blixmesh format still reopened
+        // it for materials and node structure. The cooked format owns those now. Keeping the copy
+        // would make a derived tree look source-dependent even when its artifact loads alone, and
+        // would duplicate large embedded GLBs for no runtime use.
+        if (cookedAsset is not null)
+        {
+            var driverOut = Path.Combine(Path.GetTempPath(), "blix-mesh-driver-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(driverOut);
+            try
+            {
+                t.Expect("out-of-place mesh cooking succeeds",
+                    Blix.Tools.Cook.Program.Main(new[] { "mesh", cookedAsset, "--out", driverOut }) == 0);
+
+                var driverMesh = Path.Combine(
+                    driverOut, Path.GetFileNameWithoutExtension(cookedAsset) + ".blixmesh");
+                t.ExpectTrue("and writes the cooked mesh", File.Exists(driverMesh));
+                t.ExpectTrue("without copying the authored glTF into the cooked tree",
+                    !Directory.EnumerateFiles(driverOut, "*.gltf", SearchOption.AllDirectories).Any()
+                    && !Directory.EnumerateFiles(driverOut, "*.glb", SearchOption.AllDirectories).Any());
+
+                var fromDriver = new Blix.GltfImporter().Import(
+                    new AssetImportContext(AssetId.Parse("t/driver-output"), driverMesh));
+                t.Expect("the driver's source-free output opens directly",
+                    fromDriver.Primitives.Length > 0,
+                    $"{fromDriver.Primitives.Length} primitive(s)");
+            }
+            finally
+            {
+                try { Directory.Delete(driverOut, recursive: true); } catch (IOException) { }
+            }
+        }
+
         // ── the OBJ path: cooked and source agree, and the settings guard holds ──
         // <b>Closing the gap `blix check --cooked` had over .obj.</b> The judge used to answer
         // "nothing here that this judges" over a directory of them — the same sentence an EMPTY
@@ -675,6 +802,95 @@ public static class Program
         };
         t.Expect("distinct outputs are not a collision",
             !Blix.Tools.Cook.Program.FindOutputCollisions(fineBatch).Any(), "reported one anyway");
+
+        // ── cook host accounting and argument boundaries ───────────────────
+        var hostTemp = Path.Combine(Path.GetTempPath(), "blix-cook-host-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(hostTemp);
+        try
+        {
+            var recipeMethod = typeof(FontRecipe).GetMethod(nameof(FontRecipe.Cook))!;
+            var unreadableSource = Path.Combine(hostTemp, "broken.font.json");
+            File.WriteAllText(unreadableSource, "{}");
+            File.WriteAllText(Path.ChangeExtension(unreadableSource, ".blixfont"), "not cooked");
+
+            var fontRecipe = recipes.Single(r => r.Id == BlixFont.ShippedRecipe);
+            var unreadable = CaptureConsole(() =>
+                Blix.Tools.Cook.Program.ReportStatus(hostTemp, new[] { fontRecipe }));
+            t.Expect("status counts an unreadable output in its coverage denominator",
+                unreadable.ExitCode == 0
+                && unreadable.Stdout.Contains("0/1 cooked", StringComparison.Ordinal)
+                && unreadable.Stdout.Contains("1 unreadable", StringComparison.Ordinal),
+                unreadable.Stdout.Trim());
+
+            var ambiguousSource = Path.Combine(hostTemp, "shared.claim");
+            File.WriteAllText(ambiguousSource, "fixture");
+            var ambiguousRecipes = new[]
+            {
+                new FoundRecipe("am01", ".one", new[] { ".claim" }, "first claimant", 1, recipeMethod),
+                new FoundRecipe("am02", ".two", new[] { ".claim" }, "second claimant", 1, recipeMethod),
+            };
+            var ambiguous = CaptureConsole(() =>
+                Blix.Tools.Cook.Program.ReportStatus(hostTemp, ambiguousRecipes));
+            t.ExpectTrue("status reports both recipes that ambiguously claim one source",
+                ambiguous.Stdout.Contains("AMBIGUOUS", StringComparison.Ordinal)
+                && ambiguous.Stdout.Contains("am01, am02", StringComparison.Ordinal)
+                && ambiguous.Stdout.Contains("1 ambiguous", StringComparison.Ordinal));
+
+            var skippedSource = Path.Combine(hostTemp, "ordinary.json");
+            var skippedOutput = Path.Combine(hostTemp, "ordinary.blixfont");
+            var batchList = Path.Combine(hostTemp, "batch.txt");
+            File.WriteAllText(
+                batchList,
+                $"{BlixFont.ShippedRecipe}\t{skippedSource}\t{skippedOutput}{Environment.NewLine}");
+            var skippedBatch = CaptureConsole(() =>
+                Blix.Tools.Cook.Program.Main(new[] { "batch", batchList }));
+            t.Expect("batch respects a recipe's skipped outcome",
+                skippedBatch.ExitCode == 0
+                && skippedBatch.Stdout.Contains("skipped fnt1", StringComparison.Ordinal)
+                && skippedBatch.Stdout.Contains("0 cooked, 1 skipped", StringComparison.Ordinal)
+                && !File.Exists(skippedOutput),
+                skippedBatch.Stdout.Trim());
+
+            var extraStatus = CaptureConsole(() =>
+                Blix.Tools.Cook.Program.Main(new[] { "status", hostTemp, "ignored" }));
+            t.ExpectTrue("status rejects a surplus argument",
+                extraStatus.ExitCode == 2 && extraStatus.Stderr.Contains("Usage:", StringComparison.Ordinal));
+
+            var extraList = CaptureConsole(() =>
+                Blix.Tools.Cook.Program.Main(new[] { "list", "ignored" }));
+            var extraHelp = CaptureConsole(() =>
+                Blix.Tools.Cook.Program.Main(new[] { "help", "ignored" }));
+            t.ExpectTrue("zero-argument host verbs reject surplus arguments",
+                extraList.ExitCode == 2 && extraHelp.ExitCode == 2);
+
+            var extraBatch = CaptureConsole(() =>
+                Blix.Tools.Cook.Program.Main(new[] { "batch", batchList, "ignored" }));
+            t.ExpectTrue("batch rejects a surplus argument",
+                extraBatch.ExitCode == 2 && extraBatch.Stderr.Contains("Usage:", StringComparison.Ordinal));
+
+            var extraRun = CaptureConsole(() =>
+                Blix.Tools.Cook.Program.Main(new[]
+                {
+                    "run", BlixFont.ShippedRecipe, unreadableSource, skippedOutput, "ignored"
+                }));
+            t.ExpectTrue("run rejects a second output-like argument",
+                extraRun.ExitCode == 2
+                && extraRun.Stderr.Contains("unexpected argument", StringComparison.Ordinal)
+                && !File.Exists(skippedOutput));
+
+            var malformedBatch = Path.Combine(hostTemp, "malformed-batch.txt");
+            File.WriteAllText(
+                malformedBatch,
+                $"{BlixFont.ShippedRecipe}\t{skippedSource}\t{skippedOutput}\t\textra{Environment.NewLine}");
+            var malformed = CaptureConsole(() =>
+                Blix.Tools.Cook.Program.Main(new[] { "batch", malformedBatch }));
+            t.ExpectTrue("batch rejects ignored tab-separated fields",
+                malformed.ExitCode == 1 && malformed.Stderr.Contains("malformed line", StringComparison.Ordinal));
+        }
+        finally
+        {
+            try { Directory.Delete(hostTemp, recursive: true); } catch (IOException) { }
+        }
 
         // ── a texture's identity is the same across independent loads ───────
         // <b>Every upload cache in this tree is keyed by the OBJECT, so nothing can be shared.</b>
@@ -942,6 +1158,11 @@ public static class Program
                 var shippedStamp = StampOf(viaShipped);
                 t.ExpectTrue("a shipped cook supplies a simplifier",
                     shippedStamp.Contains("simplify=yes", StringComparison.Ordinal));
+                t.ExpectTrue("the shipped mesh is current for the exact options that made it",
+                    MeshRecipe.IsShippedCurrent(
+                        lodSource, viaShipped, includeTangents: true));
+                t.ExpectTrue("and a layout-option change invalidates it",
+                    !MeshRecipe.IsShippedCurrent(lodSource, viaShipped));
 
                 // The uniform path a build rule invokes must agree with the typed one. They are the
                 // two ways an asset reaches a shipped tree, and they diverged once already.
@@ -1066,5 +1287,24 @@ public static class Program
     {
         try { a(); return null; }
         catch (Exception ex) { return ex.Message; }
+    }
+
+    private static (int ExitCode, string Stdout, string Stderr) CaptureConsole(Func<int> action)
+    {
+        var originalOut = Console.Out;
+        var originalError = Console.Error;
+        using var stdout = new StringWriter();
+        using var stderr = new StringWriter();
+        try
+        {
+            Console.SetOut(stdout);
+            Console.SetError(stderr);
+            return (action(), stdout.ToString(), stderr.ToString());
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+            Console.SetError(originalError);
+        }
     }
 }

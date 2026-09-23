@@ -1,5 +1,8 @@
 # Attachment arc — plan
 
+> **Archived 2026-09-21 — completed.** W-A through W-E shipped. This is a
+> historical implementation record; see `docs/plans.md` for current plan status.
+
 > The Rogue has twelve primitives and Blix loads six. The other six are a knife, two crossbows, a
 > throwable and a cape, each parented to a joint — which is how every game character holds anything,
 > and a shape this engine has no word for.

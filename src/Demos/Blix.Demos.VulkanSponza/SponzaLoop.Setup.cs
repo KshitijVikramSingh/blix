@@ -36,10 +36,7 @@ internal sealed partial class SponzaLoop
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         renderHeightPx = host.LogicalSize.Height;
 
-        // <b>Fog is ON by default now.</b> It was off because it was a per-frame compute pass that
-        // added a wash to the picture; it has since become the scene's own sky and bounce scattered
-        // through a medium with a shape, it costs about 2 ms measured, and every dump taken since
-        // has had it enabled by hand. --no-fog turns it off, which is the flag worth having.
+        // Fog is part of the standard composition; --no-fog retains the unscattered reference path.
         var cmdArgs = Environment.GetCommandLineArgs();
         fog.Enabled = !cmdArgs.Contains("--no-fog");
         if (cmdArgs.Contains("--fog")) fog.Enabled = true;
@@ -52,7 +49,7 @@ internal sealed partial class SponzaLoop
         if (cmdArgs.Contains("--no-ao")) ambient.Enabled = false;
         if (cmdArgs.Contains("--no-shadow")) shadows.Enabled = false;
         if (cmdArgs.Contains("--ao-fullres")) aoScale = 1f;
-        // The incident-light field ships on; --no-incident is the inline path it replaced.
+        // The incident-light field ships on; --no-incident selects the inline reference path.
         if (cmdArgs.Contains("--no-incident")) incidentField = false;
         if (cmdArgs.Contains("--incident")) incidentField = true;
         if (cmdArgs.Contains("--incident-full")) { incidentField = true; incidentScale = 1f; }
@@ -75,10 +72,7 @@ internal sealed partial class SponzaLoop
             // camera's frame is then mostly a count of what the camera did not face.
             if (cmdArgs[i] == "--probe-sleep" && float.TryParse(cmdArgs[i + 1], out var ps))
                 probeSleepFrames = MathF.Max(0f, ps);
-            // <b>Zero isolates the sky.</b> The injector's two source terms are the sun and the sky;
-            // with the sun off, whatever the probe census then reports IS the sky term, and it can
-            // be compared against sky irradiance times the volume's own mean visibility. That turns
-            // "the interior looks too dark" into two separable questions with one run each.
+            // Zero isolates sky-fed transport from the direct-sun source for probe censuses.
             if (cmdArgs[i] == "--sun-strength" && float.TryParse(cmdArgs[i + 1], out var ss))
                 sunStrength = MathF.Max(0f, ss);
             if (cmdArgs[i] == "--ref-bounces" && int.TryParse(cmdArgs[i + 1], out var rb))
@@ -91,12 +85,6 @@ internal sealed partial class SponzaLoop
                 {
                     Math.Clamp(m0, 256, 4096), Math.Clamp(m1, 256, 4096), Math.Clamp(m2, 256, 4096),
                 };
-            }
-            if (cmdArgs[i] == "--gtao-taps" && cmdArgs[i + 1].Split('x') is { Length: 2 } tp
-                && float.TryParse(tp[0], out var gs) && float.TryParse(tp[1], out var gt))
-            {
-                ambient.Slices = gs;
-                ambient.Steps = gt;
             }
             if (cmdArgs[i] == "--foliage-lod" && float.TryParse(cmdArgs[i + 1], out var fl))
                 FoliageLodMargin = MathF.Max(0.1f, fl);
@@ -118,32 +106,13 @@ internal sealed partial class SponzaLoop
         }
         if (cmdArgs.Contains("--sky-no-inject")) skipInject = true;
         if (cmdArgs.Contains("--sky-no-sample")) skipSkySample = true;
-        // <b>ON by default, and it was off — which meant the demo's own lighting model was opt-in.</b>
-        // With this false, uSkyMin.w and uBounceStrength both write 0, so blixSkyVisibility() returns
-        // 1.0 for every surface and the bounce block never executes: every wall sees a full
-        // unoccluded sky and nothing bounces. That is a different renderer, and nothing on screen or
-        // in the log said which one was running. It cost a session — boots judged for brightness,
-        // probe views read as empty, and an --ab arm that toggled two terms already off in both
-        // arms and duly reported them free.
-        //
-        // The flag now turns it OFF. --sky is still accepted so existing invocations keep working,
-        // and it is a no-op.
+        // Standard rendering uses baked enclosure and dynamic bounce. --no-sky disables both;
+        // --sky remains a compatibility no-op for existing invocations.
         skyVisibilityEnabled = !cmdArgs.Contains("--no-sky");
         if (skyVisibilityEnabled)
         {
-            // <b>The exposure that suits this lighting model, not a brightening of the old one.</b>
-            // 0.5 was chosen against an ambient that handed every surface a full sky. Once a floor
-            // receives the 3% of sky it can actually see plus what bounces down to it, the scene
-            // carries less light and the camera is the right place to account for that — which is
-            // the whole reason the units arc kept exposure and deleted the intensity knobs.
-            //
-            // 0.65 -> 1.0 when the bounce started carrying real per-surface albedo. Sponza's
-            // measured albedos average about 0.2, against the 0.35 scalar that preceded them, so
-            // there is materially less indirect light in the room than there used to be. The fix
-            // was expected to be a bounce multiplier around 2; it was judged by eye to be exposure
-            // instead, with the bounce left at exactly what the surfaces give. That is the better
-            // of the two: one of these knobs is a camera and the other would have been a lie about
-            // what stone reflects.
+            // Exposure accounts for the display level of the physically attenuated composition;
+            // transport strength remains one so material albedo is not silently reinterpreted.
             render.Exposure = 1.0f;
         }
         if (cmdArgs.Contains("--no-mask")) forceOpaqueMask = true;
@@ -156,30 +125,17 @@ internal sealed partial class SponzaLoop
         // it only the non-default could be asked for, so a paired run could not be ordered 4-2-2-4 —
         // and on this machine a single ordering is not a measurement.
         if (cmdArgs.Contains("--msaa4")) MsaaSamples = 4;
-        // <b>The sky's own sun is the default now; --sun-authored opts out.</b> This was opt-in via
-        // --sun-from-probe, so the shipped behaviour was an authored direction that had been tuned
-        // by hand against ONE sky — and every other HDRI then lit the scene from a place its own sun
-        // is not, which shows as cast shadows disagreeing with the visible sun in the sky. A probe
-        // that has no detectable sun still returns null and the authored direction stands, so an
-        // overcast sky is unaffected.
+        // Align shadows and direct light to a detected environment sun by default. --sun-authored
+        // opts out; probes without a detectable sun naturally retain the authored direction.
         if (!cmdArgs.Contains("--sun-authored")) alignSunToProbe = true;
-        // <b>--sun-overhead: straight down, for working on base lighting rather than on a sky.</b>
-        // Sponza is a courtyard, so the sun's ELEVATION decides how much of the scene is lit at all:
-        // measured on the direct-sun-only channel, this sky's own sun at 53 deg reaches 1.4% of the
-        // frame where the authored 73 deg reaches 9.3%. Judging ambient, bounce or materials while
-        // 98% of the picture is unlit means judging them by their failure modes. Overhead maximises
-        // what the sun can reach, so everything else is being compared against a lit scene.
-        //
-        // The shadow cascades already guard the degenerate up vector (|L.y| > 0.99 -> UnitZ), so
-        // exactly straight down is safe.
+        // --sun-overhead maximizes directly lit courtyard area when isolating base lighting. The
+        // cascade fit handles the vertical-light up-vector degeneracy.
         if (cmdArgs.Contains("--sun-overhead")) sunOverhead = true;
-        // Lets the probe view be exercised without a human reaching for a checkbox — which is how
-        // it shipped a crash the first time: it compiled, it ran, and nothing had drawn it.
+        // Expose the probe view to automated/headless runs as well as the overlay checkbox.
         if (cmdArgs.Contains("--show-probes")) showProbes = true;
         if (cmdArgs.Contains("--probe-carryless")) probeCarryless = true;
-        // <b>The instrument the pass timers could not be.</b> Submits and fence-waits every pass on
-        // its own, which measures real tile execution at the cost of all overlap — so the numbers
-        // attribute the frame rather than decompose it, and they sum to more than it.
+        // GPU isolation submits and waits per pass. It attributes real tile execution but removes
+        // overlap, so isolated pass times are not additive components of the normal frame.
         if (cmdArgs.Contains("--gpu-isolate")) vk.GpuPassIsolation = true;
         if (cmdArgs.Contains("--no-caster-cull")) shadowCasterCull = false;
         if (cmdArgs.Contains("--no-foliage")) noFoliage = true;
@@ -232,11 +188,8 @@ internal sealed partial class SponzaLoop
                 lodArmOff = lodOff;
             }
         }
-        // <b>Required for any timing run, and its absence invalidated a whole measurement batch.</b>
-        // With FIFO present the frame timer measures when the swapchain let go, not what the work
-        // cost: every result lands on a multiple of the refresh interval, so 34 ms of work and 49 ms
-        // of work both report 50. A matrix taken under vsync produced "removing work made it
-        // slower", which is the shape that gave it away.
+        // Timing runs require --no-vsync; FIFO quantizes frame periods to refresh intervals and can
+        // reverse small A/B differences.
         if (cmdArgs.Contains("--no-vsync")) { startUnsynced = true; vk.VsyncEnabled = false; }
         // --shot <path>: render --shot-frames frames, write the ambient-visibility buffer and the
         // tonemapped scene beside it, and close. Headless in the sense that matters — nobody has
@@ -277,10 +230,7 @@ internal sealed partial class SponzaLoop
         // target only ever sampled .rgb by tonemap. No alpha (glass blends with
         // source alpha, which needs no dst-alpha channel).
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.R11G11B10F, fullSize);
-        // <b>Two, because a resolve cannot sample the target it writes.</b> Every other history in
-        // this renderer is read from a resource a LATER pass overwrites, which ReadHistory covers
-        // with one declaration. A temporal resolve is the exception: its input and its output are
-        // the same image one frame apart, so the pair has to exist and the passes have to alternate.
+        // TAA ping-pongs because each resolve samples prior output while writing the next image.
         for (var i = 0; i < 2; i++)
             taaHandles[i] = graph.ColorTarget($"taa{i}", TextureFormat.R11G11B10F, fullSize);
         // MSAA colour + depth the lit pass renders into; resolves to hdr.
@@ -326,15 +276,9 @@ internal sealed partial class SponzaLoop
         var shadowOpaqueInterface = Reflect("shadow.vert", "shadow.frag");
         var shadowMaskInterface = Reflect("shadow_mask.vert", "shadow_mask.frag");
 
-        // <b>Every reader of the Frame block must agree where its members are.</b> Five shaders
-        // declare set 0 binding 0, each naming only the part it reads — legal, because std140
-        // offsets are positional, and the reason the skybox can reach uFog past the whole tune tail
-        // with one layout(offset=). What makes that safe is this check and nothing else: get the
-        // offset wrong by a vec4 and the sky fogs itself by the shadow strength, with no validation
-        // error and no crash. MergeStages only reconciles the stages WITHIN a program; two
-        // programs' idea of the same UBO is exactly what it cannot see.
-        // probe_debug is deliberately absent: it declares its OWN block at set 0 binding 0, on its
-        // own pipeline and its own buffer, which shares nothing with this one but the slot.
+        // Programs sharing the frame buffer must agree on reflected std140 offsets across program
+        // boundaries; stage merging validates only one program at a time. Probe debug is excluded
+        // because its set-0 block is a separate buffer on a separate pipeline.
         AssertFrameBlockAgrees(litInterface, ("skybox", skyInterface));
 
         // Scan lit.frag's //@tune decorators (shipped alongside the .spv) and
@@ -376,8 +320,8 @@ internal sealed partial class SponzaLoop
         var injectInterface = Reflect("sky_inject.comp");
         injectPassHandle = graph.ComputePass("sky-inject").Shader(injectInterface).Handle;
 
-        // After the depth pre-pass, because it reads what that pass wrote. Its marks are consumed by
-        // the NEXT frame's injection — one frame of latency on a field that refreshes over 32.
+        // Samples the previous frame's resolved depth: declaration order puts this before the
+        // current frame's depth pre-pass. Its marks are consumed by the NEXT frame's injection.
         usageInterface = Reflect("probe_usage.comp");
         probeUsagePassHandle = graph.ComputePass("probe-usage").Shader(usageInterface).Handle;
 
@@ -399,28 +343,22 @@ internal sealed partial class SponzaLoop
         // 8-bit one quantises the IBL lookup into visible facets on a smooth curved surface.
         // Only under MSAA: at one sample the depth target is already what a reader wants.
         if (MsaaSamples > 1) depthResolveHandle = graph.DepthTarget("scene-depth-1x", fullSize);
-        // <b>HALF resolution, and the measurement is what decided it.</b> At full res the horizon
-        // search alone measured ~50 ms against a 49.8 ms baseline for the whole rest of the frame —
-        // it doubled the picture's cost. Quartering the pixels quarters that. The argument against
-        // half res was that it needs a bilateral upsample and reconstruction should not creep in,
-        // and that argument was wrong: the denoise below is already a spatial filter, and the house
-        // rule bans TEMPORAL reconstruction, which neither of these is.
+        // GTAO defaults to half resolution: the full-resolution horizon search measured about 50 ms
+        // against a 49.8 ms rest-of-frame baseline. Bilateral denoise restores full-size output
+        // without introducing temporal reconstruction.
         ambientHandle = graph.ColorTarget(
             "ambient-visibility", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(aoScale));
         ambientDenoisedHandle = graph.ColorTarget("ambient-visibility-denoised", TextureFormat.Rgba16F, fullSize);
 
-        // <b>The incident-light field, at the frequency of the volume rather than the display.</b>
-        // rgb = bounced radiance, a = baked sky visibility. Rgba16F for the same reason the ambient
-        // buffer is: this is HDR radiance, and an 8-bit one would band a smooth interior wash.
-        // incidentScale 1 restores full resolution for the A/B, without the pass moving.
+        // Incident light is evaluated at volume frequency: rgb is bounce and a is baked sky
+        // visibility. Rgba16F preserves HDR gradients; incidentScale 1 is the full-resolution arm.
         incidentHandle = graph.ColorTarget(
             "incident-light", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(incidentScale));
         incidentFullHandle = graph.ColorTarget("incident-light-full", TextureFormat.Rgba16F, fullSize);
 
-        // <b>The pre-pass stopped being depth-only.</b> It already rasterises every surface whose
-        // normal the half-res incident field was guessing at from depth, and guessing measured
-        // 5.31 mean sRGB against the lit pass. Rgba16F rather than Rgba8 for the reason the ambient
-        // buffer gives: a direction quantised to 8 bits puts visible facets on smooth curvature.
+        // The pre-pass writes geometric normals for incident reconstruction instead of inferring
+        // them from depth. That inference measured 5.31 mean sRGB error. Rgba16F avoids directional
+        // quantization on smooth curvature.
         prepassNormalHandle = graph.ColorTarget(
             "prepass-normal", TextureFormat.Rgba16F, fullSize, samples: MsaaSamples);
         if (MsaaSamples > 1)
@@ -464,10 +402,8 @@ internal sealed partial class SponzaLoop
         // Reads every pyramid level: which one a tap lands on depends on how far it steps, so all
         // of them are inputs and the graph orders the whole chain ahead of this pass.
         for (var level = 0; level < HiZLevels; level++) gtaoBuilder = gtaoBuilder.Read(hiZHandles[level]);
-        // <b>Declared as a READ of the target the denoise writes later this frame.</b> Ordering is
-        // what makes that sound rather than circular: this pass is declared first, so it samples
-        // the previous frame's contents, and the denoise overwrites them afterwards. Without the
-        // declaration the graph would not know to transition the layout or order the two.
+        // ReadHistory samples the prior denoised target before this frame's denoise overwrites it;
+        // the graph owns the required ordering and layout transition.
         gtaoBuilder = gtaoBuilder.ReadHistory(ambientDenoisedHandle);
         gtaoPassHandle = gtaoBuilder.Shader(gtaoInterface).Handle;
 
@@ -481,8 +417,8 @@ internal sealed partial class SponzaLoop
             .Handle;
 
         // Between the depth it unprojects and the lit pass that reads it. It also reads the bounce
-        // atlas the injection dispatch writes, but that is a compute dispatch outside the graph's
-        // ordering, exactly as the lit pass's own read of it is.
+        // atlas the injection dispatch writes. That atlas is device-owned rather than a graph
+        // resource, so declaration order carries this dependency without a graph edge.
         incidentPassHandle = graph.GraphicsPass("incident-light")
             .Target(incidentHandle, LoadOp.Clear, StoreOp.Store)
             .Read(SampleableSceneDepth)
@@ -535,14 +471,15 @@ internal sealed partial class SponzaLoop
                 .Handle;
         }
         graph.Compile();
+        graphResourceGeneration = graph.MatchSwapchainResourceGeneration;
 
         // --- Shader programs + pipelines --------------------------------
         // shaderDir was resolved above (reflection sidecars live alongside the .spv).
         var litVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "lit.vert.spv"));
         var litFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "lit.frag.spv"));
         litProgram = vk.CreateShaderProgramFromSpv(litVertSpv, litFragSpv, litInterface, "lit");
-        // Opaque + Mask share the no-blend pipeline group. Depth is now
-        // LessEqual + NO write: the depth pre-pass already wrote the complete
+        // Opaque + Mask share the no-blend pipeline group. Depth is
+        // LessEqual with writes disabled: the depth pre-pass already wrote the complete
         // scene depth, so the lit pass only shades the front-most fragment
         // (overdraw killed). Mask materials trigger the discard branch via the
         // per-material UBO's alphaCutoff > 0; opaque materials leave it at 0.
@@ -620,8 +557,8 @@ internal sealed partial class SponzaLoop
             DepthState.LessEqualWrite, RasterizerState.NoCulling,
             Array.Empty<BlendState>(), cascadePassHandles[0], "shadow.mask");
 
-        // Depth pre-pass pipelines — lit.vert (shared → invariant depth) + a
-        // trivial fragment, depth-only into the 4× MSAA pre-pass surface. No
+        // Depth + normal pre-pass pipelines — lit.vert (shared → invariant depth) plus fragments
+        // that write the interpolated world normal into the matching colour target. No
         // culling: solid geometry's nearest face still wins the depth test
         // (matching lit's back-cull front face), and double-sided geometry
         // always writes depth from either view side so the sky never overdraws
@@ -629,7 +566,7 @@ internal sealed partial class SponzaLoop
         // Flat preview pipeline (streamed-load phase): lit.vert + flat.frag, lit
         // surface, depth-test no-write (the pre-pass wrote depth). Reuses
         // litInterface; flat.frag samples nothing, so set1/set2 stay unbound (as
-        // with the trivial pre-pass program).
+        // with the pre-pass programs).
         var flatFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "flat.frag.spv"));
         flatProgram = vk.CreateShaderProgramFromSpv(litVertSpv, flatFragSpv, litInterface, "flat");
         flatPipeline = Pipeline(flatProgram, VertexPosition3NormalTangentTexture.Layout,
@@ -661,12 +598,8 @@ internal sealed partial class SponzaLoop
 
         var gtaoFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "gtao.frag.spv"));
         gtaoProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, gtaoFragSpv, gtaoInterface, "gtao");
-        // <b>Through Pipeline(), so it carries graph.GetPassSurface(gtaoPassHandle).</b> Built the
-        // way the PRESENT pipeline is built — vk.CreatePipeline with no RenderTarget — it compiled,
-        // bound, and drew its triangle, and the target came back every pixel zero: present is
-        // recorded straight on the command list against the swapchain, so its pipeline needs no
-        // pass surface, and copying that shape into a GRAPH pass silently produces a pipeline
-        // compatible with the wrong render pass.
+        // Graph-pass pipelines must be created against the pass surface. Swapchain-present
+        // pipelines have no graph render target and are not compatible here.
         gtaoPipeline = Pipeline(gtaoProgram, VertexPosition3NormalTexture.Layout,
             DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled }, gtaoPassHandle, "gtao");
@@ -763,8 +696,8 @@ internal sealed partial class SponzaLoop
             $"[VulkanSponza] froxel grid {froxelGridX}x{froxelGridY}x{froxelGridZ} " +
             $"({FroxelPixels} px/froxel at {fbW}x{fbH})");
 
-        // Build the per-frame-constant buffers once (graph compiled + all
-        // textures created by now). Reused every frame in OnRender.
+        // Build the per-frame-constant buffers after graph compilation and texture creation. Reuse
+        // them every frame in OnRender.
         identityPush = ModelPushBytes(Matrix4x4.Identity);
         passBindings = new[]
         {
@@ -816,12 +749,8 @@ internal sealed partial class SponzaLoop
         {
             ("main", gltfPath, "models/sponza_main"),
         };
-        // <b>--no-foliage prices the cutouts, which no --ab arm can.</b> The arms toggle shading
-        // terms inside a draw; the cost of alpha-cutout geometry is that it DISCARDS, which turns
-        // off early-Z and makes every leaf card shade what is behind it — in the pre-pass, the lit
-        // pass and all three cascades. That is not a term to switch off, it is geometry not to
-        // load, and the measured baseline says it is worth roughly half the frame: 60 fps
-        // elsewhere, 30 with the tree in view, 20 moving.
+        // --no-foliage excludes cutout geometry from every pass. A uniform A/B cannot price discard,
+        // overdraw, pre-pass work, and all shadow cascades together; the pack-level arm can.
         AddOptionalPackPath(packsToParse, assetsRoot, "curtains", "addons/curtains");
         if (!noFoliage)
         {
@@ -873,30 +802,14 @@ internal sealed partial class SponzaLoop
         return true;
     }
 
-    // IBL: prefer a cooked .blixprobe baked from an HDR sky (real GGX importance-
-    // sampled specular + cosine irradiance + split-sum BRDF LUT, RGBA16F), else
-    // the procedural analytic-sky bake (vanilla checkout that hasn't cooked one).
-    // Preference: autumn_field (has a sun → high light/dark contrast for punchy
-    // shadows; we align our directional sun to its detected sun) → rogland
-    // overcast (sunless ambient, our own sun) → old sky → procedural. Sun
-    // alignment is automatic: HdrSunFinder returns null for skies with no clear
-    // sun, so we only align when the probe actually has one.
+    // IBL prefers a cooked .blixprobe, then any probe in the texture directory, and finally the
+    // procedural sky. DefaultProbeCandidates defines the named order. Detected probe suns align
+    // direct light automatically unless --sun-authored opts out.
     private void LoadIbl(string assetsRoot)
     {
-        // <b>pizzo_pernice leads, and the ordering rule changed with it.</b> kloppenheim led because
-        // it was cooked TO an authored sun direction — rotated with --yaw=-31.43 so its disc landed
-        // where a hand-tuned directional light already pointed. That is backwards: it makes the sky
-        // serve the light instead of being it, and every other HDRI then lights the scene from a
-        // place its own sun is not. The sun direction now comes from whichever sky is loaded
-        // (--sun-authored opts out), so a probe no longer has to be turned to fit.
-        //
-        // Measured on this one: the sun finder puts it at elevation 53.0 deg, and integrating the
-        // raw equirect independently puts it at 53.1. Its irradiance round-trips to within 0.5% —
-        // cook records 5.69 perpendicular, direct integration gives 5.66 — so measuring the sun out
-        // of the sky and handing it back as a directional light loses nothing.
-        // <b>--probe <name> puts a sky ahead of the list without editing the list.</b> Trying a new
-        // HDRI meant changing a hardcoded preference, which is a code edit for what is entirely a
-        // choice of asset — and it made comparing two skies a rebuild rather than a flag.
+        // --probe places an explicit asset ahead of the default preference list without requiring a
+        // rebuild. Pizzo Pernice is the standard first choice; its detected sun direction and
+        // irradiance independently round-trip to the source HDR within the recorded tolerance.
         string[] probeCandidates = probeName is { Length: > 0 }
             ? new[] { probeName.EndsWith(".blixprobe", StringComparison.Ordinal) ? probeName : probeName + ".blixprobe" }
                 .Concat(DefaultProbeCandidates).ToArray()
@@ -905,11 +818,8 @@ internal sealed partial class SponzaLoop
         var probePath = probeCandidates
             .Select(p => Path.Combine(probeDir, p))
             .FirstOrDefault(File.Exists)
-            // <b>Then ANY probe in the directory, because a named list silently ignores one you
-            // cooked.</b> The three names above are a real preference — the first has a sun to align
-            // the directional light to, the second deliberately has none — so they keep priority.
-            // What they should not do is send a person back to the procedural sky while a perfectly
-            // good .blixprobe sits beside them under a name nobody hardcoded.
+            // Named preferences win; otherwise use the first cooked probe rather than falling back
+            // to procedural lighting while a valid asset is available.
             ?? (Directory.Exists(probeDir)
                 ? Directory.EnumerateFiles(probeDir, "*.blixprobe").OrderBy(f => f, StringComparer.Ordinal).FirstOrDefault()
                 : null);
@@ -958,11 +868,8 @@ internal sealed partial class SponzaLoop
                     $"yaw {sunYaw * 180f / MathF.PI:0.0} deg)");
             }
 
-            // <b>And its brightness comes from the same measurement.</b> The probe reports the
-            // irradiance the sun actually delivers in the HDR's units, and the bake removed that
-            // disc from the diffuse and specular integrals — so the sun arrives once, in the same
-            // units as the sky. The scale that used to sit between them is not tuned to a better
-            // value here; it no longer exists.
+            // Use the probe's measured sun irradiance. The bake removes that disc from IBL so the
+            // directional sun and remaining sky contribute once in the same units.
             if (baked.Probe.SunIrradiance is { } measured)
             {
                 sunIrradiance = measured;
@@ -990,18 +897,10 @@ internal sealed partial class SponzaLoop
         if (asset is not null) packs.Add((packDirName, asset, assetId));
     }
 
-    /// <summary>The pack's model file: a cooked <c>.blixmesh</c> when there is one, else the glTF.</summary>
+    /// <summary>Returns the pack's cooked mesh when present, otherwise its source glTF.</summary>
     /// <remarks>
-    /// <b>Cooked FIRST, and that ordering is the point rather than an optimisation.</b> A cooked
-    /// mesh now carries its own materials and an image table saying where every texture lives, so a
-    /// pack directory holding nothing but a <c>.blixmesh</c> and its <c>.blixtex</c> files is a
-    /// complete, loadable pack. Globbing for <c>*.gltf</c> first would have found nothing in exactly
-    /// the layout the cook exists to produce — 6.3 GB of main Sponza becomes 1.6 GB, and the glTF
-    /// and its 133 MB buffer are not part of it.
-    /// <para>
-    /// The glTF fallback stays for an uncooked checkout, which is still a supported way to run this.
-    /// The importer takes either path and reports which one it took.
-    /// </para>
+    /// A cooked pack is self-contained through <c>.blixmesh</c> material/image metadata and sibling
+    /// <c>.blixtex</c> files. Source glTF remains a supported fallback for uncooked checkouts.
     /// </remarks>
     private static string? FirstAsset(string packDir) =>
         Directory.EnumerateFiles(packDir, "*.blixmesh", SearchOption.TopDirectoryOnly).FirstOrDefault()
@@ -1021,14 +920,8 @@ internal sealed partial class SponzaLoop
 
     /// <summary>Loads the baked sky-visibility volume, if the pack ships one.</summary>
     /// <remarks>
-    /// <b>Optional, and a scene without one looks exactly as it did.</b> The shader gates on
-    /// uSkyMin.w, so a missing volume means every surface sees a full sky — the behaviour that was
-    /// there before this existed. A renderer that refuses to start because an optional bake is
-    /// absent has turned an improvement into a dependency.
-    ///
-    /// Still bound when absent: a descriptor with no texture is a validation error, so a 1x1x1
-    /// volume of "sees everything" stands in. That keeps the binding table uniform rather than
-    /// making every consumer branch on whether the slot exists.
+    /// This bake is optional. When absent, identity volumes keep descriptors valid and describe a
+    /// fully visible sky, preserving a uniform binding layout across both paths.
     /// </remarks>
     private void LoadSkyVisibility(string assetsRoot)
     {
@@ -1082,31 +975,18 @@ internal sealed partial class SponzaLoop
                         albX = volume.AlbedoX; albY = volume.AlbedoY; albZ = volume.AlbedoZ;
                         albedoCpu = volume.Albedo;
                         albCpuX = albX; albCpuY = albY; albCpuZ = albZ;
-                        // <b>Nearest, now that this grid matches the occupancy grid one to one.</b>
-                        // The march reports the occupancy cell it struck, and that cell has exactly
-                        // one colour — there is nothing between cells to interpolate toward except
-                        // the empty space around the surface. Linear filtering was tolerable while
-                        // the grid was half resolution and its cells were fat; at full resolution
-                        // the surface is a one-cell shell filling 5% of the volume, so every tap
-                        // pulled in void and neighbouring materials, which made the colour bleeding
-                        // worse rather than better.
+                        // Albedo is one-to-one with occupancy cells. Nearest sampling preserves the
+                        // struck cell's material instead of mixing the one-cell surface shell with
+                        // empty space or neighbouring materials.
                         albedoTexture = vk.CreateTexture3D(
                             albX, albY, albZ, TextureFormat.Rgba8,
                             SamplerDescription.NearestClamp, volume.Albedo!, "sponza.albedo");
                         Console.WriteLine(
                             $"[VulkanSponza]   albedo {albX}x{albY}x{albZ} ({volume.Albedo!.Length / 1024.0 / 1024.0:0.00} MB), so the bounce carries surface colour.");
                     }
-                    // <b>Half the visibility grid, and --bounce-div makes that a question.</b> The
-                    // bounce field was measured to be far higher-frequency spatially than this
-                    // lattice can carry: over 14,072 neighbouring probe pairs at 1.57 m, 29% differ
-                    // by more than 2x, p90 is 5.15x and p99 is 25.7x. Nothing in the WEIGHTING can
-                    // reconstruct a signal that coarse, which is why crushing the cutoff, changing
-                    // the normalisation and storing variance all failed to touch the banding.
-                    //
-                    // Going octahedral traded space for angle -- 41k probes to 5k, with 36 angular
-                    // samples each. This flag walks part of that back so the trade can be measured
-                    // rather than assumed: --bounce-div 1 puts the bounce on the visibility grid's
-                    // own spacing, about 0.8 m, at eight times the probe count.
+                    // --bounce-div controls the spatial side of the atlas trade-off independently
+                    // from its 36 directional samples. A divisor of one matches the visibility
+                    // grid's roughly 0.8 m spacing; total solve cost scales cubically per axis.
                     bounceX = Math.Max(2, (int)MathF.Round(probeX / bounceDiv));
                     bounceY = Math.Max(2, (int)MathF.Round(probeY / bounceDiv));
                     bounceZ = Math.Max(2, (int)MathF.Round(probeZ / bounceDiv));
@@ -1136,10 +1016,7 @@ internal sealed partial class SponzaLoop
                     $"[VulkanSponza] sky visibility: {Path.GetFileName(path)} " +
                     $"{volume.SizeX}x{volume.SizeY}x{volume.SizeZ} probes, " +
                     $"min {volume.Min} span {span} invSpan {skyVolumeInvSpan}");
-                // <b>The gate, not just the load.</b> This line reported that the volume was READ,
-                // which is true whether or not a shader will ever sample it — so it read identically
-                // in the configuration where every surface sees a full sky. What a reader needs to
-                // know is whether the term is live.
+                // Report shader participation, not merely successful file I/O.
                 Console.WriteLine(
                     skyVisibilityEnabled && !skipSkySample
                         ? "[VulkanSponza]   sampled: sky visibility LIVE, bounce LIVE."
@@ -1157,12 +1034,7 @@ internal sealed partial class SponzaLoop
                     var cx = Math.Clamp((int)(t.X * volume.SizeX), 0, volume.SizeX - 1);
                     var cy = Math.Clamp((int)(t.Y * volume.SizeY), 0, volume.SizeY - 1);
                     var cz = Math.Clamp((int)(t.Z * volume.SizeZ), 0, volume.SizeZ - 1);
-                    // <b>The cell stride is FloatsPerCell, and hardcoding 4 made this read every
-                    // third cell.</b> It was 4 when a cell held L0 plus three L1 terms; the L2 band
-                    // took it to 12 and this line did not follow, so the probe reported a point 18 m
-                    // in open air as seeing 0.9% of the sky. An instrument that disagrees with the
-                    // renderer by a factor of ten is worse than no instrument, because it gets
-                    // quoted. Derived from the format now, so the two cannot drift again.
+                    // Derive cell stride from the format so CPU diagnostics follow SH band changes.
                     var o = ((cz * volume.SizeY + cy) * volume.SizeX + cx) * BlixSkyVolume.FloatsPerCell;
                     var l0 = volume.Coefficients[o];
                     var l1 = new Vector3(volume.Coefficients[o + 1], volume.Coefficients[o + 2], volume.Coefficients[o + 3]);

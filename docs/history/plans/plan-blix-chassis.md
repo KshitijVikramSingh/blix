@@ -1,5 +1,9 @@
 # Blix chassis — reshaping the engine for ambitious applications
 
+> **Archived 2026-09-21 — completed.** This records the application, host,
+> diagnostics, and view reshape that later arcs built upon. See `docs/plans.md`
+> and the focused current documentation for the resulting surfaces.
+
 > Branch `view-first-class`. First arc of a larger reshape.
 
 The goal is not to cut duplication. It is to change the **shape** of Blix so that

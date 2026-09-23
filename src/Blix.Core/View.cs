@@ -79,7 +79,7 @@ public readonly record struct ViewId(int Id)
 /// route debug geometry into it. That split was settled by the toolchain lab's embedded viewport — two
 /// stages of a real consumer, and the table's location caused it no friction at all. What DID bite was
 /// timing (a view is declared before UI layout and consumed during it), which moving the table would not
-/// have helped. See <c>plan-blix-view.md</c> stage D.
+/// have helped. See <c>docs/history/plans/plan-blix-view.md</c> stage D.
 /// </para>
 /// <para>
 /// Not thread-safe, and not meant to be: views are declared from the frame that draws them.

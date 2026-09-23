@@ -168,7 +168,7 @@ symmetry) and **AH.7** (`WorldMatrix` through the GLSL `M*v` path).
   The cooked pipeline is what the streaming target uses, not a blanket
   requirement. What is non-negotiable is the *boundary* (no third-party type
   leaks past import) and that the runtime can **explain** what it loaded
-  (`blix-cook inspect`).
+  (`blix inspect`).
 
 **Enforced by:** [`blix.md` §glTF import + §Project dependencies](blix.md) ·
 [`architecture.md`](architecture.md) (cooked-asset pipeline) ·
@@ -217,9 +217,9 @@ pose).
   id. The one `ViewTable` lives on `DebugState` and exists to **group across
   frames**: which debug commands belong to which picture, which trail remembers
   which points. Build a declaration to point at a picture; intern a name only to
-  ask diagnostics to route geometry into it. (Settled by the toolchain lab's
+  ask diagnostics to route geometry into it. (Settled by Studio's
   embedded viewport — two stages of a real consumer, no friction from the
-  table's location. `plan-blix-view.md` §D.)
+  table's location. `history/plans/plan-blix-view.md` §D.)
 
 - **Decomposing an application and extracting a library are different bars.**
   Moving code into a shared library needs a *second consumer* wanting the same
@@ -231,7 +231,7 @@ pose).
 
 **Enforced by:** [`architecture.md` §"Library, not framework"](architecture.md)
 · [`architecture.md` §"How an application is put together"](architecture.md)
-· the *Proves / Owns* header block on each `src/Blix.Demos.*/Program.cs` · the
+· the *Proves / Owns* header block on each `src/Demos/Blix.Demos.*/Program.cs` · the
 *Deliberate limits* sections throughout [`blix.md`](blix.md).
 
 ---
@@ -405,6 +405,32 @@ capability?"* — a question about abstraction, not about permission.
 
 ---
 
+## 9. Comments describe the contract; records preserve the journey
+
+- **Keep a source comment when it explains something the code cannot:** a present ownership
+  boundary, invariant, unit, lifetime, failure mode, or reason a tempting alternative is unsafe.
+- **Write that explanation in the present tense.** “This handle stays stable while mips arrive” is
+  a contract. A diary of the bug that led there belongs in a dated report, completed plan, commit,
+  or regression test.
+- **Keep measurements only while they govern behaviour.** Name the conditions and provenance when
+  a threshold, budget, or default still depends on them. Move one-off censuses and comparisons to
+  [`reports.md`](reports.md); move completed implementation arcs to [`plans.md`](plans.md).
+- **Do not let prose substitute for enforcement.** A compatibility requirement belongs in a test,
+  refusal, assertion, type, or build dependency where one is practical; the nearby comment explains
+  why that mechanism exists.
+- **Headers state current ownership and usage.** They do not recount which file a type used to live
+  in, how many copies preceded an extraction, or which development session discovered the issue.
+
+The test is simple: could a future maintainer act correctly from the comment without reconstructing
+the chronology? If yes, keep it near the code. If the chronology is the useful part, preserve it as
+history and link to it from the current documentation only when it still answers a live question.
+
+**Enforced by:** current-contract comments in `Directory.Build.targets`, `Blix.Recipes/MeshRecipe.cs`,
+and `Blix.Tools.Studio/StudioRenderer.cs` · historical destinations indexed by
+[`plans.md`](plans.md) and [`reports.md`](reports.md).
+
+---
+
 ## Where the surface stands
 
 Blix now reaches across the corners it set out to cover — rendering,
@@ -415,7 +441,7 @@ is the milestone worth naming.
 The **application chassis** is the more recent one: an application now gets a window,
 its own interface, named views, retained trails, picking into any of them, shared
 shader compilation, shared arguments and a bounded run without restating any of it —
-and `src/Blix.Demos.Chassis/` is the proof, at 25 lines of project file and no shaders
+and `src/Demos/Blix.Demos.Chassis/` is the proof, at 25 lines of project file and no shaders
 of its own. The layering that made room for it is unchanged; what moved was the set of
 things a single executable was assumed to own. It is **not** a stability promise: the principles
 above are frozen, but signatures still move, a primitive may be reshaped, and a

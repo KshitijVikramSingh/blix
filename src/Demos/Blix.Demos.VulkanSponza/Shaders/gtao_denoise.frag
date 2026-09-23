@@ -11,17 +11,8 @@
 // them is read at FULL res, which is what makes this an upsample rather than a blur: each output
 // pixel asks its own depth which of the coarse neighbours belong to it.
 //
-// <b>This is not optional polish; an 8-slice estimate is noisy by construction.</b> GTAO samples a
-// few directions per pixel and rotates them per pixel, so on a surface whose true occlusion is
-// smooth, neighbouring pixels return a few different discrete answers. Unfiltered, that reads as a
-// stipple on flat walls and as cell-shading on anything softly curved — a curtain fold steps
-// between values instead of sweeping through them.
-//
-// <b>Spatial, and that distinction is the house rule rather than a detail.</b> The usual fix is to
-// accumulate over frames, which makes the picture depend on the ones before it — the thing this
-// renderer refuses. Averaging a NEIGHBOURHOOD costs the same information-theoretically (16 nearby
-// estimates of the same quantity) and costs nothing in history: throw every previous frame away and
-// this one is still correct.
+// The low-tap GTAO estimate is noisy by construction. This spatial pass supplies a stable current
+// frame before temporal accumulation adds longer-term convergence.
 //
 // Edge-aware, because the one thing a blur must not do is average across a silhouette. Two pixels
 // belong to the same surface when their depths agree RELATIVE to how far away they are — a 5 cm
@@ -79,24 +70,15 @@ void main() {
             vec2 at = vUv + vec2(float(x), float(y)) * d.uTarget.zw;
             float sampleDepth = viewDepth(at);
 
-            // <b>A smooth weight, because a binary one draws the grid it samples on.</b> This was
-            // `abs(dz) < tolerance ? 1 : 0`, and with the source at half resolution that admits a
-            // different set of coarse taps for each full-res pixel — switching on the half-res grid,
-            // which is a checkerboard painted over every flat surface. Nothing about the surface
-            // changes at those boundaries; only the kernel did.
-            //
-            // Relative depth, with a floor so near-camera geometry does not get an absurdly tight
-            // tolerance: a 5 cm step is a different surface at 1 m and the same one at 50 m.
+            // Smooth relative-depth weighting avoids exposing the half-resolution sampling grid.
+            // The floor prevents an impractically tight tolerance near the camera.
             float tolerance = max(0.02 * centreDepth, 0.01);
             float dz = (sampleDepth - centreDepth) / tolerance;
             float depthWeight = exp2(-dz * dz);
             // Spatial falloff as well, so the kernel has no hard edge of its own.
             //
-            // <b>0.5, and tightening it does not buy detail.</b> Swept to 1.5 and 4.0 chasing curtain
-            // folds: high-frequency content on the cloth rose 0.00800 -> 0.01693, but it rose on flat
-            // stone by the same factor, leaving the signal-to-noise ratio flat at 1.44 / 1.39 / 1.45.
-            // Sharpening a filter amplifies what is under it; it does not separate structure from
-            // noise. Full-resolution AO is worse by the same measure (1.11) for four times the cost.
+            // The 0.5 falloff retained the best measured signal-to-noise ratio; tightening amplified
+            // cloth detail and stone noise together.
             float spatialWeight = exp2(-0.5 * float(x * x + y * y));
             float weight = depthWeight * spatialWeight;
 

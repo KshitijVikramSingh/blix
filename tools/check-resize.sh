@@ -4,7 +4,7 @@
 # <b>The instrument for a class of bug nothing else here can see.</b> A swapchain resize
 # reallocates every matchSwapchain-sized graph resource and rebuilds the framebuffers that point at
 # them, and getting that wrong fails LATER — vkAcquireNextImageKHR with ErrorDeviceLost, several
-# frames on, with no validation message and no stack that names the resize. The lab baseline cannot
+# frames on, with no validation message and no stack that names the resize. The Studio baseline cannot
 # see it: every capture is a fixed-size bounded run that never resizes.
 #
 # Drives the window through System Events, so it needs Accessibility permission for the terminal.

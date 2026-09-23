@@ -55,14 +55,8 @@ internal sealed partial class SponzaLoop
     {
         // Cmd+C toggles this; Debug() runs unconditionally so it re-applies.
         debug.State.Enabled = overlayEnabled;
-        // <b>The read-only half runs whether or not anybody is looking at it.</b> This used to be
-        // a bare early return, so with the panel hidden (Cmd+C) NOTHING was emitted — and an F12
-        // frame dump taken in that state came back with two values and zero controls. A dump whose
-        // whole job is to record the state that produced a frame was blank in exactly the case
-        // where the state could not be read off the screen instead.
-        //
-        // Controls and gizmos still stop: a control is an input, and the debug-line pass renders
-        // whatever is queued, so the cascade and sun gizmos would linger after hiding the overlay.
+        // Read-only values run even with the overlay hidden so F12 captures remain self-describing.
+        // Controls and gizmos stop here because they are interactive or feed the debug-line pass.
         ReportValues(debug);
         if (!overlayEnabled) return;
 
@@ -70,11 +64,8 @@ internal sealed partial class SponzaLoop
         // value feeds this frame's render (Debug() runs before OnRender).
         using (debug.Scope("Camera"))
         {
-            // <b>Pasteable straight back in as --cam, and that is the whole point.</b> Every number
-            // measured tonight came from the measurement orbit, because the orbit was the only
-            // viewpoint anything could be replayed at — so a defect seen from the chair and a
-            // measurement taken headless were never about the same pixels. Three wrong conclusions
-            // came out of that gap. An F12 dump now carries the viewpoint that produced the frame.
+            // Keep the camera value pasteable as --cam so an observed frame can be replayed by the
+            // headless measurement and capture paths.
             debug.Values.Value("--cam", string.Create(System.Globalization.CultureInfo.InvariantCulture,
                 $"{cameraPosition.X:0.##},{cameraPosition.Y:0.##},{cameraPosition.Z:0.##}," +
                 $"{camYaw * 180f / MathF.PI:0.##},{camPitch * 180f / MathF.PI:0.##}"));
@@ -88,8 +79,7 @@ internal sealed partial class SponzaLoop
             sunStrength = debug.Controls.Float("Strength (x measured)", sunStrength, 0f, 8f);
             UpdateSunDirection();
         }
-        // Shadows + Render scopes are now [Tune]-tagged settings objects
-        // (ShadowsSettings / RenderSettings), auto-paneled by tuneObjects below.
+        // ShadowsSettings and RenderSettings are [Tune]-tagged and auto-paneled below.
         // Shader-uniform tunables (//@tune in lit.frag): sun/ambient intensity,
         // metallic/normal/slope/glass thresholds, indirect-shadow base/range,
         // cascade-viz. Auto-built + read back here — grouped by their UBO block.
@@ -133,35 +123,24 @@ internal sealed partial class SponzaLoop
         using (debug.Scope("Render"))
         {
             vk.VsyncEnabled = debug.Controls.Toggle("Vsync", vk.VsyncEnabled);
-            // <b>Named, because a number is not a control.</b> Ten channels behind a 0..9 slider
-            // meant the only way to know what 7 was involved reading the shader, which makes the
-            // person at the keyboard — the one who can actually see the image — the one least able
-            // to use the instrument. Controls.Enum has existed the whole time.
+            // Visualization channels are named here and share the shader's stable integer IDs.
             vizChannel = debug.Controls.Enum("Show", (int)MathF.Round(vizChannel), VizChannelNames);
             // Outlines every opaque primitive NOT at full detail, tinted by how coarse it is, and
             // flashes white the moment one switches level. The question this answers is not "how
             // much does LOD save" — the A/B answers that — but "which piece of wall was it".
             showLodBoxes = debug.Controls.Toggle("Show LOD levels", showLodBoxes);
-            // <b>Live, because this one has to be judged by eye and not by a number.</b> The field
-            // and the inline path differ by 1.29 mean sRGB, which is small enough that a pair of
-            // screenshots taken minutes apart cannot settle it and twice already has not. Flipping
-            // it under a still camera puts both on the same retina a second apart.
-            //
-            // The resolution stays a launch flag (--incident-scale): the target's size is fixed
-            // when the graph compiles. The error barely moves with it anyway — 5.32 at half and
-            // 5.45 at full, back when the normal was the thing being measured.
+            // Toggle the incident field under a still camera for direct visual comparison with the
+            // inline path. Its allocation scale remains a launch flag because graph resources are
+            // fixed at compile time.
             incidentField = debug.Controls.Toggle("Half-res incident field", incidentField);
         }
 
-        // The indirect solve's cost is rays x probes x march, divided by period, and every one of
-        // those was a compile-time constant measured by rebuilding between runs. That is how the
-        // grid's density grade stayed thrown away on this side for as long as it did: the two
-        // readings were never on screen at the same time. They are controls now.
+        // Expose the indirect solve's rays, refresh period, and occupancy interpretation together
+        // so their cost and image effect can be compared within one run.
         if (skyVisibilityEnabled)
         {
-            // <b>What one probe holds, with nothing multiplied into it.</b> An indirect term reaches
-            // the eye only after albedo, AO and visibility have each taken a share, so "the bounce
-            // looks weak" and "the bounce IS weak" were indistinguishable from the image alone.
+            // Display raw per-probe fields before material albedo, AO, and visibility attenuate the
+            // indirect contribution seen by the camera.
             using (debug.Scope("Probes"))
             {
                 showProbes    = debug.Controls.Toggle("Show probes", showProbes);
@@ -174,20 +153,16 @@ internal sealed partial class SponzaLoop
             using (debug.Scope("Indirect"))
             {
                 injectDensity = debug.Controls.Toggle("Density march", injectDensity);
-                // 256 is the ceiling — the workgroup is 256 lanes and each marches one ray. The
-                // range stopped at 64 because the value was inert; a dial that does nothing can
-                // have any range at all.
+                // 256 is the ceiling: the workgroup has 256 lanes and each marches one ray.
                 injectRays    = debug.Controls.Float("Rays / probe", injectRays, 8f, 256f);
                 injectPeriod  = debug.Controls.Float("Refresh period", injectPeriod, 4f, 64f);
                 injectTranslucency = debug.Controls.Float("Translucency", injectTranslucency, 0f, 1f);
-                // 0 = never sleep, which is the honest A/B against everything before this.
+                // Zero disables sleeping and supplies the full-grid A/B baseline.
                 probeSleepFrames = MathF.Round(debug.Controls.Float("Sleep after (frames)", probeSleepFrames, 0f, 600f));
             }
 
-            // The two cloth numbers were guesses written into a patch file, and a patch is cooked —
-            // so judging them meant a re-cook per attempt, which is not judging. These override the
-            // cooked values live for every sheened material at once, to FIND the number; the found
-            // number then goes back into the patch, where it belongs.
+            // Override cooked cloth values across sheened materials for live judgment. Settled
+            // values belong back in the patch rather than in this ephemeral control state.
             using (debug.Scope("Cloth"))
             {
                 clothOverride   = debug.Controls.Toggle("Override the patch", clothOverride);
@@ -197,8 +172,7 @@ internal sealed partial class SponzaLoop
         }
 
         // Spatial gizmos: sun direction + the three cascade ortho boxes.
-        // Every primitive below belongs to this view. Scoped rather than assigned: the old
-        // per-channel matrix meant a frame could only ever be one world seen one way.
+        // Every primitive below belongs to the main view; the scope supplies its matrix.
         using var view = debug.Draw.In("main", viewProj);
         debug.Draw.Arrow("sun/dir", -sunDirection * 6f, Vector3.Zero,
             new GraphicsColor(1f, 0.92f, 0.3f, 1f));
@@ -213,11 +187,8 @@ internal sealed partial class SponzaLoop
             debug.Draw.Frustum($"cascade/{c}", cascadeViewProj[c], cascadeTints[c]);
         }
 
-        // <b>The multi-select highlight, which used to draw from the selection block above and
-        // therefore from OUTSIDE any view.</b> That threw "Debug primitives were emitted outside any
-        // view" and took the process with it — but only ever on the SECOND selection, because the
-        // loop skips the primary and a single selection leaves nothing to draw. One Cmd-click was
-        // the difference between working and an unhandled exception.
+        // Draw secondary selections inside the active view. The framework owns the primary
+        // highlight; these boxes make the rest of a multi-selection visible.
         foreach (var p in selection)
         {
             if (p == primarySelection) continue;
@@ -254,29 +225,23 @@ internal sealed partial class SponzaLoop
 
         using (debug.Scope("Indirect"))
         {
-            // <b>The cost, reported beside the dials that move it.</b> Windowed rather than a
-            // lifetime mean, so a slider shows up here within about a second — see
+            // Report a windowed injection cost beside the controls that affect it; see
             // SampleGpuPassTimes.
             var injectMs = GpuPassMs("sky-inject");
             debug.Values.Value("inject-gpu", lastFramePeriodMs > 0.01
                 ? $"{injectMs:0.00} ms ({injectMs / lastFramePeriodMs * 100.0:0.0}% of a {lastFramePeriodMs:0.0} ms frame)"
                 : $"{injectMs:0.00} ms");
 
-            // What was actually commanded, which is not what the period suggests. EVERY probe's
-            // workgroup launches every frame; the period only decides which of them go on to march
-            // rays. The rest take the early-out — and the early-out is not free, because a probe
-            // that skips its turn still has to COPY its whole tile into the other atlas (the pair
-            // alternates every frame, so a probe that simply returned would be empty in one of
-            // them). That copy is the part of this pass nobody ordered: it scales with probe count
-            // and not with the refresh rate at all.
+            // Report commanded work rather than inferring it from refresh period. Every probe
+            // launches a workgroup each frame; selected probes march rays, while skipped probes copy
+            // their irradiance and depth tiles into the other ping-pong atlas. Carry cost therefore
+            // scales with probe count rather than refresh rate.
             var probes = bounceX * bounceY * bounceZ;
             const int tileTexels = 8 * 8;
             var rays = Math.Clamp((int)MathF.Round(injectRays), 8, 256);
             var period = MathF.Max(1f, MathF.Round(injectPeriod));
             var solving = Math.Max(1, (int)MathF.Round(probes / period));
-            // <b>Invariant, not current, culture.</b> These came out as "6,19,008" on a machine set
-            // to Indian digit grouping. A diagnostic is read against other diagnostics and pasted
-            // into notes; it does not get to change shape with the locale.
+            // Use invariant formatting so captures and measurement notes compare across locales.
             debug.Values.Value("inject-dispatch", string.Create(Inv,
                 $"{probes:N0} workgroups x {tileTexels} lanes"));
             debug.Values.Value("inject-solving", string.Create(Inv,
@@ -286,12 +251,9 @@ internal sealed partial class SponzaLoop
             debug.Values.Value("probe-refresh", $"{rays} rays every {period:0}f");
         }
 
-        // <b>Live, because the console breakdown only prints when the process ends.</b> Every perf
-        // question this session has been answered after the fact, from a log, about a run that had
-        // already finished. These are the same timestamps the exit dump reads, windowed per frame.
-        // The caveat travels with them: on a tile-based GPU they bracket ENCODER submission, not the
-        // deferred tiled execution, so they do NOT sum to the frame period and a pass reading
-        // 0.004 ms has not been shown to be free.
+        // Surface the same windowed pass timings used by the exit report. On tile-based GPUs these
+        // bracket encoder submission rather than deferred tiled execution, so they need not sum to
+        // the frame period and very small values are not proof that a pass is free.
         using (debug.Scope("GPU passes"))
         {
             var passTotal = GpuPassTotalMs();
@@ -304,10 +266,8 @@ internal sealed partial class SponzaLoop
 
         debug.Values.Value("shadow-map", $"{ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}");
         debug.Values.Value("splits-m", $"{cascadeSplits[1]:0}/{cascadeSplits[2]:0}/{cascadeSplits[3]:0}");
-        // One shadow texel in WORLD units, per cascade — the quantity the map size and the splits
-        // jointly imply, and the one that sets both the acne offset and the filter width. It was
-        // computed every frame and never shown, so a cascade whose texel had grown to a third of a
-        // metre looked, in the overlay, exactly like one whose texel was two centimetres.
+        // One shadow texel in world units per cascade. Map size and fitted extent jointly determine
+        // this value, which drives both receiver bias and filter width.
         debug.Values.Value("cascade-texel-m",
             $"{cascadeTexelWorld[0]:0.000}/{cascadeTexelWorld[1]:0.000}/{cascadeTexelWorld[2]:0.000}");
         // Per-cascade caster counts after frustum cull (one frame stale — set
@@ -322,10 +282,8 @@ internal sealed partial class SponzaLoop
         // LOD diagnostic: max levels available + histogram of selected levels
         // across opaque drawables at the current camera + pixel-error budget.
         //
-        // <b>And WHICH ones, and when they changed.</b> The histogram says four primitives coarsened
-        // and says nothing about where they are, so "LOD is visible on that wall as I walk past it"
-        // and "LOD is fine" produce the same three numbers. The level is recorded per drawable here
-        // and the gizmo pass below draws it, so the thing that popped can be pointed at.
+        // Retain each drawable's rendered level and transition age as well as the aggregate
+        // histogram so the gizmo pass can identify where and when a visible switch occurred.
         if (lodLevels.Length != opaqueDrawables.Count)
         {
             lodLevels = new int[opaqueDrawables.Count];
@@ -342,9 +300,8 @@ internal sealed partial class SponzaLoop
         {
             var d = opaqueDrawables[i];
             maxLevels = Math.Max(maxLevels, d.LodIndexCounts.Length);
-            // <b>Read, not re-picked.</b> Recomputing it here used to be harmless because the
-            // selection was a pure function of the camera; with hysteresis it is a function of
-            // history too, and a second evaluation would report a level the renderer never drew.
+            // Read the renderer's persistent selection. Hysteresis makes a second evaluation here
+            // history-dependent and potentially different from the level actually submitted.
             var lv = i < opaqueLodState.Length ? opaqueLodState[i] : 0;
             if (lv < hist.Length) hist[lv]++;
             if (lv != lodLevels[i]) { lodPopAge[i] = 0f; popped++; }
@@ -353,11 +310,8 @@ internal sealed partial class SponzaLoop
             submitted += d.LodIndexCounts[Math.Min(lv, d.LodIndexCounts.Length - 1)];
             full += d.LodIndexCounts[0];
         }
-        // <b>The trade, in one line, while the hand is on the slider.</b> Frame time on this machine
-        // moves several milliseconds between two runs of the same thing, so dragging the budget and
-        // watching the frame counter cannot separate a real saving from thermal drift. The triangle
-        // count has no such problem: it is exactly what the budget decides, and it responds the
-        // instant the dial does.
+        // Show the exact submitted/full-detail triangle trade beside the LOD budget; unlike frame
+        // time, this responds immediately and is not confounded by thermal or scheduling drift.
         debug.Values.Value("lod-tris", string.Create(Inv,
             $"{submitted / 3:N0} of {full / 3:N0} ({(full > 0 ? submitted * 100.0 / full : 100.0):0.0}% of full detail)"));
         // A switch lasts one frame and the eye catches it as a flicker with no location. Held for

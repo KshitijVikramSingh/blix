@@ -93,15 +93,9 @@ internal sealed partial class SponzaLoop
         System.Array.Fill(opaqueLodMargins, 1f);
         System.Array.Fill(blendLodMargins, 1f);
 
-        // <b>Foliage starts at four times the budget, selected by CUTOUT rather than by name.</b>
-        // A drawable with an alpha cutoff is a leaf card or an ivy sprig — geometry whose silhouette
-        // is already defined by a texture's alpha rather than by its triangles, so coarsening the
-        // mesh moves the shape far less than it would on a column or an arch. It is also the
-        // geometry that costs the most: removing the ivy and tree packs takes 9.85 ms off the frame.
-        //
-        // By material and not by asset name because names come from whatever the glTF author chose,
-        // and a selector that reads "tree" stops working the first time somebody cooks a different
-        // one. The cutoff is a property of what the surface IS.
+        // Give cutout foliage four times the global LOD error budget. Its texture-defined silhouette
+        // tolerates coarser geometry, and the ivy/tree packs account for a measured 9.85 ms. Select
+        // by alpha-cutoff semantics rather than asset naming.
         var foliage = 0;
         for (var i = 0; i < opaqueDrawables.Count; i++)
         {
@@ -114,12 +108,8 @@ internal sealed partial class SponzaLoop
             if (blendDrawables[i].AlphaCutoff <= 0f) continue;
             blendLodMargins[i] = FoliageLodMargin;
         }
-        // <b>Where the foliage actually is, so a measurement run can be pointed at it.</b> The
-        // measurement orbit was placed by arithmetic on the volume bounds — centre of the box, 28%
-        // of the shorter span, 3.2 m off the floor, facing along the path — which put it in the dark
-        // base of the atrium with the tree never in frame. Every foliage number taken on it was
-        // therefore a number about stone. A path derived from the geometry it is meant to exercise
-        // cannot drift that way.
+        // Derive the measurement orbit from cutout geometry so foliage-focused runs keep their
+        // intended subject in view as scene bounds or authored placement change.
         var sum = Vector3.Zero;
         var n = 0;
         foreach (var d in opaqueDrawables)
@@ -183,8 +173,7 @@ internal sealed partial class SponzaLoop
         {
             var pm = prim.Material;
             var mesh = prim.Mesh;
-            // Only genuinely transmissive materials need alpha blending, and "genuinely" now means
-            // the asset says so.
+            // Only materials with authored transmission use alpha blending.
             // Cutout foliage authored as BLEND (the cypress, etc.) is treated as
             // MASK so it lands in the opaque bucket → written by the depth
             // pre-pass → early-Z. That kills the layered double-sided foliage
@@ -309,24 +298,9 @@ internal sealed partial class SponzaLoop
         return mat;
     }
 
-    // <b>Deleted: a name-matched transmission fallback.</b> It said the asset was "missing the
-    // metadata". The asset is not missing anything — Intel Sponza declares
-    // extensionsUsed: ["KHR_lights_punctual"] and authors glass as
-    // baseColorFactor [0,0,0,1], metallic 0, roughness 0. Alpha is 1.0. That is a positive
-    // statement that the surface is an opaque, perfectly smooth, black dielectric, not an omission
-    // to be inferred around, and a substring match on the material NAME overrode it.
-    //
-    // It also bought less than it appeared to. A black metallic-0 dielectric already renders as
-    // glass under plain PBR: F0 = 0.04 head-on ramping to ~1 at grazing IS the Fresnel curve the
-    // special case hand-coded. The only thing the fallback added was transmission — seeing through
-    // the pane — and that is exactly the part the asset declines to claim.
-    //
-    // And it cost: the renderer was told to ignore the asset while SkyVisibilityBaker, reading the
-    // same glTF alpha mode, was not. Glass was 96% transparent on screen and a solid black wall to
-    // every lighting computation. Measured, opening it moves 1.9% of probes (max 1.11 on an L0 whose
-    // mean is 0.93) and the scene mean by 0.15%. Transmission now comes from TransmissionFactor
-    // alone; an asset that wants see-through glass authors KHR_materials_transmission and both
-    // consumers read the same number.
+    // Material semantics come only from authored glTF data. Transmission requires
+    // KHR_materials_transmission so raster shading and lighting bakes consume the same surface
+    // model; names are labels and never override authored opacity.
 
     // One engine Material per glTF material. BaseColorFactor / EmissiveFactor /
     // MaterialParams (alphaCutoff, normalScale, roughness, metallic) UBO + the
@@ -359,7 +333,7 @@ internal sealed partial class SponzaLoop
         var roughness = gm?.RoughnessFactor ?? 0.8f;
         var metallic = gm?.MetallicFactor ?? 0.0f;
         var transmission = gm?.TransmissionFactor ?? 0f;
-        // The two cloth terms, from the extensions the importer now reads and the patch authored.
+        // Cloth terms come from imported material extensions authored by the patch.
         var ext = gm?.Ext ?? Blix.GltfMaterialExtensions.None;
         var sheen = ext.SheenColorFactor;
         var sheenRoughness = ext.SheenRoughnessFactor;
@@ -377,14 +351,9 @@ internal sealed partial class SponzaLoop
                 // build the same coverage mask the lit pass will -- it has no frame block bound, and
                 // a spare component here beats duplicating a std140 layout to reach one float.
                 //
-                // <b>And the single-sample cutout policy rides the same channel, for the same
-                // reason and a stronger one.</b> At one sample the lit pass resolves coverage with a
-                // hashed discard and the pre-pass must make the IDENTICAL decision, or it writes
-                // leaf depth where the lit pass drew nothing and the canopy fills with holes. A
-                // frame-uniform toggle could not do that job: the pre-pass cannot see the frame
-                // block, so a slider would desynchronise the two passes the moment it moved. Any
-                // negative value means "one sample, plain binary" -- the comparison --no-hashed-alpha
-                // exists to make -- and both shaders read it from this one number.
+                // At one sample, carry the cutout policy in the same material channel so depth and
+                // lit passes make identical coverage decisions. A negative value selects the plain
+                // binary --no-hashed-alpha comparison; a positive value enables hashed coverage.
                 new Vector4(transmission, sheenRoughness, diffuseTransmission,
                     MsaaSamples > 1 ? MsaaSamples : (hashedAlpha ? 1f : -1f)))
             .SetUniform(binding: 0, "uSheenColor", new Vector4(sheen.X, sheen.Y, sheen.Z, 0f))

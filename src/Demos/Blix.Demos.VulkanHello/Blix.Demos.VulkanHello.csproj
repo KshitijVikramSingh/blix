@@ -4,7 +4,7 @@
     <!-- The application brings its own UI library. Blix.Core declares IUiSource with no UI types in
          the signature, so the engine never takes this dependency on an application's behalf. -->
     <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
-    <ProjectReference Include="..\Blix\Blix.csproj" />
+    <ProjectReference Include="..\..\Blix\Blix.csproj" />
     <ProjectReference Include="..\..\Blix.Core\Blix.Core.csproj" />
     <ProjectReference Include="..\..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
     <ProjectReference Include="..\..\Blix.Graphics\Blix.Graphics.csproj" />

@@ -1,5 +1,8 @@
 # RTSGame — Thread A: the game layer
 
+> **Status 2026-09-21 — active.** This remains the continuing RTS game-design
+> and implementation record.
+
 ## Handoff — read this first
 
 **You are picking up a design that is fully specified, and a codebase that now implements the

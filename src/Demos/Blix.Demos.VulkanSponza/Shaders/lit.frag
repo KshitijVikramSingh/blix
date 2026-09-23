@@ -1,31 +1,9 @@
 #version 450
 
-// <b>The shadow lookup is the engine's, not this demo's.</b> shadow.glsl said the problem out loud
-// before this change was made: "there are already three PCF implementations in this tree (here,
-// Sponza's, VulkanLit's) and the way to stop there being a fourth is for the cascade layer not to
-// need one." Sponza's was the second of the three, and it was the weakest — a square tap grid, a
-// hand-tuned radius, and a depth bias scaled by two tuned constants where the shared one offsets
-// along the normal by a length the cascade fit already computes.
-// Tap count for the sun's percentage-closer filter, before shadow.glsl picks its default of 16.
-//
-// <b>FOUR, and sixteen was buying nothing.</b> The sun shadow measured 1.216x of this frame at
-// sixteen taps and 1.031x at four — about eighteen per cent of the whole picture — and the two
-// outputs differ on 0.00% of pixels above 2/255, with a maximum difference of 21/255 on one pixel
-// in a hundred thousand.
-//
-// The reason is the disc, not the sampling. radiusTexels is 2 and a cascade-0 texel is around 8 mm
-// of world, so the filter spans roughly 1.6 cm — a couple of screen pixels. Sixteen samples over
-// two texels is oversampling by a large factor, and what comes out is very nearly a hard edge
-// either way. Widening the disc does not rescue it: at 6 and 12 texels the image still changes on
-// 0.01% of pixels, because this scene's shadow BOUNDARIES are a sliver of the frame. The shadow
-// itself is doing real work — turning it off changes 24-50% of pixels by more than 16/255 — but as
-// an in-or-out answer, which four taps give as well as sixteen.
-//
-// <b>This is a property of this sun, not a law.</b> The direction comes from the probe and sits
-// high, about 46 degrees, so the atrium is mostly interior shade with sunlight on the upper walls.
-// A low sun raking long shadows across the floor would put penumbra everywhere the eye goes, and
-// then the taps would be worth their price again. The measurement is written down here so that
-// changing the sun prompts re-checking the number rather than inheriting it.
+// The engine's shared cascade implementation owns PCF shape, normal offset, and cascade selection.
+// Sponza overrides only the tap count. Four taps measured about 18% cheaper than sixteen for the
+// current high sun with no material image difference; remeasure if the default sky or sun angle
+// changes enough to put broad penumbrae across the view.
 #define BLIX_SHADOW_PCF_TAPS 4
 // ── What this pass costs, measured ───────────────────────────────────────────
 // Each term ablated in-process on the measurement orbit (--ab <term>), ratios first because the
@@ -42,34 +20,14 @@
 // They do not sum to the pass: each is what removing that term saves with everything else present,
 // so the table ranks levers rather than partitioning a budget.
 //
-// <b>The GGX lobe is 0.2% of frame and normal mapping is a hundred times more.</b> The term with
-// the reputation — distributions, geometry terms, Fresnel — is free, while a texture fetch and a
-// tangent-frame transform is not. This pass is bound by memory traffic and not by arithmetic, which
-// is the same reason every structural win in this renderer came from not doing work at all: LOD,
-// frustum culling, caster culling, probe sleeping, fewer fog slices, fewer GTAO taps.
+// The attribution shows a memory-bound pass: material/normal-map traffic is much more expensive
+// than the GGX arithmetic. Measurements must use the foliage-inclusive orbit; a wall-only path
+// changes the ranking rather than merely scaling it.
 //
-// Taken on the orbit AFTER it was corrected. The previous path never had the foliage in frame and
-// did not merely scale this table down — it re-ordered it, reading IBL at 0.39 ms against 3.77 and
-// normal mapping at 0.84 against 3.97, because those scale with pixels shaded and it was looking at
-// a dark wall. Optimising from that version would have meant working on probe lookups and never
-// opening the two terms that together cost 7.7 ms.
-
-// <b>early_fragment_tests was tried here and reverted; the note is the point.</b> A shader that
-// can discard is late-Z by rule, so the cutout branch below costs the WHOLE lit pass its early
-// depth test — opaque geometry included. Forcing the test early is legal here, since this pass
-// tests LessEqual against the pre-pass depth and writes none of its own, and it measured 3 ms.
-//
-// It also speckled the canopy with holes, and the reason is worth keeping: the pre-pass and this
-// pass agree about which cutout fragments exist only because they compute the same coverage, and
-// that coverage divides by fwidth(alpha). A derivative depends on which fragments in the quad are
-// live, which is not the same set in a depth-only pass as in this one — so the two can disagree by
-// a hair on a leaf edge. Late-Z was hiding that; early-Z turned each disagreement into a hole.
-//
-// The real finding from the attempt is that foliage is not an overdraw problem at all. Removing
-// the trees drops this pass 8.95 ms, and early-Z moved that to 8.52 — it recovered general
-// overdraw, roughly equally with and without foliage. The front leaf layer is simply expensive per
-// pixel: the thin-sheet path adds a second sky-visibility query and a back-side irradiance fetch
-// on top of ordinary PBR, at about 4x an average pixel's cost.
+// Do not enable early_fragment_tests while cutout coverage depends on fwidth(alpha). The depth and
+// lit passes can evaluate derivatives over different live quads, producing mismatched leaf edges
+// and visible holes. Late-Z preserves agreement; foliage cost is primarily thin-sheet shading, not
+// recoverable overdraw.
 
 #include "shadow.glsl"
 #include "sheen.glsl"
@@ -105,15 +63,8 @@ layout(set = 0, binding = 0) uniform Frame {
     mat4  uViewProjection;
     vec3  uSunDirection;
     float uSunPad;
-    // <b>The sun's irradiance, MEASURED from the probe — not a knob.</b> It replaces
-    // uSunIntensity, whose default was 9.42 because that is 3*PI, chosen by its own comment to
-    // "match the old look". The probe now reports what the sun in the HDR actually delivers, in the
-    // HDR's own units, and the bake removes that disc from the diffuse and specular integrals — so
-    // the sun arrives exactly once and in the same units as the sky it came from.
-    //
-    // uIblIntensity is gone with it, and for the same reason. A scale between sun and sky only
-    // needs tuning while the two are in different units; measured from one capture they are not.
-    // The artistic knob for overall brightness is exposure, which already exists.
+    // Irradiance measured from the environment probe. The extracted disc is removed from the IBL,
+    // so sun and sky arrive once in the same units; exposure owns overall image brightness.
     vec3  uSunIrradiance;
     float uIblPad;
     vec3  uCameraPos;
@@ -127,32 +78,20 @@ layout(set = 0, binding = 0) uniform Frame {
     float uShadowStrength;         // 0 = sun shadows off, 1 = on
     vec3  _cascadePad;
     mat4  uCascadeViewProj[3];     // light view-proj per cascade
-    // .xyz = one shadow texel in WORLD units per cascade. Derived from the cascade fit — the same
-    // number it already used to texel-snap the ortho footprint — where this slot previously held a
-    // per-cascade NDC depth bias that was that length converted and then tuned twice over.
+    // .xyz = one shadow texel in world units per cascade, derived from the fitted ortho footprint.
     vec4  uCascadeTexels;
     vec4  uFog;                    // x=screenW, y=screenH, z=fogFar, w=enabled(0/1)
-    // Live-tunable shader params. Un-packed from the former uShaderParams /
-    // uShadowParams / uIblParams vec4s into named members so each carries its
-    // own //@tune range+default and the diagnostics overlay can auto-bind and
-    // label it (see docs/renderer.md "SPIR-V reflection" + the tune scanner).
+    // Named live-tunable members carry their own range/default metadata for reflected diagnostics.
     //@tune 0..1 = 0
     float uVisualizeCascades;
-    // 1 = visibility as greyscale, 2 = bent normal as RGB. A term you cannot look at on its own is
-    // a term you tune by staring at the final image, which is how the five deleted knobs happened.
+    // 1 = visibility as greyscale, 2 = bent normal as RGB. Keep the term directly inspectable so
+    // its structure can be judged independently of the final composition.
     // Note it still goes through exposure + tonemap in the present pass, so read it for STRUCTURE
     // (where the corners darken, where the normals bend) rather than as calibrated values.
     //@tune 0..2 = 0
     float uVisualizeAmbient;
-    // <b>1 makes cutout surfaces fully opaque, so the lit path can be compared with the viz
-    // channels.</b> Those write alpha 1 while the lit path writes `coverage`, which means over
-    // foliage they are not the same pixels: viz shows the nearest leaf solid, lit shows an average
-    // of ~10 semi-transparent layers and whatever lies beyond them. Every shading term can read
-    // dark in viz while the lit image glows, with no contradiction and nothing to point at.
-    //
-    // This removes that difference. If the tree goes dark at 1, the glow is compositing and the
-    // canopy's 6.3%-per-card opacity is the subject. If it still glows, a shading term is being
-    // added that none of channels 12 and 17-20 can see, and that is a different hunt.
+    // Makes cutout fragments fully covered so diagnostic and lit paths address the same foliage
+    // pixels. This separates coverage compositing from shading-term faults.
     //@tune 0..1 = 0
     float uForceOpaqueCutout;
     // Four-corner tetrahedral probe reconstruction instead of eight-corner trilinear. Halves this
@@ -165,24 +104,12 @@ layout(set = 0, binding = 0) uniform Frame {
     // march says is behind geometry. Read the leak census (--viz 21) and the fallback rate
     // together: rejecting everything reports no leak and no light.
     //
-    // <b>Defaults to 1.</b> It takes the leak from 17.4% of blend weight to 0 while surviving
-    // weight falls only 24.4% to 21.0%, and it is worth 1.03 mean sRGB in an arcade against 0.34
-    // on the measurement orbit — the orbit sits in the open atrium and was the one camera least
-    // able to see it. Nearly free once the incident field is on: the march runs per coarse texel.
+    // Defaults to 1: measured leak falls from 17.4% of blend weight to zero while surviving weight
+    // falls from 24.4% to 21.0%. The incident field amortizes the march over coarse texels.
     //@tune 0..1 = 1
     float uProbeOcclusion;
-    // <b>These work, and the accusation that they did not was a bug in the test harness.</b> They
-    // were declared dead on the evidence that uNoBounceTerm moved nothing while uProbeTetrahedral,
-    // twelve bytes away in this block, moved 1.97 — and the reflection offsets, the merge and the
-    // by-name write path were all read through looking for the fault. It was none of them: a zsh
-    // shell function passed its flags as `$2` unquoted, zsh does not word-split that, and every
-    // multi-flag run in those batches silently became a plain run. Single-flag runs worked, which
-    // is what made the pattern look like a Frame-block tail.
-    //
-    // Checked properly against viz channel 11, uNoBounceTerm takes the bounce from 10.49 to 1.14.
-    //
-    // Second time word-splitting has done this here; the first cost four budget runs that all
-    // measured the same arm. A shell helper that forwards arguments takes "$@" after a shift.
+    // Transport diagnostics. Measurement helpers must forward argument arrays with "$@"; collapsed
+    // multi-flag invocations invalidate these A/B controls.
     //@tune 0..1 = 0
     float uSkyDropL2;
     //@tune 0..1 = 0
@@ -243,38 +170,20 @@ layout(set = 1, binding = 3) uniform sampler2D   uCascadeShadowMaps[3];
 layout(set = 1, binding = 4) uniform sampler3D   uFroxelGrid;
 // Ambient visibility from the GTAO pass: .xyz = bent normal (WORLD space), .a = visibility.
 layout(set = 1, binding = 5) uniform sampler2D   uAmbientVisibility;
-// Baked sky visibility as L1 spherical harmonics, one Rgba16F texel per probe cell. Geometry, not
-// lighting: what escapes the building, which no sun position changes.
-// <b>L1 spherical harmonics in a small 3D texture, and an octahedral atlas was tried and
-// reverted.</b> The atlas reconstructs better — a courtyard floor reads 0.063 against L1's 0.041,
-// where the raw transmittance is 0.057 — and it doubled the frame, 35.9 ms to 70.8 ms, on a single
-// fetch before any blending. Four floats in 331 KB get hardware trilinear with perfect locality;
-// an atlas costs an octahedral encode and a scattered texel at every one of this shader's call
-// sites. The same change was right for the bounce and wrong here, which is about how often and how
-// coherently each volume is read rather than about what either holds.
+// Baked directional sky visibility. The compact SH volumes get coherent hardware trilinear
+// filtering; an octahedral form reconstructed more accurately but doubled the measured frame cost
+// at these frequent call sites. The transport atlas below has different frequency/cost constraints.
 layout(set = 1, binding = 6)  uniform sampler3D uSkyVisibility;   // L0, L1 x/y/z
 layout(set = 1, binding = 14) uniform sampler3D uSkyVisibility1;  // L2 -2,-1,0,+1
 layout(set = 1, binding = 15) uniform sampler3D uSkyVisibility2;  // L2 +2
-// Sun bounce, injected each frame over the same voxel grid. RGB irradiance, no direction: the
-// visibility volume supplies the shape, this supplies the colour and the level.
-// One volume per colour channel, each holding that channel's (L0, L1x, L1y, L1z). Directional, so
-// a surface receives what reaches the side it FACES — the previous single RGB gave every surface at
-// a point the same answer, which is why a teal curtain metres away tinted a whole tree.
-// An octahedral atlas: one 8x8 tile per probe, 6x6 interior plus a border ring. Directional at
-// thirty-six samples rather than L1's four, which is the difference between knowing a curtain is
-// over there and knowing how much of the sky it covers.
+// Dynamic incident-light atlas: one 8x8 octahedral tile per probe, with a 6x6 directional interior
+// and border ring. Direction matters here because surfaces at one point can face distinct coloured
+// emitters and occluders.
 layout(set = 1, binding = 7) uniform sampler2D uSkyBounce;
 layout(set = 1, binding = 13) uniform sampler2D uSkyBounceDepth;
-// <b>No storage image here, and the reason is measured.</b> Marking probes from the fragment stage
-// is the obvious way to learn which ones shading reads — and on this tile-based GPU merely
-// DECLARING an image3D in this shader cost 8x the frame: 35 ms became 290 ms. Not the write, the
-// declaration: disabling every store left it at 289 ms, and deleting the binding restored 35 ms.
-// A TBDR tiler cannot keep its guarantees about a fragment shader that might scatter to memory, so
-// it stops trying, and the image resolves visibly block by block.
-//
-// The information is still wanted and still only exists at render time — it just has to be derived
-// somewhere that can afford to write. Reading the depth buffer in a compute pass gives the same
-// answer, which probes sit near visible geometry, from a stage where scattering is free.
+// Probe-usage writes deliberately happen in compute, not here. Declaring a fragment-stage image3D
+// disabled tile-renderer behavior and measured 35 ms -> 290 ms even with stores removed. The
+// depth-driven compute pass derives the same visible-probe set without fragment scatter.
 // The environment convolved with CHARLIE rather than GGX, and the Charlie lobe's directional
 // albedo. Separate from uPrefilteredEnv on purpose: a GGX cube in sheen's place renders something
 // dimmer and rimless and entirely plausible, which is the failure this whole arc keeps closing.
@@ -364,29 +273,11 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
-// --- Cascaded sun shadows -----------------------------------------------
-// Deleted, all of it: a Vogel-disc PCF with a tuned radius, an interleaved-gradient rotation, a
-// constant-index cascade dispatch, and a depth bias scaled by uCascadeBias and uSlopeScale. Every
-// one of those exists in shadow.glsl, better — the shared version's disc is the same idea with a
-// derived radius, and its bias is small on purpose because blix_shadow_normal_offset has already
-// moved the sample off the surface it belongs to.
-//
-// <b>The selection changed with it, and that is a real behaviour change rather than a refactor.</b>
-// This picked a cascade by view depth — dot(world - eye, forward) against uCascadeSplits. The
-// shared path picks by CONTAINMENT: whichever cascade's box actually holds the fragment. At equal
-// view depth a fragment at the edge of a wide frustum is genuinely further from the eye than one at
-// its centre, so depth selection can put neighbours in different cascades and draw an arc across
-// the picture. Containment cannot.
+// Cascaded sun shadows are provided by shadow.glsl. Its containment-based selection avoids the
+// view-depth boundary arcs that can occur across a wide frustum, and it owns PCF, normal offset,
+// bias, and diagnostic tint consistently with other renderers.
 
-// The cascade tint is shadow.glsl's blix_cascade_tint — a fourth copy of three colours is
-// still a fourth copy, and the shared one also names "beyond the last cascade" in magenta, which
-// a still picture otherwise cannot tell from "lit".    // cascade 2 — blue
-
-// <b>Hoisted, because glass was the one surface that skipped every occlusion term.</b> The
-// transmissive branch returns before ambient visibility, before this, and before the debug views —
-// so a pane reflected an unoccluded outdoor sky from inside a closed room, and viz channel 7 drew
-// the skybox on it. The lookup needs only a position and a direction, so there is no reason it had
-// to live where it did.
+// Available before material branching so glass reflections and opaque ambient share enclosure.
 float blixSkyVisibility(vec3 worldPos, vec3 dir, float push) {
     if (frame.uSkyMin.w <= 0.5 || frame.uAbFlags2.x > 0.5) return 1.0;
     return blix_skyVisibility(uSkyVisibility, uSkyVisibility1, uSkyVisibility2,
@@ -395,23 +286,15 @@ float blixSkyVisibility(vec3 worldPos, vec3 dir, float push) {
 }
 
 void main() {
-    // <b>Written unconditionally, because a partial write is an undefined mask.</b> GLSL says that
-    // if a fragment shader STATICALLY assigns gl_SampleMask, its value is undefined for every
-    // invocation that does not assign it -- not "full", undefined. Writing it only in the cutout
-    // branch therefore handed every opaque fragment in the scene a garbage mask, and the building
-    // vanished, leaving a cypress floating in front of the skybox. Caught from the chair; I had
-    // looked straight past it in the screenshot that proved the coverage fix worked.
+    // A shader that statically writes gl_SampleMask must assign it on every invocation; opaque
+    // fragments start fully covered and cutout handling narrows the mask below.
     gl_SampleMask[0] = ~0;
 
     // UVs arrive in the correct top-down origin already: the Sponza assets are
     // imported with AssetImportContext.FlipTextureV, which bakes the V-flip
     // into the vertex buffer at load. Nothing to do here.
     vec2 uv = vUv;
-    // <b>Collapsed to a constant rather than branched around.</b> A uniform-conditional texture read
-    // is still a texture read as far as the compiler is concerned, and it may hoist it regardless;
-    // pointing every fragment at the same texel keeps the instruction and removes the traffic, which
-    // is exactly the variable being isolated. Derivatives go to zero with it, so the sample also
-    // pins to mip 0 and stays in cache.
+    // The bandwidth A/B collapses UVs to one cacheable texel while retaining texture instructions.
     uv = mix(uv, vec2(0.5), frame.uAbFlags.x);
 
     // --- Albedo + alpha test --------------------------------------------
@@ -426,16 +309,12 @@ void main() {
     float coverage = 1.0;
     if (alphaCutoff > 0.0) {
         coverage = clamp((albedo4.a - alphaCutoff) / max(fwidth(albedo4.a), 1e-5) + 0.5, 0.0, 1.0);
-        // <b>The discard is unchanged, deliberately.</b> The depth pre-pass decides which fragments
-        // exist with its own copy of this test and the two must agree -- they disagreed once tonight
-        // and it cost an hour. Only the MASK is jittered, after the silhouette is settled.
+        // The depth pre-pass uses the same discard and coverage decision; only sample ownership is
+        // decorrelated after the silhouette is established.
         if (coverage <= 0.0) discard;
 
-        // <b>One sample has no mask to spread coverage across, so the coverage goes into the
-        // discard instead.</b> This is the case the whole alpha-to-coverage apparatus below cannot
-        // reach: at uMsaaSamples == 1 alphaToCoverage is off in the pipeline and gl_SampleMask has
-        // a single bit, so a partial leaf pixel is binary. The pre-pass runs the identical test
-        // from the identical hash — they disagreed once tonight and it cost an hour.
+        // At one sample there is no mask over which to distribute coverage, so both depth and lit
+        // passes use the same hashed binary keep test.
         if (mat.uMaterialParams2.w > 0.0 && mat.uMaterialParams2.w < 1.5) {
             if (!blix_hashedAlphaKeeps(coverage, blix_layerHash(vWorldPos))) discard;
             coverage = 1.0;
@@ -443,16 +322,8 @@ void main() {
 
         coverage = mix(coverage, 1.0, frame.uForceOpaqueCutout);
 
-        // <b>Choose the samples ourselves, so ten leaves do not all claim bucket zero.</b> Writing
-        // alpha 1 makes alpha-to-coverage produce a full mask, and gl_SampleMask below then governs
-        // alone -- same expected coverage, decorrelated ownership. The correlated failure this
-        // replaced is reproduced by checking out 76466e4, not by a live slider: the depth pre-pass
-        // computes this same mask and cannot see the frame block, so any dial here would
-        // desynchronise the two passes the moment it moved.
-        //
-        // The depth pre-pass computes the identical mask from the identical hash, so the samples
-        // this fragment does not own carry no leaf depth and the background draws there properly.
-        // They would otherwise keep the cleared colour, which is a second way the canopy goes flat.
+        // Assign a decorrelated sample mask with the same expected coverage. The depth pre-pass uses
+        // the identical world-position hash so unowned samples contain neither leaf depth nor colour.
         {
             float h = blix_layerHash(vWorldPos);
             gl_SampleMask[0] = blix_coverageMask(coverage, int(mat.uMaterialParams2.w), h);
@@ -467,18 +338,15 @@ void main() {
     // back-face culled, so the flip is a no-op there.
     vec3 N = normalize(vNormalWorld);
     if (!gl_FrontFacing) N = -N;
-    // TBN from the forwarded glTF tangent. Gram-Schmidt re-orthonormalize the
-    // tangent against N (removes interpolation drift); bitangent handedness
-    // from TANGENT.w. This replaces the old screen-space-derivative frame,
-    // which swirled on sculpted / mirrored-UV geometry (lavabo, lion heads).
+    // Build TBN from the authored glTF tangent. Gram-Schmidt removes interpolation drift and
+    // TANGENT.w supplies bitangent handedness, including mirrored UVs.
     vec3 T = normalize(vTangentWorld - N * dot(N, vTangentWorld));
     vec3 B = cross(N, T) * vTangentSign;
     // Reconstruct Z from XY. Cooked normals are BC5 (2-channel RG, blue
     // dropped), so the sampled .z is meaningless — derive it from the
     // unit-length constraint. This is also correct for RGBA8 normal maps
     // (their stored Z ≈ sqrt(1 - x² - y²)), so it works for both paths.
-    // glTF's own per-material normalScale, with no global multiplier on top. The global was a
-    // second control over one quantity, and the material already says what it wants.
+    // The authored per-material normal scale is the single strength control.
     float normalScale = mat.uMaterialParams.y;
     vec3 vizGeometricN = N;
     vec2 nxy = (texture(uNormalMap, uv).xy * 2.0 - 1.0) * normalScale * (1.0 - frame.uAbFlags.w);
@@ -494,13 +362,8 @@ void main() {
     float roughness = clamp(mat.uMaterialParams.z * mrSample.g, 0.04, 1.0);
     float metallic  = clamp(mat.uMaterialParams.w * mrSample.b, 0.0, 1.0);
 
-    // Metalness noise-gate (asset conformance, not a global look hack).
-    // Sponza Modern leaves a stray ~0.35 metalness on dielectric stone/brick
-    // (its metallic channel doubled as a specular-intensity dial under the
-    // <b>No metallic gate.</b> A threshold snapping metalness to zero was compensating for authored
-    // MR values, in the fragment shader, on every pixel, forever — a data question answered in the
-    // hottest place it could be. If an asset's metalness is wrong, that is the asset's or the cook's
-    // to fix, where it is fixed once.
+    // Material metalness is consumed as authored. Asset conformance belongs in source data or the
+    // cook, not as a per-pixel threshold in the renderer.
 
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
 
@@ -524,14 +387,10 @@ void main() {
         // reflection gathers from where it points, and a window deep inside a room points at a wall.
         vec3 envRefl = textureLod(uPrefilteredEnv, R, lod).rgb * blixSkyVisibility(vWorldPos, R, 0.0);
         float fresnel = 0.04 + 0.96 * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
-        // <b>No opacity floor.</b> Clean glass IS ~96% transparent head-on, and lifting it was
-        // faking the presence that refraction and absorption would give for free. The panes will
-        // read as nearly absent until there is a transmission pass; that is the honest picture of
-        // what this model currently computes.
+        // No opacity floor: this branch models Fresnel reflection over the background, without
+        // refraction or absorption. Clean head-on glass is therefore nearly transparent.
         float glassAlpha = mix(albedo4.a, fresnel, transmission);
-        // The debug views have to reach glass too. They did not, because this branch returns first
-        // — so every channel drew a lit pane over whatever it was meant to be showing, and the one
-        // surface worth interrogating was the one the instrument could not see.
+        // Handle diagnostics before the early return so transmissive surfaces remain inspectable.
         if (frame.uVizChannel > 0.5) {
             float vis = blixSkyVisibility(vWorldPos, R, 0.0);
             vec3 c = frame.uVizChannel < 1.5 ? vizGeometricN * 0.5 + 0.5 :
@@ -550,29 +409,13 @@ void main() {
     float NdotL = max(dot(N, L), 0.0);
     float NdotH = max(dot(N, H), 0.0);
     float VdotH = max(dot(V, H), 0.0);
-    // <b>The sample is moved off its own surface before it is projected, by the shared path.</b> It
-    // used to happen here, with cascade 0's texel size, because that is the only one a call site can
-    // pick before selection has run — and the same vec3 of METRES then went on to size a kernel
-    // measured in UV, making a 2-texel filter into a ~100-texel smear. Both halves are the chosen
-    // cascade's business, so both now live where the cascade is chosen.
+    // The shared shadow path chooses the cascade before applying its world-space normal offset and
+    // texel-space filter radius, keeping the two units and cascade footprints distinct.
     int shadowCascade = -1;
     float sunShadow = 1.0;
-    // <b>NdotL > 0, because a surface facing away from the sun is already shadowed by its own
-    // orientation.</b> The taps were being paid for a value that the direct term then multiplies by
-    // a zero NdotL — sixteen filtered depth comparisons whose result could not reach the image.
-    // Priced at 1.3-1.4x of the frame, the sun shadow is the largest single shading term here, so
-    // the fragments that cannot use it are worth not charging.
-    //
-    // <b>And then diffuse transmission made that premise false.</b> A transmitting surface uses the
-    // sun on the side facing AWAY — dot(-N, L) — which is precisely where NdotL is zero, so the
-    // gate skipped the lookup on exactly the fragments that needed it and sunShadow kept its
-    // initial 1.0. Every back-facing curtain fragment received full unshadowed sun through it, and
-    // the curtains held their colour in deep shade as though lit from within. The saving is still
-    // real and still taken; what the gate asks is now "can ANY term here use a shadow", which for
-    // an opaque material is the same question it was before.
-    //
-    // The cascade index stays -1 for those fragments, so --visualize-cascades paints them as
-    // "beyond the last cascade". That is a debug view reading a fragment that asked no question.
+    // Pay for shadow filtering only when front-side reflection or back-side diffuse transmission
+    // can consume it. Fragments needing neither leave cascade index -1, which diagnostics render as
+    // outside the cascades because no lookup was requested.
     float backNdotL = max(dot(-N, L), 0.0);
     float shadowNeed = max(NdotL, mat.uMaterialParams2.z > 0.0 ? backNdotL : 0.0);
     if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0) {
@@ -652,15 +495,9 @@ void main() {
     vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);
 
     // --- Ambient visibility ---------------------------------------------
-    // <b>The term that was missing, and the reason five knobs could be deleted without one.</b>
-    // The GTAO pass answers, from depth alone, how much of the sky this point can see and which
-    // way the opening faces.
-    //
-    // Skipped for TRANSMISSIVE surfaces, and not as a special case: glass is the only thing that
-    // goes through the blend pipelines, so it is the only thing the depth pre-pass did not write.
-    // Sampling this buffer from glass would read the visibility of whatever is BEHIND it. The test
-    // is uMaterialParams2.x because that is literally the predicate the scene sorts on
-    // (isBlend = material.TransmissionFactor > 0), so the two cannot drift apart.
+    // GTAO provides screen-space visibility and a bent normal for opaque surfaces. Transmissive
+    // materials are absent from the depth pre-pass, so sampling here would describe geometry behind
+    // the pane. The predicate matches the scene's blend classification.
     vec4 ambientVis = texture(uAmbientVisibility, gl_FragCoord.xy / frame.uFog.xy);
     bool opaqueSurface = mat.uMaterialParams2.x <= 0.0;
     float visibility = opaqueSurface ? ambientVis.a : 1.0;
@@ -668,46 +505,29 @@ void main() {
     // instead of along N is what makes a surface in a corner pick up the light from the opening
     // rather than an average that includes the wall it is pressed against.
     vec3 gatherN = opaqueSurface ? normalize(ambientVis.xyz) : N;
-    // <b>A bent normal is a refinement of N, never a replacement for it.</b> GTAO derives it in
-    // screen space from depth, which cannot tell which side of a leaf card is being shaded — so on
-    // the back face of two-sided geometry it points into the hemisphere the surface does NOT face,
-    // and the fragment gathers its indirect light from the wrong side of itself.
-    //
-    // Harmless while the bounce was one direction-free RGB, mild under L1's single smooth lobe, and
-    // plainly wrong at thirty-six directional samples: it fetches a different part of the probe's
-    // map entirely. Reported from the chair as back-facing leaves shifting blue.
+    // Keep the bent normal in the geometric normal's hemisphere. Screen-space depth cannot identify
+    // the active side of a two-sided sheet, and crossing the hemisphere samples unrelated incident
+    // light on back-facing foliage.
     if (dot(gatherN, N) < 0.0) gatherN = N;
 
-    // The same constant gtao.frag writes for a background texel: the camera's view axis in world
-    // space. Applied BEFORE the per-consumer dials so it reproduces the arm exactly.
-    // <b>All three of these shipped at zero, which is the geometric normal.</b> They were three
-    // dials asking "should the bent normal steer the cube fetch / the sky-visibility query / the
-    // bounce lookup", the answer came back no for each, and the dials stayed. gatherN survives
-    // only as something to LOOK at (Visualize ambient 2), which is a different job from steering.
+    // Bent normal remains an inspectable GTAO output. Production IBL, sky visibility, and bounce
+    // use the surface normal; uAmbientGeoNormal isolates interpolated versus normal-mapped input.
     vec3 cubeN   = N;
     vec3 skyVisN = frame.uAmbientGeoNormal > 0.5 ? vizGeometricN : N;
     vec3 bounceN = frame.uAmbientGeoNormal > 0.5 ? vizGeometricN : N;
     vec3 irradiance = frame.uAbFlags.z > 0.5 ? vec3(0.2) : texture(uIrradiance, cubeN).rgb;
 
     // --- Baked sky visibility -------------------------------------------
-    // <b>What this surface can SEE, which nothing in this renderer previously knew.</b> The
-    // screen-space term above has a sub-metre radius: it answers whether a leaf is near this stone,
-    // not whether the stone is at the bottom of a courtyard. Measured, the atrium floor receives
-    // about 0.15 of the sky and the shader was giving it 0.85.
-    //
-    // Sampled a little along the NORMAL, because a probe cell straddling a wall holds both sides of
-    // it and a lookup taken exactly at the surface reads the enclosure on the wrong side. It is the
-    // same failure as shadow acne — a query about a surface, taken on that surface — and the same
-    // remedy.
+    // Baked sky visibility supplies building-scale enclosure beyond GTAO's screen-space radius.
+    // The lookup is pushed along the normal so a probe cell straddling a wall reads the surface's
+    // side of the enclosure.
     float skyVisibility = 1.0;
     vec3 vizProbeUv = vec3(0.0);
     vec4 vizSh = vec4(0.0);
     BlixSkySample skySample;
     bool skySampleValid = false;
-    // <b>One texel instead of two volume reconstructions.</b> The field carries both terms this
-    // block used to compute: .a is the sky visibility for this surface's geometric normal, .rgb the
-    // bounced radiance arriving at it. Everything the lit pass is uniquely able to say — albedo,
-    // the normal map, the specular lobe and its IBL, shadows — stays exactly where it was.
+    // The incident field carries .a sky visibility and .rgb incoming bounce, replacing two volume
+    // reconstructions while leaving material response and direct/specular lighting in this pass.
     vec4 incidentField = frame.uIncident.z > 0.5
         ? texture(uIncidentField, gl_FragCoord.xy / frame.uFog.xy)
         : vec4(0.0);
@@ -717,12 +537,8 @@ void main() {
     } else if (frame.uSkyMin.w > 0.5) {
         vec3 probeUv = (vWorldPos + N * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz;
         vizProbeUv = probeUv;
-        // One call, the same one glass and everything else uses. Two copies of this evaluation is
-        // how the volume and its readers drifted apart before.
-        // Fetched once here and evaluated twice — the transmission branch below wants the sky on
-        // the other side of the same point, and with no normal push the two queries read identical
-        // texels. Three taps instead of six on exactly the pixels that were four times the price of
-        // an average one.
+        // Fetch once and evaluate for both N and -N; with no positional push both directions share
+        // the same three volume texels.
         skySample = blix_skyFetch(uSkyVisibility, uSkyVisibility1, uSkyVisibility2,
                                   frame.uSkyMin.xyz, frame.uSkyScale.xyz, vWorldPos);
         skySampleValid = true;
@@ -746,18 +562,7 @@ void main() {
         specularIBL = prefiltered * (F * envBrdf.x + envBrdf.y) * skyVisibility;
     }
 
-    // AO attenuates the indirect contribution only, per the glTF spec.
-    //
-    // <b>The sun shadow no longer dims indirect light.</b> It used to, as 0.60 + 0.40*sunShadow,
-    // and that is wrong in kind rather than degree: sun visibility is not ambient visibility. A
-    // crevice facing away from the sun but open to the sky was darkened; one in full sun but
-    // enclosed was not. It was standing in for ambient occlusion using the only occlusion signal to
-    // hand.
-    //
-    // It was standing in for ambient occlusion using the only occlusion signal to hand — and the
-    // real one now exists above, so this line multiplies by MEASURED visibility rather than by a
-    // constant plus a fraction of the sun's shadow.
-    //
+    // AO attenuates indirect light only. Sun visibility is not an ambient-occlusion signal.
     // Specular gets its own occlusion, derived rather than dialled: a rough surface gathers over a
     // wide cone and is occluded nearly as much as the diffuse lobe, while a mirror gathers along
     // one ray that the visibility average says little about. Lagarde's approximation is that
@@ -765,10 +570,8 @@ void main() {
     float specularVisibility = clamp(
         pow(max(NdotV + visibility, 0.0), exp2(-16.0 * roughness - 1.0)) - 1.0 + visibility,
         0.0, 1.0);
-    // <b>ADDED, not multiplied — which is the distinction the first attempt got wrong.</b> Sky
-    // visibility scales the sky a surface can see; bounced sunlight is light arriving from
-    // elsewhere and belongs in the sum. Folding it into the visibility SH made an up-facing floor
-    // evaluate negative, because two directional fields multiplied double-count direction.
+    // Bounce is added to visibility-scaled sky light. It is incident light arriving from elsewhere,
+    // not another visibility factor to multiply into the sky field.
     vec3 bounce = vec3(0.0);
     vec3 vizBounceRaw = vec3(0.0);
     float probeConfidence = 0.0;
@@ -778,24 +581,15 @@ void main() {
     float vizProbeLeak = -1.0;
     if (frame.uBounceStrength > 0.0 && frame.uAbFlags2.x < 0.5 && frame.uNoBounceTerm < 0.5) {
         vec3 probeUv = (vWorldPos + N * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz;
-        // The volume stores average incident RADIANCE; irradiance is PI times it. Getting this
-        // conversion wrong is invisible in a single pass and fatal once the pass feeds itself.
-        // <b>Reflected exactly the way diffuseIBL is, because they are the same kind of quantity.</b>
-        // That line is irradiance x albedo; this must be too, or the two halves of the ambient are
-        // in different units. The volume stores average incident RADIANCE, so irradiance is PI times
-        // it — and the /PI that briefly sat here is the radiance conversion, which belongs in the
-        // injection pass where a surface re-emits, not here where one receives.
-        // <b>Eight probes, weighted by whether each can actually SEE this point.</b> The previous
-        // nearest-probe fetch had no visibility term at all, so a wall took its light from whatever
-        // probe happened to be closest — including one on the far side of itself. That leak is why
-        // colour bled through walls from curtains and a tree they do not face.
+        // Incident irradiance is reflected with the same albedo response as diffuse IBL. Inline
+        // reconstruction blends up to eight probes with depth/occupancy visibility to prevent a
+        // nearest probe on the far side of a wall from contributing.
         vec3 incident;
         if (frame.uIncident.z > 0.5) {
             incident = incidentField.rgb;
-            // The field carries no per-pixel confidence — it is one number per coarse texel and the
-            // upsample has already mixed four of them. Channel 16 and the leak census therefore read
-            // as fully confident here; that is honest rather than convenient, because the quantity
-            // they were measuring is no longer decided at this resolution.
+            // The field carries no per-pixel confidence: each full-resolution texel has already
+            // mixed four coarse samples. Channel 16 and the leak census therefore report full
+            // confidence because receiver selection is not evaluated in this pass.
             probeConfidence = 1.0;
         } else {
             incident = blix_probeIrradianceEx(
@@ -829,20 +623,8 @@ void main() {
     // direct sun on it at all, and that is most of what makes cloth read as thin.
     vec3 transmittedIBL = vec3(0.0);
     if (diffTrans > 0.0) {
-        // <b>The BACK side's own sky visibility, queried along -N.</b> This reused the front face's
-        // `skyVisibility`, which is a different question with a different answer: a curtain whose
-        // front faces a 3%-sky wall and whose back faces an open courtyard was told it could see 3%
-        // of the sky from behind. That handed cloth a second light path scaled by the wrong occlusion,
-        // and in an atrium where the walls see 2.4-3.8% of the sky it routinely outweighed the
-        // properly shadowed front face.
-        //
-        // The baked volume CAN answer this, which is the point — it is a world-space field, so -N is
-        // as valid a query direction as N. Only the screen-space term (`visibility` below) genuinely
-        // cannot see the back side, and that one stays an approximation.
-        //
-        // Diagnosed, then mis-fixed: the curtain patch set diffuseTransmission to 0 and recorded this
-        // exact reasoning as the justification. Deleting the term because its occlusion was wrong is
-        // hiding a symptom; the occlusion is what was wrong.
+        // Diffuse transmission queries the back side's own baked sky visibility along -N. The
+        // world-space field supports both directions; GTAO remains a front-view approximation.
         float backVis = skySampleValid
             ? blix_skyEvaluate(skySample, -N)
             : blixSkyVisibility(vWorldPos, -N, 0.0);
@@ -876,72 +658,36 @@ void main() {
             // is a bad coordinate, a bad uniform, or a bad texel.
             frame.uVizChannel < 8.5 ? clamp(vizProbeUv, vec3(0.0), vec3(1.0)) :
             frame.uVizChannel < 9.5 ? vec3(clamp(vizSh.x / (4.0 * PI * 0.282095), 0.0, 1.0)) :
-            // <b>The bounce, on its own and unscaled by anything it is later multiplied into.</b>
-            // "There is almost no light bouncing" is a claim about a quantity nothing displayed:
-            // the injected field only ever reached the eye after albedo, AO and ambient visibility
-            // had each taken a share, so a weak result and a correct-but-attenuated one looked the
-            // same. 10 is the radiance the probe volume holds here; 11 is what it contributes after
-            // the surface takes its share; 12 is the direct sun alone, for scale — read 10 against
-            // 12 and the ratio IS the bounce's strength, which is the number in dispute.
+            // 10 is raw incident bounce; 11 includes surface response and occlusion; 12 is direct
+            // sun for scale. Keeping these stages separate distinguishes weak transport from later
+            // attenuation.
             frame.uVizChannel < 10.5 ? vizBounceRaw :
             frame.uVizChannel < 11.5 ? bounce :
             frame.uVizChannel < 12.5 ? direct :
-            // <b>The occlusion stack, one term at a time and then multiplied.</b> Ambient is
-            // irradiance x albedo x skyVisibility x GTAO x textureAO — three occlusion terms in a
-            // row, each defensible alone. Whether their product is defensible is a question nobody
-            // had looked at, because nothing displayed it.
+            // 13-15 expose GTAO, material AO, and the complete ambient-occlusion product.
             frame.uVizChannel < 13.5 ? vec3(visibility) :
             frame.uVizChannel < 14.5 ? vec3(ao) :
             frame.uVizChannel < 15.5 ? vec3(skyVisibility * visibility * ao) :
-            // <b>16: how much of the eight-probe blend survived the visibility test.</b> Green is a
-            // full blend; darkening green is a partial one; RED is the fallback — every probe
-            // rejected, so the surface is lit by an unweighted nearest probe with NO occlusion term
-            // at all. That state is invisible in the final image, which is the problem: it looks
-            // like light rather than like a reconstruction failure, and a large red area would mean
-            // the bounce is painting flat fill wherever the Chebyshev test gives up.
-            //
-            // <b>BLUE is the term being switched off, and it is a separate colour for a reason.</b>
-            // The first version of this channel painted red whenever the confidence was zero, which
-            // is also what an unexecuted bounce block leaves behind — so a whole scene running
-            // without --sky read as "every probe rejected" instead of "this feature is not on". One
-            // glance cost an hour. A diagnostic must distinguish a measured zero from an absent
-            // measurement.
+            // 16 shows probe-blend confidence: green is surviving weight, red is the nearest-probe
+            // fallback after all candidates were rejected, and blue means transport was disabled.
             frame.uVizChannel < 16.5 ? (frame.uBounceStrength <= 0.0
                                             ? vec3(0.0, 0.1, 1.0)
                                             : probeConfidence <= 1e-5
                                                 ? vec3(1.0, 0.0, 0.0)
                                                 : vec3(0.0, clamp(probeConfidence, 0.0, 1.0), 0.0)) :
-            // <b>17-20: the ambient sum, one term at a time.</b> "The shadowed leaves are blue" is a
-            // statement about a SUM, and the four things in it are lit very differently: the sky
-            // diffuse is albedo-tinted, the specular is not (it is ~4% of the sky whatever colour the
-            // surface is), the transmitted term is the new thin-sheet path, and the bounce carries
-            // whatever the probes hold. Any one of them can own a hue without the others moving, and
-            // reading which from the total is guesswork -- these are the same terms the final line
-            // adds up, exposed before they are added.
+            // 17-20 expose the ambient sum before addition: diffuse sky, specular sky, thin-sheet
+            // transmission, and bounce.
             frame.uVizChannel < 17.5 ? kD * diffuseIBL * transScale * visibility * ao :
             frame.uVizChannel < 18.5 ? specularIBL * specularVisibility * ao :
             frame.uVizChannel < 19.5 ? transmittedIBL :
             frame.uVizChannel < 20.5 ? bounce * transScale :
-            // <b>22: the normal the half-res incident field reconstructs its ambient from.</b>
-            // "Normals leaking at some angles" is a claim about a quantity nothing displayed — the
-            // field's directional input is the pre-pass normal, not the shading normal, and where
-            // those disagree is where its ambient can be wrong in a way no amount of filtering
-            // fixes. Read it against channel 1 (the geometric normal) and channel 2 (the shading
-            // normal): 22 disagreeing with 1 is a pre-pass or resolve fault and mine to fix; 22
-            // agreeing with 1 while the artifact persists means the field is reading a correct
-            // normal and the fault is elsewhere.
+            // 22 shows the pre-pass normal used by the half-resolution incident field. Compare it
+            // with geometric channel 1 and shading channel 2 to localize reconstruction faults.
             frame.uVizChannel < 22.5 && frame.uVizChannel > 21.5
                 ? texture(uPrepassNormalViz, gl_FragCoord.xy / frame.uFog.xy).xyz * 0.5 + 0.5 :
-            // <b>21: how much of this point's probe blend arrives through a wall.</b> Red is the
-            // leaked fraction, green marks the pixel as measured — which is what lets the census
-            // average over the surfaces that asked the probe volume a question, rather than over
-            // the whole frame including sky. The Chebyshev visibility test is a statistical stand-in
-            // for exactly this march; this is the march, so the two can be compared instead of the
-            // approximation being trusted.
-            // Green carries the blend's surviving weight as 0.5 + 0.5*confidence, so one capture
-            // answers both halves of the question. A visibility test is only as good as the light
-            // it leaves standing, and the cheap way to score zero leak is to reject every probe —
-            // which reads as confidence collapsing to zero while the leak reads perfect.
+            // 21 compares the probe blend with an occupancy march: red is leaked weight and green
+            // is 0.5 + 0.5*confidence for measured pixels. Reporting both prevents zero-leak scores
+            // achieved by rejecting all useful light.
                                        vec3(max(vizProbeLeak, 0.0),
                                             vizProbeLeak >= 0.0
                                                 ? 0.5 + 0.5 * clamp(probeConfidence, 0.0, 1.0)
@@ -949,12 +695,8 @@ void main() {
                                             0.0);
         // Straight out, no exposure and no tonemap — these are directions and flags, and a film
         // curve on a direction is a way to misread it.
-        // <b>Coverage 1, not the fragment's own — a diagnostic must not be alpha-to-coverage masked.</b>
-        // Writing `coverage` here hands the pipeline a partial sample mask, so the samples it drops
-        // keep whatever drew next, which for a canopy is the SKYBOX. Every viz channel then showed
-        // the same blue over foliage no matter what it was displaying, because none of them were
-        // displaying anything there -- that is how "the exact same blue in all of them" got noticed,
-        // and it is also the blue on the tree in the lit image.
+        // Diagnostics force full coverage so dropped foliage samples cannot reveal the skybox and
+        // contaminate the quantity being inspected.
         outColor = vec4(c, 1.0);
         return;
     }

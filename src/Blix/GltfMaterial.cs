@@ -2,32 +2,20 @@ using System.Numerics;
 
 namespace Blix;
 
-// glTF 2.0 PBR-metallic-roughness material, decoded into the subset the engine
-// consumes. The renderer doesn't get the full glTF surface (KHR_materials_*
-// extension grab-bag is large), but it covers the fields the current PBR lit
-// shader can actually act on plus the ones a downstream shader is likely to.
+// glTF 2.0 PBR-metallic-roughness material plus the KHR_materials_* values
+// surfaced by the current SharpGLTF boundary. Import preserves parameters;
+// individual renderers decide which ones they implement.
 public sealed record GltfMaterial(
     /// <summary>
-    /// What this material IS — stable across loads, and equal for two loads of the same source.
+    /// Stable origin identity for sharing the same material across loads.
     /// </summary>
     /// <remarks>
-    /// <b><c>&lt;container&gt;#material&lt;N&gt;</c>, for the same reason <see cref="GltfTexture"/>
-    /// carries one.</b> VulkanSponza's material cache is keyed by this record's OBJECT, so two
-    /// imports of one file would build two GPU materials for one material — inert today only
-    /// because it loads each of its four packs exactly once.
+    /// Formed as <c>&lt;container&gt;#material&lt;N&gt;</c>, parallel to
+    /// <see cref="GltfTexture.ResourceId"/>.
     /// </remarks>
     /// <para>
-    /// <b>The identity is here; the storage is deliberately not.</b> A texture has one canonical GPU
-    /// form — <c>(identity, format) → TextureHandle</c> is true for everyone — so a shared
-    /// TextureRegistry is possible. A material does not: <c>GltfTextureLoader</c>'s own header says
-    /// binding is the renderer's and the UBO layout is the game's, and Sponza caches a
-    /// Sponza-shaped tuple. A generic registry over that would be a type parameter pretending to be
-    /// a shared decision.
-    /// </para>
-    /// <para>
-    /// Done now rather than when a second owner appears, because the shape does not depend on who
-    /// that is: this string is the same whoever shows up. Waiting would buy no information and
-    /// guarantee the broken key gets written once more first.
+    /// Identity is shared engine data; GPU material storage remains renderer-owned because binding
+    /// layouts and shader policy differ by application.
     /// </para>
     string ResourceId,
     string Name,
@@ -37,8 +25,7 @@ public sealed record GltfMaterial(
 
     /// <summary>Which TEXCOORD set <see cref="BaseColorTexture"/> samples. Almost always 0.</summary>
     /// <remarks>
-    /// <b>Carried because a material naming set 1 on a reader that assumes 0 does not fail — it
-    /// samples the wrong coordinates.</b> glTF lets every texture on a material choose its set
+    /// glTF lets every texture on a material choose its coordinate set
     /// independently, so this is a property of the CHANNEL rather than of the mesh or the material.
     /// Only base colour is recorded because only base colour is sampled by anything here; the rest
     /// of the channels keep their sets when something reads them.
@@ -114,24 +101,16 @@ public enum GltfAlphaMode
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Read because the spec defines them, not because an asset in the tree asks.</b> Conventions §7:
-/// for a format Blix reads, the specification is the requirement and owning an asset that exercises
-/// it is a download, not a precondition. SharpGLTF 1.0.6 surfaces thirteen of these and the importer
-/// consumed two — transmission and emissive strength — so eleven spec-defined material properties
-/// were being parsed by the library and dropped on the floor at our boundary.
+/// These values follow the glTF specification surface exposed by SharpGLTF rather than the subset
+/// exercised by repository-owned sample assets.
 /// </para>
 /// <para>
-/// <b>A group rather than thirty more members on the material.</b> These all belong to one family,
-/// they arrive together from one API, and keeping them together leaves GltfMaterial at the width it
-/// has. Every field is REQUIRED with a spec default, because the alternative — an optional block —
-/// is an optionality mechanism this codebase does not have and does not need: .blixmesh has bumped
-/// its version and re-cooked from v2 to v8, and the build re-cooks by itself.
+/// The extension family is grouped separately from core metallic-roughness fields. Every field has
+/// its specification default so absence preserves the base material model.
 /// </para>
 /// <para>
-/// <b>What is here is the parameters; what is NOT here is what to do with them.</b> How sheen
-/// shades, whether transmission refracts against a scene-colour copy or stays Fresnel-only, what a
-/// voxel baker does with diffuse transmission — those are §6 policy and live at the call site. This
-/// type's whole job is that the numbers survive the format boundary (§3) so a consumer can decide.
+/// This type preserves parameters only. Shading, transmission, and baking policy belong to each
+/// renderer or baker.
 /// </para>
 /// </remarks>
 public sealed record GltfMaterialExtensions(

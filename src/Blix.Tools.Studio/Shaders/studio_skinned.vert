@@ -37,10 +37,9 @@ layout(set = 0, binding = 0) uniform Frame {
 // bytes and the tail is simply never read.
 //
 // 1024 = StudioRig.MaxBones (128) x StudioRig.MaxInstances (8). A literal, because the build's
-// SPIR-V target does not pass -D — so the number does live in two files, and the probe is what
-// makes that safe: it reads the reflected block size back and exits non-zero the moment it
-// stops matching the C# constants. Bulwark hard-codes `#define BONE_COUNT 15` in two shaders
-// and throws at load if the asset disagrees; the throw exists because nothing checks earlier.
+// SPIR-V target does not pass -D — so the number does live in two files. Blix.Test.Studio reads
+// the reflected block size and fails if it stops matching the C# constants; StudioRig rejects an
+// asset whose skin cannot fit before allocating its GPU resources.
 layout(std430, set = 3, binding = 0) readonly buffer Bones {
     mat4 m[1024];
 } bones;

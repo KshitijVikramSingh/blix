@@ -1,5 +1,9 @@
 # Material response arc — plan
 
+> **Status 2026-09-21 — active.** Shared sheen vocabulary, probe data, and
+> Sponza's raster response exist. The planned per-material response in the
+> light-transport bake is not yet represented by the current global control.
+
 > The engine now *reads* thirteen material extensions and *responds* to one. Reading a property and
 > shading it are different obligations, and only the first one is finished.
 

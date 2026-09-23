@@ -7,15 +7,7 @@ namespace Blix.Cooked;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Three formats existed before this and none of them knew it was one of three.</b>
-/// <c>.blixtex</c> announced itself as <c>"BLIX"</c> while the other two used <c>BLX*</c>; its
-/// version was a <c>ushort</c> where theirs were <c>uint</c>. The consequence was not cosmetic — it
-/// meant no single function could read any Blix cooked file's magic and version, which is the most
-/// basic thing a family of formats gives you, and it is why nothing in the tree could report on
-/// cooked output without knowing in advance what it was looking at.
-/// </para>
-/// <para>
-/// So the preamble is fixed, identical across formats, and self-describing:
+/// The preamble is fixed, identical across formats, and self-describing:
 /// <see cref="PreambleBytes"/> sits at offset 8 so twelve bytes are enough to learn what a file is,
 /// what version it is, and where its own header starts. A reader that understands none of the three
 /// formats can still report a file's provenance.
@@ -42,7 +34,7 @@ namespace Blix.Cooked;
 ///   the format's own header follows
 /// </code>
 /// <para>
-/// Little-endian throughout, matching all three formats as they already were.
+/// Little-endian throughout.
 /// </para>
 /// </remarks>
 public static class CookPreamble

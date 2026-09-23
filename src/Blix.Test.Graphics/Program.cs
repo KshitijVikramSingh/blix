@@ -759,6 +759,14 @@ static UniformBlockLayout Mat4Block() => new(
         StoreOp.Store != StoreOp.DontCare);
 }
 
+{
+    // K.4 — Temporal clients can cache the graph's match-swapchain generation.
+    // A graph has not replaced anything before its backend sees a recreation.
+    var graph = new RenderGraph();
+    t.ExpectTrue("K.4 match-swapchain generation starts at zero",
+        graph.MatchSwapchainResourceGeneration == 0);
+}
+
 // ============================================================================
 // Section L — RenderGraph validation (Vector B VB.ii).
 // ============================================================================
@@ -3546,12 +3554,12 @@ static ShaderInterface MinimalShader() => new(new[]
             Math.Abs(fwts[0] - onDisk.X) < 1e-5f && Math.Abs(fwts[1] - onDisk.Y) < 1e-5f
             && Math.Abs(fwts[2] - onDisk.Z) < 1e-5f && Math.Abs(fwts[3] - onDisk.W) < 1e-5f);
 
-        // ── BC.4 and the file says what it could not keep ───────────────────
-        t.ExpectTrue("BC.4 the dropped influence set is reported, not silent",
-            model.IgnoredOrEmpty.Any(i => i.Semantic is "JOINTS_1" or "WEIGHTS_1"));
-        t.ExpectTrue("BC.4 and the report says the skin is TRUNCATED rather than merely unread",
-            model.IgnoredOrEmpty.Where(i => i.Semantic.StartsWith("JOINTS_", StringComparison.Ordinal))
-                 .All(i => i.Explanation.Contains("TRUNCATED", StringComparison.Ordinal)));
+        // ── BC.4 the diagnostic agrees with the reader ──────────────────────
+        // JOINTS_1/WEIGHTS_1 are inputs to the strongest-four selection above. Calling the whole
+        // attributes ignored was an older collector describing its shared allow-list rather than
+        // what this import actually consumed.
+        t.ExpectTrue("BC.4 complete additional influence sets are not falsely reported as ignored",
+            model.IgnoredOrEmpty.All(i => i.Semantic is not ("JOINTS_1" or "WEIGHTS_1")));
     }
     finally
     {
@@ -3792,10 +3800,16 @@ static ShaderInterface MinimalShader() => new(new[]
         attrs["_CUSTOM_THING"] = attrs["TEXCOORD_0"]!.DeepClone();
         File.WriteAllText(extra, json.ToJsonString());
 
+        var plainWithoutTangents = new GltfStaticImporter().ImportNodes(
+            new AssetImportContext(AssetId.Parse("ba/plain-default"), plain));
         var plainModel = new GltfStaticImporter().ImportNodes(
-            new AssetImportContext(AssetId.Parse("ba/plain"), plain));
+            new AssetImportContext(AssetId.Parse("ba/plain"), plain, includeTangents: true));
         var extraModel = new GltfStaticImporter().ImportNodes(
-            new AssetImportContext(AssetId.Parse("ba/extra"), extra));
+            new AssetImportContext(AssetId.Parse("ba/extra"), extra, includeTangents: true));
+        var colouredModel = new GltfStaticImporter().ImportNodes(
+            new AssetImportContext(AssetId.Parse("ba/extra-colour"), extra, includeColour: true));
+        var flatExtraModel = new GltfStaticImporter().Import(
+            new AssetImportContext(AssetId.Parse("ba/extra-flat"), extra, includeTangents: true));
 
         // ── BA.1 THE CONTROL FIRST ──────────────────────────────────────────
         //
@@ -3805,6 +3819,8 @@ static ShaderInterface MinimalShader() => new(new[]
         t.Expect("BA.1 CONTROL a file with no unread attributes reports none",
             plainModel.IgnoredOrEmpty.Length == 0,
             $"got {string.Join(", ", plainModel.IgnoredOrEmpty.Select(i => i.Semantic))}");
+        t.ExpectTrue("BA.1 and the same file reports TANGENT when the selected layout omits it",
+            plainWithoutTangents.IgnoredOrEmpty.Any(i => i.Semantic == "TANGENT"));
 
         // ── BA.2 what it does catch ─────────────────────────────────────────
         var names = extraModel.IgnoredOrEmpty.Select(i => i.Semantic).ToArray();
@@ -3814,6 +3830,8 @@ static ShaderInterface MinimalShader() => new(new[]
         // The subtractive sweep's whole reason for being: nobody wrote "_CUSTOM_THING" into a list.
         t.ExpectTrue("BA.2 and so is an attribute nobody anticipated, which a fixed list would miss",
             names.Contains("_CUSTOM_THING"));
+        t.ExpectTrue("BA.2 the flat static importer reports the same unread second UV set",
+            flatExtraModel.IgnoredOrEmpty.Any(i => i.Semantic == "TEXCOORD_1"));
 
         t.Expect("BA.2 the semantics Blix DOES read are not reported as ignored",
             !names.Contains("POSITION") && !names.Contains("NORMAL") && !names.Contains("TEXCOORD_0"),
@@ -3821,27 +3839,27 @@ static ShaderInterface MinimalShader() => new(new[]
 
         var uv1 = extraModel.IgnoredOrEmpty.First(i => i.Semantic == "TEXCOORD_1");
         t.Expect("BA.2 counted per primitive", uv1.Primitives == 1, $"{uv1.Primitives}");
+        t.ExpectTrue("BA.2 the coloured layout consumes TEXCOORD_1 instead of merely allow-listing it",
+            colouredModel.IgnoredOrEmpty.All(i => i.Semantic != "TEXCOORD_1"));
 
-        // ── BA.3 the explanation separates omission from corruption ─────────
-        //
-        // The distinction the whole record exists to carry: an unread UV set is a missing feature,
-        // an unread fifth bone influence is a wrong answer. A reader who cannot tell them apart will
-        // triage them the same way, which is the failure mode this prevents.
+        // ── BA.3 explanations name the relevant import capability ───────────
+        // A semantic alone is not enough to say what happened: an additional influence pair is
+        // consumed by the rigged path but irrelevant to a static layout. The explanation points at
+        // that distinction without claiming the mode-aware collector dropped data it actually read.
         t.ExpectTrue("BA.3 a second UV set explains itself as a missing capability",
             uv1.Explanation.Contains("UV", StringComparison.Ordinal));
 
         var joints1 = new GltfIgnored("JOINTS_1", 3);
-        t.ExpectTrue($"BA.3 JOINTS_1 says the skin is TRUNCATED, not merely unread ({joints1.Explanation})",
-            joints1.Explanation.Contains("TRUNCATED", StringComparison.Ordinal)
-            && joints1.Explanation.Contains("incorrectly", StringComparison.Ordinal));
+        t.ExpectTrue($"BA.3 JOINTS_1 distinguishes static omission from rigged consumption ({joints1.Explanation})",
+            joints1.Explanation.Contains("static", StringComparison.Ordinal)
+            && joints1.Explanation.Contains("rigged", StringComparison.Ordinal));
 
         t.ExpectTrue("BA.3 and an underscore attribute is named as application-specific",
             new GltfIgnored("_BATCHID", 1).Explanation.Contains("application-specific", StringComparison.Ordinal));
 
-        // ── BA.4 the ordering puts the corrupting one first ─────────────────
-        //
-        // A list read top-down should lead with the entry that changes geometry rather than the one
-        // that omits a feature.
+        // ── BA.4 likely importer-mode mistakes come first ───────────────────
+        // A skin channel on a static import is the strongest signal that the caller chose the wrong
+        // importer, so it leads ordinary omitted capabilities and application metadata.
         // Each alias borrows an accessor of a type its semantic actually allows: TEXCOORD_1 a VEC2,
         // COLOR_1 a VEC3, JOINTS_1 the VEC4 tangent. Declared in an order that puts JOINTS_1 in the
         // middle, so passing cannot be an accident of insertion order.
@@ -3854,9 +3872,9 @@ static ShaderInterface MinimalShader() => new(new[]
         File.WriteAllText(mixedPath, mixedJson.ToJsonString());
 
         var mixedModel = new GltfStaticImporter().ImportNodes(
-            new AssetImportContext(AssetId.Parse("ba/mixed"), mixedPath));
+            new AssetImportContext(AssetId.Parse("ba/mixed"), mixedPath, includeTangents: true));
         var first = mixedModel.IgnoredOrEmpty.FirstOrDefault()?.Semantic;
-        t.Expect("BA.4 the entry that corrupts geometry is listed first",
+        t.Expect("BA.4 the skin channel that suggests the wrong importer is listed first",
             first == "JOINTS_1", $"got '{first}'");
     }
     finally

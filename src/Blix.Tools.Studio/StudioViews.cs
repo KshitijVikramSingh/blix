@@ -4,22 +4,11 @@ using Blix.Graphics;
 namespace Blix.Tools.Studio;
 
 /// <summary>
-/// A static glTF on the stage, placed by its own node hierarchy.
+/// Alpha-mode decisions shared by Studio's static and rigged views.
 /// </summary>
-/// <remarks>
-/// Ready-made, so a tool that wants to look at a model writes no draw call. The contrast with
-/// <see cref="RigView"/> is the whole difference between a static asset and a rigged one: here each
-/// part is placed by its node's composed world matrix, because the hierarchy IS the articulation.
-/// </remarks>
-/// <summary>The cutout threshold a part's material asks for. Zero for anything that never cuts.</summary>
-/// <remarks>
-/// <b>Zero rather than the material's own cutoff for OPAQUE and BLEND.</b> glTF gives every material
-/// an alphaCutoff whether or not its alphaMode uses one — the field defaults to 0.5 and means nothing
-/// unless the mode is MASK. Pushing it regardless would punch holes in every opaque surface whose
-/// texture happened to carry an alpha channel.
-/// </remarks>
 internal static class StudioAlpha
 {
+    /// <summary>The cutout threshold for MASK; zero for modes where glTF alphaCutoff has no meaning.</summary>
     public static float CutoffFor(GltfAlphaMode mode, float cutoff) =>
         mode == GltfAlphaMode.Mask ? cutoff : 0f;
 
@@ -27,18 +16,13 @@ internal static class StudioAlpha
     /// Whether a part is drawn in the blended group: last, and not into the shadow map.
     /// </summary>
     /// <remarks>
-    /// <b>Order within the blended group is NOT solved, and saying so is the point.</b> Blended
-    /// surfaces are drawn after every opaque one, which is the part the depth buffer cannot do for
-    /// them; between themselves they are drawn in the order the asset lists them. Two overlapping
-    /// transparent surfaces therefore composite by list order rather than by depth. Sorting them is
-    /// a design choice with several defensible answers — per-object depth sort, per-triangle sort,
-    /// depth peeling, order-independent blending — and conventions §5 says a policy with several
-    /// answers waits for a consumer to pick between them. Rendering the material is conformance;
-    /// ordering it is not.
+    /// Blended parts follow opaque parts but retain asset order within their group. Studio does not
+    /// claim depth-correct ordering for overlapping transparent parts.
     /// </remarks>
     public static bool IsBlended(GltfAlphaMode mode) => mode == GltfAlphaMode.Blend;
 }
 
+/// <summary>A static glTF on the stage, placed by its authored node hierarchy.</summary>
 public sealed class ModelView : IStudioView
 {
     private readonly byte[] lit = new byte[StudioPush.LitBytes];
@@ -51,11 +35,7 @@ public sealed class ModelView : IStudioView
     }
 
     /// <summary>Colour overrides by material name, or null to draw what the file said.</summary>
-    /// <remarks>
-    /// <b>Optional, and null is the honest default.</b> A view that always consults a tint table
-    /// would make every caller construct one to say "no thanks", and a capture of an asset should
-    /// show the asset. See <see cref="StudioTints"/> for why the table is keyed on the name.
-    /// </remarks>
+    /// <remarks>Null preserves authored colour. Overrides are keyed by material name.</remarks>
     public StudioTints? Tints { get; set; }
 
     private Vector3 Colour(string materialName, Vector3 assetColour) =>
@@ -69,9 +49,7 @@ public sealed class ModelView : IStudioView
     {
         var casterOnly = draw.Pass == StudioPass.Shadow;
 
-        // <b>Two sweeps: opaque, then blended.</b> A blended surface has to come after everything
-        // it might show through, and its own pipeline does not write depth — so drawing it in asset
-        // order alongside opaques would let an opaque part drawn later sit on top of it.
+        // Draw opaque parts before the non-depth-writing blended group.
         for (var pass = 0; pass < 2; pass++)
         for (var index = 0; index < Model.Parts.Count; index++)
         {
@@ -91,19 +69,14 @@ public sealed class ModelView : IStudioView
             else StudioPush.Material(push, Colour(part.MaterialName, part.BaseColour), part.Metallic, part.Roughness,
                      alphaCutoff: cutoff, baseAlpha: part.BaseAlpha, albedoUvSet: part.AlbedoUvSet);
 
-            // A FRESH texture array per part. Push payloads are copied at record time; texture
-            // lists are still retained by reference, so a shared array would give every draw the
-            // last part's albedo — the aliasing that once stacked seven boxes at the seventh's
-            // transform, wearing a different hat.
+            // Texture lists are retained by reference, so each recorded draw needs its own array.
             draw.Scope.DrawIndexed(
                 vertexBuffer: part.Vertices,
                 indexBuffer: part.Indices,
                 pipeline: blended && draw.BlendPipeline.Id != 0 ? draw.BlendPipeline : draw.Pipeline,
                 indexCount: part.IndexCount,
                 uniforms: draw.Uniforms,
-                // <b>The caster binds an albedo too, at slot 0.</b> Its shader declares one so it
-                // can cut out, and every draw on a pipeline must bind every texture that shader
-                // declares — the ground included — or the draw reaches a set nothing filled.
+                // Casters also bind albedo at slot 0 because MASK shadows sample alpha.
                 textures: draw.WithAlbedo(part.Albedo),
                 pushConstants: push);
         }
@@ -120,7 +93,7 @@ public sealed class ModelView : IStudioView
 /// seams.
 /// </para>
 /// <para>
-/// <b>The palette must be uploaded before the pass is recorded</b>, not here. A descriptor set's
+/// The palette must be uploaded before the pass is recorded, not here. A descriptor set's
 /// buffer is not copied at record time the way a push payload is, so the draw carries a binding
 /// rather than a copy of the matrices — which is what makes one palette per frame slot correct and
 /// one palette per renderer a frame of lag.
@@ -138,11 +111,7 @@ public sealed class RigView : IStudioView
     }
 
     /// <summary>Colour overrides by material name, or null to draw what the file said.</summary>
-    /// <remarks>
-    /// <b>Optional, and null is the honest default.</b> A view that always consults a tint table
-    /// would make every caller construct one to say "no thanks", and a capture of an asset should
-    /// show the asset. See <see cref="StudioTints"/> for why the table is keyed on the name.
-    /// </remarks>
+    /// <remarks>Null preserves authored colour. Overrides are keyed by material name.</remarks>
     public StudioTints? Tints { get; set; }
 
     private Vector3 Colour(string materialName, Vector3 assetColour) =>
@@ -157,10 +126,8 @@ public sealed class RigView : IStudioView
     /// Joint world transforms for the pose being drawn, from <c>RigAnimation.BoneWorlds</c>.
     /// </summary>
     /// <remarks>
-    /// <b>Not the palette, and nothing here recomputes them.</b> A palette matrix is
-    /// <c>InverseBindPose · world</c> — a displacement, not a position — so composing a knife onto
-    /// one puts it near the origin. The worlds are already computed once per pose by the session;
-    /// this only needs to be handed them.
+    /// These are joint positions, not palette matrices. Attachments compose against joint worlds;
+    /// palette matrices include inverse bind and are not positions.
     /// </remarks>
     public IReadOnlyList<Matrix4x4>? BoneWorlds { get; set; }
 
@@ -168,23 +135,14 @@ public sealed class RigView : IStudioView
     /// Where the body stands. Composed onto every attachment; the skin gets it through the palette.
     /// </summary>
     /// <remarks>
-    /// <b>The skinned path does not need this and the attachment path does</b>, which is the one
-    /// genuine asymmetry between them. <c>PackInstances</c> bakes placement into each palette slice,
-    /// so a skinned draw pushes the identity and the bones carry it — but an attachment is not
-    /// skinned, so its placement has to arrive some other way, and the caller is the only thing that
-    /// knows it.
+    /// Skinned placement is baked into the palette; rigid attachments need the same placement here.
     /// </remarks>
     public Matrix4x4 Placement { get; set; } = Matrix4x4.Identity;
 
     /// <summary>
     /// Attachments to draw, by name. Empty by default.
     /// </summary>
-    /// <remarks>
-    /// <b>Empty by default because five weapons in one hand is not a picture of anything.</b> Four
-    /// of the Rogue's six attachments hang off <c>handslot.r</c>; a game shows one. Which one is the
-    /// caller's decision and the engine has no opinion — the same rule pose composition follows,
-    /// where the engine takes weights and knows nothing about states.
-    /// </remarks>
+    /// <remarks>Selection is caller policy; Studio does not choose among mutually exclusive gear.</remarks>
     public HashSet<string> VisibleAttachments { get; } = new(StringComparer.Ordinal);
 
     /// <summary>
@@ -192,28 +150,9 @@ public sealed class RigView : IStudioView
     /// alone, from <see cref="BoneWorlds"/>.
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// <b>A function rather than an array, and that is the whole design of this feature.</b>
-    /// <c>RigAnimation.InstanceBoneWorlds</c> hands back a SHARED scratch for every instance past the
-    /// first, valid only until the next call — so the obvious implementation,
-    /// </para>
-    /// <code>
-    /// for (var i = 0; i &lt; n; i++) worlds[i] = session.InstanceBoneWorlds(i);   // WRONG
-    /// </code>
-    /// <para>
-    /// fills the array with N references to one buffer and draws every body's gear in the LAST
-    /// echo's pose. No crash and no warning — the same aliasing that once gave every part of a model
-    /// the last part's albedo. Materialising N real arrays instead would be correct and would
-    /// allocate boneCount matrices per instance per frame; handing this view a <c>RigAnimation</c>
-    /// would be correct and would make a per-frame draw description reach back into durable state,
-    /// which is the one property that keeps these two types separable.
-    /// </para>
-    /// <para>
-    /// So the view asks for one instance's worlds at the moment it draws that instance and is
-    /// finished with them before it asks for the next. <b><see cref="DrawAttachments"/> must stay
-    /// instance-outer and attachment-inner for that to hold</b>, which is why the loops are written
-    /// that way rather than the other.
-    /// </para>
+    /// The callback is evaluated immediately per instance because
+    /// <c>RigAnimation.InstanceBoneWorlds</c> may return shared scratch valid only until the next
+    /// call. <see cref="DrawAttachments"/> must therefore remain instance-outer.
     /// </remarks>
     public Func<int, IReadOnlyList<Matrix4x4>>? InstanceBoneWorlds { get; set; }
 
@@ -232,12 +171,7 @@ public sealed class RigView : IStudioView
     /// Which attachments instance <c>i</c> shows. Null gives every instance
     /// <see cref="VisibleAttachments"/>.
     /// </summary>
-    /// <remarks>
-    /// <b>The point of the stage: one body with a knife and its neighbour with a crossbow.</b> The
-    /// engine takes a selection per body and has no opinion about what drives it — a state machine,
-    /// an inventory, or a checkbox in a tool — which is the same rule pose composition follows,
-    /// where the engine takes weights and knows nothing about states.
-    /// </remarks>
+    /// <remarks>Selection source is caller policy: inventory, state, or a tool control.</remarks>
     public Func<int, ISet<string>>? InstanceAttachments { get; set; }
 
     public void Draw(in StudioDraw draw)
@@ -281,15 +215,8 @@ public sealed class RigView : IStudioView
                     baseAlpha: part.BaseAlpha, albedoUvSet: part.AlbedoUvSet);
             }
 
-            // <b>The material decides whether its back face exists.</b> Every material on all three
-            // rigged assets in this tree is doubleSided and all of them were drawn by the culling
-            // pipeline. Measured rather than described: honouring it moves 731 pixels of a peasant
-            // capture (0.02%), mean delta +40 — POSITIVE, so this is surfaces appearing rather than
-            // shading shifting — and 81% of those pixels fall in the head band where MI_Hair_1 sits.
-            // A small effect from this camera, and a real one; a closed torso genuinely does not
-            // care, which is why the culling comment on the pipeline above is not wrong either.
-            // Blend first: its pipeline is already unculled, so a doubleSided blend material needs
-            // no fourth combination of the two.
+            // BLEND is already unculled. Other double-sided materials use the unculled skinned
+            // pipeline; closed single-sided parts retain back-face culling.
             var skinned = blended && draw.SkinnedBlendPipeline.Id != 0
                 ? draw.SkinnedBlendPipeline
                 : part.DoubleSided && draw.SkinnedDoubleSidedPipeline.Id != 0
@@ -304,9 +231,7 @@ public sealed class RigView : IStudioView
                 instanceCount: Instances,
                 uniforms: draw.Uniforms,
                 textures: draw.WithAlbedo(part.Albedo),
-                // <b>This part's skin, not the rig's first one.</b> Every part carries the index of
-                // the skin that poses it, and each skin has its own palette buffer — same pose,
-                // different inverse binds and a different authored frame.
+                // Each part selects its authored skin; skins may share joints but not inverse binds.
                 perDrawMaterial: (uint)part.SkinIndex < (uint)Rig.Skins.Count
                     ? Rig.Skins[part.SkinIndex].BoneMaterial
                     : Rig.BoneMaterial,
@@ -317,14 +242,8 @@ public sealed class RigView : IStudioView
         DrawStaticParts(draw, casterOnly);
     }
 
-    // <b>An attachment is a rung-two draw and costs nothing structurally.</b> It uses the stage's
-    // STANDARD lit pipeline — the same one a ground plane or a box uses — with an ordinary model
-    // matrix, because it is static geometry that happens to be carried by something that moves. No
-    // fourth pipeline, no change to StudioPush, no new pass. That was the thing worth finding out:
-    // the ladder said bringing a draw should be the ordinary case, and this is a draw.
-    // <b>Always drawn, with no visibility set.</b> An attachment is a choice — four of the Rogue's
-    // six share one hand and a game shows one — so the caller picks. A turret is not a choice; it is
-    // part of the model, and hiding it by default would be the old bug wearing a checkbox.
+    // Static rig parts use the standard rigid pipeline and are always drawn. Attachments are
+    // caller-selected because several authored options may occupy the same joint.
     private void DrawStaticParts(in StudioDraw draw, bool casterOnly)
     {
         if (Rig.StaticParts.Count == 0) return;
@@ -355,11 +274,8 @@ public sealed class RigView : IStudioView
 
         var attachPush = casterOnly ? attachCaster : attachLit;
 
-        // <b>Instance-outer, attachment-inner, and that order is load-bearing.</b> InstanceBoneWorlds
-        // hands back a shared scratch for every body past the first; this loop reads one body's
-        // worlds, draws everything that body carries, and only then asks for the next. Swapping the
-        // loops would ask N times before the first draw and leave every body wearing the last one's
-        // pose. See the remarks on InstanceBoneWorlds.
+        // InstanceBoneWorlds may return shared scratch, so finish one body's attachments before
+        // asking for the next body's transforms. See the property contract above.
         var bodies = InstanceBoneWorlds is null ? 1 : Math.Max(1, Instances);
         for (var body = 0; body < bodies; body++)
         {

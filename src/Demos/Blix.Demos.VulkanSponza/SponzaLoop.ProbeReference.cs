@@ -5,19 +5,10 @@ namespace Blix.Demos.VulkanSponza;
 
 // A CPU path-traced reference for the probe field.
 //
-// <b>Built because three hand-built expectations for the field's magnitude were wrong in a row.</b>
-// The runtime solve has been shown self-consistent — its ray closure matches the cook's independent
-// sky-visibility bake to 0.002 across a 5.5x range of enclosure — but self-consistency says the
-// transport loses nothing, not that the answer is right. "Is the bounce the correct BRIGHTNESS"
-// needs something to be correct against, and arithmetic on the back of an envelope has now failed
-// at that three times: once comparing the bounce field against the sky floor it is not supposed to
-// carry, once against a sunlit floor the probes turned out to be ten metres above, and once with a
-// binary sunlit counter when the effect was in the magnitude.
-//
-// So this shares the DATA and computes the TRANSPORT independently: the same occupancy grid, the
-// same per-cell albedo, the same sun direction and measured irradiance, and a plain brute-force
-// path trace over them. A disagreement is then about the solve rather than about the scene, which
-// is the only way the comparison means anything.
+// It shares scene inputs with the runtime — occupancy, per-cell albedo, sun direction, and measured
+// irradiance — but computes transport independently with a brute-force path trace. Runtime ray
+// closure already matches the cook's sky-visibility bake to 0.002 across a 5.5x enclosure range;
+// this reference tests absolute bounce magnitude rather than self-consistency alone.
 //
 // Sun only, deliberately. The question is why sunlight does not spread, the sky's contribution
 // arrives through a separate path, and leaving it out removes the one input this cannot reproduce
@@ -53,14 +44,8 @@ internal sealed partial class SponzaLoop
 
     // Marches the occupancy grid to a scattering event.
     //
-    // <b>Stochastic, and at the cell it ENTERS rather than the cell's centre.</b> Both were wrong in
-    // the first version and both bias directionally, which matters because the disagreement this
-    // reference found was itself directional. A partial cell is partially-occluding geometry, so the
-    // unbiased treatment is to interact there with probability equal to its density and pass through
-    // otherwise — the previous rule accumulated transmittance and declared a hit once it fell under
-    // a half, which turns a 0.3-density leaf cell into a guaranteed miss and three of them into a
-    // guaranteed hit. And reporting the voxel centre put every interaction up to half a cell further
-    // along the ray than it happened, always in the ray's own direction.
+    // Treat occupancy stochastically and report the cell-entry position. Interaction probability
+    // equals cell density, while the entry point avoids a directional half-cell position bias.
     private bool MarchCpu(
         Vector3 origin, Vector3 dir, Random rng,
         out Vector3 hitPos, out Vector3 hitNormal, out Vector3 hitCell)
@@ -94,12 +79,8 @@ internal sealed partial class SponzaLoop
             if (density > 0f && rng.NextDouble() < density)
             {
                 hitPos = origin + dir * tEnter;
-                // <b>Albedo comes from the CELL, not from the point of entry.</b> The entry point
-                // sits exactly on the boundary between this cell and the one before it, and now
-                // that the albedo grid matches the occupancy grid one to one, flooring it lands in
-                // the empty neighbour as often as not — which returns black and silently deletes
-                // the bounce. The runtime reads the cell centre; so must this. The entry point is
-                // still where the ray continues from, which is what it was introduced for.
+                // Sample albedo at the occupied cell centre. The entry point lies on a cell boundary
+                // and may otherwise floor into the empty neighbour; ray continuation still uses it.
                 hitCell = skyVolumeMin
                         + (new Vector3(c[0], c[1], c[2]) + new Vector3(0.5f)) * cellSize;
                 var n = new float[3];
@@ -119,11 +100,8 @@ internal sealed partial class SponzaLoop
         return false;
     }
 
-    // <b>The expected transmittance, not a coin flip.</b> A shadow ray wants the FRACTION of light
-    // that survives, and the product of (1 - density) along the path is exactly that with none of
-    // the variance a stochastic answer would add. It also matches what a partial cell means: a leaf
-    // canopy at 0.3 per cell passes 70% of the sun, and the binary version this replaced called that
-    // either fully lit or fully shadowed depending on how many cells it happened to cross.
+    // Shadow rays return expected transmittance: the product of (1 - density) along the path. This
+    // represents fractional coverage without adding stochastic variance to direct-light visibility.
     private float SunVisibilityCpu(Vector3 from, Vector3 toSun)
     {
         var cellSize = skyVolumeSpan / new Vector3(occCpuX, occCpuY, occCpuZ);
@@ -213,12 +191,9 @@ internal sealed partial class SponzaLoop
 
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] probe reference — CPU path trace, sun only, {paths} paths x {bounces} bounces:"));
-        // <b>Closure and visibility beside the radiance, because they separate two explanations.</b>
-        // If the +Z probes disagree on closure too, the two marches are finding different geometry
-        // and the fault is in transport. If closure matches while radiance does not, the geometry is
-        // agreed and something about what the surfaces RADIATE differs — which is a much smaller
-        // search. The closure instrument already matched the cook's bake to 0.002 in aggregate; the
-        // question is whether it still does at these specific probes.
+        // Report closure and visibility beside radiance. A closure mismatch points to different
+        // geometry traversal; matching closure with divergent radiance narrows the fault to surface
+        // emission/transport. The aggregate closure reference is within 0.002 of the cook's bake.
         var depth = vk.ReadTexture(bounceDepthTextures[BounceRead], out var dw, out var dh, out _);
         Console.WriteLine("    probe (x,y,z)        world            reference    measured     ratio   closure  expected  vis");
 
@@ -249,10 +224,8 @@ internal sealed partial class SponzaLoop
             var refLum = 0.2126 * reference.X + 0.7152 * reference.Y + 0.0722 * reference.Z;
 
             // What the field holds at the same probe: the mean over its tile.
-            // <b>The 6x6 interior, not the 8x8 tile.</b> The border ring is a duplicate of the edge
-            // texels, wrapped for filtering — averaging the whole tile counts those twice and tilts
-            // the mean toward whichever directions happen to sit on the octahedral seam. That is a
-            // directional bias in a comparison whose finding was directional.
+            // Average the 6x6 interior. The 8x8 tile's duplicated filtering border would count edge
+            // directions twice and bias the mean toward the octahedral seam.
             const int tile = 8;
             var x0 = px * tile;
             var y0 = (py + pz * bounceY) * tile;

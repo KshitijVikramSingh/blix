@@ -25,7 +25,7 @@ namespace Blix.Tools.Studio;
 /// </remarks>
 public sealed class StudioCamera
 {
-    /// <summary>Where the camera is looking. The lab's subjects stand at the origin.</summary>
+    /// <summary>Where the camera is looking. Studio subjects stand at the origin.</summary>
     public Vector3 Target { get; set; } = new(0f, 1f, 0f);
 
     /// <summary>Rotation about the world Y axis, in radians.</summary>
@@ -37,7 +37,7 @@ public sealed class StudioCamera
     /// <summary>Distance from <see cref="Target"/>.</summary>
     public float Distance { get; set; } = 11f;
 
-    /// <summary>Vertical field of view. Matches what the lab's renderer was built around.</summary>
+    /// <summary>Vertical field of view. Matches what the Studio renderer was built around.</summary>
     public float FieldOfView { get; set; } = MathF.PI / 3.2f;
 
     public float NearPlane { get; set; } = 0.1f;
@@ -91,8 +91,8 @@ public sealed class StudioCamera
 
     /// <summary>Turn the camera by a pointer delta, in logical pixels.</summary>
     /// <remarks>
-    /// The sensitivities are the ones the lab was tuned to by hand and are deliberately not a knob:
-    /// a lab that let you tune how a drag feels would need you to tune it before you could compare
+    /// The sensitivities are the ones Studio was tuned to by hand and are deliberately not a knob:
+    /// a viewer that let you tune how a drag feels would need you to tune it before you could compare
     /// two runs.
     /// </remarks>
     public void Orbit(float deltaX, float deltaY)
@@ -109,7 +109,7 @@ public sealed class StudioCamera
 
     /// <summary>Frame a subject of this height, standing on the ground.</summary>
     /// <remarks>
-    /// Used when an asset of unknown scale is loaded. Not a general "fit the bounds" — the lab
+    /// Used when an asset of unknown scale is loaded. Not a general "fit the bounds" — Studio
     /// normalises its subjects to a couple of metres before drawing them, so the only thing this
     /// needs to do is look at the middle of one and stand far enough back.
     /// </remarks>

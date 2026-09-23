@@ -8,34 +8,17 @@ using Microsoft.Toolkit.HighPerformance;
 using System.Diagnostics;
 using System.Numerics;
 
-// Blix asset cooker (CLI).
-//
-//   blix-cook textures <dir>
-//     Walks <dir> recursively. For every .png / .jpg / .jpeg, generates a
-//     CPU mip chain, picks a BCn format based on the file's role (BaseColor
-//     -> BC7sRGB, Normal -> BC5, MR/Occlusion -> BC7Unorm, Emissive
-//     -> BC7sRGB), encodes each mip, and writes a side-by-side .blixtex.
-//     Existing .blixtex files older than their source are re-cooked.
-//
-// Runtime reads .blixtex with no decode + no compression cost; the cost
-// is paid here, once.
+// Asset recipe host plus policy-bearing tree and packaging drivers. Invoke through `blix cook`.
 
 using Blix.Core;
 
 namespace Blix.Tools.Cook;
 
-/// <summary>Blix's asset cooker, addressable as <c>blix run cook</c>.</summary>
+/// <summary>Discovers recipes, runs declared transformations, and hosts asset-specific drivers.</summary>
 /// <remarks>
-/// <b>A class rather than top-level statements, which is the whole of what this change was.</b> It
-/// was the last open cell in the tooling arc's Stage B table, and the row's point is why it
-/// mattered: <i>"Blix's tools are not special."</i> A launcher layer whose own cooker is the one
-/// thing it cannot address is a layer with an exception in it, and an exception is where the next
-/// one goes. Top-level statements have no method to hang an attribute on; every other tool here
-/// already declares a Program class, so this now matches them.
-/// <para>
-/// Nothing about how the cooker WORKS changed. The verbs, the helpers and their behaviour are the
-/// same code, one indent level in.
-/// </para>
+/// <c>list</c>, <c>run</c>, <c>status</c>, and <c>batch</c> are format-neutral host operations.
+/// Mesh, texture, probe, asset-tree, and sky verbs carry traversal, packaging, or scene policy that
+/// deliberately does not belong in a one-file recipe.
 /// </remarks>
 public static class Program
 {
@@ -57,40 +40,24 @@ public static class Program
             "mesh" => CookMesh(args),
             "asset" => CookAsset(args),
             "sky" => CookSky(args),
-            "list" => ListRecipes(),
+            "list" => ListRecipes(args),
             "run" => RunRecipe(args),
             "status" => Status(args),
             "batch" => Batch(args),
-            "help" or "-h" or "--help" => Help(),
+            "help" or "-h" or "--help" => Help(args),
             _ => UnknownVerb(args[0]),
         };
     }
 
-    /// <summary>
-    /// Cooks one asset and exactly the images it references, into a tree of its own.
-    /// </summary>
-    /// <remarks>
-    /// <b>The driver that makes a cooked tree self-contained AND smaller than its source.</b> The
-    /// other drivers sweep a directory, which is right when the directory IS the unit of work and
-    /// wrong for an asset: main Sponza ships 137 texture files and names 72, so a sweep pays a
-    /// quarter of its time and bytes for images nothing samples.
-    /// <para>
-    /// <b>Textures first, then the mesh, and the order is load-bearing.</b> The mesh cook records
-    /// where each image's pixels are by looking for a cooked artifact at the place the loader will
-    /// look. Cooking the mesh first would have it record source PNGs — correct, and useless for
-    /// shipping, because those live in the tree the user is trying to delete.
-    /// </para>
-    /// <para>
-    /// Grouping stays the consumer's: this writes one cooked artifact per source image and records
-    /// the relative path, which is a POLICY expressed as data. A project that wants atlases writes
-    /// its own driver and its own rows, and the engine's resolver never learns the difference.
-    /// </para>
-    /// </remarks>
     // blix cook sky <dir-of-blixmesh> [--occupancy N] [--probes N] [--rays N] [--albedo N]
     //
-    // Bakes how much sky each point in a scene can see. Prints a profile rather than writing a file
-    // for now: the first question is whether the numbers are physics, and a format that stores
-    // wrong numbers is worse than no format.
+    // Bakes how much sky each point in a scene can see. Always prints the profile that makes the
+    // result inspectable; writes a volume when --out names one.
+    /// <summary>Bakes a sky-visibility volume from a cooked mesh tree.</summary>
+    /// <remarks>
+    /// This is a scene driver rather than a discoverable one-file recipe: it consumes a collection
+    /// of cooked meshes, applies sampling policy, and may write one <c>.blixsky</c> volume.
+    /// </remarks>
     static int CookSky(string[] args)
     {
         if (args.Length < 2) { Console.Error.WriteLine("Usage: blix cook sky <dir>"); return 2; }
@@ -158,6 +125,15 @@ public static class Program
         return i >= 0 && i + 1 < a.Length && int.TryParse(a[i + 1], out var v) ? v : fallback;
     }
 
+    /// <summary>
+    /// Cooks one asset and exactly the images it references, into a tree of its own.
+    /// </summary>
+    /// <remarks>
+    /// Follows material image references rather than sweeping the source directory. Textures are
+    /// cooked before the mesh so its image table records the destination artifacts. The driver
+    /// keeps one output per referenced image; projects that want another grouping policy own a
+    /// different driver and table layout.
+    /// </remarks>
     static int CookAsset(string[] args)
     {
         if (args.Length < 2)
@@ -183,54 +159,103 @@ public static class Program
         }
 
         var sourceDir = Path.GetDirectoryName(Path.GetFullPath(source)) ?? ".";
-        Directory.CreateDirectory(outDir);
+        var outputRoot = Path.GetFullPath(outDir);
+        Directory.CreateDirectory(outputRoot);
 
-        var uris = Blix.Recipes.MeshRecipe.ReferencedImageUris(source);
-        Console.WriteLine($"  {uris.Count} referenced image(s)");
+        IReadOnlyList<Blix.Recipes.MeshRecipe.ReferencedImage> references;
+        try
+        {
+            references = Blix.Recipes.MeshRecipe.ReferencedImages(source);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or ArgumentException)
+        {
+            Console.Error.WriteLine($"  cannot read asset references: {ex.Message}");
+            return 1;
+        }
+        var byUri = references
+            .GroupBy(reference => reference.Uri, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        Console.WriteLine($"  {byUri.Length} referenced image(s)");
+
+        var invalid = false;
+        foreach (var group in byUri)
+        {
+            var roles = group.Select(reference => reference.Role).Distinct().ToArray();
+            if (roles.Length > 1)
+            {
+                Console.Error.WriteLine(
+                    $"  ambiguous: {group.Key} is used as {string.Join(" and ", roles)}; one "
+                    + ".blixtex cannot preserve both material-channel roles");
+                invalid = true;
+            }
+
+            var sourcePath = Path.GetFullPath(Path.Combine(sourceDir, group.Key));
+            var outputPath = Path.GetFullPath(
+                Path.Combine(outputRoot, Path.ChangeExtension(group.Key, ".blixtex")));
+            if (!IsWithin(sourceDir, sourcePath) || !IsWithin(outputRoot, outputPath))
+            {
+                Console.Error.WriteLine(
+                    $"  outside tree: {group.Key} does not remain inside both source and output roots");
+                invalid = true;
+            }
+            else if (!File.Exists(sourcePath))
+            {
+                Console.Error.WriteLine($"  missing: {group.Key}");
+                invalid = true;
+            }
+        }
+
+        foreach (var collision in byUri.GroupBy(
+                     group => Path.ChangeExtension(group.Key, ".blixtex"),
+                     StringComparer.OrdinalIgnoreCase).Where(group => group.Count() > 1))
+        {
+            Console.Error.WriteLine(
+                $"  output collision: {string.Join(", ", collision.Select(group => group.Key))} "
+                + $"all map to {collision.Key}");
+            invalid = true;
+        }
+
+        if (invalid) return 1;
 
         long sourceBytes = 0, cookedBytes = 0;
         var sw = Stopwatch.StartNew();
-        Parallel.ForEach(uris, uri =>
+        try
         {
-            var from = Path.Combine(sourceDir, uri);
-            if (!File.Exists(from))
+            Parallel.ForEach(byUri, group =>
             {
-                Console.Error.WriteLine($"  missing: {uri}");
-                return;
-            }
-
-            var to = Path.Combine(outDir, Path.ChangeExtension(uri, ".blixtex"));
-            Directory.CreateDirectory(Path.GetDirectoryName(to)!);
-            Blix.Recipes.TextureRecipe.CookOne(from, to, out var inLen, out var outLen);
-            Interlocked.Add(ref sourceBytes, inLen);
-            Interlocked.Add(ref cookedBytes, outLen);
-        });
+                var reference = group.Single();
+                var from = Path.Combine(sourceDir, reference.Uri);
+                var to = Path.Combine(outputRoot, Path.ChangeExtension(reference.Uri, ".blixtex"));
+                Directory.CreateDirectory(Path.GetDirectoryName(to)!);
+                Blix.Recipes.TextureRecipe.CookOne(
+                    from, to, out var inLen, out var outLen, reference.Role);
+                Interlocked.Add(ref sourceBytes, inLen);
+                Interlocked.Add(ref cookedBytes, outLen);
+            });
+        }
+        catch (AggregateException ex)
+        {
+            foreach (var failure in ex.Flatten().InnerExceptions)
+                Console.Error.WriteLine($"  texture cook failed: {failure.Message}");
+            return 1;
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or NotSupportedException)
+        {
+            Console.Error.WriteLine($"  texture cook failed: {ex.Message}");
+            return 1;
+        }
 
         Console.WriteLine(
             $"  textures: {sourceBytes / 1048576.0:F1} MB -> {cookedBytes / 1048576.0:F1} MB in {sw.Elapsed.TotalSeconds:F0}s");
 
-        var meshOut = Path.Combine(outDir, Path.GetFileNameWithoutExtension(source) + ".blixmesh");
-        // <b>The same simplifier `cook mesh` uses, which this path was silently missing.</b> It
-        // called CookToBlixMesh without a `simplify:` argument, so the parameter defaulted to null
-        // and every mesh cooked through `cook asset` shipped with LOD0 and nothing else. The stamp
-        // said so — simplify=none — and nothing read the stamp.
-        //
-        // The cost was invisible in the cook and expensive at runtime: VulkanSponza's whole
-        // screen-space-error LOD system had nothing to select between, so its overlay read
-        // lod-maxlevels 1 and lod-hist 401/0/0/0 even at an eight-pixel error budget, and 12.8M
-        // triangles were submitted at full detail twice a frame.
-        //
-        // This is the second time this exact bug has been fixed. The comment above the call in
-        // CookMesh records the first: the simplifier used to be a lambda in this file, "which is how
-        // the uniform [Recipe] path ended up with no decimation at all". That fix taught the recipe
-        // path and `cook mesh` to share one simplifier, and left `cook asset` behind.
+        var meshOut = Path.Combine(outputRoot, Path.GetFileNameWithoutExtension(source) + ".blixmesh");
+        // Use the shared shipped-mesh path so asset trees and direct mesh cooks receive the same LOD
+        // and splitting policy.
         var splitBudget = 0;
         var splitIdx = Array.FindIndex(args, x => x.Equals("--split", StringComparison.OrdinalIgnoreCase));
         if (splitIdx >= 0 && splitIdx + 1 < args.Length && int.TryParse(args[splitIdx + 1], out var sb))
             splitBudget = sb;
-        // --patch here as well as on `mesh`, because this is the verb every shipped driver
-        // actually calls — and a mechanism available only on the path nobody uses is the shape of
-        // the simplifier bug this same method was fixed for twice.
+        // Material patches are explicit inputs to both mesh-producing drivers.
         Blix.Recipes.MaterialPatch? assetPatch = null;
         var apIdx = Array.FindIndex(args, x => x.Equals("--patch", StringComparison.OrdinalIgnoreCase));
         if (apIdx >= 0)
@@ -266,18 +291,33 @@ public static class Program
         }
         catch (InvalidDataException ex)
         {
-            Console.Error.WriteLine($"patch: {ex.Message}");
+            Console.Error.WriteLine($"cook refused: {ex.Message}");
             return 1;
         }
 
         var header = Blix.Cooked.CookedFile.TryReadHeader(meshOut);
         Console.WriteLine($"  mesh: {count} primitive(s) -> {meshOut}");
-        Console.WriteLine(
-            header?.Stamp.Flags == Blix.Cooked.CookedFlags.None
-                ? "  this tree stands alone — no source file is needed to load it."
-                : "  the source is still needed; run `blix check --cooked` on the output to see why.");
+        if (header?.Stamp.Flags != Blix.Cooked.CookedFlags.None)
+        {
+            Console.Error.WriteLine(
+                header is null
+                    ? "  packaging failed: the mesh has no readable cooked header."
+                    : $"  packaging failed: the mesh still declares {header.Value.Stamp.Flags}; "
+                      + "run `blix check --cooked` on the output to inspect the fallback.");
+            return 1;
+        }
+
+        Console.WriteLine("  this tree stands alone — no source file is needed to load it.");
 
         return 0;
+    }
+
+    private static bool IsWithin(string root, string path)
+    {
+        var relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(path));
+        return relative != ".."
+            && !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+            && !Path.IsPathRooted(relative);
     }
 
     /// <summary>Every output path claimed by more than one line, described for a person.</summary>
@@ -335,24 +375,31 @@ public static class Program
     Console.WriteLine();
     Console.WriteLine("  The host — knows nothing about any particular format:");
     Console.WriteLine("    list                     what recipes this build declares");
-    Console.WriteLine("    status <dir>             what is cooked under <dir>, what is stale, what is not");
+    Console.WriteLine("    status [<dir>]           what is cooked under <dir>, what is stale, what is not");
     Console.WriteLine("    run <id> <src> [<out>] [-Dkey=value ...]");
     Console.WriteLine("                             run one recipe on one file");
     Console.WriteLine();
-    Console.WriteLine("  The drivers — each welded to one recipe, because each knows something");
-    Console.WriteLine("  the host does not (out-of-place trees, parallelism, a native simplifier):");
+    Console.WriteLine("  The drivers — carry tree, packaging, progress or scene policy");
+    Console.WriteLine("  that does not belong in the uniform one-file recipe host:");
     Console.WriteLine("    textures <dir>           cook every .png/.jpg under <dir> to .blixtex");
     Console.WriteLine("    probe <hdr> [--env-face=256] [--irr-face=32] [--prefilter-base=128]");
     Console.WriteLine("                [--prefilter-mips=5] [--brdf-size=256] [--clamp=50]");
+    Console.WriteLine("                [--yaw=<degrees>]");
     Console.WriteLine("                             bake an HDR sky to a .blixprobe");
     Console.WriteLine("    mesh <path> [--flip-v] [--tangents] [--split N] [--no-split-foliage]");
     Console.WriteLine("                             cook a .gltf/.glb (or a tree of them) to .blixmesh");
+    Console.WriteLine("    asset <gltf-or-glb> --out <dir> [mesh flags]");
+    Console.WriteLine("                             cook one model and its referenced images into an output tree");
+    Console.WriteLine("    sky <dir-or-blixmesh> [--out <file>] [--occupancy N] [--probes N]");
+    Console.WriteLine("                            [--rays N] [--albedo N]");
+    Console.WriteLine("                             bake scene sky visibility from cooked meshes");
     Console.WriteLine();
-    Console.WriteLine("    --out <dir>              write cooked output into a separate tree, mirroring");
-    Console.WriteLine("                             each source's path. mesh also copies the .gltf, which");
-    Console.WriteLine("                             the runtime still needs beside the .blixmesh.");
+    Console.WriteLine("    mesh/textures/probe --out <dir>");
+    Console.WriteLine("                             write cooked output into a separate tree, mirroring");
+    Console.WriteLine("                             each source's path. mesh writes only .blixmesh;");
+    Console.WriteLine("                             uncooked referenced images remain a packaging concern.");
     Console.WriteLine();
-    Console.WriteLine("  Moved out of this tool, because a cooker's verbs cook:");
+    Console.WriteLine("  Related tools:");
     Console.WriteLine("    blix inspect <file>      list what is in an asset — source OR cooked");
     Console.WriteLine("    blix run Blix.Test.Recipes");
     Console.WriteLine("                             prove the native simplifier and BC7 encoder load");
@@ -363,7 +410,7 @@ public static class Program
     var (outDir, a) = ExtractOutDir(args);
     if (a.Length < 2)
     {
-        Console.Error.WriteLine("Usage: blix-cook mesh <gltf-or-directory> [--out <dir>] [--flip-v] [--tangents] [--split N] [--patch <file>]");
+        Console.Error.WriteLine("Usage: blix cook mesh <gltf-or-directory> [--out <dir>] [--flip-v] [--tangents] [--split N] [--patch <file>]");
         return 1;
     }
     var target = a[1];
@@ -371,8 +418,7 @@ public static class Program
     // into the cooked vertex data. Granular per invocation — mirrors
     // AssetImportContext.FlipTextureV on the runtime-import path.
     var flipV = a.Any(x => x.Equals("--flip-v", StringComparison.OrdinalIgnoreCase));
-    // Cook the 48-byte tangent layout (VulkanSponza needs it for normal
-    // mapping). GL's non-tangent path is sunsetting.
+    // Cook the tangent-bearing layout required by normal-mapped consumers.
     var tangents = a.Any(x => x.Equals("--tangents", StringComparison.OrdinalIgnoreCase));
     // Spatial split: primitives over this triangle budget are recursively
     // partitioned into chunks (each its own LOD chain) so per-prim distance LOD
@@ -382,10 +428,7 @@ public static class Program
     var splitIdx = Array.FindIndex(a, x => x.Equals("--split", StringComparison.OrdinalIgnoreCase));
     if (splitIdx >= 0 && splitIdx + 1 < a.Length && int.TryParse(a[splitIdx + 1], out var sb))
         splitBudget = sb;
-    // --patch <file>: what this scene needs the asset to say that its author did not. EXPLICIT
-    // rather than found by convention beside the source: a patch that applies because a file
-    // happens to exist is an invisible input, and this session lost an afternoon to exactly that
-    // when a probe's rotation lived only in a shell command nobody had written down.
+    // Patches are explicit command inputs rather than implicitly discovered neighbours.
     var patchIdx = Array.FindIndex(a, x => x.Equals("--patch", StringComparison.OrdinalIgnoreCase));
     Blix.Recipes.MaterialPatch? patch = null;
     if (patchIdx >= 0)
@@ -435,69 +478,41 @@ public static class Program
         Console.Error.WriteLine($"Path not found: {target}");
         return 1;
     }
-    if (outDir is not null) Console.WriteLine($"  writing cooked .blixmesh (+ .gltf) into {outDir}");
+    if (outDir is not null) Console.WriteLine($"  writing cooked .blixmesh into {outDir}");
 
     if (sources.Length == 0) return 0;
 
     foreach (var src in sources)
     {
         var outPath = ResolveDest(src, inRoot, outDir, ".blixmesh");
-        // Out-of-place: the runtime reads the .gltf (material/image metadata +
-        // node graph) from the cooked tree, so copy it alongside the .blixmesh.
-        // The .bin stays behind — with a .blixmesh present the importer never
-        // reads it (GltfStaticImporter returns empty for buffer requests).
         if (outDir is not null)
         {
-            var gltfDest = ResolveDest(src, inRoot, outDir, Path.GetExtension(src));
-            if (!string.Equals(Path.GetFullPath(gltfDest), Path.GetFullPath(src), StringComparison.Ordinal))
-                File.Copy(src, gltfDest, overwrite: true);
+            // Do not destructively clean a tree that may contain deliberately retained sources,
+            // but make the migration visible when an older cook left its automatic copy behind.
+            var legacySource = ResolveDest(src, inRoot, outDir, Path.GetExtension(src));
+            if (!string.Equals(Path.GetFullPath(legacySource), Path.GetFullPath(src), StringComparison.Ordinal)
+                && File.Exists(legacySource))
+            {
+                Console.WriteLine(
+                    $"  note: legacy source copy remains at {legacySource}; mesh no longer writes " +
+                    "or removes authored sources");
+            }
         }
-        // Skip if the .blixmesh is newer than its .gltf source AND was written by this format
-        // version.
-        //
-        // <b>The version half is new, and its absence was a real trap.</b> The check used to compare
-        // timestamps alone, so bumping the format left every existing file "up-to-date" while no
-        // reader would accept it any more — the cook declining to do the one thing the bump
-        // required. Found by bumping to v4 and watching Rogue.blixmesh skip.
-        //
-        // Reading the preamble is what makes this possible at all: before it, the cook had no way
-        // to ask a cooked file what version it was without parsing the format itself.
         if (File.Exists(outPath))
         {
-            var srcTime = File.GetLastWriteTimeUtc(src);
-            var outTime = File.GetLastWriteTimeUtc(outPath);
-            var existing = CookedFile.TryReadHeader(outPath);
-            var currentFormat = existing is { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version9 };
-            if (outTime > srcTime && currentFormat)
+            if (Blix.Recipes.MeshRecipe.IsShippedCurrent(
+                    src, outPath, flipV, tangents,
+                    splitTriBudget: splitBudget, splitFoliage: splitFoliage, patch: patch))
             {
-                Console.WriteLine($"  up-to-date: {outPath}");
+                Console.WriteLine($"  up-to-date: {outPath}{SourceImageDebtNote(outPath)}");
                 continue;
             }
 
-            if (!currentFormat)
-            {
-                Console.WriteLine($"  re-cooking (format is not {nameof(BlixMesh)} v{BlixMesh.Version9}): {outPath}");
-            }
+            Console.WriteLine($"  re-cooking (source, recipe, or options changed): {outPath}");
         }
         var sw = Stopwatch.StartNew();
-        // <b>Borders are locked only when there are seams to protect.</b> LockBorder pins every
-        // mesh-boundary vertex, and it is there so that spatially split chunks stay watertight where they
-        // meet — which matters when --split is on and is meaningless when it is off, because a whole
-        // primitive has no seam with anything.
-        //
-        // It is not a free precaution. On a model made of many open shells — a stylised tree, whose leaf
-        // clusters are separate pieces — nearly every vertex is a border vertex, so locking them forbids
-        // the simplifier from collapsing anything at all: measured, a 4,345 triangle tree reduced to 3,975
-        // and stopped, while the same simplifier takes a closed grid from 8,192 to 818. A model that cannot
-        // be decimated is then drawn at full detail on every horizon, which is where that afternoon went.
-        // <b>And pruning, which is what finally moves a tree.</b> Unlocking the borders took a blade of
-        // grass from 326/224 to 326/162/81/40 and left a tree at 4,345/3,939, because the two fail for
-        // different reasons: a tree's canopy is hundreds of small disconnected clusters, and a simplifier
-        // that may not delete a component can only thin each one until it would vanish, which is almost
-        // immediately. Prune lets whole components go — which for foliage is not a compromise but the
-        // correct behaviour, since what a canopy looks like from further away is fewer, larger masses.
-        // The recipe's own simplifier, not a second copy of it here. It used to be a lambda in
-        // this file, which is how the uniform [Recipe] path ended up with no decimation at all.
+        // The recipe owns simplification policy; the driver only selects whether splitting creates
+        // borders that must remain locked.
         int count;
         try
         {
@@ -507,10 +522,8 @@ public static class Program
         }
         catch (InvalidDataException ex)
         {
-            // A rule that matched nothing, or matched a different number than it asserted. Refusing
-            // to cook IS the feature — a heuristic that stops matching renders the wrong thing
-            // forever, and this stops and says which selector and what was there instead.
-            Console.Error.WriteLine($"patch: {ex.Message}");
+            // Recipe and patch validation are content refusals, not tool crashes.
+            Console.Error.WriteLine($"cook refused: {ex.Message}");
             return 1;
         }
         var size = new FileInfo(outPath).Length;
@@ -521,25 +534,18 @@ public static class Program
         var splitNote = splitBudget > 0
             ? $", split@{splitBudget / 1000}k → biggest chunk {biggest.Lods[0].IndexCount / 3} tris"
             : "";
-        Console.WriteLine($"  cooked {Path.GetFileName(src)} -> {Path.GetFileName(outPath)} ({count} prims, {size / 1024.0 / 1024.0:0.00} MB, {tangents}-tan) in {sw.ElapsedMilliseconds} ms; LOD tris (biggest prim): {lodCounts}{splitNote}");
+        var imageDebt = SourceImageDebtNote(outPath);
+        Console.WriteLine($"  cooked {Path.GetFileName(src)} -> {Path.GetFileName(outPath)} ({count} prims, {size / 1024.0 / 1024.0:0.00} MB, {tangents}-tan) in {sw.ElapsedMilliseconds} ms; LOD tris (biggest prim): {lodCounts}{splitNote}{imageDebt}");
     }
     return 0;
 }
 
-// Inspect a rigged/articulated glTF for fitting it onto a Transform3D rig
-// (hull/turret/barrel, etc.). Prints the node hierarchy and, for every
-// mesh-bearing node, its composed-world transform — the SCALE and TRANSLATION
-// are the numbers the fit recipe needs: a rigged part's node translation is its
-// rotation PIVOT (authors place the node origin there), and the assembled bounds
-// give the model's size + forward axis. Read the values off this, hard-code the
-// pivots, and the model drops onto the rig with no blind dialing (see how
-// Blix.Demos.TankArena consumes the Quaternius tank).
     static int CookProbe(string[] args)
 {
     var (outDir, args2) = ExtractOutDir(args);
     if (args2.Length < 2)
     {
-        Console.Error.WriteLine("Usage: blix-cook probe <hdr-path> [--out <dir>] [options]");
+        Console.Error.WriteLine("Usage: blix cook probe <hdr-path> [--out <dir>] [options]");
         return 1;
     }
     var hdrPath = args2[1];
@@ -551,11 +557,8 @@ public static class Program
 
     int envFace = 256, irrFace = 32, prefilterBase = 128, prefilterMips = 5, brdfSize = 256;
     float clamp = 50.0f;
-    // --yaw turns the sky about the vertical before anything reads it, so the sun DETECTION, the
-    // cube conversion and the irradiance all see the same rotated sky and stay consistent. It is
-    // there so an authored sun and a photographed one can be brought together by moving the sky,
-    // which is free, rather than by moving the light, which is a decision someone made on purpose.
-    // Only yaw: elevation has no roll that leaves the horizon level.
+    // Rotate before sun measurement and every convolution so all probe products share orientation.
+    // Only yaw preserves the photographed horizon.
     float yawDegrees = 0f;
     foreach (var a in args2.Skip(2))
     {
@@ -595,8 +598,14 @@ public static class Program
     return 0;
 }
 
-    static int Help()
+    static int Help(string[] args)
 {
+    if (args.Length != 1)
+    {
+        Console.Error.WriteLine("Usage: blix cook help");
+        return 2;
+    }
+
     PrintUsage();
     return 0;
 }
@@ -611,15 +620,19 @@ public static class Program
 
 // --- cook as a host -------------------------------------------------------
 //
-// The three verbs above are DRIVERS: each knows how to walk a tree, report progress and
-// parallelise, and each is welded to one recipe. The three below are the HOST: they know nothing
-// about meshes, textures or probes and work on whatever recipes the assembly declares. A recipe
-// added tomorrow is listed, runnable and counted by them on the day it exists.
+// The verbs above are DRIVERS: each carries tree, packaging, progress or scene policy that does
+// not belong in a one-file recipe. The host verbs below operate on the discovered recipe contract.
 
     static Blix.Cooked.FoundRecipe[] Recipes() => RecipeCatalog.All();
 
-    static int ListRecipes()
+    static int ListRecipes(string[] args)
 {
+    if (args.Length != 1)
+    {
+        Console.Error.WriteLine("Usage: blix cook list");
+        return 2;
+    }
+
     foreach (var r in Recipes())
     {
         Console.WriteLine($"  {r.Id}  {string.Join(" ", r.Consumes),-18} -> {r.Produces,-11} v{r.Version}  {r.Summary}");
@@ -630,9 +643,7 @@ public static class Program
 
 // blix cook run <id> <source> [<output>] [-Dkey=value ...]
 //
-// The uniform path. `mesh`, `textures` and `probe` stay because each carries real driver knowledge
-// this does not have -- out-of-place trees, parallelism, a native simplifier -- and folding those
-// in would make this a build system, which is policy. This is the entry a build rule uses.
+// The uniform one-file path. Asset-specific traversal and packaging stay in the drivers.
     static int RunRecipe(string[] args)
 {
     if (args.Length < 3)
@@ -655,21 +666,44 @@ public static class Program
         return 1;
     }
 
-    var output = args.Length > 3 && !args[3].StartsWith("-D", StringComparison.Ordinal)
-        ? args[3]
-        : recipe.OutputFor(source);
-
     var options = new Dictionary<string, string>(StringComparer.Ordinal);
-    foreach (var a in args.Where(a => a.StartsWith("-D", StringComparison.Ordinal)))
+    string? output = null;
+    var sawOption = false;
+    foreach (var argument in args.Skip(3))
     {
-        var kv = a[2..].Split('=', 2);
+        if (!argument.StartsWith("-D", StringComparison.Ordinal))
+        {
+            if (argument.StartsWith("-", StringComparison.Ordinal))
+            {
+                Console.Error.WriteLine($"blix cook run: unknown option '{argument}'.");
+                return 2;
+            }
+            if (output is not null || sawOption)
+            {
+                Console.Error.WriteLine($"blix cook run: unexpected argument '{argument}'.");
+                return 2;
+            }
+
+            output = argument;
+            continue;
+        }
+
+        sawOption = true;
+        var kv = argument[2..].Split('=', 2);
+        if (kv[0].Length == 0)
+        {
+            Console.Error.WriteLine("blix cook run: -D needs a non-empty option name.");
+            return 2;
+        }
         options[kv[0]] = kv.Length > 1 ? kv[1] : "1";
     }
+    output ??= recipe.OutputFor(source);
 
     try
     {
         var outcome = recipe.Cook(new Blix.Cooked.CookRequest(source, output, options));
-        Console.WriteLine($"  {recipe.Id}: {source} -> {output} ({outcome.Detail})");
+        var verb = outcome.Wrote ? "cooked" : "skipped";
+        Console.WriteLine($"  {verb} {recipe.Id}: {source} -> {output} ({outcome.Detail})");
         return 0;
     }
     catch (Blix.Cooked.AssetImportException refused)
@@ -681,13 +715,15 @@ public static class Program
 
 // blix cook status <dir>
 //
-// The answer to "what is cooked here", which nothing could give before. Coverage in this tree was
-// decided by shell history -- one directory fully cooked and its sibling untouched, same project
-// and same importer -- and there was no way to find that out short of listing files by hand. Every
-// column below is read from the cooked artifacts' own preambles, so this knows nothing about any
-// particular format.
+// Reports recipe coverage and provenance from common preambles without loading format bodies.
     static int Status(string[] args)
 {
+    if (args.Length > 2)
+    {
+        Console.Error.WriteLine("Usage: blix cook status [<dir>]");
+        return 2;
+    }
+
     var root = args.Length > 1 ? args[1] : ".";
     if (!Directory.Exists(root))
     {
@@ -695,8 +731,19 @@ public static class Program
         return 2;
     }
 
-    var recipes = Recipes();
-    int cooked = 0, missing = 0, stale = 0, unknown = 0, outdated = 0, pinned = 0;
+    return ReportStatus(root, Recipes());
+}
+
+    /// <summary>Reports recipe coverage for one tree using an explicit recipe set.</summary>
+    /// <remarks>
+    /// Kept separate from discovery so claim resolution and accounting can be checked without
+    /// loading project assemblies. A source with multiple claimants is one ambiguous source, not
+    /// zero sources and not several independently cookable outputs.
+    /// </remarks>
+    internal static int ReportStatus(string root, IReadOnlyList<Blix.Cooked.FoundRecipe> recipes)
+{
+    int cooked = 0, missing = 0, unreadable = 0, ambiguous = 0;
+    int stale = 0, unknown = 0, outdated = 0, pinned = 0;
 
     foreach (var source in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories).OrderBy(x => x, StringComparer.Ordinal))
     {
@@ -704,11 +751,18 @@ public static class Program
             source.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)) continue;
 
         var matches = recipes.Where(r => r.Accepts(source)).ToArray();
-        if (matches.Length != 1) continue;   // nothing claims it, or two do -- neither is this verb's call
+        if (matches.Length == 0) continue;
+        var rel = Path.GetRelativePath(root, source);
+        if (matches.Length > 1)
+        {
+            ambiguous++;
+            Console.WriteLine(
+                $"  AMBIGUOUS  {rel}   ({string.Join(", ", matches.Select(r => r.Id))} all claim {Path.GetExtension(source)})");
+            continue;
+        }
         var recipe = matches[0];
 
         var output = recipe.OutputFor(source);
-        var rel = Path.GetRelativePath(root, source);
 
         if (!File.Exists(output))
         {
@@ -719,7 +773,7 @@ public static class Program
 
         if (Blix.Cooked.CookedFile.TryReadHeader(output) is not { } h)
         {
-            unknown++;
+            unreadable++;
             Console.WriteLine($"  UNREADABLE {rel}   (its {Path.GetExtension(output)} has no Blix preamble)");
             continue;
         }
@@ -727,9 +781,7 @@ public static class Program
         cooked++;
         if (h.Stamp.SourceRequired) pinned++;
 
-        // Two different kinds of out-of-date, and flattening them would hide the second: the SOURCE
-        // may have changed, or the RECIPE may have. The first is the one everyone thinks of; the
-        // second is what silently leaves a tree half-cooked by two versions of one transformation.
+        // Source freshness and recipe version are independent dimensions.
         var freshness = Blix.Cooked.CookedFile.Compare(h, source);
         if (freshness == Blix.Cooked.CookedFile.Freshness.Stale)
         {
@@ -749,34 +801,31 @@ public static class Program
         }
     }
 
-    var total = cooked + missing;
+    var total = cooked + missing + unreadable + ambiguous;
     Console.WriteLine();
     Console.WriteLine(total == 0
         ? $"  nothing under {root} is claimed by a recipe."
         : $"  {cooked}/{total} cooked ({100.0 * cooked / total:0}%) -- {missing} uncooked, {stale} stale, " +
-          $"{outdated} by an older recipe, {unknown} unknown");
+          $"{unreadable} unreadable, {ambiguous} ambiguous, {outdated} by an older recipe, {unknown} unknown");
     if (pinned > 0)
     {
         Console.WriteLine($"  {pinned} declare their source is still REQUIRED at load (an optimisation, not a replacement).");
     }
 
-    // Reports; does not judge. `blix check --cooked` is where an exit code will live, because a
-    // status verb that failed would make every partially-cooked tree a broken build.
+    // Coverage is a report: incomplete or stale trees still exit successfully. Use the build or
+    // `blix check --cooked` when a policy needs an enforcing exit code.
     return 0;
 }
 
 
 // blix cook batch <list-file>
 //
-// One process for a whole build, rather than one per file. The shader pipeline runs glslc once per
-// shader and that is fine because glslc starts in milliseconds; a .NET process does not, so 29
-// assets would be 29 startups on every build that touched any of them. MSBuild writes the list, and
-// this walks it.
+// One process for an MSBuild-filtered list, avoiding one managed-process startup per asset.
 //
 // Each line is TAB-separated: recipeId, source, output, options (k=v, space separated).
     static int Batch(string[] args)
 {
-    if (args.Length < 2)
+    if (args.Length != 2)
     {
         Console.Error.WriteLine("Usage: blix cook batch <list-file>");
         return 2;
@@ -790,18 +839,7 @@ public static class Program
 
     var lines = File.ReadAllLines(args[1]);
 
-    // <b>Two declarations that write one file is an error, not a race.</b> The build rule derives a
-    // cooked path from the source's name alone, so two BlixCook items for one source — differing
-    // only in Options — both cook and the second silently overwrites the first. Demonstrated:
-    // declaring Villager.obj at recenter=0 and recenter=1 produced two "cooked omsh" lines, one
-    // Villager.blixmesh, no warning, and the survivor was whichever came last. The consumer whose
-    // settings lost then has its cooked file refused by the loader's guard and walks the source
-    // forever — correct, slow, and traceable to nothing.
-    //
-    // Refused rather than disambiguated, which is this tree's standing answer to ambiguity:
-    // BlixRecipes.For returns null rather than guessing when two recipes accept one extension, and
-    // the app indexer refuses two recipes sharing an id. Naming the settings in the path would be a
-    // design — one with no consumer asking for it — and picking a winner silently is what this is.
+    // Two declarations may not claim one output. Settings do not implicitly disambiguate paths.
     foreach (var collision in FindOutputCollisions(lines))
     {
         Console.Error.WriteLine($"blix cook batch: {collision}");
@@ -815,7 +853,7 @@ public static class Program
     {
         if (line.Length == 0) continue;
         var parts = line.Split('\t');
-        if (parts.Length < 3)
+        if (parts.Length is < 3 or > 4 || parts[0].Length == 0 || parts[1].Length == 0 || parts[2].Length == 0)
         {
             Console.Error.WriteLine($"blix cook batch: malformed line '{line}'");
             return 1;
@@ -829,16 +867,8 @@ public static class Program
             return 1;
         }
 
-        // <b>No skip check here, deliberately.</b> MSBuild has already filtered @(BlixCook) down
-        // to the out-of-date items before this is called, so anything reaching this loop is
-        // something the build decided needs doing — and a second opinion can only ever subtract.
-        // It did: an early version re-checked the preamble and "helpfully" skipped two files
-        // MSBuild had correctly marked stale, which left them carrying a stamp written by an older
-        // version of this tool.
-        //
-        // The preamble check belongs in the `mesh` driver instead, which walks a directory itself
-        // and therefore has to decide. Two layers, one decision each: MSBuild decides whether to
-        // look, the driver decides whether to work.
+        // MSBuild already selected this list as out of date; batch must not apply a competing skip
+        // policy that can override the build decision.
         var options = new Dictionary<string, string>(StringComparer.Ordinal);
         if (parts.Length > 3)
         {
@@ -853,8 +883,16 @@ public static class Program
         {
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);
             var outcome = recipe.Cook(new Blix.Cooked.CookRequest(source, output, options));
-            cooked++;
-            Console.WriteLine($"  cooked {recipe.Id} {Path.GetFileName(source)} -> {Path.GetFileName(output)} ({outcome.Detail})");
+            if (outcome.Wrote)
+            {
+                cooked++;
+                Console.WriteLine($"  cooked {recipe.Id} {Path.GetFileName(source)} -> {Path.GetFileName(output)} ({outcome.Detail})");
+            }
+            else
+            {
+                skipped++;
+                Console.WriteLine($"  skipped {recipe.Id} {Path.GetFileName(source)} -> {Path.GetFileName(output)} ({outcome.Detail})");
+            }
         }
         catch (Blix.Cooked.AssetImportException refused)
         {
@@ -866,17 +904,13 @@ public static class Program
         }
     }
 
-    if (cooked > 0 || skipped > 0) Console.WriteLine($"  {cooked} cooked, {skipped} already current");
+    if (cooked > 0 || skipped > 0) Console.WriteLine($"  {cooked} cooked, {skipped} skipped");
     return 0;
 }
 
 // --- Out-of-place cooking -------------------------------------------------
-// `--out <dir>` makes a verb write its outputs into a separate tree, mirroring
-// each source's path relative to the input root, instead of as siblings of the
-// source. Lets the cooked set (what the runtime reads) live apart from the raw
-// sources (the re-cook set) — e.g. sponza/ (cooked) vs sponza-src/ (raw).
-// Returns the output root (created) and `args` with `--out <dir>` removed, so
-// each verb's own argument parser doesn't trip over the flag or its value.
+// Extract a shared out-of-place destination and remove it before verb-specific parsing. Tree
+// drivers mirror paths relative to their input root.
     static (string? OutDir, string[] Remaining) ExtractOutDir(string[] args)
 {
     var i = Array.FindIndex(args, a => a.Equals("--out", StringComparison.OrdinalIgnoreCase));
@@ -905,12 +939,20 @@ public static class Program
     return dest;
 }
 
+    static string SourceImageDebtNote(string cookedPath)
+{
+    var flags = CookedFile.TryReadHeader(cookedPath)?.Stamp.Flags ?? CookedFlags.None;
+    return flags.HasFlag(CookedFlags.SourceRequiredForImagesOnly)
+        ? "; source images still required"
+        : "";
+}
+
     static int CookTextures(string[] args)
 {
     var (outDir, a) = ExtractOutDir(args);
     if (a.Length < 2)
     {
-        Console.Error.WriteLine("Usage: blix-cook textures <directory> [--out <dir>] [--force]");
+        Console.Error.WriteLine("Usage: blix cook textures <directory> [--out <dir>] [--force]");
         return 1;
     }
     var root = a[1];
@@ -922,7 +964,7 @@ public static class Program
     }
     if (force)
     {
-        Console.WriteLine("  --force: re-cooking even when .blixtex is newer than source");
+        Console.WriteLine("  --force: re-cooking even when the existing stamp identity is current");
     }
 
     var sources = Directory
@@ -974,9 +1016,7 @@ public static class Program
         }
     });
 
-    // Diagnostic mode: serial + per-stage timings. Switch back to
-    // Parallel.ForEach once we know the cook isn't hanging on a specific
-    // image / decode / encode step.
+    // Diagnostic mode trades parallel throughput for attributable per-stage timings.
     var serial = Environment.GetEnvironmentVariable("BLIX_COOK_SERIAL") != null;
     var verbose = Environment.GetEnvironmentVariable("BLIX_COOK_VERBOSE") != null;
     Action<string> traceLine = msg =>
@@ -987,16 +1027,11 @@ public static class Program
     void ProcessOne(string source)
     {
         var destination = ResolveDest(source, root, outDir, ".blixtex");
-        if (File.Exists(destination) && !force)
+        if (!force && Blix.Recipes.TextureRecipe.IsCurrent(source, destination))
         {
-            var sourceWrite = File.GetLastWriteTimeUtc(source);
-            var destWrite = File.GetLastWriteTimeUtc(destination);
-            if (destWrite >= sourceWrite)
-            {
-                Interlocked.Increment(ref skippedCount);
-                Interlocked.Increment(ref doneCount);
-                return;
-            }
+            Interlocked.Increment(ref skippedCount);
+            Interlocked.Increment(ref doneCount);
+            return;
         }
         var name = Path.GetFileName(source);
         traceLine($"  START {name}");

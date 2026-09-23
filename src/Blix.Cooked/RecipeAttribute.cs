@@ -6,18 +6,19 @@ namespace Blix.Cooked;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>For finding, not for constraining.</b> There is no base class, no interface and no contract
+/// This attribute supports discovery rather than an inheritance boundary. There is no base class,
+/// interface or contract
 /// beyond a signature the build errors on — the same deal <c>[BlixApp]</c> makes one layer up. A
 /// recipe is a plain static method; this only lets the index, <c>blix cook</c> and a coverage
 /// report discover that it exists without loading the assembly it lives in.
 /// </para>
 /// <para>
-/// <b>And it lives here, in a project with no dependencies</b>, so declaring a recipe costs a
+/// It lives in this dependency-light project, so declaring a recipe costs a
 /// reference to <c>Blix.Cooked</c> and nothing else. A project cooking its own content does not
 /// take a graphics device to say so.
 /// </para>
 /// <para>
-/// <b>What a recipe is NOT.</b> It is not the format — the byte layout, the reader, the writer and
+/// A recipe is not the format: the byte layout, reader, writer and
 /// the preamble belong to the engine, because the runtime reads them. It is not the capability
 /// either: BC7 encoding, GGX prefiltering and mesh simplification are reusable work a recipe calls.
 /// A recipe is the third thing, the decision — <em>this source, these settings, that format</em> —
@@ -63,7 +64,7 @@ public sealed class RecipeAttribute : Attribute
 
 /// <summary>One file to cook, and where to put it.</summary>
 /// <remarks>
-/// <b>Options are strings because they end up in the stamp as strings.</b> A recipe parses what it
+/// Options are strings because the normalized result is recorded in the stamp. A recipe parses what it
 /// understands and records what it used — and recording the parsed form rather than the raw input
 /// is deliberate, so a default that changes between versions shows up as a different stamp rather
 /// than as an identical one.
@@ -92,7 +93,7 @@ public sealed record CookRequest(
 }
 
 /// <summary>What a recipe did.</summary>
-/// <param name="Wrote">False when the output was already current and nothing was written.</param>
+/// <param name="Wrote">False whenever no output was written, whether current or not applicable.</param>
 /// <param name="Detail">One line for the log — what came out, and anything worth knowing about it.</param>
 public readonly record struct CookOutcome(bool Wrote, string Detail)
 {

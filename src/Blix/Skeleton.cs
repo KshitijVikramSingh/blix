@@ -142,29 +142,43 @@ public sealed class Skeleton
                 nameof(outPalette));
         }
 
-        // Row-vector composition (F-016): a vertex flows left-to-right through
-        // the chain. For bone i, world = local[i] · local[parent] · … · local[root]
-        // so the recurrence pre-multiplies the child's local onto the parent's
-        // accumulated world. Palette then maps rest → bone-local (InverseBindPose)
-        // and bone-local → world (worldMatrices), in that left-to-right order.
-        if (outJointWorlds is not null && outJointWorlds.Length != Bones.Length)
+        var worldMatrices = outJointWorlds ?? new Matrix4x4[Bones.Length];
+        ComputeBoneWorlds(pose, worldMatrices);
+
+        // Palette maps rest → bone-local (InverseBindPose), then bone-local → posed world.
+        for (var i = 0; i < Bones.Length; i++)
+        {
+            outPalette.Matrices[i] = Bones[i].InverseBindPose * worldMatrices[i];
+        }
+    }
+
+    /// <summary>Computes each joint's object-space transform under <paramref name="pose"/>.</summary>
+    /// <remarks>
+    /// These are joint transforms for attachments and inspection, not skinning matrices. The
+    /// hierarchy-order invariant makes this a single forward walk.
+    /// </remarks>
+    public void ComputeBoneWorlds(Pose pose, Matrix4x4[] outJointWorlds)
+    {
+        ArgumentNullException.ThrowIfNull(pose);
+        ArgumentNullException.ThrowIfNull(outJointWorlds);
+        if (pose.BoneCount != Bones.Length)
+        {
+            throw new ArgumentException(
+                $"Pose has {pose.BoneCount} bones; skeleton has {Bones.Length}.", nameof(pose));
+        }
+        if (outJointWorlds.Length != Bones.Length)
         {
             throw new ArgumentException(
                 $"Joint-world array has {outJointWorlds.Length} matrices; skeleton has {Bones.Length}.",
                 nameof(outJointWorlds));
         }
 
-        var worldMatrices = outJointWorlds ?? new Matrix4x4[Bones.Length];
+        // Row-vector composition (F-016): local[i] · local[parent] · … · local[root].
         for (var i = 0; i < Bones.Length; i++)
         {
             var localMatrix = pose.Locals[i].ToMatrix();
             var p = Bones[i].ParentIndex;
-            worldMatrices[i] = p < 0 ? localMatrix : localMatrix * worldMatrices[p];
-        }
-
-        for (var i = 0; i < Bones.Length; i++)
-        {
-            outPalette.Matrices[i] = Bones[i].InverseBindPose * worldMatrices[i];
+            outJointWorlds[i] = p < 0 ? localMatrix : localMatrix * outJointWorlds[p];
         }
     }
 }

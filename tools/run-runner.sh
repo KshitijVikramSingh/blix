@@ -2,9 +2,9 @@
 # Launcher for Blix.Demos.Runner on macOS (the 3D endless runner).
 #
 # Same exec-the-apphost rationale as run-pong.sh: dyld snapshots DYLD_* at exec,
-# so going through the dotnet muxer can drop the Vulkan loader path. The demo
-# auto-exits after a few frames; run under BLIX_VK_VALIDATE=1 and grep stderr
-# for [vk-ERR]/[vk-WARN] to assert a validation-clean instanced draw.
+# so going through the dotnet muxer can drop the Vulkan loader path. Pass
+# --frames N for a bounded smoke run; use BLIX_VK_VALIDATE=1 to inspect Vulkan
+# validation output.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

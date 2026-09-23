@@ -4,28 +4,16 @@ using Blix.Cooked;
 namespace Blix.Recipes;
 
 /// <summary>
-/// A <c>.font.json</c> spec to a baked <c>.blixfont</c> atlas: Blix's fourth recipe.
+/// A <c>.font.json</c> spec to a baked <c>.blixfont</c> atlas.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>This one exists to answer a question about the substrate, not about fonts.</b> The claim the
-/// cook arc rests on is that a recipe costs the recipe — that declaring, discovering, stamping,
-/// covering, re-cooking and reporting all arrive for free, and what you write is only the decision
-/// about your own content. Three recipes written together prove nothing about that; a fourth,
-/// written afterwards by following the same pattern, is the test.
+/// <see cref="FontImporter"/> owns TTF rasterisation and <c>BlixFont</c> owns the runtime format.
+/// This recipe binds one declaration and its requested sizes to that capability and format.
 /// </para>
 /// <para>
-/// <b>And it is the clean case for the three-way split.</b> The capability — rasterising a TTF into
-/// coverage bitmaps — already existed in the engine as <see cref="FontImporter"/> and is untouched.
-/// The format, <c>BlixFont</c>, is engine too, because the runtime reads it. What is here is only
-/// the decision: this spec, these settings, that format. It calls the engine and writes the engine's
-/// format and contains no rasterising of its own.
-/// </para>
-/// <para>
-/// <b>What it removes.</b> <c>.font.json</c> has always been a recipe with no cook — it declares a
-/// source TTF and the pixel sizes to bake, which is exactly a recipe's shape, and then the atlas is
-/// rasterised at load, on every launch, forever. stb_truetype's BakeFontBitmap walks every glyph at
-/// every requested size and retries at doubled atlas dimensions until they fit.
+/// Cooking moves glyph rasterisation and atlas-growth retries out of application startup. Runtime
+/// loading prefers the resulting sibling and falls back to this same source capability when absent.
 /// </para>
 /// </remarks>
 public static class FontRecipe
@@ -60,11 +48,8 @@ public static class FontRecipe
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        // <b>Consumes ".json" and then narrows, which is worth saying out loud.</b> The declared
-        // extension is what a build rule and `cook status` match on, and this recipe wants
-        // `*.font.json` — a compound extension the file system does not model. So it claims .json
-        // and declines anything that is not a font spec, rather than claiming an extension it
-        // cannot honour. A recipe that silently cooked every .json it met would be worse.
+        // Discovery works on simple extensions, so this recipe claims .json and explicitly narrows
+        // that set to the compound .font.json convention.
         if (!request.SourcePath.EndsWith(".font.json", StringComparison.OrdinalIgnoreCase))
         {
             return CookOutcome.Skipped("not a .font.json spec");

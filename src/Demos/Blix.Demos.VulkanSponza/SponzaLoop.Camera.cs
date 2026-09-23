@@ -73,30 +73,19 @@ internal sealed partial class SponzaLoop
 
     /// <summary>Places the camera on a closed, frame-indexed path for measurement runs.</summary>
     /// <remarks>
-    /// <b>A still camera hides three of the frame's largest costs, and every A/B run so far has had
-    /// one.</b> Shadow cascades serve from cache when the light matrix does not move, so the 3x
-    /// caster redraw — 5,420 primitives each — is never paid in EITHER arm of a --ab shadow run.
-    /// LOD never switches, so hysteresis and popping are untestable. The Hi-Z pyramid reduces a
-    /// depth buffer that does not change. A measurement taken like that is not of the renderer, it
-    /// is of one photograph of it.
+    /// The orbit exercises cascade refits, LOD transitions, and changing Hi-Z input that a still
+    /// camera would leave cached or static.
     ///
-    /// <b>The period is the A/B period, and that is not a coincidence.</b> --ab alternates arms
-    /// every AbPeriodFrames; if the path period were anything else, the two arms would sample
-    /// different stretches of it and the difference between them would be partly a difference of
-    /// viewpoint. Matched, phase K and phase K+1 traverse the identical positions in the identical
-    /// order, so the camera cancels exactly and what is left is the thing being toggled.
+    /// The path period matches <c>AbPeriodFrames</c>, so successive A/B phases traverse identical
+    /// viewpoints in identical order and camera motion cancels from their comparison.
     ///
-    /// Driven by the frame counter rather than elapsed time for the same reason: wall-clock would
-    /// make the path depend on how fast each arm ran, which is the quantity under test.
+    /// A post-load frame clock, rather than elapsed time, makes the path independent of streaming
+    /// duration and of the performance difference being measured.
     /// </remarks>
     private void ApplyOrbit()
     {
-        // <b>The measured clock, not the wall clock of rendered frames.</b> framesRendered counts
-        // loading frames, and how many of those there are depends on how long texture streaming
-        // took — so two runs capturing at the same --shot-frames sat at DIFFERENT points on the
-        // circle, and a paired comparison between them was comparing two camera positions as well
-        // as two settings. Both now ride postLoadFrames, so the same --shot-frames is the same
-        // viewpoint every time, however long the textures took to stream in.
+        // Use the post-load measurement clock so --shot-frames identifies the same viewpoint even
+        // when texture streaming takes a different number of frames.
         var t = (postLoadFrames % OrbitFrames) / (float)OrbitFrames;
         var angle = t * MathF.Tau;
         // Orbit the foliage when there is any, because that is the content a measurement most often
@@ -111,12 +100,8 @@ internal sealed partial class SponzaLoop
             eyeY,
             centre.Z + MathF.Sin(angle) * radius);
 
-        // <b>Looking inward now, and the earlier reasoning for not doing so was wrong.</b> Facing
-        // along the path was meant to keep the cascades re-fitting the hard way — but it also kept
-        // the subject out of frame, and a path that exercises the shadow fit while measuring none of
-        // the content measures the wrong thing convincingly. An inward-facing orbit still sweeps the
-        // light frustum through the whole scene, because the camera POSITION is what a cascade is
-        // fitted around, and that still travels the full circle.
+        // Face inward to keep the measured subject in view. The moving camera position still sweeps
+        // each fitted light frustum through the scene and exercises cascade updates.
         var toCentre = centre - cameraPosition;
         camYaw = MathF.Atan2(toCentre.X, -toCentre.Z);
         camPitch = MathF.Atan2(toCentre.Y, new Vector2(toCentre.X, toCentre.Z).Length());
@@ -173,7 +158,7 @@ internal sealed partial class SponzaLoop
                     overlayEnabled = !overlayEnabled;
                 }
                 break;
-            // Exposure / sun / shadow tuning live in the overlay Controls now;
+            // Exposure, sun, and shadow tuning live in the overlay controls;
             // arrow keys drive the camera (see OnUpdate).
             case Key.Escape:
                 host.RequestClose();

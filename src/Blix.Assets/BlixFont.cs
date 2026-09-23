@@ -2,10 +2,8 @@ using Blix.Cooked;
 
 namespace Blix.Assets;
 
-// Engine-native baked font atlas. Cooked from a .font.json spec (which names a
-// TTF and the pixel sizes to bake); loaded at runtime as a header read plus one
-// memcpy per size, replacing stb_truetype's BakeFontBitmap — which rasterises
-// every glyph at every requested size, on every launch, forever.
+// Engine-native baked font atlas. A .font.json specification names the TTF and pixel sizes;
+// runtime loading reads the already rasterized glyph metrics and coverage atlases.
 //
 // File layout (little-endian), v1:
 //
@@ -66,9 +64,7 @@ public static class BlixFontWriter
             bw.Write(size.Descent);
             bw.Write(size.LineGap);
 
-            // Ordered, so two cooks of one source produce identical bytes. A dictionary's
-            // enumeration order is not a promise, and the reproducibility check would have caught
-            // it eventually — after blaming the cook.
+            // Stable codepoint order keeps repeated cooks byte-for-byte deterministic.
             var glyphs = size.Glyphs.OrderBy(g => g.Key).ToArray();
             bw.Write(glyphs.Length);
             foreach (var (codepoint, g) in glyphs)

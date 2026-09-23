@@ -7,37 +7,25 @@ namespace Blix;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Three owners hand-rolled this and none of them could share anything.</b> The engine's
-/// <see cref="GltfTextureLoader"/> kept five dictionaries, the studio two more, and VulkanSponza its
-/// own — every one keyed by a <see cref="GltfTexture"/> reference. That type is a class with no
-/// value equality, so two imports of one file produce two instances and upload the same pixels
-/// twice, by construction. Not a bug in any of the three: a cache cannot share what the language
-/// cannot tell it is the same.
-/// </para>
-/// <para>
-/// <b>The key is (identity, format), and both halves earn their place.</b> Identity is
+/// The key is (identity, format). Identity is
 /// <see cref="GltfTexture.ResourceId"/> — two loads of one file agree on it. Format is there because
 /// one image can legitimately be resident twice: a base colour wants <c>Rgba8Srgb</c> and the same
 /// picture used as a normal map wants <c>Rgba8</c>, and those are different GPU textures. Keying on
 /// identity alone would hand a shader the wrong colour space; keying on the object gives up on both.
 /// </para>
 /// <para>
-/// <b>Unidentified textures are still deduplicated, just not shared.</b> A texture built from bytes
+/// Unidentified textures are deduplicated within their object graph but not shared across imports. A texture built from bytes
 /// with no origin has an empty identity, and an identity nobody can reproduce is not an identity —
 /// so those fall back to the object key, which is exactly what every caller did before. Behaviour
 /// for them is unchanged rather than degraded.
 /// </para>
 /// <para>
-/// <b>What this makes answerable, which is why it is worth having:</b> D5-c ends when "resident
-/// texture bytes exceed the budget on a machine someone runs", and until now nothing in this tree
-/// could compute that number, because nothing could tell whether two handles were the same picture.
-/// <see cref="ResidentBytes"/> is that number. <see cref="SharedUploads"/> is the evidence the
-/// sharing is real rather than asserted.
+/// <see cref="ResidentBytes"/> reports identified texture bytes and <see cref="SharedUploads"/>
+/// reports requests satisfied by an existing handle.
 /// </para>
 /// <para>
-/// Eviction is deliberately absent. It needs a policy — a budget, an age, a priority — and that is a
-/// second decision with nothing waiting on it. What it needed FIRST was the ability to name a
-/// resource, which is this.
+/// Eviction is deliberately absent; this registry names and shares resources but does not choose a
+/// budget, age, priority, or lifetime policy.
 /// </para>
 /// </remarks>
 public sealed class TextureRegistry

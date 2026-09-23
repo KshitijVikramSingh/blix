@@ -2,16 +2,10 @@
 
 // Which probes the frame actually needs, derived from the depth buffer.
 //
-// <b>The obvious place to learn this is the fragment shader, and on this GPU it cannot be.</b>
-// Marking probes where shading samples them is exact and direct — and merely DECLARING an image3D
-// in lit.frag cost 8x the frame here: 35 ms became 290 ms. Not the store, the declaration. A
-// tile-based deferred tiler cannot keep its guarantees about a fragment shader that might scatter
-// to memory, so it stops trying, and the image resolves visibly block by block.
-//
-// Depth answers the same question from a stage where scattering is free. Every probe near a surface
-// the frame drew is a probe the frame will read, and the depth buffer IS the set of surfaces the
-// frame drew. It is arguably the better source: it sees what was rendered rather than what one
-// shader happened to sample.
+// Mark usage from resolved depth in compute rather than scattering from lit.frag. Declaring a
+// fragment-stage image3D disabled the tile renderer's normal path on the measured GPU and increased
+// the frame from 35 ms to 290 ms even before stores. Depth represents the visible surfaces whose
+// neighbouring probes the next frame may consume, without that fragment-stage penalty.
 //
 // Sampled sparsely on purpose. This is not reconstructing an image; it is marking cells of a grid
 // whose spacing is over a metre, so one sample per 8x8 block of pixels lands many samples in every
@@ -49,9 +43,8 @@ void main() {
     ivec3 dims = ivec3(u.uProbeDims.xyz);
     ivec3 base = ivec3(floor(grid));
 
-    // The 2x2x2 block a surface here could read. The reader takes the nearest probe today, but a
-    // camera in motion crosses cell boundaries between the mark and the use, and a probe woken one
-    // frame late is a probe that shows its previous answer.
+    // Mark the 2x2x2 neighbourhood a reconstructed surface can address. The one-frame delay and
+    // camera motion may cross a cell boundary between marking and consumption.
     for (int z = 0; z <= 1; ++z)
     for (int y = 0; y <= 1; ++y)
     for (int x = 0; x <= 1; ++x) {

@@ -361,10 +361,10 @@ public static class Program
     /// Run everything this project calls its gate, and return one verdict.
     /// </summary>
     /// <remarks>
-    /// <b>The step run most often in a session, and the one with the least support.</b> Proving a
-    /// change meant five invocations and a person reading five outputs, which is exactly the shape
-    /// of thing that gets skipped. One command, one exit code, and it keeps going after a failure
-    /// so you learn everything that is broken rather than the first thing.
+    /// <b>The step run most often in a session gets one project declaration and one verdict.</b>
+    /// Before this gate, proving a change meant several invocations and a person reconciling several
+    /// outputs, which is the shape of thing that gets skipped. It keeps going after a failure so you
+    /// learn everything that is broken rather than only the first thing.
     /// </remarks>
     private static int Test(string[] args)
     {

@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- The third entry point onto the lab. No shaders, no render code, no UI. -->
+  <!-- Deterministic capture entry point over the shared Studio scene and renderer. -->
   <ItemGroup>
     <ProjectReference Include="..\Blix\Blix.csproj" />
     <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />

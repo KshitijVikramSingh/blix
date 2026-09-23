@@ -1,5 +1,9 @@
 # Blix's house style
 
+> **Archived 2026-09-21 — completed.** StudioLook, IBL, cascades, the depth
+> pre-pass decision, MSAA, and resize instrumentation shipped. See
+> `docs/plans.md` for current plan status.
+
 The engine has no opinion about how anything looks, and that is correct. This arc gives the
 opinions a **home** instead of leaving them scattered or absent.
 

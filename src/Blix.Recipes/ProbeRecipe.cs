@@ -8,15 +8,12 @@ namespace Blix.Recipes;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>The one recipe whose output cannot be produced at load time.</b> The other two are
-/// optimisations — a <c>.blixmesh</c> saves a parse and a <c>.blixtex</c> saves a decode, and
-/// without either the engine still runs. Convolving an environment map and integrating a BRDF LUT
-/// cost seconds at startup, every startup, so this one is the reason cooking exists rather than a
-/// way of making it faster.
+/// Probe convolution and BRDF integration are intentionally cook-time work. Unlike source-decoding
+/// fallbacks for meshes, textures, and fonts, the runtime probe path expects the baked product.
 /// </para>
 /// <para>
-/// That difference is why a single Source/Cooked flag is not enough to report with: three recipes,
-/// three economics — load time, GPU memory, and work that has nowhere else to happen.
+/// This is why load reports retain cost and recipe identity rather than reducing cooking to a
+/// source/cooked boolean: different artifacts remove different kinds of runtime work.
 /// </para>
 /// </remarks>
 public static class ProbeRecipe
@@ -36,10 +33,8 @@ public static class ProbeRecipe
         ArgumentNullException.ThrowIfNull(hdrPath);
         ArgumentNullException.ThrowIfNull(outPath);
 
-        // Turned BEFORE anything reads it, so the sun finder, the cube conversion and the
-        // irradiance integral all see one sky. Rotating after the bake would leave the recorded sun
-        // direction pointing at where the sun used to be, which is the disagreement this is here to
-        // end rather than to introduce.
+        // Apply yaw before profiling or convolution so the sun direction, cube, irradiance, and
+        // prefilter chain all describe the same rotated environment.
         var hdr = EquirectYaw.Rotate(ImageLoader.LoadRgba32F(hdrPath), yawDegrees);
         var profile = new EnvironmentProfile
         {
@@ -52,9 +47,7 @@ public static class ProbeRecipe
         };
         var data = EnvironmentBaker.CookHdrProbeData(profile, brdfSize);
 
-        // Every knob that changes the bake, recorded verbatim — including clamp, which was the one
-        // probe parameter the old header did NOT carry. Authored order, so the string is stable and
-        // a byte-compare between two cooks means something.
+        // Record every bake input in stable authored order.
         var stamp = CookStamp.Of(
             BlixProbe.ShippedRecipe, BlixProbe.ShippedRecipeVersion, hdrPath, outPath,
             $"env={envFace} irr={irrFace} prefilterBase={prefilterBase} prefilterMips={prefilterMips} " +
@@ -88,7 +81,8 @@ public static class ProbeRecipe
             prefilterBase: request.Number("prefilterBase", 128),
             prefilterMips: request.Number("prefilterMips", 5),
             brdfSize: request.Number("brdf", 256),
-            clamp: request.Real("clamp", 50f));
+            clamp: request.Real("clamp", 50f),
+            yawDegrees: request.Real("yaw"));
 
         return CookOutcome.Written($"{bytes / 1024.0 / 1024.0:0.00} MB");
     }

@@ -1,88 +1,212 @@
 # Blix
 
-**Blix is a readable native game engine for C# / .NET that you use as a library, not a framework — game code wires explicit rendering, asset, audio, physics, and runtime primitives into each frame, instead of handing control to an engine that owns the loop.**
+Blix is a readable native game engine for C# and .NET. It is used as a set of
+libraries, not as a framework that takes ownership of an application.
 
-An in-development engine workbench: rendering, assets, streaming, audio, physics, UI, animation, runtime hosting, and diagnostics, all exposed as explicit pieces game code wires together directly. Blix doesn't try to make the engine disappear — it makes the important machinery visible.
+An application owns its world representation, update policy, render-graph
+composition, draw grouping, culling, and LOD decisions. Blix supplies the
+reusable mechanisms underneath: a typed graphics command model, Vulkan
+execution, render graphs, cooked assets, deferred loading and upload,
+diagnostics, audio, geometry and collision, animation, runtime hosting, and a
+small set of rendering primitives.
 
-The split is deliberate. The engine owns the reusable hard parts — cooked asset formats, background loading, progressive texture upload, mesh bundling, the typed graphics-command layer, shader interfaces, render graphs, Vulkan execution, and diagnostics. The game owns how those become a frame — which passes run, how draw groups are built, what gets culled, how LOD is chosen, how the world is represented. No single scene renderer or fixed world model is imposed on top, and there's no ECS, editor, scripting, or hot reload.
+The engine is intentionally explicit. There is no required ECS, scene format,
+editor, scripting layer, fixed renderer, or engine-owned game loop.
 
-The stack is Vulkan-first: `Blix.Graphics` is the typed command layer, `Blix.Graphics.Vulkan` the backend, and `Blix.Runtime.Silk` hosts the window, input, Vulkan surface, audio device, and diagnostics. An application supplies its own interface (`IUiSource`), declares named views to draw and pick through, and gets shared shader compilation, shared arguments and bounded `--frames` runs from the host rather than restating them — `src/Blix.Demos.Chassis/` is that surface with nothing else attached. Visibility is part of that surface — systems contribute debug values, controls, timers, events, overlays, stats, selections, inspectors, and live-tunable parameters, so the engine can answer practical questions while it runs: what was loaded, streamed, bundled, submitted, culled, and drawn, and where the frame time went.
+## Start here
 
-Today that spans cooked binary asset formats (`.blixtex`, `.blixprobe`, `.blixmesh`), progressive texture streaming, mesh bundling, screen-space-error LOD, GPU-driven indirect drawing, per-instance instanced rendering, PBR + HDR/IBL, cascaded and cubemap shadows, volumetric fog, bloom, tonemapping, glTF skinning, OpenAL positional audio, kinematic collision, and a Vulkan `SpriteBatch`/font path — driving four complete games (2D Pong, a 3D endless runner, a tank-arena survival shooter, and a tower defense) alongside the Sponza capabilities scene.
+Blix currently targets .NET 8 and the Vulkan + Silk.NET runtime. On macOS,
+install the native toolchain once:
 
-Blix is still early — APIs are changing, the demos do real engine work, and some systems are exposed before they're polished. The goal is a readable native engine you wire and own: serious enough to push multi-GB scenes through a modern Vulkan frame, small enough to understand and change.
+```sh
+brew install molten-vk vulkan-loader vulkan-headers vulkan-tools vulkan-validationlayers shaderc openal-soft
+```
+
+Then bootstrap the Blix front door, build the tree, and ask the project what it
+contains:
+
+```sh
+./blix ls
+dotnet build Blix.sln
+./blix ls
+./blix test
+```
+
+The first `./blix ls` builds the small app resolver and indexer when they are
+absent. A fresh tree may then ask for one build before every app is indexed.
+
+Run any discovered app by name:
+
+```sh
+./blix view --model path/to/model.glb
+./blix view --rig path/to/character.glb --clip Walking_A
+./blix inspect path/to/asset.glb
+./blix check --model path/to/asset.glb
+./blix rts:selftest
+```
+
+`./blix run <app>` is the explicit form; `./blix <app>` is its shorter twin.
+Arguments after the app name belong to that app. `project:app` addresses an app
+in a particular project when more than one project is visible.
+
+See [Workflow](docs/workflow.md) for projects, app declaration and discovery,
+bounded runs, verification gates, and how to add an application.
+
+## The shape of the engine
+
+The stable split is mechanism in the engine, policy at the call site:
+
+| Layer | Owns |
+| --- | --- |
+| `Blix.Core` | Host, input, UI, view, and app contracts |
+| `Blix.Cooked` | Recipe declarations, cooked provenance, load outcomes and refusals |
+| `Blix.Graphics` | Backend-neutral handles, resources, layouts, and recorded commands |
+| `Blix.Graphics.Vulkan` | Vulkan execution, render graphs, pipelines, binding and residency |
+| `Blix.Graphics.Images` | Image decode, environment processing, cooked image formats and CPU tonemap |
+| `Blix.Diagnostics` | Values, controls, timing, events, views, selection and history |
+| `Blix.Geometry` | Geometry, intersections, sweeps, and collision worlds |
+| `Blix.Assets` | Importers, runtime asset data, and cooked readers |
+| `Blix.Recipes` | Blix's build-time asset transformations |
+| `Blix.Render` | Mesh upload and bundling, deferred upload, instancing, sprites, particles and fullscreen work |
+| `Blix` | The game-facing loop, transforms, cameras, animation, physics and glTF composition |
+| `Blix.Runtime.Silk` | Window, input, Vulkan surface, audio and diagnostics hosting |
+
+Applications compose these pieces directly. `Blix.Tools.Studio` sits beside,
+not inside, the game-facing engine: it is an optional reference rendering
+composition for tools, with an authored `StudioLook`. A game can take all, some,
+or none of it.
+
+## Projects, apps, and tools
+
+A Blix project is a folder identified by `blix.project`. It can contain many
+assemblies and many headed or headless apps. `[BlixApp]` declarations are
+indexed during the build, so `./blix ls` discovers them without loading every
+assembly. The same project marker may declare the apps run by `./blix test`.
+
+Tools are ordinary apps:
+
+| App | Purpose |
+| --- | --- |
+| `inspect` | Report what is in a source or cooked asset |
+| `check` | Judge the asset contracts Blix can verify |
+| `cook` | Run and report declared cooking recipes |
+| `view` | View a model or rig using the Studio reference pipeline |
+| `shot` | Render a deterministic model or rig capture |
+
+The older `tools/run-*.sh` scripts remain for compatibility and specialized
+setup, but they are not the pattern for a new application. Use `./blix` and an
+app declaration instead.
+
+## Assets: declared build, observable load
+
+Asset cooking is part of the build rather than a command that must be
+remembered. Projects declare mesh, texture, probe, font, or project-owned recipe
+inputs in their project files. Shared build targets run only out-of-date recipes
+and stage newly produced artifacts in the same build.
+
+Every cooked artifact records its format and recipe versions, source identity,
+settings, and provenance. Runtime loaders report whether they used source,
+cooked, fallback, or missing data. Heavy CPU work can be produced off-thread and
+drained within a frame budget; cooked texture mips upload progressively behind a
+stable GPU handle, smallest first.
+
+Blix currently ships `.blixmesh`, `.blixtex`, `.blixprobe`, and `.blixfont`
+artifacts. Projects can declare their own recipes through the same mechanism;
+`RTSGame.Cooking` is the working example.
+
+See [Assets](docs/assets.md) for the full lifecycle: declarations, recipes,
+provenance, runtime reports, deferred work, and residency ownership.
+
+## Two rendering tracks
+
+Blix deliberately distinguishes the Studio reference rendering pipeline from renderer
+research.
+
+**Studio** is the optional reference path used by `view` and `shot`. It composes
+shared techniques into a good ordinary model/rig view and keeps visual policy in
+`StudioLook`, outside engine core.
+
+**Vulkan Sponza** is the forward research path. It is where heavy-scene asset
+flow, GPU-driven submission, screen-space-error LOD, cascaded shadows, Hi-Z,
+GTAO, probe-based indirect light, incident fields, TAA, temporal volumetric fog,
+material response, and measurement tooling are stressed. Successful mechanisms
+may move into shared engine layers; the complete Sponza graph remains bespoke.
+
+![Intel Sponza rendered in Blix](docs/sponza.jpg)
+
+Sponza's source assets are not committed. `tools/setup-sponza-modern.sh`
+prepares the local asset tree; the application remains runnable through the
+Blix front door once built.
+
+## Demos and proving grounds
+
+The repository contains complete games, focused executable specifications,
+tools, and isolated laboratories:
+
+- Pong, Runner, Tank Arena, and Bulwark are end-to-end playable games.
+- Vulkan Hello, Graph, Lit, Instanced, Particles, and Chassis isolate engine
+  surfaces.
+- Vulkan Sponza is the renderer and heavy-asset research scene.
+- Character labs isolate contact, controller, camera, rig, and capture work.
+- RTSGame is a co-located but separate game project with its own simulations,
+  scenarios, gates, tools, and cooking recipe. It is a consumer of Blix, not an
+  engine subsystem; a future repository move does not change that boundary.
+
+Use `./blix ls` for the runnable inventory. See [Demos](docs/demos.md) for the
+current application catalogue, ownership boundaries, and verification routing.
 
 ## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md) — orientation: project graph, host contracts, the Vulkan binding model, conventions, where to find things.
-- [`docs/renderer.md`](docs/renderer.md) — the Vulkan renderer: render graph, recording draws, pipelines, shaders, and the rendering techniques (PBR, IBL, shadows, bloom, fog).
-- [`docs/blix.md`](docs/blix.md) — the layer game code targets: loop, scene primitives, cameras, lights, animation, skeletal, physics, geometry, audio, picking.
-- [`docs/demos.md`](docs/demos.md) — full writeups for every demo (the table below is the index).
+- [Workflow](docs/workflow.md) — projects, apps, discovery, running, shared
+  arguments, and verification gates.
+- [Assets](docs/assets.md) — declared cooking, recipes, provenance, runtime load
+  decisions, deferred work, and GPU residency.
+- [Architecture](docs/architecture.md) — engine organization, host contracts,
+  views, binding, and code locations.
+- [Renderer](docs/renderer.md) — graphics commands, render graph, pipelines,
+  shaders, and shared rendering techniques.
+- [Game-facing API](docs/blix.md) — loops, transforms, cameras, animation,
+  geometry, collision, audio, and picking.
+- [Conventions](docs/conventions.md) — the design rules behind engine/caller
+  boundaries and executable specifications.
+- [Demos](docs/demos.md) — applications, proving grounds, tools, and how to verify them.
+- [Plan status](docs/plans.md) — active design records and completed-plan archive.
+- [Evidence reports](docs/reports.md) — dated measurements, superseded proposals,
+  and their current documentation replacements.
+- [Reality ledger](docs/reality-ledger.md) — temporary evidence and the queue for
+  the documentation catch-up.
 
-## Demos
+The older subsystem documents are being reconciled against the current tree.
+Where they disagree with executable behavior, the code and tests are the present
+source of truth and the ledger records the known conflict.
 
-Eleven demos ship in `src/`, all on the Vulkan backend, each a standalone entry point and an
-executable spec for an engine subsystem. **Vulkan Sponza** is the capabilities demo — the
-forward edge of what the engine can pull off, written up below. Full writeups for the rest
-live in [`docs/demos.md`](docs/demos.md).
+## Shared application arguments
 
-| Demo | Run | Proves |
-| --- | --- | --- |
-| **Vulkan Sponza** | `tools/run-vulkan-sponza.sh` | Capabilities edge — multi-GB cooked/streamed/SSE-LOD'd scene, 3-cascade shadows, HDR + 4× MSAA, GGX/IBL, volumetric fog |
-| **Pong** | `tools/run-pong.sh` | Game · 2D — the `SpriteBatch` / `Font` + CRT post-FX path |
-| **Runner** | `tools/run-runner.sh` | Game · 3D — per-instance instancing + skeletal animation |
-| **Tank Arena** | `tools/run-tank.sh` | Game · 3D — `Transform3D` parenting (turret rig; detach-and-fly shells) |
-| **Bulwark** | `tools/run-bulwark.sh` | Game · 3D — pointer picking + A\* nav + skinned-mesh instanced crowd |
-| **Particles** | `tools/run-particles.sh` | VFX · `ParticleBatch` + fullscreen / `PostChain` post-process |
-| **Instanced** | `tools/run-instanced.sh` | Reference · the per-instance instancing foundation |
-| **Lit** | *(launcher — see docs)* | Reference · the lit / shadow / PBR / IBL / bloom path |
-| **Graph** | `dotnet run --project src/Blix.Demos.VulkanGraph` | Reference · render-graph topology |
-| **Hello** | `tools/run-vulkan-hello.sh` | Reference · the narrowest known-good Vulkan call site |
-| **Chassis** | `tools/run-chassis.sh` | Reference · the application chassis — own UI without diagnostics, host-owned `--frames`, no shader boilerplate |
+Applications that use `WindowOptions.FromArgs` inherit:
 
-Four are complete, end-to-end playable games (Pong, Runner, Tank Arena, Bulwark); one is a
-VFX showcase; five are focused references. (The OpenGL backend and its four heavy demos
-were sunset; Pong was rebuilt on the Vulkan `SpriteBatch`.)
-
-### Vulkan Sponza — capabilities demo
-
-![Intel Sponza rendered in Blix: PBR stone and draped cloth, cascaded sun shadows, alpha-cutout foliage, and image-based lighting — all from cooked, streamed, screen-space-error-LOD'd assets.](docs/sponza.jpg)
-
-```sh
-tools/run-vulkan-sponza.sh
+```text
+--frames N       close after N rendered frames
+--width N        set the window width
+--height N       set the window height
+--title TEXT     set the window title
+--debug          start with diagnostics visible
+--dump-frame N   write the diagnostics dump for frame N
 ```
 
-The forward edge of the engine, and the demo where the whole pipeline has to come together to keep a multi-GB scene playable: the Khronos Intel Sponza scene (main + curtains + ivy + trees packs). It loads cooked siblings only (`.blixtex` BC7/BC5 textures, `.blixprobe` IBL, `.blixmesh` geometry with LOD): 3-cascade directional shadows with per-cascade resolution + rotated-Vogel PCF, depth pre-pass, R11G11B10F HDR scene target at 4× MSAA, GGX/IBL + Fresnel glass, ACES/AgX tonemap, and an optional froxel volumetric-fog compute pass (`--fog`). Geometry uses screen-space-error LOD over cook-time meshopt chains + spatial split, all bundled into one shared vertex/index buffer by the engine's `MeshBundler` (draws are sub-ranges), with cutout foliage rendered as depth-writing MASK + alpha-to-coverage to avoid overdraw. The Vulkan binding model (descriptor sets + std140 UBO layouts + push ranges) is reflected from the compiled SPIR-V at build time; cooked textures stream in through the engine's `GltfTextureLoader` + `AsyncLoadQueue`; and shader/scene tunables are live-editable in the overlay via `//@tune` / `[Tune]` decorators. The diagnostics overlay surfaces per-pass draw/triangle counts, the LOD histogram, and a CPU-phase frame breakdown (`cpu-wait` / `cpu-encode` / `cpu-submit`) for separating GPU-bound from draw-encode-bound frames — the levers you actually pull to make the scene fast.
-
-Assets are multi-GB and not committed — run `tools/setup-sponza-modern.sh` once to populate + cook from a local Khronos download.
-
-## Cooked asset pipeline
-
-VulkanSponza runs entirely off cooked siblings; `tools/setup-sponza-modern.sh` populates the sources from a local Khronos download and produces the cooked split, and the cook scripts re-cook on demand. Source assets are multi-GB and not committed. Source: <https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/IntelSponza>.
-
-Three sibling binary formats let the runtime skip the slow paths (PNG decode, equirect → IBL convolution, glTF JSON+`.bin` parse + accessor walk). All cookers live in `src/Blix.Tools.Cook` (`blix-cook textures|probe|mesh`).
-
-| Format | Cook input | What it skips at load | Code |
-| --- | --- | --- | --- |
-| `.blixtex` | PNG / JPEG | StbImage decode + mip generation; supports BC7/BC5 | `src/Blix.Graphics.Images/BlixTex.cs` |
-| `.blixprobe` | HDR equirect | Equirect → cube + diffuse irradiance + GGX prefilter + BRDF LUT bake | `src/Blix.Graphics.Images/BlixProbe.cs` |
-| `.blixmesh` | `.gltf` / `.glb` | SharpGLTF `.bin` validation + per-accessor walk + vertex packing; also bakes a meshopt LOD chain (+ optional spatial split) per primitive | `src/Blix.Assets/BlixMesh.cs` |
-
-When a `.blixmesh` sibling exists, the importer also switches `ModelRoot.Load` to a lite path (`ReadContext.Create` + `ValidationMode.Skip` + an empty buffer reader) — the JSON still parses for material descriptors, but the multi-megabyte `.bin` validation is skipped entirely. Textures upload progressively through `ResourceUploader`, smallest mip first, so materials bind a usable-if-blurry texture within a frame and sharpen over the next few.
-
-`.blixmesh` also carries geometry LOD: `blix-cook mesh` bakes a meshoptimizer-decimated chain per primitive (each level tagged with its world-space geometric error) and, with `--split N`, recursively splits oversized primitives into spatial chunks so a huge floor/wall/ivy mesh can coarsen its far half independently of its near half. The runtime picks a level by screen-space error; `src/Blix.Demos.VulkanSponza/` is the working reference.
-
-## Build
-
-```sh
-dotnet build Blix.sln
-```
-
-Target framework: net8.0. The 2D physics CLI test harness lives at `src/Blix.Test.Physics2D` — run with `dotnet run --project src/Blix.Test.Physics2D/Blix.Test.Physics2D.csproj`.
+Application-specific arguments remain owned by the application.
 
 ## Platform notes
 
-- **Launchers exec the apphost, never `dotnet run`.** Homebrew's `$prefix/bin/dotnet` is a `#!/bin/bash` wrapper and `/bin/bash` is SIP-protected, so dyld strips `DYLD_*` before the app starts and Silk reports "doesn't support Vulkan on this computer" while Vulkan is fine. Every `tools/run-*.sh` exports `DOTNET_ROOT`, builds, then `exec`s the apphost — copy one when adding another. `--frames N` works for any application; the host honours it.
-- **Vulkan toolchain (one-time, macOS).** `brew install molten-vk vulkan-loader vulkan-headers vulkan-tools vulkan-validationlayers shaderc`. The `tools/run-*.sh` launchers point the loader at MoltenVK. `BLIX_VK_VALIDATE=1` enables Khronos validation layers; `BLIX_DIAG_INTERVAL=<frames>` controls the periodic console digest cadence (default 60; `BLIX_DIAG=off` disables).
-- **macOS audio requires OpenAL Soft.** Apple's bundled `OpenAL.framework` has been deprecated since macOS 10.15 and silently no-ops on most source calls (looping, playback transitions). Install via `brew install openal-soft` — `OpenALAudioDevice` probes the standard Homebrew prefixes and points the loader at the working library.
-- **Keep shaders ASCII.** Shaders are compiled offline to SPIR-V with `glslc` (Khronos), so the old Apple GL 4.1 compiler quirks no longer bite at runtime. Pure ASCII is still the portability convention for the shader library.
+- The root `./blix` script establishes the macOS Vulkan loader environment and
+  execs an apphost. This avoids Homebrew's `dotnet` shell shim losing `DYLD_*`
+  variables across macOS SIP boundaries.
+- `BLIX_VK_VALIDATE=1` enables Vulkan validation layers.
+- `BLIX_DIAG_INTERVAL=<frames>` controls the periodic console diagnostics
+  cadence; `BLIX_DIAG=off` disables it.
+- Keep shared GLSL ASCII. Shaders compile offline to SPIR-V through `glslc`.
+- OpenAL Soft is required for working audio on current macOS; Apple's legacy
+  OpenAL framework is deprecated and frequently silent.
+
+Blix is under active development. APIs and compositions are still moving, but
+the intended character is stable: serious native machinery that remains small
+enough to inspect, understand, and change.

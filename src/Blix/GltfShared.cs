@@ -12,35 +12,16 @@ namespace Blix;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>These lived in both importers, and the copies had drifted.</b> The header of
-/// GltfStaticImporter recorded the trade at the time — "the extraction logic is duplicated rather
-/// than shared because hoisting it would pull GltfImporter's private internals into a third file.
-/// ~30 lines of dupe" — and the estimate did not survive: it measured 203 lines against 235, with
-/// all four copies differing.
+/// Both rigged and static importers use these routines for image discovery, source/cooked texture
+/// choice, material extraction, identity, and load reporting.
 /// </para>
 /// <para>
-/// <b>None of the differences were decisions.</b> ExtractTexture differed by a type qualification
-/// alone. TryResolveBlixTex resolved relative texture paths in one copy and not the other.
-/// ExtractMaterial had KHR_materials_transmission and emissive strength on the static side only, so
-/// a rigged character with a glass visor lost it silently. PreDecodeImages had the cooked .blixtex
-/// fast path on one side, so rigged assets decoded PNGs that had already been cooked. Every one of
-/// those is the static importer receiving work the character path was never asked about.
-/// </para>
-/// <para>
-/// So the static copy was the superset in all four cases, and this is it. The static path is
-/// unchanged by construction; the rigged path gains transmission, emissive strength, cooked-texture
-/// loading and relative-path resolution — none of which it was refusing, all of which it was
-/// missing.
+/// Geometry layout, transforms, skinning, and animation remain in the specialised importers.
 /// </para>
 /// </remarks>
 internal static class GltfShared
 {
     /// <summary>The material channels worth pre-decoding, in the order a decode pass walks them.</summary>
-    /// <remarks>
-    /// This was duplicated too, byte for byte, with a comment on one copy reading "Mirror of
-    /// GltfStaticImporter.PreDecodeChannels". A comment that names its own twin is a note saying
-    /// the drift has not happened YET.
-    /// </remarks>
     internal static readonly string[] PreDecodeChannels =
     {
         "BaseColor",
@@ -108,12 +89,8 @@ internal static class GltfShared
         var cookedWatch = System.Diagnostics.Stopwatch.StartNew();
         foreach (var (idx, path) in cookedSourcePaths)
         {
-            // Lazy handle: parses just the 32-byte header + per-mip
-            // (offset, length) table. The pixel bytes stay on disk until
-            // the upload pump pulls them mip-by-mip at GL upload time.
-            // This drops the per-pack import-time memory peak from
-            // "all mip data for all textures" (multi-GB) to ~hundreds of
-            // bytes per texture.
+            // The lazy handle reads metadata and mip locations only. Pixel bytes stay on disk until
+            // the upload queue requests each mip, avoiding an all-textures CPU-byte working set.
             var one = System.Diagnostics.Stopwatch.StartNew();
             var handle = BlixTexReader.ReadHandle(path);
             textureCache[idx] = new GltfTexture(Path.GetFileNameWithoutExtension(path), handle)
@@ -156,10 +133,8 @@ internal static class GltfShared
                 d.Pixels, d.Width, d.Height,
                 ImageIdentity(image, containerPath, gltfDir));
 
-            // <b>The silent one.</b> A texture that decodes from PNG on every load, because no
-            // .blixtex sibling was found, is indistinguishable from one that did not — and for an
-            // image embedded in a .glb it is not even possible to have a sibling, which is a fact
-            // about how the asset was authored that nothing could previously report.
+            // Report source decoding and distinguish embedded images, which cannot have a sibling
+            // .blixtex resolved through a source URI.
             if (AssetLoadLog.Enabled)
             {
                 var embedded = string.IsNullOrEmpty(image.Content.SourcePath);
@@ -211,50 +186,61 @@ internal static class GltfShared
         var blixTexPath = Path.ChangeExtension(sourcePath, ".blixtex");
         return File.Exists(blixTexPath) ? blixTexPath : null;
     }
-    /// <summary>The attribute semantics this importer actually reads. Everything else is reported.</summary>
-    /// <remarks>
-    /// <b>One list, because both importers have the same gap.</b> The rigged path reads JOINTS_0 and
-    /// WEIGHTS_0 where the static path does not, but neither reads index 1 of anything — so a single
-    /// set is honest for both and a second copy would be a place for them to drift.
-    /// </remarks>
-    private static readonly HashSet<string> ReadSemantics = new(StringComparer.Ordinal)
+    /// <summary>Vertex channels one concrete import path consumes beyond position/normal/UV0.</summary>
+    [Flags]
+    internal enum VertexFeatures
     {
-        "POSITION", "NORMAL", "TANGENT", "TEXCOORD_0", "COLOR_0", "JOINTS_0", "WEIGHTS_0",
-    };
+        None = 0,
+        Tangents = 1 << 0,
+        Colour = 1 << 1,
+        Skinning = 1 << 2,
+    }
+
+    /// <summary>Every attribute the selected vertex path did not consume.</summary>
+    /// <remarks>
+    /// Collection remains subtractive, so application-specific and future semantics are surfaced
+    /// without a prewritten list. The feature set is the actual output layout: tangent and colour
+    /// are opt-in on static imports, while the rigged layout always reads tangents and every
+    /// contiguous complete JOINTS/WEIGHTS pair before reducing influences to its strongest four.
+    /// </remarks>
+    internal static GltfIgnored[] CollectIgnored(ModelRoot model, VertexFeatures features)
+    {
+        ArgumentNullException.ThrowIfNull(model);
+        return CollectIgnored(model.LogicalMeshes.SelectMany(
+            mesh => mesh.Primitives.Select(primitive => (primitive, features))));
+    }
 
     /// <summary>
-    /// Every attribute the file declares that this importer does not read, with how many primitives
-    /// carried each.
+    /// Every attribute not consumed by the feature set paired with its primitive.
     /// </summary>
     /// <remarks>
-    /// Subtractive on purpose: it asks what the primitive HAS and removes what we read, rather than
-    /// looking for a list of names someone thought of. An exporter emitting something nobody here
-    /// anticipated is exactly the case worth hearing about, and a hardcoded list is deaf to it.
+    /// The per-primitive form is used by rigged files, which may also contain coloured static parts
+    /// and attachments. A primitive used by two different output layouts is audited once for each
+    /// layout because either copy may drop a channel.
     /// </remarks>
-    internal static GltfIgnored[] CollectIgnored(ModelRoot model)
+    internal static GltfIgnored[] CollectIgnored(
+        IEnumerable<(MeshPrimitive Primitive, VertexFeatures Features)> reads)
     {
+        ArgumentNullException.ThrowIfNull(reads);
         var counts = new Dictionary<string, int>(StringComparer.Ordinal);
-        foreach (var mesh in model.LogicalMeshes)
+        foreach (var (prim, features) in reads.Distinct())
         {
-            foreach (var prim in mesh.Primitives)
+            foreach (var semantic in prim.VertexAccessors.Keys)
             {
-                foreach (var semantic in prim.VertexAccessors.Keys)
-                {
-                    if (ReadSemantics.Contains(semantic)) continue;
-                    counts[semantic] = counts.GetValueOrDefault(semantic) + 1;
-                }
+                if (Consumes(prim, semantic, features)) continue;
+                counts[semantic] = counts.GetValueOrDefault(semantic) + 1;
+            }
 
-                if (prim.MorphTargetsCount > 0)
-                {
-                    counts[GltfIgnored.MorphTargets] = counts.GetValueOrDefault(GltfIgnored.MorphTargets) + 1;
-                }
+            if (prim.MorphTargetsCount > 0)
+            {
+                counts[GltfIgnored.MorphTargets] = counts.GetValueOrDefault(GltfIgnored.MorphTargets) + 1;
             }
         }
 
         if (counts.Count == 0) return Array.Empty<GltfIgnored>();
 
-        // Ordered so the report reads the same way twice, and so the one that corrupts geometry
-        // rather than merely omitting it comes first.
+        // Deterministic order, with skin-influence diagnostics first because they are the strongest
+        // signal that a static caller may have chosen the wrong importer.
         return counts
             .Select(kv => new GltfIgnored(kv.Key, kv.Value))
             .OrderByDescending(i => i.Semantic.StartsWith("JOINTS_", StringComparison.Ordinal)
@@ -263,16 +249,49 @@ internal static class GltfShared
             .ToArray();
     }
 
+    private static bool Consumes(MeshPrimitive primitive, string semantic, VertexFeatures features)
+    {
+        if (semantic is "POSITION" or "NORMAL" or "TEXCOORD_0") return true;
+        if (semantic == "TANGENT") return (features & VertexFeatures.Tangents) != 0;
+        if (semantic is "COLOR_0" or "TEXCOORD_1")
+            return (features & VertexFeatures.Colour) != 0;
+
+        if ((features & VertexFeatures.Skinning) == 0) return false;
+        if (!TryInfluenceSet(semantic, out var set)) return false;
+
+        // BuildMeshData stops at the first incomplete pair, so a later pair is not consumed even
+        // when both of its accessors exist.
+        for (var i = 0; i <= set; i++)
+        {
+            if (primitive.GetVertexAccessor($"JOINTS_{i}") is null
+                || primitive.GetVertexAccessor($"WEIGHTS_{i}") is null)
+                return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryInfluenceSet(string semantic, out int set)
+    {
+        set = -1;
+        const string joints = "JOINTS_";
+        const string weights = "WEIGHTS_";
+        var suffix = semantic.StartsWith(joints, StringComparison.Ordinal)
+            ? semantic.AsSpan(joints.Length)
+            : semantic.StartsWith(weights, StringComparison.Ordinal)
+                ? semantic.AsSpan(weights.Length)
+                : default;
+        return suffix.Length > 0 && int.TryParse(suffix, out set) && set >= 0;
+    }
+
     /// <summary>
     /// Builds a material out of a COOKED table rather than out of the glTF, resolving each channel's
     /// image through the cache the pre-decode pass already filled.
     /// </summary>
     /// <remarks>
-    /// <b>This is what stage K-F actually buys, and it is worth stating precisely.</b> Before it,
-    /// a cooked mesh still walked <c>model.LogicalMaterials</c> on every load — so "cooked" meant
-    /// geometry only, and every factor, alpha mode and texture reference was re-parsed out of the
-    /// source each time. Now the values come from the file and the SOURCE is opened for one thing:
-    /// image bytes. That is the difference the <c>SourceRequiredForImagesOnly</c> flag records.
+    /// Factors, alpha state, extension values, and image-table rows come from the cooked material
+    /// table. A legacy artifact marked <c>SourceRequiredForImagesOnly</c> may still need source image
+    /// bytes, but current self-contained artifacts resolve their own image resources.
     /// <para>
     /// An image index that is not in the cache resolves to null rather than throwing, and the two
     /// passes agree by construction — <see cref="PreDecodeImages"/> walks
@@ -285,12 +304,10 @@ internal static class GltfShared
     /// Loads every image a cooked mesh names, from the cooked mesh's own table — no glTF involved.
     /// </summary>
     /// <remarks>
-    /// <b>The counterpart to <see cref="PreDecodeImages"/>, and the reason a cooked asset can be
-    /// loaded with its source deleted.</b> That method walks a <c>ModelRoot</c> to discover which
-    /// images the materials use and where they live; this reads both off the cooked file, which is
-    /// what the image table was added to record.
+    /// Counterpart to <see cref="PreDecodeImages"/> for source-free cooked loads. Image discovery
+    /// and resource location both come from the cooked image table.
     /// <para>
-    /// <b>The cache is keyed by ROW, matching what a cooked material channel now holds.</b>
+    /// The cache is keyed by image-table row, matching what a cooked material channel stores.
     /// <see cref="MaterialFromCooked"/> looks its textures up by that same number, so the two agree
     /// without either of them knowing a glTF logical index exists.
     /// </para>
@@ -328,10 +345,8 @@ internal static class GltfShared
 
             if (!File.Exists(path))
             {
-                // Reported rather than thrown: one missing texture should not stop an asset from
-                // loading, and a model drawn with a channel missing is a thing a person can see and
-                // act on. The row still says what was wanted, which is more than the old path could
-                // say once the glTF was gone.
+                // A missing image leaves that material channel unbound and is reported without
+                // preventing the rest of the cooked model from loading.
                 if (AssetLoadLog.Enabled)
                 {
                     AssetLoadLog.Report(new AssetLoadReport(
@@ -412,7 +427,7 @@ internal static class GltfShared
             return Path.GetFullPath(gltfDir is null ? unescaped : Path.Combine(gltfDir, unescaped));
         }
 
-        // <b>Embedded: named by its CONTAINER and index, not by the directory.</b> Two .glb files
+        // Embedded images are named by container and index, not by directory. Two .glb files
         // side by side both have an image 0, and a dir-scoped name would equate them — which is the
         // one thing an identity must never do.
         //
@@ -459,10 +474,8 @@ internal static class GltfShared
             m.AlphaCutoff,
             m.DoubleSided,
             m.TransmissionFactor,
-            // The cooked block back into the engine's, image INDICES resolved to textures. Without
-            // this the cooked path would silently carry every extension as its default while the
-            // raw-glTF path read them — the exact producer/consumer split that made glass 96%
-            // transparent on screen and a solid wall to the lighting.
+            // Resolve cooked extension image rows through the same texture cache as core material
+            // channels so source and cooked material shapes agree.
             CookedExtensions(m.Ext, Texture));
 
         materialCache[index] = result;
@@ -588,13 +601,7 @@ internal static class GltfShared
             _                                  => GltfAlphaMode.Opaque,
         };
 
-        // <b>Every KHR_materials_* property the spec defines, not the two we happened to consume.</b>
-        // Conventions §7: the specification is the requirement, and owning an asset that exercises it
-        // is a download rather than a precondition. SharpGLTF surfaces thirteen of these; this
-        // boundary was letting eleven through unread, which is the engine's capability being set by
-        // an accident of what was downloaded.
-        //
-        // Read by CHANNEL and PARAMETER NAME, which is SharpGLTF's own vocabulary for them, so a
+        // Read the KHR_materials_* surface exposed by SharpGLTF by channel and parameter name. A
         // material that declares nothing simply yields no channel and every field keeps its spec
         // default. Those defaults are not zero across the board — IOR is 1.5, attenuation distance
         // is infinite — because absence means "the base model", not "the parameter set to nothing".
@@ -627,7 +634,7 @@ internal static class GltfShared
 
     /// <summary>Reads every <c>KHR_materials_*</c> property SharpGLTF surfaces, by channel and parameter name.</summary>
     /// <remarks>
-    /// <b>Absence is not zero.</b> A material that declares no extension yields no channel, and each
+    /// A material that declares no extension yields no channel, and each
     /// field then keeps the value the SPEC says that absence means — IOR 1.5, attenuation distance
     /// infinite, specular strength 1 — because those describe the base BRDF rather than a parameter
     /// turned off. Writing zeros here would silently author a different material for every asset in

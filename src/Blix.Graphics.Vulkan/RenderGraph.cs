@@ -24,6 +24,13 @@ public sealed partial class RenderGraph
     private int nextId = 1;
     internal bool IsCompiled { get; private set; }
 
+    /// <summary>
+    /// Changes after the graph has reallocated its <see cref="MatchSwapchainGraphSize"/>
+    /// resources for a new swapchain. Applications that accumulate temporal data in
+    /// graph-owned targets can cache this value and invalidate that history when it changes.
+    /// </summary>
+    public ulong MatchSwapchainResourceGeneration { get; private set; }
+
     // Populated at Compile time. Empty for graphics-only graphs (subpass
     // deps cover cross-pass memory + layout); compute reads/writes add
     // explicit vkCmdPipelineBarrier emissions.

@@ -31,21 +31,10 @@ public static class HdrSunFinder
     /// The sun's direction AND the energy it carries, in the source's own units.
     /// </summary>
     /// <remarks>
-    /// <b>The brightness was already computed here and thrown away.</b> Only the direction came
-    /// back, so a renderer wanting a directional light to match the sky had no number to use and
-    /// reached for a hand-tuned one — VulkanSponza's was 9.42, which is 3π, chosen to "match the old
-    /// look" by its own comment.
-    /// <para>
-    /// <b>Measuring it is what makes the sun and the sky commensurable.</b> Both come out of one
-    /// capture in one set of units, so a directional light built from this needs no scale factor
-    /// against the IBL baked from the same file — and a scale factor nobody can derive is exactly
-    /// the knob this replaces.
-    /// </para>
-    /// <para>
-    /// Irradiance rather than radiance, because that is what a directional light delivers: the
-    /// integral of radiance over the disc's solid angle. A single pixel's radiance would be a number
-    /// that changes with the HDR's resolution, which is not a property of the sun.
-    /// </para>
+    /// Direction and energy come from the same capture as the IBL, so a directional light needs no
+    /// independent scale against that environment. Energy is reported as irradiance: radiance
+    /// integrated over the disc's solid angle. Unlike a peak pixel, it is stable across source
+    /// resolutions.
     /// </remarks>
     public static HdrSun? FindSun(HdrImageData src)
     {
@@ -94,21 +83,9 @@ public static class HdrSunFinder
     /// The same sky with the sun's disc replaced by the sky immediately around it.
     /// </summary>
     /// <remarks>
-    /// <b>Because otherwise the sun is counted twice.</b> The irradiance and prefiltered-specular
-    /// integrals include every pixel of the source, sun included — and a renderer that also adds a
-    /// directional light for that same sun delivers its energy through two paths at once. No choice
-    /// of intensity can balance that, which is exactly why both of VulkanSponza's intensity knobs
-    /// had to be found by eye.
-    /// <para>
-    /// The VISIBLE sky keeps its sun; only the lighting integrals lose it. A skybox with a hole
-    /// where the sun should be is wrong in a way anyone can see, and a mirror reflecting that hole
-    /// is worse.
-    /// </para>
-    /// <para>
-    /// Filled with the mean radiance of the annulus just outside the disc rather than with black.
-    /// Zeroing it would replace "sun counted twice" with "a dark spot in every reflection", trading
-    /// one visible error for another; the surrounding sky is what would be there if the sun were not.
-    /// </para>
+    /// Lighting integrals use this version so a separate directional light does not count the same
+    /// sun twice. The visible environment keeps the disc. Filling from the surrounding annulus also
+    /// avoids introducing a dark spot into filtered reflections.
     /// </remarks>
     public static HdrImageData WithoutSun(HdrImageData src, HdrSun sun)
     {
@@ -460,12 +437,8 @@ public static class PbrIblBaker
     }
 
     // --- Sheen: the Charlie lobe's own prefilter and albedo table ---------
-    //
-    // <b>A second prefiltered cube, because sheen is not GGX blurred differently.</b> GGX
-    // distributes microfacets about the normal; cloth is fibres standing AWAY from it, so the
-    // Charlie lobe puts its energy at the horizon. Convolving the environment with the wrong
-    // distribution does not make cloth look slightly off — it deletes the grazing rim that is the
-    // entire visual signature of fabric.
+    // Charlie concentrates energy toward the horizon rather than distributing microfacets like
+    // GGX, so sheen needs its own convolution to retain the grazing rim of cloth.
 
     /// <summary>Prefilters the environment with the Charlie distribution, one mip per roughness.</summary>
     public static Half[][] BakeSheenPrefilteredMips(
@@ -506,13 +479,8 @@ public static class PbrIblBaker
                     var N = Vector3.Normalize(CubeDirection(face, u, v));
                     var V = N;   // the same split-sum assumption the GGX prefilter makes
 
-                    // <b>Sample the INCOMING direction, not a half-vector to reflect about.</b> The
-                    // GGX prefilter samples H and takes L = reflect(-V, H), and that is exactly
-                    // wrong here: Charlie puts H at the HORIZON, so dot(V,H) is near zero, the
-                    // reflection sends L to about -N, and every sample lands below the surface.
-                    // Mirroring the specular loop produced a cube that was black in every RGB
-                    // channel — which at a glance reads as "sheen IBL is subtle" rather than
-                    // "sheen IBL is not running", and would have been believed.
+                    // Sample incoming directions directly. Reusing the GGX half-vector reflection
+                    // scheme sends Charlie's horizon-weighted samples below the surface.
                     var tangentZ = MathF.Abs(N.Z) < 0.999f ? new Vector3(0, 0, 1) : new Vector3(1, 0, 0);
                     var tangent = Vector3.Normalize(Vector3.Cross(tangentZ, N));
                     var bitangent = Vector3.Cross(N, tangent);
@@ -562,17 +530,9 @@ public static class PbrIblBaker
     /// The Charlie lobe's directional albedo E(NdotV, roughness), as an RGBA8 table in R.
     /// </summary>
     /// <remarks>
-    /// <b>Computed rather than fitted, and that is a decision with a scar.</b> An analytic
-    /// approximation to this integral was written into the shader library first. It compiled, it
-    /// stayed inside [0,1] across the whole domain, and it disagreed with the integrated lobe by two
-    /// orders of magnitude at low roughness — 0.4694 against 0.0001 at roughness 0.1, NdotV 0.6 — in
-    /// the direction that darkens cloth which should be untouched. A fit that returns plausible
-    /// numbers looks correct from everywhere except the integral it claims to approximate. This
-    /// cannot be wrong in that way: it IS the integral.
-    /// <para>
-    /// Uniform hemisphere sampling rather than importance sampling: the integrand already contains
-    /// the distribution, so importance-sampling it would cancel the very term being measured.
-    /// </para>
+    /// The table is numerically integrated from the same distribution used by the prefilter rather
+    /// than fitted independently. Uniform hemisphere sampling is intentional: the integrand already
+    /// contains the distribution, so importance-sampling it would cancel the term being measured.
     /// </remarks>
     public static byte[] BakeSheenLut(int size, int sampleCount = 1024)
     {

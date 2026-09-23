@@ -2,6 +2,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix;
 using Blix.Assets;
+using Blix.Cooked;
 using Blix.Graphics;
 using Blix.Graphics.Images;
 using Blix.Graphics.Vulkan;
@@ -9,45 +10,33 @@ using Blix.Graphics.Vulkan;
 namespace Blix.Tools.Studio;
 
 /// <summary>
-/// An imported glTF kept as a SKELETON and its clips, rather than as a node hierarchy.
+/// A rigged glTF prepared for inspection and rendering in Studio.
 /// </summary>
 /// <remarks>
-/// <b>The sibling of <see cref="StudioModel"/>, and deliberately not a mode of it.</b> A static asset raises
-/// "where is this part's pivot"; a rigged one raises "is the motion right", and the two are answered by
-/// different data out of different importers. <c>GltfStaticImporter.ImportNodes</c> keeps the authored
-/// node tree and hands back <c>VertexPosition3NormalTexture</c>; <c>GltfImporter.Import</c> fuses the
-/// skin's primitives and hands back <c>Skin4Tangent</c> vertices plus a <see cref="Skeleton"/> and every
-/// clip. Making one type serve both would mean a type where half the fields are null.
-/// <para>
-/// <b>What this owns and what it does not.</b> It owns GPU residency (vertex/index buffers, the albedo,
-/// the bone-palette buffer) and the bind-time facts a viewer needs to draw a skeleton. It does NOT own a
-/// clock: <see cref="Blix.ClipPlayer"/> does, and a lab that wants two of them for a blend makes two.
-/// </para>
+/// Rigged assets have a separate representation from <see cref="StudioModel"/>: they carry fused
+/// skinned primitives, skeletons, clips, per-skin inverse-bind state, and palette bindings rather
+/// than an authored static-node hierarchy. This type owns their GPU residency and bind-time facts.
+/// Animation clocks, blending, instance policy, and frame orchestration remain with callers.
 /// </remarks>
 public sealed class StudioRig : IDisposable
 {
     /// <summary>Matches the fixed bound in <c>studio_skinned.vert</c>.</summary>
     /// <remarks>
-    /// Public so the probe can check a rig against it without a device. A rig over this draws nothing
-    /// useful — the shader would index past its array — and finding that out at load is a message,
-    /// while finding it out on the GPU is a hang.
+    /// Public so Studio's UI and conformance suite can describe the limit. <see cref="Load"/> checks
+    /// every skin before allocating GPU resources; a larger rig is valid engine data but unsupported
+    /// by this reference pipeline.
     /// </remarks>
     public const int MaxBones = 128;
 
-    /// <summary>How many independently posed bodies one palette buffer holds.</summary>
+    /// <summary>Maximum independently posed bodies packed into each skin's palette buffer.</summary>
     /// <remarks>
-    /// <b>The number that closes the gap this rig type used to document.</b> One palette binding
-    /// served one pose per frame, so two same-frame draws sharing it both rendered the second — fine
-    /// for a lab with one subject and the first thing a game breaks. The buffer is now
-    /// <see cref="MaxBones"/> x this, sliced by instance, which is the shape Bulwark and RTSGame
-    /// already use for their crowds.
-    /// <para>
-    /// Eight rather than a crowd: the lab's question is "are these poses independent", which three
-    /// bodies answer and three hundred only make slower. <c>MaxBones * MaxInstances * 64</c> = 64 KB,
-    /// allocated once per rig and short-written per frame.
-    /// </para>
+    /// Studio needs enough instances to compare independent poses, not crowd-scale storage.
+    /// <c>MaxBones * MaxInstances * 64</c> is 64 KB per skin and is allocated once per rig.
     /// </remarks>
     public const int MaxInstances = 8;
+
+    /// <summary>Total matrices in each Studio skin-palette buffer.</summary>
+    public const int PaletteMatrixCapacity = MaxBones * MaxInstances;
 
     /// <summary>One drawable piece of the skin: every primitive shares the skeleton and the palette.</summary>
     public readonly record struct Part(
@@ -59,24 +48,16 @@ public sealed class StudioRig : IDisposable
         float Roughness,
         TextureHandle Albedo,
         /// <summary>Which of <see cref="Skins"/> poses this part.</summary>
-        /// <remarks>
-        /// <b>Two skins can share every joint and still disagree about the bind pose.</b> tank.glb's
-        /// tracks are bound 3.97 from its hull, so drawing a part against another skin's palette
-        /// puts it somewhere plausible and wrong.
-        /// </remarks>
+        /// <remarks>Skins may share joints while retaining distinct inverse-bind matrices.</remarks>
         int SkinIndex,
         /// <summary>
         /// What the material says about its own surface: <c>OPAQUE</c>/<c>MASK</c>/<c>BLEND</c>, the
         /// cutout threshold, and whether the back face is part of the model.
         /// </summary>
         /// <remarks>
-        /// <b><see cref="GltfMaterial"/> has carried these for a long time and nothing on this stage
-        /// read them.</b> Of the three, only <c>DoubleSided</c> currently changes a picture in this
-        /// tree — measured, not assumed: all 26 MASK materials here have no base-colour texture and
-        /// <c>baseAlpha = 1.00</c> against a 0.20 cutoff, so their alpha is 1.0 everywhere and a
-        /// faithful cutout would discard nothing. The alpha pair is carried because it is free once
-        /// the material is threaded and because the next asset may mean it, NOT because it is
-        /// demonstrated here.
+        /// The shared Studio pipeline consumes double-sided state now. Alpha mode and cutoff are
+        /// retained as authored material facts even when the current sample assets do not exercise
+        /// a visible cutout.
         /// </remarks>
         /// <summary>Which TEXCOORD set this part's albedo samples — 0 for almost everything.</summary>
         int AlbedoUvSet = 0,
@@ -92,10 +73,8 @@ public sealed class StudioRig : IDisposable
     /// A static mesh carried by a joint — a knife in a hand, a cape on a chest.
     /// </summary>
     /// <remarks>
-    /// <b>Uploaded exactly like a <see cref="Part"/>, drawn nothing like one.</b> The geometry is
-    /// static, so it goes through the standard lit pipeline with an ordinary model matrix rather
-    /// than the skinned one with a palette — which is the whole reason it is a separate record and
-    /// not a Part with a flag.
+    /// Attachments use the standard lit pipeline and a model matrix composed from their joint world
+    /// transform; they do not consume the skinned palette as vertex data.
     /// </remarks>
     public readonly record struct Attachment(
         string Name,
@@ -128,7 +107,7 @@ public sealed class StudioRig : IDisposable
 
     public Skeleton Skeleton { get; private set; } = null!;
 
-    /// <summary>Every clip in the file, ordered by name so two runs of the lab list them the same way.</summary>
+    /// <summary>Every clip in the file, ordered by name so two runs of the viewer list them the same way.</summary>
     public IReadOnlyList<AnimationClip> Clips { get; private set; } = Array.Empty<AnimationClip>();
 
     public IReadOnlyList<Part> Parts => parts;
@@ -136,22 +115,11 @@ public sealed class StudioRig : IDisposable
     /// <summary>Static meshes the asset hangs off joints. Empty for most rigs.</summary>
     public IReadOnlyList<Attachment> Attachments => attachments;
 
-    /// <summary>Mesh nodes the import declined, and why. Empty when the file was read whole.</summary>
-    /// <remarks>
-    /// <b>Kept because a tool that cannot say what it dropped is the fault these records exist to
-    /// fix.</b> The importer learned to report skipped nodes and unread attributes, and both landed
-    /// in <c>AssetLoadLog</c> — a channel only the test suites drain. So the reports were being
-    /// produced and, in the one tool whose entire job is looking at assets, shown to nobody. Holding
-    /// them on the rig costs a reference and makes the panel possible.
-    /// </remarks>
     /// <summary>
-    /// Static geometry the model carries that hangs off no joint — a turret, a gun.
+    /// Static geometry carried by the asset that follows no joint.
     /// </summary>
     /// <remarks>
-    /// <b>Not an <see cref="Attachment"/>, because an attachment follows a joint and this does not.</b>
-    /// Reusing that record would need a joint index meaning "no joint" — a contradiction sitting in
-    /// a field name — and would drop scenery into the viewer's attachment picker, where the
-    /// meaningful act is choosing which weapon a hand holds.
+    /// Static parts keep their authored world transform and are excluded from the attachment picker.
     /// </remarks>
     public readonly record struct StaticPart(
         string Name,
@@ -168,16 +136,11 @@ public sealed class StudioRig : IDisposable
 
     public IReadOnlyList<StaticPart> StaticParts => staticParts;
 
-    /// <summary>Vertex attributes the file declared that the importer did not read.</summary>
+    /// <summary>Mesh nodes or attributes the importer declined, with their reasons.</summary>
+    /// <remarks>Studio retains these diagnostics so inspection exposes incomplete imports.</remarks>
     public IReadOnlyList<GltfIgnored> Ignored { get; private set; } = Array.Empty<GltfIgnored>();
 
-    /// <summary>The distinct base-colour images this asset uploaded, deduped per source texture.</summary>
-    /// <remarks>
-    /// <b>What an asset viewer could never show.</b> The lab has reported texture COUNTS since it
-    /// learned to load a model — "1 image across 12 parts" — and a count is the least interesting
-    /// fact about a texture. Which image, at what size, and whether it is the one you meant are all
-    /// answerable by looking, and until the UI layer could draw a texture there was nowhere to look.
-    /// </remarks>
+    /// <summary>Distinct uploaded base-colour images, with labels and dimensions for inspection.</summary>
     public IReadOnlyList<Image> Images => images;
 
     /// <summary>The skin node's ancestor chain, composed. Goes into uModel BEFORE the user transform.</summary>
@@ -192,36 +155,20 @@ public sealed class StudioRig : IDisposable
 
     public int VertexCount { get; private set; }
 
-    /// <summary>Per bone: does some vertex carry a non-zero weight for it? Literally, with no promotion.</summary>
+    /// <summary>Per bone, whether any vertex carries a non-zero weight for it.</summary>
     /// <remarks>
-    /// <b>A finding from looking at the first skeleton the lab drew.</b> The Rogue has 41 bones and the
-    /// overlay was unreadable — a star of lines radiating from the feet — which looked like a bug and
-    /// was not: most of those bones are IK handles and roll controls (<c>kneeIK.l</c>,
-    /// <c>control-heel-roll.r</c>, <c>handIK.l</c>) parented straight to the root, skinning nothing.
-    /// They are in the file because an animator posed through them, and they are in the palette because
-    /// the exporter had no reason to drop them.
-    /// <para>
-    /// This is the census: the bones the mesh is actually attached to. It is <em>not</em> what the
-    /// overlay filters on — see <see cref="DeformHierarchy"/>, and see why they differ.
-    /// </para>
+    /// This is the literal vertex-weight census. Control bones may remain false even though they are
+    /// present in the skeleton and palette. Use <see cref="DeformHierarchy"/> for overlay drawing.
     /// </remarks>
     public IReadOnlyList<bool> WeightedBones => weightedBones;
 
     /// <summary>How many bones some vertex weights. The rest are controls the mesh never sees.</summary>
     public int WeightedBoneCount { get; private set; }
 
-    /// <summary>Weighted bones <em>plus every ancestor that carries one</em> — what it takes to DRAW the chain.</summary>
+    /// <summary>Weighted bones plus every ancestor needed to draw their chains continuously.</summary>
     /// <remarks>
-    /// <b>A superset of <see cref="WeightedBones"/>, and the distinction is not pedantry.</b> A joint that
-    /// no vertex weights can still sit in the middle of a chain that several do — the Rogue's <c>root</c>
-    /// is exactly that, weighted by nothing and the parent of everything. Drawing only the weighted set
-    /// leaves such a chain as floating segments, which reads as a broken skeleton.
-    /// <para>
-    /// They were one property once, and the name said "does any vertex weight this" while the value had
-    /// silently been promoted up the ancestry. A count reported from it would have meant "bones needed to
-    /// draw the deformation ancestry" while claiming to mean "bones the mesh follows" — a number that is
-    /// right, labelled with a question it does not answer. Two names, because they are two facts.
-    /// </para>
+    /// This is deliberately a superset of <see cref="WeightedBones"/>: unweighted parents can carry
+    /// weighted descendants, and omitting them leaves disconnected overlay segments.
     /// </remarks>
     public IReadOnlyList<bool> DeformHierarchy => deformHierarchy;
 
@@ -251,11 +198,7 @@ public sealed class StudioRig : IDisposable
     public sealed record SkinSlot(Skeleton Skeleton, Matrix4x4 MeshNodeTransform, MaterialHandle BoneMaterial);
 
     /// <summary>Every skin the asset declares. One for most rigs, three for tank.glb.</summary>
-    /// <remarks>
-    /// <b>A palette buffer each, because a palette matrix is inverse-bind times world.</b> The POSE
-    /// can be shared and is — the joints are the same nodes — but the inverse binds belong to the
-    /// skin, so the products differ and each needs somewhere to live.
-    /// </remarks>
+    /// <remarks>Each skin has its own palette binding because its inverse-bind matrices may differ.</remarks>
     public IReadOnlyList<SkinSlot> Skins => skins;
 
     /// <summary>
@@ -270,15 +213,16 @@ public sealed class StudioRig : IDisposable
         var rig = new StudioRig { device = vk, SourcePath = path };
 
         var imported = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("lab.rig"), path));
+        ValidatePaletteCapacity(path, imported.SkinsOrEmpty);
         rig.Skeleton = imported.Skeleton;
 
         rig.Ignored = imported.IgnoredOrEmpty;
         rig.MeshNodeTransform = imported.MeshNodeTransform;
         rig.Clips = imported.Animations.OrderBy(c => c.Name, StringComparer.Ordinal).ToArray();
-        rig.palettePayload = new byte[MaxBones * MaxInstances * 64];
-        rig.weightedBones = FindWeightedBones(imported.Skeleton, imported.Primitives);
+        rig.palettePayload = new byte[PaletteMatrixCapacity * 64];
+        rig.weightedBones = SkinningAnalysis.FindWeightedBones(imported.Skeleton, imported.Primitives);
         rig.WeightedBoneCount = rig.weightedBones.Count(b => b);
-        rig.deformHierarchy = PromoteToHierarchy(imported.Skeleton, rig.weightedBones);
+        rig.deformHierarchy = SkinningAnalysis.IncludeAncestors(imported.Skeleton, rig.weightedBones);
         rig.DeformHierarchyCount = rig.deformHierarchy.Count(b => b);
 
         var white = vk.CreateTexture2D(
@@ -286,8 +230,8 @@ public sealed class StudioRig : IDisposable
             new byte[] { 255, 255, 255, 255 }, "lab.rig.white");
         rig.ownedTextures.Add(white);
 
-        // Keyed by what a texture IS. Was a Dictionary<GltfTexture, TextureHandle>, which keys on
-        // an object with no value equality — see TextureRegistry for why that cannot share.
+        // TextureRegistry uses source identity rather than GltfTexture object identity so repeated
+        // material references share one upload.
         var uploaded = new TextureRegistry();
         for (var i = 0; i < imported.Primitives.Length; i++)
         {
@@ -327,10 +271,8 @@ public sealed class StudioRig : IDisposable
                 MaterialName: material?.Name ?? string.Empty));
         }
 
-        // <b>Attachments upload beside the parts and are bounded out of the rest bounds.</b> A
-        // weapon is not part of the body's silhouette — including a two-handed crossbow in the
-        // bounds would push the camera back and shrink the character for every viewer, whether or
-        // not anything is drawing it.
+        // Static parts and attachments upload beside the skinned parts but do not expand the body's
+        // rest bounds; camera framing describes the skinned subject rather than optional equipment.
         for (var i = 0; i < imported.StaticPartsOrEmpty.Length; i++)
         {
             var source = imported.StaticPartsOrEmpty[i];
@@ -401,16 +343,9 @@ public sealed class StudioRig : IDisposable
             rig.BoundsMax = Vector3.Zero;
         }
 
-        // <b>framesInFlight, and that is the whole aliasing story.</b> The palette is written at
-        // RECORD time and read at Execute — the same lifetime hazard that put seven boxes at the
-        // seventh's transform. One buffer per frame slot is what keeps this frame's pose from
-        // overwriting the pose the GPU is still reading from the last one.
-        //
-        // What it does NOT solve: two draws in the SAME frame wanting different poses. They would
-        // share this one buffer and both render the second. The lab draws one rig, so the question
-        // does not arise here — a second rig gets a second StudioRig and a second material, which is
-        // why this is per-rig rather than owned by the renderer.
-        // One palette buffer per skin. The single-skin case allocates exactly what it always did.
+        // Each skin owns a material with one backing buffer per frame slot. Frame-slot separation
+        // prevents CPU palette writes from aliasing GPU reads; instance slices separate poses drawn
+        // within one frame.
         var imports = imported.SkinsOrEmpty;
         for (var s = 0; s < imports.Length; s++)
         {
@@ -427,18 +362,13 @@ public sealed class StudioRig : IDisposable
         return rig;
     }
 
-    /// <summary>Copies every live instance's palette into the frame's bone buffer. Once per frame, before recording.</summary>
+    /// <summary>Copies every live instance palette into skin 0's current-frame buffer.</summary>
     /// <remarks>
     /// The 4x4s go up untransposed, exactly as conventions §2 says: GLSL reads std430 column-major,
     /// which is the transpose of the row-vector form the CPU built, so `skin * v` in the shader
     /// computes what `v_row * skin` computes here. There is no transpose in this file and there must
     /// not be one.
-    /// <para>
-    /// <b>Only the live prefix is sent.</b> The buffer holds eight instances' worth; three 41-bone
-    /// rigs are 7,872 bytes of it, and uploading the whole 64 KB to draw three bodies is how an
-    /// instance buffer comes to cost more than the draw. A short write is legal and the shader never
-    /// reads past <c>instanceCount</c>.
-    /// </para>
+    /// Only the live matrix prefix is written; unused instance capacity is not uploaded.
     /// </remarks>
     public void UploadPalettes(BonePaletteSet palettes) => UploadPalettes(palettes, 0);
 
@@ -446,11 +376,8 @@ public sealed class StudioRig : IDisposable
     /// Packs N posed bodies into one palette set per skin, at the stride the shader reads.
     /// </summary>
     /// <remarks>
-    /// <b>Here because this is where the skins live.</b> A palette matrix is inverse-bind times
-    /// world, the inverse binds belong to the skin, and this type owns <see cref="Skins"/> — so the
-    /// loop over them belongs to it rather than to each caller. It was written twice before that was
-    /// true: once in the viewer's animation and once in the capture tool, and when skins became
-    /// plural both copies had to learn it separately.
+    /// Palette packing lives here because this type owns the per-skin inverse-bind state. Callers
+    /// provide poses and placements without duplicating the skin loop.
     /// </remarks>
     /// <param name="poses">One per body, in instance order.</param>
     /// <param name="placements">Where each body stands. Same length as <paramref name="poses"/>.</param>
@@ -492,10 +419,7 @@ public sealed class StudioRig : IDisposable
 
     /// <summary>Copies one skin's live instance palettes into that skin's frame buffer.</summary>
     /// <remarks>
-    /// <b>Per skin, because a palette is inverse-bind times world and the inverse binds are the
-    /// skin's own.</b> The pose behind them is shared — tank.glb's three skins are the same joints
-    /// in the same order — so this is N uploads of the same posed hierarchy through N different bind
-    /// matrices, not N poses.
+    /// A shared pose can produce different palette matrices for skins with different inverse binds.
     /// </remarks>
     public void UploadPalettes(BonePaletteSet palettes, int skinIndex)
     {
@@ -516,7 +440,13 @@ public sealed class StudioRig : IDisposable
                 nameof(palettes));
         }
 
-        var live = Math.Min(palettes.LiveMatrixCount, MaxBones * MaxInstances);
+        var live = palettes.LiveMatrixCount;
+        if (live > PaletteMatrixCapacity)
+        {
+            throw new InvalidOperationException(
+                $"Studio palette needs {live} matrices ({palettes.BoneCount} bones x " +
+                $"{palettes.Count} instances), but its reflected buffer holds {PaletteMatrixCapacity}.");
+        }
         for (var i = 0; i < live; i++)
         {
             MemoryMarshal.Write(palettePayload.AsSpan(i * 64, 64), in palettes.Matrices[i]);
@@ -525,34 +455,14 @@ public sealed class StudioRig : IDisposable
         skinBones[skinIndex].WriteBuffer(device.CurrentFrameSlot, 0, palettePayload.AsSpan(0, live * 64));
     }
 
-    /// <summary>
-    /// Each bone's object-space transform under <paramref name="pose"/> — where to DRAW a bone, not how to skin with one.
-    /// </summary>
-    /// <remarks>
-    /// <b>Not the palette.</b> A palette matrix is `InverseBindPose * world`: it maps a rest-pose vertex
-    /// to its posed place, and its translation is a displacement, not a position — drawing a skeleton
-    /// from palette translations gives a heap of lines near the origin, which is the first thing anyone
-    /// tries and the first thing that looks broken. This is the hierarchy walk's `world` term on its
-    /// own, which is where the joint actually is.
-    /// </remarks>
+    /// <summary>Computes each bone's object-space world transform under <paramref name="pose"/>.</summary>
+    /// <remarks>Studio convenience wrapper over the skeleton's shared hierarchy walk.</remarks>
     public static void ComputeBoneWorlds(Skeleton skeleton, Pose pose, Matrix4x4[] outWorlds)
     {
         ArgumentNullException.ThrowIfNull(skeleton);
         ArgumentNullException.ThrowIfNull(pose);
         ArgumentNullException.ThrowIfNull(outWorlds);
-        if (outWorlds.Length < skeleton.BoneCount)
-        {
-            throw new ArgumentException(
-                $"Need {skeleton.BoneCount} matrices, got {outWorlds.Length}.", nameof(outWorlds));
-        }
-
-        for (var i = 0; i < skeleton.BoneCount; i++)
-        {
-            var local = pose.Locals[i].ToMatrix();
-            var parent = skeleton.Bones[i].ParentIndex;
-            // Row-vector compose, same direction as Skeleton.ComputeBonePalette's own walk.
-            outWorlds[i] = parent < 0 ? local : local * outWorlds[parent];
-        }
+        skeleton.ComputeBoneWorlds(pose, outWorlds);
     }
 
     /// <summary>The clip with this name, ignoring an exporter's `Armature|` prefix; null if absent.</summary>
@@ -577,17 +487,8 @@ public sealed class StudioRig : IDisposable
     {
         if (texture is null) return white;
 
-        // <b>A cooked texture arrives LAZY and MIPPED, and this read knew neither shape.</b>
-        // GltfTexture carries its pixels one of two ways: MipBytes in RAM (the PNG-decode path) or
-        // a BlixTexLazyHandle with the bytes still on disk (the cooked .blixtex path, which exists
-        // so a pack does not hold every mip of every texture in memory at import). This looked only
-        // at MipBytes and fell through to `white` — silently.
-        //
-        // It went unnoticed for as long as rigs had no cooked form, because the studio's rig only
-        // ever met the eager path. The first cooked rig rendered a blown-out white character with
-        // every assertion in the suite passing: the importer DID hand over a material carrying a
-        // texture, so a cooked-versus-source material comparison saw two textures and agreed. The
-        // loss was here, one layer below what any test was looking at.
+        // Source imports provide eager mip bytes; cooked imports may provide a lazy .blixtex handle.
+        // Material upload accepts both representations and realizes lazy mips only at this boundary.
         var mips = texture.MipBytes is { Count: > 0 } eager
             ? eager
             : texture.LazyHandle is { } lazy
@@ -602,11 +503,8 @@ public sealed class StudioRig : IDisposable
             return white;
         }
 
-        // <b>A pre-built chain uploads verbatim; a single mip is generated from.</b> CreateTexture2D
-        // downsamples by blitting, which a BC format cannot do — MoltenVK refuses it outright with
-        // "MTLPixelFormatBC7_RGBAUnorm_sRGB is not color renderable", during upload rather than
-        // during a draw. A cooked texture already carries every level, which is what the cook is
-        // for, so the chain is handed over whole.
+        // Preserve a prebuilt mip chain verbatim. In particular, block-compressed textures cannot
+        // rely on the renderable-format blit path used to generate mips from a single level.
         return uploaded.GetOrAdd(texture, texture.Format, () =>
         {
             var description = new TextureDescription(
@@ -623,101 +521,30 @@ public sealed class StudioRig : IDisposable
         });
     }
 
-    /// <summary>Which bones some vertex actually weights, read off the vertex data. No device needed.</summary>
-    /// <remarks>
-    /// <b>Static and deviceless on purpose</b> — the probe answers the same question with no GPU in
-    /// sight, and a rig's bone census is a fact about the FILE. Duplicating the weight walk so the
-    /// headless tool could have it would be two implementations of one answer, which is how the two
-    /// come to disagree.
-    /// <para>
-    /// Attribute offsets come from the LAYOUT rather than from the 80-byte stride this asset happens
-    /// to have: the same file could arrive without tangents one day, and a hard-coded offset would
-    /// then read weights out of the middle of a texcoord and report a plausible, wrong answer.
-    /// </para>
-    /// <para>
-    /// Returns the LITERAL set. <see cref="PromoteToHierarchy"/> is the separate step that widens it to
-    /// something drawable, and it is separate precisely so a caller has to choose which one it meant.
-    /// </para>
-    /// </remarks>
-    public static bool[] FindWeightedBones(Skeleton skeleton, IReadOnlyList<GltfPrimitive> primitives)
+    /// <summary>Refuses a rig that cannot fit Studio's maximum instance row.</summary>
+    internal static void ValidatePaletteCapacity(
+        string sourcePath,
+        IReadOnlyList<GltfSkinBinding> skins)
     {
-        ArgumentNullException.ThrowIfNull(skeleton);
-        ArgumentNullException.ThrowIfNull(primitives);
+        ArgumentNullException.ThrowIfNull(sourcePath);
+        ArgumentNullException.ThrowIfNull(skins);
 
-        var deform = new bool[skeleton.BoneCount];
-        foreach (var primitive in primitives)
+        for (var skin = 0; skin < skins.Count; skin++)
         {
-            var mesh = primitive.Mesh;
-            var indexAttribute = Attribute(mesh.Layout, location: 3);
-            var weightAttribute = Attribute(mesh.Layout, location: 4);
-            if (indexAttribute < 0 || weightAttribute < 0) continue;
+            var bones = skins[skin].Skeleton.BoneCount;
+            var required = checked(bones * MaxInstances);
+            if (required <= PaletteMatrixCapacity) continue;
 
-            var stride = mesh.Layout.Stride;
-            for (var v = 0; v < mesh.VertexCount; v++)
-            {
-                var at = v * stride;
-                for (var j = 0; j < 4; j++)
-                {
-                    var weight = BitConverter.ToSingle(mesh.VertexBytes, at + weightAttribute + (j * 4));
-                    if (weight <= 0f) continue;
-                    var bone = (int)BitConverter.ToSingle(mesh.VertexBytes, at + indexAttribute + (j * 4));
-                    if (bone >= 0 && bone < deform.Length) deform[bone] = true;
-                }
-            }
+            throw new AssetImportException(
+                sourcePath,
+                null,
+                $"skin {skin} has {bones} bones; Studio supports at most {MaxBones} bones across " +
+                $"its {MaxInstances}-instance reference row ({PaletteMatrixCapacity} palette matrices)");
         }
-
-        return deform;
     }
 
-    /// <summary>Widens a weighted set to include every ancestor that carries one.</summary>
-    /// <remarks>
-    /// A chain drawn without the joints that carry it is a set of floating segments, which is a worse
-    /// picture than the cluttered one. The hierarchy-order invariant — a parent always precedes its
-    /// child — makes this one backwards pass with no recursion and no visited set.
-    /// <para>
-    /// Does not mutate its argument: the literal census and the drawable set are both wanted, by
-    /// different callers, from the same load.
-    /// </para>
-    /// </remarks>
-    public static bool[] PromoteToHierarchy(Skeleton skeleton, IReadOnlyList<bool> weighted)
-    {
-        ArgumentNullException.ThrowIfNull(skeleton);
-        ArgumentNullException.ThrowIfNull(weighted);
-
-        var hierarchy = new bool[skeleton.BoneCount];
-        for (var i = 0; i < hierarchy.Length && i < weighted.Count; i++) hierarchy[i] = weighted[i];
-
-        for (var i = hierarchy.Length - 1; i >= 0; i--)
-        {
-            if (!hierarchy[i]) continue;
-            var parent = skeleton.Bones[i].ParentIndex;
-            if (parent >= 0) hierarchy[parent] = true;
-        }
-
-        return hierarchy;
-    }
-
-    private static int Attribute(VertexLayout layout, int location)
-    {
-        foreach (var attribute in layout.Attributes)
-        {
-            if (attribute.Location == location) return attribute.Offset;
-        }
-
-        return -1;
-    }
-
-    // Bounds of the mesh at REST, in mesh-node space.
-    //
-    // <b>Through MeshNodeTransform, because that is what the draw goes through.</b> The Rogue's skin
-    // node is identity, but the RTS villager's carries a hundredfold scale — measuring in raw vertex
-    // space there gives a body a hundred times too small, and the camera frames on empty air. Third
-    // time in this project that measuring through a different transform from the drawing was the bug.
-    //
-    // Rest rather than posed, so the framing describes the asset rather than whichever clip happened
-    // to be selected. At rest the bone palette is the identity by construction (BindWorld ×
-    // InverseBindPose = I), so no palette appears here — that identity is why it can be left out, not
-    // an assumption that skinning does nothing.
+    // Measure rest-pose bounds through MeshNodeTransform, matching the model-space transform used by
+    // the draw. The rest palette is identity by construction, so clip selection cannot affect framing.
     private void AccumulateRestBounds(MeshData mesh)
     {
         var stride = mesh.Layout.Stride;

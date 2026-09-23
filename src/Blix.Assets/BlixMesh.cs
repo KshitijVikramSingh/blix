@@ -6,147 +6,24 @@ using Blix.Graphics;
 
 namespace Blix.Assets;
 
-// Engine-native binary mesh container. Cooked from .gltf (or .glb) at
-// offline cook time; loaded at runtime with no JSON parse + no buffer
-// interpretation -- just a header read + a memcpy of each primitive's
-// packed vertex + index bytes. Replaces the ~1-5 seconds SharpGLTF's
-// ModelRoot.Load + per-accessor interpretation otherwise burns for big
-// scenes like Khronos Sponza Modern.
+// Engine-native version 9 mesh container. The shared cooked preamble is followed,
+// in order, by counted tables for primitives, materials, images, skins, clips,
+// attachments, static parts, and authored nodes. All values are little-endian.
 //
-// File layout (little-endian), v4:
+// Each primitive carries its own vertex layout, material-table row, bounds, packed
+// vertex bytes, skin and node indices, index width, and LOD index chains. Material
+// image fields are rows in this file's image table, not source glTF image indices.
+// An image row separates identity (name and source-byte hash) from location (a
+// recipe-authored relative resource). Texture packing and grouping remain recipe
+// policy rather than an inference made by the reader.
 //
-//   The shared Blix cooked preamble first — see Blix.Cooked/CookPreamble.cs for
-//   its fields. It carries the magic, the version, which recipe produced this
-//   file, what it was cooked from, and the settings used, and it tells a reader
-//   where this header starts. Then:
+// Static vertices remain world-baked for the flat runtime path. NodeIndex makes
+// that transform reversible for hierarchy-aware consumers: compose the node's
+// world transform from the node table and apply its inverse. Parent indices in
+// both bone and node tables must refer backward, allowing one-pass composition.
 //
-//   offset  size    field
-//   ---------------------------------
-//   0       4       layoutId     (VertexLayout id; 1 = Position3NormalTexture, 2 = +Tangent)
-//   4       4       primitiveCount
-//   --------- 8 bytes (format header) ---------
-//   For each primitive, sequentially:
-//     nameLen[4]
-//     name[nameLen]    UTF-8 (no NUL terminator)
-//     materialIndex[4] glTF logical material index; -1 for no material
-//     bounds[24]       6 floats: minX, minY, minZ, maxX, maxY, maxZ
-//     vertexCount[4]
-//     vertexBytesLen[4]
-//     vertexBytes[vertexBytesLen]
-//     indexFormat[1]   0 = UInt16, 1 = UInt32
-//     indexCount[4]
-//     indexBytes[indexCount * 2 or 4]
-//
-//   Then, after the last primitive, the material table; then the image table;
-//   then (v7) the bone table and the clip table:
-//     boneCount[4]
-//     For each bone: nameLen[4] name[..] parentIndex[4] inverseBindPose[64]
-//     clipCount[4]
-//     For each clip: nameLen[4] name[..] trackCount[4]
-//       For each track: boneIndex[4], then three channels in order
-//         (translation vec3, rotation quat, scale vec3), each:
-//           keyCount[4]  -- 0 means the channel is absent
-//           per key: time[4] then 12 bytes (vec3) or 16 bytes (quat)
-//
-//   Then (v8) the node table:
-//     nodeCount[4]
-//     For each node: nameLen[4] name[..] parentIndex[4] localTransform[64]
-//
-//   ── Why the vertices stay world-baked ───────────────────────────────────
-//   The cook bakes each node's world transform into its vertices, which is a
-//   large part of what the flat load path buys. The studio's model view needs
-//   the authored HIERARCHY — names, parents, pivots — and a table gives it
-//   that without unbaking anything: it draws parts that are already in world
-//   space and reads the table for structure.
-//
-//   A primitive's nodeIndex is what makes the baking reversible. A consumer
-//   that genuinely needs local-space geometry composes the node's world matrix
-//   from the table and applies its inverse — exactly recovering what the cook
-//   folded in. That cost is paid by the consumer that wants it, when it wants
-//   it, rather than by every load: cooking local vertices instead would have
-//   made the flat path transform eight million vertices on every Sponza load.
-//
-//   A bone's ParentIndex is -1 or strictly less than its own index, which
-//   Skeleton's constructor enforces; the writer does not reorder, so a file
-//   that violates it is refused on read where it can be named.
-//
-//     imageCount[4]
-//     For each image, sequentially:
-//       nameLen[4] name[nameLen]         UTF-8, for a person and for diagnostics
-//       contentHash[8]                   u64 of the SOURCE image bytes
-//       resourceLen[4] resource[...]     UTF-8 relative reference, forward slashes
-//
-//     materialCount[4]
-//     For each material, sequentially:
-//       nameLen[4] name[nameLen]      UTF-8
-//       baseColorFactor[16]           4 floats, linear
-//       baseColorTexCoord[4]          which TEXCOORD set base colour samples
-//       metallicFactor[4] roughnessFactor[4]
-//       occlusionStrength[4]
-//       emissiveFactor[12]            3 floats, linear
-//       emissiveStrength[4]           KHR_materials_emissive_strength
-//       alphaMode[1]                  0 OPAQUE, 1 MASK, 2 BLEND
-//       alphaCutoff[4]
-//       doubleSided[1]
-//       transmissionFactor[4]         KHR_materials_transmission
-//       baseColorImage[4] normalImage[4] metallicRoughnessImage[4]
-//       occlusionImage[4] emissiveImage[4]
-//                                     source IMAGE index per channel, -1 = none
-//
-// No offset/length table for primitives -- the runtime always walks all
-// primitives in submission order anyway, and a sequential read avoids the
-// "seek per primitive" cache miss the table would introduce.
-//
-// Materials ARE cooked here as of v5 -- every property except the image
-// BYTES. That split is the whole of stage K-F, and it is the split the arc
-// had collapsed: factors, alpha mode, alpha cutoff, double-sidedness, names
-// and texCoord sets are properties of a material and cook like any other
-// value, while the pixels are a separate artifact whose ADDRESSING (one file
-// per source? an atlas? an array? a streaming pool?) is a project's decision
-// and not this format's. Parking the first behind the second meant a cooked
-// mesh could not describe its own surface for want of a decision about
-// texture packing.
-//
-// So each channel records the source IMAGE INDEX rather than pixels, and the
-// loader resolves those against images it decodes from the source. The source
-// therefore stays required -- but required for ONE named reason instead of
-// for everything, which is what CookedFlags.SourceRequiredForImagesOnly says.
-//
-// materialIndex on a primitive indexes THIS table, and the table is written in
-// the source's own material order, so the number means what it always meant.
-//
-// ── The image table (v6), and the three things it separates ────────────────
-//
-// A material channel's image field is a ROW in this file's own image table. It
-// used to be a glTF logical image index, which is a number that means nothing
-// without the glTF open -- so a "cooked" mesh still pinned its source for the
-// sole purpose of asking where the pixels were.
-//
-// Three things were tangled in that one number, and the table exists to pull
-// them apart:
-//
-//   IDENTITY  which image is this?      -> Name + ContentHash, stable across
-//                                          renames, and equal for two copies of
-//                                          the same bytes.
-//   LOCATION  where are its pixels?     -> Resource, a relative reference the
-//                                          RECIPE writes.
-//   GROUPING  how are many images       -> not here at all. It is a consequence
-//             packed into artifacts?       of what a recipe writes into Resource.
-//
-// That last line is the point. Before this, "one cooked artifact per source
-// image" was not a decision anyone had written down -- it was implied by a
-// loader rule that swapped a source URI's extension, which is a grouping policy
-// wearing a path's clothing. Cooking materials was then parked behind "textures
-// need a grouping decision" while the tree quietly had one.
-//
-// Now the shipped recipe writes 1:1 siblings, as before, but as DATA. A project
-// that wants atlases, arrays, shared palettes or a streaming pool writes rows
-// naming whatever its own resolver understands; the engine's default resolver
-// knows only "a relative path to a .blixtex" and never has to learn the rest.
-//
-// An EMBEDDED image is not a special case here. The cook extracts it, writes a
-// .blixtex under `<stem>.textures/`, and fills in a row that looks like every
-// other row. Embedded and external stop differing above the recipe.
+// Tables are sequential because runtime readers consume the complete artifact;
+// the format has no per-primitive offset table or partial-read contract.
 public static class BlixMesh
 {
     public const uint Magic = 0x4D584C42; // "BLXM" little-endian
@@ -156,42 +33,9 @@ public static class BlixMesh
     /// stamps its own, which is what makes "who made this file" answerable.
     /// </summary>
     public const string ShippedRecipe = "gmsh";
-    // v2: tangent-layout support + per-primitive LOD index chains (one shared
-    // vertex buffer, N index buffers, coarsest selected by distance at runtime).
-    // v3: each LOD level also carries its world-space geometric error (a float
-    // after indexCount) so the runtime can do screen-space-error selection
-    // instead of a magic metres-per-level distance. No back-read path — re-cook
-    // to migrate (the cook is fast, and nothing ships older files).
-    // v4: the shared cooked preamble replaces the private magic+version pair, so
-    // provenance and settings travel with the file and a tool can read them
-    // without knowing this format at all.
-    // v5: a material table follows the primitives -- every material property
-    // except image bytes (see the header note). No back-read path, by the same
-    // rule as v3: re-cook to migrate, which the build does by itself because the
-    // recipe assembly is one of the cook target's Inputs.
-    // v6: an IMAGE TABLE follows the materials, and a material channel's image
-    // field becomes a row in it rather than a glTF logical image index. That is
-    // what lets a cooked mesh be loaded with no source file present at all --
-    // see the header note on identity, location and grouping.
-    // v7: a BONE table and a CLIP table follow the images, and layoutId 3 is the skinned vertex.
-    // A rigged glTF had no cooked form at all — `blix check --cooked` said so on every one of them
-    // — and that was the last category of asset in this tree with no fast path.
-    //
-    // <b>Two more tables rather than a new format, which the plan had called for.</b> Its reasoning
-    // was that a rig "needs the skinned vertices, the skeleton, and the clips, which is a new format
-    // rather than a fifth column in this one". But this format already carries materials and images,
-    // neither of which is mesh data either, and both arrived as tables appended after the
-    // primitives. A skeleton and its clips are the same move. Keeping one format also keeps one
-    // RECIPE per source extension, which matters: BlixRecipes.For refuses to guess when two recipes
-    // accept the same extension, so a second .gltf recipe would have made `blix cook` unable to
-    // choose between them.
-    // v8: a NODE table, and every primitive names the node it came from. Vertices stay
-    // world-baked — the cook's whole value for the flat path — and the table is what lets a
-    // consumer that wants the authored hierarchy have it anyway. See the header note.
-    // v9: every material carries the KHR_materials_* block. The importer was reading two of the
-    // thirteen extensions SharpGLTF surfaces and dropping eleven at the boundary, so a cooked file
-    // could not carry what the engine had begun to read. Same rule as every bump before it: no
-    // back-read, re-cook to migrate, which the build does by itself.
+    // Version 9 is the only accepted layout. It includes per-primitive layouts and LOD errors,
+    // common provenance, material and image tables, rig data, attachments/static parts, authored
+    // nodes, and the current KHR_materials_* parameter block. Older layouts must be re-cooked.
     public const uint Version9 = 9;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
@@ -256,23 +100,11 @@ public sealed record BlixMeshLod(ushort[]? Indices16, uint[]? Indices32, float E
     public int IndexCount => Indices32?.Length ?? Indices16!.Length;
 }
 
-/// <summary>A cooked material: every glTF material property except the image bytes.</summary>
-/// <remarks>
-/// <b>The image channels are source IMAGE indices, not paths and not pixels.</b> An index is what
-/// survives the two things a path does not — a container with its images embedded, where there is no
-/// path to write down, and a future in which the pixels move into some other artifact, where a path
-/// would have to be rewritten in every cooked file. It is also what the loader already keys its
-/// decoded-texture cache by, so resolving one costs a dictionary lookup.
-/// <para>
-/// -1 means the channel has no texture, which is different from an index that resolves to nothing.
-/// </para>
-/// </remarks>
 /// <summary>One image a material references: what it is, and where its pixels were put.</summary>
 /// <remarks>
-/// <b><paramref name="Resource"/> is written by the recipe, not derived by the loader.</b> That is
-/// the whole of how grouping stays the consumer's: the shipped recipe writes one cooked artifact per
-/// source image and records its relative path, and a recipe that packs differently records something
-/// its own resolver understands. Nothing in the engine infers a location from a name.
+/// <paramref name="Resource"/> is written by the recipe rather than derived by the loader. The
+/// shipped recipe records one relative artifact per source image; alternate grouping remains
+/// project recipe and resolver policy.
 /// </remarks>
 /// <param name="Name">Human-meaningful and stable; for diagnostics and for a resolver to key on.</param>
 /// <param name="ContentHash">
@@ -285,6 +117,10 @@ public sealed record BlixMeshLod(ushort[]? Indices16, uint[]? Indices32, float E
 /// </param>
 public sealed record BlixMeshImage(string Name, ulong ContentHash, string Resource);
 
+/// <summary>
+/// A cooked material whose image fields index this file's image table. -1 means the channel has no
+/// texture, distinct from a row whose resource is missing.
+/// </summary>
 public sealed record BlixMeshMaterial(
     string Name,
     Vector4 BaseColorFactor,
@@ -304,7 +140,7 @@ public sealed record BlixMeshMaterial(
     int OcclusionImage = BlixMesh.NoImage,
     int EmissiveImage = BlixMesh.NoImage,
 
-    /// <summary>Every <c>KHR_materials_*</c> property, as cooked. Null on a file older than v9.</summary>
+    /// <summary>Every <c>KHR_materials_*</c> property, as cooked. Null for in-memory callers that omit the block.</summary>
     BlixMaterialExtensions? Extensions = null)
 {
     /// <summary>The extensions, never null — an absent block reads as every spec default.</summary>
@@ -384,7 +220,7 @@ public readonly record struct BlixMeshQuaternionKey(float Time, Quaternion Value
 
 /// <summary>One bone's animation across a clip. An empty channel array means that channel is absent.</summary>
 /// <remarks>
-/// <b>Absent and empty are the same thing here, deliberately.</b> glTF gives a channel keys or does
+/// Absent and empty are represented the same way. glTF gives a channel keys or does
 /// not give it at all; a channel with zero keys has no meaning either way, so one representation
 /// covers both and the reader needs no presence flag per channel.
 /// </remarks>
@@ -403,12 +239,7 @@ public sealed record BlixMeshClip(string Name, BlixMeshTrack[] Tracks);
 
 /// <summary>One skin: its bones and the transform its mesh node sat under.</summary>
 /// <remarks>
-/// <b>A TABLE of skins, because a file can hold several, and this tree has one that does.</b> The
-/// first cut of this format carried a single skeleton — until <c>tank.glb</c> was measured and found
-/// to declare three. The rigged importer already knew: every primitive carries a <c>SkinIndex</c>,
-/// and its comment records that choosing one skin and discarding the rest was a real bug once. A
-/// cooked form that could hold only one would have reintroduced it silently, in a file, where it is
-/// far harder to see.
+/// Files may carry several skins, and each primitive records the skin table row that drives it.
 /// <para>
 /// <paramref name="MeshNodeTransform"/> travels with the skin because it belongs to it: most
 /// authored characters put their axis correction on an ancestor node rather than per-vertex, and a
@@ -449,13 +280,8 @@ public sealed record BlixMeshPrimitive(
     /// This primitive's own vertex layout.
     /// </summary>
     /// <remarks>
-    /// <b>Per primitive, not per file, and that migration is what let a rig cook whole.</b> One
-    /// layout per file was true while a file held one kind of geometry. A rigged glTF does not: its
-    /// skinned primitives are 80-byte, while the ATTACHMENTS hanging off its bones — Rogue's cape
-    /// and its two knives — are built through the static path and carry a static layout. With one
-    /// layout per file, cooking a rig meant dropping them, and dropping them meant a cooked Rogue
-    /// that draws a character with no cape. Refusing to cook such files was the first answer here,
-    /// and it left exactly the half-cooked category this arc exists to remove.
+    /// Layout is per primitive because a rigged file may contain skinned geometry, static joint
+    /// attachments, and independent static parts with different vertex widths.
     /// </remarks>
     VertexLayout Layout,
     int MaterialIndex,
@@ -470,7 +296,7 @@ public sealed record BlixMeshPrimitive(
     /// Which node of the file's table this came from, or -1 when the file has no hierarchy.
     /// </summary>
     /// <remarks>
-    /// <b>This is what makes the cook's world-baking reversible.</b> The vertices are already in
+    /// This makes world-baking reversible. The vertices are already in
     /// world space; a consumer that needs them in the node's own space composes that node's world
     /// matrix from the table and applies its inverse.
     /// </remarks>
@@ -617,9 +443,8 @@ internal static class BlixMeshBinary
 public static class BlixMeshWriter
 {
     /// <param name="stamp">
-    /// Who cooked this, from what, with which settings. <b>Required, and that is the point</b> — a
-    /// recipe never writes bytes itself, so making this a parameter is what makes an unstamped
-    /// cooked file impossible to produce rather than merely discouraged.
+    /// Who cooked this, from what, and with which settings. Required so this writer cannot produce
+    /// an unstamped artifact.
     /// </param>
     public static void Write(string path, BlixMeshFile file, in CookStamp stamp)
     {

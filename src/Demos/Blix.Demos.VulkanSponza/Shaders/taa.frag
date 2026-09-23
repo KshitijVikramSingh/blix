@@ -2,12 +2,8 @@
 
 // Temporal resolve: this frame, made quieter by the ones before it.
 //
-// <b>The present frame owns the image; history gets permission to make it calmer.</b> That is the
-// whole policy, and every choice here follows from it. History is rejected outright where it cannot
-// be trusted, clamped to what this frame would have accepted where it can, and blended at a weight
-// that loses to a disagreement. Nothing here is allowed to invent detail the current frame does not
-// have — the renderer's spatial frame is good enough at native resolution that temporal only has to
-// stop it shimmering.
+// The present frame owns the image. History is rejected where reprojection is invalid, clamped to
+// the current neighbourhood where valid, and blended only to reduce shimmer.
 //
 // Reprojection is camera-only and exact. Nothing in this scene animates, so a velocity buffer would
 // be a per-object previous-transform, an extra target and an extra pass to encode a quantity that is
@@ -51,11 +47,8 @@ void main() {
 
     // The neighbourhood this frame would accept. Gathered from the 3x3 around the pixel, which is
     // the same information a spatial filter would use — here it bounds history instead of blurring.
-    // <b>A five-tap cross, not the nine-tap square.</b> The clamp only needs to know what this
-    // frame considers plausible nearby, and the four edge neighbours bound that almost as well as
-    // eight do — the corners are further away and mostly widen the range, which makes the clamp
-    // weaker rather than better informed. At this resolution the pass is bandwidth-bound, so the
-    // four taps saved are the cheapest half of it: the resolve measured 7.73 ms with nine.
+    // A five-tap cross bounds plausible current colour without the weaker corner samples; the
+    // nine-tap square measured 7.73 ms in this bandwidth-bound resolve.
     vec3 lo = current;
     vec3 hi = current;
     vec2 texel = 1.0 / vec2(textureSize(uCurrent, 0));

@@ -6,9 +6,8 @@
 // tangent frame to the fragment shader for normal mapping. Per-frame UBO in
 // set 0; per-draw model matrix rides a push constant.
 
-// Only the matrix, because only the matrix is read here. The four members that used to follow it
-// were named for a lighting model lit.frag has since left — uAmbientIntensity sat on what is now
-// padding — and an unused declaration that has gone stale is a trap with no failure mode.
+// Declare only the matrix this stage reads. The shared block's remaining layout is owned and
+// validated by the fragment-stage interface rather than duplicated here.
 layout(set = 0, binding = 0) uniform Frame {
     mat4 uViewProjection;
 } frame;

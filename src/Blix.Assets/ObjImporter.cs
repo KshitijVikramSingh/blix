@@ -69,8 +69,8 @@ public sealed class ObjImporter : IAssetImporter<MeshData>
     /// The cooked mesh when one is usable HERE, or null with <paramref name="why"/> saying why not.
     /// </summary>
     /// <remarks>
-    /// <b>This reader returns one mesh and the cooked format holds parts, so a multi-part file is
-    /// refused rather than merged.</b> Merging would be a second, different flattening of the same
+    /// This reader returns one mesh while the cooked format may hold multiple material parts, so a
+    /// multi-part artifact is refused rather than merged. Merging would be a second flattening of the same
     /// source — <see cref="WavefrontParts"/> exists precisely because this one drops <c>usemtl</c>
     /// — and a loader that quietly produces a shape neither the source nor the cook describes is
     /// worse than one that parses the OBJ again and says so.
@@ -161,7 +161,7 @@ public sealed class ObjImporter : IAssetImporter<MeshData>
 
                 // Directives we silently ignore: o (object), g (group), s (smoothing),
                 // mtllib, usemtl, l (line). Adding material/group support means a richer
-                // MeshData with submeshes, deferred until needed.
+                // MeshData with submeshes; use WavefrontParts when material parts are required.
             }
         }
 

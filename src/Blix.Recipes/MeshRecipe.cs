@@ -12,22 +12,14 @@ namespace Blix.Recipes;
 /// glTF geometry to <c>.blixmesh</c>: the shipped mesh recipe.
 /// </summary>
 /// <remarks>
-/// <para>
-/// <b>This used to live inside <c>Blix/GltfStaticImporter.cs</c></b>, which made it engine code and
-/// therefore a different kind of thing from a recipe a project writes for itself. Nothing about the
-/// work needed it to be there — moving it out cost exactly two engine members becoming public,
-/// <see cref="GltfStaticImporter.BuildStaticMeshData"/> and
-/// <see cref="GltfStaticImporter.ComputeNormalMatrix"/>, and no internals grant.
-/// </para>
-/// <para>
-/// What stayed behind is the right half: the format (<c>BlixMesh</c>, its reader, its writer and
-/// the preamble) is engine, because the runtime reads it. What came here is the decision — which
-/// nodes, which layout, whether to split, how far to decimate — which is a judgement about content
-/// rather than a capability of the engine.
-/// </para>
+/// Runtime format and reader contracts live in <c>Blix.Assets</c>/<c>Blix.Cooked</c>. This recipe
+/// owns content policy: node and layout selection, spatial splitting, and decimation.
 /// </remarks>
 public static class MeshRecipe
 {
+    /// <summary>An external image reached from a material channel, with its encoding role.</summary>
+    public readonly record struct ReferencedImage(string Uri, TextureRole Role);
+
     // Cook a .gltf/.glb to its .blixmesh sibling. CPU-only -- no GraphicsDevice
     // required; safe to invoke from the offline cook tool. Walks the same
     // node/primitive structure the runtime importer does, packs vertices via
@@ -40,7 +32,7 @@ public static class MeshRecipe
     // Splitting floor: below this a chunk is not halved again whatever its extent, because each
     // split duplicates seam vertices and locks one more border against the simplifier.
     private const int MinSplitTris = 128;
-    // <b>How long a chunk may be before distance stops meaning anything for it.</b> Selection uses
+    // Maximum chunk extent for meaningful distance-based LOD selection. Selection uses
     // the distance to the nearest point of a chunk's bounds, so a chunk longer than this has parts
     // at wildly different distances answering to whichever end you stand near. Four metres is about
     // one Sponza arcade bay — close enough that a chunk is at one distance, far enough that the
@@ -49,7 +41,7 @@ public static class MeshRecipe
 
     // Normal xyz + UV xy, the attributes a collapse is not allowed to wreck.
     private const int AttributeFloats = 5;
-    // <b>Weights, and they are the one real judgement call in this file.</b> meshopt scores an edge
+    // Attribute weights are the recipe's fidelity policy. meshopt scores an edge
     // collapse by position error plus the weighted attribute error, so these set how much UV shear
     // a collapse may buy with a given amount of surface flatness. Normals are unit-length, so 0.5
     // makes a full right-angle normal flip cost about as much as moving the surface half a unit of
@@ -66,9 +58,8 @@ public static class MeshRecipe
 
     /// <summary>What a simplifier is given about a primitive.</summary>
     /// <remarks>
-    /// Positions drove the whole decision on their own until they were shown not to be enough:
-    /// a collapse can leave the surface where it was and still shear the UVs across it, which is
-    /// what makes a pillar's texture slide as it changes level. <see cref="Attributes"/> is the
+    /// A collapse can leave the surface nearly fixed while shearing UVs or normals.
+    /// <see cref="Attributes"/> is the
     /// interleaved per-vertex data that must survive too — <see cref="AttributeStride"/> floats
     /// each, one weight per float — and is empty for a caller that only cares about shape.
     /// </remarks>
@@ -91,17 +82,9 @@ public static class MeshRecipe
     /// the same source and settings. Recorded in every file it writes, so a re-cook can be told
     /// from a rewrite.
     /// </summary>
-    // v2: the material table (.blixmesh v5). Bumping this re-cooks every mesh in the tree, which
-    // is the point — a v4 file has no table and the reader refuses it by name rather than reading
-    // a material count out of whatever followed the last primitive.
-    // v3: the image table (.blixmesh v6). Material channels index it instead of naming a glTF
-    // logical image, which is what removes the source from the load path entirely.
-    // v4: every KHR_materials_* property (.blixmesh v9). The cook was reading two of the thirteen
-    // extensions SharpGLTF surfaces, so a cooked material could not carry what the raw importer had
-    // begun to read — and a cooked path that silently defaults every extension while the raw path
-    // reads them is the same producer/consumer split that let glass be transparent on screen and a
-    // solid wall to the lighting.
-    public const uint MeshRecipeVersion = 4;
+    // Version 5 uses culture-invariant parameter identity. Format compatibility is versioned
+    // separately by BlixMesh; changing recipe output with the same format bumps this value.
+    public const uint MeshRecipeVersion = 5;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false, bool includeTangents = false,
@@ -112,29 +95,20 @@ public static class MeshRecipe
         ArgumentNullException.ThrowIfNull(gltfPath);
         ArgumentNullException.ThrowIfNull(outPath);
 
-        // <b>A rigged glTF cooks as a rig, through the same recipe.</b> It is one recipe rather than
-        // two because BlixRecipes.For refuses to guess when two recipes accept the same extension —
-        // a second .gltf recipe would leave `blix cook` unable to choose — and because "is this
-        // rigged?" is a property of the FILE, not a thing a caller should have to know before
-        // asking for it cooked.
-        //
-        // Routed by the rigged importer's own refusal, exactly as `blix check --cooked` routes it:
-        // it declines by name when no node carries both a mesh and a skin. Asking it first and
-        // letting the refusal decide beats sniffing the JSON for a "skins" array, because the
-        // question is not "does this file mention a skin" but "can this importer use it".
-        if (TryCookRig(gltfPath, outPath, out var rigPrimitiveCount, patch, log)) return rigPrimitiveCount;
+        // One glTF recipe handles both rigged and static content. The rigged importer decides
+        // whether the file forms a supported rig; a named refusal routes it to the static cook.
+        if (TryCookRig(
+                gltfPath, outPath, out var rigPrimitiveCount,
+                flipTextureV, includeTangents, splitTriBudget, splitFoliage, splitMaxExtent,
+                patch, log))
+            return rigPrimitiveCount;
 
         var layout = includeTangents
             ? VertexPosition3NormalTangentTexture.Layout
             : VertexPosition3NormalTexture.Layout;
         var model = ModelRoot.Load(gltfPath);
 
-        // <b>The hierarchy is recorded, not discarded, even though the vertices are baked.</b> The
-        // cook folds each node's world transform into its positions, which is a large part of what
-        // the flat load path buys — but it also threw away the authored structure, and the studio's
-        // model view is built on exactly that: names, parents, pivots, per-part selection. It could
-        // not open a cooked model at all.
-        //
+        // Preserve the authored hierarchy even though flat geometry stores world-baked vertices.
         // Every node is written, including ones carrying no geometry: a parent that holds only a
         // transform is still what its children are relative to, and pruning it breaks the
         // composition it exists for.
@@ -144,7 +118,7 @@ public static class MeshRecipe
         foreach (var node in model.LogicalNodes)
         {
             if (node.Mesh is null) continue;
-            // F-016: engine is now row-vector form; matches SharpGLTF.
+            // Engine and SharpGLTF both use System.Numerics row-vector form.
             var world = node.WorldMatrix;
             var normalMatrix = GltfStaticImporter.ComputeNormalMatrix(world);
             for (var i = 0; i < node.Mesh.Primitives.Count; i++)
@@ -182,35 +156,16 @@ public static class MeshRecipe
             }
         }
 
-        // Every setting that changes the bytes, recorded verbatim. Before this, --flip-v, --split
-        // and --no-split-foliage silently altered the output and nothing anywhere said which had
-        // been used — so the cooked half of the tree could not be reproduced from the tree, and
-        // "cook it again and compare" was a test nobody could write. Authored order, not sorted,
-        // so the string is stable across runs and a byte-compare means something.
-        //
-        // `simplify` is in here because a null simplifier writes LOD0 only: same source, same
-        // flags, a different file. That it is a delegate rather than a flag is exactly why it was
-        // the easiest one to forget.
-        var parameters =
-            $"flipV={(flipTextureV ? 1 : 0)} tangents={(includeTangents ? 1 : 0)} " +
-            $"split={splitTriBudget}@{splitMaxExtent:0.##}m splitFoliage={(splitFoliage ? 1 : 0)} " +
-            $"simplify={(simplify is null ? "none" : "yes")}" +
-            // Recorded, so `blix inspect` can answer "where did this material's sheen come from"
-            // without anyone reading a shader. An artifact that was patched and cannot say so is
-            // the same unexplainable state the heuristic left behind.
-            (patch is null ? "" : $" {patch.StampFragment}");
+        // Record byte-affecting settings in stable authored order. Simplification is explicit
+        // because a null simplifier produces an LOD0-only artifact.
+        var parameters = StaticParameters(
+            flipTextureV, includeTangents, splitTriBudget, splitFoliage, splitMaxExtent,
+            simplify is not null, patch);
 
         var (images, imageRows) = CookImages(model, gltfPath, outPath);
 
-        // <b>The flag can finally be FALSE, and this is the debt stage K-A wrote down.</b> A
-        // .blixmesh used to declare its source permanently required because every material was
-        // re-parsed from the glTF on each load; K-F cooked the materials and narrowed the debt to
-        // image bytes; the image table removes the last reason to open the source at all. So when
-        // every image resolves to a cooked artifact, nothing is owed — the first artifact in this
-        // tree that can be shipped, moved or opened on its own.
-        //
-        // When some image is still an uncooked PNG, the thing wanted is that IMAGE and not the
-        // glTF, and the narrow flag says so rather than implying the source is needed whole.
+        // A mesh is source-independent when every image-table resource is cooked. If a row still
+        // names a source image, only image bytes remain required; geometry and materials do not.
         var everyImageCooked = images.All(
             i => i.Resource.EndsWith(".blixtex", StringComparison.OrdinalIgnoreCase));
 
@@ -231,20 +186,14 @@ public static class MeshRecipe
     /// Cooks a rigged glTF — skinned vertices, skins and clips — or returns false if it is not one.
     /// </summary>
     /// <remarks>
-    /// <b>This is the last category of asset in this tree with no cooked form.</b>
-    /// <c>blix check --cooked</c> said so on every rigged file: "a rigged glTF has no cooked form —
-    /// .blixmesh holds no skinned vertex layout". Measured, the four RTSGame villagers spent ~890 ms
-    /// of their ~1,950 ms on geometry and skin, which is about half a second off every launch and is
-    /// behind nothing.
-    /// <para>
     /// The vertices come from <see cref="GltfImporter"/> rather than being rebuilt here, and that is
-    /// deliberate: joint remapping and weight normalisation are subtle, the importer already does
-    /// them, and a cook that reimplemented them would be a second opinion whose disagreements would
-    /// show up as a character loading differently once cooked.
-    /// </para>
+    /// important: source and cooked paths share joint remapping, influence selection, attachment
+    /// discovery, and static-part handling.
     /// </remarks>
     private static bool TryCookRig(
         string gltfPath, string outPath, out int primitiveCount,
+        bool flipTextureV, bool includeTangents, int splitTriBudget, bool splitFoliage,
+        float splitMaxExtent,
         MaterialPatch? patch = null, Action<string>? log = null)
     {
         primitiveCount = 0;
@@ -252,8 +201,7 @@ public static class MeshRecipe
         GltfModel rig;
         try
         {
-            // ImportSource, not Import — a recipe must never read through the cooked path, or it
-            // consumes its own previous output. See that method for why this is the second time.
+            // Recipes bypass cooked siblings so output is always derived from authored source.
             rig = new GltfImporter().ImportSource(new AssetImportContext(AssetId.Parse("cook/rig"), gltfPath));
         }
         catch (AssetImportException noRig) when (noRig.Message.Contains("no rig here", StringComparison.Ordinal))
@@ -263,6 +211,20 @@ public static class MeshRecipe
 
         var skins = rig.SkinsOrEmpty;
         if (skins.Length == 0) return false;
+
+        var unsupported = new List<string>();
+        if (flipTextureV) unsupported.Add("flipV");
+        if (includeTangents) unsupported.Add("tangents");
+        if (splitTriBudget != 0) unsupported.Add("split");
+        if (!splitFoliage) unsupported.Add("splitFoliage");
+        if (splitMaxExtent != DefaultSplitMaxExtent) unsupported.Add("splitExtent");
+        if (unsupported.Count > 0)
+        {
+            throw new InvalidDataException(
+                $"'{gltfPath}' is rigged, but {string.Join(", ", unsupported)} "
+                + "only affect static mesh cooking; remove those options rather than stamping "
+                + "settings this artifact did not apply");
+        }
 
         var model = ModelRoot.Load(gltfPath);
         var (images, imageRows) = CookImages(model, gltfPath, outPath);
@@ -277,13 +239,8 @@ public static class MeshRecipe
 
         var clips = rig.Animations.Select(CookClip).ToArray();
 
-        // <b>Attachments and static parts cook too, and making that possible is why a primitive
-        // owns its layout.</b> Both are built through the STATIC path, so their vertices are a
-        // different width from the skinned ones beside them. While a .blixmesh carried one layout
-        // per file, the only honest options were to drop them — a cooked Rogue whose cape and two
-        // knives had quietly vanished — or to refuse to cook any rig that had them, which left the
-        // half-cooked category this stage exists to remove. Of the tree's eight rigged assets
-        // exactly one has attachments, so refusing would have looked fine and consolidated nothing.
+        // Attachments and static parts use static vertex layouts beside skinned primitives. Layout
+        // is therefore stored per primitive rather than once for the whole file.
         var attachments = rig.AttachmentsOrEmpty.Select(a => new BlixMeshAttachment(
             a.Name, a.JointName, a.JointIndex, a.SkinIndex, a.LocalTransform,
             a.Primitives.Select(CookPrimitive).ToArray())).ToArray();
@@ -320,7 +277,7 @@ public static class MeshRecipe
     /// The authored node hierarchy, in an order where every parent precedes its children.
     /// </summary>
     /// <remarks>
-    /// <b>Re-ordered rather than written as found.</b> glTF does not promise parents come first, and
+    /// glTF does not promise parents come first, and
     /// a consumer composing world matrices in one forward pass needs them to — which is the same
     /// invariant <c>Skeleton</c> enforces on bones, for the same reason. The reader refuses a file
     /// that violates it, naming the node, so a re-order that went wrong cannot pass quietly.
@@ -366,7 +323,7 @@ public static class MeshRecipe
 
     /// <summary>One animation, as keyframes.</summary>
     /// <remarks>
-    /// <b>Keyframes rather than curve objects, because keyframes are what the source had.</b> The
+    /// Store source keyframes rather than serializing runtime curve objects. The
     /// glTF importer builds exactly two curve types — <c>KeyframeVector3Curve</c> and
     /// <c>KeyframeQuaternionCurve</c> — each from a plain array of (time, value). Writing those
     /// arrays back is lossless; writing a serialised "curve" would be inventing a representation
@@ -391,25 +348,24 @@ public static class MeshRecipe
             : Array.Empty<BlixMeshQuaternionKey>();
 
     /// <summary>
-    /// The relative URIs of the external images this asset's materials actually reference.
+    /// The external images this asset's materials actually reference, with material-channel roles.
     /// </summary>
     /// <remarks>
-    /// <b>For cooking what an asset USES rather than what a folder CONTAINS.</b> Main Sponza ships
-    /// 137 texture files and its own glTF names 72 of them; sweeping the directory spends a quarter
-    /// of the time and a quarter of the bytes on images nothing will ever sample. Following
-    /// references is what makes a cooked tree smaller than the source tree rather than larger.
+    /// Follows material references instead of sweeping the containing directory, so unrelated and
+    /// unused images are not included in an asset cook.
     /// <para>
     /// Embedded images are not listed: they have no URI to cook from, and the mesh cook extracts
     /// and cooks them itself as it builds the image table.
     /// </para>
     /// </remarks>
-    public static IReadOnlyList<string> ReferencedImageUris(string gltfPath)
+    public static IReadOnlyList<ReferencedImage> ReferencedImages(string gltfPath)
     {
         ArgumentNullException.ThrowIfNull(gltfPath);
 
         var model = ModelRoot.Load(gltfPath);
+        var rolesByImage = ResolveImageRoles(model);
         var gltfDir = Path.GetDirectoryName(Path.GetFullPath(gltfPath)) ?? ".";
-        var uris = new List<string>();
+        var references = new List<ReferencedImage>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var material in model.LogicalMaterials)
@@ -421,26 +377,31 @@ public static class MeshRecipe
                 if (uri.StartsWith("data:", StringComparison.Ordinal)) continue;
 
                 var relative = RelativeImagePath(gltfDir, uri);
-                if (seen.Add(relative)) uris.Add(relative);
+                var role = rolesByImage[image.LogicalIndex];
+                if (seen.Add($"{relative}\0{role}")) references.Add(new ReferencedImage(relative, role));
             }
         }
 
-        return uris;
+        return references;
     }
+
+    /// <summary>The unique external image URIs, when channel roles are not needed.</summary>
+    public static IReadOnlyList<string> ReferencedImageUris(string gltfPath) =>
+        ReferencedImages(gltfPath)
+            .Select(reference => reference.Uri)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
     /// <summary>
     /// Every image the source's materials reference, and where each one's pixels ended up.
     /// </summary>
     /// <remarks>
-    /// <b>This is what lets the cooked file be loaded with no source present.</b> The table records
-    /// a LOCATION the recipe knows to be true, rather than a rule the loader applies later — see the
+    /// The table records a location the recipe knows to be true, rather than a rule the loader applies later — see the
     /// note in <c>BlixMesh</c> on why deriving a location by swapping a URI's extension was a
     /// grouping policy in disguise.
     /// <para>
-    /// <b>Embedded images stop being a special case here, and that is the whole trick.</b> A glTF
-    /// with its pixels inline has no path to record, so the cook EXTRACTS each one, cooks it beside
-    /// the mesh, and writes a row that looks like every other row. Everything above this method
-    /// sees one shape.
+    /// Embedded images have no source path, so the cook extracts each one, cooks it beside the
+    /// mesh, and writes an ordinary resource row.
     /// </para>
     /// <para>
     /// Only images the MATERIALS reach are recorded. A glTF may carry images no channel samples, and
@@ -454,6 +415,7 @@ public static class MeshRecipe
     {
         var images = new List<BlixMeshImage>();
         var rows = new Dictionary<int, int>();
+        var rolesByImage = ResolveImageRoles(model);
         var sourceDir = Path.GetDirectoryName(Path.GetFullPath(gltfPath)) ?? ".";
         var outDir = Path.GetDirectoryName(Path.GetFullPath(outPath)) ?? ".";
         var extractDir = Path.Combine(
@@ -466,21 +428,9 @@ public static class MeshRecipe
                 var image = material.FindChannel(channelName)?.Texture?.PrimaryImage;
                 if (image is null || rows.ContainsKey(image.LogicalIndex)) continue;
 
-                // <b>The channel IS the role, so it is passed rather than re-sniffed.</b> An
-                // extracted image's name is one this cook invents, and TextureRecipe's classifier
-                // reads names: Rogue's base colour came out "rogue_texture", matched nothing, and
-                // cooked linear instead of sRGB. The character rendered blown out and nothing
-                // errored.
-                var role = channelName switch
-                {
-                    "BaseColor" => TextureRole.BaseColor,
-                    "Normal" => TextureRole.Normal,
-                    "MetallicRoughness" => TextureRole.MetallicRoughness,
-                    "Emissive" => TextureRole.Emissive,
-                    // Occlusion is single-channel linear data. It is not MetallicRoughness, whose
-                    // loader zeroes a channel to build the ORM layout.
-                    _ => TextureRole.Linear,
-                };
+                // The material channel is authoritative texture-role metadata, especially for
+                // embedded images whose generated names carry no reliable role.
+                var role = rolesByImage[image.LogicalIndex];
 
                 var bytes = image.Content.Content;
                 var hash = ContentHash(bytes.Span);
@@ -506,11 +456,8 @@ public static class MeshRecipe
                 var relative = RelativeImagePath(sourceDir, uri);
                 var cooked = Path.ChangeExtension(relative, ".blixtex");
 
-                // <b>Checked against the OUTPUT directory, because that is where the loader will
-                // look.</b> Resource is relative to the cooked mesh, so for an in-place cook this is
-                // the same directory as the source and the distinction is invisible; for a cook into
-                // a separate tree it is the whole difference between a path that resolves and one
-                // that points back at a folder the user is about to delete.
+                // Check the output directory because Resource is relative to the cooked mesh. For
+                // an out-of-place cook, source and destination trees are intentionally different.
                 return File.Exists(Path.Combine(outDir, cooked)) ? cooked : relative;
             }
 
@@ -546,17 +493,50 @@ public static class MeshRecipe
     private static readonly string[] ImageChannels =
         { "BaseColor", "Normal", "MetallicRoughness", "Occlusion", "Emissive" };
 
+    private static TextureRole RoleForChannel(string channelName) => channelName switch
+    {
+        "BaseColor" => TextureRole.BaseColor,
+        "Normal" => TextureRole.Normal,
+        "MetallicRoughness" => TextureRole.MetallicRoughness,
+        "Emissive" => TextureRole.Emissive,
+        // Occlusion is single-channel linear data. It is not MetallicRoughness, whose loader
+        // rewrites grayscale input into the engine's ORM layout.
+        _ => TextureRole.Linear,
+    };
+
+    /// <summary>One cooked image has one role; refuse a material graph that says otherwise.</summary>
+    private static Dictionary<int, TextureRole> ResolveImageRoles(ModelRoot model)
+    {
+        var roles = new Dictionary<int, TextureRole>();
+        foreach (var material in model.LogicalMaterials)
+        {
+            foreach (var channelName in ImageChannels)
+            {
+                var image = material.FindChannel(channelName)?.Texture?.PrimaryImage;
+                if (image is null) continue;
+
+                var role = RoleForChannel(channelName);
+                if (roles.TryGetValue(image.LogicalIndex, out var existing) && existing != role)
+                {
+                    var name = image.Name ?? image.Content.SourcePath ?? $"image {image.LogicalIndex}";
+                    throw new InvalidDataException(
+                        $"'{name}' is used as both {existing} and {role}; one cooked image cannot "
+                        + "preserve both material-channel roles");
+                }
+
+                roles[image.LogicalIndex] = role;
+            }
+        }
+
+        return roles;
+    }
+
     /// <summary>
     /// An image reference as a path RELATIVE to the asset, whatever form the parser handed back.
     /// </summary>
     /// <remarks>
-    /// <b>SharpGLTF resolves <c>Image.Content.SourcePath</c> to an ABSOLUTE path, and that cost real
-    /// damage.</b> The value was used directly as a relative reference, so
-    /// <c>Path.Combine(outDir, it)</c> silently discarded <c>outDir</c> — .NET's documented
-    /// behaviour for a rooted second argument — and an out-of-place cook wrote its cooked textures
-    /// back into the SOURCE folder while reporting that it had written them to the output. Both the
-    /// "did I cook this?" check and the recorded location then agreed with each other and with
-    /// nothing else, which is why the mesh cheerfully declared itself self-contained.
+    /// SharpGLTF may return an absolute resolved path while cooked resources require relative,
+    /// portable locations.
     /// <para>
     /// Normalised through the asset's own directory so a relative URI, an absolute path and an
     /// escaped one all arrive as the same forward-slashed relative string.
@@ -576,7 +556,7 @@ public static class MeshRecipe
     /// A cooked artifact exists to be moved and shipped, so a row pointing at an absolute path or
     /// climbing out with <c>..</c> is not a slightly-wrong file — it is a file that works on this
     /// machine and nowhere else. Thrown rather than logged: this is a bug in a recipe, and the
-    /// previous version of it wrote 85 MB into a folder it had been asked not to touch.
+    /// violation is refused rather than logged.
     /// </remarks>
     private static string Shippable(string resource, string gltfPath)
     {
@@ -623,11 +603,9 @@ public static class MeshRecipe
     /// image bytes.
     /// </summary>
     /// <remarks>
-    /// <b>In the source's order and in full, including materials no primitive uses.</b> A
-    /// primitive's MaterialIndex is a glTF logical-material index and was one before this table
-    /// existed, so writing a compacted table would silently change what that number means in every
-    /// file already on disk. The table is small — a name and twenty-odd scalars each — and an index
-    /// that still means what it says is worth more than the bytes.
+    /// Materials remain in source order and include unused entries because a primitive's
+    /// <c>MaterialIndex</c> is the source logical-material index. Compacting the table would change
+    /// that index's meaning.
     /// <para>
     /// This reads the same channels <c>GltfShared.ExtractMaterial</c> does and must keep reading
     /// them: a property the cook drops is one the loader stops seeing the moment a mesh is cooked,
@@ -688,10 +666,7 @@ public static class MeshRecipe
         // whole mechanism exists to end.
         return patch is null ? cooked : patch.Apply(cooked, log);
 
-        // <b>A ROW IN THIS FILE'S OWN IMAGE TABLE, not a glTF logical image index.</b> The old
-        // number could only be resolved by reopening the glTF, which is precisely why a "cooked"
-        // mesh still pinned its source. Mapped through imageRows so the cooked file is readable
-        // with nothing else present.
+        // Store rows in this cooked file's image table, not source glTF image indices.
         int ImageIndex(MaterialChannel? channel)
         {
             var logical = channel?.Texture?.PrimaryImage?.LogicalIndex;
@@ -768,7 +743,7 @@ public static class MeshRecipe
     // are duplicated across chunks — with BuildLods' LockBorder this keeps chunk
     // boundaries watertight even when adjacent chunks pick different LOD levels.
     //
-    // <b>And under an EXTENT, which is the half this was missing.</b> A triangle budget splits
+    // A triangle budget splits
     // dense primitives and leaves sparse ones whole, and a sparse primitive is exactly the one that
     // hurts: a thirty-metre wall carrying a few hundred triangles is one drawable with one level of
     // detail and one distance, so standing at one end of it holds the far end at full detail and no
@@ -921,15 +896,11 @@ public static class MeshRecipe
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>This was a lambda inside the cook driver, and leaving it there was a silent downgrade.</b>
-    /// The uniform <see cref="Cook"/> path passed no simplifier, so a build rule invoking a recipe
-    /// produced LOD0-only files while the same recipe invoked by hand produced full LOD chains —
-    /// the build quietly making worse output than the command, which is exactly the class of thing
-    /// this arc exists to stop. Caught by watching Rogue.blixmesh lose its chain on the first
-    /// build-rule run.
+    /// The shared shipped path always supplies this simplifier so recipe-host and driver invocations
+    /// both produce LOD chains.
     /// </para>
     /// <para>
-    /// <b>Prune, not LockBorder, except when splitting.</b> LockBorder pins every mesh-boundary
+    /// Use Prune generally and add LockBorder only for spatially split chunks. LockBorder pins every mesh-boundary
     /// vertex, which is right when spatially split chunks must stay watertight where they meet and
     /// ruinous otherwise: on a stylised tree, whose canopy is hundreds of separate leaf clusters,
     /// nearly every vertex is a border vertex, so locking them forbids collapsing anything at all —
@@ -992,19 +963,9 @@ public static class MeshRecipe
     /// Cook a glTF the way a SHIPPED asset is cooked. The only entry any driver should call.
     /// </summary>
     /// <remarks>
-    /// <b>This exists because the same bug has now shipped twice.</b> Three callers each assembled
-    /// the arguments to <see cref="CookToBlixMesh"/> themselves, and `simplify` defaults to null —
-    /// so forgetting it is silent, produces a valid file, and costs every LOD in it. The first time,
-    /// the simplifier was a lambda inside the cook driver and the uniform [Recipe] path ended up
-    /// with no decimation at all. That fix taught the recipe and `cook mesh` to share one
-    /// simplifier and left `cook asset` behind — which is the command the Sponza pipeline uses, so
-    /// 12.8M triangles shipped at full detail and the renderer's LOD selection had nothing to
-    /// choose between. Fixing it was worth 29% of the frame.
-    ///
-    /// The lesson is not "remember the argument". It is that a default of null on a parameter whose
-    /// absence is invisible will be forgotten by somebody, and the answer is for there to be one
-    /// place that cannot forget. Drivers now pick the SOURCE and the OPTIONS; they do not get to
-    /// decide whether a shipped asset has LODs.
+    /// Centralises the shipped policy that all drivers must share: LOD simplification is always
+    /// enabled, while callers choose source, destination, layout, splitting, and material patches.
+    /// Use <see cref="CookToBlixMesh"/> directly only when an LOD0-only artifact is intentional.
     /// </remarks>
     public static int CookShipped(
         string sourcePath, string outputPath,
@@ -1022,6 +983,48 @@ public static class MeshRecipe
             splitMaxExtent: splitMaxExtent,
             patch: patch,
             log: log);
+
+    /// <summary>Whether a shipped mesh artifact matches today's recipe, source and options.</summary>
+    public static bool IsShippedCurrent(
+        string sourcePath, string outputPath,
+        bool flipTextureV = false, bool includeTangents = false,
+        int splitTriBudget = 0, bool splitFoliage = true,
+        float splitMaxExtent = DefaultSplitMaxExtent,
+        MaterialPatch? patch = null)
+    {
+        var header = CookedFile.TryReadHeader(outputPath);
+        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version9 }) return false;
+        var stamp = header.Value.Stamp;
+        if (!stamp.MatchesProducerAndSource(BlixMesh.ShippedRecipe, MeshRecipeVersion, sourcePath))
+            return false;
+
+        if (!stamp.Parameters.StartsWith("rig=1 ", StringComparison.Ordinal))
+        {
+            return stamp.Parameters == StaticParameters(
+                flipTextureV, includeTangents, splitTriBudget, splitFoliage, splitMaxExtent,
+                simplify: true, patch: patch);
+        }
+
+        // The dynamic counts in a rig stamp are source-derived and therefore covered by the source
+        // identity above. Only caller policy remains to compare here.
+        if (flipTextureV || includeTangents || splitTriBudget != 0 || !splitFoliage
+            || splitMaxExtent != DefaultSplitMaxExtent)
+            return false;
+
+        var patchMarker = " patch=";
+        return patch is null
+            ? !stamp.Parameters.Contains(patchMarker, StringComparison.Ordinal)
+            : stamp.Parameters.EndsWith(" " + patch.StampFragment, StringComparison.Ordinal);
+    }
+
+    private static string StaticParameters(
+        bool flipTextureV, bool includeTangents, int splitTriBudget, bool splitFoliage,
+        float splitMaxExtent, bool simplify, MaterialPatch? patch) =>
+        $"flipV={(flipTextureV ? 1 : 0)} tangents={(includeTangents ? 1 : 0)} "
+        + $"split={splitTriBudget}@{splitMaxExtent.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)}m "
+        + $"splitFoliage={(splitFoliage ? 1 : 0)} simplify={(simplify ? "yes" : "none")}"
+        // Recorded so inspection can attribute authored material changes to their project policy.
+        + (patch is null ? "" : $" {patch.StampFragment}");
 
     /// <summary>Cooks every <c>KHR_materials_*</c> property a material declares.</summary>
     /// <remarks>

@@ -21,7 +21,7 @@ public sealed record FoundRecipe(
 /// Finds the recipes an assembly declares, at run time.
 /// </summary>
 /// <remarks>
-/// <b>The second reader of one truth.</b> <c>Blix.Tools.Apps</c> reads the same attributes out of
+/// <c>Blix.Tools.Apps</c> reads the same attributes out of
 /// ECMA-335 metadata at build time and writes the index; this reads them off a loaded assembly.
 /// They agree because they read the same declarations — and "because" is a claim, so the suite
 /// checks it. If the two ever disagree, <c>blix cook</c> would be listing recipes that cannot be

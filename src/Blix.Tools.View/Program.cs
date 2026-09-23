@@ -13,12 +13,11 @@ using Blix.Cooked;
 
 namespace Blix.Tools.View;
 
-// The toolchain lab's viewer — chassis conventions over a real lit scene.
+// Interactive model and rig viewer over the shared Studio reference pipeline.
 //
 // ── Proves ──────────────────────────────────────────────────────────────────
-//   • Several executables over ONE lab: the shaders, scene and renderer live in
-//     Blix.Tools.Studio and arrive here as content. This project declares no
-//     shaders and has no render code.
+//   • View and capture share one Studio renderer, scene model, and shader set.
+//     This project owns the interactive root, not a second rendering pipeline.
 //   • Reflected binding: every descriptor set, UBO offset and push range comes from
 //     spirv-cross sidecars, not from a hand-written ShaderInterface.
 //   • The shared build targets doing real work — BlixShaderMode=Library plus
@@ -28,12 +27,12 @@ namespace Blix.Tools.View;
 //     named views and trails.
 //   • Skeletal animation, made visible: ClipPlayer drives a pose, SkeletonGizmo
 //     draws it, and RootMotion says where a clip travels. The three composition
-//     modes are three ENGINE primitives with no lab-local maths behind them —
+//     modes are three ENGINE primitives with no viewer-local maths behind them —
 //     ClipPlayer, PoseBlend.Lerp, PoseDelta.LayerOnto. The last two had unit tests
 //     and no callers until this, which is its own kind of unverified.
 //
 // ── Intentionally owns ──────────────────────────────────────────────────────
-//   • Camera feel, the panel's controls, what the lab scene contains.
+//   • Camera feel, the panel's controls, and what the interactive scene contains.
 //   • Which clip feeds which player, how the blend weight is driven, and whether
 //     the root delta drives the model — all policy a game would decide for itself.
 public static class Program
@@ -77,7 +76,7 @@ public static class Program
         var instances = int.TryParse(ArgValue(args, "--instances"), out var n) ? n : 1;
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
-            Title = "Blix — toolchain lab",
+            Title = "Blix — model and rig viewer",
             Width = 1280,
             Height = 760,
         });
@@ -122,7 +121,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
     // <b>Constructed here and called from here.</b> The root builds its parts and drives them; there
     // is no registry, no discovery and no "which tool is active" branch. A different executable over
-    // this same lab simply builds a different root.
+    // the same Studio composition simply builds a different root.
     private ViewerPanels panels = null!;
 
     // ── The rig half ────────────────────────────────────────────────────────
@@ -366,7 +365,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // pass --image-based-lighting parsed, assigned, and changed nothing.
         new ObjectTunables(renderer.Look).Apply(args);
 
-        // Shaders arrive from the lab library's content propagation — this executable
+        // Shaders arrive from Studio's content propagation — this executable
         // never compiled one.
                 // A structural setting the stage cannot honour is a configuration error, not a crash. Same
         // rule the asset refusals follow: say which setting and what to do, and exit non-zero.
@@ -416,7 +415,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         // The model is the subject now; the box ring is a backdrop that hides it.
 
         // Assets arrive at whatever scale their author used — the Quaternius tank is ~14 units
-        // long — so the lab normalises to a couple of metres and seats the model on the ground.
+        // long — so the viewer normalises to a couple of metres and seats the model on the ground.
         // A viewer that shows nothing because the asset is off-screen teaches nothing.
         var extent = model.LongestExtent;
         var scale = extent > 0.001f ? 3f / extent : 1f;
@@ -457,15 +456,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         {
             Console.Error.WriteLine($"blix cannot read this: {refused.Message}");
             Environment.Exit(1);
-        }
-        if (rig.Skeleton.BoneCount > StudioRig.MaxBones)
-        {
-            // Said here rather than discovered on the GPU: past the shader's array bound the draw
-            // reads whatever follows the buffer, which renders as a character exploded across the
-            // map with no validation error to explain it.
-            Console.Error.WriteLine(
-                $"{Path.GetFileName(rigPath)} has {rig.Skeleton.BoneCount} bones; the lab's skinned " +
-                $"shader holds {StudioRig.MaxBones}. Raise the bound in studio_skinned.vert.");
         }
 
         session = new RigInstances(rig, requestedInstances)
@@ -699,7 +689,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         rigTransform = rigBase;
 
         // Bodies stand in a row across the camera's view, a stride apart, centred on the origin so
-        // one body sits where one body always did. Where they stand is the lab's choice, which is
+        // one body sits where one body always did. Where they stand is the viewer's choice, which is
         // why the session takes it rather than inventing one.
         var spacing = MathF.Max(1.2f, rig.LongestExtent * rigScale * 0.75f);
         session.Pack(rigTransform, spacing);
@@ -855,7 +845,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
         }
     }
 
-    // Everything the lab draws into a view. Called once per view rather than once per frame,
+    // Everything the viewer draws into a view. Called once per view rather than once per frame,
     // because a view is a camera AND a target — the same geometry seen twice is two sets of lines.
     private void DrawSceneGizmos(DebugContext debug, bool trails)
     {
@@ -971,7 +961,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
     // <b>What the importer actually produced, drawn where it produced it.</b>
     //
-    // blix-cook inspect prints these same numbers — composed-world pivots, assembled bounds, the
+    // blix inspect prints these same numbers — composed-world pivots, assembled bounds, the
     // node tree — and printing them is where asset work has always had to stop. The measured-pivot
     // fit has been done by hand at least three times in this project (TankArena's tank rig, the CC0
     // sourcing workflow, the RTS villager), each time by turning knobs in an overlay until the model
@@ -1106,7 +1096,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     /// <b>The first caller ViewPicking has ever had.</b> It was built and tested with the view arc and
     /// nothing used it — which is its own kind of unverified, however many assertions cover the maths.
     /// <para>
-    /// Bounds rather than triangles, deliberately. A node's AABB is what the lab already computes and
+    /// Bounds rather than triangles, deliberately. A node's AABB is what the viewer already computes and
     /// draws, so what gets picked is exactly what is outlined; picking against geometry the viewer does
     /// not show would select things for reasons the picture cannot explain. Triangle-accurate picking is
     /// a different question, and one no consumer has asked.

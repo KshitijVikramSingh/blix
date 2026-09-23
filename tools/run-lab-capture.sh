@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launcher for Blix.Tools.Shot — the toolchain lab capture tool.
+# Compatibility launcher for Blix.Tools.Shot — deterministic model and rig capture.
 #
 # Execs the apphost rather than `dotnet run`: Homebrew's $prefix/bin/dotnet is a
 # "#!/bin/bash" wrapper and /bin/bash is SIP-protected, so dyld strips DYLD_* from

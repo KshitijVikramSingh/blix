@@ -1,94 +1,150 @@
 # Architecture
 
-The engine is organised so that game code lives in `Blix` (the root namespace, the layer game code targets), the renderer spine lives below it (`Blix.Graphics` → `Blix.Graphics.Vulkan`), and platform contracts (windowing, input, audio host, diagnostics) live below everything in `Blix.Core`.
+Blix is a code-first library and a family of explicit applications. It does not
+own a universal scene, editor, project model, or renderer. A game or tool builds
+an ordinary C# root, chooses the capabilities it needs, and calls them in an
+order visible in that root.
 
-One backend + runtime ship today: the Vulkan + Silk.NET pair. The original OpenGL backend (`Blix.Graphics.OpenGL`) and its OpenTK runtime (`Blix.Runtime.OpenTK`) were sunset, along with the GL-only `Blix.Render` engine-facing API (name-keyed `Material`/`MaterialResolver`/`PostProcessStack`/`PbrSceneRenderer`) and the four heavy GL demos. Eleven Vulkan demos ship: `Blix.Demos.VulkanHello`, `Blix.Demos.VulkanGraph`, `Blix.Demos.VulkanLit`, `Blix.Demos.VulkanInstanced`, and `Blix.Demos.VulkanSponza` cover validation, render-graph topology, the full lit/shadow/PBR/IBL/bloom scene, the per-instance instancing foundation (5000-cube gate), and the GPU-driven Intel Sponza performance + asset-pipeline target; `Blix.Demos.VulkanParticles` is the CPU-particle + post-process VFX showcase; and four are complete games — `Blix.Demos.Pong` (2D, on the rebuilt Vulkan `SpriteBatch`), `Blix.Demos.Runner` (a 3D endless runner exercising instancing + skeletal animation + kinematic physics), `Blix.Demos.TankArena` (a survival shooter on the `Transform3D` parenting rig over a sun-shadow + HDR graph), and `Blix.Demos.Bulwark` (a tower defense exercising pointer picking, multi-front A\* navigation, and skinned-mesh instancing). `Blix.Demos.Chassis` is the newest and the smallest — an executable spec for the application chassis itself, deliberately *not* a diagnostics producer, which is what lets it prove that an application gets a window, an interface and a bounded run without being one. The engine was progressively reshaped around the Vulkan target — name-keyed materials gave way to SPIR-V-reflected binding (see [the Vulkan binding model](#the-vulkan-binding-model) below).
+One graphics backend and one desktop runtime ship today: Vulkan through
+`Blix.Graphics.Vulkan`, hosted by Silk.NET in `Blix.Runtime.Silk`. OpenGL and
+OpenTK have been removed. OpenAL remains the audio backend.
 
-**Library, not framework.** The engine is a set of composable primitives game code calls — not a control-inverting framework. The split: the **engine owns asset loading, reading, and bundling** (decode/upload/dedup/stream textures, pack geometry into shared buffers, run an off-thread load queue); the **game owns synthesis and composition** (which passes run, how draws are recorded, material/pipeline choice, render-graph topology). There is no `SceneRenderer` that owns read→cull→draw: `VulkanSponza` composes the engine primitives (`MeshBundler`, `AsyncLoadQueue`, `GltfTextureLoader`, the `RenderGraph`) itself and keeps its own draw groups + LOD/cull policy. New rendering capability lands as a primitive the game calls, not a stage the engine runs for you.
+The central ownership rule is:
 
-This doc orients you. For the game-engine layer game code targets, see [`blix.md`](blix.md). For the renderer — render graph, recording draws, shaders, and rendering techniques — see [`renderer.md`](renderer.md); `src/Blix.Demos.VulkanLit/` and `src/Blix.Demos.VulkanSponza/` are the working references it points at. For the non-negotiable conventions at a glance — transform/matrix/asset/demo — and where each is enforced, see [`conventions.md`](conventions.md).
+- engine projects provide contracts, data, algorithms, command vocabulary,
+  importers, and reusable rendering mechanisms;
+- recipes decide how source data becomes an engine-readable artifact;
+- Studio provides an optional reference rendering pipeline;
+- applications own scene policy, pass topology, feature selection, lifetime,
+  loading budgets, and domain behavior; and
+- tools are applications over the same libraries, not privileged engine modes.
 
-## Project graph
+There is no `SceneRenderer` that owns load, cull, and draw. Vulkan Sponza, for
+example, composes `MeshBundler`, `AsyncLoadQueue`, `GltfTextureLoader`, and
+`RenderGraph`, while retaining its own grouping, culling, LOD, lighting, and
+research policy.
 
-```
-Blix.Demos.VulkanHello         ← Vulkan validation demo (cube + debug overlay)
-Blix.Demos.VulkanGraph         ← Vulkan render-graph topology demo (3-pass invert)
-Blix.Demos.VulkanLit           ← Vulkan PBR + IBL + shadows + skinning + bloom
-Blix.Demos.VulkanInstanced     ← per-instance instancing foundation (5000-cube gate)
-Blix.Demos.VulkanSponza        ← Khronos Intel Sponza on Vulkan (GPU-driven indirect,
-                                  SSE LOD, cascaded shadows, froxel fog, streamed cooked assets)
-Blix.Demos.VulkanParticles     ← CPU particle system + post-process VFX showcase
-Blix.Demos.Pong                ← 2D game (SpriteBatch + Font, CRT post-FX)
-Blix.Demos.Runner              ← 3D game: endless runner (instanced world + props,
-                                  skinned animated character, kinematic physics, sky/fog/HUD/audio)
-Blix.Demos.TankArena           ← 3D game: survival shooter (Transform3D parenting rig,
-                                  articulated glTF tank, cover, sun-shadow + HDR graph)
-Blix.Demos.Bulwark             ← 3D game: tower defense (picking + multi-front A* nav +
-                                  skinned-mesh instancing, sun-shadow + HDR graph)
-Blix.Demos.Chassis             ← application-chassis spec (no diagnostics, own ImGui panel,
-                                  host-owned --frames; 25-line csproj, no shaders)
-Blix.Tools.Studio            ← LAB library: lit scene + render graph + shaders + glTF
-                                  node/pivot model, reflected binding (library content)
-   ↑        ↑
-Viewer  Probe  Capture        ← three executables over one lab; none declares a shader
-                                  nor contains render code. Probe opens no window;
-                                  Capture reads the HDR target back and writes a PNG.
-        ↑
-Blix.Runtime.Silk              ← Vulkan window/runtime adapter
-                                  (Silk.NET window + IVkSurface + MoltenVK bootstrap,
-                                   VkLineDrawer for debug overlay)
-        ↑
-Blix                           ← layer game code targets
-   ↑   ↑      ↑       ↑           (loop, scene, animation, physics, audio,
-   │   │      │       │            glTF import + GltfTextureLoader, ViewPicking)
-   │   │      │   Blix.Assets    ← asset DB + importers + cooked formats
-   │   │      │       ↑             (texture, OBJ, font, WAV, .blixmesh)
-   │   │   Blix.Render          ← engine-facing rendering + asset pipeline
-   │   │      ↑                    (Mesh, GraphicsDeviceMeshExtensions, ResourceUploader,
-   │   │                            MeshBundler, AsyncLoadQueue; SpriteBatch + Font + UI
-   │   │                            — Vulkan 2D path; FullscreenPass + PostChain
-   │   │                            — fullscreen/post-process primitives)
-   │ Blix.Geometry              ← primitives + intersection tests
-   │                              (Bounds3/2, Sphere, Capsule, OBB, mesh colliders)
-Blix.Graphics                  ← graphics command language
-   ↑                              (handles, pipelines, surfaces, vertex types,
-   │                               shader sources, GLSL preprocessor + ShaderLoader)
-   Blix.Graphics.Vulkan         ← Vulkan backend (Silk.NET.Vulkan bindings,
-                                   instance/device/swapchain, per-draw transient
-                                   descriptor pool, RenderGraph, MaterialBindings,
-                                   ShaderReflection: build-time SPIR-V binding +
-                                   std140 layout reflection via spirv-cross sidecars)
-Blix.Graphics.Images           ← image decode + HDR IBL bake pipeline
-                                  (StbImageSharp, EquirectangularToCubemap,
-                                   PbrIblBaker, HdrSunFinder)
-Blix.Shaders                   ← engine-level GLSL library (no csproj; .glsl
-                                  included by game/demo shaders and expanded by
-                                  Blix.Tools.Shader; pbr/tonemap/noise/fullscreen/bloom)
-Blix.Tools.Shader              ← build-only GLSL preprocessor + glslc driver
-Blix.Diagnostics               ← contribution-based debug system
-        ↑                         (DebugFrame snapshots + history ring,
-                                   Values/Controls/Draw/Stats/Timers/Events
-                                   channels, named views + retained trails,
-                                   sinks, selection + picking,
-                                   //@tune + [Tune] live-tuning panels,
-                                   PeriodicConsoleSummarySink for stdout digest)
-Blix.Core                      ← platform contracts (no implementations)
-                                  (IRenderHost, IAudioHost, IDebugHost,
-                                   IInputHandler, IUiSource, IRuntimeDiagnosticsSink,
-                                   Key, MouseButton, RenderFrameContext,
-                                   View/ViewId/ViewDeclaration/ViewTable)
+For the game-facing library see [Game-facing API](blix.md). For formats,
+recipes, loading, and residency see [Assets](assets.md). For render commands,
+graphs, shaders, and techniques see [Renderer](renderer.md). For application
+discovery and verification see [Workflow](workflow.md).
 
-Blix.Audio                     ← audio command language (IAudioDevice)
-Blix.Audio.OpenAL              ← OpenAL Soft backend
+## Project map
+
+The checkout currently contains 50 project files and four project roots:
+`blix`, `demos`, `character`, and `rts`. The table is a map of responsibility,
+not a claim that every row is one strict dependency tier.
+
+The `rts` root is a separate game currently co-located with the engine. Treat it
+as an application consumer with project-owned policy, tests, tools, and cooking;
+its possible future move to another repository is an organizational change, not
+an engine-layer migration.
+
+| Responsibility | Projects or directories |
+| --- | --- |
+| Host and application contracts | `Blix.Core` |
+| Graphics and audio command vocabulary | `Blix.Graphics`, `Blix.Audio` |
+| Cooked-asset contracts | `Blix.Cooked` |
+| Geometry and collision algorithms | `Blix.Geometry` |
+| Image and environment processing | `Blix.Graphics.Images` |
+| Runtime asset data and importers | `Blix.Assets` |
+| Diagnostics data and optional UI | `Blix.Diagnostics`, `Blix.Diagnostics.Overlay` |
+| Vulkan and OpenAL backends | `Blix.Graphics.Vulkan`, `Blix.Audio.OpenAL` |
+| Render and loading mechanisms | `Blix.Render` |
+| Game-facing types | `Blix` |
+| Blix-owned cooking decisions | `Blix.Recipes` |
+| Desktop composition | `Blix.Runtime.Silk` |
+| Reference rendering pipeline | `Blix.Tools.Studio` |
+| Reusable headed-tool shell | `Blix.Tools.Studio.Shell` |
+| App discovery and launch | `Blix.Cli`, `Blix.Tools.Apps` |
+| Build-time and asset tools | `Blix.Tools.Shader`, `Blix.Tools.Cook` |
+| User-facing asset tools | `Blix.Tools.Inspect`, `Blix.Tools.Check`, `Blix.Tools.View`, `Blix.Tools.Shot` |
+| Shared assertion tally and suites | `Blix.Verify`, `Blix.Test.*` |
+| Character subsystem instruments | `src/Character/Blix.Labs.Character*` |
+| Executable specifications and games | `src/Demos/Blix.Demos.*` |
+| Co-located RTS game and its cooking policy | `RTSGame`, `RTSGame.Cooking` |
+
+### Dependency direction
+
+The important edges in the current project references are:
+
+```text
+applications and tools
+  -> Blix / Blix.Tools.Studio / project-specific libraries
+  -> Blix.Render + Blix.Assets + Blix.Diagnostics
+  -> Blix.Graphics.Vulkan + Blix.Graphics + Blix.Core
+  -> Blix.Runtime.Silk at the executable composition edge
+
+build-time cooking
+  -> Blix.Tools.Cook -> Blix.Recipes -> engine formats and capabilities
+  -> project recipe assemblies such as RTSGame.Cooking
 ```
 
-Every cross-project dependency in the source tree fits one of the arrows above. Nothing above `Blix.Core` depends on a windowing/audio backend directly — `Blix.Runtime.Silk` is the only project that wires `IRenderHost`/`IAudioHost`/`IDebugHost` to concrete implementations.
+Several details stop this from being a simplistic layered pyramid:
+
+- `Blix.Core` is the host-contract assembly, not a dependency-free foundation;
+  its contracts name graphics and audio handles from `Blix.Graphics` and
+  `Blix.Audio`.
+- `Blix.Render` is currently Vulkan-backed. It provides reusable rendering
+  mechanisms, but it references `Blix.Graphics.Vulkan`; it is not a second
+  backend abstraction.
+- `Blix.Runtime.Silk` is the composition point that wires windowing, Vulkan,
+  audio, diagnostics, UI, and the game-facing loop together. Executables
+  reference it to construct the host; their domain code then consumes the host
+  contracts.
+- `Blix.Cooked` keeps recipe declarations, stamps, preambles, load reports, and
+  import refusals low in the graph so build tools and project recipes can use
+  them without taking a graphics device.
+- `Blix.Cli`, `Blix.Tools.Apps`, and `Blix.Verify` deliberately avoid the engine
+  graph. The launcher reads generated indexes, the indexer reads assembly
+  metadata without loading assemblies, and the assertion tally has no project
+  references.
+- Consumer projects reference the modules they actually compose. There is no
+  plugin registry that injects engine subsystems into them.
+
+## Rendering roles
+
+Blix has three distinct rendering roles. They should not be described as
+successive versions of one default renderer.
+
+### Reusable rendering mechanisms
+
+`Blix.Graphics`, `Blix.Graphics.Vulkan`, `Blix.Render`, and `Blix.Shaders`
+provide the command model, render graph, reflected binding, buffers, upload and
+batching helpers, fullscreen work, sprites, particles, and shared shader
+vocabulary. These are capabilities. They do not decide which passes an
+application runs or what its authored look should be.
+
+### Studio reference rendering pipeline
+
+`Blix.Tools.Studio` is the optional reference pipeline used by Blix's model
+and rig tools. `StudioLook` owns its lighting, environment, shadows, exposure,
+tonemap, MSAA, and other authored defaults. `Blix.Tools.Studio.Shell` adds the
+separate ImGui-dependent viewport/panel layer.
+
+“Reference rendering pipeline” is the durable name. It communicates that this
+is the coherent setup Blix uses to inspect content without implying that every
+game must accept a global default renderer. A project may reuse all, some, or
+none of it.
+
+### Vulkan Sponza research renderer
+
+Vulkan Sponza is the heavy-scene rendering and measurement application. It owns
+its experimental graph, scene-specific packaging, diagnostic modes, comparisons,
+and adoption decisions. A mechanism moves into an engine project only when it
+has a reusable contract and another credible consumer. Sponza is therefore not
+the getting-started renderer and its current graph is not an engine promise.
 
 ## The Vulkan binding model
 
 The renderer's defining choice is that the binding model is *derived*, not declared by hand. At build time the compiled SPIR-V is reflected (via spirv-cross sidecars) into a `ShaderInterface`: descriptor sets + std140 UBO layouts + push-constant ranges, keyed by the set/binding/member names in the shader. `CreateMaterial(program, setIndex, …)` then allocates a `MaterialBindings` against one reflected set — `SetUniform("uTint", …)` / `SetTexture(binding, …)` write into it by name, and `.Handle` is the backend-neutral `MaterialHandle` a `GameObject` stores. Sets are organised by lifetime (frame-global, per-material, per-draw), and per-draw data rides push constants or a transient descriptor pool refilled each frame. There is no parallel hand-maintained binding table to drift out of sync with the shader source.
 
-The Vulkan path is now the sole renderer, and in `VulkanSponza` it has moved well past the old GL feature set: that SPIR-V-reflected binding model, per-material descriptor sets, push constants, per-draw transient descriptor pools, a declarative render graph (`Blix.Graphics.Vulkan/RenderGraph.cs`), glTF + skinning (via the existing `Blix.Assets` importers), PBR + IBL (procedural-sky or cooked-probe environment + irradiance cube + split-sum BRDF LUT), HDR + ACES/AgX tonemap, and a separable-Gaussian bloom chain. `VulkanSponza` adds cascaded directional shadows (texel-snapped + cached), a depth pre-pass, froxel volumetric fog, GPU-driven indirect rendering, screen-space-error LOD over meshopt chains, and the cooked-asset pipeline (`.blixmesh`/`.blixtex`/`.blixprobe`) streamed through the engine's `GltfTextureLoader` + `AsyncLoadQueue` + `MeshBundler`. The 2D path (`SpriteBatch` + `Font`, used by `Pong`) was rebuilt on the Vulkan binding model. SSR and the dual-filter bloom were GL-only techniques and did not survive the sunset; froxel fog now lives on Vulkan in VulkanSponza.
+The Vulkan path is the sole renderer. Reflected descriptors, push constants,
+transient per-draw data, the declarative render graph, glTF/skinning, PBR/IBL,
+HDR presentation, sprites, particles, and instancing all use this binding model.
+Vulkan Sponza applies it to the larger research graph described above; the
+exact technique inventory belongs in [Renderer](renderer.md), not in the
+architectural dependency map.
 
 `Blix.Shaders` isn't a code project — it's a folder of `blix_`-prefixed `.glsl` library files. Game and demo shaders `#include "<file>.glsl"`; the shared `BlixCompileSpirV` target in the root `Directory.Build.targets` runs the build-only `Blix.Tools.Shader`, which expands the source with the same Blix preprocessor before invoking `glslc`. A project declares *what* it compiles (`@(GlslShader)`, `@(GlslInclude)`) and, if unusual, *how* (`BlixShaderMode` for a library that ships its own `.spv`; `BlixShaderCustomTarget` to stand the shared one aside). Library files stay in the target's `Inputs` so edits retrigger the cook (see **Shader library** under Conventions below).
 
@@ -117,13 +173,28 @@ Three properties are load-bearing:
   because "this thing, in *that* view, over the last N frames" needs an identity that
   outlives the declaration carrying it.
 
-**What views do not do yet.** A view's rect never reaches the renderer — it is carried
-for picking and DPI and is not applied as a viewport or scissor, so a view draws across
-its whole target. And debug passes are appended after the game's entire command list,
-so debug geometry written into a game-owned intermediate target cannot be presented
-that frame. An inspector viewport therefore is not yet achievable: picking into one
-works and is tested, rendering one does not. Both are left for a real consumer to force
-rather than guessed at.
+**A view describes and routes; it does not schedule a scene render.** An
+application still declares the graph pass, target, camera, and draws that make a
+picture. `ViewDeclaration.PhysicalViewport` is not automatically installed as
+an arbitrary scene pass's Vulkan viewport or scissor. The current embedded
+viewport fills its own off-screen target, so no sub-rectangle of that target is
+needed.
+
+The complete embedded path now exists in `Blix.Tools.View`:
+
+```text
+StudioRenderer second-camera pass
+  -> off-screen HDR viewport target
+  -> IRenderHost.RegisterUiTexture
+  -> ViewportPanel inside ImGui
+  -> ViewPicking.RayThrough on the panel's logical image rectangle
+```
+
+Debug geometry is routed to `StudioRenderer.ViewportSurface` through the same
+view declaration and is loaded over the rendered scene before the texture is
+presented in the panel. The panel has its own orbit camera and selection works
+through its letterboxed image. This is an implemented consumer, not a future
+editor claim.
 
 Debug primitives are emitted into a view with `using (debug.Draw.In(view))`, and each
 command stores the resolved `ViewId` — ambient at the call site, recorded in the data,
@@ -183,7 +254,7 @@ debug lines landed on a freshly cleared image rather than over the scene. That i
 every graphics pass now bakes a load-form render pass alongside its declared form
 (`BackendPass.RenderPassLoad`), a synthetic render surface carries it, and
 `RenderPassDescription.LoadExisting` is how an externally-routed `commandList.Pass` asks
-for it. The toolchain lab's capture is the consumer — its skeleton overlay is drawn into
+for it. The Studio capture tool is the consumer — its skeleton overlay is drawn into
 the scene target and comes back in the PNG.
 
 **What capture still cannot do.** Read back a graph colour target at a size the graph has
@@ -194,7 +265,7 @@ artifact would need.
 
 ## How an application is put together
 
-The toolchain lab's viewer is the worked example, and it earned the section by going wrong first:
+`Blix.Tools.View` is the worked example, and it earned the section by going wrong first:
 it reached **1,645 lines** with the camera, the animation clocks, picking and the entire UI in one
 type. The problem was never the line count on its own — it was that *what is shown* and *what is
 true* had become impossible to tell apart. A checkbox that hides a skeleton and a clock that
@@ -238,7 +309,11 @@ are ordinary classes with constructors, called in an order you can read top to b
 
 ## Host contracts
 
-`Blix.Core` owns the platform-facing interfaces. The runtime (`Blix.Runtime.Silk.Window`) implements all of them; game code consumes them. Game code never references `Blix.Runtime.Silk` directly.
+`Blix.Core` owns the baseline platform-facing interfaces; `Blix.Diagnostics`
+adds the diagnostics host facet. The runtime (`Blix.Runtime.Silk.Window`)
+implements them and an executable references the runtime to construct that
+host. Once running, loop and domain code consume the interfaces rather than
+backend details.
 
 | Contract | Defined in | What it does |
 | --- | --- | --- |
@@ -271,7 +346,14 @@ The Vulkan backend uploads these row-major bytes **untransposed**. GLSL's std140
 
 **Pixel coordinates.** `IRenderHost.LogicalSize` returns the window's client area in logical pixels (same coordinate system as mouse events). `RenderFrameContext.Width/Height` is the framebuffer in physical pixels (typically 2× on Retina). Don't mix them — `Camera3D.ScreenPointToRay` needs logical pixels because mouse coords are logical.
 
-A `ViewDeclaration` carries **both** rectangles, `LogicalViewport` and `PhysicalViewport`, so neither is derived at a call site: `ViewPicking.RayThrough` compares against the logical one, the renderer uses the physical one. That is the same Retina gotcha removed rather than documented — and it is why a view is given its rectangles by whoever makes it, which is the only place that knows the backing scale.
+A `ViewDeclaration` carries **both** rectangles, `LogicalViewport` and
+`PhysicalViewport`, so neither has to be guessed from the other.
+`ViewPicking.RayThrough` compares against the logical one. The physical one
+records the intended output region for diagnostics and render routing, but it
+does not currently install a Vulkan viewport or scissor for an arbitrary scene
+pass; that pass still owns its target and draw state. The embedded Studio view
+fills its own off-screen target, while its logical rectangle follows the
+letterboxed image in the UI.
 
 **GLSL includes.** `Blix.Graphics.GlslPreprocessor.PreprocessDetailed` resolves `#include "filename"` directives by inlining the referenced content. It is recursive, cycle-detected, and consumes Blix-owned `#pragma once` directives rather than sending them to `glslc`; stable source identities deduplicate the same canonical file even when it is reached through different relative spellings. It emits `#line N <source-id>` directives around every inclusion so shader compile errors report the original file's line numbers; the source-id-to-filename map flows through `ShaderSources` to diagnostic formatting. File I/O stays in the caller via a source-aware resolver, and `ShaderLoader.PreprocessFile(...)` supplies the canonical file implementation used at build time.
 
@@ -285,12 +367,12 @@ A `ViewDeclaration` carries **both** rectangles, `LogicalViewport` and `Physical
 
 | If you want... | Look at... |
 | --- | --- |
-| Render a frame, write a shader, set up a pipeline | [`renderer.md`](renderer.md); `src/Blix.Demos.VulkanGraph/` (smallest graph) and `src/Blix.Demos.VulkanLit/` (full pipeline) |
-| See HDR + IBL + shadows + bloom wired together on Vulkan | `src/Blix.Demos.VulkanLit/` and `src/Blix.Demos.VulkanSponza/` |
+| Render a frame, write a shader, set up a pipeline | [`renderer.md`](renderer.md); `src/Demos/Blix.Demos.VulkanGraph/` (smallest graph) and `src/Demos/Blix.Demos.VulkanLit/` (full pipeline) |
+| See HDR + IBL + shadows + bloom wired together on Vulkan | `src/Demos/Blix.Demos.VulkanLit/`; use `src/Demos/Blix.Demos.VulkanSponza/` for renderer research rather than as a starting template |
 | Make a `Game` subclass, place an object, animate it, query collisions | [`blix.md`](blix.md) |
 | Add a host facet (audio, gamepads, networking) | `src/Blix.Core/` for the contract, then implement in `src/Blix.Runtime.Silk/` |
-| Add a new asset type | `src/Blix.Assets/` (importer + intermediate data type) |
-| Bundle meshes into shared buffers / stream glTF textures | `Blix.Render.MeshBundler`, `Blix.Render.AsyncLoadQueue<T>`, `GltfTextureLoader` — `src/Blix.Demos.VulkanSponza/` composes them |
+| Understand or extend asset cooking/loading | [`assets.md`](assets.md); runtime types in `src/Blix.Assets/`, recipe contracts in `src/Blix.Cooked/`, transformations in `src/Blix.Recipes/` or a project recipe assembly |
+| Bundle meshes into shared buffers / stream glTF textures | `Blix.Render.MeshBundler`, `Blix.Render.AsyncLoadQueue<T>`, `GltfTextureLoader` — `src/Demos/Blix.Demos.VulkanSponza/` composes them |
 | Add a new debug control / stat / timer / event | `IDebuggable.Debug(DebugContext)` — `Blix.Diagnostics` |
 | Draw debug geometry at all | Declare a view, then `using (debug.Draw.In(view))` — drawing outside one throws |
 | Show where something has been | `debug.Draw.Trail(name, point, colour, seconds)` |
@@ -298,7 +380,7 @@ A `ViewDeclaration` carries **both** rectangles, `LogicalViewport` and `Physical
 | Add a panel to the diagnostics overlay instead | Implement `IDebugUi` on a registered contributor (`Blix.Diagnostics.Overlay`) |
 | Turn a click into a ray, in any view | `Blix.ViewPicking.RayThrough(view, pointer)` — panels and off-screen targets included |
 | Run bounded (CI, a smoke test, a capture) | `--frames N`, honoured by the host for every application |
-| Start a new executable | `src/Blix.Demos.Chassis/` is the smallest working one — 25-line csproj, no shader boilerplate |
+| Start a new executable | `src/Demos/Blix.Demos.Chassis/` is the smallest working one — 25-line csproj, no shader boilerplate |
 | Expose a value for live tuning in the overlay | `//@tune lo..hi = default` in a GLSL uniform, or `[Tune(min,max)]` on a C# field |
 | Register a debug producer (subsystem, asset, scene instance) | `debugSystem.Register(contributor)` from `OnLoad` — implement `IDebuggable` / `IDebugGeometrySource` / `IDebugSelectable` / `IDebugInspectable` / `IDebugUi` independently |
 | Save a frame snapshot to disk | Press `F12` (runtime-owned) — writes `dumps/frame-NNNNNN.json` via `JsonDumpSink` |
@@ -309,18 +391,14 @@ A `ViewDeclaration` carries **both** rectangles, `LogicalViewport` and `Physical
 
 ```sh
 dotnet build Blix.sln
-# Vulkan demos need MoltenVK env vars on macOS — use the launcher scripts:
-tools/run-vulkan-hello.sh
-tools/run-vulkan-sponza.sh
-tools/run-chassis.sh --frames 60      # any app: the host honours --frames
+./blix ls
+./blix run <app> [args...]
+./blix run <project>:<app> [args...]
+./blix test
 ```
 
-**Launchers exec the apphost; they never use `dotnet run`.** On macOS Homebrew's
-`$prefix/bin/dotnet` is a `#!/bin/bash` wrapper script, and `/bin/bash` is
-SIP-protected — dyld strips `DYLD_*` from a protected binary's environment, so the
-Vulkan loader path is laundered away before the application starts and Silk reports
-*"doesn't support Vulkan on this computer"* while Vulkan is installed and working. A
-launcher exports `DOTNET_ROOT`, builds, then `exec`s
-`bin/Debug/net8.0/<App>` directly. Copy an existing `tools/run-*.sh` when adding one.
-
-See top-level [`README.md`](../README.md) for the full per-demo run commands and platform notes (macOS OpenAL Soft, shader ASCII, MoltenVK setup).
+The root `blix` script owns the macOS Vulkan environment and then executes the
+indexed application. The older `tools/run-*.sh` scripts remain for compatibility
+and specialized setup; they are not the pattern for a new executable. See
+[Workflow](workflow.md) for project discovery, app declarations, shared
+arguments, and verification gates.

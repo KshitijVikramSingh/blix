@@ -1,15 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!--
-    THE SECOND EXECUTABLE, and the claim the lab split was making.
-
-    No shaders, no render code, no window. It reads the reflection sidecars the lab
-    compiled and links the lab's own types. Everything it needs arrives through the
-    lab's content propagation.
-  -->
+  <!-- Headless engine asset/load judge. Application renderer limits stay with their consumers. -->
   <ItemGroup>
-    <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
-    <ProjectReference Include="..\Blix.Tools.Studio\Blix.Tools.Studio.csproj" />
+    <ProjectReference Include="..\Blix\Blix.csproj" />
+    <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
+    <ProjectReference Include="..\Blix.Assets\Blix.Assets.csproj" />
+    <ProjectReference Include="..\Blix.Cooked\Blix.Cooked.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

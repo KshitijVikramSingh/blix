@@ -9,28 +9,16 @@ using Blix.Render;
 namespace Blix.Tools.Studio;
 
 /// <summary>
-/// The lab's three passes: cast, light, present.
+/// The Studio reference renderer: cascade casting, optional pre-pass, HDR lighting, inspection
+/// viewport, and presentation.
 /// </summary>
 /// <remarks>
-/// <b>Reflected, not hand-declared.</b> Every binding below is read out of the compiled SPIR-V at build
-/// time (spirv-cross sidecars next to each <c>.spv</c>) and merged per program. The older demos declare a
-/// <see cref="ShaderInterface"/> by hand, which is fine at their size and does not scale: the interface
-/// has to be restated every time a shader gains a binding, and nothing checks the restatement against the
-/// shader it claims to describe. A lab meant to grow starts on the path that cannot drift.
+/// Every binding is reflected from build-generated SPIR-V sidecars and merged per program, so the
+/// reference pipeline cannot drift from the shader interface it executes.
 /// <para>
-/// <b>Not here YET:</b> cascades, texel snapping, bloom, IBL, MSAA, a depth pre-pass. This used to say
-/// "deliberately not here", on the grounds that a lab which grew them would be claiming to be a renderer
-/// — and that was the right call while this stage was only a lab. It is now also where Blix's house style
-/// lives (see <see cref="StudioLook"/>), which is a different job: the reference look is the answer to
-/// "what does Blix think this asset should look like", and a reference that is out-rendered by every demo
-/// answers it badly. So these arrive here rather than being kept out, one at a time, each earning its
-/// place in <see cref="StudioLook"/> as a declared value rather than a constant.
-/// <para>
-/// What has NOT changed is where the technique lives. A capability belongs in the engine and its shading
-/// vocabulary in <c>Blix.Shaders</c>; what this stage owns is the COMPOSITION — which of them are on, and
-/// at what settings. That is the same rule that sent the NdotV fix into the shared <c>pbr.glsl</c> rather
-/// than into this file.
-/// </para>
+/// This is an optional reference composition, not a universal default renderer. Engine layers own
+/// techniques and shared shading vocabulary; Studio owns which techniques are active and their authored
+/// settings through <see cref="StudioLook"/>.
 /// </para>
 /// </remarks>
 public sealed class StudioRenderer : IDisposable
@@ -42,16 +30,7 @@ public sealed class StudioRenderer : IDisposable
     public const int CascadeCount = 3;
 
     /// <summary>Bytes the lit pass pushes. <see cref="StudioPush.LitBytes"/> is the definition.</summary>
-    /// <remarks>
-    /// <b>These were separate numbers, and they drifted.</b> This file declared its own 96, 64 and 16
-    /// beside <see cref="StudioPush"/>'s, with a comment calling the lit one "the one number in this
-    /// file that can silently disagree with the SPIR-V". It disagreed with <see cref="StudioPush"/>
-    /// instead, the moment a second UV set widened the block there and not here: every draw from this
-    /// file pushed 96 bytes into a pipeline declaring 112.
-    ///
-    /// Forwarding rather than deleting, because the names are public and a tool checks them against
-    /// what the shader declares — which is exactly the check that should keep working.
-    /// </remarks>
+    /// <remarks>Forwarded for public compatibility; <see cref="StudioPush"/> is the sole size owner.</remarks>
     public const int LitPushBytes = StudioPush.LitBytes;
 
     /// <summary>Bytes the caster pushes: the model matrix, and what it takes to cut out.</summary>
@@ -93,8 +72,8 @@ public sealed class StudioRenderer : IDisposable
     // state in Vulkan and cannot be pushed per draw.
     private PipelineHandle skinnedDoubleSidedPipeline;
 
-    // <b>Blending is pipeline state, which is the whole reason BLEND costs a pipeline and MASK does
-    // not.</b> Depth-tested but not depth-WRITING, so a transparent surface does not hide what is
+    // BLEND needs its own pipeline because blending is Vulkan pipeline state. It is depth-tested
+    // but not depth-writing, so a transparent surface does not hide what is
     // behind it, and never culled, because a single-sided blend material shows its own far side
     // through itself.
     private PipelineHandle blendPipeline;
@@ -108,17 +87,8 @@ public sealed class StudioRenderer : IDisposable
     private int cubeIndexCount;
     private int groundIndexCount;
 
-    // <b>One scratch buffer, reused across draws — which is safe now and was not.</b>
-    // This started as a pool of one array per recorded draw, because a recorded command
-    // held the caller's array by reference and read it at Execute: seven objects rendered
-    // at the seventh's transform, six apparently missing, draw counts perfectly healthy.
-    //
-    // The workaround is gone because the API stopped needing it. DrawIndexedCommand copies
-    // its push payload at record time, so a renderer may pack into one buffer per draw
-    // exactly as the obvious code does. Keeping the pool would have left a local remedy
-    // standing in for an engine contract, and the next renderer would have had to
-    // rediscover it.
-    // <b>Every draw on the lit pipeline must bind every texture its shader declares.</b> The lab's
+    // Reusing one scratch buffer is safe because DrawIndexedCommand copies push data when recorded.
+    // Every draw on the lit pipeline must bind every texture its shader declares. Studio's
     // own ground and boxes went through the same pipeline passing only the shadow map, so binding 1
     // was left unwritten and validation reported uAlbedo "used in draw but never updated" — which
     // reads like a model-loading bug and is not one. White is the identity for a base-colour factor.
@@ -156,14 +126,8 @@ public sealed class StudioRenderer : IDisposable
     private TextureHandle prefilteredTexture;
     private TextureHandle brdfLutTexture;
 
-    // <b>What this renderer must destroy, deduplicated — because the probe ALIASES.</b>
-    // EnvironmentBaker's procedural path returns ONE cube and assigns it to EnvCubemap,
-    // DiffuseIrradiance and PrefilteredSpecular alike, so destroying "the irradiance" and "the
-    // prefiltered env" is destroying the same texture twice. That double free is a SIGSEGV in
-    // teardown — intermittent, after the frame is captured and the PNG is on disk, so the run looks
-    // successful right up until the process dies and the exit code says 139.
-    // Kept as a set rather than by reasoning about which fields alias today: that is the baker's
-    // business and it may differ per source.
+    // EnvironmentBaker may alias the environment, irradiance, and prefiltered handles. Keep unique
+    // ownership here so teardown destroys each underlying texture exactly once.
     private readonly List<TextureHandle> ownedEnvironmentTextures = new();
 
     private bool iblActive;
@@ -184,11 +148,8 @@ public sealed class StudioRenderer : IDisposable
     /// The stage's graph, for a tool recording a pass of its own.
     /// </summary>
     /// <remarks>
-    /// <b>Recording needs no help from here, which is why there is no per-frame hook.</b>
-    /// RenderGraph.Pass stores a scope against a pass HANDLE, and Execute walks PassOrder —
-    /// declaration order — so when a tool records is irrelevant to when its pass runs. It calls this
-    /// itself, any time before Render, and its pass runs after the stage's because that is when it
-    /// was declared. Scopes are cleared at Execute, so it re-records each frame like everything else.
+    /// Tools record their declared extension passes directly before Render. Execution follows graph
+    /// declaration order, and scopes are cleared after each execution.
     /// </remarks>
     public RenderGraph Graph => graph;
 
@@ -202,39 +163,15 @@ public sealed class StudioRenderer : IDisposable
     // device with the sizes named, which is the binding model earning its keep: a
     // hand-declared interface would have shrugged and corrupted the tail.
 
-    // ── the look ─────────────────────────────────────────────────────────────────────────────
-    //
-    // <b>These moved to StudioLook, and the comment that used to sit here argued against it.</b> The
-    // old argument — that gathering them dissolves once they are sorted by what READS them, since the
-    // sun is the lit pass's, the shadow extent is the caster's and the exposure is the present pass's
-    // — is true, and it answers a different question than the one that matters. Sorted by who DECIDES
-    // them they are one artifact: Blix's house style, which a tool takes wholesale and a lab overrides
-    // in part. TuneAttribute.Group carries the by-pass grouping into the panel, so nothing was lost by
-    // letting the by-author grouping own the type.
-    //
-    // They lived on a StudioScene before that, because SetSunDirection needed somewhere to sit.
-    // "Scene" promised a graph this deliberately does not have, and once the light moved out and the
-    // ring of boxes turned out never to be drawn, there was nothing left in it.
+    // ── authored look ────────────────────────────────────────────────────────────────────────
 
     /// <summary>The house style this stage draws with. Owned here; a caller adjusts it in place.</summary>
-    /// <remarks>
-    /// <b>Owned rather than taken, and structural members are the reason the distinction is quiet.</b>
-    /// A per-frame value can be changed whenever. A <see cref="TuneAttribute.Structural"/> one is read
-    /// when the graph is built, so the window for setting it is between constructing this renderer and
-    /// the first frame — the same window rung four's <c>extend</c> hook uses, and the same window the
-    /// command line already runs in.
-    /// </remarks>
+    /// <remarks>Set structural members before <see cref="Load"/>; live members may change per frame.</remarks>
     public StudioLook Look { get; } = new();
 
     /// <param name="extend">
-    /// <b>Rung four: a tool adding a pass of its own.</b> Called with the stage's graph and targets
-    /// after they exist and BEFORE <c>Compile()</c>, which is the only window in which a pass can be
-    /// declared at all — so a selection outline, a pre-pass or an id buffer is a delegate rather
-    /// than a fork of this file.
-    /// <para>
-    /// It is here on one prediction, recorded as one: <b>tooling asks to extend a graph before it
-    /// asks to replace one.</b> If that turns out false this is one parameter to remove.
-    /// </para>
+    /// Optional construction-time declaration of passes that append after Studio lighting and
+    /// before presentation.
     /// </param>
     public void Load(VulkanGraphicsDevice vk, string shaderDirectory, Action<StudioGraph>? extend = null)
     {
@@ -253,20 +190,14 @@ public sealed class StudioRenderer : IDisposable
         // The skinned pair reuses the unskinned FRAGMENT stages, so these differ from the two above
         // by exactly one thing: a set-3 storage buffer the vertex stage reads. That is what makes
         // the bone palette's size a reflected fact rather than a constant restated in C# — the
-        // hazard the probe exists to catch, in the one place the lab still had a hand-written number.
+        // hazard Blix.Test.Studio catches where Studio still has a hand-written number.
         var skinnedInterface = Reflect("studio_skinned.vert", "studio_lit.frag");
         var skinnedShadowInterface = Reflect("studio_skinned_shadow.vert", "studio_skinned_shadow.frag");
 
-        // <b>A render graph, not hand-built surfaces.</b> The first cut of this used
-        // CreateRenderSurface directly and failed on the first run: "RenderSurface needs at
-        // least one color attachment" — which a shadow map does not have and should not be
-        // made to pretend to. Depth-only targets live on the graph, which is the layer that
-        // knows a pass can want depth and nothing else.
+        // The graph owns colour, depth-only, resolve, and execution dependencies.
         graph = new RenderGraph(vk);
         var fullSize = new MatchSwapchainGraphSize(1.0f);
-        // <b>THREE maps, near to far.</b> One box sized to cover everything spends its texels on
-        // air: at the stage's default framing a single 2048 map over the visible ground is ~9 mm a
-        // texel, and a contact shadow under a foot is the thing that resolution decides.
+        // Three maps preserve contact-shadow resolution near the subject while retaining reach.
         for (var c = 0; c < CascadeCount; c++)
         {
             cascadeTargets[c] = graph.DepthTarget(
@@ -274,13 +205,8 @@ public sealed class StudioRenderer : IDisposable
         }
         sceneColourTarget = graph.ColorTarget("lab-hdr", TextureFormat.Rgba16F, fullSize);
 
-        // <b>MSAA is a second colour target and a resolve, and nothing else knows.</b> The pass
-        // builder takes its surface from whichever target it is given, so switching the target is
-        // the whole of switching MSAA — the same two lines RTSGame reaches for, and the reason there
-        // is no second code path here. The scene DEPTH has to match the colour's sample count or the
-        // render pass is invalid, which is why it is threaded even when MSAA is off.
-        // Clamped to what the device can actually do, and said out loud. This laptop's Metal backend
-        // stops at 4x, and asking for 8 is a native assertion rather than an error anything can catch.
+        // MSAA changes target sample counts, not the scene-recording path. Colour and depth must
+        // agree, and the request is clamped before native render-pass creation.
         var samples = Math.Clamp(Look.MsaaSamples, 1, vk.MaxMsaaSamples);
         if (samples != Look.MsaaSamples)
         {
@@ -297,44 +223,22 @@ public sealed class StudioRenderer : IDisposable
 
         sceneDepthTarget = graph.DepthTarget("lab-scene-depth", fullSize, samples: samples);
 
-        // <b>A 1x depth for the present pass to SAMPLE.</b> A multisampled attachment is not
-        // sampleable, and this stage's present pass carries scene depth across to the swapchain so
-        // debug gizmos depth-test against the scene. GraphicsPassBuilder.ResolveDepth exists because
-        // of this; before it, turning MSAA on failed at the first frame with "graph resource id 6
-        // has no sampleable handle".
+        // Presentation samples scene depth for downstream gizmo depth testing, so MSAA needs a 1x
+        // resolve target. At one sample the original depth target is already sampleable.
         if (samples > 1)
         {
             sceneDepthResolveTarget = graph.DepthTarget("lab-scene-depth-1x", fullSize);
         }
 
-        // <b>A SECOND camera on the same scene, not a mirror of the first.</b> Showing the main
-        // scene target in a panel would be a picture of the picture — it proves a texture can be
-        // drawn (stage A did that) and nothing about views. A viewport is only a view if it can
-        // look somewhere else, so this is its own target, its own camera and its own depth.
-        //
-        // <b>The SAME formats as the scene target, deliberately.</b> Two render passes whose
-        // attachments match in format and sample count are render-pass COMPATIBLE, so a pipeline
-        // baked against one is legal in the other — which means the viewport needs no pipelines of
-        // its own. Give it an Rgba8 target instead and every lit and skinned pipeline would need a
-        // twin, for a picture that is the same picture from a different chair.
-        //
-        // What that costs: the viewport holds HDR radiance with no tonemap, because the curve lives
-        // in the present pass and a panel has no present pass — ImGui samples a texture and draws
-        // it. Anything over 1.0 therefore clips. Accepted for now and written down; the fix is a
-        // fragment stage that tonemaps, and it is not worth two pipeline families until the clipping
-        // is actually in the way.
-        //
-        // Half the swapchain's size. A panel is a fraction of the window, the scene is drawn twice
-        // to fill both, and paying full resolution for the smaller of the two is the kind of cost
-        // that is invisible until a frame budget is tight.
+        // The panel is a true second camera with its own half-size colour and depth targets. Matching
+        // scene formats keeps the render passes pipeline-compatible. It carries untonemapped HDR into
+        // ImGui, so values over 1 may clip until the panel earns a dedicated presentation pass.
         var halfSize = new MatchSwapchainGraphSize(0.5f);
         viewportColourTarget = graph.ColorTarget("lab-viewport", TextureFormat.Rgba16F, halfSize);
         viewportDepthTarget = graph.DepthTarget("lab-viewport-depth", halfSize);
 
-        // <b>Three passes, and the caster geometry is drawn in every one of them.</b> That is the
-        // cost cascades actually have and it is worth saying out loud rather than discovering: this
-        // stage now redraws its casters 3x. It draws a handful of objects, so it is affordable here;
-        // it is the first thing to look at if this stage ever gets a scene.
+        // Each cascade redraws every caster. This is affordable for Studio's intended small subjects;
+        // larger scenes should measure caster cost explicitly.
         for (var c = 0; c < CascadeCount; c++)
         {
             cascadePasses[c] = graph.GraphicsPass($"lab.shadow.{c}")
@@ -343,10 +247,8 @@ public sealed class StudioRenderer : IDisposable
                 .Handle;
         }
 
-        // <b>Depth first, into the same buffer the lit pass then tests against.</b> The caster
-        // shaders already do exactly this job — transform by a matrix, discard on a cutout — so the
-        // pre-pass is those shaders with the CAMERA's view-projection where the light's goes, and
-        // views need no new code path: to a view this is another StudioPass.Shadow.
+        // The optional pre-pass reuses caster shaders with the camera matrix and writes the depth
+        // buffer later loaded by the lit pass.
         if (Look.DepthPrePass)
         {
             prePass = graph.GraphicsPass("lab.prepass")
@@ -375,16 +277,8 @@ public sealed class StudioRenderer : IDisposable
             .Shader(litInterface)
             .Handle;
 
-        // Same shader interface as the lit pass, the same Read edge on the shadow map, and the same
-        // PIPELINES — the viewport is the lit pass pointed somewhere else, which is exactly what
-        // makes it a view rather than a second renderer.
-        //
-        // <b>It needed its own programs until the engine grew dynamic uniform offsets.</b> A program
-        // used to own one uniform buffer per frame slot, so two passes sharing one shared the buffer
-        // and the last uViewProjection written won for both — two cameras, one picture. The fix was
-        // a duplicate program; the real fix was per-draw uniform storage, and now that it exists the
-        // duplicate is gone. Two render passes whose attachments match are render-pass compatible,
-        // so one pipeline serves both.
+        // The viewport reuses the lit interface and pipelines. Per-draw uniform storage keeps its
+        // camera independent, while compatible attachment formats let one pipeline serve both passes.
         viewportPass = graph.GraphicsPass("lab.viewport")
             .Target(viewportColourTarget, LoadOp.Clear, StoreOp.Store)
             .Depth(viewportDepthTarget, LoadOp.Clear, StoreOp.Store)
@@ -456,11 +350,8 @@ public sealed class StudioRenderer : IDisposable
             new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(litPass)), "lab.lit");
 
-        // <b>Back-face culling, unlike everything else in this lab.</b> The boxes and the ground are
-        // drawn with NoCulling so a camera inside one still shows something; a character is a closed
-        // manifold whose interior is never the subject, and culling it halves the fill on the pass
-        // that already costs the most. It also makes an inside-out rig — inverted bind matrices, a
-        // mirrored import — visible as holes rather than as a mesh that merely looks odd.
+        // Closed, single-sided rig parts use back-face culling. This reduces fill and makes an
+        // inside-out import visible as missing surfaces.
         skinnedPipeline = vk.CreatePipeline(new PipelineDescription(
             skinnedProgram,
             VertexPosition3NormalTextureSkin4Tangent.Layout,
@@ -470,12 +361,8 @@ public sealed class StudioRenderer : IDisposable
             new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(litPass)), "lab.skinned");
 
-        // <b>Its twin, for the materials that say they have two sides.</b> Every material on all
-        // three rigged assets in this tree is doubleSided — the Rogue's single material, the
-        // peasant's four including MI_Hair_1 at 646 verts, the ranger's three — and all of them were
-        // being drawn by the pipeline above, which culls. A closed body does not notice, so the
-        // comment above stays true for the case it describes; what it missed is that a rig is not
-        // only a closed body. See StudioViews.RigView for what honouring it actually moves.
+        // Blended and double-sided materials use uncullled variants; closed single-sided parts use
+        // the pipeline above. RigView selects the authored material case per part.
         blendPipeline = vk.CreatePipeline(new PipelineDescription(
             litProgram,
             VertexPosition3NormalTexture2Color.Layout,
@@ -679,9 +566,7 @@ public sealed class StudioRenderer : IDisposable
                 new("uCascadeVP0", new Matrix4x4Uniform(cascadeViewProjection[0])),
                 new("uCascadeVP1", new Matrix4x4Uniform(cascadeViewProjection[1])),
                 new("uCascadeVP2", new Matrix4x4Uniform(cascadeViewProjection[2])),
-                // WORLD metres per shadow texel, per cascade — each box's own side over the map side.
-                // This used to be 1/ShadowMapSize three times, a UV quantity standing in for a length,
-                // and the acne offset it fed was three millimetres wide as a result.
+                // World metres per shadow texel, per cascade.
                 new("uCascadeTexels", new Vector4Uniform(new Vector4(
                     cascadeSide[0] / Look.ShadowMapSize,
                     cascadeSide[1] / Look.ShadowMapSize,
@@ -719,9 +604,7 @@ public sealed class StudioRenderer : IDisposable
                     new("uCascadeVP0", new Matrix4x4Uniform(cascadeViewProjection[0])),
                 new("uCascadeVP1", new Matrix4x4Uniform(cascadeViewProjection[1])),
                 new("uCascadeVP2", new Matrix4x4Uniform(cascadeViewProjection[2])),
-                // WORLD metres per shadow texel, per cascade — each box's own side over the map side.
-                // This used to be 1/ShadowMapSize three times, a UV quantity standing in for a length,
-                // and the acne offset it fed was three millimetres wide as a result.
+                // World metres per shadow texel, per cascade.
                 new("uCascadeTexels", new Vector4Uniform(new Vector4(
                     cascadeSide[0] / Look.ShadowMapSize,
                     cascadeSide[1] / Look.ShadowMapSize,
@@ -736,9 +619,7 @@ public sealed class StudioRenderer : IDisposable
 
                 if (Look.Ground) DrawGround(scope, litPipeline, uniforms, textures);
 
-                // The SAME views, from the second camera. That is what makes it a view rather
-                // than a second renderer — and now that a view is an interface, a tool's own
-                // contribution appears in the panel for free, which it never did before.
+                // Record the same views through the second camera; content has one draw description.
                 var draw = new StudioDraw(
                     scope, StudioPass.Lit, uniforms, textures, litPipeline, skinnedPipeline, whiteTexture,
                     SkinnedDoubleSidedPipeline: skinnedDoubleSidedPipeline,
@@ -775,18 +656,8 @@ public sealed class StudioRenderer : IDisposable
     /// <summary>
     /// The floor: one lit quad, no shadow of its own, a fixed slate grey.
     /// </summary>
-    /// <remarks>
-    /// The last of what used to be a scene. There were seven boxes beside it at varied roughness —
-    /// a good lighting subject and a terrible backdrop, as their own comment said — and both tools
-    /// replaced them with ground-only the moment they loaded anything, so they were never once
-    /// drawn. If look development wants a test subject again it arrives as a view, which is what
-    /// rung two is for.
-    /// </remarks>
     /// <param name="depthOnly">
-    /// <b>The pre-pass draws this through a CASTER pipeline, which declares a smaller push block.</b>
-    /// The lit block is 112 bytes and a caster's is 80, and pushing the larger at the smaller is
-    /// rejected by the device with both sizes named — which is the binding model earning its keep,
-    /// and how this was found the first time the ground went down the pre-pass.
+    /// Use the caster-sized push block and cutout binding required by the depth-only pipeline.
     /// </param>
     private void DrawGround(
         RenderPassBuilder pass,
@@ -806,12 +677,8 @@ public sealed class StudioRenderer : IDisposable
             pipeline: pipeline,
             indexCount: groundIndexCount,
             uniforms: uniforms,
-            // The same array every other lit draw gets, plus this one's albedo. It used to be
-            // `textures[0]` and a white texture, which was exactly right while the pass bound one
-            // texture and one short of correct the moment it bound four.
-            //
-            // The caster shader declares an albedo too — at slot 0, so it can cut out — and every
-            // draw on a pipeline must bind every texture that shader declares.
+            // Lit draws append ground albedo to the pass bindings. The caster declares albedo at
+            // slot 0 as well so MASK geometry can discard consistently.
             textures: depthOnly
                 ? new[] { new ShaderTextureBinding("uAlbedo", whiteTexture, Slot: 0) }
                 : AppendAlbedo(textures, whiteTexture),
@@ -822,19 +689,8 @@ public sealed class StudioRenderer : IDisposable
     /// Bakes the house style's environment from its own sun — no asset, no HDR, no download.
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// <b>Procedural, and that is the whole reason the stage can have IBL at all.</b> The engine's
-    /// baker takes either an HDR equirect or a sun direction, and a tool that must open any model on
-    /// any machine cannot depend on shipping an environment map. So the sun the house style already
-    /// declares bakes its own sky, and the look stays self-contained.
-    /// </para>
-    /// <para>
-    /// <b>The stand-in is 1x1 and the shader branches on it.</b> With IBL off there is still a cube
-    /// and a LUT bound, because every draw on a pipeline must bind every texture its shader
-    /// declares; what changes is a flag that sends the fragment down the flat-ambient path, rather
-    /// than integrating one texel through the split-sum to arrive at a worse version of the same
-    /// answer.
-    /// </para>
+    /// The authored sun provides a self-contained procedural environment. With IBL disabled, 1x1
+    /// identity textures still satisfy the reflected bindings while the shader uses flat ambient.
     /// </remarks>
     private void BakeEnvironment(VulkanGraphicsDevice vk)
     {
@@ -867,7 +723,7 @@ public sealed class StudioRenderer : IDisposable
             },
             "lab.ibl");
 
-        // Cached beside the binary. The table is the same numbers on every run, and the lab baseline
+        // Cached beside the binary. The table is the same numbers on every run, and the Studio baseline
         // alone launches this tool twenty-three times.
         brdfLutTexture = EnvironmentBaker.BakeBrdfLut(
             vk, Look.BrdfLutSize, "lab.ibl.brdf",
@@ -890,28 +746,9 @@ public sealed class StudioRenderer : IDisposable
     /// Fits the three cascades as concentric boxes around the stage's content.
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// <b>Around the CONTENT, not around slices of the view frustum, and that was measured rather
-    /// than chosen.</b> The textbook fit slices the frustum by depth, which assumes a camera
-    /// standing among what it looks at. This stage's camera orbits its subject from eleven metres
-    /// out, so the frustum where the subject stands is about twenty metres wide and any slice
-    /// containing it must be at least that big. Fitted that way, at every split ratio tried, the
-    /// subject landed in a cascade between 1.8x and 4.1x COARSER than the single origin-fitted box
-    /// the cascades replaced — 15.6 to 36.1 mm a texel against 8.8. Nothing in the picture said so;
-    /// the shadows were all present and merely soft.
-    /// </para>
-    /// <para>
-    /// So the boxes are concentric on the stage's origin, which is where its ground and its subject
-    /// both are, and the shader picks the first one that CONTAINS the fragment. That is the same
-    /// conclusion RTSGame reached from the other direction, and it is a fact about this stage rather
-    /// than about cascades: a turntable knows where its content is, and a fit that ignores that is
-    /// spending resolution on the space between the camera and the thing.
-    /// </para>
-    /// <para>
-    /// The radii follow the same practical split curve the frustum scheme uses, so
-    /// <see cref="StudioLook.CascadeSplitLambda"/> still means what it means — 0 spaces them evenly,
-    /// 1 concentrates them near the subject.
-    /// </para>
+    /// Studio is an origin-centred turntable, so concentric content boxes retain 1.8–4.1x more
+    /// subject resolution than measured frustum slices from the default orbit. The split lambda
+    /// still controls how strongly the radii concentrate near the subject.
     /// </remarks>
     private void FitCascades()
     {
@@ -983,21 +820,12 @@ public sealed class StudioRenderer : IDisposable
     /// <summary>
     /// Releases everything this renderer made.
     /// </summary>
-    /// <remarks>
-    /// It used to release only the fullscreen pass, leaving three pipelines, three programs and four
-    /// buffers behind — nine objects, which is exactly what <c>BLIX_VK_VALIDATE=1</c> reported at device
-    /// teardown. Nothing else notices a leak in a process that is about to exit, which is why the
-    /// validation layers are the only thing that ever will.
-    /// <para>
-    /// The graph's own resources are the graph's; the surfaces here are its targets, not ours.
-    /// </para>
-    /// </remarks>
+    /// <remarks>The graph releases graph-owned resources; this type releases its pipelines, programs,
+    /// buffers, and uniquely owned environment textures.</remarks>
     public void Dispose()
     {
-        // The graph owns render passes, framebuffers and offscreen images created through raw
-        // Vulkan calls, which the device's own tables know nothing about — so it must be told to
-        // let go. TankArena disposes its graph and says why; this one did not, which is what the
-        // leaked-object count was.
+        // The graph owns render passes, framebuffers, and offscreen images created below the device's
+        // tracked resource tables, so it must release them explicitly.
         graph?.Dispose();
         fullscreen?.Dispose();
         if (device is null) return;

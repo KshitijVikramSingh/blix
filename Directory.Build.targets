@@ -21,54 +21,25 @@
   </PropertyGroup>
 
   <!--
-    ONE SPIR-V COMPILE TARGET, declared once.
+    Shared SPIR-V compile contract. Projects declare @(GlslShader) and
+    @(GlslInclude); this target owns the common mechanism.
 
-    Named BlixCompileSpirV, NOT CompileSpirV, and that is load-bearing. A
-    Directory.Build.targets is imported AFTER the project body, and a target
-    redefined under the same name REPLACES the earlier one — so calling this
-    CompileSpirV silently overrode the two projects that kept their own, and the
-    opt-out condition below then turned the replacement into a no-op. They built
-    clean and shipped no shaders: 20 modules to 6 for Sponza, 13 to 6 for Runner,
-    with a "Build succeeded" over the top of it. A distinct name cannot collide.
+      BlixShaderMode         App (default) writes to $(OutDir)Shaders; Library
+                             writes to the project's Shaders directory.
+      BlixShaderCustomTarget true lets a project supply a genuinely different
+                             compile algorithm.
 
-    Thirteen projects carried a copy of this. Eight were byte-identical, and the
-    argument for pulling them together is not that copies are untidy — it is that
-    copies DRIFT, and one already had: Blix.Demos.VulkanInstanced omits
-    @(GlslInclude) from its Inputs, so an edit to a shared .glsl would not have
-    retriggered its compile. Harmless today only because that project happens to
-    include nothing. The next project to add an #include inherits a silent
-    staleness bug, and nothing about a stale shader announces itself.
-
-    A project declares WHAT it compiles (@(GlslShader), @(GlslInclude)) and, if it
-    is unusual, HOW (the properties below). It no longer restates the mechanism.
-
-      BlixShaderMode        App (default) — build into $(OutDir)Shaders, after the
-                            output copy. Library — build into the project's own
-                            Shaders folder, before content paths are assigned, so
-                            the .spv can ship as embedded/copied content.
-      BlixShaderCustomTarget
-                            true — this project declares its own CompileSpirV and
-                            this one stands aside. Two do: VulkanSponza reflects
-                            each module into a sidecar, Runner compiles #define
-                            variants from item metadata. Those are different
-                            algorithms, not different settings, and folding them in
-                            would make this a shader build SYSTEM — which is policy,
-                            and policy waits for a third consumer to want it.
+    The BlixCompileSpirV name must remain distinct from project-local
+    CompileSpirV targets: Directory.Build.targets is imported after the project
+    body, so a same-named target would replace the local one.
   -->
   <PropertyGroup>
-    <!-- Absolute, from THIS file, not relative to the project. A relative
-         "$(MSBuildProjectDirectory)/../Blix.Shaders" quietly assumed every project sits
-         exactly one level under src/ — true of all 39 until the character lab became a
-         folder holding four of them, and then silently wrong. The shared include
-         directory has one location; it should be named from the one file that knows it. -->
+    <!-- Absolute from this repository-root file; projects may be nested at any depth. -->
     <BlixShaderIncludeDir Condition="'$(BlixShaderIncludeDir)' == ''">$(MSBuildThisFileDirectory)src/Blix.Shaders</BlixShaderIncludeDir>
 
     <BlixShaderMode Condition="'$(BlixShaderMode)' == ''">App</BlixShaderMode>
 
-    <!-- MSBuildPROJECTDirectory, not MSBuildThisFileDirectory. In a .csproj those
-         two agree, which is why the library copies used the latter; here, in a file
-         that lives at the repo root, the latter would quietly write every library's
-         shaders into /Shaders. -->
+    <!-- Library output is project-relative; this file itself lives at the repository root. -->
     <BlixShaderOutDir Condition="'$(BlixShaderMode)' == 'Library'">$(MSBuildProjectDirectory)\Shaders\</BlixShaderOutDir>
     <BlixShaderOutDir Condition="'$(BlixShaderOutDir)' == ''">$(OutDir)Shaders\</BlixShaderOutDir>
 
@@ -76,12 +47,7 @@
     <BlixShaderBeforeTargets Condition="'$(BlixShaderMode)' == 'Library'">AssignTargetPaths</BlixShaderBeforeTargets>
   </PropertyGroup>
 
-  <!--
-    spirv-cross, for projects that reflect their binding model out of the compiled
-    SPIR-V rather than hand-declaring a ShaderInterface. Hand-declaration is fine for a
-    small demo and does not scale: the interface has to be restated every time a shader
-    gains a binding, and nothing checks the restatement against the shader.
-  -->
+  <!-- spirv-cross emits the runtime binding sidecar for reflected programs. -->
   <PropertyGroup>
     <SpirvCross Condition="'$(SpirvCross)' == '' AND Exists('/opt/homebrew/bin/spirv-cross')">/opt/homebrew/bin/spirv-cross</SpirvCross>
     <SpirvCross Condition="'$(SpirvCross)' == '' AND Exists('/usr/local/bin/spirv-cross')">/usr/local/bin/spirv-cross</SpirvCross>
@@ -100,51 +66,18 @@
   </Target>
 
   <!--
-    Reflect each compiled module into a sidecar the runtime loads at program creation
-    (descriptor sets + std140 UBO offsets + push ranges), for projects that set
-    BlixShaderReflect.
-
-    A SEPARATE target rather than another Exec inside the compile, which matters for
-    two reasons: its Inputs are the .spv files and its Outputs the sidecars, so
-    incrementality is right without the compile target having to claim outputs it does
-    not write; and a project can be moved onto reflection without touching how its
-    shaders compile.
-
-    Extracted when a second consumer wanted it (conventions §4) — VulkanSponza had
-    carried a bespoke copy since it was written, and the toolchain lab is the second.
-  -->
-  <!--
-    THE APP INDEX.
-
-    Every assembly in the tree gets a sidecar listing the [BlixApp] methods it
-    declares, written next to its output. No opt-in: a project that declares none
-    gets an index saying so, which is itself the answer `blix ls` needs.
-
-    The attribute is the source of truth because it lives with the code it names and
-    cannot drift from it. But discovery must be instant and must not require a build —
-    the moment you most want to know what a project holds is often the moment its build
-    is broken. Generating the index from the attribute gets both properties: it is
-    regenerated rather than maintained, so it cannot drift, and it is a file, so reading
-    it costs nothing. It is also the only place that can record WHICH APPHOST runs which
-    app, which an attribute cannot say about itself and the launcher needs the moment a
-    project has more than one assembly.
-
-    Same shape as BlixReflectSpirV below, deliberately: Inputs are the assembly, Outputs
-    the sidecar, so incrementality is right and nothing re-runs for an unchanged build.
-
-    The Exists() guard is the bootstrap. Unlike the shader compiler, nothing references
-    this tool — a reference in all 39 projects would be a worse cure than the disease —
-    so on a fresh clone the first few assemblies may build before the indexer does. That
-    is why `blix` builds the indexer before it reads anything: by the time an index is
-    ASKED for it is correct, and a missing or stale one is reported rather than believed.
+    The app index is generated beside every runnable assembly. [BlixApp] remains
+    the source of truth; the sidecar makes discovery cheap and records the apphost.
+    The Exists() guard permits a fresh-clone bootstrap. `blix` builds the indexer
+    before discovery and rejects a missing or stale index.
   -->
   <PropertyGroup>
     <BlixAppIndexerDll>$(MSBuildThisFileDirectory)src/Blix.Tools.Apps/bin/$(Configuration)/net8.0/Blix.Tools.Apps.dll</BlixAppIndexerDll>
   </PropertyGroup>
 
 
-  <!-- ══ Cooking assets at build ═══════════════════════════════════════════════
-       A project declares WHAT it cooks; the recipe decides HOW.
+  <!-- Cooking assets at build. A project declares what it cooks; the recipe
+       decides how.
 
          <ItemGroup>
            <CookMesh    Include="Assets/models/**/*.glb" />
@@ -152,32 +85,19 @@
            <CookProbe   Include="Assets/sky.hdr" Options="env=512" />
          </ItemGroup>
 
-       Why this exists, in one measurement: before it, 62 mesh assets sat in this
-       tree and 30 were cooked, and the line between them was a DIRECTORY —
-       RTSGame's kit/ entirely cooked, its models/ entirely not, same project and
-       same importer. Nobody decided that. Somebody once typed one path. Coverage
-       was shell history, and there was no way to find out except by listing files
-       by hand.
-
-       The shader pipeline had already shown the answer one layer down: declared
-       inputs, MSBuild Inputs/Outputs, runs automatically, 100% coverage because it
-       cannot be anything else. This is the same move for assets.
-
-       Escape hatch, taking BlixShaderCustomTarget's rule verbatim: set
-       BlixCookCustomTarget=true and this stands aside. Settings are Options;
-       a different ALGORITHM is your own target. There is nothing in between,
-       because the thing in between is a build system, and that is policy.
+       Set BlixCookCustomTarget=true only when a project supplies a different
+       build algorithm. Recipe settings belong in Options.
 
        A project's own recipe needs no new target — it adds BlixCook directly:
          <BlixCook Include="Maps/**/*.hmap" Recipe="hmap" Cooked=".blixterrain" />
-       which is the whole point: Blix's recipes and a project's take the same path.
-  ══════════════════════════════════════════════════════════════════════════════ -->
+       Blix recipes and project-owned recipes use the same path. See docs/assets.md.
+  -->
 
   <PropertyGroup>
     <BlixCookDll>$(MSBuildThisFileDirectory)src/Blix.Tools.Cook/bin/$(Configuration)/net8.0/Blix.Tools.Cook.dll</BlixCookDll>
   </PropertyGroup>
 
-  <!-- Sugar for the three Blix ships. This file is imported AFTER the project body,
+  <!-- Sugar for the recipes Blix ships. This file is imported after the project body,
        so the item groups it maps from are already populated. Recipe and Cooked are
        stated here rather than looked up, because MSBuild needs the output path at
        evaluation time to be incremental at all — and incrementality is the entire
@@ -189,29 +109,13 @@
     <BlixCook Include="@(CookFont)"    Recipe="fnt1" Cooked=".blixfont" />
   </ItemGroup>
 
-  <!-- Inputs/Outputs as item transforms, so MSBuild rebinds @(BlixCook) inside the
-       target to ONLY the out-of-date items. Touch one asset and one asset re-cooks;
-       touch nothing and the cook is not launched at all.
-
-       $(BlixCookDll) is in Inputs on purpose, and it is what covers the case
-       timestamps alone cannot: a format or recipe VERSION change leaves every
-       cooked file newer than its source and yet unreadable. Bumping a version
-       rebuilds the cook, which changes that timestamp, which makes every asset
-       out of date. Demonstrated by bumping MeshRecipeVersion and watching all
-       three of Runner's assets re-cook, and revert when it was put back.
-
-       @(BlixCookRecipeAssembly) is the same protection for a recipe a PROJECT owns,
-       and a project that declares one needs it: $(BlixCookDll) moves only when Blix's
-       own cook is rebuilt, so bumping a project's own recipe version would otherwise
-       leave every stale file it had already written in place. Such a project lists the
-       assembly holding its recipe:
+  <!-- Item transforms let MSBuild invoke the target only for out-of-date assets.
+       The cook host and project recipe assemblies are also inputs, so rebuilding
+       either invalidates prior output. A project-owned recipe lists its assembly:
          <BlixCookRecipeAssembly Include="../RTSGame.Cooking/bin/$(Configuration)/net8.0/RTSGame.Cooking.dll" />
 
-       Caveat, because it is a real one: this invokes a PRE-BUILT cook, the same
-       way the shader and app-index targets do. Building one project alone uses
-       whatever cook binary is on disk, so a recipe change takes effect once the
-       cook itself has been rebuilt — which a solution build does and a single
-       project build does not. -->
+       This invokes a pre-built cook host. A solution build rebuilds it; a single
+       consumer-project build uses the host already on disk. -->
   <Target Name="BlixCookAssets"
           Condition="'@(BlixCook)' != '' AND '$(BlixCookCustomTarget)' != 'true' AND Exists('$(BlixCookDll)')"
           BeforeTargets="AssignTargetPaths"
@@ -229,16 +133,8 @@
     <Exec Command="dotnet &quot;$(BlixCookDll)&quot; batch &quot;$(BlixCookList)&quot;" />
   </Target>
 
-  <!-- And ship what was cooked, on the build that cooked it.
-
-       A project's assets are usually a glob — <None Include="Assets/**/*" ...> —
-       and a glob is evaluated at project LOAD, before this target has run. So a
-       file cooked today would not be copied to the output until the NEXT build,
-       which is the same trap the shader pipeline hit when consumers silently got
-       no .spv: a build that reports success and ships an incomplete folder.
-
-       Declaring them inside a target is what fixes it, because item groups in a
-       target are evaluated when the target runs. -->
+  <!-- Declare staged outputs inside the target: project globs are evaluated
+       before cooking, while this item group sees files produced by this build. -->
   <Target Name="BlixStageCookedAssets"
           Condition="'@(BlixCook)' != '' AND '$(BlixCookCustomTarget)' != 'true'"
           DependsOnTargets="BlixCookAssets"

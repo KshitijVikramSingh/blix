@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <ProjectReference Include="..\Blix\Blix.csproj" />
+    <ProjectReference Include="..\..\Blix\Blix.csproj" />
     <ProjectReference Include="..\..\Blix.Assets\Blix.Assets.csproj" />
     <ProjectReference Include="..\..\Blix.Audio\Blix.Audio.csproj" />
     <ProjectReference Include="..\..\Blix.Core\Blix.Core.csproj" />

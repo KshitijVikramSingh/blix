@@ -4,11 +4,7 @@
 // depth buffer that answers, per pixel, *how much of the sky this point can actually
 // see*, and *which way the opening faces*.
 //
-// <b>This exists because the lighting model has no ambient visibility term at all.</b>
-// lit.frag used to fake one as `0.60 + 0.40 * sunShadow`, which is wrong in kind: sun
-// visibility is not ambient visibility. A crevice facing away from the sun but open to
-// the sky was darkened; one in full sun but sealed shut was not. Deleting it left the
-// honest baseline — flat, bright shadowed areas — and this is the term that was missing.
+// This supplies ambient visibility independently of directional sun visibility.
 //
 //   out .rgb  bent normal, WORLD space: the average unoccluded direction. The IBL
 //             diffuse lookup uses this instead of the geometric normal, so a surface in
@@ -17,11 +13,8 @@
 //             power, not scaled by a strength dial — the integral already answers the
 //             question, and a knob on top of it would only be a way to disagree with it.
 //
-// <b>Inputs are depth ONLY, and that is deliberate rather than a shortcut.</b> Occlusion
-// is a question about SPACE. Feeding it the normal-mapped normal makes the horizon search
-// answer a question about a texture instead — a flat wall with a brick normal map would
-// grow occlusion in mortar lines that occlude nothing. The normal is reconstructed from
-// the depth of the neighbours, which is the geometry, which is what casts.
+// Inputs are depth only because occlusion is geometric. Normal-map detail must not invent
+// occluders, so the geometric normal is reconstructed from neighbouring depth.
 
 #include "fullscreen.glsl"
 
@@ -55,54 +48,22 @@ layout(set = 0, binding = 0) uniform Gtao {
 #define HIZ_LEVELS 6
 #define uRayXY() (g.uRay.xy)
 layout(set = 0, binding = 1) uniform sampler2D uHiZ[HIZ_LEVELS];
-// <b>Last frame's DENOISED visibility, and no ping-pong needed to get it.</b> This pass is declared
-// before the denoise that writes that target, so when this samples it, it still holds the previous
-// frame's result. One declared read replaces a second target, a second pass and an alternation.
+// The denoised target still contains the previous frame when this earlier pass reads it, so GTAO
+// history needs no second target or parity swap.
 layout(set = 0, binding = 2) uniform sampler2D uHistory;
 
 #define PI     3.14159265359
 #define HALF_PI 1.57079632679
 
-// Slices of the hemisphere, and steps along each — 24 taps, down from 8x8 = 64.
-//
-// <b>Sized against the denoise, not on its own.</b> Eight-by-eight was chosen to be stable per
-// pixel without a temporal accumulator, which is the right instinct and the wrong place to spend
-// it: the bilateral pass downstream already integrates nine independent neighbours, so each pixel
-// only has to be unbiased, not quiet. Measured at 10.86 ms/frame interleaved — the single largest
-// shading term in the renderer, larger than the sun shadows — for a near-field correction.
-//
-// Slices cut harder than steps because azimuthal error is what the spatial denoise fixes best:
-// neighbouring pixels rotate their slice sets differently, so nine neighbours already sample many
-// more than four directions between them. Steps are the radial resolution of a single horizon, and
-// no amount of neighbour-averaging recovers a horizon that was never found.
-// <b>Constants again, and the sweep that chose them is why.</b> These were briefly uniform-driven
-// so --gtao-taps could find the knee, and that measurement carries a warning worth keeping: dynamic
-// loop bounds cost 3.4 ms on their own here, because they stop the compiler unrolling a tight loop
-// of dependent texture fetches. The ratios the sweep reported were sound (24 taps against 8) and
-// its absolutes were not. Anything that makes a hot loop configurable is measuring a different
-// shader from the one that ships.
-//
-// 2x4 rather than the old 4x6, because the count no longer carries the smoothness alone. It was
-// sized against the SPATIAL denoise — nine neighbours integrate what one pixel cannot — and history
-// extends that over frames as well; the sweep found 8 taps and 6 taps indistinguishable in cost,
-// which is the floor of the pass's fixed work rather than of its sampling.
+// Two hemisphere slices with four radial steps. Spatial denoise and temporal accumulation carry
+// smoothness; steps retain horizon reach while neighbouring rotated slices provide azimuthal
+// coverage. These stay compile-time constants because dynamic loop bounds added 3.4 ms by blocking
+// unrolling on the measured backend.
 const int SLICES = 2;
 const int STEPS  = 4;
 
-// <b>A bandwidth limit, not a look control.</b> The world radius decides how far occlusion reaches;
-// this decides how far the SEARCH is allowed to wander in screen space before the cost stops being
-// worth it. At Retina resolution 0.8 m subtends hundreds of pixels on near geometry, and 128
-// dependent depth fetches scattered over a disc that size miss cache on nearly every tap — measured
-// at 175 ms/frame against a 50-66 ms baseline. Capping it costs near-field AO on surfaces right
-// against the camera and nothing anywhere else.
-//
-// The principled fix is a depth mip chain, sampling a coarser level as the step radius grows, so a
-// wide search costs the same as a narrow one. That is the Hi-Z pyramid, and it is the next pillar
-// rather than a detail to smuggle in here.
-// <b>Raised from 48 now that the pyramid pays for width.</b> The cap existed because a wide search
-// meant more scattered fetches into one full-resolution image — measured at 175 ms/frame before it
-// went in. Sampling a coarser level as the step grows makes a distant tap cost the same as a near
-// one, so the limit can go back to being about what occlusion MEANS rather than what it costs.
+// Screen-space safety limit for the world-space radius. Hi-Z moves wider steps to coarser levels,
+// allowing a 256-pixel cap without scattered full-resolution fetches.
 #define MAX_RADIUS_PIXELS 256.0
 
 // Nearest linear view depth at a uv, from a chosen pyramid level.
@@ -117,11 +78,8 @@ float hiZDepth(int level, vec2 uv) {
 
 // View-space position, as a ray times a length.
 //
-// <b>No matrix, and no depth buffer.</b> This was an inverse-projection multiply per tap against a
-// nonlinear depth buffer — a matrix product to undo a division, done 128 times a pixel. The pyramid
-// already holds LINEAR depth, so a position is the pixel's view ray scaled by it: two multiplies.
-// The ray is linear in NDC for a perspective projection, so uRay.xy carries it whole, Y-flip
-// included.
+// Hi-Z already stores linear depth, so position is the interpolated view ray times a length. uRay.xy
+// includes the projection's Y flip.
 vec3 viewPositionAt(vec2 uv, int level) {
     float z = hiZDepth(level, uv);
     return vec3((uv * 2.0 - 1.0) * uRayXY(), -1.0) * z;
@@ -129,21 +87,8 @@ vec3 viewPositionAt(vec2 uv, int level) {
 
 // The geometric normal, from the depth of the four neighbours.
 //
-// <b>Central differences where the surface is smooth, one-sided only at a depth edge.</b> The
-// one-sided version alone — take whichever neighbour is nearer in depth — is the standard remedy
-// for silhouettes, where a fixed pair straddles the edge and invents a normal halfway between the
-// foreground and whatever is behind it, producing a dark fringe around every object.
-//
-// But it is BIASED on a smooth surface seen at a grazing angle, and a floor is exactly that. Depth
-// along the screen is strongly curved there, so a one-sided difference leans toward the view by
-// tens of degrees. That is not cosmetic: the horizon search clamps its answer to the hemisphere of
-// this normal, and a normal leaning toward the eye withdraws the clamp precisely where the grazing
-// geometry needs it. The measured result was a floor at visibility ~0 — not contact darkening, an
-// open, sky-facing floor reading as fully enclosed.
-//
-// Second difference tells which case this is. |right.z - left.z| is the curvature of depth across
-// the pixel: small means the three samples are collinear and a central difference is exact, large
-// means an edge runs through them and the nearer side is the honest answer.
+// Use central differences on smooth depth and the nearer one-sided difference at an edge. Central
+// differences avoid grazing-surface bias; one-sided differences avoid normals spanning silhouettes.
 vec3 reconstructNormal(vec2 uv, vec3 P) {
     vec2 texel = g.uTarget.zw;
     vec3 right = viewPositionAt(uv + vec2(texel.x, 0.0), 0) - P;
@@ -167,11 +112,7 @@ vec3 reconstructNormal(vec2 uv, vec3 P) {
 }
 
 void main() {
-    // Sky: the pre-pass clears depth to 1 and does not draw the skybox, so an untouched texel
-    // is background. Tested on the raw depth rather than on a reconstructed distance — the
-    // cleared value is exact, and a distance threshold near a 200 m far plane is not.
-    // Background: the pyramid reports the far plane where nothing was drawn. Tested as a distance
-    // now rather than against a raw depth of exactly 1, because the value here is metres.
+    // The linear-depth pyramid reports the far-plane distance where the pre-pass drew nothing.
     if (hiZDepth(0, vUv) >= g.uRay.z) {
         outAmbient = vec4(normalize((g.uInvView * vec4(0.0, 0.0, 1.0, 0.0)).xyz), 1.0);
         return;
@@ -197,19 +138,12 @@ void main() {
     // the set by a different angle at every pixel converts that structure into noise the
     // eye reads as grain rather than as geometry.
     //
-    // <b>And by a different angle every FRAME, which is what makes history worth keeping.</b> This
-    // was spatial only, deliberately, so the image did not depend on the ones before it. With an
-    // accumulator the same reasoning inverts: rotating identically each frame means every frame
-    // re-measures the same four azimuths, and averaging them reduces nothing. Turning the set per
-    // frame makes successive frames independent estimates of the same integral — the same argument
-    // the froxel fog's slice jitter rests on, in the other domain.
+    // Add a frame rotation so temporal accumulation combines independent estimates rather than
+    // repeatedly averaging the same azimuths.
     float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
     float sliceRotation = ign * PI + g.uTemporal.y;
-    // <b>A different sequence, not a rescaling of the first.</b> The step offset was fract(ign*7),
-    // which is a function of the rotation — so two pixels that turned their slices alike also
-    // marched alike, and the pair of them agreed on an answer that a third pixel disagreed with in
-    // the same way. That is what put a stipple on flat walls. R2 (Roberts' low-discrepancy
-    // sequence) is independent of the IGN above and spreads evenly over the plane.
+    // Use an independent R2 low-discrepancy sequence for radial offsets; deriving this from IGN
+    // would correlate slice rotation and step placement into visible stipple.
     float stepOffset = fract(dot(gl_FragCoord.xy, vec2(0.75487766624669276, 0.56984029099805327)));
 
     float visibility = 0.0;
@@ -227,16 +161,7 @@ void main() {
         // (direction.x, -direction.y, 0) — the standard approximation, and it is exact for the axis
         // the horizon angles are measured in.
         //
-        // <b>NEGATED Y, and leaving it out cost the floor entirely.</b> Vulkan's clip space is
-        // Y-down and this projection bakes that flip in, so increasing uv.y — marching DOWN the
-        // screen — is view-space MINUS Y. Lifting the screen direction as (direction, 0) therefore
-        // builds a tangent pointing opposite to the direction actually being marched, and h1/h2 are
-        // assigned to the wrong sides of the view vector.
-        //
-        // The error scales with how much of a surface's normal lies along view-space Y. A wall has
-        // almost none and looked perfect; the floor is entirely Y and came back uniformly occluded,
-        // a flat black plane with a hard edge at the wall bases. It was also indifferent to the
-        // search radius, because an inverted axis is an angular mistake and no distance fixes it.
+        // Vulkan clip Y is down, so screen-down maps to negative view-space Y.
         vec3 sliceDir = vec3(direction.x, -direction.y, 0.0);
         vec3 axis = normalize(cross(sliceDir, V));
         vec3 projectedN = N - axis * dot(N, axis);
@@ -255,13 +180,8 @@ void main() {
             // Squared spacing: samples bunch near the pixel, where contact lives and where
             // a linear march wastes most of its taps on empty space.
             float fraction = (float(t) + stepOffset) / float(STEPS);
-            // <b>At least one texel further out each step.</b> Squared spacing bunches the early
-            // steps near the pixel, and when radiusPixels is small — which is what distance does to
-            // it — the first few land INSIDE the centre texel. That delta is a near-zero vector
-            // whose normalised direction is noise, and the distance falloff hands it full weight
-            // precisely because it is close. Every one of those is a horizon at a random angle,
-            // sampled at maximum strength, and it is why occlusion grew with distance while being
-            // almost indifferent to the search radius.
+            // Keep each step at least one texel beyond the preceding sample; sub-texel deltas
+            // normalise noise into a full-strength false horizon.
             float stepPixels = max(fraction * fraction * radiusPixels, float(t) + 1.0);
             vec2 offset = direction * stepPixels * g.uTarget.zw;
 
@@ -305,11 +225,7 @@ void main() {
         bentNormal += (V * cos(bent) + tangent * sin(bent)) * projectedLength;
     }
 
-    // <b>The slices are already four independent estimates, so the clamp is free.</b> A temporal
-    // blend needs to know how far history may stray before it is a different surface rather than a
-    // quieter one, and the usual answer is a neighbourhood min/max — which this pass cannot gather,
-    // because it computes one pixel and has no neighbours yet. It does have the spread of its own
-    // slices, which is an estimate of exactly the noise the accumulation exists to remove.
+    // Slice variance bounds acceptable history before the spatial neighbourhood exists.
     float sliceMean = visibility / float(SLICES);
     float sliceVar = max(visibilitySq / float(SLICES) - sliceMean * sliceMean, 0.0);
     float sliceSd = sqrt(sliceVar);

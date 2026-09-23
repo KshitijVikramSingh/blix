@@ -4,8 +4,9 @@ namespace Blix.Graphics.Vulkan;
 // chained call mutates the underlying entry and returns this. After
 // Compile() the graph freezes; builders held past that point throw.
 //
-// ComputePass.Dispatch() throws at execute time today — declaration is
-// stable, execution will light up when there's a real consumer.
+// Graphics and compute passes are both recorded per frame and replayed in
+// declaration order. The builders describe topology only; graph.Pass and
+// graph.Dispatch supply that frame's work after Compile freezes it.
 
 public sealed class GraphicsPassBuilder
 {

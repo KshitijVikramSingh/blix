@@ -1,7 +1,10 @@
 # Character arc — plan
 
+> **Status 2026-09-21 — active, paused.** The Room/contact instrument is built.
+> The combined controller and animation acceptance phase remains explicitly paused.
+
 > The first arc aimed at Spear's own domain: **motion, contact, camera, combat**.
-> `plan-blix-chassis.md` §11 ended by inverting its premise — *"Blix's theory cannot be
+> `docs/history/plans/plan-blix-chassis.md` §11 ended by inverting its premise — *"Blix's theory cannot be
 > proved any further until Spear exists"* — and named the vocabulary deliberately left
 > uninvented for a first Spear application to pressure out: **world, editor, character
 > controller, IK**. This arc takes the third.
@@ -453,7 +456,7 @@ Section AQ.
 belong in different places:
 
 - **Interpolation** — given explicit weights and masks, produce a pose. One right answer, mechanical,
-  testable. This is `Blix`'s, and it is `plan-blix-animation.md` **stage D**, which deferred exactly
+  testable. This is `Blix`'s, and it is `docs/history/plans/plan-blix-animation.md` **stage D**, which deferred exactly
   this until a consumer asked. M-A's dump is the consumer asking.
 - **Selection** — which pose, when, why. At least two right answers, as this arc has already
   demonstrated at its own expense. **Not decided, and not this stage's problem.** Whether Blix ever
@@ -475,7 +478,7 @@ second consumer disagrees with it.
 
 > **Paused at the tooling arc.** Replanning this stage surfaced that its first question —
 > where does a rig come from — is tree-wide rather than character-shaped, and that four other
-> arcs had hit the same wall from other sides. See `plan-blix-tooling.md`. **C-0 moved there
+> arcs had hit the same wall from other sides. See `docs/history/plans/plan-blix-tooling.md`. **C-0 moved there
 > as T-C1.** C resumes after it, with C-A repurposed as the thing that proves the extraction:
 > the first consumer built *on* the extracted loader rather than around it.
 
@@ -502,7 +505,7 @@ consumer. So does `Blix.Render/PropModel`. Two engine-side attempts at "a loaded
 each stranded at one consumer, because each baked a draw into itself and the draw is the part that
 differs — render graph, material sets, instancing, shadow passes.
 
-### C-0 — rig residency — **MOVED to plan-blix-tooling.md T-C1**
+### C-0 — rig residency — **MOVED to docs/history/plans/plan-blix-tooling.md T-C1**
 
 Kept here as the record of how it was found. Six duplicate skinned-draw paths is a tree-wide
 number, and an extraction discovered by one arc does not belong to it.

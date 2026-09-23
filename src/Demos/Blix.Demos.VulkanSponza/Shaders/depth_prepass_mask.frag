@@ -34,14 +34,9 @@ void main() {
     float a = texture(uAlbedo, vUv).a * mat.uBaseColorFactor.w;
     if (a < mat.uMaterialParams.x) discard;
 
-    // <b>The same mask the lit pass will claim, from the same hash.</b> This pass wrote depth for
-    // EVERY sample of a passing fragment while the lit pass covered only some, so the samples the
-    // lit pass dropped held leaf depth with no leaf colour -- the background could not draw there
-    // and they kept the cleared value. Across a ten-deep canopy that is most of the tree.
-    //
-    // The sample count rides in uMaterialParams2.w: this shader has no frame block bound, and a
-    // spare component of a block it already declares beats duplicating a std140 layout to reach
-    // one float.
+    // Match the lit pass's sample mask and layer hash exactly. Otherwise depth survives in samples
+    // where leaf colour is discarded and prevents background layers from filling the canopy.
+    // uMaterialParams2.w carries the sample-count/policy because this pass has no frame block.
     float coverage = clamp((a - mat.uMaterialParams.x) / max(fwidth(a), 1e-5) + 0.5, 0.0, 1.0);
     float policy = mat.uMaterialParams2.w;
     int samples = int(policy);

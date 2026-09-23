@@ -9,14 +9,8 @@
 // pipeline's LessEqual depth test draws sky exactly where the depth buffer
 // still carries the clear value.
 
-// <b>Declared by offset, and only what is read.</b> This is the same buffer lit.frag describes in
-// full; std140 offsets are positional, so a reader may name any subset of it. This one used to
-// name a prefix instead — six members, three of which had been RENAMED in lit.frag when the sun
-// became a measured irradiance. uSunIntensity and uIblIntensity here were padding floats over
-// there, and nothing said so: the declaration compiled, validated and ran, and would have handed
-// back a pad to the first line that used it. Naming only what is used removes the drift instead of
-// re-synchronising it, and SponzaLoop's AssertFrameBlockAgrees stops the boot if these offsets and
-// lit.frag's ever disagree.
+// This reader declares only the members it uses at their explicit std140 offsets. The buffer is
+// shared with lit.frag, and SponzaLoop.AssertFrameBlockAgrees rejects offset drift during startup.
 layout(set = 0, binding = 0) uniform Frame {
     mat4 uViewProjection;
     layout(offset = 96)  vec3 uCameraPos;

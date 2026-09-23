@@ -210,10 +210,9 @@ public sealed partial class VulkanGraphicsDevice
     // Allocate a mipped 2D texture with NO data uploaded yet — storage + view +
     // sampler only. Mips are filled afterwards, one at a time, by
     // UploadTextureMip. Backs the streamed load (ResourceUploader): the smallest
-    // mip lands first and finer mips stream in over frames. The image is left in
-    // ShaderReadOnly so it's bindable immediately; callers must not SAMPLE it
-    // until the level they read has been uploaded (the demo binds a texture only
-    // once its chain is complete — contents are undefined until then).
+    // mip lands first and finer mips upload over later drains. The image is left in
+    // ShaderReadOnly so descriptors may reference its stable handle immediately; callers must not
+    // sample levels before upload. Current asset consumers wait for the complete chain.
     public unsafe TextureHandle AllocateTexture2DMips(
         TextureDescription description,
         int mipCount,
@@ -292,9 +291,7 @@ public sealed partial class VulkanGraphicsDevice
     // whole image to TransferDst, copy this level, flip back to ShaderReadOnly.
     // The copy runs on a single-time command the device waits on, so it never
     // races a sampling frame on this image. Levels arrive smallest-first and the
-    // handle is bindable from the moment the smallest one lands; callers gate
-    // sampling per their own streaming policy (the streamed-asset path binds the
-    // stable handle early and treats finer levels as progressive refinement). A
+    // handle remains stable throughout; callers gate sampling according to residency because a
     // level's contents are undefined until that level has been uploaded.
     public unsafe void UploadTextureMip(TextureHandle handle, int mipLevel, ReadOnlySpan<byte> bytes)
     {

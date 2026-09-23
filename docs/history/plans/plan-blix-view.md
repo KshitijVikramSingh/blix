@@ -1,5 +1,9 @@
 # View arc — plan
 
+> **Archived 2026-09-21 — completed at its stated stopping point.** Embedded
+> rendering, picking, and ownership were settled; multiple views in one target
+> remain consumer-driven. See `docs/plans.md` for status.
+
 > Finishing what `ViewDeclaration` started. Same shape as the toolchain and animation arcs: one
 > real consumer forces the decisions, a probe checks what it can headlessly, and engine
 > extractions happen only where pressure has already shown.

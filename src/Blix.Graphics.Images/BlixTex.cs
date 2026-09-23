@@ -3,12 +3,8 @@ using Blix.Graphics;
 
 namespace Blix.Graphics.Images;
 
-// Engine-native binary texture container. Cooked from PNG/JPEG (or HDR) at
-// offline cook time; loaded at runtime with no decode -- just a single
-// 32-byte header read + an 8-byte-per-mip table lookup + a memcpy of each
-// mip's bytes into a GPU staging buffer. Skips ~1-2 seconds of stb_image
-// decode per 4K texture, plus enables BCn-compressed formats that GL can't
-// generate mips for at upload time.
+// Engine-native binary texture container. Runtime loading reads a 28-byte format header and an
+// eight-byte extent per mip, then copies already encoded mip bytes into GPU staging memory.
 //
 // File layout (little-endian), v3:
 //
@@ -30,14 +26,7 @@ namespace Blix.Graphics.Images;
 //   --------- dataOffset ---------
 //   packed mip data: mip 0 first, then mip 1, etc.
 //
-// v1 was a single-mip Rgba8-only variant with no mip table; v2 added the table.
-//
-// v3 is where this format stopped being its own island. It announced itself as
-// "BLIX" while .blixmesh and .blixprobe used BLX*, and its version was a ushort
-// where theirs were uint -- so no single function could read any Blix cooked
-// file's magic and version, which is the most basic thing a family of formats
-// gives you. Magic is now "BLXT" and the version is a uint like everyone
-// else's, in the shared preamble. Re-cook to migrate; the cook is fast.
+// The reader accepts v3 only. Earlier layouts must be recooked.
 public static class BlixTex
 {
     public const uint Magic = 0x54584C42; // "BLXT" little-endian
@@ -45,23 +34,12 @@ public static class BlixTex
     /// <summary>The recipe id the shipped texture cook stamps.</summary>
     public const string ShippedRecipe = "gtex";
 
-    /// <summary>The texture cook's own version — see BlixMesh.MeshRecipeVersion for why.</summary>
-    // v2: normal maps cook to BC5 rather than BC7. NOT smaller — BC5, BC7 and BC6h are all 16
-    // bytes per 4x4 block, as TextureFormatExtensions.MipByteCount says in one line. What changes
-    // is how those bits are spent: BC5 gives two channels a BC4-style endpoint pair each, where
-    // BC7 divides one block across three or four. A tangent-space normal only needs XY, so this is
-    // strictly more precision for the same bytes. Bumping this re-cooks every texture in the tree.
-    // v3: images are no longer flipped on decode. The loader had carried a GL-era y-flip, so every
-    // cooked texture held upside-down pixels; removing it changes the bytes of every .blixtex.
-    // v4: mip RGB is weighted by alpha instead of box-filtered flat. A leaf blended with the
-    // transparent gaps around it took three quarters of its colour from whatever was left in them,
-    // which walked the cypress's green/blue ratio from 5.14 at mip 0 to 3.08 at the tail. Opaque
-    // textures are byte-identical — with alpha 255 everywhere the weights are equal.
-    // v5: mip alpha rescaled so cutout COVERAGE is preserved, not just mean alpha. A box filter
-    // conserves the average and destroys the fraction above the cutoff — 6.33% to 0% by the tail on
-    // the cypress — which under alphaToCoverage turns distant foliage into a uniform haze the sky
-    // shows through, and under a binary alpha test makes it vanish.
-    public const uint ShippedRecipeVersion = 5;
+    /// <summary>
+    /// The shipped texture transformation version. It covers role-aware BC5/BC7 encoding,
+    /// unflipped decode, alpha-weighted mip colour, cutout-coverage preservation, and complete
+    /// role/encoder provenance.
+    /// </summary>
+    public const uint ShippedRecipeVersion = 6;
     public const uint Version3 = 3;
     public const uint KindTexture2D = 1;
     public const int HeaderSize = 28;
@@ -137,12 +115,7 @@ public static class BlixTexWriter
     }
 }
 
-// Lightweight handle returned by BlixTexReader.ReadHandle for the lazy
-// upload path -- just header info + the mip table's (offset, length)
-// pairs. No pixel data loaded yet. Use ReadMip(handle, level) to pull one
-// mip's bytes at upload time. Cheap to keep around (~hundreds of bytes
-// per texture) so the importer can hold them while the actual mip bytes
-// stay on disk.
+// Header and mip extents for deferred reads. No pixel data is retained by this handle.
 public sealed record BlixTexLazyHandle(
     string Path,
     TextureFormat Format,
@@ -155,11 +128,7 @@ public sealed record BlixTexLazyHandle(
 
 public static class BlixTexReader
 {
-    // Lazy read: parses just the header + mip table. The returned handle
-    // can be used to read individual mips on demand without loading the
-    // pixel data into memory upfront. Used by the streamed-upload path
-    // to keep peak load-time memory low -- only the mips actively being
-    // uploaded sit in RAM.
+    // Parses only the preamble, format header, and mip table. Individual mip bytes remain on disk.
     public static BlixTexLazyHandle ReadHandle(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
@@ -217,25 +186,9 @@ public static class BlixTexReader
         return buf;
     }
 
-    // Returns a mip reader that opens the .blixtex ONCE -- on the first mip
-    // request -- and serves every subsequent mip by seeking within that same
-    // open handle, instead of re-opening the file per mip like ReadMip does.
-    //
-    // Why this exists: the streamed-upload path requests mips one at a time,
-    // smallest (mipCount-1) first down to finest (0). ReadMip's open-per-call
-    // pattern means MipCount opens per texture; across a scene that's thousands
-    // of file opens. On a volume with high per-open latency but ample bandwidth
-    // (e.g. an external SSD: ~1.3ms/open vs ~0.01ms internal, but multi-GB/s
-    // sequential), those opens dominate load time and starve the per-frame
-    // upload budget. Collapsing to one open per texture removes that cost while
-    // keeping per-mip granularity for the GPU uploads.
-    //
-    // The handle is closed once the finest mip (level 0) has been served -- the
-    // upload queue enqueues levels descending to 0, so 0 is always last. RAM
-    // stays at one open FileStream (no whole-file buffering); since the upload
-    // queue drains a texture's mips contiguously, only one stream is open at a
-    // time. Intended for the streamed (descending) path; for an ascending or
-    // random read of all mips, use ReadAllMips.
+    // Keeps one file open while the progressive uploader requests mips from smallest to finest.
+    // Serving mip 0 closes it because the descending upload contract makes that the final read.
+    // Random or ascending callers should use ReadMip or ReadAllMips instead.
     public static Func<int, byte[]> CreateBufferedMipReader(BlixTexLazyHandle handle)
     {
         ArgumentNullException.ThrowIfNull(handle);
@@ -283,11 +236,8 @@ public static class BlixTexReader
 
     /// <summary>Reads a whole cooked texture, mips and all.</summary>
     /// <remarks>
-    /// <b>Goes through <see cref="ReadHandle"/> rather than parsing the header a second time.</b>
-    /// It used to be its own full parser over <c>File.ReadAllBytes</c> — a second copy of the same
-    /// offsets, the same magic check and the same version check — and the v3 preamble change is
-    /// what surfaced it: the two copies had to be edited together, which is the definition of the
-    /// problem. One parser, two read strategies.
+    /// Header validation and parsing stay centralized in <see cref="ReadHandle"/>; this method
+    /// selects the eager all-mips read strategy.
     /// </remarks>
     public static BlixTexImage Read(string path)
     {

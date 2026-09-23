@@ -46,10 +46,9 @@ public sealed record GltfModel(
     /// import, where <see cref="Skeleton"/> and <see cref="MeshNodeTransform"/> already say it all.
     /// </summary>
     /// <remarks>
-    /// <b>Additive on purpose.</b> Six of the seven rigged assets in this tree have one skin, and
-    /// every consumer of them reads <c>Skeleton</c> and <c>MeshNodeTransform</c> directly. Widening
-    /// those two into arrays would have made a one-skin change out of a no-skin-change, so the
-    /// singular pair stays and means skin 0 — which it always did.
+    /// The singular <see cref="Skeleton"/> and <see cref="MeshNodeTransform"/> members are
+    /// compatibility shorthands for skin 0. Multi-skin consumers should use this collection and
+    /// each primitive's <c>SkinIndex</c>.
     /// </remarks>
     GltfSkinBinding[]? Skins = null)
 {

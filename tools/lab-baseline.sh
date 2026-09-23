@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The lab's regression control: a fixed set of captures, hashed, so a change that should
+# Studio's regression control: a fixed set of captures, hashed, so a change that should
 # alter nothing can be shown to have altered nothing.
 #
 #   tools/lab-baseline.sh record [dir]     # default .baseline/ (gitignored)

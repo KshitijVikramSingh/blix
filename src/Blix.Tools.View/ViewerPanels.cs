@@ -8,7 +8,7 @@ using ImGuiNET;
 namespace Blix.Tools.View;
 
 /// <summary>
-/// Every panel the lab draws, and the display-only state they toggle.
+/// Every panel the viewer draws, and the display-only state they toggle.
 /// </summary>
 /// <remarks>
 /// <b>Local decomposition, and the reason is not line count alone.</b> The viewer had grown to 1,645
@@ -18,7 +18,7 @@ namespace Blix.Tools.View;
 /// fact, and a reader had to know the codebase to say which a given field was.
 /// <para>
 /// What lives here is what a panel owns: which toggles are on, which clip row is highlighted, how big
-/// a thumbnail is. What lives on the root is what the lab IS: the rig, the session, the cameras, the
+/// a thumbnail is. What lives on the root is what the viewer owns: the rig, the session, the cameras, the
 /// selection. The gizmo drawing reads these toggles back through the same reference, which is normal
 /// for a view — it is the model that must not know about the view, not the other way round.
 /// </para>
@@ -220,7 +220,7 @@ internal sealed class ViewerPanels
     /// <remarks>
     /// <b>The root is picked from the rig's own bone list, not typed.</b> A mask names a bone, and a
     /// bone's name comes from whoever exported the rig — "Spine", "spine_01" and "mixamorig:Spine"
-    /// are all real, and a lab that makes you guess which is a lab that mostly reports typos. The
+    /// are all real, and a viewer that makes you guess which is a viewer that mostly reports typos. The
     /// names are right there; offering them is free.
     /// <para>
     /// The falloff has no correct value. It depends on the rig and on taste, which is exactly why it
@@ -528,7 +528,7 @@ internal sealed class ViewerPanels
 
     // The node tree, and what the selected one actually is.
     //
-    // The same facts blix-cook inspect prints — name, parent, composed pivot, bounds, vertex
+    // The same facts blix inspect prints — name, parent, composed pivot, bounds, vertex
     // count — except the selected node is simultaneously outlined in the app.Scene, so a number and
     // the thing it describes are in front of you at once. That pairing is the entire reason this
     // exists; either half alone is what the project already had.
@@ -627,7 +627,7 @@ internal sealed class ViewerPanels
             }
 
             // A closed window needs a way back, and the X is the only way out. Here rather than in
-            // a menu bar the lab does not have.
+            // a menu bar the viewer does not have.
             ImGui.Checkbox("viewport panel", ref ViewportOpen);
 
             if (app.Rig is not null)
@@ -723,7 +723,7 @@ internal sealed class ViewerPanels
     // <b>The asset's own textures, drawn.</b> Stage A of the view arc, and the first thing in this
     // engine to put a non-font image on screen.
     //
-    // The lab has reported texture COUNTS since it learned to load a model — "1 image across 12
+    // The viewer has reported texture COUNTS since it learned to load a model — "1 image across 12
     // parts" — and a count is the least interesting fact about a texture. Which image, at what
     // size, and whether it is the one you meant are all answerable by looking, and until the UI
     // layer could read `cmd.TextureId` there was nowhere to look.
@@ -731,7 +731,7 @@ internal sealed class ViewerPanels
     {
         if (app.UiImages.Count == 0 && app.ShadowMapId == 0) return;
 
-        // <b>Its own window, not a section of the lab panel.</b> It was a collapsing header at the
+        // <b>Its own window, not a section of the viewer panel.</b> It was a collapsing header at the
         // bottom of a panel that already holds image, sun, gizmo, animation, instance and node
         // sections — and it drew nothing, because ImGui clips items scrolled out of a window and
         // emits no draw for them. The draw count said 3 before and 3 after, which is what a

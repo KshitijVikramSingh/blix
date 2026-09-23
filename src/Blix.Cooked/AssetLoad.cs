@@ -25,9 +25,9 @@ public enum AssetLoadMode
 /// <param name="Bytes">How much was read.</param>
 /// <param name="LoadMs">How long it took.</param>
 /// <param name="Recipe">The 4cc of the recipe that made the cooked artifact, when there was one.</param>
-/// <param name="Warning">Why a fallback was taken, when one was.</param>
+/// <param name="Warning">Optional diagnostic detail: fallback reason, missing resource, or ignored content.</param>
 /// <remarks>
-/// <b>Cost is carried, not just the branch.</b> The three cooked formats buy three different
+/// Cost accompanies the branch because the cooked formats buy different
 /// things — <c>.blixmesh</c> is load time, <c>.blixtex</c> is GPU memory and bandwidth, and
 /// <c>.blixprobe</c> is work that cannot happen at load at all — so a bare Cooked/Source flag
 /// flattens three economics into a checkmark and tells a reader nothing about whether cooking was
@@ -47,21 +47,11 @@ public sealed record AssetLoadReport(
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>This is the piece whose absence kept <see cref="AssetLoadReport"/> at zero emitters.</b> The
-/// type has existed, correct and documented, for a long time — and its documentation said to hand
-/// reports to <c>DebugContext.Events</c>, which is a FRAME-time channel. Asset loading happens
-/// before there is a frame, with no <c>DebugContext</c> anywhere in reach, so the prescribed
-/// mechanism did not exist at the moment the event occurred. The type was not neglected; it was
-/// unreachable.
+/// The channel is ambient because imports may run before a frame diagnostics context exists and
+/// importers should not depend on a particular observer.
 /// </para>
 /// <para>
-/// So the channel is ambient and static, which is unusual in this tree and is the right shape here:
-/// the alternative is threading a reporter through six layers of importer that have no other reason
-/// to know about diagnostics, and an importer's job is not to know who is listening.
-/// </para>
-/// <para>
-/// <b>Off by default</b>, because a game's load path should pay nothing for an instrument nobody
-/// turned on — the same rule <c>DebugState.Enabled</c> follows one layer up.
+/// Collection is off by default so ordinary loads do not retain diagnostic records.
 /// </para>
 /// </remarks>
 public static class AssetLoadLog

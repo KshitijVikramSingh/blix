@@ -59,12 +59,8 @@ internal sealed partial class SponzaLoop
             center /= 8f;
             var radius = 0f;
             for (var i = 0; i < 8; i++) radius = MathF.Max(radius, Vector3.Distance(corners[i], center));
-            // <b>Padded, so a cascade may be reused for frames after the one it was fitted to.</b>
-            // The far cascades cover 30 m and 60 m, where a shadow changes slowly and re-rendering
-            // every frame redraws thousands of casters to move almost nothing. Reuse needs slack:
-            // the map has to still cover the view a few frames later, and the only way to buy that
-            // is to fit a larger box than the slice needs. It is paid for in texel size, which is
-            // why cascade 0 gets none — it is the one whose sharpness is looked at.
+            // Pad cached cascades so their rendered footprint remains valid between refits. The
+            // near cascade stays unpadded to preserve its world-space texel density.
             radius = MathF.Ceiling(radius * (1f + CascadePad[c]));
 
             // Texel-snap the sphere centre in light space so the ortho footprint
@@ -73,10 +69,7 @@ internal sealed partial class SponzaLoop
             var lightView = Matrix4x4.CreateLookAt(eye, center, sunUp);
             var texelSize = (2f * radius) / ShadowMapSizes[c];
 
-            // <b>Kept, because the shadow lookup needs it and used to guess it.</b> This number was
-            // computed for texel-snapping and thrown away, while the shader offset its samples by
-            // uCascadeBias * (1 + slope * uSlopeScale) — four hand-tuned constants standing in for
-            // the one derived quantity that was already sitting here.
+            // Preserve the fitted world-space texel size for receiver bias and filter footprint.
             cascadeTexelWorld[c] = texelSize;
             var centreLight = Vector3.Transform(center, lightView);
             centreLight.X = MathF.Round(centreLight.X / texelSize) * texelSize;
@@ -90,10 +83,8 @@ internal sealed partial class SponzaLoop
             var ortho = GraphicsMatrices.CreateOrthographicVulkan(2f * radius, 2f * radius, 0.1f, farPlane);
             cascadeViewProj[c] = lightView2 * ortho;
 
-            // <b>Due, or moved far enough that the padding no longer covers.</b> Interval alone
-            // would tear at the edges the moment the camera outran the slack; distance alone would
-            // never refresh a cascade under a rotating-but-stationary camera, whose slice sweeps
-            // through the scene while its centre barely moves. Both, and either one triggers.
+            // Refit when the update interval expires or the snapped centre exceeds the padding.
+            // The two tests cover rotating-in-place slices and camera motion beyond cached slack.
             var moved = Vector3.Distance(snapped, cascadeFitCentre[c]);
             var slack = radius * CascadePad[c];
             var due = (framesRendered - cascadeFittedFrame[c]) >= CascadeInterval[c];
@@ -109,10 +100,8 @@ internal sealed partial class SponzaLoop
             {
                 cascadeDue[c] = false;
             }
-            // <b>The lit pass samples the map that EXISTS, not the fit this frame computed.</b> A
-            // reused cascade was rendered with an older matrix, and sampling it with a newer one
-            // reads the right texture through the wrong transform — every shadow in that cascade
-            // displaced by however far the camera moved since.
+            // Reused maps must be sampled with the matrix and texel size that rendered them, not
+            // the provisional fit computed for this frame.
             cascadeViewProj[c] = cascadeRenderViewProj[c];
             cascadeTexelWorld[c] = cascadeTexelRendered[c];
         }

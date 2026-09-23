@@ -11,15 +11,12 @@ namespace Blix.Assets;
 /// An OBJ split into one mesh per material, with each material's colour.
 /// </summary>
 /// <remarks>
-/// <b>What <see cref="ObjImporter"/>'s own comment said would be needed when it was needed.</b> That
-/// importer flattens a file into one <c>MeshData</c> and drops <c>usemtl</c> on the floor, which is right
-/// for a single-material body — the villager — and useless for anything with a trunk and a canopy.
+/// <see cref="ObjImporter"/> flattens a file into one <c>MeshData</c> and ignores <c>usemtl</c>;
+/// this loader preserves one part per material.
 /// <para>
-/// Written as a separate loader rather than as a change to that one, deliberately: <c>MeshData</c> is a
-/// mesh, and giving it submeshes to carry a material list would push a material system into the type every
-/// other importer returns. What the renderer actually wants is what the glTF path already hands it — a
-/// sequence of (mesh, colour) pairs, one per material — so this produces exactly that and the two paths
-/// meet at the same shape.
+/// It remains separate because <c>MeshData</c> represents one mesh rather than a material-bearing
+/// submesh collection. The result is a sequence of mesh/colour pairs, matching the shape consumed by
+/// renderers that need material-separated geometry.
 /// </para>
 /// <para>
 /// Untextured by assumption, because the packs this exists for are: no <c>vt</c>, one flat <c>Kd</c> per
@@ -51,10 +48,7 @@ public static class WavefrontParts
 
         var result = cooked ?? ImportSource(objPath, recenter);
 
-        // <b>Reported, because a load nobody reports is a load no instrument can judge.</b> Before
-        // this, `blix check --cooked` answered "nothing here that this judges" over a directory of
-        // .obj files whether they were cooked or not — the sweep was not blind to the FILES, it was
-        // blind to the LOAD, because no .obj reader had ever said what it did.
+        // Report the chosen cooked/source branch so asset diagnostics can judge OBJ loads.
         if (AssetLoadLog.Enabled)
         {
             AssetLoadLog.Report(new AssetLoadReport(
@@ -74,13 +68,8 @@ public static class WavefrontParts
     /// The cooked parts, or null with <paramref name="why"/> saying what stopped it.
     /// </summary>
     /// <remarks>
-    /// <b>The settings are checked, not just the file's existence.</b> Every other cooked-sibling
-    /// check in this tree is <c>File.Exists</c> and gets away with it because the recipe and the
-    /// loader happen to agree; here they demonstrably need not. This reader centres a model by
-    /// default and <c>SettlementArt</c> loads <c>Villager.obj</c> through <c>ObjImporter</c> with
-    /// <c>RecenterToOrigin = false</c> — so a cook whose glob widened by one directory would hand
-    /// that consumer geometry shifted by half a bounding box, on machines that had cooked and
-    /// nowhere else. The recipe stamps what it used; this refuses what does not match.
+    /// The <c>recenter</c> recipe setting is part of vertex identity, so a sibling cooked with a
+    /// different value is refused and the source OBJ is parsed instead.
     /// </remarks>
     private static IReadOnlyList<Part>? TryReadCooked(string cookedPath, bool recenter, out string? why)
     {
@@ -98,10 +87,7 @@ public static class WavefrontParts
         }
         catch (AssetImportException stale)
         {
-            // <b>Reported, not thrown.</b> A cooked artifact written by an older format is a reason
-            // to parse the OBJ, not a reason to take a game down — and because the reason travels
-            // out through the load report, `blix check --cooked` names the file rather than leaving
-            // it quietly slow.
+            // An unreadable sibling falls back to source parsing and carries the reason in the load report.
             why = $"{stale.Message} — the OBJ was parsed";
             return null;
         }
@@ -153,11 +139,8 @@ public static class WavefrontParts
     /// Parses the OBJ, ignoring any cooked artifact beside it.
     /// </summary>
     /// <remarks>
-    /// <b>What a RECIPE must call, and the reason this is public.</b> <see cref="Import"/> prefers a
-    /// cooked sibling, which is right for a game and catastrophic for a cook: a recipe reading
-    /// through it would consume its own previous output and re-cook that — the one mistake a recipe
-    /// can make that still looks like it worked. It was caught only because a format version
-    /// happened to change in the same commit; at a matching version it would have been silent.
+    /// Recipes use this entry point so output is derived from authored OBJ/MTL source rather than a
+    /// pre-existing cooked sibling. Runtime callers normally use <see cref="Import"/>.
     /// </remarks>
     public static IReadOnlyList<Part> ImportSource(string objPath, bool recenter = true)
     {

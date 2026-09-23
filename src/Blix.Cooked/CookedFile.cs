@@ -5,16 +5,7 @@ namespace Blix.Cooked;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>This is what the shared preamble is for.</b> Before it, answering "what made this file, from
-/// what, and is it current" meant knowing in advance whether you were holding a
-/// <c>.blixmesh</c>, a <c>.blixtex</c> or a <c>.blixprobe</c>, and then calling a different reader
-/// with a different header layout and a differently-sized version field. So nothing ever asked —
-/// the one type that could have reported it, <c>AssetLoadReport</c>, had four states and zero
-/// emitters.
-/// </para>
-/// <para>
-/// A tool built on this needs no graphics device, no format knowledge, and no list of extensions
-/// to keep up to date. A format added tomorrow is readable by it on the day it exists.
+/// Uses only the common preamble, so callers need no graphics device or format-specific reader.
 /// </para>
 /// </remarks>
 public static class CookedFile
@@ -72,11 +63,9 @@ public static class CookedFile
     /// Compares a cooked artifact against a source on disk.
     /// </summary>
     /// <remarks>
-    /// <b>Reports; does not refuse.</b> A loader that rejected a stale file would turn every
-    /// <c>git checkout</c> into a build break, because a checkout rewrites modification times
-    /// without changing a byte. Making staleness <em>visible</em> costs nothing and is what was
-    /// actually missing — the loader's entire check was <c>File.Exists</c>, so a cooked file older
-    /// than its source was preferred over the source, silently, for as long as it sat there.
+    /// Reports freshness without deciding whether a loader may use the artifact. Timestamp changes
+    /// can reflect a checkout rather than changed content, and current stamps do not provide a
+    /// content-verified decision.
     /// </remarks>
     public static Freshness Compare(in CookedHeader header, string sourcePath)
     {

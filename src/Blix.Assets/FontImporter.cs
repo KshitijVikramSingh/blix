@@ -47,10 +47,8 @@ public sealed class FontImporter : IAssetImporter<FontData>
     /// Loads a font, preferring a baked <c>.blixfont</c> sibling over rasterising the TTF.
     /// </summary>
     /// <remarks>
-    /// <b>Same shape as the mesh path, deliberately.</b> A cooked sibling is used when present and
-    /// the source is parsed when it is not, and — unlike every loader in this tree before K-E — it
-    /// says which it did. Before the cook existed this rasterised every glyph at every requested
-    /// size on every launch, because <c>.font.json</c> was a recipe with nothing to run it.
+    /// A cooked sibling is used when present; otherwise the declared TTF is rasterised at every
+    /// requested size. Both branches publish an <see cref="AssetLoadReport"/> when reporting is enabled.
     /// </remarks>
     public FontData Import(AssetImportContext context)
     {
@@ -95,8 +93,8 @@ public sealed class FontImporter : IAssetImporter<FontData>
     /// Rasterises the TTF, ignoring any baked sibling.
     /// </summary>
     /// <remarks>
-    /// Public because the font recipe calls it: a recipe that went through <see cref="Import"/>
-    /// would read its own previous output and cook that forever.
+    /// Recipes use this entry point so output is always derived from the TTF and font declaration,
+    /// never from a pre-existing cooked sibling.
     /// </remarks>
     public FontData ImportSource(AssetImportContext context)
     {

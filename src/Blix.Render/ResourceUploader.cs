@@ -4,27 +4,15 @@ using Blix.Graphics;
 
 namespace Blix.Render;
 
-// Spreads GPU-side texture uploads over multiple frames so the main thread
-// doesn't stall on a synchronous wall of per-mip staged copies during scene
-// load. Backend-agnostic — it drives an IGraphicsDevice — and is the pump
-// underneath the Vulkan GltfTextureLoader. Callers enqueue an upload + a
-// callback; each frame the runtime calls Drain(budgetMs), which processes
-// pending work items until the budget runs out.
+// Budgets GPU-side texture uploads across Drain calls. Backend-agnostic: it drives an
+// IGraphicsDevice and is the upload pump under GltfTextureLoader.
 //
-// Per-mip granularity is the key trick. Each Enqueue splits into N work
-// items (one per mip level), so Drain's "do at least one item" guarantee
-// means at most one mip's-worth of device work per Drain iteration. A 4K
-// texture has ~11 mips at descending sizes; the smallest mips (4x4, 8x8,
-// ...) are microseconds each, so Drain can chew through many of them in
-// 4ms. The biggest mip (full 4K = ~64MB) might be 100-200ms on its own,
-// but only one such per frame -- a tolerable single-frame stutter
-// rather than the multi-second freeze the original "whole texture per
-// Drain" path produced.
+// Each texture becomes one work item per mip. Drain always processes at least one pending item, so
+// an individual large mip may exceed the requested budget but a queue cannot stall indefinitely.
 //
-// Smallest-mip-first ordering: the texture handle is created when the
-// smallest mip's work item runs, so a material can bind the stable handle
-// immediately and render usable-if-blurry. Finer mips stream in over later
-// frames and sharpen the result; the handle never changes across the stream.
+// Mips queue smallest-first and share one stable texture handle. Unuploaded levels remain undefined;
+// this class does not clamp sampler LOD, so callers must gate sampling until the levels they may read
+// are resident. GltfTextureLoader's current consumers wait for PendingCount to reach zero.
 //
 // Deliberate non-goals:
 // - Not a streaming system. Every enqueue is unconditional.
@@ -121,13 +109,9 @@ public sealed class ResourceUploader : IDebuggable
         ArgumentNullException.ThrowIfNull(onUploaded);
         if (mipCount <= 0) throw new ArgumentOutOfRangeException(nameof(mipCount));
 
-        // Per-mip granularity, smallest-first. The first ProcessOne call
-        // (level = mipCount-1, the smallest mip) allocates storage via
-        // AllocateTexture2DMips and uploads that mip; subsequent calls
-        // upload progressively finer levels into the same image. The texture
-        // becomes bindable as soon as the smallest mip lands (callback fires
-        // from inside ProcessOne) -- materials see a usable, if blurry,
-        // texture immediately, sharpening over the next ~N frames.
+        // Per-mip granularity, smallest-first. The first item allocates the complete chain and
+        // uploads its smallest level; later items fill progressively finer levels in the same image.
+        // The callback exposes the stable handle, not permission to sample undefined levels.
         var ctx = new TextureUploadContext(format, width, height, sampler, name, mipCount, mipReader, onUploaded);
         for (var level = mipCount - 1; level >= 0; level--)
         {
@@ -200,8 +184,7 @@ public sealed class ResourceUploader : IDebuggable
         }
         else
         {
-            // Finer mip: UploadTextureMip fills in `level`, so the sampler
-            // picks up the new highest-quality mip on the next draw.
+            // Fill one finer level. The caller controls when partially resident chains may be sampled.
             device.UploadTextureMip(ctx.Handle.Value, level, bytes);
         }
         uploadedCount++;

@@ -1,5 +1,9 @@
 # RTSGame — locomotion layer: state, seams, and what not to break
 
+> **Status 2026-09-21 — active reference.** The current RTS code and game plan
+> still cite these locomotion invariants and measured refusals; this is not a
+> standalone new roadmap.
+
 Status as of 2026-08-19. `--selftest` **53/53 passing**, on a body that walks at 1.79 m/s, a router
 that partitions ground into rectangles rather than searching it, and — since Session 4 — **six unit
 types across two body classes**, which is what most of the recent findings here came out of.

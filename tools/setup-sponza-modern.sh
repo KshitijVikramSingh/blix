@@ -169,8 +169,8 @@ done
 
 # Cook raw sources (in SRC) into runtime .blix* (in COOKED). When SRC != COOKED
 # the cook writes out-of-place via --out, mirroring SRC's structure into COOKED
-# (and copying each .gltf, which the runtime needs beside the .blixmesh); the
-# raw .png/.bin/.hdr stay in SRC and never reach COOKED.
+# as self-contained mesh metadata plus separately cooked image/probe artifacts;
+# the authored .gltf/.bin/.png/.hdr stay in SRC and never reach COOKED.
 COOK="$REPO_ROOT/src/Blix.Tools.Cook/Blix.Tools.Cook.csproj"
 if command -v dotnet >/dev/null 2>&1 && dotnet build "$COOK" -c Release --nologo -v:q >/dev/null 2>&1; then
     OUTDIR=""

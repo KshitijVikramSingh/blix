@@ -2,14 +2,11 @@
 
 // The incident-light field: what arrives at a surface from the probe volumes, at half resolution.
 //
-// <b>Do expensive spatial reasoning at the frequency of the information, not the frequency of the
-// display.</b> The two terms computed here — bounced radiance from the probe atlas, and baked sky
-// visibility — are both reconstructions of a volume whose own resolution is 48x27x32 probes and
-// 256x141x168 occupancy cells. A 2880x1620 framebuffer asks that volume the same question about
-// four Retina pixels that all land inside one probe cell, four times, independently. Measured, the
-// pair costs 8.69 ms of a 19 ms lit pass, and the occupancy line-of-sight test that finally closes
-// the leak (see probe_volume.glsl) costs 6.46 ms more on top. None of that buys a single pixel of
-// detail the volume is capable of carrying.
+// Evaluate low-frequency probe reconstruction at the field's resolution rather than once per
+// display pixel. The recorded 48x27x32 probe and 256x141x168 occupancy volumes spent 8.69 ms on
+// bounce plus sky reconstruction in the full-resolution lit pass, with occupancy visibility adding
+// 6.46 ms. Repeating those queries across neighbouring Retina pixels cannot recover more volume
+// detail.
 //
 // What DOES belong at full resolution stays there: albedo, normal mapping, the specular lobe, the
 // specular IBL, shadow sampling. This pass moves the low-frequency half of the ambient and nothing
@@ -19,44 +16,23 @@
 // Written as rgb = bounced incident radiance, a = sky visibility. One RGBA16F at half resolution
 // replaces two volume reconstructions per full-res pixel.
 //
-// <b>The normal comes from the depth pre-pass, which is the whole story of this pass's accuracy.</b>
-// Both terms are directional, and the first version inferred the normal from the depth buffer
-// because there was no G-buffer to ask. That measured 5.31 mean sRGB against the lit pass and did
-// not improve at full resolution — it was never a sampling-rate error. Splitting it showed the
-// normal MAP's entire contribution to the ambient is 0.90, so the missing 4.4 was the inference
-// failing wherever depth is not a smooth height field: the canopy, two-sided cloth, silhouettes.
+// Both terms use the geometric world normal written by the depth pre-pass. Inferring it from depth
+// measured 5.31 mean sRGB from the inline path and did not improve at full resolution; omitting the
+// material normal map accounts for 0.90 of that difference. The remaining approximation avoids
+// duplicating normal-map sampling and TBN work.
 //
-// The pre-pass already rasterises all of it and already holds the interpolated normal, so it now
-// writes one. What is still approximated here is only the normal map, which is worth that 0.90.
-//
-// <b>What it costs, against the lit pass doing both terms itself.</b> Same viewpoint, occupancy
-// march on in both, noise floor 0.06 mean sRGB:
+// Recorded half-resolution error against inline evaluation, with occupancy visibility enabled and
+// a 0.06 mean-sRGB noise floor:
 //
 //   both terms                         5.20 mean,  p95 21,  27.8% of pixels past 8/255
 //   sky visibility alone               2.73 mean,  p95 11,  12.1%
 //   (so the bounce carries the rest)
 //
-// <b>And the obvious fix was built, measured, and lost.</b> The story the difference image tells is
-// that the ambient stops responding to the masonry's normal map — this pass has only a geometric
-// normal from depth, where the lit pass has the mapped one. sh0 in sky_visibility.glsl IS
-// (L0, L1x, L1y, L1z), so carrying those four numbers in a second target and evaluating them at
-// full resolution in the shading normal costs one RGBA16F pair and drops only L2, which measures at
-// 0.36 mean — nearly nothing.
-//
-// It made the sky term WORSE: 3.69 against 2.73. Interpolating coefficients across the coarse grid
-// and then evaluating is worse than interpolating the evaluated scalar, which is clamped to [0,1]
-// and low-dynamic-range where the coefficients are neither, and the L1 dot product amplifies what
-// the interpolation got wrong before the clamp truncates it asymmetrically.
-//
-// So the error here is not a direction error and no richer basis fixes it. It is a POSITION error:
-// the coarse pass asks the volume where the half-res texel centre landed, and on a surface running
-// away from the camera that is metres from where the fine pixel sits. The levers are the sampling
-// position and incidentScale, not the payload.
-//
-// What it saves, paired and interleaved on the measurement orbit:
-//
-//   occupancy march off:  -7.04 ms   (the shipped configuration today)
-//   occupancy march on:  -12.72 ms   (so the leak fix stops costing anything at all)
+// Store evaluated sky visibility rather than interpolated SH coefficients. Carrying L0/L1 to full
+// resolution increased the sky-term error from 2.73 to 3.69 mean sRGB, while omitted L2 measured
+// only 0.36. The dominant residual is positional: a coarse texel centre can reconstruct a different
+// world point from the fine pixel. Tune incidentScale or the sampling position, not the payload.
+// --no-incident retains the inline reference and the host records the paired timing comparison.
 
 #include "fullscreen.glsl"
 #include "probe_volume.glsl"
@@ -79,9 +55,7 @@ layout(set = 0, binding = 0) uniform Incident {
 } g;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
-// The interpolated world normal the depth pre-pass wrote. See depth_prepass.frag: reconstructing
-// this from depth measured 5.31 mean sRGB against the lit pass, and the normal map's entire
-// contribution to the ambient measured 0.90 — so the error was the inference, not the detail.
+// Interpolated geometric world normal from the depth pre-pass; see depth_prepass.frag.
 layout(set = 0, binding = 8) uniform sampler2D uPrepassNormal;
 layout(set = 0, binding = 2) uniform sampler2D uSkyBounce;
 layout(set = 0, binding = 3) uniform sampler2D uSkyBounceDepth;

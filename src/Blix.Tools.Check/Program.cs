@@ -1,57 +1,22 @@
 using Blix.Core;
-using Blix.Graphics.Vulkan;
 using System.Numerics;
 using Blix.Assets;
-using Blix.Tools.Studio;
 using Blix.Cooked;
 
 namespace Blix.Tools.Check;
 
-// The lab's binding model, printed — and checked.
-//
-// ── Which tool answers which question ───────────────────────────────────────
-//   blix-cook inspect <asset>   LISTS what is in a file — node hierarchy, composed
-//                               pivots, assembled bounds. Always exits 0. It reports.
-//   this probe --model <asset>  CHECKS that an asset is sound — clip lengths, skeleton,
-//                               and the binding contracts below — and exits non-zero
-//                               when it is not. It judges.
-//
-// Deliberately not merged. They overlap in subject and not in purpose, and the honest
-// fix for "two tools answer the same question" is to make the questions different rather
-// than to fuse the tools: a check that returns an exit code belongs next to the thing it
-// gates, and a listing belongs next to the cookers that produce the files.
-//
-// ── Proves ──────────────────────────────────────────────────────────────────
-//   • A second executable over one lab. This project declares no shaders, owns no
-//     render code and never opens a window; the .spv sidecars and the lab's types
-//     both arrive from Blix.Tools.Studio. That was the whole claim of splitting
-//     the lab out, and until now nothing tested it.
-//   • Reflection is worth something OFF the GPU: the binding model is a build
-//     artifact, so it can be read, diffed and asserted against without a device.
-//
-// ── Why it checks rather than only prints ───────────────────────────────────
-//   The lab's first run died on "payload length 96 does not match the shader's
-//   declared total push-constant size 64" — a C# constant disagreeing with the
-//   SPIR-V it describes. That is the exact drift the reflected path exists to
-//   prevent, and the device caught it at draw time, which is late. Here it is a
-//   non-zero exit code before anything is submitted.
+// Headless asset judge. `blix inspect` reports what a source or cooked artifact
+// contains; this command verifies supported model, rig, clip, and cooked-load
+// contracts and returns non-zero when they fail. Shader and descriptor conformance
+// and application-specific rig budgets belong to their consumers, not to an engine
+// asset check.
 public static class Program
 {
-    [BlixApp("check", Summary = "judge an asset — clips, skeleton, binding contracts; exits non-zero")]
+    [BlixApp("check", Summary = "judge model, rig, animation, and cooked-load contracts; exits non-zero")]
     public static int Main(string[] args)
     {
-        // --model <path> reports what an import produced, with no device anywhere in sight. A glTF
-        // is a build artifact too, and everything below is readable without a GPU.
-        //
-        // <b>One catch, for one exception type, and deliberately not a blanket one.</b>
-        // AssetImportException is the engine saying "this is not something Blix can read" — a
-        // refusal, with the path in it, and the only thing a person can act on. Anything ELSE
-        // escaping from here is a fault in this tool and should arrive as a stack trace, because a
-        // judge that swallows its own bugs reports a clean bill of health on a broken asset.
-        //
-        // Before this, nothing was caught at all: `blix check --rig not-a-glb` exited 134 through
-        // the parser's own exception. A judge whose whole job is to survive a bad asset crashed on
-        // the first one it was handed.
+        // Import refusals are expected asset verdicts. Other exception types remain tool faults and
+        // are not converted into a clean asset report.
         try
         {
             for (var i = 0; i < args.Length - 1; i++)
@@ -69,120 +34,49 @@ public static class Program
 
         if (args.Contains("--help") || args.Contains("-h"))
         {
-            Console.WriteLine("Usage: probe [--model <gltf-or-glb>] [--rig <rigged.glb> [--verbose]]");
-            Console.WriteLine("  no args     check the lab's reflected binding model against the renderer");
-            Console.WriteLine("  --model     check an asset: clip lengths, skeleton, mesh-node transform");
-            Console.WriteLine("  --cooked    judge a DIRECTORY: load every asset under it and fail if");
-            Console.WriteLine("              anything resolved to the slow path");
+            Console.WriteLine("Usage: blix check --model <gltf-or-glb> | --rig <rigged.glb> [--verbose] | --cooked <directory>");
+            Console.WriteLine("  --model     import a static or rigged model; report shape and reject unusable clip lengths");
+            Console.WriteLine("  --cooked    load supported meshes under a DIRECTORY and fail if geometry or images");
+            Console.WriteLine("              resolve to source, fallback, or missing data");
             Console.WriteLine("  --rig       check a RIG: hierarchy, rest palette, track coverage,");
-            Console.WriteLine("              finiteness across every clip, root-motion loop continuity");
+            Console.WriteLine("              finiteness across every clip; report root-motion observations");
             Console.WriteLine("  Exits non-zero when something is wrong. For a plain listing of an");
-            Console.WriteLine("  asset's hierarchy and pivots, use: blix-cook inspect <path>");
+            Console.WriteLine("  asset's hierarchy and pivots, use: blix inspect <path>");
             return 0;
         }
 
-        // <b>The binding model moved out, and running this with no asset is what showed it should.</b>
-        // These two hundred lines described and judged the STUDIO — shader interfaces, push sizes,
-        // the bone palette — and needed no asset at all: `blix check` with nothing to check printed
-        // a full report and exited 0. A verb you type at an asset whose subject is not the asset is
-        // two tools sharing a name. The studio's half is Blix.Test.Studio now, a leg of the gate
-        // that judges Blix rather than a command aimed at a file.
+        // Shader and binding conformance has no asset subject and belongs to Blix.Test.Studio.
         Console.Error.WriteLine(
-            "check needs something to check: --model <path.glb> or --rig <rigged.glb>.");
+            "check needs something to check: --model <path.glb>, --rig <rigged.glb>, or --cooked <directory>.");
         Console.Error.WriteLine(
             "  (the studio's own binding model is checked by `blix test`, not here)");
         return 2;
     }
 
-    // <b>What blix-cook inspect does not say.</b> That tool prints the node tree, the composed
-    // pivots and the assembled bounds, which is most of what an asset raises — but not its clips,
-    // not its skeleton, and not whether the numbers are finite. A skeleton whose rest pose does not
-    // build, or a clip with no usable length, surfaces later as a character folding inside out.
-
-    /// <summary>
-    /// Loads every asset under a directory and fails if any of them took the slow path.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>This judges what a LOAD does, not what files exist.</b> `blix cook status` answers the
-    /// second question and is the right tool for it; they differ whenever a cooked artifact is
-    /// present but unusable — corrupt, stale, or a format this build no longer reads — in which case
-    /// the files are all there and the loader quietly parses the source anyway. Only running the
-    /// load can tell you that, which is the whole reason the report exists.
-    /// </para>
-    /// <para>
-    /// <b>And this is what makes cooking enforceable without making it mandatory.</b> Nothing in the
-    /// engine refuses to run from source; a project that wants the guarantee asks for it here, and
-    /// the exit code is the contract — the same deal every other check in this tree makes.
-    /// </para>
-    /// <para>
-    /// Textures are judged too, for free: the mesh load pre-decodes its images and each reports
-    /// itself, so an asset whose geometry is cooked and whose albedo is still a PNG decode fails —
-    /// which it should, because that is the larger cost of the two.
-    /// </para>
-    /// </remarks>
     /// <summary>The source kinds this judge knows how to load. Anything else is not its business.</summary>
     /// <remarks>
-    /// <b><c>.obj</c> was missing and the omission was invisible</b>, because a directory holding
-    /// nothing else produced "nothing here that this judges" — the same sentence an empty directory
-    /// produces. RTSGame's nature kit sat cooked and unjudged behind that sentence. An extension
-    /// this cannot load is a real answer; an extension it silently skips is not.
-    /// <para>
-    /// <b><c>.blixmesh</c> is here because a cooked asset is now a thing you can open.</b> A tree
-    /// holding only cooked artifacts — which is what a shippable tree IS — would otherwise be judged
-    /// as empty, so the one shape the whole arc exists to produce would be the one shape the
-    /// instrument could not see.
-    /// </para>
+    /// Includes standalone cooked meshes so a source-free shipping tree is still exercised.
     /// </remarks>
     private static readonly string[] Judged = { ".gltf", ".glb", ".obj", ".blixmesh" };
 
-    /// <summary>Loads one source the way a game would, so the report says what a game would get.</summary>
+    /// <summary>Routes each supported path through its normal source-or-cooked importer.</summary>
     /// <remarks>
-    /// <b>Loaded the way it would actually be used, not the way that is convenient.</b> This judged
-    /// everything through the STATIC glTF importer once, which meant a rigged character was measured
-    /// on a path no game takes — and the rigged path is the one with no cooked form at all, so the
-    /// judge reported the cheaper half of the truth about the most expensive assets in the tree.
-    /// <para>
-    /// For glTF, which importer wants a file is not guessed from its extension: the rigged one
-    /// refuses, by name, when no node carries both a mesh and a skin. So ask it first and let its
-    /// refusal route the file. That refusal exists because a judge crashed on it once; it is also
-    /// the cleanest way to ask "is this a rig?" without parsing the file twice ourselves.
-    /// </para>
-    /// <para>
-    /// For OBJ the routing is a choice rather than a question the file can answer, and it goes to
-    /// <see cref="WavefrontParts"/>: both readers report, but only that one can consume a cooked
-    /// file with more than one part, so it is the reader the cooked format is shaped for. An asset
-    /// a game loads through <c>ObjImporter</c> instead still reports for itself at load time — this
-    /// only decides what the SWEEP asks.
-    /// </para>
+    /// glTF tries the rigged importer first and uses its named no-rig refusal to select the static
+    /// path. OBJ uses <see cref="WavefrontParts"/> because it can round-trip multipart cooked files.
     /// </remarks>
     private static void LoadAsUsed(string source)
     {
         if (Path.GetExtension(source).Equals(".obj", StringComparison.OrdinalIgnoreCase))
         {
-            // <b>Loaded with the settings the cooked file was made for, not with this reader's
-            // defaults.</b> An OBJ has two readers here and they disagree about centring:
-            // WavefrontParts centres, ObjImporter can be told not to. Hardcoding one meant judging
-            // Villager.obj — cooked UNCENTRED because that is what its consumer asks for — against
-            // a setting no consumer of that file uses, and reporting a correctly cooked asset as
-            // slow. An instrument that answers the wrong question confidently is worse than one
-            // that answers none.
-            //
-            // <b>The blind spot this leaves, stated:</b> a file cooked with settings NOBODY wants
-            // reads as cooked here. That is narrow — the loader's guard still refuses it for every
-            // real consumer, which is where it matters — and it is the price of the judge not
-            // pretending to know which reader a game uses.
+            // Reuse the cooked stamp's recenter setting. The sweep cannot infer which setting a
+            // particular game wants; real consumers still enforce their own request at load time.
             var stamped = CookedFile.TryReadHeader(Path.ChangeExtension(source, ".blixmesh"));
             var recenter = stamped?.Stamp.Parameters.Contains("recenter=0", StringComparison.Ordinal) != true;
             WavefrontParts.Import(source, recenter);
             return;
         }
 
-        // A cooked mesh opens standalone through whichever importer matches what it HOLDS, and the
-        // file answers that itself — a skin table or none. Routing it by guess sent every cooked rig
-        // to the static importer, which refused it by name and reported a red on an asset that was
-        // cooked correctly. Judged alongside its source when both are present, which is not double
-        // counting: they are two different loads and the point is that they agree.
+        // A standalone cooked mesh routes by its stored skin table.
         if (Path.GetExtension(source).Equals(".blixmesh", StringComparison.OrdinalIgnoreCase))
         {
             var id = AssetId.Parse("check/cooked");
@@ -201,6 +95,13 @@ public static class Program
         }
     }
 
+    /// <summary>Loads every supported asset under a directory and fails on non-cooked loads.</summary>
+    /// <remarks>
+    /// This judges the path a runtime loader takes, including image loads triggered by a mesh. It
+    /// does not judge source freshness; <c>blix cook status</c> compares stamps to sources.
+    /// Unsupported extensions are outside this sweep and an empty supported set is reported with a
+    /// successful exit.
+    /// </remarks>
     private static int JudgeCooked(string root)
     {
         if (!Directory.Exists(root))
@@ -256,12 +157,8 @@ public static class Program
         Console.WriteLine($"{sources.Length} asset(s), {reports.Length} load(s): {cooked} cooked, {slow.Length} on the slow path.");
         if (reports.Length > 0)
         {
-            // <b>These two numbers are not a whole and a share, and saying so took two tries.</b>
-            // A mesh import pre-decodes its own images, so a texture's time sits inside its
-            // asset's — but the decodes run in Parallel.ForEach, so their SUM is concurrent CPU
-            // time and can exceed the wall clock of the import containing them. The first version
-            // of this line called it "of which", and RTSGame duly reported 3195 ms of 1540 ms.
-            // Reported as what each actually is instead.
+            // Texture reports are nested concurrent work, so their summed CPU time can exceed the
+            // top-level asset load time. Report the two measures independently.
             var assetPaths = sources.Select(Path.GetFullPath).ToHashSet(StringComparer.Ordinal);
             var wallMs = reports.Where(r => assetPaths.Contains(Path.GetFullPath(r.SourcePath))).Sum(r => r.LoadMs);
             var slowMs = slow.Sum(r => r.LoadMs);
@@ -303,16 +200,7 @@ public static class Program
 
         var problems = 0;
 
-        // <b>Routed by the rigged importer's own refusal, not by assumption.</b> This called the
-        // RIGGED importer unconditionally, so `check --model` on any static asset — the knight, a
-        // prop, anything without a skin — exited by name with "there is no rig here". The tool's own
-        // help gives the mistake away: it describes --model as checking "clip lengths, skeleton,
-        // mesh-node transform", which is a rig's vocabulary. It was written for rigs and named for
-        // models.
-        //
-        // The same routing `check --cooked` already uses: ask the rigged one, let its refusal choose
-        // the static one. A checker that refuses half the assets it is named after teaches a reader
-        // to stop running it.
+        // A named no-rig refusal selects the static importer; other import failures remain verdicts.
         GltfModel imported;
         var rigged = true;
         try
@@ -346,12 +234,7 @@ public static class Program
             var rotation = clip.Tracks.Count(t => t.Rotation is not null);
             var scale = clip.Tracks.Count(t => t.Scale is not null);
 
-            // <b>A zero-length clip is a POSE, not a fault.</b> This used to count them as problems and
-            // reported seven on the Rogue — T-Pose, Lie_Pose and four Sit/Unarmed poses, every one of
-            // them a deliberate single-keyframe shape an animator authored to be held. A tool that
-            // cries fault on a sound file is worse than one that says nothing, because it teaches a
-            // reader to stop looking at the output. Only a NON-finite duration is a real fault: that
-            // is a length nothing can sample against.
+            // A zero-length clip is an authored pose. Only a non-finite duration is unusable.
             var kind = clip.Duration > 0.0 ? $"{clip.Duration,6:0.00}s" : "  pose";
             Console.WriteLine(
                 $"    {clip.Name,-28} {kind}  {clip.Tracks.Length,3} track(s)  " +
@@ -367,14 +250,8 @@ public static class Program
         return 1;
     }
 
-    // <b>What a rig can be wrong about, checked without a device.</b>
-    //
-    // Every failure below shows up on screen as the same thing — a character folded inside out —
-    // and on screen they are indistinguishable. Here they are five separate lines with five
-    // different causes, and the run exits non-zero before anything is submitted.
-    //
-    // Not a listing. `blix-cook inspect` lists and the --model path above reports; this judges, and
-    // the difference is the exit code.
+    // Rig checks separate hierarchy, rest-pose, and sampled animation faults before a graphics
+    // device is involved. Consumer budgets and naming conventions are deliberately outside it.
     private static int InspectRig(string path, bool verbose)
     {
         if (!File.Exists(path))
@@ -395,12 +272,8 @@ public static class Program
             $"{imported.Primitives.Length} skinned primitive(s), {attachments.Length} attachment(s), " +
             $"{staticParts.Length} static part(s)");
 
-        // ── 0a. Static parts ────────────────────────────────────────────────
-        // <b>This block used to fail the check.</b> It counted what the importer had refused to read
-        // and called an asset it could only half load unsound — which was right about the symptom
-        // and wrong about the cause. Both refusals (a mesh on a second skin, a static mesh under no
-        // joint) were this importer's rules rather than the format's, and both are gone. What is
-        // left is a listing: these are read now, and seeing them is still worth the line.
+        // ── Static parts and attachments ───────────────────────────────────
+        // These are inventory, not failures: a rigged file may legitimately carry both.
         if (staticParts.Length > 0)
         {
             Console.WriteLine();
@@ -412,11 +285,6 @@ public static class Program
             }
         }
 
-        // ── 0. Attachments ──────────────────────────────────────────────────
-        // <b>Reported before anything is judged, because their absence was the bug.</b> The importer
-        // used to take nodes carrying both a mesh and a skin and drop the rest in silence — so the
-        // Rogue loaded as six primitives of twelve and every tool agreed it was complete. Printing
-        // them is most of the fix; a count nobody can see is the state this arc exists to leave.
         if (attachments.Length > 0)
         {
             Console.WriteLine();
@@ -428,9 +296,7 @@ public static class Program
                     $"{a.Primitives.Length} prim, {verts} verts");
             }
 
-            // Several meshes on one joint is the ordinary case, not a fault — five of the Rogue's
-            // six hang off handslot.r, and a game shows one. Said out loud so the picture a viewer
-            // draws with all of them visible is expected rather than alarming.
+            // Several alternatives may share one joint; a caller normally selects one.
             var shared = attachments.GroupBy(a => a.JointName, StringComparer.Ordinal)
                 .Where(g => g.Count() > 1)
                 .ToArray();
@@ -442,39 +308,26 @@ public static class Program
             }
         }
 
-        // ── 1. Hierarchy ────────────────────────────────────────────────────
-        // Skeleton's constructor already rejects a parent index that is not strictly less than the
-        // child's, so a cycle is impossible by construction and this cannot fail for an imported
-        // rig. It is checked anyway because the invariant is what makes every later single forward
-        // pass correct, and a check that never fires is the cheapest possible documentation of one.
+        // ── Hierarchy ───────────────────────────────────────────────────────
+        // Skeleton construction already enforces parent-before-child ordering; report root count.
         var roots = 0;
         for (var i = 0; i < skeleton.BoneCount; i++)
         {
-            // <b>Only the root count, because out-of-order cannot happen here.</b> Skeleton's
-            // constructor throws when a bone parents forward, and GltfImporter builds every
-            // skeleton through it — so a check for it downstream can only ever pass, and a check
-            // that can only pass is not a check. What an out-of-order export actually does is fail
-            // at IMPORT, naming the bone, which is both earlier and more useful.
             var parent = skeleton.Bones[i].ParentIndex;
             if (parent < 0) roots++;
         }
 
         Console.WriteLine($"  hierarchy: {roots} root(s), order valid");
-        if (skeleton.BoneCount > StudioRig.MaxBones)
-        {
-            Console.Error.WriteLine(
-                $"  {skeleton.BoneCount} bones exceeds the lab shader's {StudioRig.MaxBones}-matrix palette.");
-            problems++;
-        }
 
-        // ── 2. The rest pose must build the identity ────────────────────────
+        // ── Rest pose ───────────────────────────────────────────────────────
         // BindWorld × InverseBindPose = I by construction, so every rest palette matrix is the
         // identity — and a rig whose inverse-bind matrices do not invert its bind pose fails here
         // rather than as a mesh that explodes the moment it is skinned. This is the single most
         // valuable check in the file: it is exact, it needs no clip, and it catches a bad export.
         var rest = skeleton.CreateRestPose();
         var palette = new BonePalette(skeleton.BoneCount);
-        skeleton.ComputeBonePalette(rest, palette);
+        var worlds = new Matrix4x4[skeleton.BoneCount];
+        skeleton.ComputeBonePalette(rest, palette, worlds);
         var worstRest = 0f;
         for (var i = 0; i < skeleton.BoneCount; i++)
         {
@@ -496,24 +349,11 @@ public static class Program
             $"  rest palette: worst deviation from identity {worstRest:0.00000}" + (restOk ? "" : "  ← TOO LARGE"));
         if (!restOk) problems++;
 
-        // ── 3. Where the bones actually are ─────────────────────────────────
-        // The number that was missing when the lab's first skeleton overlay drew a knot at the
-        // origin: bone WORLD positions are metres apart, palette translations are near zero. Two
-        // correct arithmetics, one of which answers a different question.
-        var worlds = new System.Numerics.Matrix4x4[skeleton.BoneCount];
-        StudioRig.ComputeBoneWorlds(skeleton, rest, worlds);
-
-        // <b>How many of those bones the mesh actually follows, and how many it takes to draw them.</b>
-        // A rig ships the handles its animator posed through, and they are indistinguishable from
-        // deform bones in the skeleton, in the palette and in every clip — the weights are the only
-        // place the difference is recorded.
-        //
-        // Two numbers, because they are two facts and one name for both is how a report comes to lie.
-        // Weighted is the census: what the mesh is attached to. The hierarchy adds the ancestors that
-        // carry those chains — the Rogue's `root` is weighted by nothing and is the parent of
-        // everything — and is what an overlay must draw to avoid floating segments.
-        var weighted = StudioRig.FindWeightedBones(skeleton, imported.Primitives);
-        var deform = StudioRig.PromoteToHierarchy(skeleton, weighted);
+        // ── World-space joint positions and deformation reach ──────────────
+        // Weighted bones deform vertices; promoted ancestors are required to draw those chains
+        // without gaps. Control bones may appear in neither set.
+        var weighted = SkinningAnalysis.FindWeightedBones(skeleton, imported.Primitives);
+        var deform = SkinningAnalysis.IncludeAncestors(skeleton, weighted);
         var weightedCount = weighted.Count(b => b);
         var deformCount = deform.Count(b => b);
         Console.WriteLine(
@@ -547,7 +387,7 @@ public static class Program
             }
         }
 
-        // ── 4 & 5. Every clip, sampled ──────────────────────────────────────
+        // ── Every clip, sampled ─────────────────────────────────────────────
         var poses = 0;
         var travelling = 0;
         var pose = skeleton.CreateRestPose();
@@ -556,10 +396,7 @@ public static class Program
 
         foreach (var clip in imported.Animations.OrderBy(c => c.Name, StringComparer.Ordinal))
         {
-            // A zero-length clip is a POSE, not a fault. The Rogue ships seven — T-Pose, Lie_Pose,
-            // four Sit/Unarmed poses — and calling them broken was this probe's own bug: it reported
-            // seven problems on a file with none, which is worse than reporting nothing at all
-            // because it trains a reader to ignore the output.
+            // Zero-length clips are held poses; sample them once at t=0.
             if (clip.Duration <= 0.0)
             {
                 poses++;
@@ -579,10 +416,7 @@ public static class Program
                 continue;
             }
 
-            // <b>Sampled across the whole clip, not only at its ends.</b> A NaN at t=0.7 is a
-            // character folding inside out three-quarters of the way through a swing, and both
-            // endpoints are perfectly finite. 33 points is dense enough to land inside every
-            // keyframe span of a clip this length and cheap enough to run over all 76.
+            // Interior samples catch non-finite interpolation that endpoint-only checks miss.
             const int Samples = 33;
             var bad = -1;
             var badAt = 0.0;
@@ -602,21 +436,16 @@ public static class Program
                 continue;
             }
 
-            // Track coverage: which bones this clip leaves at rest. A clip that touches a handful
-            // is a partial one, and a partial one is exactly the case the rest reset exists for —
-            // so this line is the evidence for why ClipPlayer resets rather than an assertion about
-            // a rule someone remembered.
+            // Track coverage identifies partial clips whose untouched bones remain at rest.
             var touched = new HashSet<int>();
             foreach (var track in clip.Tracks) touched.Add(track.BoneIndex);
 
             var cycle = RootMotion.PerCycle(clip, rootBone, rest.Locals[rootBone]);
 
-            // ── Root-motion loop continuity ─────────────────────────────────
-            // The check the whole of Stage C hangs on. Travel across the seam — the last sliver of
-            // one cycle plus the first sliver of the next — must be about the same size as travel
-            // across an equal span in the clip's interior. The naive implementation reports a whole
-            // cycle backwards here, which is a number three orders of magnitude out, so the
-            // tolerance does not need to be clever.
+            // ── Root-motion observations ────────────────────────────────────
+            // The asset format carries no loop-intent bit. A large seam or multi-cycle mismatch is
+            // useful evidence for an author or consumer, but not proof that an arbitrary clip is
+            // invalid, so both remain notes rather than exit-code failures.
             var sliver = clip.Duration * 0.02;
             var seam = RootMotion.AcrossLoop(
                 clip, rootBone, rest.Locals[rootBone], clip.Duration - sliver, sliver, clip.Duration);
@@ -629,22 +458,14 @@ public static class Program
             var continuous = seam.Distance <= MathF.Max(0.01f, interior.Distance * 8f);
             if (!continuous)
             {
-                Console.Error.WriteLine(
-                    $"    {clip.Name}: travel across the loop seam is {seam.Distance:0.0000} m against " +
-                    $"{interior.Distance:0.0000} m in the interior — the wrap is being subtracted, not walked.");
-                problems++;
+                Console.WriteLine(
+                    $"    note: {clip.Name} moves {seam.Distance:0.0000} m across its end/start seam " +
+                    $"against {interior.Distance:0.0000} m over an equal interior interval; only a " +
+                    "consumer that loops this clip needs to treat that as a discontinuity");
             }
 
-            // ── The wrap, integrated rather than reasoned about ─────────────
-            // The check above compares travel across the seam to travel in the interior, which
-            // catches the subtraction bug at one boundary. This one runs the actual player at a
-            // fixed step over three whole cycles and adds up what it reported: if ClipPlayer's
-            // piecewise walk drops a sliver at a wrap, misses a cycle, or double-counts one, the
-            // total comes out short or long and no amount of per-seam reasoning would have said so.
-            //
-            // A step deliberately NOT a divisor of the duration, so wraps land mid-step — which is
-            // the only case the piecewise loop exists for. A step that divides evenly would land on
-            // the seam exactly and pass whatever the code did.
+            // Integrate three cycles through ClipPlayer with a non-divisor step so wraps occur
+            // mid-step and dropped or duplicated travel becomes measurable.
             if (travels)
             {
                 const int Cycles = 3;
@@ -664,10 +485,10 @@ public static class Program
                 var error = (summed - expected).Length();
                 if (error > MathF.Max(0.002f, expected.Length() * 0.02f))
                 {
-                    Console.Error.WriteLine(
-                        $"    {clip.Name}: {Cycles} cycles integrate to {summed.Length():0.0000} m " +
-                        $"but one cycle travels {cycle.Distance:0.0000} m — off by {error:0.0000} m.");
-                    problems++;
+                    Console.WriteLine(
+                        $"    note: {clip.Name} integrates to {summed.Length():0.0000} m over " +
+                        $"{Cycles} wraps while one cycle reports {cycle.Distance:0.0000} m " +
+                        $"(vector error {error:0.0000} m); inspect if this clip is intended to loop");
                 }
             }
 
@@ -682,182 +503,9 @@ public static class Program
             $"  {imported.Animations.Length - poses} timed clip(s), {poses} pose(s), " +
             $"{travelling} with root travel");
 
-        problems += CheckInstancing(skeleton, imported.Animations);
-
         if (problems == 0) return 0;
         Console.Error.WriteLine($"{problems} problem(s).");
         return 1;
-    }
-
-    // <b>Are N instances actually independent, or does one slice get read N times?</b>
-    //
-    // The failure this guards is silent: a stride of zero, a write that always lands in slot 0, a
-    // shader that ignores gl_InstanceIndex — none of them throw, none of them warp the geometry, and
-    // all of them render a row of bodies that looks entirely reasonable until you notice every body
-    // is doing the same thing. On a rig whose clips happen to be similar, you might not notice at all.
-    //
-    // So it is checked in BOTH directions, with no device in sight:
-    //   • different clips must produce different fingerprints — the positive claim;
-    //   • the SAME clip at the SAME time, placed identically, must produce IDENTICAL ones.
-    //
-    // The second is the control, and it is the half that makes the first mean something. A check that
-    // only ever asserts "these differ" passes trivially whenever anything differs, including for
-    // reasons that have nothing to do with the mechanism.
-    private static int CheckInstancing(Skeleton skeleton, AnimationClip[] clips)
-    {
-        var usable = clips.Where(c => c.Duration > 0.0).Take(3).ToArray();
-        if (usable.Length < 2)
-        {
-            Console.WriteLine("  instancing: fewer than two timed clips — nothing to tell apart");
-            return 0;
-        }
-
-        var problems = 0;
-        var set = new BonePaletteSet(skeleton.BoneCount, usable.Length);
-
-        // Positive: a different clip per slot, each at its own phase.
-        for (var i = 0; i < usable.Length; i++)
-        {
-            var player = new ClipPlayer(skeleton, usable[i]);
-            player.ScrubTo(i / (double)usable.Length * player.Duration);
-            set.Add(skeleton, player.Pose, Matrix4x4.Identity);
-        }
-
-        var distinct = true;
-        for (var i = 0; i < set.Count && distinct; i++)
-        {
-            for (var j = i + 1; j < set.Count; j++)
-            {
-                if (set.Fingerprint(i) != set.Fingerprint(j)) continue;
-                Console.Error.WriteLine(
-                    $"  instancing: slots {i} and {j} hold the SAME pose from different clips " +
-                    $"('{usable[i].Name}' and '{usable[j].Name}') — the slices are aliasing.");
-                distinct = false;
-                problems++;
-                break;
-            }
-        }
-
-        // Control: one clip, one instant, one placement. These must be bit-identical.
-        set.Reset();
-        var control = new ClipPlayer(skeleton, usable[0]);
-        control.ScrubTo(usable[0].Duration * 0.37);
-        for (var i = 0; i < usable.Length; i++) set.Add(skeleton, control.Pose, Matrix4x4.Identity);
-
-        var identical = true;
-        for (var i = 1; i < set.Count; i++)
-        {
-            if (set.Fingerprint(i) == set.Fingerprint(0)) continue;
-            Console.Error.WriteLine(
-                $"  instancing: the control put one pose in every slot and slot {i} came out " +
-                $"different — the packing is not deterministic.");
-            identical = false;
-            problems++;
-            break;
-        }
-
-        Console.WriteLine(
-            $"  instancing: {usable.Length} slots, " +
-            $"{(distinct ? "different clips give different poses" : "ALIASED")}; " +
-            $"{(identical ? "one clip gives one pose in every slot" : "NOT REPRODUCIBLE")}");
-        problems += CheckMasks(skeleton);
-        return problems;
-    }
-
-    /// <summary>
-    /// What a layer mask over this rig would actually reach — judged, not listed.
-    /// </summary>
-    /// <remarks>
-    /// <b>Two failures a mask can have, and neither looks like one.</b> A mask that reaches every bone
-    /// is a whole-body blend wearing a mask's name; a mask that reaches none is a layer that runs,
-    /// costs, and changes nothing. Both look perfectly plausible on a slider and neither survives a
-    /// count, which is why this is a check and not a listing.
-    /// <para>
-    /// It judges the RIG as much as the mask: a skeleton with no bone the common spine names match
-    /// is one where every masked layer has to be wired by hand, and saying so once at import beats
-    /// finding out in a panel.
-    /// </para>
-    /// </remarks>
-    private static int CheckMasks(Skeleton skeleton)
-    {
-        Console.WriteLine();
-        Console.WriteLine("layer masks");
-
-        var root = RigAnimation.GuessUpperBodyRoot(skeleton);
-        if (root is null)
-        {
-            Console.WriteLine("  no bone matches the usual spine names — a masked layer must be named by hand");
-            return 0;
-        }
-
-        var problems = 0;
-        var hard = BoneMask.Subtree(skeleton, root);
-        var soft = BoneMask.Subtree(skeleton, root, falloff: 2);
-
-        Console.WriteLine($"  upper body from '{root}': {hard.Reach()} of {skeleton.BoneCount} bones");
-
-        // A mask has to divide the rig. Covering all of it or none of it is the same fault twice.
-        if (hard.Reach() == 0 || hard.Reach() == skeleton.BoneCount)
-        {
-            Console.Error.WriteLine(
-                $"  PROBLEM: a mask from '{root}' reaches {hard.Reach()} of {skeleton.BoneCount} bones — " +
-                "a layer that covers everything or nothing is not a layer");
-            problems++;
-        }
-
-        // The falloff must add reach without adding anyone at full weight: it fades bones the hard
-        // mask left out, and touches nothing the hard mask already had.
-        if (soft.Reach() <= hard.Reach() || soft.Reach(0.999f) != hard.Reach(0.999f))
-        {
-            Console.Error.WriteLine(
-                $"  PROBLEM: a falloff changed the fully-masked set ({hard.Reach(0.999f)} -> " +
-                $"{soft.Reach(0.999f)}) or added no partial bones ({hard.Reach()} -> {soft.Reach()})");
-            problems++;
-        }
-        else
-        {
-            Console.WriteLine(
-                $"  with a 2-bone falloff: {soft.Reach()} reached, {soft.Reach(0.999f)} fully — " +
-                $"{soft.Reach() - soft.Reach(0.999f)} fading");
-        }
-
-        // AN UPPER-BODY MASK MUST NOT REACH A LEG, which is a claim about what the mask MEANS rather
-        // than about how it was computed — so it survives the algorithm being wrong. Breaking the
-        // subtree walk to mark every bone moves the counts above without tripping them (39 of 41 is
-        // neither everything nor nothing), and trips this immediately.
-        var caught = new List<string>();
-        for (var i = 0; i < skeleton.BoneCount; i++)
-        {
-            var bone = skeleton.Bones[i].Name.ToLowerInvariant();
-            var isLeg = bone.Contains("leg") || bone.Contains("thigh") || bone.Contains("shin")
-                     || bone.Contains("calf") || bone.Contains("foot") || bone.Contains("toe");
-            if (isLeg && hard[i] > 0f) caught.Add(skeleton.Bones[i].Name);
-        }
-
-        if (caught.Count > 0)
-        {
-            Console.Error.WriteLine(
-                $"  PROBLEM: an upper-body mask reaches {caught.Count} lower-body bone(s): " +
-                string.Join(", ", caught.Take(6)));
-            problems++;
-        }
-        else
-        {
-            Console.WriteLine("  and it reaches no bone named like a leg");
-        }
-
-        // And the complement has to be the rest of the body, exactly. Two masks built separately are
-        // not guaranteed to partition a rig; a mask and its inverse are.
-        var lower = hard.Inverted();
-        var exact = true;
-        for (var i = 0; i < skeleton.BoneCount; i++) exact &= hard[i] + lower[i] == 1f;
-        if (!exact)
-        {
-            Console.Error.WriteLine("  PROBLEM: a mask and its inverse do not partition the rig");
-            problems++;
-        }
-
-        return problems;
     }
 
     private static bool SampleIsFinite(AnimationClip clip, Pose pose, Pose rest, double time, out int bone)

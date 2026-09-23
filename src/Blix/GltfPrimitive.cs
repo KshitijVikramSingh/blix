@@ -20,10 +20,7 @@ public sealed record GltfPrimitive(
     /// The source's own material index, or -1 when it declares none.
     /// </summary>
     /// <remarks>
-    /// <b>Carried so a COOK can link a primitive to a material table without matching on names.</b>
-    /// The importer resolves a material into an object, which is what a renderer wants and exactly
-    /// what a writer cannot use: <c>.blixmesh</c> stores materials once and has primitives index
-    /// them. Recovering that index by comparing names would be a guess, and two materials in one
-    /// glTF may legitimately share a name.
+    /// The cooker uses this source index to link the primitive to the deduplicated material table.
+    /// Material names are not identities and may be shared within one glTF.
     /// </remarks>
     int MaterialIndex = -1);

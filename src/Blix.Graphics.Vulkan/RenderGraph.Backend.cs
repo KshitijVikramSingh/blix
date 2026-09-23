@@ -89,12 +89,14 @@ public sealed partial class RenderGraph : IDisposable
     {
         if (!BackendCompiled || Device is null) return;
         var device = Device;
+        var reallocatedMatchSwapchainResource = false;
 
         // 1. Reallocate matchSwapchain-sized resources in place.
         foreach (var (resourceId, entry) in BackendResources)
         {
             var declared = Resources[resourceId];
             if (declared.Size is not MatchSwapchainGraphSize) continue;
+            reallocatedMatchSwapchainResource = true;
 
             // Tear down old image + views (whole + cube faces).
             foreach (var v in entry.FaceViews)
@@ -172,6 +174,11 @@ public sealed partial class RenderGraph : IDisposable
                 surfEntry.Height = bpass.Height;
             }
         }
+
+        // A stable TextureHandle does not mean stable CONTENTS: every matching image above is a
+        // fresh allocation. Temporal clients must refuse their old history for the first frame on
+        // the new resources, including same-sized recreation after a present-mode change.
+        if (reallocatedMatchSwapchainResource) MatchSwapchainResourceGeneration++;
     }
 
     // Same logic as Allocate* but writes into the provided existing entry

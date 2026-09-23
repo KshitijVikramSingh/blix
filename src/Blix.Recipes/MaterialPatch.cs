@@ -9,37 +9,20 @@ namespace Blix.Recipes;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>This exists because the same decision kept landing in the wrong place.</b> Five times over one
-/// arc: glass tagged transmissive by a substring match on its material NAME, in the render path;
-/// a metalness threshold in the fragment shader compensating for authored MR values on every pixel
-/// forever; curtains that need sheen the asset never authored; a probe chosen and rotated by a
-/// command typed once into a shell; clip names mapped on a Blender command line. Every one of them
-/// is the same sentence — <i>this asset needs a property its author did not give it</i> — and none
-/// of them is a bug in the asset or in the engine. It is a decision belonging to whoever assembles
-/// the scene, and it had nowhere to live.
+/// Project-owned patches record material corrections or additions that are neither source-format
+/// facts nor renderer heuristics. They are applied once while cooking and included in provenance.
 /// </para>
 /// <para>
-/// <b>What separates this from the heuristic it replaces.</b> The deleted glass fallback and this
-/// both key on a material name, and that is not the difference. The differences are that a patch is
-/// written down where a reviewer sees it, recorded in the cooked artifact's stamp so
-/// <c>blix inspect</c> can answer "where did this come from", applied once at cook rather than per
-/// pixel, and — the one that matters — <b>a rule matching nothing is an error</b>. A heuristic that
-/// stops matching renders the wrong thing forever; this refuses to cook and names what it could not
-/// find.
+/// Rules match material names, may assert an expected match count, and fail when they match nothing.
+/// The patch hash is recorded in the cooked stamp so tools can identify the exact policy applied.
 /// </para>
 /// <para>
-/// <b>Mechanism here, policy at the call site</b> (conventions §6). This parses, matches, applies
-/// and refuses. It knows no asset's name, no project's conventions and no material's intended
-/// value; every string lives in the game's own file. The engine never learns that Sponza has a
-/// material called "glass".
+/// This type owns parsing, matching, application, and refusal mechanics. Asset names, selectors,
+/// intended values, and patch-file ownership remain with the project.
 /// </para>
 /// <para>
-/// <b>Materials only, deliberately.</b> The grammar carries a <c>kind</c> because materials are not
-/// the only conceivable target, but nothing else has asked twice. The obvious candidate turned out
-/// to argue against itself: the RTS resolves animation clips through an ordered alias table with
-/// separate stand-in names and a load report that stars substitutions, which a cook-time rename
-/// would collapse into one name and make worse. Bone-prefix stripping and texture-channel selection
-/// are the real remaining candidates, and neither has a second consumer yet.
+/// Only <c>material</c> rules are implemented. The grammar retains an explicit kind so unsupported
+/// targets are refused rather than accidentally interpreted as material policy.
 /// </para>
 /// </remarks>
 public sealed class MaterialPatch
@@ -71,11 +54,8 @@ public sealed class MaterialPatch
     /// The source hash this patch was written against, if it declared one.
     /// </summary>
     /// <remarks>
-    /// <b>The failure a name key cannot catch.</b> A rename makes a rule match nothing, which is
-    /// already an error. The subtler case is a material that keeps its name and changes meaning —
-    /// the patch then applies confidently to something its author never described. Pinning the
-    /// source is the same discipline the glTF corpus manifest uses for upstream commits: an unpinned
-    /// control is not a control. Optional, and enforced when present.
+    /// Name matching catches renames but not a source that keeps names while changing meaning.
+    /// An optional source pin guards that case and is enforced when present.
     /// </remarks>
     public string? SourcePin { get; }
 
@@ -211,9 +191,8 @@ public sealed class MaterialPatch
         var x = m.Ext;
         switch (key)
         {
-            // Base PBR. metallic is here because Sponza Modern leaves a stray ~0.35 on dielectric
-            // stone — its MR channel doubled as a specular dial — which used to be answered by a
-            // threshold in the fragment shader, on every pixel, forever.
+            // Base metallic-roughness values can be corrected explicitly instead of through
+            // renderer-wide thresholds.
             case "metallic":  return m with { MetallicFactor = F(value) };
             case "roughness": return m with { RoughnessFactor = F(value) };
 

@@ -2,24 +2,20 @@
 
 // Edge-aware upsample of the incident-light field, from incidentScale to full resolution.
 //
-// <b>A separate pass for the same reason gtao_denoise.frag is one.</b> The lit pass cannot do this
-// itself: the gather needs scene depth to decide which coarse neighbours belong to this surface,
-// and the lit pass has that depth bound as its own depth ATTACHMENT. Sampling an attachment you are
-// also testing against is a feedback loop, not an optimisation. So the reconstruction happens here,
-// where depth is an ordinary input, and the lit pass reads one full-res texel.
+// Resolve separately because the gather samples scene depth to identify matching coarse neighbours;
+// the lit pass simultaneously uses that image as its depth attachment and cannot sample it without
+// a feedback loop. The lit pass therefore consumes one already-resolved full-resolution texel.
 //
 // The cost of that choice is one full-res RGBA16F written and read — the same round trip the
 // ambient buffer already pays, and small against the two volume reconstructions per pixel it
 // replaces.
 //
-// <b>Four taps, not hardware bilinear.</b> Plain bilinear averages across every silhouette, which
-// puts a halo of a wall's bounced colour around every pillar and a ring of the wrong sky visibility
-// around every leaf. The test is on RELATIVE depth: a 5 cm step is a different surface at 1 m and
-// the same surface at 50 m.
+// Gather the four bilinear neighbours explicitly and guide them by relative depth. Hardware
+// bilinear filtering would mix bounced colour and sky visibility across silhouettes; relative depth
+// distinguishes a 5 cm discontinuity nearby from the same separation at long range.
 //
-// The weight is smooth rather than binary, and that is not polish. A binary accept admits a
-// different set of coarse taps for each fine pixel, which draws the half-res grid as a checkerboard
-// across every flat wall — the same bug, found the same way, as the ambient denoise's.
+// Smooth weights avoid exposing the coarse grid when neighbouring fine pixels cross a hard accept
+// threshold.
 
 #include "fullscreen.glsl"
 
@@ -33,16 +29,10 @@ layout(set = 0, binding = 0) uniform Resolve {
 
 layout(set = 0, binding = 1) uniform sampler2D uIncidentRaw;
 layout(set = 0, binding = 2) uniform sampler2D uSceneDepth;
-// <b>The second guide, and the one the first version was missing.</b> Depth alone accepts a coarse
-// tap wherever depth is continuous — which at a corner, an arch springing from a wall, or any
-// grazing surface is precisely where the tap belongs to a DIFFERENT surface facing a different way.
-// Reported from the chair as probes and normals leaking at some angles, and the measurement agrees
-// emphatically: at that viewpoint the field cost 9.17 mean sRGB against 1.29 on the measurement
-// orbit, because the orbit looks at walls square-on and an arcade does not.
-//
-// The pre-pass already writes this at full resolution and it is already bound. Comparing the tap's
-// normal against this pixel's costs one fetch per tap and rejects exactly the taps that belong to
-// something else.
+// Geometric normal is the second reconstruction guide. Depth continuity alone admits neighbouring
+// taps from differently oriented surfaces at corners, arches, and grazing angles; the recorded
+// depth-only resolve reached 9.17 mean sRGB at the chair view versus 1.29 on the square-on orbit.
+// The full-resolution pre-pass normal rejects those taps with one additional fetch each.
 layout(set = 0, binding = 4) uniform sampler2D uPrepassNormal;
 
 // View-space depth (positive, metres) — the scale the tolerance is relative to.

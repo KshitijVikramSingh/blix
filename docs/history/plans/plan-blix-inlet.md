@@ -1,5 +1,8 @@
 # Inlet arc — plan
 
+> **Archived 2026-09-21 — completed.** The importer/viewer completeness sweep
+> and its conformance follow-up shipped. See `docs/plans.md` for status.
+
 > What a glTF contains, and what Blix takes from it. The gap between those two is not one feature —
 > it is a list, and every entry on it was invisible until someone compared the file against the
 > import.
@@ -144,9 +147,10 @@ accessors are read.
 | `POSITION` `NORMAL` `TEXCOORD_0` `JOINTS_0` `WEIGHTS_0` | read |
 | `TANGENT` | read, opt-in |
 | `COLOR_0` | read, opt-in — I-A |
-| `TEXCOORD_1+` | ignored — I-E |
+| `TEXCOORD_1` | read with the coloured static layout — I-E |
+| `TEXCOORD_2+` | ignored, no current layout |
 | `COLOR_1+` | ignored, no consumer |
-| **`JOINTS_1+` / `WEIGHTS_1+`** | **ignored — a skin with >4 influences per vertex is silently TRUNCATED** |
+| `JOINTS_1+` / `WEIGHTS_1+` | read as contiguous pairs; strongest four retained — I-G |
 | `_CUSTOM` | ignored; spec reserves the underscore prefix for these |
 
 **The one the asset sweep could never have found is `JOINTS_1`.** Every other gap is a missing
@@ -595,8 +599,10 @@ that actually shapes the vertex.
 **Four stays the limit, and that is now a decision rather than an accident.** Widening the vertex to
 eight costs 32 bytes on every skinned vertex in every asset, for influences that are almost always
 negligible — bandwidth against fidelity, which by §5 is a trade to make deliberately. Approximate
-deformation is a limitation; a collapsing mesh was a bug. `GltfIgnored` still reports the dropped
-set, and its explanation still says TRUNCATED rather than merely unread.
+deformation is a limitation; a collapsing mesh was a bug. The first implementation reported the
+whole additional set as ignored; the later mode-aware collector corrected that category error,
+because those attributes are inputs to the strongest-four selection even though not every entry is
+retained.
 
 **Negative control:** removing the renormalisation puts the sum back to **0.8000** — the collapse,
 named exactly. **Control:** a single influence set passes through untouched, compared against the

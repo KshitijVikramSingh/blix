@@ -8,15 +8,7 @@ namespace Blix.Recipes;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>There can only be one resolver per assembly, and there used to be two.</b>
-/// <c>Bc7Native</c> and <c>MeshoptNative</c> each registered their own in a static constructor, so
-/// whichever initialised second threw <c>"A resolver is already set for the assembly"</c>. That
-/// never fired because nothing had ever touched both in one process: the cooker's <c>mesh</c> verb
-/// used meshopt, its <c>textures</c> verb used bc7, and a process only ever ran one of them.
-/// </para>
-/// <para>
-/// The first thing that used both was the suite written to prove they load — which is the whole
-/// argument for the suite existing, arriving before it had finished being written.
+/// .NET permits one import resolver per assembly, so BC7 and meshoptimizer share this registration.
 /// </para>
 /// <para>
 /// Resolution is by absolute path from <see cref="AppContext.BaseDirectory"/> because default

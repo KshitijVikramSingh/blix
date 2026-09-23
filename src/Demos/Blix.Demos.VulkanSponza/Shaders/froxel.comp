@@ -14,27 +14,13 @@
 // scene renders with), so the Vulkan clip-space Y flip is handled for free and
 // the grid aligns with gl_FragCoord in the lit shader.
 //
-// <b>The medium is lit by the scene, not by a constant.</b> The ambient in-scatter used to be one
-// number — the same value in a sealed room as in open sky — which is what made the fog read as a
-// lens filter over the picture rather than as air inside the building. It now scatters the two
-// fields this renderer already bakes: the sky, attenuated by the baked visibility volume, and the
-// probe volume's bounced light. Same correction as the bounce solve's: a transport term whose
-// source was a guess.
+// Ambient in-scatter comes from the same scene fields as surfaces: environment irradiance weighted
+// by baked sky visibility plus dynamic probe bounce. The fallback constant applies only when those
+// fields are unavailable. Medium density falls from the volume floor and varies over a slowly
+// drifting noise field so both extinction and scattering have spatial structure.
 //
-// <b>The medium has a shape.</b> Density used to be one scalar for the whole volume, which is a
-// perfectly even haze — and an even haze has no shafts in it, because a shaft is the sun picking
-// out where the air is thicker. It now falls off with height about the volume floor (air does) and
-// varies over a drifting noise field.
-//
-// Remaining simplifications, each one deliberate:
-//  - No temporal integration: no slice jitter, no reprojected history. This renderer's thesis is
-//    stable silhouettes WITHOUT temporal reconstruction — it pays 18% for 4x MSAA rather than take
-//    TAA — so the slice count and the distribution carry the smoothness instead. Adding a history
-//    buffer here would be the first temporal reconstruction in the frame, and that is a decision
-//    about the renderer, not about the fog.
-//  - Shadow lookup is a single cascade texel (no PCF) — cheap, because this runs
-//    per froxel rather than per fragment. The CHOICE of cascade is the shared
-//    one (blix_sun_shadow_cascaded_hard); only the tap is local.
+// Deliberate simplification: shadow lookup is one cascade texel per froxel rather than filtered
+// PCF. Cascade selection still uses the shared fitted-volume lookup.
 
 #include "shadow.glsl"
 #include "sky_visibility.glsl"
@@ -55,12 +41,11 @@ layout(set = 0, binding = 0) uniform Froxel {
     vec4 uBoundsMin;     // xyz sky/probe volume min
     vec4 uBoundsSpan;    // xyz sky/probe volume span
     vec4 uProbeDims;     // xyz bounce grid dimensions
-    // xyz occupancy grid dims, w = how hard the probe blend trusts a marched line of sight over
-    // Chebyshev's statistical stand-in. Held at 0 here on purpose: the lit pass owns that dial for
-    // now, and moving two passes at once makes the measurement unattributable.
+    // xyz occupancy grid dims, w = line-of-sight occupancy weight. Held at zero here so the surface
+    // pass remains the sole owner of that measurement axis.
     vec4 uOccupancyDims;
     vec4 uMedium;        // x = height scale (m), y = noise amount 0..1
-    vec4 uTemporal;      // x = history weight 0..1, y = slice jitter 0..1, z = show history weight
+    vec4 uTemporal;      // x = history weight, y = slice jitter, z = visualize rejection
     mat4 uPrevViewProj;  // last frame's camera, for reprojecting the medium
     mat4 uCascadeVP[3];
 } f;
@@ -72,12 +57,9 @@ layout(set = 0, binding = 3) uniform sampler3D  uSkyVisibility;
 layout(set = 0, binding = 4) uniform samplerCube uIrradiance;
 layout(set = 0, binding = 5) uniform sampler2D  uAtlas;
 layout(set = 0, binding = 6) uniform sampler2D  uDepthAtlas;
-// <b>The medium, not the picture of it.</b> This holds per-froxel in-scattered radiance (rgb) and
-// extinction (a) BEFORE integration — the two quantities that belong to a point in the world rather
-// than to a ray from a particular camera. The integrated grid cannot be reprojected at all: each of
-// its slices is an integral from the camera outward, so the same world point carries a different
-// value the moment the camera moves. Keeping history here and integrating after the blend is the
-// whole architecture of this change.
+// Reproject local medium state, not the camera-relative integral. RGB stores in-scattered radiance
+// and alpha stores extinction before front-to-back integration; after blending, uGrid receives the
+// newly integrated result for the current camera.
 layout(set = 0, binding = 7) uniform sampler3D uScatterPrev;
 layout(set = 0, binding = 8, rgba16f) uniform writeonly image3D uScatter;
 // The density grid, for the probe blend's line-of-sight test. Bound rather than passed a stand-in
@@ -132,10 +114,8 @@ void main()
     bool  giOn      = f.uFogParams.z > 0.5;
     vec3  sunInto   = normalize(f.uSunDir.xyz);
 
-    // <b>Extinction and scattering are two coefficients, not one.</b> They used to be multiplied
-    // together into a single `ext`, which meant turning the albedo down also thinned the air —
-    // a darker fog and a sparser fog were the same slider. Now density is what the medium removes
-    // from a ray and albedo is the share of that which scatters rather than absorbs.
+    // Extinction controls energy removed from the ray; scattering albedo selects the share returned
+    // as in-scatter rather than absorbed.
     float sigmaT = max(f.uCamForward.w, 1e-5);
     float sigmaS = sigmaT * clamp(f.uSunColor.w, 0.0, 1.0);
 
@@ -172,22 +152,17 @@ void main()
     float noiseScale = fogFar / NOISE_FEATURES;
     float groundY = f.uBoundsMin.y;
 
-    // <b>March between slice CENTRES, not across slice spans.</b> A trilinear fetch at coordinate
-    // t reads the texel whose centre is at t, so the value stored in slice z has to be the integral
-    // from the camera to that centre. Accumulating a whole slice and then storing put every texel
-    // half a slice too far out — invisible at uniform 1.25 m steps, and a real error once the near
-    // slices are centimetres and the far ones are metres.
+    // Integrate between slice centres because trilinear coordinate t addresses texel centres. Each
+    // stored slice therefore represents the integral from the camera to that centre, including for
+    // the non-uniform near/far slice distribution.
     float prevD = 0.0;
 
     for (int z = 0; z < numSlices; z++)
     {
         float d  = blix_froxelSliceDistance((float(z) + 0.5) / float(numSlices), fogFar);
         float dt = max(d - prevD, 1e-6);               // this segment's world length
-        // <b>Jittered within the segment, which is what makes history worth keeping.</b> Sampled at
-        // the midpoint every frame, a temporal blend averages the identical sample and buys nothing
-        // but noise reduction on a sample that was not noisy. Moving the sample each frame turns
-        // the blend into an actual integral over the segment — and since the shadow lookup is one
-        // hard tap per froxel, it is also what turns a hard shaft edge into a soft one.
+        // Jitter within the segment so reprojected history integrates different shadow/density
+        // samples over time instead of repeatedly averaging the same midpoint.
         float dist = mix(prevD, d, clamp(f.uTemporal.y, 0.0, 1.0));
         prevD = d;
         vec3 worldPos = camPos + rayDir * dist;
@@ -229,8 +204,8 @@ void main()
         vec3 stepScatter = (sunLit + ambientRadiance) * (sigmaS * rho);
 
         // --- temporal blend, on the medium ---------------------------------
-        // Where this froxel's world position sat in last frame's grid. Both halves have to agree
-        // with how the grid is addressed now: the screen coordinate through the previous camera,
+        // Where this froxel's world position sat in last frame's grid. Both halves follow the
+        // current addressing contract: the screen coordinate through the previous camera,
         // and the slice coordinate through the SAME quadratic curve the lit pass inverts.
         float historyWeight = 0.0;
         vec4 history = vec4(0.0);
@@ -241,10 +216,7 @@ void main()
                 vec2 uvPrev = ndcPrev.xy * 0.5 + 0.5;
                 float distPrev = length(worldPos - f.uPrevCamPos.xyz);
                 float tPrev = blix_froxelSliceCoord(distPrev, fogFar);
-                // <b>Rejected outright rather than clamped.</b> A clamp would fetch the nearest
-                // edge froxel and blend a stranger's medium into this one — which is exactly the
-                // smear this is supposed to avoid. Off the edge of the previous frame means there
-                // is no history for this point, and the honest answer is to use none.
+                // Reject out-of-bounds reprojection rather than clamping to unrelated edge medium.
                 bool inside = all(greaterThanEqual(uvPrev, vec2(0.0)))
                            && all(lessThanEqual(uvPrev, vec2(1.0)))
                            && tPrev > 0.0 && tPrev < 1.0;
@@ -270,11 +242,8 @@ void main()
         accum += transmittance * sliceIntegral;
         transmittance *= sliceT;
 
-        // <b>The REJECTION, made visible — bright where history was thrown away.</b> This showed the
-        // weight itself at first, which is the same number everywhere it is valid and therefore a
-        // white screen with nothing to read: the interesting state is the rare one. Normalised by
-        // the configured weight so full trust is black whatever the dial says, and so a still camera
-        // correctly shows nothing at all — there is no disocclusion when nothing moves.
+        // Visualize normalized rejection: full trust is black at any configured weight, while
+        // invalid or unwritten history is bright.
         if (f.uTemporal.z > 0.5) {
             float refused = 1.0 - historyWeight / max(f.uTemporal.x, 1e-3);
             imageStore(uGrid, ivec3(xy, z), vec4(vec3(refused), 0.0));

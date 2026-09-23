@@ -17,7 +17,7 @@ namespace Blix.Render;
 // mode (additive sparks vs alpha smoke), a plain viewProj push, or a soft-particle
 // shader that samples scene depth and reads a fade push — none of that lives here. The
 // batch stays a descriptor-less arena consumer; whatever bindings the caller hands it
-// just ride through to the draw (see docs/renderer.md → "two substrates, one boundary").
+// just ride through to the draw (see docs/renderer.md, "Recording, binding, and dynamic data").
 public sealed class ParticleBatch : IDisposable
 {
     // pos(3) + color(4) + uv(2) = 9 floats. The caller builds a matching pipeline

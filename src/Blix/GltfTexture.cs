@@ -6,50 +6,35 @@ namespace Blix;
 // Decoded glTF texture image. Cached + shared by the importer when multiple
 // materials reference the same image (deduping by glTF image index).
 //
-// Two flavours via the same type:
-//   - Source PNG/JPEG path: Format = Rgba8, MipBytes contains one entry
-//     (mip 0). The runtime calls glGenerateMipmap on upload to fill out
-//     the chain.
+// Two storage paths use the same type:
+//   - Source PNG/JPEG: Format = Rgba8 and MipBytes contains mip 0. The
+//     graphics backend generates the rest of the chain when the format
+//     supports linear blitting.
 //   - Cooked .blixtex path: Format may be Rgba8 or Bc7Srgb/Bc7Unorm/Bc5/Bc6h.
-//     MipBytes carries pre-baked mips (CPU box-filtered + per-mip BCn
-//     encoded). For compressed formats this is mandatory -- GL can't
-//     generate mips on compressed textures.
+//     MipBytes or LazyHandle exposes the pre-baked mip chain. Pre-baked
+//     mips are required for compressed formats because the backend cannot
+//     generate their chain with a linear blit.
 //
-// **CPU-byte ownership**: the byte arrays are owned by this instance only
-// until the GPU upload has been enqueued (ResourceUploader takes the
-// reference in its work-item list). After that, the CPU data is dead
-// weight -- a 4K texture with mips is ~85MB of bytes that won't be read
-// again. ReleaseCpuMipBytes() drops the references so the GC can reclaim
-// them. The texture's logical identity (name + format + dimensions) stays
-// queryable; only the pixel data goes.
-//
-// Mutable class rather than the original record because the byte arrays
-// need to be released after upload without throwing away the rest of the
-// object. The cost is no value-equality, which nothing relied on anyway.
+// Eager CPU bytes can be released after downstream upload work has retained
+// everything it needs. Logical identity, format, and dimensions remain
+// available after ReleaseCpuMipBytes clears this instance's byte references.
+// The type is mutable only for that ownership handoff; it has reference rather
+// than value equality.
 public sealed class GltfTexture
 {
     public string Name { get; }
 
     /// <summary>
-    /// What these pixels ARE — stable across loads, and equal for two loads of the same source.
+    /// Stable origin identity for sharing the same image across loads.
     /// </summary>
     /// <remarks>
-    /// <b>Every cache of uploaded textures in this tree is keyed by the OBJECT, which is why none of
-    /// them can share anything.</b> This type is a class with no value equality — its own comment
-    /// says so — so two imports of one file produce two instances and upload the same pixels twice,
-    /// by construction. Three owners hand-roll that same broken key: the engine's
-    /// <see cref="GltfTextureLoader"/>, the studio, and VulkanSponza.
     /// <para>
     /// A resolved absolute path, or <c>&lt;container&gt;#&lt;imageIndex&gt;</c> for an image embedded
-    /// in a .glb, which has no path of its own. Cheap on every path we have and equal wherever the
-    /// pixels are, which is the whole requirement.
+    /// in a .glb, which has no path of its own.
     /// </para>
     /// <para>
-    /// <b>Not a content hash, deliberately.</b> A hash would additionally equate two identically
-    /// valued files under different names — a strictly stronger identity, which the cook already
-    /// computes as <c>BlixMeshImage.ContentHash</c>. Nothing is asking for that, and paying a read
-    /// of every image to get it is a cost with no consumer. The stronger identity can replace this
-    /// one later without any caller noticing, which is the point of it being a string.
+    /// This is origin identity rather than content identity: identical bytes under different paths
+    /// remain distinct. Cooked mesh images separately carry <c>BlixMeshImage.ContentHash</c>.
     /// </para>
     /// <para>
     /// Empty means "unidentifiable" — a texture built from bytes with no origin. Such a texture is
@@ -62,9 +47,9 @@ public sealed class GltfTexture
     public int Height { get; }
     public int MipCount { get; }
 
-    // Eager path: byte arrays for each mip held in RAM. Set by the source-
-    // PNG decoder (single-mip) or the .blixtex eager Read. Released after
-    // upload-enqueue via ReleaseCpuMipBytes.
+    // Eager path: byte arrays for each mip held in RAM. Set by source-image
+    // decoding (single mip) or an eager .blixtex read. A caller may release
+    // them once downstream work has retained every required byte array.
     public IReadOnlyList<byte[]>? MipBytes { get; private set; }
 
     // Lazy path: mip data stays on disk; ReadMip(level) pulls one mip at
@@ -92,26 +77,21 @@ public sealed class GltfTexture
         LazyHandle = lazyHandle;
     }
 
-    // Convenience for the legacy single-mip Rgba8 shape. Used by the
-    // source-PNG decode path; cooked-load callers use the constructor
-    // directly with the BlixTex's full mip chain.
+    // Factory for the source-decoded, single-mip Rgba8 shape. Cooked-load
+    // callers use a constructor that exposes the artifact's full mip chain.
     public static GltfTexture Rgba8Single(string name, byte[] pixels, int width, int height, string resourceId = "")
         => new(name, TextureFormat.Rgba8, width, height, new[] { pixels }) { ResourceId = resourceId };
 
-    // Drops the CPU pixel-data references so the garbage collector can
-    // reclaim the ~85MB-per-4K-texture working set the rest of the app
-    // doesn't need anymore. Called by GltfSceneInstance after the upload
-    // has been enqueued through ResourceUploader; the uploader's work
-    // items still hold their own slot of the same arrays (alive until
-    // each mip is processed), so freeing here just removes OUR reference.
+    // Drops this instance's eager CPU-byte references. The caller is responsible
+    // for retaining any bytes still needed by deferred upload work.
     public void ReleaseCpuMipBytes()
     {
         MipBytes = null;
     }
 
-    // Legacy shortcut used by older single-mip Rgba8 call sites. Throws
-    // if CPU data has been released; callers should branch on MipBytes
-    // being null when they need to be tolerant.
+    // Compatibility accessor for callers that require eager mip 0. It throws
+    // after CPU data has been released; tolerant callers should inspect
+    // MipBytes first.
     public byte[] RgbaPixels
     {
         get

@@ -68,7 +68,7 @@ internal sealed class MyGame : Game, IInputHandler, IDebuggable
         // The Vulkan backend drives a declarative RenderGraph: passes declare their
         // targets + Read edges, materials bind through MaterialBindings, and per-draw
         // data rides push constants / transient descriptor sets. See the demo programs
-        // (src/Blix.Demos.VulkanLit, src/Blix.Demos.VulkanSponza) for the full render
+        // (src/Demos/Blix.Demos.VulkanLit, src/Demos/Blix.Demos.VulkanSponza) for the full render
         // setup; this doc focuses on the game-layer types above the renderer.
         foreach (var obj in objects)
         {
@@ -83,7 +83,7 @@ internal sealed class MyGame : Game, IInputHandler, IDebuggable
 }
 ```
 
-See `Blix.Demos.VulkanLit/Program.cs` for a full game-layer reference — it exercises the lit/skinned/PBR path (directional + spot + point shadows, IBL, bloom, skinned glTF). For the higher-end scene path (3-cascade shadows, depth pre-pass, IBL, geometry LOD, optional froxel volumetric fog, ACES/AgX tonemap), see `Blix.Demos.VulkanSponza/Program.cs`. For the game layer driving an actual playable title — the fixed-step-ish update loop, `Transform3D`, `PhysicsHost3D` (gravity/jump), `CollisionWorld3D.Overlap`, skeletal animation (`SkinnedGameObject` path via clip → `Pose` → `BonePalette`), `AudioSource`, and `IDebuggable` diagnostics, all wired together — see `Blix.Demos.Runner/Program.cs` (a 3D endless runner).
+See `src/Demos/Blix.Demos.VulkanLit/Program.cs` for a full game-layer reference — it exercises the lit/skinned/PBR path (directional + spot + point shadows, IBL, bloom, skinned glTF). Vulkan Sponza is the higher-end research and measurement path; its current, evolving feature set belongs in [Renderer](renderer.md#vulkan-sponza-research-renderer), not in this game-facing overview. For the game layer driving an actual playable title — the fixed-step-ish update loop, `Transform3D`, `PhysicsHost3D` (gravity/jump), `CollisionWorld3D.Overlap`, skeletal animation (`SkinnedGameObject` path via clip → `Pose` → `BonePalette`), `AudioSource`, and `IDebuggable` diagnostics, all wired together — see `src/Demos/Blix.Demos.Runner/Program.cs` (a 3D endless runner).
 
 ## Project dependencies
 
@@ -262,7 +262,7 @@ var worldMuzzle = barrel.WorldPosition;   // composed down hull -> turret -> bar
 
 Mapping a rigged glTF (a tank with a separate turret/gun, a mech, a crane) onto a `Transform3D` rig works without screenshots if you **measure the asset instead of guessing pivots**:
 
-1. **Inspect it** — `dotnet run --project src/Blix.Tools.Cook -- inspect <model.glb>` prints the node hierarchy and, for each mesh-bearing node, its composed-world `scale` / `translation` and assembled `bounds`. A rigged part's **node translation is its rotation pivot** (authors place the node origin at the hinge); the bounds give the model's size and forward axis.
+1. **Inspect it** — `./blix inspect <model.glb>` prints the node hierarchy and, for each mesh-bearing node, its composed-world `scale` / `translation` and assembled `bounds`. A rigged part's **node translation is its rotation pivot** (authors place the node origin at the hinge); the bounds give the model's size and forward axis.
 2. **Import nodes, not a fused blob** — `GltfStaticImporter.ImportNodes` keeps every node in its own local space (vs `Import`, which bakes world transforms into one static mesh). Compose each node's world transform by walking parents (`world = local * parentWorld`).
 3. **Bake each part to its pivot** — transform a part's primitives by `nodeWorld * Translate(-pivot)` so its pivot sits at the mesh origin, upload as a `Mesh`, and give each part its own `InstancedBatch` (reusing one world/caster pipeline — same vertex layout).
 4. **Drive from the rig** — the per-frame instance matrix is `Scale(s) * RotateY(yawFix) * rigPart.WorldMatrix * Translate(0, lift, 0)`, and the rig's child positions (turret-on-hull, gun-on-turret) are the **measured** node offsets mapped through the same `RotateY(yawFix) * s` — so the meshes and the gameplay rig (aim, muzzle, recoil) stay locked and a single scale/yaw knob can't desync them.
@@ -1047,21 +1047,24 @@ public static Ray? ViewPicking.RayThrough(in ViewDeclaration view, Vector2 point
 ```
 
 Reads the view's **own** matrix and **own** rectangle, so a picture drawn anywhere can
-be picked anywhere, including one rendered to an off-screen texture. (Picking into such
-a view works today; *rendering* one as a panel does not — see the view limitations in
-[`architecture.md`](architecture.md).) Returns `null`
-when the pointer is outside the view — which is also how *"which view is the cursor
-over?"* gets answered: ask each declared view, and for a non-overlapping layout at
-most one says yes. Overlapping panels are an ordering question, which is the caller's.
+be picked anywhere, including one rendered to an off-screen texture. `Blix.Tools.View`
+is the proving consumer: Studio renders a second camera into an off-screen target,
+`ViewportPanel` presents that texture inside ImGui, and selection casts through the
+letterboxed image rectangle. `RayThrough` returns `null` when the pointer is outside
+the view — which is also how *"which view is the cursor over?"* gets answered: ask
+each declared view, and for a non-overlapping layout at most one says yes. Overlapping
+panels are an ordering question, which is the caller's.
 
 For a view that does fill the window it returns **exactly** what `ScreenPointToRay`
 returns; `Blix.Test.Graphics` Section **AN** pins that equality, because a picking
 routine that disagrees with the camera is worse than none.
 
 `pointer` is in logical coordinates and is compared against
-`ViewDeclaration.LogicalViewport`. A view carries both rectangles — logical for input,
-physical for the renderer — so neither is derived at a call site, which is the Retina
-bug described above, removed rather than documented.
+`ViewDeclaration.LogicalViewport`. A view also records a physical rectangle, but the
+view does not schedule a scene pass or automatically install that rectangle as a Vulkan
+viewport/scissor. The embedded Studio viewport explicitly renders a pass that fills its
+own target; its logical rectangle describes where the letterboxed image appears for
+input. See [Architecture](architecture.md#views-and-the-frame-that-is-not-one-picture).
 
 **What's pickable is what the game chooses to iterate.** Picking has no engine-level "is pickable" concept — `CollisionWorld3D` holds whatever the game registers, and the per-object loop is game code. A future editor would probably want a separate `PickableRegistry<T>` (similar to `CollisionWorld3D`, distinct semantics — "click-targetable" vs "physically present"), but that doesn't exist yet and bolting it onto colliders would conflate two unrelated questions. `ViewPicking` deliberately stops at the ray for the same reason: it answers where a click points, not what is there. What exists in a world, how it is stored, and what selecting something means stay with the application — and the two applications here that pick things already disagree about all three.
 
@@ -1125,7 +1128,7 @@ State-based push, once per frame. Game code calls `audioListener.Sync(device)` a
 
 ## Cross-references
 
-- **Mesh / materials / shaders / render passes** — game code reads `obj.Mesh` and `obj.Material` (a `MaterialHandle`) and records them into the Vulkan `RenderGraph`. See `src/Blix.Demos.VulkanLit/` and `src/Blix.Demos.VulkanSponza/` for the render setup, and [`architecture.md`](architecture.md#the-vulkan-binding-model) for the backend's binding model.
+- **Mesh / materials / shaders / render passes** — game code reads `obj.Mesh` and `obj.Material` (a `MaterialHandle`) and records them into the Vulkan `RenderGraph`. See `src/Demos/Blix.Demos.VulkanLit/` and `src/Demos/Blix.Demos.VulkanSponza/` for application-owned render setup, [Renderer](renderer.md) for the ownership split, and [Architecture](architecture.md#the-vulkan-binding-model) for the backend's binding model.
 - **`IDebuggable` / `DebugContext` / debug draw** — game code implements `IDebuggable` to contribute UI/values/draw commands; the diagnostics system lives in `Blix.Diagnostics`.
 - **2D physics test harness** — `Blix.Test.Physics2D` is a 43-case CLI test runner exercising every `Intersection2D` overload. Pressure-tests the 2D primitives without a visual demo.
 - **3D physics test harness** — `Blix.Test.Physics3D`, its twin, opened by the character arc because the 3D math had never had one. Covers the capsule: the nine-candidate closest pair (including the impaled case the original eight could not see), the exact plane sweep, and the converging triangle/mesh sweep checked against it — plus tunnelling at 100 m/s with the discrete test as its control.
@@ -1136,13 +1139,12 @@ In approximate priority order. Each item is a feature direction, not a structura
 
 ### Pending
 
-- **Editor layer.** Scene authoring, material tweaking, save/load. Substantially larger than other items here; the picking + debug-overlay infrastructure already in place is a meaningful head start.
+- **Editor layer.** Scene authoring, material tweaking, save/load. Substantially larger than other items here; picking, embedded viewports, and diagnostics UI are meaningful pieces, not yet an editor model.
 - **Broadphase** (BVH / grid / SAP). Premature until profiling shows pairwise n² in `CollisionWorld3D` is a problem. Mesh-internal BVH first (when triangle counts pass hundreds), world-level second.
 
 ### Skipped (explicitly deferred)
 
 - **Forces / impulses / mass + multi-body solver.** Real physics-gameplay. Kinematic depenetration covers the demo; full N-body iterative resolution is a multi-week commitment that isn't justified by current content.
-- **Pathfinding.** Graph / navmesh / grid representations. No autonomous-AI content motivates it.
+- **Engine-owned pathfinding.** Bulwark and RTSGame already carry domain-specific navigation. No repeated generic contract yet justifies moving one representation or policy into `Blix`.
 - **Convex hull collider.** No specific content needs it; OBB covers the tilted-prop case.
 - **Hot-reload / asset cache.** The cooked-asset pipeline (`.blixtex` / `.blixprobe` / `.blixmesh`) skips the slow import paths for VulkanSponza, but there's no in-memory asset cache or hot-reload; uncooked loads re-import every time. Each becomes a follow-up when iteration speed becomes a bottleneck.
-- **Particle system.** Generic GPU/CPU emitter with sorted billboards + soft-particle depth fade. Planned next; a real particle system would enable sparks, embers, dust motes, debris.

@@ -11,7 +11,7 @@ namespace Blix.Tools.View;
 /// <remarks>
 /// <b>Local decomposition, not an engine extraction.</b> Only the viewer picks — the capture tool
 /// has no pointer and the probe has no device — so this stays in the executable. The bar for moving
-/// something into the lab library is a second consumer; the bar for making a 1,600-line file into
+/// something into the Studio library is a second consumer; the bar for making a 1,600-line file into
 /// several is that the file had stopped being readable.
 /// <para>
 /// Two things are picked and they are genuinely different questions: a static model's NODE (against
@@ -60,7 +60,7 @@ internal sealed class StudioSelection
 
     /// <summary>Nearest node whose drawn bounds the ray enters; -1 for empty space.</summary>
     /// <remarks>
-    /// Bounds rather than triangles, deliberately: a node's AABB is what the lab computes and draws,
+    /// Bounds rather than triangles, deliberately: a node's AABB is what the viewer computes and draws,
     /// so what gets picked is exactly what is outlined. Triangle-accurate picking is a different
     /// question and no consumer has asked it.
     /// </remarks>

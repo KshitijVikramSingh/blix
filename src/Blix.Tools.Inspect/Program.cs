@@ -11,27 +11,14 @@ namespace Blix.Tools.Inspect;
 /// <c>blix inspect</c> — lists what is in an asset. Reports; never judges.
 /// </summary>
 /// <remarks>
-/// <para>
-/// <b>Moved out of the cooker, where it never belonged.</b> It was <c>blix-cook inspect</c>, sitting
-/// beside three verbs that transform files while itself transforming nothing — the same finding
-/// <c>check</c> had, which turned out to be two tools sharing a name. A cooker's verbs cook.
-/// </para>
-/// <para>
-/// <b>The inspect/check distinction is deliberate and worth keeping.</b> This lists and always exits
-/// 0; <c>blix check</c> judges and exits non-zero when something is wrong. They overlap in subject
-/// and not in purpose, and collapsing them would mean either a lister that fails or a judge that
-/// shrugs.
-/// </para>
-/// <para>
-/// <b>It now inspects cooked artifacts too, which is new.</b> Before the shared preamble there was
-/// no way to ask a <c>.blixmesh</c> what made it, so nothing did — and the one type that could have
-/// reported it had four states and no emitters. One verb over both halves of the pipeline is what
-/// the preamble bought.
-/// </para>
+/// glTF/GLB input reports hierarchy, transforms, bounds, and material extensions. Any artifact
+/// carrying the common cooked preamble reports format, provenance, settings, source freshness, and
+/// source requirements; cooked meshes also report material extensions. Contract verdicts belong to
+/// <c>blix check</c>.
 /// </remarks>
 public static class Program
 {
-    [BlixApp("inspect", Summary = "list what is in an asset — source or cooked. always exits 0")]
+    [BlixApp("inspect", Summary = "list what is in an asset — source or cooked; reports rather than judges")]
     public static int Main(string[] args)
     {
         if (args.Length < 1 || args[0] is "-h" or "--help")
@@ -42,7 +29,8 @@ public static class Program
             Console.WriteLine("  A cooked file — what made it, from what, with which settings, and");
             Console.WriteLine("                  whether the source still matches.");
             Console.WriteLine();
-            Console.WriteLine("Always exits 0: it reports, it does not judge. For a verdict, use `blix check`.");
+            Console.WriteLine("Reports rather than judging content. Usage and I/O errors still fail.");
+            Console.WriteLine("For a verdict, use `blix check`.");
             return args.Length < 1 ? 1 : 0;
         }
 
@@ -53,10 +41,7 @@ public static class Program
             return 1;
         }
 
-        // <b>Decided by what the file IS, not by a flag.</b> A cooked artifact announces itself in
-        // its first four bytes, so asking is cheaper and more honest than making the caller say
-        // which kind of thing they are holding — and it means a format added later is inspectable
-        // on the day it exists, without this tool learning about it.
+        // The common preamble identifies cooked artifacts without a format-specific command flag.
         if (CookedFile.TryReadHeader(path) is { } cooked) return InspectCooked(path, cooked);
 
         return InspectGltf(new[] { "inspect", path });
@@ -72,12 +57,7 @@ public static class Program
         Console.WriteLine($"  source    {(stamp.SourcePath.Length > 0 ? stamp.SourcePath : "(not recorded)")}");
         if (stamp.SourceSize > 0) Console.WriteLine($"            {stamp.SourceSize:N0} bytes at cook time");
 
-        // The state that used to be invisible. The loader's whole check was File.Exists, so a
-        // cooked file older than its source was preferred over the source for as long as it sat
-        // there, and nothing anywhere could say so.
-        // Resolved against the ARTIFACT's directory, because that is what the stamp is relative to.
-        // Resolving against the working directory instead would report every artifact's source as
-        // missing the moment you ran this from anywhere but the right folder.
+        // Source paths in stamps are relative to the artifact, not the invoking working directory.
         var resolved = stamp.SourcePath.Length > 0
             ? Path.GetFullPath(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path)) ?? ".", stamp.SourcePath))
             : null;
@@ -99,10 +79,7 @@ public static class Program
             Console.WriteLine("        It is an optimisation, not a replacement — the source must travel with it.");
         }
 
-        // A cooked mesh's materials, for the same reason the raw path reports them: a cooked file
-        // that silently defaults every extension while the raw file reads them is indistinguishable
-        // from a working one until something renders wrong. Printing both makes the round trip
-        // checkable by eye and by diff.
+        // Mirror the source report so source/cooked material extensions can be diffed directly.
         if (header.Magic == Blix.Assets.BlixMesh.Magic)
         {
             try
@@ -156,7 +133,7 @@ public static class Program
     {
         if (args.Length < 2)
         {
-            Console.Error.WriteLine("Usage: blix-cook inspect <gltf-or-glb>");
+            Console.Error.WriteLine("Usage: blix inspect <gltf-or-glb>");
             return 1;
         }
         var path = args[1];
@@ -240,11 +217,8 @@ public static class Program
 
     /// <summary>Prints the KHR_materials_* properties each material declares, and nothing it does not.</summary>
     /// <remarks>
-    /// <b>Conventions §3: the runtime has to be able to EXPLAIN what it loaded.</b> Until the
-    /// importer read these, "does Blix see the sheen on this chair" had no answer short of running
-    /// a renderer and squinting — which is how eleven spec-defined properties sat unparsed without
-    /// anyone noticing. A material that declares nothing prints nothing, so this stays quiet on the
-    /// assets that have no extensions and is the whole report on the ones that do.
+    /// Materials without extensions stay quiet; declared extension values are printed so source and
+    /// cooked interpretations can be compared without rendering.
     /// </remarks>
     private static void ReportMaterialExtensions(IReadOnlyList<Blix.GltfNode> nodes)
     {

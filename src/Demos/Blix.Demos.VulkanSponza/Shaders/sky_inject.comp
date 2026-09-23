@@ -1,71 +1,29 @@
 #version 450
 
-// Injects the CURRENT sun's first bounce into the probe grid, by marching the same voxel geometry
-// the visibility bake traced.
+// Updates the directional incident-light probe atlas from the current sun, distant sky, and the
+// previous transport sweep. Geometry is baked as occupancy/visibility; lighting stays dynamic so
+// sun direction and environment changes can propagate without rebaking.
 //
-// ── Why this is a pass and not a bake ────────────────────────────────────────
-// Baked sky visibility told the floor it sees 0.15 of the sky where the renderer had been giving it
-// 0.85 — correct, and on its own it made the courtyard black. What actually lights a courtyard is
-// sunlight off its own lit walls, and the sun arrives at irradiance 17 against an ambient of well
-// under one. That term cannot be baked: move the sun and every lit wall changes. So the geometry is
-// precomputed and the lighting is solved here, which is the split the roadmap asked for.
+// Rays use the entered voxel face as a surface normal, trace sun transmittance, and feed the
+// previous probe field back through the surface albedo. Stored values are average incident
+// radiance; conversion to irradiance happens during directional reconstruction. Keeping feedback
+// in radiance makes albedo the per-bounce gain and therefore keeps physical materials convergent.
 //
-// ── No per-voxel material, and none needed ───────────────────────────────────
-// A ray that hits takes the voxel FACE it entered through as the surface normal — exact for an
-// axis-aligned voxel, and the DDA already knows which axis it last stepped. From that hit a second
-// march runs toward the sun: unoccluded means the surface is lit, and it re-radiates. Storing an
-// albedo and a normal per voxel would be 24 MB to say something this derives for free.
-//
-// ── Multi-bounce, because one is not enough for a courtyard ─────────────────
-// A point three metres up in Sponza's courtyard sees about three of ninety-six ray directions as
-// sky — measured, and matching the analytic solid angle of a 21-degree cone between sixteen-metre
-// walls. Light down there has bounced several times by the time it arrives, so a single bounce off
-// walls that are themselves nearly enclosed cannot fill it.
-//
-// So a hit surface re-radiates the sun it catches PLUS whatever the previous sweep already left
-// there. Reading the texture this pass writes is deliberate: probes refresh on a rotation, so a
-// read almost always sees a settled neighbour, and each full sweep advances the solution by one
-// bounce. Albedo multiplies in every time, so the series converges rather than runs away.
-//
-// ── What the probe stores, and why the units matter ─────────────────────────
-// Average incident RADIANCE over the sphere, not irradiance. The distinction decides whether the
-// feedback loop converges: with each ray contributing albedo/PI and the sum then scaled by 4*PI/N,
-// the gain per bounce came to albedo*4 = 1.4, and a gain above one is a runaway. Measured, it lit
-// the scene to four times its original brightness.
-//
-// Kept as radiance the accounting is simply: a surface's incident irradiance is PI times the
-// average radiance reaching it, its outgoing radiance is albedo times that over PI, and the probe
-// averages what arrives. The albedo is then the whole per-bounce gain, so the series converges for
-// any physical material. The consumer multiplies by PI to get irradiance back.
-//
-// ── L0 only ─────────────────────────────────────────────────────────────────
-// RGB radiance, no direction. Bounce is the low-frequency half of the image and a directional
-// bounce is four times the storage for a term that is about to be added to a cosine lobe anyway.
-// The visibility volume beside it IS directional, so the SHAPE of the ambient still comes from
-// geometry; this supplies its colour and level.
+// The atlas is directional because nearby occluders and coloured surfaces cannot be represented by
+// one RGB value per probe. Sky visibility remains a separate baked field: it supplies the enclosure
+// geometry while this pass supplies changing incident light.
 
 #include "probe_volume.glsl"
 #include "sky_visibility.glsl"
 
 #define BLIX_OCT_INTERIOR 6
 #define BLIX_OCT_TILE     8
-// <b>256, and the reason is the DEPTH map rather than the irradiance.</b> Irradiance averages every
-// ray under a cosine lobe and was well fed at 64: measured, 24.0 effective samples per texel. Depth
-// uses a pow(dot, 50) lobe to keep a wall's edge an edge, and that lobe is so tight that 64 rays over
-// 36 texels gave it <b>1.82 effective samples</b> — each depth texel was essentially ONE ray.
-//
-// That breaks the visibility test in the specific way this file's own comment forbids: the mean is
-// one ray's hit distance, so whether a probe behind a wall gets rejected depends on whether its
-// single ray in that direction struck the wall or slipped past it; and the variance, which is the
-// entire reason probe_volume.glsl chose Chebyshev over a hard depth test, is the variance of one
-// sample — zero, clamped to 1e-5. The soft test the design asked for was a hard one all along.
-//
-// 256 rays take it to 4.97. The cheaper alternative — widening the lobe to pow 8, which gives 6.72
-// at 64 rays — was rejected because it buys the samples by blurring exactly the edge the exponent
-// exists to preserve, and the edge is what the test reads.
+// 256 rays are required by the sharp directional depth reconstruction, not irradiance. With the
+// pow(dot, 50) depth lobe, measured effective samples rise from 1.82 at 64 rays to 4.97 at 256.
+// Widening the lobe improves the count by blurring the wall boundaries the visibility test needs.
 #define BLIX_OCT_RAYS     256
 
-// How far one solve moves a stored tile toward its new answer. 1.0 is the hard replace this had.
+// Fraction of the newly solved value incorporated into an established tile.
 #define SOLVE_CONVERGE 0.4
 
 
@@ -100,58 +58,34 @@ layout(set = 0, binding = 0) uniform Inject {
     vec4 uSchedule;   // w: 1 when the atlases alternate and a skipped probe must carry its tile
     // x = post-load frames during which NOTHING sleeps. See the wake test below.
     vec4 uWarmup;
-    // <b>The transport solve's own dials, which shading's could not reach.</b>
-    //   x  multi-bounce feedback strength. 0 makes this a single-bounce solve, which is the
-    //      discriminator: energy that leaked into a probe through a bad visibility relationship is
-    //      re-injected every round and converges to a fixed point ABOVE the physical answer, so a
-    //      cast caused that way collapses at 0 and a cast caused by the sky or the first bounce
-    //      does not. Toggling shading-time occlusion cannot tell those apart, because by then the
-    //      leaked energy is a number baked into an atlas texel.
-    //   y  occupancy-march strength for the feedback lookup. This was hard-coded to 0 while the
-    //      shading path's march was being attributed, and then forgotten — so probe -> surface
-    //      visibility got the exact test while surface -> previous-probe kept the statistical one.
+    // x = multi-bounce feedback strength; 0 isolates direct sun and sky injection.
+    // y = occupancy-march strength for transport feedback visibility.
     vec4 uTransport;
     // xyz albedo grid dims (0 = none shipped), w = translucency.
     vec4 uAlbedoDims;
 } u;
 
-// <b>An octahedral atlas, not four coefficients.</b> L1 is one smooth lobe over the sphere, so a
-// source subtending twenty degrees and one subtending ninety give the same SHAPE at different
-// magnitudes — measured on the cypress, teal curtains metres away washed its lower half because L1
-// could say they were there and not how wide they were. A map discretises instead of projecting, so
-// sharpness becomes resolution rather than basis order.
-//
-// One tile per probe, 8x8 with a one-texel border ring around a 6x6 interior. The border is not
-// decoration: tiles are sampled bilinearly, and across an octahedral fold the neighbour is the texel
-// diagonally opposite rather than the one beside it. Without it every probe carries a seam that
-// moves with the camera.
+// One octahedral tile per probe: an 8x8 footprint containing a 6x6 directional interior and a
+// one-texel fold-aware border for bilinear sampling. This preserves narrower incident-light
+// features than an L1 representation while keeping a fixed-size atlas.
 //
 // Tiles are laid out x across, (y + z * dimY) down — so a probe's neighbours in x are adjacent in
 // memory, which is the axis a trilinear fetch walks first.
 layout(set = 0, binding = 1, rgba16f) uniform image2D uAtlas;
 layout(set = 0, binding = 4) uniform sampler2D uAtlasPrev;
-// Mean and mean-square distance per direction — the half of a probe that says whether it can SEE a
-// shading point, as opposed to how bright it is. Same tile layout, so one set of coordinate maths.
+// Mean hit distance, variance, reachability, and closure per direction/tile. These describe whether
+// a probe can see a shading point rather than how bright the probe is.
 layout(set = 0, binding = 11, rgba16f) uniform image2D uDepthAtlas;
 layout(set = 0, binding = 12) uniform sampler2D uDepthAtlasPrev;
 layout(set = 0, binding = 2) uniform sampler3D uOccupancy;
-// <b>The sky, as a SOURCE in the transport chain rather than only a term at the end.</b> These
-// were bound and unused: uSkyVisibility was declared here and never read once. The bounce solve
-// took its energy from `sun * sunReach + previousBounce`, so the only thing that could start a
-// chain was a SUNLIT surface. That is enough to bring a courtyard alive and not nearly enough for
-// an arcade: a corridor that sees little sun is lit almost entirely by sky arriving through an
-// opening and then bouncing twice more off warm stone, and none of that existed. The interiors
-// were not failing to sample their light, they had never been given any.
+// Baked directional sky visibility and the irradiance cube form the distant-sky source term.
 layout(set = 0, binding = 3) uniform sampler3D uSkyVisibility;
 layout(set = 0, binding = 6) uniform sampler3D uSkyVisibility1;
 layout(set = 0, binding = 8) uniform sampler3D uSkyVisibility2;
 // The distant sky's cosine-convolved irradiance, the same cube the lit pass reads.
 layout(set = 0, binding = 9) uniform samplerCube uIrradiance;
 layout(set = 0, binding = 5) uniform sampler3D uAlbedo;
-// <b>Which probes shading actually read, written by the fragment stage.</b> No bake-time test can
-// tell a probe inside the model's shell from one in the arcade — measured, they are geometrically
-// identical and the occupancy grid is not even watertight. What separates them is that nothing
-// renders against one of them, and that is a fact only the fragment shader holds.
+// Usage marks written by shading let the scheduler age out probes that no visible surface reads.
 layout(set = 0, binding = 10, rgba16f) uniform image3D uProbeUsage;
 
 #define PI 3.14159265359
@@ -170,32 +104,25 @@ vec3 blixSampleAtlas(vec3 worldPos, vec3 n) {
     return texture(uAtlasPrev, texel / atlasSize).rgb;
 }
 
-// The grid stores DENSITY, not occupancy. The baker writes 1.0 for an opaque triangle and
-// CutoutOpacity for an alpha-cutout one, precisely so that a canopy attenuates instead of walling,
-// and its own Transmittance() reads it that way. Reading it back here through a `> 0.5` test threw
-// that grade away and made every leaf INVISIBLE to this march: rays passed clean through the tree,
-// escaped, and reported sky — which lit the inside of the canopy as though it were open air. Same
-// texture, same decision, now taken the same way on both sides of it.
+// The grid stores density: opaque triangles write 1 while cutout surfaces retain partial opacity.
+// Transport must preserve that grade so foliage attenuates rather than becoming either air or wall.
 float densityAt(ivec3 c) {
     float d = texelFetch(uOccupancy, clamp(c, ivec3(0), ivec3(u.uOccupancyDims.xyz) - 1), 0).r;
-    // uOccupancyDims.w = 0 restores the old boolean read, so the two can be compared by turning a
-    // control rather than by rebuilding. An opaque cell reads 1.0 either way; only foliage differs.
+    // uOccupancyDims.w selects density-aware foliage transport; opaque cells read identically.
     return u.uOccupancyDims.w > 0.5 ? d : (d > 0.5 ? 1.0 : 0.0);
 }
 
-// What the surface in this cell is coloured, linear. Filtered rather than fetched: the grid is
-// half the occupancy resolution, so a nearest read would step in visible blocks across a wall that
-// the density grid resolves smoothly. Squared on the way in — the byte holds sqrt(linear), which is
-// what keeps a curtain's absorbing channels from quantising to a handful of codes.
+// Linear surface colour from the albedo cell corresponding to the hit. The host binds nearest
+// sampling because this grid is one-to-one with occupancy; the stored byte is sqrt(linear), so
+// square it after sampling to retain precision in absorbing channels.
 vec3 albedoAt(vec3 worldPos) {
-    if (u.uAlbedoDims.x < 1.0) return vec3(1.0);   // older .blixsky: the scalar alone, as before
+    if (u.uAlbedoDims.x < 1.0) return vec3(1.0);   // compatibility with packs without an albedo grid
     vec3 uvw = (worldPos - u.uBoundsMin.xyz) / u.uBoundsSpan.xyz;
     vec3 c = texture(uAlbedo, clamp(uvw, vec3(0.0), vec3(1.0))).rgb;
     return c * c;
 }
 
-// The DDA itself is shared, because the two walks below differ only in what they do per cell, and
-// a second hand-inlined copy of this is how the two sides drifted apart in the first place.
+// Shared DDA state keeps sun and gather traversal on the same cell-stepping contract.
 struct Dda {
     ivec3 c;
     ivec3 step;
@@ -256,31 +183,20 @@ vec3 transmittance(vec3 origin, vec3 dir, float maxCells) {
     return t;
 }
 
-// Walk one direction and accumulate what it passes, rather than stopping at the first thing it
-// hits. An opaque wall still ends the walk on its first cell — t drops to zero there — so this
-// costs nothing wherever the old version was already right. A canopy now contributes each leaf the
-// ray crosses, weighted by how much light is still travelling when it arrives.
-// Returns the contribution as radiance; the caller projects it onto SH using the ray's direction,
-// which is the direction that light arrived FROM and the whole reason this became directional.
-// <b>reach: 1 if this ray left the volume without meeting anything, sunlit: 1 if any cell it met
-// could see the sun.</b> Together, over a probe's whole ray set, they say whether light has any
-// route to this probe at all — which is a different question from how much light it holds, and the
-// one nothing previously asked.
+// Walk one direction and accumulate every encountered surface, weighted by remaining transmittance.
+// Opaque geometry still terminates at its first occupied cell. The caller reconstructs directional
+// irradiance using the direction from which this radiance arrived.
+// reach is 1 when the ray escapes without solid geometry; sunlit is 1 when any encountered surface
+// can see the sun. Their reductions distinguish a dark but reachable probe from a sealed one.
 vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize,
             out float hitDistance, out float reach, out float sunlit, out float closure) {
-    // <b>How much of this ray's unit of transport was handed to a surface.</b> A self-consistency
-    // number and the only kind this solve can check without an external reference: the march starts
+    // Closure is the fraction of this ray's unit transport handed to surfaces. The march starts
     // with a transmittance of one, spends `t * density` at every cell that re-radiates, and this is
-    // the total it spent. A ray ending in opaque geometry must close to 1; a ray that escapes to sky
-    // closes to 0, correctly, because the sky's direct contribution is the lit pass's IBL term and
-    // not the probe field's job. So the EXPECTED mean over a probe's rays is 1 - its sky visibility,
-    // and the bake computed that independently — two separate calculations of the same geometry,
-    // which is what makes disagreement between them evidence rather than opinion.
+    // the total it spent. Mean closure should agree with one minus independently baked sky
+    // visibility and is retained as a transport self-check.
     closure = 0.0;
-    // <b>How far the ray got, which is the other half of a probe.</b> Radiance alone cannot say
-    // whether a probe is behind a wall from some shading point's perspective; distance can, and the
-    // march already knows it. Escaping rays report the far bound rather than zero — an open
-    // direction is infinitely far, not immediately blocked, and zero would read as a wall.
+    // Directional hit distance supports visibility rejection. Escaping rays use the far bound;
+    // zero would incorrectly describe an immediate blocker.
     hitDistance = maxCells * length(u.uBoundsSpan.xyz / u.uOccupancyDims.xyz);
     vec3 dims = u.uOccupancyDims.xyz;
     vec3 cell = u.uBoundsSpan.xyz / dims;
@@ -303,15 +219,8 @@ vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize,
             hitDistance = distance(origin, u.uBoundsMin.xyz + (vec3(d.c) + 0.5) * cell);
             recordedHit = true;
         }
-        // <b>Only SOLID geometry seals a space; a canopy never does.</b> This cleared on any
-        // density at all, so a probe inside the lower half of the cypress -- surrounded by cells at
-        // 0.34 -- was counted as enclosed and rejected, while the sunlit top half passed. Reported
-        // from the chair as exactly that split, and it is wrong: leaves are a filter, not a wall.
-        // Dappled light reaches under a tree, and rejecting those probes deletes it.
-        //
-        // The transmittance through ten foliage cells is 0.66^10 = 1.5%, which is under the 2%
-        // threshold below -- so foliage could seal a volume by arithmetic that stone would need a
-        // closed room to achieve.
+        // Only solid geometry clears reach. Partial-density foliage attenuates transport but does
+        // not by itself classify a probe as sealed.
         if (density >= 0.99) reach = 0.0;
 
         // A cell absorbs this fraction of the light still travelling, and re-radiates it. Spectral
@@ -332,27 +241,17 @@ vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize,
             vec3 n = vec3(0.0);
             n[d.axis] = float(-d.step[d.axis]);
 
-            // A surface facing away from the sun catches none of it, and asking the grid about a
-            // ray whose answer is already zero was the old loop's one plain waste.
+            // A surface facing away from the sun catches none of it and needs no sun march.
             float ndotl = max(dot(n, toSun), 0.0);
             vec3 sunReach = ndotl > 0.0
                 ? transmittance(hitPos + n * cellSize * 1.5, toSun, maxCells) * ndotl
                 : vec3(0.0);
             if (dot(sunReach, vec3(1.0)) > 1e-4) sunlit = 1.0;
 
-            // Sampled just off the face, so the lookup is not taken inside the geometry it stands on.
-            vec3 prevUv = (hitPos + n * cellSize * 1.5 - u.uBoundsMin.xyz) / u.uBoundsSpan.xyz;
-            // <b>Evaluated along the hit surface's OWN normal.</b> The directionless version could
-            // only ask "how much light is around here"; a surface re-radiates what reaches the side
-            // it faces, and now it can be asked that.
             // Evaluated along the hit surface's OWN normal: a surface re-radiates what reaches the
-            // side it faces, and the atlas can finally be asked that at full directional resolution.
-            // <b>Three sources now: sun, sky, and the previous bounce.</b> The sky term is the
-            // distant irradiance cube along this surface's own normal, scaled by how much sky the
-            // baked volume says it can actually see from here — the same pair the lit pass uses,
-            // asked at the hit instead of at the camera. A wall under an arcade opening therefore
-            // re-radiates the sky it receives, and the corridor behind it gets a second and third
-            // bounce of that light rather than nothing.
+            // side it faces, using the atlas at full directional resolution.
+            // The source sum is direct sun, visibility-weighted distant sky, and prior-sweep
+            // feedback, all evaluated at the hit surface.
             //
             // Queried at the already-offset position with no further push: hitPos is one and a half
             // occupancy cells off the face, which is what the wall bias is for.
@@ -363,23 +262,10 @@ vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize,
                                          u.uBoundsMin.xyz, 1.0 / u.uBoundsSpan.xyz, 0.0,
                                          probePos, n)
                 : vec3(0.0);
-            // <b>The full eight-probe blend, kept, and the measurement is why.</b> This looks like
-            // the expensive thing in the loop — a trilinear blend with a Chebyshev visibility test
-            // on each of eight probes, roughly sixteen fetches, taken at every cell every ray
-            // touches — and it was tried three ways. Against a nearest-probe fetch it is worth
-            // 5.06 ms of 36.1, and against no feedback at all 5.35: fifteen percent of the pass,
-            // not the bulk of it. In the shipped configuration, where sleeping keeps most probes
-            // out of the solve, that is about 0.6 ms.
-            //
-            // And the cheap version LEAKS. Dropping to the nearest probe skips the Chebyshev test,
-            // which is precisely what stops a probe behind a wall contributing — the field's median
-            // rose from 0.0521 to 0.0530 when it was removed. Trading 0.6 ms for light coming
-            // through walls is a worse bargain than the milliseconds suggest.
-            //
-            // <b>Transport dependency is not rendering dependency, and neither is transport
-            // visibility the same code path as shading visibility.</b> The occupancy strength here
-            // was 0 while shading's was being measured, which left the two halves of the same
-            // geometric question answered by two different tests.
+            // Feedback uses the full visibility-weighted probe blend. Measured against a nearest
+            // probe lookup, this costs about 0.6 ms with sleeping enabled and avoids light crossing
+            // walls. Transport has its own occupancy strength because this dependency is evaluated
+            // during injection rather than at the final shading point.
             vec3 feedback = u.uTransport.x > 0.0
                 ? u.uTransport.x * blix_probeIrradiance(
                       uAtlasPrev, uDepthAtlasPrev, uOccupancy,
@@ -388,8 +274,7 @@ vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize,
                 : vec3(0.0);
             vec3 incident = u.uSunIrradiance.rgb * sunReach + skyTerm + feedback;
 
-            // Lambertian outgoing radiance, now in the surface's OWN colour. uBoundsSpan.w stops
-            // being the scene's albedo and becomes a plain strength multiplier over it.
+            // Lambertian outgoing radiance in the surface's colour; uBoundsSpan.w is a strength.
             sum += weight * u.uBoundsSpan.w * albedoAt(hitPos) * incident / PI;
         }
 
@@ -429,14 +314,8 @@ void main() {
 
     int lane = int(gl_LocalInvocationIndex);
     ivec2 tile = blixTileOrigin(probe, dims);
-    // <b>A lane only owns a texel while there are as many lanes as texels.</b> This mapping is exact
-    // at 64 lanes over an 8x8 tile and silently catastrophic above it: lane 64 lands on row 8, which
-    // is the NEXT probe's tile, so raising the ray count made every dispatch stomp its neighbours.
-    // On screen that is not a subtle bias, it is a disco - and it invalidated the measurement taken
-    // to judge the ray count, which duly reported the corruption as a worse light leak.
-    //
-    // The ray count and the texel count are now independent: rays are lanes, texels are the first
-    // TILE*TILE lanes, and everything that writes the atlas is gated on owning one.
+    // Rays and tile texels are independent: every lane may trace a ray, but only the first 8x8
+    // lanes own atlas texels. Gating writes prevents higher ray counts from crossing tile bounds.
     const int tileTexels = BLIX_OCT_TILE * BLIX_OCT_TILE;
     bool ownsTexel = lane < tileTexels;
     ivec2 texel = ivec2(lane % BLIX_OCT_TILE, lane / BLIX_OCT_TILE);
@@ -444,44 +323,23 @@ void main() {
     // Is this probe's turn? A scatter over the three axes rather than whole slices, so the ones
     // refreshed together are spread through the volume and a sun change arrives evenly rather than
     // sweeping across the scene as a visible plane.
-    // <b>A probe nobody sampled is one nobody wanted lighting from.</b> Shading marks what it
-    // reads; this decays that mark and stops solving once it reaches zero. The tile is still
-    // carried forward, so a sleeping probe keeps its answer and wakes on its next turn rather than
-    // flashing black — the sleep condition is cheap and the WAKE condition is the one that has to
-    // be right.
+    // Shading marks probes it samples. Marks decay into sleeping state, while the stored tile is
+    // carried forward so waking resumes from a valid answer.
     float usage = imageLoad(uProbeUsage, probe).r;
     float decay = u.uSchedule.z;
 
-    // <b>Nothing sleeps until the field exists.</b> The usage grid is created zero-filled, so every
-    // probe begins asleep and only the ones shading marks ever wake. With a camera that has been
-    // moving that is invisible — it sweeps and wakes probes as it goes — but park it and 99.5% of
-    // the volume is still zero after six hundred frames, and the bounce is simply absent. More
-    // frames never helped, because this was never convergence.
-    //
-    // <b>And the marked set is not sufficient even in principle.</b> Light reaching an arcade comes
-    // through the courtyard probes by multi-bounce, and those are exactly the probes a camera
-    // inside the arcade never marks. Sleeping is a steady-state optimisation and it was gating the
-    // steady state's existence: a conduit nobody looks at is still load-bearing.
-    //
-    // A warm-up of several injection periods lets the whole volume solve once and propagate, after
-    // which the usage marks are an honest statement about what still needs refreshing.
+    // Sleeping starts only after a whole-volume warm-up. Multi-bounce paths depend on intermediate
+    // probes the current camera may never sample, so usage is a steady-state refresh hint rather
+    // than permission to omit initial transport.
     bool warm = u.uSchedule.x >= u.uWarmup.x;
     bool asleep = warm && decay > 0.0 && usage <= 0.02;
 
     int period = int(u.uSchedule.y);
     int slot = (probe.x * 5 + probe.y * 11 + probe.z * 17) % period;
 
-    // <b>There was a wake stride here and it gated nothing.</b> It tested `asleep && !eligible`
-    // and returned — but the very next test returns for `asleep` alone, so an eligible sleeping
-    // probe took the second exit and behaved identically. Waking never passed through it: a probe
-    // wakes when probe_usage marks it, which clears `asleep` before either test is reached. Deleted
-    // rather than repaired, because the pop it was aimed at turned out to be the hard replace below.
     if (asleep || slot != int(u.uSchedule.x) % period) {
-        // <b>Nothing to carry when there is only one atlas.</b> The copy below exists solely because
-        // the pair alternates: a probe that simply returned was written into ONE of the two buffers
-        // and stayed empty in the other, which read as the light swinging about between frames. With
-        // a single atlas its last answer is already where every reader will look, and this becomes
-        // the cheapest branch in the shader instead of the most expensive one in the pass.
+        // Alternating atlases require skipped tiles to be copied forward. A single-atlas solve can
+        // leave the existing tile in place.
         if (u.uSchedule.w > 0.5 && ownsTexel) {
             imageStore(uAtlas, tile + texel, texelFetch(uAtlasPrev, tile + texel, 0));
             imageStore(uDepthAtlas, tile + texel, texelFetch(uDepthAtlasPrev, tile + texel, 0));
@@ -496,12 +354,8 @@ void main() {
     float cellSize = length(u.uBoundsSpan.xyz / u.uOccupancyDims.xyz);
 
     // One ray per thread, marched once and shared with every texel that wants it.
-    // <b>The count the dial actually asks for.</b> uProbeDims.w has carried "rays per probe" since
-    // this shader was written and was never read: every probe marched all 256 lanes whatever the
-    // overlay said, and the census printed "1,296 probes x 64 rays" — a number computed from a
-    // slider with no effect. 256 is the ceiling, one ray per lane, so this can only reduce; lanes
-    // past the count contribute nothing to the reconstruction but still own their texel and still
-    // reach every barrier.
+    // uProbeDims.w selects active rays up to the 256-lane ceiling. Inactive lanes still participate
+    // in barriers and may own tile texels, but contribute zero to reconstruction.
     int rays = clamp(int(u.uProbeDims.w + 0.5), 8, BLIX_OCT_RAYS);
     vec3 d = fibonacci(lane, rays);
     float rayDistance, rayReach, raySunlit, rayClosure;
@@ -523,20 +377,9 @@ void main() {
     }
     barrier();
 
-    // <b>Is there any route by which light reaches this probe at all?</b> Measured over the scene,
-    // 38% of every surface's eight-probe blend weight targets probes it has no line of sight to,
-    // and the Chebyshev test recovers only 39% of that — it cannot reject a probe just behind a
-    // wall, because dist - mean is small there and var/(var + d^2) stays near 1. At 1.57 m spacing
-    // against architectural walls that is the common case.
-    //
-    // This is the cheap half of the answer. A probe buried in geometry, or one that sees under 2%
-    // of the sphere with no sun down any of its 64 rays, is in space light never enters — the
-    // "army of boxes inside the shell of the model" a viewer spotted from the chair. It is not a
-    // dim light source, it is not a light source. 7% of this grid (216 sealed + 132 buried of
-    // 4,992) is in that state, and nothing downstream knew.
-    //
-    // Deliberately NOT a brightness test: a room lit only by a doorway is dim and entirely legitimate,
-    // and thresholding on radiance would delete it. The test is geometric and asks about ROUTES.
+    // Reachability is geometric rather than brightness-based: buried probes, or probes with neither
+    // meaningful escape nor a sunlit encountered surface, must not become light sources. A dim room
+    // reached through a doorway remains valid.
     float escape = 0.0, litRays = 0.0;
     for (int i = 0; i < rays; ++i) { escape += sReach[i]; litRays += sSunlit[i]; }
     escape /= float(rays);
@@ -544,16 +387,12 @@ void main() {
     vec3 selfUvw = (origin - u.uBoundsMin.xyz) / u.uBoundsSpan.xyz;
     bool buried = texture(uOccupancy, clamp(selfUvw, vec3(0.0), vec3(1.0))).r > 0.5;
     float reachable = (!buried && (escape >= 0.02 || litRays > 0.0)) ? 1.0 : 0.0;
-    // <b>What share of the surfaces this probe can see is in sun.</b> The census says the sun
-    // contributes LESS bounce to the field than the sky does, while being 7.6x brighter — which
-    // would mean almost nothing a probe sees is lit, however bright the sun is. `sunlit` is already
-    // computed per ray for the reachability test; summing it costs nothing and turns a suspicion
-    // about the sun-ward voxel march into a number.
+    // The sunlit fraction is retained in the atlas as a transport diagnostic; the gather already
+    // computes it for reachability, so the aggregate adds no marches.
     float sunlitFraction = litRays / float(rays);
 
-    // Interior texels: the cosine-weighted average of every ray, which IS the irradiance arriving
-    // at a surface facing that texel's direction. Stored as irradiance so a reader multiplies by
-    // albedo and nothing else — the PI that used to sit at the read site lives here now.
+    // Interior texels store the cosine-weighted irradiance arriving at a surface facing the texel
+    // direction, so readers multiply by surface response without another PI conversion.
     const int interiorCount = BLIX_OCT_INTERIOR * BLIX_OCT_INTERIOR;
     if (lane < interiorCount) {
         ivec2 c = ivec2(lane % BLIX_OCT_INTERIOR, lane / BLIX_OCT_INTERIOR);
@@ -582,20 +421,10 @@ void main() {
             d2Sum += sDistance[i] * sDistance[i] * w;
             dWeight += w;
         }
-        // <b>Variance, not the second moment — and the difference is the banding.</b> This stored
-        // (mean, mean-square) and left the reader to form variance as mean2 - mean*mean. That is a
-        // difference of two large nearly-equal numbers, and the reader takes both through a BILINEAR
-        // fetch first, independently. The variance of two separately smoothed moments is not the
-        // variance of anything; it is catastrophic cancellation, unstable enough that the consumer
-        // has to clamp it off negative. Traced on one probe, it moved 0.35 to 2.06 across 6 cm of
-        // surface, the cubed Chebyshev turned that into an 8x weight swing, and the probe flickered
-        // in and out of the blend. Those switching contours are the bands on the stone.
-        //
-        // Differencing HERE, where both moments are exact and unfiltered, and storing the result
-        // makes the interpolated quantity a variance: positive, bounded, and smooth between texels.
-        // It loses the mixture's between-texel term, t(1-t)(meanA - meanB)^2 — which is precisely
-        // the unstable part — so the stored variance slightly understates a texel boundary. An
-        // understated variance is a STRICTER visibility test, which is the safe direction here.
+        // Store variance rather than a second moment. Forming mean2 - mean^2 after independently
+        // filtering both moments causes cancellation and unstable Chebyshev weights. Computing it
+        // before filtering keeps the sampled value positive and smooth; the omitted between-texel
+        // mixture term makes boundaries slightly stricter, which is the safe direction for leaks.
         float dMean = dWeight > 0.0 ? dSum / dWeight : 0.0;
         float dVar  = dWeight > 0.0 ? max(d2Sum / dWeight - dMean * dMean, 0.0) : 0.0;
         sDepthTexel[lane] = dWeight > 0.0 ? vec2(dMean, dVar) : vec2(0.0);
@@ -607,34 +436,16 @@ void main() {
     if (!ownsTexel) return;
     ivec2 src = blix_octBorderSource(texel, BLIX_OCT_TILE);
     vec3 value = sTexel[(src.y - 1) * BLIX_OCT_INTERIOR + (src.x - 1)];
-    // <b>Converge, do not replace.</b> A solve used to overwrite the tile outright, which is
-    // invisible for a probe that solves every `period` frames in a scene that has not changed — and
-    // a hard step for one that has been asleep, because its stored answer is however old the sleep
-    // was. Blending toward the new solution turns that step into a ramp of a few solves. The scene
-    // is static and the sun moves by hand, so the lag this introduces for an awake probe costs
-    // nothing; the smoothness it buys a waking one is the whole point.
-    // <b>Converge from an answer, never from nothing.</b> Blending toward the new solution turns a
-    // waking probe's jump into a ramp — but a probe that has NEVER solved holds the cleared tile,
-    // and ramping from that is a fade up out of black, which is a worse artifact than the pop it
-    // was meant to fix. The stored alpha is the marker: solves write 1.0, the clear leaves 0, so
-    // the first solve of a probe's life takes its answer outright.
+    // Established probes converge toward a new solve to avoid waking or relighting steps. A probe's
+    // first solve replaces the cleared tile outright; alpha distinguishes unsolved storage.
     vec4 previous = texelFetch(uAtlasPrev, tile + texel, 0);
-    // <b>Alpha carries two things, and the encoding is what lets it.</b> It was the has-ever-solved
-    // marker, needed so a first solve takes its answer outright instead of ramping up out of the
-    // cleared tile. Mapping the sunlit fraction into [0.5, 1] keeps every solved texel above 0.25
-    // and leaves the cleared value of 0 the only thing below it — so one channel answers "has this
-    // probe solved" and "how much sun did it see" without either question blurring the other.
+    // Alpha encodes sunlit fraction in [0.5, 1], leaving zero as the unambiguous unsolved marker.
     float converge = previous.a > 0.25 ? SOLVE_CONVERGE : 1.0;
     imageStore(uAtlas, tile + texel,
                vec4(mix(previous.rgb, value, converge), 0.5 + 0.5 * sunlitFraction));
     vec2 moments = sDepthTexel[(src.y - 1) * BLIX_OCT_INTERIOR + (src.x - 1)];
-    // <b>.b carries reachability, and it costs nothing.</b> The depth atlas is Rgba16F and has only
-    // ever used .rg, so the flag rides along in memory already allocated and already fetched by
-    // every consumer — no second texture, no second binding, no extra bandwidth. It is constant
-    // across the tile, so the bilinear fetch that reads the moments returns it exactly.
-    // Alpha carries the mean ray closure. It is constant across the tile, like the reachability
-    // flag beside it, and the atlas is Rgba16F with .a never having been read — so the instrument
-    // costs no texture, no binding and no bandwidth that was not already moving.
+    // Depth .b stores tile-constant reachability and .a stores mean closure. Both travel with the
+    // already allocated and sampled RG depth moments.
     imageStore(uDepthAtlas, tile + texel, vec4(moments, reachable, sMeanClosure));
     if (lane == 0) imageStore(uProbeUsage, probe, vec4(max(usage - decay, 0.0)));
 }

@@ -1,19 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Step 7 of the Vulkan reshape (see docs/vulkan-reshape-shaderlab-target.md):
-       the Khronos Intel Sponza port to the new engine surface (Vector A
-       binding model + Vector B render graph). VulkanLit ships the shape
-       diversity story (many distinct shaders); VulkanSponza ships the
-       volume story (many materials, double-sided foliage, alpha-test
-       cutouts).
-
-       Scaffold scope: window + 2-pass graph (scene HDR -> present) +
-       glTF load. PBR/IBL/cascade-shadows/post-process land in follow-up
-       pushes; the existing OpenGL Blix.Demos.SponzaModern is the
-       reference for "what eventually goes here." -->
+  <!-- Heavy-scene rendering and measurement application. It deliberately owns
+       the current Sponza graph, scene-specific draw policy, A/B modes, and
+       research tuning; reusable mechanisms graduate to engine projects only
+       after their contract and another consumer are clear. See docs/renderer.md. -->
 
   <ItemGroup>
-    <ProjectReference Include="..\Blix\Blix.csproj" />
+    <ProjectReference Include="..\..\Blix\Blix.csproj" />
     <ProjectReference Include="..\..\Blix.Core\Blix.Core.csproj" />
     <ProjectReference Include="..\..\Blix.Assets\Blix.Assets.csproj" />
     <ProjectReference Include="..\..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
@@ -36,33 +29,29 @@
     <RootNamespace>Blix.Demos.VulkanSponza</RootNamespace>
   </PropertyGroup>
 
-  <!-- Reuse the existing SponzaModern asset tree (populated by
-       tools/setup-sponza-modern.sh). Linked in, not copied, so a single
-       checkout sources both the GL and Vulkan demos from one ~2GB pack
-       set. CopyToOutputDirectory="PreserveNewest" mirrors what the GL
-       demo does so the Vulkan bin/ ends up self-contained at runtime.
+  <!-- Link the cooked Sponza pack tree populated by tools/setup-sponza-modern.sh
+       into a bin-local Assets directory when BLIX_SPONZA_ASSETS is not set.
 
        When BLIX_SPONZA_ASSETS is set (pack set kept on an external SSD
        shared across machines), skip the copy entirely — the runtime
-       reads straight from that path. See Program.cs OnLoad(). -->
+       reads straight from that path. See SponzaLoop.Setup.cs. -->
   <ItemGroup Condition="'$(BLIX_SPONZA_ASSETS)' == ''">
-    <None Include="..\..\Blix.Demos.SponzaModern\Assets\**\*"
+    <None Include="..\Blix.Demos.SponzaModern\Assets\**\*"
           Exclude="..\Blix.Demos.SponzaModern\Assets\.gitignore;..\Blix.Demos.SponzaModern\Assets\.gitkeep"
           Link="Assets\%(RecursiveDir)%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
-  <!-- glslc lookup mirrors VulkanLit's. The shader library #include path
-       isn't wired up in the scaffold — these shaders are intentionally
-       self-contained until the step-6 shader library settles. -->
+  <!-- Tool lookup mirrors the other shader-bearing applications. Shared GLSL
+       includes are resolved by the repository shader build target. -->
   <PropertyGroup>
     <Glslc Condition="'$(Glslc)' == '' AND Exists('/opt/homebrew/bin/glslc')">/opt/homebrew/bin/glslc</Glslc>
     <Glslc Condition="'$(Glslc)' == '' AND Exists('/usr/local/bin/glslc')">/usr/local/bin/glslc</Glslc>
     <Glslc Condition="'$(Glslc)' == ''">glslc</Glslc>
     <!-- spirv-cross is located the same way as glslc (both ship in the Vulkan
          SDK / Homebrew). It emits a per-shader reflection sidecar the runtime
-         loads instead of hand-authored binding tables; see docs/renderer.md
-         "SPIR-V reflection". Install with: brew install spirv-cross. -->
+         loads instead of hand-authored binding tables; see the Shaders section
+         of docs/renderer.md. Install with: brew install spirv-cross. -->
     <SpirvCross Condition="'$(SpirvCross)' == '' AND Exists('/opt/homebrew/bin/spirv-cross')">/opt/homebrew/bin/spirv-cross</SpirvCross>
     <SpirvCross Condition="'$(SpirvCross)' == '' AND Exists('/usr/local/bin/spirv-cross')">/usr/local/bin/spirv-cross</SpirvCross>
     <SpirvCross Condition="'$(SpirvCross)' == ''">spirv-cross</SpirvCross>
@@ -104,8 +93,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Shared GLSL library (src/Blix.Shaders), resolved via the -I path in the
-         CompileSpirV Exec below. Listed so edits retrigger the cook. -->
+    <!-- Shared GLSL library (src/Blix.Shaders), resolved by the shared shader
+         build target. Listed so edits retrigger compilation. -->
     <GlslInclude Include="..\..\Blix.Shaders\fullscreen.glsl" />
   </ItemGroup>
 

@@ -3,20 +3,18 @@ using System.Numerics;
 namespace Blix.Graphics.Images;
 
 /// <summary>
-/// A baked grid of how much sky each point in a scene can see, as L1 spherical harmonics.
+/// A baked grid of how much sky each point in a scene can see, as L2 spherical harmonics.
 /// </summary>
 /// <remarks>
 /// <para>
 /// Written by <c>blix cook sky</c>, read by a renderer that wants to know what a surface can
-/// actually see. The contents are GEOMETRY — what escapes the building — so the same file stays
-/// correct at dawn, at noon, and under a different sky entirely. That is the whole reason it is a
-/// bake rather than a lightmap.
+/// actually see. The contents describe geometry rather than a particular sun or sky, so one bake
+/// remains valid as lighting changes.
 /// </para>
 /// <para>
-/// Four coefficients per cell, which is one Rgba16F texel, so the runtime uploads it as a 3D
-/// texture and the shader evaluates it for whatever normal a fragment has. A scalar per cell would
-/// have been smaller and would have answered the wrong question: a cell has no normal, and
-/// hemisphere visibility depends entirely on which way a surface faces.
+/// Nine coefficients per cell are padded to twelve and uploaded as three RGBA16F 3D textures. The
+/// shader evaluates directional visibility for the surface normal; a scalar per cell cannot express
+/// which part of the sky is open.
 /// </para>
 /// </remarks>
 public sealed record BlixSkyVolume(
@@ -28,15 +26,8 @@ public sealed record BlixSkyVolume(
     /// The occupancy grid the visibility was traced through, shipped alongside it.
     /// </summary>
     /// <remarks>
-    /// <b>Because the bounce has to be solved at runtime, and it needs the same geometry.</b> What
-    /// lights a courtyard is the sun off its walls, which no sun-independent bake can carry — so the
-    /// probes' visibility is baked and the bounce is injected each frame by marching this grid with
-    /// the current sun. Shipping the grid is what makes "bake geometry, solve lighting dynamically"
-    /// an arrangement rather than a slogan: the expensive, sun-invariant half is precomputed and the
-    /// cheap, sun-dependent half is not.
-    ///
-    /// One byte per voxel rather than one bit. A bitmask is eight times smaller and cannot be a
-    /// sampled 3D texture, and the consumer is a shader.
+    /// Runtime bounce injection marches the same geometry with the current sun. One byte per voxel
+    /// preserves partial foliage density and is directly sampleable as a 3D texture.
     /// </remarks>
     public bool HasOccupancy => Occupancy is { Length: > 0 };
 
@@ -44,39 +35,22 @@ public sealed record BlixSkyVolume(
     /// What colour each cell's surface is, RGBA8 at half the occupancy resolution.
     /// </summary>
     /// <remarks>
-    /// <b>Without it the injection has no idea what it is bouncing off.</b> The march finds a
-    /// surface and knows only that one is there, so every bounce took a single scalar albedo for the
-    /// whole scene — which meant the light could only ever be the colour of the sun, and Sponza's
-    /// one famous effect, red and green bleeding off the curtains, was absent by construction
-    /// rather than merely faint.
-    ///
-    /// Coarser than the occupancy it accompanies, because colour is low-frequency where occlusion
-    /// is not: a curtain is one colour over its whole area, but its EDGE has to be sharp or it stops
-    /// being a curtain. Half resolution keeps this at ~3 MB against ~25 MB at full.
-    ///
-    /// Gamma-2.0 encoded (the byte holds sqrt of linear). Eight linear bits leave almost no codes
-    /// below 0.05, and that is precisely the range a saturated fabric occupies in the two channels
-    /// it absorbs — curtain_02 is (0.031, 0.099, 0.014), so two of its three channels would quantise
-    /// to a handful of steps. The shader squares it back on read.
+    /// Surface colour is lower-frequency than occupancy, so the default baker uses half resolution.
+    /// Bytes store the square root of linear colour to preserve precision in dark saturated
+    /// channels; the shader squares values on read.
     /// </remarks>
     public bool HasAlbedo => Albedo is { Length: > 0 };
 
     /// <summary>Nine floats per cell: L0, L1 x/y/z, then the five L2 coefficients.</summary>
     /// <remarks>
-    /// <b>Twelve on disk, because the runtime reads them as three RGBA texels.</b> Nine does not
-    /// divide into four, and the three wasted slots buy hardware trilinear filtering on a small 3D
-    /// texture — which is the entire reason this is spherical harmonics and not an octahedral atlas.
-    /// That was measured: the atlas reconstructs better and doubled the frame.
+    /// Twelve are stored so the coefficients divide into three RGBA texels and retain hardware
+    /// trilinear filtering. The final three slots are padding.
     /// </remarks>
     public const int FloatsPerCell = 12;
 
     private const ulong Magic = 0x594B53_58494C42UL; // "BLIXSKY"
-    // v2 added the albedo grid after the occupancy block. No back-read: the bake takes 1.6 s and
-    // nothing ships older files, so re-cooking is cheaper than carrying a migration.
-    // v3: L2 spherical harmonics, nine coefficients where there were four. L1 cannot express
-    // "bright in that cone, dark elsewhere", which is both of this scene's visibility failures — a
-    // vault ceiling inheriting an opening's direction-independent L0 and reading as sky-facing, and
-    // a courtyard floor losing the narrow zenith cone that is all the light it gets.
+    // Current layout: L2 coefficients, followed by occupancy and albedo grids. No older layout is
+    // accepted; regenerate the scene-level bake instead.
     private const int Version = 3;
 
     public static void Write(string path, BlixSkyVolume v)
@@ -113,7 +87,6 @@ public sealed record BlixSkyVolume(
         return new BlixSkyVolume(min, max, sx, sy, sz, coeffs, ox, oy, oz, occ, ax, ay, az, alb);
     }
 
-    /// <summary>The volume as Rgba16F bytes, in the order a 3D texture upload wants.</summary>
     /// <summary>One of the three RGBA16F volumes the nine coefficients are split across.</summary>
     /// <remarks>
     /// Split rather than interleaved because a 3D texture holds four channels, and the shader wants

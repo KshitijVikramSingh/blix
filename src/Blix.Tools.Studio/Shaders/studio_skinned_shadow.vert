@@ -21,8 +21,8 @@ layout(set = 0, binding = 0) uniform ShadowFrame {
 
 // 1024 = StudioRig.MaxBones (128) x StudioRig.MaxInstances (8). The literal is here because the
 // build's SPIR-V target does not pass -D, so this cannot be a define — which means the number
-// lives in two files, and that is precisely what the probe checks: it reads the reflected
-// block size back and fails non-zero if it stops matching the C# constants.
+// lives in two files. Blix.Test.Studio reads the reflected block size and fails if it stops
+// matching the C# constants; StudioRig owns the corresponding asset limit at load.
 layout(std430, set = 3, binding = 0) readonly buffer Bones {
     mat4 m[1024];
 } bones;

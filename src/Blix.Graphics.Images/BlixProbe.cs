@@ -4,55 +4,44 @@ using System.Runtime.InteropServices;
 
 namespace Blix.Graphics.Images;
 
-// Engine-native binary IBL probe container. One file per HDR sky source --
-// bundles the equirect-to-cube conversion, the GGX-prefiltered specular
-// mip pyramid, the cosine-weighted diffuse irradiance cube, the BRDF
-// LUT, and the auto-detected sun direction. Cooking is offline (the same
-// Blix.Tools.Cook tool that produces .blixtex); loading at runtime is a
-// header read + four blob copies into GPU textures, replacing the ~2s
-// of equirect convolution + ~1.6s BRDF LUT integration the runtime
-// EnvironmentBaker would otherwise burn at startup.
+// Engine-native binary IBL probe container. One file per HDR sky source bundles the visible
+// environment, diffuse irradiance, GGX and Charlie prefilter chains, their lookup tables, and the
+// detected sun. Cooking performs all convolution; runtime loading only reads and uploads blobs.
 //
-// File layout (little-endian), v2:
+// File layout (little-endian), v4:
 //
 //   The shared Blix cooked preamble first -- see Blix.Cooked/CookPreamble.cs.
 //   Then this format's own header, at offsets relative to the end of it:
 //
 //   offset  size  field
-//   ---------------------------------
-//   0       4     flags       (bit 0 = has sun direction)
+//   ------------------------------------------
+//   0       4     flags       (bit 0 = sun direction, bit 1 = sun irradiance)
 //   4       4     envFaceSize
 //   8       4     irrFaceSize
 //   12      4     prefilterBaseSize
 //   16      4     prefilterMipCount
 //   20      4     brdfLutSize
-//   24      12    sunDirection (vec3 float32, valid only when flag bit 0)
-//   --------- 36 bytes (format header) ---------
+//   24      12    sunDirection  (vec3 float32, valid only when flag bit 0)
+//   36      12    sunIrradiance (vec3 float32, valid only when flag bit 1)
+//   --------- 48 bytes (format header) ---------
 //                 envCube      : 4 channels * 6 faces * envFaceSize^2     Halves (RGBA16F)
 //                 irrCube      : 4 channels * 6 faces * irrFaceSize^2     Halves (RGBA16F)
 //                 prefilter[k] : 4 * 6 * (prefilterBaseSize>>k)^2 Halves, k=0..prefilterMipCount-1
 //                 brdfLut      : brdfLutSize * brdfLutSize * 4 bytes      (RGBA8)
+//                 sheenFaceSize, sheenMipCount, sheenLutSize               (3 int32 values)
+//                 sheen[k]     : 4 * 6 * (sheenFaceSize>>k)^2 Halves
+//                 sheenLut     : sheenLutSize * sheenLutSize * 4 bytes     (RGBA8)
 //
-// All blobs are concatenated tightly in the order above. No per-blob
-// length fields -- sizes are recoverable from the header dimensions.
+// Blobs are tightly concatenated. Their dimensions provide the lengths; there are no per-blob
+// length fields. The reader accepts v4 only, so older probes must be recooked.
 public static class BlixProbe
 {
     public const uint Magic = 0x50584C42; // "BLXP" little-endian
 
-    // v2: the shared cooked preamble replaces the private magic+version pair.
-    // This format already recorded five of its six cook parameters in its own
-    // header -- the one of the three that had worked out it should be
-    // reproducible -- and the preamble generalises that to all of them.
-    // v3: the sun's IRRADIANCE rides with its direction. Without it a consumer knows where the sun
-    // is and not how bright, so it reaches for a hand-tuned intensity — and since v3 also removes
-    // the sun's disc from the diffuse and specular integrals, a reader that ignores this number is
-    // rendering a sky with the sun taken out of it.
+    // Retained as the identifier of the previous layout; no current reader accepts it.
     public const uint Version3 = 3;
-    // v4: the sheen half of the lighting model — a second prefiltered cube convolved with the
-    // CHARLIE distribution, and the Charlie lobe's directional-albedo table. A GGX cube blurred
-    // differently is not sheen: GGX distributes microfacets about the normal and cloth is fibres
-    // standing away from it, so using the specular cube deletes the grazing rim that is the whole
-    // visual signature of fabric. No back-read; re-cook, as every bump here has.
+
+    /// <summary>The current probe layout, including sun irradiance and Charlie sheen data.</summary>
     public const uint Version4 = 4;
     public const int HeaderSize = 48;
 

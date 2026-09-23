@@ -20,24 +20,19 @@ public readonly record struct MaterialTextures(
 //   - cooked-`.blixtex` (streamed, mip-chained) vs decoded-PNG routing,
 //   - per-source dedup,
 //   - standard glTF default fallbacks (white / flat-normal / black / neutral),
-//   - a budgeted streaming queue (ResourceUploader) — drive Drain() per frame.
+//   - a budgeted mip-upload queue (ResourceUploader) — drive Drain() per frame.
 //
 // It does NOT build the material UBO or descriptor set — binding is the
 // renderer's, and (post SPIR-V reflection) the UBO layout is the game's. The
 // caller does `loader.Load(gltfMaterial)` → writes its UBO from the material's
-// scalar factors → binds the returned handles. Lifted from VulkanSponza's
-// hand-rolled `UploadOrFallback`; sits beside GltfSceneInstance (its GL cousin).
+// scalar factors → binds the returned handles.
 public sealed class GltfTextureLoader
 {
     private readonly IGraphicsDevice device;
     private readonly ResourceUploader uploader;
 
-    // <b>One registry where there were five dictionaries, and it is not a tidy-up.</b> The five
-    // were per CHANNEL because each channel uploads at its own format — albedo sRGB, normal linear —
-    // and that distinction is real, so it survives as half the registry's key. What did not survive
-    // is the other half: they were keyed by the GltfTexture OBJECT, and that type has no value
-    // equality, so two loads of one file uploaded the same pixels twice and nothing could be shared
-    // or counted. See TextureRegistry.
+    // The registry keys resource identity together with channel format so cross-import sharing
+    // preserves sRGB/linear distinctions.
     private readonly TextureRegistry registry;
 
     /// <summary>What this loader has resident — distinct textures, their bytes, and uploads avoided.</summary>
@@ -53,11 +48,8 @@ public sealed class GltfTextureLoader
     /// A registry to share with other owners, or null to keep one of this loader's own.
     /// </param>
     /// <remarks>
-    /// <b>Sharing is a parameter rather than a default, because who shares with whom is the
-    /// caller's to decide.</b> A loader given its own registry behaves exactly as this class always
-    /// did, only keyed properly; two loaders handed the SAME registry upload one copy of a texture
-    /// they both want. Making it implicit would decide a lifetime on the caller's behalf, and the
-    /// lifetime is the only interesting part.
+    /// Sharing is explicit because the caller also chooses the associated lifetime scope. Two
+    /// loaders given the same registry reuse identified textures; null creates a private scope.
     /// </remarks>
     public GltfTextureLoader(IGraphicsDevice device, TextureRegistry? shared = null)
     {
@@ -83,14 +75,14 @@ public sealed class GltfTextureLoader
             new byte[] { 255, 255, 255, 255 }, "gltf.default.ao");
     }
 
-    // The streaming queue: drive Drain(budgetMs) each frame; PendingCount == 0
+    // The upload queue: drive Drain(budgetMs) each frame; PendingCount == 0
     // when every texture's mips have landed (callers gate their full-detail
     // render path on this).
     public int PendingCount => uploader.PendingCount;
     public void Drain(double budgetMillis) => uploader.Drain(budgetMillis);
 
     // Resolve a material's five textures to GPU handles (defaults where absent),
-    // deduped + streamed. Same material/texture instance returns cached handles.
+    // deduplicated by resource identity and format, with budgeted cooked-mip uploads.
     public MaterialTextures Load(GltfMaterial? material) => new(
         Resolve(material?.BaseColorTexture, fallbackAlbedo, TextureFormat.Rgba8Srgb, "albedo"),
         Resolve(material?.NormalTexture, flatNormal, TextureFormat.Rgba8, "normal"),
@@ -119,8 +111,9 @@ public sealed class GltfTextureLoader
             // Cooked .blixtex: pre-baked BC (or Rgba8) mip chain on disk. tex.Format
             // already encodes the sRGB choice (BC7Srgb albedo vs BC7Unorm MR, BC5
             // normal), so use it directly. Allocate the chain now (materials bind a
-            // stable handle immediately) and stream the per-mip uploads budgeted over
-            // the next frames. One file open per texture (not per mip) — see
+            // stable handle immediately) and queue per-mip uploads across later drains. Callers must
+            // not sample undefined levels; current applications hold a flat preview until the queue
+            // drains. One file open per texture (not per mip) — see
             // CreateBufferedMipReader — which matters on a high-open-latency volume.
             handle = device.AllocateTexture2DMips(
                 new TextureDescription(tex.Width, tex.Height, tex.Format, SamplerDescription.LinearRepeat),

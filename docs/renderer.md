@@ -1,225 +1,386 @@
 # Renderer
 
-The Vulkan renderer reference — the layers between game code and the GPU, and the techniques they implement. This is the complement to the other two docs: [`architecture.md`](architecture.md) covers the project graph, host contracts, and the **binding model**; [`blix.md`](blix.md) covers the game-facing layer (loop, scene, cameras, lights). This doc covers what sits in the middle: how you declare a frame, record draws, write shaders, and which rendering techniques ship.
+Blix has one active graphics backend and several renderer compositions. This page separates
+the contracts that applications can reuse from the rendering choices made by
+Studio and from the active research in Vulkan Sponza.
 
-The renderer is one layer of a larger pipeline — cooking, streaming, LOD, and bundling all feed it, and on a heavy scene those are what make a frame affordable (see [`README.md`](../README.md) and the asset-pipeline notes in [`architecture.md`](architecture.md)). This doc covers the rendering layer itself. There is no `SceneRenderer` that owns read→cull→draw — game code composes a frame itself out of the primitives below. `VulkanLit` and `VulkanSponza` (`src/Blix.Demos.VulkanLit/`, `src/Blix.Demos.VulkanSponza/`) are the working references; the shader files cited throughout are the authoritative implementation of each technique.
+For adjacent concerns, see [Architecture](architecture.md) for project
+boundaries and the binding model, [Assets](assets.md) for cooking and deferred
+loading, [Workflow](workflow.md) for the supported commands, and
+[Blix](blix.md) for the game-facing loop, views, cameras, and lights.
 
-## Layers
+## Rendering roles
 
-- **`Blix.Graphics`** — the graphics command language. Opaque handles (`PipelineHandle`, `VertexBufferHandle`, `TextureHandle`, `MaterialHandle`, …), `PipelineDescription`, render surfaces, the `RenderCommandList`, vertex layouts, shader sources, and the GLSL include preprocessor. Backend-neutral.
-- **`Blix.Graphics.Vulkan`** — the backend (the sole `IGraphicsDevice`). Owns the instance/device/swapchain, the `RenderGraph`, `MaterialBindings`, per-draw transient descriptor pools, and SPIR-V reflection. On macOS it runs through MoltenVK.
-- **`Blix.Render`** — engine-facing rendering helpers: `Mesh`, `MeshBundler`, `ResourceUploader`, `AsyncLoadQueue<T>`, the 2D path (`SpriteBatch` + `Font`), and the fullscreen/post primitives (`FullscreenPass`, `PostChain`).
-- **`Blix.Graphics.Images`** — image decode (StbImageSharp) and the HDR IBL bake (`EquirectangularToCubemap`, `PbrIblBaker`, `BlixProbe`).
-- **`Blix.Shaders`** — the shared GLSL library (`#include`d by demo shaders).
+There is deliberately no engine-owned `SceneRenderer` or universal default
+pipeline. An application declares its frame and records its draws explicitly.
+Four roles make that practical without turning every application into a copy of
+the same renderer:
 
-## The render graph
+| Role | Owner | Contract |
+| --- | --- | --- |
+| Reusable mechanisms | `Blix.Graphics`, `Blix.Graphics.Vulkan`, `Blix.Render`, `Blix.Shaders` | Commands, resources, graph execution, binding, batches, and shader vocabulary. No authored look or mandatory pass topology. |
+| Application pipeline | Each game, demo, or tool | Chooses passes, shaders, formats, quality, and presentation for its own needs. |
+| Studio reference rendering pipeline | `Blix.Tools.Studio` | Optional coherent rendering setup for model and rig inspection. `StudioLook` owns its authored defaults. |
+| Research renderer | `Blix.Demos.VulkanSponza` | Heavy-scene experiments, measurements, diagnostics, and promotion decisions. Its graph is not an engine promise. |
 
-`RenderGraph` (`src/Blix.Graphics.Vulkan/RenderGraph.cs` + `RenderGraph.Builders.cs`) is declarative: you declare resources and passes once at setup, `Compile()` once, then `Execute()` per frame. The graph infers the image-layout barriers between passes from the declared `Read`/`Target`/`Write` edges.
+The distinction is the main rule for reading this repository: the presence of
+a technique in Sponza does not make it a shared feature, and the presence of a
+default in `StudioLook` does not impose that choice on a game.
 
-**Declare resources:**
+## Layer map
+
+- **`Blix.Graphics`** is the backend-independent command and resource
+  vocabulary: opaque handles, `IGraphicsDevice`, `RenderCommandList`, draw and
+  dispatch commands, pipeline descriptions, render surfaces, vertex layouts,
+  shader interfaces, and the GLSL preprocessor.
+- **`Blix.Graphics.Vulkan`** is the only current backend. It owns Vulkan device
+  and swapchain work, `RenderGraph`, SPIR-V reflection, `MaterialBindings`,
+  transient descriptor and vertex storage, indirect drawing, compute dispatch,
+  timing, and the live resource registry.
+- **`Blix.Render`** contains higher-level helpers such as `Mesh`,
+  `MeshBundler`, `FullscreenPass`, `PostChain`, `SpriteBatch`, `Font`,
+  `ParticleBatch`, `InstanceBuffer`, `InstancedBatch`, and upload queues. It is
+  engine-facing but currently Vulkan-backed; it is not a backend-neutral
+  abstraction layer.
+- **`Blix.Graphics.Images`** owns image decode, CPU tonemapping, environment
+  conversion, probe baking, and cooked probe upload.
+- **`Blix.Shaders`** is the shared, `blix_`-prefixed GLSL vocabulary included by
+  application shaders.
+- **Application projects** own shader programs, graph composition, culling,
+  draw grouping, material policy, presentation, and the final visual result.
+
+## Frame construction with `RenderGraph`
+
+`RenderGraph` is a persistent frame topology. Setup declares resources and
+passes, `Compile()` validates and allocates them, each frame records only the
+work needed that frame, and `Execute()` emits the recorded graphics and compute
+work.
 
 ```csharp
-var sceneColor = graph.ColorTarget("scene", TextureFormat.Rgba16F,
-    new MatchSwapchainGraphSize(), samples: 4);          // 4× MSAA HDR target
-var sceneDepth = graph.DepthTarget("depth", new MatchSwapchainGraphSize(), samples: 4);
-var sunShadow  = graph.DepthTarget("sun.shadow", new FixedGraphSize(2048, 2048));
-var pointCube  = graph.DepthCube("point.shadow", faceSize: 1024);  // .Face(0..5)
-```
+var graph = new RenderGraph(device);
+var size = new MatchSwapchainGraphSize();
 
-`GraphSize` is either `FixedGraphSize(w, h)` or `MatchSwapchainGraphSize(scale)` (resizes with the window).
+var hdr = graph.ColorTarget("hdr", TextureFormat.Rgba16F, size);
+var depth = graph.DepthTarget("depth", size);
+var shadow = graph.DepthTarget("sun-shadow", new FixedGraphSize(2048, 2048));
 
-**A multisampled attachment is not sampleable.** `ResolveColor` has always been the way to get a 1× colour image out of an MSAA pass; `ResolveDepth` is the same for depth, and exists because a pass can multisample its depth and still need it readable afterwards — the studio's present pass writes `gl_FragDepth` from the scene's depth so debug gizmos depth-test against the scene. Depth resolve is a structure chained onto `VkSubpassDescription2`, so **a pass that asks for it is built with `vkCreateRenderPass2`**; every pass that does not keeps the original path unchanged. The resolve mode is `SAMPLE_ZERO` — averaging depth across a silhouette produces a surface that is not there.
+var shadowPass = graph.GraphicsPass("shadow")
+    .Depth(shadow, LoadOp.Clear, StoreOp.Store)
+    .Shader(shadowInterface)
+    .Handle;
 
-`VulkanGraphicsDevice.MaxMsaaSamples` reports the highest count colour *and* depth can both do, since a render pass requires them to agree. Over-asking is a native Metal assertion, not a Vulkan error, so callers clamp to it.
-
-**Declare passes** with the fluent builder, then `Compile`:
-
-```csharp
 var litPass = graph.GraphicsPass("lit")
-    .Target(sceneColor, LoadOp.Clear, StoreOp.Store)
-    .ResolveColor(presentColor)          // MSAA resolve destination
-    .ResolveDepth(presentDepth)          // 1x depth, for anything that SAMPLES it
-    .Depth(sceneDepth, LoadOp.Clear, StoreOp.Store)
-    .Read(sunShadow)                     // sampled as a texture this pass
-    .Shader(litInterface, skyInterface)  // shaders this pass supports
-    .Build();
-
-var fogPass = graph.ComputePass("froxel")
-    .Read(sceneDepth).Write(froxelVolume).Shader(froxelInterface).Build();
+    .Target(hdr, LoadOp.Clear, StoreOp.Store)
+    .Depth(depth, LoadOp.Clear, StoreOp.Store)
+    .Read(shadow)
+    .Shader(litInterface)
+    .Handle;
 
 graph.Compile();
-```
 
-After `Compile()`, query sampleable handles and synthetic render surfaces:
-`GetColorTexture(handle)`, `GetDepthTexture(handle)`, `GetDepthCubeTexture(cube)`, `GetPassSurface(pass)` (pass that handle as `PipelineDescription.RenderTarget`).
-
-**Record per frame** inside `OnRender`, then execute:
-
-```csharp
-graph.Pass(litPass, builder => { /* record draws — see below */ });
-graph.Dispatch(fogPass, new DispatchCommand(froxelPipeline, gx, gy, gz, uniforms, textures));
+// Per frame:
+graph.Pass(shadowPass, pass => RecordCasters(pass));
+graph.Pass(litPass, pass => RecordScene(pass));
 graph.Execute(commandList);
 ```
 
-`VulkanLit`'s topology, for reference:
-`sun-shadow → spot0-shadow → spot1-shadow → 6× point-cube-faces → lit-scene → bloom-bright → bloom-blurH → bloom-blurV → present`.
+Graph resources are persistent across frames. `FixedGraphSize` keeps an exact
+size; `MatchSwapchainGraphSize(scale)` follows swapchain recreation at the
+requested scale. Current graph-owned resource factories cover two-dimensional
+colour and depth targets plus depth cubes. After compilation, callers retrieve
+the concrete handles with `GetColorTexture`, `GetDepthTexture`,
+`GetDepthCubeTexture`, and `GetPassSurface`.
 
-## Recording draws
+Pass declaration order is execution order. Read and write edges validate the
+topology and drive image transitions and compute barriers; they do not schedule
+or reorder passes. A pass that is not recorded in a frame is skipped. This is
+how the two TAA parity passes in Sponza share one declared topology while only
+one runs on a given frame.
 
-Inside a `graph.Pass` scope you get a `RenderPassBuilder` (`src/Blix.Graphics/RenderCommandList.cs`). The core call is `DrawIndexed`, with overloads that add a per-material descriptor set, a per-draw set, push constants, shared-buffer sub-ranges, and a scissor:
+Compilation rejects invalid topology early: duplicate or empty names, missing
+attachments, undeclared shaders, ordinary reads before a producer, incompatible
+resolves, and other resource errors. A pipeline is created against the
+synthetic surface returned for its pass, so attachment formats and sample counts
+remain part of pipeline compatibility.
+
+### Graphics, compute, and external resources
+
+A graphics pass declares colour targets, one depth target, resolves, sampled
+reads, and the shader interfaces it permits. A compute pass declares sampled or
+read-only inputs, storage-image writes, and one shader interface; per-frame work
+is recorded with `graph.Dispatch(...)` and is interleaved with graphics work in
+declaration order.
+
+Graph colour targets can serve as compute storage images. Device-created
+storage textures, including three-dimensional textures, and buffers are not
+graph-owned resources. Applications may use them in dispatch bindings, but
+their lifetime and any ordering not represented by graph edges remain the
+caller's responsibility. Sponza's froxel and probe atlases are the important
+current example of that boundary.
+
+### MSAA and resolves
+
+A multisampled attachment cannot be sampled as an ordinary texture. Render to
+the multisampled target, resolve colour into a single-sample colour target, and
+resolve depth into a single-sample depth target when a later pass needs to read
+it:
 
 ```csharp
-builder.DrawIndexed(vb, ib, pipeline, indexCount, uniforms, textures);
-builder.DrawIndexed(vb, ib, pipeline, indexCount, uniforms, textures, material);          // + set 2
-builder.DrawIndexed(vb, ib, pipeline, indexCount, uniforms, textures, material,
-    pushConstants, indexOffset, vertexOffset);                                            // shared VB/IB sub-range
+var hdrMsaa = graph.ColorTarget("hdr-msaa", TextureFormat.Rgba16F, size, samples: 4);
+var hdr = graph.ColorTarget("hdr", TextureFormat.Rgba16F, size);
+var depthMsaa = graph.DepthTarget("depth-msaa", size, samples: 4);
+var depth = graph.DepthTarget("depth", size);
+
+var scene = graph.GraphicsPass("scene")
+    .Target(hdrMsaa, LoadOp.Clear, StoreOp.Store)
+    .ResolveColor(hdr)
+    .Depth(depthMsaa, LoadOp.Clear, StoreOp.Store)
+    .ResolveDepth(depth)
+    .Shader(sceneInterface)
+    .Handle;
 ```
 
-For GPU-driven rendering, `DrawIndexedIndirect` issues one `vkCmdDrawIndexedIndirect` over a buffer of draw structs — group objects by `(pipeline, material)` and emit one per group. `VulkanSponza` fills the indirect buffer per cascade after frustum culling.
+Colour and depth sample counts must agree. Clamp an application request to
+`VulkanGraphicsDevice.MaxMsaaSamples`. Depth uses `SAMPLE_ZERO` resolution: an
+average across a silhouette would invent a depth surface that was never drawn.
 
-For drawing one mesh many times, `DrawIndexedInstanced` issues a single `vkCmdDrawIndexed(instanceCount=N)`; the vertex shader reads `gl_InstanceIndex` into a per-instance storage buffer for its transform/tint. Two `Blix.Render` layers wrap this, kept deliberately separate: **`InstanceBuffer`** is the data layer — a frames-in-flight-replicated set-3 SSBO of `InstanceData {mat4 model; vec4 tint}`, exposing `Write(span)`, its `Material` handle, and the static `Slot` contract a shader composes into its interface. **`InstancedBatch`** is the ergonomics layer — constructed with an already-built `(mesh, pipeline, InstanceBuffer)`, it stages instances via `Begin(push)/Add/End` and records the one draw. It owns no GPU resources and no shader: the caller brings the pipeline (and thus the material — lighting, fog, whatever), so the engine ships no built-in instanced shader. `Blix.Demos.VulkanInstanced` is the 5000-cube proof gate; `Blix.Demos.Runner` draws its whole world (tiles, obstacles, coins) through per-mesh `InstancedBatch`es.
+### Cross-frame history
 
-**The binding model.** Materials bind by *reflected slot*, not by name-keyed bags. `CreateMaterial(program, setIndex, framesInFlight)` allocates a `MaterialBindings` against one SPIR-V-reflected descriptor set; `SetUniform(binding, "uName", value)` / `SetTexture(binding, handle)` write it by name, and `.Handle` is the `MaterialHandle` a draw (or `GameObject`) carries. Sets are organised by lifetime — set 0 per-frame, set 1 per-pass, set 2 per-material, set 3 per-draw — and per-draw data rides push constants (≤256 B) or a transient descriptor pool refilled each frame. Full detail: [`architecture.md` → The Vulkan binding model](architecture.md#the-vulkan-binding-model).
+`ReadHistory(resource)` means “sample the previous frame's contents.” It keeps
+the real transition and barrier but exempts that read from the usual
+producer-before-consumer ordering check. Temporal accumulation therefore has
+two obligations outside the graph:
 
-**Per-frame transient data — two substrates, one boundary.** Dynamic data uploaded fresh every frame has exactly two homes, split by whether it needs a descriptor:
+- gate history blending until the target has been written once; and
+- invalidate history after resize or resource recreation.
 
-- **Vertex/index data bound by offset → the transient arena.** `IGraphicsDevice.AllocVertices(span, stride)` sub-allocates from a ring of host-visible vertex buffers (`MaxFramesInFlight + 1` slots, mirroring the indirect ring) and returns a `TransientVertexSlice`; the draw binds the buffer at `slice.ByteOffset` (`DrawIndexedCommand.VertexBufferByteOffset`) and uses base-0 indices. This is the race-free replacement for the old "own one `Dynamic` vertex buffer and re-`UpdateVertexBuffer` it every frame" pattern, which collided with in-flight GPU reads. `SpriteBatch` and `VkLineDrawer` ride it; it's also what a `ParticleBatch`-style consumer expands its billboards into. The arena has **no descriptor** — a slice is just a `(buffer, offset, length)` triple.
+`MatchSwapchainResourceGeneration` changes after the graph reallocates any
+`MatchSwapchainGraphSize` resources. Cache it and refuse temporal history for
+one frame whenever it changes. This includes same-sized swapchain recreation,
+such as a present-mode change; a window-size callback alone is not sufficient.
 
-- **Per-frame SSBO/UBO that needs a descriptor → `MaterialBindings`.** Per-instance transforms (`InstanceBuffer`, a set-3 SSBO) and skinned bone palettes are frames-in-flight-replicated *and carry their own descriptor set*. These stay in `MaterialBindings` — it already owns the buffer **and** the descriptor write correctly. They do **not** belong in the transient arena: pushing a descriptor-backed buffer through the arena would mean rebuilding the per-frame descriptor machinery `MaterialBindings` already provides, for no gain. The rule: *arena = descriptor-less vertex/index data bound by offset; `MaterialBindings` = descriptor-backed per-frame storage.*
+Sponza follows that generation for GTAO accumulation and its two-target TAA
+ping-pong. Its froxel history is device-owned rather than graph-owned, so the
+application invalidates that separately when it replaces the froxel grid. Use
+an ordinary `Read` whenever the producer is in the current frame.
 
-  *Soft particles show why the batch stays out of it.* `ParticleBatch` owns geometry only — billboard expansion + arena upload + depth sort — and forwards the *caller's* pipeline, push constants, and texture bindings to the draw. So "soft particles" is a property of the **caller's pipeline**, not the batch: `VulkanParticles` hands it a soft shader whose push carries a fade and whose textures include one **read-only** scene-depth sampler, letting the fragment shader dissolve a billboard into geometry instead of clipping through it. That depth sampler is a render-pass *read edge*, not `MaterialBindings`-owned storage (nothing per-frame to replicate), and the vertex stream still rides the arena. The boundary holds, and the primitive stays generic — the same way `InstancedBatch` leaves the shader to its caller. `VulkanParticles` wires the rest through a `RenderGraph` (depth pre-pass → scene → bloom → tonemap present) since a colour target is single-writer and a pass can't sample its own depth attachment.
+## Recording, binding, and dynamic data
 
-## Meshes, pipelines, vertex types
+Inside `graph.Pass`, a `RenderPassBuilder` records indexed, instanced, and
+indirect draws. The basic shape is explicit:
 
-`Mesh` (`Blix.Render`) bundles a vertex buffer + index buffer + count + mesh-local AABB under a name; build one from a `MeshData` via `IGraphicsDevice.CreateMesh(...)`, or bundle many primitives into one shared `(VB, IB)` with `MeshBundler.Bundle(...)` (draws become sub-ranges via `indexOffset`/`vertexOffset`).
+```csharp
+pass.DrawIndexed(vb, ib, pipeline, indexCount, uniforms, textures);
+pass.DrawIndexed(vb, ib, pipeline, indexCount, uniforms, textures, material);
+pass.DrawIndexed(
+    vb, ib, pipeline, indexCount, uniforms, textures, material,
+    pushConstants, indexOffset, vertexOffset);
+```
 
-`PipelineDescription` (`src/Blix.Graphics/PipelineDescription.cs`) is the immutable draw state: `ShaderProgram`, `VertexLayout`, `Topology`, `DepthState`, `RasterizerState`, a list of `BlendState`, an optional `RenderTarget` (null → swapchain — its attachment formats must match the render-pass it's drawn into), and `AlphaToCoverage` (antialiased alpha-cutout edges under MSAA).
+SPIR-V reflection supplies each `ShaderInterface`: descriptor sets, std140
+uniform layouts, and push-constant ranges. `MaterialBindings` allocates one
+reflected set and writes uniforms or textures by their reflected names and
+bindings. There is no second hand-maintained binding table.
 
-Vertex layouts (`src/Blix.Graphics/`): `VertexPosition3Color`, `VertexPosition3Texture`, `VertexPosition3NormalTexture` (standard lit), `VertexPosition3NormalTangentTexture` (PBR + normal maps), `VertexPosition3NormalTextureSkin4Tangent` (+ 4-bone skinning), plus the 2D `VertexPositionTexture` / `VertexPosition3TextureColor` (sprites).
+Sets are grouped by lifetime rather than by object type: frame-global,
+per-pass, per-material, and per-draw. Small per-draw values use push constants;
+descriptor-backed values use transient or persistent material bindings.
+Recorded push data is copied, so callers may safely reuse scratch storage while
+recording subsequent draws.
 
-**Render surfaces & attachments** (`src/Blix.Graphics/RenderSurface.cs`): a surface is a set of color attachments + an optional depth attachment. Color formats include `Rgba8`, `Rgba16F` / `R11G11B10F` (HDR), and `Bc7` (compressed); depth is `D24` / `D32F`. Depth attachments can be a renderbuffer, a sampleable depth texture, or a single cubemap face (`DepthCubeFace`) for point-light shadows. MSAA targets declare `samples > 1` and resolve via the pass's `ResolveColor`.
+Fresh per-frame data has two distinct homes:
+
+- `AllocVertices` returns a `TransientVertexSlice` from a frames-in-flight ring.
+  It is for descriptor-less vertex/index data bound by offset. `SpriteBatch`,
+  debug lines, and `ParticleBatch` use it.
+- `MaterialBindings` owns descriptor-backed uniform and storage buffers.
+  `InstanceBuffer` and bone palettes use it because each frame slot needs both
+  storage and a correct descriptor.
+
+Do not update one long-lived dynamic vertex buffer under in-flight GPU reads,
+and do not rebuild descriptor machinery inside the transient vertex arena.
+
+`DrawIndexedIndirect` consumes GPU draw structs; Sponza groups compatible draws
+and maintains per-cascade command buffers. `DrawIndexedInstanced` is the lower
+level primitive behind `InstanceBuffer` and `InstancedBatch`. Those helpers own
+instance transport and batching, not a shader or lighting policy.
+
+## Resources, lifetime, and residency
+
+The device registry exposes live buffers, textures, shader programs, pipelines,
+and surfaces for diagnostics. Texture entries report dimensions, format, byte
+size, kind, mip count, and `Pending`, `Streaming`, or `Resident` state.
+
+That residency describes the progressive upload path, not render-graph
+availability. A cooked mip chain may allocate its stable texture handle first,
+upload the smallest mip, and sharpen over later frames. Render targets,
+compute-written storage images, and textures uploaded in full are resident
+immediately. See [Assets](assets.md) for the loading lifecycle, registry
+identity, and upload budgets.
+
+Every owner still destroys what it creates. Be careful with aliased handles:
+for example, a procedural environment can return one cube through several
+semantic fields, so teardown must deduplicate rather than destroy by field.
+
+## Shared rendering primitives
+
+The reusable layer is intentionally made of small pieces rather than a hidden
+scene pipeline:
+
+| Primitive | Responsibility | Deliberately does not own |
+| --- | --- | --- |
+| `Mesh`, `CreateMesh` | GPU vertex/index buffers, count, name, and local bounds | Materials, transforms, culling |
+| `MeshBundler` | Packs primitives into shared buffers and preserves draw subranges | Draw policy or LOD selection |
+| `FullscreenPass` | Records one fullscreen triangle with caller bindings | Shader, effect, or presentation policy |
+| `PostChain` | Declares and records a linear image-to-image graph chain | Composite, exposure, tonemap |
+| `SpriteBatch`, `Font` | Texture-partitioned quad and text batching | Game UI policy |
+| `ParticleBatch` | CPU particle evolution, depth sorting, billboard expansion | Particle shader, soft-depth policy, post stack |
+| `InstanceBuffer` | Frames-in-flight replicated instance SSBO | Mesh, pipeline, scene ownership |
+| `InstancedBatch` | Stages instances and emits one instanced draw | GPU resources or shader |
+
+`PipelineDescription` remains the immutable draw-state boundary: program,
+vertex layout, topology, depth and raster state, blends, alpha-to-coverage, and
+the compatible render target. Changing culling or blending means a distinct
+pipeline; changing a live uniform does not.
 
 ## Shaders
 
-Shaders are authored in GLSL and compiled offline to SPIR-V with `glslc`. The Vulkan binding model is then **reflected** from the compiled `.spv` (spirv-cross JSON sidecars) into a `ShaderInterface` — descriptor sets + std140 UBO layouts + push-constant ranges — by `ShaderReflection` (`src/Blix.Graphics.Vulkan/ShaderReflection.cs`). There is no hand-maintained binding table to drift out of sync with the shader source.
+Shaders are authored in GLSL and compiled offline to SPIR-V. The shared build
+target expands includes through `GlslPreprocessor`, invokes `glslc`, and emits
+reflection sidecars. Include processing supports recursive includes,
+cycle detection, Blix-owned `#pragma once`, canonical source identity, injected
+defines after `#version`, and `#line` mappings for useful compiler errors.
 
-`GlslPreprocessor.PreprocessDetailed` resolves `#include "<file>.glsl"` recursively, detects cycles, and consumes Blix-owned `#pragma once` directives. Canonical source identities make once-only inclusion hold across different relative spellings of the same file. It emits `#line` directives so compile errors report the original file + line. `ShaderLoader.LoadVertexFragment(vert, frag, includeDirs?, defines?)` bundles read + preprocess + source-map plumbing for runtime callers; `ShaderLoader.PreprocessFile(...)` is the file-backed entry used by offline compilation. `defines` injects `#define` lines after `#version` so one library function serves multiple variants.
+`src/Blix.Shaders/` is shared vocabulary, not a monolithic shader framework:
 
-The shared library (`src/Blix.Shaders/`, every symbol `blix_`-prefixed) is deliberately small. Demo shaders consume it with `#include "<file>.glsl"`; each shader-bearing project's `CompileSpirV` target runs `Blix.Tools.Shader`, which expands includes and variants with the same Blix preprocessor before invoking `glslc`. Included library files remain in the target's `Inputs` so edits retrigger the cook.
-
-| File | Provides |
+| Include | Shared vocabulary |
 | --- | --- |
-| `pbr.glsl` | Cook-Torrance BRDF — `blix_distributionGGX`, `blix_geometrySmith`, `blix_fresnelSchlick` |
-| `tonemap.glsl` | `blix_acesFilm` + a `blix_tonemap(hdr, mode)` selector (ACES / AgX / Reinhard / Neutral) |
-| `noise.glsl` | Pseudorandom jitter (PCF rotation, banding decorrelation) |
-| `fullscreen.glsl` | `blix_fullscreenTriangle` / `blix_fullscreenTriangleNdc` — the `gl_VertexIndex` fullscreen-triangle synthesis every present/post/sky `.vert` shares |
-| `bloom.glsl` | `blix_bloomThreshold` (luma bright-extract) + `blix_gaussianBlur9` (separable 9-tap) |
+| `pbr.glsl` | Cook-Torrance metallic/roughness BRDF |
+| `ibl.glsl` | Diffuse irradiance and split-sum specular ambient |
+| `shadow.glsl` | Shared soft sun-shadow sampling and cascade selection |
+| `tonemap.glsl` | ACES, AgX, Reinhard, and neutral curves |
+| `fullscreen.glsl` | Fullscreen-triangle vertex synthesis |
+| `bloom.glsl` | Bright extraction and separable Gaussian blur |
+| `froxel.glsl` | Shared froxel addressing and integration helpers |
+| `probe_volume.glsl`, `sky_visibility.glsl`, `octahedral.glsl` | Probe-volume and directional-field sampling |
+| `sheen.glsl`, `coverage.glsl`, `noise.glsl` | Material sheen, coverage shaping, and stochastic helpers |
 
-Other GLSL helpers are demo-local includes rather than shared library — e.g. `src/Blix.Demos.VulkanLit/Shaders/` carries `ibl.glsl` (diffuse + split-sum specular sampling), `brdf.glsl` (BRDF LUT integration), `shadows.glsl` (depth compare + PCF), and `normal_mapping.glsl`. A helper graduates into `Blix.Shaders` when a second demo needs it.
+Application shaders stay with the application. A helper should graduate into
+`Blix.Shaders` only when it has a stable reusable contract, not merely because a
+large experiment uses it.
 
-## Rendering techniques
+## Studio reference rendering pipeline
 
-All techniques run on Vulkan; the shader files below are the source of truth.
+`StudioRenderer` is the optional pipeline used by Blix's own model and rig
+tools. Its current composition includes:
 
-| Technique | Where it lives |
+- three fitted, texel-snapped sun-shadow cascades;
+- optional depth pre-pass, off by default because it did not pay for the small
+  inspection stage;
+- HDR PBR lighting for static and skinned meshes;
+- procedural or cooked-probe IBL and a BRDF LUT;
+- opaque, cutout, double-sided, and blended material routing;
+- configurable MSAA with colour and depth resolves;
+- tonemapped presentation plus a separate half-resolution inspection view; and
+- a pre-compile extension window for a tool to add graph passes without forking
+  the renderer.
+
+`StudioLook` is the authored policy boundary. Its defaults are Blix's reference
+look: sun, environment, shadow fit, exposure, tonemap, MSAA, and related values.
+Most are live per-frame settings. Members marked
+`[Tune(Structural = true)]` must be set before graph and pipeline construction;
+changing one after the renderer seals the structure is reported rather than
+pretending the control took effect.
+
+Studio owns the composition and its defaults, not the underlying capabilities.
+A game can reuse all, some, or none of it. This is why “Studio reference
+rendering pipeline” is the durable name and `DefaultRenderer` is not.
+
+## Application-owned pipelines
+
+The smaller applications are focused examples of explicit composition:
+
+| Application | What it demonstrates |
 | --- | --- |
-| PBR (metallic-roughness) | `lit.frag` + `pbr.glsl` (VulkanLit, VulkanSponza) |
-| IBL — the ambient term | **`blix_iblAmbient` in `Blix.Shaders/ibl.glsl`** — diffuse irradiance + split-sum specular in one call, taking the prefilter LOD ceiling as a PARAMETER from the bake rather than a constant. Used by the studio stage; VulkanLit and VulkanSponza still carry their own copies (each has a complete parallel lit-shader library, so converting either is its own job) |
-| IBL — procedural source | `ProceduralEnvironmentSource(sunDirection)` bakes a sky from a sun with **no environment asset**, which is what lets a tool that opens any model anywhere have IBL at all. Note the specular half is box-filtered mips, not a true GGX prefilter |
-| BRDF LUT | `EnvironmentBaker.BakeBrdfLut(device, size, name, cacheDirectory)` — a pure function of size and sample count, so it is computed once and kept. O(n²): 32→25 ms, 64→84 ms, 128→407 ms, 256→1451 ms |
-| HDR IBL bake | `EquirectangularToCubemap` + `PbrIblBaker`; cooked into `.blixprobe` (`BlixProbe`) — irradiance + GGX-prefiltered specular + BRDF LUT |
-| Cascade shadow maps (3-cascade) | `shadow.vert/.frag`; `lit.frag` samples the cascade array (VulkanSponza, RTSGame — each with its own fit) |
-| Cascade selection, shared | **`blix_sun_shadow_cascaded` in `Blix.Shaders/shadow.glsl`** — SELECTION only, sampling via the existing `blix_sun_shadow_soft`. Three cascades, fixed: dynamically indexing a sampler array needs `shaderSampledImageArrayDynamicIndexing`, which is not guaranteed, so portable implementations branch on a constant index. Picks by CONTAINMENT rather than view depth |
-| Cascade fit, shared | `GraphicsMatrices.FrustumSliceCorners` / `FitCascadeViewProjection` / `CascadeSplits` — bounding sphere (rotation-invariant, so the box does not crawl), texel-snapped **on the light's own axes** |
-| Point cubemap shadows | `point_shadow.vert/.frag` (linear distance), sampled as `samplerCube` (VulkanLit) |
-| Spot shadows | perspective shadow + `shadows.glsl` compare (VulkanLit) |
-| PCF filtering | `shadows.glsl` (VulkanLit); rotated-Vogel PCF (VulkanSponza) |
-| Alpha-cutout shadow casters | `depth_prepass_mask.frag` (alpha threshold + alpha-to-coverage) |
-| Tonemap | `tonemap.glsl` — four curves (ACES, AgX, Reinhard, neutral) behind `blix_tonemap(hdr, mode)`. **`Blix.Graphics.Images.Tonemap` is the CPU twin**, for captures read back before the present pass runs; `Blix.Test.Graphics` section BD holds the two answerable to each other |
-| Fullscreen pass | `FullscreenPass` (`Blix.Render`) — dummy-VB + `gl_VertexIndex` triangle + `DrawIndexed(3)`; caller brings pipeline/textures/push (present, bloom, sky, CRT, invert) |
-| Bloom | `PostChain` of `bloom_bright.frag` → `bloom_blur.frag` (H then V) over `bloom.glsl`; composite + tonemap stay in the caller's present pass (VulkanLit, VulkanParticles) |
-| Fullscreen effect chain | `PostChain` (`Blix.Render`) — linear image→image passes over auto-managed intermediate targets; declares targets+passes, caller supplies pipelines, yields an output texture |
-| Froxel volumetric fog | `froxel.comp` compute pass, froxel grid (VulkanSponza, `--fog`) |
-| Depth pre-pass | `depth_prepass.frag` / `depth_prepass_mask.frag` (VulkanSponza). The studio stage has one too, **off by default**: correct either way (captures are byte-identical) but the benefit was not measurable on a stage that draws a handful of objects, while the cost was |
-| MSAA | a second colour target at `samples: n` plus `ResolveColor`; depth matches the colour's sample count and resolves via `ResolveDepth` when anything samples it |
-| Glass / transmissive | Fresnel + alpha-blend pipeline in `lit.frag` (no refraction) |
-| GPU-driven indirect draw | `DrawIndexedIndirect`, per-material multi-draw (VulkanSponza) |
-| Per-frame transient vertices | `AllocVertices` → `TransientVertexSlice`, ring of host-visible buffers bound by offset (SpriteBatch, VkLineDrawer, ParticleBatch) |
-| Billboard particles | `ParticleBatch` (CPU sim, colour/size-over-life, optional soft-depth fade) → arena slice; VulkanParticles (fountain · explosion · vortex) over an HDR bloom pipeline with soft particles |
-| Per-instance instancing | `DrawIndexedInstanced` + `InstanceBuffer` (set-3 SSBO) / `InstancedBatch` (VulkanInstanced, Runner) |
-| Skeletal animation (GPU skinning) | bone-palette set-3 SSBO; `skinned_lit.vert` (VulkanLit), `skinned.vert` (Runner) |
-| Screen-space-error LOD | `.blixmesh` per-level geometric error; runtime selects by SSE (VulkanSponza) |
-| Geometry bundling | `MeshBundler` packs primitives into one shared `(VB, IB)`; draws are sub-ranges |
+| `Blix.Demos.VulkanGraph` | Small render-graph composition |
+| `Blix.Demos.VulkanInstanced` | `InstanceBuffer`/`InstancedBatch` at scale |
+| `Blix.Demos.VulkanLit` | PBR, IBL, multiple shadow types, HDR, bloom, and skinning |
+| `Blix.Demos.VulkanParticles` | Depth pre-pass, soft particles, HDR bloom, and present |
+| `Blix.Demos.Pong` | Sprites, fonts, supersampled offscreen rendering, and CRT post-effect |
+| `Blix.Demos.Runner` | Game-owned instanced world rendering and skinned characters |
+| `Blix.Demos.Bulwark`, `RTSGame` | Larger game-owned render policy and diagnostics |
 
-**Not ported from the GL renderer.** Screen-space reflections (SSR), dual-filter (Kawase) bloom, and the MRT material G-buffer that fed SSR were GL-only techniques and did not survive the OpenGL sunset. Bloom on Vulkan is the separable-Gaussian chain above; reflections come from prefiltered-environment IBL, not SSR.
+They are examples and proving consumers, not stages in a renderer inheritance
+hierarchy.
 
-## Where the engine is allowed to have an opinion
+## Vulkan Sponza research renderer
 
-Nothing in `Blix.*` says how bright a sun is, and nothing has to. The techniques above are
-capabilities and vocabulary; **what to do with them is a separate question, and it has one home.**
+Vulkan Sponza is being rebuilt as a heavy-scene rendering instrument. Its live
+graph is approximately:
 
-`Blix.Tools.Studio.StudioLook` holds the answers — sun angle and intensity, ambient, exposure,
-tonemap, shadow radius and reach, cascade split, MSAA, IBL. **The defaults of that type ARE Blix's
-reference look**, `blix view` takes them without being asked, and a game takes none of them, some of
-them, or all of them. Keeping it there rather than in the engine is what stops "the default
-renderer" existing for everyone to fight; keeping it *somewhere* is what stops every consumer
-re-answering "how bright is the sun" from scratch.
-
-**The technique never moves into the stage.** A capability belongs to the engine and its shading
-vocabulary to `Blix.Shaders`; the stage owns only the COMPOSITION — which of them are on, at what
-settings. That is why the NdotV fix went into the shared `pbr.glsl` rather than into a studio shader,
-and why `blix_iblAmbient` is shared vocabulary rather than studio code.
-
-Two kinds of setting, and the difference is load-bearing. Most are read every frame: move the slider,
-see it. A few are `[Tune(Structural = true)]` — read once when the pipelines and targets are BUILT,
-and never again. Those are flags rather than sliders, and the debug panel shows them among the
-read-only values, because a control that changes nothing is worse than one that does not exist.
-
-See `plan-blix-house-style.md` for how each default was arrived at; several are the opposite of the
-sophisticated-looking choice, and the measurements are recorded there.
-
-## Fullscreen passes and post-process
-
-Two layered primitives in `Blix.Render`, kept separate the same way `InstanceBuffer`/`InstancedBatch` are:
-
-**`FullscreenPass`** is the draw. It owns a dummy 3-vertex VB/IB (never sampled — the vertex shader synthesises positions from `gl_VertexIndex` via `blix_fullscreenTriangle`) and exposes `Draw(pass, pipeline, textures, push?, uniforms?)`. It carries no shader and no policy: the caller brings the pipeline (bright extract, Gaussian tap, ACES vs AgX tonemap, CRT, invert…), the push bytes, and the bindings. Every present/post/sky pass across the demos goes through it.
-
-**`PostChain`** is the orchestration above it — a linear chain of fullscreen image→image passes over auto-managed intermediate targets. It declares one color target + one graphics pass per stage, wiring each stage's `Read` to the previous stage's output (stage 0 reads the chain input), and records the per-frame draws. It owns only that plumbing: like `FullscreenPass`, the caller brings the pipelines, and it **stops at a texture** — compositing the result back (exposure, intensity, tonemap) is the caller's own present pass, which is what lets a scene opt out of the chain and keep its own tonemap policy (Sponza does).
-
-The lifecycle is three calls, dictated by `RenderGraph`: passes/targets must be declared before `Compile()`, but render surfaces and sampleable textures only exist after it.
-
-```csharp
-// 1. ctor — declare targets + passes (before Compile)
-var bloom = new PostChain(device, graph, hdrHandle, new[] {
-    new PostStage("bloom-bright", Rgba16F, quarterRes, brightInterface, "uHdr"),
-    new PostStage("bloom-blurH",  Rgba16F, quarterRes, blurInterface,   "uSrc"),
-    new PostStage("bloom-blurV",  Rgba16F, quarterRes, blurInterface,   "uSrc"),
-});
-graph.Compile();
-// 2. after Compile — caller builds each stage's pipeline against its surface
-bloom.BuildPipelines((stage, surface) => device.GetOrCreatePipeline(descFor(stage, surface), stage.Name));
-// 3. per frame — record; per-stage push (bright threshold, each blur's texel step)
-bloom.Record((i, stage) => i == 0 ? thresholdPush : texelStep(i));
-// caller's present pass composites graph.GetColorTexture(bloom.Output) over hdr, then tonemaps
+```text
+three shadow cascades
+    -> sky/probe compute work and froxel fog
+    -> depth + normal pre-pass and MSAA resolves
+    -> Hi-Z pyramid
+    -> GTAO -> temporal/spatial denoise
+    -> half-resolution incident light -> full-resolution resolve
+    -> HDR lit scene
+    -> parity-selected TAA resolve
+    -> present and diagnostics
 ```
 
-Bloom is the proving consumer (`VulkanLit`, `VulkanParticles`); the stage shaders are the shared `bloom.glsl` + `blix_acesFilm`.
+The exact graph continues to move. The important current research areas are:
 
-## Sprites, text, and UI
+- GPU-driven indirect submission, draw grouping, culling, and screen-space
+  error LOD over cooked mesh chains;
+- cascade fitting plus caster/receiver reasoning and survivor counts;
+- a depth/normal pre-pass, six-level Hi-Z pyramid, half-resolution GTAO,
+  temporal history, bilateral reconstruction, and denoising;
+- baked sky visibility and occupancy/albedo volumes;
+- runtime probe injection, usage marking, sleeping, carry/ping-pong policy,
+  transport, and indirect-light sampling;
+- a half-resolution incident-light field and full-resolution resolve;
+- colour TAA and temporally accumulated volumetric froxel fog;
+- extended material work including sheen and transmission; and
+- debug views, command-line A/Bs, pass timings, resource and draw censuses,
+  captures, and CPU/path-traced reference checks.
 
-The 2D path (`src/Blix.Render/SpriteBatch.cs`, `Font.cs`) is rebuilt on the Vulkan binding model — one alpha-blended pipeline, texture at set 0, view-projection via push constant. `Pong` is the proving ground.
+Some storage textures and probe resources are device-owned rather than graph
+resources, so Sponza also exposes where the graph contract is not yet broad
+enough. Local comments retain present contracts and measurements that still
+govern the implementation; completed experiments and superseded alternatives
+belong in dated reports or plans. Neither is automatically normative engine
+documentation.
 
-```csharp
-spriteBatch.Begin(viewProjection);              // optionally a SpriteSortMode
-spriteBatch.Draw(texture, position, size, sourceRect, color, depth);
-spriteBatch.End(passBuilder);                   // emits one batched draw per texture partition
-```
+When a Sponza result is ready to promote, move the reusable mechanism or shader
+vocabulary into an engine project, give it another credible consumer, and leave
+Sponza with only the scene-specific composition and policy.
 
-`Font.Upload(device, fontData)` uploads a baked glyph atlas; `NearestSize(pixelSize)` picks the closest baked size. Text draws as quads through the same `SpriteBatch`. Pong renders sprites + text into a 2×-supersampled offscreen `RenderGraph` target, then a fullscreen CRT post-FX pass (`postfx.vert/.frag`) grades it onto the swapchain.
+## Technique ownership at a glance
 
-## Asset pipeline, diagnostics, debug draw
+| Scope | Current examples |
+| --- | --- |
+| Shared mechanism or vocabulary | Reflected binding, graphics/compute graph passes, history reads, MSAA resolves, transient vertices, instancing, indirect draw, mesh bundling, PBR/IBL/shadow/tonemap helpers, fullscreen work, sprites, particles |
+| Studio-authored reference | Three-cascade inspection lighting, procedural fallback environment, reference exposure/tonemap/MSAA, optional pre-pass, inspection viewport |
+| Application-owned | Point and spot shadows in Vulkan Lit, bloom chains, Pong CRT presentation, game culling and draw grouping |
+| Sponza research | Hi-Z/GTAO/TAA, probe transport and incident field, froxel fog, heavy-scene LOD/culling, material experiments, A/B and reference machinery |
 
-These are backend-neutral and documented where they're owned:
+Screen-space reflections, dual-filter/Kawase bloom, and the MRT material
+G-buffer from the retired OpenGL renderer are not present in the current Vulkan
+renderer. Vulkan bloom uses the separable Gaussian path; current reflections
+come from environment lighting rather than SSR.
 
-- **Asset pipeline** — `AssetDatabase` + importers (`Blix.Assets`), the cooked `.blixmesh` / `.blixtex` / `.blixprobe` formats, and the runtime streaming primitives (`MeshBundler`, `ResourceUploader`, `AsyncLoadQueue<T>`, `GltfTextureLoader`). See [`README.md` → Cooked asset pipeline](../README.md) and the "Asset pipeline" arrows in [`architecture.md`](architecture.md).
-- **Diagnostics & debug draw** — the contribution-based `DebugSystem` (`Blix.Diagnostics`): `IDebuggable.Debug(DebugContext)`, the Values/Controls/Draw/Stats/Timers/Events channels, selection + picking, and live tuning via `//@tune lo..hi = default` (GLSL) or `[Tune(min, max)]` (C#). The overlay panels live in `Blix.Diagnostics.Overlay` and render through `VkImGuiRenderer`. See the Diagnostics rows in [`architecture.md` → Where to find things](architecture.md#where-to-find-things).
+## Where to start
+
+- To understand the minimum graph lifecycle, read
+  `src/Demos/Blix.Demos.VulkanGraph/`.
+- To build a game renderer, start from the mechanisms in `Blix.Graphics`,
+  `Blix.Graphics.Vulkan`, and `Blix.Render`, then compose passes in the
+  application.
+- To give a content tool a coherent inspection view, adopt
+  `Blix.Tools.Studio` and set structural `StudioLook` choices before loading.
+- To investigate or measure a rendering technique, use Vulkan Sponza and keep
+  the experiment local until its reusable boundary is demonstrated.
+- To understand when a texture is usable versus fully sharp, read
+  [Assets](assets.md), especially the deferred CPU and progressive GPU paths.

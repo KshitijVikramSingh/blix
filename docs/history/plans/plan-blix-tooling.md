@@ -1,9 +1,14 @@
 # Tooling arc — plan
 
+> **Archived 2026-09-21 — completed.** App declaration, generated discovery,
+> project scope, dispatch, the `blix` front door, and representative migrations
+> shipped. See `docs/plans.md` for current plan status.
+
 > **Rewritten 2026-09-15.** The first version of this document asked what had earned the right to
 > move, and staged a rename, a CLI and three extractions around duplication counts. That was the
 > wrong question twice over. The record of getting to the right one is in `docs/` — the counted
-> graph, then two superseded drafts, then `blix-what-it-ships.html`.
+> graph, then two superseded drafts, then
+> `docs/history/reports/blix-what-it-ships.html`.
 
 ---
 

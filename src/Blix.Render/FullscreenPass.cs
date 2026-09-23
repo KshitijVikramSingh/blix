@@ -44,9 +44,9 @@ public sealed class FullscreenPass : IDisposable
         this.device = device;
 
         // Three zeroed vertices: never sampled (the vertex shader reads gl_VertexIndex),
-        // but the bound pipeline declares a VertexPosition3NormalTexture layout so the
-        // dummy buffer must match that stride. Matches the present.vert pipelines across
-        // every demo, so this is a behaviour-preserving extraction.
+        // but the bound pipeline still needs the stride exposed by FullscreenPass.Layout,
+        // which intentionally declares no vertex attributes. Matches the present.vert
+        // pipelines across the applications.
         var dummyVerts = new VertexPosition3NormalTexture[]
         {
             new(new GraphicsVector3(0, 0, 0), new GraphicsVector3(0, 0, 1), new GraphicsVector2(0, 0)),

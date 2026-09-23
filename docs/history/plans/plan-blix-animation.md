@@ -1,5 +1,9 @@
 # Animation arc — plan
 
+> **Archived 2026-09-21 — completed at its evidence-backed stopping point.**
+> Pose inspection, playback, root motion, and masks shipped; analytic IK remains
+> deliberately deferred until a consumer asks. See `docs/plans.md` for status.
+
 > Follows the toolchain lab. Same shape: a lab that makes a thing visible, a probe that
 > checks it headlessly, and engine extractions only where pressure has already shown.
 

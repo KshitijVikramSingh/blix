@@ -42,8 +42,8 @@ public sealed partial class VulkanGraphicsDevice
     // full 1024x1024 RGBA mask per frame without a resize path.
     private const int TextureUploadSlotBytes = 4 * 1024 * 1024;
 
-    // <b>Copy offsets must satisfy the device's optimalBufferCopyOffsetAlignment as well
-    // as the texel block size.</b> 256 covers every alignment reported by the drivers this
+    // Copy offsets satisfy the device's optimalBufferCopyOffsetAlignment and texel block size.
+    // 256 covers every alignment reported by the drivers this
     // engine runs on and is a multiple of four, which is the spec's own floor. Alignment is
     // per allocation rather than per buffer, so the cost is a few wasted bytes per upload.
     private const int TextureUploadAlignment = 256;
@@ -130,8 +130,8 @@ public sealed partial class VulkanGraphicsDevice
     /// render pass, before the passes are translated.
     /// </summary>
     /// <remarks>
-    /// <b>The barrier out of ShaderReadOnlyOptimal is what makes this safe against the frame still
-    /// in flight.</b> A barrier applies to commands earlier in submission order on the same queue,
+    /// The barrier out of ShaderReadOnlyOptimal orders the copy after earlier sampling on the same
+    /// queue. A barrier applies to commands earlier in submission order,
     /// which includes earlier submissions — so declaring the source stage as the fragment shader
     /// makes the previous frame's sampling of this image complete before the copy overwrites it,
     /// without anybody waiting on the CPU.
