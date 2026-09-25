@@ -15,41 +15,14 @@ editor, scripting layer, fixed renderer, or engine-owned game loop.
 
 ## Start here
 
-Blix currently targets .NET 8 and the Vulkan + Silk.NET runtime. On macOS,
-install the native toolchain once:
+Follow [Getting started](docs/getting-started.md) for one linear first path:
+install the supported macOS prerequisites, bootstrap and prove the checkout,
+run the minimal Chassis application, run Vulkan Lit, and make one visible code
+change. The path is designed to take about ten minutes after prerequisite
+downloads.
 
-```sh
-brew install molten-vk vulkan-loader vulkan-headers vulkan-tools vulkan-validationlayers shaderc spirv-cross openal-soft
-```
-
-Then bootstrap the Blix front door, build the tree, and ask the project what it
-contains:
-
-```sh
-./blix ls
-dotnet build Blix.sln
-./blix ls
-./blix test
-```
-
-The first `./blix ls` builds the small app resolver and indexer when they are
-absent. A fresh tree may then ask for one build before every app is indexed.
-
-Run any discovered app by name:
-
-```sh
-./blix view --model path/to/model.glb
-./blix view --rig path/to/character.glb --clip Walking_A
-./blix inspect path/to/asset.glb
-./blix check --model path/to/asset.glb
-```
-
-`./blix run <app>` is the explicit form; `./blix <app>` is its shorter twin.
-Arguments after the app name belong to that app. `project:app` addresses an app
-in a particular project when more than one project is visible.
-
-See [Workflow](docs/workflow.md) for projects, app declaration and discovery,
-bounded runs, verification gates, and how to add an application.
+Then see [Workflow](docs/workflow.md) for projects, app declaration and
+discovery, bounded runs, verification gates, and the complete launcher model.
 
 A game may keep Blix as a pinned source checkout rather than living in this
 repository. The two imports under `build/` expose paths and build mechanisms
@@ -158,6 +131,8 @@ current application catalogue, ownership boundaries, and verification routing.
 
 ## Documentation
 
+- [Getting started](docs/getting-started.md) — the first build, repository gate,
+  two representative applications, and one visible edit.
 - [Workflow](docs/workflow.md) — projects, apps, discovery, running, shared
   arguments, and verification gates.
 - [Assets](docs/assets.md) — declared cooking, recipes, provenance, runtime load
