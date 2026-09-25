@@ -52,6 +52,11 @@ in a particular project when more than one project is visible.
 See [Workflow](docs/workflow.md) for projects, app declaration and discovery,
 bounded runs, verification gates, and how to add an application.
 
+A game may keep Blix as a pinned source checkout rather than living in this
+repository. The two imports under `build/` expose paths and build mechanisms
+without adding engine references or application policy; the external-project
+shape is documented in [Workflow](docs/workflow.md#using-blix-from-another-repository).
+
 ## The shape of the engine
 
 The stable split is mechanism in the engine, policy at the call site:

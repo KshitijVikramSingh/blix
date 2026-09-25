@@ -1,5 +1,12 @@
 <Project>
 
+  <!-- Set by this file itself so build/Blix.Source.targets can safely import the
+       same mechanisms into a project outside this repository without ever
+       applying them twice to projects that already live below the Blix root. -->
+  <PropertyGroup>
+    <BlixBuildTargetsImported>true</BlixBuildTargetsImported>
+  </PropertyGroup>
+
   <!--
     Shader-bearing projects reference Blix.Tools.Shader as a build-only project.
     This shared path keeps their Exec targets identical without shipping the
@@ -114,8 +121,9 @@
        either invalidates prior output. A project-owned recipe lists its assembly:
          <BlixCookRecipeAssembly Include="../RTSGame.Cooking/bin/$(Configuration)/net8.0/RTSGame.Cooking.dll" />
 
-       This invokes a pre-built cook host. A solution build rebuilds it; a single
-       consumer-project build uses the host already on disk. -->
+       This invokes the cook host after project references have been resolved.
+       A project that declares cooked assets references Blix.Tools.Cook as a
+       build-only project, making the host available on the first build. -->
   <Target Name="BlixCookAssets"
           Condition="'@(BlixCook)' != '' AND '$(BlixCookCustomTarget)' != 'true' AND Exists('$(BlixCookDll)')"
           BeforeTargets="AssignTargetPaths"

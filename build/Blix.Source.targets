@@ -1,0 +1,18 @@
+<Project>
+
+  <!--
+    Import from the consumer's Directory.Build.targets. The repository target
+    file remains the one implementation of shader compilation, cooking and app
+    indexing; this file only gives an external source consumer a named door to
+    it. The guard matters when a Blix project is itself built through a consumer
+    graph: projects below the engine root already receive these targets through
+    normal MSBuild Directory.Build.targets discovery.
+  -->
+  <PropertyGroup Condition="'$(BlixRoot)' == ''">
+    <BlixRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..'))</BlixRoot>
+  </PropertyGroup>
+
+  <Import Project="$(BlixRoot)/Directory.Build.targets"
+          Condition="'$(BlixBuildTargetsImported)' != 'true'" />
+
+</Project>

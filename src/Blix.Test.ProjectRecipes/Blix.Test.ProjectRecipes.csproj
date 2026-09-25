@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Blix.Cooked\Blix.Cooked.csproj" />
+    <!-- The fixture must produce its metadata index on a clean suite build. The
+         reference is build-only: recipe code discovers no indexer at runtime. -->
+    <ProjectReference Include="..\Blix.Tools.Apps\Blix.Tools.Apps.csproj"
+                      ReferenceOutputAssembly="false" PrivateAssets="all" Private="false" />
+  </ItemGroup>
+
+</Project>

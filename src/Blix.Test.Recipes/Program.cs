@@ -90,6 +90,17 @@ public static class Program
         t.Expect("no two recipes share an id",
             recipes.Select(r => r.Id).Distinct(StringComparer.Ordinal).Count() == recipes.Length);
 
+        // This assembly is deliberately not referenced at runtime. It is built as another
+        // project's recipe library, indexed from metadata, and found by the cook host through the
+        // checkout. That is the mechanism an extracted game relies on.
+        var catalog = Blix.Tools.Cook.RecipeCatalog.All();
+        t.ExpectTrue("the cook host discovers a project-owned recipe from its generated index",
+            catalog.Any(r => r.Id == "tst1"));
+        t.ExpectTrue("the foreign recipe keeps its declared source and output contract",
+            catalog.Any(r => r.Id == "tst1"
+                && r.Consumes.SequenceEqual(new[] { ".fixture" })
+                && r.Produces == ".blixfixture"));
+
         // Matching a source to a recipe is what a build rule does first, so it is worth a check in
         // both directions.
         t.ExpectTrue("a .glb is claimed by the mesh recipe",

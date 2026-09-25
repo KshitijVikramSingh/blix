@@ -206,6 +206,11 @@ Put the recipe in a small project referenced by the consumer and register its
 built assembly with the cook target:
 
 ```xml
+<ProjectReference Include="$(BlixCookProject)"
+                  ReferenceOutputAssembly="false"
+                  PrivateAssets="all"
+                  Private="false" />
+
 <ProjectReference Include="../Game.Cooking/Game.Cooking.csproj"
                   ReferenceOutputAssembly="false"
                   PrivateAssets="all"
@@ -214,6 +219,12 @@ built assembly with the cook target:
 <BlixCookRecipeAssembly
     Include="../Game.Cooking/bin/$(Configuration)/net8.0/Game.Cooking.dll" />
 ```
+
+The build-only cook-host reference makes the first build honest when Blix lives
+in another source checkout. In this repository a solution build already builds
+the host, but an external consumer must not depend on that accidental order.
+`$(BlixCookProject)` is supplied by `build/Blix.Source.props`; see
+[Workflow](workflow.md#using-blix-from-another-repository).
 
 Then use a normal `BlixCook` item. `RTSGame.Cooking/ObjMeshRecipe.cs` and the
 `omsh` declarations in `RTSGame.csproj` are the working example. They also show

@@ -37,6 +37,82 @@ An index is generated beside each built assembly. Discovery reads files rather
 than loading every assembly, so it remains quick and can still report what was
 last built when another part of the tree is temporarily broken.
 
+## Using Blix from another repository
+
+Blix is currently distributed as a source tree, not a set of binary packages.
+An external game can pin that tree at `engine/blix` and keep one optional
+`BLIX_ROOT` override for working against a sibling checkout. Its
+`Directory.Build.props` chooses the checkout and imports the path vocabulary:
+
+```xml
+<Project>
+  <PropertyGroup>
+    <BlixCheckout Condition="'$(BLIX_ROOT)' != ''">$(BLIX_ROOT)</BlixCheckout>
+    <BlixCheckout Condition="'$(BlixCheckout)' == ''">$(MSBuildThisFileDirectory)engine/blix</BlixCheckout>
+  </PropertyGroup>
+  <Import Project="$(BlixCheckout)/build/Blix.Source.props" />
+</Project>
+```
+
+Its `Directory.Build.targets` imports the mechanisms after each consumer
+project has declared its shaders and cooking items:
+
+```xml
+<Project>
+  <Import Project="$(BlixRoot)/build/Blix.Source.targets" />
+</Project>
+```
+
+The imports deliberately add no engine assemblies. Each application states the
+libraries and build tools it actually consumes:
+
+```xml
+<ItemGroup>
+  <ProjectReference Include="$(BlixSourceRoot)/Blix/Blix.csproj" />
+  <ProjectReference Include="$(BlixSourceRoot)/Blix.Core/Blix.Core.csproj" />
+
+  <ProjectReference Include="$(BlixCookProject)"
+                    ReferenceOutputAssembly="false" PrivateAssets="all" Private="false" />
+  <ProjectReference Include="$(BlixShaderCompilerProject)"
+                    ReferenceOutputAssembly="false" PrivateAssets="all" Private="false" />
+</ItemGroup>
+```
+
+The cook-host reference matters on the first build. Without it, an absent cook
+host makes the guarded cooking target inapplicable; relying on a previous engine
+build would produce the classic failure where a clean checkout behaves
+differently from a developer's machine. A project that declares no cooked
+assets does not need that reference. Likewise, only a shader-bearing project
+references the shader compiler.
+
+The app indexer is bootstrapped by Blix's launcher. An external repository can
+keep this tiny `./blix` wrapper without changing the working directory:
+
+```sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BLIX_CHECKOUT="${BLIX_ROOT:-$SCRIPT_DIR/engine/blix}"
+exec "$BLIX_CHECKOUT/blix" "$@"
+```
+
+Project selection, index discovery, and the declared gate then remain owned by
+the external repository's own `blix.project`.
+
+The clean source-consumer sequence is the same shape as Blix's own checkout:
+
+```sh
+./blix ls       # bootstrap the indexer and resolver
+dotnet build
+./blix ls       # see the indexes produced by the build
+./blix test
+```
+
+Pin the default checkout to an exact Blix commit or tag. `BLIX_ROOT` is a
+development override, not a substitute for recording what revision the game
+ships against.
+
 ## Projects
 
 A project is a folder. The nearest `blix.project` at or above the working
@@ -58,7 +134,7 @@ The current tree has four marked projects:
 
 | Project | Folder | Gate |
 | --- | --- | --- |
-| `blix` | repository root | Graphics, Diagnostics, Physics2D, Physics3D, Apps, and Studio suites |
+| `blix` | repository root | Graphics, Diagnostics, Physics2D, Physics3D, Apps, Studio, and Recipes suites |
 | `demos` | `src/Demos` | none declared |
 | `character` | `src/Character` | `Blix.Labs.Character.Probe` |
 | `rts` | `src/RTSGame` | `selftest` |

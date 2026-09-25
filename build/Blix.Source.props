@@ -1,0 +1,21 @@
+<Project>
+
+  <!--
+    The deliberately small source-checkout contract for a project that keeps
+    Blix in another repository. Import this file from the consumer's
+    Directory.Build.props; the import path chooses the checkout, and this file
+    names stable locations inside it. It adds no references and owns no
+    application policy.
+  -->
+  <PropertyGroup>
+    <BlixRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..'))</BlixRoot>
+    <BlixSourceRoot>$(BlixRoot)/src</BlixSourceRoot>
+    <BlixSharedShaderRoot>$(BlixSourceRoot)/Blix.Shaders</BlixSharedShaderRoot>
+
+    <BlixLauncher>$(BlixRoot)/blix</BlixLauncher>
+    <BlixCookProject>$(BlixSourceRoot)/Blix.Tools.Cook/Blix.Tools.Cook.csproj</BlixCookProject>
+    <BlixShaderCompilerProject>$(BlixSourceRoot)/Blix.Tools.Shader/Blix.Tools.Shader.csproj</BlixShaderCompilerProject>
+    <BlixAppIndexerProject>$(BlixSourceRoot)/Blix.Tools.Apps/Blix.Tools.Apps.csproj</BlixAppIndexerProject>
+  </PropertyGroup>
+
+</Project>
