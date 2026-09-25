@@ -27,8 +27,8 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Install the shader tools
-        run: brew install shaderc spirv-cross
+      - name: Install the supported macOS prerequisites
+        run: brew install molten-vk vulkan-loader vulkan-headers vulkan-tools vulkan-validationlayers shaderc spirv-cross openal-soft
 
       - name: Restore
         run: dotnet restore Blix.sln
