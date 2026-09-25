@@ -170,15 +170,11 @@ current application catalogue, ownership boundaries, and verification routing.
 - [Conventions](docs/conventions.md) — the design rules behind engine/caller
   boundaries and executable specifications.
 - [Demos](docs/demos.md) — applications, proving grounds, tools, and how to verify them.
-- [Plan status](docs/plans.md) — active design records and completed-plan archive.
-- [Evidence reports](docs/reports.md) — dated measurements, superseded proposals,
-  and their current documentation replacements.
-- [Reality ledger](docs/reality-ledger.md) — temporary evidence and the queue for
-  the documentation catch-up.
+- [Plan status](docs/plans.md) — the active design records that still own open work.
 
-The older subsystem documents are being reconciled against the current tree.
-Where they disagree with executable behavior, the code and tests are the present
-source of truth and the ledger records the known conflict.
+These pages describe the current tree. Where prose and executable behavior ever
+disagree, the code and tests are the present source of truth; correct the prose
+instead of preserving a second historical account beside it.
 
 ## Shared application arguments
 

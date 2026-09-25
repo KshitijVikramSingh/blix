@@ -323,9 +323,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private BoneMask? mask;
 
     // One set per skin, the same shape RigAnimation carries. This tool keeps its own players rather
-    // than a RigAnimation, so the per-skin packing is written twice -- noted in
-    // docs/history/plans/plan-blix-inlet.md
-    // as duplication that should not have survived the extraction.
+    // than a RigAnimation, so the per-skin packing remains duplicated here. Keep the layouts aligned
+    // until a common owner is justified by another consumer.
     private float rowSpacing;
     private readonly List<string> visibleAttachments = new();
     private Matrix4x4[] boneWorlds = Array.Empty<Matrix4x4>();

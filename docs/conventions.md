@@ -218,8 +218,8 @@ pose).
   frames**: which debug commands belong to which picture, which trail remembers
   which points. Build a declaration to point at a picture; intern a name only to
   ask diagnostics to route geometry into it. (Settled by Studio's
-  embedded viewport — two stages of a real consumer, no friction from the
-  table's location. `history/plans/plan-blix-view.md` §D.)
+  embedded viewport — two stages of a real consumer, with no friction from the
+  table's location.)
 
 - **Decomposing an application and extracting a library are different bars.**
   Moving code into a shared library needs a *second consumer* wanting the same
@@ -405,16 +405,17 @@ capability?"* — a question about abstraction, not about permission.
 
 ---
 
-## 9. Comments describe the contract; records preserve the journey
+## 9. Comments describe the contract; version control preserves the journey
 
 - **Keep a source comment when it explains something the code cannot:** a present ownership
   boundary, invariant, unit, lifetime, failure mode, or reason a tempting alternative is unsafe.
 - **Write that explanation in the present tense.** “This handle stays stable while mips arrive” is
-  a contract. A diary of the bug that led there belongs in a dated report, completed plan, commit,
-  or regression test.
+  a contract. A diary of the bug that led there belongs in commit history, an issue or review, or
+  a regression test.
 - **Keep measurements only while they govern behaviour.** Name the conditions and provenance when
-  a threshold, budget, or default still depends on them. Move one-off censuses and comparisons to
-  [`reports.md`](reports.md); move completed implementation arcs to [`plans.md`](plans.md).
+  a threshold, budget, or default still depends on them. Distil a one-off census or completed arc
+  into the current documentation and tests it justified, then let version control preserve the
+  working record.
 - **Do not let prose substitute for enforcement.** A compatibility requirement belongs in a test,
   refusal, assertion, type, or build dependency where one is practical; the nearby comment explains
   why that mechanism exists.
@@ -422,12 +423,12 @@ capability?"* — a question about abstraction, not about permission.
   in, how many copies preceded an extraction, or which development session discovered the issue.
 
 The test is simple: could a future maintainer act correctly from the comment without reconstructing
-the chronology? If yes, keep it near the code. If the chronology is the useful part, preserve it as
-history and link to it from the current documentation only when it still answers a live question.
+the chronology? If yes, keep it near the code. If chronology is the useful part, version control is
+its home; current documentation should link only to material that still answers a live question.
 
 **Enforced by:** current-contract comments in `Directory.Build.targets`, `Blix.Recipes/MeshRecipe.cs`,
-and `Blix.Tools.Studio/StudioRenderer.cs` · historical destinations indexed by
-[`plans.md`](plans.md) and [`reports.md`](reports.md).
+and `Blix.Tools.Studio/StudioRenderer.cs` · active design records indexed by
+[`plans.md`](plans.md) · regression tests that retain the failure after its diary is gone.
 
 ---
 

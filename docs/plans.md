@@ -1,9 +1,9 @@
 # Plan status
 
-Root `plan-*.md` files are live design records. Completed plans move to
-`docs/history/plans/`; they remain useful archaeology, but they are not current
-API documentation. The canonical descriptions of present behavior live in the
-README and the focused pages under `docs/`.
+Root `plan-*.md` files are live design records. When a plan completes, its
+durable contracts move into the focused documentation and executable tests;
+the working record then leaves the current tree. Git history remains the
+archaeology rather than a second documentation hierarchy.
 
 Status was reconciled against the checkout on 2026-09-21.
 
@@ -26,27 +26,18 @@ No root plan is currently classified as abandoned. None of the six active
 records is safe to call superseded without first resolving the open decision it
 still carries.
 
-## Completed plans
-
-| Archived plan | Completion boundary |
-| --- | --- |
-| [`plan-blix-animation.md`](history/plans/plan-blix-animation.md) | Pose inspection, playback, root motion, and mask composition shipped; analytic IK remains deliberately consumer-driven. |
-| [`plan-blix-attachment.md`](history/plans/plan-blix-attachment.md) | W-A through W-E completed and accepted. |
-| [`plan-blix-chassis.md`](history/plans/plan-blix-chassis.md) | The application/host/view/diagnostics reshape reached its stated inversion; later view and Studio arcs continued from it. |
-| [`plan-blix-cook.md`](history/plans/plan-blix-cook.md) | The declared recipe, build, provenance, reporting, standalone artifact, and project-owned recipe arc shipped; capacity-triggered texture questions remain future work, not unfinished stages. |
-| [`plan-blix-house-style.md`](history/plans/plan-blix-house-style.md) | StudioLook, IBL, cascades, depth-prepass decision, MSAA, and resize instrumentation shipped. |
-| [`plan-blix-inlet.md`](history/plans/plan-blix-inlet.md) | The importer/viewer completeness stages and conformance-corpus follow-up completed. |
-| [`plan-blix-tooling.md`](history/plans/plan-blix-tooling.md) | App declaration, generated discovery, dispatch, CLI, project scope, and representative migrations shipped. |
-| [`plan-blix-view.md`](history/plans/plan-blix-view.md) | Embedded rendering, picking, and ownership were settled; multi-view rectangles in one target remain deferred until a real consumer asks. |
-
-## Classification rule
+## Lifecycle
 
 - **Active** means the document still owns a concrete unresolved decision,
   acceptance step, or implementation stage.
 - **Completed** means it reached the stopping condition written in the plan.
-  Ideas deliberately deferred until a future consumer do not keep it active.
+  Distill its current contracts into canonical documentation and tests, then
+  remove the plan. Ideas deliberately deferred until a future consumer do not
+  keep it active.
 - **Superseded** means another named design record now owns the same decision.
 - **Abandoned** means its intended outcome was rejected without a replacement.
 
-When a plan changes state, update this page and move the document in the same
-change. Do not leave a completed development journal at the repository root.
+Any non-active record leaves the current tree after its durable decision is
+captured. When a plan changes state, update this page in the same change. Do not
+leave a completed development journal at the repository root or reproduce it
+under a history directory; version control already preserves it.
