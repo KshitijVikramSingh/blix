@@ -204,6 +204,11 @@ Application-specific arguments remain owned by the application.
 - OpenAL Soft is required for working audio on current macOS; Apple's legacy
   OpenAL framework is deprecated and frequently silent.
 
+## License
+
+Blix is licensed under the [Apache License 2.0](LICENSE). Third-party components
+remain under the terms listed in [Third-party notices](THIRD_PARTY_NOTICES.md).
+
 Blix is under active development. APIs and compositions are still moving, but
 the intended character is stable: serious native machinery that remains small
 enough to inspect, understand, and change.
