@@ -46,7 +46,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Blix\Blix.csproj" />
+    <ProjectReference Include="..\..\Blix\Blix.csproj" />
     <ProjectReference Include="..\..\Blix.Core\Blix.Core.csproj" />
     <ProjectReference Include="..\..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
     <ProjectReference Include="..\..\Blix.Geometry\Blix.Geometry.csproj" />

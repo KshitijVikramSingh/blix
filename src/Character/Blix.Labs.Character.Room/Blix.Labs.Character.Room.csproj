@@ -6,7 +6,7 @@
   -->
   <ItemGroup>
     <PackageReference Include="ImGui.NET" Version="1.91.6.1" />
-    <ProjectReference Include="..\Blix\Blix.csproj" />
+    <ProjectReference Include="..\..\Blix\Blix.csproj" />
     <ProjectReference Include="..\..\Blix.Core\Blix.Core.csproj" />
     <ProjectReference Include="..\..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
     <ProjectReference Include="..\..\Blix.Geometry\Blix.Geometry.csproj" />
