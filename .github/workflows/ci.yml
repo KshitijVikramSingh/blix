@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Build and root gate
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out Blix
+        uses: actions/checkout@v7
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install the shader compiler
+        run: command -v glslc >/dev/null || brew install shaderc
+
+      - name: Restore
+        run: dotnet restore Blix.sln
+
+      - name: Build
+        run: dotnet build Blix.sln --no-restore --disable-build-servers -p:UseSharedCompilation=false -m:1
+
+      - name: Run the root gate
+        run: ./blix test
