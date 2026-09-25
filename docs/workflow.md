@@ -10,7 +10,7 @@ Blix currently targets .NET 8 and its headed applications use the Vulkan +
 Silk.NET runtime. On macOS, install the native dependencies once:
 
 ```sh
-brew install molten-vk vulkan-loader vulkan-headers vulkan-tools vulkan-validationlayers shaderc openal-soft
+brew install molten-vk vulkan-loader vulkan-headers vulkan-tools vulkan-validationlayers shaderc spirv-cross openal-soft
 ```
 
 Bootstrap the front door before the first full build:

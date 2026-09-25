@@ -27,8 +27,8 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Install the shader compiler
-        run: command -v glslc >/dev/null || brew install shaderc
+      - name: Install the shader tools
+        run: brew install shaderc spirv-cross
 
       - name: Restore
         run: dotnet restore Blix.sln
