@@ -358,7 +358,7 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
     private void UpdateCharacter(Time time)
     {
         // <b>Three lines and three fields lighter than it was.</b> The rest reset, the loop wrap and
-        // the zero-duration guard were written here by hand, and identically in Bulwark and RTSGame —
+        // the zero-duration guard were written here by hand, and identically in Bulwark and the external RTSGame consumer —
         // one non-obvious decision (a clip writes only the channels it has tracks for, so an
         // un-reset pose keeps last frame's values on every other bone) copied three times.
         //

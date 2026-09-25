@@ -9,7 +9,7 @@ namespace Blix.Graphics;
 /// away at import.</b> Sampled from the content it is not colour at all: greyscale, 0.0 to 1.0,
 /// 152 distinct values on one tree trunk and 51 on a blade of grass, with the same tree's leaf card
 /// uniformly white. That is <b>baked ambient occlusion</b> — a blade dark where it meets the
-/// ground, bark dark in its crevices — and it was being discarded on every piece of scatter RTSGame
+/// ground, bark dark in its crevices — and it was being discarded on every piece of scatter an external RTS consumer
 /// draws.
 /// </para>
 /// <para>

@@ -226,10 +226,10 @@ the host, but an external consumer must not depend on that accidental order.
 `$(BlixCookProject)` is supplied by `build/Blix.Source.props`; see
 [Workflow](workflow.md#using-blix-from-another-repository).
 
-Then use a normal `BlixCook` item. `RTSGame.Cooking/ObjMeshRecipe.cs` and the
-`omsh` declarations in `RTSGame.csproj` are the working example. They also show
-why options are part of identity: the villager is deliberately cooked with
-`recenter=0`, while the nature-kit default is centred.
+Then use a normal `BlixCook` item. The deliberately foreign recipe in
+`Blix.Test.ProjectRecipes` keeps metadata discovery across a project boundary
+inside the engine gate; the source-consumer contract above is the application
+shape used by a separate repository.
 
 Recipe discovery comes from the generated app/recipe indexes. A built recipe
 assembly becomes listable and runnable without a hand-maintained registry.
@@ -500,9 +500,10 @@ when an unconditional rewrite is wanted.
 
 ### Current adoption
 
-The ordinary project declarations currently cover meshes and fonts, plus
-RTSGame's project-owned OBJ recipe. The shared `CookTexture` and `CookProbe`
-items are available, but no checked-in project currently declares them.
+The ordinary project declarations currently cover meshes and fonts. The shared
+`CookTexture` and `CookProbe` items are available, but no checked-in project
+currently declares them. `Blix.Test.ProjectRecipes` separately guards
+project-owned recipe discovery without making a game part of the engine tree.
 
 Vulkan Sponza is intentionally the exceptional, heavy-asset path. Its sources
 live outside the repository, and `tools/cook-sponza-modern.sh` builds an
@@ -545,4 +546,4 @@ research decisions, not defaults for an ordinary Blix application.
 | Deferred CPU handoff | `src/Blix.Render/AsyncLoadQueue.cs` |
 | Budgeted GPU upload | `src/Blix.Render/ResourceUploader.cs` |
 | glTF texture policy and residency identity | `src/Blix/GltfTextureLoader.cs`, `TextureRegistry.cs` |
-| Project-owned recipe example | `src/RTSGame.Cooking/ObjMeshRecipe.cs`, `src/RTSGame/RTSGame.csproj` |
+| Project-owned recipe fixture | `src/Blix.Test.ProjectRecipes/FixtureRecipe.cs`, `src/Blix.Test.Recipes/Program.cs` |

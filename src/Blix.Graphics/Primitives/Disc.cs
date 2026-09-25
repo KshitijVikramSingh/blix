@@ -10,7 +10,7 @@ namespace Blix.Graphics.Primitives;
 /// out of the vertex stream instead of reconstructing the instance's centre in a shader.
 /// <para>
 /// Geometry only, like the rest of this namespace: what a disc is <em>for</em> is the caller's business.
-/// RTSGame draws contact shadows with it; a decal, a selection ring or a light pool would use the same mesh.
+/// An external RTS consumer draws contact shadows with it; a decal, a selection ring or a light pool would use the same mesh.
 /// </para>
 /// </remarks>
 public static class Disc

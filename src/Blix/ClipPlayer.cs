@@ -5,7 +5,7 @@ namespace Blix;
 // ── The decision being named ────────────────────────────────────────────────
 // Three places in this tree write the same three lines independently:
 //
-//     pose.CopyFrom(restPose);                 // Runner, Bulwark, RTSGame
+//     pose.CopyFrom(restPose);                 // Runner, Bulwark, external RTSGame consumer
 //     clip.Sample(time % clip.Duration, pose);
 //     skeleton.ComputeBonePalette(pose, palette);
 //

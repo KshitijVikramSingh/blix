@@ -339,7 +339,7 @@ public static class GraphicsMatrices
     /// <b>Snapped on the LIGHT's axes, which is the grid the texels are actually on.</b> Snapping the
     /// centre in world XZ — the obvious version — snaps to a grid the texels are not aligned with
     /// unless the sun happens to be axis-aligned, so the shimmer it is meant to stop only partly
-    /// stops. Learned in RTSGame, which still carries its own copy of this: converting it is a job
+    /// stops. Learned in the external RTSGame consumer, which still carries its own copy of this: converting it is a job
     /// of its own and not one to do while it is working.
     /// </para>
     /// </remarks>

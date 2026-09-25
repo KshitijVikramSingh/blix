@@ -119,7 +119,7 @@ public sealed class Skeleton
     /// </para>
     /// <para>
     /// <b>It also removes a per-frame allocation.</b> The scratch array was allocated inside this
-    /// method on every call — once per skinned body per frame, which in RTSGame is a crowd. A
+    /// method on every call — once per skinned body per frame, which in the external RTSGame consumer is a crowd. A
     /// caller that wants the worlds supplies the array and there is none; a caller that does not
     /// gets the old behaviour, because making everyone provide one to fix an allocation they never
     /// asked about is a worse trade than the allocation.

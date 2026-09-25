@@ -792,7 +792,7 @@ internal sealed class ViewerPanels
     /// green, by trying one.
     /// </para>
     /// <para>
-    /// <b>It knows nothing about any game.</b> RTSGame's SettlementArt holds the real table and the
+    /// <b>It knows nothing about any game.</b> The external RTSGame consumer holds the real table and the
     /// studio must not reference a game — but the NAME is the surface that table keys on, so listing
     /// names and taking colours shows exactly that surface. Audition a green, read the RGB off the
     /// swatch, go and write it down where the table lives.

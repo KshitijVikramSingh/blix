@@ -139,7 +139,7 @@ public static class Program
         // ── the tint table, which is how a kit asset gets a colour it does not ship ──────────
         //
         // <b>Keyed on the material NAME, which is the whole reason a game stays out of this.</b> The
-        // 29 files in RTSGame's kit carry an empty pbrMetallicRoughness — no factor, no texture — and
+        // 29 files in the external RTSGame consumer's kit carry an empty pbrMetallicRoughness — no factor, no texture — and
         // twelve material names between them. SettlementArt turns those names into colours and lives
         // in a game the studio must never reference; keying on the name shows the exact surface that
         // table keys on while knowing nothing about it.

@@ -119,7 +119,7 @@
   <!-- Item transforms let MSBuild invoke the target only for out-of-date assets.
        The cook host and project recipe assemblies are also inputs, so rebuilding
        either invalidates prior output. A project-owned recipe lists its assembly:
-         <BlixCookRecipeAssembly Include="../RTSGame.Cooking/bin/$(Configuration)/net8.0/RTSGame.Cooking.dll" />
+         <BlixCookRecipeAssembly Include="../Game.Cooking/bin/$(Configuration)/net8.0/Game.Cooking.dll" />
 
        This invokes the cook host after project references have been resolved.
        A project that declares cooked assets references Blix.Tools.Cook as a

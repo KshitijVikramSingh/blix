@@ -47,7 +47,6 @@ fast gate unless `blix.project` actually names it.
 | Renderer research | Vulkan Sponza | Heavy-scene experimentation, measurement, and promotion decisions |
 | Asset and Studio tools | `inspect`, `check`, `cook`, `view`, `shot` | Report, judge, transform, inspect interactively, and capture deterministically |
 | Character instruments | `room`, `room-shot`, `Blix.Labs.Character.Probe` | Isolate authored contact geometry and later character work |
-| Larger project | RTSGame | Game, simulations, benchmarks, project recipes, and its own gate |
 
 ## Playable games
 
@@ -282,21 +281,6 @@ cd src/Character
 
 The family exists so physics, contact, controller, and camera questions can be
 observed without game policy or a complex scene obscuring the answer.
-
-## RTSGame
-
-RTSGame is a larger sibling project with its own main game, headless
-`selftest`, movement and fight benchmarks, long scenarios, cooked project
-recipes, and task-specific scripts. Its quick gate is:
-
-```sh
-cd src/RTSGame
-../../blix test
-```
-
-Longer checks stay explicit in `tools/gate-rts-game.sh` and the focused scripts
-under the RTS project. Do not describe them as part of the quick gate merely
-because they exist.
 
 ## Verification surfaces
 

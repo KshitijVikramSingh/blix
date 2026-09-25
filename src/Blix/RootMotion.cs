@@ -5,7 +5,7 @@ namespace Blix;
 // How far a clip's root bone TRAVELLED over an interval, rather than where it is.
 //
 // Nothing in the tree produced this before. The only consumer that looked at the root at
-// all — RTSGame's StripRootMotion — reverts it to rest, which throws the travel away: the
+// all — the external RTSGame consumer's StripRootMotion — reverts it to rest, which throws the travel away: the
 // simulation owns where a body is and a clip is not allowed an opinion. That is the right
 // call for an RTS and it means root-driven locomotion was *absent*, not merely unextracted.
 // A delta is the missing half: the clip still does not move anything, but it can now say
@@ -117,7 +117,7 @@ public readonly record struct RootMotion(Vector3 Translation, Quaternion Rotatio
     /// </para>
     /// <para>
     /// The cost is a clip that turns in place, whose turn now goes nowhere; the turn belongs in the
-    /// steering layer. <c>RTSGame.SkinnedBodies</c> carries a private copy of exactly this, written before
+    /// steering layer. The external RTSGame consumer carries a private copy of exactly this, written before
     /// there was anywhere to put it, and should fold in the next time that game is touched under its own
     /// gate — a mechanical swap is still a change to a simulation that verifies in years, not seconds.
     /// </para>

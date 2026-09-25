@@ -107,7 +107,7 @@ public sealed class PropModel : IDisposable
     // <b>This is the FIRST pass's figure.</b> Once a caller gives the later passes coarser geometry the
     // model no longer has one caster cost, and a load computed as instances x this number understates the
     // cheap passes and overstates nothing — which is a lie in the safe direction and still a lie. Anything
-    // reporting a total wants CasterTriangleCountIn per pass; see StagedCasterLoad in RTSGame.
+    // reporting a total wants CasterTriangleCountIn per pass, as the external RTSGame consumer does.
     public int CasterTriangleCount => casterPasses.Length > 0 ? casterPasses[0].TriangleCount : 0;
 
     /// <summary>Triangles one copy costs ONE shadow pass, which differs per pass once geometry does.</summary>
@@ -231,7 +231,7 @@ public sealed class PropModel : IDisposable
             {
                 // <b>The caller's fourth channel is the caller's business.</b> This forced it to one, which
                 // is right for a colour and wrong for a channel: an opaque pass has no use for alpha, so a
-                // game is free to put something else there — RTSGame carries a material class in it, which
+                // game is free to put something else there — the external RTSGame consumer carries a material class in it, which
                 // is how a barn's plaster and a tree's canopy end up shaded differently without this
                 // primitive learning what either of those is. Geometry only; the meaning is the caller's.
                 Tint = tint,
@@ -578,7 +578,7 @@ public sealed class PropModel : IDisposable
         /// <remarks>
         /// <b>Chunked because a caller can legitimately have more copies than a buffer holds.</b> An instance
         /// buffer tops out at InstanceBuffer.MaxInstances, which was never a problem while a species had four
-        /// levels of detail and the copies spread across forty models — and became one the moment RTSGame's
+        /// levels of detail and the copies spread across forty models — and became one the moment the external RTSGame consumer's
         /// cheap-tree swap collapsed those forty into six and the zoom was unpinned far enough to show 24,000
         /// trees at once. It threw: "given 16714 instances; max is 16384", at a 450 m standoff.
         /// <para>

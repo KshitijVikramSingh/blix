@@ -110,8 +110,8 @@ public static class Program
     /// <b>The one hand-written file in this layer, and it earns it.</b> Everything about an app
     /// comes from the app — the index is generated precisely so it cannot drift. But "what
     /// constitutes verification for this project" is not a fact about any one app; it is a
-    /// statement the project makes about itself, and no attribute can carry it. That is the same
-    /// thing <c>tools/gate-rts-game.sh</c> already is, written in shell.
+    /// statement the project makes about itself, and no attribute can carry it. Longer or
+    /// specialized verification can remain in project-owned scripts beside this quick gate.
     /// </remarks>
     private static Marked Marker(DirectoryInfo root)
     {
@@ -146,7 +146,7 @@ public static class Program
             // Which project this app belongs to: the nearest marker ABOVE it, or the
             // root's own name when there is none. This is what makes the marker do real
             // work rather than only scope a listing — two projects may both declare
-            // "selftest", and `rts:selftest` is how you say which.
+            // "selftest", and `project:selftest` is how you say which.
             var project = OwningProject(file.Directory, root) ?? rootName;
             Index? index;
             try

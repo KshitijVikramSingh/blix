@@ -62,7 +62,6 @@ an engine-layer migration.
 | Shared assertion tally and suites | `Blix.Verify`, `Blix.Test.*` |
 | Character subsystem instruments | `src/Character/Blix.Labs.Character*` |
 | Executable specifications and games | `src/Demos/Blix.Demos.*` |
-| Co-located RTS game and its cooking policy | `RTSGame`, `RTSGame.Cooking` |
 
 ### Dependency direction
 
@@ -77,7 +76,7 @@ applications and tools
 
 build-time cooking
   -> Blix.Tools.Cook -> Blix.Recipes -> engine formats and capabilities
-  -> project recipe assemblies such as RTSGame.Cooking
+  -> project-owned recipe assemblies discovered through generated indexes
 ```
 
 Several details stop this from being a simplistic layered pyramid:

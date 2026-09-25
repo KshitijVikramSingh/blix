@@ -746,7 +746,7 @@ var t = new TestRunner();
 // The regression this exists for: OnDraw took indexCount/3 and ignored
 // InstanceCount, so an instanced draw of four thousand trees reported one
 // tree's worth of triangles. A frame read 246k where the geometry submitted
-// was 2.8M, and nothing about the figure looked wrong -- RTSGame sized shadow
+// was 2.8M, and nothing about the figure looked wrong -- the external RTSGame consumer sized shadow
 // work against it. A counter nobody can tell is lying is worse than none.
 {
     var sys = new DebugSystem(historyCapacity: 4);
@@ -1756,4 +1756,3 @@ sealed class TestDebuggable : IDebuggable
 
     public void Debug(DebugContext debug) => body?.Invoke(debug);
 }
-

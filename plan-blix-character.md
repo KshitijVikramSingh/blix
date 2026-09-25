@@ -69,7 +69,7 @@ only consumer: it clamps Y against a ground constant and uses sphere `Overlap` f
 pickups. TankArena overlaps AABBs. "Sweep, stop at time of impact, deflect the remainder,
 repeat" does not exist at any layer, and neither does the question that forces it.
 
-**F3 — the animation state machine already exists three times, unnamed.** RTSGame carries
+**F3 — the animation state machine already exists three times, unnamed.** The external RTSGame consumer carries
 the complete one inside `RtsGameLoop.cs`: `BodyAction`, a pure `BodyActions.For`, a
 **dwell table** (`heldAction` / `heldUntil`) so nothing alternates at frame rate, an
 **interrupt set** (`Flinch`, `Fall` may cut in early), and `GaitOf` running **three
@@ -133,7 +133,7 @@ decision takeable, and it said something no amount of reading would have:
 | --- | --- | --- | --- |
 | toolchain lab | 2,880 | 10,560 | **0 B** |
 | VulkanHello | 120 | 120 | 0 B |
-| TankArena · Bulwark · VulkanParticles · RTSGame | **0** | **0** | 0 B |
+| TankArena · Bulwark · VulkanParticles · external RTSGame | **0** | **0** | 0 B |
 
 Every game passes **zero** inline uniforms — push constants and materials instead — and nothing in
 the tree uses the uniform-array path at all. The note's worry that copying "costs far more than 128
@@ -500,7 +500,7 @@ the body is a capsule. Every Controller stage needs a rig, so where the rig come
 structural decision rather than a detail — which is the good reason to have asked it first.
 
 **The tree holds six independent skinned-draw paths** — Runner, VulkanLit, the toolchain lab,
-Bulwark, RTSGame, and `Blix/SkinnedGameObject`. The engine's own abstraction has exactly one
+Bulwark, the external RTSGame consumer, and `Blix/SkinnedGameObject`. The engine's own abstraction has exactly one
 consumer. So does `Blix.Render/PropModel`. Two engine-side attempts at "a loaded model you can draw",
 each stranded at one consumer, because each baked a draw into itself and the draw is the part that
 differs — render graph, material sets, instancing, shadow passes.

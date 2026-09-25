@@ -1145,6 +1145,6 @@ In approximate priority order. Each item is a feature direction, not a structura
 ### Skipped (explicitly deferred)
 
 - **Forces / impulses / mass + multi-body solver.** Real physics-gameplay. Kinematic depenetration covers the demo; full N-body iterative resolution is a multi-week commitment that isn't justified by current content.
-- **Engine-owned pathfinding.** Bulwark and RTSGame already carry domain-specific navigation. No repeated generic contract yet justifies moving one representation or policy into `Blix`.
+- **Engine-owned pathfinding.** Bulwark and external game consumers already carry domain-specific navigation. No repeated generic contract yet justifies moving one representation or policy into `Blix`.
 - **Convex hull collider.** No specific content needs it; OBB covers the tilted-prop case.
 - **Hot-reload / asset cache.** The cooked-asset pipeline (`.blixtex` / `.blixprobe` / `.blixmesh`) skips the slow import paths for VulkanSponza, but there's no in-memory asset cache or hot-reload; uncooked loads re-import every time. Each becomes a follow-up when iteration speed becomes a bottleneck.

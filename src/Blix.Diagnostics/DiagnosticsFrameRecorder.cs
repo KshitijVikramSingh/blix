@@ -99,7 +99,7 @@ public sealed class DiagnosticsFrameRecorder : IFrameRecorder
         // looked entirely plausible.
         //
         // The cost of that is not the wrong figure, it is the decisions
-        // taken against it: RTSGame concluded from these rows that its
+        // taken against it: the external RTSGame consumer concluded from these rows that its
         // shadow casters were cheap at "59k triangles per cascade" and
         // sized work accordingly. A counter nobody can tell is wrong is
         // worse than no counter, because it is believed.

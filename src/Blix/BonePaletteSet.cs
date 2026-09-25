@@ -15,13 +15,13 @@ namespace Blix;
 //   • Bulwark packs `i * EnemyBones * 16` floats and hard-codes `#define BONE_COUNT 15` in
 //     two shaders, guarded by a throw at load if the asset disagrees. The throw exists
 //     *because* the number is in three places.
-//   • RTSGame packs into `paletteScratch[count * BoneCount ..]` and multiplies
+//   • the external RTSGame consumer packs into `paletteScratch[count * BoneCount ..]` and multiplies
 //     `gl_InstanceIndex * int(uSkin.x)` — same contract, bone count passed as data.
 //   • The toolchain lab is the third.
 //
 // ── What is deliberately NOT named ──────────────────────────────────────────
 // **Where the model matrix lives.** Bulwark bakes it into the palette (`skin × model`, a
-// world-space palette and no instance buffer at all); RTSGame keeps the palette in model
+// world-space palette and no instance buffer at all); the external RTSGame consumer keeps the palette in model
 // space and carries `model` and `tint` in a separate instance buffer. Those are two
 // algorithms, not two copies of one — a set that insisted on either would force one shape
 // onto the other, which is the mistake conventions §4 names with the turret rigs.
@@ -72,7 +72,7 @@ public sealed class BonePaletteSet
     /// <param name="post">
     /// Multiplied onto every matrix after the palette is built — the caller's chance to bake a world
     /// placement in (Bulwark's shape). Pass <see cref="Matrix4x4.Identity"/> to keep the palette in
-    /// model space and place the body some other way (RTSGame's shape). Row-vector compose: the
+    /// model space and place the body some other way (the external RTSGame consumer's shape). Row-vector compose: the
     /// palette is applied first, then this.
     /// </param>
     /// <returns>The instance index, which is what a shader's gl_InstanceIndex must equal.</returns>

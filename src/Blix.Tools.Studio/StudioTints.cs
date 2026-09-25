@@ -15,7 +15,7 @@ namespace Blix.Tools.Studio;
 /// whose job is looking at assets.
 /// </para>
 /// <para>
-/// <b>Keyed on the NAME, which is what keeps a game out of this.</b> RTSGame's <c>SettlementArt</c>
+/// <b>Keyed on the NAME, which is what keeps a game out of this.</b> The external RTSGame consumer's material table
 /// holds the real table and the studio must not reference a game. But the name is the surface a game
 /// tints against, so a panel that lists names and takes colours shows exactly that surface while
 /// knowing nothing about any game: audition a green, read off the RGB, put it in the game's table.

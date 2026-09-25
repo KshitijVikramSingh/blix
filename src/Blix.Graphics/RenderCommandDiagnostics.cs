@@ -61,7 +61,7 @@ public static class RenderCommandDiagnostics
     //
     // MEASURED (120 frames each, BLIX_VK_VALIDATE=1): the toolchain lab 2,880 uniform-bearing
     // commands / 10,560 uniform entries / 5,032 texture entries / 0 B of array payload; TankArena,
-    // Bulwark, VulkanParticles and RTSGame each ZERO uniform-bearing commands — every one of them
+    // Bulwark, VulkanParticles and the external RTSGame consumer each ZERO uniform-bearing commands — every one of them
     // passes its per-draw values as push constants and materials. So the "copying them per draw
     // costs far more than 128 bytes" worry was about a shape no application in this tree has, and
     // the array payload it named is 0 B/frame everywhere that can be run here. That is what made

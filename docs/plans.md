@@ -15,14 +15,8 @@ Status was reconciled against the checkout on 2026-09-21.
 | `plan-blix-material-response.md` | Active | Shared sheen vocabulary, probe data, and Sponza raster response exist; the planned per-material response in the light-transport bake is not yet represented by the current global translucency control. |
 | `plan-blix-studio.md` | Active, decision required | Stages S-A through S-E are complete. S-F still proposes moving Runner onto Studio; current documentation treats Studio primarily as an optional tool reference pipeline, so that stage should be accepted or retired explicitly. |
 | `plan-bulwark.md` | Active, acceptance/polish | The playable game and skinned crowd are built, but the plan still records visual review and content-variety follow-ups. |
-| `plan-rts-game.md` | Active | This is the continuing RTS game-design and implementation record. |
-| `plan-rts.md` | Active reference | The locomotion invariants and measured refusals remain referenced by the current RTS implementation and larger game plan. |
 
-The two RTS plans belong to the separate, co-located game project. They remain
-at the checkout root while that project remains here, but they are not engine
-documentation debt and should move with the game if it receives its own repository.
-
-No root plan is currently classified as abandoned. None of the six active
+No root plan is currently classified as abandoned. None of the four active
 records is safe to call superseded without first resolving the open decision it
 still carries.
 

@@ -21,7 +21,7 @@ public sealed record Matrix4x4Uniform(Matrix4x4 Value) : ShaderUniformValue;
 // copied to prevent. Every other ShaderUniformValue holds a struct and was never exposed to
 // this; the three array variants were the only ones that could move, which is why they are
 // the ones that copy. Measured before doing it (see RenderCommandDiagnostics): across the lab,
-// TankArena, Bulwark, VulkanParticles and RTSGame this path carries ZERO bytes per frame —
+// TankArena, Bulwark, VulkanParticles and the external RTSGame consumer this path carries ZERO bytes per frame —
 // only Sponza's cascade view-projections use it at all, at 4 matrices a pass.
 public sealed record Matrix4x4ArrayUniform : ShaderUniformValue
 {

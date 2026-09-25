@@ -2757,7 +2757,7 @@ static ShaderInterface MinimalShader() => new(new[]
     // Instance i's matrices start at i * BoneCount. That sentence is restated in a C# packing
     // loop and in a GLSL `gl_InstanceIndex * stride`, and nothing checks the two agree — when
     // they disagree the bodies do not vanish, they render as other bodies' poses, smeared.
-    // Bulwark and RTSGame each carry their own copy of it; this names it once.
+    // Bulwark and the external RTSGame consumer each carry their own copy of it; this names it once.
     {
         var set = new BonePaletteSet(skeleton.BoneCount, capacity: 3);
         t.ExpectTrue("AQ.15 the buffer is capacity x bone count",
@@ -2786,7 +2786,7 @@ static ShaderInterface MinimalShader() => new(new[]
         t.ExpectClose("AQ.15 and Slice agrees with the arithmetic", set.Slice(1)[0].M41, 2f);
 
         // `post` is where a caller bakes a world placement in (Bulwark's shape) or passes identity
-        // and places the body some other way (RTSGame's). The set takes no view; it just composes.
+        // and places the body some other way (the external RTSGame consumer's). The set takes no view; it just composes.
         set.Reset();
         t.ExpectTrue("AQ.16 Reset makes the slots free again", set.Count == 0);
         set.Add(skeleton, a, Matrix4x4.CreateTranslation(10f, 0f, 0f));

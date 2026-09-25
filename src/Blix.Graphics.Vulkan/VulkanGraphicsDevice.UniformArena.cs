@@ -23,7 +23,7 @@ namespace Blix.Graphics.Vulkan;
 // ── Sets 0 and 1 only ───────────────────────────────────────────────────────
 // Materials bind sets 2 and 3 and own their own buffers through MaterialBindings, which is already
 // per-consumer and cannot alias. Making those dynamic would mean the material's descriptor writes
-// and its bind had to carry offsets too — 33 call sites across nine files including RTSGame — for no
+// and its bind had to carry offsets too — 33 call sites across nine files including the external RTSGame consumer — for no
 // behavioural gain. Sets 0 and 1 are exclusively program-owned, which is what makes this safe.
 public sealed partial class VulkanGraphicsDevice
 {

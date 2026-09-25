@@ -130,18 +130,17 @@ test: selftest, asset-check
 The first non-comment line without a colon is the project name. The optional
 `test:` line lists the apps that form that project's verification gate.
 
-The current tree has four marked projects:
+The current tree has three marked projects:
 
 | Project | Folder | Gate |
 | --- | --- | --- |
 | `blix` | repository root | Graphics, Diagnostics, Physics2D, Physics3D, Apps, Studio, and Recipes suites |
 | `demos` | `src/Demos` | none declared |
 | `character` | `src/Character` | `Blix.Labs.Character.Probe` |
-| `rts` | `src/RTSGame` | `selftest` |
 
 Project scope follows the current working directory. From the repository root,
-all projects below it are visible. From `src/RTSGame`, the `rts` marker is the
-scope and a bare app name resolves within that project.
+all projects below it are visible. From `src/Character`, the `character` marker
+is the scope and a bare app name resolves within that project.
 
 ## Apps
 
@@ -163,11 +162,10 @@ Run one explicitly or with the short form:
 ```
 
 Arguments after the name are forwarded unchanged to the app. If the same name
-is visible in more than one project, qualify it:
+is visible in more than one project, qualify it with its project name:
 
 ```sh
-./blix run rts:selftest
-./blix rts:selftest
+./blix run character:Blix.Labs.Character.Probe
 ```
 
 Resolution tries an exact name, then case-insensitive equality, then an
@@ -229,8 +227,7 @@ public static class Program
 `BlixApps.Dispatch` removes the internal selector before invoking the selected
 method. It returns `null` when the launcher did not select an app, which permits
 an existing executable or hand-written dispatcher to migrate one branch at a
-time. RTSGame uses this shape while its older scenario switches are gradually
-converted.
+time.
 
 ## Headed applications
 
@@ -286,7 +283,7 @@ From a nested project, invoke the same root script while keeping that directory
 as the project scope:
 
 ```sh
-cd src/RTSGame
+cd src/Character
 ../../blix test
 ```
 
@@ -296,9 +293,6 @@ asset recipe/cooking suite. The recipe leg belongs here because it verifies
 shipped-format compatibility, native encoder availability, source-free cooked
 loading, driver behavior, and packaging invariants; those are engine release
 claims rather than an optional specialist check.
-
-RTSGame deliberately keeps longer simulated-year scenarios in
-`tools/gate-rts-game.sh`; its `blix test` entry is the quick `selftest` tier.
 
 If a headed app belongs in a gate, pass `--frames N` so it terminates without a
 person closing the window. Prefer headless probes and deterministic captures for

@@ -41,7 +41,7 @@ public readonly record struct ScissorRect(int X, int Y, int Width, int Height);
 //   struct copy and was never at risk; the three ARRAY variants were the only payload a
 //   caller could change under a recorded command, and they copy on construction as of the
 //   character arc's prologue. Cost, measured: 0 B/frame in the toolchain lab, TankArena,
-//   Bulwark, VulkanParticles and RTSGame — none of them uses the uniform-array path at
+//   Bulwark, VulkanParticles and the external RTSGame consumer — none of them uses the uniform-array path at
 //   all. Sponza's cascade view-projections are the tree's only consumer, at 4 matrices a
 //   pass. The worry that copying "costs far more than 128 bytes" was about a shape no
 //   application here has.
@@ -55,7 +55,7 @@ public readonly record struct ScissorRect(int X, int Y, int Width, int Height);
 //   naming the uniform and the pass wherever validation is on.
 //
 // The skeletal work did not settle any of this and was never going to: a bone palette
-// does NOT travel as a Matrix4x4ArrayUniform in any consumer. Runner, Bulwark, RTSGame
+// does NOT travel as a Matrix4x4ArrayUniform in any consumer. Runner, Bulwark, the external RTSGame consumer
 // and the toolchain lab all send it as a set-3 storage buffer through MaterialBindings.
 // What settled it was a consumer asking — see plan-blix-character.md, prologue.
 public sealed record DispatchCommand(
@@ -144,7 +144,7 @@ public sealed record DispatchCommand(
 //   struct copy and was never at risk; the three ARRAY variants were the only payload a
 //   caller could change under a recorded command, and they copy on construction as of the
 //   character arc's prologue. Cost, measured: 0 B/frame in the toolchain lab, TankArena,
-//   Bulwark, VulkanParticles and RTSGame — none of them uses the uniform-array path at
+//   Bulwark, VulkanParticles and the external RTSGame consumer — none of them uses the uniform-array path at
 //   all. Sponza's cascade view-projections are the tree's only consumer, at 4 matrices a
 //   pass. The worry that copying "costs far more than 128 bytes" was about a shape no
 //   application here has.
@@ -158,7 +158,7 @@ public sealed record DispatchCommand(
 //   naming the uniform and the pass wherever validation is on.
 //
 // The skeletal work did not settle any of this and was never going to: a bone palette
-// does NOT travel as a Matrix4x4ArrayUniform in any consumer. Runner, Bulwark, RTSGame
+// does NOT travel as a Matrix4x4ArrayUniform in any consumer. Runner, Bulwark, the external RTSGame consumer
 // and the toolchain lab all send it as a set-3 storage buffer through MaterialBindings.
 // What settled it was a consumer asking — see plan-blix-character.md, prologue.
 public sealed record DrawIndexedIndirectCommand(

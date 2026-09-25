@@ -13,7 +13,7 @@ namespace Blix.Graphics.Vulkan;
 // CPU + GPU instead of max(CPU, GPU), and the wait is charged to whoever touched the
 // device first rather than to the work it is waiting for.
 //
-// Measured in RTSGame, whose fog-of-war mask is uploaded on every frame its texels
+// Measured in the external RTSGame consumer, whose fog-of-war mask is uploaded on every frame its texels
 // change: 20 ms of a 28 ms frame at a wide standoff, and about 33 ms of a 45 ms frame
 // on a heavier map. A frame that skipped the upload — the fog happened to be clean —
 // ran at about 7 ms. Same build, same view: the frame was bimodal and the mode was set

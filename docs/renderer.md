@@ -308,7 +308,7 @@ The smaller applications are focused examples of explicit composition:
 | `Blix.Demos.VulkanParticles` | Depth pre-pass, soft particles, HDR bloom, and present |
 | `Blix.Demos.Pong` | Sprites, fonts, supersampled offscreen rendering, and CRT post-effect |
 | `Blix.Demos.Runner` | Game-owned instanced world rendering and skinned characters |
-| `Blix.Demos.Bulwark`, `RTSGame` | Larger game-owned render policy and diagnostics |
+| `Blix.Demos.Bulwark` | Larger game-owned render policy and diagnostics |
 
 They are examples and proving consumers, not stages in a renderer inheritance
 hierarchy.

@@ -42,7 +42,6 @@ Run any discovered app by name:
 ./blix view --rig path/to/character.glb --clip Walking_A
 ./blix inspect path/to/asset.glb
 ./blix check --model path/to/asset.glb
-./blix rts:selftest
 ```
 
 `./blix run <app>` is the explicit form; `./blix <app>` is its shorter twin.
@@ -117,7 +116,7 @@ stable GPU handle, smallest first.
 
 Blix currently ships `.blixmesh`, `.blixtex`, `.blixprobe`, and `.blixfont`
 artifacts. Projects can declare their own recipes through the same mechanism;
-`RTSGame.Cooking` is the working example.
+the external-consumer contract and its in-tree fixture exercise that boundary.
 
 See [Assets](docs/assets.md) for the full lifecycle: declarations, recipes,
 provenance, runtime reports, deferred work, and residency ownership.
@@ -153,9 +152,6 @@ tools, and isolated laboratories:
   surfaces.
 - Vulkan Sponza is the renderer and heavy-asset research scene.
 - Character labs isolate contact, controller, camera, rig, and capture work.
-- RTSGame is a co-located but separate game project with its own simulations,
-  scenarios, gates, tools, and cooking recipe. It is a consumer of Blix, not an
-  engine subsystem; a future repository move does not change that boundary.
 
 Use `./blix ls` for the runnable inventory. See [Demos](docs/demos.md) for the
 current application catalogue, ownership boundaries, and verification routing.

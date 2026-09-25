@@ -666,121 +666,11 @@ public static class Program
             }
         }
 
-        // ── the OBJ path: cooked and source agree, and the settings guard holds ──
-        // <b>Closing the gap `blix check --cooked` had over .obj.</b> The judge used to answer
-        // "nothing here that this judges" over a directory of them — the same sentence an EMPTY
-        // directory produces — because no .obj reader reported what it did. Reporting is only
-        // worth having if the cooked path it reports is the same geometry, so both halves are
-        // checked here rather than the report alone.
-        var objAsset = FindFile("Bush_1.obj");
-        if (objAsset is null)
-        {
-            t.Fail("a cooked .obj is findable", "no Bush_1.obj under the repo");
-        }
-        else
-        {
-            var objTemp = Path.Combine(Path.GetTempPath(), "blix-obj-" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(objTemp);
-            try
-            {
-                // The source leg needs the .mtl beside it or the colours come back as defaults and
-                // the comparison would be measuring the copy, not the cook.
-                var loneObj = Path.Combine(objTemp, Path.GetFileName(objAsset));
-                File.Copy(objAsset, loneObj);
-                var mtl = Path.ChangeExtension(objAsset, ".mtl");
-                if (File.Exists(mtl)) File.Copy(mtl, Path.ChangeExtension(loneObj, ".mtl"));
-
-                var partsCooked = WavefrontParts.Import(objAsset);
-                var partsSource = WavefrontParts.Import(loneObj);
-
-                t.Expect("cooked and source OBJ yield the same part count",
-                    partsCooked.Count == partsSource.Count,
-                    $"cooked {partsCooked.Count}, source {partsSource.Count}");
-
-                var objMismatches = new List<string>();
-                for (var i = 0; i < Math.Min(partsCooked.Count, partsSource.Count); i++)
-                {
-                    var a = partsCooked[i];
-                    var b = partsSource[i];
-                    if (a.Material != b.Material) objMismatches.Add($"[{i}] material {a.Material} vs {b.Material}");
-                    if (a.Color != b.Color) objMismatches.Add($"[{i}] colour {a.Color} vs {b.Color}");
-                    if (a.Mesh.VertexCount != b.Mesh.VertexCount) objMismatches.Add($"[{i}] vertices {a.Mesh.VertexCount} vs {b.Mesh.VertexCount}");
-                    if (a.Mesh.IndexCount != b.Mesh.IndexCount) objMismatches.Add($"[{i}] indices {a.Mesh.IndexCount} vs {b.Mesh.IndexCount}");
-                    if (a.Mesh.Bounds.Min != b.Mesh.Bounds.Min || a.Mesh.Bounds.Max != b.Mesh.Bounds.Max)
-                        objMismatches.Add($"[{i}] bounds {a.Mesh.Bounds.Min}..{a.Mesh.Bounds.Max} vs {b.Mesh.Bounds.Min}..{b.Mesh.Bounds.Max}");
-                    // Byte equality, not just counts and bounds. RTSGame's settlement art now comes
-                    // off these cooked files, so "the same number of vertices in the same box" is not
-                    // enough — a reordered or re-packed vertex stream passes that and draws
-                    // differently. The cook runs this same parser, so anything but equality here is
-                    // the writer or the reader losing information.
-                    if (!a.Mesh.VertexBytes.AsSpan().SequenceEqual(b.Mesh.VertexBytes))
-                        objMismatches.Add($"[{i}] vertex bytes differ");
-                    if (!a.Mesh.Indices.AsSpan().SequenceEqual(b.Mesh.Indices))
-                        objMismatches.Add($"[{i}] indices differ");
-                }
-
-                t.Expect("a cooked OBJ part-for-part matches the parsed one",
-                    objMismatches.Count == 0, string.Join("; ", objMismatches.Take(5)));
-
-                // And the reports say which path each took, which is the whole of what the judge reads.
-                var wasOnObj = AssetLoadLog.Enabled;
-                try
-                {
-                    AssetLoadLog.Start();
-                    WavefrontParts.Import(objAsset);
-                    WavefrontParts.Import(loneObj);
-                    var objReports = AssetLoadLog.Drain();
-
-                    t.Expect("the cooked OBJ reports Cooked",
-                        objReports.SingleOrDefault(r => r.SourcePath == objAsset) is { Mode: AssetLoadMode.Cooked },
-                        "no Cooked report");
-                    var lonely = objReports.SingleOrDefault(r => r.SourcePath == loneObj);
-                    t.Expect("and one with no sibling reports Source, saying why",
-                        lonely is { Mode: AssetLoadMode.Source }
-                        && lonely.Warning?.Contains("no .blixmesh sibling", StringComparison.Ordinal) == true,
-                        lonely?.Warning ?? "no report");
-
-                    // <b>The settings guard.</b> The cook stamps recenter=1; this reader is asked
-                    // for the opposite. A loader that ignored the stamp would hand back geometry
-                    // shifted by half a bounding box — on machines that had cooked and nowhere
-                    // else, which is the shape of bug the whole stamp exists to prevent.
-                    AssetLoadLog.Start();
-                    new ObjImporter { RecenterToOrigin = false }
-                        .Import(new AssetImportContext(AssetId.Parse("t/obj-uncentred"), objAsset));
-                    var guarded = AssetLoadLog.Drain().SingleOrDefault(r => r.SourcePath == objAsset);
-                    t.Expect("a reader wanting other settings refuses the cooked file",
-                        guarded is { Mode: AssetLoadMode.Source }
-                        && guarded.Warning?.Contains("recenter=0", StringComparison.Ordinal) == true,
-                        guarded?.Warning ?? "no report");
-
-                    // <b>A cooked OBJ whose material library names no texture owes NOTHING.</b>
-                    // This kit's .mtl files carry colour and no map_ line at all, and the recipe
-                    // declared SourceRequired | SourceRequiredForImagesOnly on every file anyway —
-                    // claiming its source was needed for image bytes that do not exist. The same
-                    // overstatement K-F removed from the mesh cook, in the one recipe that is not
-                    // Blix's, and the reason a flag nobody checks drifts.
-                    var objHeader = CookedFile.TryReadHeader(Path.ChangeExtension(objAsset, ".blixmesh"));
-                    t.Expect("a cooked OBJ with no textures declares nothing owed",
-                        objHeader?.Stamp.Flags == CookedFlags.None,
-                        $"flags = {objHeader?.Stamp.Flags.ToString() ?? "no header"}");
-                }
-                finally
-                {
-                    AssetLoadLog.Enabled = wasOnObj;
-                    AssetLoadLog.Drain();
-                }
-            }
-            finally
-            {
-                try { Directory.Delete(objTemp, recursive: true); } catch (IOException) { }
-            }
-        }
-
         // ── two declarations for one output are refused ─────────────────────
         // <b>A cooked path is derived from the source's NAME, so settings are not in it.</b> Two
         // BlixCook items for one source differing only in Options therefore both cook and both
-        // write the same file — demonstrated by declaring Villager.obj at recenter=0 and recenter=1
-        // and watching two "cooked omsh" lines produce one artifact, no warning, last one winning.
+        // write the same file — demonstrated by declaring one source at recenter=0 and recenter=1
+        // and watching two recipe invocations produce one artifact, no warning, last one winning.
         // The consumer whose settings lost then has its cooked file refused by the loader's guard
         // and walks the source forever, traceable to nothing.
         //
@@ -790,14 +680,14 @@ public static class Program
         var tab = "\t";
         var collidingBatch = new[]
         {
-            $"omsh{tab}/a/Villager.obj{tab}/a/Villager.blixmesh{tab}recenter=0",
-            $"omsh{tab}/a/Villager.obj{tab}/a/Villager.blixmesh{tab}recenter=1",
+            $"mesh{tab}/a/model.obj{tab}/a/model.blixmesh{tab}recenter=0",
+            $"mesh{tab}/a/model.obj{tab}/a/model.blixmesh{tab}recenter=1",
         };
         var collisions = Blix.Tools.Cook.Program.FindOutputCollisions(collidingBatch).ToArray();
         t.Expect("two declarations writing one file are caught", collisions.Length == 1,
             $"{collisions.Length} collision(s)");
         t.ExpectTrue("and the message names the output",
-            collisions.Length == 1 && collisions[0].Contains("/a/Villager.blixmesh", StringComparison.Ordinal));
+            collisions.Length == 1 && collisions[0].Contains("/a/model.blixmesh", StringComparison.Ordinal));
         t.ExpectTrue("and both claimants, with what differs",
             collisions.Length == 1
             && collisions[0].Contains("recenter=0", StringComparison.Ordinal)
@@ -806,8 +696,8 @@ public static class Program
         // The control: distinct outputs are not a collision, or the check would refuse every build.
         var fineBatch = new[]
         {
-            $"omsh{tab}/a/Villager.obj{tab}/a/Villager.blixmesh{tab}recenter=0",
-            $"omsh{tab}/a/Bush_1.obj{tab}/a/Bush_1.blixmesh{tab}recenter=1",
+            $"mesh{tab}/a/model.obj{tab}/a/model.blixmesh{tab}recenter=0",
+            $"mesh{tab}/a/prop.obj{tab}/a/prop.blixmesh{tab}recenter=1",
             string.Empty,
             "malformed line with no tabs",
         };

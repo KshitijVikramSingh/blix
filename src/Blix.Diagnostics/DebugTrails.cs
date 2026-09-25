@@ -12,7 +12,7 @@ namespace Blix.Diagnostics;
 /// built on top, because a draw command cannot outlive the frame that made it.
 /// <para>
 /// That constraint is why the one real instrument this codebase has for a question about time —
-/// RTSGame's StallCensus — lives in the game rather than the engine, hand-rolling per-body arrays of
+/// The external RTSGame consumer's StallCensus lives in the game rather than the engine, hand-rolling per-body arrays of
 /// accumulators. A path through space is the commonest temporal question there is for anything that moves,
 /// and Spear's whole domain is things that move.
 /// </para>
