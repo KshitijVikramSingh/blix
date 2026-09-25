@@ -30,6 +30,9 @@ jobs:
       - name: Install the supported macOS prerequisites
         run: brew install molten-vk vulkan-loader vulkan-headers vulkan-tools vulkan-validationlayers shaderc spirv-cross openal-soft
 
+      - name: Bootstrap the Blix tools
+        run: ./blix ls
+
       - name: Restore
         run: dotnet restore Blix.sln
 
