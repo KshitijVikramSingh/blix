@@ -33,9 +33,9 @@ public static class BlixMark
         [(40f, 14.5f), (23f, 23f), (23f, 39f), (40f, 30.5f)];
 
     // Ember, and the same two derived faces the site uses.
-    private static readonly (byte R, byte G, byte B) TopColour = (0xcb, 0x45, 0x26);
-    private static readonly (byte R, byte G, byte B) LeftColour = (0x8f, 0x2d, 0x17);
-    private static readonly (byte R, byte G, byte B) RightColour = (0xe2, 0x68, 0x3f);
+    private static readonly (byte R, byte G, byte B) TopColour = (0xe8, 0x41, 0x17);
+    private static readonly (byte R, byte G, byte B) LeftColour = (0xa7, 0x2f, 0x11);
+    private static readonly (byte R, byte G, byte B) RightColour = (0xee, 0x6f, 0x4f);
 
     /// <summary>Sizes a window manager is likely to ask for, smallest first.</summary>
     private static readonly int[] DefaultSizes = [16, 24, 32, 48, 64, 128];
