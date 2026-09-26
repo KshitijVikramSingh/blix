@@ -240,10 +240,15 @@ h1 {
 .plate img {
   width: 100%;
   height: auto;
-  max-height: 68vh;
-  aspect-ratio: 21 / 9;
+  /* 11/5 rather than 21/9: the taller band gives back the crown of the cypress
+     and the roofline above the arcade. The gain is taken off the TOP - 44%
+     holds the bottom edge exactly where 21/9 at 55% had it. The cap is 78vh
+     because 68 lands at 650px on a 1470x956 screen and would silently crop
+     18px back off a 668px band. */
+  max-height: 78vh;
+  aspect-ratio: 11 / 5;
   object-fit: cover;
-  object-position: center 55%;
+  object-position: center 44%;
   background: var(--screen);
 }
 
