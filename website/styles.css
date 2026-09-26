@@ -600,18 +600,12 @@ p > code, dd > code {
      EXPLICIT line, which collapses the art back into row 1. */
   grid-row: 1 / span 10;
   align-self: center;
-  height: auto;
-
-  /* The terminal is already at its narrowest - its longest command needs every
-     pixel of 47rem - so there is no column width to take. The art grows into
-     the page gutter instead, by exactly the padding the band already reserves
-     there, less 1.25rem so it can never reach the viewport edge and raise a
-     scrollbar. */
-  max-width: none;          /* the global img{max-width:100%} would cancel the bleed */
-  --bleed: max(var(--gut), calc((100vw - var(--page)) / 2));
-  --inset: 5rem;                         /* how far the art stays off the edge */
-  width: calc(100% + max(0px, var(--bleed) - var(--inset)));
-  margin-right: calc(-1 * max(0px, var(--bleed) - var(--inset)));
+  max-width: none;          /* the global img{max-width:100%} would cap it at the column */
+  /* Portrait art in a landscape slot: capped by height and centred, rather
+     than filled to the column width the way a wide drawing would be. */
+  width: auto;
+  max-height: 30rem;
+  justify-self: center;
 }
 
 /* Below this the terminal claims the width and the art shrinks to a crumb, so
