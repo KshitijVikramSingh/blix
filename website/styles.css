@@ -1,5 +1,5 @@
-/* Blix — the renders are the only colour on this page. Everything else is ink on
-   a cool paper, and interaction reads through weight, rule and inversion. */
+/* Blix — the renders carry the colour. Ink on a cool paper everywhere else, and
+   one accent spent only on what the reader is meant to do: run the commands. */
 
 :root {
   --paper:   #e8eaec;   /* cool monitor grey, deliberately not a warm cream */
@@ -11,7 +11,13 @@
   --screen:  #10141a;   /* terminal surface */
   --screen-2:#1b212a;
   --screen-t:#dfe4ea;
-  --focus:   #2f6be0;   /* functional only: focus ring. Never decorative. */
+  /* Ember. Three values, not one: the brand red is bright enough that it clears
+     the 3:1 non-text floor but not the 4.5:1 text floor on this paper, so coloured
+     text on the paper uses the darker sibling. */
+  --accent:     #cb4526;   /* fills, rules, the mark        — 3.94:1 on paper */
+  --accent-ink: #a7301b;   /* accent-coloured text on paper — 5.65:1 */
+  --accent-d:   #ec6851;   /* anything on a dark surface    — 5.86:1 */
+  --focus:      #cb4526;
 
   --display: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
   --mono:    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -73,11 +79,22 @@ button { font: inherit; }
   gap: 2rem;
 }
 
+/* Lockup: the bracketed cube, then the word. The glyph is a <use> of one
+   symbol defined once in the document. */
 .mark {
+  display: inline-flex;
+  align-items: center;
+  gap: .48rem;
   font-size: 1.3rem;
-  font-weight: 700;
-  letter-spacing: -.045em;
+  font-weight: 800;
+  letter-spacing: -.035em;
   text-decoration: none;
+}
+
+.mark-glyph {
+  height: 1.32em;
+  width: calc(1.32em * 62 / 46);   /* the mark is wider than it is tall */
+  flex: none;
 }
 
 .bar nav, .foot nav {
@@ -92,7 +109,7 @@ button { font: inherit; }
   padding-bottom: 2px;
   border-bottom: 2px solid transparent;
 }
-.bar nav a:hover, .foot nav a:hover { border-bottom-color: var(--ink); }
+.bar nav a:hover, .foot nav a:hover { border-bottom-color: var(--accent); }
 
 /* ── Hero ─────────────────────────────────────────────────────────────── */
 
@@ -185,7 +202,7 @@ h1 {
   line-height: 1.75;
 }
 
-.term .p { color: #7c8794; }   /* prompt */
+.term .p { color: var(--accent-d); }   /* prompt: the one lit thing in a block */
 .term .d { color: #7c8794; }
 .term .k { color: #9fb4d8; }
 .term .t { color: #b8c9a8; }   /* dim path line */
@@ -326,7 +343,8 @@ h2 {
 .dark .codes p { color: #a9b4c0; }
 .dark .band-lead,
 .dark .after { color: #a9b4c0; }
-.dark .link { color: #f4f7fa; }
+.dark .link { color: #f4f7fa; text-decoration-color: var(--accent-d); }
+.dark .link:hover { color: var(--accent-d); }
 
 /* the code sits ON the band, so it lifts instead of matching it */
 .dark .term { background: #1c232d; }
@@ -471,15 +489,15 @@ p > code, dd > code {
   min-height: 48px;
   padding: .6rem 1.4rem;
   align-items: center;
-  background: var(--ink);
-  color: var(--paper);
-  border: 2px solid var(--ink);
+  background: var(--accent);
+  color: #fff;
+  border: 2px solid var(--accent);
   font-family: var(--display);
   font-size: .95rem;
   font-weight: 600;
   text-decoration: none;
 }
-.btn:hover { background: transparent; color: var(--ink); }
+.btn:hover { background: transparent; color: var(--accent-ink); }
 
 .after + .after { margin-top: .7rem; }
 
@@ -487,9 +505,11 @@ p > code, dd > code {
   font-family: var(--display);
   font-size: .95rem;
   font-weight: 500;
-  text-decoration-thickness: 1px;
+  text-decoration-thickness: 2px;
+  text-decoration-color: var(--accent);
   text-underline-offset: .25em;
 }
+.link:hover { color: var(--accent-ink); }
 
 /* ── Foot ─────────────────────────────────────────────────────────────── */
 

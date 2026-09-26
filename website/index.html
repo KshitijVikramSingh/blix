@@ -8,15 +8,31 @@
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="icon" href="assets/icon-32.png" sizes="32x32">
+  <link rel="apple-touch-icon" href="assets/icon-180.png">
   <link rel="stylesheet" href="styles.css">
   <script src="script.js" defer></script>
 </head>
 <body>
   <a class="skip" href="#start">Skip to getting started</a>
 
+  <svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+    <symbol id="blix-mark" viewBox="0 0 62 46">
+      <path d="M17 4 H4 V42 H17 M45 4 H58 V42 H45" stroke="#cb4526" stroke-width="7"
+            fill="none" stroke-linecap="butt" stroke-linejoin="miter"/>
+      <polygon points="31,10 44,16.5 31,23 18,16.5" fill="#cb4526"/>
+      <polygon points="18,16.5 31,23 31,36 18,29.5" fill="#8f2d17"/>
+      <polygon points="44,16.5 31,23 31,36 44,29.5" fill="#e2683f"/>
+    </symbol>
+  </svg>
+
   <header class="bar">
-    <a class="mark" href="#top">Blix</a>
+    <a class="mark" href="#top">
+      <svg class="mark-glyph" aria-hidden="true" focusable="false"><use href="#blix-mark"/></svg>
+      <span>blix</span>
+    </a>
     <nav aria-label="Primary">
       <a href="#start">Get started</a>
       <a href="https://github.com/KshitijVikramSingh/blix/blob/main/docs/getting-started.md">Docs</a>
@@ -332,7 +348,10 @@ graph.Execute(commandList);</code></pre>
   </main>
 
   <footer class="foot">
-    <a class="mark" href="#top">Blix</a>
+    <a class="mark" href="#top">
+      <svg class="mark-glyph" aria-hidden="true" focusable="false"><use href="#blix-mark"/></svg>
+      <span>blix</span>
+    </a>
     <nav aria-label="Footer">
       <a href="https://github.com/KshitijVikramSingh/blix">Source</a>
       <a href="https://github.com/KshitijVikramSingh/blix/blob/main/docs/getting-started.md">Docs</a>

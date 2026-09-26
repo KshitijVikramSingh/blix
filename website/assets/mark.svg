@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 62 46">
+  <title>Blix</title>
+  <path d="M17 4 H4 V42 H17 M45 4 H58 V42 H45" stroke="#cb4526" stroke-width="7"
+        fill="none" stroke-linecap="butt" stroke-linejoin="miter"/>
+  <polygon points="31,10 44,16.5 31,23 18,16.5" fill="#cb4526"/>
+  <polygon points="18,16.5 31,23 31,36 18,29.5" fill="#8f2d17"/>
+  <polygon points="44,16.5 31,23 31,36 44,29.5" fill="#e2683f"/>
+</svg>
