@@ -288,10 +288,13 @@ h1 {
 /* the strip IS the accent here, so a declaration in it reads as ink like the rest */
 .plate figcaption .decl { color: #000; }
 
-/* a full-width band would stretch a terminal far past its longest line */
+/* A full-width band would stretch a terminal far past its longest line. The
+   floor is measured, not guessed: the widest line renders at 523px and the pre
+   adds 30px of padding, so 553 is the point a scrollbar appears. 40rem sits
+   above that with room to spare, and leaves the rest of the row to the art. */
 .band > .term,
 .band > .band-lead + .term {
-  max-width: 47rem;
+  max-width: 40rem;
   margin-top: clamp(1.9rem, 3.4vw, 2.6rem);
 }
 
@@ -584,7 +587,7 @@ p > code, dd > code {
   /* The first track is the terminal's own width, not 1fr. With 1fr it absorbed
      every pixel the gap gave up, so the dead space between the terminal's
      47rem cap and the art stayed put however small the gap was set. */
-  grid-template-columns: minmax(0, 47rem) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 40rem) minmax(0, 1fr);
   column-gap: clamp(1.25rem, 2.4vw, 2.5rem);
   align-items: start;
 }
