@@ -2,10 +2,10 @@
   <title>Blix</title>
   <rect width="62" height="62" rx="13.95" fill="#e8eaec"/>
   <g transform="translate(7.054,13.233) scale(0.7725)">
-    <path d="M17 4 H4 V42 H17 M45 4 H58 V42 H45" stroke="#e84117" stroke-width="7"
+    <path d="M17 4 H4 V42 H17 M45 4 H58 V42 H45" stroke="#ba3412" stroke-width="7"
           fill="none" stroke-linecap="butt" stroke-linejoin="miter"/>
-    <polygon points="31,10 44,16.5 31,23 18,16.5" fill="#e84117"/>
-    <polygon points="18,16.5 31,23 31,36 18,29.5" fill="#a72f11"/>
-    <polygon points="44,16.5 31,23 31,36 44,29.5" fill="#ee6f4f"/>
+    <polygon points="31,10 44,16.5 31,23 18,16.5" fill="#ba3412"/>
+    <polygon points="18,16.5 31,23 31,36 18,29.5" fill="#83230b"/>
+    <polygon points="44,16.5 31,23 31,36 44,29.5" fill="#e3441c"/>
   </g>
 </svg>

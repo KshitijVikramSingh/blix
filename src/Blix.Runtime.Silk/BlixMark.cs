@@ -63,6 +63,14 @@ public static class BlixMark
     private const float TileInset = 0.12f;      // margin between the mark and the tile edge
     private static readonly (byte R, byte G, byte B) TileColour = (0xe8, 0xea, 0xec);
 
+    // A second ramp, for the mark on paper. The dark-band one cannot be reused: it is built so the
+    // LIT face is brightest, which is right against a dark surface and backwards against a light
+    // one - there the lit face is the closest to the background and the box loses its third side.
+    // These hold the same order and sit the whole ramp far enough below paper to read.
+    private static readonly (byte R, byte G, byte B) TileTop = (0xba, 0x34, 0x12);
+    private static readonly (byte R, byte G, byte B) TileLeft = (0x83, 0x23, 0x0b);
+    private static readonly (byte R, byte G, byte B) TileRight = (0xe3, 0x44, 0x1c);
+
     // Rendering the whole set costs ~7 ms and the dock tile another ~12 ms, measured on an M4.
     // That is not much, but it is the same answer every time and it would otherwise be paid on
     // every window a process opens. A benign race just renders twice and keeps one.
@@ -188,10 +196,10 @@ public static class BlixMark
                         var my = ((gy - ((Grid / 2f) - (23f * fit))) / fit);
 
                         var hit = TileColour;
-                        if (InBracket(mx, my)) hit = TopColour;
-                        else if (Inside(Top, mx, my)) hit = TopColour;
-                        else if (Inside(Left, mx, my)) hit = LeftColour;
-                        else if (Inside(Right, mx, my)) hit = RightColour;
+                        if (InBracket(mx, my)) hit = TileTop;
+                        else if (Inside(Top, mx, my)) hit = TileTop;
+                        else if (Inside(Left, mx, my)) hit = TileLeft;
+                        else if (Inside(Right, mx, my)) hit = TileRight;
 
                         r += hit.R; g += hit.G; b += hit.B; covered++;
                     }
