@@ -188,6 +188,10 @@ Application-specific arguments remain owned by the application.
 - Keep shared GLSL ASCII. Shaders compile offline to SPIR-V through `glslc`.
 - OpenAL Soft is required for working audio on current macOS; Apple's legacy
   OpenAL framework is deprecated and frequently silent.
+- Windows show the Blix mark as their icon unless an application sets
+  `WindowOptions.Icons`. macOS windows carry no icon at all, so there the mark
+  goes on the dock tile instead — the only icon a macOS application has, and
+  otherwise the generic one for a terminal-launched apphost.
 
 ## License
 

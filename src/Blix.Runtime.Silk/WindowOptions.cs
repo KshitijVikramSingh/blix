@@ -1,4 +1,5 @@
 using Blix.Core;
+using Silk.NET.Core;
 
 namespace Blix.Runtime.Silk;
 
@@ -31,6 +32,18 @@ public sealed record WindowOptions(string Title, int Width, int Height)
 
     /// <summary>Start with the diagnostics overlay live, for an application that produces diagnostics.</summary>
     public bool Diagnostics { get; init; }
+
+    /// <summary>
+    /// Images for the window icon, smallest first. Null uses the Blix mark; an empty list leaves
+    /// whatever the platform would have shown.
+    /// </summary>
+    /// <remarks>
+    /// A game shipping its own art sets this. The default is the engine's mark rather than nothing,
+    /// because the alternative on Windows and Linux is the generic executable icon, which is what
+    /// every unbranded window looks like and tells a player nothing about what they just launched.
+    /// It is rasterised only when a window is actually created &mdash; see <see cref="BlixMark"/>.
+    /// </remarks>
+    public IReadOnlyList<RawImage>? Icons { get; init; }
 
     /// <summary>
     /// Write a JSON dump of this frame and carry on. 0 never dumps.

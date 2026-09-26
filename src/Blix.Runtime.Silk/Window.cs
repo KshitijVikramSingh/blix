@@ -6,6 +6,7 @@ using Blix;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 using Blix.Render;
+using Silk.NET.Core;
 using Silk.NET.Input;
 using Silk.NET.Maths;
 using Silk.NET.Windowing;
@@ -117,6 +118,36 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         window.Closing += OnClosing;
     }
 
+    // Called from OnLoad, not from the constructor: Silk refuses SetWindowIcon on a window it has
+    // not initialised yet ("Window should be initialized"), and the constructor only creates it.
+    private static void ApplyWindowIcon(IWindow window, BlixWindowOptions options)
+    {
+        var icons = options.Icons ?? BlixMark.WindowIcons();
+        if (icons.Count == 0) return;
+
+        try
+        {
+            // Windows and Linux: the title bar and the taskbar. Documented to do nothing on
+            // macOS, where it returns without error rather than failing.
+            window.SetWindowIcon(icons is RawImage[] array ? array : [.. icons]);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // An icon is decoration. A backend that refuses one must not stop an application.
+            Console.Error.WriteLine($"[blix] window icon not applied: {ex.Message}");
+        }
+
+        // macOS has no window icon, so the line above is the whole story everywhere except the
+        // one platform Blix is currently verified on. The dock tile is the icon there.
+        if (OperatingSystem.IsMacOS())
+        {
+            var largest = options.Icons is null
+                ? BlixMark.DockIcon()
+                : icons.Aggregate((a, b) => b.Width > a.Width ? b : a);
+            MacDockIcon.TrySet(largest);
+        }
+    }
+
     public void Run()
     {
         window.Run();
@@ -124,6 +155,8 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
     private void OnLoad()
     {
+        ApplyWindowIcon(window, options);
+
         var vkSurface = window.VkSurface
             ?? throw new InvalidOperationException("Silk window did not provide a Vulkan surface. Was the window created with WindowOptions.DefaultVulkan?");
         var fb = window.FramebufferSize;

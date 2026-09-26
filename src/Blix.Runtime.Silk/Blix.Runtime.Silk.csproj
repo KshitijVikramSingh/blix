@@ -7,6 +7,8 @@
     <ProjectReference Include="..\Blix\Blix.csproj" />
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
     <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
+    <!-- PngWriter, to hand the macOS dock an NSImage without a temp file. -->
+    <ProjectReference Include="..\Blix.Graphics.Images\Blix.Graphics.Images.csproj" />
     <ProjectReference Include="..\Blix.Render\Blix.Render.csproj" />
     <ProjectReference Include="..\Blix.Audio\Blix.Audio.csproj" />
     <ProjectReference Include="..\Blix.Audio.OpenAL\Blix.Audio.OpenAL.csproj" />
