@@ -56,6 +56,13 @@ public static class BlixMark
     /// <summary>The size macOS wants for a dock tile, rendered rather than upscaled from 128.</summary>
     private const int DockSize = 256;
 
+    // The dock tile: paper, with the platform's usual rounded square. Only the dock gets it.
+    // A background helps a large icon sit among its neighbours and hurts a small one, because it
+    // shrinks the mark inside its own border - the same reason the site's 16px favicon has none.
+    private const float TileRadius = 0.225f;    // of the side, the platform convention
+    private const float TileInset = 0.12f;      // margin between the mark and the tile edge
+    private static readonly (byte R, byte G, byte B) TileColour = (0xe8, 0xea, 0xec);
+
     // Rendering the whole set costs ~7 ms and the dock tile another ~12 ms, measured on an M4.
     // That is not much, but it is the same answer every time and it would otherwise be paid on
     // every window a process opens. A benign race just renders twice and keeps one.
@@ -68,8 +75,8 @@ public static class BlixMark
     /// </summary>
     public static IReadOnlyList<RawImage> WindowIcons() => windowIcons ??= RenderSet();
 
-    /// <summary>The mark at the size macOS uses for a dock tile.</summary>
-    public static RawImage DockIcon() => dockIcon ??= Render(DockSize);
+    /// <summary>The mark on a paper tile, at the size macOS uses for a dock icon.</summary>
+    public static RawImage DockIcon() => dockIcon ??= RenderTile(DockSize);
 
     private static RawImage[] RenderSet()
     {
@@ -143,6 +150,79 @@ public static class BlixMark
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// The mark centred on an opaque rounded-square tile, for a dock or a home screen.
+    /// </summary>
+    private static RawImage RenderTile(int size)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(size, 1);
+
+        const int Samples = 4;
+        const int PerPixel = Samples * Samples;
+        var pixels = new byte[size * size * 4];
+
+        // Fit the mark's 61x45 of ink inside the tile's safe area and centre it there.
+        var avail = Grid * (1f - (TileInset * 2f));
+        var fit = Math.Min(avail / 61f, avail / 45f);
+        var radius = Grid * TileRadius;
+        var scale = Grid / size;
+
+        for (var y = 0; y < size; y++)
+        {
+            for (var x = 0; x < size; x++)
+            {
+                int r = 0, g = 0, b = 0, covered = 0;
+
+                for (var sy = 0; sy < Samples; sy++)
+                {
+                    for (var sx = 0; sx < Samples; sx++)
+                    {
+                        var gx = (x + ((sx + 0.5f) / Samples)) * scale;
+                        var gy = (y + ((sy + 0.5f) / Samples)) * scale;
+                        if (!InRoundedSquare(gx, gy, radius)) continue;
+
+                        // Back out of the tile's frame into the mark's own coordinates.
+                        var mx = ((gx - ((Grid / 2f) - (31f * fit))) / fit);
+                        var my = ((gy - ((Grid / 2f) - (23f * fit))) / fit);
+
+                        var hit = TileColour;
+                        if (InBracket(mx, my)) hit = TopColour;
+                        else if (Inside(Top, mx, my)) hit = TopColour;
+                        else if (Inside(Left, mx, my)) hit = LeftColour;
+                        else if (Inside(Right, mx, my)) hit = RightColour;
+
+                        r += hit.R; g += hit.G; b += hit.B; covered++;
+                    }
+                }
+
+                if (covered == 0) continue;
+
+                var i = (y * size + x) * 4;
+                pixels[i + 0] = (byte)(r / covered);
+                pixels[i + 1] = (byte)(g / covered);
+                pixels[i + 2] = (byte)(b / covered);
+                pixels[i + 3] = (byte)(covered * 255 / PerPixel);
+            }
+        }
+
+        return new RawImage(size, size, pixels);
+    }
+
+    /// <summary>Point test for a rounded square filling the whole grid.</summary>
+    private static bool InRoundedSquare(float px, float py, float radius)
+    {
+        if (px < 0f || py < 0f || px > Grid || py > Grid) return false;
+
+        // Only the four corner boxes need the distance test.
+        var cx = px < radius ? radius : (px > Grid - radius ? Grid - radius : px);
+        var cy = py < radius ? radius : (py > Grid - radius ? Grid - radius : py);
+        if (cx == px || cy == py) return true;
+
+        var dx = px - cx;
+        var dy = py - cy;
+        return (dx * dx) + (dy * dy) <= radius * radius;
     }
 
     /// <summary>Winding test for a convex polygon wound consistently in one direction.</summary>
