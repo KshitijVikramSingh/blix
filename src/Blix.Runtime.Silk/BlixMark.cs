@@ -18,19 +18,32 @@ namespace Blix.Runtime.Silk;
 /// </remarks>
 public static class BlixMark
 {
-    // The 46-unit grid the mark is authored on. The box spans 6..40 horizontally and 6..39
-    // vertically, so roughly an eighth of the frame is margin on every side - which is what keeps
-    // it from crowding its neighbours in a dock or a tab strip.
-    private const float Grid = 46f;
+    // The mark is authored 62 wide and 46 tall. A square icon letterboxes it rather than
+    // redrawing it: shortening the bracket arms to fit a 46-wide canvas leaves almost nothing
+    // between them for the box, and the deep arms are what make it read as a bracket at all.
+    private const float Grid = 62f;
+    private const float OriginY = -8f;      // centres the 46-tall mark in a 62-tall square
 
     private static readonly (float X, float Y)[] Top =
-        [(23f, 6f), (40f, 14.5f), (23f, 23f), (6f, 14.5f)];
+        [(31f, 10f), (44f, 16.5f), (31f, 23f), (18f, 16.5f)];
 
     private static readonly (float X, float Y)[] Left =
-        [(6f, 14.5f), (23f, 23f), (23f, 39f), (6f, 30.5f)];
+        [(18f, 16.5f), (31f, 23f), (31f, 36f), (18f, 29.5f)];
 
     private static readonly (float X, float Y)[] Right =
-        [(40f, 14.5f), (23f, 23f), (23f, 39f), (40f, 30.5f)];
+        [(44f, 16.5f), (31f, 23f), (31f, 36f), (44f, 29.5f)];
+
+    // The brackets, as the six rectangles a 7-wide stroke on "M17 4 H4 V42 H17" traces out,
+    // mirrored. Axis-aligned, so they need no polygon test.
+    private static readonly (float X0, float Y0, float X1, float Y1)[] Brackets =
+    [
+        (0.5f,  0.5f, 7.5f,  45.5f),    // left stem
+        (0.5f,  0.5f, 17f,   7.5f),     // left top arm
+        (0.5f,  38.5f, 17f,  45.5f),    // left bottom arm
+        (54.5f, 0.5f, 61.5f, 45.5f),    // right stem
+        (45f,   0.5f, 61.5f, 7.5f),     // right top arm
+        (45f,   38.5f, 61.5f, 45.5f),   // right bottom arm
+    ];
 
     // Ember, and the same two derived faces the site uses.
     private static readonly (byte R, byte G, byte B) TopColour = (0xe8, 0x41, 0x17);
@@ -93,13 +106,14 @@ public static class BlixMark
                     {
                         // Sample at the centre of each sub-pixel cell, in grid units.
                         var gx = (x + (sx + 0.5f) / Samples) * scale;
-                        var gy = (y + (sy + 0.5f) / Samples) * scale;
+                        var gy = ((y + (sy + 0.5f) / Samples) * scale) + OriginY;
 
                         // The three faces tile the hexagon without overlapping, so the first hit
                         // is the only hit; shared edges fall to whichever is tested first and the
                         // supersampling hides the seam.
                         (byte R, byte G, byte B) hit;
-                        if (Inside(Top, gx, gy)) hit = TopColour;
+                        if (InBracket(gx, gy)) hit = TopColour;
+                        else if (Inside(Top, gx, gy)) hit = TopColour;
                         else if (Inside(Left, gx, gy)) hit = LeftColour;
                         else if (Inside(Right, gx, gy)) hit = RightColour;
                         else continue;
@@ -119,6 +133,16 @@ public static class BlixMark
         }
 
         return new RawImage(size, size, pixels);
+    }
+
+    private static bool InBracket(float px, float py)
+    {
+        foreach (var (x0, y0, x1, y1) in Brackets)
+        {
+            if (px >= x0 && px <= x1 && py >= y0 && py <= y1) return true;
+        }
+
+        return false;
     }
 
     /// <summary>Winding test for a convex polygon wound consistently in one direction.</summary>
