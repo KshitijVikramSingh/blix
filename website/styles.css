@@ -576,6 +576,28 @@ p > code, dd > code {
 }
 .link:hover { color: var(--accent-ink); }
 
+/* Getting started keeps one column of content; the art is not content, so it
+   takes a second grid column of its own and every real child stays in the
+   first. Below 900 there is no room for it and it is decorative, so it goes. */
+#start {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 23rem);
+  column-gap: clamp(2rem, 5vw, 4.5rem);
+  align-items: start;
+}
+
+#start > * { grid-column: 1; }
+
+#start > .launch {          /* #start > * outranks a bare class - match its shape */
+  grid-column: 2;
+  /* span, not 1 / -1: these rows are implicit, and -1 resolves to the last
+     EXPLICIT line, which collapses the art back into row 1. */
+  grid-row: 1 / span 10;
+  align-self: center;
+  width: 100%;
+  height: auto;
+}
+
 /* ── Foot ─────────────────────────────────────────────────────────────── */
 
 .foot {
@@ -592,6 +614,9 @@ p > code, dd > code {
 /* ── Narrow ───────────────────────────────────────────────────────────── */
 
 @media (max-width: 900px) {
+  /* the art goes, and so must its column, or the text keeps the squeeze */
+  #start { display: block; }
+  #start > .launch { display: none; }
   body { font-size: 18px; }
 
   h1 { font-size: clamp(2.5rem, 8.2vw, 4rem); }
