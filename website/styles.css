@@ -17,6 +17,7 @@
   --accent:     #cb4526;   /* fills, rules, the mark        — 3.94:1 on paper */
   --accent-ink: #a7301b;   /* accent-coloured text on paper — 5.65:1 */
   --accent-d:   #ec6851;   /* anything on a dark surface    — 5.86:1 */
+  --accent-lit: #d74228;   /* Ember lifted 3 points so BLACK on it clears AA — 4.70:1 */
   --focus:      #cb4526;
 
   --display: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
@@ -211,7 +212,6 @@ h1 {
 
 .plate {
   margin: 0;
-  padding-bottom: 1.6rem;
   background: var(--screen);
 }
 
@@ -235,21 +235,27 @@ h1 {
 }
 
 .plate figcaption {
-  width: min(100% - (var(--gut) * 2), var(--page));
-  margin: .9rem auto 0;
+  width: 100%;
+  margin: 0;
   display: grid;
   grid-template-columns: minmax(0, 18.5rem) minmax(0, 64ch);
   gap: clamp(1rem, 4vw, 3rem);
+  /* full-bleed colour, contents still landing on the page grid */
+  padding: .85rem max(var(--gut), calc((100% - var(--page)) / 2));
+  background: var(--accent-lit);
   font-size: .84rem;
-  color: #a9b4c0;
+  color: #000;
 }
 .plate figcaption b {
   font-family: var(--mono);
-  font-weight: 400;
-  color: var(--accent-d);       /* a command you can run, like the prompts */
+  font-weight: 500;
+  color: #000;
   font-size: .86em;
   white-space: nowrap;
 }
+
+/* the strip IS the accent here, so a declaration in it reads as ink like the rest */
+.plate figcaption .decl { color: #000; }
 
 /* a full-width band would stretch a terminal far past its longest line */
 .band > .term,
@@ -262,23 +268,11 @@ h1 {
 
 .band { padding: clamp(3.5rem, 6vw, 5.5rem) 0; }
 
-/* A short rule marking where a section begins. The bands already alternate
-   surface, but a heading that sits inside a column has nothing to start it. */
 /* The declaration mechanism, wherever it appears: [Tune] and [BlixApp] in C#,
    //@tune in GLSL. Same colour in prose as in the code blocks, because it is the
    same thing being named. */
 .decl { color: var(--accent-ink); }
 .dark .decl, .plate .decl { color: var(--accent-d); }
-
-.band h2::before {
-  content: "";
-  display: block;
-  width: 2.5rem;
-  height: 3px;
-  margin-bottom: clamp(.9rem, 1.6vw, 1.25rem);
-  background: var(--accent);
-}
-.band.dark h2::before { background: var(--accent-d); }
 
 h2 {
   max-width: 18ch;
