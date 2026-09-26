@@ -240,15 +240,19 @@ h1 {
 .plate img {
   width: 100%;
   height: auto;
-  /* 11/5 rather than 21/9: the taller band gives back the crown of the cypress
-     and the roofline above the arcade. The gain is taken off the TOP - 44%
-     holds the bottom edge exactly where 21/9 at 55% had it. The cap is 78vh
-     because 68 lands at 650px on a 1470x956 screen and would silently crop
-     18px back off a 668px band. */
-  max-height: 78vh;
-  aspect-ratio: 11 / 5;
+  /* 2/1 rather than 21/9: 89% of the frame is visible against 76%, and at 50%
+     the remaining 11% splits evenly, so the sky above the arcade and the
+     banners along the floor both come back.
+
+     No max-height. A vh cap is a SECOND crop competing with this one, and it
+     wins silently: vh is the viewport, not the screen, so a 1470x956 display
+     has 869px of viewport once browser chrome is gone and a 78vh cap lands at
+     678px against this 735px band - re-cropping exactly what the ratio was
+     widened to show. The ratio is the framing decision; nothing else gets a
+     vote. */
+  aspect-ratio: 2 / 1;
   object-fit: cover;
-  object-position: center 44%;
+  object-position: center 50%;
   background: var(--screen);
 }
 
