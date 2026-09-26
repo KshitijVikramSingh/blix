@@ -606,7 +606,7 @@ p > code, dd > code {
      scrollbar. */
   max-width: none;          /* the global img{max-width:100%} would cancel the bleed */
   --bleed: max(var(--gut), calc((100vw - var(--page)) / 2));
-  --inset: 2.5rem;                       /* how far the art stays off the edge */
+  --inset: 5rem;                         /* how far the art stays off the edge */
   width: calc(100% + max(0px, var(--bleed) - var(--inset)));
   margin-right: calc(-1 * max(0px, var(--bleed) - var(--inset)));
 }
