@@ -94,20 +94,30 @@ the external-consumer contract and its in-tree fixture exercise that boundary.
 See [Assets](docs/assets.md) for the full lifecycle: declarations, recipes,
 provenance, runtime reports, deferred work, and residency ownership.
 
-## Two rendering tracks
+## Rendering: machinery, not a renderer
 
-Blix deliberately distinguishes the Studio reference rendering pipeline from renderer
-research.
+Blix provides rendering *capabilities* and ships no default renderer.
+`Blix.Graphics`, `Blix.Graphics.Vulkan`, `Blix.Render`, and `Blix.Shaders` give
+the command model, render graph, reflected binding, buffers, upload and batching
+helpers, fullscreen work, sprites, particles, and a shared shader vocabulary.
+They do not decide which passes an application runs or what it should look like.
+An application composes its own graph.
 
-**Studio** is the optional reference path used by `view` and `shot`. It composes
-shared techniques into a good ordinary model/rig view and keeps visual policy in
-`StudioLook`, outside engine core.
+Two things sit on top, and neither is a default:
 
-**Vulkan Sponza** is the forward research path. It is where heavy-scene asset
-flow, GPU-driven submission, screen-space-error LOD, cascaded shadows, Hi-Z,
-GTAO, probe-based indirect light, incident fields, TAA, temporal volumetric fog,
-material response, and measurement tooling are stressed. Successful mechanisms
-may move into shared engine layers; the complete Sponza graph remains bespoke.
+**Studio** (`Blix.Tools.Studio`) is the render graph Blix's own model and rig
+tools use. `StudioLook` owns its lighting, environment, shadows, exposure,
+tonemap, and MSAA defaults, outside engine core. It is a reasonable thing to
+prototype against, and a project may reuse all, some, or none of it.
+
+**Vulkan Sponza** is a demo. It is where heavy-scene asset flow, GPU-driven
+submission, screen-space-error LOD, cascaded shadows, Hi-Z, GTAO, probe-based
+indirect light, incident fields, TAA, temporal volumetric fog, material
+response, and measurement tooling are implemented and stressed — a worked
+reference for how far the machinery goes and how those techniques are built.
+It is not a renderer to adopt and its graph is not an engine promise. A
+mechanism moves into an engine project only when it has a reusable contract and
+another credible consumer.
 
 ![Intel Sponza rendered in Blix](docs/sponza.jpg)
 
@@ -123,7 +133,7 @@ tools, and isolated laboratories:
 - Pong, Runner, Tank Arena, and Bulwark are end-to-end playable games.
 - Vulkan Hello, Graph, Lit, Instanced, Particles, and Chassis isolate engine
   surfaces.
-- Vulkan Sponza is the renderer and heavy-asset research scene.
+- Vulkan Sponza is a heavy-scene rendering demo and measurement scene.
 - Character labs isolate contact, controller, camera, rig, and capture work.
 
 Use `./blix ls` for the runnable inventory. See [Demos](docs/demos.md) for the

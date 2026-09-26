@@ -283,13 +283,13 @@ tools. Its current composition includes:
 - configurable MSAA with colour and depth resolves;
 - tonemapped presentation plus a separate half-resolution inspection view; and
 - a pre-compile extension window for a tool to add graph passes without forking
-  the renderer.
+  Studio.
 
 `StudioLook` is the authored policy boundary. Its defaults are Blix's reference
 look: sun, environment, shadow fit, exposure, tonemap, MSAA, and related values.
 Most are live per-frame settings. Members marked
 `[Tune(Structural = true)]` must be set before graph and pipeline construction;
-changing one after the renderer seals the structure is reported rather than
+changing one after Studio seals the structure is reported rather than
 pretending the control took effect.
 
 Studio owns the composition and its defaults, not the underlying capabilities.

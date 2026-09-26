@@ -505,7 +505,7 @@ The ordinary project declarations currently cover meshes and fonts. The shared
 currently declares them. `Blix.Test.ProjectRecipes` separately guards
 project-owned recipe discovery without making a game part of the engine tree.
 
-Vulkan Sponza is intentionally the exceptional, heavy-asset path. Its sources
+Vulkan Sponza is intentionally the exceptional, heavy-asset case. Its sources
 live outside the repository, and `tools/cook-sponza-modern.sh` builds an
 out-of-place shippable tree with `cook asset`, `cook probe`, and `cook sky`.
 That script owns pack selection, material patches, tangent/splitting settings,

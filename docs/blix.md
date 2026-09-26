@@ -69,7 +69,7 @@ internal sealed class MyGame : Game, IInputHandler, IDebuggable
         // targets + Read edges, materials bind through MaterialBindings, and per-draw
         // data rides push constants / transient descriptor sets. See the demo programs
         // (src/Demos/Blix.Demos.VulkanLit, src/Demos/Blix.Demos.VulkanSponza) for the full render
-        // setup; this doc focuses on the game-layer types above the renderer.
+        // setup; this doc focuses on the game-layer types above the graphics layers.
         foreach (var obj in objects)
         {
             // record obj.Mesh + obj.Material (a MaterialHandle) into the frame's graph
@@ -83,7 +83,7 @@ internal sealed class MyGame : Game, IInputHandler, IDebuggable
 }
 ```
 
-See `src/Demos/Blix.Demos.VulkanLit/Program.cs` for a full game-layer reference — it exercises the lit/skinned/PBR path (directional + spot + point shadows, IBL, bloom, skinned glTF). Vulkan Sponza is the higher-end research and measurement path; its current, evolving feature set belongs in [Renderer](renderer.md#vulkan-sponza-research-renderer), not in this game-facing overview. For the game layer driving an actual playable title — the fixed-step-ish update loop, `Transform3D`, `PhysicsHost3D` (gravity/jump), `CollisionWorld3D.Overlap`, skeletal animation (`SkinnedGameObject` path via clip → `Pose` → `BonePalette`), `AudioSource`, and `IDebuggable` diagnostics, all wired together — see `src/Demos/Blix.Demos.Runner/Program.cs` (a 3D endless runner).
+See `src/Demos/Blix.Demos.VulkanLit/Program.cs` for a full game-layer reference — it exercises the lit/skinned/PBR path (directional + spot + point shadows, IBL, bloom, skinned glTF). Vulkan Sponza is a heavy-scene demo where higher-end rendering is researched and measured; its current, evolving feature set belongs in [Renderer](renderer.md#vulkan-sponza-research-renderer), not in this game-facing overview. For the game layer driving an actual playable title — the fixed-step-ish update loop, `Transform3D`, `PhysicsHost3D` (gravity/jump), `CollisionWorld3D.Overlap`, skeletal animation (`SkinnedGameObject` path via clip → `Pose` → `BonePalette`), `AudioSource`, and `IDebuggable` diagnostics, all wired together — see `src/Demos/Blix.Demos.Runner/Program.cs` (a 3D endless runner).
 
 ## Project dependencies
 
@@ -285,7 +285,7 @@ The 2D sibling. Same shape; scalar `Rotation` around Z; 2D `Position` and `Scale
 #### Deliberate limits
 
 - No `LookAt`. Collapses to `Rotation = MathF.Atan2(target.Y - Position.Y, target.X - Position.X)` (modulo facing convention).
-- `ToMatrix()` returns `Matrix4x4`, not `Matrix3x2`, to share the renderer's `uModel` pipeline.
+- `ToMatrix()` returns `Matrix4x4`, not `Matrix3x2`, to share the same `uModel` pipeline meshes use.
 
 ### GameObject
 
@@ -360,7 +360,7 @@ Every type with a pose composes a `Transform`. Camera3D, GameObject, PointLight,
 
 ## Lights
 
-Three light types, structurally distinct rather than a common `Light` base — their per-fragment evaluation differs (distance falloff, cone falloff, world-space direction-only), and the renderer's shader binds them as type-specific uniform arrays.
+Three light types, structurally distinct rather than a common `Light` base — their per-fragment evaluation differs (distance falloff, cone falloff, world-space direction-only), and shaders bind them as type-specific uniform arrays.
 
 ### DirectionalLight
 
