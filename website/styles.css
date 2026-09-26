@@ -552,13 +552,17 @@ p > code, dd > code {
      counts as large text and the bar drops to 3:1. The size is what makes the
      white legal, so the two cannot be changed independently. */
   color: #fff;
-  border: 2px solid var(--accent);
+  border: 2.5px solid var(--accent);   /* 5 device px on a 2x screen; 3 looked heavy */
   font-family: var(--display);
   font-size: 1.2rem;
   font-weight: 700;
   text-decoration: none;
 }
-.btn:hover { background: transparent; color: var(--accent-ink); }
+/* True Ember on hover, not the darker text value: at 19.2px bold the label is
+   large text, so the floor is 3:1 and Ember's 3.35:1 on paper clears it. The
+   darker --accent-ink exists for small accent text and reads as brick here,
+   which left the label a different colour from its own border. */
+.btn:hover { background: transparent; color: var(--accent); }
 
 .after + .after { margin-top: .7rem; }
 
