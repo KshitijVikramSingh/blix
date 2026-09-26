@@ -115,6 +115,23 @@ button { font: inherit; }
 
 .hero { padding: clamp(3rem, 7vw, 6rem) 0 clamp(3rem, 6vw, 5rem); }
 
+/* The highlight: black on Ember, one rule for every size. The band is drawn as
+   a sized gradient rather than a plain background, because the font's em box is
+   much taller than its letters - a flat background paints a slab that collides
+   with the line below at display sizes. Sized in em, so it hugs the caps whether
+   it is wrapping a word in a 6.4rem headline or one in a paragraph. Cloned, so a
+   phrase breaking across lines keeps its band on each one. */
+mark, .hl {
+  background: linear-gradient(var(--accent), var(--accent)) no-repeat;
+  background-size: 100% .86em;
+  background-position: 0 .12em;
+  color: #000;
+  padding: 0 .09em;
+  margin-inline: -.03em;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
 h1 {
   font-size: clamp(2.9rem, 8.4vw, 6.4rem);
   font-weight: 700;
