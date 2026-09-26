@@ -17,7 +17,7 @@
   --accent:     #cb4526;   /* fills, rules, the mark        — 3.94:1 on paper */
   --accent-ink: #a7301b;   /* accent-coloured text on paper — 5.65:1 */
   --accent-d:   #ec6851;   /* anything on a dark surface    — 5.86:1 */
-  --accent-lit: #d74228;   /* Ember lifted 3 points so BLACK on it clears AA — 4.70:1 */
+  --accent-lit: #db553d;   /* the caption bar: Ember lifted so black on it reads easily — 5.38:1 */
   --focus:      #cb4526;
 
   --display: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
@@ -243,7 +243,7 @@ h1 {
   /* full-bleed colour, contents still landing on the page grid */
   padding: .85rem max(var(--gut), calc((100% - var(--page)) / 2));
   background: var(--accent-lit);
-  font-size: .84rem;
+  font-size: .95rem;
   color: #000;
 }
 .plate figcaption b {
