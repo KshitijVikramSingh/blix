@@ -17,7 +17,11 @@
   --accent:     #cb4526;   /* fills, rules, the mark        — 3.94:1 on paper */
   --accent-ink: #a7301b;   /* accent-coloured text on paper — 5.65:1 */
   --accent-d:   #ec6851;   /* anything on a dark surface    — 5.86:1 */
-  --accent-lit: #db553d;   /* the caption bar: Ember lifted so black on it reads easily — 5.38:1 */
+  /* The caption bar. Black needs 4.5:1 and Ember gives 4.42, so the bar has to
+     move - but lifting lightness alone drains the chroma and lands on a dusty
+     salmon. Going HOTTER instead (more chroma, hue toward orange) clears the
+     floor at 5.20:1 while reading as more fire than the brand value, not less. */
+  --accent-lit: #e84117;
   --focus:      #cb4526;
 
   --display: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
