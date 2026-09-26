@@ -238,22 +238,10 @@ h1 {
 }
 
 .plate img {
+  display: block;
   width: 100%;
-  height: auto;
-  max-height: 68vh;
-  aspect-ratio: 21 / 9;
-  object-fit: cover;
-  object-position: center 55%;
+  height: auto;              /* natural ratio: nothing here is cropped */
   background: var(--screen);
-}
-
-/* a UI capture must not be cropped: the header and tab strip are the point */
-/* A UI capture keeps its own ratio and anchors to the top: the header and tab
-   strip are the point, and a 21:9 cover crop eats exactly those. */
-.plate.ui img {
-  aspect-ratio: auto;
-  max-height: none;
-  object-position: center top;
 }
 
 .plate figcaption {
@@ -584,9 +572,6 @@ p > code, dd > code {
   h1 { font-size: clamp(2.5rem, 8.2vw, 4rem); }
   h1 br { display: none; }
 
-  /* a UI capture keeps its own ratio here too; only the 21:9 hero re-crops */
-  .plate img { aspect-ratio: 16 / 9; }
-  .plate.ui img { aspect-ratio: auto; }
   .plate figcaption { grid-template-columns: minmax(0, 1fr); gap: .3rem; }
 
   /* one column, and the flip order resets so the heading always comes first */
