@@ -1,0 +1,541 @@
+/* Blix — the renders are the only colour on this page. Everything else is ink on
+   a cool paper, and interaction reads through weight, rule and inversion. */
+
+:root {
+  --paper:   #e8eaec;   /* cool monitor grey, deliberately not a warm cream */
+  --raised:  #f3f4f6;
+  --ink:     #14181d;   /* deep ink with a blue cast; not a tinted near-black */
+  --ink-2:   #4a525b;
+  --ink-3:   #5a626b;
+  --rule:    #c9cdd2;
+  --screen:  #10141a;   /* terminal surface */
+  --screen-2:#1b212a;
+  --screen-t:#dfe4ea;
+  --focus:   #2f6be0;   /* functional only: focus ring. Never decorative. */
+
+  --display: "Archivo", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --mono:    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --page: 1220px;
+  --gut: clamp(20px, 4vw, 56px);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; scroll-padding-top: 4.5rem; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--display);
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3, dt, .mark, .btn, nav, .term-bar, h1, h2, h3, p, ol, dl, dd, figure, pre { margin: 0; }
+ol { padding: 0; list-style: none; }
+img { display: block; max-width: 100%; height: auto; }
+a { color: inherit; }
+button { font: inherit; }
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+
+.skip {
+  position: fixed;
+  top: 10px; left: 10px; z-index: 50;
+  padding: .7rem 1rem;
+  background: var(--ink); color: var(--paper);
+  font-family: var(--display); font-size: .9rem;
+  transform: translateY(-160%);
+}
+.skip:focus { transform: none; }
+
+.bar, .hero, .band, .foot {
+  width: min(100% - (var(--gut) * 2), var(--page));
+  margin-inline: auto;
+}
+
+/* grid children default to min-width:auto, which lets a wide <pre> or a
+/* ── Bar ──────────────────────────────────────────────────────────────── */
+
+.bar {
+  display: flex;
+  min-height: 70px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2rem;
+}
+
+.mark {
+  font-size: 1.3rem;
+  font-weight: 700;
+  letter-spacing: -.045em;
+  text-decoration: none;
+}
+
+.bar nav, .foot nav {
+  display: flex;
+  gap: clamp(1rem, 2.4vw, 2rem);
+  font-size: .9rem;
+  font-weight: 500;
+}
+
+.bar nav a, .foot nav a {
+  text-decoration: none;
+  padding-bottom: 2px;
+  border-bottom: 2px solid transparent;
+}
+.bar nav a:hover, .foot nav a:hover { border-bottom-color: var(--ink); }
+
+/* ── Hero ─────────────────────────────────────────────────────────────── */
+
+.hero { padding: clamp(3rem, 7vw, 6rem) 0 clamp(3rem, 6vw, 5rem); }
+
+h1 {
+  font-size: clamp(2.9rem, 8.4vw, 6.4rem);
+  font-weight: 700;
+  line-height: .95;
+  letter-spacing: -.048em;
+}
+
+.sub {
+  max-width: 74ch;
+  margin-top: 1.5rem;
+  font-family: var(--display);
+  font-size: clamp(1.25rem, 2.1vw, 1.7rem);
+  font-weight: 500;
+  line-height: 1.25;
+  letter-spacing: -.022em;
+  text-wrap: balance;
+}
+
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1.75rem;
+  margin-top: clamp(2.25rem, 4.5vw, 3.25rem);
+}
+
+/* ── Terminal and code surfaces ───────────────────────────────────────── */
+
+.term {
+  min-width: 0;
+  background: var(--screen);
+  color: var(--screen-t);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.term-bar {
+  display: flex;
+  min-height: 42px;
+  padding: .4rem .5rem .4rem .95rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  background: var(--screen-2);
+  color: #99a3ae;
+  font-size: .78rem;
+  font-weight: 500;
+}
+
+.copy {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid #39424e;
+  border-radius: 2px;
+  background: transparent;
+  color: #c3cad3;
+  cursor: pointer;
+}
+
+.copy svg {
+  grid-area: 1 / 1;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.copy .i-done { opacity: 0; }
+.copy[data-copied] .i-copy { opacity: 0; }
+.copy[data-copied] .i-done { opacity: 1; color: #9dd0a6; }
+
+.copy:hover { border-color: #7d8895; color: #fff; }
+
+.term pre {
+  padding: 1.15rem .95rem 1.3rem;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: .8rem;
+  line-height: 1.75;
+}
+
+.term .p { color: #7c8794; }   /* prompt */
+.term .d { color: #7c8794; }
+.term .k { color: #9fb4d8; }
+.term .t { color: #b8c9a8; }   /* dim path line */
+
+/* ── The plate: full-bleed render ─────────────────────────────────────── */
+
+.plate {
+  margin: 0;
+  padding-bottom: 1.6rem;
+  background: var(--screen);
+}
+
+.plate img {
+  width: 100%;
+  height: auto;
+  max-height: 68vh;
+  aspect-ratio: 21 / 9;
+  object-fit: cover;
+  object-position: center 55%;
+  background: var(--screen);
+}
+
+/* a UI capture must not be cropped: the header and tab strip are the point */
+/* A UI capture keeps its own ratio and anchors to the top: the header and tab
+   strip are the point, and a 21:9 cover crop eats exactly those. */
+.plate.ui img {
+  aspect-ratio: auto;
+  max-height: none;
+  object-position: center top;
+}
+
+.plate figcaption {
+  width: min(100% - (var(--gut) * 2), var(--page));
+  margin: .9rem auto 0;
+  display: grid;
+  grid-template-columns: minmax(0, 18.5rem) minmax(0, 64ch);
+  gap: clamp(1rem, 4vw, 3rem);
+  font-size: .84rem;
+  color: #a9b4c0;
+}
+.plate figcaption b { font-family: var(--mono); font-weight: 400; color: #dfe4ea; font-size: .86em; white-space: nowrap; }
+
+/* a full-width band would stretch a terminal far past its longest line */
+.band > .term,
+.band > .band-lead + .term {
+  max-width: 47rem;
+  margin-top: clamp(1.9rem, 3.4vw, 2.6rem);
+}
+
+/* ── Bands ────────────────────────────────────────────────────────────── */
+
+.band { padding: clamp(3.5rem, 6vw, 5.5rem) 0; }
+
+h2 {
+  max-width: 18ch;
+  text-wrap: balance;
+  font-size: clamp(2rem, 4.2vw, 3.1rem);
+  font-weight: 700;
+  line-height: 1.04;
+  letter-spacing: -.035em;
+}
+
+.band-lead {
+  max-width: 62ch;
+  margin-top: 1.4rem;
+  color: var(--ink-2);
+  font-size: 1.04rem;
+}
+.band-lead + .band-lead { margin-top: .9rem; }
+
+/* A heading lives INSIDE its column, so whatever sits in the other column
+   starts level with it instead of being pushed below the intro text. */
+.two > * > h2 { max-width: 18ch; }
+.two > * > h2 + .band-lead,
+.two > * > h2 + p { margin-top: 1.1rem; }
+.two .band-lead { max-width: none; }
+.two .essay > h2 + .band-lead + p,
+.two .essay > h2 + p { margin-top: 1.5rem; }
+
+/* a two-column row that follows a full-width lead needs its own air; the
+   sections whose heading lives inside a column do not */
+.band-lead + .two { margin-top: clamp(1.6rem, 2.8vw, 2.3rem); }
+
+.two {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: clamp(2rem, 4.5vw, 4rem);
+  align-items: start;
+  margin-top: 0;
+}
+.two > * { min-width: 0; }
+
+/* Alternate which side the anchor sits on, so nine sections do not share one
+   composition. DOM order stays prose-then-anchor, which is the reading order
+   a screen reader and the single-column layout both want. */
+.two.flip > :first-child { order: 2; }
+.two.flip > :last-child { order: 1; }
+
+.essay { max-width: 54ch; }
+
+.essay p {
+  font-size: 1.04rem;
+  line-height: 1.6;
+}
+.codes > * + * { margin-top: 1.4rem; }
+.codes p { max-width: 50ch; color: var(--ink-2); font-size: .98rem; }
+
+.essay p + p { margin-top: 1.15rem; }
+
+/* the one line on the page that states the principle outright */
+.claim {
+  margin-top: 1.5rem;
+  padding-top: 1.3rem;
+  border-top: 1px solid var(--rule);
+  font-family: var(--display);
+  font-size: 1.12rem;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -.012em;
+}
+
+.essay .claim + p { margin-top: 1.4rem; }
+
+/* ── A dark band, for the one section that carries the argument. Inverting a
+       surface is the only hierarchy device on this page that does not rely on
+       size, and it breaks a run of five identical grey-and-dark sections. ─ */
+
+.band.dark {
+  width: 100%;
+  padding-block: clamp(4rem, 6.5vw, 6rem);
+  padding-inline: max(var(--gut), calc((100% - var(--page)) / 2));
+  background: var(--screen);
+  color: var(--screen-t);
+}
+
+.dark h2 { color: #f4f7fa; }
+.dark .essay p { color: #a9b4c0; }
+.dark .codes p { color: #a9b4c0; }
+.dark .band-lead,
+.dark .after { color: #a9b4c0; }
+.dark .link { color: #f4f7fa; }
+
+/* the code sits ON the band, so it lifts instead of matching it */
+.dark .term { background: #1c232d; }
+.dark .term-bar { background: #262f3a; color: #a9b4c0; }
+.dark p > code { background: #2c343f; color: #e7ecf2; }
+
+/* ── The three rendering roles, stacked: the names are long enough that a
+       term column would squeeze the descriptions. ─────────────────────── */
+
+.roles { margin-top: 1.6rem; }
+
+.roles > div {
+  padding: .85rem 0;
+  border-top: 1px solid var(--rule);
+}
+
+/* the rule separates the entries; it should not fence off the first one */
+.roles > div:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.roles dt {
+  font-family: var(--mono);
+  font-size: .8rem;
+  font-weight: 500;
+}
+
+.roles dd {
+  margin-top: .3rem;
+  color: var(--ink-2);
+  font-size: .95rem;
+  line-height: 1.5;
+}
+
+/* ── One library, several programs. Drawn in the DOM rather than shipped as
+       an image, so it stays sharp and reads to a screen reader as a list. ─ */
+
+.shape { margin: 2.4rem 0 0; }
+
+.shape-progs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .55rem;
+  padding: 0;
+  list-style: none;
+}
+
+.shape-progs li {
+  position: relative;
+  display: grid;
+  gap: .3rem;
+  padding: .7rem .65rem .75rem;
+  border: 1px solid #333c48;
+  border-radius: 2px;
+  font-family: var(--mono);
+}
+
+.shape-progs b {
+  font-weight: 400;
+  font-size: .76rem;
+  color: var(--screen-t);
+}
+
+.shape-progs span {
+  font-size: .66rem;
+  line-height: 1.45;
+  color: #8d98a5;
+}
+
+.shape-progs li::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -.9rem;
+  width: 1px;
+  height: .9rem;
+  background: #333c48;
+}
+
+.shape-row {
+  position: relative;
+  display: flex;
+  margin-top: .9rem;
+  padding: .85rem .8rem;
+  gap: 1rem;
+  align-items: baseline;
+  justify-content: space-between;
+  border: 1px solid #46525f;
+  border-radius: 2px;
+  background: #1c232d;
+  font-family: var(--mono);
+  font-size: .76rem;
+  color: #f4f7fa;
+}
+
+.shape-row b {
+  font-weight: 400;
+  font-size: .68rem;
+  color: #8d98a5;
+}
+
+/* the tier below is reached DOWN into, never the other way, which is the
+   whole distinction between a library and a framework */
+.shape-row.engine::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -.9rem;
+  width: 1px;
+  height: .9rem;
+  background: #46525f;
+}
+
+.shape figcaption {
+  margin-top: .8rem;
+  color: #8d98a5;
+  font-size: .82rem;
+}
+
+p > code, dd > code {
+  padding: .06rem .28rem;
+  background: #dcdfe3;
+  font-family: var(--mono);
+  font-size: .85em;
+}
+
+.term .s { color: #b8c9a8; }
+.term .a { color: #8e9aa8; }
+
+.after {
+  max-width: 58ch;
+  margin-top: 2.25rem;
+  color: var(--ink-2);
+  font-size: 1.02rem;
+}
+
+/* ── Where it stands ──────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  min-height: 48px;
+  padding: .6rem 1.4rem;
+  align-items: center;
+  background: var(--ink);
+  color: var(--paper);
+  border: 2px solid var(--ink);
+  font-family: var(--display);
+  font-size: .95rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+.btn:hover { background: transparent; color: var(--ink); }
+
+.after + .after { margin-top: .7rem; }
+
+.link {
+  font-family: var(--display);
+  font-size: .95rem;
+  font-weight: 500;
+  text-decoration-thickness: 1px;
+  text-underline-offset: .25em;
+}
+
+/* ── Foot ─────────────────────────────────────────────────────────────── */
+
+.foot {
+  display: flex;
+  min-height: 96px;
+  padding: 1.75rem 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2rem;
+  border-top: 1px solid var(--rule);
+  color: var(--ink-2);
+}
+
+/* ── Narrow ───────────────────────────────────────────────────────────── */
+
+@media (max-width: 900px) {
+  body { font-size: 18px; }
+
+  h1 { font-size: clamp(2.5rem, 8.2vw, 4rem); }
+  h1 br { display: none; }
+
+  /* a UI capture keeps its own ratio here too; only the 21:9 hero re-crops */
+  .plate img { aspect-ratio: 16 / 9; }
+  .plate.ui img { aspect-ratio: auto; }
+  .plate figcaption { grid-template-columns: minmax(0, 1fr); gap: .3rem; }
+
+  /* one column, and the flip order resets so the heading always comes first */
+  .two { grid-template-columns: minmax(0, 1fr); gap: 2rem; }
+  .two.flip > :first-child,
+  .two.flip > :last-child { order: 0; }
+
+  .essay { max-width: none; }
+}
+
+@media (max-width: 560px) {
+  .bar nav a:nth-child(2) { display: none; }
+  .term pre { font-size: .72rem; }
+  .foot { flex-direction: column; align-items: flex-start; gap: 1.25rem; }
+  .foot nav { flex-wrap: wrap; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .copy svg { transition: opacity .12s ease; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}

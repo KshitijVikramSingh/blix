@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blix - a game engine for C# and .NET</title>
+  <meta name="description" content="Blix is a source-first game engine for C# and .NET, rendering on Vulkan. It is the engine for the game and for every program you build around it.">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script src="script.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#start">Skip to getting started</a>
+
+  <header class="bar">
+    <a class="mark" href="#top">Blix</a>
+    <nav aria-label="Primary">
+      <a href="#start">Get started</a>
+      <a href="https://github.com/KshitijVikramSingh/blix/blob/main/docs/getting-started.md">Docs</a>
+      <a href="https://github.com/KshitijVikramSingh/blix">Source</a>
+    </nav>
+  </header>
+
+  <main id="top">    <section class="hero">
+      <h1>An engine for the game <br>and the workshop around it.</h1>
+      <p class="sub">A game engine for C&#35; and .NET on Vulkan, used as a set of libraries rather than a framework that takes over your application.</p>
+
+      <div class="hero-actions">
+        <a class="btn" href="#start">Get started</a>
+        <a class="link" href="https://github.com/KshitijVikramSingh/blix">View the source</a>
+      </div>
+    </section>
+
+    <figure class="plate">
+      <img src="assets/sponza.jpg" width="1920" height="1080" alt="The Sponza atrium rendered in Blix: sunlight crossing the courtyard, foliage against limestone arches, haze in the shaded interior." fetchpriority="high">
+      <figcaption>
+        <b>blix run Blix.Demos.VulkanSponza</b>
+        <span>A renderer assembled directly from Blix&rsquo;s graphics layers: GPU-driven submission, screen-space-error LOD, cascaded shadows, Hi-Z occlusion, GTAO, probe-based indirect light and temporal volumetric fog.</span>
+      </figcaption>
+    </figure>
+
+    <!-- ── Promise and premise together: why you write many programs, ──
+         ── and the thing that makes each one cheap to start.          ── -->
+    <section class="band dark">
+      <div class="two">
+        <div class="essay">
+          <h2>Your game is one of the programs</h2>
+
+          <p>A Blix project is a library and the programs that use it. Your game is one of them, with its own <code>Main</code> and its own build output. A level editor is another, a headless benchmark a third.</p>
+
+          <p>They share the library, so a change to your world code reaches every one of them. They reference the engine separately, so each takes only the parts it actually uses and a program that draws nothing never links a renderer.</p>
+
+          <p>Underneath them all: rendering and render graphs, assets and cooking, animation and rigs, geometry and collision, audio and input, diagnostics, and runtime hosting.</p>
+
+          <p>Blix is laid out the same way: thirty-two runnable programs, from eleven demos to seven headless test suites, a character lab and the asset tools further down. A file at the repo root names a project and says which of its programs is the gate, and anything marked <code>[BlixApp]</code> is runnable by name.</p>
+
+          <figure class="shape">
+            <ul class="shape-progs">
+              <li><b>the game</b><span>world, rendering, audio</span></li>
+              <li><b>an editor</b><span>world, rendering, UI</span></li>
+              <li><b>a benchmark</b><span>world only</span></li>
+            </ul>
+            <div class="shape-row"><span>your game code</span><b>one library, shared</b></div>
+            <div class="shape-row engine"><span>Blix</span><b>referenced per program</b></div>
+            <figcaption>Same library, different slices of the engine.</figcaption>
+          </figure>
+        </div>
+
+        <div class="codes">
+          <div class="term">
+            <div class="term-bar"><span>Program.cs</span></div>
+            <pre><code><span class="k">using var</span> window = <span class="k">new</span> <span class="t">Window</span>(<span class="k">new</span> <span class="t">Spinner</span>());
+window.Run();
+
+<span class="k">sealed class</span> <span class="t">Spinner</span> : <span class="t">IGameLoop</span>
+{
+    <span class="k">public void</span> OnRender(<span class="t">Time</span> time,
+                         <span class="t">RenderFrameContext</span> frame,
+                         <span class="t">RenderCommandList</span> commandList)
+    {
+        <span class="d">// your frame goes here</span>
+    }
+}</code></pre>
+          </div>
+
+          <p>That is a whole program. You write <code>Main</code>, the loop is yours, and <code>OnRender</code> is the only method Blix insists on. The rest of the contract is there when you want it:</p>
+
+          <div class="term">
+            <div class="term-bar"><span>src/Blix/IGameLoop.cs</span></div>
+            <pre><code><span class="k">void</span> OnLoad(<span class="t">IRenderHost</span> host, <span class="t">IGraphicsDevice</span> device) { }
+<span class="k">void</span> OnUpdate(<span class="t">Time</span> time) { }
+<span class="k">void</span> OnRender(<span class="t">Time</span> time, <span class="t">RenderFrameContext</span> frame,
+              <span class="t">RenderCommandList</span> commandList);
+<span class="k">void</span> OnResize(<span class="k">int</span> width, <span class="k">int</span> height) { }
+<span class="k">void</span> OnUnload() { }</code></pre>
+          </div>
+
+          <p>Blix has no ECS, no scene format and no editor. How the rest of your game is structured is your decision.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── The workshop: what you build, with Blix's own tools as examples
+         ── of the pattern rather than the subject of it.               ── -->
+    <section class="band">
+      <div class="two flip">
+        <div class="essay">
+          <h2>Build the workshop around your game</h2>
+          <p class="band-lead">A model viewer, a level editor, an animation tool, a balance simulator, a one-off program that answers one question. All of them can be built from the same project code and the same libraries as the game.</p>
+
+          <p>None of them work on an export. A tool references the same library the game does, so it handles your actual types, and a change to them reaches the tool and the game together.</p>
+
+          <p>The pieces you build one from report rather than take over. A view names where a picture goes, never how it is drawn. <code>IUiSource</code> is two members and no UI types, so a tool brings its own ImGui. The viewport panel hands back what the pointer did and lets the tool decide what it meant.</p>
+
+          <p class="claim">You call them. They never call your code.</p>
+
+          <p>A tool can also have a rendering composition without building one. Studio is the pipeline Blix&rsquo;s own model and rig tools use, and it leaves a window before compilation for a tool to add passes without forking it.</p>
+
+          <p class="after">Blix&rsquo;s own <code>view</code>, <code>shot</code>, <code>inspect</code>, <code>check</code> and <code>cook</code> are built that way. So is the character lab: a two-thousand-line library with three programs over it - a room you walk around, a capture that writes a PNG with the clock stopped, and a probe.</p>
+        </div>
+
+        <div class="codes">
+          <div class="term">
+            <div class="term-bar"><span>src/Blix.Core/IUiSource.cs</span></div>
+            <pre><code><span class="k">public interface</span> <span class="t">IUiSource</span>
+{
+    <span class="k">string</span> UiName { <span class="k">get</span>; }
+    <span class="k">void</span> DrawUi();
+}</code></pre>
+          </div>
+
+          <div class="term">
+            <div class="term-bar"><span>src/Blix.Core/View.cs</span></div>
+            <pre><code><span class="k">public readonly record struct</span> <span class="t">ViewDeclaration</span>(
+    <span class="t">ViewId</span> Id,
+    <span class="k">string</span> Name,
+    <span class="t">Matrix4x4</span> ViewProjection,
+    <span class="t">RenderSurfaceHandle</span> Target,
+    <span class="t">Rect</span> LogicalViewport,
+    <span class="t">Rect</span> PhysicalViewport);</code></pre>
+          </div>
+
+          <p>An editor viewport, rendering to a texture, and working out what the player clicked are one declaration, so a game camera, an editor camera and a shadow cascade all take the same path.</p>
+        </div>
+      </div>
+    </section>
+
+    <figure class="plate ui">
+      <img src="assets/views.jpg" width="1920" height="867" loading="lazy" alt="The Blix rig viewer running eight instances of the Rogue character. Panels on the left list the attachment slots with a knife and crossbow checked, the per-body selection, root motion readout and bone hierarchy. A panel top right shows the model texture and the sun depth buffer as a red shadow map. A viewport panel at bottom right shows the same characters from a second camera.">
+      <figcaption>
+        <b>blix run view --rig Rogue.glb</b>
+        <span>Eight instances of one rig, with its attachments, bone tree, root motion, the sun&rsquo;s depth buffer and a second camera.</span>
+      </figcaption>
+    </figure>
+
+    <section class="band dark">
+      <div class="two">
+        <div class="essay">
+          <h2>Teach the build a new format</h2>
+          <p class="band-lead">Blix cooks meshes, textures, fonts and lighting data. When your game needs something it does not know - terrain, navigation fields, dialogue - you add it yourself.</p>
+
+          <p>A recipe is one method, with an attribute saying what it reads and what it writes. Reference it from your project and the build runs it whenever your source changes.</p>
+          <p>Declaring it is one line in the project file. Only out-of-date items reach the cooker, and what it produces joins the same build rather than waiting for a second pass. An output path can be claimed once per batch, so a collision is an error rather than a last-writer race.</p>
+
+          <p class="after">From then on your format is cooked and loaded exactly like one Blix ships. The recipe here is a real game teaching the build about <code>.obj</code>, which Blix has never claimed.</p>
+
+          <p class="after"><a class="link" href="https://github.com/KshitijVikramSingh/blix/blob/main/docs/assets.md">Read the assets guide</a></p>
+        </div>
+
+        <div class="codes">
+          <div class="term">
+            <div class="term-bar"><span>RTSGame.Cooking/ObjMeshRecipe.cs</span></div>
+            <pre><code><span class="a">[Recipe(</span><span class="s">"omsh"</span><span class="a">,</span>
+    Produces = <span class="s">".blixmesh"</span><span class="a">,</span>
+    Consumes = <span class="s">".obj"</span><span class="a">,</span>
+    Summary = <span class="s">"a Wavefront OBJ to .blixmesh"</span><span class="a">)]</span>
+<span class="k">public static</span> <span class="t">CookOutcome</span> Cook(<span class="t">CookRequest</span> request)
+{
+    <span class="d">// parse the source, write the engine&#39;s mesh format</span>
+    <span class="k">return</span> <span class="t">CookOutcome</span>.Written(<span class="s">"mesh"</span>);
+}</code></pre>
+          </div>
+
+          <div class="term">
+            <div class="term-bar"><span>RTSGame.csproj</span></div>
+            <pre><code><span class="a">&lt;BlixCook</span> Include=<span class="s">"Assets/models/nature/**/*.obj"</span>
+          Recipe=<span class="s">"omsh"</span> Cooked=<span class="s">".blixmesh"</span> <span class="a">/&gt;</span>
+
+<span class="d">&lt;!-- the villager is cooked uncentred, because the loader
+     reads it that way --&gt;</span>
+<span class="a">&lt;BlixCook</span> Include=<span class="s">"Assets/models/Villager.obj"</span>
+          Recipe=<span class="s">"omsh"</span> Cooked=<span class="s">".blixmesh"</span>
+          Options=<span class="s">"recenter=0"</span> <span class="a">/&gt;</span></code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── The question the Sponza frame raises and the page never answered. ── -->
+    <section class="band">
+      <div class="two flip">
+        <div class="essay">
+          <h2>Declare what you want to watch</h2>
+          <p class="band-lead">Mark a field <code>[Tune]</code> and the overlay picks the control from its type: a slider for a number, a toggle for a bool, a dropdown for an enum, a text field for a string.</p>
+
+          <p>Shader uniforms too. A <code>//@tune</code> comment above a GLSL uniform binds it to a dial in the same panel, with the range, the default and enum cases read straight out of the decorator.</p>
+
+          <p>A program can draw into the world as well as report on it. <code>debug.Draw</code> puts lines, spheres and crosses into whichever view is in scope, and <code>Trail</code> keeps a named point&rsquo;s last few seconds - the one part of diagnostics that remembers anything between frames.</p>
+
+          <p>It all arrives through one method: a program implements <code>Debug(DebugContext)</code> and writes scopes, values, controls, timers, events and draw commands into the context each frame, with <code>[Tune]</code> as reflection onto that same channel. The frame and pass timings, the GPU cost of each pass, and the resources and pipelines the frame touched are there already. Press <code>`</code> to show it.</p>
+        </div>
+
+        <div class="codes">
+          <div class="term">
+            <div class="term-bar"><span>Blix.Demos.TankArena</span></div>
+            <pre><code><span class="a">[Tune(</span>3f, 18f<span class="a">)]</span>    <span class="k">public float</span> DriveSpeed = 3f;
+<span class="a">[Tune(</span>0.3f, 2.5f<span class="a">)]</span> <span class="k">public float</span> TurnSpeed = 0.3f;
+<span class="a">[Tune(</span>0f, 8f<span class="a">)]</span>     <span class="k">public float</span> EnemyMax = 1f;
+<span class="a">[Tune]</span>             <span class="k">public bool</span> EnemiesFire = <span class="k">true</span>;</code></pre>
+          </div>
+
+          <div class="term">
+            <div class="term-bar"><span>and in a shader</span></div>
+            <pre><code><span class="k">layout</span>(set = 0, binding = 0) <span class="k">uniform</span> <span class="t">Tune</span> {
+    <span class="d">//@tune 0..16 = 9.42</span>
+    <span class="k">float</span> uSunIntensity;
+    <span class="d">//@tune enum{ PBR, Albedo, Normal, Roughness }</span>
+    <span class="k">int</span>   uDebugView;
+} tune;</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <figure class="plate ui">
+      <img src="assets/overlay.jpg" width="1800" height="747" loading="lazy" alt="Four captures of the Blix diagnostics overlay fanned out side by side over Tank Arena. Left to right: the Perf tab with phase timings and a per-pass table of draws and triangles; the Pipeline tab listing sun-shadow casters with their push-constant floats; the Timers tab with live graphs per pass; and the Controls tab with named sliders for drive speed, turret speed, muzzle speed and more.">
+      <figcaption>
+        <b>blix run Blix.Demos.TankArena --debug</b>
+        <span>Phase and pass timings, the shadow casters with their push constants, live graphs, and the <code>[Tune]</code> sliders. Nothing in Tank Arena draws any of it.</span>
+      </figcaption>
+    </figure>
+
+    <section class="band">
+      <div class="two">
+        <div class="essay">
+          <h2>The renderer is yours</h2>
+          <p class="band-lead">Blix gives you the rendering capabilities and no default renderer. They do not decide which passes your game runs, or what it should look like.</p>
+
+          <p>A render graph is a persistent frame topology. You declare targets and passes once, compile, and then each frame record only the work that frame needs. A pass you do not record is skipped, which is how two variants of a technique can share one declared graph while only one runs.</p>
+
+          <p>Compilation rejects a bad topology up front: duplicate names, missing attachments, undeclared shaders, a read before its producer. Declaration order is execution order, and read edges drive the image transitions and barriers for you.</p>
+
+          <dl class="roles">
+            <div>
+              <dt>Blix.Graphics + Blix.Graphics.Vulkan + Blix.Render + Blix.Shaders</dt>
+              <dd>The command model, render graph, reflected binding, buffers, upload and batching helpers, fullscreen work, sprites, particles, and a shared shader vocabulary. These are capabilities.</dd>
+            </div>
+            <div>
+              <dt>Blix.Tools.Studio</dt>
+              <dd>The optional reference pipeline Blix&rsquo;s own model and rig tools use. <code>StudioLook</code> owns its lighting, environment, shadows, exposure, tonemap and MSAA defaults, outside engine core. Reuse all of it, some of it, or none.</dd>
+            </div>
+          </dl>
+
+          <p class="after">Point and spot shadows, bloom chains, Pong&rsquo;s CRT presentation and every culling decision are application-owned. Most projects start on Studio and grow their own graph as the game gets specific.</p>
+
+          <p class="after"><a class="link" href="https://github.com/KshitijVikramSingh/blix/blob/main/docs/renderer.md">Read the renderer guide</a></p>
+        </div>
+
+        <div class="codes">
+          <div class="term">
+            <div class="term-bar"><span>declaring a frame</span></div>
+            <pre><code><span class="k">var</span> graph = <span class="k">new</span> <span class="t">RenderGraph</span>(device);
+<span class="k">var</span> size  = <span class="k">new</span> <span class="t">MatchSwapchainGraphSize</span>();
+
+<span class="k">var</span> hdr    = graph.ColorTarget(<span class="s">"hdr"</span>, <span class="t">TextureFormat</span>.Rgba16F, size);
+<span class="k">var</span> shadow = graph.DepthTarget(<span class="s">"sun-shadow"</span>,
+                             <span class="k">new</span> <span class="t">FixedGraphSize</span>(2048, 2048));
+
+<span class="k">var</span> shadowPass = graph.GraphicsPass(<span class="s">"shadow"</span>)
+    .Depth(shadow, <span class="t">LoadOp</span>.Clear, <span class="t">StoreOp</span>.Store)
+    .Shader(shadowInterface).Handle;
+
+<span class="k">var</span> litPass = graph.GraphicsPass(<span class="s">"lit"</span>)
+    .Target(hdr, <span class="t">LoadOp</span>.Clear, <span class="t">StoreOp</span>.Store)
+    .Read(shadow)
+    .Shader(litInterface).Handle;
+
+graph.Compile();
+
+<span class="d">// then, per frame</span>
+graph.Pass(shadowPass, pass =&gt; RecordCasters(pass));
+graph.Pass(litPass,    pass =&gt; RecordScene(pass));
+graph.Execute(commandList);</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Getting started: one compact block, then the guide. ───────────── -->
+    <section class="band dark" id="start">
+      <h2>Getting started</h2>
+      <p class="band-lead">About ten minutes from a clean machine to a running window. Version 0.1 is verified on macOS, with Windows and Linux to follow.</p>
+
+      <div class="term">
+      <div class="term-bar">
+      <span>From nothing to a window</span>
+      <button class="copy" type="button" data-copy="cmd-full" aria-label="Copy the commands">
+      <svg class="i-copy" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="5.75" y="5.75" width="8.5" height="8.5" rx="1.5"/><path d="M10.5 3.4V2.25a1.5 1.5 0 0 0-1.5-1.5H2.25a1.5 1.5 0 0 0-1.5 1.5V9a1.5 1.5 0 0 0 1.5 1.5H3.4"/></svg>
+      <svg class="i-done" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M2.75 8.4 6.3 12 13.25 4.6"/></svg>
+      </button>
+      </div>
+      <pre id="cmd-full"><code><span class="p">$</span> brew install molten-vk vulkan-loader vulkan-headers vulkan-tools \
+    vulkan-validationlayers shaderc spirv-cross openal-soft
+
+<span class="p">$</span> git clone https://github.com/KshitijVikramSingh/blix.git
+<span class="p">$</span> cd blix &amp;&amp; dotnet build Blix.sln
+
+<span class="p">$</span> ./blix run Blix.Demos.Chassis    <span class="d"># the smallest program there is</span>
+<span class="p">$</span> ./blix run Blix.Demos.VulkanSponza
+<span class="p">$</span> ./blix test                      <span class="d"># Blix&#39;s own checks</span></code></pre>
+      </div>
+
+      <p class="after">The guide goes further: the smallest program that runs, a renderer composed from the graphics layers, and your first change to the source.</p>
+
+      <p class="after"><a class="link" href="https://github.com/KshitijVikramSingh/blix/blob/main/docs/getting-started.md">Read the getting-started guide</a></p>
+      <p class="after"><a class="link" href="https://github.com/KshitijVikramSingh/blix/blob/main/docs/architecture.md">Read the architecture</a></p>
+    </section>
+
+  </main>
+
+  <footer class="foot">
+    <a class="mark" href="#top">Blix</a>
+    <nav aria-label="Footer">
+      <a href="https://github.com/KshitijVikramSingh/blix">Source</a>
+      <a href="https://github.com/KshitijVikramSingh/blix/blob/main/docs/getting-started.md">Docs</a>
+      <a href="https://github.com/KshitijVikramSingh/blix/releases">Releases</a>
+      <a href="https://github.com/KshitijVikramSingh/blix/blob/main/LICENSE">Apache 2.0</a>
+    </nav>
+  </footer>
+</body>
+</html>
