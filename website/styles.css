@@ -243,7 +243,13 @@ h1 {
   font-size: .84rem;
   color: #a9b4c0;
 }
-.plate figcaption b { font-family: var(--mono); font-weight: 400; color: #dfe4ea; font-size: .86em; white-space: nowrap; }
+.plate figcaption b {
+  font-family: var(--mono);
+  font-weight: 400;
+  color: var(--accent-d);       /* a command you can run, like the prompts */
+  font-size: .86em;
+  white-space: nowrap;
+}
 
 /* a full-width band would stretch a terminal far past its longest line */
 .band > .term,
@@ -255,6 +261,24 @@ h1 {
 /* ── Bands ────────────────────────────────────────────────────────────── */
 
 .band { padding: clamp(3.5rem, 6vw, 5.5rem) 0; }
+
+/* A short rule marking where a section begins. The bands already alternate
+   surface, but a heading that sits inside a column has nothing to start it. */
+/* The declaration mechanism, wherever it appears: [Tune] and [BlixApp] in C#,
+   //@tune in GLSL. Same colour in prose as in the code blocks, because it is the
+   same thing being named. */
+.decl { color: var(--accent-ink); }
+.dark .decl, .plate .decl { color: var(--accent-d); }
+
+.band h2::before {
+  content: "";
+  display: block;
+  width: 2.5rem;
+  height: 3px;
+  margin-bottom: clamp(.9rem, 1.6vw, 1.25rem);
+  background: var(--accent);
+}
+.band.dark h2::before { background: var(--accent-d); }
 
 h2 {
   max-width: 18ch;
@@ -473,7 +497,7 @@ p > code, dd > code {
 }
 
 .term .s { color: #b8c9a8; }
-.term .a { color: #8e9aa8; }
+.term .a { color: var(--accent-d); }   /* [Tune], [Recipe], <BlixCook — the declarations */
 
 .after {
   max-width: 58ch;

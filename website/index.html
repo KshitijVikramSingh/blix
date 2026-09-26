@@ -71,7 +71,7 @@
 
           <p>Underneath them all: rendering and render graphs, assets and cooking, animation and rigs, geometry and collision, audio and input, diagnostics, and runtime hosting.</p>
 
-          <p>Blix is laid out the same way: thirty-two runnable programs, from eleven demos to seven headless test suites, a character lab and the asset tools further down. A file at the repo root names a project and says which of its programs is the gate, and anything marked <code>[BlixApp]</code> is runnable by name.</p>
+          <p>Blix is laid out the same way: thirty-two runnable programs, from eleven demos to seven headless test suites, a character lab and the asset tools further down. A file at the repo root names a project and says which of its programs is the gate, and anything marked <code class="decl">[BlixApp]</code> is runnable by name.</p>
 
           <figure class="shape">
             <ul class="shape-progs">
@@ -220,13 +220,13 @@ window.Run();
       <div class="two flip">
         <div class="essay">
           <h2>Declare what you want to watch</h2>
-          <p class="band-lead">Mark a field <code>[Tune]</code> and the overlay picks the control from its type: a slider for a number, a toggle for a bool, a dropdown for an enum, a text field for a string.</p>
+          <p class="band-lead">Mark a field <code class="decl">[Tune]</code> and the overlay picks the control from its type: a slider for a number, a toggle for a bool, a dropdown for an enum, a text field for a string.</p>
 
-          <p>Shader uniforms too. A <code>//@tune</code> comment above a GLSL uniform binds it to a dial in the same panel, with the range, the default and enum cases read straight out of the decorator.</p>
+          <p>Shader uniforms too. A <code class="decl">//@tune</code> comment above a GLSL uniform binds it to a dial in the same panel, with the range, the default and enum cases read straight out of the decorator.</p>
 
           <p>A program can draw into the world as well as report on it. <code>debug.Draw</code> puts lines, spheres and crosses into whichever view is in scope, and <code>Trail</code> keeps a named point&rsquo;s last few seconds - the one part of diagnostics that remembers anything between frames.</p>
 
-          <p>It all arrives through one method: a program implements <code>Debug(DebugContext)</code> and writes scopes, values, controls, timers, events and draw commands into the context each frame, with <code>[Tune]</code> as reflection onto that same channel. The frame and pass timings, the GPU cost of each pass, and the resources and pipelines the frame touched are there already. Press <code>`</code> to show it.</p>
+          <p>It all arrives through one method: a program implements <code>Debug(DebugContext)</code> and writes scopes, values, controls, timers, events and draw commands into the context each frame, with <code class="decl">[Tune]</code> as reflection onto that same channel. The frame and pass timings, the GPU cost of each pass, and the resources and pipelines the frame touched are there already. Press <code>`</code> to show it.</p>
         </div>
 
         <div class="codes">
@@ -241,9 +241,9 @@ window.Run();
           <div class="term">
             <div class="term-bar"><span>and in a shader</span></div>
             <pre><code><span class="k">layout</span>(set = 0, binding = 0) <span class="k">uniform</span> <span class="t">Tune</span> {
-    <span class="d">//@tune 0..16 = 9.42</span>
+    <span class="a">//@tune</span><span class="d"> 0..16 = 9.42</span>
     <span class="k">float</span> uSunIntensity;
-    <span class="d">//@tune enum{ PBR, Albedo, Normal, Roughness }</span>
+    <span class="a">//@tune</span><span class="d"> enum{ PBR, Albedo, Normal, Roughness }</span>
     <span class="k">int</span>   uDebugView;
 } tune;</code></pre>
           </div>
@@ -255,7 +255,7 @@ window.Run();
       <img src="assets/overlay.jpg" width="1800" height="747" loading="lazy" alt="Four captures of the Blix diagnostics overlay fanned out side by side over Tank Arena. Left to right: the Perf tab with phase timings and a per-pass table of draws and triangles; the Pipeline tab listing sun-shadow casters with their push-constant floats; the Timers tab with live graphs per pass; and the Controls tab with named sliders for drive speed, turret speed, muzzle speed and more.">
       <figcaption>
         <b>blix run Blix.Demos.TankArena --debug</b>
-        <span>Phase and pass timings, the shadow casters with their push constants, live graphs, and the <code>[Tune]</code> sliders. Nothing in Tank Arena draws any of it.</span>
+        <span>Phase and pass timings, the shadow casters with their push constants, live graphs, and the <code class="decl">[Tune]</code> sliders. Nothing in Tank Arena draws any of it.</span>
       </figcaption>
     </figure>
 
