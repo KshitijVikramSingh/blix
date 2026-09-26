@@ -581,8 +581,8 @@ p > code, dd > code {
    first. Below 900 there is no room for it and it is decorative, so it goes. */
 #start {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 23rem);
-  column-gap: clamp(2rem, 5vw, 4.5rem);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 25rem);
+  column-gap: clamp(1.75rem, 4vw, 4rem);
   align-items: start;
 }
 
@@ -594,8 +594,17 @@ p > code, dd > code {
      EXPLICIT line, which collapses the art back into row 1. */
   grid-row: 1 / span 10;
   align-self: center;
-  width: 100%;
   height: auto;
+
+  /* The terminal is already at its narrowest - its longest command needs every
+     pixel of 47rem - so there is no column width to take. The art grows into
+     the page gutter instead, by exactly the padding the band already reserves
+     there, less 1.25rem so it can never reach the viewport edge and raise a
+     scrollbar. */
+  max-width: none;          /* the global img{max-width:100%} would cancel the bleed */
+  --bleed: max(var(--gut), calc((100vw - var(--page)) / 2));
+  width: calc(100% + var(--bleed) - 1.25rem);
+  margin-right: calc(-1 * (var(--bleed) - 1.25rem));
 }
 
 /* ── Foot ─────────────────────────────────────────────────────────────── */
