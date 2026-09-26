@@ -23,5 +23,11 @@ and does not replace those terms.
 | StbImageSharp and StbTrueTypeSharp | Public domain | [StbSharp](https://github.com/StbSharp) |
 | System.Reflection.Metadata | MIT | [.NET Runtime](https://github.com/dotnet/runtime) |
 
+## Bundled assets
+
+| Asset | Source | Terms |
+| --- | --- | --- |
+| `website/assets/launch.svg` | [GetIllustrations.com](https://www.getillustrations.com) | Licensed for use with visible attribution; the credit appears on the site itself, below Getting started |
+
 Transitive package dependencies may carry additional notices. Their restored
 package metadata and upstream distributions are authoritative for those terms.

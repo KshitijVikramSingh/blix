@@ -615,6 +615,24 @@ p > code, dd > code {
   #start > .launch { display: none; }
 }
 
+/* The attribution the illustration's licence asks for. Same device as a plate
+   caption - full-bleed Ember, black on it - so it reads as part of the page's
+   own vocabulary rather than a notice stuck underneath, and it closes the dark
+   band against the paper footer. */
+.credit {
+  width: 100%;
+  padding: .55rem max(var(--gut), calc((100% - var(--page)) / 2));
+  background: var(--accent);
+  color: #000;
+  font-size: .82rem;
+}
+
+.credit a {
+  color: inherit;
+  text-decoration-thickness: 1px;
+  text-underline-offset: .22em;
+}
+
 /* ── Foot ─────────────────────────────────────────────────────────────── */
 
 .foot {
