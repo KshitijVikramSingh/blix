@@ -121,6 +121,12 @@ button { font: inherit; }
    with the line below at display sizes. Sized in em, so it hugs the caps whether
    it is wrapping a word in a 6.4rem headline or one in a paragraph. Cloned, so a
    phrase breaking across lines keeps its band on each one. */
+/* Selecting text is the reader highlighting it, so it uses the highlight. */
+::selection {
+  background: var(--accent);
+  color: #000;
+}
+
 mark, .hl {
   background: linear-gradient(var(--accent), var(--accent)) no-repeat;
   background-size: 100% .86em;
