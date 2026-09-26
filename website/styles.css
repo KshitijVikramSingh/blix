@@ -464,6 +464,17 @@ h2 {
   color: #8d98a5;
 }
 
+/* The engine tier is the one thing in the diagram that IS Blix, so it carries
+   the brand rather than another grey box. Black on it, like every other Ember
+   surface at text size. */
+.shape-row.engine {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #000;
+}
+
+.shape-row.engine b { color: rgba(0, 0, 0, .85); }   /* 4.66:1, still AA at 10.9px */
+
 /* the tier below is reached DOWN into, never the other way, which is the
    whole distinction between a library and a framework */
 .shape-row.engine::before {
@@ -473,7 +484,7 @@ h2 {
   top: -.9rem;
   width: 1px;
   height: .9rem;
-  background: #46525f;
+  background: var(--accent);
 }
 
 .shape figcaption {
@@ -507,10 +518,13 @@ p > code, dd > code {
   padding: .6rem 1.4rem;
   align-items: center;
   background: var(--accent);
-  color: #000;                  /* white is 4.04:1 on Ember; black is 5.20:1 */
+  /* White is 4.04:1 on Ember, which is short of 4.5 - but at 19.2px bold this
+     counts as large text and the bar drops to 3:1. The size is what makes the
+     white legal, so the two cannot be changed independently. */
+  color: #fff;
   border: 2px solid var(--accent);
   font-family: var(--display);
-  font-size: 1.05rem;
+  font-size: 1.2rem;
   font-weight: 700;
   text-decoration: none;
 }
