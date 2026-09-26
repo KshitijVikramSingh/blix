@@ -284,11 +284,9 @@ h1 {
 
 .band { padding: clamp(3.5rem, 6vw, 5.5rem) 0; }
 
-/* The declaration mechanism, wherever it appears: [Tune] and [BlixApp] in C#,
-   //@tune in GLSL. Same colour in prose as in the code blocks, because it is the
-   same thing being named. */
-.decl { color: var(--accent-ink); }
-.dark .decl, .plate .decl { color: var(--accent-d); }
+/* Kept as a hook, but the accent no longer lives in syntax - see the note on
+   .term .a. A declaration reads as an ordinary code chip. */
+.decl { color: inherit; }
 
 h2 {
   max-width: 18ch;
@@ -518,7 +516,7 @@ p > code, dd > code {
 }
 
 .term .s { color: #b8c9a8; }
-.term .a { color: var(--accent-d); }   /* [Tune], [Recipe], <BlixCook — the declarations */
+.term .a { color: #8e9aa8; }   /* declaration syntax: part of the listing, not the page */
 
 .after {
   max-width: 58ch;
