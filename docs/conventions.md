@@ -229,6 +229,18 @@ pose).
   them; there is no discovery, registration, or active-tool branch, and a
   different executable simply builds a different root.
 
+- **Count consumers across the source consumers, not just `src/`.** A second
+  consumer is the bar for extraction, and the absence of consumers is the
+  argument for deletion — so both readings depend on counting the right set.
+  Blix is consumed as a pinned source checkout by at least one game outside
+  this repository, and a `grep` over `src/` cannot see it. Measured that way,
+  `CreateMesh` and `PropModel` both read as having *zero* consumers while
+  between them holding eighty-one callers in the external RTSGame tree, and
+  `PropModel` looks like an abstraction nobody adopted when in truth the game
+  it was built for left the repository. An engine type's consumer count is a
+  question about every consumer, and answering it with the convenient search
+  argues for deleting load-bearing code.
+
 **Enforced by:** [`architecture.md` §"Library, not framework"](architecture.md)
 · [`architecture.md` §"How an application is put together"](architecture.md)
 · the *Proves / Owns* header block on each `src/Demos/Blix.Demos.*/Program.cs` · the
@@ -348,6 +360,17 @@ promoted to a requirement, and then defended with the evidence it produced. The 
 asks for it"* is **go and get something that asks for it** — see [[blix-gltf-sample-corpus]] for the
 three corpora and what each is for.
 
+**A variant worth naming, because the sentence can be TRUE and still wrong.** The sun-bounce bake
+applied one translucency to every non-opaque cell in Sponza, and the note defending that said the
+scene authors transmission nowhere — every material reporting `TransmissionFactor` 0. It did, and
+the note was about `KHR_materials_transmission`, the clear pane you see *through*. The bake needed
+`KHR_materials_diffuse_transmission`, the thin sheet that glows backlit, which the scene authors on
+exactly the surfaces that have it. Two extensions, two lines apart in the same material table, and
+checking the near one produced a true measurement of the wrong quantity — which then justified not
+building the thing for a year. When *"nothing authors it"* is the argument, the check that sentence
+rests on is the part to read twice, and it is the same discipline as [[blix-audit-by-grep]]: search
+for the value, not for the name.
+
 **Where the line actually falls**, using transparency as the case: *rendering* a BLEND material is
 conformance and the spec settles it. *Sorting* blended surfaces correctly is policy — depth peeling,
 per-triangle sorting, order-independent blending are all defensible — so that half waits, and the
@@ -421,14 +444,23 @@ capability?"* — a question about abstraction, not about permission.
   why that mechanism exists.
 - **Headers state current ownership and usage.** They do not recount which file a type used to live
   in, how many copies preceded an extraction, or which development session discovered the issue.
+- **A plan record lives at the repository root only while it owns an unresolved decision.** It is
+  *active* while a concrete decision, acceptance step or stage is still open; it is *completed*
+  when it reaches the stopping condition written in it, *superseded* when another named record
+  owns the same decision, and *abandoned* when its outcome was rejected with no replacement.
+  Ideas deliberately deferred until a future consumer do not keep one active. On any of the last
+  three: distil its durable contracts into the focused documentation and the tests they justify,
+  then **delete it**. Do not leave a completed development journal at the root and do not
+  reproduce one under a history or archive directory — that is a second documentation hierarchy
+  nobody reads, and version control already preserves the record.
 
 The test is simple: could a future maintainer act correctly from the comment without reconstructing
 the chronology? If yes, keep it near the code. If chronology is the useful part, version control is
 its home; current documentation should link only to material that still answers a live question.
 
 **Enforced by:** current-contract comments in `Directory.Build.targets`, `Blix.Recipes/MeshRecipe.cs`,
-and `Blix.Tools.Studio/StudioRenderer.cs` · active design records indexed by
-[`plans.md`](plans.md) · regression tests that retain the failure after its diary is gone.
+and `Blix.Tools.Studio/StudioRenderer.cs` · the active design record at
+[`plan.md`](../plan.md) · regression tests that retain the failure after its diary is gone.
 
 ---
 

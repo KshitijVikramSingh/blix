@@ -73,27 +73,6 @@
                     "type" : "mat4",
                     "offset" : 0,
                     "matrix_stride" : 16
-                },
-                {
-                    "name" : "uSunViewProjection",
-                    "type" : "mat4",
-                    "offset" : 64,
-                    "matrix_stride" : 16
-                },
-                {
-                    "name" : "uCameraPosition",
-                    "type" : "vec4",
-                    "offset" : 128
-                },
-                {
-                    "name" : "uSunDirection",
-                    "type" : "vec4",
-                    "offset" : 144
-                },
-                {
-                    "name" : "uSunColour",
-                    "type" : "vec4",
-                    "offset" : 160
                 }
             ]
         }
@@ -156,7 +135,7 @@
         {
             "type" : "_68",
             "name" : "Frame",
-            "block_size" : 176,
+            "block_size" : 64,
             "set" : 0,
             "binding" : 0
         }

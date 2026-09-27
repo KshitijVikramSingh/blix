@@ -71,6 +71,14 @@ public static class SkyVisibilityBaker
         // Coarser than occupancy on purpose — see the albedo parameter on Bake. RGBA8, one texel
         // per cell, gamma-2.0 encoded (sqrt of linear) so the dark saturated channels of a red
         // curtain survive eight bits. The shader squares it back.
+        //
+        // <b>ALPHA is KHR_materials_diffuse_transmission, encoded LINEARLY.</b> Not gamma: it is a
+        // scattering fraction rather than a colour, and eight linear bits over [0,1] resolve it to
+        // better than half a percent. It rode here at zero storage cost because the channel was
+        // being written as a constant 255 and nothing read it. Before this the transport applied
+        // ONE translucency to every non-opaque cell in the scene, which meant a curtain whose
+        // material says 0 — measured, and deliberately kept as an explicit 0 — still passed tinted
+        // light in the bounce, while foliage authored at 0.45 got the same number by coincidence.
         int AlbedoX = 0, int AlbedoY = 0, int AlbedoZ = 0, byte[]? Albedo = null)
     {
         public SkyCell At(int x, int y, int z) => Cells[(z * SizeY + y) * SizeX + x];
@@ -227,7 +235,7 @@ public static class SkyVisibilityBaker
         // masonry. The grid stores density and a ray
         // accumulates transmittance through it. Stone stays opaque; alpha-tested geometry
         // contributes a fraction, and enough overlapping leaf cards still add up to darkness.
-        var tris = new List<(Vector3 A, Vector3 B, Vector3 C, float Opacity, Vector3 Albedo)>();
+        var tris = new List<(Vector3 A, Vector3 B, Vector3 C, float Opacity, Vector3 Albedo, float Transmit)>();
         var min = new Vector3(float.MaxValue);
         var max = new Vector3(float.MinValue);
 
@@ -244,6 +252,13 @@ public static class SkyVisibilityBaker
                     ? materials[prim.MaterialIndex].AlphaMode : (byte)0;
                 var opacity = mode == 0 ? 1f : CutoutOpacity;
                 var albedoRgb = MaterialAlbedo(file, prim.MaterialIndex, path, albedoCache, log);
+                // No cache and no texture read: this one is a scalar sitting in the material table,
+                // where the cook already put every KHR_materials_* property. Ext is the
+                // never-null accessor, so a material with no extension block reads the spec
+                // default of zero rather than throwing.
+                var transmit = prim.MaterialIndex >= 0 && prim.MaterialIndex < materials.Count
+                    ? Math.Clamp(materials[prim.MaterialIndex].Ext.DiffuseTransmissionFactor, 0f, 1f)
+                    : 0f;
                 var stride = prim.Layout.Stride;
                 var positions = new Vector3[prim.VertexCount];
                 for (var v = 0; v < prim.VertexCount; v++)
@@ -264,10 +279,10 @@ public static class SkyVisibilityBaker
                 var lod = prim.Lods[^1];
                 if (lod.Indices32 is { } i32)
                     for (var i = 0; i + 2 < i32.Length; i += 3)
-                        tris.Add((positions[i32[i]], positions[i32[i + 1]], positions[i32[i + 2]], opacity, albedoRgb));
+                        tris.Add((positions[i32[i]], positions[i32[i + 1]], positions[i32[i + 2]], opacity, albedoRgb, transmit));
                 else if (lod.Indices16 is { } i16)
                     for (var i = 0; i + 2 < i16.Length; i += 3)
-                        tris.Add((positions[i16[i]], positions[i16[i + 1]], positions[i16[i + 2]], opacity, albedoRgb));
+                        tris.Add((positions[i16[i]], positions[i16[i + 1]], positions[i16[i + 2]], opacity, albedoRgb, transmit));
             }
         }
 
@@ -293,6 +308,9 @@ public static class SkyVisibilityBaker
         // colour of a boundary cell depend on mesh ordering.
         var albedoSum = new Vector3[ax * ay * az];
         var albedoCount = new int[ax * ay * az];
+        // Averaged over the SAME samples as the colour, for the same reason: a cell straddling
+        // curtain and leaf should read as the mix rather than as whichever triangle came last.
+        var transmitSum = new float[ax * ay * az];
 
         // Voxelise by sampling each triangle's SURFACE, densely enough that no cell it crosses is
         // missed.
@@ -302,7 +320,7 @@ public static class SkyVisibilityBaker
         // is the safe direction: a pinhole in a wall leaks a little light, where a filled courtyard
         // deletes all of it.
         var cellDiag = cell.Length();
-        foreach (var (a, b, c, opacity, albedoRgb) in tris)
+        foreach (var (a, b, c, opacity, albedoRgb, transmit) in tris)
         {
             var area = Vector3.Cross(b - a, c - a).Length() * 0.5f;
             // Two samples per cell-width along each edge direction, so a triangle crossing a cell
@@ -330,6 +348,7 @@ public static class SkyVisibilityBaker
                             + Math.Clamp((int)((p.Y - min.Y) / span.Y * ay), 0, ay - 1)) * ax
                             + Math.Clamp((int)((p.X - min.X) / span.X * ax), 0, ax - 1);
                 albedoSum[avoxel] += albedoRgb;
+                transmitSum[avoxel] += transmit;
                 albedoCount[avoxel]++;
             }
         }
@@ -339,6 +358,7 @@ public static class SkyVisibilityBaker
         // here and one multiply in the shader, and it is format-independent — no 3D sRGB view needed.
         var albedoBytes = new byte[ax * ay * az * 4];
         var coloured = 0;
+        var translucent = 0;
         for (var i = 0; i < albedoSum.Length; i++)
         {
             if (albedoCount[i] == 0) continue;
@@ -347,10 +367,18 @@ public static class SkyVisibilityBaker
             albedoBytes[i * 4 + 0] = (byte)Math.Clamp((int)MathF.Round(MathF.Sqrt(Math.Clamp(c3.X, 0f, 1f)) * 255f), 0, 255);
             albedoBytes[i * 4 + 1] = (byte)Math.Clamp((int)MathF.Round(MathF.Sqrt(Math.Clamp(c3.Y, 0f, 1f)) * 255f), 0, 255);
             albedoBytes[i * 4 + 2] = (byte)Math.Clamp((int)MathF.Round(MathF.Sqrt(Math.Clamp(c3.Z, 0f, 1f)) * 255f), 0, 255);
-            albedoBytes[i * 4 + 3] = 255;
+            // Linear, not sqrt: a scattering fraction, not a colour. See the Volume record.
+            var transmit = transmitSum[i] / albedoCount[i];
+            if (transmit > 0.002f) translucent++;
+            albedoBytes[i * 4 + 3] = (byte)Math.Clamp((int)MathF.Round(transmit * 255f), 0, 255);
         }
         log?.Invoke($"  albedo grid {ax}x{ay}x{az} ({albedoBytes.Length / 1024.0 / 1024.0:0.00} MB), " +
                     $"{100.0 * coloured / albedoSum.Length:0.0}% of cells carry a surface");
+        // Reported because the number is the check: a bake whose scene authors diffuse
+        // transmission somewhere and reports 0% here has lost the material table on the way in,
+        // and the picture it produces would look merely a little darker rather than wrong.
+        log?.Invoke($"  of those, {(coloured > 0 ? 100.0 * translucent / coloured : 0):0.0}% scatter light " +
+                    "through (KHR_materials_diffuse_transmission, in the alpha channel)");
 
         var opaqueCells = density.Count(d => d >= 0.99f);
         var partialCells = density.Count(d => d > 0.01f && d < 0.99f);

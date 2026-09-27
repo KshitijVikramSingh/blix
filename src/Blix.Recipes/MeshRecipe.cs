@@ -664,7 +664,9 @@ public static class MeshRecipe
         // reads the same number. Patching at load instead would mean each consumer applying it, and
         // the ones that forgot would disagree with the ones that did, which is the exact split this
         // whole mechanism exists to end.
-        return patch is null ? cooked : patch.Apply(cooked, log);
+        var final = patch is null ? cooked : patch.Apply(cooked, log);
+        ReportDefaultTransmissionColour(final, log);
+        return final;
 
         // Store rows in this cooked file's image table, not source glTF image indices.
         int ImageIndex(MaterialChannel? channel)
@@ -684,6 +686,45 @@ public static class MeshRecipe
             }
 
             return fallback;
+        }
+    }
+
+    /// <summary>
+    /// Reports a material that scatters light through itself without saying what colour it turns.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// glTF's default for <c>diffuseTransmissionColorFactor</c> is WHITE, and a renderer that obeys
+    /// the spec gives such a material a white glow from behind. That is correct and it is usually
+    /// not what was meant: the term is reached for on leaves and cloth, which tint what passes
+    /// through them, and a red curtain glowing white looks like a bug in the renderer.
+    /// </para>
+    /// <para>
+    /// So this reports rather than judges, in the manner of <c>blix inspect</c>. White transmission
+    /// is a legal material and refusing it would be the cook overriding an author. But the cook is
+    /// where an asset's omissions get answered — it is the one place that sees the material table
+    /// after patching and before anything renders — so it is the right place to say out loud that
+    /// a default is in force, rather than leaving it to be discovered in a picture.
+    /// </para>
+    /// <para>
+    /// Deliberately silent when a colour texture is present: the factor then multiplies the texture
+    /// and white is the correct, intended neutral.
+    /// </para>
+    /// </remarks>
+    private static void ReportDefaultTransmissionColour(
+        IReadOnlyList<BlixMeshMaterial> materials, Action<string>? log)
+    {
+        if (log is null) return;
+        foreach (var m in materials)
+        {
+            var x = m.Ext;
+            if (x.DiffuseTransmissionFactor <= 0f) continue;
+            if (x.DiffuseTransmissionColorImage != BlixMesh.NoImage) continue;
+            if (x.DiffuseTransmissionColorFactor != Vector3.One) continue;
+            log($"  note: {m.Name} scatters light through itself (diffuseTransmission " +
+                $"{x.DiffuseTransmissionFactor:0.##}) but authors no diffuseTransmissionColor, so " +
+                "the glTF default applies and it will glow WHITE from behind. Set " +
+                "diffuseTransmissionColor in the patch if it should carry the surface's own tint.");
         }
     }
 

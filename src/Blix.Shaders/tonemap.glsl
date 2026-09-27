@@ -7,6 +7,20 @@
 // temperature) BEFORE the operator while still in HDR linear space; the
 // operator's curve assumes a meaningful dynamic range and grading after
 // tonemap just shifts already-clipped LDR values around.
+//
+// --- THERE IS A SECOND COPY OF THESE CURVES. EDIT BOTH. -------------------
+// Blix.Graphics.Images/Tonemap.cs is the CPU twin, and it is SHIPPED, not a
+// test fixture: a capture is read back from the HDR scene target before the
+// present pass runs, so something has to apply the curve in C#. That pair has
+// already gone wrong once -- the C# copy was hardcoded to ACES while this file
+// offered four curves, so --tonemap-mode moved the screen and left every
+// capture alone, and both halves were internally consistent the whole time.
+//
+// Blix.Test.Graphics section BD is what makes the two answerable to each
+// other: it reads this file and fails when a constant named in Tonemap.cs
+// stops appearing here, or when the mode thresholds change shape. A deliberate
+// change to a curve or a threshold is therefore a two-file change.
+// Same arrangement as sheen.glsl / section BE's twin.
 
 // Narkowicz 2015 (Knarkowicz/Heitz) fit of the ACES Filmic curve to a
 // rational polynomial. The "industry standard" cinematic look: saturated

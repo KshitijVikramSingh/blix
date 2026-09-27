@@ -182,10 +182,6 @@ internal sealed partial class SponzaLoop
             // w marks whether shading should write usage at all — off while the volume is not ready.
             new("uBounceDims", new Vector4Uniform(new Vector4(
                 bounceX, bounceY, bounceZ, bounceReady && ProbeSleepNow > 0f ? 1f : 0f))),
-            // x < 0 means "use what the material carries"; the overlay sets it to find a value.
-            new("uClothOverride",    new Vector4Uniform(clothOverride
-                ? new Vector4(sheenRoughness, diffuseTransmit, 0f, 0f)
-                : new Vector4(-1f, -1f, 0f, 0f))),
             new("uShadowStrength",   new FloatUniform(
                 shadows.Enabled && !(abMode == "shadow" && AbOffPhase) ? 1f : 0f)),
             new("uCascadeViewProj",  new Matrix4x4ArrayUniform(cascadeViewProj)),
@@ -501,7 +497,7 @@ internal sealed partial class SponzaLoop
                 new("uOccupancyDims", new Vector4Uniform(new Vector4(occX, occY, occZ, injectDensity ? 1f : 0f))),
                 // w carries translucency: how much of what a partial cell absorbs comes out the far
                 // side wearing its colour. Zero on opaque cells in the shader, or walls would leak.
-                new("uAlbedoDims", new Vector4Uniform(new Vector4(albX, albY, albZ, injectTranslucency))),
+                new("uAlbedoDims", new Vector4Uniform(new Vector4(albX, albY, albZ, injectTransmissionScale))),
                 new("uSunDirection",  new Vector4Uniform(new Vector4(sunDirection, 0f))),
                 // w: whether the sky-visibility volume is loaded, so the injector knows whether its
                 // sky SOURCE term can be evaluated at all.

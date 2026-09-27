@@ -156,18 +156,12 @@ internal sealed partial class SponzaLoop
                 // 256 is the ceiling: the workgroup has 256 lanes and each marches one ray.
                 injectRays    = debug.Controls.Float("Rays / probe", injectRays, 8f, 256f);
                 injectPeriod  = debug.Controls.Float("Refresh period", injectPeriod, 4f, 64f);
-                injectTranslucency = debug.Controls.Float("Translucency", injectTranslucency, 0f, 1f);
+                // A multiplier on what the bake read out of each material, so 1.0 is "as authored"
+                // and 0 is the A/B that removes the term. Above 1 exaggerates it for judgment.
+                injectTransmissionScale = debug.Controls.Float(
+                    "Transmission x", injectTransmissionScale, 0f, 2f);
                 // Zero disables sleeping and supplies the full-grid A/B baseline.
                 probeSleepFrames = MathF.Round(debug.Controls.Float("Sleep after (frames)", probeSleepFrames, 0f, 600f));
-            }
-
-            // Override cooked cloth values across sheened materials for live judgment. Settled
-            // values belong back in the patch rather than in this ephemeral control state.
-            using (debug.Scope("Cloth"))
-            {
-                clothOverride   = debug.Controls.Toggle("Override the patch", clothOverride);
-                sheenRoughness  = debug.Controls.Float("Sheen roughness", sheenRoughness, 0.05f, 1f);
-                diffuseTransmit = debug.Controls.Float("Diffuse transmission", diffuseTransmit, 0f, 1f);
             }
         }
 

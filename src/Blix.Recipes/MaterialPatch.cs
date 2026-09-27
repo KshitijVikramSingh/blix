@@ -202,6 +202,32 @@ public sealed class MaterialPatch
             case "sheenRoughness": return m with { Extensions = x with { SheenRoughnessFactor = F(value) } };
             case "diffuseTransmission":      return m with { Extensions = x with { DiffuseTransmissionFactor = F(value) } };
             case "diffuseTransmissionColor": return m with { Extensions = x with { DiffuseTransmissionColorFactor = V3(value) } };
+
+            // The one texture a patch may author, and it names an image the asset ALREADY has
+            // rather than introducing one.
+            //
+            // <b>Why this exists.</b> lit.frag used to shade the transmitted lobe as
+            // diffuseTransmissionColor * baseColor, which gave a leaf card its per-texel variation
+            // for free -- and squared the tint the moment a scene authored the colour, because the
+            // value authored was the leaf's own measured albedo. Removing the multiply made the
+            // renderer obey the spec and cost that variation. This is how a scene asks for it back
+            // as a decision it states, instead of one the renderer assumes for everybody.
+            //
+            // <b>Why not a file path.</b> A cooked material's image fields are rows in THIS file's
+            // image table, built while cooking from the images the source actually carries. Naming
+            // an outside file would mean growing that table, cooking a texture that no material
+            // references, and inventing a resolution rule for the path -- none of which the use
+            // case needs, since the image wanted is always one the asset already ships.
+            case "diffuseTransmissionColorTexture":
+                return value switch
+                {
+                    "baseColor" => m with { Extensions = x with { DiffuseTransmissionColorImage = m.BaseColorImage } },
+                    "none" => m with { Extensions = x with { DiffuseTransmissionColorImage = BlixMesh.NoImage } },
+                    _ => throw new InvalidDataException(
+                        $"{path}:{rule.Line}: diffuseTransmissionColorTexture takes 'baseColor' or " +
+                        $"'none', not '{value}'. A patch may point this at an image the asset " +
+                        "already carries; it cannot introduce one."),
+                };
             case "thickness":           return m with { Extensions = x with { ThicknessFactor = F(value) } };
             case "attenuationDistance": return m with { Extensions = x with { AttenuationDistance = F(value) } };
             case "attenuationColor":    return m with { Extensions = x with { AttenuationColor = V3(value) } };

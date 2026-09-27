@@ -156,7 +156,7 @@ current application catalogue, ownership boundaries, and verification routing.
 - [Conventions](docs/conventions.md) — the design rules behind engine/caller
   boundaries and executable specifications.
 - [Demos](docs/demos.md) — applications, proving grounds, tools, and how to verify them.
-- [Plan status](docs/plans.md) — the active design records that still own open work.
+- [Plan](plan.md) — the active design record: the arc in flight and the decisions still open.
 
 These pages describe the current tree. Where prose and executable behavior ever
 disagree, the code and tests are the present source of truth; correct the prose

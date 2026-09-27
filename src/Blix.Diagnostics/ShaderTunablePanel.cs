@@ -73,7 +73,13 @@ public sealed class ShaderTunablePanel
             {
                 foreach (var t in items)
                 {
-                    if (t.Kind == TunableKind.Enum && t.EnumNames is { Count: > 0 } names)
+                    if (t.Kind == TunableKind.Bool)
+                    {
+                        // A checkbox for a choice, a slider for an amount. The uniform is a float
+                        // either way, so the shader's `> 0.5` test never learns the difference.
+                        values[t.Name] = debug.Controls.Toggle(t.Label, values[t.Name] != 0f) ? 1f : 0f;
+                    }
+                    else if (t.Kind == TunableKind.Enum && t.EnumNames is { Count: > 0 } names)
                     {
                         values[t.Name] = debug.Controls.Enum(t.Label, (int)values[t.Name], names);
                     }

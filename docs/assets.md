@@ -172,6 +172,17 @@ grids needed for dynamic sun-bounce injection. Scene bounds, sampling density,
 and output grouping are driver policy, so the result is a scene-level
 `.blixsky` artifact rather than a sibling transformation of one source file.
 
+The surface-colour grid is RGBA8. RGB is the cell's mean linear albedo stored as
+its square root, so dark saturated channels survive eight bits. **Alpha is the
+cell's mean `KHR_materials_diffuse_transmission` factor, stored linearly** — a
+scattering fraction rather than a colour — and the transport reads it per cell
+instead of applying one translucency to the whole scene. A cell with no surface
+holds zero in all four channels, so a reader distinguishes absence by the grid's
+presence and by RGB, never by alpha: a fully opaque surface legitimately stores
+alpha zero. `.blixsky` is at v4 for that meaning; the byte layout is unchanged
+from v3, and the version exists so an older file is refused rather than read as
+a scene whose every surface scatters all of its light.
+
 Recipe identity covers those policy inputs: texture stamps name the resolved
 role, format, flags, mip count, encoder backend, and quality; mesh split extent
 uses invariant formatting; probe yaw is normalized through the uniform recipe;

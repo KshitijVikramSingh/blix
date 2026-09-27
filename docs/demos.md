@@ -104,6 +104,22 @@ Left-click builds or upgrades, right-click sells, `Space` starts a wave, and
 the arrow keys orbit the camera. `--selftest` exercises game invariants;
 `--frames N` is the headed smoke path.
 
+Bulwark existed to force extraction decisions against real duplication instead
+of guessed duplication (see [Conventions](conventions.md) §4). All four
+candidates were inspected on shipped code and decided against:
+
+| Candidate | Second consumer | Verdict |
+| --- | --- | --- |
+| Navigation | Tank Arena steering | Hold. Grid shortest-path search and continuous obstacle-avoidance steering are different algorithms; a shared `NavGrid`/A\* would be a forced abstraction over both. Revisit only when a third consumer wants the *same* shape. |
+| Turret rig | Tank Arena turret/barrel | No. `Transform3D` parenting plus `LookAt` and `WorldPosition` is composition these two games happen to share — an API without a capability. |
+| `Grid2D<T>` | none | Not now. One consumer; a `bool[]` and an index helper is the right size. |
+| Ground-plane picking | none | Keep local and annotated, exactly as Tank Arena did with nav. |
+
+Skinned-mesh instancing is the one engine gap the game did close. A crowd draws
+from a `[MaxAlive x BoneCount]` world-baked palette read at `gl_InstanceIndex *
+BONE_COUNT`, in both the scene pass and an instanced skinned shadow caster. It
+stays local to the demo until a second consumer asks for it.
+
 ## Focused renderer references
 
 ### Chassis

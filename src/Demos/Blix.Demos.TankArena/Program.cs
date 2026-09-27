@@ -226,14 +226,6 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     // material colour per primitive); placements share it. Unlike the tank's gameplay
     // team tints, props keep their authored material colours (the world shader is
     // tint×lighting, so per-primitive BaseColorFactor reproduces the model's look).
-    private sealed class PropPrim
-    {
-        public required Vector4 Tint;
-        public required InstancedBatch World;
-        public required InstancedBatch Caster;
-        public required InstanceBuffer WorldInstances;
-        public required InstanceBuffer CasterInstances;
-    }
     private sealed class PropType
     {
         public required string Name;
@@ -241,7 +233,12 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         public required float Radius;         // game-space horizontal half-extent (cover footprint)
         public required float Height;         // game-space height (shells lob over the top)
         public required bool Explosive;       // detonates on hit: AoE damage + chain
-        public required IReadOnlyList<PropPrim> Prims;
+        // <b>The per-primitive batches, instance buffers and tints used to live here by hand.</b>
+        // A prop is one model split into a primitive per material, so every part has to be handed
+        // the SAME instance list -- and keeping four lists in step by hand is how a lid ends up on
+        // a different barrel from its body. PropModel owns exactly that, was written for this
+        // shape, and this game is one of the two whose private version motivated it.
+        public required PropModel Model;
     }
     // A placed prop. Destructible (Alive) so an exploding barrel can be removed from
     // render + collision when it detonates; OwnerId is its collision-world handle.
@@ -457,7 +454,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
 
         TankPart Part(MeshData md, Attach attach, Vector4? tint)
         {
-            var mesh = UploadMesh(md);
+            var mesh = vk.CreateMesh(md);
             var wInst = new InstanceBuffer(vk, worldShader, $"{md.Name}.w");
             var cInst = new InstanceBuffer(vk, casterShader, $"{md.Name}.c");
             return new TankPart
@@ -528,18 +525,6 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
             VertexPosition3NormalTexture.Layout, new Bounds3(min, max));
     }
 
-    private Mesh UploadMesh(MeshData md)
-    {
-        var vb = vk.CreateVertexBuffer(
-            new VertexBufferData(new VertexBufferDescription(md.Layout, md.VertexCount, GraphicsBufferUsage.Static), md.VertexBytes),
-            $"{md.Name}.vb");
-        // u16 covers the tank parts + props; handle u32 too so the loader is general.
-        var (ib, count) = md.Indices32 is { } u32
-            ? (vk.CreateIndexBuffer(u32, name: $"{md.Name}.ib"), u32.Length)
-            : (vk.CreateIndexBuffer(md.Indices, name: $"{md.Name}.ib"), md.Indices.Length);
-        return new Mesh(md.Name, vb, ib, count, md.Bounds);
-    }
-
     // Load a static prop model: flat Import (bakes node transforms into one space),
     // uniformly scaled so the model is `targetHeight` game units tall. Each primitive
     // becomes an instanced batch tinted by its material's base colour. Returns the
@@ -560,23 +545,16 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         var scale = size.Y > 1e-3f ? targetHeight / size.Y : 1f;
         var radius = 0.5f * MathF.Max(size.X, size.Z) * scale;
 
-        var prims = new List<PropPrim>();
-        foreach (var prim in model.Primitives)
+        // Tint per primitive is the material's own base colour: the world shader is
+        // tint x lighting, so this reproduces the authored look without a texture.
+        var parts = model.Primitives.Select(prim =>
         {
-            var mesh = UploadMesh(prim.Mesh);
             var c = prim.Material?.BaseColorFactor ?? new Vector4(0.7f, 0.7f, 0.7f, 1f);
-            var wInst = new InstanceBuffer(vk, worldShader, $"{mesh.Name}.w");
-            var cInst = new InstanceBuffer(vk, casterShader, $"{mesh.Name}.c");
-            prims.Add(new PropPrim
-            {
-                Tint = new Vector4(c.X, c.Y, c.Z, 1f),
-                WorldInstances = wInst,
-                CasterInstances = cInst,
-                World = new InstancedBatch(mesh, worldPipeline, wInst),
-                Caster = new InstancedBatch(mesh, casterPipeline, cInst),
-            });
-        }
-        return new PropType { Name = file, Scale = scale, Radius = radius, Height = targetHeight, Explosive = explosive, Prims = prims };
+            return (prim.Mesh, new Vector4(c.X, c.Y, c.Z, 1f));
+        });
+        var prop = PropModel.Create(
+            vk, file, parts, worldShader, worldPipeline, casterShader, casterPipeline);
+        return new PropType { Name = file, Scale = scale, Radius = radius, Height = targetHeight, Explosive = explosive, Model = prop };
     }
 
     // Scatter cover props in a mid-arena ring (deterministic), keeping clear of the
@@ -1199,17 +1177,19 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         AddTankParts(player, PlayerTeam);
         foreach (var e in enemies) AddTankParts(e, EnemyTeam);
 
-        // Environment props (cover): material-coloured, instanced across placements.
-        foreach (var pt in propTypes)
-            foreach (var pp in pt.Prims) { pp.World.Begin(worldPush); pp.Caster.Begin(shadowPush); }
+        // Environment props (cover): material-coloured, instanced across placements. One Add per
+        // placement reaches every part and both passes, which is the property worth having -- a
+        // caster cannot drift from what it casts for.
+        foreach (var pt in propTypes) pt.Model.Begin();
         foreach (var inst in props)
         {
             if (!inst.Alive) continue;   // detonated barrels are gone
-            var m = Matrix4x4.CreateScale(inst.Type.Scale)
+            inst.Type.Model.Add(
+                Matrix4x4.CreateScale(inst.Type.Scale)
                 * Matrix4x4.CreateRotationY(inst.Yaw)
-                * Matrix4x4.CreateTranslation(inst.Position);
-            foreach (var pp in inst.Type.Prims) { pp.World.Add(m, pp.Tint); pp.Caster.Add(m, Vector4.Zero); }
+                * Matrix4x4.CreateTranslation(inst.Position));
         }
+        foreach (var pt in propTypes) pt.Model.Stage(worldPush, shadowPush);
 
         // Shadow casters: walls (not the ground receiver or tiny shells); tanks via parts.
         casterBatch.Begin(shadowPush);
@@ -1221,7 +1201,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         {
             casterBatch.End(scope);
             foreach (var part in tankParts) part.Caster.End(scope);
-            foreach (var pt in propTypes) foreach (var pp in pt.Prims) pp.Caster.End(scope);
+            foreach (var pt in propTypes) pt.Model.DrawShadow(scope);
         });
         var shadowTex = graph.GetDepthTexture(sunShadowHandle);
         graph.Pass(scenePassHandle, scope =>
@@ -1230,7 +1210,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
             var shadowBind = new[] { new ShaderTextureBinding("uSunShadowMap", shadowTex, Slot: 0) };
             batch.End(scope, shadowBind);
             foreach (var part in tankParts) part.World.End(scope, shadowBind);
-            foreach (var pt in propTypes) foreach (var pp in pt.Prims) pp.World.End(scope, shadowBind);
+            foreach (var pt in propTypes) pt.Model.DrawScene(scope, shadowBind);
         });
         graph.Execute(commandList);
 
@@ -1325,11 +1305,6 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
             part.WorldInstances.Dispose();
             part.CasterInstances.Dispose();
         }
-        foreach (var pt in propTypes)
-            foreach (var pp in pt.Prims)
-            {
-                pp.WorldInstances.Dispose();
-                pp.CasterInstances.Dispose();
-            }
+        foreach (var pt in propTypes) pt.Model.Dispose();
     }
 }

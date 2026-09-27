@@ -13,6 +13,19 @@
 // KHR_materials_diffuse_transmission. They are separate extensions because they
 // are separate physics -- one is a rim you see, the other is light you see
 // through -- and a curtain wants both.
+//
+// --- THERE IS A SECOND COPY OF THIS ARITHMETIC. EDIT BOTH. -----------------
+// Blix.Test.Graphics section BE carries a TEST-LOCAL C# twin (SheenTwin) of
+// every function below except blix_sheenAlbedo, because these terms cannot
+// otherwise be evaluated without a GPU and the alternative was debugging a
+// BRDF by staring at a curtain. It is test-local on purpose: shipping a second
+// evaluator is exactly what this file exists to prevent.
+//
+// BE.1 fails when a line here stops matching the twin -- it pins the Charlie
+// exponent and normalisation, Ashikhmin's folded 4*NdotL*NdotV, the inverted
+// normal and 1/pi on transmission, and the max-over-channels in the scaling.
+// So a deliberate change here is a two-file change, and BE.1 is what tells you
+// that before a curtain does. Same arrangement as tonemap.glsl / Tonemap.cs.
 
 #ifndef BLIX_PI
 #define BLIX_PI 3.14159265359
@@ -85,9 +98,41 @@ float blix_sheenAlbedo(sampler2D sheenLut, float NdotV, float sheenRoughness)
     return texture(sheenLut, vec2(clamp(NdotV, 0.0, 1.0), clamp(sheenRoughness, 0.0, 1.0))).r;
 }
 
-// The factor the base (diffuse + specular) layer is multiplied by, so the pair
-// conserves energy. max over the channels because the sheen layer occludes
-// geometrically, not per wavelength: a red sheen still shadows the blue beneath.
+// The factor the base layer is multiplied by, so the pair conserves energy. max
+// over the channels because the sheen layer occludes geometrically, not per
+// wavelength: a red sheen still shadows the blue beneath.
+//
+// --- THE LAYERING ORDER, BECAUSE IT IS NOT GUESSABLE -----------------------
+//
+//     result = sheen_lobe + blix_sheenScaling(...) * base
+//
+// The sheen lobe is ADDED ON TOP and is NOT itself scaled -- scaling it means
+// attenuating the lobe by its own absorption, which dims the grazing rim that
+// is the entire reason the term exists.
+//
+// <b>And "base" includes diffuse transmission.</b> glTF does not make the thin
+// sheet a third peer beside diffuse and specular; it modifies the base
+// material's DIFFUSE lobe --
+//
+//     diffuse = mix(diffuse_brdf(baseColor),
+//                   diffuse_btdf(diffuseTransmissionColor),
+//                   diffuseTransmissionFactor)
+//
+// -- so the transmitted light leaves through the sheen layer like everything
+// else underneath it, and is scaled with the rest of the base:
+//
+//     result = sheen_lobe + sheenScaling * (kD*diffuse*transScale
+//                                           + specular
+//                                           + transmitted_lobe)
+//
+// where transScale is blix_diffuseTransmissionScaling -- the (1 - factor) half
+// of that mix, applied to the REFLECTED diffuse only, because the transmitted
+// lobe already carries the factor.
+//
+// Written out because a renderer got it wrong in two different ways at once:
+// its direct-sun path left the base unscaled and scaled the sheen lobe, while
+// its ambient path scaled the base correctly and left transmission outside the
+// scaling. Both compiled, both looked like cloth, and neither matched this file.
 float blix_sheenScaling(vec3 sheenColor, float sheenAlbedo)
 {
     return 1.0 - max(max(sheenColor.r, sheenColor.g), sheenColor.b) * sheenAlbedo;

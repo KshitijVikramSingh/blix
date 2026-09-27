@@ -28,7 +28,7 @@ namespace Blix.Graphics;
 // reflection; this intent comes from the source. The diagnostics layer joins the
 // two by name. GLSL-source tooling lives here in Blix.Graphics (next to the GLSL
 // preprocessor / ShaderLoader), independent of any backend.
-public enum TunableKind { Float, Int, Enum }
+public enum TunableKind { Float, Int, Enum, Bool }
 
 public sealed record ShaderTunable(
     string Name,
@@ -123,8 +123,27 @@ public static class ShaderTunables
         return result;
     }
 
+    private static readonly Regex BoolPayload = new(
+        @"^bool(?:\s*=\s*(\S+))?$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private static ShaderTunable Build(string name, string block, string type, string payload)
     {
+        // <b>`//@tune bool` exists because most of these were never magnitudes.</b> Six of
+        // VulkanSponza's eight dials switch something on or off, and every one of them was
+        // declared `0..1` and drawn as a slider, because a toggle could not be asked for. A
+        // slider over a boolean invites 0.37, which the shader silently rounds at its `> 0.5`
+        // test, and it reads as an amount when it names a choice -- which is how one of them
+        // acquired a DEFAULT of 1 that nobody intended as "use the other normal".
+        //
+        // The uniform stays a float carrying 0 or 1, so the shader side is unchanged and
+        // AppendUniforms keeps writing one kind of thing.
+        var bl = BoolPayload.Match(payload);
+        if (bl.Success)
+        {
+            var on = bl.Groups[1].Success && ParseFloat(bl.Groups[1].Value) != 0f;
+            return new ShaderTunable(name, block, TunableKind.Bool, 0, 1, on ? 1f : 0f);
+        }
+
         var en = EnumPayload.Match(payload);
         if (en.Success)
         {
@@ -149,4 +168,55 @@ public static class ShaderTunables
 
     private static float ParseFloat(string s) =>
         float.Parse(s, NumberStyles.Float, CultureInfo.InvariantCulture);
+}
+
+/// <summary>
+/// The `//@tune` metadata as a build artifact: written beside the .spv, read at load.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Scanning source is right; scanning it at RUNTIME was not.</b> The decorators are intent that
+/// the compiled module cannot carry, so they have to come from the GLSL — but the build is where
+/// the GLSL is, fully expanded, with every include resolved against the compiler's own -I paths.
+/// Recovering them at load instead meant shipping every .vert/.frag/.comp into the application
+/// output purely so something could re-read the text, and it could not see an engine-owned include
+/// at all, because those are not staged. A tunable declared in a shared block was therefore
+/// invisible, and <see cref="ShaderTunablePanel"/> answers zero for a name it never saw — so the
+/// failure was a dial silently reading zero rather than an error.
+/// </para>
+/// <para>
+/// This is the sidecar pattern the tree already uses twice: <c>.spv.refl.json</c> for the binding
+/// table and <c>.blixapps.json</c> for app discovery. Run at build, write a sidecar, read it cheap.
+/// </para>
+/// </remarks>
+public static class ShaderTunableSidecar
+{
+    /// <summary>The sidecar that belongs to a compiled shader: <c>&lt;name&gt;.spv.tune.json</c>.</summary>
+    public static string PathFor(string spvPath) => spvPath + ".tune.json";
+
+    private static readonly System.Text.Json.JsonSerializerOptions Options = new()
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
+        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
+    };
+
+    public static string ToJson(IReadOnlyList<ShaderTunable> tunables) =>
+        System.Text.Json.JsonSerializer.Serialize(tunables, Options);
+
+    /// <summary>
+    /// Reads the sidecar beside a compiled shader. An absent file yields no tunables.
+    /// </summary>
+    /// <remarks>
+    /// Absent is not an error: a shader with no decorators is the ordinary case, and a consumer
+    /// that asks for tunables it does not have should get an empty panel rather than a throw.
+    /// </remarks>
+    public static IReadOnlyList<ShaderTunable> Load(string spvPath)
+    {
+        var path = PathFor(spvPath);
+        if (!File.Exists(path)) return Array.Empty<ShaderTunable>();
+        return System.Text.Json.JsonSerializer.Deserialize<ShaderTunable[]>(File.ReadAllText(path), Options)
+               ?? Array.Empty<ShaderTunable>();
+    }
 }

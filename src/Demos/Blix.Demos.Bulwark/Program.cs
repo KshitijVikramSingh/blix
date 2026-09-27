@@ -14,7 +14,7 @@ using Plane = Blix.Geometry.Plane;
 
 namespace Blix.Demos.Bulwark;
 
-// Bulwark — tower-defense, Blix game #2 (see plan-bulwark.md). Defend a central core
+// Bulwark — tower-defense, Blix game #2 (see docs/demos.md, "Bulwark"). Defend a central core
 // from waves of enemies converging on four fronts: build + upgrade towers with the
 // scrap you earn from kills, survive 5 waves (a leak costs a life). Built to pressure
 // the engine where TankArena/Runner/Pong didn't — pointer-driven picking, navigation,
@@ -217,9 +217,10 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
     private bool skinnedLoaded;
     private PipelineHandle skinnedPipeline;         // scene (lit, instanced)
     private PipelineHandle skinnedShadowPipeline;   // shadow caster (depth-only, instanced)
-    private VertexBufferHandle[] enemyVBs = Array.Empty<VertexBufferHandle>();
-    private IndexBufferHandle[] enemyIBs = Array.Empty<IndexBufferHandle>();
-    private int[] enemyIndexCounts = Array.Empty<int>();
+    // One Mesh per glTF primitive — see Runner. The palette's per-instance stride, both
+    // pipelines and the shadow caster stay here, which is where this game differs from every
+    // other skinned consumer.
+    private Mesh[] enemyMeshes = Array.Empty<Mesh>();
     private Skeleton enemySkeleton = null!;
     private Pose enemyRestPose = null!, enemyPose = null!;
     private BonePalette enemyBonePalette = null!;
@@ -495,8 +496,8 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
             if (skinnedLoaded && enemies.Count > 0)
             {
                 var instN = Math.Min(enemies.Count, MaxAlive);
-                for (var i = 0; i < enemyVBs.Length; i++)
-                    scope.DrawIndexedInstanced(enemyVBs[i], enemyIBs[i], skinnedShadowPipeline, enemyIndexCounts[i],
+                foreach (var mesh in enemyMeshes)
+                    scope.DrawIndexedInstanced(mesh.VertexBuffer, mesh.IndexBuffer, skinnedShadowPipeline, mesh.IndexCount,
                         instN, Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), enemyBones.Handle, shadowPush);
             }
         });
@@ -520,8 +521,8 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
             if (skinnedLoaded && enemies.Count > 0)
             {
                 var instN = Math.Min(enemies.Count, MaxAlive);
-                for (var i = 0; i < enemyVBs.Length; i++)
-                    scope.DrawIndexedInstanced(enemyVBs[i], enemyIBs[i], skinnedPipeline, enemyIndexCounts[i],
+                foreach (var mesh in enemyMeshes)
+                    scope.DrawIndexedInstanced(mesh.VertexBuffer, mesh.IndexBuffer, skinnedPipeline, mesh.IndexCount,
                         instN, Array.Empty<ShaderUniform>(), shadowBind, enemyBones.Handle, worldPush);
             }
             particles.Draw(scope, particlePipeline,
@@ -954,9 +955,12 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
     // ── Art (M3): load the CC0 meshes, best-effort ──
     //
     // Each mesh-bearing node is baked from its composed-world transform into one
-    // VertexPosition3NormalTexture mesh (lifting TankArena's BakeMerge/UploadMesh) and
-    // wrapped in an InstancedBatch on the SHARED cube pipeline. Any failure leaves
-    // artLoaded=false and the demo falls back to primitives.
+    // VertexPosition3NormalTexture mesh (lifting TankArena's BakeMerge), uploaded through the
+    // engine's CreateMesh, and wrapped in an InstancedBatch on the SHARED cube pipeline. Any
+    // failure leaves artLoaded=false and the demo falls back to primitives.
+    //
+    // BakeMerge itself is still a private copy here and in TankArena, with identical signatures --
+    // a second consumer wanting the same decision, which is §4's bar for extracting it.
     private void LoadArt(ShaderProgramHandle worldShader, PipelineHandle worldPipe,
                          ShaderProgramHandle casterShader, PipelineHandle casterPipe)
     {
@@ -978,7 +982,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
                     return m;
                 }
                 var w = World(idx);
-                return UploadMesh(BakeMerge(meshName, nodes[idx].Primitives.Select(prim => (prim.Mesh, w))));
+                return vk.CreateMesh(BakeMerge(meshName, nodes[idx].Primitives.Select(prim => (prim.Mesh, w))));
             }
 
             // Each mesh gets a world batch (lit scene pass) + a caster batch (shadow pass).
@@ -1049,17 +1053,6 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
             VertexPosition3NormalTexture.Layout, new Bounds3(min, max));
     }
 
-    private Mesh UploadMesh(MeshData md)
-    {
-        var vb = vk.CreateVertexBuffer(
-            new VertexBufferData(new VertexBufferDescription(md.Layout, md.VertexCount, GraphicsBufferUsage.Static), md.VertexBytes),
-            $"{md.Name}.vb");
-        var (ib, count) = md.Indices32 is { } u32
-            ? (vk.CreateIndexBuffer(u32, name: $"{md.Name}.ib"), u32.Length)
-            : (vk.CreateIndexBuffer(md.Indices, name: $"{md.Name}.ib"), md.Indices.Length);
-        return new Mesh(md.Name, vb, ib, count, md.Bounds);
-    }
-
     // ── Skinned enemy (M4 Gate A) — full GltfImporter (Skeleton + clips + JOINTS/
     // WEIGHTS); one animated enemy, shadow-aware via the shared cube.frag. ──
     private void LoadSkinnedEnemy(string shaderDir)
@@ -1115,19 +1108,10 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
                 RenderTarget: graph.GetPassSurface(shadowPassHandle)), "skinned.shadow");
 
             var n = model.Primitives.Length;
-            enemyVBs = new VertexBufferHandle[n];
-            enemyIBs = new IndexBufferHandle[n];
-            enemyIndexCounts = new int[n];
+            enemyMeshes = new Mesh[n];
             for (var i = 0; i < n; i++)
             {
-                var mesh = model.Primitives[i].Mesh;
-                enemyVBs[i] = vk.CreateVertexBuffer(
-                    new VertexBufferData(new VertexBufferDescription(mesh.Layout, mesh.VertexCount, GraphicsBufferUsage.Static), mesh.VertexBytes),
-                    $"enemy.vb{i}");
-                enemyIBs[i] = mesh.Indices32 is { } u32
-                    ? vk.CreateIndexBuffer(u32, name: $"enemy.ib{i}")
-                    : vk.CreateIndexBuffer(mesh.Indices, name: $"enemy.ib{i}");
-                enemyIndexCounts[i] = mesh.IndexCount;
+                enemyMeshes[i] = vk.CreateMesh(model.Primitives[i].Mesh, $"enemy.{i}");
             }
             enemyBones = vk.CreateMaterial(sceneShader, setIndex: 3, framesInFlight: vk.MaxFramesInFlightCount, name: "enemy.bones");
             skinnedLoaded = true;

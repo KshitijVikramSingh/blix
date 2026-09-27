@@ -11,7 +11,11 @@ public readonly record struct MaterialTextures(
     TextureHandle Normal,
     TextureHandle MetallicRoughness,
     TextureHandle Emissive,
-    TextureHandle Occlusion);
+    TextureHandle Occlusion,
+    // KHR_materials_diffuse_transmission's colour texture: what a thin sheet tints the light it
+    // scatters through. sRGB, and its default is WHITE rather than black -- an absent texture must
+    // leave diffuseTransmissionColorFactor exactly as authored, and black would delete the term.
+    TextureHandle DiffuseTransmissionColor);
 
 // Engine glTF texture loader — the asset-pipeline half of material handling:
 // read/decode/upload/dedup/stream a material's textures into GPU handles. Owns
@@ -88,7 +92,11 @@ public sealed class GltfTextureLoader
         Resolve(material?.NormalTexture, flatNormal, TextureFormat.Rgba8, "normal"),
         Resolve(material?.MetallicRoughnessTexture, defaultMr, TextureFormat.Rgba8, "mr"),
         Resolve(material?.EmissiveTexture, blackEmissive, TextureFormat.Rgba8Srgb, "emissive"),
-        Resolve(material?.OcclusionTexture, defaultAo, TextureFormat.Rgba8, "ao"));
+        Resolve(material?.OcclusionTexture, defaultAo, TextureFormat.Rgba8, "ao"),
+        // Shares the 1x1 white sRGB fallback with albedo: same format, same meaning here (a
+        // multiplier that changes nothing), and one texture rather than a second identical one.
+        Resolve(material?.Ext.DiffuseTransmissionColorTexture, fallbackAlbedo, TextureFormat.Rgba8Srgb,
+                "diffuse-transmission colour"));
 
     private TextureHandle Resolve(
         GltfTexture? tex,

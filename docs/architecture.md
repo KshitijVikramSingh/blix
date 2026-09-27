@@ -126,6 +126,15 @@ is the coherent setup Blix uses to inspect content without implying that every
 game must accept a global default renderer. A project may reuse all, some, or
 none of it.
 
+No game is moved onto it to prove that point. The Studio arc's last stage
+proposed migrating `Blix.Demos.Runner` onto the stage as a standing
+demonstration that a game *may*; that stage is retired rather than built. It
+was a statement, not a capability, and the evidence that matters already runs
+the other way — Tank Arena and Bulwark keep hand-built graphs because games
+choose their own composition. A game that wants the setup takes it; none is
+migrated for tidiness, and the reference pipeline does not become canonical by
+accumulating consumers it was handed.
+
 ### Vulkan Sponza research renderer
 
 Vulkan Sponza is the heavy-scene rendering and measurement application. It owns
@@ -296,6 +305,30 @@ them is how a lab grows a framework:
 - **Staying in the executable needs no second consumer at all.** `StudioSelection` and `ViewerPanels`
   are local decomposition: only the viewer picks, and only the viewer has panels. The bar there is
   simply that the file had stopped being readable.
+
+**Adopting beats extracting, and an unadopted helper is worse than none.** Four skinned consumers
+and the two Studio loaders each hand-rolled the same mesh upload while
+`Blix.Render`'s `device.CreateMesh(MeshData)` sat unused by all of them — it read the 16-bit index
+array unconditionally, so a 32-bit mesh got no indices and a count of zero, and a rig is exactly
+the asset that passes 65535 vertices. The fix was one branch and then eight adoptions, not a new
+type. Three lessons are worth keeping:
+
+- **Check whether the extraction already exists before writing one.** The tree had produced three
+  attempts at "a loaded model you can draw", and the proposal was to add a fourth.
+- **A private copy of an engine step is a place to miss a case silently.** Both bugs found the day
+  this was written had that shape: `CreateMesh`'s missing 32-bit branch, and Vulkan Lit resolving
+  its own albedo — handling only the raw-PNG form, so the moment a build cooked its assets the
+  character lost its texture with no error anywhere, and a person had to notice.
+- **Count consumers across the source consumers too, not just `src/`.** Both helpers above were
+  first written off as having *zero* consumers, measured inside this repository. `CreateMesh` has
+  nine callers in the external RTSGame tree and `PropModel` has seventy-two; `PropModel` reads as
+  dead here only because the game it was built for left the repository. An engine type's consumer
+  count is not a `grep` over `src/`, and treating it as one argues for deleting things that are
+  load-bearing.
+
+The matching decision is recorded where it was taken: a *rig* type was refused, because once the
+upload was shared what remained would have had to carry the bone palette's instancing policy, and
+that is precisely what may not cross into a loader.
 
 **A view may hold its model.** `ViewerPanels` keeps a reference to the root and reads what it needs
 through a short, explicit list of internal accessors. That is not a circular dependency worth

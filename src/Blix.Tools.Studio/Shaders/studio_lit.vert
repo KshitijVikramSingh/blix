@@ -8,12 +8,15 @@ layout(location = 2) in vec2 aTexCoord;
 layout(location = 3) in vec2 aTexCoord1;
 layout(location = 4) in vec4 aColour;
 
+// Only the member this stage reads. A LEADING PREFIX of the fragment stage's block is legal and
+// costs nothing: std140 puts uViewProjection at offset 0 either way.
+//
+// It used to name five, and the last four were both unread AND at the wrong offsets -- the
+// fragment stage has three cascade matrices where this had one uSunViewProjection, so this
+// stage's uCameraPosition sat on the fragment stage's uCascadeVP1. Harmless only for as long as
+// nobody read it, which is not a property worth relying on.
 layout(set = 0, binding = 0) uniform Frame {
     mat4 uViewProjection;
-    mat4 uSunViewProjection;
-    vec4 uCameraPosition;
-    vec4 uSunDirection;   // xyz = direction TOWARD the sun, w unused
-    vec4 uSunColour;      // rgb = radiance, a = ambient strength
 };
 
 layout(push_constant) uniform Push {

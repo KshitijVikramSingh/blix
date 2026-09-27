@@ -9,13 +9,7 @@
 // pipeline's LessEqual depth test draws sky exactly where the depth buffer
 // still carries the clear value.
 
-// This reader declares only the members it uses at their explicit std140 offsets. The buffer is
-// shared with lit.frag, and SponzaLoop.AssertFrameBlockAgrees rejects offset drift during startup.
-layout(set = 0, binding = 0) uniform Frame {
-    mat4 uViewProjection;
-    layout(offset = 96)  vec3 uCameraPos;
-    layout(offset = 416) vec4 uFog;   // x=screenW, y=screenH, z=fogFar, w=enabled(0/1)
-} frame;
+#include "frame.glsl"
 
 // Vertex inputs are declared (matching the pipeline's VertexPosition3-
 // NormalTexture layout) but ignored — sky positions come from

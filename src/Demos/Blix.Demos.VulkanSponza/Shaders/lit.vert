@@ -8,9 +8,7 @@
 
 // Declare only the matrix this stage reads. The shared block's remaining layout is owned and
 // validated by the fragment-stage interface rather than duplicated here.
-layout(set = 0, binding = 0) uniform Frame {
-    mat4 uViewProjection;
-} frame;
+#include "frame.glsl"
 
 layout(push_constant) uniform PushConstants {
     mat4 uModel;

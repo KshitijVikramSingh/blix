@@ -128,9 +128,10 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
     private const float CharFacing = MathF.PI;     // face -Z (into the screen); flip if backwards
     private ShaderProgramHandle skinnedShader;
     private PipelineHandle skinnedPipeline;
-    private VertexBufferHandle[] charVBs = Array.Empty<VertexBufferHandle>();
-    private IndexBufferHandle[] charIBs = Array.Empty<IndexBufferHandle>();
-    private int[] charIndexCounts = Array.Empty<int>();
+    // One Mesh per glTF primitive. Blix.Render's Mesh is buffers + count + bounds and nothing
+    // else, which is the whole of what this needs from a loaded model: the skin material, the
+    // palette and the pipeline are all still built here, because they are what this game differs in.
+    private Mesh[] charMeshes = Array.Empty<Mesh>();
     private MaterialHandle charSkinMaterial;       // set 2: albedo (shared, 1 material)
     private MaterialBindings charBones = null!;    // set 3: bone palette, framesInFlight
     private Skeleton charSkeleton = null!;
@@ -328,22 +329,13 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
                 PrimitiveTopology.Triangles, DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled }),
             "runner.skinned");
 
-        // One VB/IB per primitive; all 12 share one skin material + one bone palette.
+        // One mesh per primitive; all 12 share one skin material + one bone palette.
         var n = model.Primitives.Length;
-        charVBs = new VertexBufferHandle[n];
-        charIBs = new IndexBufferHandle[n];
-        charIndexCounts = new int[n];
+        charMeshes = new Mesh[n];
         GltfTexture? albedo = null;
         for (var i = 0; i < n; i++)
         {
-            var mesh = model.Primitives[i].Mesh;
-            charVBs[i] = vk.CreateVertexBuffer(
-                new VertexBufferData(new VertexBufferDescription(mesh.Layout, mesh.VertexCount, GraphicsBufferUsage.Static), mesh.VertexBytes),
-                $"rogue.vb{i}");
-            charIBs[i] = mesh.Indices32 is { } u32
-                ? vk.CreateIndexBuffer(u32, name: $"rogue.ib{i}")
-                : vk.CreateIndexBuffer(mesh.Indices, name: $"rogue.ib{i}");
-            charIndexCounts[i] = mesh.IndexCount;
+            charMeshes[i] = vk.CreateMesh(model.Primitives[i].Mesh, $"rogue.{i}");
             albedo ??= model.Primitives[i].Material?.BaseColorTexture;
         }
 
@@ -610,9 +602,9 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
                 {
                     // Skinned character: each primitive shares the set-3 bone palette
                     // and the set-2 albedo; depth-tested into the same buffer as the world.
-                    for (var i = 0; i < charVBs.Length; i++)
+                    foreach (var mesh in charMeshes)
                     {
-                        pass.DrawIndexed(charVBs[i], charIBs[i], skinnedPipeline, charIndexCounts[i],
+                        pass.DrawIndexed(mesh.VertexBuffer, mesh.IndexBuffer, skinnedPipeline, mesh.IndexCount,
                             Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(),
                             charSkinMaterial, charBones.Handle, skinnedPush);
                     }

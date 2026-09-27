@@ -75,6 +75,9 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     // Albedo textures + materials.
     private TextureHandle albedoTexture;
     private TextureHandle cesiumAlbedoTexture;
+    // The engine's texture loader, which knows BOTH shapes a GltfTexture arrives in. See the
+    // comment at its one call site for why this demo stopped resolving its own.
+    private GltfTextureLoader textureLoader = null!;
     private MaterialHandle cubeMaterial;
     private MaterialHandle groundMaterial;
     private MaterialHandle cesiumSkinMaterial;   // set 2 (per-material)
@@ -98,9 +101,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     private PipelineHandle skinnedShadowPipeline;
 
     // Skinned model state.
-    private VertexBufferHandle cesiumVB;
-    private IndexBufferHandle cesiumIB;
-    private int cesiumIndexCount;
+    private Mesh cesiumMesh = null!;
     private Skeleton cesiumSkeleton = null!;
     private Pose cesiumPose = null!;
     private Pose cesiumRestPose = null!;
@@ -339,17 +340,29 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         cesiumPalettePayload = new byte[cesiumSkeleton.BoneCount * 64];
 
         // First primitive only — CesiumMan is a single-primitive mesh.
+        //
+        // This upload used to read prim.Mesh.Indices directly and take its Length as the count,
+        // which is correct for CesiumMan and silently wrong for any asset large enough to carry
+        // 32-bit indices. CreateMesh makes that branch the engine's rather than each caller's.
         var prim = cesiumModel.Primitives[0];
-        var vbData = new VertexBufferData(
-            new VertexBufferDescription(prim.Mesh.Layout, prim.Mesh.VertexCount, GraphicsBufferUsage.Static),
-            prim.Mesh.VertexBytes);
-        cesiumVB = vk.CreateVertexBuffer(vbData, name: "cesium.vb");
-        cesiumIB = vk.CreateIndexBuffer(prim.Mesh.Indices, name: "cesium.ib");
-        cesiumIndexCount = prim.Mesh.Indices.Length;
+        cesiumMesh = vk.CreateMesh(prim.Mesh, "cesium");
 
         // Cesium albedo: prefer the glTF's BaseColorTexture; fall back to a
         // neutral white if the material strips out images for some reason.
-        cesiumAlbedoTexture = LoadGltfAlbedo(vk, prim.Material, fallbackName: "cesium.albedo.fallback");
+        // <b>This demo used to resolve its own albedo, and lost the character's texture the first
+        // time anything cooked its assets.</b> The csproj declares CookMesh over Assets/models, so
+        // a build writes cesium_man.textures/image_0.blixtex beside the .glb; GltfShared then
+        // PREFERS that cooked sibling and hands back a GltfTexture carrying a LazyHandle rather
+        // than MipBytes, in a BC format rather than Rgba8. The local loader tested for MipBytes
+        // and Rgba8, matched neither, and returned its neutral fallback -- so Cesium Man went
+        // quietly cream-coloured, with no error and nothing in the log.
+        //
+        // GltfTextureLoader already handles both shapes: MipBytes uploads directly, LazyHandle
+        // allocates the chain and queues per-mip uploads to drain across later frames. Resolving
+        // textures is the asset layer's job and this demo had no business having an opinion about
+        // it, least of all a partial one.
+        textureLoader = new GltfTextureLoader(vk);
+        cesiumAlbedoTexture = textureLoader.Load(prim.Material).Albedo;
 
         // --- Render graph ------------------------------------------------
         graph = new RenderGraph(vk);
@@ -788,6 +801,11 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
     {
         var dt = (float)time.Delta;
 
+        // Cooked textures arrive over several frames; until the queue drains the character holds
+        // whatever levels have landed. Nothing else in this demo is deferred, so a small budget is
+        // ample and the cost disappears once PendingCount reaches zero.
+        if (textureLoader is not null && textureLoader.PendingCount > 0) textureLoader.Drain(budgetMillis: 4.0);
+
         // WASD = horizontal-plane move along view forward/right; Space /
         // LeftControl = world up/down. Full-3D forward (W follows pitch).
         var move = Vector3.Zero;
@@ -1041,10 +1059,10 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             }
             // Skinned cesium: set 2 (skin material) + set 3 (bone palette SSBO).
             scope.DrawIndexed(
-                vertexBuffer: cesiumVB,
-                indexBuffer: cesiumIB,
+                vertexBuffer: cesiumMesh.VertexBuffer,
+                indexBuffer: cesiumMesh.IndexBuffer,
                 pipeline: skinnedLitPipeline,
-                indexCount: cesiumIndexCount,
+                indexCount: cesiumMesh.IndexCount,
                 uniforms: perFrame,
                 textures: shadowBindings,
                 material: cesiumSkinMaterial,
@@ -1138,10 +1156,10 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 textures: Array.Empty<ShaderTextureBinding>(),
                 pushConstants: cubePush);
             scope.DrawIndexedSkinnedShadow(
-                vertexBuffer: cesiumVB,
-                indexBuffer: cesiumIB,
+                vertexBuffer: cesiumMesh.VertexBuffer,
+                indexBuffer: cesiumMesh.IndexBuffer,
                 pipeline: skinnedShadowPipeline,
-                indexCount: cesiumIndexCount,
+                indexCount: cesiumMesh.IndexCount,
                 uniforms: Array.Empty<ShaderUniform>(),
                 textures: Array.Empty<ShaderTextureBinding>(),
                 perDrawMaterial: cesiumBoneMaterial,
@@ -1179,10 +1197,10 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
                 textures: Array.Empty<ShaderTextureBinding>(),
                 pushConstants: cubePush);
             scope.DrawIndexedSkinnedShadow(
-                vertexBuffer: cesiumVB,
-                indexBuffer: cesiumIB,
+                vertexBuffer: cesiumMesh.VertexBuffer,
+                indexBuffer: cesiumMesh.IndexBuffer,
                 pipeline: pointSkinnedShadowPipeline,
-                indexCount: cesiumIndexCount,
+                indexCount: cesiumMesh.IndexCount,
                 uniforms: Array.Empty<ShaderUniform>(),
                 textures: Array.Empty<ShaderTextureBinding>(),
                 perDrawMaterial: cesiumBoneMaterial,
@@ -1330,30 +1348,6 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
             floats[off + 8]  = m.M31; floats[off + 9]  = m.M32; floats[off + 10] = m.M33; floats[off + 11] = m.M34;
             floats[off + 12] = m.M41; floats[off + 13] = m.M42; floats[off + 14] = m.M43; floats[off + 15] = m.M44;
         }
-    }
-
-    private static TextureHandle LoadGltfAlbedo(VulkanGraphicsDevice vk, GltfMaterial? material, string fallbackName)
-    {
-        if (material?.BaseColorTexture is { MipBytes: { Count: > 0 } mipBytes } tex
-            && tex.Format == TextureFormat.Rgba8)
-        {
-            // Promote to sRGB at sample time: BaseColor is sRGB-encoded per
-            // glTF spec. The engine's SamplerDescription.LinearRepeat covers
-            // the wrap+filter we want for character textures.
-            return vk.CreateTexture2D(
-                new TextureDescription(tex.Width, tex.Height, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
-                mipBytes[0],
-                $"cesium.albedo");
-        }
-        // Fallback: 4×4 neutral-white texture.
-        var fallback = new byte[4 * 4 * 4];
-        for (var i = 0; i < fallback.Length; i += 4)
-        {
-            fallback[i] = 230; fallback[i + 1] = 220; fallback[i + 2] = 200; fallback[i + 3] = 255;
-        }
-        return vk.CreateTexture2D(
-            new TextureDescription(4, 4, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
-            fallback, fallbackName);
     }
 
     private static (VertexPosition3NormalTexture[] Vertices, ushort[] Indices) BuildCube()
