@@ -955,9 +955,12 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
     // ── Art (M3): load the CC0 meshes, best-effort ──
     //
     // Each mesh-bearing node is baked from its composed-world transform into one
-    // VertexPosition3NormalTexture mesh (lifting TankArena's BakeMerge/UploadMesh) and
-    // wrapped in an InstancedBatch on the SHARED cube pipeline. Any failure leaves
-    // artLoaded=false and the demo falls back to primitives.
+    // VertexPosition3NormalTexture mesh (lifting TankArena's BakeMerge), uploaded through the
+    // engine's CreateMesh, and wrapped in an InstancedBatch on the SHARED cube pipeline. Any
+    // failure leaves artLoaded=false and the demo falls back to primitives.
+    //
+    // BakeMerge itself is still a private copy here and in TankArena, with identical signatures --
+    // a second consumer wanting the same decision, which is §4's bar for extracting it.
     private void LoadArt(ShaderProgramHandle worldShader, PipelineHandle worldPipe,
                          ShaderProgramHandle casterShader, PipelineHandle casterPipe)
     {
@@ -979,7 +982,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
                     return m;
                 }
                 var w = World(idx);
-                return UploadMesh(BakeMerge(meshName, nodes[idx].Primitives.Select(prim => (prim.Mesh, w))));
+                return vk.CreateMesh(BakeMerge(meshName, nodes[idx].Primitives.Select(prim => (prim.Mesh, w))));
             }
 
             // Each mesh gets a world batch (lit scene pass) + a caster batch (shadow pass).
@@ -1048,17 +1051,6 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
         Buffer.BlockCopy(floats.ToArray(), 0, bytes, 0, bytes.Length);
         return new MeshData(name, bytes, indices.ToArray(),
             VertexPosition3NormalTexture.Layout, new Bounds3(min, max));
-    }
-
-    private Mesh UploadMesh(MeshData md)
-    {
-        var vb = vk.CreateVertexBuffer(
-            new VertexBufferData(new VertexBufferDescription(md.Layout, md.VertexCount, GraphicsBufferUsage.Static), md.VertexBytes),
-            $"{md.Name}.vb");
-        var (ib, count) = md.Indices32 is { } u32
-            ? (vk.CreateIndexBuffer(u32, name: $"{md.Name}.ib"), u32.Length)
-            : (vk.CreateIndexBuffer(md.Indices, name: $"{md.Name}.ib"), md.Indices.Length);
-        return new Mesh(md.Name, vb, ib, count, md.Bounds);
     }
 
     // ── Skinned enemy (M4 Gate A) — full GltfImporter (Skeleton + clips + JOINTS/
