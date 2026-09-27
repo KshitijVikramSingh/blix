@@ -57,7 +57,7 @@ public readonly record struct ScissorRect(int X, int Y, int Width, int Height);
 // The skeletal work did not settle any of this and was never going to: a bone palette
 // does NOT travel as a Matrix4x4ArrayUniform in any consumer. Runner, Bulwark, the external RTSGame consumer
 // and the toolchain lab all send it as a set-3 storage buffer through MaterialBindings.
-// What settled it was a consumer asking — see plan-blix-character.md, prologue.
+// What settled it was a consumer asking — see docs/conventions.md §2, which states the rule.
 public sealed record DispatchCommand(
     PipelineHandle Pipeline,
     int GroupsX,
@@ -160,7 +160,7 @@ public sealed record DispatchCommand(
 // The skeletal work did not settle any of this and was never going to: a bone palette
 // does NOT travel as a Matrix4x4ArrayUniform in any consumer. Runner, Bulwark, the external RTSGame consumer
 // and the toolchain lab all send it as a set-3 storage buffer through MaterialBindings.
-// What settled it was a consumer asking — see plan-blix-character.md, prologue.
+// What settled it was a consumer asking — see docs/conventions.md §2, which states the rule.
 public sealed record DrawIndexedIndirectCommand(
     VertexBufferHandle VertexBuffer,
     IndexBufferHandle IndexBuffer,

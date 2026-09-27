@@ -7,13 +7,18 @@ archaeology rather than a second documentation hierarchy.
 
 Status was reconciled against the checkout on 2026-09-27.
 
-## Active plans
+## The active plan
 
 | Plan | Status | Why it remains at the root |
 | --- | --- | --- |
-| `plan-blix-character.md` | Active, C-A next | Room is built, Motion was deleted, and C-0 (rig residency) is closed: the shared half was the mesh upload, which already existed as `CreateMesh` and is now adopted at eight sites, and a rig type is a recorded decided-no. Nothing blocks C-A — contact driving blend weights with no state machine between them. |
+| `plan.md` | Active | The portability arc — publish, runtime closure, Windows, the CI matrix, input completion — plus the one stage the character arc still owns. Opened 2026-09-28. |
 
-Three records closed on 2026-09-27 and their durable decisions moved into the
+`plan-blix-character.md` was folded into it the same day: Room is built, Motion
+was deleted, C-0 closed as a decided-no and C-C dropped on evidence, so what
+remained (C-A, C-B, acceptance, and the undecided selection question) is one
+section of the current plan rather than a record of its own.
+
+Four records closed on 2026-09-27 and their durable decisions moved into the
 focused documentation:
 
 - **Studio arc** — S-A through S-E shipped. S-F, which proposed migrating
@@ -31,6 +36,7 @@ focused documentation:
   grid's alpha ([Assets](assets.md), [Renderer](renderer.md)). The three
   responses the arc deliberately did not build, and why, are recorded with the
   Sponza renderer rather than left in a plan.
+- **Character arc** — folded into `plan.md` rather than closed; see above.
 
 ## Work found beside a plan, and finished without one
 

@@ -139,7 +139,7 @@ public static class RenderCommandDiagnostics
                 $"does not help because the aliasing is on the source rather than the destination.\n" +
                 $"Scalar and vector uniforms hold their value by struct copy and cannot do this; the ones " +
                 $"that can are the array uniforms and a reused list. Give this draw its own array, or copy " +
-                $"into a fresh one per draw. See RenderCommand.cs and plan-blix-character.md (prologue).");
+                $"into a fresh one per draw. See RenderCommand.cs and conventions.md §2.");
         }
     }
 
