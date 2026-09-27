@@ -87,7 +87,16 @@
   <ItemGroup>
     <!-- Shared GLSL library (src/Blix.Shaders), resolved by the shared shader
          build target. Listed so edits retrigger compilation. -->
-    <GlslInclude Include="..\..\Blix.Shaders\fullscreen.glsl" />
+    <!-- Every .glsl these shaders can reach, globbed rather than listed.
+         A missing entry here is a shader that does not rebuild. Only fullscreen.glsl was listed,
+         while lit.frag alone includes shadow, sheen, probe_volume and sky_visibility, so editing
+         any of those left the .spv and its //@tune sidecar stale, with a clean build and no
+         warning. Found the hard way: changing a tunable's default in frame.glsl and watching the
+         overlay come up with the old value.
+         Globbing can only over-invalidate, which costs a rebuild. Listing can under-invalidate,
+         which costs a wrong picture you have no reason to distrust. -->
+    <GlslInclude Include="..\..\Blix.Shaders\*.glsl" />
+    <GlslInclude Include="Shaders\**\*.glsl" />
   </ItemGroup>
 
 
