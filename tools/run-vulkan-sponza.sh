@@ -80,7 +80,7 @@ if [ -d "$SHADER_BUILD_DIR" ]; then
     # And the .spv.tune.json sidecars, which carry the //@tune dials the overlay builds from.
     # That is now three hand-copied globs for the same underlying reason -- publish does not treat
     # generated shader output as content -- which is an argument for `blix publish` owning the
-    # staging rather than every launcher repeating it. See docs/plans.md.
+    # staging rather than every launcher repeating it. See plan.md, stage A.
     cp -p "$SHADER_BUILD_DIR"/*.spv.tune.json "$PUBLISH_DIR/Shaders/" 2>/dev/null || true
 fi
 

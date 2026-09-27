@@ -444,14 +444,23 @@ capability?"* — a question about abstraction, not about permission.
   why that mechanism exists.
 - **Headers state current ownership and usage.** They do not recount which file a type used to live
   in, how many copies preceded an extraction, or which development session discovered the issue.
+- **A plan record lives at the repository root only while it owns an unresolved decision.** It is
+  *active* while a concrete decision, acceptance step or stage is still open; it is *completed*
+  when it reaches the stopping condition written in it, *superseded* when another named record
+  owns the same decision, and *abandoned* when its outcome was rejected with no replacement.
+  Ideas deliberately deferred until a future consumer do not keep one active. On any of the last
+  three: distil its durable contracts into the focused documentation and the tests they justify,
+  then **delete it**. Do not leave a completed development journal at the root and do not
+  reproduce one under a history or archive directory — that is a second documentation hierarchy
+  nobody reads, and version control already preserves the record.
 
 The test is simple: could a future maintainer act correctly from the comment without reconstructing
 the chronology? If yes, keep it near the code. If chronology is the useful part, version control is
 its home; current documentation should link only to material that still answers a live question.
 
 **Enforced by:** current-contract comments in `Directory.Build.targets`, `Blix.Recipes/MeshRecipe.cs`,
-and `Blix.Tools.Studio/StudioRenderer.cs` · active design records indexed by
-[`plans.md`](plans.md) · regression tests that retain the failure after its diary is gone.
+and `Blix.Tools.Studio/StudioRenderer.cs` · the active design record at
+[`plan.md`](../plan.md) · regression tests that retain the failure after its diary is gone.
 
 ---
 
