@@ -1,0 +1,42 @@
+{
+    "entryPoints" : [
+        {
+            "name" : "main",
+            "mode" : "frag"
+        }
+    ],
+    "types" : {
+        "_9" : {
+            "name" : "Push",
+            "members" : [
+                {
+                    "name" : "uSkin",
+                    "type" : "vec4",
+                    "offset" : 0
+                }
+            ]
+        }
+    },
+    "inputs" : [
+        {
+            "type" : "vec2",
+            "name" : "vUv",
+            "location" : 0
+        }
+    ],
+    "textures" : [
+        {
+            "type" : "sampler2D",
+            "name" : "uAlbedo",
+            "set" : 1,
+            "binding" : 0
+        }
+    ],
+    "push_constants" : [
+        {
+            "type" : "_9",
+            "name" : "_11",
+            "push_constant" : true
+        }
+    ]
+}

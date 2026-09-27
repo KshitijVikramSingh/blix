@@ -35,6 +35,30 @@ not treat generated shader output as content. That is the same duplication
 The first work is diagnosing **why** staging does not survive publish, in the
 targets, rather than reimplementing the copy inside a `publish` verb.
 
+**And it is worse than publish.** A library project stages its compiled shaders
+with `<None Include="Shaders\*.spv">`, an item glob **evaluated at project
+load** — before the build writes a single `.spv`. On a clean tree it therefore
+matches nothing, and no consumer's output receives the shaders. Four projects
+do this. It has been true for as long as the glob has existed and nobody saw
+it, because the `.spv.refl.json` sidecars beside them *were* committed (the
+`*.spv` ignore does not match a name ending in `.json`), so the output
+directory existed and was populated by the one artifact that happened to be in
+git.
+
+Untracking those sidecars on 2026-09-28 exposed it, on CI, which is the only
+machine here that builds from a clean tree. They were put back, with their
+churn, because the alternative was shipping a half-fix: a staging target that
+runs at the right time and with the right item list still did not reach a
+consumer's output, and chasing that mid-landing was the wrong trade.
+
+So stage A owns one problem in two costumes: **generated build output that does
+not reliably reach an output directory** — `dotnet publish` ignoring it at one
+end, and an item glob evaluated too early at the other. The tree already has the
+answer in outline: `BlixStageCookedAssets` declares its items *inside* a target
+for precisely this reason, and says so in a comment. Whatever fixes this should
+let the sidecars go back to being ignored, and should delete the three
+hand-copied globs from `run-vulkan-sponza.sh` as its acceptance test.
+
 The machinery already knows what a project is (`blix.project`), what
 applications it contains (`.blixapps.json`), which has an apphost, and how
 shaders and cooked assets are staged. What is missing is
@@ -44,12 +68,29 @@ One enrichment it needs: the app index records the assembly and apphost, but
 publishing is a **source-project** operation, so the indexer should record the
 originating `.csproj`.
 
-**Verified by:** Bulwark, from clone to a double-clickable `.app`.
+**Acceptance — deliberately narrower than it sounds.** `clone → build → publish
+→ Bulwark.app`, launching **on the build machine**, with every managed, shader
+and cooked output arriving through build declarations and no application-specific
+copy script. Whether it runs anywhere else is B's question, and A has a strong
+tendency to absorb it.
+
+**One target per invocation**, and `--target osx-arm64` stays singular: designing
+for a second before it exists is the speculation this tree avoids. Internally,
+resolve it once into a value carrying the RID, platform and architecture rather
+than threading `"osx-arm64"` around as a semantic string — not a target
+abstraction, just the recognition that a RID is not a packaging policy, and that
+`win-x64` will want different closure behaviour even when .NET hands back the
+same kind of string. CI can invoke it three times later.
 
 ## B — runtime closure
 
 **The one genuinely new design question in this plan:** what constitutes the
 runtime closure of a Blix application, per target?
+
+**Acceptance is a clean machine.** Take `Bulwark.app` to a Mac with no
+Homebrew, no installed .NET, no Vulkan SDK and no OpenAL, and it launches. That
+sentence *is* the definition of runtime closure, and it is the only test that
+cannot be passed by accident on a developer's box.
 
 Development assumes Homebrew throughout — `./blix` sets `DYLD_FALLBACK_LIBRARY_PATH`
 and the MoltenVK ICD, `MoltenVkBootstrap` probes Homebrew, `OpenALAudioDevice`
@@ -107,11 +148,15 @@ not asked twice.
 
 ---
 
-## F — the character arc's last open stage
+## F — the character arc's last open stage (paused)
 
 Folded in from `plan-blix-character.md`. Room (R-A…R-E) is built, Motion was
 deleted, C-0 closed as a decided-no on 2026-09-27, and C-C dropped on evidence.
 What remains:
+
+**Paused while A–D run.** Two arcs in flight is how a tree rots, and the
+portability spine does not need a character controller. This section is the
+record of where it stops, not a queue being worked.
 
 **C-A — contact drives weights, and there are no states.** Speed and
 groundedness come out of the resolver and drive **blend weights directly**. No
