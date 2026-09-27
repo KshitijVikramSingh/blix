@@ -126,6 +126,15 @@ is the coherent setup Blix uses to inspect content without implying that every
 game must accept a global default renderer. A project may reuse all, some, or
 none of it.
 
+No game is moved onto it to prove that point. The Studio arc's last stage
+proposed migrating `Blix.Demos.Runner` onto the stage as a standing
+demonstration that a game *may*; that stage is retired rather than built. It
+was a statement, not a capability, and the evidence that matters already runs
+the other way — Tank Arena and Bulwark keep hand-built graphs because games
+choose their own composition. A game that wants the setup takes it; none is
+migrated for tidiness, and the reference pipeline does not become canonical by
+accumulating consumers it was handed.
+
 ### Vulkan Sponza research renderer
 
 Vulkan Sponza is the heavy-scene rendering and measurement application. It owns

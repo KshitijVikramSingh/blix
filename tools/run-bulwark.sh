@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launcher for Blix.Demos.Bulwark on macOS (tower-defense game #2 — see
-# plan-bulwark.md). Same exec-the-apphost rationale as run-tank.sh: dyld snapshots
+# docs/demos.md#bulwark). Same exec-the-apphost rationale as run-tank.sh: dyld snapshots
 # DYLD_* at exec, so going through the dotnet muxer can drop the Vulkan loader path.
 # Pass --frames N for a headless validation run (run under BLIX_VK_VALIDATE=1 and
 # grep stderr for [vk-ERR]/[vk-WARN]).

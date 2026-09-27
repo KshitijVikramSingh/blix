@@ -14,7 +14,7 @@ using Plane = Blix.Geometry.Plane;
 
 namespace Blix.Demos.Bulwark;
 
-// Bulwark — tower-defense, Blix game #2 (see plan-bulwark.md). Defend a central core
+// Bulwark — tower-defense, Blix game #2 (see docs/demos.md, "Bulwark"). Defend a central core
 // from waves of enemies converging on four fronts: build + upgrade towers with the
 // scrap you earn from kills, survive 5 waves (a leak costs a life). Built to pressure
 // the engine where TankArena/Runner/Pong didn't — pointer-driven picking, navigation,
