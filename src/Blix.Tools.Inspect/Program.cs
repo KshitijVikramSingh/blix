@@ -99,6 +99,12 @@ public static class Program
     /// <summary>The cooked mirror of <see cref="ReportMaterialExtensions"/>, off a .blixmesh.</summary>
     private static void ReportCookedExtensions(Blix.Assets.BlixMeshFile mesh)
     {
+        // An extension's factor without its texture is half the material. Reporting only the
+        // factor made "is this texture actually wired" unanswerable from the tool whose job is to
+        // answer exactly that -- it had to be inferred from the picture instead.
+        static string Img(int row) =>
+            row == Blix.Assets.BlixMesh.NoImage ? string.Empty : $" tex#{row}";
+
         var rows = new List<string>();
         foreach (var m in mesh.MaterialTable)
         {
@@ -106,9 +112,11 @@ public static class Program
             var parts = new List<string>();
             if (e.TransmissionFactor > 0f) parts.Add($"transmission {e.TransmissionFactor:0.##}");
             if (e.DiffuseTransmissionFactor > 0f)
-                parts.Add($"diffuse-transmission {e.DiffuseTransmissionFactor:0.##} rgb({e.DiffuseTransmissionColorFactor.X:0.##},{e.DiffuseTransmissionColorFactor.Y:0.##},{e.DiffuseTransmissionColorFactor.Z:0.##})");
+                parts.Add($"diffuse-transmission {e.DiffuseTransmissionFactor:0.##} rgb({e.DiffuseTransmissionColorFactor.X:0.##},{e.DiffuseTransmissionColorFactor.Y:0.##},{e.DiffuseTransmissionColorFactor.Z:0.##})"
+                    + Img(e.DiffuseTransmissionColorImage));
             if (e.SheenColorFactor != System.Numerics.Vector3.Zero)
-                parts.Add($"sheen rgb({e.SheenColorFactor.X:0.##},{e.SheenColorFactor.Y:0.##},{e.SheenColorFactor.Z:0.##}) rough {e.SheenRoughnessFactor:0.##}");
+                parts.Add($"sheen rgb({e.SheenColorFactor.X:0.##},{e.SheenColorFactor.Y:0.##},{e.SheenColorFactor.Z:0.##}) rough {e.SheenRoughnessFactor:0.##}"
+                    + Img(e.SheenColorImage));
             if (e.ThicknessFactor > 0f)
             {
                 var atten = e.AttenuationDistance >= float.MaxValue || float.IsPositiveInfinity(e.AttenuationDistance)
@@ -222,6 +230,10 @@ public static class Program
     /// </remarks>
     private static void ReportMaterialExtensions(IReadOnlyList<Blix.GltfNode> nodes)
     {
+        // The source side carries a resolved texture rather than a table row -- see Img() in the
+        // cooked report for why either is worth printing at all.
+        static string Tex(Blix.GltfTexture? t) => t is null ? string.Empty : $" tex:{t.Name}";
+
         var seen = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         foreach (var n in nodes)
         foreach (var prim in n.Primitives)
@@ -232,9 +244,11 @@ public static class Program
             var parts = new List<string>();
             if (e.TransmissionFactor > 0f) parts.Add($"transmission {e.TransmissionFactor:0.##}");
             if (e.DiffuseTransmissionFactor > 0f)
-                parts.Add($"diffuse-transmission {e.DiffuseTransmissionFactor:0.##} rgb({e.DiffuseTransmissionColorFactor.X:0.##},{e.DiffuseTransmissionColorFactor.Y:0.##},{e.DiffuseTransmissionColorFactor.Z:0.##})");
+                parts.Add($"diffuse-transmission {e.DiffuseTransmissionFactor:0.##} rgb({e.DiffuseTransmissionColorFactor.X:0.##},{e.DiffuseTransmissionColorFactor.Y:0.##},{e.DiffuseTransmissionColorFactor.Z:0.##})"
+                    + Tex(e.DiffuseTransmissionColorTexture));
             if (e.SheenColorFactor != System.Numerics.Vector3.Zero)
-                parts.Add($"sheen rgb({e.SheenColorFactor.X:0.##},{e.SheenColorFactor.Y:0.##},{e.SheenColorFactor.Z:0.##}) rough {e.SheenRoughnessFactor:0.##}");
+                parts.Add($"sheen rgb({e.SheenColorFactor.X:0.##},{e.SheenColorFactor.Y:0.##},{e.SheenColorFactor.Z:0.##}) rough {e.SheenRoughnessFactor:0.##}"
+                    + Tex(e.SheenColorTexture));
             if (e.ThicknessFactor > 0f)
             {
                 // float.MaxValue is how a glTF says "no attenuation" — the spec's default is
