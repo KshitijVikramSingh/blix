@@ -1146,6 +1146,27 @@ public static class Program
 
             t.ExpectTrue("an unknown key is refused rather than ignored",
                 Throws(() => MaterialPatch.Load(Write("bad.blixpatch", "material glass nonsense=1\n")).Apply(table)) is not null);
+
+            // A patch may point an extension's texture at an image the asset already carries.
+            // The leaf case: transmitted light tinted per texel by the same map the surface uses,
+            // stated by the scene instead of assumed by the renderer.
+            var textured = MaterialPatch.Load(Write("tex.blixpatch",
+                "material glass diffuseTransmissionColorTexture=baseColor\n")).Apply(table);
+            t.Expect("a patch can point a transmission colour at the base-colour image",
+                textured[0].Ext.DiffuseTransmissionColorImage == table[0].BaseColorImage,
+                $"got image {textured[0].Ext.DiffuseTransmissionColorImage}, base is {table[0].BaseColorImage}");
+
+            var cleared = MaterialPatch.Load(Write("tex0.blixpatch",
+                "material glass diffuseTransmissionColorTexture=none\n")).Apply(table);
+            t.Expect("and can clear it back to the factor alone",
+                cleared[0].Ext.DiffuseTransmissionColorImage == BlixMesh.NoImage,
+                $"got {cleared[0].Ext.DiffuseTransmissionColorImage}");
+
+            // A path would mean growing this file's image table; refusing says so rather than
+            // silently doing nothing, which is how a scene learns the rule.
+            t.ExpectTrue("but it cannot introduce an image the asset does not carry",
+                Throws(() => MaterialPatch.Load(Write("texbad.blixpatch",
+                    "material glass diffuseTransmissionColorTexture=leaf.png\n")).Apply(table)) is not null);
         }
         finally
         {
