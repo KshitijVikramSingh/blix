@@ -11,7 +11,7 @@ Status was reconciled against the checkout on 2026-09-27.
 
 | Plan | Status | Why it remains at the root |
 | --- | --- | --- |
-| `plan-blix-character.md` | Active, resumed | Room is built and Motion was deleted. The arc resumes at rig residency (T-C1), which the tooling arc took and did not land: `StudioRig` still loads glTF itself and the tree still carries several independent skinned-load paths. C-A is blocked on it. |
+| `plan-blix-character.md` | Active, C-A next | Room is built, Motion was deleted, and C-0 (rig residency) is closed: the shared half was the mesh upload, which already existed as `CreateMesh` and is now adopted at eight sites, and a rig type is a recorded decided-no. Nothing blocks C-A — contact driving blend weights with no state machine between them. |
 
 Three records closed on 2026-09-27 and their durable decisions moved into the
 focused documentation:

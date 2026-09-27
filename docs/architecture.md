@@ -306,6 +306,24 @@ them is how a lab grows a framework:
   are local decomposition: only the viewer picks, and only the viewer has panels. The bar there is
   simply that the file had stopped being readable.
 
+**Adopting beats extracting, and an unadopted helper is worse than none.** Four skinned consumers
+and the two Studio loaders each hand-rolled the same mesh upload while
+`Blix.Render`'s `device.CreateMesh(MeshData)` sat at zero consumers — unusable because it read the
+16-bit index array unconditionally, so a 32-bit mesh got no indices and a count of zero. The fix
+was one branch and then eight adoptions, not a new type. Two lessons are worth keeping:
+
+- **Check whether the extraction already exists before writing one.** The tree had produced three
+  attempts at "a loaded model you can draw" and two of them (`CreateMesh`, `PropModel`) had no
+  consumers at all.
+- **A private copy of an engine step is a place to miss a case silently.** Both bugs found the day
+  this was written had that shape: `CreateMesh`'s missing 32-bit branch, and Vulkan Lit resolving
+  its own albedo — handling only the raw-PNG form, so the moment a build cooked its assets the
+  character lost its texture with no error anywhere, and a person had to notice.
+
+The matching decision is recorded where it was taken: a *rig* type was refused, because once the
+upload was shared what remained would have had to carry the bone palette's instancing policy, and
+that is precisely what may not cross into a loader.
+
 **A view may hold its model.** `ViewerPanels` keeps a reference to the root and reads what it needs
 through a short, explicit list of internal accessors. That is not a circular dependency worth
 avoiding — it is the ordinary shape for a view, and it is what keeps each panel method's dependency

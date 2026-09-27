@@ -1,19 +1,22 @@
 # Character arc — plan
 
-> **Status 2026-09-27 — active, resumed at C-0/T-C1.** The Room/contact
+> **Status 2026-09-27 — active, C-0 closed, C-A next.** The Room/contact
 > instrument is built (R-A through R-E). Motion was built, argued against by
 > its own dump, and deleted; its interpolation half became the animation arc's
 > stage D and its selection half is undecided and unbuilt. C-C is dropped on
 > evidence.
 >
-> **The pause is over because its cause was found, not because its reason
-> expired.** C-0 (rig residency) was handed to the tooling arc as T-C1 and
-> never landed — checked, not remembered: `StudioRig` still does its own glTF
-> import, buffer upload and material setup, and the tree still carries
-> several independent skinned-load paths. Every remaining Controller stage
-> needs a rig, so this arc resumes by doing T-C1 itself, under the two rules
-> the stage already wrote down. C-A follows as the thing that proves the
-> extraction.
+> **C-0 is done and its answer was no.** Rig residency was handed to the
+> tooling arc as T-C1 and never landed, so this arc took it back — and found
+> the extraction already existed as `Blix.Render`'s `CreateMesh`, unusable and
+> unused because of one missing 32-bit branch. Fixing it and adopting it at
+> eight call sites removed the real duplication. What was left could not earn
+> a type without carrying the palette's instancing policy across the line rule
+> 1 draws, so a rig type is a recorded **decided-no** rather than a third
+> stranded abstraction. See C-0 for the measurement.
+>
+> **Nothing now blocks C-A**, which is where the arc resumes: contact drives
+> blend weights, with no state machine between them.
 
 > The first arc aimed at Spear's own domain: **motion, contact, camera, combat**.
 > The completed Chassis arc ended by inverting its premise — *"Blix's theory cannot be
@@ -517,33 +520,62 @@ consumer. So does `Blix.Render/PropModel`. Two engine-side attempts at "a loaded
 each stranded at one consumer, because each baked a draw into itself and the draw is the part that
 differs — render graph, material sets, instancing, shadow passes.
 
-### C-0 — rig residency — **HANDED TO THE TOOLING ARC AS T-C1, AND COMES BACK**
+### C-0 — rig residency — **DONE, AND THE TYPE IS A DECIDED-NO**
 
 Moved out on the correct principle — six duplicate skinned-draw paths is a tree-wide number, and
 an extraction discovered by one arc does not belong to it. The tooling arc then shipped without
-it. That is worth recording plainly rather than quietly re-adopting: **an extraction handed to
-another arc is not scheduled by being handed over.** `StudioRig` still owns its own import path
-and the duplication is where it was.
+it, which is worth recording plainly rather than quietly re-adopting: **an extraction handed to
+another arc is not scheduled by being handed over.**
 
-So it comes back here, because this is the arc that cannot proceed without it. The two rules
-below are unchanged, and rule 2 is what the handover lost — the extraction has to actually move
-its existing consumer, not sit beside it.
+It came back here and was resolved on 2026-09-27, and the answer is not the one this stage
+expected. **The extraction already existed.**
 
-The duplicated part is **loading**, not drawing: glTF import, vertex and index buffers, albedo
-upload, material scalars, bounds, weighted-bone analysis. That part is identical in every consumer
-and contains no draw. The part that differs — the bone material, its shader program and set index,
-the palette buffer's instance layout, the passes — stays with the consumer.
+`Blix.Render`'s `device.CreateMesh(MeshData)` is precisely the per-primitive half this stage
+described — buffers, index count, bounds, and no shader, material, pipeline or instance count. It
+had **zero** consumers, and one missing branch is the whole reason: it read `data.Indices`
+unconditionally, and for a 32-bit mesh that array is empty, so the draw got no indices and a count
+of zero. Eight call sites had each written the branch themselves rather than adopt it. So the work
+was to fix it and adopt it, not to invent a third abstraction beside it: Runner, Bulwark,
+VulkanLit, `StudioRig` (skinned parts, static parts, attachments) and `StudioModel` now all upload
+through it, which satisfies rule 2 with four consumers instead of one.
 
-Two rules keep this from becoming the third stranded abstraction:
+**What remains does not earn a type, and that is the decided-no.** Measured after the migration,
+each consumer keeps 16–20 lines of rig setup, but almost none of it is shared shape:
+
+- `GltfImporter.Import` was already the common entry point and always has been.
+- `Skeleton` and `MeshNodeTransform` are two assignments.
+- **The palette sizing genuinely differs, by design.** Runner is `[bones]`, Bulwark is
+  `[MaxAlive x bones]` because its crowd is instanced, `StudioRig` is a fixed `[128 x 8]`, and
+  VulkanLit is a single body. That is instancing policy, which rule 1 keeps out of a loader —
+  and it is the exact parameter that would have had to cross the line for a rig type to be worth
+  writing.
+
+So a `Rig` type would be two assignments wrapped around a policy it is forbidden to hold. The
+duplication is recorded here instead, and no third stranded abstraction is added to the tree.
+
+**One candidate is left and is NOT taken:** clip-lookup-by-name-with-fallbacks exists three times,
+as Runner's `FindClip`, Bulwark's `FindEnemyClip` and `StudioRig.Clip`. Three lines each, and the
+fallback chains differ per game. It earns a place when something wants the *same* shape, per §4.
+
+**The two rules held, and are kept here because they are why this came out well:**
 
 1. **No shader program, no material, no pass, no instancing count** crosses into it. If a parameter
    exists only so a caller can say how it will be drawn, the line is in the wrong place.
-2. **`StudioRig` is rewritten on top of it, not left beside it.** An extraction whose first consumer
-   keeps its own copy has not been proved by anything. The toolchain lab is the existing consumer
-   and it has to actually move.
+2. **The existing consumer is rewritten on top of it, not left beside it.** An extraction whose
+   first consumer keeps its own copy has not been proved by anything.
 
-If rule 1 cannot be held, the honest outcome is a **decided-no**: the character lab writes its own
-loader, the duplication is recorded, and no third stranded abstraction is added to the tree.
+Rule 2 is not hypothetical. `Blix.Render/PropModel` — 686 lines, extracted from TankArena and
+Bulwark, adopted by neither, still at zero consumers — is what skipping it looks like, and this
+stage cited it as evidence without noticing it had already happened.
+
+**And the cost of an unadopted helper was measured, not argued.** Two bugs on the same day shared
+one signature: a consumer hand-rolling a load step, missing a case the engine helper already
+covered, failing silently. `CreateMesh`'s missing 32-bit path was one. The other was VulkanLit
+resolving its own albedo, handling only the raw-PNG shape, and going quietly cream the first time
+anything cooked its assets — found by a person looking at the screen, because no test could see it.
+
+**C-A is unblocked.** A rig comes from `GltfImporter` plus `CreateMesh`, and the character lab
+writes the dozen lines around them like everything else does.
 
 ### C-A — contact drives weights, and there are no states
 
@@ -631,9 +663,11 @@ became the animation arc's stage D (masks, weights only) and the selection half 
 undecided and unbuilt. Controller is now where selection gets asked again — and the
 answer C-A gives is that contact can drive weights with nothing in between.
 
-Within Controller: C-0 → C-A → C-B, and C-0 is first only because C-A cannot see a foot
-without it. If C-0's line cannot be drawn without a draw crossing it, it is abandoned and
-C-A proceeds on a local loader — the stage exists to be decidable, not to be completed.
+Within Controller: C-0 → C-A → C-B, and C-0 was first only because C-A cannot see a foot
+without it. That stage existed to be decidable rather than to be completed, and it was decided:
+the shared piece was the mesh upload, it already existed, and everything above it stays with the
+caller. C-A proceeds on `GltfImporter` plus `CreateMesh` and a dozen local lines, which is what
+"a local loader" turned out to mean once the genuinely shared half had been found.
 
 The honest stopping point is after C-A: at that point Blix can move a body through a
 world and animate it truthfully, which is the whole of what a character *is*. C-B is
