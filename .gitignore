@@ -1,6 +1,13 @@
 bin/
 obj/
 *.spv
+
+# The //@tune sidecars the shader compiler writes beside each .spv. Derived, and
+# re-derived by any build — the same rule *.spv above already follows. Unlike the
+# .spv.refl.json sidecars (which are tracked because producing them needs spirv-cross,
+# an extra tool a consumer may not have), this one is written by Blix.Tools.Shader
+# itself, so there is nothing a checkout gains by carrying it.
+*.spv.tune.json
 .vs/
 .vscode/
 *.user

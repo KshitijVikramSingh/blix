@@ -63,7 +63,23 @@ try
 
     if (standardOutput.Length > 0) Console.Out.Write(standardOutput);
     if (standardError.Length > 0) Console.Error.Write(standardError);
-    if (process.ExitCode == 0) return 0;
+    if (process.ExitCode == 0)
+    {
+        // The //@tune sidecar, from the EXPANDED source, written only once the compile succeeded.
+        //
+        // This is the only place that has all three things the metadata needs: the GLSL (the
+        // compiled module cannot carry a comment), every include already resolved against the
+        // -I paths, and the .spv's own path to sit beside. Recovering it at load instead meant
+        // shipping shader sources into the application output, and still could not see a tunable
+        // declared in an engine-owned include, because those are not staged.
+        //
+        // Always written, even when empty: a present file with no entries says "scanned, none
+        // here", which an absent file cannot distinguish from "not built yet".
+        File.WriteAllText(
+            ShaderTunableSidecar.PathFor(output),
+            ShaderTunableSidecar.ToJson(ShaderTunables.Scan(preprocessed.ExpandedSource)));
+        return 0;
+    }
 
     Console.Error.WriteLine("Shader source map:");
     for (var i = 0; i < preprocessed.SourceMap.Count; i++)

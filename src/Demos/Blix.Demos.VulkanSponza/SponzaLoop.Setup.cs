@@ -285,8 +285,12 @@ internal sealed partial class SponzaLoop
         // build the overlay's shader-variable panel. The panel owns the live
         // values + the dials; the per-frame write and the froxel sun term pull
         // from it by name.
-        tunePanel = new ShaderTunablePanel(ShaderTunables.Scan(
-            File.ReadAllText(Path.Combine(shaderDir, "lit.frag"))));
+        // Read from the sidecar the shader compiler wrote beside lit.frag.spv, rather than
+        // rescanning GLSL here. The build has the expanded source with every include resolved;
+        // this process has neither, which is why the decorators in frame.glsl were invisible to
+        // a load-time scan and why the application used to ship its shader sources at all.
+        tunePanel = new ShaderTunablePanel(
+            ShaderTunableSidecar.Load(Path.Combine(shaderDir, "lit.frag.spv")));
         tuneObjects = new ObjectTunables(fog, shadows, render, ambient);
 
         // --tune <uName>=<value>, repeatable. A shader dial that can only be reached from the

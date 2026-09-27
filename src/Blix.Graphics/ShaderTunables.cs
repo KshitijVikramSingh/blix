@@ -150,3 +150,54 @@ public static class ShaderTunables
     private static float ParseFloat(string s) =>
         float.Parse(s, NumberStyles.Float, CultureInfo.InvariantCulture);
 }
+
+/// <summary>
+/// The `//@tune` metadata as a build artifact: written beside the .spv, read at load.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Scanning source is right; scanning it at RUNTIME was not.</b> The decorators are intent that
+/// the compiled module cannot carry, so they have to come from the GLSL — but the build is where
+/// the GLSL is, fully expanded, with every include resolved against the compiler's own -I paths.
+/// Recovering them at load instead meant shipping every .vert/.frag/.comp into the application
+/// output purely so something could re-read the text, and it could not see an engine-owned include
+/// at all, because those are not staged. A tunable declared in a shared block was therefore
+/// invisible, and <see cref="ShaderTunablePanel"/> answers zero for a name it never saw — so the
+/// failure was a dial silently reading zero rather than an error.
+/// </para>
+/// <para>
+/// This is the sidecar pattern the tree already uses twice: <c>.spv.refl.json</c> for the binding
+/// table and <c>.blixapps.json</c> for app discovery. Run at build, write a sidecar, read it cheap.
+/// </para>
+/// </remarks>
+public static class ShaderTunableSidecar
+{
+    /// <summary>The sidecar that belongs to a compiled shader: <c>&lt;name&gt;.spv.tune.json</c>.</summary>
+    public static string PathFor(string spvPath) => spvPath + ".tune.json";
+
+    private static readonly System.Text.Json.JsonSerializerOptions Options = new()
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
+        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
+    };
+
+    public static string ToJson(IReadOnlyList<ShaderTunable> tunables) =>
+        System.Text.Json.JsonSerializer.Serialize(tunables, Options);
+
+    /// <summary>
+    /// Reads the sidecar beside a compiled shader. An absent file yields no tunables.
+    /// </summary>
+    /// <remarks>
+    /// Absent is not an error: a shader with no decorators is the ordinary case, and a consumer
+    /// that asks for tunables it does not have should get an empty panel rather than a throw.
+    /// </remarks>
+    public static IReadOnlyList<ShaderTunable> Load(string spvPath)
+    {
+        var path = PathFor(spvPath);
+        if (!File.Exists(path)) return Array.Empty<ShaderTunable>();
+        return System.Text.Json.JsonSerializer.Deserialize<ShaderTunable[]>(File.ReadAllText(path), Options)
+               ?? Array.Empty<ShaderTunable>();
+    }
+}
