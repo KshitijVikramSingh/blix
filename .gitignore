@@ -2,12 +2,18 @@ bin/
 obj/
 *.spv
 
-# The //@tune sidecars the shader compiler writes beside each .spv. Derived, and
-# re-derived by any build — the same rule *.spv above already follows. Unlike the
-# .spv.refl.json sidecars (which are tracked because producing them needs spirv-cross,
-# an extra tool a consumer may not have), this one is written by Blix.Tools.Shader
-# itself, so there is nothing a checkout gains by carrying it.
+# The sidecars the shader build writes beside each .spv. Derived, and re-derived by any
+# build — the same rule *.spv above already follows.
+#
+# The .refl.json half was tracked for years, and by accident rather than by decision:
+# BlixShaderMode=Library writes its output into the PROJECT's Shaders directory rather
+# than bin/, and the *.spv pattern above does not match "foo.spv.refl.json" because that
+# ends in .json. So fifteen generated files rode along in history while the .spv beside
+# each of them was correctly ignored — and they churned, because spirv-cross numbers
+# SPIR-V ids differently between versions, so every build on a machine with a different
+# toolchain dirtied the tree and would have dirtied every CI runner the same way.
 *.spv.tune.json
+*.spv.refl.json
 .vs/
 .vscode/
 *.user

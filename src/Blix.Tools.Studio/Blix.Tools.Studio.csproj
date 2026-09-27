@@ -35,10 +35,10 @@
     <GlslShader Include="Shaders\studio_skinned_shadow.frag" />
     <GlslShader Include="Shaders\studio_present.vert" />
     <GlslShader Include="Shaders\studio_present.frag" />
-    <GlslInclude Include="..\Blix.Shaders\pbr.glsl" />
-    <GlslInclude Include="..\Blix.Shaders\shadow.glsl" />
-    <GlslInclude Include="..\Blix.Shaders\tonemap.glsl" />
-    <GlslInclude Include="..\Blix.Shaders\fullscreen.glsl" />
+    <!-- Globbed, not listed: ibl.glsl was used and not declared, so editing it never rebuilt
+         these shaders. Over-invalidating costs a rebuild; under-invalidating costs a stale
+         shader that a clean build and a green gate both report as fine. -->
+    <GlslInclude Include="..\Blix.Shaders\*.glsl" />
   </ItemGroup>
 
   <ItemGroup>

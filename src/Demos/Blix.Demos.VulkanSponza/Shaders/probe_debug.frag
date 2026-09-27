@@ -6,7 +6,11 @@
 #include "probe_volume.glsl"
 #define PI 3.14159265359
 
-layout(set = 0, binding = 0) uniform Frame {
+// Named for what it is. This is the probe viewer's OWN per-frame block, on its own
+// pipeline's set 0 -- not lit.frag's Frame, which it shares neither members nor
+// meaning with. Calling both "Frame" at the same set and binding reads like a shared
+// buffer that must agree, and it is not one.
+layout(set = 0, binding = 0) uniform ProbeFrame {
     mat4 uViewProj;
     vec4 uCameraPos;
     vec4 uProbeMin;

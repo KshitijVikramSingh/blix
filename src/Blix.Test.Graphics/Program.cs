@@ -15,6 +15,7 @@ using VkImageLayout = Silk.NET.Vulkan.ImageLayout;
 using VkPipelineStageFlags = Silk.NET.Vulkan.PipelineStageFlags;
 using VkAccessFlags = Silk.NET.Vulkan.AccessFlags;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using Blix.Cooked;
 using Blix.Graphics.Images;
 
@@ -4815,6 +4816,169 @@ static ShaderInterface MinimalShader() => new(new[]
         mesh32.Name == "bf.wide", mesh32.Name);
 }
 
+
+// ============================================================================
+// Section BG — a project declares every shader include it reads, and shaders
+//              that share a uniform block agree about it.
+// ============================================================================
+//
+// <b>Two classes of breakage that a clean build and seven green suites cannot see.</b> Both were
+// hit on the same day, and in both cases the only instrument that worked was a person looking at
+// the screen.
+//
+//   1. VulkanSponza declared one GlslInclude while its shaders included nine files, so editing
+//      shadow.glsl or sheen.glsl never invalidated the .spv. The build succeeded, the gate passed,
+//      and the shader on disk was stale. It surfaced only because a tunable's DEFAULT changed and
+//      could be read back; a changed lighting term would have shown up as a picture nobody had
+//      reason to distrust.
+//
+//   2. skybox.vert declared a sparse copy of lit.frag's Frame block at hand-written absolute byte
+//      offsets. Deleting a vec4 from that block moved uFog and pointed the skybox at the member
+//      after it. The device refused the pipeline by name at startup -- which is good, and is also
+//      the point: the gate had already passed, because no suite here builds a pipeline.
+//
+// These are static properties of the source and the project file, so they are checkable without a
+// GPU, in milliseconds, on every platform -- which matters more than it sounds, because CI has no
+// Vulkan device and the portability arc will not give it one soon.
+{
+    var srcDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    var engineShaders = Path.Combine(srcDir, "Blix.Shaders");
+
+    // CONTROL: every check below is a loop over discovered projects, and a loop over nothing
+    // passes. conventions §5's corollary — a green result must be evidence the check ran.
+    var projects = Directory.Exists(srcDir)
+        ? Directory.GetFiles(srcDir, "*.csproj", SearchOption.AllDirectories)
+            .Where(p => File.ReadAllText(p).Contains("<GlslShader", StringComparison.Ordinal))
+            .ToArray()
+        : Array.Empty<string>();
+    t.Expect("BG.0 CONTROL shader-bearing projects were found",
+        projects.Length >= 4, $"{projects.Length} project(s) under {srcDir}");
+
+    // An MSBuild item's Include, expanded on disk. Only the two glob forms the tree uses.
+    static IEnumerable<string> Expand(string projectDir, string include)
+    {
+        var rel = include.Replace('\\', Path.DirectorySeparatorChar);
+        var full = Path.GetFullPath(Path.Combine(projectDir, rel));
+        if (!full.Contains('*')) return File.Exists(full) ? new[] { full } : Array.Empty<string>();
+        var recursive = full.Contains("**");
+        var dir = full[..full.IndexOf('*')].TrimEnd(Path.DirectorySeparatorChar);
+        var pattern = Path.GetFileName(full);
+        return Directory.Exists(dir)
+            ? Directory.GetFiles(dir, pattern,
+                recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly)
+            : Array.Empty<string>();
+    }
+
+    static string[] Items(string projectText, string projectDir, string itemName) =>
+        Regex.Matches(projectText, $"<{itemName}\\s+Include=\"([^\"]+)\"")
+            .SelectMany(m => Expand(projectDir, m.Groups[1].Value))
+            .Select(Path.GetFullPath)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+    var undeclared = new List<string>();
+    var disagreements = new List<string>();
+    var hardOffsets = new List<string>();
+    var shadersChecked = 0;
+    var blocksCompared = 0;
+
+    foreach (var project in projects)
+    {
+        var projectDir = Path.GetDirectoryName(project)!;
+        var text = File.ReadAllText(project);
+        var shaders = Items(text, projectDir, "GlslShader");
+        var declared = new HashSet<string>(Items(text, projectDir, "GlslInclude"), StringComparer.Ordinal);
+        var name = Path.GetFileNameWithoutExtension(project);
+
+        // Block signature per (set, binding), across this project's shaders.
+        var blocks = new Dictionary<string, (string Shader, string[] Members)>(StringComparer.Ordinal);
+
+        foreach (var shader in shaders)
+        {
+            if (!File.Exists(shader)) continue;
+            shadersChecked++;
+
+            GlslPreprocessResult expanded;
+            try
+            {
+                expanded = ShaderLoader.PreprocessFile(
+                    shader, new[] { engineShaders, Path.Combine(projectDir, "Shaders") });
+            }
+            catch (Exception ex)
+            {
+                undeclared.Add($"{name}/{Path.GetFileName(shader)}: will not preprocess — {ex.Message}");
+                continue;
+            }
+
+            // BG.1 — every file this shader actually reached must be a declared input, or a
+            // change to it does not rebuild. SourceMap[0] is the shader itself.
+            foreach (var reached in expanded.SourceMap.Skip(1))
+            {
+                if (!declared.Contains(Path.GetFullPath(reached)))
+                {
+                    undeclared.Add(
+                        $"{name}: {Path.GetFileName(shader)} includes {Path.GetFileName(reached)}, " +
+                        "which is not a GlslInclude — editing it will not rebuild the .spv");
+                }
+            }
+
+            // BG.2 — uniform blocks, from the EXPANDED source so an included declaration counts.
+            foreach (Match b in Regex.Matches(
+                expanded.ExpandedSource,
+                @"layout\s*\(\s*set\s*=\s*(\d+)\s*,\s*binding\s*=\s*(\d+)\s*\)\s*uniform\s+(\w+)\s*\{([^}]*)\}",
+                RegexOptions.Singleline))
+            {
+                var key = $"set{b.Groups[1].Value}.binding{b.Groups[2].Value} {b.Groups[3].Value}";
+                var body = b.Groups[4].Value;
+
+                if (body.Contains("layout(offset", StringComparison.Ordinal)
+                    || body.Contains("layout (offset", StringComparison.Ordinal))
+                {
+                    hardOffsets.Add($"{name}: {Path.GetFileName(shader)} pins byte offsets inside {key}");
+                }
+
+                var members = Regex.Matches(body, @"\b(?:float|int|uint|bool|vec[234]|ivec[234]|mat[234])\s+(\w+)\s*(?:\[[^\]]*\])?\s*;")
+                    .Select(m => m.Groups[1].Value).ToArray();
+                if (members.Length == 0) continue;
+
+                if (blocks.TryGetValue(key, out var first))
+                {
+                    blocksCompared++;
+                    var shorter = Math.Min(first.Members.Length, members.Length);
+                    // A PREFIX is legal and common: a vertex stage may name only the leading
+                    // members it uses, and std140 puts them at the same offsets. Skipping a
+                    // member is what is not legal, because everything after it shifts.
+                    if (!first.Members.Take(shorter).SequenceEqual(members.Take(shorter)))
+                    {
+                        disagreements.Add(
+                            $"{name}: {key} is declared differently by {first.Shader} and " +
+                            $"{Path.GetFileName(shader)} — the two read the same bytes as different members");
+                    }
+                }
+                else
+                {
+                    blocks[key] = (Path.GetFileName(shader), members);
+                }
+            }
+        }
+    }
+
+    t.Expect("BG.0 CONTROL shaders were actually preprocessed", shadersChecked >= 20,
+        $"{shadersChecked} shader(s)");
+    t.Expect("BG.0 CONTROL shared blocks were actually compared", blocksCompared >= 1,
+        $"{blocksCompared} comparison(s)");
+
+    t.Expect("BG.1 every shader include is a declared build input",
+        undeclared.Count == 0, string.Join("; ", undeclared.Take(4)));
+
+    t.Expect("BG.2 shaders sharing a uniform block agree about its members",
+        disagreements.Count == 0, string.Join("; ", disagreements.Take(4)));
+
+    // Not a failure on its own — a single-owner block may legitimately pin offsets — but a shared
+    // one must not, because the offsets then belong to a file that does not know it owns them.
+    t.Expect("BG.2 no shader pins absolute byte offsets into a shared block",
+        hardOffsets.Count == 0, string.Join("; ", hardOffsets.Take(4)));
+}
 
 t.PrintSummary();
 return t.Failed;

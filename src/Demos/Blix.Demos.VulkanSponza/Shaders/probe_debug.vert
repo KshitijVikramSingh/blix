@@ -5,7 +5,11 @@
 // direction-dependent value: an impostor gives an exact silhouette and an analytic normal at every
 // fragment for four vertices, where a tessellated sphere would spend hundreds of triangles per
 // probe to approximate the same normal worse. 41,472 probes makes that difference structural.
-layout(set = 0, binding = 0) uniform Frame {
+// Named for what it is. This is the probe viewer's OWN per-frame block, on its own
+// pipeline's set 0 -- not lit.frag's Frame, which it shares neither members nor
+// meaning with. Calling both "Frame" at the same set and binding reads like a shared
+// buffer that must agree, and it is not one.
+layout(set = 0, binding = 0) uniform ProbeFrame {
     mat4 uViewProj;
     vec4 uCameraPos;
     vec4 uProbeMin;     // xyz volume min, w probe radius in metres
