@@ -269,6 +269,17 @@ Application shaders stay with the application. A helper should graduate into
 `Blix.Shaders` only when it has a stable reusable contract, not merely because a
 large experiment uses it.
 
+Two of these have a C# counterpart, and both are pinned by a test rather than by
+a comment asking the next reader to remember. `tonemap.glsl` has a **shipped**
+twin in `Blix.Graphics.Images/Tonemap.cs`, because a capture is read back from
+the HDR target before the present pass and something has to apply the curve on
+the CPU; `Blix.Test.Graphics` section **BD** fails when a constant stops
+appearing in the shader. `sheen.glsl` has a **test-local** twin in section
+**BE**, which exists only so the Charlie lobe and the diffuse-transmission terms
+can be evaluated without a GPU; shipping it would create the second evaluator
+the shared-vocabulary rule exists to prevent. Each shader names its twin at the
+top of the file.
+
 ## Studio reference rendering pipeline
 
 `StudioRenderer` is the optional pipeline used by Blix's own model and rig
@@ -342,9 +353,22 @@ The exact graph continues to move. The important current research areas are:
   transport, and indirect-light sampling;
 - a half-resolution incident-light field and full-resolution resolve;
 - colour TAA and temporally accumulated volumetric froxel fog;
-- extended material work including sheen and transmission; and
+- extended material work including sheen and diffuse transmission, the latter
+  read per material out of the baked albedo grid's alpha rather than from one
+  scene-wide control; and
 - debug views, command-line A/Bs, pass timings, resource and draw censuses,
   captures, and CPU/path-traced reference checks.
+
+Three material responses are deliberately absent, each for a stated reason
+rather than a backlog position. There is **no second, cheaper sheen BRDF**: a
+consumer wanting one writes it at its own call site, because an engine that
+ships a fast lobe beside the real one has made the fast one the default. There
+is **no `KHR_materials_volume` response** — thickness and attenuation are read
+and stored, but responding to them means refraction against a scene-colour
+copy, which is a transmission pass and its own piece of work. And there is **no
+sheen in the voxel bake**: sheen is a view-dependent rim and a probe has no
+view, so diffuse transmission is the half of cloth that indirect light can
+carry.
 
 Some storage textures and probe resources are device-owned rather than graph
 resources, so Sponza also exposes where the graph contract is not yet broad

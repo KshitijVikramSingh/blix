@@ -348,6 +348,17 @@ promoted to a requirement, and then defended with the evidence it produced. The 
 asks for it"* is **go and get something that asks for it** — see [[blix-gltf-sample-corpus]] for the
 three corpora and what each is for.
 
+**A variant worth naming, because the sentence can be TRUE and still wrong.** The sun-bounce bake
+applied one translucency to every non-opaque cell in Sponza, and the note defending that said the
+scene authors transmission nowhere — every material reporting `TransmissionFactor` 0. It did, and
+the note was about `KHR_materials_transmission`, the clear pane you see *through*. The bake needed
+`KHR_materials_diffuse_transmission`, the thin sheet that glows backlit, which the scene authors on
+exactly the surfaces that have it. Two extensions, two lines apart in the same material table, and
+checking the near one produced a true measurement of the wrong quantity — which then justified not
+building the thing for a year. When *"nothing authors it"* is the argument, the check that sentence
+rests on is the part to read twice, and it is the same discipline as [[blix-audit-by-grep]]: search
+for the value, not for the name.
+
 **Where the line actually falls**, using transparency as the case: *rendering* a BLEND material is
 conformance and the spec settles it. *Sorting* blended surfaces correctly is policy — depth peeling,
 per-triangle sorting, order-independent blending are all defensible — so that half waits, and the

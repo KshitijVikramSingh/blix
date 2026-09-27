@@ -50,7 +50,9 @@
 //   set 1 binding 5 : sampler2D   uAmbientVisibility (GTAO: bent normal + visibility)
 //   set 2 binding 0 : per-material UBO (BaseColorFactor, EmissiveFactor,
 //                                       MaterialParams = alphaCutoff/normalScale/
-//                                       roughness/metallic, MaterialParams2 = transmission)
+//                                       roughness/metallic, MaterialParams2 = the two
+//                                       transmissions, sheen roughness, and the MSAA/cutout
+//                                       policy -- see the block for why the last one lives there)
 //   set 2 binding 1 : albedo  (sRGB)
 //   set 2 binding 2 : normal  (linear; tangent-space)
 //   set 2 binding 3 : emissive (sRGB)
@@ -74,7 +76,6 @@ layout(set = 0, binding = 0) uniform Frame {
     float uMsaaSamples;
     vec4  uSkyDims;        // xyz visibility probe counts
     vec4  uBounceDims;     // xyz bounce probe counts
-    vec4  uClothOverride;  // x=sheenRoughness, y=diffuseTransmission; x<0 = use the material's
     float uShadowStrength;         // 0 = sun shadows off, 1 = on
     vec3  _cascadePad;
     mat4  uCascadeViewProj[3];     // light view-proj per cascade
@@ -114,11 +115,21 @@ layout(set = 0, binding = 0) uniform Frame {
     float uSkyDropL2;
     //@tune 0..1 = 0
     float uNoBounceTerm;
-    // Diagnostic: make the inline ambient use the INTERPOLATED GEOMETRIC normal instead of the
-    // normal-mapped one. The half-res field's error is all normal (it does not change with
-    // resolution), and this splits that into the two halves that have different fixes: relief the
-    // field can never see, versus a depth reconstruction a prepass normal target would repair.
-    //@tune 0..1 = 0
+    // Which normal the inline ambient asks the world-space fields along: 1 (the default) is the
+    // INTERPOLATED GEOMETRIC normal, 0 is the normal-mapped one.
+    //
+    // <b>Defaults to geometric because these are metre-scale fields.</b> Baked sky visibility and
+    // the bounce probes resolve enclosure at roughly the size of a room; a normal map varies over
+    // millimetres. Feeding the mapped normal into them adds high-frequency variation to a query
+    // that has no high-frequency information to give back, so the relief shows up as noise on the
+    // ambient term rather than as detail. Direct lighting and specular keep the mapped normal,
+    // which is where surface relief belongs and is visible.
+    //
+    // Kept as a dial rather than welded shut: the half-res incident field's error is all normal
+    // and does not shrink with resolution, so flipping this to 0 still splits that error into the
+    // two halves with different fixes -- relief the field can never see, versus a depth
+    // reconstruction a prepass normal target would repair.
+    //@tune 0..1 = 1
     float uAmbientGeoNormal;
     // Measurement switches, one per --ab mode. Each removes one term from the fragment so a paired
     // interleaved run can price it:
@@ -208,7 +219,13 @@ layout(set = 2, binding = 0) uniform Material {
     vec4 uBaseColorFactor;
     vec4 uEmissiveFactor;
     vec4 uMaterialParams;  // x=alphaCutoff, y=normalScale, z=roughness, w=metallic
-    vec4 uMaterialParams2; // x=transmission, y=sheenRoughness, z=diffuseTransmission
+    // x=transmission (KHR_materials_transmission, the clear pane)
+    // y=sheenRoughness  z=diffuseTransmission (KHR_materials_diffuse_transmission, the thin sheet)
+    // w=MSAA sample count, or the cutout policy at one sample. NOT a material property: the depth
+    //   pre-pass's mask shader has no frame block and needs the same coverage decision this pass
+    //   makes, and a spare component here beat duplicating a std140 layout to reach one float.
+    //   See SponzaLoop.Scene.cs, which packs it, and depth_prepass_mask.frag, which reads it.
+    vec4 uMaterialParams2;
     vec4 uSheenColor;              // KHR_materials_sheen colour factor
     vec4 uDiffuseTransmissionColor;// KHR_materials_diffuse_transmission colour
 } mat;
@@ -225,6 +242,9 @@ layout(set = 2, binding = 4) uniform sampler2D uMetallicRoughness;
 // Ambient occlusion (R channel, linear). Default texture is white so
 // materials without an OcclusionTexture get no extra attenuation.
 layout(set = 2, binding = 5) uniform sampler2D uOcclusion;
+// KHR_materials_diffuse_transmission's colour texture (sRGB), multiplying the factor beside it.
+// Defaults to 1x1 white, so a material that authors only the factor is unaffected.
+layout(set = 2, binding = 6) uniform sampler2D uDiffuseTransmissionColorTex;
 
 layout(location = 0) in vec3 vNormalWorld;
 layout(location = 1) in vec2 vUv;
@@ -450,14 +470,33 @@ void main() {
     // back of a single layer and scattering out the front. A curtain wants both, and the glTF spec
     // keeps them as separate extensions because they are separate physics — one you see, one you
     // see THROUGH.
+    // The material is the answer. A live override used to sit here so the two cloth numbers could
+    // be found by eye and written back into the patch; they have been found, they are in the
+    // patch, and a control that can silently disagree with the cooked value is a second source of
+    // truth for a question that is settled.
     vec3  sheenColor     = mat.uSheenColor.rgb;
-    float sheenRoughness = clamp(frame.uClothOverride.x >= 0.0 ? frame.uClothOverride.x
-                                                                : mat.uMaterialParams2.y, 0.0, 1.0);
-    // Only where the material already HAS the term: the override is for finding a value, not for
-    // making stone translucent.
-    float diffTrans      = mat.uMaterialParams2.z > 0.0 && frame.uClothOverride.y >= 0.0
-                         ? clamp(frame.uClothOverride.y, 0.0, 1.0)
-                         : clamp(mat.uMaterialParams2.z, 0.0, 1.0);
+    float sheenRoughness = clamp(mat.uMaterialParams2.y, 0.0, 1.0);
+    float diffTrans      = clamp(mat.uMaterialParams2.z, 0.0, 1.0);
+    // <b>The transmitted lobe's colour is the material's, NOT the base colour.</b> glTF makes
+    // diffuseTransmissionColor the colour of the light that goes through, in place of baseColor --
+    // it does not modulate it. This used to read `* albedo`, and the scene's patches author the
+    // colour as each leaf's MEASURED MEAN ALBEDO, so the tint landed twice: transmitted light came
+    // out at albedo squared, roughly 3.6x too dark in green, 5.8x in red and 25x in blue. Not a
+    // dimming -- a hue shift, on the one term that exists to make backlit foliage read correctly.
+    //
+    // The multiply was almost certainly written to make an UNAUTHORED material fall back to
+    // albedo-tinted transmission, which looks plausible. The spec's default is white, and the
+    // place to say otherwise is the asset or the cook, not the renderer.
+    //
+    // Fetched only where the term exists. The branch is on a MATERIAL uniform, so it is coherent
+    // across the whole draw and costs no divergence -- and without it every stone surface in the
+    // scene pays a sampler fetch for a value it discards, which is the per-pixel tax `shadowNeed`
+    // above already declines to pay for shadow filtering.
+    vec3 dtColor = vec3(0.0);
+    if (diffTrans > 0.0) {
+        dtColor = mat.uDiffuseTransmissionColor.rgb
+                * texture(uDiffuseTransmissionColorTex, uv).rgb;
+    }
     // A probe older than v4 has no Charlie cube, so sheen is off rather than approximated.
     bool  hasSheen       = dot(sheenColor, vec3(1.0)) > 0.0 && frame.uSheenMipCount > 0.0;
 
@@ -479,13 +518,26 @@ void main() {
     vec3 sunTransmission = vec3(0.0);
     if (diffTrans > 0.0) {
         sunTransmission = blix_diffuseTransmission(
-            N, L, frame.uSunIrradiance * sunShadow,
-            mat.uDiffuseTransmissionColor.rgb * albedo, diffTrans);
+            N, L, frame.uSunIrradiance * sunShadow, dtColor, diffTrans);
     }
 
-    vec3 direct = (kDsun * albedo / PI * transScale + sunSpecular)
-                  * NdotL * frame.uSunIrradiance * sunShadow
-                  + (sunSheen + sunTransmission) * sheenScale;
+    // <b>The layering order, which these two paths used to disagree about.</b> glTF puts the
+    // sheen lobe ON TOP of the base material and scales what is underneath by sheenScale; diffuse
+    // transmission is not a third peer but a modification of the base material's DIFFUSE lobe, so
+    // it sits under the sheen layer with everything else. One shape, stated once:
+    //
+    //     (base + transmitted) * sheenScale + sheen
+    //
+    // This path had it inverted -- the base went unscaled and the sheen lobe was multiplied by its
+    // own absorption term -- while the ambient path below had the base right and left transmission
+    // out of the scaling. Neither was the spec, they disagreed with each other, and they disagreed
+    // with sheen.glsl, which says in as many words that the factor is what the BASE layer is
+    // multiplied by. On the curtains it read as a rim slightly too dim under direct sun and a
+    // fabric slightly too bright, which is the size of mistake that survives being looked at.
+    vec3 direct = ((kDsun * albedo / PI * transScale + sunSpecular)
+                      * NdotL * frame.uSunIrradiance * sunShadow
+                   + sunTransmission) * sheenScale
+                + sunSheen;
 
     // --- IBL: split-sum diffuse + specular ------------------------------
     // Diffuse: irradiance cube × albedo, modulated by (1 - F) and (1 - metallic)
@@ -499,12 +551,20 @@ void main() {
     // materials are absent from the depth pre-pass, so sampling here would describe geometry behind
     // the pane. The predicate matches the scene's blend classification.
     vec4 ambientVis = texture(uAmbientVisibility, gl_FragCoord.xy / frame.uFog.xy);
-    bool opaqueSurface = mat.uMaterialParams2.x <= 0.0;
-    float visibility = opaqueSurface ? ambientVis.a : 1.0;
+    // <b>Named for what it actually tests.</b> This is "did this surface write depth in the
+    // pre-pass", which is what makes a screen-space visibility lookup meaningful here -- and the
+    // only thing excluded from that pre-pass is a KHR_materials_transmission pane. It was called
+    // `opaqueSurface`, which is false of a curtain that scatters light through itself: a
+    // diffuse-transmission surface IS in the pre-pass and DOES read GTAO, correctly. The behaviour
+    // never changed; the name asserted the same near-miss between KHR_materials_transmission and
+    // KHR_materials_diffuse_transmission that once put a flat translucency on every cell of the
+    // light-transport bake.
+    bool inDepthPrepass = mat.uMaterialParams2.x <= 0.0;
+    float visibility = inDepthPrepass ? ambientVis.a : 1.0;
     // The bent normal is where the unoccluded sky actually is. Gathering irradiance along it
     // instead of along N is what makes a surface in a corner pick up the light from the opening
     // rather than an average that includes the wall it is pressed against.
-    vec3 gatherN = opaqueSurface ? normalize(ambientVis.xyz) : N;
+    vec3 gatherN = inDepthPrepass ? normalize(ambientVis.xyz) : N;
     // Keep the bent normal in the geometric normal's hemisphere. Screen-space depth cannot identify
     // the active side of a two-sided sheet, and crossing the hemisphere samples unrelated incident
     // light on back-facing foliage.
@@ -513,8 +573,8 @@ void main() {
     // Bent normal remains an inspectable GTAO output. Production IBL, sky visibility, and bounce
     // use the surface normal; uAmbientGeoNormal isolates interpolated versus normal-mapped input.
     vec3 cubeN   = N;
-    vec3 skyVisN = frame.uAmbientGeoNormal > 0.5 ? vizGeometricN : N;
-    vec3 bounceN = frame.uAmbientGeoNormal > 0.5 ? vizGeometricN : N;
+    vec3 skyVisN = frame.uAmbientGeoNormal > 0.5 ? vizGeometricN : N;   // geometric by default
+    vec3 bounceN = frame.uAmbientGeoNormal > 0.5 ? vizGeometricN : N;   // -- see the declaration
     vec3 irradiance = frame.uAbFlags.z > 0.5 ? vec3(0.2) : texture(uIrradiance, cubeN).rgb;
 
     // --- Baked sky visibility -------------------------------------------
@@ -630,12 +690,14 @@ void main() {
             : blixSkyVisibility(vWorldPos, -N, 0.0);
         vec3 backIrradiance = texture(uIrradiance, -cubeN).rgb * backVis;
         transmittedIBL = blix_diffuseTransmissionAmbient(
-            backIrradiance, mat.uDiffuseTransmissionColor.rgb * albedo, diffTrans) * ao * visibility;
+            backIrradiance, dtColor, diffTrans) * ao * visibility;
     }
 
+    // Same shape as `direct` above, deliberately: (base + transmitted) * sheenScale + sheen.
     vec3 ambient = ((kD * diffuseIBL * transScale * visibility + specularIBL * specularVisibility) * ao
-                    + bounce * transScale) * sheenScale
-                 + sheenIBL + transmittedIBL;
+                    + bounce * transScale
+                    + transmittedIBL) * sheenScale
+                 + sheenIBL;
 
     // --- Emissive ------------------------------------------------------
     vec3 emissive = texture(uEmissive, uv).rgb * mat.uEmissiveFactor.rgb * mat.uEmissiveFactor.a;

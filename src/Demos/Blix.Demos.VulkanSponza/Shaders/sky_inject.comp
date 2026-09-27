@@ -61,7 +61,8 @@ layout(set = 0, binding = 0) uniform Inject {
     // x = multi-bounce feedback strength; 0 isolates direct sun and sky injection.
     // y = occupancy-march strength for transport feedback visibility.
     vec4 uTransport;
-    // xyz albedo grid dims (0 = none shipped), w = translucency.
+    // xyz albedo grid dims (0 = none shipped), w = a SCALE on the grid's baked diffuse
+    // transmission, 1.0 = take the material at its word. See transmissionAt.
     vec4 uAlbedoDims;
 } u;
 
@@ -122,6 +123,25 @@ vec3 albedoAt(vec3 worldPos) {
     return c * c;
 }
 
+// How much of the light meeting this cell's surface continues THROUGH it instead of stopping:
+// KHR_materials_diffuse_transmission, averaged over the surfaces in the cell by the bake and
+// stored linearly in the albedo grid's alpha. Nearest sampling, like the colour beside it.
+//
+// <b>This replaced one number for the whole scene.</b> That number was 0.5 applied to every
+// non-opaque cell, which in this scene meant the curtains -- authored at an explicit 0, after
+// somebody measured that transmission made them worse and wrote down why -- still passed tinted
+// light in the bounce, while foliage authored at 0.45 happened to land near its correct value by
+// coincidence. A single global cannot be right for both, and it was wrong in the direction that
+// looks like a slightly brighter room rather than like a bug.
+//
+// uAlbedoDims.w survives as a SCALE, which is what the panel's slider now drives: it remains the
+// way to judge the term by eye, and at its default of 1.0 the material is the answer.
+float transmissionAt(vec3 worldPos) {
+    if (u.uAlbedoDims.x < 1.0) return u.uAlbedoDims.w;   // no albedo grid: the scalar is all there is
+    vec3 uvw = (worldPos - u.uBoundsMin.xyz) / u.uBoundsSpan.xyz;
+    return texture(uAlbedo, clamp(uvw, vec3(0.0), vec3(1.0))).a * u.uAlbedoDims.w;
+}
+
 // Shared DDA state keeps sun and gather traversal on the same cell-stepping contract.
 struct Dda {
     ivec3 c;
@@ -169,13 +189,14 @@ vec3 transmittance(vec3 origin, vec3 dir, float maxCells) {
         if (!ddaStep(d, dims)) break;   // left the grid: the rest of the way is open sky
         float density = densityAt(d.c);
         if (density <= 0.01) continue;
-        // An OPAQUE cell transmits nothing, whatever colour it is. Without this gate a wall at
-        // density 1 would pass albedo * translucency and the sun would come through stone.
-        float trans = density >= 0.99 ? 0.0 : u.uAlbedoDims.w;
         vec3 through = vec3(1.0 - density);
-        if (trans > 0.0) {
+        // An OPAQUE cell transmits nothing, whatever its material says. Without this gate a wall
+        // at density 1 would pass albedo * transmission and the sun would come through stone.
+        // Opaque cells also never reach the fetch, which is why walls pay nothing for this.
+        if (density < 0.99) {
             vec3 hit = u.uBoundsMin.xyz + (vec3(d.c) + 0.5) * cell;
-            through += density * albedoAt(hit) * trans;
+            float trans = transmissionAt(hit);
+            if (trans > 0.0) through += density * albedoAt(hit) * trans;
         }
         t *= through;
         if (dot(t, vec3(1.0)) < 0.03) return vec3(0.0);
@@ -231,12 +252,15 @@ vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize,
         // to matter is still transport that happened, and hiding it here would make the instrument
         // agree with the shortcut instead of measuring it.
         closure += dot(weight, vec3(1.0)) / 3.0;
-        float trans = density >= 0.99 ? 0.0 : u.uAlbedoDims.w;
+        // One expression, three former copies: the sun march, the re-radiation and the tint below
+        // all wanted this cell's centre.
+        vec3 cellCentre = u.uBoundsMin.xyz + (vec3(d.c) + 0.5) * cell;
+        float trans = density >= 0.99 ? 0.0 : transmissionAt(cellCentre);
 
         // Below this a cell moves the answer by less than the 32-frame rotation's own noise, and
         // each one that clears the bar costs a second march. This bound is why foliage stays cheap.
         if (dot(weight, vec3(1.0)) > 0.06) {
-            vec3 hitPos = u.uBoundsMin.xyz + (vec3(d.c) + 0.5) * cell;
+            vec3 hitPos = cellCentre;
             // The face we came through: opposite the axis we stepped along.
             vec3 n = vec3(0.0);
             n[d.axis] = float(-d.step[d.axis]);
@@ -282,8 +306,7 @@ vec3 gather(vec3 origin, vec3 dir, float maxCells, vec3 toSun, float cellSize,
         {
             vec3 through = vec3(1.0 - density);
             if (trans > 0.0) {
-                vec3 here = u.uBoundsMin.xyz + (vec3(d.c) + 0.5) * cell;
-                through += density * albedoAt(here) * trans;
+                through += density * albedoAt(cellCentre) * trans;
             }
             t *= through;
         }

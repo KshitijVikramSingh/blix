@@ -14,7 +14,13 @@
 layout(set = 0, binding = 0) uniform Frame {
     mat4 uViewProjection;
     layout(offset = 96)  vec3 uCameraPos;
-    layout(offset = 416) vec4 uFog;   // x=screenW, y=screenH, z=fogFar, w=enabled(0/1)
+    // <b>These offsets are lit.frag's layout, written down by hand.</b> This block names only the
+    // three members the skybox needs, so every offset here is an absolute byte position into a
+    // block whose shape another file owns -- remove a vec4 from lit.frag's Frame and this silently
+    // starts reading the member after it. It is survivable only because the device cross-checks
+    // shared blocks at pipeline creation and refuses the mismatch by name; that check has now
+    // caught it once, when uClothOverride was deleted and uFog moved 416 -> 400.
+    layout(offset = 400) vec4 uFog;   // x=screenW, y=screenH, z=fogFar, w=enabled(0/1)
 } frame;
 
 // Vertex inputs are declared (matching the pipeline's VertexPosition3-

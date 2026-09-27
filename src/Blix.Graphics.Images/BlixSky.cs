@@ -35,9 +35,18 @@ public sealed record BlixSkyVolume(
     /// What colour each cell's surface is, RGBA8 at half the occupancy resolution.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Surface colour is lower-frequency than occupancy, so the default baker uses half resolution.
-    /// Bytes store the square root of linear colour to preserve precision in dark saturated
+    /// RGB stores the square root of linear colour to preserve precision in dark saturated
     /// channels; the shader squares values on read.
+    /// </para>
+    /// <para>
+    /// <b>ALPHA is the cell's mean <c>KHR_materials_diffuse_transmission</c> factor, stored
+    /// linearly</b> — how much light the surface in this cell scatters through rather than
+    /// stopping. It is not a colour and is not gamma-encoded. Cells with no surface hold zero in
+    /// all four channels; a reader distinguishes "no surface" by the grid's own presence and by
+    /// RGB, never by alpha, because a fully opaque surface legitimately stores alpha zero.
+    /// </para>
     /// </remarks>
     public bool HasAlbedo => Albedo is { Length: > 0 };
 
@@ -51,7 +60,14 @@ public sealed record BlixSkyVolume(
     private const ulong Magic = 0x594B53_58494C42UL; // "BLIXSKY"
     // Current layout: L2 coefficients, followed by occupancy and albedo grids. No older layout is
     // accepted; regenerate the scene-level bake instead.
-    private const int Version = 3;
+    //
+    // v4: the albedo grid's alpha carries per-material diffuse transmission. The BYTES did not
+    // move — v3 wrote a constant 255 into that channel and nothing read it — so this bump buys
+    // nothing structural and is made anyway, because a v3 file loaded by a v4 build would be
+    // silently interpreted as "every surface in the scene scatters 100% of the light through it".
+    // A format whose meaning changes under a fixed layout is exactly the case a version exists
+    // for; refusing the file is the only outcome that cannot be mistaken for a look.
+    private const int Version = 4;
 
     public static void Write(string path, BlixSkyVolume v)
     {

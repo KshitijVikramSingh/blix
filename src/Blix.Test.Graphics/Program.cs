@@ -4502,6 +4502,10 @@ static ShaderInterface MinimalShader() => new(new[]
 // mode thresholds still appear in the shader, which is the drift that actually happens: somebody
 // tunes a coefficient in GLSL and the C# keeps the old one. Crude next to reflecting an interface out
 // of SPIR-V, same idea — make the second copy answerable to the first.
+//
+// <b>Section BE is this section's sibling</b>, and the two differ in one way worth knowing before
+// copying either: Tonemap.cs is SHIPPED, because a capture needs the curve on the CPU, while BE's
+// SheenTwin is test-local and has to stay that way. Both shaders carry a pointer back here.
 {
     var glslPath = Path.Combine(
         AppContext.BaseDirectory, "..", "..", "..", "..", "Blix.Shaders", "tonemap.glsl");
@@ -4568,6 +4572,166 @@ static ShaderInterface MinimalShader() => new(new[]
         picked.Distinct().Count() == 4,
         string.Join(", ", picked.Select(v => v.ToString("0.0000"))));
 }
+
+// ============================================================================
+// Section BE — the sheen and diffuse-transmission terms, evaluated.
+// ============================================================================
+//
+// <b>The arc that shipped these skipped the stage that was supposed to check them, and it had
+// already written down why that was the mistake.</b> The material-response plan's stage B existed
+// because "a BRDF that cannot be evaluated on its own gets debugged by staring at Sponza" — the way
+// the GTAO slice-direction Y-flip survived, with a dark floor and a dozen candidate causes. The
+// vocabulary, the probe's Charlie cube and Sponza's response all went in; B did not. Until this
+// section the only instrument for the Charlie lobe was a curtain.
+//
+// <b>The twin below is TEST-LOCAL and deliberately not shipped.</b> Section BD's C# tonemap exists
+// because a capture is read back on the CPU and genuinely needs the curve in C#. Nothing needs
+// sheen in C#, so putting it in Blix would manufacture exactly the second implementation the
+// material-response arc exists to avoid — a cheaper lobe sitting beside the real one. Here it buys
+// the four invariants the plan named and nothing else.
+//
+// And it inherits BD's warning in full: <b>a twin can satisfy every invariant while the shipped
+// GLSL drifts out from under it.</b> That is the entire job of BE.1, which holds the twin
+// answerable line by line to the file that actually compiles.
+//
+// blix_sheenAlbedo is not here. It is a texture fetch into a table the cook bakes, and the plan
+// already records what happened to the analytic fit that stood in its place: it disagreed with the
+// integrated lobe by two orders of magnitude and survived a compile, a range check and a clamp. A
+// C# twin of a sampler proves nothing about the table.
+{
+    var sheenPath = Path.Combine(
+        AppContext.BaseDirectory, "..", "..", "..", "..", "Blix.Shaders", "sheen.glsl");
+    var sheen = File.Exists(sheenPath) ? File.ReadAllText(sheenPath) : null;
+
+    // CONTROL, per conventions §5: if the file is not found every source check below passes
+    // vacuously, and a green result would not be evidence that anything ran.
+    t.Expect("BE.0 CONTROL the sheen shader source was actually read",
+        sheen is { Length: > 200 } && sheen.Contains("blix_sheenBrdf", StringComparison.Ordinal),
+        sheen is null ? $"not found at {Path.GetFullPath(sheenPath)}" : $"{sheen.Length} chars");
+
+    if (sheen is not null)
+    {
+        // Every line of arithmetic the twin copies, pinned against the original. This is the half
+        // that notices when somebody tunes the shader and leaves the twin behind.
+        foreach (var (what, fragment) in new (string, string)[]
+        {
+            ("Charlie's inverted-roughness exponent", "pow(sin2h, invAlpha * 0.5)"),
+            ("Charlie's normalisation term",          "(2.0 + invAlpha)"),
+            ("Charlie's 2*pi denominator",            "(2.0 * BLIX_PI)"),
+            ("Ashikhmin's folded 4*NdotL*NdotV",      "1.0 / (4.0 * (NdotL + NdotV - NdotL * NdotV))"),
+            ("transmission's inverted normal",        "dot(-N, L)"),
+            ("the Lambertian 1/pi on transmission",   "/ BLIX_PI"),
+            ("sheen scaling's max over channels",     "max(max(sheenColor.r, sheenColor.g), sheenColor.b)"),
+        })
+        {
+            t.Expect($"BE.1 {what} still reads the way the twin does",
+                sheen.Contains(fragment, StringComparison.Ordinal),
+                $"sheen.glsl no longer contains `{fragment}`");
+        }
+
+        // <b>The lobe multiplies D * V and stops.</b> Ashikhmin is the VISIBILITY term with the
+        // 4*NdotL*NdotV denominator already folded in; a consumer that divides again is off by
+        // exactly that factor, which reads as "sheen is too strong at grazing angles" — precisely
+        // where sheen is supposed to be strong. It looks plausible and it is wrong, which is why
+        // it gets a source pin and not only a number.
+        t.Expect("BE.2 the sheen lobe multiplies D*V and does not divide a second time",
+            sheen.Contains("return sheenColor * d * v;", StringComparison.Ordinal),
+            "blix_sheenBrdf's body changed shape — check for a reintroduced 4*NdotL*NdotV divide");
+    }
+
+    // The same claim as a number, so it survives a reformat of the shader. At normal incidence
+    // Ashikhmin is 1/(4*(1+1-1)) = 1/4. A second fold would make it 1/16.
+    t.ExpectClose("BE.2 Ashikhmin at normal incidence is 1/4, not 1/16",
+        SheenTwin.VisibilityAshikhmin(1f, 1f), 0.25f);
+
+    // --- BE.3: the invariant the whole distribution exists for ------------------------------
+    // GGX peaks where the half-vector meets the normal. Charlie's sin^(1/a) peaks at the HORIZON,
+    // and that inversion IS the velvet rim — the cue that makes a curtain read as cloth rather
+    // than as a painted board. If this ever flips, cloth goes quietly back to looking like board
+    // and every other check here still passes.
+    const float Rough = 0.3f;
+    var atHorizon = SheenTwin.DistributionCharlie(0f, Rough);
+    var atNormal = SheenTwin.DistributionCharlie(1f, Rough);
+    t.Expect("BE.3 the Charlie lobe is maximal at the horizon and vanishes at the normal",
+        atHorizon > 1f && atNormal < atHorizon * 1e-6f,
+        $"NdotH 0 -> {atHorizon:0.0000}, NdotH 1 -> {atNormal:E3}");
+
+    var monotonic = true;
+    var previous = float.MaxValue;
+    for (var i = 0; i <= 20; i++)
+    {
+        var d = SheenTwin.DistributionCharlie(i / 20f, Rough);
+        if (d > previous + 1e-6f)
+        {
+            monotonic = false;
+        }
+
+        previous = d;
+    }
+
+    t.ExpectTrue("BE.3 the lobe falls monotonically from horizon to normal", monotonic,
+        "the distribution is not monotonic in NdotH — energy is no longer at the horizon");
+
+    // CONTROL: a stub returning a constant would satisfy "maximal at the horizon" trivially
+    // (everything equals everything) and would sail through the monotonic check too.
+    t.ExpectTrue("BE.3 CONTROL the lobe is not a constant",
+        MathF.Abs(atHorizon - SheenTwin.DistributionCharlie(0.5f, Rough)) > 1e-3f,
+        "the distribution returns the same value everywhere");
+
+    // --- BE.4: the sheen layer takes energy, it does not add it -----------------------------
+    // Without this the base layer is never darkened and a curtain gets brighter than the light
+    // falling on it — the failure that makes a sheen implementation look like a bloom bug.
+    var outOfRange = 0;
+    var worstScaling = 0f;
+    for (var c = 0; c <= 10; c++)
+    for (var a = 0; a <= 10; a++)
+    {
+        var scaling = SheenTwin.Scaling(new Vector3(c / 10f, c / 20f, c / 40f), a / 10f);
+        if (scaling is < 0f or > 1f)
+        {
+            outOfRange++;
+            worstScaling = scaling;
+        }
+    }
+
+    t.Expect("BE.4 sheen scaling stays in [0,1] across colour x albedo",
+        outOfRange == 0, $"{outOfRange} of 121 samples left the range, worst {worstScaling:0.0000}");
+
+    t.ExpectClose("BE.4 a white sheen at full albedo leaves the base nothing",
+        SheenTwin.Scaling(Vector3.One, 1f), 0f);
+    t.ExpectClose("BE.4 zero sheen albedo leaves the base untouched",
+        SheenTwin.Scaling(Vector3.One, 0f), 1f);
+
+    // --- BE.5: transmission is the light you did NOT see ------------------------------------
+    // Lambertian about the inverted normal. Front-lit is zero because that light already went
+    // into the diffuse term; adding it here would count the same photon twice.
+    var up = Vector3.UnitY;
+    var radiance = new Vector3(3f);
+    var fromFront = SheenTwin.DiffuseTransmission(up, up, radiance, Vector3.One, 1f);
+    var fromBehind = SheenTwin.DiffuseTransmission(up, -up, radiance, Vector3.One, 1f);
+
+    t.Expect("BE.5 diffuse transmission is zero when the light is in front",
+        fromFront == Vector3.Zero, $"{fromFront}");
+    t.ExpectTrue("BE.5 and positive when the light is behind", fromBehind.X > 0f, $"{fromBehind}");
+    t.ExpectClose("BE.5 a light lying in the surface plane transmits nothing",
+        SheenTwin.DiffuseTransmission(up, Vector3.UnitX, radiance, Vector3.One, 1f).X, 0f);
+
+    // pi of radiance, fully backlit, white, factor one -> exactly one. Pins the 1/pi that makes
+    // this a Lambertian lobe rather than a brightness knob.
+    t.ExpectClose("BE.5 the transmitted lobe carries the Lambertian 1/pi",
+        SheenTwin.DiffuseTransmission(up, -up, new Vector3(MathF.PI), Vector3.One, 1f).X, 1f);
+
+    // --- BE.6: and what the opaque base keeps -----------------------------------------------
+    // Energy that went out the back did not come out the front. A consumer that adds transmission
+    // without this makes cloth a light source.
+    t.ExpectClose("BE.6 an opaque surface keeps all of its base layer",
+        SheenTwin.DiffuseTransmissionScaling(0f), 1f);
+    t.ExpectClose("BE.6 a fully transmitting surface keeps none of it",
+        SheenTwin.DiffuseTransmissionScaling(1f), 0f);
+    t.ExpectClose("BE.6 an out-of-range factor is clamped rather than inverted",
+        SheenTwin.DiffuseTransmissionScaling(2f), 0f);
+}
+
 
 t.PrintSummary();
 return t.Failed;
@@ -4648,4 +4812,48 @@ sealed class TuneFixture
     [Tune]         public string Clip = "Walking_A";
     [Tune(MaxLength = 4)] public string Bone = "spine";
     public float NotTunable = 9f;   // no attribute → must be ignored
+}
+
+
+// Test-local twin of Blix.Shaders/sheen.glsl, for Section BE. NOT shipped, and not a candidate
+// for shipping: the material-response arc's whole boundary is that the spec's answer lives in one
+// file that every consumer includes, so a second evaluator in C# would be the thing that boundary
+// forbids. It exists to make four invariants assertable without a GPU, and BE.1 holds every line
+// of it answerable to the GLSL it copies.
+static class SheenTwin
+{
+    private const float Pi = 3.14159265359f;
+
+    public static float DistributionCharlie(float nDotH, float sheenRoughness)
+    {
+        var alpha = MathF.Max(sheenRoughness * sheenRoughness, 1e-4f);
+        var invAlpha = 1.0f / alpha;
+        var cos2h = nDotH * nDotH;
+        var sin2h = MathF.Max(1.0f - cos2h, 1e-7f);
+        return (2.0f + invAlpha) * MathF.Pow(sin2h, invAlpha * 0.5f) / (2.0f * Pi);
+    }
+
+    public static float VisibilityAshikhmin(float nDotL, float nDotV) =>
+        Math.Clamp(1.0f / (4.0f * (nDotL + nDotV - nDotL * nDotV)), 0.0f, 1.0f);
+
+    public static Vector3 Brdf(
+        Vector3 sheenColor, float sheenRoughness, float nDotH, float nDotL, float nDotV) =>
+        sheenColor * DistributionCharlie(nDotH, sheenRoughness) * VisibilityAshikhmin(nDotL, nDotV);
+
+    public static float Scaling(Vector3 sheenColor, float sheenAlbedo) =>
+        1.0f - MathF.Max(MathF.Max(sheenColor.X, sheenColor.Y), sheenColor.Z) * sheenAlbedo;
+
+    public static Vector3 DiffuseTransmission(
+        Vector3 n, Vector3 l, Vector3 radiance, Vector3 transmissionColor, float transmissionFactor)
+    {
+        var backNdotL = MathF.Max(Vector3.Dot(-n, l), 0.0f);
+        return radiance * backNdotL * transmissionColor * transmissionFactor / Pi;
+    }
+
+    public static Vector3 DiffuseTransmissionAmbient(
+        Vector3 backIrradiance, Vector3 transmissionColor, float transmissionFactor) =>
+        backIrradiance * transmissionColor * transmissionFactor;
+
+    public static float DiffuseTransmissionScaling(float transmissionFactor) =>
+        1.0f - Math.Clamp(transmissionFactor, 0.0f, 1.0f);
 }

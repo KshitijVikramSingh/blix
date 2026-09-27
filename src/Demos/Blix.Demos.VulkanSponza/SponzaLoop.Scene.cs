@@ -365,6 +365,7 @@ internal sealed partial class SponzaLoop
             .SetTexture(binding: 3, tex.Emissive)
             .SetTexture(binding: 4, tex.MetallicRoughness)
             .SetTexture(binding: 5, tex.Occlusion)
+            .SetTexture(binding: 6, tex.DiffuseTransmissionColor)
             .Handle;
     }
 

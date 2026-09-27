@@ -190,7 +190,7 @@ internal sealed partial class SponzaLoop
         }
         // Timing runs require --no-vsync; FIFO quantizes frame periods to refresh intervals and can
         // reverse small A/B differences.
-        if (cmdArgs.Contains("--no-vsync")) { startUnsynced = true; vk.VsyncEnabled = false; }
+        if (cmdArgs.Contains("--no-vsync")) vk.VsyncEnabled = false;
         // --shot <path>: render --shot-frames frames, write the ambient-visibility buffer and the
         // tonemapped scene beside it, and close. Headless in the sense that matters — nobody has
         // to be watching.

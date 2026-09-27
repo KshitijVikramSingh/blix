@@ -247,10 +247,22 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // sixty-four the steady state starts to drift, which is the multi-bounce feedback no longer
     // keeping up with its own convergence.
     private float injectPeriod = 32f;
-    // Global rather than per-material: glTF carries KHR_materials_transmission, and Sponza authors
-    // it nowhere — every material reports TransmissionFactor 0, so a baked per-material value would
-    // be zero everywhere and buy nothing until someone authors it.
-    private float injectTranslucency = 0.5f;
+    // A SCALE on the baked per-material value, not the value. 1.0 takes the material at its word;
+    // the slider stays because the term is judged by eye, and dragging it to 0 is the A/B.
+    //
+    // <b>It was a global 0.5 for the whole scene, and the note explaining why named the wrong
+    // extension.</b> That note said Sponza authors transmission nowhere, every material reporting
+    // TransmissionFactor 0 — true, and about KHR_materials_transmission, the clear pane you see
+    // THROUGH. What the bounce needed was KHR_materials_diffuse_transmission, the thin sheet that
+    // GLOWS backlit, which the scene's patches author on exactly the surfaces that have it:
+    // LeafSpring and IvyLeaf at 0.45, and the three curtains at an explicit measured 0. Two
+    // extensions, two lines apart in the material table, and checking the near one made a
+    // per-material bake look like it would buy nothing.
+    //
+    // The cost of the conflation was not subtle once found: every non-opaque cell in the scene
+    // scattered half its light, so the curtains passed tinted light in the bounce that their own
+    // material says they do not pass.
+    private float injectTransmissionScale = 1.0f;
 
     // Isolate the sky path's two costs: the compute solve and the two 3D fetches made by every lit
     // fragment. Amortising the dispatch 8x recovered only 4 of 19 ms, so keep both switches for a
@@ -381,9 +393,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // solid cards); the point is the frame time beside it.
     private bool forceOpaqueMask;
 
-    // --no-vsync: uncap the presentation so the frame timer reports work rather than refresh.
-    private bool startUnsynced;
-
     // --ab-flat: after loading, alternate between the FLAT path and the full lit path every
     // AbPeriodFrames frames, bucketing frame times separately.
     //
@@ -443,13 +452,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
         "Probe leak (red = weight through walls)",
         "Pre-pass normal (what the incident field reads)",
     };
-
-    // Live overrides for the two cloth numbers, so they can be found by eye and then written back
-    // into the patch. Off by default: the cooked value is the real one.
-    private bool clothOverride;
-    // Seeded from the cooked patch so enabling the override does not jump the image.
-    private float sheenRoughness = 1.0f;
-    private float diffuseTransmit = 0.0f;
 
     // --ao-fullres: run ambient visibility at framebuffer resolution instead of half. Half res is
     // the right default for a low-frequency term, but a crease a few centimetres wide is not low
@@ -518,10 +520,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     // Whether each cascade re-rendered this frame (vs. served from cache) —
     // surfaced in the overlay so the caching is visible.
     private readonly bool[] cascadeRendered = new bool[CascadeCount];
-    // Per-cascade base depth bias in NDC units, derived each frame from that
-    // cascade's world-space texel size ÷ ortho depth range (≈ BiasTexels
-    // shadow texels of slope-independent offset). The fragment shader adds a
-    // grazing-angle slope term on top.
     /// <summary>One shadow texel in WORLD units, per cascade — derived from the cascade fit.</summary>
     /// <remarks>The shared shadow path derives normal offset and filter scale from this length.</remarks>
     private readonly float[] cascadeTexelWorld = new float[CascadeCount];
@@ -551,7 +549,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     private readonly long[] cascadeTriangleSum = new long[CascadeCount];
     private long cameraTriangleSum;
     private long triangleFrames;
-    private bool triangleWindowOpen;
     /// <summary>--shadow-lod N: caster geometric error allowed, in shadow-map texels.</summary>
     private float shadowLodTexels = 1.5f;
     /// <summary>The camera frustum for this frame; the cascades cull their casters against it.</summary>
@@ -897,6 +894,11 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
 
 }
 
+// <b>The [Tune] bools below carry an explicit `= false`.</b> The overlay assigns them through
+// reflection, which the compiler cannot see, so each one raised a CS0649 "never assigned". Three
+// false positives in the warning channel is how the two fields that WERE dead -- a never-read
+// vsync flag and a never-used triangle-window bool -- sat there being reported and ignored. The
+// initialiser costs nothing and keeps that channel worth reading.
 // Volumetric-fog tunables, auto-exposed via [Tune] (overlay "Fog" group —
 // FogSettings → "Fog"). The fields are the source of truth; the render loop
 // reads fog.Density etc. directly, the overlay reflects + edits them.
@@ -920,7 +922,7 @@ internal sealed class FogSettings
     [Tune(0f, 0.98f)]   public float Temporal = 0.9f;
     // Visualize fog-history rejection: bright at disocclusions and newly exposed screen edges,
     // black where history was accepted. A still camera should therefore be nearly black.
-    [Tune]              public bool ShowRejection;
+    [Tune]              public bool ShowRejection = false;
 }
 
 // Tonemap operators (overlay Render → Tonemap); the enum's int value indexes
@@ -928,11 +930,18 @@ internal sealed class FogSettings
 internal enum TonemapMode { Reinhard, ACES, AgX, Hejl }
 
 // Sun-shadow tunables (overlay "Shadows" group). Read live by UpdateCascades
-// (bias + ortho-fit distance) and the per-frame uShadowStrength write.
+// (the ortho-fit distance) and the per-frame uShadowStrength write.
+//
+// <b>BiasTexels was here and was connected to nothing.</b> It sat in this group as a
+// [Tune(0f, 6f)] slider, and the only other mention of it in the tree was a comment describing a
+// per-cascade NDC bias array that had already been deleted. Depth bias now lives in the shared
+// blix_sun_shadow_cascaded path as a slope-scaled constant, and the receiver offset and filter
+// width are derived from cascadeTexelWorld by the cascade fit -- so there was no longer a quantity
+// for this dial to move. It is deleted rather than re-wired: a control that silently does nothing
+// is worse than no control, because dragging it is evidence the bias is not the problem.
 internal sealed class ShadowsSettings
 {
     [Tune]            public bool Enabled = true;
-    [Tune(0f, 6f)]    public float BiasTexels = 1.5f;
     [Tune(10f, 120f)] public float SunDistance = 40f;
 }
 
@@ -954,7 +963,7 @@ internal sealed class AmbientSettings
     [Tune(0f, 0.97f)] public float Temporal = 0.9f;
     // Visualize ambient-history rejection or clamping: bright at disocclusions and screen edges,
     // black where history was accepted.
-    [Tune]            public bool ShowRejection;
+    [Tune]            public bool ShowRejection = false;
 }
 
 // Misc render tunables (overlay "Render" group). Vsync stays a manual toggle —
@@ -974,7 +983,7 @@ internal sealed class RenderSettings
     // rejected off-screen and neighbourhood-clamped so the present frame remains authoritative.
     [Tune(0f, 0.97f)]  public float Taa = 0.7f;
     // Bright where history was refused or clamped back. A still camera should show nearly nothing.
-    [Tune]             public bool ShowTaaRejection;
+    [Tune]             public bool ShowTaaRejection = false;
 }
 
 // Pickable scene primitives for the diagnostics overlay. Built after geometry

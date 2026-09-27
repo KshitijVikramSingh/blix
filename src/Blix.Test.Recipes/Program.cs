@@ -1153,6 +1153,65 @@ public static class Program
         }
 
 
+        // ====================================================================
+        // The sky volume's albedo alpha: per-material diffuse transmission.
+        // ====================================================================
+        //
+        // <b>The format's MEANING changed under a fixed layout, which is the version bump's whole
+        // reason.</b> v3 wrote a constant 255 into the albedo grid's alpha and nothing read it;
+        // v4 writes each cell's mean KHR_materials_diffuse_transmission there and the transport
+        // reads it. The bytes are identical in size and position, so a v3 file loaded by a v4
+        // build would not fail — it would quietly report that every surface in the scene scatters
+        // 100% of the light through it, and the result would look like a slightly brighter room.
+        //
+        // The BAKER's half of this — that a material's factor actually reaches the cell — is
+        // checked by the cook's own report rather than here, because reaching it needs real
+        // cooked meshes. `blix cook sky` prints the percentage of surface cells that scatter, and
+        // a scene known to author the extension printing 0% is the failure that matters.
+        var skyDir = Path.Combine(Path.GetTempPath(), "blix-sky-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(skyDir);
+        try
+        {
+            var file = Path.Combine(skyDir, "probe.blixsky");
+            var cells = 2 * 2 * 2;
+            // Alpha holds 0.45 (foliage, as Sponza's tree and ivy patches author it) in the first
+            // cell and 0 (a curtain, authored as an explicit measured zero) in the second.
+            var albedo = new byte[cells * 4];
+            albedo[3] = (byte)Math.Round(0.45f * 255f);
+            albedo[7] = 0;
+            var volume = new Blix.Graphics.Images.BlixSkyVolume(
+                new System.Numerics.Vector3(-1f), new System.Numerics.Vector3(1f),
+                2, 2, 2, new float[cells * Blix.Graphics.Images.BlixSkyVolume.FloatsPerCell],
+                2, 2, 2, new byte[cells],
+                2, 2, 2, albedo);
+            Blix.Graphics.Images.BlixSkyVolume.Write(file, volume);
+
+            var read = Blix.Graphics.Images.BlixSkyVolume.Read(file);
+            t.ExpectTrue("a sky volume round-trips its albedo grid", read.HasAlbedo);
+            t.Expect("and the alpha channel survives as the cell's diffuse transmission",
+                read.Albedo![3] == albedo[3] && read.Albedo![7] == 0,
+                $"alpha came back {read.Albedo![3]} and {read.Albedo![7]}, wrote {albedo[3]} and 0");
+            t.Expect("an opaque cell's zero is a VALUE, not an absent surface",
+                read.Albedo![7] == 0 && read.HasAlbedo,
+                "a reader must not treat alpha 0 as 'no surface here'");
+
+            // Stamp the version field back to v3 and confirm the file is refused. Byte offset 8:
+            // the magic is one ulong, the version the int immediately after it.
+            var stale = Path.Combine(skyDir, "v3.blixsky");
+            var bytes = File.ReadAllBytes(file);
+            BitConverter.GetBytes(3).CopyTo(bytes, 8);
+            File.WriteAllBytes(stale, bytes);
+            var refused = Throws(() => Blix.Graphics.Images.BlixSkyVolume.Read(stale));
+            t.ExpectTrue("a volume from before alpha meant anything is REFUSED, not reinterpreted",
+                refused is not null);
+            t.ExpectTrue("and the refusal names the version it found",
+                refused?.Contains("v3", StringComparison.Ordinal) == true);
+        }
+        finally
+        {
+            Directory.Delete(skyDir, recursive: true);
+        }
+
         t.PrintSummary();
 
         return t.Failed;
