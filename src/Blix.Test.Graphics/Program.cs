@@ -4737,12 +4737,13 @@ static ShaderInterface MinimalShader() => new(new[]
 // Section BF — CreateMesh uploads the index buffer the mesh actually has.
 // ============================================================================
 //
-// <b>An engine helper with zero consumers, because of one missing branch.</b>
+// <b>An engine helper no SKINNED consumer could use, because of one missing branch.</b>
 // Blix.Render's device.CreateMesh(MeshData) is the whole of "turn an imported mesh into
 // something drawable" and it takes no shader, material, pipeline or instance count -- exactly the
-// line a loader is supposed to stop at. Four skinned consumers (Runner, Bulwark, VulkanLit and
-// StudioRig) each hand-rolled that upload anyway, and the reason was that CreateMesh read
-// data.Indices unconditionally. For a 32-bit mesh that array is EMPTY: the draw got no indices and
+// line a loader is supposed to stop at. The external RTSGame consumer calls it happily, nine
+// times, because its props are small enough to index in 16 bits. Every skinned consumer in this
+// tree hand-rolled the upload instead, and the reason was that CreateMesh read data.Indices
+// unconditionally. For a 32-bit mesh that array is EMPTY: the draw got no indices and
 // an index count of zero, which renders nothing rather than failing. MeshData's own comment states
 // the obligation -- "consumers branch on IndexFormat to decide which array + which
 // CreateIndexBuffer overload to use" -- and the helper written to spare consumers that branch was

@@ -308,17 +308,23 @@ them is how a lab grows a framework:
 
 **Adopting beats extracting, and an unadopted helper is worse than none.** Four skinned consumers
 and the two Studio loaders each hand-rolled the same mesh upload while
-`Blix.Render`'s `device.CreateMesh(MeshData)` sat at zero consumers — unusable because it read the
-16-bit index array unconditionally, so a 32-bit mesh got no indices and a count of zero. The fix
-was one branch and then eight adoptions, not a new type. Two lessons are worth keeping:
+`Blix.Render`'s `device.CreateMesh(MeshData)` sat unused by all of them — it read the 16-bit index
+array unconditionally, so a 32-bit mesh got no indices and a count of zero, and a rig is exactly
+the asset that passes 65535 vertices. The fix was one branch and then eight adoptions, not a new
+type. Three lessons are worth keeping:
 
 - **Check whether the extraction already exists before writing one.** The tree had produced three
-  attempts at "a loaded model you can draw" and two of them (`CreateMesh`, `PropModel`) had no
-  consumers at all.
+  attempts at "a loaded model you can draw", and the proposal was to add a fourth.
 - **A private copy of an engine step is a place to miss a case silently.** Both bugs found the day
   this was written had that shape: `CreateMesh`'s missing 32-bit branch, and Vulkan Lit resolving
   its own albedo — handling only the raw-PNG form, so the moment a build cooked its assets the
   character lost its texture with no error anywhere, and a person had to notice.
+- **Count consumers across the source consumers too, not just `src/`.** Both helpers above were
+  first written off as having *zero* consumers, measured inside this repository. `CreateMesh` has
+  nine callers in the external RTSGame tree and `PropModel` has seventy-two; `PropModel` reads as
+  dead here only because the game it was built for left the repository. An engine type's consumer
+  count is not a `grep` over `src/`, and treating it as one argues for deleting things that are
+  load-bearing.
 
 The matching decision is recorded where it was taken: a *rig* type was refused, because once the
 upload was shared what remained would have had to carry the bone palette's instancing policy, and

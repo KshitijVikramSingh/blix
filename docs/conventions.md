@@ -229,6 +229,18 @@ pose).
   them; there is no discovery, registration, or active-tool branch, and a
   different executable simply builds a different root.
 
+- **Count consumers across the source consumers, not just `src/`.** A second
+  consumer is the bar for extraction, and the absence of consumers is the
+  argument for deletion — so both readings depend on counting the right set.
+  Blix is consumed as a pinned source checkout by at least one game outside
+  this repository, and a `grep` over `src/` cannot see it. Measured that way,
+  `CreateMesh` and `PropModel` both read as having *zero* consumers while
+  between them holding eighty-one callers in the external RTSGame tree, and
+  `PropModel` looks like an abstraction nobody adopted when in truth the game
+  it was built for left the repository. An engine type's consumer count is a
+  question about every consumer, and answering it with the convenient search
+  argues for deleting load-bearing code.
+
 **Enforced by:** [`architecture.md` §"Library, not framework"](architecture.md)
 · [`architecture.md` §"How an application is put together"](architecture.md)
 · the *Proves / Owns* header block on each `src/Demos/Blix.Demos.*/Program.cs` · the

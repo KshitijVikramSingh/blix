@@ -532,9 +532,12 @@ expected. **The extraction already existed.**
 
 `Blix.Render`'s `device.CreateMesh(MeshData)` is precisely the per-primitive half this stage
 described — buffers, index count, bounds, and no shader, material, pipeline or instance count. It
-had **zero** consumers, and one missing branch is the whole reason: it read `data.Indices`
-unconditionally, and for a 32-bit mesh that array is empty, so the draw got no indices and a count
-of zero. Eight call sites had each written the branch themselves rather than adopt it. So the work
+had no consumer among the skinned paths, and one missing branch is the whole reason: it read
+`data.Indices` unconditionally, and for a 32-bit mesh that array is empty, so the draw got no
+indices and a count of zero — and a rig is exactly the asset that passes 65535 vertices. (It was
+not unused in general: the external RTSGame tree calls it nine times, because its props index in
+16 bits. That distinction was missed on the first pass and is the whole subject of the note
+below.) Eight call sites here had each written the branch themselves rather than adopt it. So the work
 was to fix it and adopt it, not to invent a third abstraction beside it: Runner, Bulwark,
 VulkanLit, `StudioRig` (skinned parts, static parts, attachments) and `StudioModel` now all upload
 through it, which satisfies rule 2 with four consumers instead of one.
@@ -564,9 +567,18 @@ fallback chains differ per game. It earns a place when something wants the *same
 2. **The existing consumer is rewritten on top of it, not left beside it.** An extraction whose
    first consumer keeps its own copy has not been proved by anything.
 
-Rule 2 is not hypothetical. `Blix.Render/PropModel` — 686 lines, extracted from TankArena and
-Bulwark, adopted by neither, still at zero consumers — is what skipping it looks like, and this
-stage cited it as evidence without noticing it had already happened.
+**A correction, because the first version of this section got it backwards.** `PropModel` was
+written off here as 686 lines that TankArena and Bulwark had never adopted — rule 2's failure,
+already in the tree. That is wrong. Its header says those two games grew a private version
+*before* it lived here, which is what motivated the extraction; the consumer it was actually built
+for and used by was **RTSGame**, which uses it seventy-two times and which left this repository on
+2026-09-25. It reads as dead here because its consumer moved, not because nobody adopted it.
+
+The lesson is not about `PropModel`, it is about the measurement. **Blix now has a source consumer
+outside this repository, so a consumer count taken over `src/` is structurally wrong** — it says
+zero for two helpers that between them have eighty-one callers, and it would have argued for
+deleting both. This is the same failure [[blix-audit-by-grep]] already records: search for the
+value, not for the name, and be sure the search covers where the value would be.
 
 **And the cost of an unadopted helper was measured, not argued.** Two bugs on the same day shared
 one signature: a consumer hand-rolling a load step, missing a case the engine helper already
