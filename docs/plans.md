@@ -32,29 +32,32 @@ focused documentation:
   responses the arc deliberately did not build, and why, are recorded with the
   Sponza renderer rather than left in a plan.
 
-## Deferred work with no plan of its own
+## Work found beside a plan, and finished without one
 
-Neither of these owns a design decision large enough to be a plan record, and
-neither should be lost because of that. Both were found on 2026-09-27 while
-closing the material-response arc.
+Both were found on 2026-09-27 while closing the material-response arc, were too
+small to be plan records, and are **done**. They are recorded here because what
+each one exposed outlived the fix.
 
-- **One declaration for Sponza's `Frame` block.** `skybox.vert` declares a
-  sparse copy of `lit.frag`'s `Frame` uniform block using hand-written absolute
-  byte offsets, so adding or removing a member in `lit.frag` silently
-  invalidates it. It is survivable only because the device cross-checks shared
-  blocks at pipeline creation and refuses the mismatch by name — which it did,
-  when `uClothOverride` was deleted and `uFog` moved 416 to 400. The fix is one
-  shared include both shaders pull in, so the offsets stop existing rather than
-  staying correct by vigilance. Note that `blix test` cannot catch this class of
-  break: every suite is deviceless and builds no pipeline.
-- **Texture authoring in `MaterialPatch`.** The patch mechanism sets scalars and
-  vectors, so a scene can author `diffuseTransmissionColor` but not
-  `diffuseTransmissionColorTexture`. `lit.frag` now consumes that texture and
-  nothing in any pack can supply one, which makes the binding conformance
-  plumbing with no way to exercise it. Teaching the patch to name a texture
-  would also turn the deleted `* albedo` hack into a declared decision: a scene
-  that wants per-texel transmission variation says so, instead of the renderer
-  assuming it.
+- **One declaration for Sponza's `Frame` block.** `skybox.vert` held a sparse
+  copy of `lit.frag`'s block at hand-written byte offsets; deleting a `vec4`
+  moved `uFog` under it. Now one `Shaders/frame.glsl` that every shader
+  includes, so the offsets are the compiler's problem. Moving the block also
+  moved the `//@tune` decorators out of the file a load-time scan could see,
+  which is why that metadata became a build sidecar and why an application no
+  longer ships its GLSL at all.
+- **Texture authoring in `MaterialPatch`.** A patch can now point
+  `diffuseTransmissionColorTexture` at an image the asset already carries, which
+  is what makes the renderer's spec-correct behaviour liveable: the per-texel
+  variation the deleted `* albedo` hack used to provide is authored by the scene
+  instead of assumed for everybody.
+
+The durable lesson is neither of those. **Both were invisible to a green gate**,
+as were two other faults the same day, because every suite here is deviceless
+and builds no Vulkan pipeline. Two of the four turned out to be static
+properties of the source, and are now checked as such in `Blix.Test.Graphics`
+section **BG**: a shader's includes must be declared build inputs, and shaders
+sharing a uniform block must agree about it. The rest still need an application
+to actually boot, which is a pre-commit concern rather than a CI one.
 
 ## Lifecycle
 

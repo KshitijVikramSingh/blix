@@ -1,6 +1,6 @@
 # Character arc — plan
 
-> **Status 2026-09-27 — active, C-0 closed, C-A next.** The Room/contact
+> **Status 2026-09-28 — active, C-0 closed, C-A next.** The Room/contact
 > instrument is built (R-A through R-E). Motion was built, argued against by
 > its own dump, and deleted; its interpolation half became the animation arc's
 > stage D and its selection half is undecided and unbuilt. C-C is dropped on
@@ -8,12 +8,15 @@
 >
 > **C-0 is done and its answer was no.** Rig residency was handed to the
 > tooling arc as T-C1 and never landed, so this arc took it back — and found
-> the extraction already existed as `Blix.Render`'s `CreateMesh`, unusable and
-> unused because of one missing 32-bit branch. Fixing it and adopting it at
-> eight call sites removed the real duplication. What was left could not earn
-> a type without carrying the palette's instancing policy across the line rule
-> 1 draws, so a rig type is a recorded **decided-no** rather than a third
-> stranded abstraction. See C-0 for the measurement.
+> the extraction already existed as `Blix.Render`'s `CreateMesh`, unusable by
+> any *skinned* consumer because of one missing 32-bit branch. (Not unused in
+> general: the external RTSGame tree calls it nine times, because its props
+> index in 16 bits. Measuring that only inside `src/` is its own lesson, now
+> conventions §4.) Fixing it and adopting it at ten call sites removed the real
+> duplication. What was left could not earn a type without carrying the
+> palette's instancing policy across the line rule 1 draws, so a rig type is a
+> recorded **decided-no** rather than a third stranded abstraction. See C-0 for
+> the measurement.
 >
 > **Nothing now blocks C-A**, which is where the arc resumes: contact drives
 > blend weights, with no state machine between them.
