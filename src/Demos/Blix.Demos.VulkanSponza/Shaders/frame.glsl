@@ -38,37 +38,43 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  uCascadeTexels;
     vec4  uFog;                    // x=screenW, y=screenH, z=fogFar, w=enabled(0/1)
     // Named live-tunable members carry their own range/default metadata for reflected diagnostics.
-    //@tune 0..1 = 0
+    //@tune bool
     float uVisualizeCascades;
     // 1 = visibility as greyscale, 2 = bent normal as RGB. Keep the term directly inspectable so
     // its structure can be judged independently of the final composition.
     // Note it still goes through exposure + tonemap in the present pass, so read it for STRUCTURE
     // (where the corners darken, where the normals bend) rather than as calibrated values.
-    //@tune 0..2 = 0
+    //@tune enum{ Off, Visibility, Bent normal }
     float uVisualizeAmbient;
     // Makes cutout fragments fully covered so diagnostic and lit paths address the same foliage
     // pixels. This separates coverage compositing from shading-term faults.
-    //@tune 0..1 = 0
+    //@tune bool
     float uForceOpaqueCutout;
     // Four-corner tetrahedral probe reconstruction instead of eight-corner trilinear. Halves this
     // lookup's fetches and pays a few compares; watch for LEAKING rather than blurring, since
     // fewer candidates means the visibility test empties the set more often.
-    //@tune 0..1 = 0
+    //@tune bool
     float uProbeTetrahedral;
-    // How hard the probe blend trusts a marched line of sight through the occupancy grid over the
-    // Chebyshev depth-moment test. 0 is the shipped behaviour exactly, 1 rejects any probe the
+    // Whether the probe blend trusts a marched line of sight through the occupancy grid over the
+    // Chebyshev depth-moment test. Off is the shipped behaviour exactly; on rejects any probe the
     // march says is behind geometry. Read the leak census (--viz 21) and the fallback rate
     // together: rejecting everything reports no leak and no light.
     //
-    // Defaults to 1: measured leak falls from 17.4% of blend weight to zero while surviving weight
-    // falls from 24.4% to 21.0%. The incident field amortizes the march over coarse texels.
-    //@tune 0..1 = 1
+    // <b>Off by default, and that reverts a measured improvement on purpose.</b> With it on,
+    // leak falls from 17.4% of blend weight to zero while surviving weight falls from 24.4% to
+    // 21.0% -- so the number that justified defaulting it on is real and is kept here rather than
+    // deleted with it. What the number does not capture is what the darkening costs by eye, which
+    // is the judgement this default now follows.
+    //
+    // It was also a 0..1 slider, and the intermediate values were a fiction: nothing chose 0.4
+    // between two rejection strategies. A switch is what it is.
+    //@tune bool
     float uProbeOcclusion;
     // Transport diagnostics. Measurement helpers must forward argument arrays with "$@"; collapsed
     // multi-flag invocations invalidate these A/B controls.
-    //@tune 0..1 = 0
+    //@tune bool
     float uSkyDropL2;
-    //@tune 0..1 = 0
+    //@tune bool
     float uNoBounceTerm;
     // Which normal the inline ambient asks the world-space fields along: 1 (the default) is the
     // INTERPOLATED GEOMETRIC normal, 0 is the normal-mapped one.
@@ -84,7 +90,7 @@ layout(set = 0, binding = 0) uniform Frame {
     // and does not shrink with resolution, so flipping this to 0 still splits that error into the
     // two halves with different fixes -- relief the field can never see, versus a depth
     // reconstruction a prepass normal target would repair.
-    //@tune 0..1 = 1
+    //@tune bool
     float uAmbientGeoNormal;
     // Measurement switches, one per --ab mode. Each removes one term from the fragment so a paired
     // interleaved run can price it:

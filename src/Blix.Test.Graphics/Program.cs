@@ -1257,6 +1257,10 @@ static ShaderInterface MinimalShader() => new(new[]
             float uEngineThing;
             //@tune enum{ PBR, Albedo, Normal, Roughness, Cascade }
             int   uDebugView;
+            //@tune bool
+            float uShowCascades;
+            //@tune bool = 1
+            float uProbeOcclusionOn;
         } tune;
 
         // A bare uniform outside any block, still tunable.
@@ -1271,8 +1275,8 @@ static ShaderInterface MinimalShader() => new(new[]
         return null;
     }
 
-    // Q.0 — only the four tagged decls surface; uEngineThing is dropped.
-    t.ExpectClose("Q.0 four tunables found (untagged ignored)", tunables.Count, 4);
+    // Q.0 — only the tagged decls surface; uEngineThing is dropped.
+    t.ExpectClose("Q.0 six tunables found (untagged ignored)", tunables.Count, 6);
     t.ExpectTrue("Q.0 untagged uEngineThing excluded", Find("uEngineThing") is null);
 
     // Q.1 — float range + default + inferred group/label.
@@ -1295,6 +1299,26 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectTrue("Q.2 first option 'PBR'", dv?.EnumNames is { Count: > 0 } e && e[0] == "PBR");
     t.ExpectTrue("Q.2 last option 'Cascade'", dv?.EnumNames is { Count: 5 } e2 && e2[4] == "Cascade");
     t.ExpectClose("Q.2 enum max = count-1", dv?.Max ?? -1, 4);
+
+    // Q.4 — `//@tune bool`: a switch declared as one instead of as a 0..1 slider.
+    //
+    // Six of VulkanSponza's eight dials were switches wearing a float range, because a toggle
+    // could not be asked for. A slider over a boolean accepts 0.37, which the shader rounds at
+    // its `> 0.5` test, and reads as an amount when it names a choice -- which is how one of
+    // them got a default of 1 that nobody meant as "use the other normal".
+    var show = Find("uShowCascades");
+    t.ExpectTrue("Q.4 uShowCascades is Bool", show is { Kind: TunableKind.Bool });
+    t.ExpectClose("Q.4 bare bool defaults off", show?.Default ?? -1, 0);
+    t.ExpectClose("Q.4 and spans 0..1", show?.Max ?? -1, 1);
+
+    var on = Find("uProbeOcclusionOn");
+    t.ExpectTrue("Q.4 an explicit '= 1' is Bool too", on is { Kind: TunableKind.Bool });
+    t.ExpectClose("Q.4 and defaults on", on?.Default ?? -1, 1);
+
+    // CONTROL: the float form must NOT be swept up as a bool, or every slider becomes a
+    // checkbox and the one genuine 0..1 amount in the tree loses its range.
+    t.ExpectTrue("Q.4 CONTROL a ranged payload is still Float",
+        Find("uSunIntensity") is { Kind: TunableKind.Float });
 
     // Q.3 — bare uniform outside a block: Int kind, empty group.
     var lod = Find("uLodBias");

@@ -28,7 +28,7 @@ namespace Blix.Graphics;
 // reflection; this intent comes from the source. The diagnostics layer joins the
 // two by name. GLSL-source tooling lives here in Blix.Graphics (next to the GLSL
 // preprocessor / ShaderLoader), independent of any backend.
-public enum TunableKind { Float, Int, Enum }
+public enum TunableKind { Float, Int, Enum, Bool }
 
 public sealed record ShaderTunable(
     string Name,
@@ -123,8 +123,27 @@ public static class ShaderTunables
         return result;
     }
 
+    private static readonly Regex BoolPayload = new(
+        @"^bool(?:\s*=\s*(\S+))?$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private static ShaderTunable Build(string name, string block, string type, string payload)
     {
+        // <b>`//@tune bool` exists because most of these were never magnitudes.</b> Six of
+        // VulkanSponza's eight dials switch something on or off, and every one of them was
+        // declared `0..1` and drawn as a slider, because a toggle could not be asked for. A
+        // slider over a boolean invites 0.37, which the shader silently rounds at its `> 0.5`
+        // test, and it reads as an amount when it names a choice -- which is how one of them
+        // acquired a DEFAULT of 1 that nobody intended as "use the other normal".
+        //
+        // The uniform stays a float carrying 0 or 1, so the shader side is unchanged and
+        // AppendUniforms keeps writing one kind of thing.
+        var bl = BoolPayload.Match(payload);
+        if (bl.Success)
+        {
+            var on = bl.Groups[1].Success && ParseFloat(bl.Groups[1].Value) != 0f;
+            return new ShaderTunable(name, block, TunableKind.Bool, 0, 1, on ? 1f : 0f);
+        }
+
         var en = EnumPayload.Match(payload);
         if (en.Success)
         {
