@@ -217,9 +217,10 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
     private bool skinnedLoaded;
     private PipelineHandle skinnedPipeline;         // scene (lit, instanced)
     private PipelineHandle skinnedShadowPipeline;   // shadow caster (depth-only, instanced)
-    private VertexBufferHandle[] enemyVBs = Array.Empty<VertexBufferHandle>();
-    private IndexBufferHandle[] enemyIBs = Array.Empty<IndexBufferHandle>();
-    private int[] enemyIndexCounts = Array.Empty<int>();
+    // One Mesh per glTF primitive — see Runner. The palette's per-instance stride, both
+    // pipelines and the shadow caster stay here, which is where this game differs from every
+    // other skinned consumer.
+    private Mesh[] enemyMeshes = Array.Empty<Mesh>();
     private Skeleton enemySkeleton = null!;
     private Pose enemyRestPose = null!, enemyPose = null!;
     private BonePalette enemyBonePalette = null!;
@@ -495,8 +496,8 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
             if (skinnedLoaded && enemies.Count > 0)
             {
                 var instN = Math.Min(enemies.Count, MaxAlive);
-                for (var i = 0; i < enemyVBs.Length; i++)
-                    scope.DrawIndexedInstanced(enemyVBs[i], enemyIBs[i], skinnedShadowPipeline, enemyIndexCounts[i],
+                foreach (var mesh in enemyMeshes)
+                    scope.DrawIndexedInstanced(mesh.VertexBuffer, mesh.IndexBuffer, skinnedShadowPipeline, mesh.IndexCount,
                         instN, Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), enemyBones.Handle, shadowPush);
             }
         });
@@ -520,8 +521,8 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
             if (skinnedLoaded && enemies.Count > 0)
             {
                 var instN = Math.Min(enemies.Count, MaxAlive);
-                for (var i = 0; i < enemyVBs.Length; i++)
-                    scope.DrawIndexedInstanced(enemyVBs[i], enemyIBs[i], skinnedPipeline, enemyIndexCounts[i],
+                foreach (var mesh in enemyMeshes)
+                    scope.DrawIndexedInstanced(mesh.VertexBuffer, mesh.IndexBuffer, skinnedPipeline, mesh.IndexCount,
                         instN, Array.Empty<ShaderUniform>(), shadowBind, enemyBones.Handle, worldPush);
             }
             particles.Draw(scope, particlePipeline,
@@ -1115,19 +1116,10 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
                 RenderTarget: graph.GetPassSurface(shadowPassHandle)), "skinned.shadow");
 
             var n = model.Primitives.Length;
-            enemyVBs = new VertexBufferHandle[n];
-            enemyIBs = new IndexBufferHandle[n];
-            enemyIndexCounts = new int[n];
+            enemyMeshes = new Mesh[n];
             for (var i = 0; i < n; i++)
             {
-                var mesh = model.Primitives[i].Mesh;
-                enemyVBs[i] = vk.CreateVertexBuffer(
-                    new VertexBufferData(new VertexBufferDescription(mesh.Layout, mesh.VertexCount, GraphicsBufferUsage.Static), mesh.VertexBytes),
-                    $"enemy.vb{i}");
-                enemyIBs[i] = mesh.Indices32 is { } u32
-                    ? vk.CreateIndexBuffer(u32, name: $"enemy.ib{i}")
-                    : vk.CreateIndexBuffer(mesh.Indices, name: $"enemy.ib{i}");
-                enemyIndexCounts[i] = mesh.IndexCount;
+                enemyMeshes[i] = vk.CreateMesh(model.Primitives[i].Mesh, $"enemy.{i}");
             }
             enemyBones = vk.CreateMaterial(sceneShader, setIndex: 3, framesInFlight: vk.MaxFramesInFlightCount, name: "enemy.bones");
             skinnedLoaded = true;

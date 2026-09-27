@@ -6,6 +6,7 @@ using Blix.Cooked;
 using Blix.Graphics;
 using Blix.Graphics.Images;
 using Blix.Graphics.Vulkan;
+using Blix.Render;
 
 namespace Blix.Tools.Studio;
 
@@ -241,21 +242,17 @@ public sealed class StudioRig : IDisposable
             rig.AccumulateRestBounds(mesh);
 
             var name = $"lab.rig.{Path.GetFileNameWithoutExtension(path)}.{i}";
-            var vb = vk.CreateVertexBuffer(
-                new VertexBufferData(
-                    new VertexBufferDescription(mesh.Layout, mesh.VertexCount, GraphicsBufferUsage.Static),
-                    mesh.VertexBytes),
-                $"{name}.vb");
-            var ib = mesh.Indices32 is { } wide
-                ? vk.CreateIndexBuffer(wide, name: $"{name}.ib")
-                : vk.CreateIndexBuffer(mesh.Indices, name: $"{name}.ib");
+            // Blix.Render owns the upload; this owns what the upload is FOR. The skinned material,
+            // the palette buffer's per-skin stride and the passes stay here, because they are what
+            // consumers of a rig actually differ in -- see the Part record below.
+            var partMesh = vk.CreateMesh(mesh, name);
 
             var material = primitive.Material;
             rig.parts.Add(new Part(
                 SkinIndex: primitive.SkinIndex,
-                Vertices: vb,
-                Indices: ib,
-                IndexCount: mesh.IndexCount,
+                Vertices: partMesh.VertexBuffer,
+                Indices: partMesh.IndexBuffer,
+                IndexCount: partMesh.IndexCount,
                 BaseColour: material is null
                     ? new Vector3(0.75f)
                     : new Vector3(
@@ -280,19 +277,14 @@ public sealed class StudioRig : IDisposable
             {
                 var mesh = source.Primitives[p].Mesh;
                 var name = $"lab.rig.{Path.GetFileNameWithoutExtension(path)}.static.{i}.{p}";
+                var staticMesh = vk.CreateMesh(mesh, name);
                 var material = source.Primitives[p].Material;
                 rig.staticParts.Add(new StaticPart(
                     Name: source.Primitives.Length > 1 ? $"{source.Name}.{p}" : source.Name,
                     WorldTransform: source.WorldTransform,
-                    Vertices: vk.CreateVertexBuffer(
-                        new VertexBufferData(
-                            new VertexBufferDescription(mesh.Layout, mesh.VertexCount, GraphicsBufferUsage.Static),
-                            mesh.VertexBytes),
-                        $"{name}.vb"),
-                    Indices: mesh.Indices32 is { } staticWide
-                        ? vk.CreateIndexBuffer(staticWide, name: $"{name}.ib")
-                        : vk.CreateIndexBuffer(mesh.Indices, name: $"{name}.ib"),
-                    IndexCount: mesh.IndexCount,
+                    Vertices: staticMesh.VertexBuffer,
+                    Indices: staticMesh.IndexBuffer,
+                    IndexCount: staticMesh.IndexCount,
                     BaseColour: material is null
                         ? new Vector3(0.75f)
                         : new Vector3(
@@ -311,21 +303,16 @@ public sealed class StudioRig : IDisposable
             {
                 var mesh = source.Primitives[p].Mesh;
                 var name = $"lab.rig.{Path.GetFileNameWithoutExtension(path)}.attach.{i}.{p}";
+                var attachMesh = vk.CreateMesh(mesh, name);
                 var material = source.Primitives[p].Material;
                 rig.attachments.Add(new Attachment(
                     Name: source.Primitives.Length > 1 ? $"{source.Name}.{p}" : source.Name,
                     JointName: source.JointName,
                     JointIndex: source.JointIndex,
                     LocalTransform: source.LocalTransform,
-                    Vertices: vk.CreateVertexBuffer(
-                        new VertexBufferData(
-                            new VertexBufferDescription(mesh.Layout, mesh.VertexCount, GraphicsBufferUsage.Static),
-                            mesh.VertexBytes),
-                        $"{name}.vb"),
-                    Indices: mesh.Indices32 is { } attachWide
-                        ? vk.CreateIndexBuffer(attachWide, name: $"{name}.ib")
-                        : vk.CreateIndexBuffer(mesh.Indices, name: $"{name}.ib"),
-                    IndexCount: mesh.IndexCount,
+                    Vertices: attachMesh.VertexBuffer,
+                    Indices: attachMesh.IndexBuffer,
+                    IndexCount: attachMesh.IndexCount,
                     BaseColour: material is null
                         ? new Vector3(0.75f)
                         : new Vector3(

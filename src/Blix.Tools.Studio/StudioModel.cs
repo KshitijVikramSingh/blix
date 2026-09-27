@@ -4,6 +4,7 @@ using Blix.Graphics.Images;
 using Blix.Assets;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
+using Blix.Render;
 
 namespace Blix.Tools.Studio;
 
@@ -147,22 +148,14 @@ public sealed class StudioModel : IDisposable
                 Accumulate(mesh, world[i], ref min, ref max);
 
                 var name = $"lab.{Path.GetFileNameWithoutExtension(path)}.{node.Name}.{model.parts.Count}";
-                var vb = vk.CreateVertexBuffer(
-                    new VertexBufferData(
-                        new VertexBufferDescription(mesh.Layout, mesh.VertexCount, GraphicsBufferUsage.Static),
-                        mesh.VertexBytes),
-                    $"{name}.vb");
-
-                var ib = mesh.Indices32 is { } wide
-                    ? vk.CreateIndexBuffer(wide, name: $"{name}.ib")
-                    : vk.CreateIndexBuffer(mesh.Indices, name: $"{name}.ib");
+                var uploaded = vk.CreateMesh(mesh, name);
 
                 var material = primitive.Material;
                 model.parts.Add(new Part(
                     NodeIndex: i,
-                    Vertices: vb,
-                    Indices: ib,
-                    IndexCount: mesh.IndexCount,
+                    Vertices: uploaded.VertexBuffer,
+                    Indices: uploaded.IndexBuffer,
+                    IndexCount: uploaded.IndexCount,
                     BaseColour: material is null
                         ? new Vector3(0.7f)
                         : new Vector3(

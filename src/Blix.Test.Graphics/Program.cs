@@ -4733,6 +4733,64 @@ static ShaderInterface MinimalShader() => new(new[]
 }
 
 
+// ============================================================================
+// Section BF — CreateMesh uploads the index buffer the mesh actually has.
+// ============================================================================
+//
+// <b>An engine helper with zero consumers, because of one missing branch.</b>
+// Blix.Render's device.CreateMesh(MeshData) is the whole of "turn an imported mesh into
+// something drawable" and it takes no shader, material, pipeline or instance count -- exactly the
+// line a loader is supposed to stop at. Four skinned consumers (Runner, Bulwark, VulkanLit and
+// StudioRig) each hand-rolled that upload anyway, and the reason was that CreateMesh read
+// data.Indices unconditionally. For a 32-bit mesh that array is EMPTY: the draw got no indices and
+// an index count of zero, which renders nothing rather than failing. MeshData's own comment states
+// the obligation -- "consumers branch on IndexFormat to decide which array + which
+// CreateIndexBuffer overload to use" -- and the helper written to spare consumers that branch was
+// the one place not doing it.
+//
+// Pinned against a RECORDING STUB rather than a real device, deliberately. Every suite in the root
+// gate is deviceless, and the question here is which overload the helper chose and what index
+// count it reported -- both answerable without a GPU. It also means the check does not depend on
+// some owned asset happening to exceed 65535 vertices in one primitive, which is the conformance
+// argument conventions §7 already makes about reference assets.
+{
+    // 16-bit stays 16-bit, and reports its own length.
+    var narrow = new MeshData(
+        "narrow", new byte[3 * 16], new ushort[] { 0, 1, 2 },
+        VertexPositionTexture.Layout,
+        new Bounds3(Vector3.Zero, Vector3.One));
+    var stub16 = new RecordingDevice();
+    var mesh16 = stub16.CreateMesh(narrow, "bf.narrow");
+    t.Expect("BF.1 a 16-bit mesh takes the ushort overload",
+        stub16.LastIndexWidth == 16, $"took the {stub16.LastIndexWidth}-bit path");
+    t.ExpectClose("BF.1 and reports its three indices", mesh16.IndexCount, 3);
+
+    // 32-bit is the case that was broken: Indices is empty and Indices32 is authoritative.
+    var wide = new MeshData(
+        "wide", new byte[4 * 16], Array.Empty<ushort>(),
+        VertexPositionTexture.Layout,
+        new Bounds3(Vector3.Zero, Vector3.One),
+        Indices32: new uint[] { 0, 1, 2, 2, 1, 3 });
+    var stub32 = new RecordingDevice();
+    var mesh32 = stub32.CreateMesh(wide, "bf.wide");
+    t.Expect("BF.2 a 32-bit mesh takes the uint overload, not the empty ushort array",
+        stub32.LastIndexWidth == 32, $"took the {stub32.LastIndexWidth}-bit path");
+    t.Expect("BF.2 and reports SIX indices rather than zero",
+        mesh32.IndexCount == 6, $"IndexCount {mesh32.IndexCount}");
+
+    // CONTROL: the two cases must actually differ, or the stub is reporting one path for both and
+    // BF.1 and BF.2 would agree with each other while agreeing with nothing else.
+    t.ExpectTrue("BF.2 CONTROL the two meshes took different paths",
+        stub16.LastIndexWidth != stub32.LastIndexWidth);
+
+    t.Expect("BF.3 the mesh carries the imported bounds through",
+        mesh32.Bounds.Min == Vector3.Zero && mesh32.Bounds.Max == Vector3.One,
+        $"{mesh32.Bounds.Min}..{mesh32.Bounds.Max}");
+    t.Expect("BF.3 and the caller's name, not the MeshData's",
+        mesh32.Name == "bf.wide", mesh32.Name);
+}
+
+
 t.PrintSummary();
 return t.Failed;
 
@@ -4856,4 +4914,60 @@ static class SheenTwin
 
     public static float DiffuseTransmissionScaling(float transmissionFactor) =>
         1.0f - Math.Clamp(transmissionFactor, 0.0f, 1.0f);
+}
+
+// A device that records the one decision Section BF is about and refuses everything else.
+//
+// Everything below the three implemented members throws rather than returning a default, which is
+// the point: if CreateMesh ever starts creating a pipeline or uploading a texture, the line it is
+// supposed to stop at has moved and this stub says so by failing loudly instead of quietly
+// tolerating it. A no-op stub would let that change pass.
+sealed class RecordingDevice : IGraphicsDevice
+{
+    /// <summary>16, 32, or 0 when no index buffer was created.</summary>
+    public int LastIndexWidth { get; private set; }
+
+    public IndexBufferHandle CreateIndexBuffer(
+        IReadOnlyList<ushort> indices, GraphicsBufferUsage usage = GraphicsBufferUsage.Static, string? name = null)
+    {
+        LastIndexWidth = 16;
+        return new IndexBufferHandle(1);
+    }
+
+    public IndexBufferHandle CreateIndexBuffer(
+        IReadOnlyList<uint> indices, GraphicsBufferUsage usage = GraphicsBufferUsage.Static, string? name = null)
+    {
+        LastIndexWidth = 32;
+        return new IndexBufferHandle(2);
+    }
+
+    public VertexBufferHandle CreateVertexBuffer(VertexBufferData data, string? name = null) => new(1);
+
+    private static NotSupportedException No([System.Runtime.CompilerServices.CallerMemberName] string m = "") =>
+        new($"RecordingDevice: CreateMesh must not call {m} — see Section BF.");
+
+    public GraphicsDeviceInfo Info => throw No();
+    public GraphicsDeviceDiagnostics DiagnosticsSnapshot => throw No();
+    public void SetDefaultRenderSurfaceSize(int width, int height) => throw No();
+    public void UpdateVertexBuffer(VertexBufferHandle handle, ReadOnlySpan<byte> bytes, int byteOffset = 0) => throw No();
+    public void DestroyVertexBuffer(VertexBufferHandle handle) => throw No();
+    public TransientVertexSlice AllocVertices(ReadOnlySpan<byte> data, int vertexStride, string? name = null) => throw No();
+    public void DestroyIndexBuffer(IndexBufferHandle handle) => throw No();
+    public void DestroyShaderProgram(ShaderProgramHandle handle) => throw No();
+    public PipelineHandle CreatePipeline(PipelineDescription description, string? name = null) => throw No();
+    public PipelineHandle GetOrCreatePipeline(PipelineDescription description, string? name = null) => throw No();
+    public void DestroyPipeline(PipelineHandle handle) => throw No();
+    public TextureHandle CreateTexture2D(TextureDescription description, ReadOnlySpan<byte> pixels, string? name = null) => throw No();
+    public TextureHandle CreateTexture2DMipped(TextureDescription description, IReadOnlyList<byte[]> mipBytes, string? name = null) => throw No();
+    public void UploadTextureMip(TextureHandle handle, int mipLevel, ReadOnlySpan<byte> bytes) => throw No();
+    public void QueueTextureUpload(TextureHandle handle, int mipLevel, ReadOnlySpan<byte> bytes) => throw No();
+    public TextureHandle AllocateTexture2DMips(TextureDescription description, int mipCount, string? name = null) => throw No();
+    public TextureHandle CreateTexture3D(int width, int height, int depth, TextureFormat format, SamplerDescription sampler, ReadOnlySpan<byte> pixels, string? name = null) => throw No();
+    public TextureHandle CreateTextureCubeHdr(int faceSize, ReadOnlySpan<Half> faces, SamplerDescription sampler, string? name = null) => throw No();
+    public TextureHandle CreateTextureCubeHdrMipped(int baseFaceSize, IReadOnlyList<Half[]> mipFaces, SamplerDescription sampler, string? name = null) => throw No();
+    public void DestroyTexture(TextureHandle handle) => throw No();
+    public RenderSurface CreateRenderSurface(RenderSurfaceDescription description) => throw No();
+    public void DestroyRenderSurface(RenderSurfaceHandle handle) => throw No();
+    public ResourceRegistrySnapshot SnapshotResources() => throw No();
+    public void Dispose() { }
 }
