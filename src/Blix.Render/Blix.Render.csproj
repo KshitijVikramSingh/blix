@@ -36,12 +36,5 @@
   </ItemGroup>
 
 
-  <ItemGroup>
-    <None Include="Shaders\*.spv">
-      <Pack>false</Pack>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>Shaders\%(Filename)%(Extension)</Link>
-    </None>
-  </ItemGroup>
 
 </Project>

@@ -2,21 +2,17 @@ bin/
 obj/
 *.spv
 
-# The //@tune sidecars the shader compiler writes beside each .spv. Derived, and re-derived
-# by any build — the same rule *.spv above already follows.
+# The sidecars the shader build writes beside each .spv. Derived, and re-derived by any
+# build — the same rule *.spv above already follows.
 #
-# <b>The .spv.refl.json sidecars beside them are NOT ignored, and that is load-bearing rather
-# than deliberate.</b> They were tracked by accident — BlixShaderMode=Library writes into the
-# PROJECT's Shaders directory, and *.spv does not match a name ending in .json — but untracking
-# them broke CI, because they are the only reason a library project's shader output reaches a
-# consumer at all. Those projects stage with `<None Include="Shaders\*.spv">`, an item glob
-# evaluated at project LOAD, so on a clean tree it matches nothing and the files are written
-# moments later. The committed sidecars masked that for every project at once.
-#
-# So they stay tracked, with their churn, until the staging is fixed. See plan.md stage A,
-# which owns exactly this: generated build output that does not reliably reach an output
-# directory. This one is a tune.json only.
+# The .refl.json half was tracked for years, by accident rather than decision: a Library-mode
+# project writes its shader output into the PROJECT's Shaders directory, and *.spv does not
+# match a name ending in .json. Untracking them once broke CI, because those committed files
+# were the only reason a library project's shaders reached ANY output directory — the projects
+# staged with an item glob evaluated at load, before the compiler had written anything.
+# BlixStageLibraryShaders fixes the staging, so the sidecars can be what they always were.
 *.spv.tune.json
+*.spv.refl.json
 .vs/
 .vscode/
 *.user

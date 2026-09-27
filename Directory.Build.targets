@@ -156,6 +156,51 @@
     </ItemGroup>
   </Target>
 
+  <!--
+    Stage a Library-mode project's compiled shader output.
+
+    <b>Declared inside a target, for the same reason BlixStageCookedAssets is: a project's item
+    globs are evaluated at LOAD, before this build produces anything.</b> Four projects used to
+    carry `<None Include="Shaders\*.spv">` to stage their own output, and that glob can only
+    match what a PREVIOUS build left on disk. On a clean tree it matches nothing, the compiler
+    writes the files moments later, and the project's own output never receives them — let alone
+    a consumer's.
+
+    It survived unnoticed because the .spv.refl.json sidecars beside them were committed: the
+    *.spv ignore does not match a name ending in .json, so one accidentally-tracked artifact was
+    holding up the staging for every library project at once. Untracking them broke CI, which is
+    the only machine here that ever builds from a clean tree.
+
+    Both Include and TargetPath are transforms over @(GlslShader), which is what makes this work
+    where a directory glob cannot: the file names are DERIVED from the declared shaders rather
+    than discovered on disk, so they are correct before the compiler has run, and the files exist
+    by the time the copy happens. A bare %(Filename) in the TargetPath ATTRIBUTE would read as
+    task batching and evaluate empty, landing every file on the directory itself.
+  -->
+  <Target Name="BlixStageLibraryShaders"
+          Condition="'$(BlixShaderMode)' == 'Library' AND '@(GlslShader)' != '' AND '$(BlixShaderCustomTarget)' != 'true'"
+          DependsOnTargets="BlixCompileSpirV"
+          BeforeTargets="AssignTargetPaths">
+    <!-- Materialised first, in its own ItemGroup, so the second can self-reference their
+         metadata. A transform in a TargetPath ATTRIBUTE does not pair with Include item by
+         item: it expands to the whole joined list, and every file lands under a name with
+         semicolons in it. -->
+    <ItemGroup>
+      <_BlixLibShader Include="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv')" />
+      <_BlixLibShader Include="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv.tune.json')" />
+      <!-- Only where reflection is switched on; elsewhere the file is never written. -->
+      <_BlixLibShader Condition="'$(BlixShaderReflect)' == 'true'"
+                      Include="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv.refl.json')" />
+    </ItemGroup>
+    <ItemGroup>
+      <ContentWithTargetPath Include="@(_BlixLibShader)">
+        <!-- %(Filename) is everything before the LAST dot, so a .spv.refl.json rebuilds whole. -->
+        <TargetPath>Shaders\%(Filename)%(Extension)</TargetPath>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </ContentWithTargetPath>
+    </ItemGroup>
+  </Target>
+
   <Target Name="BlixIndexApps"
           Condition="'$(BlixSkipAppIndex)' != 'true' AND '$(OutputType)' != '' AND Exists('$(BlixAppIndexerDll)')"
           AfterTargets="CopyFilesToOutputDirectory"

@@ -34,16 +34,6 @@
     <GlslInclude Include="..\..\Blix.Shaders\fullscreen.glsl" />
   </ItemGroup>
 
-  <ItemGroup>
-    <None Include="Shaders\*.spv">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>Shaders\%(Filename)%(Extension)</Link>
-    </None>
-    <None Include="Shaders\*.refl.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>Shaders\%(Filename)%(Extension)</Link>
-    </None>
-  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\Blix\Blix.csproj" />
