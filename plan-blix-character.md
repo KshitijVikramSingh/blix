@@ -1,7 +1,19 @@
 # Character arc — plan
 
-> **Status 2026-09-21 — active, paused.** The Room/contact instrument is built.
-> The combined controller and animation acceptance phase remains explicitly paused.
+> **Status 2026-09-27 — active, resumed at C-0/T-C1.** The Room/contact
+> instrument is built (R-A through R-E). Motion was built, argued against by
+> its own dump, and deleted; its interpolation half became the animation arc's
+> stage D and its selection half is undecided and unbuilt. C-C is dropped on
+> evidence.
+>
+> **The pause is over because its cause was found, not because its reason
+> expired.** C-0 (rig residency) was handed to the tooling arc as T-C1 and
+> never landed — checked, not remembered: `StudioRig` still does its own glTF
+> import, buffer upload and material setup, and the tree still carries
+> several independent skinned-load paths. Every remaining Controller stage
+> needs a rig, so this arc resumes by doing T-C1 itself, under the two rules
+> the stage already wrote down. C-A follows as the thing that proves the
+> extraction.
 
 > The first arc aimed at Spear's own domain: **motion, contact, camera, combat**.
 > The completed Chassis arc ended by inverting its premise — *"Blix's theory cannot be
@@ -505,10 +517,17 @@ consumer. So does `Blix.Render/PropModel`. Two engine-side attempts at "a loaded
 each stranded at one consumer, because each baked a draw into itself and the draw is the part that
 differs — render graph, material sets, instancing, shadow passes.
 
-### C-0 — rig residency — **MOVED TO THE TOOLING ARC AS T-C1**
+### C-0 — rig residency — **HANDED TO THE TOOLING ARC AS T-C1, AND COMES BACK**
 
-Kept here as the record of how it was found. Six duplicate skinned-draw paths is a tree-wide
-number, and an extraction discovered by one arc does not belong to it.
+Moved out on the correct principle — six duplicate skinned-draw paths is a tree-wide number, and
+an extraction discovered by one arc does not belong to it. The tooling arc then shipped without
+it. That is worth recording plainly rather than quietly re-adopting: **an extraction handed to
+another arc is not scheduled by being handed over.** `StudioRig` still owns its own import path
+and the duplication is where it was.
+
+So it comes back here, because this is the arc that cannot proceed without it. The two rules
+below are unchanged, and rule 2 is what the handover lost — the extraction has to actually move
+its existing consumer, not sit beside it.
 
 The duplicated part is **loading**, not drawing: glTF import, vertex and index buffers, albedo
 upload, material scalars, bounds, weighted-bone analysis. That part is identical in every consumer
