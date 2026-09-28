@@ -35,7 +35,7 @@ namespace Blix.Core;
 /// would buy nothing but a harder suite.
 /// </para>
 /// </remarks>
-public sealed class InputState
+public sealed class InputState : IInputState
 {
     private readonly ButtonTrack keys = new(Enum.GetValues<Key>().Length);
     private readonly ButtonTrack buttons = new(Enum.GetValues<MouseButton>().Length);

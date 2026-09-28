@@ -59,8 +59,12 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     // is about routing one gesture, and this is about holding still for the length of a tick.
     private readonly InputState inputState = new();
 
+    // Whether this window currently has focus, which for a POLLED device is an eligibility
+    // boundary rather than a nicety. See SampleGamepads.
+    private bool windowFocused = true;
+
     /// <inheritdoc />
-    public InputState Input => inputState;
+    public IInputState Input => inputState;
 
     // Lightweight perf HUD (F1): a debounced real-FPS readout drawn without the
     // DebugOverlayUi panels, so it measures actual frame rate at minimal cost.
@@ -400,11 +404,15 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     /// because nothing hooked focus. A remedy with no caller is a remedy that has never run.
     /// </para>
     /// <para>
-    /// The application is NOT handed synthetic releases. A release means "the gesture completed here",
-    /// and a window losing focus is the opposite of that — inventing one would fire whatever a release
-    /// means (a shot loosed, a menu opened) for a gesture the user abandoned. Forgetting the press is
-    /// the honest cancel; an application that needs to know a drag was abandoned can ask the host
-    /// whether it still has focus.
+    /// The application IS handed synthetic releases, which is the opposite of what this said when
+    /// only ownership was being cleared. Forgetting a press on the application's behalf leaves the
+    /// application still holding it; the honest report is that everything was let go of, which is
+    /// what physically happened as far as this window can ever know. The same rule covers a gamepad
+    /// being unplugged, and for the same reason.
+    /// </para>
+    /// <para>
+    /// Focus is also where a POLLED device differs from an event-driven one — see
+    /// <c>SampleGamepads</c>, which stops feeding the pad in while the window is not focused.
     /// </para>
     /// </remarks>
     /// <summary>Makes a texture drawable inside a UI panel. See <see cref="IRenderHost"/>.</summary>
@@ -420,6 +428,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
     private void OnFocusChanged(bool focused)
     {
+        windowFocused = focused;
         if (focused) return;
         keysHeld.Clear();
         buttonsHeld.Clear();
@@ -496,6 +505,15 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     {
         if (input is null) return;
 
+        // <b>Focus is an eligibility boundary, and only a polled device needs to be told.</b>
+        // A keyboard and a mouse stop being eligible by themselves: the platform simply stops
+        // sending their events to an unfocused window. A pad has no events to stop — it is read
+        // every tick, whatever the window is doing — so releasing everything on focus loss and
+        // then sampling again one tick later put the held button and the pulled trigger straight
+        // back, and the game carried on driving while the player was in another application.
+        // The invariant held inside InputState and the host defeated it on the way in.
+        if (!windowFocused) return;   // NOT a guard clause to tidy away: H.3 asserts this read
+
         for (var i = 0; i < input.Gamepads.Count; i++)
         {
             var pad = input.Gamepads[i];
@@ -531,11 +549,32 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
             foreach (var trigger in pad.Triggers)
             {
-                if (trigger.Index == 0) inputState.RecordGamepadAxis(pad.Index, BlixGamepadAxis.LeftTrigger, trigger.Position);
-                else if (trigger.Index == 1) inputState.RecordGamepadAxis(pad.Index, BlixGamepadAxis.RightTrigger, trigger.Position);
+                if (trigger.Index == 0) inputState.RecordGamepadAxis(pad.Index, BlixGamepadAxis.LeftTrigger, Trigger01(trigger.Position));
+                else if (trigger.Index == 1) inputState.RecordGamepadAxis(pad.Index, BlixGamepadAxis.RightTrigger, Trigger01(trigger.Position));
             }
         }
     }
+
+    /// <summary>A trigger as GLFW reports it, to a trigger as Blix promises it.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>GLFW gives all six gamepad axes in [-1, 1], triggers included, so an untouched trigger
+    /// reads -1 and not 0.</b> Silk forwards the number untouched — checked by disassembling
+    /// <c>GlfwGamepad.Update</c>, which contains no floating-point constants at all — so the
+    /// conversion has to happen here.
+    /// </para>
+    /// <para>
+    /// This is representation, not policy. Blix says a trigger is [0, 1]; a backend that measures
+    /// the same physical thing on a different scale is exactly what a bridge is for. A deadzone
+    /// would be the other kind of change and stays out.
+    /// </para>
+    /// <para>
+    /// Left unconverted it is quietly wrong rather than obviously wrong: a resting controller
+    /// reports full reverse on both triggers, and anything asking "is this pad being touched"
+    /// answers yes forever.
+    /// </para>
+    /// </remarks>
+    private static float Trigger01(float glfwAxis) => Math.Clamp((glfwAxis + 1f) * 0.5f, 0f, 1f);
 
     /// <summary>Silk's button names to Blix's, exhaustively. The suite checks that.</summary>
     private static BlixGamepadButton MapGamepadButton(ButtonName name) => name switch

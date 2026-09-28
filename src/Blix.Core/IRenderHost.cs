@@ -57,7 +57,7 @@ public interface IRenderHost
     /// it deliberately refuses to decide.
     /// </para>
     /// </remarks>
-    InputState Input { get; }
+    IInputState Input { get; }
 
     // The display's refresh rate in hertz, or null where the platform will not say.
     //

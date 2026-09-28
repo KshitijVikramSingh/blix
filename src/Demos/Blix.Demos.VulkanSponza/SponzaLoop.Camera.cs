@@ -150,7 +150,7 @@ internal sealed partial class SponzaLoop
     }
 
     /// <summary>Read the devices once per tick, at a point this loop chose.</summary>
-    private void ReadInput(InputState input)
+    private void ReadInput(IInputState input)
     {
         // Cmd+C toggles the diagnostics overlay. Plain C does nothing.
         if (input[Key.C].Pressed && (input[Key.LeftSuper].Down || input[Key.RightSuper].Down))

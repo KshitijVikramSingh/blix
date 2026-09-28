@@ -1358,7 +1358,7 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
     /// this used to get by luck: a click was handled whenever the event arrived, against whatever
     /// hover the previous frame's pick had left behind.
     /// </remarks>
-    private void HandleClicks(InputState input)
+    private void HandleClicks(IInputState input)
     {
         if (!hoverValid || phase is Phase.Won or Phase.Lost) return;
         var left = input[MouseButton.Left].Pressed;

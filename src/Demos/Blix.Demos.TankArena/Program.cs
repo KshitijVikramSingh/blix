@@ -272,7 +272,7 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
 
     // What the devices did this tick. Safe to read from any helper the update calls, because it
     // does not move until the next one — which is the whole reason the runtime holds it still.
-    private InputState Input => host.Input;
+    private IInputState Input => host.Input;
     private InstanceBuffer instanceBuffer = null!;
     private InstancedBatch batch = null!;               // lit world (ground/walls/tanks/shells)
     private InstanceBuffer casterInstances = null!;

@@ -514,7 +514,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
     /// kept in step across a pair of callbacks, which is the job this layer now does once for
     /// everyone.
     /// </remarks>
-    private void ReadInput(InputState input)
+    private void ReadInput(IInputState input)
     {
         if (input[Key.N].Pressed) showNormals = !showNormals;
         if (input[Key.G].Pressed) showGrid = !showGrid;

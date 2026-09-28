@@ -416,6 +416,44 @@ Setting the public flag directly is the obvious thing and it is wrong in both di
 a connect cleared by the very flip that should show it, a disconnect forgotten before
 anything reads it. The suite found each separately, before any of it was wired to Silk.
 
+### Two faults review found in the seam, not the model
+
+The abstraction was right and the bridge to the backend was not. Both were invisible
+from inside Blix and both needed the backend's own behaviour read rather than assumed.
+
+**Triggers arrived on GLFW's scale, not Blix's.** GLFW reports all six gamepad axes in
+`[-1, 1]`, triggers included, so an untouched trigger is `-1`. Silk forwards the number
+untouched — confirmed by disassembling `GlfwGamepad.Update`, which contains no
+floating-point constants at all. Blix promises `[0, 1]`, so the bridge now converts, and
+the suite pins `-1 → 0`, `0 → 0.5`, `+1 → 1`. Left alone it was quietly wrong rather than
+obviously wrong: a controller resting on a desk reports both triggers fully pulled.
+
+**Focus loss did not survive a polled device.** A keyboard stops being eligible by
+itself — the platform stops sending its events to an unfocused window. A pad has no
+events to stop, so releasing everything on focus loss was undone one tick later by the
+next sample, and a game kept driving while the player was in another application. The
+invariant held inside `InputState` and the host defeated it on the way in.
+
+That is a refinement to the layering worth keeping:
+
+```
+physical device state
+        │
+        ▼
+application eligibility   ← gesture ownership for events, FOCUS for polled devices
+        │
+        ▼
+InputState live state
+        │  BeginTick
+        ▼
+snapshot
+```
+
+`IRenderHost.Input` hands out `IInputState`, the reading half. The concrete class keeps
+its recording surface, because a host is not the only legitimate driver — a test, a
+replay and a recorded demo are the same shape — but game code receives a type it cannot
+rewrite mid-frame. "Fixed for the length of an update" is enforced rather than promised.
+
 ### Breaking, and deliberately
 
 `IInputHandler` is gone. Keypad digits are their own keys rather than aliases of the

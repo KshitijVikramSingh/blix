@@ -19,6 +19,7 @@ using Blix.Verify;
 //   D  the mouse's two different kinds of number
 //   E  the backend's vocabulary reaches Blix's intact
 //   F  gamepads: axes as state, and a pad that stops existing
+//   G  the backend's numbers become Blix's numbers
 
 var t = new TestRunner();
 
@@ -309,6 +310,94 @@ var t = new TestRunner();
         input.Gamepads.Count == 1 && input.Gamepads[1] is { Connected: true, Name: "Second" }
         && !input.Gamepads[0].Connected,
         "indexing by position would have handed the game a different controller");
+}
+
+// ============================================================================
+// Section G — a trigger arrives on the backend's scale, and leaves on Blix's.
+// ============================================================================
+//
+// <b>GLFW reports all six gamepad axes in [-1, 1], triggers included, so an untouched trigger is
+// -1.</b> Silk forwards the number untouched — its GlfwGamepad.Update contains no floating-point
+// constants at all, which is checkable by disassembly and was. Blix promises [0, 1], so the bridge
+// converts, and this pins the conversion rather than the promise.
+//
+// Left undone it is quietly wrong rather than obviously wrong: a controller sitting on a desk
+// reports both triggers fully pulled, and anything asking "is this pad being touched" says yes
+// forever. Nothing crashes, so nothing tells you.
+{
+    var toBlix = typeof(Blix.Runtime.Silk.Window)
+        .GetMethod("Trigger01", BindingFlags.NonPublic | BindingFlags.Static);
+    t.Expect("G.0 CONTROL the conversion was found to test", toBlix is not null);
+
+    static float Call(MethodInfo m, float v) => (float)m.Invoke(null, new object[] { v })!;
+
+    t.Expect("G.1 an untouched trigger (-1) is zero, not full",
+        MathF.Abs(Call(toBlix!, -1f)) < 1e-6f, Call(toBlix!, -1f).ToString());
+    t.Expect("G.2 half way (0) is half", MathF.Abs(Call(toBlix!, 0f) - 0.5f) < 1e-6f);
+    t.Expect("G.3 fully pulled (+1) is one", MathF.Abs(Call(toBlix!, 1f) - 1f) < 1e-6f);
+    t.Expect("G.4 and anything outside the range is clamped rather than trusted",
+        MathF.Abs(Call(toBlix!, -4f)) < 1e-6f && MathF.Abs(Call(toBlix!, 4f) - 1f) < 1e-6f);
+}
+
+// ============================================================================
+// Section H — focus is an eligibility boundary, and only a POLLED device notices.
+// ============================================================================
+//
+// <b>A keyboard stops being eligible by itself: the platform stops sending its events to a window
+// that lost focus.</b> A pad has no events to stop — it is read every tick, whatever the window is
+// doing — so "release everything on focus loss" is defeated one tick later by the next sample,
+// which puts the held button and the pulled trigger straight back.
+//
+// The invariant held inside InputState and the host defeated it on the way in. It would have been
+// found eventually as "my character walks while I am in another application", which is a long way
+// from the line that caused it.
+{
+    var input = new InputState();
+    input.RecordGamepadConnected(0, "Test Pad");
+    input.RecordGamepadButton(0, GamepadButton.A, pressed: true);
+    input.RecordGamepadAxis(0, GamepadAxis.RightTrigger, 1f);
+    input.BeginTick();
+    t.Expect("H.0 CONTROL the pad is holding A at full throttle",
+        input.Gamepads[0][GamepadButton.A].Down && MathF.Abs(input.Gamepads[0].RightTrigger - 1f) < 1e-6f);
+
+    // Focus is lost: the host releases everything.
+    input.ReleaseAll();
+
+    // Nothing re-records it, which is the whole question: a host that kept sampling a still-held
+    // controller would write both straight back before the flip and this would read as though
+    // focus had never been lost.
+    input.BeginTick();
+    t.Expect("H.1 after focus loss the button reads released, not re-pressed",
+        input.Gamepads[0][GamepadButton.A] is { Down: false, Released: true });
+    t.Expect("H.2 and the throttle is zero rather than back where it was",
+        MathF.Abs(input.Gamepads[0].RightTrigger) < 1e-6f);
+
+    // And the seam itself. The two assertions above describe what InputState does when nobody
+    // re-records; they say nothing about whether the host actually stops. So: does the polled path
+    // READ the focus bit? Asserting the field merely exists would pass against a host that keeps
+    // it and ignores it, which is precisely the bug that was here.
+    var window = typeof(Blix.Runtime.Silk.Window);
+    var gate = window.GetField("windowFocused", BindingFlags.NonPublic | BindingFlags.Instance);
+    var sample = window.GetMethod("SampleGamepads", BindingFlags.NonPublic | BindingFlags.Instance);
+    t.Expect("H.0 CONTROL the focus bit and the polled path were both found",
+        gate is not null && gate.FieldType == typeof(bool) && sample is not null);
+
+    // ldfld <token> — the field's metadata token, little-endian, after opcode 0x7B.
+    var il = sample!.GetMethodBody()!.GetILAsByteArray()!;
+    var token = BitConverter.GetBytes(gate!.MetadataToken);
+    var consults = false;
+    for (var i = 0; i + 4 < il.Length; i++)
+    {
+        if (il[i] != 0x7B) continue;
+        if (il[i + 1] == token[0] && il[i + 2] == token[1] && il[i + 3] == token[2] && il[i + 4] == token[3])
+        {
+            consults = true;
+            break;
+        }
+    }
+
+    t.Expect("H.3 the polled path reads the focus bit, rather than the host merely keeping one",
+        consults, "a pad is sampled every tick whether or not the window is listening");
 }
 
 t.PrintSummary();
