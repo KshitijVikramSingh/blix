@@ -262,7 +262,7 @@ application's to parse. Bounded runs, sizing, diagnostics, and dumping should
 not be reimplemented in each game or tool.
 
 `Blix.Demos.Chassis` is the smallest executable specification of this surface:
-an `IGameLoop`, optional `IUiSource`, optional `IInputHandler`, and a host-owned
+an `IGameLoop`, optional `IUiSource`, and a host-owned
 bounded run. `Blix.Tools.View` is the fuller example with Studio composition,
 an interface, input ownership, diagnostics, asset loading, and named views.
 

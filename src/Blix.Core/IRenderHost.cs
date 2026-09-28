@@ -44,6 +44,21 @@ public interface IRenderHost
     // Forget a registered id. Safe to call with an id that was never registered.
     void ReleaseUiTexture(nint id);
 
+    /// <summary>What the input devices did, as of this tick.</summary>
+    /// <remarks>
+    /// <para>
+    /// On the host because input is a host capability, exactly like the cursor, the logical size
+    /// and the refresh rate above it — not on <c>IGameLoop</c>, and not on a base class a game is
+    /// made to inherit. A loop already keeps the host it was handed at load; this is reachable from
+    /// the same place, at the same cost, and nothing has to change shape to receive it.
+    /// </para>
+    /// <para>
+    /// Fixed for the length of an update. See <see cref="InputState"/> for what that buys and what
+    /// it deliberately refuses to decide.
+    /// </para>
+    /// </remarks>
+    IInputState Input { get; }
+
     // The display's refresh rate in hertz, or null where the platform will not say.
     //
     // Needed because vsync-on pacing is measured against a deadline, and a deadline

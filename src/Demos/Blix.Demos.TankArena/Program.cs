@@ -171,7 +171,7 @@ internal sealed class Tank
     public Vector3 BarrelForward => Vector3.Transform(-Vector3.UnitZ, Barrel.WorldRotation);
 }
 
-internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDisposable
+internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
 {
     private const float ArenaHalf = 42f;
     private const float PivotFactor = 0f;       // no in-place spin — must be moving to turn
@@ -269,6 +269,10 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     private readonly int exitAfterFrames;
     private VulkanGraphicsDevice vk = null!;
     private IRenderHost host = null!;
+
+    // What the devices did this tick. Safe to read from any helper the update calls, because it
+    // does not move until the next one — which is the whole reason the runtime holds it still.
+    private IInputState Input => host.Input;
     private InstanceBuffer instanceBuffer = null!;
     private InstancedBatch batch = null!;               // lit world (ground/walls/tanks/shells)
     private InstanceBuffer casterInstances = null!;
@@ -298,7 +302,6 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     private Tank player = null!;
     private readonly List<Tank> enemies = new();
     private readonly List<Shell> shells = new();
-    private readonly HashSet<Key> held = new();
 
     // Static world: ground slab + four arena walls, as Bounds3 colliders. Tanks
     // resolve their AABB against it each step (gravity rests them on the ground;
@@ -680,11 +683,15 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     public void OnUpdate(Time time)
     {
         var dt = (float)time.Delta;
+        // Escape is a transition, not a hold: closing once is the point, and Down would ask again
+        // every tick until the window went away.
+        if (Input[Key.Escape].Pressed) host.RequestClose();
+
         trauma = MathF.Max(0f, trauma - juice.TraumaDecay * dt);   // screen shake settles
         UpdateSparks(dt);                                          // VFX live on through game-over
         if (gameOver)
         {
-            if (held.Contains(Key.Enter) || held.Contains(Key.R)) Reset();
+            if (Input[Key.Enter].Down || Input[Key.R].Down) Reset();
             return;
         }
 
@@ -706,25 +713,25 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     {
         // Ramp forward speed toward the throttle target (W forward / S reverse) so the
         // hull has weight instead of snapping to full speed.
-        var targetSpeed = (held.Contains(Key.W) ? feel.DriveSpeed : 0f) - (held.Contains(Key.S) ? feel.ReverseSpeed : 0f);
+        var targetSpeed = (Input[Key.W].Down ? feel.DriveSpeed : 0f) - (Input[Key.S].Down ? feel.ReverseSpeed : 0f);
         var rate = MathF.Abs(targetSpeed) > MathF.Abs(playerSpeed) ? feel.DriveAccel : feel.DriveDecel;
         playerSpeed = MoveToward(playerSpeed, targetSpeed, rate * dt);
 
         // Steering is coupled to motion: full turn rate while driving, only a slow
         // pivot when parked — so the tank carves a turn radius rather than spinning
         // on a dime. (speedFrac scales the available yaw rate with current speed.)
-        var steer = (held.Contains(Key.A) ? 1f : 0f) - (held.Contains(Key.D) ? 1f : 0f);
+        var steer = (Input[Key.A].Down ? 1f : 0f) - (Input[Key.D].Down ? 1f : 0f);
         var speedFrac = MathF.Min(1f, MathF.Abs(playerSpeed) / feel.DriveSpeed);
         player.HullYaw += steer * feel.TurnSpeed * (PivotFactor + (1f - PivotFactor) * speedFrac) * dt;
 
-        if (held.Contains(Key.Left)) player.TurretYaw += feel.TurretSpeed * dt;
-        if (held.Contains(Key.Right)) player.TurretYaw -= feel.TurretSpeed * dt;
+        if (Input[Key.Left].Down) player.TurretYaw += feel.TurretSpeed * dt;
+        if (Input[Key.Right].Down) player.TurretYaw -= feel.TurretSpeed * dt;
         // Clamp the turret to a forward arc (no 360 spin) so the gun — and the
         // turret-follow camera — stay anchored to where the hull faces.
         player.TurretYaw = Math.Clamp(player.TurretYaw, -feel.TurretLimit, feel.TurretLimit);
         // Up/Down elevate the gun — higher pitch lobs the shell further (range control).
-        if (held.Contains(Key.Up)) player.BarrelPitch += feel.PitchSpeed * dt;
-        if (held.Contains(Key.Down)) player.BarrelPitch -= feel.PitchSpeed * dt;
+        if (Input[Key.Up].Down) player.BarrelPitch += feel.PitchSpeed * dt;
+        if (Input[Key.Down].Down) player.BarrelPitch -= feel.PitchSpeed * dt;
         player.BarrelPitch = Math.Clamp(player.BarrelPitch, 0f, feel.MaxPitch);
         SeatRig(player);
         player.Apply();
@@ -739,7 +746,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         ResolveTank(player);
 
         player.FireTimer -= dt;
-        if (held.Contains(Key.Space) && player.FireTimer <= 0f) Fire(player, fromPlayer: true);
+        if (Input[Key.Space].Down && player.FireTimer <= 0f) Fire(player, fromPlayer: true);
     }
 
     private static float MoveToward(float current, float target, float maxDelta)
@@ -1275,14 +1282,6 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
             debug.Values.Value("trauma", trauma);
         }
     }
-
-    public void OnKeyDown(Key key)
-    {
-        held.Add(key);
-        if (key == Key.Escape) host.RequestClose();
-    }
-
-    public void OnKeyUp(Key key) => held.Remove(key);
 
     // Disposed by Window after WaitIdle (the graph owns render passes + offscreen
     // images that aren't in the device's auto-freed resource tables).

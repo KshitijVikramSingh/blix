@@ -16,7 +16,7 @@ namespace Blix.Core;
 /// something happens, the application says what.
 /// </para>
 /// <para>
-/// Implemented by the game loop, the way <see cref="IInputHandler"/> is. One source, because one is what
+/// Implemented by the game loop. One source, because one is what
 /// there is evidence for; a registry can come when something needs two.
 /// </para>
 /// </remarks>

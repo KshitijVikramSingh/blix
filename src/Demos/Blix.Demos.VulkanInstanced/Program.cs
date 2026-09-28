@@ -45,7 +45,7 @@ public static class Program
     }
 }
 
-internal sealed class InstancedLoop : IGameLoop, IInputHandler
+internal sealed class InstancedLoop : IGameLoop
 {
     private const int InstanceCount = 5000;
     private const int GridX = 100;            // 100 columns × 50 rows = 5000
@@ -173,8 +173,4 @@ internal sealed class InstancedLoop : IGameLoop, IInputHandler
     // (VulkanHello/VulkanLit) rely on device.Dispose() — which vkDeviceWaitIdle's
     // and frees every resource table — to clean up at process teardown.
 
-    public void OnKeyDown(Key key)
-    {
-        if (key == Key.Escape) host.RequestClose();
-    }
 }

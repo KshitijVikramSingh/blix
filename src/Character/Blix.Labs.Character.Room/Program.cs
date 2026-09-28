@@ -57,7 +57,7 @@ public static class Program
     }
 }
 
-internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandler, IDisposable
+internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
 {
     private readonly RoomRenderer renderer = new();
     private readonly RoomCamera camera = new();
@@ -68,8 +68,6 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
     private float aspect = 16f / 9f;
     private int frames;
 
-    private bool orbiting;
-    private bool panning;
 
     // ── The body ────────────────────────────────────────────────────────────
     // <b>This owns the input and nothing else.</b> Where the body ends up is BodyResolver's, and
@@ -101,8 +99,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
     // DOWN to see a body turn like a vehicle is a thing the Motion lab will want.
     private float turnRate = 20f;
     private bool bodyEnabled = true;
-    private readonly HashSet<Key> held = new();
-
+    
     private int selected = -1;
     private bool showNormals;
     private bool showBounds = true;
@@ -139,6 +136,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
 
     public void OnUpdate(Time time)
     {
+        if (host is { } h) ReadInput(h.Input);
         renderer.SlopeTint = slopeTint;
         if (bodyEnabled) MoveBody((float)time.Delta);
 
@@ -154,13 +152,14 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
     /// <summary>Gather the frame's intent and hand it to the motor.</summary>
     private void MoveBody(float deltaSeconds)
     {
+        var input = host!.Input;
         var (forward, right) = camera.GroundBasis;
 
         var wish = Vector3.Zero;
-        if (held.Contains(Key.W)) wish += forward;
-        if (held.Contains(Key.S)) wish -= forward;
-        if (held.Contains(Key.D)) wish += right;
-        if (held.Contains(Key.A)) wish -= right;
+        if (input[Key.W].Down) wish += forward;
+        if (input[Key.S].Down) wish -= forward;
+        if (input[Key.D].Down) wish += right;
+        if (input[Key.A].Down) wish -= right;
 
         // WHICH WAY THE BODY IS POINTING. The motor has no opinion — a capsule is symmetric and
         // nothing it computes depends on a facing — but a camera behind the shoulder needs one, and
@@ -509,47 +508,40 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IInputHandle
         ImGui.End();
     }
 
-    public void OnMouseDown(MouseButton button)
+    /// <summary>Read the devices once, at the top of the update.</summary>
+    /// <remarks>
+    /// Orbit and pan follow the buttons' own state; the two bools they replace were a copy of it
+    /// kept in step across a pair of callbacks, which is the job this layer now does once for
+    /// everyone.
+    /// </remarks>
+    private void ReadInput(IInputState input)
     {
-        if (button == MouseButton.Left) orbiting = true;
-        if (button == MouseButton.Right || button == MouseButton.Middle) panning = true;
-    }
+        if (input[Key.N].Pressed) showNormals = !showNormals;
+        if (input[Key.G].Pressed) showGrid = !showGrid;
+        if (input[Key.T].Pressed) slopeTint = slopeTint > 0.5f ? 0f : 1f;
+        if (input[Key.Number1].Pressed) camera.Rig = CameraRig.Orbit;
+        if (input[Key.Number2].Pressed) camera.Rig = CameraRig.ThirdPerson;
+        if (input[Key.Number3].Pressed) camera.Rig = CameraRig.FirstPerson;
+        if (input[Key.Number4].Pressed) camera.Rig = CameraRig.Isometric;
+        if (input[Key.R].Pressed) motor.Teleport(Blix.Labs.Character.Room.SpawnPoint);
 
-    public void OnMouseUp(MouseButton button)
-    {
-        if (button == MouseButton.Left) orbiting = false;
-        if (button == MouseButton.Right || button == MouseButton.Middle) panning = false;
-    }
-
-    public void OnMouseMove(float x, float y, float deltaX, float deltaY)
-    {
-        if (orbiting)
+        var delta = input.MouseDelta;
+        if (delta != System.Numerics.Vector2.Zero)
         {
-            camera.Orbit(deltaX, deltaY);
-            return;
+            if (input[MouseButton.Left].Down)
+            {
+                camera.Orbit(delta.X, delta.Y);
+            }
+            // Pan only means anything to the Orbit rig; every other one places itself from the
+            // body, and the camera says so rather than the caller having to know.
+            else if (input[MouseButton.Right].Down || input[MouseButton.Middle].Down)
+            {
+                camera.Pan(delta.X, delta.Y);
+            }
         }
 
-        // Pan only means anything to the Orbit rig; every other one places itself from the body, and
-        // the camera says so rather than the caller having to know.
-        if (panning) camera.Pan(deltaX, deltaY);
+        if (input.MouseWheel.Y != 0f) camera.Zoom(input.MouseWheel.Y);
     }
-
-    public void OnMouseWheel(float offsetX, float offsetY) => camera.Zoom(offsetY);
-
-    public void OnKeyDown(Key key)
-    {
-        held.Add(key);
-        if (key == Key.N) showNormals = !showNormals;
-        if (key == Key.G) showGrid = !showGrid;
-        if (key == Key.T) slopeTint = slopeTint > 0.5f ? 0f : 1f;
-        if (key == Key.Number1) camera.Rig = CameraRig.Orbit;
-        if (key == Key.Number2) camera.Rig = CameraRig.ThirdPerson;
-        if (key == Key.Number3) camera.Rig = CameraRig.FirstPerson;
-        if (key == Key.Number4) camera.Rig = CameraRig.Isometric;
-        if (key == Key.R) motor.Teleport(Blix.Labs.Character.Room.SpawnPoint);
-    }
-
-    public void OnKeyUp(Key key) => held.Remove(key);
 
     public void Dispose()
     {

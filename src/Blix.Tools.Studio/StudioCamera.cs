@@ -12,7 +12,7 @@ namespace Blix.Tools.Studio;
 /// their own copy of the spherical-to-cartesian arithmetic — the same decision written twice, in one
 /// file, which is the bar conventions §4 sets regardless of where the copies live.
 /// <para>
-/// <b>It owns no input.</b> A drag arrives through <see cref="IInputHandler"/> for one camera and
+/// <b>It owns no input.</b> A drag arrives as a call from whoever read the frame's input, for one camera and
 /// through an ImGui item's own state for the other — ImGui captures the pointer over its windows, so
 /// a panel viewport has to ask the widget rather than the host. Those are two genuinely different
 /// routes, so this takes deltas and has no opinion about where they came from.

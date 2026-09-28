@@ -137,7 +137,7 @@ internal sealed class TunedLoop : IGameLoop, IDebuggable
 }
 
 /// <summary>The whole application. No diagnostics, its own interface, its own input.</summary>
-internal sealed class ChassisLoop : IGameLoop, IUiSource, IInputHandler
+internal sealed class ChassisLoop : IGameLoop, IUiSource
 {
     private int keyDowns;
     private int keyUps;
@@ -145,6 +145,9 @@ internal sealed class ChassisLoop : IGameLoop, IUiSource, IInputHandler
     private int mouseUps;
     private int mouseMoves;
     private int wheels;
+    private int padButtons;
+    private int padAxisTicks;
+    private int padsSeen;
     private int frames;
 
     // Counts calls to DrawUi. The host only calls it inside an ImGui frame it has built, so a non-zero
@@ -156,7 +159,15 @@ internal sealed class ChassisLoop : IGameLoop, IUiSource, IInputHandler
     private string typeHere = "click here and type";
     private int keysAtFocus = -1;
 
+    // Kept for one reason: input is read from it. This loop has no diagnostics and no graphics
+    // state of its own, which is the point of the demo, so the host is the only thing it holds.
+    private IRenderHost host = null!;
+
     public string UiName => "chassis";
+
+    public void OnLoad(IRenderHost renderHost, IGraphicsDevice graphicsDevice) => host = renderHost;
+
+    public void OnUpdate(Time time) => CountInput();
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
@@ -192,6 +203,9 @@ internal sealed class ChassisLoop : IGameLoop, IUiSource, IInputHandler
         ImGui.Text($"frames {frames}   t {now:0.0}s");
         ImGui.Text($"keys   down {keyDowns}   up {keyUps}");
         ImGui.Text($"mouse  down {mouseDowns}   up {mouseUps}   moves {mouseMoves}   wheel {wheels}");
+        ImGui.Text(padsSeen > 0
+            ? $"pad    {padsSeen} seen   buttons {padButtons}   axis ticks {padAxisTicks}"
+            : "pad    none connected");
         ImGui.Separator();
 
         // The capture test, made checkable. Remember the game's key count when the field
@@ -225,17 +239,68 @@ internal sealed class ChassisLoop : IGameLoop, IUiSource, IInputHandler
         Console.WriteLine(
             $"chassis: {frames} frame(s); input reaching the application — " +
             $"keys {keyDowns}/{keyUps}, mouse {mouseDowns}/{mouseUps}, moves {mouseMoves}, wheel {wheels}");
+        Console.WriteLine(
+            padsSeen > 0
+                ? $"chassis: {padsSeen} gamepad(s) seen — {padButtons} button press(es), {padAxisTicks} tick(s) with a stick or trigger off centre"
+                : "chassis: no gamepad was connected during the run");
     }
 
-    public void OnKeyDown(Key key) => keyDowns++;
+    /// <summary>
+    /// Count what reached the application this tick.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// These used to be six callbacks counting platform events. They now count TICK transitions,
+    /// which is a real change in what the number means and the right one for what this demo is
+    /// for: it exists to show that input reaches the application and that a focused text field
+    /// does not leak keys past it, and both of those are questions about what the application
+    /// sees, not about how many times a driver spoke.
+    /// </para>
+    /// <para>
+    /// Moves and wheel count ticks in which the pointer moved at all, rather than reports, for the
+    /// same reason — several reports inside one tick are one thing happening.
+    /// </para>
+    /// </remarks>
+    private void CountInput()
+    {
+        var input = host.Input;
 
-    public void OnKeyUp(Key key) => keyUps++;
+        foreach (var key in Enum.GetValues<Key>())
+        {
+            if (input[key].Pressed) keyDowns++;
+            if (input[key].Released) keyUps++;
+        }
 
-    public void OnMouseDown(MouseButton button) => mouseDowns++;
+        foreach (var button in Enum.GetValues<MouseButton>())
+        {
+            if (input[button].Pressed) mouseDowns++;
+            if (input[button].Released) mouseUps++;
+        }
 
-    public void OnMouseUp(MouseButton button) => mouseUps++;
+        if (input.MouseDelta != System.Numerics.Vector2.Zero) mouseMoves++;
+        if (input.MouseWheel != System.Numerics.Vector2.Zero) wheels++;
 
-    public void OnMouseMove(float x, float y, float dx, float dy) => mouseMoves++;
+        // A pad is the only device that can appear and vanish while the application runs, so it is
+        // the only one whose lifetime is worth showing. Reported here because this demo is where
+        // "did input reach the application" is answered, and a controller is input.
+        foreach (var pad in input.Gamepads)
+        {
+            if (pad.ConnectedThisTick) Console.WriteLine($"chassis: gamepad {pad.Id} connected ({pad.Name})");
+            if (pad.DisconnectedThisTick) Console.WriteLine($"chassis: gamepad {pad.Id} disconnected");
 
-    public void OnMouseWheel(float dx, float dy) => wheels++;
+            foreach (var button in Enum.GetValues<GamepadButton>())
+            {
+                if (pad[button].Pressed) padButtons++;
+            }
+
+            if (pad.LeftStick != System.Numerics.Vector2.Zero
+                || pad.RightStick != System.Numerics.Vector2.Zero
+                || pad.LeftTrigger != 0f || pad.RightTrigger != 0f)
+            {
+                padAxisTicks++;
+            }
+
+            padsSeen = Math.Max(padsSeen, pad.Id + 1);
+        }
+    }
 }

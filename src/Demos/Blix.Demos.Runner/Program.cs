@@ -55,7 +55,7 @@ public static class Program
     }
 }
 
-internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
+internal sealed class RunnerLoop : IGameLoop, IDebuggable
 {
     // --- Track geometry -----------------------------------------------------
     private static readonly float[] LaneX = { -2.2f, 0f, 2.2f };
@@ -459,6 +459,8 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
 
     public void OnUpdate(Time time)
     {
+        ReadInput();
+
         var dt = (float)time.Delta;
 
         if (!gameOver)
@@ -775,27 +777,30 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
         return x;
     }
 
-    public void OnKeyDown(Key key)
+    /// <summary>Read the devices, once, at a point this loop chose.</summary>
+    /// <remarks>
+    /// Lane changes and the jump are <c>Pressed</c>, which is what they always meant: one press,
+    /// one lane. Running them from the platform callback made them one per key-down EVENT, which
+    /// is the same thing only as long as the backend never repeats.
+    /// </remarks>
+    private void ReadInput()
     {
-        if (key == Key.Escape) { host.RequestClose(); return; }
+        var input = host.Input;
+        if (input[Key.Escape].Pressed) { host.RequestClose(); return; }
 
         if (gameOver)
         {
-            if (key is Key.Enter or Key.R) Restart();
+            if (input[Key.Enter].Pressed || input[Key.R].Pressed) Restart();
             return;
         }
 
-        switch (key)
+        if (input[Key.Left].Pressed || input[Key.A].Pressed) laneIndex = Math.Max(0, laneIndex - 1);
+        if (input[Key.Right].Pressed || input[Key.D].Pressed) laneIndex = Math.Min(LaneX.Length - 1, laneIndex + 1);
+        if ((input[Key.Up].Pressed || input[Key.W].Pressed || input[Key.Space].Pressed) && grounded)
         {
-            case Key.Left or Key.A:
-                laneIndex = Math.Max(0, laneIndex - 1);
-                break;
-            case Key.Right or Key.D:
-                laneIndex = Math.Min(LaneX.Length - 1, laneIndex + 1);
-                break;
-            case Key.Up or Key.W or Key.Space:
-                if (grounded) { physics.Velocity = new Vector3(0f, JumpSpeed, 0f); grounded = false; PlaySfx(jumpSfx, 1f); }
-                break;
+            physics.Velocity = new Vector3(0f, JumpSpeed, 0f);
+            grounded = false;
+            PlaySfx(jumpSfx, 1f);
         }
     }
 

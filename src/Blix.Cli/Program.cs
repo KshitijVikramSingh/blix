@@ -555,10 +555,18 @@ public static class Program
     /// target wants its output in.
     /// </para>
     /// <para>
-    /// <b>What this deliberately does NOT do yet is make the result portable.</b> The bundle runs
-    /// on the machine that built it and still finds MoltenVK and OpenAL through the developer's
-    /// Homebrew. Taking it to a clean Mac is stage B, and conflating the two is how "it
-    /// published" comes to mean two different things.
+    /// <b>For a macOS target this means the closed thing, not merely the built thing.</b> The
+    /// bundle carries its own Vulkan loader, MoltenVK and OpenAL, finds them without help from the
+    /// environment, and is signed — and the command reads the finished artifact back rather than
+    /// trusting the steps that produced it. A missing runtime library or a signature that will not
+    /// verify stops the publish and parks what was built under a name nothing can ship, because a
+    /// command that returns 0 having produced something other than what it claims is the failure
+    /// this engine keeps meeting.
+    /// </para>
+    /// <para>
+    /// What it still does not claim: no clean Mac has run one. Every measurement was taken on the
+    /// machine that built the bundle, and "nothing maps out of /opt/homebrew" is the strongest
+    /// proxy available here rather than a substitute for the real test.
     /// </para>
     /// </remarks>
     private static int Publish(string[] args)
@@ -827,28 +835,11 @@ public static class Program
         var missing = required.Where(r => !File.Exists(r.Path)).ToArray();
         if (missing.Length > 0)
         {
-            // Keep it, but not under a name anyone can ship. A failed publish that leaves a
-            // plausible `Foo.app` in the output directory is the same trap one level down: an
-            // artifact that is not what it looks like. Finder will not launch `.app.incomplete`,
-            // and it is still there to be looked at.
-            var parked = bundle + ".incomplete";
-            var note = string.Empty;
-            try
-            {
-                if (Directory.Exists(parked)) Directory.Delete(parked, recursive: true);
-                Directory.Move(bundle, parked);
-                note = $" What was built is at {Path.GetFileName(parked)}.";
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                // Not worth masking the real error over.
-                note = $" ({Path.GetFileName(bundle)} could not be set aside: {ex.Message})";
-            }
-
             throw new BlixCliException(
                 "the bundle is not closed — " +
                 string.Join("; ", missing.Select(m => $"{m.What} is missing ({Path.GetFileName(m.Path)})")) +
-                ". Publishing stopped rather than hand you a bundle that runs only here." + note);
+                ". Publishing stopped rather than hand you a bundle that runs only here." +
+                ParkIncomplete(bundle));
         }
 
         Console.WriteLine($"  closure verified: {required.Length} required parts present");
@@ -882,29 +873,83 @@ public static class Program
         var bundle = Path.Combine(dest, $"{BundleName(app)}.app");
         if (!Directory.Exists(bundle) || !File.Exists("/usr/bin/codesign")) return;
 
+        var (signed, complaint) = RunCodesign("--force", "--deep", "--sign", "-", bundle);
+        if (!signed)
+        {
+            throw new BlixCliException(
+                $"could not sign the bundle: {complaint}. A bundle whose seal does not verify is " +
+                "not one this command should claim to have produced." + ParkIncomplete(bundle));
+        }
+
+        Console.WriteLine("  signed the bundle ad-hoc");
+
+        // <b>And then ask, rather than assume.</b> Everything before this point judged the bundle
+        // as a set of files; the signature is a property of the finished artifact and can only be
+        // checked once it exists. Signing and then hoping is the shape this whole command spent an
+        // arc removing.
+        var (valid, why) = RunCodesign("--verify", "--strict", bundle);
+        if (!valid)
+        {
+            throw new BlixCliException(
+                $"the bundle signed but does not verify: {why}." + ParkIncomplete(bundle));
+        }
+
+        Console.WriteLine("  signature verifies");
+    }
+
+    /// <summary>Run codesign, and say whether it was happy.</summary>
+    /// <remarks>
+    /// The catch is narrow on purpose. A <c>catch (Exception)</c> around the whole of the previous
+    /// version swallowed the <see cref="BlixCliException"/> that version threw to make a signing
+    /// failure fatal — so the failure printed, the command carried on, and publish returned 0
+    /// having produced an unsigned bundle. Measured, not deduced: with a bogus identity the exit
+    /// code was 0 and the message arrived doubled, which was the catch wrapping its own throw.
+    /// Only the process failing to start is translated here; a verdict is returned, not thrown.
+    /// </remarks>
+    private static (bool Ok, string Complaint) RunCodesign(params string[] args)
+    {
         try
         {
-            var sign = Process.Start(new ProcessStartInfo("/usr/bin/codesign")
+            var info = new ProcessStartInfo("/usr/bin/codesign")
             {
                 UseShellExecute = false,
                 RedirectStandardError = true,
-                ArgumentList = { "--force", "--deep", "--sign", "-", bundle },
-            });
-            if (sign is null) return;
-            var complaint = sign.StandardError.ReadToEnd();
-            sign.WaitForExit();
-            if (sign.ExitCode != 0)
-            {
-                throw new BlixCliException(
-                    $"could not sign the bundle: {complaint.Trim()}. A bundle whose seal does not " +
-                    "verify is not one this command should claim to have produced.");
-            }
+            };
+            foreach (var a in args) info.ArgumentList.Add(a);
 
-            Console.WriteLine("  signed the bundle ad-hoc");
+            var run = Process.Start(info);
+            if (run is null) return (false, "codesign did not start");
+
+            var complaint = run.StandardError.ReadToEnd();
+            run.WaitForExit();
+            return (run.ExitCode == 0, complaint.Trim());
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
         {
-            Console.Error.WriteLine($"blix: could not sign the bundle: {ex.Message}");
+            return (false, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Rename a bundle that failed its checks, so nothing can ship it by accident.
+    /// </summary>
+    /// <remarks>
+    /// Kept rather than deleted, because a failed publish is worth looking at — but not under a
+    /// name Finder will launch. Returns the sentence to append to the refusal.
+    /// </remarks>
+    private static string ParkIncomplete(string bundle)
+    {
+        var parked = bundle + ".incomplete";
+        try
+        {
+            if (Directory.Exists(parked)) Directory.Delete(parked, recursive: true);
+            Directory.Move(bundle, parked);
+            return $" What was built is at {Path.GetFileName(parked)}.";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Not worth masking the real error over.
+            return $" ({Path.GetFileName(bundle)} could not be set aside: {ex.Message})";
         }
     }
 

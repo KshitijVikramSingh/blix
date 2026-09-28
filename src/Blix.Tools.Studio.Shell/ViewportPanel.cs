@@ -136,9 +136,9 @@ public sealed class ViewportPanel
         ImGui.SetCursorScreenPos(ImageMin);
         ImGui.InvisibleButton("##viewport-surface", fitted, ImGuiButtonFlags.MouseButtonLeft);
 
-        // <b>Not through IInputHandler, and that is forced rather than chosen.</b> This is an ImGui
-        // window, so ImGui captures the pointer over it, GestureOwnership hands the press to the UI,
-        // and the application's input handler is never called — correctly. The picture is an ImGui
+        // <b>Not through the frame's InputState, and that is forced rather than chosen.</b> This is
+        // an ImGui window, so ImGui captures the pointer over it, GestureOwnership hands the press to
+        // the UI, and it never reaches the application's input at all — correctly. The picture is an ImGui
         // ITEM, so the only place that can ask "is the pointer on it" is here, during layout, using
         // the item state ImGui just computed. The engine needed no change to allow this: the capture
         // rule was already right, and a widget asking about itself is what the rule leaves room for.

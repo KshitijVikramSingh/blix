@@ -69,7 +69,7 @@ internal sealed class ParticleSettings
     [Tune]             public bool ShowGizmos = false;
 }
 
-internal sealed class ParticlesLoop : IGameLoop, IInputHandler, IDebuggable, IDisposable
+internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
 {
     // Effect anchor points, consolidated so the whole scene frames in one view.
     private static readonly Vector3 FountainAt = new(0f, 0f, 0f);
@@ -133,7 +133,7 @@ internal sealed class ParticlesLoop : IGameLoop, IInputHandler, IDebuggable, IDi
 
     // Orbit camera state.
     private float camYaw = 0.7f, camPitch = 0.30f, camRadius = 10.5f;
-    private bool autoOrbit = true, dragging;
+    private bool autoOrbit = true;
     private static readonly Vector3 CamTarget = new(0f, 2.2f, 0f);
     private Matrix4x4 viewProj;
     private Vector3 camRight, camUp, camPos;
@@ -323,6 +323,8 @@ internal sealed class ParticlesLoop : IGameLoop, IInputHandler, IDebuggable, IDi
 
     public void OnUpdate(Time time)
     {
+        ReadInput();
+
         var dt = MathF.Min((float)time.Delta, 1f / 30f);   // clamp the first big frame
         if (autoOrbit) camYaw += dt * 0.25f;
         BuildCamera();
@@ -583,42 +585,38 @@ internal sealed class ParticlesLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     }
 
     // --- Input -------------------------------------------------------------
-    public void OnKeyDown(Key key)
+    /// <summary>Read the devices once per tick, rather than being told about them mid-frame.</summary>
+    /// <remarks>
+    /// The camera nudges use <c>Pressed</c> and not <c>Down</c> deliberately: they were one step
+    /// per key-down, and a hold would previously have repeated them only if the backend chose to
+    /// send repeats. A tick transition is one step per press on every backend, which is the same
+    /// feel and stops being a question about drivers.
+    /// </remarks>
+    private void ReadInput()
     {
-        switch (key)
+        var input = host.Input;
+
+        if (input[Key.Escape].Pressed) host.RequestClose();
+        if (input[Key.Space].Pressed) autoOrbit = !autoOrbit;
+        if (input[Key.R].Pressed) { camYaw = 0.7f; camPitch = 0.30f; camRadius = 10.5f; autoOrbit = true; }
+        if (input[Key.Left].Pressed || input[Key.A].Pressed) { camYaw -= 0.08f; autoOrbit = false; }
+        if (input[Key.Right].Pressed || input[Key.D].Pressed) { camYaw += 0.08f; autoOrbit = false; }
+        if (input[Key.Up].Pressed || input[Key.W].Pressed) { camPitch += 0.06f; autoOrbit = false; }
+        if (input[Key.Down].Pressed || input[Key.S].Pressed) { camPitch -= 0.06f; autoOrbit = false; }
+        if (input[Key.Q].Pressed) camRadius += 0.8f;
+        if (input[Key.E].Pressed) camRadius -= 0.8f;
+
+        // The drag is the button's own state now. The `dragging` field this replaces was a copy of
+        // it, kept in step by hand across two callbacks.
+        var dragging = input[MouseButton.Left].Down;
+        if (input[MouseButton.Left].Pressed) autoOrbit = false;
+        if (dragging)
         {
-            case Key.Escape: host.RequestClose(); break;
-            case Key.Space: autoOrbit = !autoOrbit; break;
-            case Key.R: camYaw = 0.7f; camPitch = 0.30f; camRadius = 10.5f; autoOrbit = true; break;
-            case Key.Left: case Key.A: camYaw -= 0.08f; autoOrbit = false; break;
-            case Key.Right: case Key.D: camYaw += 0.08f; autoOrbit = false; break;
-            case Key.Up: case Key.W: camPitch += 0.06f; autoOrbit = false; break;
-            case Key.Down: case Key.S: camPitch -= 0.06f; autoOrbit = false; break;
-            case Key.Q: camRadius += 0.8f; break;
-            case Key.E: camRadius -= 0.8f; break;
+            camYaw += input.MouseDelta.X * 0.006f;
+            camPitch += input.MouseDelta.Y * 0.006f;
         }
-    }
 
-    public void OnMouseDown(MouseButton button)
-    {
-        if (button == MouseButton.Left) { dragging = true; autoOrbit = false; }
-    }
-
-    public void OnMouseUp(MouseButton button)
-    {
-        if (button == MouseButton.Left) dragging = false;
-    }
-
-    public void OnMouseMove(float x, float y, float deltaX, float deltaY)
-    {
-        if (!dragging) return;
-        camYaw += deltaX * 0.006f;
-        camPitch += deltaY * 0.006f;
-    }
-
-    public void OnMouseWheel(float offsetX, float offsetY)
-    {
-        camRadius -= offsetY * 0.9f;
+        camRadius -= input.MouseWheel.Y * 0.9f;
     }
 
     // Window.Dispose disposes the loop after WaitIdle and before device teardown — the
