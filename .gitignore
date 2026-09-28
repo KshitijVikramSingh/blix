@@ -66,3 +66,7 @@ third_party/gltf-corpus/
 *.blixprobe
 *.blixfont
 *.textures/
+
+# `blix publish` output. Derived, per-target, and large — the same rule every other
+# build product here follows.
+dist/

@@ -68,11 +68,27 @@ One enrichment it needs: the app index records the assembly and apphost, but
 publishing is a **source-project** operation, so the indexer should record the
 originating `.csproj`.
 
-**Acceptance — deliberately narrower than it sounds.** `clone → build → publish
-→ Bulwark.app`, launching **on the build machine**, with every managed, shader
-and cooked output arriving through build declarations and no application-specific
-copy script. Whether it runs anywhere else is B's question, and A has a strong
-tendency to absorb it.
+**Acceptance — and "double-clickable" is not part of it.** `clone → build →
+publish → Bulwark.app`, with every managed, shader and cooked output arriving
+through build declarations and no application-specific copy script, and the
+bundle running when launched **with the development environment**.
+
+That wording was tightened after measuring it. The bundle publishes correctly
+and runs clean at exit 0 with the Homebrew Vulkan variables set; double-clicked
+it dies, because `MoltenVkBootstrap` and GLFW find `libvulkan` through
+`DYLD_FALLBACK_LIBRARY_PATH` and `VK_ICD_FILENAMES`, which a shell exports and
+Finder does not. So the dependency is not merely *installed* on the build
+machine, it is *discovered through environment a terminal happens to provide* —
+and putting the loader inside the bundle where it needs no environment is
+runtime closure. **Double-clicking belongs entirely to B, even on the machine
+that built it.**
+
+**Done:** `blix publish <app> --target osx-arm64` produces
+`dist/<app>/<rid>/<App>.app` with `Contents/{MacOS,Resources,Info.plist,PkgInfo}`.
+The app index now records its originating `.csproj`, because publishing is a
+source-project operation and rediscovering that from an assembly path is
+guesswork. `run` and `publish` share one resolver, so a name cannot mean two
+different apps.
 
 **One target per invocation**, and `--target osx-arm64` stays singular: designing
 for a second before it exists is the speculation this tree avoids. Internally,

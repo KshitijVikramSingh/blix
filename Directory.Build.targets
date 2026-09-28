@@ -233,7 +233,7 @@
           AfterTargets="CopyFilesToOutputDirectory"
           Inputs="@(IntermediateAssembly);$(BlixAppIndexerDll)"
           Outputs="$(OutDir)$(AssemblyName).blixapps.json">
-    <Exec Command="dotnet &quot;$(BlixAppIndexerDll)&quot; --assembly &quot;$(OutDir)$(AssemblyName).dll&quot; --output &quot;$(OutDir)$(AssemblyName).blixapps.json&quot;" />
+    <Exec Command="dotnet &quot;$(BlixAppIndexerDll)&quot; --assembly &quot;$(OutDir)$(AssemblyName).dll&quot; --output &quot;$(OutDir)$(AssemblyName).blixapps.json&quot; --project &quot;$(MSBuildProjectFullPath)&quot;" />
   </Target>
 
   <Target Name="BlixReflectSpirV"

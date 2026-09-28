@@ -35,6 +35,7 @@ public static class Program
                 "ls" or "list" => List(),
                 "run" => Run(args.Skip(1).ToArray()),
                 "test" => Test(args.Skip(1).ToArray()),
+                "publish" => Publish(args.Skip(1).ToArray()),
                 "help" or "-h" or "--help" => Help(0),
                 // A bare name is a run. `blix view rogue.glb` reads better than
                 // `blix run view rogue.glb`, and underneath it is the same thing — which is
@@ -183,7 +184,8 @@ public static class Program
                     // which one, and only those callers need BlixApps.Dispatch at all.
                     apps.Add(new App(
                         project, app.Name, app.Summary, app.Headed, host, assembly,
-                        app.IsEntryPoint ? null : app.Name, stale, Declared: true));
+                        app.IsEntryPoint ? null : app.Name, stale, Declared: true,
+                        SourceProject: index.Project));
                 }
             }
 
@@ -198,7 +200,8 @@ public static class Program
             if (index.HasEntryPoint && !index.Apps.Any(a => a.IsEntryPoint))
             {
                 var name = Path.GetFileNameWithoutExtension(index.Assembly);
-                apps.Add(new App(project, name, null, false, host, assembly, null, stale, Declared: false));
+                apps.Add(new App(project, name, null, false, host, assembly, null, stale,
+                    Declared: false, SourceProject: index.Project));
             }
         }
 
@@ -279,15 +282,35 @@ public static class Program
     {
         if (args.Length == 0) throw new BlixCliException("run what? `blix ls` shows this project's apps.");
 
-        var root = ProjectRoot();
-        var wanted = args[0];
         var rest = args.Skip(1).ToArray();
+        var app = ResolveOne(args[0]);
 
-        // project:app addresses across folders; a bare name means "anywhere below here",
-        // which from inside a project folder is that project and from the repository root
-        // is everything. Both resolve the same way, which is what keeps "I am standing in
-        // it" from being a different mechanism than "I am not".
+        if (app.Stale)
+        {
+            Console.Error.WriteLine($"blix: the index for '{app.Name}' is older than its assembly — rebuilding.");
+        }
+
+        return Launch(app, rest);
+    }
+
+    /// <summary>
+    /// Find the one app a name means, from wherever the caller is standing.
+    /// </summary>
+    /// <remarks>
+    /// Shared by run and publish rather than written twice: which app a name refers to is one
+    /// question, and two verbs answering it differently is how `blix run x` and `blix publish x`
+    /// come to mean different apps.
+    ///
+    /// <c>project:app</c> addresses across folders; a bare name means "anywhere below here",
+    /// which from inside a project folder is that project and from the repository root is
+    /// everything. Both resolve the same way, which keeps "I am standing in it" from being a
+    /// different mechanism than "I am not".
+    /// </remarks>
+    private static App ResolveOne(string wanted)
+    {
+        var root = ProjectRoot();
         var candidates = Discover(root);
+
         if (wanted.Contains(':'))
         {
             var parts = wanted.Split(':', 2);
@@ -307,14 +330,7 @@ public static class Program
             candidates = scoped;
         }
 
-        var app = Resolve(candidates, wanted);
-
-        if (app.Stale)
-        {
-            Console.Error.WriteLine($"blix: the index for '{app.Name}' is older than its assembly — rebuilding.");
-        }
-
-        return Launch(app, rest);
+        return Resolve(candidates, wanted);
     }
 
     /// <summary>Start an app, wait for it, and hand back its exit code.</summary>
@@ -467,6 +483,7 @@ public static class Program
         to.WriteLine("  blix ls                    what this project has");
         to.WriteLine("  blix run <app> [args...]   run one; args after the name are the app's own");
         to.WriteLine("  blix run <project>:<app>   reach across folders");
+        to.WriteLine("  blix publish <app>         build a distributable; --target <rid>");
         to.WriteLine();
         to.WriteLine("A project is the nearest folder above you with a blix.project marker,");
         to.WriteLine("a solution, or a repository in it.");
@@ -478,7 +495,8 @@ public static class Program
         PropertyNameCaseInsensitive = true,
     };
 
-    private sealed record Index(string Assembly, string? AppHost, bool HasEntryPoint, IndexedApp[] Apps);
+    private sealed record Index(
+        string Assembly, string? AppHost, bool HasEntryPoint, IndexedApp[] Apps, string? Project = null);
 
     private sealed record IndexedApp(string Name, string? Summary, bool Headed, bool IsEntryPoint);
 
@@ -486,9 +504,185 @@ public static class Program
     /// <param name="Assembly">Its dll, which is how an app with no apphost is run.</param>
     /// <param name="Selector">The name to pass as <c>--blix-app</c>, or null when the app IS the
     /// executable and its entry point needs no selecting.</param>
+    /// <param name="Project">The project FOLDER this app is grouped under, for addressing.</param>
+    /// <param name="SourceProject">The .csproj it was built from, which is what publishing needs
+    /// and running does not. Null for an index written before the field existed.</param>
     private sealed record App(
         string Project, string Name, string? Summary, bool Headed, string? AppHost, string Assembly,
-        string? Selector, bool Stale, bool Declared);
+        string? Selector, bool Stale, bool Declared, string? SourceProject = null);
+
+
+    /// <summary>
+    /// One target of a publish, resolved once instead of threaded around as a string.
+    /// </summary>
+    /// <remarks>
+    /// <b>A RID is not a packaging policy.</b> `osx-arm64` names what .NET should build; it does
+    /// not say that the result is a `.app` bundle with an Info.plist, or that its native
+    /// dependencies are dylibs found by rpath. Windows and Linux will want different answers to
+    /// the second question while .NET hands back the same shape of string for the first, so the
+    /// distinction is worth having before there is a second target rather than after.
+    ///
+    /// Deliberately NOT a target abstraction: one target per invocation, no list, no matrix. CI
+    /// can call this three times.
+    /// </remarks>
+    private sealed record PublishTarget(string Rid, string Platform, string Architecture)
+    {
+        public static PublishTarget Parse(string rid)
+        {
+            var dash = rid.LastIndexOf('-');
+            if (dash <= 0 || dash == rid.Length - 1)
+            {
+                throw new BlixCliException(
+                    $"'{rid}' is not a runtime identifier. Expected something like osx-arm64.");
+            }
+
+            return new PublishTarget(rid, rid[..dash], rid[(dash + 1)..]);
+        }
+
+        /// <summary>Whether this target wants a macOS application bundle rather than a plain folder.</summary>
+        public bool WantsAppBundle => Platform is "osx";
+    }
+
+    /// <summary>
+    /// Build one application into something a person can run, for one target.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This exists because seven launcher scripts each grew their own `dotnet publish` plus a
+    /// hand-copy of whatever that missed. The copying is gone now -- shaders and cooked assets
+    /// are declared content and publish carries them -- so what is left is the part a script
+    /// should never have been doing: knowing which project an app came from, and what shape the
+    /// target wants its output in.
+    /// </para>
+    /// <para>
+    /// <b>What this deliberately does NOT do yet is make the result portable.</b> The bundle runs
+    /// on the machine that built it and still finds MoltenVK and OpenAL through the developer's
+    /// Homebrew. Taking it to a clean Mac is stage B, and conflating the two is how "it
+    /// published" comes to mean two different things.
+    /// </para>
+    /// </remarks>
+    private static int Publish(string[] args)
+    {
+        if (args.Length == 0)
+        {
+            throw new BlixCliException("publish what? `blix ls` shows this project's apps.");
+        }
+
+        var wanted = args[0];
+        var rid = ValueAfter(args, "--target") ?? DefaultRid();
+        var target = PublishTarget.Parse(rid);
+        var outRoot = ValueAfter(args, "--out");
+
+        var app = ResolveOne(wanted);
+        if (app.SourceProject is not { } project)
+        {
+            throw new BlixCliException(
+                $"'{app.Name}' does not record the project it was built from — rebuild it, " +
+                "and the index will.");
+        }
+
+        if (!File.Exists(project))
+        {
+            throw new BlixCliException($"'{app.Name}' was built from {project}, which is gone.");
+        }
+
+        var dest = Path.GetFullPath(outRoot
+            ?? Path.Combine(ProjectRoot().FullName, "dist", app.Name, target.Rid));
+        var payload = target.WantsAppBundle
+            ? Path.Combine(dest, $"{BundleName(app)}.app", "Contents", "MacOS")
+            : dest;
+
+        Console.WriteLine($"publishing {app.Name} for {target.Rid}");
+
+        // Self-contained, because the whole point is that the person running it did not install
+        // anything. A framework-dependent publish is a second set of prerequisites wearing a
+        // folder, and the launchers it replaces were all self-contained already.
+        var publish = Process.Start(new ProcessStartInfo("dotnet")
+        {
+            UseShellExecute = false,
+            ArgumentList =
+            {
+                "publish", project,
+                "-c", Environment.GetEnvironmentVariable("BLIX_CONFIG") ?? "Debug",
+                "-r", target.Rid,
+                "--self-contained", "true",
+                "-o", payload,
+                "--nologo",
+            },
+        }) ?? throw new BlixCliException("could not start dotnet publish");
+        publish.WaitForExit();
+        if (publish.ExitCode != 0) return publish.ExitCode;
+
+        if (target.WantsAppBundle) WriteAppBundle(app, target, dest);
+
+        Console.WriteLine($"  {dest}");
+        return 0;
+    }
+
+    /// <summary>The bundle's name: the apphost's, because that is the binary Info.plist names.</summary>
+    private static string BundleName(App app) =>
+        app.AppHost is { } host ? Path.GetFileName(host) : app.Name;
+
+    /// <summary>
+    /// The two files that make a folder of Mach-O into something Finder will launch.
+    /// </summary>
+    /// <remarks>
+    /// Written here rather than by the project, because it is a property of the TARGET and not of
+    /// the application: the same app published for win-x64 wants neither of them. This is the
+    /// first thing in the tree that is packaging policy rather than build policy, which is why
+    /// PublishTarget exists to be asked instead of a RID string being matched on.
+    /// </remarks>
+    private static void WriteAppBundle(App app, PublishTarget target, string dest)
+    {
+        var bundle = Path.Combine(dest, $"{BundleName(app)}.app");
+        var contents = Path.Combine(bundle, "Contents");
+        Directory.CreateDirectory(Path.Combine(contents, "Resources"));
+
+        File.WriteAllText(Path.Combine(contents, "Info.plist"),
+            $"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+              <key>CFBundleName</key><string>{BundleName(app)}</string>
+              <key>CFBundleDisplayName</key><string>{app.Name}</string>
+              <key>CFBundleIdentifier</key><string>dev.blix.{BundleId(app)}</string>
+              <key>CFBundleExecutable</key><string>{BundleName(app)}</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>CFBundleVersion</key><string>1.0</string>
+              <key>CFBundleShortVersionString</key><string>1.0</string>
+              <key>LSMinimumSystemVersion</key><string>11.0</string>
+              <key>NSHighResolutionCapable</key><true/>
+            </dict>
+            </plist>
+
+            """);
+
+        // A bundle with no CFBundleIconFile is a bundle Finder draws a blank page for. The mark
+        // is not converted here — that needs iconutil and belongs with the icon work — so the
+        // key is left out rather than pointing at a file that is not there.
+        File.WriteAllText(Path.Combine(contents, "PkgInfo"), "APPL????");
+    }
+
+    /// <summary>The reverse-DNS tail, without repeating the "blix" the prefix already said.</summary>
+    private static string BundleId(App app)
+    {
+        var name = app.Name.ToLowerInvariant();
+        return name.StartsWith("blix.", StringComparison.Ordinal) ? name["blix.".Length..] : name;
+    }
+
+    private static string DefaultRid() =>
+        System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier;
+
+    private static string? ValueAfter(string[] args, string flag)
+    {
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] == flag) return args[i + 1];
+        }
+
+        return null;
+    }
 
     private sealed class BlixCliException(string message) : Exception(message);
 }
