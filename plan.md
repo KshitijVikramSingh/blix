@@ -108,49 +108,87 @@ Homebrew, no installed .NET, no Vulkan SDK and no OpenAL, and it launches. That
 sentence *is* the definition of runtime closure, and it is the only test that
 cannot be passed by accident on a developer's box.
 
-### What a first attempt established, 2026-09-28
+### Done, 2026-09-28 — the bundle is closed and signed
 
-Measured by hand-building a closed bundle and running it with Homebrew off the
-search path. None of this is built yet; it is what the next attempt should not
-have to rediscover.
+`blix publish` assembles the closure itself: it copies the loader, MoltenVK and
+OpenAL Soft out of the build machine's Homebrew into `Contents/Frameworks`
+(resolving the symlink chain into the Cellar, since a link to a directory the
+target machine does not have is not a dependency that travelled), writes a
+bundle-relative ICD manifest, moves the assets to `Contents/Resources`, and
+signs.
+
+Four findings, each measured, each of which had a wrong belief in front of it:
 
 - **Pre-loading `libvulkan` does NOT satisfy GLFW.** `MoltenVkBootstrap`'s
-  header claims that once the library is mapped by absolute path, dyld answers
-  later bare-name `dlopen`s from the existing image. It does not — tested with
-  both `libvulkan.dylib` and the exact `libvulkan.1.dylib` soname GLFW asks
-  for. `DYLD_FALLBACK_LIBRARY_PATH` is doing all the work today, and that
-  comment is wrong.
-- **Therefore the bundle needs the variable set before exec**, which a shell
-  does and Finder does not. Either a launcher shim as `CFBundleExecutable`, an
-  `LSEnvironment` entry, or the process re-execing itself. Not yet chosen.
-- **A bundled MoltenVK plus a bundle-relative ICD manifest works.** Pointing
-  `VK_ICD_FILENAMES` at a json inside `Contents/Resources` whose
-  `library_path` is relative to itself drove the app correctly.
-- **A bundled copy of the Khronos loader does not.** Same app, same ICD, only
-  the loader swapped for a copy in the bundle: `vkCreateInstance` fails with
-  `ErrorExtensionNotPresent`. Unexplained, and worth understanding before
-  choosing to ship the loader at all.
-- **Dropping the loader and letting MoltenVK answer directly gets further and
-  then hits Silk.** `Vk.GetApi()` resolves Vulkan through its own name list,
-  which is not GLFW's, and fails when MoltenVK wears the loader's filename.
-  So a loader-less bundle needs Silk's resolver pointed at MoltenVK too.
+  header claimed dyld would answer a later bare-name `dlopen` from the mapped
+  image. It does not — tested with `libvulkan.dylib`, the exact
+  `libvulkan.1.dylib` soname, and a bare-leaf install name plus re-sign.
+  `DYLD_FALLBACK_LIBRARY_PATH` was doing all the work.
+- **So the process re-execs itself**, with the path computed from
+  `Environment.ProcessPath`. The alternatives were measured and lost:
+  `LSEnvironment` works but bakes an absolute path and dies the first time the
+  `.app` is moved; a launcher shim adds a second binary to sign. The re-exec
+  keeps working when the bundle moves, which is the property that matters.
+  `setenv` + `execv`, because .NET's environment API does not reach `environ`.
+- **`Environment.SetEnvironmentVariable` never reached the Vulkan loader.**
+  On Unix it writes .NET's own dictionary and leaves `environ` alone, so
+  `VK_ICD_FILENAMES` had been a no-op since it was written — invisible because
+  the loader's built-in search covers Homebrew's prefix anyway. In a bundle it
+  was not invisible: the loader found the bundle's manifest *and* Homebrew's,
+  mapped two copies of MoltenVK into one process (objc reported duplicate
+  `MVKBlockObserver`), and used the installed one. Native `setenv` fixed it —
+  and unlike `DYLD_*`, it needs no re-exec, because the loader reads it at
+  `vkCreateInstance`.
+- **codesign refuses a bundle with data in `Contents/MacOS`.** One cooked
+  `core.textures/` sidecar — a directory with an extension — is read as a
+  malformed nested bundle and fails the whole signature. `--deep` is also
+  required, because a self-contained publish puts managed `.dll`s beside the
+  apphost and codesign will not seal those unsigned either. Assets therefore
+  live in `Contents/Resources`, and `Blix.Core.AppFiles` is the one place that
+  knows to look across for them — replacing eleven hand-written copies of
+  `Path.Combine(AppContext.BaseDirectory, "Assets", …)`, every one of which
+  would have been wrong in a published bundle and *quietly* wrong: Bulwark
+  drew primitives instead of its turrets and exited 0. Pinned by
+  `Blix.Test.Graphics` Section **BH**.
 
-One thing did come out of it and is already in: the instance no longer requests
-`VK_KHR_portability_enumeration` unconditionally on macOS. That is a loader
-extension, absent when talking to MoltenVK directly, and requesting it failed
-instance creation outright. It is now asked for only when the runtime offers
-it, which is correct whether or not anything is ever bundled.
+Two earlier dead ends are now moot but should not be re-tried: a bundled
+Khronos loader failing `vkCreateInstance` with `ErrorExtensionNotPresent`, and
+a loader-less bundle failing in Silk's own name resolution. Both were artefacts
+of requesting `VK_KHR_portability_enumeration` unconditionally — a *loader*
+extension, absent when talking to MoltenVK directly. It is now asked for only
+when the runtime offers it, and the bundled loader works.
 
-Development assumes Homebrew throughout — `./blix` sets `DYLD_FALLBACK_LIBRARY_PATH`
-and the MoltenVK ICD, `MoltenVkBootstrap` probes Homebrew, `OpenALAudioDevice`
-probes Homebrew. That is reasonable *bootstrap* and cannot be the release story:
-a shipped `.app` cannot tell someone to `brew install`.
+**What was measured on the finished bundle**, moved out of its publish
+directory, with no environment set: exit 0; one ICD manifest; one driver, the
+bundled one; zero images mapped from `/opt/homebrew`; OpenAL resolving to
+`Contents/Frameworks`; `codesign --verify` valid and satisfying its designated
+requirement; and a Launch Services double-click running all 12,000 frames in
+the same 10.0s as a direct run.
 
-So the stage forces a distinction worth having: **developer dependencies**
-(`glslc`, `spirv-cross`, validation layers) versus **runtime dependencies that
-belong inside the bundle** (MoltenVK, the loader or a direct link, OpenAL Soft),
-plus rpath fixups and signing. The closure is target-dependent, which is what
-makes it a design question rather than a copy.
+**The acceptance test above is still unrun.** Every measurement here was taken
+on the machine that built the bundle, and "zero images from `/opt/homebrew`" is
+the strongest available proxy for a clean Mac, not a substitute for one. No
+clean Mac or VM is available — that is the one open thing in this stage, and it
+is an access problem rather than a work item.
+
+### The distinction the stage settled
+
+**Developer dependencies** — `glslc`, `spirv-cross`, the validation layers —
+stay outside. They run on the build machine and never ship.
+
+**Runtime dependencies** — the Khronos loader, MoltenVK, OpenAL Soft — go in
+`Contents/Frameworks`. Both loader filenames are needed, not one: GLFW dlopens
+`libvulkan.1.dylib` and Silk.NET's resolver asks for `libvulkan.dylib`, and a
+bundle carrying only one gets past whichever asks first and dies on the other.
+
+Development still assumes Homebrew — `./blix` sets `DYLD_FALLBACK_LIBRARY_PATH`
+and the ICD, and both probes fall back to it. That stays, and is now explicitly
+the *second* branch: a bundled runtime wins, so a developer machine that happens
+to have Homebrew exercises what was shipped rather than what is lying around.
+
+The one thing knowingly left crude: the bundle is sourced from the build
+machine's Homebrew, so a publish inherits whatever version that machine has.
+Pinning the runtime is a real question and not this one.
 
 Note `spirv-cross` became load-bearing for a fresh clone on 2026-09-28, when the
 `.spv.refl.json` sidecars stopped being tracked. It is a documented prerequisite
