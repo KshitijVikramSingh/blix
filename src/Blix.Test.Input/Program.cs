@@ -435,6 +435,43 @@ var t = new TestRunner();
 
     t.Expect("H.3 the polled path reads the focus bit, rather than the host merely keeping one",
         consults, "a pad is sampled every tick whether or not the window is listening");
+
+    // ── coming back ────────────────────────────────────────────────────────────────────────────
+    //
+    // Letting go on focus loss is only half of it. The player is still holding what they were
+    // holding when focus returns, and sampling that as ordinary input makes it a PRESS — which is
+    // where one-shot actions live, so returning to a window would select, confirm or shoot.
+    // Nothing was pressed; the application became allowed to look again, and that is not an event.
+    var back = new InputState();
+    back.RecordGamepadConnected(0, "Test Pad");
+    back.RecordGamepadButton(0, GamepadButton.A, pressed: true);
+    back.RecordGamepadAxis(0, GamepadAxis.LeftX, 0.8f);
+    back.BeginTick();
+    t.Expect("H.0 CONTROL A is held and the stick is off centre", back.Gamepads[0][GamepadButton.A].Down);
+
+    back.ReleaseAll();          // focus lost
+    back.BeginTick();
+    back.ResyncGamepads();      // focus regained, and the thumb never moved
+    back.RecordGamepadButton(0, GamepadButton.A, pressed: true);
+    back.RecordGamepadAxis(0, GamepadAxis.LeftX, 0.8f);
+    back.BeginTick();
+
+    t.Expect("H.4 a button still held on return is DOWN without being pressed",
+        back.Gamepads[0][GamepadButton.A] is { Down: true, Pressed: false, Released: false },
+        "a one-shot bound to A must not fire because the window became eligible");
+    t.Expect("H.5 and a stick still off centre reports no movement",
+        MathF.Abs(back.Gamepads[0][GamepadAxis.LeftX].Delta) < 1e-6f
+        && MathF.Abs(back.Gamepads[0][GamepadAxis.LeftX].Value - 0.8f) < 1e-6f,
+        "otherwise the stick 'travels' from centre to where the thumb already was");
+
+    // And the priming lasts exactly one sample: a real press after it is a real press.
+    back.RecordGamepadButton(0, GamepadButton.A, pressed: false);
+    back.BeginTick();
+    back.RecordGamepadButton(0, GamepadButton.A, pressed: true);
+    back.BeginTick();
+    t.Expect("H.6 a genuine press after re-acquisition still presses",
+        back.Gamepads[0][GamepadButton.A] is { Down: true, Pressed: true },
+        "priming must not be sticky");
 }
 
 t.PrintSummary();

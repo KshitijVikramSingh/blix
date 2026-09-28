@@ -162,7 +162,19 @@ public sealed class InputState : IInputState
 
     /// <summary>Record a pad's button, as sampled.</summary>
     public void RecordGamepadButton(int id, GamepadButton button, bool pressed) =>
-        Gamepads.Mutable(id).RecordButton(button, pressed);
+        Gamepads.Mutable(id).RecordButton(button, pressed, Gamepads.Priming);
+
+    /// <summary>
+    /// Treat the next gamepad sample as re-acquisition: what is held, without calling it a change.
+    /// </summary>
+    /// <remarks>
+    /// <b>The counterpart to <see cref="ReleaseAll"/>, and the reason that one is not enough.</b>
+    /// Losing focus lets go of everything, which is right. Getting it back finds the player still
+    /// holding what they were holding — and treating that as fresh input means returning to a
+    /// window fires whatever the held button does. Nothing was pressed; the application merely
+    /// became allowed to look again, and that is not an event.
+    /// </remarks>
+    public void ResyncGamepads() => Gamepads.BeginResync();
 
     /// <summary>Record a pad's axis, as sampled, in the backend's own range.</summary>
     public void RecordGamepadAxis(int id, GamepadAxis axis, float value) =>

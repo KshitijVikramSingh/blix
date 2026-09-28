@@ -429,7 +429,13 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     private void OnFocusChanged(bool focused)
     {
         windowFocused = focused;
-        if (focused) return;
+        if (focused)
+        {
+            // Coming back, the pad is still holding whatever it was holding. That is not input.
+            inputState.ResyncGamepads();
+            return;
+        }
+
         keysHeld.Clear();
         buttonsHeld.Clear();
 

@@ -65,11 +65,13 @@ available proxy and is not the test. Take a `.app` to a Mac with no Homebrew, no
 the GPU driver installs it — but OpenAL Soft is neither a system library nor in a
 NuGet runtime pack. Stage B's closure question, unanswered for Windows.
 
-**No physical gamepad has been held.** The lifetime is proven against the state
-machine; the Silk seam is not. Specifically unverified: that thumbstick index 0/1 is
-left/right on a real device, and that a resting trigger now reads 0.00 rather than
-1.00 — the direct observable of the range fix. `blix run Chassis --frames 900` prints
-the lifetime lines; plug and unplug.
+**No physical gamepad has been held.** The lifetime, the trigger range and
+re-acquisition are proven against the state machine; the Silk seam is not.
+Specifically unverified: that thumbstick index 0/1 is left/right on a real device,
+that a resting trigger reads 0.00 rather than 1.00 — the direct observable of the
+range fix — and that holding a button while alt-tabbing back does not fire it.
+`blix run Chassis --frames 900` prints the lifetime lines; plug, unplug, and
+switch away holding something.
 
 **`blix.cmd` is only as verified as CI exercises it**, and the Windows branch of the
 native build targets has only ever run on a GitHub runner.
