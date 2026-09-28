@@ -32,12 +32,10 @@ fi
 echo "Publishing self-contained ($RID) ..."
 dotnet publish "$PROJECT" -c Debug -r "$RID" --self-contained true -o "$PUBLISH_DIR" --nologo -v:q
 
-BUILD_SHADERS="$REPO_ROOT/src/Demos/Blix.Demos.TankArena/bin/Debug/net8.0/$RID/Shaders"
-[ -d "$BUILD_SHADERS" ] || BUILD_SHADERS="$REPO_ROOT/src/Demos/Blix.Demos.TankArena/bin/Debug/net8.0/Shaders"
-if [ -d "$BUILD_SHADERS" ]; then
-    mkdir -p "$PUBLISH_DIR/Shaders"
-    cp -p "$BUILD_SHADERS"/*.spv "$PUBLISH_DIR/Shaders/" 2>/dev/null || true
-fi
+# Shaders and cooked assets arrive through `dotnet publish` itself: both compile to a staged
+# location and are declared as content, so publish carries them like any other item. This script
+# used to mirror them by hand afterwards, because app shaders were written straight into the
+# output directory and were never items at all. See plan.md stage A.
 
 export DYLD_FALLBACK_LIBRARY_PATH="$prefix/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"
 export VK_ICD_FILENAMES="$prefix/etc/vulkan/icd.d/MoltenVK_icd.json"

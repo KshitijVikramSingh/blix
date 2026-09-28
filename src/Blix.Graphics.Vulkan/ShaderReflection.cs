@@ -60,10 +60,37 @@ public static class ShaderReflection
         return new ReflStage(stage, slots, pushConstants);
     }
 
+    /// <summary>
+    /// The interface of a whole program, read from the reflection sidecars beside its shaders.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The three callers that wanted this each wrote it, identically, as a local function.</b>
+    /// Three copies of one step, and with them three spellings of the <c>.spv.refl.json</c>
+    /// suffix — which is every spelling of it in the tree. Nothing about that was going to fail
+    /// loudly; it is the shape conventions §4 names, and it is why this is here rather than in
+    /// whichever renderer needed it first.
+    /// </para>
+    /// <para>
+    /// The stage names are the shader filenames, <c>lit.vert</c> and not <c>lit.vert.spv</c> — the
+    /// sidecar suffix belongs to this method, being the thing the build decided to call them.
+    /// </para>
+    /// </remarks>
+    public static ShaderInterface ForProgram(string shaderDirectory, params string[] stages)
+    {
+        ArgumentNullException.ThrowIfNull(shaderDirectory);
+        ArgumentNullException.ThrowIfNull(stages);
+        return MergeStages(stages
+            .Select(s => Load(Path.Combine(shaderDirectory, s + SidecarSuffix)))
+            .ToArray());
+    }
+
+    /// <summary>What the build calls a stage's reflection, beside the stage's own .spv.</summary>
+    public const string SidecarSuffix = ".spv.refl.json";
+
     // Combine the per-stage reflections of one program into a single interface.
-    // Shared (set,binding) across stages must agree on type/count/layout; their
-    // stage flags are OR'd. A type/size conflict is a real cross-stage bug and
-    // throws (today it's a silent mismatch between two hand-tables).
+    // Shared (set,binding) across stages must agree on type, count and block layout; their stage
+    // flags are OR'd. Every one of those disagreements is a real cross-stage bug and throws.
     public static ShaderInterface MergeStages(params ReflStage[] stages)
     {
         ArgumentNullException.ThrowIfNull(stages);
@@ -84,13 +111,20 @@ public static class ShaderReflection
                         $"ShaderReflection: conflicting declarations at (set={slot.Set}, binding={slot.Binding}) " +
                         $"across stages — {existing.Type}×{existing.Count} vs {slot.Type}×{slot.Count}.");
                 }
-                // A stage only reflects the UBO members it references, so the
-                // same (set,binding) block can come back with a different member
-                // count — even different trailing names — per stage (e.g. the
-                // vertex stage of a lit shader sees a short prefix of the Frame
-                // block the fragment stage fully reads). std140 offsets are
-                // positional, so the fuller block is the authoritative layout
-                // for the by-name write path; keep it and OR the stage flags.
+                // A stage only reflects the UBO members it references, so the same (set,binding)
+                // block can come back with a different member count per stage — measured:
+                // studio_lit.vert sees one 64-byte member of the Frame block and studio_lit.frag
+                // sees eleven, 368 bytes. std140 offsets are positional, so the fuller block is
+                // the authoritative layout for the by-name write path.
+                //
+                // But "fuller" is only meaningful if the shorter really is a PREFIX of it, and
+                // that has to be checked rather than assumed. Two stages declaring different
+                // members at the same offset is not a longer and a shorter view of one block, it
+                // is two different blocks sharing a binding — and picking either one silently
+                // sends the by-name path to write B where the shader reads C. Nothing downstream
+                // would object: the descriptor type matches, so the device has no opinion.
+                RequireCompatibleBlocks(existing, slot);
+
                 var fuller = (slot.BlockLayout?.TotalSize ?? 0) > (existing.BlockLayout?.TotalSize ?? 0)
                     ? slot : existing;
                 merged[key] = fuller with { Stages = existing.Stages | slot.Stages };
@@ -118,6 +152,53 @@ public static class ShaderReflection
             }
         }
         return new ShaderInterface(merged.Values.ToArray(), pushByRange.Values.ToArray());
+    }
+
+    /// <summary>
+    /// Two stages' views of one block must be the same block: overlapping members agree exactly,
+    /// and the shorter is a prefix of the longer.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Matched by OFFSET, because that is what std140 makes authoritative and what the by-name
+    /// write path ultimately resolves to. A member present in one view and absent from the other
+    /// at the same offset means the shorter is not a prefix, which is the same disagreement wearing
+    /// a gap instead of a clash.
+    /// </para>
+    /// <para>
+    /// This lives in the merge rather than in a repository test on purpose. A source-level check
+    /// can keep one tree's shaders honest; this is public machinery, and an external project's
+    /// shaders never pass through that gate.
+    /// </para>
+    /// </remarks>
+    private static void RequireCompatibleBlocks(DescriptorSetSlot a, DescriptorSetSlot b)
+    {
+        if (a.BlockLayout is not { } la || b.BlockLayout is not { } lb) return;
+
+        // Compare the shorter against the longer, so "missing at this offset" means what it says.
+        var (shorter, longer) = la.TotalSize <= lb.TotalSize ? (la, lb) : (lb, la);
+        var byOffset = new Dictionary<int, UniformBlockMember>();
+        foreach (var m in longer.Members) byOffset[m.Offset] = m;
+
+        foreach (var m in shorter.Members)
+        {
+            if (!byOffset.TryGetValue(m.Offset, out var other))
+            {
+                throw new InvalidOperationException(
+                    $"ShaderReflection: stages disagree about the block at (set={a.Set}, binding={a.Binding}) — " +
+                    $"'{m.Name}' at offset {m.Offset} in one stage has no member at that offset in the other. " +
+                    "One view of a block must be a prefix of the other; these are two different blocks " +
+                    "sharing a binding.");
+            }
+
+            if (other.Name == m.Name && other.Size == m.Size && other.ElementStride == m.ElementStride) continue;
+
+            throw new InvalidOperationException(
+                $"ShaderReflection: stages disagree about the block at (set={a.Set}, binding={a.Binding}) — " +
+                $"offset {m.Offset} is '{m.Name}' ({m.Size}B, stride {m.ElementStride}) in one stage and " +
+                $"'{other.Name}' ({other.Size}B, stride {other.ElementStride}) in the other. Writing by name " +
+                "would put bytes where the other stage reads something else.");
+        }
     }
 
     // --- parsing helpers ---------------------------------------------------

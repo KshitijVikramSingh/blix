@@ -25,8 +25,12 @@ FILTER="${1:-}"
 
 # Sources land in SRC_<key> rather than an associative array: macOS ships bash 3.2, where
 # `declare -A` is a syntax error, and every other launcher here runs on that bash.
-PLAN="$(mktemp -t gltf-corpus-plan)"
-CONF="$(mktemp -t gltf-corpus-conf)"
+# A full template, not `mktemp -t <prefix>`. BSD mktemp treats the argument as a prefix and
+# adds its own randomness; GNU mktemp -- which is what Git Bash ships, and therefore what a
+# Windows CI runner uses -- reads it as the template itself and refuses it with "too few X's in
+# template". Naming the directory and the X's works the same way on both.
+PLAN="$(mktemp "${TMPDIR:-/tmp}/gltf-corpus-plan.XXXXXX")"
+CONF="$(mktemp "${TMPDIR:-/tmp}/gltf-corpus-conf.XXXXXX")"
 trap 'rm -f "$PLAN" "$CONF"' EXIT
 
 # Records a download rather than performing one. Already-present files are dropped here, so
@@ -38,6 +42,10 @@ get() {
 }
 
 while read -r line; do
+    # Belt as well as braces. .gitattributes pins this file to LF, which is the fix; this is
+    # here because a manifest can also be edited on Windows, pasted, or generated, and a
+    # parser that silently builds broken URLs from an invisible byte is a bad way to find out.
+    line="${line%$'\r'}"
     line="${line%%#*}"
     case "$line" in '') continue ;; esac
     # shellcheck disable=SC2086
@@ -92,13 +100,24 @@ planned=$(wc -l < "$PLAN" | tr -d ' ')
 if [ "$planned" -gt 0 ]; then
     echo
     echo "fetching $planned file(s)..."
+    # Under Git Bash the curl on PATH is a NATIVE Windows binary. MSYS rewrites POSIX paths in
+    # command-line ARGUMENTS, and does not touch paths inside a -K config file, so an output of
+    # /d/a/blix/... is read as \d\a\blix\... on the current drive and every write fails. `-sf`
+    # then says nothing, which is how this cost a CI round: correct URLs, zero files.
+    # cygpath -m gives D:/a/blix/..., which curl accepts and which needs no escaping. One call,
+    # used as a prefix, because 207 process spawns to learn the same answer is silly.
+    dest_for_curl="$DEST"
+    if command -v cygpath >/dev/null 2>&1; then dest_for_curl="$(cygpath -m "$DEST")"; fi
+
     while IFS="$(printf '\t')" read -r url out; do
         mkdir -p "$(dirname "$out")"
-        printf 'url = "%s"\noutput = "%s"\n' "$url" "$out" >> "$CONF"
+        printf 'url = "%s"\noutput = "%s"\n' "$url" "$dest_for_curl${out#"$DEST"}" >> "$CONF"
     done < "$PLAN"
     # --parallel reuses connections and overlaps requests; -f so a 404 is a failure rather
     # than an HTML error page written to disk under the name of a glTF file.
-    curl -sfL --parallel --parallel-max 8 --max-time 300 -K "$CONF" || true
+    conf_for_curl="$CONF"
+    if command -v cygpath >/dev/null 2>&1; then conf_for_curl="$(cygpath -m "$CONF")"; fi
+    curl -sfL --parallel --parallel-max 8 --max-time 300 -K "$conf_for_curl" || true
 fi
 
 # A curl that returns non-zero does not say WHICH file, and --parallel returns one code for

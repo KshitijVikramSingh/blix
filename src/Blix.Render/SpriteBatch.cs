@@ -28,19 +28,16 @@ public sealed class SpriteBatch : IDisposable
     // view-projection). Exposed so a RenderGraph GraphicsPass that SpriteBatch
     // draws into can declare it via .Shader(SpriteBatch.Interface) — the graph
     // validator requires every graphics pass to declare its shader interfaces.
-    public static ShaderInterface Interface { get; } = new(
-        Slots: new[]
-        {
-            new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-        },
-        PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+    public static ShaderInterface Interface { get; } = ShaderReflection.ForProgram(
+        Path.Combine(AppContext.BaseDirectory, "Shaders"), "sprite.vert", "sprite.frag");
 
     private readonly VulkanGraphicsDevice device;
     private readonly IndexBufferHandle indexBuffer;
     private readonly ShaderProgramHandle shader;
     private readonly PipelineHandle pipeline;
     private readonly byte[] uploadBuffer;
-    private readonly byte[] pushConstants = new byte[64]; // one mat4 (view-projection)
+    // Sized from the shader's own push block rather than from a 64 typed here.
+    private readonly byte[] pushConstants = new byte[Interface.PushConstants.Sum(r => r.Size)];
     private readonly Dictionary<int, (int Width, int Height)> textureDimensionsCache = [];
     private readonly List<SpriteEntry> entries = new(capacity: 64);
 

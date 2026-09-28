@@ -53,6 +53,25 @@ public sealed class RecipeAttribute : Attribute
     public string Summary { get; init; } = "";
 
     /// <summary>
+    /// A directory of further output this writes beside its named one, named
+    /// <c>&lt;output stem&gt;&lt;this suffix&gt;</c>. Empty when a recipe writes one file and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>So that a recipe's whole output is something the recipe says, not something the build
+    /// guesses.</b> A mesh carrying embedded images writes them to <c>&lt;name&gt;.textures/</c>, and for
+    /// a while the only thing that knew was a glob in Directory.Build.targets — MSBuild holding a
+    /// fact about one recipe that the recipe had never told it. Declaring it here is what lets
+    /// <c>blix cook outputs</c> answer for any recipe, including one in a consumer's own assembly
+    /// that this repository has never seen.
+    /// </para>
+    /// <para>
+    /// A suffix rather than a full path, because the stem is not known until a cook is requested.
+    /// </para>
+    /// </remarks>
+    public string SidecarFolder { get; init; } = "";
+
+    /// <summary>
     /// Bumped whenever this recipe would produce different bytes from the same source and settings.
     /// </summary>
     /// <remarks>

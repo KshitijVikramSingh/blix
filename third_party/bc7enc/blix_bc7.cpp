@@ -12,6 +12,16 @@
 #include <cstdint>
 #include <cstddef>
 
+// A Windows DLL exports nothing unless each symbol says so; ELF and Mach-O export
+// everything with default visibility, which is why this was not needed while macOS was the
+// only platform. meshoptimizer's own header has the same switch (MESHOPTIMIZER_API), so the
+// cook's two natives are now built the same way on all three.
+#if defined(_WIN32)
+#define BLIX_BC7_API __declspec(dllexport)
+#else
+#define BLIX_BC7_API
+#endif
+
 extern "C" {
 
 // bc7enc_compress_block_init() builds global lookup tables and MUST run once
@@ -20,7 +30,7 @@ extern "C" {
 static std::once_flag g_init_flag;
 static void ensure_init() { std::call_once(g_init_flag, [] { bc7enc_compress_block_init(); }); }
 
-void blix_bc7_init() { ensure_init(); }
+BLIX_BC7_API void blix_bc7_init() { ensure_init(); }
 
 // Encode a tightly-packed width*height RGBA8 image (R first) into dst as raw
 // BC7 blocks, row-major over 4x4 blocks: dst size = ceil(w/4)*ceil(h/4)*16.
@@ -28,7 +38,7 @@ void blix_bc7_init() { ensure_init(); }
 // weights (normal / data maps). quality: 0 = fastest, 1 = balanced, 2 = high.
 // num_threads <= 0 means single-threaded (the cook parallelises across textures
 // already, so it passes 1 to avoid core oversubscription).
-void blix_bc7_encode(
+BLIX_BC7_API void blix_bc7_encode(
     const uint8_t* src, int width, int height,
     uint8_t* dst, int perceptual, int quality, int num_threads)
 {

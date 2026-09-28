@@ -46,12 +46,21 @@
 
     <BlixShaderMode Condition="'$(BlixShaderMode)' == ''">App</BlixShaderMode>
 
-    <!-- Library output is project-relative; this file itself lives at the repository root. -->
+    <!-- Library output is project-relative, because a consumer picks it up through the project
+         reference; this file itself lives at the repository root. -->
     <BlixShaderOutDir Condition="'$(BlixShaderMode)' == 'Library'">$(MSBuildProjectDirectory)\Shaders\</BlixShaderOutDir>
-    <BlixShaderOutDir Condition="'$(BlixShaderOutDir)' == ''">$(OutDir)Shaders\</BlixShaderOutDir>
+    <!-- App output is INTERMEDIATE, not $(OutDir). Writing into the output directory is what made
+         these invisible to publish; from obj they are staged as content and both build and
+         publish carry them. -->
+    <BlixShaderOutDir Condition="'$(BlixShaderOutDir)' == ''">$(IntermediateOutputPath)Shaders\</BlixShaderOutDir>
 
-    <BlixShaderAfterTargets Condition="'$(BlixShaderMode)' == 'App'">CopyFilesToOutputDirectory</BlixShaderAfterTargets>
-    <BlixShaderBeforeTargets Condition="'$(BlixShaderMode)' == 'Library'">AssignTargetPaths</BlixShaderBeforeTargets>
+    <!-- Both modes now compile before AssignTargetPaths and stage as CONTENT, which is what
+         makes an app's shaders survive `dotnet publish`. App mode used to write straight into
+         $(OutDir)Shaders after CopyFilesToOutputDirectory: the files appeared in the build
+         output and were never MSBuild items, so publish, which copies items rather than whatever
+         it finds in a directory, carried none of them. That is why every launcher script hand
+         copies *.spv, and then had to learn *.spv.refl.json and *.spv.tune.json as well. -->
+    <BlixShaderBeforeTargets>AssignTargetPaths</BlixShaderBeforeTargets>
   </PropertyGroup>
 
   <!-- spirv-cross emits the runtime binding sidecar for reflected programs. -->
@@ -124,11 +133,13 @@
        This invokes the cook host after project references have been resolved.
        A project that declares cooked assets references Blix.Tools.Cook as a
        build-only project, making the host available on the first build. -->
-  <Target Name="BlixCookAssets"
-          Condition="'@(BlixCook)' != '' AND '$(BlixCookCustomTarget)' != 'true' AND Exists('$(BlixCookDll)')"
-          BeforeTargets="AssignTargetPaths"
-          Inputs="@(BlixCook);$(BlixCookDll);@(BlixCookRecipeAssembly)"
-          Outputs="@(BlixCook -> '%(RootDir)%(Directory)%(Filename)%(Cooked)')">
+  <!-- What to cook, written every build, because two targets need it and only one of them is
+       incremental. It used to live inside BlixCookAssets, which is skipped wholesale when every
+       cooked output is current — and BlixStageCookedAssets, which is not skipped, then had no list
+       to ask about. `dotnet clean` reaches that state exactly: obj goes, the cooked assets beside
+       the sources stay, so the cook has nothing to do and the staging had nothing to read. -->
+  <Target Name="BlixCookList"
+          Condition="'@(BlixCook)' != '' AND '$(BlixCookCustomTarget)' != 'true'">
     <PropertyGroup>
       <BlixCookList>$(IntermediateOutputPath)blixcook.txt</BlixCookList>
     </PropertyGroup>
@@ -137,6 +148,14 @@
         File="$(BlixCookList)"
         Lines="@(BlixCook -> '%(Recipe)%09%(FullPath)%09%(RootDir)%(Directory)%(Filename)%(Cooked)%09%(Options)')"
         Overwrite="true" WriteOnlyWhenDifferent="false" />
+  </Target>
+
+  <Target Name="BlixCookAssets"
+          Condition="'@(BlixCook)' != '' AND '$(BlixCookCustomTarget)' != 'true' AND Exists('$(BlixCookDll)')"
+          DependsOnTargets="BlixCookList"
+          BeforeTargets="AssignTargetPaths"
+          Inputs="@(BlixCook);$(BlixCookDll);@(BlixCookRecipeAssembly)"
+          Outputs="@(BlixCook -> '%(RootDir)%(Directory)%(Filename)%(Cooked)')">
     <Message Text="Cooking @(BlixCook->Count()) asset(s)" Importance="high" />
     <Exec Command="dotnet &quot;$(BlixCookDll)&quot; batch &quot;$(BlixCookList)&quot;" />
   </Target>
@@ -145,14 +164,95 @@
        before cooking, while this item group sees files produced by this build. -->
   <Target Name="BlixStageCookedAssets"
           Condition="'@(BlixCook)' != '' AND '$(BlixCookCustomTarget)' != 'true'"
-          DependsOnTargets="BlixCookAssets"
+          DependsOnTargets="BlixCookList;BlixCookAssets"
           BeforeTargets="AssignTargetPaths">
     <ItemGroup>
+      <!-- Metadata QUALIFIED with the item type it belongs to. Unqualified %(Cooked) batches
+           over the item being created, ContentWithTargetPath, and was only ever safe because
+           nothing else had added to that list yet. The moment a project stages its own shaders
+           into it, the build fails with "does not define a value for metadata Cooked". -->
       <ContentWithTargetPath
           Include="@(BlixCook -> '%(RootDir)%(Directory)%(Filename)%(Cooked)')"
-          Condition="Exists('%(RootDir)%(Directory)%(Filename)%(Cooked)')"
+          Condition="Exists('%(BlixCook.RootDir)%(BlixCook.Directory)%(BlixCook.Filename)%(BlixCook.Cooked)')"
           TargetPath="@(BlixCook -> '%(RelativeDir)%(Filename)%(Cooked)')"
           CopyToOutputDirectory="PreserveNewest" />
+
+    </ItemGroup>
+
+    <!-- The cook's OTHER output: a mesh carrying embedded images writes them to a
+         `<name>.textures/` directory beside the .blixmesh. Nothing declared that, so nothing
+         staged it, and on a clean build the cooked textures never reached the application at all —
+         GltfShared found no cooked sibling and silently fell back to decoding the embedded PNG at
+         runtime. Wasted work that looks exactly like working.
+
+         This used to be a literal glob for `**\*.textures\**\*`. It was correct, because it ran
+         after the cook — but it put a fact about ONE recipe into a file that stages every recipe,
+         and a second sidecar convention would have needed a second glob here. The recipe declares
+         its sidecar folder now (RecipeAttribute.SidecarFolder), and `blix cook outputs` reports
+         the whole closure, so this asks rather than assumes.
+
+         A QUERY, not a by-product of cooking: BlixCookAssets is incremental and skips entirely
+         when everything is current, so anything written only while cooking would be missing on
+         exactly the builds that cook nothing. Paths come back relative to the project, which makes
+         them in-cone items whose target paths AssignTargetPaths derives — the same treatment the
+         glob's matches got. -->
+    <PropertyGroup>
+      <BlixCookOutputs>$(IntermediateOutputPath)blixcook.outputs.txt</BlixCookOutputs>
+    </PropertyGroup>
+    <Exec Condition="Exists('$(BlixCookList)')"
+          Command="dotnet &quot;$(BlixCookDll)&quot; outputs &quot;$(BlixCookList)&quot; --relative-to &quot;$(MSBuildProjectDirectory)&quot; --out &quot;$(BlixCookOutputs)&quot;" />
+    <ReadLinesFromFile Condition="Exists('$(BlixCookOutputs)')" File="$(BlixCookOutputs)">
+      <Output TaskParameter="Lines" ItemName="_BlixCookProduced" />
+    </ReadLinesFromFile>
+    <ItemGroup>
+      <None Include="@(_BlixCookProduced)"
+            Condition="Exists('%(Identity)')"
+            CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+
+  <!--
+    Stage a project's compiled shader output, in either mode.
+
+    <b>Declared inside a target, for the same reason BlixStageCookedAssets is: a project's item
+    globs are evaluated at LOAD, before this build produces anything.</b> Four projects used to
+    carry `<None Include="Shaders\*.spv">` to stage their own output, and that glob can only
+    match what a PREVIOUS build left on disk. On a clean tree it matches nothing, the compiler
+    writes the files moments later, and the project's own output never receives them — let alone
+    a consumer's.
+
+    It survived unnoticed because the .spv.refl.json sidecars beside them were committed: the
+    *.spv ignore does not match a name ending in .json, so one accidentally-tracked artifact was
+    holding up the staging for every library project at once. Untracking them broke CI, which is
+    the only machine here that ever builds from a clean tree.
+
+    Both Include and TargetPath are transforms over @(GlslShader), which is what makes this work
+    where a directory glob cannot: the file names are DERIVED from the declared shaders rather
+    than discovered on disk, so they are correct before the compiler has run, and the files exist
+    by the time the copy happens. A bare %(Filename) in the TargetPath ATTRIBUTE would read as
+    task batching and evaluate empty, landing every file on the directory itself.
+  -->
+  <Target Name="BlixStageShaders"
+          Condition="'@(GlslShader)' != '' AND '$(BlixShaderCustomTarget)' != 'true'"
+          DependsOnTargets="BlixCompileSpirV"
+          BeforeTargets="AssignTargetPaths">
+    <!-- Materialised first, in its own ItemGroup, so the second can self-reference their
+         metadata. A transform in a TargetPath ATTRIBUTE does not pair with Include item by
+         item: it expands to the whole joined list, and every file lands under a name with
+         semicolons in it. -->
+    <ItemGroup>
+      <_BlixLibShader Include="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv')" />
+      <_BlixLibShader Include="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv.tune.json')" />
+      <!-- Only where reflection is switched on; elsewhere the file is never written. -->
+      <_BlixLibShader Condition="'$(BlixShaderReflect)' == 'true'"
+                      Include="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv.refl.json')" />
+    </ItemGroup>
+    <ItemGroup>
+      <ContentWithTargetPath Include="@(_BlixLibShader)">
+        <!-- %(Filename) is everything before the LAST dot, so a .spv.refl.json rebuilds whole. -->
+        <TargetPath>Shaders\%(Filename)%(Extension)</TargetPath>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </ContentWithTargetPath>
     </ItemGroup>
   </Target>
 
@@ -161,7 +261,7 @@
           AfterTargets="CopyFilesToOutputDirectory"
           Inputs="@(IntermediateAssembly);$(BlixAppIndexerDll)"
           Outputs="$(OutDir)$(AssemblyName).blixapps.json">
-    <Exec Command="dotnet &quot;$(BlixAppIndexerDll)&quot; --assembly &quot;$(OutDir)$(AssemblyName).dll&quot; --output &quot;$(OutDir)$(AssemblyName).blixapps.json&quot;" />
+    <Exec Command="dotnet &quot;$(BlixAppIndexerDll)&quot; --assembly &quot;$(OutDir)$(AssemblyName).dll&quot; --output &quot;$(OutDir)$(AssemblyName).blixapps.json&quot; --project &quot;$(MSBuildProjectFullPath)&quot;" />
   </Target>
 
   <Target Name="BlixReflectSpirV"

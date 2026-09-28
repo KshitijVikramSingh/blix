@@ -47,10 +47,12 @@ public static class Program
     {
         var assemblyPath = Value(args, "--assembly");
         var outputPath = Value(args, "--output");
+        var projectPath = Value(args, "--project");
 
         if (assemblyPath is null || outputPath is null)
         {
-            Console.Error.WriteLine("usage: blix-apps --assembly <path.dll> --output <path.blixapps.json>");
+            Console.Error.WriteLine(
+                "usage: blix-apps --assembly <path.dll> --output <path.blixapps.json> [--project <path.csproj>]");
             return 2;
         }
 
@@ -106,7 +108,8 @@ public static class Program
             AppHost: File.Exists(host) ? Path.GetFileName(host) : null,
             HasEntryPoint: hasEntryPoint,
             Apps: apps.OrderBy(a => a.Name, StringComparer.Ordinal).ToArray(),
-            Recipes: recipes.OrderBy(r => r.Id, StringComparer.Ordinal).ToArray());
+            Recipes: recipes.OrderBy(r => r.Id, StringComparer.Ordinal).ToArray(),
+            Project: projectPath is null ? null : Path.GetFullPath(projectPath));
 
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
         File.WriteAllText(outputPath, JsonSerializer.Serialize(index, JsonOptions));
@@ -340,7 +343,16 @@ public static class Program
     private sealed class DeclarationException(string message) : Exception(message);
 
     private sealed record AppIndex(
-        string Assembly, string? AppHost, bool HasEntryPoint, AppEntry[] Apps, RecipeEntry[] Recipes);
+        string Assembly, string? AppHost, bool HasEntryPoint, AppEntry[] Apps, RecipeEntry[] Recipes,
+        /// <summary>The .csproj this assembly was built from, absolute.</summary>
+        /// <remarks>
+        /// <b>Because publishing is a SOURCE-project operation and everything else here is not.</b>
+        /// Running an app needs only the built output, which is what the rest of this record
+        /// describes. `dotnet publish` needs the project that produced it, and rediscovering that
+        /// from an assembly path means guessing at directory layout. The indexer already knows,
+        /// because MSBuild tells it.
+        /// </remarks>
+        string? Project = null);
 
     private sealed record RecipeEntry(
         string Id, string Produces, string Consumes, string Summary, uint Version, string Method);

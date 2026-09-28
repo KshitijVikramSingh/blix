@@ -323,7 +323,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         }
 
         // --- Skinned model: cesium_man.glb -------------------------------
-        var assetPath = Path.Combine(AppContext.BaseDirectory, "Assets", "models", "cesium_man.glb");
+        var assetPath = AppFiles.Asset("models", "cesium_man.glb");
         var importer = new GltfImporter();
         var importCtx = new AssetImportContext(AssetId.Parse("models/cesium_man"), assetPath);
         var cesiumModel = importer.Import(importCtx);
@@ -413,103 +413,29 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         // Shadow caster interface — light-agnostic. No set 0; the shadow VP
         // rides in the push constant (mat4 uModel @0, mat4 uShadowViewProj
         // @64 = 128 bytes) so one pipeline serves sun + spot + cube faces.
-        var shadowInterface = new ShaderInterface(
-            Slots: Array.Empty<DescriptorSetSlot>(),
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 128) });
+        // --- Shader interfaces, read from the shaders -------------------------
+        // Ten programs. What stood here restated every set, binding, type, stage, array count
+        // and push size that the shaders already declare -- including five distinct push sizes
+        // (128, 144, 80, 8, 8) and a two-element sampler array, none of which anything checked.
+        //
+        // The shader is the source of truth for all of it EXCEPT the length of the bone palette:
+        // it is declared unsized, so the count is this demo's (`cesiumSkeleton.BoneCount`) and
+        // is stated once, where it is known.
+        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        ShaderInterface Reflect(params string[] stages) => ShaderReflection.ForProgram(shaderDir, stages);
+        ShaderInterface Skinned(ShaderInterface iface) =>
+            iface.WithBlockSize(set: 3, binding: 0, cesiumSkeleton.BoneCount * 64);
 
-        // Point cube shadow caster — writes linear distance via gl_FragDepth,
-        // so the frag stage also reads the push (light pos + far). Push is
-        // [model | faceVP | lightPosFar] = 144 bytes, Vertex+Fragment.
-        var pointShadowInterface = new ShaderInterface(
-            Slots: Array.Empty<DescriptorSetSlot>(),
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 144) });
-
-        var litInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer,
-                    ShaderStages.Vertex | ShaderStages.Fragment, BlockLayout: frameUbo),
-                new DescriptorSetSlot(1, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(1, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment, Count: 2),
-                new DescriptorSetSlot(1, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(1, 3, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(1, 4, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(1, 5, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(2, 0, ShaderResourceType.UniformBuffer,
-                    ShaderStages.Fragment, BlockLayout: tintUbo),
-                new DescriptorSetSlot(2, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(2, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-            },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 80) });
-
-        // Skinned interfaces: add set 3 binding 0 = readonly SSBO bone palette.
-        var boneSsboLayout = new UniformBlockLayout(
-            TotalSize: cesiumSkeleton.BoneCount * 64,
-            Members: new[]
-            {
-                new UniformBlockMember("bones", 0, cesiumSkeleton.BoneCount * 64,
-                    ElementStride: 64),
-            });
-        var skinnedShadowInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(3, 0, ShaderResourceType.StorageBuffer,
-                    ShaderStages.Vertex, BlockLayout: boneSsboLayout),
-            },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 128) });
-
-        // Skinned point cube caster: set 3 SSBO + 144-byte Vertex|Fragment push.
-        var pointSkinnedShadowInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(3, 0, ShaderResourceType.StorageBuffer,
-                    ShaderStages.Vertex, BlockLayout: boneSsboLayout),
-            },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 144) });
-
-        var skinnedLitInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer,
-                    ShaderStages.Vertex | ShaderStages.Fragment, BlockLayout: frameUbo),
-                new DescriptorSetSlot(1, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(1, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment, Count: 2),
-                new DescriptorSetSlot(1, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(1, 3, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(1, 4, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(1, 5, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(2, 0, ShaderResourceType.UniformBuffer,
-                    ShaderStages.Fragment, BlockLayout: tintUbo),
-                new DescriptorSetSlot(2, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(2, 2, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(3, 0, ShaderResourceType.StorageBuffer,
-                    ShaderStages.Vertex, BlockLayout: boneSsboLayout),
-            },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 80) });
-
-        // Depth-viz present: just a sampler, no push.
-        var presentInterface = new ShaderInterface(new[]
-        {
-            new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-        });
-        // Final present: hdr + bloom samplers + push (exposure, bloomIntensity).
-        var presentTonemapInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(0, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-            },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 8) });
-
-        // Bloom fullscreen interfaces: bright = sampler only; blur = sampler +
-        // vec2 texel-step push.
-        var bloomBrightInterface = new ShaderInterface(new[]
-        {
-            new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-        });
-        var bloomBlurInterface = new ShaderInterface(
-            Slots: new[] { new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment) },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 8) });
+        var shadowInterface = Reflect("shadow.vert", "shadow.frag");
+        var pointShadowInterface = Reflect("point_shadow.vert", "point_shadow.frag");
+        var litInterface = Reflect("lit.vert", "lit.frag");
+        var skinnedShadowInterface = Skinned(Reflect("skinned_shadow.vert", "shadow.frag"));
+        var pointSkinnedShadowInterface = Skinned(Reflect("point_skinned_shadow.vert", "point_shadow.frag"));
+        var skinnedLitInterface = Skinned(Reflect("skinned_lit.vert", "lit.frag"));
+        var presentInterface = Reflect("present.vert", "present_depth.frag");
+        var presentTonemapInterface = Reflect("present.vert", "present.frag");
+        var bloomBrightInterface = Reflect("present.vert", "bloom_bright.frag");
+        var bloomBlurInterface = Reflect("present.vert", "bloom_blur.frag");
 
         // --- Declare graph passes (shadow casters via both interfaces) --
         // sun + 2 spot depth passes; all host the static + skinned casters.
@@ -558,8 +484,6 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         graph.Compile();
 
         // --- Pipelines --------------------------------------------------
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
-
         var shadowVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow.vert.spv"));
         var shadowFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow.frag.spv"));
         shadowShaderProgram = vk.CreateShaderProgramFromSpv(shadowVertSpv, shadowFragSpv, shadowInterface, "shadow");

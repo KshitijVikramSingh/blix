@@ -47,7 +47,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # cooked interleaved in one dir).
 COOKED="${BLIX_SPONZA_ASSETS:-$REPO_ROOT/src/Demos/Blix.Demos.SponzaModern/Assets}"
 SRC="${BLIX_SPONZA_SRC:-${COOKED%/}-src}"
-SCRATCH="$(mktemp -d -t blix-sponza-extract.XXXXXX)"
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/blix-sponza-extract.XXXXXX")"
 trap 'rm -rf "$SCRATCH"' EXIT
 
 if [[ ! -d "$SOURCE_ROOT" ]]; then

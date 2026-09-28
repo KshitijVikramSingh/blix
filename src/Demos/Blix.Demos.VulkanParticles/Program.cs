@@ -168,31 +168,17 @@ internal sealed class ParticlesLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         sceneDepthHandle = graph.DepthTarget("scene-depth", fullSize);   // sampled, single-sample
         sceneDepthBHandle = graph.DepthTarget("scene-depthB", fullSize); // scene-pass occlusion
 
-        // --- Shader interfaces -------------------------------------------
-        var depthInterface = new ShaderInterface(
-            Slots: Array.Empty<DescriptorSetSlot>(),
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 128) });
-        var opaqueInterface = new ShaderInterface(
-            Slots: Array.Empty<DescriptorSetSlot>(),
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 144) });
-        // Soft particles: one read-only sampler (scene depth, set 0 binding 0) + an 80-byte
-        // viewProj/near/far/fadeDist/sharpness push.
-        var softInterface = new ShaderInterface(
-            Slots: new[] { new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment) },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 80) });
-        var bloomBrightInterface = new ShaderInterface(
-            Slots: new[] { new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment) },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 4) });
-        var bloomBlurInterface = new ShaderInterface(
-            Slots: new[] { new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment) },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 8) });
-        var presentInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(0, 1, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-            },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 8) });
+        // --- Shader interfaces, read from the shaders ------------------------
+        // Six programs, six tables restating what each shader already declares -- including six
+        // push sizes (128, 144, 80, 4, 8, 8) that nothing was checking. The bloom stages pair a
+        // fullscreen present.vert with their own fragment shader, which reflection handles the
+        // same way the pipeline does: name the stages, merge what they declare.
+        var depthInterface = ShaderReflection.ForProgram(shaderDir, "depth_only.vert", "depth_only.frag");
+        var opaqueInterface = ShaderReflection.ForProgram(shaderDir, "opaque.vert", "opaque.frag");
+        var softInterface = ShaderReflection.ForProgram(shaderDir, "particle_soft.vert", "particle_soft.frag");
+        var bloomBrightInterface = ShaderReflection.ForProgram(shaderDir, "present.vert", "bloom_bright.frag");
+        var bloomBlurInterface = ShaderReflection.ForProgram(shaderDir, "present.vert", "bloom_blur.frag");
+        var presentInterface = ShaderReflection.ForProgram(shaderDir, "present.vert", "present.frag");
 
         // --- Declare passes (execute in declaration order) ---------------
         depthPrepassHandle = graph.GraphicsPass("depth-prepass")

@@ -86,10 +86,10 @@ internal sealed class InstancedLoop : IGameLoop, IInputHandler
                 new VertexAttribute(0, VertexAttributeFormat.Float3, 0),
                 new VertexAttribute(1, VertexAttributeFormat.Float3, 3 * sizeof(float)),
             });
-        var iface = new ShaderInterface(
-            Slots: new[] { InstanceBuffer.Slot },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        // Read from the shader. InstanceBuffer supplies the one thing it cannot say: how many
+        // instances the unsized set-3 array holds.
+        var iface = InstanceBuffer.Size(ShaderReflection.ForProgram(shaderDir, "cube.vert", "cube.frag"));
         var shader = vk.CreateShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "cube.vert.spv")),
             File.ReadAllBytes(Path.Combine(shaderDir, "cube.frag.spv")),

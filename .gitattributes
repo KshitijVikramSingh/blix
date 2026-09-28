@@ -1,0 +1,24 @@
+# Line endings, decided here rather than by whoever clones.
+#
+# Git on Windows defaults to core.autocrlf=true, which rewrites text files to CRLF on
+# checkout. That is invisible until something parses one: the Windows CI job fetched 0 of
+# 207 corpus files because every URL it built carried a trailing carriage return from the
+# manifest's last field, and printed them looking truncated, because a terminal draws what
+# follows a \r over the start of the line.
+#
+# So: anything a shell reads — as a script, or as data — is LF on every platform.
+
+*.sh          text eol=lf
+*.manifest    text eol=lf
+blix          text eol=lf
+
+# The Windows front door is the one file that wants the other ending. cmd.exe copes with
+# LF, but a batch file is CRLF by convention and nothing here benefits from being unusual.
+*.cmd         text eol=crlf
+
+# Shaders are read by glslc and by the tune scanner. Neither minds, and a diff that flips
+# every line because someone's editor did is worse than either ending.
+*.glsl        text eol=lf
+*.vert        text eol=lf
+*.frag        text eol=lf
+*.comp        text eol=lf

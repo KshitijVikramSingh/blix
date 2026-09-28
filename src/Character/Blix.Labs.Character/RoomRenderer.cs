@@ -87,9 +87,7 @@ public sealed class RoomRenderer : IDisposable
         fullscreen = new FullscreenPass(vk, "room.present");
 
         ShaderInterface Reflect(params string[] stages) =>
-            ShaderReflection.MergeStages(
-                stages.Select(s => ShaderReflection.Load(
-                    Path.Combine(shaderDirectory, s + ".spv.refl.json"))).ToArray());
+            ShaderReflection.ForProgram(shaderDirectory, stages);
 
         var shadowInterface = Reflect("room_shadow.vert", "room_shadow.frag");
         var litInterface = Reflect("room_lit.vert", "room_lit.frag");

@@ -1233,6 +1233,57 @@ public static class Program
             Directory.Delete(skyDir, recursive: true);
         }
 
+        // ====================================================================
+        // A recipe reports its whole output, not just the file it is named for.
+        // ====================================================================
+        //
+        // The build has to stage everything a cook produces, and for a while the only thing that
+        // knew a mesh writes `<name>.textures/` was a glob in Directory.Build.targets — MSBuild
+        // holding a fact about one recipe that the recipe had never told it. A second sidecar
+        // convention would have needed a second glob there.
+        //
+        // The recipe declares the folder now and `blix cook outputs` reports the closure, which
+        // is also why this is a QUERY: cooking is incremental, so anything produced only while
+        // cooking would be missing on the builds that cook nothing.
+        {
+            var mesh = Blix.Cooked.BlixRecipes.ById(typeof(MeshRecipe).Assembly, BlixMesh.ShippedRecipe);
+            t.ExpectTrue("CONTROL the shipped mesh recipe was found", mesh is not null);
+            t.ExpectTrue("the mesh recipe DECLARES the folder it writes beside its output",
+                mesh?.SidecarFolder == BlixMesh.ExtractedImageFolder);
+
+            var closureDir = Path.Combine(Path.GetTempPath(), "blix-closure-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(closureDir);
+            try
+            {
+                var outPath = Path.Combine(closureDir, "thing.blixmesh");
+                File.WriteAllText(outPath, "");
+
+                // No sidecar directory yet: the closure is the named output and nothing else.
+                t.ExpectTrue("with no sidecar directory the closure is just the named output",
+                    mesh!.OutputClosure(outPath).Count() == 1);
+
+                var side = Path.Combine(closureDir, "thing" + BlixMesh.ExtractedImageFolder);
+                Directory.CreateDirectory(side);
+                File.WriteAllText(Path.Combine(side, "a.blixtex"), "");
+                File.WriteAllText(Path.Combine(side, "b.blixtex"), "");
+
+                var closure = mesh.OutputClosure(outPath).ToArray();
+                t.ExpectTrue("the closure picks up every file in the declared sidecar folder",
+                    closure.Length == 3, string.Join(", ", closure.Select(Path.GetFileName)));
+                t.ExpectTrue("and still names the output itself",
+                    closure.Any(c => Path.GetFileName(c) == "thing.blixmesh"));
+
+                // A recipe that declares no sidecar folder must not grow one by accident.
+                var font = Blix.Cooked.BlixRecipes.ById(typeof(FontRecipe).Assembly, BlixFont.ShippedRecipe);
+                t.ExpectTrue("a recipe declaring no sidecar folder reports only its output",
+                    font is not null && font.SidecarFolder.Length == 0);
+            }
+            finally
+            {
+                Directory.Delete(closureDir, recursive: true);
+            }
+        }
+
         t.PrintSummary();
 
         return t.Failed;

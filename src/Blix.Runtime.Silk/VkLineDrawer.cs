@@ -55,9 +55,7 @@ public sealed class VkLineDrawer : IDisposable
         // won for the whole frame — a second view drew the first view's geometry through its own
         // camera. Push payloads are copied at record time, so each draw owns its matrix. See
         // debugline.vert for the long version.
-        var lineInterface = new ShaderInterface(
-            Slots: Array.Empty<DescriptorSetSlot>(),
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+        var lineInterface = ShaderReflection.ForProgram(shaderDir, "debugline.vert", "debugline.frag");
         shader = device.CreateShaderProgramFromSpv(vertSpv, fragSpv, lineInterface, "debugline");
 
         // The swapchain pipeline, which is the common case and the only one there used to be.

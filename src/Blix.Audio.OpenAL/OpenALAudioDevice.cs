@@ -309,10 +309,18 @@ public sealed class OpenALAudioDevice : IAudioDevice
             return;
         }
 
+        // A runtime shipped inside the .app wins over anything installed, for the same reason
+        // MoltenVkBootstrap prefers its own: it is the copy a shipped application can rely on,
+        // and a developer machine that happens to have Homebrew should exercise what was
+        // shipped rather than what is lying around. `blix publish` puts it here.
+        var frameworks = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "Frameworks"));
+
         // Apple Silicon Homebrew + Intel Homebrew prefixes. Order matters: prefer the
         // architecture-native installation. Files probed in dependency-load priority.
         string[] candidates =
         {
+            Path.Combine(frameworks, "libopenal.1.dylib"),
+            Path.Combine(frameworks, "libopenal.dylib"),
             "/opt/homebrew/opt/openal-soft/lib/libopenal.dylib",
             "/opt/homebrew/opt/openal-soft/lib/libopenal.1.dylib",
             "/opt/homebrew/lib/libopenal.dylib",

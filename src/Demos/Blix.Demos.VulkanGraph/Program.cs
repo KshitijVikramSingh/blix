@@ -118,40 +118,14 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
         invertedHandle = graph.ColorTarget("inverted", TextureFormat.Rgba16F, halfSize);
         var sceneDepth = graph.DepthTarget("scene-depth", halfSize);
 
-        // Cube shader interface — same shape as VulkanHello (set 0 frame
-        // UBO + set 2 material UBO + sampler + push-constant uModel).
-        var frameUbo = new UniformBlockLayout(
-            TotalSize: 64,
-            Members: new[] { new UniformBlockMember("uViewProjection", 0, 64) });
-        var tintUbo = new UniformBlockLayout(
-            TotalSize: 16,
-            Members: new[] { new UniformBlockMember("uTint", 0, 16) });
-        var cubeInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(
-                    Set: 0, Binding: 0, Type: ShaderResourceType.UniformBuffer,
-                    Stages: ShaderStages.Vertex | ShaderStages.Fragment, BlockLayout: frameUbo),
-                new DescriptorSetSlot(
-                    Set: 2, Binding: 0, Type: ShaderResourceType.UniformBuffer,
-                    Stages: ShaderStages.Fragment, BlockLayout: tintUbo),
-                new DescriptorSetSlot(
-                    Set: 2, Binding: 1, Type: ShaderResourceType.SampledImage,
-                    Stages: ShaderStages.Fragment),
-            },
-            PushConstants: new[]
-            {
-                new PushConstantRange(ShaderStages.Vertex, Offset: 0, Size: 64),
-            });
+        // Both interfaces are READ from the shaders. What used to be here restated the set,
+        // binding, type, stage and block layout of each, and a hand-written stage in one of them
+        // was already wider than the shader's (the fragment stage does not read the frame UBO).
+        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var cubeInterface = ShaderReflection.ForProgram(shaderDir, "cube.vert", "cube.frag");
 
-        // Invert + present share the same interface: one SampledImage at
-        // (set 0, binding 0).
-        var samplerOnlyInterface = new ShaderInterface(new[]
-        {
-            new DescriptorSetSlot(
-                Set: 0, Binding: 0, Type: ShaderResourceType.SampledImage,
-                Stages: ShaderStages.Fragment),
-        });
+        // Invert + present share one interface: a single SampledImage at (set 0, binding 0).
+        var samplerOnlyInterface = ShaderReflection.ForProgram(shaderDir, "present.vert", "present.frag");
 
         // Declare graph passes. Scene targets hdr + depth. Invert reads hdr
         // and writes inverted.
@@ -168,7 +142,6 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
         graph.Compile();
 
         // --- Pipelines (created AFTER Compile so render passes exist) -
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
         var cubeVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "cube.vert.spv"));
         var cubeFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "cube.frag.spv"));
         cubeShaderProgram = vk.CreateShaderProgramFromSpv(cubeVertSpv, cubeFragSpv, cubeInterface, "cube");

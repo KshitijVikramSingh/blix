@@ -69,31 +69,64 @@
     <BlixNativeDir>$(MSBuildProjectDirectory)/obj/native/</BlixNativeDir>
   </PropertyGroup>
 
+  <!-- What a shared library is called, and how this platform's clang is asked to make one.
+       The C# twin is Blix.Recipes/NativeLibraries.FileName, and the two MUST agree: one
+       names the file the build writes, the other names the file the loader opens. They were
+       a single spelling each of the same fact for as long as one platform was the only
+       platform, which is how a mismatch would have gone unnoticed. Blix.Test.Graphics
+       Section BI pins the C# half; the build failing to find its own output pins this one.
+
+       Windows: clang is the image-provided compiler on GitHub's runners and takes the same
+       flags as everywhere else, which is the whole reason not to reach for MSVC here.
+       Exports need saying out loud on Windows: MESHOPTIMIZER_API is an empty macro by
+       default and blix_bc7.cpp carries its own switch. -->
+  <PropertyGroup>
+    <BlixLibPrefix Condition="!$([MSBuild]::IsOSPlatform(Windows))">lib</BlixLibPrefix>
+    <BlixLibExt Condition="$([MSBuild]::IsOSPlatform(Windows))">.dll</BlixLibExt>
+    <BlixLibExt Condition="$([MSBuild]::IsOSPlatform(OSX))">.dylib</BlixLibExt>
+    <BlixLibExt Condition="'$(BlixLibExt)' == ''">.so</BlixLibExt>
+
+    <BlixSharedFlag Condition="$([MSBuild]::IsOSPlatform(OSX))">-dynamiclib</BlixSharedFlag>
+    <BlixSharedFlag Condition="'$(BlixSharedFlag)' == ''">-shared</BlixSharedFlag>
+    <BlixPicFlag Condition="!$([MSBuild]::IsOSPlatform(Windows))">-fPIC</BlixPicFlag>
+    <BlixMeshoptExport Condition="$([MSBuild]::IsOSPlatform(Windows))">-DMESHOPTIMIZER_API=__declspec(dllexport)</BlixMeshoptExport>
+
+    <BlixMeshoptLib>$(BlixNativeDir)$(BlixLibPrefix)meshoptimizer$(BlixLibExt)</BlixMeshoptLib>
+    <BlixBc7Lib>$(BlixNativeDir)$(BlixLibPrefix)blix_bc7$(BlixLibExt)</BlixBc7Lib>
+  </PropertyGroup>
+
   <ItemGroup>
     <MeshoptCpp Include="$(MeshoptSrc)/*.cpp" />
     <Bc7Cpp Include="$(Bc7Src)/bc7enc.c;$(Bc7Src)/blix_bc7.cpp" />
   </ItemGroup>
 
-  <!-- macOS/clang only for now; Linux/Windows would add a .so/.dll branch.
-       Rebuilds only when a source is newer than the dylib. -->
+  <!-- Rebuilds only when a source is newer than the library. -->
   <Target Name="BuildMeshopt" BeforeTargets="StageBlixNatives"
-          Condition="'$([MSBuild]::IsOSPlatform(OSX))' == 'true'"
           Inputs="@(MeshoptCpp);$(MeshoptSrc)/meshoptimizer.h"
-          Outputs="$(BlixNativeDir)libmeshoptimizer.dylib">
+          Outputs="$(BlixMeshoptLib)">
     <MakeDir Directories="$(BlixNativeDir)" />
-    <Message Text="Building libmeshoptimizer.dylib (clang++)" Importance="high" />
-    <Exec Command="clang++ -O2 -std=c++14 -dynamiclib @(MeshoptCpp->'&quot;%(FullPath)&quot;', ' ') -o &quot;$(BlixNativeDir)libmeshoptimizer.dylib&quot;" />
+    <Message Text="Building $(BlixLibPrefix)meshoptimizer$(BlixLibExt) (clang++)" Importance="high" />
+    <Exec Command="clang++ -O2 -std=c++14 $(BlixSharedFlag) $(BlixPicFlag) $(BlixMeshoptExport) @(MeshoptCpp->'&quot;%(FullPath)&quot;', ' ') -o &quot;$(BlixMeshoptLib)&quot;"
+          ContinueOnError="true">
+      <Output TaskParameter="ExitCode" PropertyName="BlixMeshoptExit" />
+    </Exec>
+    <Warning Condition="'$(BlixMeshoptExit)' != '0'"
+             Text="Could not build the meshoptimizer native. LOD generation will fail at cook time with a message naming this target." />
   </Target>
 
   <!-- bc7enc.c compiles cleanly as C++, hence -Wno-deprecated for clang's
        "treating .c as C++" note. -->
   <Target Name="BuildBc7" BeforeTargets="StageBlixNatives"
-          Condition="'$([MSBuild]::IsOSPlatform(OSX))' == 'true'"
           Inputs="@(Bc7Cpp);$(Bc7Src)/bc7enc.h"
-          Outputs="$(BlixNativeDir)libblix_bc7.dylib">
+          Outputs="$(BlixBc7Lib)">
     <MakeDir Directories="$(BlixNativeDir)" />
-    <Message Text="Building libblix_bc7.dylib (clang++)" Importance="high" />
-    <Exec Command="clang++ -O2 -std=c++17 -Wno-deprecated -dynamiclib @(Bc7Cpp->'&quot;%(FullPath)&quot;', ' ') -o &quot;$(BlixNativeDir)libblix_bc7.dylib&quot;" />
+    <Message Text="Building $(BlixLibPrefix)blix_bc7$(BlixLibExt) (clang++)" Importance="high" />
+    <Exec Command="clang++ -O2 -std=c++17 -Wno-deprecated $(BlixSharedFlag) $(BlixPicFlag) @(Bc7Cpp->'&quot;%(FullPath)&quot;', ' ') -o &quot;$(BlixBc7Lib)&quot;"
+          ContinueOnError="true">
+      <Output TaskParameter="ExitCode" PropertyName="BlixBc7Exit" />
+    </Exec>
+    <Warning Condition="'$(BlixBc7Exit)' != '0'"
+             Text="Could not build the BC7 native. Texture cooking falls back to the managed encoder, which is correct and slower." />
   </Target>
 
   <!-- ContentWithTargetPath is the item MSBuild carries across a ProjectReference, so
@@ -101,13 +134,13 @@
        beside this one. -->
   <Target Name="StageBlixNatives" BeforeTargets="AssignTargetPaths">
     <ItemGroup>
-      <ContentWithTargetPath Include="$(BlixNativeDir)libmeshoptimizer.dylib"
-                             Condition="Exists('$(BlixNativeDir)libmeshoptimizer.dylib')"
-                             TargetPath="libmeshoptimizer.dylib"
+      <ContentWithTargetPath Include="$(BlixMeshoptLib)"
+                             Condition="Exists('$(BlixMeshoptLib)')"
+                             TargetPath="$(BlixLibPrefix)meshoptimizer$(BlixLibExt)"
                              CopyToOutputDirectory="PreserveNewest" />
-      <ContentWithTargetPath Include="$(BlixNativeDir)libblix_bc7.dylib"
-                             Condition="Exists('$(BlixNativeDir)libblix_bc7.dylib')"
-                             TargetPath="libblix_bc7.dylib"
+      <ContentWithTargetPath Include="$(BlixBc7Lib)"
+                             Condition="Exists('$(BlixBc7Lib)')"
+                             TargetPath="$(BlixLibPrefix)blix_bc7$(BlixLibExt)"
                              CopyToOutputDirectory="PreserveNewest" />
     </ItemGroup>
   </Target>

@@ -35,6 +35,7 @@ public static class Program
                 "ls" or "list" => List(),
                 "run" => Run(args.Skip(1).ToArray()),
                 "test" => Test(args.Skip(1).ToArray()),
+                "publish" => Publish(args.Skip(1).ToArray()),
                 "help" or "-h" or "--help" => Help(0),
                 // A bare name is a run. `blix view rogue.glb` reads better than
                 // `blix run view rogue.glb`, and underneath it is the same thing — which is
@@ -183,7 +184,8 @@ public static class Program
                     // which one, and only those callers need BlixApps.Dispatch at all.
                     apps.Add(new App(
                         project, app.Name, app.Summary, app.Headed, host, assembly,
-                        app.IsEntryPoint ? null : app.Name, stale, Declared: true));
+                        app.IsEntryPoint ? null : app.Name, stale, Declared: true,
+                        SourceProject: index.Project));
                 }
             }
 
@@ -198,7 +200,8 @@ public static class Program
             if (index.HasEntryPoint && !index.Apps.Any(a => a.IsEntryPoint))
             {
                 var name = Path.GetFileNameWithoutExtension(index.Assembly);
-                apps.Add(new App(project, name, null, false, host, assembly, null, stale, Declared: false));
+                apps.Add(new App(project, name, null, false, host, assembly, null, stale,
+                    Declared: false, SourceProject: index.Project));
             }
         }
 
@@ -279,15 +282,35 @@ public static class Program
     {
         if (args.Length == 0) throw new BlixCliException("run what? `blix ls` shows this project's apps.");
 
-        var root = ProjectRoot();
-        var wanted = args[0];
         var rest = args.Skip(1).ToArray();
+        var app = ResolveOne(args[0]);
 
-        // project:app addresses across folders; a bare name means "anywhere below here",
-        // which from inside a project folder is that project and from the repository root
-        // is everything. Both resolve the same way, which is what keeps "I am standing in
-        // it" from being a different mechanism than "I am not".
+        if (app.Stale)
+        {
+            Console.Error.WriteLine($"blix: the index for '{app.Name}' is older than its assembly — rebuilding.");
+        }
+
+        return Launch(app, rest);
+    }
+
+    /// <summary>
+    /// Find the one app a name means, from wherever the caller is standing.
+    /// </summary>
+    /// <remarks>
+    /// Shared by run and publish rather than written twice: which app a name refers to is one
+    /// question, and two verbs answering it differently is how `blix run x` and `blix publish x`
+    /// come to mean different apps.
+    ///
+    /// <c>project:app</c> addresses across folders; a bare name means "anywhere below here",
+    /// which from inside a project folder is that project and from the repository root is
+    /// everything. Both resolve the same way, which keeps "I am standing in it" from being a
+    /// different mechanism than "I am not".
+    /// </remarks>
+    private static App ResolveOne(string wanted)
+    {
+        var root = ProjectRoot();
         var candidates = Discover(root);
+
         if (wanted.Contains(':'))
         {
             var parts = wanted.Split(':', 2);
@@ -307,14 +330,7 @@ public static class Program
             candidates = scoped;
         }
 
-        var app = Resolve(candidates, wanted);
-
-        if (app.Stale)
-        {
-            Console.Error.WriteLine($"blix: the index for '{app.Name}' is older than its assembly — rebuilding.");
-        }
-
-        return Launch(app, rest);
+        return Resolve(candidates, wanted);
     }
 
     /// <summary>Start an app, wait for it, and hand back its exit code.</summary>
@@ -467,6 +483,7 @@ public static class Program
         to.WriteLine("  blix ls                    what this project has");
         to.WriteLine("  blix run <app> [args...]   run one; args after the name are the app's own");
         to.WriteLine("  blix run <project>:<app>   reach across folders");
+        to.WriteLine("  blix publish <app>         build a distributable; --target <rid>");
         to.WriteLine();
         to.WriteLine("A project is the nearest folder above you with a blix.project marker,");
         to.WriteLine("a solution, or a repository in it.");
@@ -478,7 +495,8 @@ public static class Program
         PropertyNameCaseInsensitive = true,
     };
 
-    private sealed record Index(string Assembly, string? AppHost, bool HasEntryPoint, IndexedApp[] Apps);
+    private sealed record Index(
+        string Assembly, string? AppHost, bool HasEntryPoint, IndexedApp[] Apps, string? Project = null);
 
     private sealed record IndexedApp(string Name, string? Summary, bool Headed, bool IsEntryPoint);
 
@@ -486,9 +504,422 @@ public static class Program
     /// <param name="Assembly">Its dll, which is how an app with no apphost is run.</param>
     /// <param name="Selector">The name to pass as <c>--blix-app</c>, or null when the app IS the
     /// executable and its entry point needs no selecting.</param>
+    /// <param name="Project">The project FOLDER this app is grouped under, for addressing.</param>
+    /// <param name="SourceProject">The .csproj it was built from, which is what publishing needs
+    /// and running does not. Null for an index written before the field existed.</param>
     private sealed record App(
         string Project, string Name, string? Summary, bool Headed, string? AppHost, string Assembly,
-        string? Selector, bool Stale, bool Declared);
+        string? Selector, bool Stale, bool Declared, string? SourceProject = null);
+
+
+    /// <summary>
+    /// One target of a publish, resolved once instead of threaded around as a string.
+    /// </summary>
+    /// <remarks>
+    /// <b>A RID is not a packaging policy.</b> `osx-arm64` names what .NET should build; it does
+    /// not say that the result is a `.app` bundle with an Info.plist, or that its native
+    /// dependencies are dylibs found by rpath. Windows and Linux will want different answers to
+    /// the second question while .NET hands back the same shape of string for the first, so the
+    /// distinction is worth having before there is a second target rather than after.
+    ///
+    /// Deliberately NOT a target abstraction: one target per invocation, no list, no matrix. CI
+    /// can call this three times.
+    /// </remarks>
+    private sealed record PublishTarget(string Rid, string Platform, string Architecture)
+    {
+        public static PublishTarget Parse(string rid)
+        {
+            var dash = rid.LastIndexOf('-');
+            if (dash <= 0 || dash == rid.Length - 1)
+            {
+                throw new BlixCliException(
+                    $"'{rid}' is not a runtime identifier. Expected something like osx-arm64.");
+            }
+
+            return new PublishTarget(rid, rid[..dash], rid[(dash + 1)..]);
+        }
+
+        /// <summary>Whether this target wants a macOS application bundle rather than a plain folder.</summary>
+        public bool WantsAppBundle => Platform is "osx";
+    }
+
+    /// <summary>
+    /// Build one application into something a person can run, for one target.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This exists because seven launcher scripts each grew their own `dotnet publish` plus a
+    /// hand-copy of whatever that missed. The copying is gone now -- shaders and cooked assets
+    /// are declared content and publish carries them -- so what is left is the part a script
+    /// should never have been doing: knowing which project an app came from, and what shape the
+    /// target wants its output in.
+    /// </para>
+    /// <para>
+    /// <b>What this deliberately does NOT do yet is make the result portable.</b> The bundle runs
+    /// on the machine that built it and still finds MoltenVK and OpenAL through the developer's
+    /// Homebrew. Taking it to a clean Mac is stage B, and conflating the two is how "it
+    /// published" comes to mean two different things.
+    /// </para>
+    /// </remarks>
+    private static int Publish(string[] args)
+    {
+        if (args.Length == 0)
+        {
+            throw new BlixCliException("publish what? `blix ls` shows this project's apps.");
+        }
+
+        var wanted = args[0];
+        var rid = ValueAfter(args, "--target") ?? DefaultRid();
+        var target = PublishTarget.Parse(rid);
+        var outRoot = ValueAfter(args, "--out");
+
+        var app = ResolveOne(wanted);
+        if (app.SourceProject is not { } project)
+        {
+            throw new BlixCliException(
+                $"'{app.Name}' does not record the project it was built from — rebuild it, " +
+                "and the index will.");
+        }
+
+        if (!File.Exists(project))
+        {
+            throw new BlixCliException($"'{app.Name}' was built from {project}, which is gone.");
+        }
+
+        var dest = Path.GetFullPath(outRoot
+            ?? Path.Combine(ProjectRoot().FullName, "dist", app.Name, target.Rid));
+        var payload = target.WantsAppBundle
+            ? Path.Combine(dest, $"{BundleName(app)}.app", "Contents", "MacOS")
+            : dest;
+
+        Console.WriteLine($"publishing {app.Name} for {target.Rid}");
+
+        // Self-contained, because the whole point is that the person running it did not install
+        // anything. A framework-dependent publish is a second set of prerequisites wearing a
+        // folder, and the launchers it replaces were all self-contained already.
+        var publish = Process.Start(new ProcessStartInfo("dotnet")
+        {
+            UseShellExecute = false,
+            ArgumentList =
+            {
+                "publish", project,
+                "-c", Environment.GetEnvironmentVariable("BLIX_CONFIG") ?? "Debug",
+                "-r", target.Rid,
+                "--self-contained", "true",
+                "-o", payload,
+                "--nologo",
+            },
+        }) ?? throw new BlixCliException("could not start dotnet publish");
+        publish.WaitForExit();
+        if (publish.ExitCode != 0) return publish.ExitCode;
+
+        if (target.WantsAppBundle)
+        {
+            WriteAppBundle(app, target, dest);
+            MoveDataOutOfMacOS(app, dest);
+            CloseMacRuntime(app, dest);
+            // Before signing, because a seal over an incomplete bundle is a worse lie than no seal.
+            VerifyMacBundle(app, dest);
+            SignAppBundle(app, dest);
+        }
+
+        Console.WriteLine($"  {dest}");
+        return 0;
+    }
+
+    /// <summary>The bundle's name: the apphost's, because that is the binary Info.plist names.</summary>
+    private static string BundleName(App app) =>
+        app.AppHost is { } host ? Path.GetFileName(host) : app.Name;
+
+    /// <summary>
+    /// The two files that make a folder of Mach-O into something Finder will launch.
+    /// </summary>
+    /// <remarks>
+    /// Written here rather than by the project, because it is a property of the TARGET and not of
+    /// the application: the same app published for win-x64 wants neither of them. This is the
+    /// first thing in the tree that is packaging policy rather than build policy, which is why
+    /// PublishTarget exists to be asked instead of a RID string being matched on.
+    /// </remarks>
+    private static void WriteAppBundle(App app, PublishTarget target, string dest)
+    {
+        var bundle = Path.Combine(dest, $"{BundleName(app)}.app");
+        var contents = Path.Combine(bundle, "Contents");
+        Directory.CreateDirectory(Path.Combine(contents, "Resources"));
+
+        File.WriteAllText(Path.Combine(contents, "Info.plist"),
+            $"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+              <key>CFBundleName</key><string>{BundleName(app)}</string>
+              <key>CFBundleDisplayName</key><string>{app.Name}</string>
+              <key>CFBundleIdentifier</key><string>dev.blix.{BundleId(app)}</string>
+              <key>CFBundleExecutable</key><string>{BundleName(app)}</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>CFBundleVersion</key><string>1.0</string>
+              <key>CFBundleShortVersionString</key><string>1.0</string>
+              <key>LSMinimumSystemVersion</key><string>11.0</string>
+              <key>NSHighResolutionCapable</key><true/>
+            </dict>
+            </plist>
+
+            """);
+
+        // A bundle with no CFBundleIconFile is a bundle Finder draws a blank page for. The mark
+        // is not converted here — that needs iconutil and belongs with the icon work — so the
+        // key is left out rather than pointing at a file that is not there.
+        File.WriteAllText(Path.Combine(contents, "PkgInfo"), "APPL????");
+    }
+
+    /// <summary>The reverse-DNS tail, without repeating the "blix" the prefix already said.</summary>
+    private static string BundleId(App app)
+    {
+        var name = app.Name.ToLowerInvariant();
+        return name.StartsWith("blix.", StringComparison.Ordinal) ? name["blix.".Length..] : name;
+    }
+
+    /// <summary>
+    /// Copy the native runtime the application needs into the bundle, so it needs nothing installed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the line between a developer dependency and a runtime one.</b> glslc and
+    /// spirv-cross ran at build time and are not here. MoltenVK, the Vulkan loader and OpenAL
+    /// Soft are needed by the application itself every time it runs, so they travel with it —
+    /// a shipped .app cannot tell somebody to install Homebrew.
+    /// </para>
+    /// <para>
+    /// <b>Both loader filenames, deliberately.</b> GLFW dlopens <c>libvulkan.1.dylib</c> and
+    /// Silk.NET's own resolver asks for <c>libvulkan.dylib</c>. They are separate name lists, and
+    /// a bundle carrying one of them gets past whichever asks first and dies on the other — which
+    /// cost an afternoon to find, because each failure looked like a different bug.
+    /// </para>
+    /// <para>
+    /// The ICD manifest is written rather than copied, because Homebrew's points at Homebrew.
+    /// Its <c>library_path</c> is relative to the manifest, so a bundle-relative one keeps
+    /// working wherever the bundle is moved.
+    /// </para>
+    /// <para>
+    /// Sourced from the build machine's Homebrew, which is honest rather than ideal: it means a
+    /// publish inherits whatever version that machine has. Pinning the runtime is a real question
+    /// and not this one.
+    /// </para>
+    /// </remarks>
+    private static void CloseMacRuntime(App app, string dest)
+    {
+        var prefix = new[] { "/opt/homebrew", "/usr/local" }
+            .FirstOrDefault(p => File.Exists(Path.Combine(p, "lib", "libvulkan.dylib")));
+        if (prefix is null)
+        {
+            throw new BlixCliException(
+                "no Vulkan runtime found to bundle, so the .app cannot be closed. Expected Homebrew " +
+                "under /opt/homebrew or /usr/local. This is fatal rather than a warning because " +
+                "`publish` for this target means \"produce the closed runtime\", and a command that " +
+                "returns 0 having not done that is the exact failure this engine keeps hunting.");
+        }
+
+        var contents = Path.Combine(dest, $"{BundleName(app)}.app", "Contents");
+        var frameworks = Path.Combine(contents, "Frameworks");
+        Directory.CreateDirectory(frameworks);
+
+        var wanted = new[]
+        {
+            Path.Combine(prefix, "lib", "libvulkan.dylib"),
+            Path.Combine(prefix, "lib", "libvulkan.1.dylib"),
+            Path.Combine(prefix, "lib", "libMoltenVK.dylib"),
+            Path.Combine(prefix, "opt", "openal-soft", "lib", "libopenal.1.dylib"),
+            Path.Combine(prefix, "lib", "libopenal.1.dylib"),
+        };
+
+        var copied = 0;
+        foreach (var source in wanted)
+        {
+            var name = Path.GetFileName(source);
+            var into = Path.Combine(frameworks, name);
+            if (!File.Exists(source) || File.Exists(into)) continue;
+
+            // Resolve the symlink chain: Homebrew's lib/ is links into Cellar, and a link into a
+            // directory the target machine does not have is not a dependency that travelled.
+            File.Copy(new FileInfo(source).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? source, into);
+            copied++;
+        }
+
+        var icdDir = Path.Combine(contents, "Resources", "vulkan", "icd.d");
+        Directory.CreateDirectory(icdDir);
+        File.WriteAllText(Path.Combine(icdDir, "MoltenVK_icd.json"),
+            """
+            {
+                "file_format_version": "1.0.0",
+                "ICD": {
+                    "library_path": "../../../Frameworks/libMoltenVK.dylib",
+                    "api_version": "1.4.0",
+                    "is_portability_driver": true
+                }
+            }
+
+            """);
+
+        Console.WriteLine($"  bundled {copied} native librar{(copied == 1 ? "y" : "ies")} from {prefix}");
+    }
+
+    /// <summary>
+    /// Move the application's data out of <c>Contents/MacOS</c>, which is for Mach-O only.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Not tidiness: codesign refuses the bundle otherwise. A cooked <c>foo.textures/</c> sidecar
+    /// is a directory with an extension, which codesign reads as a nested bundle and rejects as
+    /// "bundle format unrecognized" — one such directory in Bulwark was enough to fail the whole
+    /// signature. Under Resources it is data, and is sealed by hash without being interpreted.
+    /// </para>
+    /// <para>
+    /// The runtime half of this is <c>Blix.Core.AppFiles</c>, which looks here when there is no
+    /// Assets directory beside the binary. The two have to agree, and this comment is the
+    /// other end of the one over there.
+    /// </para>
+    /// </remarks>
+    private static void MoveDataOutOfMacOS(App app, string dest)
+    {
+        var contents = Path.Combine(dest, $"{BundleName(app)}.app", "Contents");
+        var from = Path.Combine(contents, "MacOS", "Assets");
+        if (!Directory.Exists(from)) return;
+
+        var to = Path.Combine(contents, "Resources", "Assets");
+        Directory.CreateDirectory(Path.GetDirectoryName(to)!);
+        if (Directory.Exists(to)) Directory.Delete(to, recursive: true);
+        Directory.Move(from, to);
+    }
+
+    /// <summary>
+    /// Judge the finished bundle against what this target promised, and fail if it falls short.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Because every step above reports on itself.</b> `blix publish` for a macOS target means
+    /// "produce the closed runtime", and the way that quietly stops being true is a step that
+    /// copied four files where five were needed and said so cheerfully. This reads the bundle
+    /// back instead, so the command is an instrument rather than a sequence of hopeful actions.
+    /// </para>
+    /// <para>
+    /// REQUIRED is the runtime closure and nothing else: the apphost, the plist, both loader
+    /// filenames (GLFW asks for one, Silk.NET's resolver the other), MoltenVK, OpenAL and the ICD
+    /// manifest. Shaders and cooked assets are deliberately absent — an application that declares
+    /// none is not incomplete, and `dotnet publish` already carries what was declared. Icons,
+    /// Developer ID and notarisation are not closure at all.
+    /// </para>
+    /// </remarks>
+    private static void VerifyMacBundle(App app, string dest)
+    {
+        var bundle = Path.Combine(dest, $"{BundleName(app)}.app");
+        var contents = Path.Combine(bundle, "Contents");
+        var required = new (string What, string Path)[]
+        {
+            ("the executable", Path.Combine(contents, "MacOS", BundleName(app))),
+            ("Info.plist", Path.Combine(contents, "Info.plist")),
+            ("the Vulkan loader (GLFW's name)", Path.Combine(contents, "Frameworks", "libvulkan.1.dylib")),
+            ("the Vulkan loader (Silk.NET's name)", Path.Combine(contents, "Frameworks", "libvulkan.dylib")),
+            ("MoltenVK", Path.Combine(contents, "Frameworks", "libMoltenVK.dylib")),
+            ("OpenAL Soft", Path.Combine(contents, "Frameworks", "libopenal.1.dylib")),
+            ("the ICD manifest", Path.Combine(contents, "Resources", "vulkan", "icd.d", "MoltenVK_icd.json")),
+        };
+
+        var missing = required.Where(r => !File.Exists(r.Path)).ToArray();
+        if (missing.Length > 0)
+        {
+            // Keep it, but not under a name anyone can ship. A failed publish that leaves a
+            // plausible `Foo.app` in the output directory is the same trap one level down: an
+            // artifact that is not what it looks like. Finder will not launch `.app.incomplete`,
+            // and it is still there to be looked at.
+            var parked = bundle + ".incomplete";
+            var note = string.Empty;
+            try
+            {
+                if (Directory.Exists(parked)) Directory.Delete(parked, recursive: true);
+                Directory.Move(bundle, parked);
+                note = $" What was built is at {Path.GetFileName(parked)}.";
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Not worth masking the real error over.
+                note = $" ({Path.GetFileName(bundle)} could not be set aside: {ex.Message})";
+            }
+
+            throw new BlixCliException(
+                "the bundle is not closed — " +
+                string.Join("; ", missing.Select(m => $"{m.What} is missing ({Path.GetFileName(m.Path)})")) +
+                ". Publishing stopped rather than hand you a bundle that runs only here." + note);
+        }
+
+        Console.WriteLine($"  closure verified: {required.Length} required parts present");
+    }
+
+    /// <summary>Ad-hoc sign the finished bundle, so the machine it lands on will run it.</summary>
+    /// <remarks>
+    /// <para>
+    /// The signature has to come last: copying libraries into Contents/Frameworks, moving the
+    /// assets and writing the ICD manifest all invalidate a seal made before them.
+    /// </para>
+    /// <para>
+    /// <c>--deep</c> rather than a plain sign, and deprecated though it is: a self-contained
+    /// publish drops managed assemblies beside the apphost, and codesign counts a <c>.dll</c> as
+    /// nested code it will not seal unsigned (measured -- it named System.Net.WebSockets.Client
+    /// and stopped). Signing each by hand is the same walk with more rope.
+    /// </para>
+    /// <para>
+    /// Ad-hoc, not Developer ID: this identifies nothing and gets no Gatekeeper pass, so a
+    /// download still needs the quarantine bit cleared. What it buys is that the bundle is
+    /// internally consistent -- an unsigned or stale-signed .app is killed on launch on Apple
+    /// silicon, where a valid signature is not optional.
+    /// </para>
+    /// <para>
+    /// Only attempted where codesign exists, and never fatal: an unsigned bundle still runs on
+    /// the machine that built it, which is where most of them are run.
+    /// </para>
+    /// </remarks>
+    private static void SignAppBundle(App app, string dest)
+    {
+        var bundle = Path.Combine(dest, $"{BundleName(app)}.app");
+        if (!Directory.Exists(bundle) || !File.Exists("/usr/bin/codesign")) return;
+
+        try
+        {
+            var sign = Process.Start(new ProcessStartInfo("/usr/bin/codesign")
+            {
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                ArgumentList = { "--force", "--deep", "--sign", "-", bundle },
+            });
+            if (sign is null) return;
+            var complaint = sign.StandardError.ReadToEnd();
+            sign.WaitForExit();
+            if (sign.ExitCode != 0)
+            {
+                throw new BlixCliException(
+                    $"could not sign the bundle: {complaint.Trim()}. A bundle whose seal does not " +
+                    "verify is not one this command should claim to have produced.");
+            }
+
+            Console.WriteLine("  signed the bundle ad-hoc");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"blix: could not sign the bundle: {ex.Message}");
+        }
+    }
+
+    private static string DefaultRid() =>
+        System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier;
+
+    private static string? ValueAfter(string[] args, string flag)
+    {
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] == flag) return args[i + 1];
+        }
+
+        return null;
+    }
 
     private sealed class BlixCliException(string message) : Exception(message);
 }

@@ -272,18 +272,13 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.Rgba16F, fullSize);
         sceneDepthHandle = graph.DepthTarget("scene-depth", fullSize);
 
-        var casterIface = new ShaderInterface(
-            Slots: new[] { InstanceBuffer.Slot },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
-        var worldIface = new ShaderInterface(
-            Slots: new[] { new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment), InstanceBuffer.Slot },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 160) });
-        var skyIface = new ShaderInterface(
-            Slots: Array.Empty<DescriptorSetSlot>(),
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 96) });
-        var presentIface = new ShaderInterface(
-            Slots: new[] { new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment) },
-            PushConstants: Array.Empty<PushConstantRange>());
+        // Each interface is READ from the shader rather than restated here. The hand-written
+        // tables these replace all agreed with their shaders when they were checked -- the point
+        // is not that they were wrong, but that nothing would have said so if they became wrong.
+        var casterIface = InstanceBuffer.Size(ShaderReflection.ForProgram(shaderDir, "shadow_caster.vert", "shadow_caster.frag"));
+        var worldIface = InstanceBuffer.Size(ShaderReflection.ForProgram(shaderDir, "cube.vert", "cube.frag"));
+        var skyIface = ShaderReflection.ForProgram(shaderDir, "sky.vert", "sky.frag");
+        var presentIface = ShaderReflection.ForProgram(shaderDir, "present.vert", "present.frag");
 
         shadowPassHandle = graph.GraphicsPass("sun-shadow")
             .Depth(sunShadowHandle, LoadOp.Clear, StoreOp.Store)
@@ -325,9 +320,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
 
         // Particle pipeline: geometry-only ParticleBatch + a minimal additive pipeline
         // (push = view-projection) into the HDR scene pass. No soft-depth / bloom.
-        var particleIface = new ShaderInterface(
-            Slots: Array.Empty<DescriptorSetSlot>(),
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+        var particleIface = ShaderReflection.ForProgram(shaderDir, "particle.vert", "particle.frag");
         var particleShader = vk.CreateShaderProgramFromSpv(Spv("particle.vert.spv"), Spv("particle.frag.spv"), particleIface, "particle");
         particlePipeline = vk.CreatePipeline(new PipelineDescription(particleShader, ParticleBatch.VertexLayoutDescription,
             PrimitiveTopology.Triangles, DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Additive },
@@ -966,7 +959,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
     {
         try
         {
-            var dir = Path.Combine(AppContext.BaseDirectory, "Assets", "models");
+            var dir = AppFiles.Asset("models");
 
             Mesh NodeMesh(string file, string nodeName, string meshName)
             {
@@ -1059,7 +1052,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
     {
         try
         {
-            var path = Path.Combine(AppContext.BaseDirectory, "Assets", "models", "enemy.glb");
+            var path = AppFiles.Asset("models", "enemy.glb");
             var model = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("enemy.skinned"), path));
             if (model.Animations.Length == 0) throw new InvalidOperationException("no animations");
 
@@ -1075,18 +1068,11 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
             enemyDeath = FindEnemyClip(model, "Death") ?? enemyWalk;
             enemyDeathHold = (float)(enemyDeath.Duration > 0 ? enemyDeath.Duration : 0.8);
 
-            // Set 3 b0: a [MaxAlive × EnemyBones] palette SSBO indexed by gl_InstanceIndex.
-            var boneLayout = new UniformBlockLayout(
-                TotalSize: MaxAlive * EnemyBones * 64,
-                Members: new[] { new UniformBlockMember("bones", 0, MaxAlive * EnemyBones * 64, ElementStride: 64) });
+            // Set 3 b0: a [MaxAlive × EnemyBones] palette SSBO indexed by gl_InstanceIndex. The
+            // shader declares it unsized, so the count below is the one number reflection cannot give.
             // Scene: shadow sampler (set 0, frag) + palette (set 3, vertex), 160B push → cube.frag (shadow-aware).
-            var sceneIface = new ShaderInterface(
-                Slots: new[]
-                {
-                    new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                    new DescriptorSetSlot(3, 0, ShaderResourceType.StorageBuffer, ShaderStages.Vertex, BlockLayout: boneLayout),
-                },
-                PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 160) });
+            var sceneIface = ShaderReflection.ForProgram(shaderDir, "skinned_instanced.vert", "cube.frag")
+                .WithBlockSize(set: 3, binding: 0, MaxAlive * EnemyBones * 64);
             var sceneShader = vk.CreateShaderProgramFromSpv(
                 File.ReadAllBytes(Path.Combine(shaderDir, "skinned_instanced.vert.spv")),
                 File.ReadAllBytes(Path.Combine(shaderDir, "cube.frag.spv")), sceneIface, "skinned.scene");
@@ -1096,9 +1082,8 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
                 RenderTarget: graph.GetPassSurface(scenePassHandle)), "skinned.scene");
 
             // Shadow: same set-3 palette (so they share one material), 64B sun-VP push, depth-only.
-            var shadowIface = new ShaderInterface(
-                Slots: new[] { new DescriptorSetSlot(3, 0, ShaderResourceType.StorageBuffer, ShaderStages.Vertex, BlockLayout: boneLayout) },
-                PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
+            var shadowIface = ShaderReflection.ForProgram(shaderDir, "skinned_shadow_instanced.vert", "shadow_caster.frag")
+                .WithBlockSize(set: 3, binding: 0, MaxAlive * EnemyBones * 64);
             var shadowShader = vk.CreateShaderProgramFromSpv(
                 File.ReadAllBytes(Path.Combine(shaderDir, "skinned_shadow_instanced.vert.spv")),
                 File.ReadAllBytes(Path.Combine(shaderDir, "shadow_caster.frag.spv")), shadowIface, "skinned.shadow");
@@ -1258,7 +1243,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
         {
             var assets = new AssetDatabase()
                 .RegisterImporter(new FontImporter())
-                .LoadManifest(Path.Combine(AppContext.BaseDirectory, "Assets", "manifest.json"));
+                .LoadManifest(AppFiles.Asset("manifest.json"));
             hudFont = Font.Upload(vk, assets.Load<FontData>(AssetId.Parse("fonts/bowlby")));
         }
         catch (Exception ex)

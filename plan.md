@@ -68,11 +68,27 @@ One enrichment it needs: the app index records the assembly and apphost, but
 publishing is a **source-project** operation, so the indexer should record the
 originating `.csproj`.
 
-**Acceptance — deliberately narrower than it sounds.** `clone → build → publish
-→ Bulwark.app`, launching **on the build machine**, with every managed, shader
-and cooked output arriving through build declarations and no application-specific
-copy script. Whether it runs anywhere else is B's question, and A has a strong
-tendency to absorb it.
+**Acceptance — and "double-clickable" is not part of it.** `clone → build →
+publish → Bulwark.app`, with every managed, shader and cooked output arriving
+through build declarations and no application-specific copy script, and the
+bundle running when launched **with the development environment**.
+
+That wording was tightened after measuring it. The bundle publishes correctly
+and runs clean at exit 0 with the Homebrew Vulkan variables set; double-clicked
+it dies, because `MoltenVkBootstrap` and GLFW find `libvulkan` through
+`DYLD_FALLBACK_LIBRARY_PATH` and `VK_ICD_FILENAMES`, which a shell exports and
+Finder does not. So the dependency is not merely *installed* on the build
+machine, it is *discovered through environment a terminal happens to provide* —
+and putting the loader inside the bundle where it needs no environment is
+runtime closure. **Double-clicking belongs entirely to B, even on the machine
+that built it.**
+
+**Done:** `blix publish <app> --target osx-arm64` produces
+`dist/<app>/<rid>/<App>.app` with `Contents/{MacOS,Resources,Info.plist,PkgInfo}`.
+The app index now records its originating `.csproj`, because publishing is a
+source-project operation and rediscovering that from an assembly path is
+guesswork. `run` and `publish` share one resolver, so a name cannot mean two
+different apps.
 
 **One target per invocation**, and `--target osx-arm64` stays singular: designing
 for a second before it exists is the speculation this tree avoids. Internally,
@@ -92,16 +108,87 @@ Homebrew, no installed .NET, no Vulkan SDK and no OpenAL, and it launches. That
 sentence *is* the definition of runtime closure, and it is the only test that
 cannot be passed by accident on a developer's box.
 
-Development assumes Homebrew throughout — `./blix` sets `DYLD_FALLBACK_LIBRARY_PATH`
-and the MoltenVK ICD, `MoltenVkBootstrap` probes Homebrew, `OpenALAudioDevice`
-probes Homebrew. That is reasonable *bootstrap* and cannot be the release story:
-a shipped `.app` cannot tell someone to `brew install`.
+### Done, 2026-09-28 — the bundle is closed and signed
 
-So the stage forces a distinction worth having: **developer dependencies**
-(`glslc`, `spirv-cross`, validation layers) versus **runtime dependencies that
-belong inside the bundle** (MoltenVK, the loader or a direct link, OpenAL Soft),
-plus rpath fixups and signing. The closure is target-dependent, which is what
-makes it a design question rather than a copy.
+`blix publish` assembles the closure itself: it copies the loader, MoltenVK and
+OpenAL Soft out of the build machine's Homebrew into `Contents/Frameworks`
+(resolving the symlink chain into the Cellar, since a link to a directory the
+target machine does not have is not a dependency that travelled), writes a
+bundle-relative ICD manifest, moves the assets to `Contents/Resources`, and
+signs.
+
+Four findings, each measured, each of which had a wrong belief in front of it:
+
+- **Pre-loading `libvulkan` does NOT satisfy GLFW.** `MoltenVkBootstrap`'s
+  header claimed dyld would answer a later bare-name `dlopen` from the mapped
+  image. It does not — tested with `libvulkan.dylib`, the exact
+  `libvulkan.1.dylib` soname, and a bare-leaf install name plus re-sign.
+  `DYLD_FALLBACK_LIBRARY_PATH` was doing all the work.
+- **So the process re-execs itself**, with the path computed from
+  `Environment.ProcessPath`. The alternatives were measured and lost:
+  `LSEnvironment` works but bakes an absolute path and dies the first time the
+  `.app` is moved; a launcher shim adds a second binary to sign. The re-exec
+  keeps working when the bundle moves, which is the property that matters.
+  `setenv` + `execv`, because .NET's environment API does not reach `environ`.
+- **`Environment.SetEnvironmentVariable` never reached the Vulkan loader.**
+  On Unix it writes .NET's own dictionary and leaves `environ` alone, so
+  `VK_ICD_FILENAMES` had been a no-op since it was written — invisible because
+  the loader's built-in search covers Homebrew's prefix anyway. In a bundle it
+  was not invisible: the loader found the bundle's manifest *and* Homebrew's,
+  mapped two copies of MoltenVK into one process (objc reported duplicate
+  `MVKBlockObserver`), and used the installed one. Native `setenv` fixed it —
+  and unlike `DYLD_*`, it needs no re-exec, because the loader reads it at
+  `vkCreateInstance`.
+- **codesign refuses a bundle with data in `Contents/MacOS`.** One cooked
+  `core.textures/` sidecar — a directory with an extension — is read as a
+  malformed nested bundle and fails the whole signature. `--deep` is also
+  required, because a self-contained publish puts managed `.dll`s beside the
+  apphost and codesign will not seal those unsigned either. Assets therefore
+  live in `Contents/Resources`, and `Blix.Core.AppFiles` is the one place that
+  knows to look across for them — replacing eleven hand-written copies of
+  `Path.Combine(AppContext.BaseDirectory, "Assets", …)`, every one of which
+  would have been wrong in a published bundle and *quietly* wrong: Bulwark
+  drew primitives instead of its turrets and exited 0. Pinned by
+  `Blix.Test.Graphics` Section **BH**.
+
+Two earlier dead ends are now moot but should not be re-tried: a bundled
+Khronos loader failing `vkCreateInstance` with `ErrorExtensionNotPresent`, and
+a loader-less bundle failing in Silk's own name resolution. Both were artefacts
+of requesting `VK_KHR_portability_enumeration` unconditionally — a *loader*
+extension, absent when talking to MoltenVK directly. It is now asked for only
+when the runtime offers it, and the bundled loader works.
+
+**What was measured on the finished bundle**, moved out of its publish
+directory, with no environment set: exit 0; one ICD manifest; one driver, the
+bundled one; zero images mapped from `/opt/homebrew`; OpenAL resolving to
+`Contents/Frameworks`; `codesign --verify` valid and satisfying its designated
+requirement; and a Launch Services double-click running all 12,000 frames in
+the same 10.0s as a direct run.
+
+**The acceptance test above is still unrun.** Every measurement here was taken
+on the machine that built the bundle, and "zero images from `/opt/homebrew`" is
+the strongest available proxy for a clean Mac, not a substitute for one. No
+clean Mac or VM is available — that is the one open thing in this stage, and it
+is an access problem rather than a work item.
+
+### The distinction the stage settled
+
+**Developer dependencies** — `glslc`, `spirv-cross`, the validation layers —
+stay outside. They run on the build machine and never ship.
+
+**Runtime dependencies** — the Khronos loader, MoltenVK, OpenAL Soft — go in
+`Contents/Frameworks`. Both loader filenames are needed, not one: GLFW dlopens
+`libvulkan.1.dylib` and Silk.NET's resolver asks for `libvulkan.dylib`, and a
+bundle carrying only one gets past whichever asks first and dies on the other.
+
+Development still assumes Homebrew — `./blix` sets `DYLD_FALLBACK_LIBRARY_PATH`
+and the ICD, and both probes fall back to it. That stays, and is now explicitly
+the *second* branch: a bundled runtime wins, so a developer machine that happens
+to have Homebrew exercises what was shipped rather than what is lying around.
+
+The one thing knowingly left crude: the bundle is sourced from the build
+machine's Homebrew, so a publish inherits whatever version that machine has.
+Pinning the runtime is a real question and not this one.
 
 Note `spirv-cross` became load-bearing for a fresh clone on 2026-09-28, when the
 `.spv.refl.json` sidecars stopped being tracked. It is a documented prerequisite
@@ -109,32 +196,128 @@ and in CI, so this is consistent — but it is now a *build* dependency with tee
 
 ## C — Windows bring-up, as an audit
 
-`Blix.Runtime.Silk` is not a macOS runtime. It is a desktop Silk runtime
-verified only on macOS: **five** OS conditionals exist tree-wide, all
-quarantined. The portability work is therefore not "abstract macOS out" but
+`Blix.Runtime.Silk` is not a macOS runtime. It is a desktop Silk runtime verified
+only on macOS. The portability work is therefore not "abstract macOS out" but
 "find the assumptions that survived because no second platform punished them".
 
-Expect bootstrap and tooling, not rendering:
+**Do not** build an `IPlatform` abstraction. Silk already is most of one — and
+the audit below is the evidence: what is macOS-specific is small, quarantined,
+and in two cases exists *only* because of dyld.
 
-- `Blix.Recipes/NativeLibraries.cs` hardcodes `libmeshoptimizer.dylib` and
-  `libblix_bc7.dylib`. **Cooking runs during the build**, so the build fails
-  before a window opens. Two lines, and undiscoverable without trying.
-- `./blix` is bash plus `brew --prefix`.
-- `MacDockIcon`, and the window-icon split that already understands Windows.
+### The audit, 2026-09-28
 
-**Do not** build an `IPlatform` abstraction. Silk already is most of one.
+Enumerated, not counted — the earlier "five OS conditionals" was stale.
+
+| | |
+|---|---|
+| `MoltenVkBootstrap.EnsureLoaded` | early-returns off macOS |
+| `VulkanGraphicsDevice.Init` portability bit | macOS-only, already conditional on the runtime offering it |
+| `OpenALAudioDevice.TryOverrideMacOSLibraryPath` | early-returns off macOS |
+| `Window.ApplyWindowIcon` | `SetWindowIcon` **is** the Windows/Linux path; the macOS branch adds the dock tile |
+| `BuildMeshopt` / `BuildBc7` targets | `IsOSPlatform(OSX)`, and staging is guarded by `Exists()` |
+
+Four in C#, two in MSBuild, all quarantined. Nothing to abstract.
+
+**The headline, measured rather than assumed: `blix publish --target win-x64`
+already works from macOS.** It produced an `.exe`, a full self-contained runtime,
+`glfw3.dll` and `cimgui.dll` from the NuGet runtime packs, and **zero** `.dylib`
+leakage. This matters because it splits a question the plan had as one: the cook
+runs on the *host* whatever the target RID, so the native-library problem below
+blocks **building on Windows**, not **producing Windows binaries**.
+
+What the audit found, in the order it matters:
+
+- **`MeshRecipe.DefaultSimplifier` had no fallback and no message.** `Bc7Native`
+  has probed `Available` and degraded to the managed encoder since it was
+  written; the simplifier did neither, so a missing native threw
+  `DllNotFoundException` from inside a P/Invoke — during a *build*, since
+  cooking is a build step. It now fails at the entry with a sentence naming the
+  file, the target that builds it, and the fact that cross-publishing is
+  unaffected. Verified by hiding the dylib and cooking.
+- **Three places spelled the filename, all `.dylib`.** The resolver table,
+  `Bc7Native.LibPath` (which the plan had not found), and nothing shared between
+  them. `NativeLibraries.FileName` is now the only place that knows, and answers
+  `lib*.dylib` / `lib*.so` / `*.dll`. Pinned by `Blix.Test.Graphics` Section
+  **BI**, which also checks every `DllImport` name is one the resolver answers —
+  an unregistered one falls through to bare-name probing, the exact path that
+  does not reliably work.
+- **A `win-x64` publish ships no OpenAL native.** `vulkan-1.dll` is correctly
+  absent (the GPU driver installs it); OpenAL Soft is neither a system library
+  nor in a runtime pack. This is stage B's closure question wearing a Windows
+  hat, and it is **open**.
+- **`blix.cmd` now exists**, and is a third the length of `./blix` for a reason
+  worth recording: almost all of the bash script is a dyld workaround, not a
+  front door. Windows resolves DLLs from the executable's directory, the loader
+  is in System32, and the ICD comes from the driver registry. What is left is
+  the bootstrap that was always the actual front door. **Unrun.**
+
+Two things the audit expected to find and did not:
+
+- **Cooked artifacts are already separator-safe.** `CookStamp` normalises
+  recorded paths to `/` with a comment naming this exact reason, and
+  `MeshRecipe` does the same for the paths it writes into a `.blixmesh`. Every
+  other `GetRelativePath` builds a filesystem path or a console message.
+- **`glslc` and `spirv-cross` already fall back to `PATH`**, which is what the
+  Vulkan SDK gives you on Windows. No change needed.
+
+### What is left, and why it is not written
+
+**The native toolchain branch.** `BuildMeshopt` and `BuildBc7` shell out to
+`clang++ -dynamiclib`. Linux wants `-shared`; Windows wants a different compiler
+entirely. Writing either without a machine to run it on is how you get a
+confidently wrong build script, and the failure is now loud and named rather
+than silent — so this waits for the machine rather than for a guess.
+
+**Acceptance is the same shape as stage B's and has the same gap:** clone on
+Windows, build, run a demo. Nothing here has been run on Windows. `blix.cmd` in
+particular is written from the audit and should be treated as a first draft.
 
 ## D — the CI matrix
 
-Cheap once C lands. 2026-09-27 defined precisely what it can and cannot be:
+**Why it comes straight after C:** a `windows-latest` runner *is* the Windows
+machine the audit did not have. `blix.cmd` and the Windows branch of the native
+build were both written from reading rather than running, and this is what turns
+them into ordinary work with a feedback loop.
 
-- **Static checks travel everywhere.** `Blix.Test.Graphics` section BG already
-  checks that a shader's includes are declared build inputs and that shaders
-  sharing a uniform block agree about it — no GPU, milliseconds, every platform.
-- **Pipeline-time breakage needs a booted application**, and the seven suites
-  build no Vulkan pipeline. CI runners have no Vulkan device and will not soon.
-  That stays a **pre-commit** concern, deliberately: the spike to make a GPU
-  work in CI is not worth its cost.
+What it can and cannot be, settled 2026-09-27 and unchanged:
+
+- **Static checks travel everywhere.** Sections BG, BH and BI need no GPU and run
+  in milliseconds on every platform.
+- **Pipeline-time breakage needs a booted application.** CI runners have no
+  Vulkan device and will not soon. That stays a **pre-commit** concern,
+  deliberately: the spike to make a GPU work in CI is not worth its cost.
+
+**Measured, and better than the above assumed: not one of the seven suites
+creates a `VulkanGraphicsDevice` or a `Window`.** So the Windows job runs the
+*whole* gate rather than a chosen subset. The deviceless/device line falls
+exactly on the suites/demos boundary already.
+
+### What landed, 2026-09-28
+
+- **A second job, not a matrix.** The two platforms share the build and the gate
+  and agree about nothing else — brew versus an SDK installer, a front door that
+  works around dyld versus one that need not. A matrix would express that as
+  `if:` on most steps, which is a matrix in name and a fork in fact.
+- **The native build targets became platform-aware**, which stage C had
+  deliberately left as a guess. It is no longer a guess, because the obstacle
+  turned out to be findable by reading the sources rather than the toolchain:
+  `MESHOPTIMIZER_API` is an empty macro by default, so a Windows DLL exports
+  *nothing*, and `blix_bc7.cpp` had only `extern "C"`. Both now carry an explicit
+  export switch. Unix keeps working because default visibility exports
+  everything, which is why this was invisible.
+- **The MSBuild side had the same duplicate spelling the C# side did** — the
+  staging step named `libmeshoptimizer.dylib` in a second place. Both halves now
+  derive the name, and the two must agree: one names the file the build writes,
+  the other the file the loader opens.
+- **A failed native build now warns rather than stopping**, because the two
+  natives differ in consequence: BC7 falls back to the managed encoder and costs
+  time, while meshopt has no fallback and fails the cook with the message stage C
+  added.
+
+**Linux is deliberately absent.** A second red job teaches nothing the first has
+not said; the shape of what Windows needs should be known before it is copied.
+
+**The Windows job has never been green.** That is its purpose, not a defect.
 
 ## E — keyboard and gamepad completion
 

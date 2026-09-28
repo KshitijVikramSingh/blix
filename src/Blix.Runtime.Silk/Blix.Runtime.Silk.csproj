@@ -23,6 +23,7 @@
   </ItemGroup>
 
   <PropertyGroup>
+    <BlixShaderReflect>true</BlixShaderReflect>
     <!-- .spv ships with the library, not into a game's output folder. -->
     <BlixShaderMode>Library</BlixShaderMode>
     <TargetFramework>net8.0</TargetFramework>
@@ -48,12 +49,5 @@
   </ItemGroup>
 
 
-  <ItemGroup>
-    <None Include="Shaders\*.spv">
-      <Pack>false</Pack>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>Shaders\%(Filename)%(Extension)</Link>
-    </None>
-  </ItemGroup>
 
 </Project>

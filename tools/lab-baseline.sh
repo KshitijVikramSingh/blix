@@ -105,7 +105,7 @@ export BLIX_TEARDOWN_TRACE=1
 
 RUN="$DIR"
 if [ "$ACTION" = check ]; then
-    RUN="$(mktemp -d -t lab-baseline-run)"
+    RUN="$(mktemp -d "${TMPDIR:-/tmp}/lab-baseline-run.XXXXXX")"
     trap 'rm -rf "$RUN"' EXIT
 fi
 mkdir -p "$RUN"

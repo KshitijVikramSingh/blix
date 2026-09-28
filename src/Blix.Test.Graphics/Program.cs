@@ -1173,6 +1173,21 @@ static ShaderInterface MinimalShader() => new(new[]
     var frag = ShaderReflection.Load(Path.Combine(fxDir, "lit.frag.refl.json"));
     var iface = ShaderReflection.MergeStages(vert, frag);
 
+    // <b>These fixtures held a real cross-stage disagreement, and nothing noticed for four
+    // months.</b> At offset 92 the vertex stage called the float `uAmbientIntensity` and the
+    // fragment called it `uIblIntensity` — same offset, same size, different meaning — from the
+    // era before frame.glsl declared the Frame block once for both stages. Every other member
+    // agreed; it was a true prefix apart from that one name.
+    //
+    // MergeStages kept whichever view was larger and asked nothing, so the merged layout said
+    // `uIblIntensity` and a write to `uAmbientIntensity` would have gone somewhere else entirely.
+    // lit.vert.refl.json now matches the authoritative stage at that offset, and the original is
+    // kept beside it, because a corpus that no longer contains the bug cannot prove it is caught.
+    var drifted = ShaderReflection.Load(Path.Combine(fxDir, "lit.vert.drifted.refl.json"));
+    t.Expect("P.0 the drifted vert/frag pair is rejected, naming the offset",
+        Throws(() => ShaderReflection.MergeStages(drifted, frag)),
+        "offset 92: uAmbientIntensity vs uIblIntensity");
+
     DescriptorSetSlot? Slot(int set, int binding) =>
         iface.Slots.FirstOrDefault(s => s.Set == set && s.Binding == binding);
     UniformBlockMember? Member(UniformBlockLayout? b, string name) =>
@@ -4978,6 +4993,278 @@ static ShaderInterface MinimalShader() => new(new[]
     // one must not, because the offsets then belong to a file that does not know it owns them.
     t.Expect("BG.2 no shader pins absolute byte offsets into a shared block",
         hardOffsets.Count == 0, string.Join("; ", hardOffsets.Take(4)));
+}
+
+// ============================================================================
+// Section BH — an application asks AppFiles where its assets are, rather than
+//              assuming they sit beside the binary.
+// ============================================================================
+//
+// <b>Because "beside the binary" stops being true the moment the thing is published.</b> A macOS
+// .app cannot keep data in Contents/MacOS: codesign reads a cooked `foo.textures/` sidecar there
+// as a malformed nested bundle and refuses to sign the bundle at all. So `blix publish` moves
+// Assets to Contents/Resources, and `Blix.Core.AppFiles` is the one place that knows to look
+// across for it.
+//
+// The check exists because the hand-rolled form had already been written eleven times, once per
+// place that wanted a model or a manifest, and every one of them would have been wrong in a
+// published bundle. Not loudly wrong: Bulwark under that layout drew grey primitives instead of
+// its turrets and carried on to a clean exit. This is conventions §4's shape — an engine step
+// copied privately, missing the case the engine handles — and a grep is the only instrument that
+// sees it before a person does.
+{
+    var srcDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    var sources = Directory.Exists(srcDir)
+        ? Directory.GetFiles(srcDir, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .ToArray()
+        : Array.Empty<string>();
+
+    // CONTROL: a grep over nothing passes. conventions §5.
+    t.Expect("BH.0 CONTROL sources were found to search",
+        sources.Length >= 100, $"{sources.Length} file(s) under {srcDir}");
+
+    // The hand-rolled form, in either order of quoting, but not AppFiles' own implementation --
+    // it is the one place entitled to write it.
+    var handRolled = new List<string>();
+    var appFilesPath = Path.Combine(srcDir, "Blix.Core", "AppFiles.cs");
+    foreach (var file in sources)
+    {
+        if (string.Equals(file, appFilesPath, StringComparison.Ordinal)) continue;
+        var text = File.ReadAllText(file);
+        var lines = text.Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!Regex.IsMatch(lines[i], @"AppContext\.BaseDirectory\s*,\s*""Assets""")) continue;
+            handRolled.Add($"{Path.GetFileName(file)}:{i + 1}");
+        }
+    }
+
+    t.Expect("BH.1 no application builds its own asset path from AppContext.BaseDirectory",
+        handRolled.Count == 0,
+        handRolled.Count == 0 ? "all sites go through AppFiles" : string.Join("; ", handRolled.Take(6)));
+
+    // And the resolver itself answers, so the check above is not passing because nothing asks.
+    t.Expect("BH.2 AppFiles resolves an Assets path",
+        AppFiles.Assets.EndsWith("Assets", StringComparison.Ordinal), AppFiles.Assets);
+    t.Expect("BH.2 AppFiles.Asset appends beneath it",
+        AppFiles.Asset("models", "x.glb") == Path.Combine(AppFiles.Assets, "models", "x.glb"),
+        AppFiles.Asset("models", "x.glb"));
+}
+
+// ============================================================================
+// Section BI — the cook does not name a platform's library filenames.
+// ============================================================================
+//
+// <b>Cooking runs as a build step, so anything the cook assumes about the host is a thing that
+// fails at build time on a platform nobody has tried.</b> `Blix.Recipes` P/Invokes two vendored
+// natives, and it used to write their filenames down: `libmeshoptimizer.dylib` in the resolver
+// table and `libblix_bc7.dylib` again, separately, in `Bc7Native`. Two spellings of one fact,
+// both true on exactly one platform.
+//
+// `NativeLibraries.FileName` is now the only place entitled to know that a shared library is
+// `lib*.dylib` here, `lib*.so` there and `*.dll` elsewhere. This pins that, because the failure
+// it prevents is invisible from macOS: the tree builds, the suites pass, and the first person on
+// another platform gets a DllNotFoundException from inside a P/Invoke with no filename in it.
+{
+    var srcDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    var recipesDir = Path.Combine(srcDir, "Blix.Recipes");
+    var recipeSources = Directory.Exists(recipesDir)
+        ? Directory.GetFiles(recipesDir, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .ToArray()
+        : Array.Empty<string>();
+
+    // CONTROL: conventions §5 — a loop over nothing passes.
+    t.Expect("BI.0 CONTROL the cook's sources were found",
+        recipeSources.Length >= 5, $"{recipeSources.Length} file(s) under {recipesDir}");
+
+    // A library extension inside a string literal. Comments and doc remarks are allowed to
+    // discuss them -- this is about what the code believes, not about what it explains.
+    var named = new List<string>();
+    var namer = Path.Combine(recipesDir, "NativeLibraries.cs");
+    foreach (var file in recipeSources)
+    {
+        if (string.Equals(file, namer, StringComparison.Ordinal)) continue;
+        var lines = File.ReadAllLines(file);
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            var code = line.TrimStart();
+            if (code.StartsWith("//", StringComparison.Ordinal) || code.StartsWith("///", StringComparison.Ordinal)) continue;
+            if (!Regex.IsMatch(line, @"""[^""]*\.(dylib|so|dll)""")) continue;
+            named.Add($"{Path.GetFileName(file)}:{i + 1}");
+        }
+    }
+
+    t.Expect("BI.1 the cook names no platform library filename",
+        named.Count == 0,
+        named.Count == 0 ? "only NativeLibraries knows" : string.Join("; ", named.Take(6)));
+
+    // Every DllImport the cook makes must be a name the resolver answers. One that is not falls
+    // through to bare-name probing, which is exactly the path that does not reliably work.
+    var imported = new SortedSet<string>(StringComparer.Ordinal);
+    foreach (var file in recipeSources)
+    {
+        foreach (Match m in Regex.Matches(File.ReadAllText(file), @"\[DllImport\(\s*(?:Lib|""([^""]+)"")"))
+        {
+            imported.Add(m.Groups[1].Success && m.Groups[1].Value.Length > 0 ? m.Groups[1].Value : "Lib");
+        }
+    }
+
+    // `Lib` is a per-file const; resolve each to its value so the comparison is on real names.
+    var constants = new SortedSet<string>(StringComparer.Ordinal);
+    foreach (var file in recipeSources)
+    {
+        foreach (Match m in Regex.Matches(File.ReadAllText(file), @"const string Lib = ""([^""]+)"""))
+        {
+            constants.Add(m.Groups[1].Value);
+        }
+    }
+
+    var registered = File.Exists(namer)
+        ? new SortedSet<string>(
+            Regex.Matches(File.ReadAllText(namer), @"""([a-z0-9_]+)""").Select(m => m.Groups[1].Value),
+            StringComparer.Ordinal)
+        : new SortedSet<string>(StringComparer.Ordinal);
+
+    t.Expect("BI.0 CONTROL the cook's P/Invoke targets were found",
+        constants.Count >= 2, string.Join(", ", constants));
+    t.Expect("BI.2 every native the cook imports is one the resolver answers",
+        constants.All(registered.Contains),
+        $"imports [{string.Join(", ", constants)}] vs registered [{string.Join(", ", registered)}]");
+}
+
+// ============================================================================
+// Section BJ — an application reads its shader interface, it does not restate it.
+// ============================================================================
+//
+// <b>Thirty-eight hand-written ShaderInterface tables, each naming a set, a binding, a type, a
+// stage and a push size that the shader beside it already declared.</b> They were checked against
+// reflection before being removed, and two already disagreed: VulkanHello and VulkanGraph declared
+// the frame UBO visible to the fragment stage, which does not read it, and Pong declared a 64-byte
+// push range against a block that is 52 -- vec4 + vec2 + vec2 + vec4 + float -- with the same
+// wrong 64 written in three places.
+//
+// Neither was breaking anything the day it was found. Both are the shape that breaks later, and
+// a device only objects to some of it: an over-wide stage and an over-long push range are legal.
+//
+// What reflection cannot supply is a runtime-sized block's length -- `InstanceData instances[]`
+// reflects with block_size 0, because the count belongs to the application. That is what
+// ShaderInterface.WithBlockSize is for, and asking for it explicitly is the point: the shader
+// owns the shape, the caller owns the count.
+{
+    var srcDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    var sources = Directory.Exists(srcDir)
+        ? Directory.GetFiles(srcDir, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .ToArray()
+        : Array.Empty<string>();
+
+    t.Expect("BJ.0 CONTROL sources were found to search",
+        sources.Length >= 100, $"{sources.Length} file(s)");
+
+    // ShaderReflection builds one from the merged stages; that is the constructor's whole job.
+    // Everyone else asks it. Test sources are exempt: several exist to exercise the type itself.
+    var owner = Path.Combine(srcDir, "Blix.Graphics.Vulkan", "ShaderReflection.cs");
+    var restated = new List<string>();
+    foreach (var file in sources)
+    {
+        if (string.Equals(file, owner, StringComparison.Ordinal)) continue;
+        if (file.Contains($"{Path.DirectorySeparatorChar}Blix.Test.", StringComparison.Ordinal)) continue;
+        var lines = File.ReadAllLines(file);
+        for (var i = 0; i < lines.Length; i++)
+        {
+            // Both spellings. SpriteBatch used the target-typed one -- `ShaderInterface
+            // Interface { get; } = new(...)` -- and the first version of this check, which looked
+            // only for the named constructor, passed over it in silence. BJ.2 caught it instead,
+            // which is luck rather than design.
+            var named = lines[i].Contains("new ShaderInterface(", StringComparison.Ordinal);
+            var targetTyped = Regex.IsMatch(lines[i], @"ShaderInterface\b[^=;]*=\s*new\s*\(");
+            if (!named && !targetTyped) continue;
+            restated.Add($"{Path.GetFileName(file)}:{i + 1}");
+        }
+    }
+
+    t.Expect("BJ.1 no application builds a ShaderInterface by hand",
+        restated.Count == 0,
+        restated.Count == 0 ? "all interfaces come from reflection" : string.Join("; ", restated.Take(6)));
+
+    // And the sidecars those callers read are actually produced. A project that reflects in C#
+    // and does not emit reflection at build time fails at startup, not here, which is late.
+    var reflecting = Directory.GetFiles(srcDir, "*.csproj", SearchOption.AllDirectories)
+        .Where(p => File.ReadAllText(p).Contains("<GlslShader", StringComparison.Ordinal))
+        .ToArray();
+    var silent = reflecting
+        .Where(p => !File.ReadAllText(p).Contains("<BlixShaderReflect>true", StringComparison.Ordinal))
+        .Select(Path.GetFileNameWithoutExtension)
+        .ToArray();
+
+    t.Expect("BJ.0 CONTROL shader-bearing projects were found",
+        reflecting.Length >= 8, $"{reflecting.Length} project(s)");
+    t.Expect("BJ.2 every project with shaders emits their reflection",
+        silent.Length == 0, string.Join(", ", silent));
+}
+
+// ============================================================================
+// Section BK — MergeStages rejects two blocks wearing one binding.
+// ============================================================================
+//
+// <b>Reflection is public machinery, so its correctness cannot rest on this repository's gate.</b>
+// A stage reflects only the members it references, so the same (set,binding) legitimately comes
+// back shorter from one stage than another -- measured: studio_lit.vert sees one 64-byte member
+// of the Frame block where studio_lit.frag sees eleven, 368 bytes, and the short one is a true
+// prefix beginning at uViewProjection@0.
+//
+// MergeStages used to keep whichever view had the greater TotalSize and check nothing else, so
+// two stages declaring DIFFERENT members at the same offset merged silently into one of them.
+// Nothing downstream would object -- the descriptor type matches, so the device has no opinion --
+// and the by-name write path would put bytes where the other stage reads something else.
+{
+    static ShaderReflection.ReflStage Stage(ShaderStages st, int total, params (string Name, int Offset, int Size)[] members) =>
+        new(st,
+            new[]
+            {
+                new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer, st,
+                    BlockLayout: new UniformBlockLayout(total,
+                        members.Select(m => new UniformBlockMember(m.Name, m.Offset, m.Size)).ToArray())),
+            },
+            Array.Empty<PushConstantRange>());
+
+    // A genuine prefix merges, keeps the fuller layout, and ORs the stages.
+    var merged = ShaderReflection.MergeStages(
+        Stage(ShaderStages.Vertex, 64, ("uViewProjection", 0, 64)),
+        Stage(ShaderStages.Fragment, 128, ("uViewProjection", 0, 64), ("uCascadeVP0", 64, 64)));
+    var slot = merged.Slots.Single();
+    t.Expect("BK.1 a shorter view that is a prefix merges into the fuller layout",
+        slot.BlockLayout?.TotalSize == 128 && slot.BlockLayout?.Members.Count == 2,
+        $"{slot.BlockLayout?.TotalSize}B, {slot.BlockLayout?.Members.Count} member(s)");
+    t.Expect("BK.1 and the merged slot carries both stages",
+        slot.Stages == (ShaderStages.Vertex | ShaderStages.Fragment), slot.Stages.ToString());
+
+    // Same offset, different member. Equal sizes, so picking "the fuller" cannot separate them.
+    t.Expect("BK.2 different members at one offset are rejected",
+        Throws(() => ShaderReflection.MergeStages(
+            Stage(ShaderStages.Vertex, 32, ("uA", 0, 16), ("uB", 16, 16)),
+            Stage(ShaderStages.Fragment, 32, ("uA", 0, 16), ("uC", 16, 16)))),
+        "equal TotalSize, incompatible members");
+
+    // A gap is the same disagreement: the shorter is not a prefix of the longer.
+    t.Expect("BK.3 a member with no counterpart at its offset is rejected",
+        Throws(() => ShaderReflection.MergeStages(
+            Stage(ShaderStages.Vertex, 48, ("uA", 0, 16), ("uOdd", 32, 16)),
+            Stage(ShaderStages.Fragment, 64, ("uA", 0, 16), ("uB", 16, 16), ("uC", 48, 16)))),
+        "offset 32 exists in one view only");
+
+    // CONTROL: the rejections above must not be this helper reporting every call as a throw.
+    t.Expect("BK.0 CONTROL a compatible merge does not throw",
+        !Throws(() => ShaderReflection.MergeStages(
+            Stage(ShaderStages.Vertex, 64, ("uViewProjection", 0, 64)),
+            Stage(ShaderStages.Fragment, 64, ("uViewProjection", 0, 64)))),
+        "identical views merge");
 }
 
 t.PrintSummary();

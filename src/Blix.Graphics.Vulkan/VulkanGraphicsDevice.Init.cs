@@ -135,8 +135,17 @@ public sealed partial class VulkanGraphicsDevice
             var name = Marshal.PtrToStringUTF8((nint)glfwExtNames[i]);
             if (name is not null) extensions.Add(name);
         }
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX) &&
-            !extensions.Contains("VK_KHR_portability_enumeration"))
+        // <b>Asked for only when the runtime actually has it.</b> VK_KHR_portability_enumeration
+        // is the Khronos LOADER's extension, offered when it can see a portability driver behind
+        // it. Talking to MoltenVK directly -- which is what a shipped bundle carrying MoltenVK and
+        // no loader does -- there is no loader to offer it, and requesting it anyway fails
+        // instance creation outright with ErrorExtensionNotPresent. Querying costs one call at
+        // startup and turns "this configuration is unsupported" into "this configuration needs no
+        // portability bit".
+        var portability = RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
+            && (extensions.Contains("VK_KHR_portability_enumeration")
+                || InstanceExtensionAvailable("VK_KHR_portability_enumeration"));
+        if (portability && !extensions.Contains("VK_KHR_portability_enumeration"))
         {
             extensions.Add("VK_KHR_portability_enumeration");
         }
@@ -156,7 +165,8 @@ public sealed partial class VulkanGraphicsDevice
             PpEnabledExtensionNames = extNames.Ptr,
             EnabledLayerCount = (uint)(validationEnabled ? ValidationLayers.Length : 0),
             PpEnabledLayerNames = layerNames.Ptr,
-            Flags = RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
+            // The flag is meaningless without the extension, and illegal with it absent.
+            Flags = portability
                 ? InstanceCreateFlags.EnumeratePortabilityBitKhr
                 : InstanceCreateFlags.None,
         };
@@ -165,6 +175,26 @@ public sealed partial class VulkanGraphicsDevice
         var result = Vk.CreateInstance(in createInfo, null, &instance);
         ThrowIfNotSuccess(result, "vkCreateInstance");
         Instance = instance;
+    }
+
+    /// <summary>Whether the Vulkan runtime in this process offers a given instance extension.</summary>
+    private unsafe bool InstanceExtensionAvailable(string name)
+    {
+        uint count = 0;
+        if (Vk.EnumerateInstanceExtensionProperties((byte*)null, ref count, null) != Result.Success) return false;
+        if (count == 0) return false;
+
+        var properties = new ExtensionProperties[count];
+        fixed (ExtensionProperties* p = properties)
+        {
+            if (Vk.EnumerateInstanceExtensionProperties((byte*)null, ref count, p) != Result.Success) return false;
+            for (var i = 0; i < count; i++)
+            {
+                if (Marshal.PtrToStringUTF8((nint)p[i].ExtensionName) == name) return true;
+            }
+        }
+
+        return false;
     }
 
     private unsafe void TryAttachDebugMessenger()
