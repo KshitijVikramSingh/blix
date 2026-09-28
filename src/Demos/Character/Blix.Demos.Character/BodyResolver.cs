@@ -1,7 +1,7 @@
 using System.Numerics;
 using Blix.Geometry;
 
-namespace Blix.Labs.Character;
+namespace Blix.Demos.Character;
 
 /// <summary>One contact a move ran into, kept so the picture can show what the arithmetic did.</summary>
 /// <remarks>
@@ -31,7 +31,7 @@ public readonly record struct MoveResult(
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Lab-local, deliberately.</b> <see cref="Intersection.Sweep(Capsule, Vector3, TriangleMesh3D, float)"/>
+/// <b>Local to this experiment, deliberately.</b> <see cref="Intersection.Sweep(Capsule, Vector3, TriangleMesh3D, float)"/>
 /// is engine math with one right answer, and <see cref="CollisionResponse.RemoveNormalComponent"/> is the
 /// deflection primitive — both already in <c>Blix.Geometry</c>. What is HERE is the loop, and a loop is
 /// policy: how many times to deflect, how much of a gap to leave, what to do with a body that starts

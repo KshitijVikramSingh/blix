@@ -1,7 +1,7 @@
 using System.Numerics;
 using Blix.Geometry;
 
-namespace Blix.Labs.Character;
+namespace Blix.Demos.Character;
 
 /// <summary>
 /// Accumulates a room's solids as flat-shaded triangles in WORLD space.
@@ -11,7 +11,7 @@ namespace Blix.Labs.Character;
 /// <b>World space, because that is what the collider is.</b> <see cref="TriangleMesh3D"/> stores its
 /// vertices baked, with no per-mesh transform — so a room built anywhere else would need a transform
 /// applied twice, once for the picture and once for the collider, and those are the two things this
-/// stage exists to keep from disagreeing. There are no model matrices in this lab at all.
+/// stage exists to keep from disagreeing. There are no model matrices here at all.
 /// </para>
 /// <para>
 /// <b>Flat-shaded, on purpose.</b> Smooth normals would draw a dome the collider does not have. Every
@@ -22,7 +22,7 @@ namespace Blix.Labs.Character;
 /// <b>Every face states its outward normal, rather than deriving one.</b> The winding is what the
 /// collider will read a contact normal out of, so a face whose winding disagrees with the direction it
 /// claims to face is a bug that lights correctly and pushes a body the wrong way. Stating both makes
-/// them checkable against each other — and <c>Blix.Labs.Character.Probe</c> checks every triangle in
+/// them checkable against each other — and <c>Blix.Demos.Character.Probe</c> checks every triangle in
 /// the room. Deriving the normal from the winding would have made that check vacuous.
 /// </para>
 /// </remarks>

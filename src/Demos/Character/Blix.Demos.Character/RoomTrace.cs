@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Numerics;
 using System.Text;
 
-namespace Blix.Labs.Character;
+namespace Blix.Demos.Character;
 
 /// <summary>
 /// One line per frame of what the body and the camera were doing, to a file.
@@ -28,12 +28,12 @@ namespace Blix.Labs.Character;
 /// turned out to be a contact at head height that nothing on screen distinguished from any other.
 /// </para>
 /// </remarks>
-public sealed class LabTrace : IDisposable
+public sealed class RoomTrace : IDisposable
 {
     private readonly StreamWriter writer;
     private readonly StringBuilder line = new();
 
-    private LabTrace(string path, StreamWriter writer)
+    private RoomTrace(string path, StreamWriter writer)
     {
         Path = path;
         this.writer = writer;
@@ -44,14 +44,14 @@ public sealed class LabTrace : IDisposable
     public int Rows { get; private set; }
 
     /// <summary>Begins a trace, creating the directory if it is not there.</summary>
-    public static LabTrace Start(string path)
+    public static RoomTrace Start(string path)
     {
         var full = System.IO.Path.GetFullPath(path);
         var directory = System.IO.Path.GetDirectoryName(full);
         if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
 
         var writer = new StreamWriter(full, append: false) { AutoFlush = true };
-        return new LabTrace(full, writer);
+        return new RoomTrace(full, writer);
     }
 
     public void Row(

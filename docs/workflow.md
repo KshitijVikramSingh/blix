@@ -134,13 +134,13 @@ The current tree has three marked projects:
 
 | Project | Folder | Gate |
 | --- | --- | --- |
-| `blix` | repository root | Graphics, Diagnostics, Physics2D, Physics3D, Apps, Studio, and Recipes suites |
-| `demos` | `src/Demos` | none declared |
-| `character` | `src/Character` | `Blix.Labs.Character.Probe` |
+| `blix` | repository root | Graphics, Diagnostics, Physics2D, Physics3D, Apps, Studio, Recipes and Input suites |
+| `demos` | `src/Demos` | `Blix.Demos.Character.Probe` |
 
 Project scope follows the current working directory. From the repository root,
-all projects below it are visible. From `src/Character`, the `character` marker
-is the scope and a bare app name resolves within that project.
+all projects below it are visible. From `src/Demos`, the `demos` marker is the scope
+and a bare app name resolves within that project — including the experiments under
+`Character/`, which are part of it rather than a project of their own.
 
 ## Apps
 
@@ -165,7 +165,7 @@ Arguments after the name are forwarded unchanged to the app. If the same name
 is visible in more than one project, qualify it with its project name:
 
 ```sh
-./blix run character:Blix.Labs.Character.Probe
+./blix run demos:Blix.Demos.Character.Probe
 ```
 
 Resolution tries an exact name, then case-insensitive equality, then an
@@ -283,7 +283,7 @@ From a nested project, invoke the same root script while keeping that directory
 as the project scope:
 
 ```sh
-cd src/Character
+cd src/Demos
 ../../blix test
 ```
 

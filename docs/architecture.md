@@ -60,7 +60,7 @@ an engine-layer migration.
 | Build-time and asset tools | `Blix.Tools.Shader`, `Blix.Tools.Cook` |
 | User-facing asset tools | `Blix.Tools.Inspect`, `Blix.Tools.Check`, `Blix.Tools.View`, `Blix.Tools.Shot` |
 | Shared assertion tally and suites | `Blix.Verify`, `Blix.Test.*` |
-| Character subsystem instruments | `src/Character/Blix.Labs.Character*` |
+| Small experiments built on Blix, grouped by theme | `src/Demos/Character/Blix.Demos.Character*` |
 | Executable specifications and games | `src/Demos/Blix.Demos.*` |
 
 ### Dependency direction

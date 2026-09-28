@@ -4,7 +4,7 @@ using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 using Blix.Render;
 
-namespace Blix.Labs.Character;
+namespace Blix.Demos.Character;
 
 /// <summary>
 /// Three passes over a room that never moves: cast, light, present.
@@ -14,12 +14,12 @@ namespace Blix.Labs.Character;
 /// <b>No model matrices anywhere.</b> The room's vertices are already in world space because that
 /// is what <see cref="Blix.Geometry.TriangleMesh3D"/> holds, so the vertex stage transforms by the
 /// view-projection alone. That removes the one place the picture and the collider could disagree —
-/// and it is why this is not the toolchain lab's renderer with a different scene in it. That one
+/// and it is why this is not the preview tool's renderer with a different scene in it. That one
 /// draws a list of objects each with its own transform; this draws one buffer, once.
 /// </para>
 /// <para>
 /// <b>Deliberately not here:</b> cascades, bloom, IBL, MSAA, a depth pre-pass, instancing. The
-/// subject of this lab is what a body does against a surface. A renderer that grew features by
+/// subject of this experiment is what a body does against a surface. A renderer that grew features by
 /// default would be claiming to be one.
 /// </para>
 /// </remarks>
@@ -30,7 +30,7 @@ public sealed class RoomRenderer : IDisposable
     /// <summary>Bytes the lit pass pushes: vec4 base colour + vec4 material.</summary>
     /// <remarks>
     /// Public so the probe can check it against what the SPIR-V declares. It is the one number in
-    /// this file that can silently disagree with the shader it describes — the toolchain lab's
+    /// this file that can silently disagree with the shader it describes — the preview tool's
     /// equivalent did, on its first run, and the device caught it at draw time, which is late.
     /// </remarks>
     public const int LitPushBytes = 32;
@@ -121,7 +121,7 @@ public sealed class RoomRenderer : IDisposable
             Spv("room_lit.vert"), Spv("room_lit.frag"), litInterface, "room.lit");
         presentProgram = vk.CreateShaderProgramFromSpv(
             Spv("room_present.vert"), Spv("room_present.frag"), presentInterface, "room.present");
-        // BACK-FACE CULLING on the lit pass, which the toolchain lab's scene deliberately does not
+        // BACK-FACE CULLING on the lit pass, which the preview tool's scene deliberately does not
         // do. Every solid here is closed and the probe says so, so an interior face is never the
         // subject — and culling makes a wrongly-wound face show up as a hole rather than as a
         // surface that merely lights oddly. That is the same fault the probe checks arithmetically;
@@ -274,7 +274,7 @@ public sealed class RoomRenderer : IDisposable
     {
         // The graph owns render passes, framebuffers and images made through raw Vulkan calls that
         // the device's tables know nothing about, so it has to be told to let go — the toolchain
-        // lab leaked nine objects by not doing this, and only BLIX_VK_VALIDATE ever noticed.
+        // preview tool leaked nine objects by not doing this, and only BLIX_VK_VALIDATE ever noticed.
         graph?.Dispose();
         fullscreen?.Dispose();
         if (device is null) return;

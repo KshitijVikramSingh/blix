@@ -6,17 +6,17 @@ using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Images;
 using Blix.Graphics.Vulkan;
-using Blix.Labs.Character;
+using Blix.Demos.Character;
 using Blix.Render;
 using Blix.Runtime.Silk;
 
-namespace Blix.Labs.Character.CaptureApp;
+namespace Blix.Demos.Character.CaptureApp;
 
-// The character lab's capture tool: the room, read back and written to a PNG.
+// The character room's capture tool: the room, read back and written to a PNG.
 //
 // Why a second executable rather than a flag on the viewer. A capture has to be reproducible —
 // same arguments, same file, byte for byte — which means it cannot read a clock or take a drag.
-// The viewer is the opposite of both. The toolchain lab drew the same line for the same reason,
+// The viewer is the opposite of both. The preview tool drew the same line for the same reason,
 // and it is the line that makes a picture usable as evidence rather than as an impression.
 //
 // It reads the HDR SCENE target rather than the swapchain, so the room's render path needs no
@@ -72,7 +72,7 @@ public static class Program
 
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
-            Title = "Blix — character lab capture",
+            Title = "Blix — character: capture",
             Width = 1280,
             Height = 720,
         });
@@ -214,8 +214,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
         // The same report the viewer publishes, so a dump from a capture and a dump from a window
         // are the same fields in the same units and a difference between them is a real difference.
-        LabReport.Publish(
-            debug, room, camera, motor, camera.Yaw, LabReport.FacingRule.CameraHeading, walked);
+        RoomReport.Publish(
+            debug, room, camera, motor, camera.Yaw, RoomReport.FacingRule.CameraHeading, walked);
 
         var declaration = debug.Draw.Declare(
             "scene", viewProjection, renderer.SceneSurface,
@@ -246,7 +246,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                 debug.Draw.Line("chevron-r", tailR, nose, new GraphicsColor(1f, 1f, 1f, 1f));
 
                 // A second marker whose meaning is unambiguous: a short post at the NOSE only. If the
-                // chevron reads backwards, this says which end the lab thinks is the front.
+                // chevron reads backwards, this says which end the room thinks is the front.
                 debug.Draw.Line("nose-post", nose, nose + new Vector3(0f, 0.5f, 0f), new GraphicsColor(0.2f, 1f, 0.4f, 1f));
             }
 

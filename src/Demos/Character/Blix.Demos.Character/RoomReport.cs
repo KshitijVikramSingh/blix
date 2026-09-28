@@ -1,10 +1,10 @@
 using System.Numerics;
 using Blix.Diagnostics;
 
-namespace Blix.Labs.Character;
+namespace Blix.Demos.Character;
 
 /// <summary>
-/// Publishes the whole of the lab's state into the debug frame, so a dump carries it.
+/// Publishes the whole of the room's state into the debug frame, so a dump carries it.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -18,7 +18,7 @@ namespace Blix.Labs.Character;
 /// <para>
 /// <b>It invents no mechanism.</b> The runtime has had a JSON dump on F12 since the chassis arc —
 /// schema 2, values, stats, events, views and every draw command including trails. What was missing
-/// is that the lab published five values into it. This publishes the state that gets argued about:
+/// is that the room published five values into it. This publishes the state that gets argued about:
 /// where the camera is and which way it looks, where the body is and which way it points, what it is
 /// standing on, what it touched and where on its body, and every policy number behind those.
 /// </para>
@@ -28,7 +28,7 @@ namespace Blix.Labs.Character;
 /// units, so "it looks different in the viewer" becomes a diff rather than a discussion.
 /// </para>
 /// </remarks>
-public static class LabReport
+public static class RoomReport
 {
     /// <summary>What the body is pointing at, for the report.</summary>
     public enum FacingRule

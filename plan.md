@@ -465,48 +465,68 @@ implement no input interface, read `host.Input` in its update, replace `shiftHel
 the four pan/turn bools with `Down`, and handle `Key.Keypad0..9` alongside
 `Key.Number0..9` if numpad control groups should keep working.
 
-## F — the character arc's last open stage (paused)
+## F — the character experiments
 
-Folded in from `plan-blix-character.md`. Room (R-A…R-E) is built, Motion was
-deleted, C-0 closed as a decided-no on 2026-09-27, and C-C dropped on evidence.
-What remains:
+**Placed, 2026-09-28.** These were at `src/Character/`, named `Blix.Labs.Character*`,
+with their own project marker — which made `blix ls` present three peers: `blix`,
+`character`, and `demos`. One room got equal billing with the entire demo collection,
+and "Character" as a bare noun beside the engine's projects reads as a *feature* the
+engine has. It does not have one.
 
-**Paused while A–D run.** Two arcs in flight is how a tree rots, and the
-portability spine does not need a character controller. This section is the
-record of where it stops, not a queue being worked.
+The repository had already written down the test, in the commit that retired the
+toolchain lab: **a thing is Blix's when its subject is a Blix format or Blix's own
+health.** A character controller is neither. `BoneMask`, `PoseBlend` and `RootMotion`
+are Blix's and live in `src/Blix/`; the thing using them is a project built on Blix,
+which is what `src/Demos/` already is.
 
-**C-A — contact drives weights, and there are no states.** Speed and
-groundedness come out of the resolver and drive **blend weights directly**. No
-states, no transitions, no dwell timers: the thing that flickered in Motion does
-not exist here to flicker. This is also `BoneMask`'s first working consumer —
-locomotion on the legs, a one-shot on the upper body, a body that walks and
-punches without its legs freezing mid-swing.
+So: `src/Demos/Character/`, `Blix.Demos.Character*`, and the marker folded into
+`demos` — which had declared **no gate at all** until this arrived carrying one. Eleven
+demos and nothing verified, because a demo proves itself by being run and looked at. An
+experiment is small enough to have an answer, so it can carry a probe; each new one
+appends to that line.
 
-*Negative control:* the mask set to `All` must visibly break the legs, and set
-to `None` must leave the walk bit-for-bit unchanged. A layer that changes
-nothing and a layer that changes everything are a mask's two failures, and both
-are invisible unless asked for.
+The "lab" vocabulary is gone with it. It claimed an open question where the intent was
+a **named collection of small character-ish experiments** — model loading and viewing
+(which became the view tool), contact, movement, basic physics, and mixed or
+multi-axis ones later. `LabReport` and `LabTrace` became `RoomReport` and `RoomTrace`,
+matching the `Room*` family already there.
 
-**C-B — and then the clip drives the contact.** Root motion says how far, the
-room says where you can go; `RootMotion.Strip` is that seam. Honest expectation
-unchanged: the Rogue has 4 travelling clips of 76, so this may end a
-**decided-no**. Reaching that with the instrument built is the output.
+### What is in it
 
-**C-D — acceptance, from the chair.** Walk the room: ramps, stairs, ledges,
-walls. No scuffing, no snapping, upper body doing something the legs do not know
-about. Every stage of this arc had at least one fault only a person watching
-could see, and four of five were **legibility, not mechanism**.
+One shared library — room, motor, camera, renderer, resolver — and three roots over it:
+`room` (walk it), `room-shot` (capture it), and the probe (87 assertions, headless).
 
-**Probe work throughout** — headless, exit code, no device: room geometry
-closed and consistently wound; R-E's invariants as a simulation rather than a
-picture; every clip a graph names exists on the rig with a finite measured
-stride.
+### The open work
 
-**The selection question stays open.** Whether Blix ever defines "a state
-machine" is undecided — it may be data, each game's code, or nothing. C-A's
-answer is that contact can drive weights with nothing in between.
+**The prerequisite nothing lists: there is no body in the room.** It draws a capsule,
+and has zero references to `ClipPlayer`, `AnimationClip` or `Pose`. Every consumer of
+`BoneMask` and `RootMotion` in the tree is a tool, a test or the preview lab — none is a
+character that moves. So "contact drives weights" is not two existing things being
+wired together; a skinned Rogue has to stand in the room first, and the rig-fit against
+a 0.35 m radius, 1.8 m capsule is the unknown that should surface on its own rather
+than tangled in a blending design.
 
----
+**Contact drives weights, and there are no states.** Speed and groundedness come out of
+the resolver and drive blend weights directly. No states, no transitions, no dwell
+timers. `BoneMask`'s first consumer that is not a tool: locomotion on the legs, a
+one-shot on the upper body. The Rogue has what this needs — `Walking_A/B/C`,
+`Running_A/B`, `Idle`, and `Unarmed_Melee_Attack_Punch_A/B`.
+
+*Negative control:* the mask set to `All` must visibly break the legs, and set to `None`
+must leave the walk bit-for-bit unchanged. A layer that changes nothing and a layer that
+changes everything are a mask's two failures, and both are invisible unless asked for.
+
+**And then the clip drives the contact.** Root motion says how far, the room says where
+you can go. Honest expectation unchanged: 4 travelling clips of 76, so this may end a
+**decided-no**, and reaching that with the instrument built is the output.
+
+**Acceptance is from the chair.** Walk the room: ramps, stairs, ledges, walls. Every
+stage of this arc had at least one fault only a person watching could see, and four of
+five were **legibility, not mechanism**.
+
+**Input is no longer in the way.** "Walks and punches" is `Down` for the locomotion and
+`Pressed` for the one-shot, from the frame's own answer. The room kept its own held-set
+for this until stage E deleted it.
 
 ## Carried, not scheduled
 

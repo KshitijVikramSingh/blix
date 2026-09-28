@@ -5,13 +5,13 @@ using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
-using Blix.Labs.Character;
+using Blix.Demos.Character;
 using Blix.Runtime.Silk;
 using ImGuiNET;
 
-namespace Blix.Labs.Character.RoomApp;
+namespace Blix.Demos.Character.RoomApp;
 
-// The character lab's ROOM: contact, with nothing else in the picture.
+// The character room: contact, with nothing else in the picture.
 //
 // ── Proves ──────────────────────────────────────────────────────────────────
 //   • One source. What is drawn and what will be swept are the same triangles —
@@ -20,8 +20,8 @@ namespace Blix.Labs.Character.RoomApp;
 //   • A claim you can check from the chair: the slope tint shades every surface by
 //     the normal the collider reads, so a mis-wound face reads as a floor standing
 //     up rather than as a surface that merely lights oddly.
-//   • The lab family generalising: a second library with its own shaders, its own
-//     renderer and three roots planned over it, none of which is the toolchain lab.
+//   • The collection generalising: a second library with its own shaders, its own
+//     renderer and three roots planned over it, none of which is the preview tool.
 //
 // ── Intentionally owns ──────────────────────────────────────────────────────
 //   • Camera feel, what the panel shows, which part is selected.
@@ -29,12 +29,12 @@ namespace Blix.Labs.Character.RoomApp;
 //     had a character in it could not tell you whether a fault was the room's.
 public static class Program
 {
-    [BlixApp("room", Summary = "walk the character lab's room — contact, with nothing else in the picture", Headed = true)]
+    [BlixApp("room", Summary = "walk the character room — contact, with nothing else in the picture", Headed = true)]
     public static void Main(string[] args)
     {
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
-            Title = "Blix — character lab: room",
+            Title = "Blix — character: room",
             Width = 1280,
             Height = 760,
         });
@@ -72,11 +72,11 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
     // ── The body ────────────────────────────────────────────────────────────
     // <b>This owns the input and nothing else.</b> Where the body ends up is BodyResolver's, and
     // what it does about ground, slopes and steps is CharacterMotor's — and every number behind
-    // that is on the panel, because the numbers are what a lab is for and one that hard-codes them
+    // that is on the panel, because the numbers are what an experiment is for and one that hard-codes them
     // can only confirm the guess it was built with.
     private readonly CharacterMotor motor = new();
     private readonly string? tracePath;
-    private LabTrace? trace;
+    private RoomTrace? trace;
     private double seconds;
     private float bodyFacing;
     private Vector3 lastTravel;
@@ -85,7 +85,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
     /// Whether the body turns toward where it is GOING or toward where the camera is LOOKING.
     /// </summary>
     /// <remarks>
-    /// <b>Two different games, and the lab should not have to pick one.</b> Facing the travel
+    /// <b>Two different games, and the room should not have to pick one.</b> Facing the travel
     /// direction is the Zelda/Mario model: press right and the character turns right. Facing the
     /// camera is the over-the-shoulder shooter model: the character always points away from the
     /// camera and strafes sideways. They are identical while walking straight forward and disagree
@@ -96,7 +96,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
     // Fast enough that the drawn facing keeps up with a camera being swung about: at 12 rad/s a
     // steady drag left the arrow a constant 15-20° behind where the body was actually going, which
     // reads as the facing being wrong rather than as lag. The slider stays, because dialling it
-    // DOWN to see a body turn like a vehicle is a thing the Motion lab will want.
+    // DOWN to see a body turn like a vehicle is a thing a motion experiment would want.
     private float turnRate = 20f;
     private bool bodyEnabled = true;
     
@@ -108,7 +108,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
     private float slopeTint;
 
     // Cached per selection rather than per frame: the normals of a part do not change, and
-    // rebuilding two lists every frame to draw the same arrows is work a lab can see in its own
+    // rebuilding two lists every frame to draw the same arrows is work an experiment can see in its own
     // frame time and then misattribute to the renderer.
     private readonly List<Vector3> normalPoints = new();
     private readonly List<Vector3> normalDirections = new();
@@ -118,7 +118,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         this.host = host;
-        motor.Teleport(Blix.Labs.Character.Room.SpawnPoint);
+        motor.Teleport(Blix.Demos.Character.Room.SpawnPoint);
         camera.Rig = CameraRig.ThirdPerson;
         var vk = (VulkanGraphicsDevice)graphicsDevice;
         renderer.Load(vk, Path.Combine(AppContext.BaseDirectory, "Shaders"), room);
@@ -163,8 +163,8 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
 
         // WHICH WAY THE BODY IS POINTING. The motor has no opinion — a capsule is symmetric and
         // nothing it computes depends on a facing — but a camera behind the shoulder needs one, and
-        // so will every clip the Motion lab plays. Turned toward the walk rather than snapped, at a
-        // rate that is a lab dial like everything else here.
+        // so will every clip a motion experiment would play. Turned toward the walk rather than snapped, at a
+        // rate that is a dial like everything else here.
         // Facing the camera is a standing decision, not a moving one — a shooter's character points
         // away from the camera whether or not it is walking.
         if (faceCamera)
@@ -184,7 +184,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
 
         // A body that leaves the room has found a hole, and chasing it into the void is a worse way
         // to learn that than being put back where it can be watched.
-        if (motor.Feet.Y < -4f) motor.Teleport(Blix.Labs.Character.Room.SpawnPoint);
+        if (motor.Feet.Y < -4f) motor.Teleport(Blix.Demos.Character.Room.SpawnPoint);
     }
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
@@ -202,12 +202,12 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
         debug.Values.Value("camera", camera.Target);
         debug.Stats.Gauge("triangles", room.TriangleCount);
         debug.Stats.Gauge("solids", room.SolidStarts.Count);
-        // EVERYTHING, into the frame F12 writes out. See LabReport for why this is a type rather
+        // EVERYTHING, into the frame F12 writes out. See RoomReport for why this is a type rather
         // than a handful of Value() calls: a dump from the viewer and one from the capture describe
         // the same fields in the same units, so "it looks different in the viewer" is a diff.
-        LabReport.Publish(
+        RoomReport.Publish(
             debug, room, camera, motor, bodyFacing,
-            faceCamera ? LabReport.FacingRule.CameraHeading : LabReport.FacingRule.Travel,
+            faceCamera ? RoomReport.FacingRule.CameraHeading : RoomReport.FacingRule.Travel,
             lastTravel);
 
         debug.Stats.Gauge("contacts", motor.Contacts.Count);
@@ -402,7 +402,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
                 : "airborne");
             ImGui.Text($"contacts {motor.Contacts.Count}{(motor.SteppedUp ? " - stepped up" : string.Empty)}");
 
-            if (ImGui.Button("respawn")) motor.Teleport(Blix.Labs.Character.Room.SpawnPoint);
+            if (ImGui.Button("respawn")) motor.Teleport(Blix.Demos.Character.Room.SpawnPoint);
 
             ImGui.Separator();
             if (trace is null)
@@ -441,7 +441,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
 
             // The framing dial. Aiming at the chest centres the body with floor below it — a follow
             // camera; aiming over its head pushes it low and fills the frame with the ground it is
-            // about to walk into, which is what you want to be watching in a lab about walking.
+            // about to walk into, which is what you want to be watching in an experiment about walking.
             var aim = camera.AimHeight;
             if (ImGui.SliderFloat("aim height m", ref aim, 0f, 3f)) camera.AimHeight = aim;
 
@@ -523,7 +523,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
         if (input[Key.Number2].Pressed) camera.Rig = CameraRig.ThirdPerson;
         if (input[Key.Number3].Pressed) camera.Rig = CameraRig.FirstPerson;
         if (input[Key.Number4].Pressed) camera.Rig = CameraRig.Isometric;
-        if (input[Key.R].Pressed) motor.Teleport(Blix.Labs.Character.Room.SpawnPoint);
+        if (input[Key.R].Pressed) motor.Teleport(Blix.Demos.Character.Room.SpawnPoint);
 
         var delta = input.MouseDelta;
         if (delta != System.Numerics.Vector2.Zero)
@@ -555,14 +555,14 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
     private void StartTrace(string path)
     {
         StopTrace();
-        trace = LabTrace.Start(path);
-        Console.WriteLine($"[lab] tracing to {trace.Path}");
+        trace = RoomTrace.Start(path);
+        Console.WriteLine($"[room] tracing to {trace.Path}");
     }
 
     private void StopTrace()
     {
         if (trace is null) return;
-        Console.WriteLine($"[lab] trace closed: {trace.Rows} rows -> {trace.Path}");
+        Console.WriteLine($"[room] trace closed: {trace.Rows} rows -> {trace.Path}");
         trace.Dispose();
         trace = null;
     }

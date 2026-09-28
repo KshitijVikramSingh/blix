@@ -59,13 +59,13 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Test.Apps", "src\Blix.
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Character", "Character", "{15A8C72F-D9AF-4074-A57C-6AD62C5D7AD7}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Labs.Character", "src\Character\Blix.Labs.Character\Blix.Labs.Character.csproj", "{23DE727C-0B02-47B8-A271-473818F20EBC}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Demos.Character", "src\Demos\Character\Blix.Demos.Character\Blix.Demos.Character.csproj", "{23DE727C-0B02-47B8-A271-473818F20EBC}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Labs.Character.Room", "src\Character\Blix.Labs.Character.Room\Blix.Labs.Character.Room.csproj", "{99343E8F-98A3-49E5-A994-FB429A7401C1}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Demos.Character.Room", "src\Demos\Character\Blix.Demos.Character.Room\Blix.Demos.Character.Room.csproj", "{99343E8F-98A3-49E5-A994-FB429A7401C1}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Labs.Character.Probe", "src\Character\Blix.Labs.Character.Probe\Blix.Labs.Character.Probe.csproj", "{CC79F70F-7E78-4198-9169-D53BA743AAC1}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Demos.Character.Probe", "src\Demos\Character\Blix.Demos.Character.Probe\Blix.Demos.Character.Probe.csproj", "{CC79F70F-7E78-4198-9169-D53BA743AAC1}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Labs.Character.Capture", "src\Character\Blix.Labs.Character.Capture\Blix.Labs.Character.Capture.csproj", "{785D00F2-5AC5-4FF6-9C0D-4E01669C2B6C}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Blix.Demos.Character.Capture", "src\Demos\Character\Blix.Demos.Character.Capture\Blix.Demos.Character.Capture.csproj", "{785D00F2-5AC5-4FF6-9C0D-4E01669C2B6C}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Demos", "Demos", "{0137BE33-7ED7-4E11-A6C3-586B7B8663C2}"
 EndProject
@@ -346,7 +346,7 @@ Global
 		{CEBA31F9-574C-4510-9623-172B4A629DA6} = {3B3A88A9-9354-470A-A0C5-9CF4E0EB69F5}
 		{C465CAB5-2E6B-4A69-B77A-3E2C7605FFBE} = {3B3A88A9-9354-470A-A0C5-9CF4E0EB69F5}
 		{D2218DE3-D83C-404C-B34E-0A147EBEE4BF} = {3B3A88A9-9354-470A-A0C5-9CF4E0EB69F5}
-		{15A8C72F-D9AF-4074-A57C-6AD62C5D7AD7} = {3B3A88A9-9354-470A-A0C5-9CF4E0EB69F5}
+		{15A8C72F-D9AF-4074-A57C-6AD62C5D7AD7} = {0137BE33-7ED7-4E11-A6C3-586B7B8663C2}
 		{23DE727C-0B02-47B8-A271-473818F20EBC} = {15A8C72F-D9AF-4074-A57C-6AD62C5D7AD7}
 		{99343E8F-98A3-49E5-A994-FB429A7401C1} = {15A8C72F-D9AF-4074-A57C-6AD62C5D7AD7}
 		{CC79F70F-7E78-4198-9169-D53BA743AAC1} = {15A8C72F-D9AF-4074-A57C-6AD62C5D7AD7}
