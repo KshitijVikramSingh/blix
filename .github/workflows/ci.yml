@@ -39,6 +39,22 @@ jobs:
       - name: Install the supported macOS prerequisites
         run: brew install molten-vk vulkan-loader vulkan-headers vulkan-tools vulkan-validationlayers shaderc spirv-cross openal-soft
 
+      # The glTF conformance corpus is a pinned manifest rather than committed bytes
+      # (conventions §7, and three upstream licences). Nothing fetched it in CI, so the
+      # eight conformance checks in Blix.Test.Recipes announced themselves as skipped on
+      # every run and only ever ran where somebody had fetched by hand -- an instrument
+      # that exists and is not used, which is how Blix.Test.Studio once went red unnoticed.
+      # Cached on the manifest's hash, so it is one download per change to the manifest.
+      - name: Cache the glTF conformance corpus
+        uses: actions/cache@v4
+        with:
+          path: third_party/gltf-corpus
+          key: gltf-corpus-${{ hashFiles('third_party/gltf-corpus.manifest') }}
+
+      - name: Fetch the glTF conformance corpus
+        shell: bash
+        run: tools/fetch-gltf-corpus.sh
+
       - name: Bootstrap the Blix tools
         run: ./blix ls
 
@@ -94,6 +110,22 @@ jobs:
           glslc --version
           spirv-cross --version
           clang++ --version
+
+      # The glTF conformance corpus is a pinned manifest rather than committed bytes
+      # (conventions §7, and three upstream licences). Nothing fetched it in CI, so the
+      # eight conformance checks in Blix.Test.Recipes announced themselves as skipped on
+      # every run and only ever ran where somebody had fetched by hand -- an instrument
+      # that exists and is not used, which is how Blix.Test.Studio once went red unnoticed.
+      # Cached on the manifest's hash, so it is one download per change to the manifest.
+      - name: Cache the glTF conformance corpus
+        uses: actions/cache@v4
+        with:
+          path: third_party/gltf-corpus
+          key: gltf-corpus-${{ hashFiles('third_party/gltf-corpus.manifest') }}
+
+      - name: Fetch the glTF conformance corpus
+        shell: bash
+        run: tools/fetch-gltf-corpus.sh
 
       - name: Bootstrap the Blix tools
         run: .\blix.cmd ls

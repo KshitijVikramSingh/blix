@@ -259,9 +259,7 @@ internal sealed partial class SponzaLoop
         // compatibility" — there is no shared bound set to be compatible with.
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
         ShaderInterface Reflect(params string[] stages) =>
-            ShaderReflection.MergeStages(
-                stages.Select(s => ShaderReflection.Load(
-                    Path.Combine(shaderDir, s + ".spv.refl.json"))).ToArray());
+            ShaderReflection.ForProgram(shaderDir, stages);
 
         var litInterface = Reflect("lit.vert", "lit.frag");
         var skyInterface = Reflect("skybox.vert", "skybox.frag");

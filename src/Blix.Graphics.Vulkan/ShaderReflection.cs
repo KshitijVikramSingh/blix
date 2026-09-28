@@ -60,6 +60,34 @@ public static class ShaderReflection
         return new ReflStage(stage, slots, pushConstants);
     }
 
+    /// <summary>
+    /// The interface of a whole program, read from the reflection sidecars beside its shaders.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The three callers that wanted this each wrote it, identically, as a local function.</b>
+    /// Three copies of one step, and with them three spellings of the <c>.spv.refl.json</c>
+    /// suffix — which is every spelling of it in the tree. Nothing about that was going to fail
+    /// loudly; it is the shape conventions §4 names, and it is why this is here rather than in
+    /// whichever renderer needed it first.
+    /// </para>
+    /// <para>
+    /// The stage names are the shader filenames, <c>lit.vert</c> and not <c>lit.vert.spv</c> — the
+    /// sidecar suffix belongs to this method, being the thing the build decided to call them.
+    /// </para>
+    /// </remarks>
+    public static ShaderInterface ForProgram(string shaderDirectory, params string[] stages)
+    {
+        ArgumentNullException.ThrowIfNull(shaderDirectory);
+        ArgumentNullException.ThrowIfNull(stages);
+        return MergeStages(stages
+            .Select(s => Load(Path.Combine(shaderDirectory, s + SidecarSuffix)))
+            .ToArray());
+    }
+
+    /// <summary>What the build calls a stage's reflection, beside the stage's own .spv.</summary>
+    public const string SidecarSuffix = ".spv.refl.json";
+
     // Combine the per-stage reflections of one program into a single interface.
     // Shared (set,binding) across stages must agree on type/count/layout; their
     // stage flags are OR'd. A type/size conflict is a real cross-stage bug and

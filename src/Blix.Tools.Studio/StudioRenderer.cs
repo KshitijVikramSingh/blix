@@ -179,9 +179,7 @@ public sealed class StudioRenderer : IDisposable
         fullscreen = new FullscreenPass(vk, "lab.present");
 
         ShaderInterface Reflect(params string[] stages) =>
-            ShaderReflection.MergeStages(
-                stages.Select(s => ShaderReflection.Load(
-                    Path.Combine(shaderDirectory, s + ".spv.refl.json"))).ToArray());
+            ShaderReflection.ForProgram(shaderDirectory, stages);
 
         var shadowInterface = Reflect("studio_shadow.vert", "studio_shadow.frag");
         var litInterface = Reflect("studio_lit.vert", "studio_lit.frag");
