@@ -2,19 +2,39 @@ using System.Runtime.InteropServices;
 
 namespace Blix.Recipes;
 
-// P/Invoke into vendored meshoptimizer (third_party/meshoptimizer, built to
-// libmeshoptimizer.dylib next to the cook by the BuildMeshopt MSBuild target).
+// P/Invoke into vendored meshoptimizer (third_party/meshoptimizer, built next to
+// the cook by the BuildMeshopt MSBuild target; NativeLibraries names the file).
 // Cook-time only — used to generate mesh LOD index chains. The runtime never
 // links meshopt; it just loads the cooked LOD buffers.
 public static unsafe class MeshoptNative
 {
     private const string Lib = "meshoptimizer";
 
-    // Load libmeshoptimizer.dylib explicitly from the app's own directory (the
-    // BuildMeshopt target drops it next to the cook assembly). Default native
-    // probing doesn't reliably find an app-local .dylib by the bare name on
-    // macOS, so resolve it by absolute path.
+    // Load the library explicitly from the app's own directory (the BuildMeshopt
+    // target drops it next to the cook assembly). Default native probing doesn't
+    // reliably find an app-local library by the bare name on macOS, so resolve it
+    // by absolute path. NativeLibraries knows what the file is called here.
     static MeshoptNative() => NativeLibraries.Ensure();
+
+    /// <summary>Is the native simplifier present?</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Bc7Native has had this since it was written; this did not, and the difference is a
+    /// build that fails without saying why.</b> BC7 probes and falls back to a managed encoder, so
+    /// a missing library costs cook time. LOD generation has no managed fallback, so a missing
+    /// library threw <c>DllNotFoundException</c> from four frames inside a P/Invoke — during a
+    /// build, because cooking runs as a build step.
+    /// </para>
+    /// <para>
+    /// The library is built by an MSBuild target conditioned on macOS, so today this is false
+    /// everywhere else. That is the honest state of the port and not a thing to paper over: see
+    /// <c>MeshRecipe.DefaultSimplifier</c>, which turns it into a sentence naming the file.
+    /// </para>
+    /// </remarks>
+    public static bool Available => NativeLibraries.Present(Lib);
+
+    /// <summary>The filename this platform's loader will look for.</summary>
+    public static string FileName => NativeLibraries.FileName(Lib);
 
     // meshopt_Simplify* option flags (meshoptimizer.h).
     [Flags]

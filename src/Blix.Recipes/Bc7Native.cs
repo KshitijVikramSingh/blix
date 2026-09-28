@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 namespace Blix.Recipes;
 
 // P/Invoke into vendored bc7enc (third_party/bc7enc + blix_bc7.cpp wrapper,
-// built to libblix_bc7.dylib next to the cook by the BuildBc7 MSBuild target).
+// built next to the cook by the BuildBc7 MSBuild target; NativeLibraries names it).
 // Cook-time only — turns RGBA8 mips into raw BC7 blocks. Replaces the slow
 // managed BCnEncoder.Net path (minutes per 4K texture) so BC7 cooking is fast
 // enough to be the default. Falls back to BCnEncoder.Net when the dylib is
@@ -14,7 +14,7 @@ public static unsafe class Bc7Native
 
     static Bc7Native() => NativeLibraries.Ensure();
 
-    private static string LibPath => Path.Combine(AppContext.BaseDirectory, "libblix_bc7.dylib");
+    private static string LibPath => NativeLibraries.PathFor(Lib);
 
     // True when the native encoder is present and loadable. Probed once; the
     // cook uses this to decide between the fast native path and the managed

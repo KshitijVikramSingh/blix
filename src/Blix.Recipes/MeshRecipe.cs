@@ -952,6 +952,22 @@ public static class MeshRecipe
     /// </remarks>
     public static SimplifyFn DefaultSimplifier(bool splitting)
     {
+        // Fail here, with a sentence, rather than four frames inside a P/Invoke with
+        // DllNotFoundException and no filename. Cooking runs as a build step, so on a platform
+        // where the native was never built this is what a person sees instead of a build that
+        // stopped for no stated reason. There is deliberately no silent fallback: a mesh cooked
+        // without a LOD chain is a quieter asset bug than a build failure, and the engine's whole
+        // position is that the loud one is cheaper.
+        if (!MeshoptNative.Available)
+        {
+            throw new InvalidOperationException(
+                $"LOD generation needs the meshoptimizer native, and {MeshoptNative.FileName} is " +
+                $"not beside the cook. It is built by the BuildMeshopt target in " +
+                $"Blix.Recipes.csproj, which is conditioned on macOS — so on another platform it " +
+                $"has to be built there first. Cross-publishing from a Mac is unaffected: the " +
+                $"cook runs on the host, whatever the target RID.");
+        }
+
         var options = MeshoptNative.Options.Prune;
         if (splitting) options |= MeshoptNative.Options.LockBorder;
 

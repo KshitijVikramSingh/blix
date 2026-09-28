@@ -196,20 +196,81 @@ and in CI, so this is consistent — but it is now a *build* dependency with tee
 
 ## C — Windows bring-up, as an audit
 
-`Blix.Runtime.Silk` is not a macOS runtime. It is a desktop Silk runtime
-verified only on macOS: **five** OS conditionals exist tree-wide, all
-quarantined. The portability work is therefore not "abstract macOS out" but
+`Blix.Runtime.Silk` is not a macOS runtime. It is a desktop Silk runtime verified
+only on macOS. The portability work is therefore not "abstract macOS out" but
 "find the assumptions that survived because no second platform punished them".
 
-Expect bootstrap and tooling, not rendering:
+**Do not** build an `IPlatform` abstraction. Silk already is most of one — and
+the audit below is the evidence: what is macOS-specific is small, quarantined,
+and in two cases exists *only* because of dyld.
 
-- `Blix.Recipes/NativeLibraries.cs` hardcodes `libmeshoptimizer.dylib` and
-  `libblix_bc7.dylib`. **Cooking runs during the build**, so the build fails
-  before a window opens. Two lines, and undiscoverable without trying.
-- `./blix` is bash plus `brew --prefix`.
-- `MacDockIcon`, and the window-icon split that already understands Windows.
+### The audit, 2026-09-28
 
-**Do not** build an `IPlatform` abstraction. Silk already is most of one.
+Enumerated, not counted — the earlier "five OS conditionals" was stale.
+
+| | |
+|---|---|
+| `MoltenVkBootstrap.EnsureLoaded` | early-returns off macOS |
+| `VulkanGraphicsDevice.Init` portability bit | macOS-only, already conditional on the runtime offering it |
+| `OpenALAudioDevice.TryOverrideMacOSLibraryPath` | early-returns off macOS |
+| `Window.ApplyWindowIcon` | `SetWindowIcon` **is** the Windows/Linux path; the macOS branch adds the dock tile |
+| `BuildMeshopt` / `BuildBc7` targets | `IsOSPlatform(OSX)`, and staging is guarded by `Exists()` |
+
+Four in C#, two in MSBuild, all quarantined. Nothing to abstract.
+
+**The headline, measured rather than assumed: `blix publish --target win-x64`
+already works from macOS.** It produced an `.exe`, a full self-contained runtime,
+`glfw3.dll` and `cimgui.dll` from the NuGet runtime packs, and **zero** `.dylib`
+leakage. This matters because it splits a question the plan had as one: the cook
+runs on the *host* whatever the target RID, so the native-library problem below
+blocks **building on Windows**, not **producing Windows binaries**.
+
+What the audit found, in the order it matters:
+
+- **`MeshRecipe.DefaultSimplifier` had no fallback and no message.** `Bc7Native`
+  has probed `Available` and degraded to the managed encoder since it was
+  written; the simplifier did neither, so a missing native threw
+  `DllNotFoundException` from inside a P/Invoke — during a *build*, since
+  cooking is a build step. It now fails at the entry with a sentence naming the
+  file, the target that builds it, and the fact that cross-publishing is
+  unaffected. Verified by hiding the dylib and cooking.
+- **Three places spelled the filename, all `.dylib`.** The resolver table,
+  `Bc7Native.LibPath` (which the plan had not found), and nothing shared between
+  them. `NativeLibraries.FileName` is now the only place that knows, and answers
+  `lib*.dylib` / `lib*.so` / `*.dll`. Pinned by `Blix.Test.Graphics` Section
+  **BI**, which also checks every `DllImport` name is one the resolver answers —
+  an unregistered one falls through to bare-name probing, the exact path that
+  does not reliably work.
+- **A `win-x64` publish ships no OpenAL native.** `vulkan-1.dll` is correctly
+  absent (the GPU driver installs it); OpenAL Soft is neither a system library
+  nor in a runtime pack. This is stage B's closure question wearing a Windows
+  hat, and it is **open**.
+- **`blix.cmd` now exists**, and is a third the length of `./blix` for a reason
+  worth recording: almost all of the bash script is a dyld workaround, not a
+  front door. Windows resolves DLLs from the executable's directory, the loader
+  is in System32, and the ICD comes from the driver registry. What is left is
+  the bootstrap that was always the actual front door. **Unrun.**
+
+Two things the audit expected to find and did not:
+
+- **Cooked artifacts are already separator-safe.** `CookStamp` normalises
+  recorded paths to `/` with a comment naming this exact reason, and
+  `MeshRecipe` does the same for the paths it writes into a `.blixmesh`. Every
+  other `GetRelativePath` builds a filesystem path or a console message.
+- **`glslc` and `spirv-cross` already fall back to `PATH`**, which is what the
+  Vulkan SDK gives you on Windows. No change needed.
+
+### What is left, and why it is not written
+
+**The native toolchain branch.** `BuildMeshopt` and `BuildBc7` shell out to
+`clang++ -dynamiclib`. Linux wants `-shared`; Windows wants a different compiler
+entirely. Writing either without a machine to run it on is how you get a
+confidently wrong build script, and the failure is now loud and named rather
+than silent — so this waits for the machine rather than for a guess.
+
+**Acceptance is the same shape as stage B's and has the same gap:** clone on
+Windows, build, run a demo. Nothing here has been run on Windows. `blix.cmd` in
+particular is written from the audit and should be treated as a first draft.
 
 ## D — the CI matrix
 

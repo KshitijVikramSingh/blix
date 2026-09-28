@@ -5038,6 +5038,90 @@ static ShaderInterface MinimalShader() => new(new[]
         AppFiles.Asset("models", "x.glb"));
 }
 
+// ============================================================================
+// Section BI — the cook does not name a platform's library filenames.
+// ============================================================================
+//
+// <b>Cooking runs as a build step, so anything the cook assumes about the host is a thing that
+// fails at build time on a platform nobody has tried.</b> `Blix.Recipes` P/Invokes two vendored
+// natives, and it used to write their filenames down: `libmeshoptimizer.dylib` in the resolver
+// table and `libblix_bc7.dylib` again, separately, in `Bc7Native`. Two spellings of one fact,
+// both true on exactly one platform.
+//
+// `NativeLibraries.FileName` is now the only place entitled to know that a shared library is
+// `lib*.dylib` here, `lib*.so` there and `*.dll` elsewhere. This pins that, because the failure
+// it prevents is invisible from macOS: the tree builds, the suites pass, and the first person on
+// another platform gets a DllNotFoundException from inside a P/Invoke with no filename in it.
+{
+    var srcDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    var recipesDir = Path.Combine(srcDir, "Blix.Recipes");
+    var recipeSources = Directory.Exists(recipesDir)
+        ? Directory.GetFiles(recipesDir, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .ToArray()
+        : Array.Empty<string>();
+
+    // CONTROL: conventions §5 — a loop over nothing passes.
+    t.Expect("BI.0 CONTROL the cook's sources were found",
+        recipeSources.Length >= 5, $"{recipeSources.Length} file(s) under {recipesDir}");
+
+    // A library extension inside a string literal. Comments and doc remarks are allowed to
+    // discuss them -- this is about what the code believes, not about what it explains.
+    var named = new List<string>();
+    var namer = Path.Combine(recipesDir, "NativeLibraries.cs");
+    foreach (var file in recipeSources)
+    {
+        if (string.Equals(file, namer, StringComparison.Ordinal)) continue;
+        var lines = File.ReadAllLines(file);
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            var code = line.TrimStart();
+            if (code.StartsWith("//", StringComparison.Ordinal) || code.StartsWith("///", StringComparison.Ordinal)) continue;
+            if (!Regex.IsMatch(line, @"""[^""]*\.(dylib|so|dll)""")) continue;
+            named.Add($"{Path.GetFileName(file)}:{i + 1}");
+        }
+    }
+
+    t.Expect("BI.1 the cook names no platform library filename",
+        named.Count == 0,
+        named.Count == 0 ? "only NativeLibraries knows" : string.Join("; ", named.Take(6)));
+
+    // Every DllImport the cook makes must be a name the resolver answers. One that is not falls
+    // through to bare-name probing, which is exactly the path that does not reliably work.
+    var imported = new SortedSet<string>(StringComparer.Ordinal);
+    foreach (var file in recipeSources)
+    {
+        foreach (Match m in Regex.Matches(File.ReadAllText(file), @"\[DllImport\(\s*(?:Lib|""([^""]+)"")"))
+        {
+            imported.Add(m.Groups[1].Success && m.Groups[1].Value.Length > 0 ? m.Groups[1].Value : "Lib");
+        }
+    }
+
+    // `Lib` is a per-file const; resolve each to its value so the comparison is on real names.
+    var constants = new SortedSet<string>(StringComparer.Ordinal);
+    foreach (var file in recipeSources)
+    {
+        foreach (Match m in Regex.Matches(File.ReadAllText(file), @"const string Lib = ""([^""]+)"""))
+        {
+            constants.Add(m.Groups[1].Value);
+        }
+    }
+
+    var registered = File.Exists(namer)
+        ? new SortedSet<string>(
+            Regex.Matches(File.ReadAllText(namer), @"""([a-z0-9_]+)""").Select(m => m.Groups[1].Value),
+            StringComparer.Ordinal)
+        : new SortedSet<string>(StringComparer.Ordinal);
+
+    t.Expect("BI.0 CONTROL the cook's P/Invoke targets were found",
+        constants.Count >= 2, string.Join(", ", constants));
+    t.Expect("BI.2 every native the cook imports is one the resolver answers",
+        constants.All(registered.Contains),
+        $"imports [{string.Join(", ", constants)}] vs registered [{string.Join(", ", registered)}]");
+}
+
 t.PrintSummary();
 return t.Failed;
 
