@@ -28,10 +28,10 @@ are also discoverable by their assembly name and by an unambiguous suffix:
 ./blix run Blix.Demos.Runner --frames 120
 ```
 
-The scripts under `tools/run-*.sh` remain useful compatibility launchers,
-especially for macOS apphost publishing and Sponza's external asset setup. New
-applications should use `[BlixApp]`, `WindowOptions.FromArgs`, and the `./blix`
-front door rather than adding another bespoke launcher.
+A new application needs `[BlixApp]`, `WindowOptions.FromArgs`, and the `./blix`
+front door — not a launcher of its own. The eleven that used to live under
+`tools/run-*.sh` are gone; what remains there prepares assets (Sponza's pack
+set, the glTF corpus) or measures something, which is work no front door does.
 
 The `demos` project currently declares no `blix test` gate. Bounded demo runs,
 Vulkan validation, deterministic captures, and task-specific scripts are
@@ -199,7 +199,7 @@ Sponza assets are not committed. Prepare the configured pack location with:
 
 ```sh
 tools/setup-sponza-modern.sh
-tools/run-vulkan-sponza.sh
+./blix run Blix.Demos.VulkanSponza
 ```
 
 Set `BLIX_SPONZA_ASSETS` when the cooked pack set lives outside the checkout.

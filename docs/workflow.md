@@ -161,8 +161,33 @@ Run one explicitly or with the short form:
 ./blix view --model Assets/hero.glb
 ```
 
-Arguments after the name are forwarded unchanged to the app. If the same name
-is visible in more than one project, qualify it with its project name:
+Arguments after the name are forwarded unchanged to the app — which is also
+where the boundary sits: blix's own options come *before* the name, so an app
+stays free to take a `--build` of its own.
+
+```sh
+./blix run --build view --model Assets/hero.glb   # build the project first
+```
+
+`run` does not build by default. It compares the app's output against the
+sources of its project, everything that project references, and the
+`Directory.Build.props` / `Directory.Build.targets` MSBuild imports into each of
+them — that last part matters here, where a single root `Directory.Build.targets`
+drives shader compilation, reflection sidecars, cooked-asset staging and app-index
+generation. When the output is older it names the file that moved and runs the old
+binary anyway.
+
+With `--build`, the name is resolved **again** after the build. A `.csproj` decides
+`AssemblyName`, `OutputPath`, `TargetFramework`, `UseAppHost` and which apps an
+assembly declares — every fact the index carries — so the resolution made before a
+build can be a fossil. A name that no longer resolves afterwards is the correct
+outcome and is reported as one; it is not worked around.
+Reporting rather than acting keeps the resolver a resolver, and the failure it
+prevents is the one you cannot otherwise see: an edit that appears to have done
+nothing. Cooked assets and other content are outside the comparison.
+
+If the same name is visible in more than one project, qualify it with its
+project name:
 
 ```sh
 ./blix run demos:Blix.Demos.Character.Probe
@@ -279,6 +304,24 @@ fails, and returns one final exit code. This is the quick, routine verification
 tier chosen by the project; it is not a claim that every expensive scenario or
 visual comparison belongs in every edit-build loop.
 
+Like `run`, the gate does not build. When any leg's output is older than the
+sources it was built from, the verdict is qualified where you read it:
+
+```text
+demos: all 1 green
+demos: but 1 of 1 ran a build older than your sources — ... That verdict is
+about what is on disk. Pass --build, or run `dotnet build`, to make it about
+your code.
+```
+
+`./blix test --build` (`-b`) builds each leg's project first, once per project,
+and a leg that fails to build fails the gate instead of running its previous
+binary. Every build finishes before any leg runs, and the gate then discovers
+the indexes again: a build rewrites them, so the app records read beforehand
+describe what used to be true. A green gate over stale binaries is not a wrong answer — it is a right
+answer to a question nobody asked — which is why it is said next to the verdict
+rather than thousands of lines above it.
+
 From a nested project, invoke the same root script while keeping that directory
 as the project scope:
 
@@ -381,16 +424,21 @@ On a truly fresh checkout, the first projects built before the indexer exists
 cannot produce an index. Running `./blix ls` bootstraps the indexer; one following
 solution build populates the complete set.
 
-## Legacy launchers
+## What is left under tools/
 
-The scripts under `tools/run-*.sh` predate project/app discovery. Some also
-encode useful task-specific setup, and Sponza's setup scripts still prepare its
-external asset tree. They are therefore not being declared obsolete wholesale.
+The per-application launchers are gone. Eleven of them predated project and app
+discovery, and each carried its own copy of the Vulkan environment because a
+project had no way to say what it contained — so every application needed a
+front door of its own. There is one now, and copying a launcher to obtain
+environment variables, `--frames`, discovery, or a short name is no longer a
+thing that can be done: `./blix` and `WindowOptions` own those concerns once.
 
-They are no longer the extension point for a new application. Do not copy a
-launcher merely to gain Vulkan environment variables, `--frames`, discovery, or
-a short command name. The root `./blix` front door and `WindowOptions` own those
-concerns once.
+What remains under `tools/` is not launchers. `setup-sponza-modern.sh` and
+`cook-sponza-modern.sh` prepare an external asset tree, `fetch-gltf-corpus.sh`
+pins a conformance corpus, and `lab-baseline.sh` and `check-resize.sh` are
+instruments — they drive `./blix shot` and `./blix view` and judge what comes
+back. Preparing inputs and measuring outputs are both work a front door does
+not do.
 
 ## Troubleshooting
 

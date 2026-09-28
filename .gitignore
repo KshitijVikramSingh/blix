@@ -45,6 +45,10 @@ third_party/gltf-corpus/
 # tools/lab-baseline.sh record. A control is a thing you re-derive, not a thing you commit.
 .baseline/
 
+# Scratch projects built by Blix.Test.Apps to exercise the build -> rediscover ->
+# launch boundary. Written and removed by the test; present only while it runs.
+.blixtest/
+
 # Cooked artifacts are DERIVED, so they are not committed — the rule .baseline/
 # already follows: a thing you can re-derive in a minute is not a thing to carry
 # in history.

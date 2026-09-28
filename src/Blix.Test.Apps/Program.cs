@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Text.Json;
 using Blix.Cooked;
 using Blix.Core;
+using Blix.Cli;
 
 namespace Blix.Test.Apps;
 
@@ -94,8 +95,411 @@ public static class Program
             () => BlixApps.Dispatch(new[] { BlixApps.Selector }, self),
             mustMention: BlixApps.Selector);
 
+        // ── is what runs what the sources say? ──────────────────────────────
+        FreshnessAnswersHonestly(t);
+        ABuildChangesWhatANameMeans(t);
+
         t.PrintSummary();
         return t.Failed == 0 ? 0 : 1;
+    }
+
+    /// <summary>
+    /// The staleness report is right about what it claims and silent about what it cannot know.
+    /// </summary>
+    /// <remarks>
+    /// <b>An instrument that cries wolf is one people learn to read past</b>, so the false
+    /// positives are tested as hard as the true ones: output under bin/, a README beside the
+    /// code, a run inside the slack. Each of those would fire on every single run if it were
+    /// wrong, and the warning would be worthless within a day.
+    /// <para>
+    /// Built on real directories rather than an abstraction over the filesystem. The question is
+    /// literally about mtimes on disk, and a seam introduced to make it mockable would be a seam
+    /// where the thing being tested no longer is the thing that ships.
+    /// </para>
+    /// </remarks>
+    private static void FreshnessAnswersHonestly(TestRunner t)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "blix-freshness-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            // A two-project closure: an app that references a library, which is the shape the
+            // transitive case needs and the shape every demo in this repository has.
+            var appDir = Path.Combine(root, "App");
+            var libDir = Path.Combine(root, "Lib");
+            var outDir = Path.Combine(appDir, "bin", "Debug", "net8.0");
+            Directory.CreateDirectory(outDir);
+            Directory.CreateDirectory(libDir);
+
+            var appProject = Path.Combine(appDir, "App.csproj");
+            var libProject = Path.Combine(libDir, "Lib.csproj");
+            var assembly = Path.Combine(outDir, "App.dll");
+
+            // Doubled separators on purpose: Blix.Test.Apps.csproj itself contains one, so a
+            // resolver that only handled the tidy form would silently drop a real reference in
+            // this very repository and report "current" for a project it never looked at.
+            File.WriteAllText(appProject,
+                "<Project><ItemGroup><ProjectReference Include=\"..\\\\Lib\\\\Lib.csproj\" /></ItemGroup></Project>");
+            File.WriteAllText(libProject, "<Project />");
+
+            var appSource = Path.Combine(appDir, "Program.cs");
+            var libSource = Path.Combine(libDir, "Thing.cs");
+            var shader = Path.Combine(appDir, "Shaders", "world.vert");
+            var readme = Path.Combine(appDir, "README.md");
+            Directory.CreateDirectory(Path.GetDirectoryName(shader)!);
+            foreach (var f in new[] { appSource, libSource, shader, readme }) File.WriteAllText(f, "x");
+            File.WriteAllText(assembly, "dll");
+
+            var old = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            var newer = old.AddHours(1);
+
+            void Age(string path, DateTime when) => File.SetLastWriteTimeUtc(path, when);
+            void AllOld()
+            {
+                foreach (var f in new[] { appSource, libSource, shader, readme, appProject, libProject })
+                {
+                    Age(f, old);
+                }
+
+                Age(assembly, old.AddMinutes(30));
+            }
+
+            AllOld();
+            t.Expect("I.0 CONTROL a build newer than every source is not reported",
+                Freshness.Check(appProject, assembly) is null);
+
+            AllOld();
+            Age(appSource, newer);
+            var own = Freshness.Check(appProject, assembly);
+            t.Expect("I.1 a source in the app's own project is caught", own is not null);
+            t.Expect("I.2 and the report names the file that moved",
+                own?.Source == appSource, own?.Source ?? "(nothing)");
+
+            AllOld();
+            Age(libSource, newer);
+            t.Expect("I.3 a source in a REFERENCED project is caught too",
+                Freshness.Check(appProject, assembly)?.Source == libSource,
+                "the engine edit behind a demo run is the whole reason this exists");
+
+            AllOld();
+            Age(shader, newer);
+            t.Expect("I.4 a shader counts as a source",
+                Freshness.Check(appProject, assembly)?.Source == shader);
+
+            AllOld();
+            Age(readme, newer);
+            t.Expect("I.5 a README beside the code does not",
+                Freshness.Check(appProject, assembly) is null);
+
+            AllOld();
+            var buildOutput = Path.Combine(outDir, "Generated.cs");
+            File.WriteAllText(buildOutput, "generated");
+            Age(buildOutput, newer.AddHours(2));
+            t.Expect("I.6 and a .cs the BUILD wrote under bin/ does not",
+                Freshness.Check(appProject, assembly) is null,
+                "obj/ and bin/ hold generated sources; counting them would fire on every run");
+            File.Delete(buildOutput);
+
+            AllOld();
+            Age(appSource, File.GetLastWriteTimeUtc(assembly).AddMilliseconds(500));
+            t.Expect("I.7 a source inside the one-second slack is not reported",
+                Freshness.Check(appProject, assembly) is null,
+                "filesystem granularity, matching the index's own staleness rule");
+
+            AllOld();
+            Age(appSource, newer);
+            Age(libSource, newer.AddMinutes(10));
+            t.Expect("I.8 of several movers the NEWEST is named",
+                Freshness.Check(appProject, assembly)?.Source == libSource);
+
+            AllOld();
+            Age(appSource, newer);
+            var copied = Path.Combine(outDir, "Lib.dll");
+            File.WriteAllText(copied, "dll");
+            Age(copied, newer.AddMinutes(5));
+            t.Expect("I.9 a dependency copied in AFTER the edit clears the report",
+                Freshness.Check(appProject, assembly) is null,
+                "the whole output directory is the datum, not this app's own dll -- MSBuild may " +
+                "leave App.dll untouched when only Lib's method bodies changed");
+            File.Delete(copied);
+
+            // ── the build files nobody imports by hand ──────────────────────
+            // The root Directory.Build.targets in this repository drives shader compilation,
+            // reflection sidecars, cooked-asset staging and app-index generation. It sits ABOVE
+            // every project directory, so the folder scan cannot reach it and adding .targets to
+            // SourceExtensions would not have either. Pinned because it is now a contract.
+            var rootTargets = Path.Combine(root, "Directory.Build.targets");
+            File.WriteAllText(rootTargets, "<Project />");
+
+            AllOld();
+            Age(rootTargets, old);
+            t.Expect("I.16 CONTROL an old Directory.Build.targets above the project says nothing",
+                Freshness.Check(appProject, assembly) is null);
+
+            Age(rootTargets, newer);
+            t.Expect("I.17 and a newer one is caught, though it is in no project folder",
+                Freshness.Check(appProject, assembly)?.Source == rootTargets);
+
+            // Nearest wins, and only the nearest is read -- which is what MSBuild does, and the
+            // reason this is worth an assertion at all. The FARTHER file is the newer one here,
+            // so a walk that collected both instead of stopping would report it and pass for the
+            // wrong reason.
+            var nearTargets = Path.Combine(appDir, "Directory.Build.targets");
+            var libTargets = Path.Combine(libDir, "Directory.Build.targets");
+            File.WriteAllText(nearTargets, "<Project />");
+            File.WriteAllText(libTargets, "<Project />");
+            Age(nearTargets, old);
+            Age(libTargets, old);
+            Age(rootTargets, newer.AddHours(3));
+
+            // BOTH projects get one, because shadowing is per project and the closure has two.
+            // Written first with only the app shadowed, which failed correctly: Lib has no near
+            // file, so Lib really does import the far one and MSBuild would too.
+            t.Expect("I.18 a nearer Directory.Build.targets shadows a farther one",
+                Freshness.Check(appProject, assembly) is null,
+                "the far file is newer; finding it would mean the walk did not stop at the first");
+
+            t.Expect("I.19 and the nearer one is what gets watched instead",
+                Freshness.ImplicitImports(appDir).Contains(nearTargets)
+                && !Freshness.ImplicitImports(appDir).Contains(rootTargets));
+
+            // props and targets are two independent walks, not one. A project can take its
+            // props from one level and its targets from another, and MSBuild imports both.
+            var rootProps = Path.Combine(root, "Directory.Build.props");
+            File.WriteAllText(rootProps, "<Project />");
+            Age(rootProps, newer.AddHours(4));
+            t.Expect("I.20 props is searched separately, so a far props still counts",
+                Freshness.Check(appProject, assembly)?.Source == rootProps,
+                "targets came from the near folder; props had to come from the far one");
+
+            File.Delete(nearTargets);
+            File.Delete(libTargets);
+            File.Delete(rootTargets);
+            File.Delete(rootProps);
+
+            // ── what it must stay quiet about ───────────────────────────────
+            AllOld();
+            Age(appSource, newer);
+            t.Expect("I.10 no project recorded is not an answer",
+                Freshness.Check(null, assembly) is null);
+            t.Expect("I.11 a project that is no longer there is not an answer",
+                Freshness.Check(Path.Combine(root, "Gone.csproj"), assembly) is null);
+            t.Expect("I.12 and an output directory with nothing in it is not an answer",
+                Freshness.Check(appProject, Path.Combine(root, "Empty", "App.dll")) is null);
+
+            // A cycle is not legal MSBuild, but this walks files a person can edit and must
+            // terminate on anything it is handed rather than trust the input.
+            File.WriteAllText(libProject,
+                "<Project><ItemGroup><ProjectReference Include=\"..\\App\\App.csproj\" /></ItemGroup></Project>");
+            var closure = Freshness.Closure(appProject);
+            t.Expect("I.13 a reference cycle terminates", closure.Count == 2, $"{closure.Count} projects");
+
+            // Malformed XML drops the REFERENCES, not the answer. The project's own folder is
+            // still scanned and still reported -- this check is a courtesy on the way to running
+            // something and must never be the reason a run does not happen.
+            File.WriteAllText(appProject, "<Project><ItemGroup><ProjectRef");
+            Age(appProject, old);  // else the rewrite itself is the newest thing here
+            t.Expect("I.14 malformed XML drops its references rather than throwing",
+                Freshness.Closure(appProject).Count == 1, "the unreadable project itself, alone");
+            Freshness.Staleness? afterGarbage = null;
+            string? thrown = null;
+            try { afterGarbage = Freshness.Check(appProject, assembly); }
+            catch (Exception e) { thrown = e.GetType().Name; }
+
+            t.Expect("I.15 and the check still answers for what it CAN read",
+                thrown is null && afterGarbage?.Source == appSource,
+                thrown ?? afterGarbage?.Source ?? "(nothing)");
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    /// <summary>
+    /// After a build, the thing launched is read from the indexes the BUILD wrote.
+    /// </summary>
+    /// <remarks>
+    /// <b>The one case the Freshness suite above cannot reach.</b> I.0-I.15 are about comparing
+    /// timestamps; this is about ORDER. `run --build` used to resolve a name, build, and then
+    /// launch the App record it had read beforehand -- but a .csproj decides AssemblyName,
+    /// OutputPath, TargetFramework, UseAppHost and which apps an assembly declares, which is
+    /// every fact the index carries. So the successful build could hand back a fossil, which is
+    /// exactly the failure the command exists to prevent, now happening after you asked for a
+    /// build.
+    /// <para>
+    /// Built and run for real, in process, through <c>Blix.Cli.Program.Main</c>. A mock of the
+    /// build step would be a mock of the only thing that makes the bug possible.
+    /// </para>
+    /// </remarks>
+    private static void ABuildChangesWhatANameMeans(TestRunner t)
+    {
+        var repo = RepositoryRoot();
+        if (repo is null)
+        {
+            // Reported, never a silent pass: a check that quietly shrinks to what it happens to
+            // be able to run is a green light for the wrong reason (conventions §5).
+            t.Expect("J.0 the fixture needs the repository root, to be under its build rules", false);
+            return;
+        }
+
+        var dir = Path.Combine(repo, ".blixtest", "Ident");
+        var project = Path.Combine(dir, "Ident.csproj");
+        var source = Path.Combine(dir, "Program.cs");
+        var was = Directory.GetCurrentDirectory();
+
+        try
+        {
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(project, $"""
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <OutputType>Exe</OutputType>
+                    <TargetFramework>net8.0</TargetFramework>
+                    <AssemblyName>Ident</AssemblyName>
+                    <UseAppHost>false</UseAppHost>
+                    <Nullable>enable</Nullable>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <ProjectReference Include="{Path.Combine(repo, "src", "Blix.Core", "Blix.Core.csproj")}" />
+                  </ItemGroup>
+                </Project>
+                """);
+
+            // The declaration is renamed, not the assembly: the index is then REWRITTEN in place
+            // rather than a new one appearing beside the old, which is what makes the pre-build
+            // resolution succeed and the post-build one have to fail.
+            // It leaves a FILE rather than printing. An app runs in its own process, so its
+            // stdout goes to the inherited handle and Console.SetOut in this one never sees it --
+            // measured, by first writing this test the obvious way and watching the assertion
+            // read an empty string while the word it wanted scrolled past on the real console.
+            // A marker on disk also makes "it did not run" observable, which a missing line in
+            // captured output only pretends to be.
+            void Declare(string app, string says) => File.WriteAllText(source, $$"""
+                using Blix.Core;
+                public static class P
+                {
+                    public static int Main(string[] args) => BlixApps.Dispatch(args) ?? 0;
+
+                    [BlixApp("{{app}}")]
+                    public static int Run()
+                    {
+                        System.IO.File.WriteAllText(
+                            System.IO.Path.Combine(System.AppContext.BaseDirectory, "ident.ran"), "{{says}}");
+                        return 0;
+                    }
+                }
+                """);
+
+            Directory.SetCurrentDirectory(repo);
+
+            Declare("ident-alpha", "alpha");
+            if (Dotnet($"build \"{project}\" -c Debug --nologo -v:q") != 0)
+            {
+                t.Expect("J.0 the fixture project builds", false, "see the build output above");
+                return;
+            }
+
+            var ran = Path.Combine(dir, "bin", "Debug", "net8.0", "ident.ran");
+            string? Ran() => File.Exists(ran) ? File.ReadAllText(ran) : null;
+            void Forget() { if (File.Exists(ran)) File.Delete(ran); }
+
+            Forget();
+            var before = Cli(out var beforeOut, "run", "ident-alpha");
+            t.Expect("J.1 CONTROL the declared app runs before anything changes",
+                before == 0 && Ran() == "alpha", $"exit {before}, ran {Ran() ?? "nothing"}. {beforeOut.Trim()}");
+
+            // The rename. Nothing else moves: same project, same assembly, same output path.
+            Declare("ident-beta", "beta");
+
+            // J.3 is the assertion with teeth here, and J.2 is a true statement that does not
+            // discriminate -- measured by reverting the fix and re-running: J.2 still passed.
+            // Without re-resolution the old record launches the assembly the build just
+            // OVERWROTE, carrying a selector that assembly no longer declares, so its own
+            // dispatch refuses and nothing runs either way. What actually differs is WHO
+            // diagnosed it: blix, before starting anything, or a child process failing
+            // obscurely on an argument it was handed. J.2 stays because "the fossil did not
+            // run" is the property being protected even when a second thing also prevents it.
+            Forget();
+            var gone = Cli(out var goneOut, "run", "--build", "ident-alpha");
+            t.Expect("J.2 a name the build removed is NOT launched from the old index",
+                gone != 0 && Ran() is null, $"exit {gone}, ran {Ran() ?? "nothing"}");
+            t.Expect("J.3 and blix is what refuses, naming the build as the change",
+                goneOut.Contains("the build succeeded"), goneOut.Trim());
+
+            Forget();
+            var renamed = Cli(out var renamedOut, "run", "--build", "ident-beta");
+            t.Expect("J.4 the name the build CREATED is what runs",
+                renamed == 0 && Ran() == "beta", $"exit {renamed}, ran {Ran() ?? "nothing"}. {renamedOut.Trim()}");
+
+            // ── the sibling ghost ───────────────────────────────────────────
+            // An index outlives its assembly, because our target writes it and MSBuild's
+            // incremental clean only knows about files it recorded in FileWrites. Found by doing
+            // exactly this rename with AssemblyName instead of the declaration.
+            var output = Path.Combine(dir, "bin", "Debug", "net8.0");
+            var assembly = Path.Combine(output, "Ident.dll");
+            var parked = assembly + ".parked";
+            File.Move(assembly, parked);
+
+            var ghost = Cli(out var ghostOut, "ls");
+            t.Expect("J.5 an index whose assembly has gone is not listed as an app",
+                ghost == 0 && !ghostOut.Contains("ident-beta"), "a name blix ls offers must be startable");
+
+            File.Move(parked, assembly);
+            t.Expect("J.6 CONTROL and it comes back when the assembly does",
+                Cli(out var backOut, "ls") == 0 && backOut.Contains("ident-beta"), backOut.Trim());
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(was);
+            try { Directory.Delete(Path.Combine(repo, ".blixtest"), recursive: true); } catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    /// <summary>Run the resolver in process, with everything it printed.</summary>
+    private static int Cli(out string printed, params string[] args)
+    {
+        var captured = new StringWriter();
+        var outWas = Console.Out;
+        var errWas = Console.Error;
+
+        try
+        {
+            Console.SetOut(captured);
+            Console.SetError(captured);
+            return Blix.Cli.Program.Main(args);
+        }
+        finally
+        {
+            Console.SetOut(outWas);
+            Console.SetError(errWas);
+            printed = captured.ToString();
+        }
+    }
+
+    private static int Dotnet(string arguments)
+    {
+        var root = Environment.GetEnvironmentVariable("DOTNET_ROOT");
+        var muxer = root is not null && File.Exists(Path.Combine(root, "dotnet"))
+            ? Path.Combine(root, "dotnet")
+            : "dotnet";
+
+        using var process = System.Diagnostics.Process.Start(
+            new System.Diagnostics.ProcessStartInfo(muxer, arguments) { UseShellExecute = false });
+        process!.WaitForExit();
+        return process.ExitCode;
+    }
+
+    /// <summary>The nearest folder above this assembly that carries the repository build rules.</summary>
+    private static string? RepositoryRoot()
+    {
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "Directory.Build.targets"))) return dir.FullName;
+        }
+
+        return null;
     }
 
     /// <summary>

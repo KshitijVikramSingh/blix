@@ -262,6 +262,19 @@
           Inputs="@(IntermediateAssembly);$(BlixAppIndexerDll)"
           Outputs="$(OutDir)$(AssemblyName).blixapps.json">
     <Exec Command="dotnet &quot;$(BlixAppIndexerDll)&quot; --assembly &quot;$(OutDir)$(AssemblyName).dll&quot; --output &quot;$(OutDir)$(AssemblyName).blixapps.json&quot; --project &quot;$(MSBuildProjectFullPath)&quot;" />
+    <!-- The index is a build output, so the build should own its removal. Without this it
+         is invisible to MSBuild: not in FileListAbsolute, so `dotnet clean` leaves it and
+         the incremental clean that removes a renamed AssemblyName's dll leaves its index
+         sitting beside the new one. Measured both ways: with this line, renaming W to W2
+         takes W.blixapps.json with it; without it, the file stays and names an app that
+         cannot start.
+
+         This does NOT replace the resolver's guard against an index whose assembly is gone.
+         Filesystem hygiene and correct discovery are different jobs, and discovery must not
+         depend on a clean having behaved. An index left by another configuration, carried
+         along by `git mv` of a folder, or belonging to a project deleted outright is one no
+         clean ever runs for, and that last pair is how the ghost was found. -->
+    <ItemGroup><FileWrites Include="$(OutDir)$(AssemblyName).blixapps.json" /></ItemGroup>
   </Target>
 
   <Target Name="BlixReflectSpirV"

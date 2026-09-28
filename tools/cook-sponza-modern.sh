@@ -103,7 +103,9 @@ cook_pack() {
     for candidate in "$@"; do
         dir="$SRC/$candidate"
         [[ -d "$dir" ]] || continue
-        gltf=$(find "$dir" -maxdepth 1 -name '*.gltf' | head -1)
+        # -print -quit, not `| head -1`: head closes the pipe, find dies of SIGPIPE, and
+        # under pipefail that 141 ends the script. See tools/lab-baseline.sh, which learned it.
+        gltf=$(find "$dir" -maxdepth 1 -name '*.gltf' -print -quit)
         if [[ -z "$gltf" ]]; then
             echo "  $dest: no .gltf in $dir — skipped"
             return 0
@@ -206,4 +208,4 @@ dotnet "$COOK" sky "$COOKED" --occupancy 256 --probes 48 --rays 512 --albedo 256
 
 echo
 echo "Cooked tree: $(du -sh "$COOKED" | cut -f1)   (sources: $(du -sh "$SRC" | cut -f1))"
-echo "Run with:  BLIX_SPONZA_ASSETS=$COOKED tools/run-vulkan-sponza.sh"
+echo "Run with:  BLIX_SPONZA_ASSETS=$COOKED ./blix run Blix.Demos.VulkanSponza"

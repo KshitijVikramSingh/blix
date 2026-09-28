@@ -68,7 +68,7 @@
 
     It used to run after CopyFilesToOutputDirectory and write straight into $(OutDir)Shaders.
     Those files appeared in the build output and were never MSBuild items, so `dotnet publish`
-    carried none of them and tools/run-runner.sh mirrored them by hand afterwards. The variant
+    carried none of them and this demo's launcher mirrored them by hand afterwards. The variant
     algorithm here is genuinely this project's own (one entry per permutation, filename infix
     from metadata), which is why BlixShaderCustomTarget exists. WHERE the output goes is not.
   -->

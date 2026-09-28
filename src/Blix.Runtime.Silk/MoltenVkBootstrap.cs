@@ -108,14 +108,16 @@ public static class MoltenVkBootstrap
         // happens later but still consults dyld's frozen view. The variable
         // has to be in the environment that exec'd our process.
         //
-        // tools/run-vulkan-hello.sh handles this. If a user runs `dotnet run`
-        // directly without it on macOS, GLFW fails with "doesn't support
-        // Vulkan on this computer" — warn loudly with the fix.
+        // The `blix` front door handles this, and is the only launcher that does:
+        // it exports the variable and execs, so every app it starts inherits a
+        // correct environment. A `dotnet run` straight at a project skips all of
+        // that, and GLFW then fails with "doesn't support Vulkan on this
+        // computer" — warn loudly with the fix rather than let that stand.
         var libDir = Path.Combine(prefix, "lib");
         var fallback = Environment.GetEnvironmentVariable("DYLD_FALLBACK_LIBRARY_PATH") ?? string.Empty;
         if (fallback.Split(':').Contains(libDir)) return;
         Console.Error.WriteLine($"[MoltenVkBootstrap] DYLD_FALLBACK_LIBRARY_PATH does not include {libDir}.");
-        Console.Error.WriteLine("[MoltenVkBootstrap] GLFW will likely fail to find libvulkan. Run via tools/run-vulkan-hello.sh,");
+        Console.Error.WriteLine("[MoltenVkBootstrap] GLFW will likely fail to find libvulkan. Run via ./blix run <app>,");
         Console.Error.WriteLine($"[MoltenVkBootstrap] or set DYLD_FALLBACK_LIBRARY_PATH={libDir} in your shell before dotnet run.");
     }
 

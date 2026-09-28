@@ -425,12 +425,19 @@ letterboxed image in the UI.
 dotnet build Blix.sln
 ./blix ls
 ./blix run <app> [args...]
+./blix run --build <app> [args...]
 ./blix run <project>:<app> [args...]
 ./blix test
 ```
 
 The root `blix` script owns the macOS Vulkan environment and then executes the
-indexed application. The older `tools/run-*.sh` scripts remain for compatibility
-and specialized setup; they are not the pattern for a new executable. See
-[Workflow](workflow.md) for project discovery, app declarations, shared
+indexed application. It is the only launcher: the eleven `tools/run-*.sh`
+scripts it replaced each carried an identical copy of that environment and were
+deleted once one front door existed.
+
+`run` resolves and executes; it does not build. When what it is about to run is
+older than the sources of the app or anything it references, it says so on
+stderr and runs it anyway — pass `--build` (`-b`) to build first. blix's own
+options go before the app's name; everything after the name belongs to the app.
+See [Workflow](workflow.md) for project discovery, app declarations, shared
 arguments, and verification gates.

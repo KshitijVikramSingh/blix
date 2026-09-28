@@ -7,10 +7,10 @@
 #
 # ── Why this script exists at all ───────────────────────────────────────────
 # Everything below the `exec` is the environment a headed Blix app needs, and it is
-# the ONLY reason this is a script rather than just a binary. Fourteen launchers under
-# tools/ each carried an identical copy of these eleven lines — not because packaging
-# was missing, but because a project had no way to say what it contains, so every app
-# needed its own front door. This is that front door, once.
+# the ONLY reason this is a script rather than just a binary. Eleven launchers under
+# tools/ each carried an identical copy of these lines — not because packaging was
+# missing, but because a project had no way to say what it contains, so every app
+# needed its own front door. This is that front door, and now the only one.
 #
 # It execs the APPHOST, never `dotnet blix.dll`: Homebrew's dotnet is a "#!/bin/bash"
 # wrapper, /bin/bash is SIP-protected, and dyld strips DYLD_* from a SIP-protected
@@ -43,14 +43,46 @@ export VK_LAYER_PATH="$prefix/share/vulkan/explicit_layer.d"
 # the first assemblies build before it exists and are not indexed. Building it here
 # means that by the time an index is ASKED for, the next build writes a correct one —
 # which is why the targets file can guard on Exists() and no project needs a reference.
-if [ ! -f "$INDEXER" ]; then
-    echo "blix: building the app indexer (first run)" >&2
-    dotnet build "$REPO_ROOT/src/Blix.Tools.Apps/Blix.Tools.Apps.csproj" -c "$CONFIG" --nologo -v:q
-fi
+#
+# ── These two are the one thing blix cannot be asked about ──────────────────
+# `blix run` says when what it is about to run is older than its sources. It cannot say
+# that about ITSELF: a stale resolver answers the question with yesterday's rules, and a
+# stale indexer writes today's indexes from yesterday's reader — so editing either and
+# then using the front door would quietly exercise the previous one. The rule therefore
+# lives here, in the script, where it needs no working blix to run.
+#
+# Each project's own directory is the whole answer, and that is checked rather than
+# assumed: neither Blix.Cli nor Blix.Tools.Apps has a ProjectReference, so there is no
+# closure to walk and no engine edit that could reach them unseen. If either ever gains
+# one, this rule goes blind and the comment is the thing that should stop you.
+bootstrap() {
+    local what="$1" project="$2" output="$3" dir moved
+    dir="$(dirname "$project")"
 
-if [ ! -f "$CLI" ]; then
-    echo "blix: building the resolver (first run)" >&2
-    dotnet build "$REPO_ROOT/src/Blix.Cli/Blix.Cli.csproj" -c "$CONFIG" --nologo -v:q
-fi
+    if [ -f "$output" ]; then
+        # bin/ and obj/ are pruned: they hold generated sources the build itself wrote,
+        # which are newer than the output by construction and would make this fire always.
+        #
+        # `-print -quit` rather than piping to `head -1`. head closes the pipe as soon as it
+        # has its line, find dies of SIGPIPE, and under `set -o pipefail` that 141 becomes the
+        # command substitution's status and `set -e` ends the script. Measured rather than
+        # assumed, because "these directories are tiny" is the kind of guard that stops being
+        # true quietly: 500 files survived, 1500 exited 141, and these two hold 3 and 2. That
+        # is a lot of headroom and no guarantee, and tools/lab-baseline.sh already carries a
+        # comment about the same shape biting it for real. -quit stops find itself, so nothing
+        # is left writing into a closed pipe.
+        moved="$(find "$dir" \( -name bin -o -name obj \) -prune -o \
+                 \( -name '*.cs' -o -name '*.csproj' \) -newer "$output" -print -quit 2>/dev/null)"
+        [ -z "$moved" ] && return 0
+        echo "blix: rebuilding the $what — $(basename "$moved") is newer than it" >&2
+    else
+        echo "blix: building the $what (first run)" >&2
+    fi
+
+    dotnet build "$project" -c "$CONFIG" --nologo -v:q
+}
+
+bootstrap "app indexer" "$REPO_ROOT/src/Blix.Tools.Apps/Blix.Tools.Apps.csproj" "$INDEXER"
+bootstrap "resolver"    "$REPO_ROOT/src/Blix.Cli/Blix.Cli.csproj"                "$CLI"
 
 exec "$CLI" "$@"

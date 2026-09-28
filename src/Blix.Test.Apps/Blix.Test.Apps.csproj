@@ -4,6 +4,10 @@
     <ProjectReference Include="..\Blix.Cooked\Blix.Cooked.csproj" />
     <ProjectReference Include="..\\Blix.Verify\\Blix.Verify.csproj" />
     <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
+    <!-- The resolver itself. It is an Exe, but it declares no apps of its own
+         (BlixSkipAppIndex), so referencing it adds nothing to what `blix ls` sees
+         and lets this suite test the real Freshness rather than a copy of it. -->
+    <ProjectReference Include="..\Blix.Cli\Blix.Cli.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

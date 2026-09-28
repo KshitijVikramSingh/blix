@@ -70,9 +70,10 @@ Tools are ordinary apps:
 | `view` | View a model or rig using the Studio reference pipeline |
 | `shot` | Render a deterministic model or rig capture |
 
-The older `tools/run-*.sh` scripts remain for compatibility and specialized
-setup, but they are not the pattern for a new application. Use `./blix` and an
-app declaration instead.
+`./blix` is the only launcher. The eleven `tools/run-*.sh` scripts that came
+before it each carried an identical copy of the macOS Vulkan environment; they
+were deleted once one front door owned it. A new application needs an app
+declaration, not a script.
 
 ## Assets: declared build, observable load
 
