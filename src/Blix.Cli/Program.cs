@@ -618,6 +618,8 @@ public static class Program
             WriteAppBundle(app, target, dest);
             MoveDataOutOfMacOS(app, dest);
             CloseMacRuntime(app, dest);
+            // Before signing, because a seal over an incomplete bundle is a worse lie than no seal.
+            VerifyMacBundle(app, dest);
             SignAppBundle(app, dest);
         }
 
@@ -710,10 +712,11 @@ public static class Program
             .FirstOrDefault(p => File.Exists(Path.Combine(p, "lib", "libvulkan.dylib")));
         if (prefix is null)
         {
-            Console.Error.WriteLine(
-                "blix: no Vulkan runtime found to bundle — the .app will need one installed. " +
-                "Expected Homebrew under /opt/homebrew or /usr/local.");
-            return;
+            throw new BlixCliException(
+                "no Vulkan runtime found to bundle, so the .app cannot be closed. Expected Homebrew " +
+                "under /opt/homebrew or /usr/local. This is fatal rather than a warning because " +
+                "`publish` for this target means \"produce the closed runtime\", and a command that " +
+                "returns 0 having not done that is the exact failure this engine keeps hunting.");
         }
 
         var contents = Path.Combine(dest, $"{BundleName(app)}.app", "Contents");
@@ -788,6 +791,69 @@ public static class Program
         Directory.Move(from, to);
     }
 
+    /// <summary>
+    /// Judge the finished bundle against what this target promised, and fail if it falls short.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Because every step above reports on itself.</b> `blix publish` for a macOS target means
+    /// "produce the closed runtime", and the way that quietly stops being true is a step that
+    /// copied four files where five were needed and said so cheerfully. This reads the bundle
+    /// back instead, so the command is an instrument rather than a sequence of hopeful actions.
+    /// </para>
+    /// <para>
+    /// REQUIRED is the runtime closure and nothing else: the apphost, the plist, both loader
+    /// filenames (GLFW asks for one, Silk.NET's resolver the other), MoltenVK, OpenAL and the ICD
+    /// manifest. Shaders and cooked assets are deliberately absent — an application that declares
+    /// none is not incomplete, and `dotnet publish` already carries what was declared. Icons,
+    /// Developer ID and notarisation are not closure at all.
+    /// </para>
+    /// </remarks>
+    private static void VerifyMacBundle(App app, string dest)
+    {
+        var bundle = Path.Combine(dest, $"{BundleName(app)}.app");
+        var contents = Path.Combine(bundle, "Contents");
+        var required = new (string What, string Path)[]
+        {
+            ("the executable", Path.Combine(contents, "MacOS", BundleName(app))),
+            ("Info.plist", Path.Combine(contents, "Info.plist")),
+            ("the Vulkan loader (GLFW's name)", Path.Combine(contents, "Frameworks", "libvulkan.1.dylib")),
+            ("the Vulkan loader (Silk.NET's name)", Path.Combine(contents, "Frameworks", "libvulkan.dylib")),
+            ("MoltenVK", Path.Combine(contents, "Frameworks", "libMoltenVK.dylib")),
+            ("OpenAL Soft", Path.Combine(contents, "Frameworks", "libopenal.1.dylib")),
+            ("the ICD manifest", Path.Combine(contents, "Resources", "vulkan", "icd.d", "MoltenVK_icd.json")),
+        };
+
+        var missing = required.Where(r => !File.Exists(r.Path)).ToArray();
+        if (missing.Length > 0)
+        {
+            // Keep it, but not under a name anyone can ship. A failed publish that leaves a
+            // plausible `Foo.app` in the output directory is the same trap one level down: an
+            // artifact that is not what it looks like. Finder will not launch `.app.incomplete`,
+            // and it is still there to be looked at.
+            var parked = bundle + ".incomplete";
+            var note = string.Empty;
+            try
+            {
+                if (Directory.Exists(parked)) Directory.Delete(parked, recursive: true);
+                Directory.Move(bundle, parked);
+                note = $" What was built is at {Path.GetFileName(parked)}.";
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Not worth masking the real error over.
+                note = $" ({Path.GetFileName(bundle)} could not be set aside: {ex.Message})";
+            }
+
+            throw new BlixCliException(
+                "the bundle is not closed — " +
+                string.Join("; ", missing.Select(m => $"{m.What} is missing ({Path.GetFileName(m.Path)})")) +
+                ". Publishing stopped rather than hand you a bundle that runs only here." + note);
+        }
+
+        Console.WriteLine($"  closure verified: {required.Length} required parts present");
+    }
+
     /// <summary>Ad-hoc sign the finished bundle, so the machine it lands on will run it.</summary>
     /// <remarks>
     /// <para>
@@ -827,9 +893,14 @@ public static class Program
             if (sign is null) return;
             var complaint = sign.StandardError.ReadToEnd();
             sign.WaitForExit();
-            Console.WriteLine(sign.ExitCode == 0
-                ? "  signed the bundle ad-hoc"
-                : $"  could not sign the bundle: {complaint.Trim()}");
+            if (sign.ExitCode != 0)
+            {
+                throw new BlixCliException(
+                    $"could not sign the bundle: {complaint.Trim()}. A bundle whose seal does not " +
+                    "verify is not one this command should claim to have produced.");
+            }
+
+            Console.WriteLine("  signed the bundle ad-hoc");
         }
         catch (Exception ex)
         {

@@ -75,7 +75,7 @@
                     "offset" : 80
                 },
                 {
-                    "name" : "uIblIntensity",
+                    "name" : "uAmbientIntensity",
                     "type" : "float",
                     "offset" : 92
                 }

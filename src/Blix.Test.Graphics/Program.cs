@@ -1173,6 +1173,21 @@ static ShaderInterface MinimalShader() => new(new[]
     var frag = ShaderReflection.Load(Path.Combine(fxDir, "lit.frag.refl.json"));
     var iface = ShaderReflection.MergeStages(vert, frag);
 
+    // <b>These fixtures held a real cross-stage disagreement, and nothing noticed for four
+    // months.</b> At offset 92 the vertex stage called the float `uAmbientIntensity` and the
+    // fragment called it `uIblIntensity` — same offset, same size, different meaning — from the
+    // era before frame.glsl declared the Frame block once for both stages. Every other member
+    // agreed; it was a true prefix apart from that one name.
+    //
+    // MergeStages kept whichever view was larger and asked nothing, so the merged layout said
+    // `uIblIntensity` and a write to `uAmbientIntensity` would have gone somewhere else entirely.
+    // lit.vert.refl.json now matches the authoritative stage at that offset, and the original is
+    // kept beside it, because a corpus that no longer contains the bug cannot prove it is caught.
+    var drifted = ShaderReflection.Load(Path.Combine(fxDir, "lit.vert.drifted.refl.json"));
+    t.Expect("P.0 the drifted vert/frag pair is rejected, naming the offset",
+        Throws(() => ShaderReflection.MergeStages(drifted, frag)),
+        "offset 92: uAmbientIntensity vs uIblIntensity");
+
     DescriptorSetSlot? Slot(int set, int binding) =>
         iface.Slots.FirstOrDefault(s => s.Set == set && s.Binding == binding);
     UniformBlockMember? Member(UniformBlockLayout? b, string name) =>
@@ -5192,6 +5207,64 @@ static ShaderInterface MinimalShader() => new(new[]
         reflecting.Length >= 8, $"{reflecting.Length} project(s)");
     t.Expect("BJ.2 every project with shaders emits their reflection",
         silent.Length == 0, string.Join(", ", silent));
+}
+
+// ============================================================================
+// Section BK — MergeStages rejects two blocks wearing one binding.
+// ============================================================================
+//
+// <b>Reflection is public machinery, so its correctness cannot rest on this repository's gate.</b>
+// A stage reflects only the members it references, so the same (set,binding) legitimately comes
+// back shorter from one stage than another -- measured: studio_lit.vert sees one 64-byte member
+// of the Frame block where studio_lit.frag sees eleven, 368 bytes, and the short one is a true
+// prefix beginning at uViewProjection@0.
+//
+// MergeStages used to keep whichever view had the greater TotalSize and check nothing else, so
+// two stages declaring DIFFERENT members at the same offset merged silently into one of them.
+// Nothing downstream would object -- the descriptor type matches, so the device has no opinion --
+// and the by-name write path would put bytes where the other stage reads something else.
+{
+    static ShaderReflection.ReflStage Stage(ShaderStages st, int total, params (string Name, int Offset, int Size)[] members) =>
+        new(st,
+            new[]
+            {
+                new DescriptorSetSlot(0, 0, ShaderResourceType.UniformBuffer, st,
+                    BlockLayout: new UniformBlockLayout(total,
+                        members.Select(m => new UniformBlockMember(m.Name, m.Offset, m.Size)).ToArray())),
+            },
+            Array.Empty<PushConstantRange>());
+
+    // A genuine prefix merges, keeps the fuller layout, and ORs the stages.
+    var merged = ShaderReflection.MergeStages(
+        Stage(ShaderStages.Vertex, 64, ("uViewProjection", 0, 64)),
+        Stage(ShaderStages.Fragment, 128, ("uViewProjection", 0, 64), ("uCascadeVP0", 64, 64)));
+    var slot = merged.Slots.Single();
+    t.Expect("BK.1 a shorter view that is a prefix merges into the fuller layout",
+        slot.BlockLayout?.TotalSize == 128 && slot.BlockLayout?.Members.Count == 2,
+        $"{slot.BlockLayout?.TotalSize}B, {slot.BlockLayout?.Members.Count} member(s)");
+    t.Expect("BK.1 and the merged slot carries both stages",
+        slot.Stages == (ShaderStages.Vertex | ShaderStages.Fragment), slot.Stages.ToString());
+
+    // Same offset, different member. Equal sizes, so picking "the fuller" cannot separate them.
+    t.Expect("BK.2 different members at one offset are rejected",
+        Throws(() => ShaderReflection.MergeStages(
+            Stage(ShaderStages.Vertex, 32, ("uA", 0, 16), ("uB", 16, 16)),
+            Stage(ShaderStages.Fragment, 32, ("uA", 0, 16), ("uC", 16, 16)))),
+        "equal TotalSize, incompatible members");
+
+    // A gap is the same disagreement: the shorter is not a prefix of the longer.
+    t.Expect("BK.3 a member with no counterpart at its offset is rejected",
+        Throws(() => ShaderReflection.MergeStages(
+            Stage(ShaderStages.Vertex, 48, ("uA", 0, 16), ("uOdd", 32, 16)),
+            Stage(ShaderStages.Fragment, 64, ("uA", 0, 16), ("uB", 16, 16), ("uC", 48, 16)))),
+        "offset 32 exists in one view only");
+
+    // CONTROL: the rejections above must not be this helper reporting every call as a throw.
+    t.Expect("BK.0 CONTROL a compatible merge does not throw",
+        !Throws(() => ShaderReflection.MergeStages(
+            Stage(ShaderStages.Vertex, 64, ("uViewProjection", 0, 64)),
+            Stage(ShaderStages.Fragment, 64, ("uViewProjection", 0, 64)))),
+        "identical views merge");
 }
 
 t.PrintSummary();

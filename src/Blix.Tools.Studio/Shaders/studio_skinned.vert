@@ -17,12 +17,15 @@ layout(location = 3) in vec4 aBoneIndices;
 layout(location = 4) in vec4 aBoneWeights;
 layout(location = 5) in vec4 aTangent;      // declared so the Skin4Tangent layout binds; unused here
 
+// The PREFIX this stage reads, and nothing after it. studio_lit.frag's Frame block gained three
+// cascade matrices at offset 64 and this one did not, so it still described the pre-cascade
+// layout: uSunViewProjection where the fragment has uCascadeVP0, and uCameraPosition at 128 where
+// the fragment has uCascadeVP1. Nothing drew wrong, because the only member read here is
+// uViewProjection at offset 0 — the four below were declared and never used, which is precisely
+// why it survived. Declaring the prefix is what studio_lit.vert does, and makes the two stages
+// describe one block again.
 layout(set = 0, binding = 0) uniform Frame {
     mat4 uViewProjection;
-    mat4 uSunViewProjection;
-    vec4 uCameraPosition;
-    vec4 uSunDirection;
-    vec4 uSunColour;
 };
 
 // The palettes, at set 3 — the engine's per-draw set, written once per frame slot through a
