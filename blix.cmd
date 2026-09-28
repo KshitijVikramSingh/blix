@@ -39,6 +39,15 @@ rem clone the first assemblies build before it exists and are not indexed. Build
 rem it here means that by the time an index is ASKED for, the next build writes a
 rem correct one - which is why the targets file can guard on Exists() and no
 rem project needs a reference.
+rem
+rem == One rule from ./blix is deliberately NOT here =======================
+rem The bash front door also rebuilds these two when their own sources are newer than
+rem their outputs, because a stale resolver and a stale indexer are the one thing blix
+rem cannot report on: each would answer that question with its previous self. Batch has
+rem no plain way to compare timestamps, this file is still UNVERIFIED, and CI drives it
+rem - so an untested construct here would risk the Windows job for a convenience on a
+rem platform nobody yet develops on. Anyone changing Blix.Cli from Windows should build
+rem it themselves, and this note is the reason why.
 if not exist "%INDEXER%" (
     echo blix: building the app indexer ^(first run^) 1>&2
     dotnet build "%REPO_ROOT%src\Blix.Tools.Apps\Blix.Tools.Apps.csproj" -c "%CONFIG%" --nologo -v:q || exit /b 1

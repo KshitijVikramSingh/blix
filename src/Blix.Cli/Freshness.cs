@@ -106,7 +106,7 @@ public static class Freshness
             var dir = Path.GetDirectoryName(project);
             if (dir is null || !Directory.Exists(dir)) continue;
 
-            foreach (var file in Sources(dir))
+            foreach (var file in Sources(dir).Concat(ImplicitImports(dir)))
             {
                 var written = File.GetLastWriteTimeUtc(file);
                 if (newest is null || written > newest.Value.Written) newest = (file, written);
@@ -114,6 +114,39 @@ public static class Freshness
         }
 
         return newest;
+    }
+
+    /// <summary>
+    /// The Directory.Build files MSBuild imports into a project without being told to.
+    /// </summary>
+    /// <remarks>
+    /// <b>These are sources that live ABOVE every project directory, so scanning project folders
+    /// cannot reach them and adding their extension to <see cref="SourceExtensions"/> would not
+    /// either.</b> In this repository the single root Directory.Build.targets drives shader
+    /// compilation, reflection sidecars, cooked-asset staging and app-index generation — change
+    /// it and what the source tree would build is materially different, while every .cs file is
+    /// untouched and this check would have had nothing to say.
+    /// <para>
+    /// Named explicitly rather than evaluated. Interpreting MSBuild is the thing this must not
+    /// start doing, and the implicit imports are a short closed list: nearest Directory.Build.props
+    /// at or above the project, nearest Directory.Build.targets, each found by its own walk and
+    /// each stopping at the first hit, which is what MSBuild itself does. An explicitly imported
+    /// .props or .targets is NOT covered, and waits for something to actually need it.
+    /// </para>
+    /// </remarks>
+    public static IEnumerable<string> ImplicitImports(string projectDir)
+    {
+        foreach (var name in new[] { "Directory.Build.props", "Directory.Build.targets" })
+        {
+            for (var dir = new DirectoryInfo(projectDir); dir is not null; dir = dir.Parent)
+            {
+                var candidate = Path.Combine(dir.FullName, name);
+                if (!File.Exists(candidate)) continue;
+
+                yield return candidate;
+                break;
+            }
+        }
     }
 
     /// <summary>Every source below <paramref name="dir"/>, skipping what a build wrote.</summary>

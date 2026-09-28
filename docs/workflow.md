@@ -170,8 +170,18 @@ stays free to take a `--build` of its own.
 ```
 
 `run` does not build by default. It compares the app's output against the
-sources of its project and everything that project references, and when the
-output is older it names the file that moved and runs the old binary anyway.
+sources of its project, everything that project references, and the
+`Directory.Build.props` / `Directory.Build.targets` MSBuild imports into each of
+them — that last part matters here, where a single root `Directory.Build.targets`
+drives shader compilation, reflection sidecars, cooked-asset staging and app-index
+generation. When the output is older it names the file that moved and runs the old
+binary anyway.
+
+With `--build`, the name is resolved **again** after the build. A `.csproj` decides
+`AssemblyName`, `OutputPath`, `TargetFramework`, `UseAppHost` and which apps an
+assembly declares — every fact the index carries — so the resolution made before a
+build can be a fossil. A name that no longer resolves afterwards is the correct
+outcome and is reported as one; it is not worked around.
 Reporting rather than acting keeps the resolver a resolver, and the failure it
 prevents is the one you cannot otherwise see: an edit that appears to have done
 nothing. Cooked assets and other content are outside the comparison.
@@ -306,7 +316,9 @@ your code.
 
 `./blix test --build` (`-b`) builds each leg's project first, once per project,
 and a leg that fails to build fails the gate instead of running its previous
-binary. A green gate over stale binaries is not a wrong answer — it is a right
+binary. Every build finishes before any leg runs, and the gate then discovers
+the indexes again: a build rewrites them, so the app records read beforehand
+describe what used to be true. A green gate over stale binaries is not a wrong answer — it is a right
 answer to a question nobody asked — which is why it is said next to the verdict
 rather than thousands of lines above it.
 

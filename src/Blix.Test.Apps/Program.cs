@@ -97,6 +97,7 @@ public static class Program
 
         // ── is what runs what the sources say? ──────────────────────────────
         FreshnessAnswersHonestly(t);
+        ABuildChangesWhatANameMeans(t);
 
         t.PrintSummary();
         return t.Failed == 0 ? 0 : 1;
@@ -259,6 +260,192 @@ public static class Program
         {
             try { Directory.Delete(root, recursive: true); } catch (IOException) { }
         }
+    }
+
+    /// <summary>
+    /// After a build, the thing launched is read from the indexes the BUILD wrote.
+    /// </summary>
+    /// <remarks>
+    /// <b>The one case the Freshness suite above cannot reach.</b> I.0-I.15 are about comparing
+    /// timestamps; this is about ORDER. `run --build` used to resolve a name, build, and then
+    /// launch the App record it had read beforehand -- but a .csproj decides AssemblyName,
+    /// OutputPath, TargetFramework, UseAppHost and which apps an assembly declares, which is
+    /// every fact the index carries. So the successful build could hand back a fossil, which is
+    /// exactly the failure the command exists to prevent, now happening after you asked for a
+    /// build.
+    /// <para>
+    /// Built and run for real, in process, through <c>Blix.Cli.Program.Main</c>. A mock of the
+    /// build step would be a mock of the only thing that makes the bug possible.
+    /// </para>
+    /// </remarks>
+    private static void ABuildChangesWhatANameMeans(TestRunner t)
+    {
+        var repo = RepositoryRoot();
+        if (repo is null)
+        {
+            // Reported, never a silent pass: a check that quietly shrinks to what it happens to
+            // be able to run is a green light for the wrong reason (conventions §5).
+            t.Expect("J.0 the fixture needs the repository root, to be under its build rules", false);
+            return;
+        }
+
+        var dir = Path.Combine(repo, ".blixtest", "Ident");
+        var project = Path.Combine(dir, "Ident.csproj");
+        var source = Path.Combine(dir, "Program.cs");
+        var was = Directory.GetCurrentDirectory();
+
+        try
+        {
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(project, $"""
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <OutputType>Exe</OutputType>
+                    <TargetFramework>net8.0</TargetFramework>
+                    <AssemblyName>Ident</AssemblyName>
+                    <UseAppHost>false</UseAppHost>
+                    <Nullable>enable</Nullable>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <ProjectReference Include="{Path.Combine(repo, "src", "Blix.Core", "Blix.Core.csproj")}" />
+                  </ItemGroup>
+                </Project>
+                """);
+
+            // The declaration is renamed, not the assembly: the index is then REWRITTEN in place
+            // rather than a new one appearing beside the old, which is what makes the pre-build
+            // resolution succeed and the post-build one have to fail.
+            // It leaves a FILE rather than printing. An app runs in its own process, so its
+            // stdout goes to the inherited handle and Console.SetOut in this one never sees it --
+            // measured, by first writing this test the obvious way and watching the assertion
+            // read an empty string while the word it wanted scrolled past on the real console.
+            // A marker on disk also makes "it did not run" observable, which a missing line in
+            // captured output only pretends to be.
+            void Declare(string app, string says) => File.WriteAllText(source, $$"""
+                using Blix.Core;
+                public static class P
+                {
+                    public static int Main(string[] args) => BlixApps.Dispatch(args) ?? 0;
+
+                    [BlixApp("{{app}}")]
+                    public static int Run()
+                    {
+                        System.IO.File.WriteAllText(
+                            System.IO.Path.Combine(System.AppContext.BaseDirectory, "ident.ran"), "{{says}}");
+                        return 0;
+                    }
+                }
+                """);
+
+            Directory.SetCurrentDirectory(repo);
+
+            Declare("ident-alpha", "alpha");
+            if (Dotnet($"build \"{project}\" -c Debug --nologo -v:q") != 0)
+            {
+                t.Expect("J.0 the fixture project builds", false, "see the build output above");
+                return;
+            }
+
+            var ran = Path.Combine(dir, "bin", "Debug", "net8.0", "ident.ran");
+            string? Ran() => File.Exists(ran) ? File.ReadAllText(ran) : null;
+            void Forget() { if (File.Exists(ran)) File.Delete(ran); }
+
+            Forget();
+            var before = Cli(out var beforeOut, "run", "ident-alpha");
+            t.Expect("J.1 CONTROL the declared app runs before anything changes",
+                before == 0 && Ran() == "alpha", $"exit {before}, ran {Ran() ?? "nothing"}. {beforeOut.Trim()}");
+
+            // The rename. Nothing else moves: same project, same assembly, same output path.
+            Declare("ident-beta", "beta");
+
+            // J.3 is the assertion with teeth here, and J.2 is a true statement that does not
+            // discriminate -- measured by reverting the fix and re-running: J.2 still passed.
+            // Without re-resolution the old record launches the assembly the build just
+            // OVERWROTE, carrying a selector that assembly no longer declares, so its own
+            // dispatch refuses and nothing runs either way. What actually differs is WHO
+            // diagnosed it: blix, before starting anything, or a child process failing
+            // obscurely on an argument it was handed. J.2 stays because "the fossil did not
+            // run" is the property being protected even when a second thing also prevents it.
+            Forget();
+            var gone = Cli(out var goneOut, "run", "--build", "ident-alpha");
+            t.Expect("J.2 a name the build removed is NOT launched from the old index",
+                gone != 0 && Ran() is null, $"exit {gone}, ran {Ran() ?? "nothing"}");
+            t.Expect("J.3 and blix is what refuses, naming the build as the change",
+                goneOut.Contains("the build succeeded"), goneOut.Trim());
+
+            Forget();
+            var renamed = Cli(out var renamedOut, "run", "--build", "ident-beta");
+            t.Expect("J.4 the name the build CREATED is what runs",
+                renamed == 0 && Ran() == "beta", $"exit {renamed}, ran {Ran() ?? "nothing"}. {renamedOut.Trim()}");
+
+            // ── the sibling ghost ───────────────────────────────────────────
+            // An index outlives its assembly, because our target writes it and MSBuild's
+            // incremental clean only knows about files it recorded in FileWrites. Found by doing
+            // exactly this rename with AssemblyName instead of the declaration.
+            var output = Path.Combine(dir, "bin", "Debug", "net8.0");
+            var assembly = Path.Combine(output, "Ident.dll");
+            var parked = assembly + ".parked";
+            File.Move(assembly, parked);
+
+            var ghost = Cli(out var ghostOut, "ls");
+            t.Expect("J.5 an index whose assembly has gone is not listed as an app",
+                ghost == 0 && !ghostOut.Contains("ident-beta"), "a name blix ls offers must be startable");
+
+            File.Move(parked, assembly);
+            t.Expect("J.6 CONTROL and it comes back when the assembly does",
+                Cli(out var backOut, "ls") == 0 && backOut.Contains("ident-beta"), backOut.Trim());
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(was);
+            try { Directory.Delete(Path.Combine(repo, ".blixtest"), recursive: true); } catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    /// <summary>Run the resolver in process, with everything it printed.</summary>
+    private static int Cli(out string printed, params string[] args)
+    {
+        var captured = new StringWriter();
+        var outWas = Console.Out;
+        var errWas = Console.Error;
+
+        try
+        {
+            Console.SetOut(captured);
+            Console.SetError(captured);
+            return Blix.Cli.Program.Main(args);
+        }
+        finally
+        {
+            Console.SetOut(outWas);
+            Console.SetError(errWas);
+            printed = captured.ToString();
+        }
+    }
+
+    private static int Dotnet(string arguments)
+    {
+        var root = Environment.GetEnvironmentVariable("DOTNET_ROOT");
+        var muxer = root is not null && File.Exists(Path.Combine(root, "dotnet"))
+            ? Path.Combine(root, "dotnet")
+            : "dotnet";
+
+        using var process = System.Diagnostics.Process.Start(
+            new System.Diagnostics.ProcessStartInfo(muxer, arguments) { UseShellExecute = false });
+        process!.WaitForExit();
+        return process.ExitCode;
+    }
+
+    /// <summary>The nearest folder above this assembly that carries the repository build rules.</summary>
+    private static string? RepositoryRoot()
+    {
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "Directory.Build.targets"))) return dir.FullName;
+        }
+
+        return null;
     }
 
     /// <summary>

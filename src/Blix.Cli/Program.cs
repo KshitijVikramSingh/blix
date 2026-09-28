@@ -186,11 +186,23 @@ public static class Program
                 continue;
             }
 
+            // <b>And neither can an index whose ASSEMBLY has gone.</b> The sibling of the rule
+            // above, found by renaming one: MSBuild's incremental clean removed the old
+            // AssemblyName's dll, but not the index beside it -- that file is written by a target
+            // of ours and never enters FileWrites, so nothing tells the clean it exists. What is
+            // left is a name `blix ls` lists and `blix run` cannot start, and after a rebuild it
+            // is the name you would reach for first because it is the one you used yesterday.
+            //
+            // Dropped rather than reported, for the same reason as a vanished project: there is
+            // nothing to do about it and nothing a person would want to see. An index IS written
+            // by a build, so an index without its assembly is never "not built yet" -- it is a
+            // build that has since been undone.
+            if (!File.Exists(assembly)) continue;
+
             // A stale index is REPORTED, never silently believed. It is the one failure
             // mode generating rather than hand-writing the index cannot rule out, and a
             // tool that has quietly moved is worse than one that says it might have.
-            var stale = File.Exists(assembly)
-                && File.GetLastWriteTimeUtc(assembly) > file.LastWriteTimeUtc.AddSeconds(1);
+            var stale = File.GetLastWriteTimeUtc(assembly) > file.LastWriteTimeUtc.AddSeconds(1);
 
             {
                 foreach (var app in index.Apps)
@@ -336,6 +348,14 @@ public static class Program
         if (build)
         {
             if (Build(app) is var code and not 0) return code;
+
+            // <b>The resolution from before the build is a fossil the moment the build succeeds.</b>
+            // A .csproj is one of the sources this very command watches, and it is the file that
+            // decides AssemblyName, OutputPath, TargetFramework, UseAppHost and which apps the
+            // assembly declares -- every fact the index exists to carry. Launching the App record
+            // read beforehand would run yesterday's binary immediately after being asked to build,
+            // which is the failure this whole command was added to remove.
+            app = Reresolve(args[0]);
         }
         else if (Freshness.Check(app.SourceProject, app.Assembly) is { } stale)
         {
@@ -349,6 +369,30 @@ public static class Program
         }
 
         return Launch(app, rest);
+    }
+
+    /// <summary>
+    /// Ask again what a name means, now that a build has had the chance to change it.
+    /// </summary>
+    /// <remarks>
+    /// A name that no longer resolves is the CORRECT outcome, not a problem to work around: the
+    /// build renamed it or removed it, and running the thing that used to answer to it would be
+    /// running a fossil. The message says the build is what changed, because "no app named x"
+    /// immediately after x built is otherwise baffling.
+    /// </remarks>
+    private static App Reresolve(string wanted)
+    {
+        try
+        {
+            return ResolveOne(wanted);
+        }
+        catch (BlixCliException failure)
+        {
+            throw new BlixCliException(
+                $"the build succeeded, and '{wanted}' does not name anything afterwards — " +
+                $"{failure.Message} Nothing was launched, because what answered to that name " +
+                "before the build is no longer what this project builds.");
+        }
     }
 
     /// <summary>Build the project an app came from, and hand back dotnet's verdict.</summary>
@@ -528,15 +572,21 @@ public static class Program
         var apps = Discover(root);
         var failed = new List<string>();
         var stale = new List<string>();
-        var built = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var unbuildable = new HashSet<string>(StringComparer.Ordinal);
 
-        foreach (var name in marker.Gate)
+        // <b>Every build finishes before any leg runs, and then the whole gate is discovered
+        // again.</b> A build rewrites the indexes, so every App record read before one describes
+        // what used to be true -- the same fossil `run --build` had, and worse here because a
+        // gate's whole output is a claim about what it ran. Building first also means you learn
+        // every build failure before waiting through the suites that still compile.
+        if (build)
         {
-            var app = Resolve(apps, name);
+            var attempted = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-            if (build)
+            foreach (var name in marker.Gate)
             {
-                // Once per project, not once per leg: several suites can share one.
+                var app = Resolve(apps, name);
+
                 if (app.SourceProject is not { Length: > 0 } project)
                 {
                     // Said rather than skipped. Being asked to build and quietly not building is
@@ -545,14 +595,44 @@ public static class Program
                     Console.Error.WriteLine(
                         $"blix: '{app.Name}' has no project recorded in its index, so --build cannot " +
                         "reach it. It is about to run as it stands.");
-                }
-                else if (built.Add(project) && Build(app) != 0)
-                {
-                    failed.Add($"{app.Name} (build)");
                     continue;
                 }
+
+                // Once per project, not once per leg: several suites can share one.
+                if (!attempted.TryGetValue(project, out var code))
+                {
+                    attempted[project] = code = Build(app);
+                }
+
+                if (code != 0) unbuildable.Add(name);
             }
-            else if (Freshness.Check(app.SourceProject, app.Assembly) is { } old)
+
+            apps = Discover(root);
+        }
+
+        foreach (var name in marker.Gate)
+        {
+            if (unbuildable.Contains(name))
+            {
+                failed.Add($"{name} (build)");
+                continue;
+            }
+
+            App app;
+            try
+            {
+                app = Resolve(apps, name);
+            }
+            catch (BlixCliException failure)
+            {
+                // A leg that stopped existing fails ITSELF rather than aborting the gate, which
+                // is the same rule as a leg that fails: you learn everything that is broken.
+                failed.Add($"{name} (unresolved)");
+                Console.Error.WriteLine($"blix: {failure.Message}");
+                continue;
+            }
+
+            if (!build && Freshness.Check(app.SourceProject, app.Assembly) is { } old)
             {
                 stale.Add($"{app.Name} (older than {Relative(old.Source)})");
             }
