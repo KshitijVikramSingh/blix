@@ -199,7 +199,7 @@ Sponza assets are not committed. Prepare the configured pack location with:
 
 ```sh
 tools/setup-sponza-modern.sh
-tools/run-vulkan-sponza.sh
+./blix run Blix.Demos.VulkanSponza
 ```
 
 Set `BLIX_SPONZA_ASSETS` when the cooked pack set lives outside the checkout.

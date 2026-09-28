@@ -35,7 +35,9 @@ cd "$REPO_ROOT"
 
 ACTION="${1:-record}"
 DIR="${2:-$REPO_ROOT/.baseline}"
-CAPTURE="$REPO_ROOT/tools/run-lab-capture.sh"
+# An array, not a string: the front door is a script plus a verb, and "$CAPTURE"
+# as one word would look for a file literally named "blix shot".
+CAPTURE=("$REPO_ROOT/blix" shot)
 CORPUS="$REPO_ROOT/third_party/gltf-corpus"
 
 ROGUE="src/Demos/Blix.Demos.Runner/Assets/models/Rogue.glb"
@@ -134,7 +136,7 @@ while IFS="$(printf '\t')" read -r name args why; do
 
     set +e
     # shellcheck disable=SC2086
-    "$CAPTURE" $args --out "$RUN/$name.png" > "$RUN/$name.raw" 2>&1
+    "${CAPTURE[@]}" $args --out "$RUN/$name.png" > "$RUN/$name.raw" 2>&1
     code=$?
     set -e
     filter "$RUN" < "$RUN/$name.raw" > "$RUN/$name.log"

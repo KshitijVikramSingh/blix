@@ -206,4 +206,4 @@ dotnet "$COOK" sky "$COOKED" --occupancy 256 --probes 48 --rays 512 --albedo 256
 
 echo
 echo "Cooked tree: $(du -sh "$COOKED" | cut -f1)   (sources: $(du -sh "$SRC" | cut -f1))"
-echo "Run with:  BLIX_SPONZA_ASSETS=$COOKED tools/run-vulkan-sponza.sh"
+echo "Run with:  BLIX_SPONZA_ASSETS=$COOKED ./blix run Blix.Demos.VulkanSponza"
