@@ -370,6 +370,16 @@ sheen in the voxel bake**: sheen is a view-dependent rim and a probe has no
 view, so diffuse transmission is the half of cloth that indirect light can
 carry.
 
+**Ambient banding is probe spacing, and automatic placement has been tried.** The
+cause is measured rather than suspected: across 14,072 adjacent probe pairs at
+1.57 m, the irradiance ratio between neighbours is median 1.41x, p90 5.15x and
+p99 25.7x. It reads worst on curtains because they are large, smooth and have
+nothing to hide it. Eight competing explanations were refuted by measurement and
+four separate attempts at automatic density heuristics failed — so a fifth is not
+the next idea. The live one is **authored** density as nested uniform volumes,
+following the `.blixpatch` precedent of letting a person state what a bake cannot
+infer. Recorded here so the refuted ground is not walked again.
+
 Some storage textures and probe resources are device-owned rather than graph
 resources, so Sponza also exposes where the graph contract is not yet broad
 enough. Local comments retain present contracts and measurements that still
