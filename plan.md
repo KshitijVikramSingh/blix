@@ -274,15 +274,50 @@ particular is written from the audit and should be treated as a first draft.
 
 ## D — the CI matrix
 
-Cheap once C lands. 2026-09-27 defined precisely what it can and cannot be:
+**Why it comes straight after C:** a `windows-latest` runner *is* the Windows
+machine the audit did not have. `blix.cmd` and the Windows branch of the native
+build were both written from reading rather than running, and this is what turns
+them into ordinary work with a feedback loop.
 
-- **Static checks travel everywhere.** `Blix.Test.Graphics` section BG already
-  checks that a shader's includes are declared build inputs and that shaders
-  sharing a uniform block agree about it — no GPU, milliseconds, every platform.
-- **Pipeline-time breakage needs a booted application**, and the seven suites
-  build no Vulkan pipeline. CI runners have no Vulkan device and will not soon.
-  That stays a **pre-commit** concern, deliberately: the spike to make a GPU
-  work in CI is not worth its cost.
+What it can and cannot be, settled 2026-09-27 and unchanged:
+
+- **Static checks travel everywhere.** Sections BG, BH and BI need no GPU and run
+  in milliseconds on every platform.
+- **Pipeline-time breakage needs a booted application.** CI runners have no
+  Vulkan device and will not soon. That stays a **pre-commit** concern,
+  deliberately: the spike to make a GPU work in CI is not worth its cost.
+
+**Measured, and better than the above assumed: not one of the seven suites
+creates a `VulkanGraphicsDevice` or a `Window`.** So the Windows job runs the
+*whole* gate rather than a chosen subset. The deviceless/device line falls
+exactly on the suites/demos boundary already.
+
+### What landed, 2026-09-28
+
+- **A second job, not a matrix.** The two platforms share the build and the gate
+  and agree about nothing else — brew versus an SDK installer, a front door that
+  works around dyld versus one that need not. A matrix would express that as
+  `if:` on most steps, which is a matrix in name and a fork in fact.
+- **The native build targets became platform-aware**, which stage C had
+  deliberately left as a guess. It is no longer a guess, because the obstacle
+  turned out to be findable by reading the sources rather than the toolchain:
+  `MESHOPTIMIZER_API` is an empty macro by default, so a Windows DLL exports
+  *nothing*, and `blix_bc7.cpp` had only `extern "C"`. Both now carry an explicit
+  export switch. Unix keeps working because default visibility exports
+  everything, which is why this was invisible.
+- **The MSBuild side had the same duplicate spelling the C# side did** — the
+  staging step named `libmeshoptimizer.dylib` in a second place. Both halves now
+  derive the name, and the two must agree: one names the file the build writes,
+  the other the file the loader opens.
+- **A failed native build now warns rather than stopping**, because the two
+  natives differ in consequence: BC7 falls back to the managed encoder and costs
+  time, while meshopt has no fallback and fails the cook with the message stage C
+  added.
+
+**Linux is deliberately absent.** A second red job teaches nothing the first has
+not said; the shape of what Windows needs should be known before it is copied.
+
+**The Windows job has never been green.** That is its purpose, not a defect.
 
 ## E — keyboard and gamepad completion
 
