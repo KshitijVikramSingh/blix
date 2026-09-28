@@ -524,11 +524,25 @@ One shared library — room, motor, camera, renderer, resolver — and three roo
 
 **The prerequisite nothing lists: there is no body in the room.** It draws a capsule,
 and has zero references to `ClipPlayer`, `AnimationClip` or `Pose`. Every consumer of
-`BoneMask` and `RootMotion` in the tree is a tool, a test or the preview lab — none is a
-character that moves. So "contact drives weights" is not two existing things being
+`BoneMask` and `RootMotion` in the tree is a tool, a test or the preview tool — none is
+a character that moves. So "contact drives weights" is not two existing things being
 wired together; a skinned Rogue has to stand in the room first, and the rig-fit against
 a 0.35 m radius, 1.8 m capsule is the unknown that should surface on its own rather
 than tangled in a blending design.
+
+**It is a sibling executable, not a change to `room`.** `Blix.Demos.Character.Body`
+beside `.Room`, `.Probe` and `.Capture`, over the same library — which is what the
+collection's shape is for, and what keeps `room` answering the question it already
+answers. A body standing on ground it cannot walk on is not an experiment, so it takes
+the room's geometry and motor from the library; what it adds is a rig on top of the
+capsule.
+
+The first observable is the honest one: a skinned Rogue standing in the room, facing
+the right way, feet on the floor. Nothing blended, nothing masked. That is the thing a
+person can look at and say "no, that is wrong" about, which every stage of this arc has
+needed before the mechanism was worth arguing over.
+
+*Not started.*
 
 **Contact drives weights, and there are no states.** Speed and groundedness come out of
 the resolver and drive blend weights directly. No states, no transitions, no dwell
