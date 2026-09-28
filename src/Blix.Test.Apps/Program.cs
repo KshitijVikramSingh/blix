@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Text.Json;
 using Blix.Cooked;
 using Blix.Core;
+using Blix.Cli;
 
 namespace Blix.Test.Apps;
 
@@ -94,8 +95,170 @@ public static class Program
             () => BlixApps.Dispatch(new[] { BlixApps.Selector }, self),
             mustMention: BlixApps.Selector);
 
+        // ── is what runs what the sources say? ──────────────────────────────
+        FreshnessAnswersHonestly(t);
+
         t.PrintSummary();
         return t.Failed == 0 ? 0 : 1;
+    }
+
+    /// <summary>
+    /// The staleness report is right about what it claims and silent about what it cannot know.
+    /// </summary>
+    /// <remarks>
+    /// <b>An instrument that cries wolf is one people learn to read past</b>, so the false
+    /// positives are tested as hard as the true ones: output under bin/, a README beside the
+    /// code, a run inside the slack. Each of those would fire on every single run if it were
+    /// wrong, and the warning would be worthless within a day.
+    /// <para>
+    /// Built on real directories rather than an abstraction over the filesystem. The question is
+    /// literally about mtimes on disk, and a seam introduced to make it mockable would be a seam
+    /// where the thing being tested no longer is the thing that ships.
+    /// </para>
+    /// </remarks>
+    private static void FreshnessAnswersHonestly(TestRunner t)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "blix-freshness-" + Guid.NewGuid().ToString("N")[..8]);
+
+        try
+        {
+            // A two-project closure: an app that references a library, which is the shape the
+            // transitive case needs and the shape every demo in this repository has.
+            var appDir = Path.Combine(root, "App");
+            var libDir = Path.Combine(root, "Lib");
+            var outDir = Path.Combine(appDir, "bin", "Debug", "net8.0");
+            Directory.CreateDirectory(outDir);
+            Directory.CreateDirectory(libDir);
+
+            var appProject = Path.Combine(appDir, "App.csproj");
+            var libProject = Path.Combine(libDir, "Lib.csproj");
+            var assembly = Path.Combine(outDir, "App.dll");
+
+            // Doubled separators on purpose: Blix.Test.Apps.csproj itself contains one, so a
+            // resolver that only handled the tidy form would silently drop a real reference in
+            // this very repository and report "current" for a project it never looked at.
+            File.WriteAllText(appProject,
+                "<Project><ItemGroup><ProjectReference Include=\"..\\\\Lib\\\\Lib.csproj\" /></ItemGroup></Project>");
+            File.WriteAllText(libProject, "<Project />");
+
+            var appSource = Path.Combine(appDir, "Program.cs");
+            var libSource = Path.Combine(libDir, "Thing.cs");
+            var shader = Path.Combine(appDir, "Shaders", "world.vert");
+            var readme = Path.Combine(appDir, "README.md");
+            Directory.CreateDirectory(Path.GetDirectoryName(shader)!);
+            foreach (var f in new[] { appSource, libSource, shader, readme }) File.WriteAllText(f, "x");
+            File.WriteAllText(assembly, "dll");
+
+            var old = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            var newer = old.AddHours(1);
+
+            void Age(string path, DateTime when) => File.SetLastWriteTimeUtc(path, when);
+            void AllOld()
+            {
+                foreach (var f in new[] { appSource, libSource, shader, readme, appProject, libProject })
+                {
+                    Age(f, old);
+                }
+
+                Age(assembly, old.AddMinutes(30));
+            }
+
+            AllOld();
+            t.Expect("I.0 CONTROL a build newer than every source is not reported",
+                Freshness.Check(appProject, assembly) is null);
+
+            AllOld();
+            Age(appSource, newer);
+            var own = Freshness.Check(appProject, assembly);
+            t.Expect("I.1 a source in the app's own project is caught", own is not null);
+            t.Expect("I.2 and the report names the file that moved",
+                own?.Source == appSource, own?.Source ?? "(nothing)");
+
+            AllOld();
+            Age(libSource, newer);
+            t.Expect("I.3 a source in a REFERENCED project is caught too",
+                Freshness.Check(appProject, assembly)?.Source == libSource,
+                "the engine edit behind a demo run is the whole reason this exists");
+
+            AllOld();
+            Age(shader, newer);
+            t.Expect("I.4 a shader counts as a source",
+                Freshness.Check(appProject, assembly)?.Source == shader);
+
+            AllOld();
+            Age(readme, newer);
+            t.Expect("I.5 a README beside the code does not",
+                Freshness.Check(appProject, assembly) is null);
+
+            AllOld();
+            var buildOutput = Path.Combine(outDir, "Generated.cs");
+            File.WriteAllText(buildOutput, "generated");
+            Age(buildOutput, newer.AddHours(2));
+            t.Expect("I.6 and a .cs the BUILD wrote under bin/ does not",
+                Freshness.Check(appProject, assembly) is null,
+                "obj/ and bin/ hold generated sources; counting them would fire on every run");
+            File.Delete(buildOutput);
+
+            AllOld();
+            Age(appSource, File.GetLastWriteTimeUtc(assembly).AddMilliseconds(500));
+            t.Expect("I.7 a source inside the one-second slack is not reported",
+                Freshness.Check(appProject, assembly) is null,
+                "filesystem granularity, matching the index's own staleness rule");
+
+            AllOld();
+            Age(appSource, newer);
+            Age(libSource, newer.AddMinutes(10));
+            t.Expect("I.8 of several movers the NEWEST is named",
+                Freshness.Check(appProject, assembly)?.Source == libSource);
+
+            AllOld();
+            Age(appSource, newer);
+            var copied = Path.Combine(outDir, "Lib.dll");
+            File.WriteAllText(copied, "dll");
+            Age(copied, newer.AddMinutes(5));
+            t.Expect("I.9 a dependency copied in AFTER the edit clears the report",
+                Freshness.Check(appProject, assembly) is null,
+                "the whole output directory is the datum, not this app's own dll -- MSBuild may " +
+                "leave App.dll untouched when only Lib's method bodies changed");
+            File.Delete(copied);
+
+            // ── what it must stay quiet about ───────────────────────────────
+            AllOld();
+            Age(appSource, newer);
+            t.Expect("I.10 no project recorded is not an answer",
+                Freshness.Check(null, assembly) is null);
+            t.Expect("I.11 a project that is no longer there is not an answer",
+                Freshness.Check(Path.Combine(root, "Gone.csproj"), assembly) is null);
+            t.Expect("I.12 and an output directory with nothing in it is not an answer",
+                Freshness.Check(appProject, Path.Combine(root, "Empty", "App.dll")) is null);
+
+            // A cycle is not legal MSBuild, but this walks files a person can edit and must
+            // terminate on anything it is handed rather than trust the input.
+            File.WriteAllText(libProject,
+                "<Project><ItemGroup><ProjectReference Include=\"..\\App\\App.csproj\" /></ItemGroup></Project>");
+            var closure = Freshness.Closure(appProject);
+            t.Expect("I.13 a reference cycle terminates", closure.Count == 2, $"{closure.Count} projects");
+
+            // Malformed XML drops the REFERENCES, not the answer. The project's own folder is
+            // still scanned and still reported -- this check is a courtesy on the way to running
+            // something and must never be the reason a run does not happen.
+            File.WriteAllText(appProject, "<Project><ItemGroup><ProjectRef");
+            Age(appProject, old);  // else the rewrite itself is the newest thing here
+            t.Expect("I.14 malformed XML drops its references rather than throwing",
+                Freshness.Closure(appProject).Count == 1, "the unreadable project itself, alone");
+            Freshness.Staleness? afterGarbage = null;
+            string? thrown = null;
+            try { afterGarbage = Freshness.Check(appProject, assembly); }
+            catch (Exception e) { thrown = e.GetType().Name; }
+
+            t.Expect("I.15 and the check still answers for what it CAN read",
+                thrown is null && afterGarbage?.Source == appSource,
+                thrown ?? afterGarbage?.Source ?? "(nothing)");
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch (IOException) { }
+        }
     }
 
     /// <summary>

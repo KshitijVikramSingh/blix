@@ -161,8 +161,23 @@ Run one explicitly or with the short form:
 ./blix view --model Assets/hero.glb
 ```
 
-Arguments after the name are forwarded unchanged to the app. If the same name
-is visible in more than one project, qualify it with its project name:
+Arguments after the name are forwarded unchanged to the app — which is also
+where the boundary sits: blix's own options come *before* the name, so an app
+stays free to take a `--build` of its own.
+
+```sh
+./blix run --build view --model Assets/hero.glb   # build the project first
+```
+
+`run` does not build by default. It compares the app's output against the
+sources of its project and everything that project references, and when the
+output is older it names the file that moved and runs the old binary anyway.
+Reporting rather than acting keeps the resolver a resolver, and the failure it
+prevents is the one you cannot otherwise see: an edit that appears to have done
+nothing. Cooked assets and other content are outside the comparison.
+
+If the same name is visible in more than one project, qualify it with its
+project name:
 
 ```sh
 ./blix run demos:Blix.Demos.Character.Probe
@@ -381,16 +396,21 @@ On a truly fresh checkout, the first projects built before the indexer exists
 cannot produce an index. Running `./blix ls` bootstraps the indexer; one following
 solution build populates the complete set.
 
-## Legacy launchers
+## What is left under tools/
 
-The scripts under `tools/run-*.sh` predate project/app discovery. Some also
-encode useful task-specific setup, and Sponza's setup scripts still prepare its
-external asset tree. They are therefore not being declared obsolete wholesale.
+The per-application launchers are gone. Eleven of them predated project and app
+discovery, and each carried its own copy of the Vulkan environment because a
+project had no way to say what it contained — so every application needed a
+front door of its own. There is one now, and copying a launcher to obtain
+environment variables, `--frames`, discovery, or a short name is no longer a
+thing that can be done: `./blix` and `WindowOptions` own those concerns once.
 
-They are no longer the extension point for a new application. Do not copy a
-launcher merely to gain Vulkan environment variables, `--frames`, discovery, or
-a short command name. The root `./blix` front door and `WindowOptions` own those
-concerns once.
+What remains under `tools/` is not launchers. `setup-sponza-modern.sh` and
+`cook-sponza-modern.sh` prepare an external asset tree, `fetch-gltf-corpus.sh`
+pins a conformance corpus, and `lab-baseline.sh` and `check-resize.sh` are
+instruments — they drive `./blix shot` and `./blix view` and judge what comes
+back. Preparing inputs and measuring outputs are both work a front door does
+not do.
 
 ## Troubleshooting
 

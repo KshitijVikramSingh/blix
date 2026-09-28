@@ -10,10 +10,10 @@ namespace Blix.Cli;
 //   execs. It hosts nothing, provides nothing, and an app does not know it exists:
 //   an app is still a Main, and this only learns how to FIND it.
 //
-//   It is also where the MoltenVK/DYLD prologue lives, once. Fourteen launcher
-//   scripts carried an identical copy of it because there was nowhere else to put
-//   it — not because packaging was missing, but because a project had no way to say
-//   what it contains. The prologue is in tools/blix, which execs this binary.
+//   It is also where the MoltenVK/DYLD prologue lives, once. Eleven launcher scripts
+//   carried an identical copy of it because there was nowhere else to put it — not
+//   because packaging was missing, but because a project had no way to say what it
+//   contains. All eleven are deleted; the prologue is in ./blix, which execs this.
 //
 // ── Why this is a binary and the prologue is a script ───────────────────────
 //   The environment has to be set before the process starts and has to survive into
@@ -294,8 +294,33 @@ public static class Program
         }
     }
 
+    /// <summary>
+    /// Run one app, having first said whether it is what your sources would build.
+    /// </summary>
+    /// <remarks>
+    /// <b>blix's own options come BEFORE the app name; everything after it belongs to the app.</b>
+    /// The boundary has to be somewhere and it cannot be a list of names, because an app is free
+    /// to take a <c>--build</c> of its own and this must not eat it. Position says whose an
+    /// argument is without either side having to know about the other.
+    /// </remarks>
     private static int Run(string[] args)
     {
+        var build = false;
+        var first = 0;
+        for (; first < args.Length; first++)
+        {
+            if (args[first] is "--build" or "-b") { build = true; continue; }
+            if (args[first].StartsWith('-'))
+            {
+                throw new BlixCliException(
+                    $"'{args[first]}' is not an option of run. There is --build (-b), and every other " +
+                    "argument goes to the app, so it belongs AFTER the app's name.");
+            }
+
+            break;
+        }
+
+        args = args.Skip(first).ToArray();
         if (args.Length == 0) throw new BlixCliException("run what? `blix ls` shows this project's apps.");
 
         var rest = args.Skip(1).ToArray();
@@ -303,10 +328,102 @@ public static class Program
 
         if (app.Stale)
         {
-            Console.Error.WriteLine($"blix: the index for '{app.Name}' is older than its assembly — rebuilding.");
+            Console.Error.WriteLine(
+                $"blix: the index for '{app.Name}' is older than its assembly, so this may not be all " +
+                "of what that assembly declares. Build it to be sure.");
+        }
+
+        if (build)
+        {
+            if (Build(app) is var code and not 0) return code;
+        }
+        else if (Freshness.Check(app.SourceProject, app.Assembly) is { } stale)
+        {
+            // Reported, then run anyway. The person asked to run something and may well have
+            // meant the old one -- comparing against a build is a normal thing to want. What
+            // they cannot do is notice this for themselves, so the only job here is to say it.
+            Console.Error.WriteLine(
+                $"blix: '{app.Name}' was built before {Relative(stale.Source)} changed " +
+                $"({Ago(stale.SourceWritten, stale.Built)} newer). Running it anyway — " +
+                "pass --build, or run `dotnet build`, for what your sources say.");
         }
 
         return Launch(app, rest);
+    }
+
+    /// <summary>Build the project an app came from, and hand back dotnet's verdict.</summary>
+    /// <remarks>
+    /// The configuration comes from the resolved assembly's own path rather than from an
+    /// environment variable: `blix run` may have picked a Release build, and rebuilding Debug
+    /// because that is the default would leave the person running the very binary they just
+    /// asked to replace.
+    /// </remarks>
+    private static int Build(App app)
+    {
+        if (app.SourceProject is not { Length: > 0 } project || !File.Exists(project))
+        {
+            throw new BlixCliException(
+                $"--build needs the project '{app.Name}' was built from, and its index does not name one. " +
+                "Run `dotnet build` once and the index it writes will.");
+        }
+
+        var start = new ProcessStartInfo(Muxer()) { UseShellExecute = false };
+        foreach (var argument in new[] { "build", project, "-c", Configuration(app.Assembly), "--nologo" })
+        {
+            start.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(start)
+            ?? throw new BlixCliException($"could not start a build of {project}");
+        process.WaitForExit();
+        return process.ExitCode;
+    }
+
+    /// <summary>The configuration an output path was built in, defaulting the way the front door does.</summary>
+    private static string Configuration(string assembly)
+    {
+        var parts = assembly.Split(Path.DirectorySeparatorChar);
+        var bin = Array.LastIndexOf(parts, "bin");
+        return bin >= 0 && bin + 1 < parts.Length
+            ? parts[bin + 1]
+            : Environment.GetEnvironmentVariable("BLIX_CONFIG") is { Length: > 0 } configured
+                ? configured
+                : "Debug";
+    }
+
+    /// <summary>
+    /// The dotnet to spawn, which is never the one on PATH if there is a better answer.
+    /// </summary>
+    /// <remarks>
+    /// DOTNET_ROOT first, deliberately. Homebrew's `dotnet` on PATH is a "#!/bin/bash" shim and
+    /// /bin/bash is SIP-protected, so going through it would strip the DYLD_* this process was so
+    /// carefully given. The real binary under DOTNET_ROOT is not a shim and keeps the environment
+    /// intact. Shared by running and building so the two cannot come to different answers.
+    /// </remarks>
+    private static string Muxer()
+    {
+        var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT");
+        return dotnetRoot is not null && File.Exists(Path.Combine(dotnetRoot, "dotnet"))
+            ? Path.Combine(dotnetRoot, "dotnet")
+            : "dotnet";
+    }
+
+    /// <summary>A path as the person would type it, when it is below where they are standing.</summary>
+    private static string Relative(string path)
+    {
+        var from = Directory.GetCurrentDirectory();
+        var relative = Path.GetRelativePath(from, path);
+        return relative.StartsWith("..", StringComparison.Ordinal) ? path : relative;
+    }
+
+    /// <summary>How much newer one moment is than another, in the coarsest unit that still says it.</summary>
+    private static string Ago(DateTime source, DateTime built)
+    {
+        var gap = source - built;
+        if (gap.TotalDays >= 1) return $"{(int)gap.TotalDays}d";
+        if (gap.TotalHours >= 1) return $"{(int)gap.TotalHours}h";
+        if (gap.TotalMinutes >= 1) return $"{(int)gap.TotalMinutes}m";
+        return $"{Math.Max(1, (int)gap.TotalSeconds)}s";
     }
 
     /// <summary>
@@ -363,16 +480,7 @@ public static class Program
         }
         else if (File.Exists(app.Assembly))
         {
-            // DOTNET_ROOT first, deliberately. Homebrew's `dotnet` on PATH is a
-            // "#!/bin/bash" shim and /bin/bash is SIP-protected, so going through it
-            // would strip the DYLD_* this process was so carefully given. The real
-            // binary under DOTNET_ROOT is not a shim and keeps the environment intact.
-            var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT");
-            var muxer = dotnetRoot is not null && File.Exists(Path.Combine(dotnetRoot, "dotnet"))
-                ? Path.Combine(dotnetRoot, "dotnet")
-                : "dotnet";
-
-            start = new ProcessStartInfo(muxer) { UseShellExecute = false };
+            start = new ProcessStartInfo(Muxer()) { UseShellExecute = false };
             start.ArgumentList.Add(app.Assembly);
         }
         else
@@ -498,11 +606,15 @@ public static class Program
         to.WriteLine();
         to.WriteLine("  blix ls                    what this project has");
         to.WriteLine("  blix run <app> [args...]   run one; args after the name are the app's own");
+        to.WriteLine("  blix run --build <app>     build it first (-b); blix's own options go BEFORE the name");
         to.WriteLine("  blix run <project>:<app>   reach across folders");
         to.WriteLine("  blix publish <app>         build a distributable; --target <rid>");
         to.WriteLine();
         to.WriteLine("A project is the nearest folder above you with a blix.project marker,");
         to.WriteLine("a solution, or a repository in it.");
+        to.WriteLine();
+        to.WriteLine("run does not build. It says so when what it is about to run is older than");
+        to.WriteLine("your sources, and runs it anyway — the point is that you can tell.");
         return code;
     }
 

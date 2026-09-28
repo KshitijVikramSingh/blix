@@ -7,10 +7,10 @@
 #
 # ── Why this script exists at all ───────────────────────────────────────────
 # Everything below the `exec` is the environment a headed Blix app needs, and it is
-# the ONLY reason this is a script rather than just a binary. Fourteen launchers under
-# tools/ each carried an identical copy of these eleven lines — not because packaging
-# was missing, but because a project had no way to say what it contains, so every app
-# needed its own front door. This is that front door, once.
+# the ONLY reason this is a script rather than just a binary. Eleven launchers under
+# tools/ each carried an identical copy of these lines — not because packaging was
+# missing, but because a project had no way to say what it contains, so every app
+# needed its own front door. This is that front door, and now the only one.
 #
 # It execs the APPHOST, never `dotnet blix.dll`: Homebrew's dotnet is a "#!/bin/bash"
 # wrapper, /bin/bash is SIP-protected, and dyld strips DYLD_* from a SIP-protected
