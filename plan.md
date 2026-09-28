@@ -108,6 +108,39 @@ Homebrew, no installed .NET, no Vulkan SDK and no OpenAL, and it launches. That
 sentence *is* the definition of runtime closure, and it is the only test that
 cannot be passed by accident on a developer's box.
 
+### What a first attempt established, 2026-09-28
+
+Measured by hand-building a closed bundle and running it with Homebrew off the
+search path. None of this is built yet; it is what the next attempt should not
+have to rediscover.
+
+- **Pre-loading `libvulkan` does NOT satisfy GLFW.** `MoltenVkBootstrap`'s
+  header claims that once the library is mapped by absolute path, dyld answers
+  later bare-name `dlopen`s from the existing image. It does not — tested with
+  both `libvulkan.dylib` and the exact `libvulkan.1.dylib` soname GLFW asks
+  for. `DYLD_FALLBACK_LIBRARY_PATH` is doing all the work today, and that
+  comment is wrong.
+- **Therefore the bundle needs the variable set before exec**, which a shell
+  does and Finder does not. Either a launcher shim as `CFBundleExecutable`, an
+  `LSEnvironment` entry, or the process re-execing itself. Not yet chosen.
+- **A bundled MoltenVK plus a bundle-relative ICD manifest works.** Pointing
+  `VK_ICD_FILENAMES` at a json inside `Contents/Resources` whose
+  `library_path` is relative to itself drove the app correctly.
+- **A bundled copy of the Khronos loader does not.** Same app, same ICD, only
+  the loader swapped for a copy in the bundle: `vkCreateInstance` fails with
+  `ErrorExtensionNotPresent`. Unexplained, and worth understanding before
+  choosing to ship the loader at all.
+- **Dropping the loader and letting MoltenVK answer directly gets further and
+  then hits Silk.** `Vk.GetApi()` resolves Vulkan through its own name list,
+  which is not GLFW's, and fails when MoltenVK wears the loader's filename.
+  So a loader-less bundle needs Silk's resolver pointed at MoltenVK too.
+
+One thing did come out of it and is already in: the instance no longer requests
+`VK_KHR_portability_enumeration` unconditionally on macOS. That is a loader
+extension, absent when talking to MoltenVK directly, and requesting it failed
+instance creation outright. It is now asked for only when the runtime offers
+it, which is correct whether or not anything is ever bundled.
+
 Development assumes Homebrew throughout — `./blix` sets `DYLD_FALLBACK_LIBRARY_PATH`
 and the MoltenVK ICD, `MoltenVkBootstrap` probes Homebrew, `OpenALAudioDevice`
 probes Homebrew. That is reasonable *bootstrap* and cannot be the release story:
