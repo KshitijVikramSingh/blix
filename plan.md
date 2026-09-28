@@ -165,6 +165,14 @@ bundled one; zero images mapped from `/opt/homebrew`; OpenAL resolving to
 requirement; and a Launch Services double-click running all 12,000 frames in
 the same 10.0s as a direct run.
 
+**A correction, 2026-09-28.** The commit that made publish judge its own output claimed
+signing failure was fatal. It was not: the `throw` sat inside a `try` whose
+`catch (Exception)` swallowed it, so a failed signature printed and publish returned 0.
+Measured with a bogus identity — exit 0, and the message arrived doubled, which was the
+catch wrapping its own throw. The catch is now narrow, and the signature is VERIFIED
+after it is applied rather than assumed from codesign's exit code, so the order is
+assemble → verify closure → sign → verify signature. Both failures park the bundle.
+
 **The acceptance test above is still unrun.** Every measurement here was taken
 on the machine that built the bundle, and "zero images from `/opt/homebrew`" is
 the strongest available proxy for a clean Mac, not a substitute for one. No
