@@ -90,6 +90,13 @@ is one step in `ci.yml` — deliberately not taken here rather than slipped in.
 **Linux is absent from the CI matrix.** A second red job teaches nothing the first
 has not; the shape of what Windows needed should be known before it is copied.
 
+**The Studio baseline needs re-recording.** `.baseline/` is local and gitignored; the
+set on this machine dates from 2026-09-17, and 15 of its 68 artifacts no longer match.
+Every `.log` and `.exit` does, so the pose fingerprints, travel numbers and exit codes
+are unchanged and only pixels moved — the picture was looked at and is right. Bisecting
+which commit moved it was abandoned as not worth the hunt. Re-record with
+`tools/lab-baseline.sh record`; until then the control is expired, not failing.
+
 ---
 
 ## Deferred until something asks

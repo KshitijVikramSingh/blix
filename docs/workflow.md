@@ -294,6 +294,22 @@ fails, and returns one final exit code. This is the quick, routine verification
 tier chosen by the project; it is not a claim that every expensive scenario or
 visual comparison belongs in every edit-build loop.
 
+Like `run`, the gate does not build. When any leg's output is older than the
+sources it was built from, the verdict is qualified where you read it:
+
+```text
+demos: all 1 green
+demos: but 1 of 1 ran a build older than your sources — ... That verdict is
+about what is on disk. Pass --build, or run `dotnet build`, to make it about
+your code.
+```
+
+`./blix test --build` (`-b`) builds each leg's project first, once per project,
+and a leg that fails to build fails the gate instead of running its previous
+binary. A green gate over stale binaries is not a wrong answer — it is a right
+answer to a question nobody asked — which is why it is said next to the verdict
+rather than thousands of lines above it.
+
 From a nested project, invoke the same root script while keeping that directory
 as the project scope:
 

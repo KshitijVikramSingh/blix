@@ -518,12 +518,44 @@ public static class Program
                 "    test: <app>, <app>, ...");
         }
 
+        // --build is consumed wherever it appears rather than only in front, because every
+        // argument a gate takes is an option -- there is no app name here to put a boundary
+        // after, so run's positional rule has nothing to bite on. A gate leg is a test suite;
+        // none takes a --build of its own, and one that did would be told this ate it.
+        var build = args.Any(a => a is "--build" or "-b");
+        args = args.Where(a => a is not ("--build" or "-b")).ToArray();
+
         var apps = Discover(root);
         var failed = new List<string>();
+        var stale = new List<string>();
+        var built = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var name in marker.Gate)
         {
             var app = Resolve(apps, name);
+
+            if (build)
+            {
+                // Once per project, not once per leg: several suites can share one.
+                if (app.SourceProject is not { Length: > 0 } project)
+                {
+                    // Said rather than skipped. Being asked to build and quietly not building is
+                    // the same silence this whole check exists to break, and it would be read as
+                    // "built and still green".
+                    Console.Error.WriteLine(
+                        $"blix: '{app.Name}' has no project recorded in its index, so --build cannot " +
+                        "reach it. It is about to run as it stands.");
+                }
+                else if (built.Add(project) && Build(app) != 0)
+                {
+                    failed.Add($"{app.Name} (build)");
+                    continue;
+                }
+            }
+            else if (Freshness.Check(app.SourceProject, app.Assembly) is { } old)
+            {
+                stale.Add($"{app.Name} (older than {Relative(old.Source)})");
+            }
             Console.WriteLine();
             Console.WriteLine($"=== {app.Name}");
 
@@ -551,11 +583,28 @@ public static class Program
         if (failed.Count == 0)
         {
             Console.WriteLine($"{marker.Name}: all {marker.Gate.Length} green");
-            return 0;
+        }
+        else
+        {
+            Console.Error.WriteLine(
+                $"{marker.Name}: {failed.Count} of {marker.Gate.Length} failed — {string.Join(", ", failed)}");
         }
 
-        Console.Error.WriteLine($"{marker.Name}: {failed.Count} of {marker.Gate.Length} failed — {string.Join(", ", failed)}");
-        return 1;
+        // <b>Said next to the verdict, because the verdict is the thing that is wrong.</b>
+        // A gate exists to be believed, and "all 8 green" from binaries older than the change
+        // they are supposed to judge is the most expensive sentence this tool can print -- it
+        // is not a wrong answer, it is a right answer to a question nobody asked. Put at the
+        // top it would scroll past several thousand lines of test output; put here it is the
+        // last thing read.
+        if (stale.Count > 0)
+        {
+            Console.Error.WriteLine(
+                $"{marker.Name}: but {stale.Count} of {marker.Gate.Length} ran a build older than your sources " +
+                $"— {string.Join(", ", stale)}. That verdict is about what is on disk. " +
+                "Pass --build, or run `dotnet build`, to make it about your code.");
+        }
+
+        return failed.Count == 0 ? 0 : 1;
     }
 
     /// <summary>
@@ -608,6 +657,7 @@ public static class Program
         to.WriteLine("  blix run <app> [args...]   run one; args after the name are the app's own");
         to.WriteLine("  blix run --build <app>     build it first (-b); blix's own options go BEFORE the name");
         to.WriteLine("  blix run <project>:<app>   reach across folders");
+        to.WriteLine("  blix test [--build]        run this project's gate; -b builds each leg first");
         to.WriteLine("  blix publish <app>         build a distributable; --target <rid>");
         to.WriteLine();
         to.WriteLine("A project is the nearest folder above you with a blix.project marker,");
