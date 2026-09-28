@@ -148,9 +148,11 @@ var t = new TestRunner();
 {
     var input = new InputState();
 
-    input.RecordMouseMove(new Vector2(10, 10), new Vector2(10, 10));
-    input.RecordMouseMove(new Vector2(14, 13), new Vector2(4, 3));
-    input.RecordMouseMove(new Vector2(20, 13), new Vector2(6, 0));
+    // The first sample only establishes a place; there is nothing to have moved FROM yet.
+    input.RecordMousePosition(new Vector2(0, 0), eligible: true);
+    input.RecordMousePosition(new Vector2(10, 10), eligible: true);
+    input.RecordMousePosition(new Vector2(14, 13), eligible: true);
+    input.RecordMousePosition(new Vector2(20, 13), eligible: true);
     input.BeginTick();
 
     t.Expect("D.1 position is the LATEST sample, not a sum",
@@ -162,6 +164,41 @@ var t = new TestRunner();
     t.Expect("D.3 delta resets when nothing moved", input.MouseDelta == Vector2.Zero);
     t.Expect("D.4 position does NOT reset — it is where the pointer is",
         input.MousePosition == new Vector2(20, 13));
+
+    // ── movement the application was not entitled to ────────────────────────────────────────
+    //
+    // A pointer that travels while the window is unfocused, or while a panel has captured it, has
+    // still travelled. Differencing the next sample against the last one the APPLICATION saw hands
+    // it every millimetre in a single frame — a camera that snaps when you come back from another
+    // window, which reads as a bug in the camera and is a bug in the bookkeeping.
+    input.BeginTick();
+    input.ReleaseAll();                                              // focus lost
+    input.RecordMousePosition(new Vector2(900, 700), eligible: true); // and the pointer is far away
+    input.BeginTick();
+    t.Expect("D.7 the first sample after focus loss is a place, not a journey",
+        input.MouseDelta == Vector2.Zero, input.MouseDelta.ToString());
+    t.Expect("D.8 and position DOES jump, because that is where the pointer is",
+        input.MousePosition == new Vector2(900, 700), input.MousePosition.ToString());
+
+    input.RecordMousePosition(new Vector2(905, 700), eligible: true);
+    input.BeginTick();
+    t.Expect("D.9 the sample after that deltas normally again",
+        input.MouseDelta == new Vector2(5, 0), input.MouseDelta.ToString());
+
+    // The same rule with a panel holding the pointer: the origin keeps following, so coming back
+    // costs no jump either — and the movement made over the panel was never the application's.
+    input.RecordMousePosition(new Vector2(600, 400), eligible: false);
+    input.RecordMousePosition(new Vector2(640, 430), eligible: false);
+    input.BeginTick();
+    t.Expect("D.10 movement while a UI owns the pointer is not the application's",
+        input.MouseDelta == Vector2.Zero, input.MouseDelta.ToString());
+    t.Expect("D.11 and the application's position does not follow it either",
+        input.MousePosition == new Vector2(905, 700), input.MousePosition.ToString());
+
+    input.RecordMousePosition(new Vector2(645, 430), eligible: true);
+    input.BeginTick();
+    t.Expect("D.12 and handing it back costs one step, not the whole excursion",
+        input.MouseDelta == new Vector2(5, 0), input.MouseDelta.ToString());
 
     input.RecordMouseWheel(new Vector2(0, 1));
     input.RecordMouseWheel(new Vector2(0, 2));

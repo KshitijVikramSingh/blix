@@ -454,6 +454,30 @@ its recording surface, because a host is not the only legitimate driver — a te
 replay and a recorded demo are the same shape — but game code receives a type it cannot
 rewrite mid-frame. "Fixed for the length of an update" is enforced rather than promised.
 
+### Eligibility, once the idea had a name
+
+Focus turned out to be an eligibility boundary in three places, not one, and the third
+only became visible once the first two had made the concept explicit.
+
+**A pointer that moves while the application cannot see it has still moved.** Delta was
+the difference between the current sample and the last one the application saw — so a
+window that lost focus, a pointer taken across the screen, and a return handed the
+application every millimetre of that journey in a single frame. A camera that snaps when
+you come back from another window, which reads as a bug in the camera.
+
+Position is a place and jumps, because that is where the pointer now is. Delta is a
+quantity and does not, because the movement was not the application's.
+
+The differencing moved into `InputState` with it. Turning consecutive places into
+movement is the same temporal job as turning key events into presses, and doing it in the
+host meant the awkward case could not be written down as an assertion. `RecordMousePosition`
+takes the place and whether the application is entitled to it; the origin follows the
+pointer either way, so returning from a captured panel costs one step rather than the
+whole excursion — behaviour the old host had by accident and a naive fix would have lost.
+
+So the three eligibility gates are now one idea: **gesture ownership** for a press, **focus**
+for a polled pad, and **focus or capture** for pointer movement.
+
 ### Breaking, and deliberately
 
 `IInputHandler` is gone. Keypad digits are their own keys rather than aliases of the

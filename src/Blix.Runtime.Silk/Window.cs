@@ -466,14 +466,12 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         inputState.RecordMouseUp(MapMouseButton(button));
     }
 
-    private global::System.Numerics.Vector2 lastMousePosition;
-
     private void OnMouseMove(IMouse mouse, global::System.Numerics.Vector2 position)
     {
-        var delta = position - lastMousePosition;
-        lastMousePosition = position;
-        if (UiWantsMouse) return;
-        inputState.RecordMouseMove(position, delta);
+        // Both halves of eligibility in one place: a panel that captured the pointer, and a
+        // window that is not focused. The difference between the places is the input layer's to
+        // compute -- see InputState.RecordMousePosition for why it is not computed here.
+        inputState.RecordMousePosition(position, eligible: !UiWantsMouse && windowFocused);
     }
 
     private void OnMouseScroll(IMouse mouse, ScrollWheel wheel)
