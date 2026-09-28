@@ -223,6 +223,60 @@ public static class Program
                 "leave App.dll untouched when only Lib's method bodies changed");
             File.Delete(copied);
 
+            // ── the build files nobody imports by hand ──────────────────────
+            // The root Directory.Build.targets in this repository drives shader compilation,
+            // reflection sidecars, cooked-asset staging and app-index generation. It sits ABOVE
+            // every project directory, so the folder scan cannot reach it and adding .targets to
+            // SourceExtensions would not have either. Pinned because it is now a contract.
+            var rootTargets = Path.Combine(root, "Directory.Build.targets");
+            File.WriteAllText(rootTargets, "<Project />");
+
+            AllOld();
+            Age(rootTargets, old);
+            t.Expect("I.16 CONTROL an old Directory.Build.targets above the project says nothing",
+                Freshness.Check(appProject, assembly) is null);
+
+            Age(rootTargets, newer);
+            t.Expect("I.17 and a newer one is caught, though it is in no project folder",
+                Freshness.Check(appProject, assembly)?.Source == rootTargets);
+
+            // Nearest wins, and only the nearest is read -- which is what MSBuild does, and the
+            // reason this is worth an assertion at all. The FARTHER file is the newer one here,
+            // so a walk that collected both instead of stopping would report it and pass for the
+            // wrong reason.
+            var nearTargets = Path.Combine(appDir, "Directory.Build.targets");
+            var libTargets = Path.Combine(libDir, "Directory.Build.targets");
+            File.WriteAllText(nearTargets, "<Project />");
+            File.WriteAllText(libTargets, "<Project />");
+            Age(nearTargets, old);
+            Age(libTargets, old);
+            Age(rootTargets, newer.AddHours(3));
+
+            // BOTH projects get one, because shadowing is per project and the closure has two.
+            // Written first with only the app shadowed, which failed correctly: Lib has no near
+            // file, so Lib really does import the far one and MSBuild would too.
+            t.Expect("I.18 a nearer Directory.Build.targets shadows a farther one",
+                Freshness.Check(appProject, assembly) is null,
+                "the far file is newer; finding it would mean the walk did not stop at the first");
+
+            t.Expect("I.19 and the nearer one is what gets watched instead",
+                Freshness.ImplicitImports(appDir).Contains(nearTargets)
+                && !Freshness.ImplicitImports(appDir).Contains(rootTargets));
+
+            // props and targets are two independent walks, not one. A project can take its
+            // props from one level and its targets from another, and MSBuild imports both.
+            var rootProps = Path.Combine(root, "Directory.Build.props");
+            File.WriteAllText(rootProps, "<Project />");
+            Age(rootProps, newer.AddHours(4));
+            t.Expect("I.20 props is searched separately, so a far props still counts",
+                Freshness.Check(appProject, assembly)?.Source == rootProps,
+                "targets came from the near folder; props had to come from the far one");
+
+            File.Delete(nearTargets);
+            File.Delete(libTargets);
+            File.Delete(rootTargets);
+            File.Delete(rootProps);
+
             // ── what it must stay quiet about ───────────────────────────────
             AllOld();
             Age(appSource, newer);

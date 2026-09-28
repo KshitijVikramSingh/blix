@@ -88,7 +88,9 @@ locate_pack() {
         # pkg_b_ivy/ already, so this branch is mostly defensive). Look for
         # the first contained directory and use it.
         local first
-        first="$(find "$SCRATCH" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+        # -print -quit, not `| head -n 1`: see tools/lab-baseline.sh on head, SIGPIPE
+        # and pipefail. find stopping itself leaves nothing writing into a closed pipe.
+        first="$(find "$SCRATCH" -mindepth 1 -maxdepth 1 -type d -print -quit)"
         if [[ -n "$first" ]]; then
             mv "$first" "$out"
         else

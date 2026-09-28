@@ -62,8 +62,17 @@ bootstrap() {
     if [ -f "$output" ]; then
         # bin/ and obj/ are pruned: they hold generated sources the build itself wrote,
         # which are newer than the output by construction and would make this fire always.
+        #
+        # `-print -quit` rather than piping to `head -1`. head closes the pipe as soon as it
+        # has its line, find dies of SIGPIPE, and under `set -o pipefail` that 141 becomes the
+        # command substitution's status and `set -e` ends the script. Measured rather than
+        # assumed, because "these directories are tiny" is the kind of guard that stops being
+        # true quietly: 500 files survived, 1500 exited 141, and these two hold 3 and 2. That
+        # is a lot of headroom and no guarantee, and tools/lab-baseline.sh already carries a
+        # comment about the same shape biting it for real. -quit stops find itself, so nothing
+        # is left writing into a closed pipe.
         moved="$(find "$dir" \( -name bin -o -name obj \) -prune -o \
-                 \( -name '*.cs' -o -name '*.csproj' \) -newer "$output" -print 2>/dev/null | head -1)"
+                 \( -name '*.cs' -o -name '*.csproj' \) -newer "$output" -print -quit 2>/dev/null)"
         [ -z "$moved" ] && return 0
         echo "blix: rebuilding the $what — $(basename "$moved") is newer than it" >&2
     else

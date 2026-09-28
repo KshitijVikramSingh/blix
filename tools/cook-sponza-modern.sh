@@ -103,7 +103,9 @@ cook_pack() {
     for candidate in "$@"; do
         dir="$SRC/$candidate"
         [[ -d "$dir" ]] || continue
-        gltf=$(find "$dir" -maxdepth 1 -name '*.gltf' | head -1)
+        # -print -quit, not `| head -1`: head closes the pipe, find dies of SIGPIPE, and
+        # under pipefail that 141 ends the script. See tools/lab-baseline.sh, which learned it.
+        gltf=$(find "$dir" -maxdepth 1 -name '*.gltf' -print -quit)
         if [[ -z "$gltf" ]]; then
             echo "  $dest: no .gltf in $dir — skipped"
             return 0
