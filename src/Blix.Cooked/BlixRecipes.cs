@@ -4,7 +4,8 @@ namespace Blix.Cooked;
 
 /// <summary>A recipe, as found at run time.</summary>
 public sealed record FoundRecipe(
-    string Id, string Produces, string[] Consumes, string Summary, uint Version, MethodInfo Method)
+    string Id, string Produces, string[] Consumes, string Summary, uint Version, MethodInfo Method,
+    string SidecarFolder = "")
 {
     /// <summary>True when this recipe accepts a source file with that extension.</summary>
     public bool Accepts(string path) =>
@@ -12,6 +13,39 @@ public sealed record FoundRecipe(
 
     /// <summary>The path this recipe would write for that source, as a sibling.</summary>
     public string OutputFor(string sourcePath) => Path.ChangeExtension(sourcePath, Produces);
+
+    /// <summary>
+    /// Every path this recipe's output at <paramref name="outputPath"/> consists of.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The named output, plus whatever is in the sidecar directory it declares. Answered from the
+    /// declaration and the disk, so it is the same answer whether this run cooked or skipped —
+    /// which is the whole point: a build stages what a cook PRODUCES, and an up-to-date cook
+    /// produces exactly what it produced last time.
+    /// </para>
+    /// <para>
+    /// Missing files are not an error here. This reports a closure, not a verification; a cook
+    /// that has never run yet has an empty sidecar directory and that is a true answer.
+    /// </para>
+    /// </remarks>
+    public IEnumerable<string> OutputClosure(string outputPath)
+    {
+        ArgumentNullException.ThrowIfNull(outputPath);
+        yield return outputPath;
+
+        if (SidecarFolder.Length == 0) yield break;
+
+        var dir = Path.Combine(
+            Path.GetDirectoryName(Path.GetFullPath(outputPath)) ?? ".",
+            Path.GetFileNameWithoutExtension(outputPath) + SidecarFolder);
+        if (!Directory.Exists(dir)) yield break;
+
+        foreach (var file in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+        {
+            yield return file;
+        }
+    }
 
     /// <summary>Runs it.</summary>
     public CookOutcome Cook(CookRequest request) => (CookOutcome)Method.Invoke(null, new object[] { request })!;
@@ -44,7 +78,8 @@ public static class BlixRecipes
                 x.Attribute.Consumes.Split(';', StringSplitOptions.RemoveEmptyEntries),
                 x.Attribute.Summary,
                 x.Attribute.Version,
-                x.Method))
+                x.Method,
+                x.Attribute.SidecarFolder))
             .OrderBy(r => r.Id, StringComparer.Ordinal)
             .ToArray();
     }

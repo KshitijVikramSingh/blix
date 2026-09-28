@@ -999,6 +999,7 @@ public static class MeshRecipe
     [Recipe(BlixMesh.ShippedRecipe,
         Produces = ".blixmesh",
         Consumes = ".gltf;.glb",
+        SidecarFolder = BlixMesh.ExtractedImageFolder,
         Version = MeshRecipeVersion,
         Summary = "glTF geometry to .blixmesh, with LOD chains")]
     public static CookOutcome Cook(CookRequest request)

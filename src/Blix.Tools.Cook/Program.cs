@@ -44,6 +44,7 @@ public static class Program
             "run" => RunRecipe(args),
             "status" => Status(args),
             "batch" => Batch(args),
+            "outputs" => Outputs(args),
             "help" or "-h" or "--help" => Help(args),
             _ => UnknownVerb(args[0]),
         };
@@ -906,6 +907,91 @@ public static class Program
 
     if (cooked > 0 || skipped > 0) Console.WriteLine($"  {cooked} cooked, {skipped} skipped");
     return 0;
+}
+
+/// <summary>
+/// Report every path the cooks in a batch list produce, without cooking any of them.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>A build should stage what a cook produces, and the only thing that knows that is the
+/// cook.</b> Before this, Directory.Build.targets declared each recipe's NAMED output from the
+/// item list and then found the rest with a literal glob for <c>*.textures</c> — correct, since it
+/// ran after the cook, but it meant MSBuild held a fact about one particular recipe that the
+/// recipe had never told it. A second recipe with a second sidecar convention would have needed a
+/// second glob, in a file that should not know about either.
+/// </para>
+/// <para>
+/// A QUERY and not a side effect of cooking, because cooking is incremental: an up-to-date build
+/// skips the cook entirely, and a manifest written only when something cooked would go missing
+/// exactly when nothing needed doing. This answers from the declarations and the disk, so it says
+/// the same thing either way.
+/// </para>
+/// <para>
+/// <c>--relative-to</c> makes the paths relative to a directory, which is what lets MSBuild
+/// include them as in-cone items and have AssignTargetPaths derive the rest, exactly as the glob's
+/// matches were.
+/// </para>
+/// </remarks>
+static int Outputs(string[] args)
+{
+    var relativeTo = ValueAfterFlag(args, "--relative-to");
+    var into = ValueAfterFlag(args, "--out");
+    var positional = args.Skip(1)
+        .Where(a => !a.StartsWith("--", StringComparison.Ordinal) && a != relativeTo && a != into)
+        .ToArray();
+
+    if (positional.Length != 1)
+    {
+        Console.Error.WriteLine("Usage: blix cook outputs <list-file> [--relative-to <dir>] [--out <file>]");
+        return 2;
+    }
+
+    if (!File.Exists(positional[0]))
+    {
+        Console.Error.WriteLine($"No list file at {positional[0]}.");
+        return 2;
+    }
+
+    var recipes = Recipes();
+    var paths = new List<string>();
+    foreach (var line in File.ReadAllLines(positional[0]))
+    {
+        if (line.Length == 0) continue;
+        var parts = line.Split('\t');
+        if (parts.Length < 3) continue;
+
+        var recipe = recipes.FirstOrDefault(r => r.Id == parts[0]);
+        if (recipe is null)
+        {
+            Console.Error.WriteLine("blix cook outputs: " + RecipeCatalog.UnknownRecipe(parts[0]));
+            return 1;
+        }
+
+        foreach (var produced in recipe.OutputClosure(parts[2]))
+        {
+            paths.Add(relativeTo is null
+                ? Path.GetFullPath(produced)
+                : Path.GetRelativePath(relativeTo, Path.GetFullPath(produced)));
+        }
+    }
+
+    var lines = paths.Distinct(StringComparer.Ordinal).ToArray();
+    if (into is null)
+    {
+        foreach (var l in lines) Console.WriteLine(l);
+        return 0;
+    }
+
+    Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(into))!);
+    File.WriteAllLines(into, lines);
+    return 0;
+}
+
+static string? ValueAfterFlag(string[] args, string flag)
+{
+    var i = Array.FindIndex(args, a => a.Equals(flag, StringComparison.OrdinalIgnoreCase));
+    return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
 }
 
 // --- Out-of-place cooking -------------------------------------------------

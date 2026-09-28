@@ -133,11 +133,13 @@
        This invokes the cook host after project references have been resolved.
        A project that declares cooked assets references Blix.Tools.Cook as a
        build-only project, making the host available on the first build. -->
-  <Target Name="BlixCookAssets"
-          Condition="'@(BlixCook)' != '' AND '$(BlixCookCustomTarget)' != 'true' AND Exists('$(BlixCookDll)')"
-          BeforeTargets="AssignTargetPaths"
-          Inputs="@(BlixCook);$(BlixCookDll);@(BlixCookRecipeAssembly)"
-          Outputs="@(BlixCook -> '%(RootDir)%(Directory)%(Filename)%(Cooked)')">
+  <!-- What to cook, written every build, because two targets need it and only one of them is
+       incremental. It used to live inside BlixCookAssets, which is skipped wholesale when every
+       cooked output is current — and BlixStageCookedAssets, which is not skipped, then had no list
+       to ask about. `dotnet clean` reaches that state exactly: obj goes, the cooked assets beside
+       the sources stay, so the cook has nothing to do and the staging had nothing to read. -->
+  <Target Name="BlixCookList"
+          Condition="'@(BlixCook)' != '' AND '$(BlixCookCustomTarget)' != 'true'">
     <PropertyGroup>
       <BlixCookList>$(IntermediateOutputPath)blixcook.txt</BlixCookList>
     </PropertyGroup>
@@ -146,6 +148,14 @@
         File="$(BlixCookList)"
         Lines="@(BlixCook -> '%(Recipe)%09%(FullPath)%09%(RootDir)%(Directory)%(Filename)%(Cooked)%09%(Options)')"
         Overwrite="true" WriteOnlyWhenDifferent="false" />
+  </Target>
+
+  <Target Name="BlixCookAssets"
+          Condition="'@(BlixCook)' != '' AND '$(BlixCookCustomTarget)' != 'true' AND Exists('$(BlixCookDll)')"
+          DependsOnTargets="BlixCookList"
+          BeforeTargets="AssignTargetPaths"
+          Inputs="@(BlixCook);$(BlixCookDll);@(BlixCookRecipeAssembly)"
+          Outputs="@(BlixCook -> '%(RootDir)%(Directory)%(Filename)%(Cooked)')">
     <Message Text="Cooking @(BlixCook->Count()) asset(s)" Importance="high" />
     <Exec Command="dotnet &quot;$(BlixCookDll)&quot; batch &quot;$(BlixCookList)&quot;" />
   </Target>
@@ -154,7 +164,7 @@
        before cooking, while this item group sees files produced by this build. -->
   <Target Name="BlixStageCookedAssets"
           Condition="'@(BlixCook)' != '' AND '$(BlixCookCustomTarget)' != 'true'"
-          DependsOnTargets="BlixCookAssets"
+          DependsOnTargets="BlixCookList;BlixCookAssets"
           BeforeTargets="AssignTargetPaths">
     <ItemGroup>
       <!-- Metadata QUALIFIED with the item type it belongs to. Unqualified %(Cooked) batches
@@ -167,18 +177,36 @@
           TargetPath="@(BlixCook -> '%(RelativeDir)%(Filename)%(Cooked)')"
           CopyToOutputDirectory="PreserveNewest" />
 
-      <!-- The cook's OTHER output: a mesh carrying embedded images writes them to a
-           `<name>.textures/` directory beside the .blixmesh. Nothing declared that, so nothing
-           staged it, and on a clean build the cooked textures never reached the application at
-           all — GltfShared found no cooked sibling and silently fell back to decoding the
-           embedded PNG at runtime. Wasted work that looks exactly like working.
-           A literal glob, not a transform over @(BlixCook): a transform substitutes strings and
-           does not expand wildcards, and only the cook knows how many images a mesh had. Safe as
-           a glob here where it was fatal one target up, because this runs AFTER BlixCookAssets,
-           so the files exist by the time it expands. In-cone files need no TargetPath —
-           AssignTargetPaths derives it from the project directory. -->
-      <None Include="**\*.textures\**\*"
-            Exclude="bin\**;obj\**"
+    </ItemGroup>
+
+    <!-- The cook's OTHER output: a mesh carrying embedded images writes them to a
+         `<name>.textures/` directory beside the .blixmesh. Nothing declared that, so nothing
+         staged it, and on a clean build the cooked textures never reached the application at all —
+         GltfShared found no cooked sibling and silently fell back to decoding the embedded PNG at
+         runtime. Wasted work that looks exactly like working.
+
+         This used to be a literal glob for `**\*.textures\**\*`. It was correct, because it ran
+         after the cook — but it put a fact about ONE recipe into a file that stages every recipe,
+         and a second sidecar convention would have needed a second glob here. The recipe declares
+         its sidecar folder now (RecipeAttribute.SidecarFolder), and `blix cook outputs` reports
+         the whole closure, so this asks rather than assumes.
+
+         A QUERY, not a by-product of cooking: BlixCookAssets is incremental and skips entirely
+         when everything is current, so anything written only while cooking would be missing on
+         exactly the builds that cook nothing. Paths come back relative to the project, which makes
+         them in-cone items whose target paths AssignTargetPaths derives — the same treatment the
+         glob's matches got. -->
+    <PropertyGroup>
+      <BlixCookOutputs>$(IntermediateOutputPath)blixcook.outputs.txt</BlixCookOutputs>
+    </PropertyGroup>
+    <Exec Condition="Exists('$(BlixCookList)')"
+          Command="dotnet &quot;$(BlixCookDll)&quot; outputs &quot;$(BlixCookList)&quot; --relative-to &quot;$(MSBuildProjectDirectory)&quot; --out &quot;$(BlixCookOutputs)&quot;" />
+    <ReadLinesFromFile Condition="Exists('$(BlixCookOutputs)')" File="$(BlixCookOutputs)">
+      <Output TaskParameter="Lines" ItemName="_BlixCookProduced" />
+    </ReadLinesFromFile>
+    <ItemGroup>
+      <None Include="@(_BlixCookProduced)"
+            Condition="Exists('%(Identity)')"
             CopyToOutputDirectory="PreserveNewest" />
     </ItemGroup>
   </Target>

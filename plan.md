@@ -376,22 +376,6 @@ answer is that contact can drive weights with nothing in between.
 
 ## Carried, not scheduled
 
-**A cook should report its own output closure.** `BlixStageCookedAssets` declares a
-recipe's named output from `@(BlixCook)`, and then finds the *rest* with a literal
-glob for `**\*.textures\**\*`. That glob is inside the target and runs after the
-cook, so it is correct today and is not the load-time trap it looks like. What it
-is, is one step short of everything else in this arc: MSBuild has to know that one
-particular recipe happens to emit a directory named `*.textures`.
-
-The shape that would finish it: a cook invocation reports every path it wrote, and
-the build stages that list. Then a new recipe with a new sidecar convention needs no
-change here, and nothing outside the recipe encodes what the recipe produces. Not
-scheduled, because the glob is honest about what it is and no second sidecar
-convention exists yet to make the seam bite — but this is the last place in the
-publish path where the build knows something about a recipe that the recipe did not
-tell it.
-
-
 **Probe density.** The confirmed cause of ambient banding is probe spacing:
 over 14,072 adjacent pairs at 1.57 m, irradiance ratio is median 1.41x, p90
 5.15x, p99 25.7x. It reads worst on curtains because they are large, smooth and
