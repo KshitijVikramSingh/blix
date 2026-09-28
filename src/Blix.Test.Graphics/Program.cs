@@ -5122,6 +5122,78 @@ static ShaderInterface MinimalShader() => new(new[]
         $"imports [{string.Join(", ", constants)}] vs registered [{string.Join(", ", registered)}]");
 }
 
+// ============================================================================
+// Section BJ — an application reads its shader interface, it does not restate it.
+// ============================================================================
+//
+// <b>Thirty-eight hand-written ShaderInterface tables, each naming a set, a binding, a type, a
+// stage and a push size that the shader beside it already declared.</b> They were checked against
+// reflection before being removed, and two already disagreed: VulkanHello and VulkanGraph declared
+// the frame UBO visible to the fragment stage, which does not read it, and Pong declared a 64-byte
+// push range against a block that is 52 -- vec4 + vec2 + vec2 + vec4 + float -- with the same
+// wrong 64 written in three places.
+//
+// Neither was breaking anything the day it was found. Both are the shape that breaks later, and
+// a device only objects to some of it: an over-wide stage and an over-long push range are legal.
+//
+// What reflection cannot supply is a runtime-sized block's length -- `InstanceData instances[]`
+// reflects with block_size 0, because the count belongs to the application. That is what
+// ShaderInterface.WithBlockSize is for, and asking for it explicitly is the point: the shader
+// owns the shape, the caller owns the count.
+{
+    var srcDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    var sources = Directory.Exists(srcDir)
+        ? Directory.GetFiles(srcDir, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .ToArray()
+        : Array.Empty<string>();
+
+    t.Expect("BJ.0 CONTROL sources were found to search",
+        sources.Length >= 100, $"{sources.Length} file(s)");
+
+    // ShaderReflection builds one from the merged stages; that is the constructor's whole job.
+    // Everyone else asks it. Test sources are exempt: several exist to exercise the type itself.
+    var owner = Path.Combine(srcDir, "Blix.Graphics.Vulkan", "ShaderReflection.cs");
+    var restated = new List<string>();
+    foreach (var file in sources)
+    {
+        if (string.Equals(file, owner, StringComparison.Ordinal)) continue;
+        if (file.Contains($"{Path.DirectorySeparatorChar}Blix.Test.", StringComparison.Ordinal)) continue;
+        var lines = File.ReadAllLines(file);
+        for (var i = 0; i < lines.Length; i++)
+        {
+            // Both spellings. SpriteBatch used the target-typed one -- `ShaderInterface
+            // Interface { get; } = new(...)` -- and the first version of this check, which looked
+            // only for the named constructor, passed over it in silence. BJ.2 caught it instead,
+            // which is luck rather than design.
+            var named = lines[i].Contains("new ShaderInterface(", StringComparison.Ordinal);
+            var targetTyped = Regex.IsMatch(lines[i], @"ShaderInterface\b[^=;]*=\s*new\s*\(");
+            if (!named && !targetTyped) continue;
+            restated.Add($"{Path.GetFileName(file)}:{i + 1}");
+        }
+    }
+
+    t.Expect("BJ.1 no application builds a ShaderInterface by hand",
+        restated.Count == 0,
+        restated.Count == 0 ? "all interfaces come from reflection" : string.Join("; ", restated.Take(6)));
+
+    // And the sidecars those callers read are actually produced. A project that reflects in C#
+    // and does not emit reflection at build time fails at startup, not here, which is late.
+    var reflecting = Directory.GetFiles(srcDir, "*.csproj", SearchOption.AllDirectories)
+        .Where(p => File.ReadAllText(p).Contains("<GlslShader", StringComparison.Ordinal))
+        .ToArray();
+    var silent = reflecting
+        .Where(p => !File.ReadAllText(p).Contains("<BlixShaderReflect>true", StringComparison.Ordinal))
+        .Select(Path.GetFileNameWithoutExtension)
+        .ToArray();
+
+    t.Expect("BJ.0 CONTROL shader-bearing projects were found",
+        reflecting.Length >= 8, $"{reflecting.Length} project(s)");
+    t.Expect("BJ.2 every project with shaders emits their reflection",
+        silent.Length == 0, string.Join(", ", silent));
+}
+
 t.PrintSummary();
 return t.Failed;
 

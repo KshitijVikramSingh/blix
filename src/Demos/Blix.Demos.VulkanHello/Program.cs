@@ -107,44 +107,11 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
 
         // Per-frame UBO layout — just uViewProjection now. uModel moved to
         // push constants per the 2e per-draw lifetime tier.
-        var uniformLayout = new UniformBlockLayout(
-            TotalSize: 64,
-            Members: new[] { new UniformBlockMember("uViewProjection", Offset: 0, Size: 64) });
-
-        // Per-material tint UBO layout — vec4 at offset 0, total 16 bytes.
-        var tintLayout = new UniformBlockLayout(
-            TotalSize: 16,
-            Members: new[] { new UniformBlockMember("uTint", Offset: 0, Size: 16) });
-
-        // Declared binding contract:
-        //   set 0 binding 0  per-frame   Frame { mat4 uViewProjection }
-        //   set 2 binding 0  per-material CubeMaterial { vec4 uTint }
-        //   set 2 binding 1  per-material sampler2D uAlbedo
-        //   push constants   per-draw    PushConstants { mat4 uModel } (vertex stage)
-        // Set 1 is unused (no per-pass data on the cube); the pipeline layout
-        // carries an empty layout for it to keep set indices contiguous.
-        var cubeInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(
-                    Set: 0, Binding: 0,
-                    Type: ShaderResourceType.UniformBuffer,
-                    Stages: ShaderStages.Vertex | ShaderStages.Fragment,
-                    BlockLayout: uniformLayout),
-                new DescriptorSetSlot(
-                    Set: 2, Binding: 0,
-                    Type: ShaderResourceType.UniformBuffer,
-                    Stages: ShaderStages.Fragment,
-                    BlockLayout: tintLayout),
-                new DescriptorSetSlot(
-                    Set: 2, Binding: 1,
-                    Type: ShaderResourceType.SampledImage,
-                    Stages: ShaderStages.Fragment),
-            },
-            PushConstants: new[]
-            {
-                new PushConstantRange(ShaderStages.Vertex, Offset: 0, Size: 64),
-            });
+        // Both interfaces are READ from the shaders rather than restated. The table this
+        // replaced declared the frame UBO as Vertex | Fragment; the fragment shader does not
+        // touch it, so the hand-written stage was already wider than the truth.
+        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var cubeInterface = ShaderReflection.ForProgram(shaderDir, "cube.vert", "cube.frag");
 
         // Offscreen render target — half-resolution Rgba16F with a depth
         // attachment so the cubes' DepthState.LessEqualWrite still
@@ -161,7 +128,6 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
         offscreenSurface = surface.Handle;
         offscreenColor = surface.ColorAttachments[0];
 
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
         var vertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "cube.vert.spv"));
         var fragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "cube.frag.spv"));
         shaderProgram = vk.CreateShaderProgramFromSpv(vertSpv, fragSpv, cubeInterface, "cube");
@@ -197,13 +163,7 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
         // swapchain. Interface: one SampledImage at set 0 binding 0 — uses
         // the inline ShaderTextureBinding path (set 0 is within the
         // single-set assumption documented in Cleanup C).
-        var presentInterface = new ShaderInterface(new[]
-        {
-            new DescriptorSetSlot(
-                Set: 0, Binding: 0,
-                Type: ShaderResourceType.SampledImage,
-                Stages: ShaderStages.Fragment),
-        });
+        var presentInterface = ShaderReflection.ForProgram(shaderDir, "present.vert", "present.frag");
         var presentVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.vert.spv"));
         var presentFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.frag.spv"));
         presentShaderProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, presentFragSpv, presentInterface, "present");

@@ -197,15 +197,17 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
         // SSBO (InstanceBuffer) and the staging/draw (InstancedBatch). Fog lives
         // here, in the runner's material. The shader declares InstanceBuffer.Slot at
         // set 3 plus a 112-byte push the runner packs each frame.
-        var worldInterface = new ShaderInterface(
-            Slots: new[] { InstanceBuffer.Slot },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 112) });
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
         // The world fragment shader is cooked in two #define variants (see csproj):
         // base (no fog) and FOG. The runner wants the haze, so it selects the FOG
         // variant by convention via ShaderVariantPath — proving the cook + select
         // + load path end to end. The base variant ships alongside, unused here.
         var fog = new ShaderVariantKey("FOG");
+        // Read from the VARIANT that is actually loaded below: a #define can change what a
+        // shader declares, so reflecting the base while running FOG would be reading a
+        // different program. InstanceBuffer supplies the unsized set-3 array's length.
+        var worldInterface = InstanceBuffer.Size(
+            ShaderReflection.ForProgram(shaderDir, "world.vert", "world.FOG.frag"));
         worldShader = vk.CreateShaderProgramFromSpv(
             File.ReadAllBytes(ShaderVariantPath.Spv(shaderDir, "world", ".vert", ShaderVariantKey.Base)),
             File.ReadAllBytes(ShaderVariantPath.Spv(shaderDir, "world", ".frag", fog)),
@@ -314,13 +316,8 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
         var boneLayout = new UniformBlockLayout(
             TotalSize: charSkeleton.BoneCount * 64,
             Members: new[] { new UniformBlockMember("bones", 0, charSkeleton.BoneCount * 64, ElementStride: 64) });
-        var iface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(2, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-                new DescriptorSetSlot(3, 0, ShaderResourceType.StorageBuffer, ShaderStages.Vertex, BlockLayout: boneLayout),
-            },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 128) });
+        var iface = ShaderReflection.ForProgram(shaderDir, "skinned.vert", "skinned.frag")
+            .WithBlockSize(set: 3, binding: 0, charSkeleton.BoneCount * 64);
         skinnedShader = vk.CreateShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "skinned.vert.spv")),
             File.ReadAllBytes(Path.Combine(shaderDir, "skinned.frag.spv")), iface, "runner.skinned");
@@ -447,11 +444,8 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
         skyVb = vk.CreateVertexBuffer(new VertexBufferData(new VertexBufferDescription(fsLayout, 3, GraphicsBufferUsage.Static), bytes), "sky.vb");
         skyIb = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2 }, name: "sky.ib");
 
-        var skyInterface = new ShaderInterface(
-            Slots: Array.Empty<DescriptorSetSlot>(),
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 96) });
-
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var skyInterface = ShaderReflection.ForProgram(shaderDir, "sky.vert", "sky.frag");
         var vert = File.ReadAllBytes(Path.Combine(shaderDir, "sky.vert.spv"));
         var frag = File.ReadAllBytes(Path.Combine(shaderDir, "sky.frag.spv"));
         skyProgram = vk.CreateShaderProgramFromSpv(vert, frag, skyInterface, "sky");

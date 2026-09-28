@@ -15,6 +15,7 @@
   <PropertyGroup>
     <!-- .spv ships with the library, not into a game's output folder. -->
     <BlixShaderMode>Library</BlixShaderMode>
+    <BlixShaderReflect>true</BlixShaderReflect>
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>

@@ -16,6 +16,7 @@
   </ItemGroup>
 
   <PropertyGroup>
+    <BlixShaderReflect>true</BlixShaderReflect>
     <!-- Declares its own CompileSpirV below; the shared one stands aside. -->
     <BlixShaderCustomTarget>true</BlixShaderCustomTarget>
     <OutputType>Exe</OutputType>
@@ -85,10 +86,16 @@
     <Message Text="Compiling SPIR-V: %(GlslShader.Identity) [%(GlslShader.VariantStem)]" Importance="high" />
     <Exec Command="dotnet &quot;$(BlixShaderCompilerDll)&quot; --glslc &quot;$(Glslc)&quot; --input &quot;%(GlslShader.FullPath)&quot; --output &quot;$(BlixShaderOutDir)%(GlslShader.VariantStem)%(GlslShader.Extension).spv&quot; --include &quot;$(MSBuildProjectDirectory)/../Blix.Shaders&quot; --define &quot;%(GlslShader.Defines)&quot;" />
 
+    <!-- Reflect too, for the same reason every other project does: the interface a program
+         declares is read from here rather than restated in C#. The shared BlixReflectSpirV
+         cannot do it, because it derives names from %(Filename) and these have variant stems. -->
+    <Exec Condition="'$(BlixShaderReflect)' == 'true'"
+          Command="&quot;$(SpirvCross)&quot; &quot;$(BlixShaderOutDir)%(GlslShader.VariantStem)%(GlslShader.Extension).spv&quot; --reflect --output &quot;$(BlixShaderOutDir)%(GlslShader.VariantStem)%(GlslShader.Extension).spv.refl.json&quot;" />
+
     <!-- Globbed rather than derived from @(GlslShader): only this target knows the variant
          stems. Safe as a glob because it runs after the Exec above, in the same target. -->
     <ItemGroup>
-      <_RunnerShaderOut Include="$(BlixShaderOutDir)*.spv;$(BlixShaderOutDir)*.spv.tune.json" />
+      <_RunnerShaderOut Include="$(BlixShaderOutDir)*.spv;$(BlixShaderOutDir)*.spv.tune.json;$(BlixShaderOutDir)*.spv.refl.json" />
     </ItemGroup>
     <ItemGroup>
       <!-- Metadata qualified to the SOURCE item, and read in a second ItemGroup so it is already

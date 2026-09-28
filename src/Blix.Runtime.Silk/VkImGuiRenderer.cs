@@ -121,12 +121,7 @@ public sealed class VkImGuiRenderer : IDisposable
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
         var vertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "imgui.vert.spv"));
         var fragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "imgui.frag.spv"));
-        var imguiInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-            },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 16) });
+        var imguiInterface = ShaderReflection.ForProgram(shaderDir, "imgui.vert", "imgui.frag");
         shader = device.CreateShaderProgramFromSpv(vertSpv, fragSpv, imguiInterface, "imgui");
 
         pipeline = device.CreatePipeline(new PipelineDescription(

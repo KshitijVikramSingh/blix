@@ -120,7 +120,10 @@ internal sealed class PongGame : Game, IInputHandler
     private ShaderProgramHandle postfxShader;
     private PipelineHandle postfxPipeline;
     private FullscreenPass fullscreen = null!;
-    private readonly byte[] postfxPush = new byte[64];
+    // Sized from the shader, not from a number typed here. The hand-written interface this
+    // replaced declared a 64-byte range against a block that is 52 -- vec4 + vec2 + vec2 + vec4
+    // + float -- so the same wrong number was written in three places and nothing minded.
+    private byte[] postfxPush = Array.Empty<byte>();
 
     private AudioClipHandle paddleClip = AudioClipHandle.Invalid;
     private AudioClipHandle wallClip = AudioClipHandle.Invalid;
@@ -158,12 +161,8 @@ internal sealed class PongGame : Game, IInputHandler
         // offscreen sampled at set 0 / slot 0, params via a fragment push
         // constant. Targets the swapchain (RenderTarget: null).
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
-        var postfxInterface = new ShaderInterface(
-            Slots: new[]
-            {
-                new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment),
-            },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 64) });
+        var postfxInterface = ShaderReflection.ForProgram(shaderDir, "postfx.vert", "postfx.frag");
+        postfxPush = new byte[postfxInterface.PushConstants.Sum(r => r.Size)];
         postfxShader = vk.CreateShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "postfx.vert.spv")),
             File.ReadAllBytes(Path.Combine(shaderDir, "postfx.frag.spv")),

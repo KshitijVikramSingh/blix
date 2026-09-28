@@ -47,6 +47,22 @@ public sealed class InstanceBuffer : IDisposable
                 new UniformBlockMember("instances", 0, MaxInstances * Stride, ElementStride: Stride),
             }));
 
+    /// <summary>Bytes the whole set-3 block occupies: every instance slot, filled or not.</summary>
+    public const int BlockSize = MaxInstances * Stride;
+
+    /// <summary>
+    /// Give a reflected interface the instance block's length.
+    /// </summary>
+    /// <remarks>
+    /// The shader declares the block unsized -- <c>InstanceData instances[]</c> -- so reflection
+    /// reports it with a block size of zero, which is the truth: how many instances there are is
+    /// this class's decision and not the shader's. Composing it here means a caller derives the
+    /// set, the binding, the stage and the stride from the shader and states only the count, in
+    /// the one place that already owns it.
+    /// </remarks>
+    public static ShaderInterface Size(ShaderInterface reflected) =>
+        reflected.WithBlockSize(Slot.Set, Slot.Binding, BlockSize);
+
     private readonly VulkanGraphicsDevice device;
     private readonly MaterialBindings ssbo;
     private readonly byte[] scratch = new byte[MaxInstances * Stride];

@@ -59,6 +59,56 @@ public sealed record ShaderInterface(
     public ShaderInterface(IReadOnlyList<DescriptorSetSlot> slots)
         : this(slots, Array.Empty<PushConstantRange>()) { }
 
+    /// <summary>
+    /// Give a runtime-sized block the length only the application knows.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The one thing reflection cannot answer.</b> A storage block ending in an unsized array
+    /// -- <c>readonly buffer Bones { mat4 m[]; }</c> -- reflects with <c>block_size: 0</c> and
+    /// <c>array: [0]</c>, because how many elements there are is not in the shader. It is
+    /// <c>MaxAlive * EnemyBones</c>, and only the caller knows that.
+    /// </para>
+    /// <para>
+    /// So this is not an escape hatch from reflection, it is the boundary of what reflection
+    /// means: the shader owns the set, the binding, the type, the stages and the stride, and the
+    /// application owns the count. Saying it in one call keeps the rest of the table derived
+    /// rather than restated. Found by converting a demo and watching it die with
+    /// <c>ErrorOutOfDeviceMemory</c>, which is what a zero total size buys you.
+    /// </para>
+    /// </remarks>
+    /// <param name="set">The descriptor set the block is bound in.</param>
+    /// <param name="binding">The binding within that set.</param>
+    /// <param name="totalSize">Bytes for the whole block, elements included.</param>
+    public ShaderInterface WithBlockSize(int set, int binding, int totalSize)
+    {
+        if (totalSize <= 0) throw new ArgumentOutOfRangeException(nameof(totalSize), totalSize,
+            "a runtime-sized block needs a positive size; that is the number reflection could not give.");
+
+        var hit = false;
+        var slots = Slots.Select(slot =>
+        {
+            if (slot.Set != set || slot.Binding != binding) return slot;
+            hit = true;
+            var members = slot.BlockLayout?.Members ?? Array.Empty<UniformBlockMember>();
+            // One unsized member grows to fill the block; that is what "runtime-sized" means.
+            var grown = members.Count == 1
+                ? new[] { members[0] with { Size = totalSize } }
+                : members;
+            return slot with { BlockLayout = new UniformBlockLayout(totalSize, grown) };
+        }).ToArray();
+
+        if (!hit)
+        {
+            throw new ArgumentException(
+                $"no slot at set {set} binding {binding} to size; this interface has " +
+                $"[{string.Join(", ", Slots.Select(x => $"{x.Set}.{x.Binding}"))}]. " +
+                "A renamed or moved binding in the shader shows up here rather than as a wrong picture.");
+        }
+
+        return this with { Slots = slots };
+    }
+
     // Structural checks only. Device-feature limits (maxPushConstantsSize,
     // SSBO support) surface later at pipeline-layout / device creation.
     // Block-layout vs SPIR-V reflection is not cross-checked here.

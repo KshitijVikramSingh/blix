@@ -356,20 +356,12 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.Rgba16F, fullSize);
         sceneDepthHandle = graph.DepthTarget("scene-depth", fullSize);
 
-        // Shadow caster: instanced depth-only, pushes the sun VP (64B).
-        var casterIface = new ShaderInterface(
-            Slots: new[] { InstanceBuffer.Slot },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex, 0, 64) });
-        // World: instances (set 3) + sun shadow map (set 0, b0) + 160B push.
-        var worldIface = new ShaderInterface(
-            Slots: new[] { new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment), InstanceBuffer.Slot },
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Vertex | ShaderStages.Fragment, 0, 160) });
-        var skyIface = new ShaderInterface(
-            Slots: Array.Empty<DescriptorSetSlot>(),
-            PushConstants: new[] { new PushConstantRange(ShaderStages.Fragment, 0, 96) });
-        var presentIface = new ShaderInterface(
-            Slots: new[] { new DescriptorSetSlot(0, 0, ShaderResourceType.SampledImage, ShaderStages.Fragment) },
-            PushConstants: Array.Empty<PushConstantRange>());
+        // Each interface is read from its shaders. InstanceBuffer supplies the instance count,
+        // which is the one part of the set-3 block the shader leaves unsized.
+        var casterIface = InstanceBuffer.Size(ShaderReflection.ForProgram(shaderDir, "shadow_caster.vert", "shadow_caster.frag"));
+        var worldIface = InstanceBuffer.Size(ShaderReflection.ForProgram(shaderDir, "cube.vert", "cube.frag"));
+        var skyIface = ShaderReflection.ForProgram(shaderDir, "sky.vert", "sky.frag");
+        var presentIface = ShaderReflection.ForProgram(shaderDir, "present.vert", "present.frag");
 
         shadowPassHandle = graph.GraphicsPass("sun-shadow")
             .Depth(sunShadowHandle, LoadOp.Clear, StoreOp.Store)
