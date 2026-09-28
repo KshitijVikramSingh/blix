@@ -66,23 +66,10 @@ fi
 echo "Publishing self-contained ($RID) ..."
 dotnet publish "$PROJECT" -c Debug -r "$RID" --self-contained true -o "$PUBLISH_DIR" --nologo -v:q
 
-# CompileSpirV (the MSBuild target that runs glslc) writes into the
-# project's bin/Debug/net8.0/$RID/Shaders/ during the publish build, but
-# `dotnet publish` doesn't see those .spv files as content and skips them.
-# Mirror them over manually — they're a few KB each.
-SHADER_BUILD_DIR="$REPO_ROOT/src/Demos/Blix.Demos.VulkanSponza/bin/Debug/net8.0/$RID/Shaders"
-if [ -d "$SHADER_BUILD_DIR" ]; then
-    mkdir -p "$PUBLISH_DIR/Shaders"
-    cp -p "$SHADER_BUILD_DIR"/*.spv "$PUBLISH_DIR/Shaders/" 2>/dev/null || true
-    # The .spv.refl.json reflection sidecars are loaded at program creation
-    # (ShaderReflection); mirror them next to the .spv for the same reason.
-    cp -p "$SHADER_BUILD_DIR"/*.spv.refl.json "$PUBLISH_DIR/Shaders/" 2>/dev/null || true
-    # And the .spv.tune.json sidecars, which carry the //@tune dials the overlay builds from.
-    # That is now three hand-copied globs for the same underlying reason -- publish does not treat
-    # generated shader output as content -- which is an argument for `blix publish` owning the
-    # staging rather than every launcher repeating it. See plan.md, stage A.
-    cp -p "$SHADER_BUILD_DIR"/*.spv.tune.json "$PUBLISH_DIR/Shaders/" 2>/dev/null || true
-fi
+# Shaders and cooked assets arrive through `dotnet publish` itself: both compile to a staged
+# location and are declared as content, so publish carries them like any other item. This script
+# used to mirror them by hand afterwards, because app shaders were written straight into the
+# output directory and were never items at all. See plan.md stage A.
 
 export DYLD_FALLBACK_LIBRARY_PATH="$prefix/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}"
 # VK_ICD_FILENAMES + VK_LAYER_PATH are reread per-call by the Vulkan loader

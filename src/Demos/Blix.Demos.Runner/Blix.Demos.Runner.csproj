@@ -61,7 +61,17 @@
     <GlslShader Include="Shaders\skinned.frag" />
   </ItemGroup>
 
-  <Target Name="CompileSpirV" AfterTargets="CopyFilesToOutputDirectory">
+  <!--
+    Compiles BEFORE AssignTargetPaths and into the intermediate directory, then stages the result
+    as content, which is what the shared BlixCompileSpirV does for every other project.
+
+    It used to run after CopyFilesToOutputDirectory and write straight into $(OutDir)Shaders.
+    Those files appeared in the build output and were never MSBuild items, so `dotnet publish`
+    carried none of them and tools/run-runner.sh mirrored them by hand afterwards. The variant
+    algorithm here is genuinely this project's own (one entry per permutation, filename infix
+    from metadata), which is why BlixShaderCustomTarget exists. WHERE the output goes is not.
+  -->
+  <Target Name="CompileSpirV" BeforeTargets="AssignTargetPaths">
     <!-- Derive each item's output stem + -D flags from its optional metadata. -->
     <ItemGroup>
       <GlslShader Condition="'%(GlslShader.Variant)' == ''">
@@ -71,9 +81,24 @@
         <VariantStem>%(GlslShader.Filename).%(GlslShader.Variant)</VariantStem>
       </GlslShader>
     </ItemGroup>
-    <MakeDir Directories="$(OutDir)Shaders" />
+    <MakeDir Directories="$(BlixShaderOutDir)" />
     <Message Text="Compiling SPIR-V: %(GlslShader.Identity) [%(GlslShader.VariantStem)]" Importance="high" />
-    <Exec Command="dotnet &quot;$(BlixShaderCompilerDll)&quot; --glslc &quot;$(Glslc)&quot; --input &quot;%(GlslShader.FullPath)&quot; --output &quot;$(OutDir)Shaders\%(GlslShader.VariantStem)%(GlslShader.Extension).spv&quot; --include &quot;$(MSBuildProjectDirectory)/../Blix.Shaders&quot; --define &quot;%(GlslShader.Defines)&quot;" />
+    <Exec Command="dotnet &quot;$(BlixShaderCompilerDll)&quot; --glslc &quot;$(Glslc)&quot; --input &quot;%(GlslShader.FullPath)&quot; --output &quot;$(BlixShaderOutDir)%(GlslShader.VariantStem)%(GlslShader.Extension).spv&quot; --include &quot;$(MSBuildProjectDirectory)/../Blix.Shaders&quot; --define &quot;%(GlslShader.Defines)&quot;" />
+
+    <!-- Globbed rather than derived from @(GlslShader): only this target knows the variant
+         stems. Safe as a glob because it runs after the Exec above, in the same target. -->
+    <ItemGroup>
+      <_RunnerShaderOut Include="$(BlixShaderOutDir)*.spv;$(BlixShaderOutDir)*.spv.tune.json" />
+    </ItemGroup>
+    <ItemGroup>
+      <!-- Metadata qualified to the SOURCE item, and read in a second ItemGroup so it is already
+           materialised. Unqualified %(Filename) here batches over ContentWithTargetPath, which
+           other targets also add to, and evaluates empty. -->
+      <ContentWithTargetPath Include="@(_RunnerShaderOut)">
+        <TargetPath>Shaders\%(_RunnerShaderOut.Filename)%(_RunnerShaderOut.Extension)</TargetPath>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </ContentWithTargetPath>
+    </ItemGroup>
   </Target>
 
 </Project>

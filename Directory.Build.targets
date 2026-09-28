@@ -46,12 +46,21 @@
 
     <BlixShaderMode Condition="'$(BlixShaderMode)' == ''">App</BlixShaderMode>
 
-    <!-- Library output is project-relative; this file itself lives at the repository root. -->
+    <!-- Library output is project-relative, because a consumer picks it up through the project
+         reference; this file itself lives at the repository root. -->
     <BlixShaderOutDir Condition="'$(BlixShaderMode)' == 'Library'">$(MSBuildProjectDirectory)\Shaders\</BlixShaderOutDir>
-    <BlixShaderOutDir Condition="'$(BlixShaderOutDir)' == ''">$(OutDir)Shaders\</BlixShaderOutDir>
+    <!-- App output is INTERMEDIATE, not $(OutDir). Writing into the output directory is what made
+         these invisible to publish; from obj they are staged as content and both build and
+         publish carry them. -->
+    <BlixShaderOutDir Condition="'$(BlixShaderOutDir)' == ''">$(IntermediateOutputPath)Shaders\</BlixShaderOutDir>
 
-    <BlixShaderAfterTargets Condition="'$(BlixShaderMode)' == 'App'">CopyFilesToOutputDirectory</BlixShaderAfterTargets>
-    <BlixShaderBeforeTargets Condition="'$(BlixShaderMode)' == 'Library'">AssignTargetPaths</BlixShaderBeforeTargets>
+    <!-- Both modes now compile before AssignTargetPaths and stage as CONTENT, which is what
+         makes an app's shaders survive `dotnet publish`. App mode used to write straight into
+         $(OutDir)Shaders after CopyFilesToOutputDirectory: the files appeared in the build
+         output and were never MSBuild items, so publish, which copies items rather than whatever
+         it finds in a directory, carried none of them. That is why every launcher script hand
+         copies *.spv, and then had to learn *.spv.refl.json and *.spv.tune.json as well. -->
+    <BlixShaderBeforeTargets>AssignTargetPaths</BlixShaderBeforeTargets>
   </PropertyGroup>
 
   <!-- spirv-cross emits the runtime binding sidecar for reflected programs. -->
@@ -148,9 +157,13 @@
           DependsOnTargets="BlixCookAssets"
           BeforeTargets="AssignTargetPaths">
     <ItemGroup>
+      <!-- Metadata QUALIFIED with the item type it belongs to. Unqualified %(Cooked) batches
+           over the item being created, ContentWithTargetPath, and was only ever safe because
+           nothing else had added to that list yet. The moment a project stages its own shaders
+           into it, the build fails with "does not define a value for metadata Cooked". -->
       <ContentWithTargetPath
           Include="@(BlixCook -> '%(RootDir)%(Directory)%(Filename)%(Cooked)')"
-          Condition="Exists('%(RootDir)%(Directory)%(Filename)%(Cooked)')"
+          Condition="Exists('%(BlixCook.RootDir)%(BlixCook.Directory)%(BlixCook.Filename)%(BlixCook.Cooked)')"
           TargetPath="@(BlixCook -> '%(RelativeDir)%(Filename)%(Cooked)')"
           CopyToOutputDirectory="PreserveNewest" />
 
@@ -171,7 +184,7 @@
   </Target>
 
   <!--
-    Stage a Library-mode project's compiled shader output.
+    Stage a project's compiled shader output, in either mode.
 
     <b>Declared inside a target, for the same reason BlixStageCookedAssets is: a project's item
     globs are evaluated at LOAD, before this build produces anything.</b> Four projects used to
@@ -191,8 +204,8 @@
     by the time the copy happens. A bare %(Filename) in the TargetPath ATTRIBUTE would read as
     task batching and evaluate empty, landing every file on the directory itself.
   -->
-  <Target Name="BlixStageLibraryShaders"
-          Condition="'$(BlixShaderMode)' == 'Library' AND '@(GlslShader)' != '' AND '$(BlixShaderCustomTarget)' != 'true'"
+  <Target Name="BlixStageShaders"
+          Condition="'@(GlslShader)' != '' AND '$(BlixShaderCustomTarget)' != 'true'"
           DependsOnTargets="BlixCompileSpirV"
           BeforeTargets="AssignTargetPaths">
     <!-- Materialised first, in its own ItemGroup, so the second can self-reference their
