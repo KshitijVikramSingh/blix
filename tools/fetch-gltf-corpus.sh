@@ -25,8 +25,12 @@ FILTER="${1:-}"
 
 # Sources land in SRC_<key> rather than an associative array: macOS ships bash 3.2, where
 # `declare -A` is a syntax error, and every other launcher here runs on that bash.
-PLAN="$(mktemp -t gltf-corpus-plan)"
-CONF="$(mktemp -t gltf-corpus-conf)"
+# A full template, not `mktemp -t <prefix>`. BSD mktemp treats the argument as a prefix and
+# adds its own randomness; GNU mktemp -- which is what Git Bash ships, and therefore what a
+# Windows CI runner uses -- reads it as the template itself and refuses it with "too few X's in
+# template". Naming the directory and the X's works the same way on both.
+PLAN="$(mktemp "${TMPDIR:-/tmp}/gltf-corpus-plan.XXXXXX")"
+CONF="$(mktemp "${TMPDIR:-/tmp}/gltf-corpus-conf.XXXXXX")"
 trap 'rm -f "$PLAN" "$CONF"' EXIT
 
 # Records a download rather than performing one. Already-present files are dropped here, so

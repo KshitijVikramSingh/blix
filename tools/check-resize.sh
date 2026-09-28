@@ -20,7 +20,7 @@ cd "$REPO_ROOT"
 
 RIG="${1:-src/Demos/Blix.Demos.Runner/Assets/models/Rogue.glb}"
 CLIP="${2:-Running_A}"
-LOG="$(mktemp -t blix-resize)"
+LOG="$(mktemp "${TMPDIR:-/tmp}/blix-resize.XXXXXX")"
 
 tools/run-lab.sh --rig "$RIG" --clip "$CLIP" --instances 3 --frames 1200 > "$LOG" 2>&1 &
 APP=$!
