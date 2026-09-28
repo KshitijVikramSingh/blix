@@ -153,6 +153,20 @@
           Condition="Exists('%(RootDir)%(Directory)%(Filename)%(Cooked)')"
           TargetPath="@(BlixCook -> '%(RelativeDir)%(Filename)%(Cooked)')"
           CopyToOutputDirectory="PreserveNewest" />
+
+      <!-- The cook's OTHER output: a mesh carrying embedded images writes them to a
+           `<name>.textures/` directory beside the .blixmesh. Nothing declared that, so nothing
+           staged it, and on a clean build the cooked textures never reached the application at
+           all — GltfShared found no cooked sibling and silently fell back to decoding the
+           embedded PNG at runtime. Wasted work that looks exactly like working.
+           A literal glob, not a transform over @(BlixCook): a transform substitutes strings and
+           does not expand wildcards, and only the cook knows how many images a mesh had. Safe as
+           a glob here where it was fatal one target up, because this runs AFTER BlixCookAssets,
+           so the files exist by the time it expands. In-cone files need no TargetPath —
+           AssignTargetPaths derives it from the project directory. -->
+      <None Include="**\*.textures\**\*"
+            Exclude="bin\**;obj\**"
+            CopyToOutputDirectory="PreserveNewest" />
     </ItemGroup>
   </Target>
 
