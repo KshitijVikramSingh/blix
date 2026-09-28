@@ -72,7 +72,7 @@ public static class Program
     }
 }
 
-internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
+internal sealed class BulwarkLoop : IGameLoop, IDisposable
 {
     // Grid: GridW × GridH square cells of Cell units, centred on the world origin.
     private const int GridW = 16;
@@ -234,8 +234,6 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
     private const float SkinnedEnemyScale = 1.15f;   // visual dial
     private const float SkinnedEnemyYawFix = 0f;     // model forward → engine; dial if facing is off
 
-    // Held-key orbit state (OnKeyDown/Up is edge-triggered; apply in OnUpdate).
-    private bool orbitLeft, orbitRight, orbitUp, orbitDown;
 
     private int frameCount;
 
@@ -355,15 +353,29 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
         gameTime += dt;
         var yawRate = 1.4f;
         var pitchRate = 1.0f;
-        if (orbitLeft) camYaw -= yawRate * dt;
-        if (orbitRight) camYaw += yawRate * dt;
-        if (orbitUp) camPitch += pitchRate * dt;
-        if (orbitDown) camPitch -= pitchRate * dt;
+        // Four bools mirrored across OnKeyDown and OnKeyUp used to live here, which is a held-key
+        // set written out by hand. The keys answer for themselves now.
+        var input = host.Input;
+        if (input[Key.Left].Down) camYaw -= yawRate * dt;
+        if (input[Key.Right].Down) camYaw += yawRate * dt;
+        if (input[Key.Up].Down) camPitch += pitchRate * dt;
+        if (input[Key.Down].Down) camPitch -= pitchRate * dt;
+
+        // These ran straight out of the platform callback before, which meant a wave could start
+        // or a game restart at whatever point in the frame the event happened to arrive, rather
+        // than at a point this loop chose.
+        if (input[Key.Escape].Pressed) host.RequestClose();
+        if (input[Key.Space].Pressed && phase == Phase.Prep) StartWave();
+        if (input[Key.Enter].Pressed && phase is Phase.Won or Phase.Lost) Restart();
+
+        camDistance = Math.Clamp(camDistance - input.MouseWheel.Y * 2f, 12f, 80f);
+        (mouseX, mouseY) = (input.MousePosition.X, input.MousePosition.Y);
         // Keep the camera above the ground and short of straight-down (degenerate pick).
         camPitch = Math.Clamp(camPitch, 0.2f, 1.45f);
 
         UpdateCamera();
         UpdatePick();
+        HandleClicks(input);
 
         if (phase == Phase.Prep && autoPlay) StartWave();
 
@@ -1338,19 +1350,25 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
         return failed;
     }
 
-    public void OnMouseMove(float x, float y, float deltaX, float deltaY)
-    {
-        mouseX = x;
-        mouseY = y;
-    }
-
-    public void OnMouseDown(MouseButton button)
+    /// <summary>
+    /// Act on a click, after the pick that decides what was clicked.
+    /// </summary>
+    /// <remarks>
+    /// Called from the update rather than from a platform callback, which also fixes an ordering
+    /// this used to get by luck: a click was handled whenever the event arrived, against whatever
+    /// hover the previous frame's pick had left behind.
+    /// </remarks>
+    private void HandleClicks(InputState input)
     {
         if (!hoverValid || phase is Phase.Won or Phase.Lost) return;
+        var left = input[MouseButton.Left].Pressed;
+        var right = input[MouseButton.Right].Pressed;
+        if (!left && !right) return;
+
         var idx = hoverCz * GridW + hoverCx;
         var onEndpoint = IsSpawn(hoverCx, hoverCz) || (hoverCx == CoreCx && hoverCz == CoreCz);
 
-        if (button == MouseButton.Left)
+        if (left)
         {
             if (onEndpoint) { Console.WriteLine("  can't build on the spawn or the core"); return; }
 
@@ -1383,7 +1401,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
             Recompute();
             Console.WriteLine($"  built tower ({hoverCx}, {hoverCz}) — scrap {scrap}, {placedCount} towers");
         }
-        else if (button == MouseButton.Right && occupied[idx])
+        else if (right && occupied[idx])
         {
             var refund = 25 + 20 * (towers.TryGetValue(idx, out var t) ? t.Level - 1 : 0);
             occupied[idx] = false;
@@ -1395,35 +1413,6 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
         }
     }
 
-    public void OnMouseWheel(float offsetX, float offsetY)
-    {
-        camDistance = Math.Clamp(camDistance - offsetY * 2f, 12f, 80f);
-    }
-
-    public void OnKeyDown(Key key)
-    {
-        switch (key)
-        {
-            case Key.Escape: host.RequestClose(); break;
-            case Key.Space: if (phase == Phase.Prep) StartWave(); break;
-            case Key.Enter: if (phase is Phase.Won or Phase.Lost) Restart(); break;
-            case Key.Left: orbitLeft = true; break;
-            case Key.Right: orbitRight = true; break;
-            case Key.Up: orbitUp = true; break;
-            case Key.Down: orbitDown = true; break;
-        }
-    }
-
-    public void OnKeyUp(Key key)
-    {
-        switch (key)
-        {
-            case Key.Left: orbitLeft = false; break;
-            case Key.Right: orbitRight = false; break;
-            case Key.Up: orbitUp = false; break;
-            case Key.Down: orbitDown = false; break;
-        }
-    }
 }
 
 // ── Game state + combat actors — plain mutable data, local to the demo ──

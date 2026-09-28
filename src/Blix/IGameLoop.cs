@@ -4,8 +4,8 @@ using Blix.Graphics;
 namespace Blix;
 
 // The game-shape loop contract. Game code targets this; the runtime (Blix.Runtime.*)
-// adapts platform events to it. Input is intentionally not on this surface — implement
-// Blix.Core.IInputHandler alongside this to receive key/mouse events.
+// adapts platform events to it. Input is intentionally not on this surface and is not a
+// callback either: read IRenderHost.Input during OnUpdate, where it holds still.
 public interface IGameLoop
 {
     void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice) { }

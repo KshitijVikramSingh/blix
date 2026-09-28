@@ -352,11 +352,11 @@ backend details.
 | `IRenderHost` | `Blix.Core` | Runtime knobs: `SetTitle`, `RequestClose`, `SetCursorCaptured`, `LogicalSize`. |
 | `IAudioHost` | `Blix.Core` | Hands out the `IAudioDevice` (`Blix.Audio`) for the running session. |
 | `IDebugHost` | `Blix.Diagnostics` | Exposes the active `DebugContext` (for per-frame writes) and the full `DebugSystem` (for contributor registration, freeze, selection). |
-| `IInputHandler` | `Blix.Core` | Edge-triggered input events: `OnKeyDown/Up`, `OnMouseDown/Up`, `OnMouseMove`, `OnMouseWheel`. A press decides who owns the gesture and its matching release goes to the same place — see `Blix.Core.GestureOwnership`. So a press the UI took delivers no release to the application, and a press the application took delivers its release even if focus has since moved to a panel. |
+| `InputState` | `Blix.Core` | The frame's input, read from `IRenderHost.Input`: `Down`/`Pressed`/`Released` per key and button, `MousePosition`/`MouseDelta`/`MouseWheel`. Fixed for the length of an update. A press decides who owns the gesture and its matching release goes to the same place — see `Blix.Core.GestureOwnership`. So a press the UI took delivers no release to the application, and a press the application took delivers its release even if focus has since moved to a panel. |
 | `IUiSource` | `Blix.Core` | The application draws its own interface: `UiName`, `DrawUi()`. No UI types in the signature, so `Blix.Core` declares the hook without depending on a UI library — the application brings its own `ImGui.NET`. Independent of diagnostics: an application that produces none still gets a UI. |
 | `IRuntimeDiagnosticsSink` | `Blix.Core` | Per-frame backend introspection: receives `FrameDebugPacket` + `ResourceRegistrySnapshot`. |
 
-The game implements `IGameLoop` (in `Blix`) and optionally `IInputHandler`, `IUiSource` and `IDebuggable`. The runtime forwards events only when the interface is present.
+The game implements `IGameLoop` (in `Blix`) and optionally `IUiSource` and `IDebuggable`. The runtime forwards events only when the interface is present.
 
 **`IUiSource` and `IDebugUi` are different hooks, deliberately.** `IUiSource` (`Blix.Core`) is *the application's* interface: it exists whether or not the loop produces diagnostics, and the host builds an ImGui frame for it regardless. `IDebugUi` (`Blix.Diagnostics.Overlay`) is a *diagnostics producer's* panel, drawn by `DebugOverlayUi` inside the overlay under a header keyed on `DebugName`, and visible only when the overlay is. One is an application having a face; the other is a subsystem adding a tab to the inspector.
 

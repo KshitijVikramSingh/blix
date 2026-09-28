@@ -40,7 +40,7 @@ public static class Program
     }
 }
 
-internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposable
+internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
 {
     public string DebugName => "vulkan-lit";
 
@@ -188,7 +188,6 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
 
     // Free-fly camera + input.
     private IRenderHost host = null!;
-    private readonly HashSet<Key> heldKeys = new();
     private float camYaw;       // radians, around world +Y
     private float camPitch;     // radians, around camera right
     private bool mouseLook;     // true while RMB held (cursor captured)
@@ -723,6 +722,8 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
 
     public void OnUpdate(Time time)
     {
+        ReadInput();
+
         var dt = (float)time.Delta;
 
         // Cooked textures arrive over several frames; until the queue drains the character holds
@@ -733,13 +734,13 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         // WASD = horizontal-plane move along view forward/right; Space /
         // LeftControl = world up/down. Full-3D forward (W follows pitch).
         var move = Vector3.Zero;
-        if (heldKeys.Contains(Key.W)) move += cameraForward;
-        if (heldKeys.Contains(Key.S)) move -= cameraForward;
+        if (host.Input[Key.W].Down) move += cameraForward;
+        if (host.Input[Key.S].Down) move -= cameraForward;
         var right = Vector3.Normalize(Vector3.Cross(cameraForward, Vector3.UnitY));
-        if (heldKeys.Contains(Key.D)) move += right;
-        if (heldKeys.Contains(Key.A)) move -= right;
-        if (heldKeys.Contains(Key.Space)) move += Vector3.UnitY;
-        if (heldKeys.Contains(Key.LeftControl)) move -= Vector3.UnitY;
+        if (host.Input[Key.D].Down) move += right;
+        if (host.Input[Key.A].Down) move -= right;
+        if (host.Input[Key.Space].Down) move += Vector3.UnitY;
+        if (host.Input[Key.LeftControl].Down) move -= Vector3.UnitY;
 
         if (move != Vector3.Zero)
         {
@@ -770,81 +771,55 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         }
     }
 
-    // --- IInputHandler ----------------------------------------------------
+    // --- input -------------------------------------------------------------
 
-    public void OnKeyDown(Key key)
+    /// <summary>Read the devices, at a point this loop chose rather than whenever an event landed.</summary>
+    /// <remarks>
+    /// Every toggle here is <c>Pressed</c>. Run from the callback they were once per key-down
+    /// event, so a backend that repeats while a key is held would have flickered each of them —
+    /// a tick transition cannot, whatever the backend does.
+    /// </remarks>
+    private void ReadInput()
     {
-        heldKeys.Add(key);
-        switch (key)
+        var input = host.Input;
+
+        if (input[Key.V].Pressed) viewMode = (viewMode + 1) % ViewLabels.Length;
+        if (input[Key.P].Pressed) animPaused = !animPaused;
+        // Per-light isolation (the Silk runtime has no clickable HUD, so these live on the
+        // keyboard). State echoes to the console diag.
+        if (input[Key.Z].Pressed) sunEnabled = !sunEnabled;
+        if (input[Key.X].Pressed) spotEnabled = !spotEnabled;
+        if (input[Key.C].Pressed) pointEnabled = !pointEnabled;
+        if (input[Key.B].Pressed) bloomEnabled = !bloomEnabled;
+        if (input[Key.Up].Pressed) exposure = Math.Clamp(exposure * 1.25f, 0.05f, 16f);
+        if (input[Key.Down].Pressed) exposure = Math.Clamp(exposure * 0.8f, 0.05f, 16f);
+        if (input[Key.Escape].Pressed) host.RequestClose();
+
+        // Cursor capture follows the button's own state, rather than a bool kept in step with it
+        // across two callbacks.
+        var look = input[MouseButton.Right].Down;
+        if (look != mouseLook)
         {
-            case Key.V:
-                viewMode = (viewMode + 1) % ViewLabels.Length;
-                break;
-            case Key.P:
-                animPaused = !animPaused;
-                break;
-            // Per-light isolation (the Silk runtime has no clickable HUD, so
-            // these live on the keyboard). State echoes to the console diag.
-            case Key.Z:
-                sunEnabled = !sunEnabled;
-                break;
-            case Key.X:
-                spotEnabled = !spotEnabled;
-                break;
-            case Key.C:
-                pointEnabled = !pointEnabled;
-                break;
-            case Key.B:
-                bloomEnabled = !bloomEnabled;
-                break;
-            case Key.Up:
-                exposure = Math.Clamp(exposure * 1.25f, 0.05f, 16f);
-                break;
-            case Key.Down:
-                exposure = Math.Clamp(exposure * 0.8f, 0.05f, 16f);
-                break;
-            case Key.Escape:
-                host.RequestClose();
-                break;
+            mouseLook = look;
+            host.SetCursorCaptured(look);
         }
-    }
 
-    public void OnKeyUp(Key key) => heldKeys.Remove(key);
-
-    public void OnMouseMove(float x, float y, float deltaX, float deltaY)
-    {
-        if (!mouseLook) return;
-        const float sensitivity = 0.0035f;
-        camYaw += deltaX * sensitivity;
-        camPitch -= deltaY * sensitivity;
-        // Clamp pitch just shy of vertical to avoid gimbal flip.
-        var limit = MathF.PI / 2f - 0.01f;
-        camPitch = Math.Clamp(camPitch, -limit, limit);
-        UpdateCamera();
-    }
-
-    public void OnMouseDown(MouseButton button)
-    {
-        if (button == MouseButton.Right)
+        if (mouseLook && input.MouseDelta != Vector2.Zero)
         {
-            mouseLook = true;
-            host.SetCursorCaptured(true);
+            const float sensitivity = 0.0035f;
+            camYaw += input.MouseDelta.X * sensitivity;
+            camPitch -= input.MouseDelta.Y * sensitivity;
+            // Clamp pitch just shy of vertical to avoid gimbal flip.
+            var limit = MathF.PI / 2f - 0.01f;
+            camPitch = Math.Clamp(camPitch, -limit, limit);
+            UpdateCamera();
         }
-    }
 
-    public void OnMouseUp(MouseButton button)
-    {
-        if (button == MouseButton.Right)
+        // Scroll adjusts fly speed (1.25×/0.8× per notch), clamped sane.
+        if (input.MouseWheel.Y != 0f)
         {
-            mouseLook = false;
-            host.SetCursorCaptured(false);
+            moveSpeed = Math.Clamp(moveSpeed * (input.MouseWheel.Y > 0 ? 1.25f : 0.8f), 0.3f, 40f);
         }
-    }
-
-    public void OnMouseWheel(float offsetX, float offsetY)
-    {
-        // Scroll adjusts fly speed (1.5×/0.66× per notch), clamped sane.
-        moveSpeed = Math.Clamp(moveSpeed * (offsetY > 0 ? 1.25f : 0.8f), 0.3f, 40f);
     }
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)

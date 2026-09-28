@@ -319,17 +319,82 @@ not said; the shape of what Windows needs should be known before it is copied.
 
 **The Windows job has never been green.** That is its purpose, not a defect.
 
-## E — keyboard and gamepad completion
+## E — input state
 
-Breadth on a contract that already exists: `IInputHandler` is six methods and
-`Key` is 53 values. Finishing the keyboard enum and adding device
-connect/disconnect, buttons and axes in the same **raw** vocabulary is not
-growing the engine in a new direction — it is finishing one.
+Renamed. "Keyboard and gamepad completion" was the pressure; what it turned out to
+need was the abstraction underneath both.
 
-**Not** input actions, bindings, or remapping. That is policy, and games have
-not asked twice.
+**The engine owed a mechanism and was charging every game for it.** `IInputHandler`
+reported platform events, and a platform event is almost never what a game wants to
+know. Three reconstructions of the same missing thing had grown in the tree:
 
----
+- a `HashSet<Key>` filled on key-down and emptied on key-up — TankArena (11 reads),
+  Character.Room (7), Pong, VulkanLit, Sponza;
+- one `bool` per key doing that job by hand — Bulwark's four orbit flags, and a
+  `dragging` / `mouseLook` / `orbiting` / `panning` bool in four more places, each a
+  copy of a button's `Down` kept in step across two callbacks;
+- gameplay run straight out of the callback — `StartWave()`, `Restart()`, a pause
+  toggle — which meant it happened at platform-event time rather than at a point the
+  loop had chosen, and repeated as often as the backend chose to repeat.
+
+None of that is policy. Working out that a key went down *this tick* is reusable
+mechanism, and mechanism is the engine's job. So `InputState` is a frame-stable
+snapshot the host computes once per update, and the callback interface is **deleted**
+rather than kept alongside it — two paths that can disagree about gesture ownership is
+the same failure this tree keeps meeting.
+
+### The shape
+
+```
+Silk events + sampled devices
+        │  (event time)
+        ▼
+  physical state  ──────────→  runtime diagnostics OBSERVE here (F1, F12, `)
+        │  GestureOwnership — who owned this press
+        ▼
+  owned state
+        │  BeginTick() — exactly once, immediately before OnUpdate
+        ▼
+  InputState — what the game reads
+```
+
+`GestureOwnership` was already the middle layer and keeps its whole job. The runtime's
+diagnostic shortcuts no longer `return` after handling a key: while `Key.F12` could not
+be named, taking it was invisible; now that a game can bind it, silently removing three
+keys would be a hole nobody could see from inside their own code.
+
+### What it refuses to do
+
+No actions, no bindings, no contexts, no chords, no rebinding, no controller profiles,
+no engine-wide deadzone, and no idea that Space might mean jump. Sticks report `[-1, 1]`
+and triggers `[0, 1]` as the backend gives them. `InputDeadzone.Radial`-style helpers
+are reusable maths and can come later; a deadzone applied for everyone is aiming feel,
+which is the game's.
+
+### Decisions worth keeping
+
+- **Three fields, not two.** `Down`/`WasDown` cannot express a key tapped and released
+  inside one tick, which on a 16 ms frame is an ordinary thing for a person to do. So
+  `Down: false, Pressed: true, Released: true` is a real state, not an illegal one.
+- **`Pressed` is a tick transition, not a platform event**, so auto-repeat produces one
+  press however chatty the backend is — and what the backend actually does stops being
+  a question anyone has to answer.
+- **Position is sampled, delta and wheel are summed.** Different kinds of number.
+- **Focus loss and device loss are one rule**: both synthesise releases, because both
+  leave a game holding an input that stopped existing.
+- **`IRenderHost.Input`**, not a `Game` base class. Input is a host capability like the
+  cursor and the refresh rate, and inheritance is the shape this engine has refused.
+
+### Breaking, and deliberately
+
+`IInputHandler` is gone. Keypad digits are their own keys rather than aliases of the
+number row — below bindings, a layer is not entitled to discard the distinction, and a
+binding can always map both onto one action while the reverse is impossible.
+
+**RTSGame pins its engine version and migrates on its own schedule.** What it will need:
+implement no input interface, read `host.Input` in its update, replace `shiftHeld` and
+the four pan/turn bools with `Down`, and handle `Key.Keypad0..9` alongside
+`Key.Number0..9` if numpad control groups should keep working.
 
 ## F — the character arc's last open stage (paused)
 

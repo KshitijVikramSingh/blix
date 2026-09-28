@@ -25,7 +25,7 @@ window.Run();
 //   • The Game base loop contract driving a complete 2D game
 // ── Intentionally owns (stays local) ──
 //   • Pong rules, paddle/ball physics, scoring, the CRT look + playfield layout
-internal sealed class PongGame : Game, IInputHandler
+internal sealed class PongGame : Game
 {
     // Virtual playfield is the coordinate space gameplay logic uses; sprites
     // render straight to the swapchain through a Vulkan-NDC ortho that maps the
@@ -75,7 +75,6 @@ internal sealed class PongGame : Game, IInputHandler
 
     protected override double FixedStep => 1.0 / 120.0;
 
-    private readonly HashSet<Key> heldKeys = new();
     private readonly Random rng = new();
 
     private float leftPaddleY = PlayfieldHeight * 0.5f;
@@ -222,25 +221,22 @@ internal sealed class PongGame : Game, IInputHandler
         }
     }
 
-    void IInputHandler.OnKeyDown(Key key)
+    /// <summary>Read the devices at the top of the update, before anything acts on them.</summary>
+    private void ReadInput()
     {
-        heldKeys.Add(key);
-        if (key == Key.Escape) Host.RequestClose();
-        else if (key == Key.R)
-        {
-            ResetMatch();
-        }
-        else if (key == Key.Space)
+        var input = Host.Input;
+        if (input[Key.Escape].Pressed) Host.RequestClose();
+        if (input[Key.R].Pressed) ResetMatch();
+        if (input[Key.Space].Pressed)
         {
             if (winner != 0) ResetMatch();
             else if (waitingForServe) LaunchBall();
         }
     }
 
-    void IInputHandler.OnKeyUp(Key key) => heldKeys.Remove(key);
-
     public override void OnUpdate(Time time)
     {
+        ReadInput();
         totalTime = time.Total;
         var dt = (float)time.Delta;
         if (dt <= 0.0f) return;
@@ -273,14 +269,14 @@ internal sealed class PongGame : Game, IInputHandler
         var accelFactor = 1.0f - MathF.Exp(-step / PaddleAccelTau);
 
         var leftTarget = 0.0f;
-        if (heldKeys.Contains(Key.W)) leftTarget -= PaddleMaxSpeed;
-        if (heldKeys.Contains(Key.S)) leftTarget += PaddleMaxSpeed;
+        if (Host.Input[Key.W].Down) leftTarget -= PaddleMaxSpeed;
+        if (Host.Input[Key.S].Down) leftTarget += PaddleMaxSpeed;
         leftPaddleVel += (leftTarget - leftPaddleVel) * accelFactor;
         leftPaddleY += leftPaddleVel * step;
 
         var rightTarget = 0.0f;
-        if (heldKeys.Contains(Key.Up))   rightTarget -= PaddleMaxSpeed;
-        if (heldKeys.Contains(Key.Down)) rightTarget += PaddleMaxSpeed;
+        if (Host.Input[Key.Up].Down)   rightTarget -= PaddleMaxSpeed;
+        if (Host.Input[Key.Down].Down) rightTarget += PaddleMaxSpeed;
         rightPaddleVel += (rightTarget - rightPaddleVel) * accelFactor;
         rightPaddleY += rightPaddleVel * step;
 

@@ -1809,5 +1809,5 @@ internal sealed partial class SponzaLoop
         return bytes;
     }
 
-    // --- IInputHandler ----------------------------------------------------
+    // --- input -------------------------------------------------------------
 }

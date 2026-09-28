@@ -71,7 +71,7 @@ public static class Program
     }
 }
 
-internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable, IDisposable
+internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDisposable
 {
     public string DebugName => "vulkan-sponza";
 
@@ -828,7 +828,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IInputHandler, IDebuggable
     /// <summary>--no-hashed-alpha: use binary rather than hashed cutouts at one sample.</summary>
     private bool hashedAlpha = true;
     private static readonly GraphicsColor MultiSelectColor = new(0.95f, 0.75f, 0.2f, 1f);
-    private readonly HashSet<Key> heldKeys = new();
     private Matrix4x4 viewProj;
 
     // Sun travel direction, recomputed from overlay yaw/pitch. A cooked probe with a detected sun

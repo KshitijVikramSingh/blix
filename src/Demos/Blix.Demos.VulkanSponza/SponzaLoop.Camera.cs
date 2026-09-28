@@ -39,18 +39,21 @@ internal sealed partial class SponzaLoop
         }
 
         var dt = (float)time.Delta;
+        var input = host.Input;
+        ReadInput(input);
 
-        // Translation: WASD + Space/Ctrl. Sprint via Cmd/Super (engine's Key
-        // enum has no Shift).
+        // Translation: WASD + Space/Ctrl. Sprint via Shift, or Cmd/Super — the latter was the only
+        // one of the two the Key enum could name when this was written.
         var move = Vector3.Zero;
-        if (heldKeys.Contains(Key.W)) move += cameraForward;
-        if (heldKeys.Contains(Key.S)) move -= cameraForward;
+        if (input[Key.W].Down) move += cameraForward;
+        if (input[Key.S].Down) move -= cameraForward;
         var right = Vector3.Normalize(Vector3.Cross(cameraForward, Vector3.UnitY));
-        if (heldKeys.Contains(Key.D)) move += right;
-        if (heldKeys.Contains(Key.A)) move -= right;
-        if (heldKeys.Contains(Key.Space)) move += Vector3.UnitY;
-        if (heldKeys.Contains(Key.LeftControl)) move -= Vector3.UnitY;
-        var sprint = heldKeys.Contains(Key.LeftSuper) || heldKeys.Contains(Key.RightSuper);
+        if (input[Key.D].Down) move += right;
+        if (input[Key.A].Down) move -= right;
+        if (input[Key.Space].Down) move += Vector3.UnitY;
+        if (input[Key.LeftControl].Down) move -= Vector3.UnitY;
+        var sprint = input[Key.LeftShift].Down || input[Key.RightShift].Down
+                     || input[Key.LeftSuper].Down || input[Key.RightSuper].Down;
         var speed = sprint ? render.MoveSpeed * 3f : render.MoveSpeed;
         if (move != Vector3.Zero)
         {
@@ -61,10 +64,10 @@ internal sealed partial class SponzaLoop
         // Left/Right yaw, Up/Down pitch; matches the mouse-look sign convention.
         const float lookSpeed = 1.8f; // rad/s
         var look = lookSpeed * dt;
-        if (heldKeys.Contains(Key.Left))  camYaw -= look;
-        if (heldKeys.Contains(Key.Right)) camYaw += look;
-        if (heldKeys.Contains(Key.Up))    camPitch += look;
-        if (heldKeys.Contains(Key.Down))  camPitch -= look;
+        if (input[Key.Left].Down)  camYaw -= look;
+        if (input[Key.Right].Down) camYaw += look;
+        if (input[Key.Up].Down)    camPitch += look;
+        if (input[Key.Down].Down)  camPitch -= look;
         var pitchLimit = MathF.PI / 2f - 0.01f;
         camPitch = Math.Clamp(camPitch, -pitchLimit, pitchLimit);
 
@@ -146,51 +149,42 @@ internal sealed partial class SponzaLoop
         }
     }
 
-    public void OnKeyDown(Key key)
+    /// <summary>Read the devices once per tick, at a point this loop chose.</summary>
+    private void ReadInput(InputState input)
     {
-        heldKeys.Add(key);
-        switch (key)
+        // Cmd+C toggles the diagnostics overlay. Plain C does nothing.
+        if (input[Key.C].Pressed && (input[Key.LeftSuper].Down || input[Key.RightSuper].Down))
         {
-            // Cmd+C toggles the diagnostics overlay. Plain C does nothing.
-            case Key.C:
-                if (heldKeys.Contains(Key.LeftSuper) || heldKeys.Contains(Key.RightSuper))
-                {
-                    overlayEnabled = !overlayEnabled;
-                }
-                break;
-            // Exposure, sun, and shadow tuning live in the overlay controls;
-            // arrow keys drive the camera (see OnUpdate).
-            case Key.Escape:
-                host.RequestClose();
-                break;
+            overlayEnabled = !overlayEnabled;
         }
-    }
 
-    public void OnKeyUp(Key key) => heldKeys.Remove(key);
+        if (input[Key.Escape].Pressed) host.RequestClose();
 
-    public void OnMouseMove(float x, float y, float deltaX, float deltaY)
-    {
-        lastMouseX = x;
-        lastMouseY = y;
-        if (!mouseLook) return;
-        const float sensitivity = 0.0035f;
-        camYaw += deltaX * sensitivity;
-        camPitch -= deltaY * sensitivity;
-        var limit = MathF.PI / 2f - 0.01f;
-        camPitch = Math.Clamp(camPitch, -limit, limit);
-        UpdateCamera();
-    }
+        (lastMouseX, lastMouseY) = (input.MousePosition.X, input.MousePosition.Y);
 
-    public void OnMouseDown(MouseButton button)
-    {
-        if (button == MouseButton.Right)
+        // Cursor capture follows the button rather than a bool kept in step with it.
+        var look = input[MouseButton.Right].Down;
+        if (look != mouseLook)
         {
-            mouseLook = true;
-            host.SetCursorCaptured(true);
+            mouseLook = look;
+            host.SetCursorCaptured(look);
         }
-        else if (button == MouseButton.Left && !mouseLook)
+
+        if (mouseLook && input.MouseDelta != Vector2.Zero)
         {
-            PickAt(lastMouseX, lastMouseY);
+            const float sensitivity = 0.0035f;
+            camYaw += input.MouseDelta.X * sensitivity;
+            camPitch -= input.MouseDelta.Y * sensitivity;
+            var limit = MathF.PI / 2f - 0.01f;
+            camPitch = Math.Clamp(camPitch, -limit, limit);
+            UpdateCamera();
+        }
+
+        if (!mouseLook && input[MouseButton.Left].Pressed) PickAt(lastMouseX, lastMouseY);
+
+        if (input.MouseWheel.Y != 0f)
+        {
+            render.MoveSpeed = Math.Clamp(render.MoveSpeed * (input.MouseWheel.Y > 0 ? 1.25f : 0.8f), 0.3f, 60f);
         }
     }
 
@@ -228,7 +222,7 @@ internal sealed partial class SponzaLoop
         // Cmd-click adds/toggles; plain click replaces. The framework tracks one
         // SelectedPath (the primary, last-picked) for its highlight + inspector;
         // the full multi-select set lives here and is drawn/edited in Debug().
-        var add = heldKeys.Contains(Key.LeftSuper) || heldKeys.Contains(Key.RightSuper);
+        var add = host.Input[Key.LeftSuper].Down || host.Input[Key.RightSuper].Down;
         if (best is { } pick)
         {
             if (add)
@@ -256,17 +250,4 @@ internal sealed partial class SponzaLoop
             debugSystem.ClearSelection();
     }
 
-    public void OnMouseUp(MouseButton button)
-    {
-        if (button == MouseButton.Right)
-        {
-            mouseLook = false;
-            host.SetCursorCaptured(false);
-        }
-    }
-
-    public void OnMouseWheel(float offsetX, float offsetY)
-    {
-        render.MoveSpeed = Math.Clamp(render.MoveSpeed * (offsetY > 0 ? 1.25f : 0.8f), 0.3f, 60f);
-    }
 }

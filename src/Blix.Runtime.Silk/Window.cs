@@ -32,7 +32,6 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 {
     private readonly IWindow window;
     private readonly IGameLoop gameLoop;
-    private readonly IInputHandler? inputHandler;
     private readonly IUiSource? uiSource;
     private readonly IRuntimeDiagnosticsSink? diagnostics;
     private readonly DebugSystem? debugSystem;
@@ -52,6 +51,14 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     // NOW is wrong in both directions, and the press already answered the question.
     private readonly GestureOwnership keysHeld = new();
     private readonly GestureOwnership buttonsHeld = new();
+
+    // The application-visible half of input. GestureOwnership decides WHETHER a press reaches it;
+    // this decides what the game sees when it looks. The two are deliberately separate: ownership
+    // is about routing one gesture, and this is about holding still for the length of a tick.
+    private readonly InputState inputState = new();
+
+    /// <inheritdoc />
+    public InputState Input => inputState;
 
     // Lightweight perf HUD (F1): a debounced real-FPS readout drawn without the
     // DebugOverlayUi panels, so it measures actual frame rate at minimal cost.
@@ -74,7 +81,6 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         MoltenVkBootstrap.EnsureLoaded();
 
         this.gameLoop = gameLoop;
-        this.inputHandler = gameLoop as IInputHandler;
         this.uiSource = gameLoop as IUiSource;
         this.diagnostics = diagnostics;
 
@@ -218,6 +224,12 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     private void OnUpdate(double deltaTime)
     {
         totalTime += deltaTime;
+
+        // Exactly here, and exactly once. Everything the game reads is fixed from this line until
+        // the next update, so rendering sees what the update before it saw, and a host running
+        // several updates per rendered frame still reports a press on exactly one of them.
+        inputState.BeginTick();
+
         gameLoop.OnUpdate(new Time(totalTime, deltaTime));
     }
 
@@ -329,21 +341,22 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
     private void OnKeyDown(IKeyboard kbd, SilkKey key, int scancode)
     {
-        // The runtime's own bindings answer first, so a UI with focus cannot swallow the dump key or the
-        // overlay toggle — the two things most needed exactly when something has gone wrong.
-        if (key == SilkKey.F12 && TryDumpCurrentFrame()) return;
-        if (key == SilkKey.F1)
-        {
-            perfHudVisible = !perfHudVisible;
-            return;
-        }
+        // The runtime's own shortcuts OBSERVE, and do not consume. They still answer before any UI,
+        // so a focused panel cannot swallow the dump key or the overlay toggle — the two things
+        // most needed exactly when something has gone wrong. What changed is the `return` that
+        // used to follow: while Blix could not even name F12, taking it was invisible. Now that a
+        // game can bind Key.F12, quietly removing three keys from the keyboard would be a hole
+        // nobody could see from inside their own code. Press it while a game binds it and both
+        // things happen, which is surprising exactly once and findable immediately.
+        if (key == SilkKey.F12) TryDumpCurrentFrame();
+        if (key == SilkKey.F1) perfHudVisible = !perfHudVisible;
         if (key == SilkKey.GraveAccent && debugSystem is not null)
         {
             debugSystem.State.ShowOverlay = !debugSystem.State.ShowOverlay;
-            return;
         }
+
         if (!keysHeld.Press((int)key, UiWantsKeyboard)) return;
-        inputHandler?.OnKeyDown(MapKey(key));
+        inputState.RecordKeyDown(MapKey(key));
     }
 
     private void OnKeyUp(IKeyboard kbd, SilkKey key, int scancode)
@@ -352,7 +365,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         // release always reaching the application fixes the stranded-key case and creates its mirror: a
         // key the UI swallowed handing the application an up it never had a down for.
         if (!keysHeld.Release((int)key)) return;
-        inputHandler?.OnKeyUp(MapKey(key));
+        inputState.RecordKeyUp(MapKey(key));
     }
 
     // True once an ImGui frame has actually been built, which is when WantCapture* mean anything.
@@ -404,12 +417,17 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         if (focused) return;
         keysHeld.Clear();
         buttonsHeld.Clear();
+
+        // And tell the application, rather than merely forgetting on its behalf. Clearing
+        // ownership stops a stranded release being delivered; it does nothing about the game that
+        // is still holding W. The tick after this reports the releases as though a person let go.
+        inputState.ReleaseAll();
     }
 
     private void OnMouseDown(IMouse mouse, SilkMouseButton button)
     {
         if (!buttonsHeld.Press((int)button, UiWantsMouse)) return;
-        inputHandler?.OnMouseDown(MapMouseButton(button));
+        inputState.RecordMouseDown(MapMouseButton(button));
     }
 
     private void OnMouseUp(IMouse mouse, SilkMouseButton button)
@@ -430,7 +448,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         // It costs the overlay nothing either way: ImGui never learned button state from these callbacks,
         // it polls IsButtonPressed in BeginFrame.
         if (!buttonsHeld.Release((int)button)) return;
-        inputHandler?.OnMouseUp(MapMouseButton(button));
+        inputState.RecordMouseUp(MapMouseButton(button));
     }
 
     private global::System.Numerics.Vector2 lastMousePosition;
@@ -440,7 +458,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         var delta = position - lastMousePosition;
         lastMousePosition = position;
         if (UiWantsMouse) return;
-        inputHandler?.OnMouseMove(position.X, position.Y, delta.X, delta.Y);
+        inputState.RecordMouseMove(position, delta);
     }
 
     private void OnMouseScroll(IMouse mouse, ScrollWheel wheel)
@@ -449,7 +467,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         // forward to the game when the overlay isn't capturing the mouse.
         lastWheel += wheel.Y;
         if (UiWantsMouse) return;
-        inputHandler?.OnMouseWheel(wheel.X, wheel.Y);
+        inputState.RecordMouseWheel(new global::System.Numerics.Vector2(wheel.X, wheel.Y));
     }
 
     private bool TryDumpCurrentFrame()
@@ -884,6 +902,18 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         }
     }
 
+    /// <summary>
+    /// Silk's keyboard vocabulary to Blix's, exhaustively.
+    /// </summary>
+    /// <remarks>
+    /// <b>Every key Silk can report has a value here, and the suite checks that.</b> A missing arm
+    /// falls to <see cref="BlixKey.Unknown"/>, which is indistinguishable from a key the hardware
+    /// does not have — so an incomplete map is not a gap a consumer can see, it is a key that does
+    /// nothing for a reason nobody can find.
+    ///
+    /// Blix names its modifiers LeftX where Silk names them XLeft; that is a house style predating
+    /// this and not worth churning consumers over.
+    /// </remarks>
     private static BlixKey MapKey(SilkKey key) => key switch
     {
         SilkKey.Escape => BlixKey.Escape,
@@ -895,31 +925,123 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         SilkKey.Right => BlixKey.Right,
         SilkKey.Up => BlixKey.Up,
         SilkKey.Down => BlixKey.Down,
-        SilkKey.A => BlixKey.A, SilkKey.B => BlixKey.B, SilkKey.C => BlixKey.C, SilkKey.D => BlixKey.D,
-        SilkKey.E => BlixKey.E, SilkKey.F => BlixKey.F, SilkKey.G => BlixKey.G, SilkKey.H => BlixKey.H,
-        SilkKey.I => BlixKey.I, SilkKey.J => BlixKey.J, SilkKey.K => BlixKey.K, SilkKey.L => BlixKey.L,
-        SilkKey.M => BlixKey.M, SilkKey.N => BlixKey.N, SilkKey.O => BlixKey.O, SilkKey.P => BlixKey.P,
-        SilkKey.Q => BlixKey.Q, SilkKey.R => BlixKey.R, SilkKey.S => BlixKey.S, SilkKey.T => BlixKey.T,
-        SilkKey.U => BlixKey.U, SilkKey.V => BlixKey.V, SilkKey.W => BlixKey.W, SilkKey.X => BlixKey.X,
-        SilkKey.Y => BlixKey.Y, SilkKey.Z => BlixKey.Z,
+        SilkKey.A => BlixKey.A,
+        SilkKey.B => BlixKey.B,
+        SilkKey.C => BlixKey.C,
+        SilkKey.D => BlixKey.D,
+        SilkKey.E => BlixKey.E,
+        SilkKey.F => BlixKey.F,
+        SilkKey.G => BlixKey.G,
+        SilkKey.H => BlixKey.H,
+        SilkKey.I => BlixKey.I,
+        SilkKey.J => BlixKey.J,
+        SilkKey.K => BlixKey.K,
+        SilkKey.L => BlixKey.L,
+        SilkKey.M => BlixKey.M,
+        SilkKey.N => BlixKey.N,
+        SilkKey.O => BlixKey.O,
+        SilkKey.P => BlixKey.P,
+        SilkKey.Q => BlixKey.Q,
+        SilkKey.R => BlixKey.R,
+        SilkKey.S => BlixKey.S,
+        SilkKey.T => BlixKey.T,
+        SilkKey.U => BlixKey.U,
+        SilkKey.V => BlixKey.V,
+        SilkKey.W => BlixKey.W,
+        SilkKey.X => BlixKey.X,
+        SilkKey.Y => BlixKey.Y,
+        SilkKey.Z => BlixKey.Z,
+        SilkKey.Number0 => BlixKey.Number0,
+        SilkKey.Number1 => BlixKey.Number1,
+        SilkKey.Number2 => BlixKey.Number2,
+        SilkKey.Number3 => BlixKey.Number3,
+        SilkKey.Number4 => BlixKey.Number4,
+        SilkKey.Number5 => BlixKey.Number5,
+        SilkKey.Number6 => BlixKey.Number6,
+        SilkKey.Number7 => BlixKey.Number7,
+        SilkKey.Number8 => BlixKey.Number8,
+        SilkKey.Number9 => BlixKey.Number9,
         SilkKey.ControlLeft => BlixKey.LeftControl,
         SilkKey.ControlRight => BlixKey.RightControl,
         SilkKey.SuperLeft => BlixKey.LeftSuper,
         SilkKey.SuperRight => BlixKey.RightSuper,
         SilkKey.ShiftLeft => BlixKey.LeftShift,
         SilkKey.ShiftRight => BlixKey.RightShift,
-        // Both rows to the same value. Which physical key produced a digit is a fact about the keyboard,
-        // and no caller has ever wanted it: a control group is bound to "4", not to "the 4 above the R".
-        SilkKey.Number0 or SilkKey.Keypad0 => BlixKey.Number0,
-        SilkKey.Number1 or SilkKey.Keypad1 => BlixKey.Number1,
-        SilkKey.Number2 or SilkKey.Keypad2 => BlixKey.Number2,
-        SilkKey.Number3 or SilkKey.Keypad3 => BlixKey.Number3,
-        SilkKey.Number4 or SilkKey.Keypad4 => BlixKey.Number4,
-        SilkKey.Number5 or SilkKey.Keypad5 => BlixKey.Number5,
-        SilkKey.Number6 or SilkKey.Keypad6 => BlixKey.Number6,
-        SilkKey.Number7 or SilkKey.Keypad7 => BlixKey.Number7,
-        SilkKey.Number8 or SilkKey.Keypad8 => BlixKey.Number8,
-        SilkKey.Number9 or SilkKey.Keypad9 => BlixKey.Number9,
+        SilkKey.AltLeft => BlixKey.LeftAlt,
+        SilkKey.AltRight => BlixKey.RightAlt,
+        SilkKey.Menu => BlixKey.Menu,
+
+        SilkKey.Insert => BlixKey.Insert,
+        SilkKey.Delete => BlixKey.Delete,
+        SilkKey.Home => BlixKey.Home,
+        SilkKey.End => BlixKey.End,
+        SilkKey.PageUp => BlixKey.PageUp,
+        SilkKey.PageDown => BlixKey.PageDown,
+
+        SilkKey.CapsLock => BlixKey.CapsLock,
+        SilkKey.ScrollLock => BlixKey.ScrollLock,
+        SilkKey.NumLock => BlixKey.NumLock,
+        SilkKey.PrintScreen => BlixKey.PrintScreen,
+        SilkKey.Pause => BlixKey.Pause,
+
+        SilkKey.Apostrophe => BlixKey.Apostrophe,
+        SilkKey.Comma => BlixKey.Comma,
+        SilkKey.Minus => BlixKey.Minus,
+        SilkKey.Period => BlixKey.Period,
+        SilkKey.Slash => BlixKey.Slash,
+        SilkKey.Semicolon => BlixKey.Semicolon,
+        SilkKey.Equal => BlixKey.Equal,
+        SilkKey.LeftBracket => BlixKey.LeftBracket,
+        SilkKey.BackSlash => BlixKey.BackSlash,
+        SilkKey.RightBracket => BlixKey.RightBracket,
+        SilkKey.GraveAccent => BlixKey.GraveAccent,
+        SilkKey.World1 => BlixKey.World1,
+        SilkKey.World2 => BlixKey.World2,
+
+        SilkKey.F1 => BlixKey.F1,
+        SilkKey.F2 => BlixKey.F2,
+        SilkKey.F3 => BlixKey.F3,
+        SilkKey.F4 => BlixKey.F4,
+        SilkKey.F5 => BlixKey.F5,
+        SilkKey.F6 => BlixKey.F6,
+        SilkKey.F7 => BlixKey.F7,
+        SilkKey.F8 => BlixKey.F8,
+        SilkKey.F9 => BlixKey.F9,
+        SilkKey.F10 => BlixKey.F10,
+        SilkKey.F11 => BlixKey.F11,
+        SilkKey.F12 => BlixKey.F12,
+        SilkKey.F13 => BlixKey.F13,
+        SilkKey.F14 => BlixKey.F14,
+        SilkKey.F15 => BlixKey.F15,
+        SilkKey.F16 => BlixKey.F16,
+        SilkKey.F17 => BlixKey.F17,
+        SilkKey.F18 => BlixKey.F18,
+        SilkKey.F19 => BlixKey.F19,
+        SilkKey.F20 => BlixKey.F20,
+        SilkKey.F21 => BlixKey.F21,
+        SilkKey.F22 => BlixKey.F22,
+        SilkKey.F23 => BlixKey.F23,
+        SilkKey.F24 => BlixKey.F24,
+        SilkKey.F25 => BlixKey.F25,
+
+        SilkKey.Keypad0 => BlixKey.Keypad0,
+        SilkKey.Keypad1 => BlixKey.Keypad1,
+        SilkKey.Keypad2 => BlixKey.Keypad2,
+        SilkKey.Keypad3 => BlixKey.Keypad3,
+        SilkKey.Keypad4 => BlixKey.Keypad4,
+        SilkKey.Keypad5 => BlixKey.Keypad5,
+        SilkKey.Keypad6 => BlixKey.Keypad6,
+        SilkKey.Keypad7 => BlixKey.Keypad7,
+        SilkKey.Keypad8 => BlixKey.Keypad8,
+        SilkKey.Keypad9 => BlixKey.Keypad9,
+        SilkKey.KeypadDecimal => BlixKey.KeypadDecimal,
+        SilkKey.KeypadDivide => BlixKey.KeypadDivide,
+        SilkKey.KeypadMultiply => BlixKey.KeypadMultiply,
+        SilkKey.KeypadSubtract => BlixKey.KeypadSubtract,
+        SilkKey.KeypadAdd => BlixKey.KeypadAdd,
+        SilkKey.KeypadEnter => BlixKey.KeypadEnter,
+        SilkKey.KeypadEqual => BlixKey.KeypadEqual,
+
         _ => BlixKey.Unknown,
     };
 

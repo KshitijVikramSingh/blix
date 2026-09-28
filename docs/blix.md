@@ -22,7 +22,7 @@ using Blix.Runtime.Silk;
 using var window = new Window(new MyGame());
 window.Run();
 
-internal sealed class MyGame : Game, IInputHandler, IDebuggable
+internal sealed class MyGame : Game, IDebuggable
 {
     private readonly List<GameObject> objects = new();
     private Camera3D camera = null!;
@@ -78,8 +78,12 @@ internal sealed class MyGame : Game, IInputHandler, IDebuggable
 
     public string DebugName => "MyGame";
     public void Debug(DebugContext debug) { /* opt-in */ }
-    public void OnKeyDown(Key key) { /* opt-in */ }
-    // ... other IInputHandler methods
+    protected override void OnUpdate(Time time)
+    {
+        // Input is read, not delivered. Fixed for the length of this call.
+        if (Host.Input[Key.Space].Pressed) Jump();
+        if (Host.Input[Key.W].Down) WalkForward();
+    }
 }
 ```
 
@@ -88,7 +92,7 @@ See `src/Demos/Blix.Demos.VulkanLit/Program.cs` for a full game-layer reference 
 ## Project dependencies
 
 `Blix` references:
-- `Blix.Core` — `IRenderHost`, `IAudioHost`, `IInputHandler`, `Key`, `MouseButton`, `RenderFrameContext`, `IRuntimeDiagnosticsSink`
+- `Blix.Core` — `IRenderHost`, `IAudioHost`, `InputState`, `Key`, `MouseButton`, `RenderFrameContext`, `IRuntimeDiagnosticsSink`
 - `Blix.Geometry` — `Bounds3`/`Bounds2`, `BoundingSphere`, `Ray`, `Plane`, `Triangle`, `Capsule`, `OrientedBounds3`, `TriangleMesh3D`, `Circle`, `Capsule2D`, `OrientedBounds2`, `LineMesh2D`, `Segment2D`, `Intersection`/`Intersection2D`, `CollisionHit`, `CollisionResponse`
 - `Blix.Graphics` — `IGraphicsDevice`, `RenderCommandList`, matrix helpers
 - `Blix.Render` — `Mesh` (composed into `GameObject` / `Submesh`; the material slot is a backend-neutral `MaterialHandle` from `Blix.Graphics`)
@@ -140,7 +144,7 @@ public interface IGameLoop
 Three deliberate separations:
 
 - **Time vs render dims.** `Time` is its own value type. `RenderFrameContext` carries only `(Width, Height)` of the default framebuffer. Splitting lets render-side and update-side state diverge cleanly (fixed-step physics, time scale, pause).
-- **Input vs loop.** Input methods live on `Blix.Core.IInputHandler`, not on `IGameLoop`. Games opt in by implementing both; the runtime forwards events only when `IInputHandler` is present.
+- **Input vs loop.** Input is not on `IGameLoop` and is not delivered by callback. The host computes a frame-stable `InputState` once per update and a game reads `Host.Input` during `OnUpdate`: `Down` for a hold, `Pressed`/`Released` for the transitions, `MouseDelta` for motion. Deriving those from platform events is mechanism the engine owes; deciding that Space means jump is the game's.
 - **Diagnostics vs loop.** `IDebuggable` (in `Blix.Diagnostics`) is a separate opt-in surface.
 
 ### Game
@@ -148,7 +152,7 @@ Three deliberate separations:
 The minimum useful base. Captures `IRenderHost` and `IGraphicsDevice` once at load, exposes them as `Host` and `GraphicsDevice`. Also auto-captures `AudioDevice` from `Host as IAudioHost` and routes `OnFixedUpdate` through the engine's `FixedStepClock`.
 
 ```csharp
-internal sealed class MyGame : Game, IInputHandler, IDebuggable
+internal sealed class MyGame : Game, IDebuggable
 {
     protected override void OnLoad()
     {

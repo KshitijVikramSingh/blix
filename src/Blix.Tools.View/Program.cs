@@ -23,7 +23,7 @@ namespace Blix.Tools.View;
 //   • The shared build targets doing real work — BlixShaderMode=Library plus
 //     BlixShaderReflect, which was extracted the moment this became the second
 //     consumer that wanted it.
-//   • Chassis: IUiSource panel, IInputHandler with UI capture, host-owned --frames,
+//   • Chassis: IUiSource panel with UI capture, host-owned --frames,
 //     named views and trails.
 //   • Skeletal animation, made visible: ClipPlayer drives a pose, SkeletonGizmo
 //     draws it, and RootMotion says where a clip travels. The three composition
@@ -97,7 +97,7 @@ public static class Program
     }
 }
 
-internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHandler, IDisposable
+internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
 {
     private readonly StudioRenderer renderer = new();
     private readonly List<IStudioView> views = new();
@@ -178,7 +178,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
     // the building. StudioCamera owns the orbit; where a drag came from stays here, because the two
     // arrive by genuinely different routes (the host for one, an ImGui item for the other).
     private readonly StudioCamera camera = new(yaw: 0.7f, pitch: 0.45f, distance: 11f);
-    private bool dragging;
 
     // <b>A click is a press that did not become a drag.</b> Left-drag orbits, so selecting on the
     // press would fight the camera and selecting on every release would fire at the end of every
@@ -641,6 +640,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
     public void OnUpdate(Time time)
     {
+        ReadInput();
         cameraPosition = camera.Position;
         viewProjection = camera.ViewProjection(aspect);
 
@@ -1041,52 +1041,55 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
 
 
 
-    public void OnKeyDown(Key key)
+    /// <summary>Read the devices once per tick.</summary>
+    /// <remarks>
+    /// The click-versus-drag gesture survives intact and gets simpler: a press starts it, the
+    /// button's own <c>Down</c> continues it, and the release decides whether the pointer moved far
+    /// enough to have been a drag. The <c>dragging</c> bool this replaces was a third copy of the
+    /// button's state, kept in step by hand across two callbacks.
+    /// </remarks>
+    private void ReadInput()
     {
-        if (session is null) return;
-        switch (key)
+        if (host is not { } h) return;
+        var input = h.Input;
+        pointer = input.MousePosition;
+
+        if (session is not null)
         {
-            case Key.Space:
+            if (input[Key.Space].Pressed)
+            {
                 session.Driven.Subject.Paused = !session.Driven.Subject.Paused;
                 if (session.Driven.Mode != PoseMode.Single) session.Driven.Secondary.Paused = session.Driven.Subject.Paused;
-                break;
-            case Key.Left:
-                session.Driven.Subject.Step(-1.0 / 30.0);
-                session.Driven.Subject.Paused = true;
-                session.Driven.Refresh();
-                break;
-            case Key.Right:
-                session.Driven.Subject.Step(1.0 / 30.0);
-                session.Driven.Subject.Paused = true;
-                session.Driven.Refresh();
-                break;
+            }
+
+            if (input[Key.Left].Pressed) StepBy(-1.0 / 30.0);
+            if (input[Key.Right].Pressed) StepBy(1.0 / 30.0);
         }
-    }
 
-    public void OnMouseDown(MouseButton button)
-    {
-        if (button != MouseButton.Left) return;
-        dragging = true;
-        pressPosition = pointer;
-        pressTravel = 0f;
-    }
+        var left = input[MouseButton.Left];
+        if (left.Pressed)
+        {
+            pressPosition = pointer;
+            pressTravel = 0f;
+        }
 
-    public void OnMouseUp(MouseButton button)
-    {
-        if (button != MouseButton.Left) return;
-        dragging = false;
+        if (left.Down && input.MouseDelta != Vector2.Zero)
+        {
+            pressTravel += MathF.Abs(input.MouseDelta.X) + MathF.Abs(input.MouseDelta.Y);
+            camera.Orbit(input.MouseDelta.X, input.MouseDelta.Y);
+        }
 
         // Four logical pixels of slop, because a click always moves a little.
-        if (pressTravel <= 4f) PickAt(pressPosition);
+        if (left.Released && pressTravel <= 4f) PickAt(pressPosition);
+
+        if (input.MouseWheel.Y != 0f) camera.Zoom(input.MouseWheel.Y);
     }
 
-    public void OnMouseMove(float x, float y, float deltaX, float deltaY)
+    private void StepBy(double seconds)
     {
-        pointer = new Vector2(x, y);
-        if (!dragging) return;
-
-        pressTravel += MathF.Abs(deltaX) + MathF.Abs(deltaY);
-        camera.Orbit(deltaX, deltaY);
+        session!.Driven.Subject.Step(seconds);
+        session.Driven.Subject.Paused = true;
+        session.Driven.Refresh();
     }
 
     /// <summary>
@@ -1119,11 +1122,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IInputHand
             panels.GizmoScale,
             model,
             modelTransform);
-
-    public void OnMouseWheel(float offsetX, float offsetY)
-    {
-        camera.Zoom(offsetY);
-    }
 
     // <b>Dispose, not OnUnload.</b> OnUnload fires from the window's Closing event, which can
     // land mid-frame before the final submit — tearing down GPU resources there is a crash,
