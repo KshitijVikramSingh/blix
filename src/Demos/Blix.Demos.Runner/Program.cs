@@ -264,7 +264,7 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
         {
             var assets = new AssetDatabase()
                 .RegisterImporter(new FontImporter())
-                .LoadManifest(Path.Combine(AppContext.BaseDirectory, "Assets", "manifest.json"));
+                .LoadManifest(AppFiles.Asset("manifest.json"));
             hudFont = Font.Upload(vk, assets.Load<FontData>(AssetId.Parse("fonts/bowlby")));
         }
         catch (Exception ex)
@@ -290,7 +290,7 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
     // leaves charLoaded false and the player falls back to the placeholder box.
     private void CreateCharacter(string shaderDir)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "Assets", "models", "Rogue.glb");
+        var path = AppFiles.Asset("models", "Rogue.glb");
         GltfModel model;
         try
         {
@@ -383,7 +383,7 @@ internal sealed class RunnerLoop : IGameLoop, IInputHandler, IDebuggable
     // Returns null on any failure so the caller can fall back to the cube.
     private Mesh? LoadStaticMesh(string fileName)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "Assets", "models", fileName);
+        var path = AppFiles.Asset("models", fileName);
         try
         {
             var model = new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse($"models/{fileName}"), path));

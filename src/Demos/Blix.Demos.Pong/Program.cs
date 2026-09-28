@@ -184,7 +184,7 @@ internal sealed class PongGame : Game, IInputHandler
         {
             var assets = new AssetDatabase()
                 .RegisterImporter(new FontImporter())
-                .LoadManifest(Path.Combine(AppContext.BaseDirectory, "Assets", "manifest.json"));
+                .LoadManifest(AppFiles.Asset("manifest.json"));
             var fontData = assets.Load<FontData>(AssetId.Parse("fonts/bowlby"));
             hudFont = Font.Upload(GraphicsDevice, fontData);
         }

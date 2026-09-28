@@ -966,7 +966,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
     {
         try
         {
-            var dir = Path.Combine(AppContext.BaseDirectory, "Assets", "models");
+            var dir = AppFiles.Asset("models");
 
             Mesh NodeMesh(string file, string nodeName, string meshName)
             {
@@ -1059,7 +1059,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
     {
         try
         {
-            var path = Path.Combine(AppContext.BaseDirectory, "Assets", "models", "enemy.glb");
+            var path = AppFiles.Asset("models", "enemy.glb");
             var model = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("enemy.skinned"), path));
             if (model.Animations.Length == 0) throw new InvalidOperationException("no animations");
 
@@ -1258,7 +1258,7 @@ internal sealed class BulwarkLoop : IGameLoop, IInputHandler, IDisposable
         {
             var assets = new AssetDatabase()
                 .RegisterImporter(new FontImporter())
-                .LoadManifest(Path.Combine(AppContext.BaseDirectory, "Assets", "manifest.json"));
+                .LoadManifest(AppFiles.Asset("manifest.json"));
             hudFont = Font.Upload(vk, assets.Load<FontData>(AssetId.Parse("fonts/bowlby")));
         }
         catch (Exception ex)

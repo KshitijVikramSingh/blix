@@ -323,7 +323,7 @@ internal sealed class LitLoop : IGameLoop, IInputHandler, IDebuggable, IDisposab
         }
 
         // --- Skinned model: cesium_man.glb -------------------------------
-        var assetPath = Path.Combine(AppContext.BaseDirectory, "Assets", "models", "cesium_man.glb");
+        var assetPath = AppFiles.Asset("models", "cesium_man.glb");
         var importer = new GltfImporter();
         var importCtx = new AssetImportContext(AssetId.Parse("models/cesium_man"), assetPath);
         var cesiumModel = importer.Import(importCtx);

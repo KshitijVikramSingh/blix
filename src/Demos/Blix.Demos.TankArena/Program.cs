@@ -427,7 +427,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     // stay cheap. Body + turret take the team tint; tracks + gun are constant.
     private void LoadTankParts(ShaderProgramHandle worldShader, ShaderProgramHandle casterShader)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "Assets", "models", "tank.glb");
+        var path = AppFiles.Asset("models", "tank.glb");
         var model = new GltfStaticImporter().ImportNodes(
             new Blix.Assets.AssetImportContext(Blix.Assets.AssetId.Parse("tank"), path));
         var nodes = model.Nodes;
@@ -531,7 +531,7 @@ internal sealed class TankArenaLoop : IGameLoop, IInputHandler, IDebuggable, IDi
     // shared PropType; PlaceProps scatters instances.
     private PropType LoadProp(string file, float targetHeight, bool explosive, ShaderProgramHandle worldShader, ShaderProgramHandle casterShader)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "Assets", "models", file);
+        var path = AppFiles.Asset("models", file);
         var model = new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse(file), path));
 
         var min = new Vector3(float.MaxValue);

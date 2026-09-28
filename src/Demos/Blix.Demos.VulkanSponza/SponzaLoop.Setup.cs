@@ -785,7 +785,7 @@ internal sealed partial class SponzaLoop
         gltfPath = "";
         assetsRoot = Environment.GetEnvironmentVariable("BLIX_SPONZA_ASSETS") is { Length: > 0 } env
             ? env
-            : Path.Combine(AppContext.BaseDirectory, "Assets");
+            : AppFiles.Assets;
         var mainPackDir = Path.Combine(assetsRoot, "main_sponza");
         if (!Directory.Exists(mainPackDir))
         {

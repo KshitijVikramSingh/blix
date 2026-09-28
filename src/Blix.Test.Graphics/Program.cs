@@ -4980,6 +4980,64 @@ static ShaderInterface MinimalShader() => new(new[]
         hardOffsets.Count == 0, string.Join("; ", hardOffsets.Take(4)));
 }
 
+// ============================================================================
+// Section BH — an application asks AppFiles where its assets are, rather than
+//              assuming they sit beside the binary.
+// ============================================================================
+//
+// <b>Because "beside the binary" stops being true the moment the thing is published.</b> A macOS
+// .app cannot keep data in Contents/MacOS: codesign reads a cooked `foo.textures/` sidecar there
+// as a malformed nested bundle and refuses to sign the bundle at all. So `blix publish` moves
+// Assets to Contents/Resources, and `Blix.Core.AppFiles` is the one place that knows to look
+// across for it.
+//
+// The check exists because the hand-rolled form had already been written eleven times, once per
+// place that wanted a model or a manifest, and every one of them would have been wrong in a
+// published bundle. Not loudly wrong: Bulwark under that layout drew grey primitives instead of
+// its turrets and carried on to a clean exit. This is conventions §4's shape — an engine step
+// copied privately, missing the case the engine handles — and a grep is the only instrument that
+// sees it before a person does.
+{
+    var srcDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    var sources = Directory.Exists(srcDir)
+        ? Directory.GetFiles(srcDir, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            .ToArray()
+        : Array.Empty<string>();
+
+    // CONTROL: a grep over nothing passes. conventions §5.
+    t.Expect("BH.0 CONTROL sources were found to search",
+        sources.Length >= 100, $"{sources.Length} file(s) under {srcDir}");
+
+    // The hand-rolled form, in either order of quoting, but not AppFiles' own implementation --
+    // it is the one place entitled to write it.
+    var handRolled = new List<string>();
+    var appFilesPath = Path.Combine(srcDir, "Blix.Core", "AppFiles.cs");
+    foreach (var file in sources)
+    {
+        if (string.Equals(file, appFilesPath, StringComparison.Ordinal)) continue;
+        var text = File.ReadAllText(file);
+        var lines = text.Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!Regex.IsMatch(lines[i], @"AppContext\.BaseDirectory\s*,\s*""Assets""")) continue;
+            handRolled.Add($"{Path.GetFileName(file)}:{i + 1}");
+        }
+    }
+
+    t.Expect("BH.1 no application builds its own asset path from AppContext.BaseDirectory",
+        handRolled.Count == 0,
+        handRolled.Count == 0 ? "all sites go through AppFiles" : string.Join("; ", handRolled.Take(6)));
+
+    // And the resolver itself answers, so the check above is not passing because nothing asks.
+    t.Expect("BH.2 AppFiles resolves an Assets path",
+        AppFiles.Assets.EndsWith("Assets", StringComparison.Ordinal), AppFiles.Assets);
+    t.Expect("BH.2 AppFiles.Asset appends beneath it",
+        AppFiles.Asset("models", "x.glb") == Path.Combine(AppFiles.Assets, "models", "x.glb"),
+        AppFiles.Asset("models", "x.glb"));
+}
+
 t.PrintSummary();
 return t.Failed;
 

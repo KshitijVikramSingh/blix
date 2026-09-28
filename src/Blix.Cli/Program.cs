@@ -613,7 +613,13 @@ public static class Program
         publish.WaitForExit();
         if (publish.ExitCode != 0) return publish.ExitCode;
 
-        if (target.WantsAppBundle) WriteAppBundle(app, target, dest);
+        if (target.WantsAppBundle)
+        {
+            WriteAppBundle(app, target, dest);
+            MoveDataOutOfMacOS(app, dest);
+            CloseMacRuntime(app, dest);
+            SignAppBundle(app, dest);
+        }
 
         Console.WriteLine($"  {dest}");
         return 0;
@@ -669,6 +675,166 @@ public static class Program
     {
         var name = app.Name.ToLowerInvariant();
         return name.StartsWith("blix.", StringComparison.Ordinal) ? name["blix.".Length..] : name;
+    }
+
+    /// <summary>
+    /// Copy the native runtime the application needs into the bundle, so it needs nothing installed.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the line between a developer dependency and a runtime one.</b> glslc and
+    /// spirv-cross ran at build time and are not here. MoltenVK, the Vulkan loader and OpenAL
+    /// Soft are needed by the application itself every time it runs, so they travel with it —
+    /// a shipped .app cannot tell somebody to install Homebrew.
+    /// </para>
+    /// <para>
+    /// <b>Both loader filenames, deliberately.</b> GLFW dlopens <c>libvulkan.1.dylib</c> and
+    /// Silk.NET's own resolver asks for <c>libvulkan.dylib</c>. They are separate name lists, and
+    /// a bundle carrying one of them gets past whichever asks first and dies on the other — which
+    /// cost an afternoon to find, because each failure looked like a different bug.
+    /// </para>
+    /// <para>
+    /// The ICD manifest is written rather than copied, because Homebrew's points at Homebrew.
+    /// Its <c>library_path</c> is relative to the manifest, so a bundle-relative one keeps
+    /// working wherever the bundle is moved.
+    /// </para>
+    /// <para>
+    /// Sourced from the build machine's Homebrew, which is honest rather than ideal: it means a
+    /// publish inherits whatever version that machine has. Pinning the runtime is a real question
+    /// and not this one.
+    /// </para>
+    /// </remarks>
+    private static void CloseMacRuntime(App app, string dest)
+    {
+        var prefix = new[] { "/opt/homebrew", "/usr/local" }
+            .FirstOrDefault(p => File.Exists(Path.Combine(p, "lib", "libvulkan.dylib")));
+        if (prefix is null)
+        {
+            Console.Error.WriteLine(
+                "blix: no Vulkan runtime found to bundle — the .app will need one installed. " +
+                "Expected Homebrew under /opt/homebrew or /usr/local.");
+            return;
+        }
+
+        var contents = Path.Combine(dest, $"{BundleName(app)}.app", "Contents");
+        var frameworks = Path.Combine(contents, "Frameworks");
+        Directory.CreateDirectory(frameworks);
+
+        var wanted = new[]
+        {
+            Path.Combine(prefix, "lib", "libvulkan.dylib"),
+            Path.Combine(prefix, "lib", "libvulkan.1.dylib"),
+            Path.Combine(prefix, "lib", "libMoltenVK.dylib"),
+            Path.Combine(prefix, "opt", "openal-soft", "lib", "libopenal.1.dylib"),
+            Path.Combine(prefix, "lib", "libopenal.1.dylib"),
+        };
+
+        var copied = 0;
+        foreach (var source in wanted)
+        {
+            var name = Path.GetFileName(source);
+            var into = Path.Combine(frameworks, name);
+            if (!File.Exists(source) || File.Exists(into)) continue;
+
+            // Resolve the symlink chain: Homebrew's lib/ is links into Cellar, and a link into a
+            // directory the target machine does not have is not a dependency that travelled.
+            File.Copy(new FileInfo(source).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? source, into);
+            copied++;
+        }
+
+        var icdDir = Path.Combine(contents, "Resources", "vulkan", "icd.d");
+        Directory.CreateDirectory(icdDir);
+        File.WriteAllText(Path.Combine(icdDir, "MoltenVK_icd.json"),
+            """
+            {
+                "file_format_version": "1.0.0",
+                "ICD": {
+                    "library_path": "../../../Frameworks/libMoltenVK.dylib",
+                    "api_version": "1.4.0",
+                    "is_portability_driver": true
+                }
+            }
+
+            """);
+
+        Console.WriteLine($"  bundled {copied} native librar{(copied == 1 ? "y" : "ies")} from {prefix}");
+    }
+
+    /// <summary>
+    /// Move the application's data out of <c>Contents/MacOS</c>, which is for Mach-O only.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Not tidiness: codesign refuses the bundle otherwise. A cooked <c>foo.textures/</c> sidecar
+    /// is a directory with an extension, which codesign reads as a nested bundle and rejects as
+    /// "bundle format unrecognized" — one such directory in Bulwark was enough to fail the whole
+    /// signature. Under Resources it is data, and is sealed by hash without being interpreted.
+    /// </para>
+    /// <para>
+    /// The runtime half of this is <c>Blix.Core.AppFiles</c>, which looks here when there is no
+    /// Assets directory beside the binary. The two have to agree, and this comment is the
+    /// other end of the one over there.
+    /// </para>
+    /// </remarks>
+    private static void MoveDataOutOfMacOS(App app, string dest)
+    {
+        var contents = Path.Combine(dest, $"{BundleName(app)}.app", "Contents");
+        var from = Path.Combine(contents, "MacOS", "Assets");
+        if (!Directory.Exists(from)) return;
+
+        var to = Path.Combine(contents, "Resources", "Assets");
+        Directory.CreateDirectory(Path.GetDirectoryName(to)!);
+        if (Directory.Exists(to)) Directory.Delete(to, recursive: true);
+        Directory.Move(from, to);
+    }
+
+    /// <summary>Ad-hoc sign the finished bundle, so the machine it lands on will run it.</summary>
+    /// <remarks>
+    /// <para>
+    /// The signature has to come last: copying libraries into Contents/Frameworks, moving the
+    /// assets and writing the ICD manifest all invalidate a seal made before them.
+    /// </para>
+    /// <para>
+    /// <c>--deep</c> rather than a plain sign, and deprecated though it is: a self-contained
+    /// publish drops managed assemblies beside the apphost, and codesign counts a <c>.dll</c> as
+    /// nested code it will not seal unsigned (measured -- it named System.Net.WebSockets.Client
+    /// and stopped). Signing each by hand is the same walk with more rope.
+    /// </para>
+    /// <para>
+    /// Ad-hoc, not Developer ID: this identifies nothing and gets no Gatekeeper pass, so a
+    /// download still needs the quarantine bit cleared. What it buys is that the bundle is
+    /// internally consistent -- an unsigned or stale-signed .app is killed on launch on Apple
+    /// silicon, where a valid signature is not optional.
+    /// </para>
+    /// <para>
+    /// Only attempted where codesign exists, and never fatal: an unsigned bundle still runs on
+    /// the machine that built it, which is where most of them are run.
+    /// </para>
+    /// </remarks>
+    private static void SignAppBundle(App app, string dest)
+    {
+        var bundle = Path.Combine(dest, $"{BundleName(app)}.app");
+        if (!Directory.Exists(bundle) || !File.Exists("/usr/bin/codesign")) return;
+
+        try
+        {
+            var sign = Process.Start(new ProcessStartInfo("/usr/bin/codesign")
+            {
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                ArgumentList = { "--force", "--deep", "--sign", "-", bundle },
+            });
+            if (sign is null) return;
+            var complaint = sign.StandardError.ReadToEnd();
+            sign.WaitForExit();
+            Console.WriteLine(sign.ExitCode == 0
+                ? "  signed the bundle ad-hoc"
+                : $"  could not sign the bundle: {complaint.Trim()}");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"blix: could not sign the bundle: {ex.Message}");
+        }
     }
 
     private static string DefaultRid() =>
