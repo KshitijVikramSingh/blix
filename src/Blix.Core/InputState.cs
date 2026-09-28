@@ -69,11 +69,21 @@ public sealed class InputState
     /// <summary>How far the wheel turned since the previous tick, summed over every report.</summary>
     public Vector2 MouseWheel => tickWheel;
 
+    /// <summary>
+    /// The gamepads, by the id the backend gives them.
+    /// </summary>
+    /// <remarks>
+    /// Asking for one that is not plugged in gives a pad reading neutral rather than null, so a
+    /// game with controller support does not have to be written twice.
+    /// </remarks>
+    public GamepadCollection Gamepads { get; } = new();
+
     /// <summary>Start a new tick: everything read from here on describes what happened since the last one.</summary>
     public void BeginTick()
     {
         keys.BeginTick();
         buttons.BeginTick();
+        Gamepads.BeginTick();
 
         tickPosition = livePosition;
         tickDelta = liveDeltaAccum;
@@ -104,6 +114,20 @@ public sealed class InputState
     /// <summary>Record wheel movement.</summary>
     public void RecordMouseWheel(Vector2 amount) => liveWheelAccum += amount;
 
+    /// <summary>Record that a pad appeared, or that one already known is still here.</summary>
+    public void RecordGamepadConnected(int id, string name) => Gamepads.Connect(id, name);
+
+    /// <summary>Record that a pad went away. Its releases are synthesised; see <see cref="GamepadState"/>.</summary>
+    public void RecordGamepadDisconnected(int id) => Gamepads.Disconnect(id);
+
+    /// <summary>Record a pad's button, as sampled.</summary>
+    public void RecordGamepadButton(int id, GamepadButton button, bool pressed) =>
+        Gamepads.Mutable(id).RecordButton(button, pressed);
+
+    /// <summary>Record a pad's axis, as sampled, in the backend's own range.</summary>
+    public void RecordGamepadAxis(int id, GamepadAxis axis, float value) =>
+        Gamepads.Mutable(id).RecordAxis(axis, value);
+
     /// <summary>
     /// Let go of everything, as though every held input had been released.
     /// </summary>
@@ -119,66 +143,8 @@ public sealed class InputState
     {
         keys.ReleaseAll();
         buttons.ReleaseAll();
+        Gamepads.ReleaseAll();
         liveDeltaAccum = Vector2.Zero;
         liveWheelAccum = Vector2.Zero;
-    }
-
-    /// <summary>
-    /// The live and per-tick halves of one set of buttons.
-    /// </summary>
-    /// <remarks>
-    /// Double-buffered rather than read live, so that when a platform delivers an event matters to
-    /// nobody. Today's host polls between ticks and reading the live set would happen to work;
-    /// "happens to work" is how a timing assumption gets discovered years later by a backend that
-    /// does it differently.
-    /// </remarks>
-    private sealed class ButtonTrack(int count)
-    {
-        private readonly bool[] liveDown = new bool[count];
-        private readonly bool[] pressedAccum = new bool[count];
-        private readonly bool[] releasedAccum = new bool[count];
-
-        private readonly bool[] tickDown = new bool[count];
-        private readonly bool[] tickPressed = new bool[count];
-        private readonly bool[] tickReleased = new bool[count];
-
-        public ButtonState this[int i] =>
-            (uint)i < (uint)count
-                ? new ButtonState(tickDown[i], tickPressed[i], tickReleased[i])
-                : default;
-
-        public void Down(int i)
-        {
-            if ((uint)i >= (uint)count) return;
-            // Only a transition counts. A backend that repeats key-down while a key is held must
-            // not turn one press into one per repeat.
-            if (!liveDown[i]) pressedAccum[i] = true;
-            liveDown[i] = true;
-        }
-
-        public void Up(int i)
-        {
-            if ((uint)i >= (uint)count) return;
-            if (liveDown[i]) releasedAccum[i] = true;
-            liveDown[i] = false;
-        }
-
-        public void BeginTick()
-        {
-            Array.Copy(liveDown, tickDown, count);
-            Array.Copy(pressedAccum, tickPressed, count);
-            Array.Copy(releasedAccum, tickReleased, count);
-            Array.Clear(pressedAccum);
-            Array.Clear(releasedAccum);
-        }
-
-        public void ReleaseAll()
-        {
-            for (var i = 0; i < count; i++)
-            {
-                if (liveDown[i]) releasedAccum[i] = true;
-                liveDown[i] = false;
-            }
-        }
     }
 }

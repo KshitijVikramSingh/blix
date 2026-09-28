@@ -385,6 +385,29 @@ which is the game's.
 - **`IRenderHost.Input`**, not a `Game` base class. Input is a host capability like the
   cursor and the refresh rate, and inheritance is the shape this engine has refused.
 
+### Gamepads
+
+Sampled once per tick, not subscribed. Silk offers button and axis events too, and taking
+them would mean two models in one layer — edges for buttons, and for axes a threshold
+nobody can justify deciding when a stick has moved enough to deserve one. Reading the lot
+before the flip makes a pad exactly as analysable as a keyboard.
+
+Indexed by the backend's id, never by position: unplug the first of two pads and a
+positional index silently hands the game a different controller than the player is
+holding. A pad that is not there reads neutral rather than null, so controller support is
+not two code paths.
+
+A pad is kept for exactly one tick after it vanishes, which is the only reason a game can
+notice at all. That tick carries `DisconnectedThisTick`, the synthesised releases and the
+zeroed axes — the last of which is the point: a pad unplugged at full throttle never sends
+its trigger back to zero, and a game with no `ReleaseAll` accelerates forever with nothing
+in its own logic to explain it.
+
+Both lifetime edges are recorded live and revealed at the flip, like a button's press.
+Setting the public flag directly is the obvious thing and it is wrong in both directions —
+a connect cleared by the very flip that should show it, a disconnect forgotten before
+anything reads it. The suite found each separately, before any of it was wired to Silk.
+
 ### Breaking, and deliberately
 
 `IInputHandler` is gone. Keypad digits are their own keys rather than aliases of the

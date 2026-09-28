@@ -145,6 +145,9 @@ internal sealed class ChassisLoop : IGameLoop, IUiSource
     private int mouseUps;
     private int mouseMoves;
     private int wheels;
+    private int padButtons;
+    private int padAxisTicks;
+    private int padsSeen;
     private int frames;
 
     // Counts calls to DrawUi. The host only calls it inside an ImGui frame it has built, so a non-zero
@@ -200,6 +203,9 @@ internal sealed class ChassisLoop : IGameLoop, IUiSource
         ImGui.Text($"frames {frames}   t {now:0.0}s");
         ImGui.Text($"keys   down {keyDowns}   up {keyUps}");
         ImGui.Text($"mouse  down {mouseDowns}   up {mouseUps}   moves {mouseMoves}   wheel {wheels}");
+        ImGui.Text(padsSeen > 0
+            ? $"pad    {padsSeen} seen   buttons {padButtons}   axis ticks {padAxisTicks}"
+            : "pad    none connected");
         ImGui.Separator();
 
         // The capture test, made checkable. Remember the game's key count when the field
@@ -233,6 +239,10 @@ internal sealed class ChassisLoop : IGameLoop, IUiSource
         Console.WriteLine(
             $"chassis: {frames} frame(s); input reaching the application — " +
             $"keys {keyDowns}/{keyUps}, mouse {mouseDowns}/{mouseUps}, moves {mouseMoves}, wheel {wheels}");
+        Console.WriteLine(
+            padsSeen > 0
+                ? $"chassis: {padsSeen} gamepad(s) seen — {padButtons} button press(es), {padAxisTicks} tick(s) with a stick or trigger off centre"
+                : "chassis: no gamepad was connected during the run");
     }
 
     /// <summary>
@@ -269,5 +279,28 @@ internal sealed class ChassisLoop : IGameLoop, IUiSource
 
         if (input.MouseDelta != System.Numerics.Vector2.Zero) mouseMoves++;
         if (input.MouseWheel != System.Numerics.Vector2.Zero) wheels++;
+
+        // A pad is the only device that can appear and vanish while the application runs, so it is
+        // the only one whose lifetime is worth showing. Reported here because this demo is where
+        // "did input reach the application" is answered, and a controller is input.
+        foreach (var pad in input.Gamepads)
+        {
+            if (pad.ConnectedThisTick) Console.WriteLine($"chassis: gamepad {pad.Id} connected ({pad.Name})");
+            if (pad.DisconnectedThisTick) Console.WriteLine($"chassis: gamepad {pad.Id} disconnected");
+
+            foreach (var button in Enum.GetValues<GamepadButton>())
+            {
+                if (pad[button].Pressed) padButtons++;
+            }
+
+            if (pad.LeftStick != System.Numerics.Vector2.Zero
+                || pad.RightStick != System.Numerics.Vector2.Zero
+                || pad.LeftTrigger != 0f || pad.RightTrigger != 0f)
+            {
+                padAxisTicks++;
+            }
+
+            padsSeen = Math.Max(padsSeen, pad.Id + 1);
+        }
     }
 }

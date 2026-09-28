@@ -15,6 +15,8 @@ using BlixWindowOptions = Blix.Runtime.Silk.WindowOptions;
 using BlixKey = Blix.Core.Key;
 using BlixMouseButton = Blix.Core.MouseButton;
 using SilkKey = Silk.NET.Input.Key;
+using BlixGamepadButton = Blix.Core.GamepadButton;
+using BlixGamepadAxis = Blix.Core.GamepadAxis;
 using SilkMouseButton = Silk.NET.Input.MouseButton;
 
 namespace Blix.Runtime.Silk;
@@ -224,6 +226,10 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     private void OnUpdate(double deltaTime)
     {
         totalTime += deltaTime;
+
+        // Sampled before the flip, because a pad is state rather than a stream of events and the
+        // flip is what turns state into transitions.
+        SampleGamepads();
 
         // Exactly here, and exactly once. Everything the game reads is fixed from this line until
         // the next update, so rendering sees what the update before it saw, and a host running
@@ -469,6 +475,88 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         if (UiWantsMouse) return;
         inputState.RecordMouseWheel(new global::System.Numerics.Vector2(wheel.X, wheel.Y));
     }
+
+    /// <summary>
+    /// Read every pad's buttons and axes into the frame's input.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Sampled, not subscribed.</b> Silk offers ButtonDown/ButtonUp/ThumbstickMoved events as
+    /// well, and using them would mean two models in one layer: buttons arriving as edges, axes
+    /// arriving as... something, with a threshold nobody can justify deciding when a stick has
+    /// moved enough to be worth an event. Reading the lot once per tick makes a pad exactly as
+    /// analysable as a keyboard, and the transitions fall out of the flip like everything else.
+    /// </para>
+    /// <para>
+    /// A pad Silk reports as disconnected is told to the state rather than dropped, because the
+    /// difference matters: dropping it leaves a game holding a trigger that stopped existing.
+    /// </para>
+    /// </remarks>
+    private void SampleGamepads()
+    {
+        if (input is null) return;
+
+        for (var i = 0; i < input.Gamepads.Count; i++)
+        {
+            var pad = input.Gamepads[i];
+            if (!pad.IsConnected)
+            {
+                inputState.RecordGamepadDisconnected(pad.Index);
+                continue;
+            }
+
+            inputState.RecordGamepadConnected(pad.Index, pad.Name ?? "");
+
+            foreach (var button in pad.Buttons)
+            {
+                inputState.RecordGamepadButton(pad.Index, MapGamepadButton(button.Name), button.Pressed);
+            }
+
+            // Index, not name: Silk numbers thumbsticks and triggers rather than naming them, and
+            // 0/1 is left/right on every pad it supports. A pad with more than two of either is
+            // reported for the two this vocabulary has, and the rest is a question nobody has asked.
+            foreach (var stick in pad.Thumbsticks)
+            {
+                if (stick.Index == 0)
+                {
+                    inputState.RecordGamepadAxis(pad.Index, BlixGamepadAxis.LeftX, stick.X);
+                    inputState.RecordGamepadAxis(pad.Index, BlixGamepadAxis.LeftY, stick.Y);
+                }
+                else if (stick.Index == 1)
+                {
+                    inputState.RecordGamepadAxis(pad.Index, BlixGamepadAxis.RightX, stick.X);
+                    inputState.RecordGamepadAxis(pad.Index, BlixGamepadAxis.RightY, stick.Y);
+                }
+            }
+
+            foreach (var trigger in pad.Triggers)
+            {
+                if (trigger.Index == 0) inputState.RecordGamepadAxis(pad.Index, BlixGamepadAxis.LeftTrigger, trigger.Position);
+                else if (trigger.Index == 1) inputState.RecordGamepadAxis(pad.Index, BlixGamepadAxis.RightTrigger, trigger.Position);
+            }
+        }
+    }
+
+    /// <summary>Silk's button names to Blix's, exhaustively. The suite checks that.</summary>
+    private static BlixGamepadButton MapGamepadButton(ButtonName name) => name switch
+    {
+        ButtonName.A => BlixGamepadButton.A,
+        ButtonName.B => BlixGamepadButton.B,
+        ButtonName.X => BlixGamepadButton.X,
+        ButtonName.Y => BlixGamepadButton.Y,
+        ButtonName.LeftBumper => BlixGamepadButton.LeftBumper,
+        ButtonName.RightBumper => BlixGamepadButton.RightBumper,
+        ButtonName.Back => BlixGamepadButton.Back,
+        ButtonName.Start => BlixGamepadButton.Start,
+        ButtonName.Home => BlixGamepadButton.Home,
+        ButtonName.LeftStick => BlixGamepadButton.LeftStick,
+        ButtonName.RightStick => BlixGamepadButton.RightStick,
+        ButtonName.DPadUp => BlixGamepadButton.DPadUp,
+        ButtonName.DPadRight => BlixGamepadButton.DPadRight,
+        ButtonName.DPadDown => BlixGamepadButton.DPadDown,
+        ButtonName.DPadLeft => BlixGamepadButton.DPadLeft,
+        _ => BlixGamepadButton.Unknown,
+    };
 
     private bool TryDumpCurrentFrame()
     {

@@ -18,6 +18,7 @@ using Blix.Verify;
 //   C  losing focus, losing a device
 //   D  the mouse's two different kinds of number
 //   E  the backend's vocabulary reaches Blix's intact
+//   F  gamepads: axes as state, and a pad that stops existing
 
 var t = new TestRunner();
 
@@ -197,11 +198,117 @@ var t = new TestRunner();
     t.Expect("E.1 every key the backend can report has a Blix value",
         unmapped.Count == 0, string.Join(", ", unmapped.Take(12)));
 
+    // The pad's vocabulary has the same obligation, and the same failure if it is not met.
+    var mapButton = typeof(Blix.Runtime.Silk.Window)
+        .GetMethod("MapGamepadButton", BindingFlags.NonPublic | BindingFlags.Static);
+    t.Expect("E.0 CONTROL the gamepad mapping was found to test", mapButton is not null);
+
+    var buttonNames = Enum.GetNames(typeof(Silk.NET.Input.ButtonName)).Where(n => n != "Unknown").ToArray();
+    t.Expect("E.0 CONTROL the backend declares a pad worth mapping",
+        buttonNames.Length >= 10, $"{buttonNames.Length} button(s)");
+
+    var unmappedButtons = buttonNames
+        .Where(n => (GamepadButton)mapButton!.Invoke(
+            null, new[] { Enum.Parse(typeof(Silk.NET.Input.ButtonName), n) })! == GamepadButton.Unknown)
+        .ToArray();
+    t.Expect("E.3 every gamepad button the backend can report has a Blix value",
+        unmappedButtons.Length == 0, string.Join(", ", unmappedButtons));
+
     // And the distinction the split exists for: the keypad is not the number row.
     t.Expect("E.2 keypad digits are their own keys, not the number row",
         (Key)mapKey!.Invoke(null, new object[] { Enum.Parse(silkKey, "Keypad4") })! == Key.Keypad4);
     t.Expect("E.2 and the number row is still the number row",
         (Key)mapKey!.Invoke(null, new object[] { Enum.Parse(silkKey, "Number4") })! == Key.Number4);
+}
+
+// ============================================================================
+// Section F — a gamepad is the same model, plus a lifetime.
+// ============================================================================
+//
+// Buttons and axes need nothing new: a button is a button and an axis is the continuous twin of
+// one. What a pad adds is that it can stop existing mid-hold, which a keyboard cannot, and that is
+// the only part worth testing hard.
+{
+    var input = new InputState();
+
+    // A pad nobody plugged in reads as a pad holding nothing, rather than as a null reference.
+    t.Expect("F.1 an absent pad reads neutral, not null",
+        input.Gamepads[0] is { Connected: false } absent
+        && !absent[GamepadButton.A].Down && absent.LeftStick == Vector2.Zero);
+
+    input.RecordGamepadConnected(0, "Test Pad");
+    input.BeginTick();
+    t.Expect("F.2 a pad that appeared says so for one tick",
+        input.Gamepads[0] is { Connected: true, ConnectedThisTick: true, Name: "Test Pad" });
+
+    input.BeginTick();
+    t.Expect("F.3 and not for the tick after",
+        input.Gamepads[0] is { Connected: true, ConnectedThisTick: false });
+
+    // Buttons behave exactly as a key does.
+    input.RecordGamepadButton(0, GamepadButton.A, pressed: true);
+    input.BeginTick();
+    t.Expect("F.4 a pad button presses once", input.Gamepads[0][GamepadButton.A] is { Down: true, Pressed: true });
+    input.BeginTick();
+    t.Expect("F.5 and holds without pressing again", input.Gamepads[0][GamepadButton.A] is { Down: true, Pressed: false });
+
+    // Axes are state, and remember where they were.
+    input.RecordGamepadAxis(0, GamepadAxis.LeftX, 0.25f);
+    input.BeginTick();
+    input.RecordGamepadAxis(0, GamepadAxis.LeftX, 0.75f);
+    input.BeginTick();
+    var axis = input.Gamepads[0][GamepadAxis.LeftX];
+    t.Expect("F.6 an axis carries value, previous and a derived delta",
+        MathF.Abs(axis.Value - 0.75f) < 1e-6f
+        && MathF.Abs(axis.Previous - 0.25f) < 1e-6f
+        && MathF.Abs(axis.Delta - 0.5f) < 1e-6f,
+        $"{axis.Value} / {axis.Previous} / {axis.Delta}");
+
+    // Raw: nothing here has an opinion about how small a movement counts.
+    input.RecordGamepadAxis(0, GamepadAxis.RightX, 0.05f);
+    input.BeginTick();
+    t.Expect("F.7 a small stick movement is reported, not swallowed by a deadzone",
+        MathF.Abs(input.Gamepads[0][GamepadAxis.RightX].Value - 0.05f) < 1e-6f);
+
+    // The case the lifetime exists for: unplugged at full throttle, holding a button.
+    input.RecordGamepadAxis(0, GamepadAxis.RightTrigger, 1.0f);
+    input.BeginTick();
+    t.Expect("F.0 CONTROL the pad is holding A and full throttle before it is pulled",
+        input.Gamepads[0][GamepadButton.A].Down
+        && MathF.Abs(input.Gamepads[0].RightTrigger - 1.0f) < 1e-6f);
+
+    input.RecordGamepadDisconnected(0);
+    input.BeginTick();
+    var gone = input.Gamepads[0];
+    t.Expect("F.8 the disconnect tick reports the pad leaving",
+        gone is { Connected: false, DisconnectedThisTick: true });
+    t.Expect("F.9 and synthesises the release it will never be sent",
+        gone[GamepadButton.A] is { Down: false, Released: true },
+        "otherwise the game is holding a button that stopped existing");
+    t.Expect("F.10 and zeroes the throttle, rather than leaving it stuck on",
+        MathF.Abs(gone.RightTrigger) < 1e-6f, gone.RightTrigger.ToString());
+
+    input.BeginTick();
+    t.Expect("F.11 one tick later the pad is forgotten",
+        input.Gamepads.Count == 0 && !input.Gamepads[0].DisconnectedThisTick);
+
+    // Reconnecting is an appearance, not a resurrection: nothing is still held.
+    input.RecordGamepadConnected(0, "Test Pad");
+    input.BeginTick();
+    t.Expect("F.12 a reconnected pad starts holding nothing",
+        input.Gamepads[0] is { Connected: true, ConnectedThisTick: true }
+        && !input.Gamepads[0][GamepadButton.A].Down);
+
+    // Ids, not positions: unplugging pad 0 must not promote pad 1 into its place.
+    input.RecordGamepadConnected(1, "Second");
+    input.BeginTick();
+    input.RecordGamepadDisconnected(0);
+    input.BeginTick();
+    input.BeginTick();
+    t.Expect("F.13 the surviving pad keeps its own id when another leaves",
+        input.Gamepads.Count == 1 && input.Gamepads[1] is { Connected: true, Name: "Second" }
+        && !input.Gamepads[0].Connected,
+        "indexing by position would have handed the game a different controller");
 }
 
 t.PrintSummary();
