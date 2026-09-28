@@ -20,6 +20,11 @@ namespace Blix.Core;
 public sealed class GamepadCollection : IReadOnlyCollection<GamepadState>
 {
     private readonly Dictionary<int, GamepadState> pads = new();
+
+    // True for exactly the next sample: what it reads is what was already there, not what just
+    // happened. Set when the application becomes eligible again and cleared by the flip that
+    // shows the result.
+    private bool priming;
     private readonly List<int> leaving = new();
     private static readonly GamepadState Absent = new(-1);
 
@@ -35,6 +40,18 @@ public sealed class GamepadCollection : IReadOnlyCollection<GamepadState>
     public IEnumerator<GamepadState> GetEnumerator() => pads.Values.GetEnumerator();
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+    /// <summary>
+    /// Treat the next sample as re-acquisition rather than as events.
+    /// </summary>
+    /// <remarks>
+    /// Collection-wide rather than per pad, because a pad plugged in while the application was
+    /// not watching is in the same position as one that was held throughout: whatever it reports
+    /// first was true before anyone was entitled to see it.
+    /// </remarks>
+    internal void BeginResync() => priming = true;
+
+    internal bool Priming => priming;
 
     internal GamepadState Mutable(int id)
     {
@@ -70,7 +87,8 @@ public sealed class GamepadCollection : IReadOnlyCollection<GamepadState>
 
         foreach (var id in leaving) pads.Remove(id);
 
-        foreach (var pad in pads.Values) pad.BeginTick();
+        foreach (var pad in pads.Values) pad.BeginTick(priming);
+        priming = false;
     }
 
     internal void ReleaseAll()

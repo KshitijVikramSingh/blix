@@ -2,7 +2,7 @@ using System.Numerics;
 using Blix.Geometry;
 using Blix.Graphics;
 
-namespace Blix.Labs.Character;
+namespace Blix.Demos.Character;
 
 /// <summary>
 /// One named piece of the room, and the claim it exists to make.
@@ -39,7 +39,7 @@ public sealed record RoomPart(
 /// triangles in the same pass. Nothing here authors a collider beside a mesh — the recurring lesson of
 /// the last arc is that two things which should agree and cannot contradict each other hide bugs for
 /// weeks, and "the collider is not quite the floor you can see" is the single most expensive version of
-/// that in a physics lab.
+/// that in a physics experiment.
 /// </para>
 /// <para>
 /// <b>Built, not imported.</b> Every feature's ground truth is a closed-form number known before
@@ -105,13 +105,13 @@ public sealed class Room
     public static Vector3 SpawnPoint => new(-1f, 0f, 0f);
 
     /// <summary>
-    /// Nothing but a floor. What the Motion lab stands on.
+    /// Nothing but a floor. What a motion experiment would stand on.
     /// </summary>
     /// <remarks>
     /// <b>The isolation the plan asks for, as a method.</b> Motion is about clips and states, and a
     /// body that walks into a ramp while its clip is wrong gives you two suspects for one symptom.
     /// The floor is the same floor the full room has, built by the same code, so nothing about
-    /// standing on it can differ between the two labs.
+    /// standing on it can differ between the two.
     /// </remarks>
     public static Room FlatGround()
     {

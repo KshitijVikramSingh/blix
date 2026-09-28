@@ -1,7 +1,7 @@
 using System.Numerics;
 using Blix.Geometry;
 
-namespace Blix.Labs.Character;
+namespace Blix.Demos.Character;
 
 /// <summary>
 /// A body that stands, walks, climbs, slides and falls — the policy on top of the resolver.
@@ -11,7 +11,7 @@ namespace Blix.Labs.Character;
 /// <b>Every number here is a decision, not a fact.</b> <see cref="BodyResolver"/> answers where a
 /// motion gets to and has one right answer; what counts as ground, how steep is too steep, how tall
 /// a step is climbable and whether gravity may push a body sideways are all things two games would
-/// answer differently. That is why they are fields on this type with a panel behind them: a lab is
+/// answer differently. That is why they are fields on this type with a panel behind them: an experiment is
 /// where the right number is FOUND, and the last arc's lesson about guessing one twice (the gizmo
 /// trail's six seconds) applies to every one of them.
 /// </para>

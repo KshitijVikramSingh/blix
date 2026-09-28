@@ -170,6 +170,22 @@ public static class Program
             // project never has to change to be reachable.
             var host = index.AppHost is null ? null : Path.Combine(file.DirectoryName!, index.AppHost);
 
+            // <b>An index whose project has gone cannot describe a live application.</b> Moving
+            // a folder carries its bin/ along, so the old assemblies and their indexes travel
+            // with it and go on describing applications under names nothing builds any more --
+            // measured: renaming the character collection made `blix ls` show every one of its
+            // apps twice, once from each name, and both looked equally real.
+            //
+            // The index records the .csproj it was generated from precisely so this is cheap to
+            // ask. It is the same failure as a cooked artifact whose recipe moved or a reflection
+            // sidecar whose shader was deleted: a generated fact that outlived its authority.
+            // Dropped rather than reported, because there is nothing a person can do about it and
+            // nothing they would want to see -- the project does not exist.
+            if (index.Project is { Length: > 0 } declaredProject && !File.Exists(declaredProject))
+            {
+                continue;
+            }
+
             // A stale index is REPORTED, never silently believed. It is the one failure
             // mode generating rather than hand-writing the index cannot rule out, and a
             // tool that has quietly moved is worse than one that says it might have.

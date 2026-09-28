@@ -2,11 +2,11 @@ using System.Numerics;
 using Blix.Geometry;
 using Blix.Graphics;
 
-namespace Blix.Labs.Character;
+namespace Blix.Demos.Character;
 
 /// <summary>Which camera you are looking through.</summary>
 /// <remarks>
-/// <b>Four rigs rather than four sliders.</b> A lab about how a body moves is a lab about how a body
+/// <b>Four rigs rather than four sliders.</b> An experiment about how a body moves is one about how a body
 /// FEELS to move, and that is mostly the camera: the same resolver reads as heavy from behind the
 /// shoulder, precise down a barrel, and tactical from above. Each of these makes different faults
 /// obvious — the third-person one shows sliding and step hops, the first-person one shows every
@@ -28,7 +28,7 @@ public enum CameraRig
 }
 
 /// <summary>
-/// The lab's camera: one set of orbit parameters, four ways of turning them into a view.
+/// The room's camera: one set of orbit parameters, four ways of turning them into a view.
 /// </summary>
 /// <remarks>
 /// <b>One type, because they share almost everything.</b> Yaw, pitch and distance mean the same thing
@@ -109,7 +109,7 @@ public sealed class RoomCamera
     /// that points away from you PROJECTS, which is a fact about perspective and not about the body.
     /// </para>
     /// <para>
-    /// A shooter earns the offset by keeping the character out of its own reticle. A lab about
+    /// A shooter earns the offset by keeping the character out of its own reticle. An experiment about
     /// watching a body move earns nothing by it and pays in exactly the ambiguity above, so the
     /// slider stays and the default is centred.
     /// </para>
@@ -309,8 +309,8 @@ public sealed class RoomCamera
     /// plan holds that open as stage C-C's question — whether <see cref="BodyResolver"/>'s loop
     /// belongs in the engine — and this is a first look at the answer: the camera wants the SWEEP,
     /// which is already engine math, and none of the loop. It needs no deflection, no step rule and
-    /// no ground state; it needs one cast and a clamp. On this evidence the resolver stays in the
-    /// lab, and the note is here rather than in a commit message because this is where a future
+    /// no ground state; it needs one cast and a clamp. On this evidence the resolver stays with
+    /// the room, and the note is here rather than in a commit message because this is where a future
     /// reader will ask.
     /// <para>
     /// A sphere rather than a ray so the near plane does not clip a wall the ray squeaked past, and

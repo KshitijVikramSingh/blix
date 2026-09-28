@@ -1,9 +1,9 @@
 using Blix.Verify;
 using System.Numerics;
 using Blix.Geometry;
-using Blix.Labs.Character;
+using Blix.Demos.Character;
 
-// The character lab's probe: it CHECKS, and exits non-zero when the room is not what it claims.
+// The character collection's probe: it CHECKS, and exits non-zero when the room is not what it claims.
 //
 // The pattern the toolchain probe established, pointed at geometry instead of a binding model. No
 // window, no device, no launcher — the room's ground truth is closed form, so verifying it is
@@ -459,7 +459,7 @@ foreach (var part in room.Parts)
 
 // ── Standing, sliding, and climbing ─────────────────────────────────────────────────────────────
 //
-// The numbers only a lab can find, and the checks that say whether they were found or guessed. Each
+// The numbers only a run can find, and the checks that say whether they were found or guessed. Each
 // one is paired with the SAME situation under a changed RULE rather than changed geometry — if a
 // body stops sliding when the slope limit moves, the limit is what stopped it.
 {

@@ -241,10 +241,27 @@ pose).
   question about every consumer, and answering it with the convenient search
   argues for deleting load-bearing code.
 
+- **A private copy of an engine step fails silently, and that is the reason to care.**
+  §4 above says when to extract. This says what the cost looks like when a copy exists,
+  because it is not the cost people expect: not drift in the abstract, but a copy that is
+  *missing a case the engine already handles* and produces a plausible result anyway.
+  Six worked examples, each found by pushing something slightly further than before:
+  `CreateMesh` had no 32-bit branch; a demo resolved its own albedo and knew only the
+  raw-PNG shape; a shader's includes were not build inputs, so a clean build shipped a
+  stale `.spv`; a cook wrote a sidecar directory nothing declared, so the runtime silently
+  decoded the embedded PNG instead; eleven copies of one asset path would each have been
+  wrong in a published bundle while still drawing *something*; thirty-eight hand-written
+  shader interfaces restated what the shader declared, and two had already drifted.
+  - Every one produced a running program. Three of the first four were caught by a person
+    looking at the screen, which is why the instruments below exist: the failure mode is
+    *plausible output*, and a gate that only asks "did it run" cannot see it.
+
 **Enforced by:** [`architecture.md` §"Library, not framework"](architecture.md)
 · [`architecture.md` §"How an application is put together"](architecture.md)
 · the *Proves / Owns* header block on each `src/Demos/Blix.Demos.*/Program.cs` · the
-*Deliberate limits* sections throughout [`blix.md`](blix.md).
+*Deliberate limits* sections throughout [`blix.md`](blix.md) · `Blix.Test.Graphics`
+Sections **BH** (no hand-built asset path), **BI** (the cook names no platform library
+filename) and **BJ** (no hand-built shader interface) — three instruments for one disease.
 
 ---
 
@@ -495,7 +512,11 @@ ECS · engine-owned scene graph / GameObject hierarchy · prefab system · edito
 scenes-as-assets format · asset registry · material graph · scripting boundary ·
 constraint-solver physics · navigation · project templates · reusable
 enemy/projectile/gameplay framework · **preview/inspection world container** · **transform
-gizmos** · **a shader build system** (as opposed to one shared compile target).
+gizmos** · **a shader build system** (as opposed to one shared compile target) ·
+**audio beyond the positional model** (velocity, Doppler, cones, streaming, buses) ·
+**packfiles** — cooked artifacts already carry provenance and MSBuild already stages
+incrementally, so a `.pak` would solve an aesthetic · **input actions, bindings and
+rebinding** — the frame's state is mechanism and what Space means is the game's.
 
 The last three are recent and were declined on §5 grounds rather than for lack of
 time: the engine can hand you a ray through any view and remember where a thing has

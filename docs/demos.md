@@ -46,7 +46,7 @@ fast gate unless `blix.project` actually names it.
 | Focused renderer references | Chassis, Vulkan Hello, Graph, Instanced, Lit, Particles | Small executable specifications of one layer or composition |
 | Renderer research | Vulkan Sponza | Heavy-scene experimentation, measurement, and promotion decisions |
 | Asset and Studio tools | `inspect`, `check`, `cook`, `view`, `shot` | Report, judge, transform, inspect interactively, and capture deterministically |
-| Character instruments | `room`, `room-shot`, `Blix.Labs.Character.Probe` | Isolate authored contact geometry and later character work |
+| Character experiments | `room`, `room-shot`, `Blix.Demos.Character.Probe` | Small character-ish pieces — contact, movement, physics — one axis at a time |
 
 ## Playable games
 
@@ -284,13 +284,13 @@ inside the Studio viewer:
 - `room` renders authored contact geometry with the same triangles used for
   collision and exposes it for inspection.
 - `room-shot` captures that room deterministically.
-- `Blix.Labs.Character.Probe` judges the room's authored claims headlessly and
+- `Blix.Demos.Character.Probe` judges the room's authored claims headlessly and
   forms the Character project's declared `blix test` gate.
 
-Run from `src/Character` to use that project scope:
+Run from `src/Demos/Character` to use that project scope:
 
 ```sh
-cd src/Character
+cd src/Demos/Character
 ../../blix ls
 ../../blix test
 ```

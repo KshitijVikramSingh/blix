@@ -429,7 +429,13 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     private void OnFocusChanged(bool focused)
     {
         windowFocused = focused;
-        if (focused) return;
+        if (focused)
+        {
+            // Coming back, the pad is still holding whatever it was holding. That is not input.
+            inputState.ResyncGamepads();
+            return;
+        }
+
         keysHeld.Clear();
         buttonsHeld.Clear();
 
@@ -466,14 +472,12 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         inputState.RecordMouseUp(MapMouseButton(button));
     }
 
-    private global::System.Numerics.Vector2 lastMousePosition;
-
     private void OnMouseMove(IMouse mouse, global::System.Numerics.Vector2 position)
     {
-        var delta = position - lastMousePosition;
-        lastMousePosition = position;
-        if (UiWantsMouse) return;
-        inputState.RecordMouseMove(position, delta);
+        // Both halves of eligibility in one place: a panel that captured the pointer, and a
+        // window that is not focused. The difference between the places is the input layer's to
+        // compute -- see InputState.RecordMousePosition for why it is not computed here.
+        inputState.RecordMousePosition(position, eligible: !UiWantsMouse && windowFocused);
     }
 
     private void OnMouseScroll(IMouse mouse, ScrollWheel wheel)

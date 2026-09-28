@@ -42,6 +42,10 @@ public sealed class InputState : IInputState
 
     private Vector2 livePosition;
     private Vector2 liveDeltaAccum;
+
+    // Where the pointer was when it was last seen, or nothing when the next sample may only
+    // establish a place. See RecordMousePosition.
+    private Vector2? mouseOrigin;
     private Vector2 liveWheelAccum;
 
     private Vector2 tickPosition;
@@ -104,11 +108,47 @@ public sealed class InputState : IInputState
     /// <summary>Record a mouse button coming up.</summary>
     public void RecordMouseUp(MouseButton button) => buttons.Up((int)button);
 
-    /// <summary>Record pointer movement: where it is now, and how far it came.</summary>
-    public void RecordMouseMove(Vector2 position, Vector2 delta)
+    /// <summary>
+    /// Record where the pointer is, and whether the application is entitled to the movement.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The difference between two positions is this layer's arithmetic, not the host's.</b> A
+    /// host reports places; turning consecutive places into movement is the same temporal job as
+    /// turning key events into presses, and doing it here is what lets the awkward case be
+    /// written down as an assertion instead of discovered.
+    /// </para>
+    /// <para>
+    /// <b>The awkward case is movement the application did not own.</b> A pointer that travels
+    /// while the window is unfocused, or while a panel has captured it, has still travelled — and
+    /// differencing the next sample against the last one the application saw hands it every
+    /// millimetre of it in a single frame. That is a camera that snaps when you come back from
+    /// another application, which reads as a bug in the camera.
+    /// </para>
+    /// <para>
+    /// So position is a place and jumps, because that is where the pointer now is; delta is a
+    /// quantity and does not, because the movement was not the application's. The origin follows
+    /// the pointer regardless, so returning from a panel or from another window costs no jump
+    /// either.
+    /// </para>
+    /// </remarks>
+    /// <param name="position">Where the pointer is, in logical pixels.</param>
+    /// <param name="eligible">
+    /// Whether the application may have this movement — false while a UI has captured the pointer
+    /// or the window is not focused.
+    /// </param>
+    public void RecordMousePosition(Vector2 position, bool eligible)
     {
-        livePosition = position;
-        liveDeltaAccum += delta;
+        if (eligible)
+        {
+            if (mouseOrigin is { } from) liveDeltaAccum += position - from;
+            livePosition = position;
+        }
+
+        // Unconditionally: the pointer is where it is whoever is entitled to know it, and an
+        // origin that stopped following would turn the next eligible sample into the jump this
+        // exists to prevent.
+        mouseOrigin = position;
     }
 
     /// <summary>Record wheel movement.</summary>
@@ -122,7 +162,19 @@ public sealed class InputState : IInputState
 
     /// <summary>Record a pad's button, as sampled.</summary>
     public void RecordGamepadButton(int id, GamepadButton button, bool pressed) =>
-        Gamepads.Mutable(id).RecordButton(button, pressed);
+        Gamepads.Mutable(id).RecordButton(button, pressed, Gamepads.Priming);
+
+    /// <summary>
+    /// Treat the next gamepad sample as re-acquisition: what is held, without calling it a change.
+    /// </summary>
+    /// <remarks>
+    /// <b>The counterpart to <see cref="ReleaseAll"/>, and the reason that one is not enough.</b>
+    /// Losing focus lets go of everything, which is right. Getting it back finds the player still
+    /// holding what they were holding — and treating that as fresh input means returning to a
+    /// window fires whatever the held button does. Nothing was pressed; the application merely
+    /// became allowed to look again, and that is not an event.
+    /// </remarks>
+    public void ResyncGamepads() => Gamepads.BeginResync();
 
     /// <summary>Record a pad's axis, as sampled, in the backend's own range.</summary>
     public void RecordGamepadAxis(int id, GamepadAxis axis, float value) =>
@@ -146,5 +198,9 @@ public sealed class InputState : IInputState
         Gamepads.ReleaseAll();
         liveDeltaAccum = Vector2.Zero;
         liveWheelAccum = Vector2.Zero;
+
+        // And the pointer forgets where it was. Whatever it does between now and the next sample
+        // the application is entitled to is not movement this application made.
+        mouseOrigin = null;
     }
 }

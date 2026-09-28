@@ -40,6 +40,19 @@ internal sealed class ButtonTrack(int count)
         liveDown[i] = false;
     }
 
+    /// <summary>
+    /// Set what is held without calling it a change.
+    /// </summary>
+    /// <remarks>
+    /// For re-acquiring a device the application was not entitled to watch. Coming back to a
+    /// window while still holding a button is not a press — nothing was pressed, the application
+    /// merely became allowed to look again — and reporting one fires whatever that button means.
+    /// </remarks>
+    public void Prime(int i, bool down)
+    {
+        if ((uint)i < (uint)count) liveDown[i] = down;
+    }
+
     public void BeginTick()
     {
         Array.Copy(liveDown, tickDown, count);

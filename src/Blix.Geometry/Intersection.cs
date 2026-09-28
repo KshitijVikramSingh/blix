@@ -411,7 +411,7 @@ public static class Intersection
             // A winding is not a tie-break; for a closed solid it already says which side is
             // outside, which is exactly what a body that is inside needs to be told.
             //
-            // That relies on the mesh being closed and outward-wound. Blix.Labs.Character's probe
+            // That relies on the mesh being closed and outward-wound. Blix.Demos.Character's probe
             // checks both for every solid in its room, which is where that check earns its keep:
             // it is not tidiness, it is the precondition for getting an impaled body out.
             //

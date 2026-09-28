@@ -1,1 +1,11 @@
+# Projects built on Blix that live in the same repository. Not Blix's own: a thing is
+# Blix's when its subject is a Blix format or Blix's own health, and a game is neither.
 demos
+
+# What `blix test` runs here. Demos declared no gate at all until the character
+# collection arrived carrying one — eleven demos and nothing verified, because a demo
+# proves itself by being run and looked at, and nothing here could be run headless.
+#
+# An experiment is different: it is small enough to have an answer, so it can carry a
+# probe that says whether the answer still holds. Each new one appends its own.
+test: Blix.Demos.Character.Probe

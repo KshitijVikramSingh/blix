@@ -75,9 +75,18 @@ public sealed class GamepadState
     /// <summary>The right trigger, in [0, 1].</summary>
     public float RightTrigger => tickAxes[(int)GamepadAxis.RightTrigger];
 
-    internal void RecordButton(GamepadButton button, bool pressed)
+    /// <summary>Record a button as sampled, or as re-acquired.</summary>
+    /// <remarks>
+    /// <b><paramref name="priming"/> is the difference between "this was pressed" and "this was
+    /// already held when we were allowed to look again".</b> The second is not a press: nothing
+    /// happened, the application merely became eligible. Reporting one fires whatever the button
+    /// means — and one-shot actions are exactly what <c>Pressed</c> is for, so coming back to a
+    /// window while resting a thumb on A would select, confirm or shoot.
+    /// </remarks>
+    internal void RecordButton(GamepadButton button, bool pressed, bool priming)
     {
-        if (pressed) buttons.Down((int)button);
+        if (priming) buttons.Prime((int)button, pressed);
+        else if (pressed) buttons.Down((int)button);
         else buttons.Up((int)button);
     }
 
@@ -86,11 +95,18 @@ public sealed class GamepadState
         if ((uint)axis < (uint)liveAxes.Length) liveAxes[(int)axis] = value;
     }
 
-    internal void BeginTick()
+    internal void BeginTick(bool primed)
     {
         buttons.BeginTick();
         Array.Copy(tickAxes, previousAxes, tickAxes.Length);
         Array.Copy(liveAxes, tickAxes, liveAxes.Length);
+
+        // An axis has no edges, so priming looks like nothing at all -- until the delta is read.
+        // ReleaseAll zeroed these when the application stopped being eligible, so the first sample
+        // back would report the stick travelling from centre to wherever the thumb had been
+        // resting the whole time. The mouse's jump, on a stick. A re-acquired axis has a previous
+        // equal to its value, which is the truth: it did not move, we started watching.
+        if (primed) Array.Copy(tickAxes, previousAxes, tickAxes.Length);
 
         ConnectedThisTick = appeared;
         DisconnectedThisTick = vanished;

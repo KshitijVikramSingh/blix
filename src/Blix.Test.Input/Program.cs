@@ -148,9 +148,11 @@ var t = new TestRunner();
 {
     var input = new InputState();
 
-    input.RecordMouseMove(new Vector2(10, 10), new Vector2(10, 10));
-    input.RecordMouseMove(new Vector2(14, 13), new Vector2(4, 3));
-    input.RecordMouseMove(new Vector2(20, 13), new Vector2(6, 0));
+    // The first sample only establishes a place; there is nothing to have moved FROM yet.
+    input.RecordMousePosition(new Vector2(0, 0), eligible: true);
+    input.RecordMousePosition(new Vector2(10, 10), eligible: true);
+    input.RecordMousePosition(new Vector2(14, 13), eligible: true);
+    input.RecordMousePosition(new Vector2(20, 13), eligible: true);
     input.BeginTick();
 
     t.Expect("D.1 position is the LATEST sample, not a sum",
@@ -162,6 +164,41 @@ var t = new TestRunner();
     t.Expect("D.3 delta resets when nothing moved", input.MouseDelta == Vector2.Zero);
     t.Expect("D.4 position does NOT reset — it is where the pointer is",
         input.MousePosition == new Vector2(20, 13));
+
+    // ── movement the application was not entitled to ────────────────────────────────────────
+    //
+    // A pointer that travels while the window is unfocused, or while a panel has captured it, has
+    // still travelled. Differencing the next sample against the last one the APPLICATION saw hands
+    // it every millimetre in a single frame — a camera that snaps when you come back from another
+    // window, which reads as a bug in the camera and is a bug in the bookkeeping.
+    input.BeginTick();
+    input.ReleaseAll();                                              // focus lost
+    input.RecordMousePosition(new Vector2(900, 700), eligible: true); // and the pointer is far away
+    input.BeginTick();
+    t.Expect("D.7 the first sample after focus loss is a place, not a journey",
+        input.MouseDelta == Vector2.Zero, input.MouseDelta.ToString());
+    t.Expect("D.8 and position DOES jump, because that is where the pointer is",
+        input.MousePosition == new Vector2(900, 700), input.MousePosition.ToString());
+
+    input.RecordMousePosition(new Vector2(905, 700), eligible: true);
+    input.BeginTick();
+    t.Expect("D.9 the sample after that deltas normally again",
+        input.MouseDelta == new Vector2(5, 0), input.MouseDelta.ToString());
+
+    // The same rule with a panel holding the pointer: the origin keeps following, so coming back
+    // costs no jump either — and the movement made over the panel was never the application's.
+    input.RecordMousePosition(new Vector2(600, 400), eligible: false);
+    input.RecordMousePosition(new Vector2(640, 430), eligible: false);
+    input.BeginTick();
+    t.Expect("D.10 movement while a UI owns the pointer is not the application's",
+        input.MouseDelta == Vector2.Zero, input.MouseDelta.ToString());
+    t.Expect("D.11 and the application's position does not follow it either",
+        input.MousePosition == new Vector2(905, 700), input.MousePosition.ToString());
+
+    input.RecordMousePosition(new Vector2(645, 430), eligible: true);
+    input.BeginTick();
+    t.Expect("D.12 and handing it back costs one step, not the whole excursion",
+        input.MouseDelta == new Vector2(5, 0), input.MouseDelta.ToString());
 
     input.RecordMouseWheel(new Vector2(0, 1));
     input.RecordMouseWheel(new Vector2(0, 2));
@@ -398,6 +435,43 @@ var t = new TestRunner();
 
     t.Expect("H.3 the polled path reads the focus bit, rather than the host merely keeping one",
         consults, "a pad is sampled every tick whether or not the window is listening");
+
+    // ── coming back ────────────────────────────────────────────────────────────────────────────
+    //
+    // Letting go on focus loss is only half of it. The player is still holding what they were
+    // holding when focus returns, and sampling that as ordinary input makes it a PRESS — which is
+    // where one-shot actions live, so returning to a window would select, confirm or shoot.
+    // Nothing was pressed; the application became allowed to look again, and that is not an event.
+    var back = new InputState();
+    back.RecordGamepadConnected(0, "Test Pad");
+    back.RecordGamepadButton(0, GamepadButton.A, pressed: true);
+    back.RecordGamepadAxis(0, GamepadAxis.LeftX, 0.8f);
+    back.BeginTick();
+    t.Expect("H.0 CONTROL A is held and the stick is off centre", back.Gamepads[0][GamepadButton.A].Down);
+
+    back.ReleaseAll();          // focus lost
+    back.BeginTick();
+    back.ResyncGamepads();      // focus regained, and the thumb never moved
+    back.RecordGamepadButton(0, GamepadButton.A, pressed: true);
+    back.RecordGamepadAxis(0, GamepadAxis.LeftX, 0.8f);
+    back.BeginTick();
+
+    t.Expect("H.4 a button still held on return is DOWN without being pressed",
+        back.Gamepads[0][GamepadButton.A] is { Down: true, Pressed: false, Released: false },
+        "a one-shot bound to A must not fire because the window became eligible");
+    t.Expect("H.5 and a stick still off centre reports no movement",
+        MathF.Abs(back.Gamepads[0][GamepadAxis.LeftX].Delta) < 1e-6f
+        && MathF.Abs(back.Gamepads[0][GamepadAxis.LeftX].Value - 0.8f) < 1e-6f,
+        "otherwise the stick 'travels' from centre to where the thumb already was");
+
+    // And the priming lasts exactly one sample: a real press after it is a real press.
+    back.RecordGamepadButton(0, GamepadButton.A, pressed: false);
+    back.BeginTick();
+    back.RecordGamepadButton(0, GamepadButton.A, pressed: true);
+    back.BeginTick();
+    t.Expect("H.6 a genuine press after re-acquisition still presses",
+        back.Gamepads[0][GamepadButton.A] is { Down: true, Pressed: true },
+        "priming must not be sticky");
 }
 
 t.PrintSummary();
