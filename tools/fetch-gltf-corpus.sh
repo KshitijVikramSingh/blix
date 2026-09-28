@@ -42,6 +42,10 @@ get() {
 }
 
 while read -r line; do
+    # Belt as well as braces. .gitattributes pins this file to LF, which is the fix; this is
+    # here because a manifest can also be edited on Windows, pasted, or generated, and a
+    # parser that silently builds broken URLs from an invisible byte is a bad way to find out.
+    line="${line%$'\r'}"
     line="${line%%#*}"
     case "$line" in '') continue ;; esac
     # shellcheck disable=SC2086
