@@ -349,6 +349,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDisposable
     private int froxelGridZ = 24;
     private int froxelGridX, froxelGridY;
     private int froxelGridBinding = -1;
+    private int skyFroxelGridBinding = -1;
 
     // The grid dimensions a framebuffer of this size asks for. Floored well above zero so a
     // minimised or absurdly small window still has a grid to dispatch over.
@@ -377,6 +378,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDisposable
     // covers Studio rather than this renderer.
     private string? shotPath;
     private int shotFrame = 240;        // long enough for the streamed textures to land
+    // --frames-after-load N: close N frames after texture streaming finishes. A host --frames count
+    // cannot bound this, because loading takes a varying ~1000 frames and the lit path only runs after it.
+    private int? framesAfterLoad;
     private int framesRendered;
     // Frame periods for capture statistics. The long window distinguishes an effect from the
     // machine's ordinary frame-time spread.
@@ -767,6 +771,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDisposable
     // the lit pass's set-1 IBL + shadow-cascade textures (all stable handles).
     private byte[] identityPush = null!;
     private ShaderTextureBinding[] passBindings = null!;
+    // The skybox's own list: it samples six of the lit pass's textures, and a name a program does
+    // not declare is an error, not a skip.
+    private ShaderTextureBinding[] skyBindings = null!;
     // Mask shadow pushes differ per draw (alpha params), so they can't share one
     // buffer like opaque casters. Pool + reuse the byte[]s across frames instead
     // of allocating per draw: CmdPushConstants copies the bytes at record time,

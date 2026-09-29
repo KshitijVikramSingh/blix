@@ -671,6 +671,21 @@ public static class Program
             () => device.Device!.CreateTexture2D(default!, ReadOnlySpan<byte>.Empty),
             mustMention: "CreateTexture2D");
 
+        // Nothing submitted is reported as nothing, not as a frame that cost nothing: a reader
+        // taking LastFrame's zeros for a measurement would publish a free frame.
+        var timing = new HeadlessHost(new RecordingLoop()).Timing;
+        t.Expect("a host that submits nothing reports no last frame", timing.LastFrame is null);
+        t.Expect("and no timestamps, no totals and no passes",
+            !timing.GpuTimestampsSupported && timing.GpuPassTotals.Count == 0 && timing.LastFramePasses.Count == 0);
+
+        // A window is a later total less an earlier one, which is exact without owning a drain.
+        var window = new GpuPassTotal(12.0, 8) - new GpuPassTotal(4.0, 4);
+        t.Expect("a window between two totals is their difference", window == new GpuPassTotal(8.0, 4), window.ToString());
+        t.Expect("and its mean is per resolution", Math.Abs(window.MeanMs - 2.0) < 1e-12, window.MeanMs.ToString());
+        t.Expect("an empty window has a mean of zero, not NaN", new GpuPassTotal(0, 0).MeanMs == 0.0);
+        var both = new SubmittedWork(1, 2, 3, 4, 5, 6, 7) + new SubmittedWork(1, 1, 1, 1, 1, 1, 1);
+        t.Expect("submitted work adds field by field", both == new SubmittedWork(2, 3, 4, 5, 6, 7, 8), both.ToString());
+
         var pressed = new RecordingLoop { CloseAfter = 5 };
         new HeadlessHost(pressed, input: (frame, input) =>
         {

@@ -65,11 +65,17 @@ Discussed and deliberately not started. Two findings hold whatever shape it take
 - **Measurement cannot ride `DebugContext`.** The RTS's sealed `--perf-run` switches its own
   diagnostics producer off, because keeping it alive cost over 4 ms a wide-village frame and
   had already skewed two sections' absolute numbers. What it measures instead comes from the
-  device (`LastCpuFrameTiming`, `GpuPassTotals` over the steady window), the game's own
+  device (`LastCpuFrameTiming`, `GpuPassTotals` over the steady window; both now
+  `IRenderHost.Timing`, which the RTS moves to when it next moves its engine pin), the game's own
   stopwatches and counts, and the display's refresh for cadence, summarised as warm-up plus
   nearest-rank percentiles into one `PERFCASE` line its scripts tabulate. A Blix version would
   be a cheap channel live only in a measured run, the host's own numbers, and one run record per
   run, with cases, arms and ABBA ordering left to the project.
+
+The host's own numbers are the part that is truth, not policy, and they have landed:
+`IRenderHost.Timing` (`Blix.Graphics.IFrameTiming`) gives the last frame's CPU phases, what it
+submitted overall and per pass, and cumulative GPU time per pass, never drained by reading.
+Windows, percentiles, warm-up and run records stay the project's.
 
 Open: whether the engine owns case execution, what an app hands the measurement channel, whether
 Sponza's in-process `--ab` feeds the same records, and whether simulation benches belong at all.
@@ -114,7 +120,17 @@ plus `sampler` in GLSL. Reflection already parses `separate_images` and `separat
 what has not been checked is that the device binds a separate sampler rather than treating every
 image slot as a combined one. The alternative, Metal argument buffers for all of MoltenVK
 (`MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS`), lifts the limit engine-wide and changes every program's
-binding path, so it is not the first thing to try. Until then Sponza is not a `demos` gate leg.
+binding path, so it is not the first thing to try. Until then Sponza's `demos` leg runs without
+`--validate`.
+
+**Sponza has image-layout errors under `--validate`, apart from the sampler limit.** Seen once
+the lit path runs (`--frames-after-load 45 --validate`): a depth image sampled while in
+`DEPTH_STENCIL_ATTACHMENT_OPTIMAL`, or undefined, where its descriptor says shader-read
+(`VUID-vkCmdDrawIndexed-imageLayout-00344`, `-DrawIndexedIndirect-imageLayout-00344`,
+`VUID-vkCmdDraw-None-09600`); a render pass whose initial layout is not the image's
+(`VUID-vkCmdBeginRenderPass-initialLayout-00900`); and an object alive at device destruction
+(`VUID-vkDestroyDevice-device-05137`). Not yet attributed to a pass. The 45-frame legs of the
+other demos are clean, so this is either Sponza's own graph or a path only it exercises.
 
 **The `demos` gate is not in CI, and now cannot be as it stands.** Its headed legs run each demo
 for 45 frames under `--validate`, which needs a GPU and the validation layers, and CI runners have

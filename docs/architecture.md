@@ -352,7 +352,7 @@ backend details.
 
 | Contract | Defined in | What it does |
 | --- | --- | --- |
-| `IRenderHost` | `Blix.Core` | Runtime knobs: `SetTitle`, `RequestClose`, `SetCursorCaptured`, `LogicalSize`. |
+| `IRenderHost` | `Blix.Core` | Runtime knobs: `SetTitle`, `RequestClose`, `SetCursorCaptured`, `LogicalSize`. And what the host measured and submitted: `Timing`. |
 | `IAudioHost` | `Blix.Core` | Hands out the `IAudioDevice` (`Blix.Audio`) for the running session. |
 | `IDebugHost` | `Blix.Diagnostics` | Exposes the active `DebugContext` (for per-frame writes) and the full `DebugSystem` (for contributor registration, freeze, selection). |
 | `InputState` | `Blix.Core` | The frame's input, read from `IRenderHost.Input`: `Down`/`Pressed`/`Released` per key and button, `MousePosition`/`MouseDelta`/`MouseWheel`. Fixed for the length of an update. A press decides who owns the gesture and its matching release goes to the same place — see `Blix.Core.GestureOwnership`. So a press the UI took delivers no release to the application, and a press the application took delivers its release even if focus has since moved to a panel. |
@@ -378,6 +378,17 @@ graphics-facing ones are spelled out below.
 The Vulkan backend uploads these row-major bytes **untransposed**. GLSL's std140 reads them column-major, which is the transpose — i.e. the column-vector form — so a shader's `M * v_col` computes the same transformation `v_row * M` does on the CPU. Net: one convention, no transposes, model matrices feed a `model * v` shader (or `InstanceData.Model`) directly. The composition + this upload→GLSL convention are pinned by `Blix.Test.Graphics` Section AH (it simulates the GLSL `M*v` against known world points).
 
 **Gotcha — the projection builders are different.** The hand-built projection matrices in `GraphicsMatrices` (`CreatePerspectiveVulkan`, the orthographics) place their terms in column form because they're authored directly as the shader-space matrix; don't pattern-match off them when reasoning about *model* matrices. Model/view matrices are the row-vector form above.
+
+**Frame timing.** `IRenderHost.Timing` is what the host measured and submitted, read without
+reaching for a backend's device: the last frame's CPU phases (wait, encode, submit and
+present), the work it submitted in all and per pass (draws, instances, triangles, indirect
+calls and the records they read, dispatches), and cumulative GPU time per pass. It is kept
+whether or not anything reads it, and reading it drains nothing, so it can sit beside the
+overlay's `gpu/passes` scope. A window of GPU time is a later `GpuPassTotals` entry less an
+earlier one. What counts as a window, a warm-up or a percentile is the program's. Comparing the
+submitted counts with what a program thinks it staged is the use they are there for: a draw
+meant and not issued, or issued and not meant, shows up as a difference. A host that submits
+nothing, the headless one, reports `LastFrame` null and no timestamps rather than zeros.
 
 **Pixel coordinates.** `IRenderHost.LogicalSize` returns the window's client area in logical pixels (same coordinate system as mouse events). `RenderFrameContext.Width/Height` is the framebuffer in physical pixels (typically 2× on Retina). Don't mix them — `Camera3D.ScreenPointToRay` needs logical pixels because mouse coords are logical.
 

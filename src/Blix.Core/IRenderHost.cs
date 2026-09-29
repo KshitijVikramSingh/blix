@@ -68,4 +68,10 @@ public interface IRenderHost
     // jitter at 14.18 ms on a 16.67 ms panel, and a "cheap case" median read 63 ms once
     // the machine was busy. The display knows; ask the display.
     int? DisplayRefreshHz { get; }
+
+    // What the host measured and submitted: the last frame's CPU phases and submitted work, and
+    // cumulative GPU time per pass. Facts, always kept and never drained by reading, so a program
+    // measuring itself reads them here instead of from a backend's device. A host that submits
+    // nothing says so: LastFrame is null and there are no timestamps. See Blix.Graphics.IFrameTiming.
+    IFrameTiming Timing { get; }
 }

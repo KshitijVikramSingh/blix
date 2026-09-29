@@ -70,6 +70,9 @@ public sealed partial class VulkanGraphicsDevice
         // Bind point this pipeline was created for. Guards against binding a
         // compute pipeline for a draw or a graphics pipeline for a dispatch.
         public bool IsCompute;
+        // What a draw with this pipeline assembles, so submitted triangles are counted only for
+        // pipelines that draw them.
+        public PrimitiveTopology Topology;
     }
 
     // --- Buffer creation ---------------------------------------------------
@@ -857,6 +860,7 @@ public sealed partial class VulkanGraphicsDevice
             Layout = layout,
             Name = name ?? "pipeline",
             ShaderProgram = description.ShaderProgram,
+            Topology = description.Topology,
         };
         var id = nextResourceId++;
         pipelineTable[id] = entry;

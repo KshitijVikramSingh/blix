@@ -88,7 +88,7 @@ public sealed partial class VulkanGraphicsDevice
     // — it fences the CPU against the GPU at every pass boundary and roughly halves the frame rate.
     private bool gpuPassIsolation;
     private Fence isolationFence;
-    private readonly Dictionary<string, (double TotalMs, long Samples)> gpuPassIsolated = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, GpuPassTotal> gpuPassIsolated = new(StringComparer.Ordinal);
     // <b>Frames, so a pass that SKIPS frames can be priced.</b> The per-execution mean is blind to
     // scheduling by construction: run a cascade every fourth frame and it costs exactly what it did
     // per run, while costing a quarter as much per frame. Amortising needs the denominator that
@@ -103,7 +103,7 @@ public sealed partial class VulkanGraphicsDevice
     }
 
     /// <summary>Isolated per-pass GPU milliseconds, cumulative. See GpuPassIsolation.</summary>
-    public IReadOnlyDictionary<string, (double TotalMs, long Samples)> GpuPassIsolatedTotals => gpuPassIsolated;
+    public IReadOnlyDictionary<string, GpuPassTotal> GpuPassIsolatedTotals => gpuPassIsolated;
 
     /// <summary>Frames recorded while isolation was on — the denominator for an amortised cost.</summary>
     public long GpuIsolationFrames => gpuIsolationFrames;
@@ -619,7 +619,7 @@ public sealed partial class VulkanGraphicsDevice
         first = false;
 
         gpuPassIsolated.TryGetValue(passName, out var acc);
-        gpuPassIsolated[passName] = (acc.TotalMs + ms, acc.Samples + 1);
+        gpuPassIsolated[passName] = acc + new GpuPassTotal(ms, 1);
 
         ThrowIfNotSuccess(Vk.ResetCommandBuffer(local, 0), "vkResetCommandBuffer(isolate)");
         var bi = new CommandBufferBeginInfo
@@ -706,8 +706,9 @@ public sealed partial class VulkanGraphicsDevice
 
         ref var f = ref frames[currentFrame];
         // CPU-phase timing: wait (fence/vsync throttle) → encode (record vkCmds)
-        // → submit/present. Surfaced via LastCpuFrameTiming so a diagnostics pass
-        // can isolate the draw-encode cost from the GPU-bound wait.
+        // → submit/present. Surfaced through IFrameTiming.LastFrame so a reader can
+        // isolate the draw-encode cost from the GPU-bound wait.
+        BeginFrameCount();
         var swWait = Stopwatch.GetTimestamp();
         Vk.WaitForFences(Device, 1, in f.InFlight, true, ulong.MaxValue);
 
@@ -782,6 +783,7 @@ public sealed partial class VulkanGraphicsDevice
                 if (canTimeCompute) nextQueryIndex += 2;
 
                 currentPassName = pass.Name;
+                CountPass(pass.Name);
                 // ComputeShaderBit is the compute encoder's boundary the way
                 // ColorAttachmentOutputBit is the render encoder's — same reason, same caveat:
                 // on MoltenVK these bracket the ENCODER, not the shader's execution.
@@ -903,6 +905,7 @@ public sealed partial class VulkanGraphicsDevice
             // Named so a uniform-conflict message can say WHICH two passes disagreed, which is the
             // difference between "something wrote this twice" and "lab.lit and lab.viewport did".
             currentPassName = pass.Name;
+            CountPass(pass.Name);
 
             Vk.CmdBeginRenderPass(f.CommandBuffer, in rpBegin, SubpassContents.Inline);
             // Timestamps INSIDE the pass — MoltenVK resolves counter samplers
@@ -1000,7 +1003,7 @@ public sealed partial class VulkanGraphicsDevice
         }
 
         var submitPresentMs = Stopwatch.GetElapsedTime(swSubmit, Stopwatch.GetTimestamp()).TotalMilliseconds;
-        lastCpuFrameTiming = new VkCpuFrameTiming(waitMs, encodeMs, submitPresentMs);
+        EndFrameCount(waitMs, encodeMs, submitPresentMs);
 
         currentFrame = (currentFrame + 1) % MaxFramesInFlight;
         // Advance the indirect ring in lockstep (only on a real presented frame,
@@ -1194,6 +1197,7 @@ public sealed partial class VulkanGraphicsDevice
             throw new InvalidOperationException(
                 $"DrawIndexed bound a compute pipeline '{pipe.Name}'. Compute pipelines can only be dispatched (RenderCommandList.ComputePass / RenderGraph.Dispatch).");
         }
+        CountDraw(currentPassName, pipe, d.IndexCount, d.InstanceCount);
         var vb = GetVertexBuffer(d.VertexBuffer);
         var ib = GetIndexBuffer(d.IndexBuffer);
         var prog = shaderProgramTable[pipe.ShaderProgram.Id];
@@ -1325,6 +1329,7 @@ public sealed partial class VulkanGraphicsDevice
         Vk.CmdDrawIndexedIndirect(
             cmd, indirect.Buffer, (ulong)d.IndirectByteOffset,
             (uint)d.DrawCount, (uint)IndirectCommandStride);
+        CountIndirect(currentPassName, d.DrawCount);
     }
 
     // Name-keyed ShaderUniform → byte offsets across every UBO/SSBO slot
@@ -1372,6 +1377,7 @@ public sealed partial class VulkanGraphicsDevice
                 throw new InvalidOperationException(
                     $"Compute pass '{pass.Name}' contains a {rc.GetType().Name}; compute passes may only contain DispatchCommands.");
             }
+            CountDispatch(pass.Name);
             var pipe = GetPipeline(d.Pipeline);
             if (!pipe.IsCompute)
             {

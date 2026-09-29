@@ -17,8 +17,7 @@ test: chassis-tune --headless --frames 30 --dump-frame 10
 
 # Every headed demo, bounded and under the validation layers, whose errors fail the leg rather
 # than scroll past it. These need a GPU and the layers, so this gate is run where both are; the
-# root gate stays deviceless for CI. Sponza is absent: it needs its external pack set, and it
-# exceeds MoltenVK's 16-sampler limit until its lit shader moves to separate images (plan.md).
+# root gate stays deviceless for CI.
 test: Blix.Demos.VulkanHello --frames 45 --validate
 test: Blix.Demos.VulkanGraph --frames 45 --validate
 test: Blix.Demos.VulkanLit --frames 45 --validate
@@ -31,3 +30,10 @@ test: Blix.Demos.Bulwark --frames 45 --validate
 test: Blix.Demos.Chassis --frames 45 --validate
 test: chassis-tune --frames 45 --validate
 test: room --frames 45 --validate
+
+# Sponza streams its textures for ~1000 frames before its lit path runs at all, so a frame count
+# ends every run on the flat preview, which is how a crash in the lit path shipped. It closes
+# 45 frames after load instead, and fails rather than passes when BLIX_SPONZA_ASSETS is not set.
+# Not under --validate yet: it exceeds MoltenVK's 16-sampler limit and has open layout errors
+# (both in plan.md).
+test: Blix.Demos.VulkanSponza --frames-after-load 45

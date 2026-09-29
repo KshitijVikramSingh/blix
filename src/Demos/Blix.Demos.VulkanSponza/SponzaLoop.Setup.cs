@@ -170,6 +170,7 @@ internal sealed partial class SponzaLoop
         // to be watching.
         if (args.String("shot") is { } shot) shotPath = shot;
         if (args.Int("shot-frames") is { } sf) shotFrame = sf;
+        framesAfterLoad = args.Int("frames-after-load");
 
         // Seed sun yaw/pitch from the default direction so the Sun controls
         // start matching the baked look.
@@ -189,7 +190,13 @@ internal sealed partial class SponzaLoop
             debugSystem = dbg;
         }
 
-        if (!TryLocateSponza(out var assetsRoot, out var gltfPath)) return;
+        if (!TryLocateSponza(out var assetsRoot, out var gltfPath))
+        {
+            // A run that asked for the loaded scene and never loaded one has not passed.
+            if (framesAfterLoad is not null || shotPath is not null)
+                BlixApps.ReportFailure("the Sponza pack set is missing, so the loaded scene never rendered");
+            return;
+        }
         LoadIbl(assetsRoot);
         LoadSkyVisibility(assetsRoot);
 
@@ -224,10 +231,10 @@ internal sealed partial class SponzaLoop
         // push-constant ranges — are reflected from the compiled SPIR-V at
         // build time (spirv-cross sidecars next to each .spv), not hand-
         // authored. See docs/architecture.md → the Vulkan binding model. Each program
-        // reflects exactly what its stages declare; per-draw descriptor binding
-        // skips any per-pass texture a program doesn't sample, so the skybox
-        // no longer has to restate the lit pass's set-1 bindings for "layout
-        // compatibility" — there is no shared bound set to be compatible with.
+        // reflects exactly what its stages declare, and a draw binds by name only
+        // what its program declares: naming a texture the program lacks throws.
+        // So the skybox has its own list of the six textures it samples rather
+        // than being handed the lit pass's.
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
         ShaderInterface Reflect(params string[] stages) =>
             ShaderReflection.ForProgram(shaderDir, stages);
@@ -711,6 +718,14 @@ internal sealed partial class SponzaLoop
         skyBounceBinding = Array.FindIndex(passBindings, b => b.Name == "uSkyBounce");
         // Same reason, different cause: the grid is re-created when the framebuffer changes size.
         froxelGridBinding = Array.FindIndex(passBindings, b => b.Name == "uFroxelGrid");
+
+        // skybox.frag's six, taken from the lit list so the two can never hold different textures.
+        // uSkyBounce's per-frame swap does not reach it (the sky does not read the bounce), and
+        // uFroxelGrid's re-creation does, through its own index.
+        string[] skySamples = { "uIrradiance", "uPrefilteredEnv", "uBrdfLut",
+            "uCascadeShadowMaps[0]", "uCascadeShadowMaps[1]", "uCascadeShadowMaps[2]", "uFroxelGrid", "uEnvCube" };
+        skyBindings = skySamples.Select(n => passBindings.Single(b => b.Name == n)).ToArray();
+        skyFroxelGridBinding = Array.FindIndex(skyBindings, b => b.Name == "uFroxelGrid");
 
         // --- Load Sponza geometry ---------------------------------------
         // Static-mesh importer (Sponza has no skinning): each glTF primitive
