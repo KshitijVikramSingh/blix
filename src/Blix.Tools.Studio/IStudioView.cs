@@ -70,11 +70,11 @@ public readonly record struct StudioDraw(
     /// </remarks>
     public ShaderTextureBinding[] WithAlbedo(TextureHandle albedo)
     {
-        if (Pass == StudioPass.Shadow) return new[] { new ShaderTextureBinding("uAlbedo", albedo, Slot: 0) };
+        if (Pass == StudioPass.Shadow) return new[] { new ShaderTextureBinding("uAlbedo", albedo) };
 
         var all = new ShaderTextureBinding[Textures.Length + 1];
         Textures.CopyTo(all, 0);
-        all[^1] = new ShaderTextureBinding("uAlbedo", albedo, Slot: 1);
+        all[^1] = new ShaderTextureBinding("uAlbedo", albedo);
         return all;
     }
 }

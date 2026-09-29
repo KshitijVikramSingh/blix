@@ -37,11 +37,14 @@ namespace Blix.Demos.VulkanGraph;
 //   • the 3-pass invert scene as a visual correctness check
 public static class Program
 {
-    public static void Main()
+    public static int Main(string[] args) => BlixApps.Main(args, Run);
+
+    private static int Run(AppArgs args)
     {
         var loop = new GraphLoop();
-        using var window = new Window(loop, new WindowOptions("Blix — Vulkan RenderGraph", 1280, 720));
+        using var window = new Window(loop, WindowOptions.FromArgs(args, new WindowOptions("Blix — Vulkan RenderGraph", 1280, 720)));
         window.Run();
+        return 0;
     }
 }
 
@@ -76,7 +79,6 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
     private FullscreenPass fullscreen = null!;
 
     // Per-frame state.
-    private readonly byte[] modelPushBytes = new byte[64];
     private int frameCount;
     private Matrix4x4 viewProj;
     private Matrix4x4 currentModel;
@@ -124,8 +126,12 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
         var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
         var cubeInterface = ShaderReflection.ForProgram(shaderDir, "cube.vert", "cube.frag");
 
-        // Invert + present share one interface: a single SampledImage at (set 0, binding 0).
-        var samplerOnlyInterface = ShaderReflection.ForProgram(shaderDir, "present.vert", "present.frag");
+        // Each program reads its own shaders. Invert and present were once handed one interface,
+        // reflected from present's shaders, on the grounds that both have a single sampler at
+        // (set 0, binding 0). They do, but invert's is uHdr and present's is uOffscreen, and binding
+        // by name is what showed that the shared interface described only one of them.
+        var invertInterface = ShaderReflection.ForProgram(shaderDir, "invert.vert", "invert.frag");
+        var presentInterface = ShaderReflection.ForProgram(shaderDir, "present.vert", "present.frag");
 
         // Declare graph passes. Scene targets hdr + depth. Invert reads hdr
         // and writes inverted.
@@ -137,7 +143,7 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
         invertPassHandle = graph.GraphicsPass("invert")
             .Target(invertedHandle, LoadOp.Clear, StoreOp.Store)
             .Read(hdrHandle)
-            .Shader(samplerOnlyInterface)
+            .Shader(invertInterface)
             .Handle;
         graph.Compile();
 
@@ -156,7 +162,7 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
 
         var invertVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "invert.vert.spv"));
         var invertFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "invert.frag.spv"));
-        invertShaderProgram = vk.CreateShaderProgramFromSpv(invertVertSpv, invertFragSpv, samplerOnlyInterface, "invert");
+        invertShaderProgram = vk.CreateShaderProgramFromSpv(invertVertSpv, invertFragSpv, invertInterface, "invert");
         invertPipeline = vk.CreatePipeline(new PipelineDescription(
             invertShaderProgram,
             VertexPosition3Texture.Layout,
@@ -168,7 +174,7 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
 
         var presentVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.vert.spv"));
         var presentFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.frag.spv"));
-        presentShaderProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, presentFragSpv, samplerOnlyInterface, "present");
+        presentShaderProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, presentFragSpv, presentInterface, "present");
         presentPipeline = vk.CreatePipeline(new PipelineDescription(
             presentShaderProgram,
             VertexPosition3Texture.Layout,
@@ -203,7 +209,7 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
         currentRotX = (float)time.Total * 0.3f;
         currentModel = Matrix4x4.CreateRotationY(currentRotY)
                      * Matrix4x4.CreateRotationX(currentRotX);
-        System.Runtime.InteropServices.MemoryMarshal.Write(modelPushBytes, in currentModel);
+        var push = new CubePush { Model = currentModel };
 
         var perFrame = new ShaderUniform[]
         {
@@ -221,7 +227,7 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
                 uniforms: perFrame,
                 textures: Array.Empty<ShaderTextureBinding>(),
                 material: cubeMaterial,
-                pushConstants: modelPushBytes);
+                pushConstants: push.ToBytes());
         }, clearColor: new GraphicsColor(0.06f, 0.08f, 0.12f, 1.0f));
 
         // Pass 2 (graph): fullscreen invert → inverted. Reads hdr via the
@@ -229,7 +235,7 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
         var hdrTexture = graph.GetColorTexture(hdrHandle);
         graph.Pass(invertPassHandle, scope =>
             fullscreen.Draw(scope, invertPipeline,
-                new[] { new ShaderTextureBinding("uHdr", hdrTexture, Slot: 0) }));
+                new[] { new ShaderTextureBinding("uHdr", hdrTexture) }));
 
         // Append graph passes to the command list.
         graph.Execute(commandList);
@@ -243,7 +249,7 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
                 ClearColors: new GraphicsColor?[] { new GraphicsColor(0, 0, 0, 1) },
                 ClearDepth: true),
             pass => fullscreen.Draw(pass, presentPipeline,
-                new[] { new ShaderTextureBinding("uInverted", invertedTexture, Slot: 0) }));
+                new[] { new ShaderTextureBinding("uOffscreen", invertedTexture) }));
     }
 
     public void Debug(DebugContext debug)
@@ -343,3 +349,8 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
         return data;
     }
 }
+
+// The cube's push block, written from cube.vert's reflection: the fields, their offsets and the
+// size come from the shader, and "u" is dropped from each name because this line says so.
+[PushConstants("cube.vert", "cube.frag", Prefix = "u")]
+internal partial struct CubePush;

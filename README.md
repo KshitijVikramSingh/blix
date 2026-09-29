@@ -122,9 +122,9 @@ another credible consumer.
 
 ![Intel Sponza rendered in Blix](docs/sponza.jpg)
 
-Sponza's source assets are not committed. `tools/setup-sponza-modern.sh`
-prepares the local asset tree; the application remains runnable through the
-Blix front door once built.
+Sponza's source assets are not committed. With `BLIX_SPONZA_ASSETS` naming
+where the cooked set goes, `tools/setup-sponza-modern.sh` extracts the packs and
+cooks them; the application then runs through the Blix front door.
 
 ## Demos and proving grounds
 
@@ -165,7 +165,7 @@ instead of preserving a second historical account beside it.
 
 ## Shared application arguments
 
-Applications that use `WindowOptions.FromArgs` inherit:
+Windowed applications that use `WindowOptions.FromArgs` inherit:
 
 ```text
 --frames N       close after N rendered frames
@@ -174,9 +174,12 @@ Applications that use `WindowOptions.FromArgs` inherit:
 --title TEXT     set the window title
 --debug          start with diagnostics visible
 --dump-frame N   write the diagnostics dump for frame N
+--validate       run under the validation layers and fail on any error
 ```
 
-Application-specific arguments remain owned by the application.
+Application-specific arguments remain owned by the application, which reads
+them from the same `AppArgs`. An argument nothing read is reported as one
+warning line when the program exits.
 
 ## Platform notes
 

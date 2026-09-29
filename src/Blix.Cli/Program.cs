@@ -113,11 +113,17 @@ public static class Program
     /// constitutes verification for this project" is not a fact about any one app; it is a
     /// statement the project makes about itself, and no attribute can carry it. Longer or
     /// specialized verification can remain in project-owned scripts beside this quick gate.
+    /// <para>
+    /// <b>A gate is a list of legs, and a leg can carry arguments.</b> <c>test: a, b</c> names
+    /// apps with none. A line with an option on it is one leg: <c>test: settlement --years 1</c>
+    /// runs <c>settlement</c> with <c>--years 1</c>. Several <c>test:</c> lines add up, in order,
+    /// so a leg with arguments sits on a line of its own and a comma never has to mean two things.
+    /// </para>
     /// </remarks>
     private static Marked Marker(DirectoryInfo root)
     {
         var path = Path.Combine(root.FullName, "blix.project");
-        if (!File.Exists(path)) return new Marked(root.Name.ToLowerInvariant(), Array.Empty<string>());
+        if (!File.Exists(path)) return new Marked(root.Name.ToLowerInvariant(), Array.Empty<GateLeg>());
 
         var lines = File.ReadAllLines(path)
             .Select(l => l.Trim())
@@ -127,15 +133,59 @@ public static class Program
         var name = lines.FirstOrDefault(l => !l.Contains(':')) ?? root.Name.ToLowerInvariant();
 
         var gate = lines
-            .FirstOrDefault(l => l.StartsWith("test:", StringComparison.OrdinalIgnoreCase))
-            ?.Split(':', 2)[1]
-            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            ?? Array.Empty<string>();
+            .Where(l => l.StartsWith("test:", StringComparison.OrdinalIgnoreCase))
+            .SelectMany(l => Legs(l.Split(':', 2)[1]))
+            .ToArray();
 
         return new Marked(name, gate);
     }
 
-    private sealed record Marked(string Name, string[] Gate);
+    private static IEnumerable<GateLeg> Legs(string line)
+    {
+        var tokens = Tokenize(line);
+        if (tokens.Skip(1).Any(t => t.StartsWith("--", StringComparison.Ordinal)))
+        {
+            return new[] { new GateLeg(tokens[0], tokens.Skip(1).ToArray()) };
+        }
+
+        return line
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(app => new GateLeg(app, Array.Empty<string>()));
+    }
+
+    // Whitespace separates, and double quotes keep a value with spaces in it whole.
+    private static List<string> Tokenize(string line)
+    {
+        var tokens = new List<string>();
+        var current = new System.Text.StringBuilder();
+        var quoted = false;
+        var any = false;
+        foreach (var c in line)
+        {
+            if (c == '"') { quoted = !quoted; any = true; continue; }
+            if (char.IsWhiteSpace(c) && !quoted)
+            {
+                if (any) tokens.Add(current.ToString());
+                current.Clear();
+                any = false;
+                continue;
+            }
+
+            current.Append(c);
+            any = true;
+        }
+
+        if (any) tokens.Add(current.ToString());
+        return tokens;
+    }
+
+    private sealed record Marked(string Name, GateLeg[] Gate);
+
+    /// <summary>One app a gate runs, and the arguments its line gives it.</summary>
+    private sealed record GateLeg(string App, string[] Args)
+    {
+        public override string ToString() => Args.Length == 0 ? App : $"{App} {string.Join(' ', Args)}";
+    }
 
     private static List<App> Discover(DirectoryInfo root)
     {
@@ -207,25 +257,24 @@ public static class Program
             {
                 foreach (var app in index.Apps)
                 {
-                    // An app declared ON the entry point needs no selector: exec it and it
-                    // simply runs. Only an assembly carrying SEVERAL apps has to be told
-                    // which one, and only those callers need BlixApps.Dispatch at all.
+                    // The default app needs no selector: exec the executable and it is what
+                    // runs. Every other app in the assembly has to be named.
                     apps.Add(new App(
                         project, app.Name, app.Summary, app.Headed, host, assembly,
-                        app.IsEntryPoint ? null : app.Name, stale, Declared: true,
-                        SourceProject: index.Project));
+                        app.IsDefault ? null : app.Name, stale, Declared: true,
+                        SourceProject: index.Project, Usage: app.Usage));
                 }
             }
 
             // CONVENTION: an executable is runnable, named after itself, unless one of
-            // its declarations already IS the entry point and has given it a better name.
+            // its declarations is its default app and has given it a better name.
             //
             // The condition is the whole rule. Suppressing this whenever an assembly
             // declares anything was too blunt: a project that declares thirty-five tools
             // would lose its application, which is the one app it certainly has. An
             // executable being runnable is simply true, and declaring only ever renames
             // it or adds neighbours.
-            if (index.HasEntryPoint && !index.Apps.Any(a => a.IsEntryPoint))
+            if (index.HasEntryPoint && !index.Apps.Any(a => a.IsDefault))
             {
                 var name = Path.GetFileNameWithoutExtension(index.Assembly);
                 apps.Add(new App(project, name, null, false, host, assembly, null, stale,
@@ -303,6 +352,7 @@ public static class Program
             var kind = app.Headed ? "  [window]" : string.Empty;
             var summary = app.Summary is null ? string.Empty : $"  {app.Summary}";
             Console.WriteLine($"   {mark} {app.Name.PadRight(width)}{summary}{kind}");
+            if (app.Usage is { } usage) Console.WriteLine($"     {new string(' ', width)}  {usage}");
         }
     }
 
@@ -559,7 +609,8 @@ public static class Program
         {
             throw new BlixCliException(
                 $"'{marker.Name}' declares no gate. Add a line to {Path.Combine(root.FullName, "blix.project")}:\n" +
-                "    test: <app>, <app>, ...");
+                "    test: <app>, <app>, ...\n" +
+                "    test: <app> --option value");
         }
 
         // --build is consumed wherever it appears rather than only in front, because every
@@ -583,8 +634,9 @@ public static class Program
         {
             var attempted = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var name in marker.Gate)
+            foreach (var leg in marker.Gate)
             {
+                var name = leg.App;
                 var app = Resolve(apps, name);
 
                 if (app.SourceProject is not { Length: > 0 } project)
@@ -610,8 +662,9 @@ public static class Program
             apps = Discover(root);
         }
 
-        foreach (var name in marker.Gate)
+        foreach (var leg in marker.Gate)
         {
+            var name = leg.App;
             if (unbuildable.Contains(name))
             {
                 failed.Add($"{name} (build)");
@@ -637,7 +690,11 @@ public static class Program
                 stale.Add($"{app.Name} (older than {Relative(old.Source)})");
             }
             Console.WriteLine();
-            Console.WriteLine($"=== {app.Name}");
+            Console.WriteLine(leg.Args.Length == 0 ? $"=== {app.Name}" : $"=== {app.Name} {string.Join(' ', leg.Args)}");
+
+            // The line's arguments first and the command line's after, so a single read takes
+            // what was typed: `blix test --frames 5` still bounds a leg that declares --frames 60.
+            var legArgs = leg.Args.Concat(args).ToArray();
 
             // <b>A gate leg that opens a window waits for a person, which makes it not a
             // gate.</b> Said rather than refused, because a headed app given --frames does
@@ -648,15 +705,15 @@ public static class Program
             // said so and metadata cannot tell — so an undeclared window still surprises you.
             // That is the first thing declaring buys beyond a better name, and the honest
             // shape of the gap rather than a guess dressed as a check.
-            if (app.Headed && !args.Any(a => a.StartsWith("--frames", StringComparison.Ordinal)))
+            if (app.Headed && !legArgs.Any(a => a.StartsWith("--frames", StringComparison.Ordinal)))
             {
                 Console.Error.WriteLine(
                     $"blix: '{app.Name}' opens a window and will wait for you to close it. " +
                     "Pass --frames N to bound it.");
             }
 
-            var code = Launch(app, args);
-            if (code != 0) failed.Add($"{app.Name} ({code})");
+            var code = Launch(app, legArgs);
+            if (code != 0) failed.Add($"{leg} ({code})");
         }
 
         Console.WriteLine();
@@ -756,7 +813,7 @@ public static class Program
     private sealed record Index(
         string Assembly, string? AppHost, bool HasEntryPoint, IndexedApp[] Apps, string? Project = null);
 
-    private sealed record IndexedApp(string Name, string? Summary, bool Headed, bool IsEntryPoint);
+    private sealed record IndexedApp(string Name, string? Summary, bool Headed, bool IsDefault, string? Usage = null);
 
     /// <param name="AppHost">The native binary, when the project builds one.</param>
     /// <param name="Assembly">Its dll, which is how an app with no apphost is run.</param>
@@ -767,7 +824,7 @@ public static class Program
     /// and running does not. Null for an index written before the field existed.</param>
     private sealed record App(
         string Project, string Name, string? Summary, bool Headed, string? AppHost, string Assembly,
-        string? Selector, bool Stale, bool Declared, string? SourceProject = null);
+        string? Selector, bool Stale, bool Declared, string? SourceProject = null, string? Usage = null);
 
 
     /// <summary>
@@ -1122,8 +1179,8 @@ public static class Program
     /// silicon, where a valid signature is not optional.
     /// </para>
     /// <para>
-    /// Only attempted where codesign exists, and never fatal: an unsigned bundle still runs on
-    /// the machine that built it, which is where most of them are run.
+    /// Only attempted where codesign exists. When it does exist, failure is fatal: returning a
+    /// bundle whose seal does not verify would contradict the command's artifact contract.
     /// </para>
     /// </remarks>
     private static void SignAppBundle(App app, string dest)

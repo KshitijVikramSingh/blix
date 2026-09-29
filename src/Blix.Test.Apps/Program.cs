@@ -4,6 +4,9 @@ using System.Text.Json;
 using Blix.Cooked;
 using Blix.Core;
 using Blix.Cli;
+using Blix.Diagnostics;
+using Blix.Graphics;
+using Blix.Runtime.Headless;
 
 namespace Blix.Test.Apps;
 
@@ -23,12 +26,12 @@ namespace Blix.Test.Apps;
 //   does not exist.
 public static class Program
 {
-    public static int Main(string[] args)
-    {
-        // The dispatch path itself. A selector reaches one of the fixtures below and
-        // this suite never runs; without one, Dispatch returns null and we do.
-        if (BlixApps.Dispatch(args) is { } code) return code;
+    // The dispatch path itself. A selector reaches one of the fixtures below and this suite
+    // never runs; without one, and with no default declared here, the suite is what runs.
+    public static int Main(string[] args) => BlixApps.Main(args, _ => Suite());
 
+    private static int Suite()
+    {
         var t = new TestRunner();
         var self = Assembly.GetExecutingAssembly();
 
@@ -42,6 +45,8 @@ public static class Program
             found.Single(a => a.Name == "fixture-headed").Headed);
         t.Expect("and headless is the default",
             !found.Single(a => a.Name == "fixture-echo").Headed);
+        t.Expect("nothing here is marked default, so the suite runs unnamed",
+            !found.Any(a => a.Default));
 
         // ── the two readers agree ───────────────────────────────────────────
         IndexMatchesReflection(t, self, found);
@@ -67,37 +72,109 @@ public static class Program
         t.Expect("a recipe found by reflection can be run", outcome.Wrote);
         t.Expect("and its outcome comes back", outcome.Detail == "in.fixture-a -> out.fixture");
 
+        // ── the command line, read ──────────────────────────────────────────
+        ArgumentsAreReadNotParsed(t);
+
         // ── dispatch ────────────────────────────────────────────────────────
-        t.Expect("no selector means this is not an app invocation",
-            BlixApps.Dispatch(new[] { "--whatever" }, self) is null);
+        t.Expect("no selector and no default runs what the caller hands in",
+            Run(out _, self, new string[0], otherwise: _ => 42) == 42);
 
         t.Expect("a selector runs the named app and returns its code",
-            BlixApps.Dispatch(new[] { BlixApps.Selector, "fixture-code" }, self) == 7);
+            Run(out _, self, BlixApps.Selector, "fixture-code") == 7);
 
         t.Expect("an app that returns void is a success",
-            BlixApps.Dispatch(new[] { BlixApps.Selector, "fixture-void" }, self) == 0);
+            Run(out _, self, BlixApps.Selector, "fixture-void") == 0);
 
-        t.Expect("an app taking no arguments is still invoked",
-            BlixApps.Dispatch(new[] { BlixApps.Selector, "fixture-void" }, self) == 0);
-
-        // The selector is removed before the app sees it, which is what lets an app's
-        // own parsing stay ignorant of this layer. Echo returns its argument count.
+        // The selector is removed before the app sees it, which is what lets an app's own reading
+        // stay ignorant of this layer. Echo returns its positional count.
         t.Expect("the selector is stripped from the app's arguments",
-            BlixApps.Dispatch(new[] { "a", BlixApps.Selector, "fixture-echo", "b", "c" }, self) == 3,
+            Run(out _, self, "a", BlixApps.Selector, "fixture-echo", "b", "c") == 3,
             "expected the app to see exactly a, b, c");
+
+        // ── what nobody read is said out loud ───────────────────────────────
+        Run(out var typo, self, BlixApps.Selector, "fixture-reads-years", "--years", "3", "--year", "4");
+        t.Expect("an argument nothing read is one warning line",
+            typo.Contains("nothing read --year 4", StringComparison.Ordinal), typo.Trim());
+        t.Expect("and one that was read is not in it",
+            !typo.Contains("--years", StringComparison.Ordinal), typo.Trim());
+
+        Run(out var clean, self, BlixApps.Selector, "fixture-reads-years", "--years", "3");
+        t.Expect("a fully read command line prints nothing", clean.Length == 0, clean.Trim());
+
+        var malformed = Run(out var complaint, self, BlixApps.Selector, "fixture-reads-years", "--years", "three");
+        t.Expect("a value that cannot mean what its reader asked for exits 2",
+            malformed == 2, $"exit {malformed}");
+        t.Expect("and says which flag and what it got",
+            complaint.Contains("--years", StringComparison.Ordinal)
+            && complaint.Contains("'three'", StringComparison.Ordinal), complaint.Trim());
+
+        // ── typed parameters: sugar over the same view ──────────────────────
+        t.Expect("typed parameters bind from their flags",
+            Run(out _, self, BlixApps.Selector, "fixture-typed", "--years", "3", "--map-seed", "40", "--fog",
+                "--view", "shadow-map", "--scale", "0.5", "--tint", "a", "--tint", "b") == 3 + 40 + 100 + 1000 + 5 + 20000,
+            "the fixture sums what it was given");
+        t.Expect("and leave out what has a default",
+            Run(out _, self, BlixApps.Selector, "fixture-typed", "--years", "2") == 2 + 7);
+        t.Expect("a squashed name reaches a kebab parameter",
+            Run(out _, self, BlixApps.Selector, "fixture-typed", "--years", "1", "--mapseed", "40") == 41);
+        var missing = Run(out var needs, self, BlixApps.Selector, "fixture-typed");
+        t.Expect("a parameter with no default is required, and exits 2", missing == 2, $"exit {missing}");
+        t.Expect("naming the flag and its type", needs.Contains("--years <int>", StringComparison.Ordinal), needs.Trim());
+        t.Expect("typed parameters and AppArgs mix",
+            Run(out _, self, BlixApps.Selector, "fixture-mixed", "--count", "2", "--extra", "5") == 7);
+        t.Expect("usage is written from the parameters",
+            AppParameters.Usage(found.Single(a => a.Name == "fixture-typed").Method)
+                == "--years <int> --map-seed <int>=7 --fog --view <lit|shadow-map>=lit [--scale <number>] [--tint <text, repeatable>]",
+            AppParameters.Usage(found.Single(a => a.Name == "fixture-typed").Method));
+
+        // The edge cases, each held to the one rule: a declared default wins; without one a
+        // nullable is null, a bool is false, and anything else is required.
+        var repeatedMissing = Run(out var repeatedSays, self, BlixApps.Selector, "fixture-repeated");
+        t.Expect("a repeated option with no default is required", repeatedMissing == 2 &&
+            repeatedSays.Contains("--tag <text, repeatable>", StringComparison.Ordinal), repeatedSays.Trim());
+        t.Expect("and binds every occurrence when given",
+            Run(out _, self, BlixApps.Selector, "fixture-repeated", "--tag", "a", "--tag", "b") == 2);
+        t.Expect("a repeated option defaulting to null is null when absent",
+            Run(out _, self, BlixApps.Selector, "fixture-typed", "--years", "1") == 1 + 7);
+
+        t.Expect("absent: a true-by-default flag is true, bool? and int? are null",
+            Run(out _, self, BlixApps.Selector, "fixture-flags") == 1 + 10);
+        t.Expect("--on=false turns a true-by-default flag off; --maybe=false is false, not absent",
+            Run(out _, self, BlixApps.Selector, "fixture-flags", "--on=false", "--maybe=false", "--seed", "3") == 0 + 30 + 300);
+        t.Expect("a bare --maybe is true", Run(out _, self, BlixApps.Selector, "fixture-flags", "--maybe") == 1 + 20);
+        t.Expect("usage shows the form worth typing for each",
+            AppParameters.Usage(found.Single(a => a.Name == "fixture-flags").Method)
+                == "--on=false [--maybe[=false]] [--seed <int>]",
+            AppParameters.Usage(found.Single(a => a.Name == "fixture-flags").Method));
+
+        // ── setup every app shares ──────────────────────────────────────────
+        t.Expect("the assembly's startup method is found",
+            BlixApps.FindStartup(self)?.Name == nameof(Startup));
+        var before = startupRuns;
+        var seen = Run(out var leverNoise, self, BlixApps.Selector, "fixture-sees-startup", "--lever", "5");
+        t.Expect("startup runs before the named app, and what it read reaches it",
+            seen == 5 && startupRuns == before + 1, $"app saw {seen}, startup ran {startupRuns - before} time(s)");
+        t.Expect("and what startup read is not reported unread", leverNoise.Length == 0, leverNoise.Trim());
+        var beforeOtherwise = startupRuns;
+        Run(out _, self, new string[0], otherwise: _ => 0);
+        t.Expect("startup runs before the app Main hands in, too", startupRuns == beforeOtherwise + 1);
 
         // ── failing loudly ──────────────────────────────────────────────────
         t.ExpectThrows("an unknown app names what does exist",
-            () => BlixApps.Dispatch(new[] { BlixApps.Selector, "nope" }, self),
+            () => BlixApps.Main(new[] { BlixApps.Selector, "nope" }, assembly: self),
             mustMention: "fixture-echo");
 
         t.ExpectThrows("a selector with nothing after it is an error",
-            () => BlixApps.Dispatch(new[] { BlixApps.Selector }, self),
+            () => BlixApps.Main(new[] { BlixApps.Selector }, assembly: self),
             mustMention: BlixApps.Selector);
 
         // ── is what runs what the sources say? ──────────────────────────────
         FreshnessAnswersHonestly(t);
         ABuildChangesWhatANameMeans(t);
+        TheExternalStarterBuildsFromCleanState(t);
+
+        // ── a loop with no window ───────────────────────────────────────────
+        HeadlessRunsTheSameLoop(t);
 
         t.PrintSummary();
         return t.Failed == 0 ? 0 : 1;
@@ -379,7 +456,7 @@ public static class Program
                 using Blix.Core;
                 public static class P
                 {
-                    public static int Main(string[] args) => BlixApps.Dispatch(args) ?? 0;
+                    public static int Main(string[] args) => BlixApps.Main(args, _ => 0);
 
                     [BlixApp("{{app}}")]
                     public static int Run()
@@ -454,6 +531,270 @@ public static class Program
             Directory.SetCurrentDirectory(was);
             try { Directory.Delete(Path.Combine(repo, ".blixtest"), recursive: true); } catch (IOException) { }
             catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    /// <summary>Run <see cref="BlixApps.Main"/> in process, with what it wrote to stderr.</summary>
+    private static int Run(out string stderr, Assembly self, params string[] args) =>
+        Run(out stderr, self, args, otherwise: null);
+
+    private static int Run(out string stderr, Assembly self, string[] args, Func<AppArgs, int>? otherwise)
+    {
+        var was = Console.Error;
+        var captured = new StringWriter();
+        Console.SetError(captured);
+        try
+        {
+            return BlixApps.Main(args, otherwise, self);
+        }
+        finally
+        {
+            Console.SetError(was);
+            stderr = captured.ToString();
+        }
+    }
+
+    /// <summary>
+    /// The command line is parsed once and each part is interpreted by whoever reads it.
+    /// </summary>
+    /// <remarks>
+    /// Every case here is one the hand-written parsers in this tree got wrong at least once: a
+    /// flag that swallowed the file after it, a number read in the machine's culture, a repeated
+    /// option where only the first was seen, and a typo that looked accepted.
+    /// </remarks>
+    private static void ArgumentsAreReadNotParsed(TestRunner t)
+    {
+        var both = AppArgs.Parse(new[] { "--width", "640", "--height=480" });
+        t.Expect("--name value and --name=value read the same",
+            both.Int("width") == 640 && both.Int("height") == 480);
+
+        var spelled = AppArgs.Parse(new[] { "--mapseed", "7", "--Drive-Root" });
+        t.Expect("names match without dashes or case",
+            spelled.Int("map-seed") == 7 && spelled.Flag("drive-root"));
+
+        var was = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            // A culture whose decimal separator is a comma, which is the machine the RTS's
+            // "8,65,710 wood" came from.
+            System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("de-DE");
+            var scale = AppArgs.Parse(new[] { "--scale", "1.5" }).Float("scale");
+            t.Expect("numbers are read culture-invariant", scale == 1.5f, $"read {scale}");
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = was;
+        }
+
+        var repeated = AppArgs.Parse(new[] { "--tint", "a=1", "--tint", "b=2" });
+        t.Expect("a repeated option keeps every value", repeated.All("tint").SequenceEqual(new[] { "a=1", "b=2" }));
+        t.Expect("and a single read takes the last",
+            AppArgs.Parse(new[] { "--frames", "1", "--frames", "2" }).Int("frames") == 2);
+
+        var cam = AppArgs.Parse(new[] { "--win", "1280", "720", "scene.glb" });
+        t.Expect("an option can take several values",
+            cam.Values("win", 2) is ["1280", "720"] && cam.Positionals is ["scene.glb"]);
+
+        var flagThenFile = AppArgs.Parse(new[] { "--flip-v", "model.glb" });
+        t.Expect("a flag does not swallow the file after it",
+            flagThenFile.Flag("flip-v") && flagThenFile.Positionals is ["model.glb"]);
+
+        var negative = AppArgs.Parse(new[] { "--offset", "-3" });
+        t.Expect("a negative number is a value, not an option", negative.Int("offset") == -3);
+
+        var terminated = AppArgs.Parse(new[] { "--out", "x", "--", "--not-a-flag" });
+        t.Expect("everything after -- is positional",
+            terminated.String("out") == "x" && terminated.Positionals is ["--not-a-flag"]);
+
+        var verb = AppArgs.Parse(new[] { "batch", "list.tsv", "--quiet" });
+        t.Expect("a leading verb is read as a command",
+            verb.Command() == "batch" && verb.Flag("quiet") && verb.Positionals is ["list.tsv"]);
+
+        var view = AppArgs.Parse(new[] { "--view", "shadow-map" });
+        t.Expect("an enum matches without dashes or case",
+            view.Enum<FixtureView>("view") == FixtureView.ShadowMap);
+
+        var unread = AppArgs.Parse(new[] { "--years", "3", "--year", "4" });
+        unread.Int("years");
+        t.Expect("what nothing read is what is left", unread.Unread is ["--year", "4"]);
+
+        t.ExpectThrows("a value that is not a number is refused, naming the flag",
+            () => AppArgs.Parse(new[] { "--frames", "abc" }).Int("frames"),
+            mustMention: "--frames");
+        t.ExpectThrows("an option with nothing after it is refused",
+            () => AppArgs.Parse(new[] { "--out" }).String("out"),
+            mustMention: "--out");
+    }
+
+    /// <summary>
+    /// A headless host runs an ordinary loop in the order a window does, on a clock of its own.
+    /// </summary>
+    /// <remarks>
+    /// The loop here is written once and knows nothing about which host runs it, which is the
+    /// claim: symmetry is a property of the host, not something each loop arranges.
+    /// </remarks>
+    private static void HeadlessRunsTheSameLoop(TestRunner t)
+    {
+        // The layering this arc moved the loop contract for. If either assembly ever references a
+        // backend, a headless run links Vulkan again and nothing else would say so.
+        var backends = new[] { "Blix.Graphics.Vulkan", "Blix.Render", "Blix.Runtime.Silk", "Silk.NET.Windowing" };
+        foreach (var assembly in new[] { typeof(IGameLoop).Assembly, typeof(HeadlessHost).Assembly })
+        {
+            var references = assembly.GetReferencedAssemblies().Select(a => a.Name).ToArray();
+            t.Expect($"{assembly.GetName().Name} references no graphics backend",
+                !references.Any(backends.Contains), string.Join(", ", references));
+        }
+        t.Expect("the loop contract lives in Blix.Core", typeof(IGameLoop).Assembly.GetName().Name == "Blix.Core");
+
+        var bounded = new RecordingLoop();
+        new HeadlessHost(bounded, new HeadlessOptions(ExitAfterFrames: 5)).Run();
+        t.Expect("a bounded run stops at the bound", bounded.Renders == 5, $"{bounded.Renders} frames");
+        t.Expect("in a window's order: load, then update before render, then unload",
+            bounded.Calls.First() == "load" && bounded.Calls.Last() == "unload"
+            && bounded.Calls.Skip(1).Take(2).SequenceEqual(new[] { "update", "render" }),
+            string.Join(" ", bounded.Calls.Take(6)));
+        t.Expect("time is a fixed step, never the wall clock",
+            Math.Abs(bounded.LastTime.Total - 5.0 / 60.0) < 1e-9 && Math.Abs(bounded.LastTime.Delta - 1.0 / 60.0) < 1e-12,
+            $"total {bounded.LastTime.Total}, delta {bounded.LastTime.Delta}");
+        t.Expect("the loop is told the size it renders at",
+            bounded.Frame == new RenderFrameContext(1280, 720), bounded.Frame.ToString());
+
+        var closing = new RecordingLoop { CloseAfter = 3 };
+        new HeadlessHost(closing).Run();
+        t.Expect("with no bound, the loop closes the run", closing.Renders == 3, $"{closing.Renders} frames");
+
+        var device = new RecordingLoop { ExitAfterFirstRender = true };
+        new HeadlessHost(device).Run();
+        t.Expect("the device describes itself as absent",
+            device.Device?.Info.Renderer.Contains("headless", StringComparison.Ordinal) == true);
+        t.ExpectThrows("and refuses to make anything, naming the call",
+            () => device.Device!.CreateTexture2D(default!, ReadOnlySpan<byte>.Empty),
+            mustMention: "CreateTexture2D");
+
+        var pressed = new RecordingLoop { CloseAfter = 5 };
+        new HeadlessHost(pressed, input: (frame, input) =>
+        {
+            if (frame == 2) input.RecordKeyDown(Key.Space);
+        }).Run();
+        t.Expect("scripted input presses on exactly one tick, as a device's would",
+            pressed.SpacePressedOn.SequenceEqual(new[] { 2 }), string.Join(",", pressed.SpacePressedOn));
+        t.Expect("and is held afterwards", pressed.SpaceHeldOn.SequenceEqual(new[] { 2, 3, 4 }),
+            string.Join(",", pressed.SpaceHeldOn));
+
+        var args = AppArgs.Parse(new[] { "--frames", "4", "--width", "320", "--height", "200", "--step", "0.5", "--title", "x" });
+        var options = HeadlessOptions.FromArgs(args);
+        t.Expect("the shared flags mean what they mean in a window",
+            options is { ExitAfterFrames: 4, Width: 320, Height: 200, Step: 0.5 }, options.ToString());
+        t.Expect("and a window's own flag is left unread", args.Unread.SequenceEqual(new[] { "--title", "x" }),
+            string.Join(" ", args.Unread));
+
+        // The dump a window writes, from a run that never had one.
+        var debuggable = new DebuggableLoop();
+        var host = new HeadlessHost(debuggable, new HeadlessOptions(ExitAfterFrames: 6, DumpOnFrame: 4));
+        var dump = Path.Combine(host.DumpDirectory!, "frame-000004.json");
+        if (File.Exists(dump)) File.Delete(dump);
+        var wasOut = Console.Out;
+        Console.SetOut(TextWriter.Null);
+        try { host.Run(); } finally { Console.SetOut(wasOut); }
+        t.Expect("--dump-frame writes that frame's dump", File.Exists(dump), dump);
+        if (File.Exists(dump))
+        {
+            var root = JsonDocument.Parse(File.ReadAllText(dump)).RootElement;
+            t.Expect("in the schema a window writes",
+                root.GetProperty("SchemaVersion").GetInt32() == 2);
+            t.Expect("carrying what the loop reported",
+                root.GetRawText().Contains("ticks", StringComparison.Ordinal), "no 'ticks' value in the dump");
+        }
+    }
+
+    /// <summary>
+    /// The external starter is a real project, not a collection of plausible snippets.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Copied outside this checkout before it is built. That detail is the assertion: a project
+    /// left under the Blix root would inherit this repository's props and targets automatically,
+    /// hiding a broken source-consumer import behind the environment it is meant to replace.
+    /// </para>
+    /// <para>
+    /// The headed app is only discovered here. The declared gate is deliberately headless, so the
+    /// same check runs on CI machines with no GPU and still proves the whole project path: imported
+    /// build rules, app indexing, project scoping, discovery, dispatch, and a child-process verdict.
+    /// </para>
+    /// </remarks>
+    private static void TheExternalStarterBuildsFromCleanState(TestRunner t)
+    {
+        var repo = RepositoryRoot();
+        if (repo is null)
+        {
+            t.Expect("K.0 the starter fixture needs the repository root", false);
+            return;
+        }
+
+        var source = Path.Combine(repo, "examples", "hello-blix");
+        var staged = Path.Combine(
+            Path.GetTempPath(), "blix-external-starter-" + Guid.NewGuid().ToString("N")[..8]);
+        var wasDirectory = Directory.GetCurrentDirectory();
+        var wasBlixRoot = Environment.GetEnvironmentVariable("BLIX_ROOT");
+
+        try
+        {
+            CopyTree(source, staged);
+            Directory.SetCurrentDirectory(staged);
+            Environment.SetEnvironmentVariable("BLIX_ROOT", repo);
+
+            var build = Dotnet(
+                "build \"src/HelloBlix/HelloBlix.csproj\" -c Debug --nologo -v:q " +
+                "--disable-build-servers -p:UseSharedCompilation=false -m:1");
+            t.Expect("K.0 the external starter builds from a clean staged copy", build == 0,
+                $"dotnet exited {build}");
+            if (build != 0) return;
+
+            var output = Path.Combine(staged, "src", "HelloBlix", "bin", "Debug", "net8.0");
+            var index = Path.Combine(output, "HelloBlix.blixapps.json");
+            t.ExpectTrue("K.1 the clean build writes its own application index", File.Exists(index));
+
+            var listed = Cli(out var listing, "ls");
+            var listedLines = listing.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            t.Expect("K.2 discovery sees the headed app and the headless gate",
+                listed == 0
+                && listedLines.Any(line => line.TrimStart().StartsWith("hello ", StringComparison.Ordinal))
+                && listedLines.Any(line => line.TrimStart().StartsWith("hello-check ", StringComparison.Ordinal))
+                && !listing.Contains("HelloBlix", StringComparison.Ordinal),
+                listing.Trim());
+
+            var gate = Cli(out var gateOutput, "test");
+            t.Expect("K.3 the external project's declared gate runs and passes",
+                gate == 0, $"exit {gate}. {gateOutput.Trim()}");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("BLIX_ROOT", wasBlixRoot);
+            Directory.SetCurrentDirectory(wasDirectory);
+            try { Directory.Delete(staged, recursive: true); } catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    /// <summary>Copy a tracked fixture without carrying any build output from its source tree.</summary>
+    private static void CopyTree(string source, string destination)
+    {
+        foreach (var directory in Directory.EnumerateDirectories(source, "*", SearchOption.AllDirectories))
+        {
+            Directory.CreateDirectory(Path.Combine(
+                destination, Path.GetRelativePath(source, directory)));
+        }
+
+        Directory.CreateDirectory(destination);
+        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(source, file);
+            if (relative.Split(Path.DirectorySeparatorChar)
+                .Any(part => part is "bin" or "obj" or "dist")) continue;
+
+            var target = Path.Combine(destination, relative);
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(file, target);
         }
     }
 
@@ -534,9 +875,19 @@ public static class Program
             $"index {indexed.Length} [{string.Join(", ", indexed.Select(i => i.Name))}] vs " +
             $"reflection {reflected.Length} [{string.Join(", ", reflected.Select(r => r.Name))}]");
 
-        t.Expect("the index knows which app is the entry point",
-            index!.Apps.Count(a => a.IsEntryPoint) == 0,
-            "none of this suite's fixtures is Main, so none should be flagged");
+        t.Expect("the index marks no default where the source declares none",
+            index!.Apps.Count(a => a.IsDefault) == 0,
+            "no fixture here is Default, which is what lets this suite run unnamed");
+
+        // The indexer rebuilds usage from metadata without loading the assembly; reflection builds
+        // it from the loaded method. Two readers of one line, so the line is compared.
+        foreach (var app in found)
+        {
+            var fromReflection = AppParameters.Usage(app.Method);
+            var fromIndex = index.Apps.Single(a => a.Name == app.Name).Usage ?? string.Empty;
+            t.Expect($"{app.Name}: the index's usage is reflection's", fromIndex == fromReflection,
+                $"index '{fromIndex}' vs reflection '{fromReflection}'");
+        }
 
         t.Expect("the index records the assembly it describes",
             index.Assembly == Path.GetFileName(self.Location));
@@ -550,10 +901,10 @@ public static class Program
     // return a code it has no opinion about.
 
     [BlixApp("fixture-echo", Summary = "returns how many arguments it was given")]
-    private static int Echo(string[] args) => args.Length;
+    private static int Echo(AppArgs args) => args.Positionals.Count;
 
     [BlixApp("fixture-code", Summary = "returns a specific exit code")]
-    private static int Code(string[] args) => 7;
+    private static int Code(AppArgs args) => 7;
 
     [BlixApp("fixture-void", Summary = "takes nothing, returns nothing")]
     private static void Void()
@@ -562,7 +913,7 @@ public static class Program
 
     private sealed record Index(string Assembly, string? AppHost, bool HasEntryPoint, IndexedApp[] Apps);
 
-    private sealed record IndexedApp(string Name, string? Summary, bool Headed, bool IsEntryPoint);
+    private sealed record IndexedApp(string Name, string? Summary, bool Headed, bool IsDefault, string? Usage);
 
     // ── recipe fixtures ─────────────────────────────────────────────────────
     // Two, because one cannot show that ids stay distinct or that two recipes can claim different
@@ -607,5 +958,104 @@ public static class Program
     }
 
     [BlixApp("fixture-headed", Summary = "declares that it would open a window", Headed = true)]
-    private static int Headed(string[] args) => 0;
+    private static int Headed(AppArgs args) => 0;
+
+    [BlixApp("fixture-typed", Summary = "takes typed parameters")]
+    private static int Typed(
+        int years, int mapSeed = 7, bool fog = false,
+        FixtureView view = FixtureView.Lit, float? scale = null, IReadOnlyList<string>? tint = null) =>
+        years + mapSeed + (fog ? 100 : 0) + (view == FixtureView.ShadowMap ? 1000 : 0)
+        + (scale is { } s ? (int)(s * 10) : 0) + (tint?.Count ?? 0) * 10000;
+
+    [BlixApp("fixture-repeated", Summary = "takes a repeated option with no default")]
+    private static int Repeated(IReadOnlyList<string> tag) => tag.Count;
+
+    // on defaults true, maybe is null when absent, seed is null when absent. The code encodes all three.
+    [BlixApp("fixture-flags", Summary = "takes the flag and nullable edge cases")]
+    private static int Flags(bool on = true, bool? maybe = null, int? seed = null) =>
+        (on ? 1 : 0) + (maybe is null ? 10 : maybe.Value ? 20 : 30) + (seed is { } v ? 100 * v : 0);
+
+    [BlixApp("fixture-mixed", Summary = "takes a typed parameter and the view")]
+    private static int Mixed(int count, AppArgs args) => count + args.Int("extra", 0);
+
+    // Setup every app in this assembly shares. It counts its runs and reads one lever, which is
+    // the shape the RTS needed: a flag that has to be read before whichever scenario runs.
+    private static int startupRuns;
+    private static int startupLever;
+
+    [BlixStartup]
+    private static void Startup(AppArgs args)
+    {
+        startupRuns++;
+        startupLever = args.Int("lever", 0);
+    }
+
+    [BlixApp("fixture-sees-startup", Summary = "returns what startup read")]
+    private static int SeesStartup() => startupLever;
+
+    [BlixApp("fixture-reads-years", Summary = "reads --years and nothing else")]
+    private static int ReadsYears(AppArgs args) => args.Int("years", 1);
+}
+
+internal enum FixtureView
+{
+    Lit,
+    ShadowMap,
+}
+
+/// <summary>An ordinary loop that writes down what happened to it.</summary>
+internal class RecordingLoop : IGameLoop
+{
+    public List<string> Calls { get; } = new();
+    public List<int> SpacePressedOn { get; } = new();
+    public List<int> SpaceHeldOn { get; } = new();
+    public int Renders { get; private set; }
+    public int CloseAfter { get; init; }
+    public bool ExitAfterFirstRender { get; init; }
+    public Time LastTime { get; private set; }
+    public RenderFrameContext Frame { get; private set; }
+    public IGraphicsDevice? Device { get; private set; }
+    private IRenderHost host = null!;
+    private int updates;
+
+    public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
+    {
+        this.host = host;
+        Device = graphicsDevice;
+        Calls.Add("load");
+    }
+
+    public void OnUpdate(Time time)
+    {
+        Calls.Add("update");
+        if (host.Input[Key.Space].Pressed) SpacePressedOn.Add(updates);
+        if (host.Input[Key.Space].Down) SpaceHeldOn.Add(updates);
+        updates++;
+    }
+
+    public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
+    {
+        Calls.Add("render");
+        LastTime = time;
+        Frame = frame;
+        commandList.Pass(
+            "clear",
+            new RenderPassDescription(
+                Target: RenderSurfaceHandle.Default,
+                ClearColors: new GraphicsColor?[] { new(0f, 0f, 0f, 1f) },
+                ClearDepth: false),
+            _ => { });
+        Renders++;
+        if (ExitAfterFirstRender || (CloseAfter > 0 && Renders >= CloseAfter)) host.RequestClose();
+    }
+
+    public void OnUnload() => Calls.Add("unload");
+}
+
+/// <summary>The same loop, reporting into diagnostics.</summary>
+internal sealed class DebuggableLoop : RecordingLoop, IDebuggable
+{
+    public string DebugName => "headless-fixture";
+
+    public void Debug(DebugContext debug) => debug.Values.Value("ticks", Renders);
 }

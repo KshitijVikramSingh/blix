@@ -238,7 +238,7 @@ public sealed class SpriteBatch : IDisposable
                 emptyUniforms,
                 new ShaderTextureBinding[]
                 {
-                    new ShaderTextureBinding("uTexture", texture, Slot: 0)
+                    new ShaderTextureBinding("uTexture", texture)
                 },
                 pushConstants,
                 indexOffset: start * 6,

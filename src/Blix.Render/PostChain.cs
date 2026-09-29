@@ -113,7 +113,7 @@ public sealed class PostChain : IDisposable
             var stage = stages[i];
             // Stage 0 reads the chain input; every later stage reads the previous target.
             var inputTex = graph.GetColorTexture(i == 0 ? input : targets[i - 1]);
-            var binding = new ShaderTextureBinding(stage.InputName, inputTex, Slot: 0);
+            var binding = new ShaderTextureBinding(stage.InputName, inputTex);
             var push = pushForStage(i, stage);
             var pipeline = pipelines[i];
             graph.Pass(passes[i], scope => fullscreen.Draw(scope, pipeline, new[] { binding }, push));

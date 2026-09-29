@@ -22,18 +22,23 @@ namespace Blix.Tools.Cook;
 /// </remarks>
 public static class Program
 {
-    [BlixApp("cook", Summary = "run Blix's cooking recipes")]
-    public static int Main(string[] args)
+    public static int Main(string[] args) => BlixApps.Main(args);
+
+    [BlixApp("cook", Summary = "run Blix's cooking recipes", Default = true)]
+    public static int Cook(AppArgs args)
     {
         ArgumentNullException.ThrowIfNull(args);
 
-        if (args.Length < 1)
+        if (args.Flag("help") | args.Flag("h")) return Help(args);
+
+        var verb = args.Command();
+        if (verb is null)
         {
             PrintUsage();
             return 1;
         }
 
-        return args[0] switch
+        return verb switch
         {
             "textures" => CookTextures(args),
             "probe" => CookProbe(args),
@@ -45,8 +50,8 @@ public static class Program
             "status" => Status(args),
             "batch" => Batch(args),
             "outputs" => Outputs(args),
-            "help" or "-h" or "--help" => Help(args),
-            _ => UnknownVerb(args[0]),
+            "help" => Help(args),
+            _ => UnknownVerb(verb),
         };
     }
 
@@ -59,10 +64,15 @@ public static class Program
     /// This is a scene driver rather than a discoverable one-file recipe: it consumes a collection
     /// of cooked meshes, applies sampling policy, and may write one <c>.blixsky</c> volume.
     /// </remarks>
-    static int CookSky(string[] args)
+    static int CookSky(AppArgs args)
     {
-        if (args.Length < 2) { Console.Error.WriteLine("Usage: blix cook sky <dir>"); return 2; }
-        var root = args[1];
+        var occupancy = args.Int("occupancy", 256);
+        var probes = args.Int("probes", 48);
+        var rays = args.Int("rays", 64);
+        var albedo = args.Int("albedo", 0);
+        var outPath = args.String("out");
+
+        if (args.Positionals is not [var root]) { Console.Error.WriteLine("Usage: blix cook sky <dir>"); return 2; }
         var meshes = Directory.Exists(root)
             ? Directory.GetFiles(root, "*.blixmesh", SearchOption.AllDirectories)
             : new[] { root };
@@ -72,17 +82,16 @@ public static class Program
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var vol = Blix.Recipes.SkyVisibilityBaker.Bake(
             meshes,
-            occupancy: IntFlag(args, "--occupancy", 256),
-            probes: IntFlag(args, "--probes", 48),
-            rays: IntFlag(args, "--rays", 64),
-            albedo: IntFlag(args, "--albedo", 0),
+            occupancy: occupancy,
+            probes: probes,
+            rays: rays,
+            albedo: albedo,
             log: Console.WriteLine);
         Console.WriteLine($"  baked in {sw.Elapsed.TotalSeconds:0.0}s");
 
         var b = vol.Bounds;
         Console.WriteLine($"  bounds {b.Min} .. {b.Max}");
 
-        var outPath = ValueOf(args, "--out");
         if (outPath is not null)
         {
             var coeffs = new float[vol.SizeX * vol.SizeY * vol.SizeZ * Blix.Graphics.Images.BlixSkyVolume.FloatsPerCell];
@@ -120,12 +129,6 @@ public static class Program
         return 0;
     }
 
-    static int IntFlag(string[] a, string name, int fallback)
-    {
-        var i = Array.FindIndex(a, x => x.Equals(name, StringComparison.OrdinalIgnoreCase));
-        return i >= 0 && i + 1 < a.Length && int.TryParse(a[i + 1], out var v) ? v : fallback;
-    }
-
     /// <summary>
     /// Cooks one asset and exactly the images it references, into a tree of its own.
     /// </summary>
@@ -135,22 +138,24 @@ public static class Program
     /// keeps one output per referenced image; projects that want another grouping policy own a
     /// different driver and table layout.
     /// </remarks>
-    static int CookAsset(string[] args)
+    static int CookAsset(AppArgs args)
     {
-        if (args.Length < 2)
+        var outDir = args.String("out");
+        var mesh = MeshFlags.Read(args);
+        if (mesh is null) return 1;
+
+        if (args.Positionals is not [var source])
         {
             Console.Error.WriteLine("Usage: blix cook asset <gltf-or-glb> --out <dir> [mesh flags]");
             return 2;
         }
 
-        var source = args[1];
         if (!File.Exists(source))
         {
             Console.Error.WriteLine($"No file at {source}.");
             return 2;
         }
 
-        var outDir = ValueOf(args, "--out");
         if (outDir is null)
         {
             Console.Error.WriteLine(
@@ -252,42 +257,16 @@ public static class Program
         var meshOut = Path.Combine(outputRoot, Path.GetFileNameWithoutExtension(source) + ".blixmesh");
         // Use the shared shipped-mesh path so asset trees and direct mesh cooks receive the same LOD
         // and splitting policy.
-        var splitBudget = 0;
-        var splitIdx = Array.FindIndex(args, x => x.Equals("--split", StringComparison.OrdinalIgnoreCase));
-        if (splitIdx >= 0 && splitIdx + 1 < args.Length && int.TryParse(args[splitIdx + 1], out var sb))
-            splitBudget = sb;
-        // Material patches are explicit inputs to both mesh-producing drivers.
-        Blix.Recipes.MaterialPatch? assetPatch = null;
-        var apIdx = Array.FindIndex(args, x => x.Equals("--patch", StringComparison.OrdinalIgnoreCase));
-        if (apIdx >= 0)
-        {
-            if (apIdx + 1 >= args.Length)
-            {
-                Console.Error.WriteLine("--patch needs a file path.");
-                return 1;
-            }
-            try
-            {
-                assetPatch = Blix.Recipes.MaterialPatch.Load(args[apIdx + 1]);
-            }
-            catch (Exception ex) when (ex is InvalidDataException or FileNotFoundException)
-            {
-                Console.Error.WriteLine($"patch: {ex.Message}");
-                return 1;
-            }
-            Console.WriteLine($"  patch {assetPatch.FileName}@{assetPatch.ContentHash}: {assetPatch.Rules.Count} rule(s)");
-        }
-
         int count;
         try
         {
             count = Blix.Recipes.MeshRecipe.CookShipped(
                 source, meshOut,
-                flipTextureV: HasFlag(args, "--flip-v"),
-                includeTangents: HasFlag(args, "--tangents"),
-                splitTriBudget: splitBudget,
-                splitFoliage: !HasFlag(args, "--no-split-foliage"),
-                patch: assetPatch,
+                flipTextureV: mesh.FlipV,
+                includeTangents: mesh.Tangents,
+                splitTriBudget: mesh.SplitBudget,
+                splitFoliage: mesh.SplitFoliage,
+                patch: mesh.Patch,
                 log: Console.WriteLine);
         }
         catch (InvalidDataException ex)
@@ -362,13 +341,45 @@ public static class Program
         }
     }
 
-    static string? ValueOf(string[] args, string name)
+    /// <summary>The flags both mesh-producing drivers take, read once for either.</summary>
+    /// <remarks>
+    /// <c>--flip-v</c> is opt-in V canonicalisation for bottom-up (OpenGL-authored) sources, baked
+    /// into the cooked vertex data; it mirrors AssetImportContext.FlipTextureV on the runtime
+    /// import path. <c>--tangents</c> cooks the layout normal-mapped consumers need.
+    /// <c>--split N</c> recursively partitions primitives over N triangles into chunks, each its
+    /// own LOD chain, so per-primitive distance LOD gets fine-grained; 0 or absent is off, and
+    /// <c>--no-split-foliage</c> leaves masked and blended primitives whole for the impostor track.
+    /// A <c>--patch</c> is an explicit input rather than an implicitly discovered neighbour.
+    /// </remarks>
+    sealed record MeshFlags(bool FlipV, bool Tangents, int SplitBudget, bool SplitFoliage,
+        Blix.Recipes.MaterialPatch? Patch)
     {
-        var i = Array.IndexOf(args, name);
-        return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
-    }
+        // Null when the patch could not be read, which has already been reported.
+        public static MeshFlags? Read(AppArgs args)
+        {
+            Blix.Recipes.MaterialPatch? patch = null;
+            if (args.String("patch") is { } patchPath)
+            {
+                try
+                {
+                    patch = Blix.Recipes.MaterialPatch.Load(patchPath);
+                }
+                catch (Exception ex) when (ex is InvalidDataException or FileNotFoundException)
+                {
+                    // A refused patch is the mechanism working, so it reports like a diagnosis and
+                    // not like a crash: one line naming the file, the line and what it could not find.
+                    Console.Error.WriteLine($"patch: {ex.Message}");
+                    return null;
+                }
 
-    static bool HasFlag(string[] args, string name) => Array.IndexOf(args, name) >= 0;
+                Console.WriteLine($"  patch {patch.FileName}@{patch.ContentHash}: {patch.Rules.Count} rule(s)");
+            }
+
+            return new MeshFlags(
+                args.Flag("flip-v"), args.Flag("tangents"), args.Int("split", 0),
+                !args.Flag("no-split-foliage"), patch);
+        }
+    }
 
     static void PrintUsage()
 {
@@ -406,53 +417,17 @@ public static class Program
     Console.WriteLine("                             prove the native simplifier and BC7 encoder load");
 }
 
-    static int CookMesh(string[] args)
+    static int CookMesh(AppArgs args)
 {
-    var (outDir, a) = ExtractOutDir(args);
-    if (a.Length < 2)
+    var outDir = OutDir(args);
+    var mesh = MeshFlags.Read(args);
+    if (mesh is null) return 1;
+    if (args.Positionals is not [var target])
     {
         Console.Error.WriteLine("Usage: blix cook mesh <gltf-or-directory> [--out <dir>] [--flip-v] [--tangents] [--split N] [--patch <file>]");
         return 1;
     }
-    var target = a[1];
-    // Opt-in V canonicalisation for bottom-up (OpenGL-authored) sources, baked
-    // into the cooked vertex data. Granular per invocation — mirrors
-    // AssetImportContext.FlipTextureV on the runtime-import path.
-    var flipV = a.Any(x => x.Equals("--flip-v", StringComparison.OrdinalIgnoreCase));
-    // Cook the tangent-bearing layout required by normal-mapped consumers.
-    var tangents = a.Any(x => x.Equals("--tangents", StringComparison.OrdinalIgnoreCase));
-    // Spatial split: primitives over this triangle budget are recursively
-    // partitioned into chunks (each its own LOD chain) so per-prim distance LOD
-    // gets fine-grained. 0/absent = off. --no-split-foliage leaves non-OPAQUE
-    // (masked/blended) prims whole for the impostor track to own.
-    var splitBudget = 0;
-    var splitIdx = Array.FindIndex(a, x => x.Equals("--split", StringComparison.OrdinalIgnoreCase));
-    if (splitIdx >= 0 && splitIdx + 1 < a.Length && int.TryParse(a[splitIdx + 1], out var sb))
-        splitBudget = sb;
-    // Patches are explicit command inputs rather than implicitly discovered neighbours.
-    var patchIdx = Array.FindIndex(a, x => x.Equals("--patch", StringComparison.OrdinalIgnoreCase));
-    Blix.Recipes.MaterialPatch? patch = null;
-    if (patchIdx >= 0)
-    {
-        if (patchIdx + 1 >= a.Length)
-        {
-            Console.Error.WriteLine("--patch needs a file path.");
-            return 1;
-        }
-        try
-        {
-            patch = Blix.Recipes.MaterialPatch.Load(a[patchIdx + 1]);
-        }
-        catch (Exception ex) when (ex is InvalidDataException or FileNotFoundException)
-        {
-            // A refused patch is the mechanism working, so it reports like a diagnosis and not like
-            // a crash: one line naming the file, the line and what it could not find.
-            Console.Error.WriteLine($"patch: {ex.Message}");
-            return 1;
-        }
-        Console.WriteLine($"  patch {patch.FileName}@{patch.ContentHash}: {patch.Rules.Count} rule(s)");
-    }
-    var splitFoliage = !a.Any(x => x.Equals("--no-split-foliage", StringComparison.OrdinalIgnoreCase));
+    var (flipV, tangents, splitBudget, splitFoliage, patch) = mesh;
 
     string[] sources;
     string inRoot;
@@ -541,36 +516,28 @@ public static class Program
     return 0;
 }
 
-    static int CookProbe(string[] args)
+    static int CookProbe(AppArgs args)
 {
-    var (outDir, args2) = ExtractOutDir(args);
-    if (args2.Length < 2)
+    var outDir = OutDir(args);
+    var envFace = args.Int("env-face", 256);
+    var irrFace = args.Int("irr-face", 32);
+    var prefilterBase = args.Int("prefilter-base", 128);
+    var prefilterMips = args.Int("prefilter-mips", 5);
+    var brdfSize = args.Int("brdf-size", 256);
+    var clamp = args.Float("clamp", 50.0f);
+    // Rotate before sun measurement and every convolution so all probe products share orientation.
+    // Only yaw preserves the photographed horizon.
+    var yawDegrees = args.Float("yaw", 0f);
+
+    if (args.Positionals is not [var hdrPath])
     {
         Console.Error.WriteLine("Usage: blix cook probe <hdr-path> [--out <dir>] [options]");
         return 1;
     }
-    var hdrPath = args2[1];
     if (!File.Exists(hdrPath))
     {
         Console.Error.WriteLine($"HDR not found: {hdrPath}");
         return 1;
-    }
-
-    int envFace = 256, irrFace = 32, prefilterBase = 128, prefilterMips = 5, brdfSize = 256;
-    float clamp = 50.0f;
-    // Rotate before sun measurement and every convolution so all probe products share orientation.
-    // Only yaw preserves the photographed horizon.
-    float yawDegrees = 0f;
-    foreach (var a in args2.Skip(2))
-    {
-        if (a.StartsWith("--env-face=")) envFace = int.Parse(a.AsSpan("--env-face=".Length));
-        else if (a.StartsWith("--irr-face=")) irrFace = int.Parse(a.AsSpan("--irr-face=".Length));
-        else if (a.StartsWith("--prefilter-base=")) prefilterBase = int.Parse(a.AsSpan("--prefilter-base=".Length));
-        else if (a.StartsWith("--prefilter-mips=")) prefilterMips = int.Parse(a.AsSpan("--prefilter-mips=".Length));
-        else if (a.StartsWith("--brdf-size=")) brdfSize = int.Parse(a.AsSpan("--brdf-size=".Length));
-        else if (a.StartsWith("--clamp=")) clamp = float.Parse(a.AsSpan("--clamp=".Length));
-        else if (a.StartsWith("--yaw=")) yawDegrees = float.Parse(a.AsSpan("--yaw=".Length));
-        else { Console.Error.WriteLine($"Unknown option: {a}"); return 1; }
     }
 
     string outPath;
@@ -599,9 +566,9 @@ public static class Program
     return 0;
 }
 
-    static int Help(string[] args)
+    static int Help(AppArgs args)
 {
-    if (args.Length != 1)
+    if (args.Positionals.Count != 0)
     {
         Console.Error.WriteLine("Usage: blix cook help");
         return 2;
@@ -626,9 +593,9 @@ public static class Program
 
     static Blix.Cooked.FoundRecipe[] Recipes() => RecipeCatalog.All();
 
-    static int ListRecipes(string[] args)
+    static int ListRecipes(AppArgs args)
 {
-    if (args.Length != 1)
+    if (args.Positionals.Count != 0)
     {
         Console.Error.WriteLine("Usage: blix cook list");
         return 2;
@@ -645,22 +612,23 @@ public static class Program
 // blix cook run <id> <source> [<output>] [-Dkey=value ...]
 //
 // The uniform one-file path. Asset-specific traversal and packaging stay in the drivers.
-    static int RunRecipe(string[] args)
+    static int RunRecipe(AppArgs args)
 {
-    if (args.Length < 3)
+    var positionals = args.Positionals;
+    if (positionals.Count < 2)
     {
         Console.Error.WriteLine("Usage: blix cook run <recipe-id> <source> [<output>] [-Dkey=value ...]");
         return 2;
     }
 
-    var recipe = Recipes().FirstOrDefault(r => r.Id == args[1]);
+    var recipe = Recipes().FirstOrDefault(r => r.Id == positionals[0]);
     if (recipe is null)
     {
-        Console.Error.WriteLine("blix cook run: " + RecipeCatalog.UnknownRecipe(args[1]));
+        Console.Error.WriteLine("blix cook run: " + RecipeCatalog.UnknownRecipe(positionals[0]));
         return 2;
     }
 
-    var source = args[2];
+    var source = positionals[1];
     if (!File.Exists(source))
     {
         Console.Error.WriteLine($"No file at {source}.");
@@ -670,7 +638,7 @@ public static class Program
     var options = new Dictionary<string, string>(StringComparer.Ordinal);
     string? output = null;
     var sawOption = false;
-    foreach (var argument in args.Skip(3))
+    foreach (var argument in positionals.Skip(2))
     {
         if (!argument.StartsWith("-D", StringComparison.Ordinal))
         {
@@ -717,15 +685,16 @@ public static class Program
 // blix cook status <dir>
 //
 // Reports recipe coverage and provenance from common preambles without loading format bodies.
-    static int Status(string[] args)
+    static int Status(AppArgs args)
 {
-    if (args.Length > 2)
+    var positionals = args.Positionals;
+    if (positionals.Count > 1)
     {
         Console.Error.WriteLine("Usage: blix cook status [<dir>]");
         return 2;
     }
 
-    var root = args.Length > 1 ? args[1] : ".";
+    var root = positionals.Count == 1 ? positionals[0] : ".";
     if (!Directory.Exists(root))
     {
         Console.Error.WriteLine($"No directory at {root}.");
@@ -824,21 +793,21 @@ public static class Program
 // One process for an MSBuild-filtered list, avoiding one managed-process startup per asset.
 //
 // Each line is TAB-separated: recipeId, source, output, options (k=v, space separated).
-    static int Batch(string[] args)
+    static int Batch(AppArgs args)
 {
-    if (args.Length != 2)
+    if (args.Positionals is not [var listFile])
     {
         Console.Error.WriteLine("Usage: blix cook batch <list-file>");
         return 2;
     }
 
-    if (!File.Exists(args[1]))
+    if (!File.Exists(listFile))
     {
-        Console.Error.WriteLine($"No list file at {args[1]}.");
+        Console.Error.WriteLine($"No list file at {listFile}.");
         return 2;
     }
 
-    var lines = File.ReadAllLines(args[1]);
+    var lines = File.ReadAllLines(listFile);
 
     // Two declarations may not claim one output. Settings do not implicitly disambiguate paths.
     foreach (var collision in FindOutputCollisions(lines))
@@ -933,15 +902,13 @@ public static class Program
 /// matches were.
 /// </para>
 /// </remarks>
-static int Outputs(string[] args)
+static int Outputs(AppArgs args)
 {
-    var relativeTo = ValueAfterFlag(args, "--relative-to");
-    var into = ValueAfterFlag(args, "--out");
-    var positional = args.Skip(1)
-        .Where(a => !a.StartsWith("--", StringComparison.Ordinal) && a != relativeTo && a != into)
-        .ToArray();
+    var relativeTo = args.String("relative-to");
+    var into = args.String("out");
+    var positional = args.Positionals;
 
-    if (positional.Length != 1)
+    if (positional.Count != 1)
     {
         Console.Error.WriteLine("Usage: blix cook outputs <list-file> [--relative-to <dir>] [--out <file>]");
         return 2;
@@ -988,28 +955,15 @@ static int Outputs(string[] args)
     return 0;
 }
 
-static string? ValueAfterFlag(string[] args, string flag)
-{
-    var i = Array.FindIndex(args, a => a.Equals(flag, StringComparison.OrdinalIgnoreCase));
-    return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
-}
-
 // --- Out-of-place cooking -------------------------------------------------
-// Extract a shared out-of-place destination and remove it before verb-specific parsing. Tree
-// drivers mirror paths relative to their input root.
-    static (string? OutDir, string[] Remaining) ExtractOutDir(string[] args)
+// The shared out-of-place destination, created if it does not exist. Tree drivers mirror paths
+// relative to their input root.
+    static string? OutDir(AppArgs args)
 {
-    var i = Array.FindIndex(args, a => a.Equals("--out", StringComparison.OrdinalIgnoreCase));
-    if (i < 0) return (null, args);
-    if (i + 1 >= args.Length)
-    {
-        Console.Error.WriteLine("--out requires a directory argument.");
-        Environment.Exit(1);
-    }
-    var dir = Path.GetFullPath(args[i + 1]);
+    if (args.String("out") is not { } given) return null;
+    var dir = Path.GetFullPath(given);
     Directory.CreateDirectory(dir);
-    var rest = args.Where((_, idx) => idx != i && idx != i + 1).ToArray();
-    return (dir, rest);
+    return dir;
 }
 
 // Resolve a cooked output path. In-place (outDir null/empty): a sibling of
@@ -1033,16 +987,17 @@ static string? ValueAfterFlag(string[] args, string flag)
         : "";
 }
 
-    static int CookTextures(string[] args)
+    static int CookTextures(AppArgs args)
 {
-    var (outDir, a) = ExtractOutDir(args);
-    if (a.Length < 2)
+    var outDir = OutDir(args);
+    var force = args.Flag("force");
+    var positionals = args.Positionals.ToList();
+    if (positionals.Remove("-f")) force = true;
+    if (positionals is not [var root])
     {
         Console.Error.WriteLine("Usage: blix cook textures <directory> [--out <dir>] [--force]");
         return 1;
     }
-    var root = a[1];
-    var force = a.Skip(2).Any(x => x == "--force" || x == "-f");
     if (!Directory.Exists(root))
     {
         Console.Error.WriteLine($"Directory not found: {root}");

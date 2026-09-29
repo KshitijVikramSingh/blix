@@ -125,17 +125,23 @@ The marker is intentionally small:
 my-project
 
 test: selftest, asset-check
+test: settlement --years 1 --map-seed 4
 ```
 
-The first non-comment line without a colon is the project name. The optional
-`test:` line lists the apps that form that project's verification gate.
+The first non-comment line without a colon is the project name. `test:` lines
+list the apps that form that project's verification gate, in order, and several
+lines add up. A line of names separated by commas runs each with no arguments. A
+line with an option on it is one leg: its first word is the app and the rest are
+its arguments, with double quotes keeping a value with spaces whole. Arguments
+given to `blix test` itself follow a leg's own, so a single read takes the typed
+value.
 
-The current tree has three marked projects:
+The current tree has two marked projects:
 
 | Project | Folder | Gate |
 | --- | --- | --- |
 | `blix` | repository root | Graphics, Diagnostics, Physics2D, Physics3D, Apps, Studio, Recipes and Input suites |
-| `demos` | `src/Demos` | `Blix.Demos.Character.Probe` |
+| `demos` | `src/Demos` | `Blix.Demos.Character.Probe`, `chassis-tune --headless`, and every headed demo but Sponza for 45 frames under `--validate` |
 
 Project scope follows the current working directory. From the repository root,
 all projects below it are visible. From `src/Demos`, the `demos` marker is the scope
@@ -200,17 +206,19 @@ has that suffix. Ambiguity is an error that lists the candidates.
 
 ## Declaring one app
 
-An executable remains runnable by convention using its assembly name. Add
-`[BlixApp]` when it needs a stable short name, a summary in `blix ls`, headed
-metadata, or when one assembly contains several apps.
+Every Blix program's `Main` is one line that hands its command line to
+`BlixApps.Main`. An executable that declares nothing is still runnable by
+convention under its assembly name; `BlixApps.Main` then runs the function it
+is given:
 
 ```csharp
 using Blix.Core;
 
 public static class Program
 {
-    [BlixApp("inspect-map", Summary = "report the authored map", Headed = false)]
-    public static int Main(string[] args)
+    public static int Main(string[] args) => BlixApps.Main(args, Run);
+
+    private static int Run(AppArgs args)
     {
         // app work
         return 0;
@@ -218,9 +226,26 @@ public static class Program
 }
 ```
 
-An app method is static, takes either no arguments or one `string[]`, and
-returns `void` or an exit code. The build-time indexer and runtime dispatcher
-validate the same four signatures.
+Add `[BlixApp]` when a program needs a stable short name, a summary in
+`blix ls`, headed metadata, or when one assembly contains several apps.
+`Default = true` marks the app the executable runs when nothing names one, as
+when a published build is started directly; it is how an executable gets a
+better name than its assembly's.
+
+```csharp
+public static class Program
+{
+    public static int Main(string[] args) => BlixApps.Main(args);
+
+    [BlixApp("inspect-map", Summary = "report the authored map", Default = true)]
+    public static int InspectMap(AppArgs args) => 0;
+}
+```
+
+An app method is static, takes either nothing or one `AppArgs`, and returns
+`void` or an exit code. `Main` itself cannot be an app, because it has to take
+`string[]`; the indexer refuses a `[BlixApp]` on it. The build-time indexer and
+the runtime dispatcher validate the same signatures.
 
 `Headed = true` says that the app opens a window. It lets discovery label the
 app and lets a verification gate warn before starting an unbounded window. It
@@ -229,35 +254,96 @@ does not impose a base class or a hosting model.
 The declaration belongs on the method it names. The generated index is derived
 from that attribute; do not maintain a parallel app registry.
 
-## Several apps in one assembly
+## Setup every app shares
 
-An assembly can declare several app methods. Its entry point checks for a
-launcher selection before performing its ordinary work:
+One static method marked `[BlixStartup]` runs before any app in its assembly,
+including the one `Main` hands to `BlixApps.Main`. It takes `AppArgs` or nothing
+and returns nothing; what it reads counts as read, and an `AppArgsException` it
+throws exits 2. It is where a process culture, a shared lever or an opened log
+belongs, so no app can run without it. At most one is allowed per assembly, and
+the indexer checks both rules at build time. Blix itself sets no culture.
 
 ```csharp
-using Blix.Core;
+[BlixStartup]
+private static void Startup() =>
+    CultureInfo.DefaultThreadCurrentCulture = CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+```
 
+## Several apps in one assembly
+
+An assembly can declare several app methods. The launcher names one with an
+internal selector, which `BlixApps.Main` removes before the app sees its
+arguments; at most one is `Default`.
+
+```csharp
 public static class Program
 {
-    public static int Main(string[] args) =>
-        BlixApps.Dispatch(args) ?? RunMainApplication(args);
+    public static int Main(string[] args) => BlixApps.Main(args);
+
+    [BlixApp("game", Headed = true, Default = true)]
+    public static int Game(AppArgs args) => 0;
 
     [BlixApp("selftest", Summary = "run the simulation invariants")]
     public static int SelfTest() => 0;
-
-    private static int RunMainApplication(string[] args) => 0;
 }
 ```
 
-`BlixApps.Dispatch` removes the internal selector before invoking the selected
-method. It returns `null` when the launcher did not select an app, which permits
-an existing executable or hand-written dispatcher to migrate one branch at a
-time.
+## Reading arguments
+
+`AppArgs` is the command line, parsed once and read by whoever understands each
+part of it. There is no schema: the window reads the flags about being a window,
+the application reads its own, and nothing decides in advance what a flag means.
+
+```csharp
+var years = args.Int("years", 1);
+var fog = args.Flag("fog");
+var tints = args.All("tint");         // a repeated option
+var size = args.Values("win", 2);     // --win 1280 720
+var files = args.Positionals;         // read options first
+```
+
+`--name value` and `--name=value` are the same. Names match without dashes or
+case, so a read of `map-seed` accepts `--mapseed`. Numbers are always read
+culture-invariant, and everything after a bare `--` is positional.
+
+Every read is recorded. After the app returns, `BlixApps.Main` prints one
+warning line naming any argument nothing read, so a typo such as `--year 3` is
+visible rather than silently ignored. A value that cannot mean what its reader
+asked for, such as `--frames abc`, is an error: the message names the flag and
+the program exits 2.
+
+## Typed parameters
+
+An app can declare its flags as parameters instead of reading them. This is
+sugar over the same `AppArgs`, not a second parser:
+
+```csharp
+[BlixApp("settlement", Summary = "simulate a settlement")]
+public static int Settlement(int years, int mapSeed = 0, bool fog = false, AppArgs? args = null) => 0;
+```
+
+A parameter is the flag its name spells in kebab case: `mapSeed` is
+`--map-seed`, which also accepts `--mapseed`. A parameter with no default is
+required, and a missing one exits 2 with a message naming it. A `bool` is a flag
+by presence. The types a command line can spell are `int`, `long`, `float`,
+`double`, `bool`, `string`, any enum, the nullable form of the value types (null
+when not passed), and `IReadOnlyList<string>` for a repeated option. One
+`AppArgs` parameter can sit alongside them for whatever the app reads
+dynamically.
+
+The indexer checks the same types from metadata, so a parameter nothing can
+bind is a build failure, and records a usage line that `blix ls` prints under
+the app's summary:
+
+```text
+settlement  simulate a settlement
+            --years <int> --map-seed <int>=0 --fog
+```
 
 ## Headed applications
 
-A headed application should let the runtime consume the arguments common to
-every Blix window:
+A headed application lets the runtime read the arguments common to every Blix
+window from the same `AppArgs`:
 
 ```csharp
 var options = WindowOptions.FromArgs(args, WindowOptions.Default with
@@ -281,15 +367,57 @@ The shared arguments are:
 | `--title TEXT` | Window title |
 | `--debug` | Start with diagnostics visible |
 | `--dump-frame N` | Write the diagnostics JSON dump for frame N |
+| `--validate` | Run under the Vulkan validation layers, and fail the run if they report an error |
 
-Unknown arguments are deliberately ignored by `WindowOptions`; they remain the
-application's to parse. Bounded runs, sizing, diagnostics, and dumping should
-not be reimplemented in each game or tool.
+`WindowOptions` reads only these; everything else is the application's to read,
+and anything nobody reads is reported. Bounded runs, sizing, diagnostics, and
+dumping should not be reimplemented in each game or tool.
 
 `Blix.Demos.Chassis` is the smallest executable specification of this surface:
 an `IGameLoop`, optional `IUiSource`, and a host-owned
 bounded run. `Blix.Tools.View` is the fuller example with Studio composition,
 an interface, input ownership, diagnostics, asset loading, and named views.
+
+## Headless runs
+
+`Blix.Runtime.Headless.HeadlessHost` gives a headless-capable `IGameLoop` the
+same lifecycle a window does, with no window, no device and no wall clock. It
+references only `Blix.Core` and `Blix.Diagnostics`, so a program that uses it
+links no graphics backend.
+
+It is not a way to remove the window from an arbitrary game. A loop that
+creates GPU resources in `OnLoad`, or casts its device to `VulkanGraphicsDevice`,
+cannot run headless, and the device it is handed makes sure it finds out at the
+first such call. Keeping a loop's headless path free of GPU work is a choice the
+loop makes, as Chassis's `chassis-tune` does.
+
+```csharp
+if (args.Flag("headless"))
+{
+    new HeadlessHost(loop, HeadlessOptions.FromArgs(args)).Run();
+    return 0;
+}
+```
+
+Each frame runs in a window's order: input held still for the tick,
+`OnUpdate`, the loop's diagnostics, `OnRender`, then the dump and the frame
+bound. `HeadlessOptions.FromArgs` reads `--frames`, `--dump-frame`, `--width`,
+`--height` and `--debug` as a window does, plus `--step`, the seconds per frame;
+time is always that fixed step. A window's own `--title` is left unread.
+
+What a headless run cannot have is stated rather than faked:
+
+- `OnLoad` receives a `NoGraphicsDevice`, which describes itself and refuses to
+  create or destroy anything, naming the call.
+- `OnRender` records into a command list that nothing executes. Diagnostics
+  still count what the loop recorded.
+- Input comes from an optional callback that is handed the frame number and the
+  `InputState` before each tick, which is how a test, a replay or a bot drives a
+  loop.
+
+`chassis-tune --headless` is the executable specification: run with the same
+`--frames` and `--dump-frame`, headed and headless, it writes dumps of the same
+schema with the same values and controls.
 
 ## Verification gates
 

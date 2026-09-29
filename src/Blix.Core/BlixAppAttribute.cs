@@ -25,7 +25,7 @@ namespace Blix.Core;
 /// <example>
 /// <code>
 /// [BlixApp("fightbench", Summary = "the fight bench matrix over three grounds")]
-/// public static int Run(string[] args) => ...;
+/// public static int Run(AppArgs args) => ...;
 /// </code>
 /// </example>
 [AttributeUsage(AttributeTargets.Method, AllowMultiple = false, Inherited = false)]
@@ -58,4 +58,15 @@ public sealed class BlixAppAttribute : Attribute
     /// starts.
     /// </remarks>
     public bool Headed { get; init; }
+
+    /// <summary>
+    /// True for the app the executable runs when nothing names one, as when a published build is
+    /// started directly. At most one per assembly.
+    /// </summary>
+    /// <remarks>
+    /// This is how an executable gets a better name than its assembly's. <c>Main</c> itself cannot
+    /// be an app, because it has to take <c>string[]</c>; it hands that to
+    /// <see cref="BlixApps.Main"/>, and the default app is what runs.
+    /// </remarks>
+    public bool Default { get; init; }
 }

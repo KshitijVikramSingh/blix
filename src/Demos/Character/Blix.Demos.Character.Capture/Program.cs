@@ -24,31 +24,33 @@ namespace Blix.Demos.Character.CaptureApp;
 // radiance, and the curve below is the same one the present shader runs.
 public static class Program
 {
-    [BlixApp("room-shot", Summary = "render the room to a PNG", Headed = true)]
-    public static void Main(string[] args)
+    public static int Main(string[] args) => BlixApps.Main(args);
+
+    [BlixApp("room-shot", Summary = "render the room to a PNG", Headed = true, Default = true)]
+    public static void Capture(AppArgs args)
     {
-        var output = ArgValue(args, "--out") ?? "room.png";
+        var output = args.String("out") ?? "room.png";
 
         // A camera you can put where the question is. A capture of a 28 m hall from one fixed chair
         // answers about a third of what the room is for — the beam's underside and the gap's throat
         // are not visible from anywhere the default camera stands.
-        var yaw = Float(args, "--yaw", 0.9f);
+        var yaw = args.Float("yaw", 0.9f);
         // NaN is the "not given" sentinel, so a rig's own defaults survive unless overridden. A
         // literal default here would silently overwrite every rig with the orbit camera's framing,
         // which is the thing these captures exist to compare.
-        var pitch = Float(args, "--pitch", float.NaN);
-        var distance = Float(args, "--distance", float.NaN);
-        var targetX = Float(args, "--x", 0f);
-        var targetZ = Float(args, "--z", 0f);
+        var pitch = args.Float("pitch", float.NaN);
+        var distance = args.Float("distance", float.NaN);
+        var targetX = args.Float("x", 0f);
+        var targetZ = args.Float("z", 0f);
 
         // 0 draws each part's own colour, 1 shades every surface by the normal the collider reads.
-        var slope = Float(args, "--slope-tint", 0f);
+        var slope = args.Float("slope-tint", 0f);
 
         // <b>A capture of a RIG, which is what makes the rigs comparable at all.</b> Framing is the
         // one thing about a camera that cannot be judged from its parameters — "pitch 0.22, distance
         // 4.2" says nothing about whether the body sits where a third-person camera puts it — and
         // the only honest way to compare four of them is four pictures taken the same way.
-        var rig = (ArgValue(args, "--rig") ?? "orbit").ToLowerInvariant() switch
+        var rig = (args.String("rig") ?? "orbit").ToLowerInvariant() switch
         {
             "third" or "thirdperson" or "3" => CameraRig.ThirdPerson,
             "fps" or "first" or "firstperson" => CameraRig.FirstPerson,
@@ -59,16 +61,16 @@ public static class Program
         // Where the body stands. It is SETTLED by the real motor rather than placed, so the capture
         // shows a body resting where the physics puts it — a picture of a camera framing a body that
         // is floating would be a picture of nothing.
-        var bodyX = Float(args, "--body-x", Room.SpawnPoint.X);
-        var bodyZ = Float(args, "--body-z", Room.SpawnPoint.Z);
+        var bodyX = args.Float("body-x", Room.SpawnPoint.X);
+        var bodyZ = args.Float("body-z", Room.SpawnPoint.Z);
 
         // <b>--walk drives the body before the picture is taken</b>, at a fixed 1/60 step and with no
         // wall clock anywhere, so the same arguments put it in the same place every run. A still of a
         // settled body shows where the resolver leaves things; only a body that has WALKED shows what
         // the resolver did on the way — which iterations fired, what it deflected off, and whether it
         // ended up wedged.
-        var walkSeconds = Float(args, "--walk", 0f);
-        var walkDegrees = Float(args, "--walk-dir", 0f);
+        var walkSeconds = args.Float("walk", 0f);
+        var walkDegrees = args.Float("walk-dir", 0f);
 
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
@@ -97,17 +99,7 @@ public static class Program
         Environment.Exit(1);
     }
 
-    private static string? ArgValue(string[] args, string name)
-    {
-        for (var i = 0; i < args.Length - 1; i++)
-        {
-            if (args[i] == name) return args[i + 1];
-        }
-        return null;
-    }
 
-    private static float Float(string[] args, string name, float fallback) =>
-        float.TryParse(ArgValue(args, name), out var v) ? v : fallback;
 }
 
 internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable

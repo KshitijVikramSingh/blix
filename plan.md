@@ -2,8 +2,11 @@
 
 Stages A–E of the portability and input arc are done and merged (PRs #37–#39).
 Their reasoning lives where it governs behaviour — code comments, `docs/`, and the
-suites that pin it — rather than here, per conventions §9. What follows is what is
-still open, and nothing else.
+suites that pin it — rather than here, per conventions §9. So does the arguments
+and headless-host arc that followed (`AppArgs`, `HeadlessHost`, typed parameters,
+`[BlixStartup]`, gate legs with arguments), recorded in [`docs/workflow.md`](docs/workflow.md)
+and pinned by `Blix.Test.Apps` and the `demos` gate. What follows is what is still open,
+and nothing else.
 
 ---
 
@@ -52,6 +55,27 @@ of five were **legibility, not mechanism**.
 
 ---
 
+## Tiers and measurement — parked
+
+Discussed and deliberately not started. Two findings hold whatever shape it takes:
+
+- **Named tiers are small and already needed.** `test <tier>:` lines would let the `demos`
+  gate's deviceless legs run in CI apart from its GPU legs, and would give the RTS's long gate
+  (simulated years, now a shell script) a declared home.
+- **Measurement cannot ride `DebugContext`.** The RTS's sealed `--perf-run` switches its own
+  diagnostics producer off, because keeping it alive cost over 4 ms a wide-village frame and
+  had already skewed two sections' absolute numbers. What it measures instead comes from the
+  device (`LastCpuFrameTiming`, `GpuPassTotals` over the steady window), the game's own
+  stopwatches and counts, and the display's refresh for cadence, summarised as warm-up plus
+  nearest-rank percentiles into one `PERFCASE` line its scripts tabulate. A Blix version would
+  be a cheap channel live only in a measured run, the host's own numbers, and one run record per
+  run, with cases, arms and ABBA ordering left to the project.
+
+Open: whether the engine owns case execution, what an app hands the measurement channel, whether
+Sponza's in-process `--ab` feeds the same records, and whether simulation benches belong at all.
+
+---
+
 ## Acceptance steps that are access, not work
 
 These keep this record open. None can be closed by writing anything.
@@ -80,12 +104,23 @@ native build targets has only ever run on a GitHub runner.
 
 ## Known gaps that are not scheduled
 
-**`demos` has a gate of one probe.** Eleven demos are still verified by being run and
-looked at, which is right for a demo. Future experiments append to that line; the
-gate growing is a consequence, not a plan.
+**Sponza's lit shader declares 25 samplers in its fragment stage; MoltenVK allows 16.** The
+device now says so by name when the program is created (`lit`, and `flat`, `depth_prepass` and
+`depth_prepass_mask`, which share its interface), and `--validate` fails a Sponza run on it.
+Sixteen is Metal's limit on sampler objects, not on textures: this device reports 256 sampled
+images per stage (`vulkaninfo`). So the fix is separate images and a few shared samplers in the
+lit shaders, `texture2D`
+plus `sampler` in GLSL. Reflection already parses `separate_images` and `separate_samplers`;
+what has not been checked is that the device binds a separate sampler rather than treating every
+image slot as a combined one. The alternative, Metal argument buffers for all of MoltenVK
+(`MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS`), lifts the limit engine-wide and changes every program's
+binding path, so it is not the first thing to try. Until then Sponza is not a `demos` gate leg.
 
-**The `demos` gate is not in CI.** The workflow runs the root gate only. Closing it
-is one step in `ci.yml` — deliberately not taken here rather than slipped in.
+**The `demos` gate is not in CI, and now cannot be as it stands.** Its headed legs run each demo
+for 45 frames under `--validate`, which needs a GPU and the validation layers, and CI runners have
+neither. The root gate is the deviceless one. A CI home for the `demos` gate would first need its
+deviceless legs (the probe, `chassis-tune --headless`) separable from the headed ones, which is
+what named tiers are for.
 
 **Linux is absent from the CI matrix.** A second red job teaches nothing the first
 has not; the shape of what Windows needed should be known before it is copied.
@@ -102,6 +137,11 @@ which commit moved it was abandoned as not worth the hunt. Re-record with
 ## Deferred until something asks
 
 Probe density, `BakeMerge`, clip-lookup-by-name, further `PropModel` adoption.
+
+**Asset manifests** (finding assets by logical name, declared external asset roots). Every
+in-repo program finds its assets through `AppFiles` and the importer's cooked-sibling lookup,
+and Sponza's external pack set is one required variable. The hand-run preparation steps do not
+fit either: EXR conversion needs Blender, and the sky bake is a scene-level driver by design.
 Each waits for a consumer, which is conventions §5 and §8, and waiting does not keep
 a plan record open. The probe-density measurements and the approaches already refuted
 are in [`docs/renderer.md`](docs/renderer.md) so the same ground is not walked twice.

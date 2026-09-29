@@ -12,6 +12,7 @@
     <ProjectReference Include="..\..\Blix.Core\Blix.Core.csproj" />
     <ProjectReference Include="..\..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
     <ProjectReference Include="..\..\Blix.Graphics\Blix.Graphics.csproj" />
+    <ProjectReference Include="..\..\Blix.Runtime.Headless\Blix.Runtime.Headless.csproj" />
     <ProjectReference Include="..\..\Blix.Runtime.Silk\Blix.Runtime.Silk.csproj" />
   </ItemGroup>
 

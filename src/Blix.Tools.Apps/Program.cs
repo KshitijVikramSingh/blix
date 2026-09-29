@@ -34,6 +34,7 @@ public static class Program
 {
     private const string AttributeNamespace = "Blix.Core";
     private const string AttributeName = "BlixAppAttribute";
+    private const string StartupName = "BlixStartupAttribute";
 
     // <b>Recipes are indexed by the same pass, for the same reason.</b> A cooking recipe has
     // exactly the app layer's discovery problem — it lives with the code it names, it must be
@@ -136,17 +137,16 @@ public static class Program
             : 0;
         var hasEntryPoint = entryToken != 0;
 
-        // Which method IS Main, so the launcher knows when an app needs no selecting.
-        // A [BlixApp] on the entry point is the smallest useful declaration there is —
-        // it renames an executable and gives it a summary, and nothing else changes —
-        // and the launcher must exec it directly rather than passing a selector the
-        // app was never written to strip.
+        // Which method IS Main, only so a [BlixApp] on it can be refused. Main has to take
+        // string[], an app takes AppArgs, and the method Main hands to BlixApps.Main is the
+        // one to declare. An app marked Default is what the executable runs unnamed.
         var entryPoint = hasEntryPoint
             ? MetadataTokens.MethodDefinitionHandle(entryToken & 0x00FFFFFF)
             : default;
 
         var apps = new List<AppEntry>();
         var recipes = new List<RecipeEntry>();
+        var startups = new List<string>();
         foreach (var handle in reader.MethodDefinitions)
         {
             var method = reader.GetMethodDefinition(handle);
@@ -157,8 +157,20 @@ public static class Program
 
                 if (IsAttribute(reader, attribute, AttributeNamespace, AttributeName))
                 {
+                    if (handle == entryPoint)
+                    {
+                        throw new DeclarationException(
+                            $"[BlixApp] on {where}: Main cannot be an app, because it takes string[]. " +
+                            "Declare the method Main hands to BlixApps.Main, with Default = true.");
+                    }
+
                     Validate(reader, method, where);
-                    apps.Add(Decode(reader, attribute, where, isEntryPoint: handle == entryPoint));
+                    apps.Add(Decode(reader, attribute, where) with { Usage = NullIfEmpty(AppParameterMetadata.Usage(reader, method)) });
+                }
+                else if (IsAttribute(reader, attribute, AttributeNamespace, StartupName))
+                {
+                    ValidateStartup(method, where);
+                    startups.Add(where);
                 }
                 else if (IsAttribute(reader, attribute, RecipeNamespace, RecipeName))
                 {
@@ -166,6 +178,21 @@ public static class Program
                     recipes.Add(DecodeRecipe(reader, attribute, where));
                 }
             }
+        }
+
+        // One runs before every app, so a second is a question with two answers.
+        if (startups.Count > 1)
+        {
+            throw new DeclarationException(
+                $"{startups.Count} [BlixStartup] methods are declared: {string.Join(", ", startups)}. " +
+                "One runs before every app, so there can be only one.");
+        }
+
+        if (apps.Count(a => a.IsDefault) is > 1 and var defaults)
+        {
+            throw new DeclarationException(
+                $"{defaults} apps are marked Default: " +
+                string.Join(", ", apps.Where(a => a.IsDefault).Select(a => a.Method)));
         }
 
         return (apps, recipes, hasEntryPoint);
@@ -275,8 +302,7 @@ public static class Program
         }
     }
 
-    private static AppEntry Decode(
-        MetadataReader reader, CustomAttribute attribute, string where, bool isEntryPoint)
+    private static AppEntry Decode(MetadataReader reader, CustomAttribute attribute, string where)
     {
         var value = attribute.DecodeValue(new StringTypeProvider());
 
@@ -288,18 +314,21 @@ public static class Program
 
         string? summary = null;
         var headed = false;
+        var isDefault = false;
         foreach (var named in value.NamedArguments)
         {
             if (named.Name == "Summary") summary = named.Value as string;
             else if (named.Name == "Headed") headed = named.Value is true;
+            else if (named.Name == "Default") isDefault = named.Value is true;
         }
 
-        return new AppEntry(name, summary, headed, where, isEntryPoint);
+        return new AppEntry(name, summary, headed, where, isDefault);
     }
 
-    // The four shapes an app may have, checked HERE so a mis-declared app is a build
-    // failure rather than a tool that is quietly unreachable. An app that cannot be
-    // found because it was declared slightly wrong is the worst failure this layer has.
+    // The shapes an app may have, checked HERE so a mis-declared app is a build failure rather
+    // than a tool that is quietly unreachable. It returns int or void and takes AppArgs, typed
+    // parameters a command line can spell, or both. An app that cannot be found because it was
+    // declared slightly wrong is the worst failure this layer has.
     private static void Validate(MetadataReader reader, MethodDefinition method, string where)
     {
         if ((method.Attributes & MethodAttributes.Static) == 0)
@@ -315,13 +344,30 @@ public static class Program
                 $"[BlixApp] on {where}: an app returns int or void, not {signature.ReturnType}.");
         }
 
-        var parameters = signature.ParameterTypes;
-        var ok = parameters.Length == 0
-            || (parameters.Length == 1 && parameters[0] == "System.String[]");
+        if (AppParameterMetadata.Problem(reader, method) is { } problem)
+        {
+            throw new DeclarationException($"[BlixApp] on {where}: {problem}");
+        }
+    }
+
+    private static string? NullIfEmpty(string s) => s.Length == 0 ? null : s;
+
+    // Checked here for the same reason an app's shape is: a startup method that cannot be run is
+    // a build failure, not a surprise on first launch.
+    private static void ValidateStartup(MethodDefinition method, string where)
+    {
+        if ((method.Attributes & MethodAttributes.Static) == 0)
+        {
+            throw new DeclarationException($"[BlixStartup] on {where}: a startup method must be static.");
+        }
+
+        var signature = method.DecodeSignature(new StringTypeProvider(), genericContext: null);
+        var ok = signature.ReturnType == "System.Void"
+            && signature.ParameterTypes is [] or ["Blix.Core.AppArgs"];
         if (!ok)
         {
             throw new DeclarationException(
-                $"[BlixApp] on {where}: an app takes string[] or nothing, not ({string.Join(", ", parameters)}).");
+                $"[BlixStartup] on {where}: a startup method takes AppArgs or nothing, and returns nothing.");
         }
     }
 
@@ -358,7 +404,11 @@ public static class Program
         string Id, string Produces, string Consumes, string Summary, uint Version, string Method);
 
     private sealed record AppEntry(
-        string Name, string? Summary, bool Headed, string Method, bool IsEntryPoint);
+        string Name, string? Summary, bool Headed, string Method, bool IsDefault)
+    {
+        /// <summary>The app's flags, as <c>--years &lt;int&gt;=1 --fog</c>, or null when it has none.</summary>
+        public string? Usage { get; init; }
+    }
 
     // Types as strings, which is all this needs. The full provider contract exists for
     // callers that rebuild real Type objects; here the questions are "is it int" and

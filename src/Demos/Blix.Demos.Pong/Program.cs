@@ -9,10 +9,14 @@ using Blix.Graphics.Vulkan;
 using Blix.Render;
 using Blix.Runtime.Silk;
 
-using var window = new Window(
-    new PongGame(),
-    new WindowOptions("Blix · Pong", 1152, 576));
-window.Run();
+return BlixApps.Main(args, a =>
+{
+    using var window = new Window(
+        new PongGame(),
+        WindowOptions.FromArgs(a, new WindowOptions("Blix · Pong", 1152, 576)));
+    window.Run();
+    return 0;
+});
 
 // Pong — the 2D game proving the Vulkan SpriteBatch + Font path, with a CRT
 // post-FX finish. Gameplay runs in a virtual playfield; sprites render to a 2×
@@ -485,7 +489,7 @@ internal sealed class PongGame : Game
                 ClearDepth: true),
             pass => fullscreen.Draw(
                 pass, postfxPipeline,
-                new ShaderTextureBinding[] { new("uScene", sceneTex, Slot: 0) },
+                new ShaderTextureBinding[] { new("uScene", sceneTex) },
                 postfxPush));
     }
 

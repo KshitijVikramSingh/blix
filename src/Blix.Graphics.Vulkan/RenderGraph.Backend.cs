@@ -628,6 +628,16 @@ public sealed partial class RenderGraph : IDisposable
     /// pipelines and the framebuffer built for the clearing form.
     /// </para>
     /// </remarks>
+    // Where a colour attachment starts. Loading means starting from where the previous use left it:
+    // SHADER_READ_ONLY_OPTIMAL for a single-sample target, COLOR_ATTACHMENT_OPTIMAL for an MSAA one,
+    // which is never sampled. A load from UNDEFINED is invalid, and the load variant of an MSAA pass
+    // used to be created that way. What it loads is still the samples the pass declared DontCare,
+    // so drawing over an MSAA target through the load variant starts from nothing useful.
+    private static ImageLayout MsaaAwareInitialLayout(bool msaa, bool loads) =>
+        !loads ? ImageLayout.Undefined
+        : msaa ? ImageLayout.ColorAttachmentOptimal
+        : ImageLayout.ShaderReadOnlyOptimal;
+
     /// <summary>
     /// The same pass, built with vkCreateRenderPass2 so its multisampled depth can be resolved.
     /// </summary>
@@ -661,19 +671,23 @@ public sealed partial class RenderGraph : IDisposable
             var binding = pass.ColorTargets[i];
             var resource = BackendResources[binding.View.Resource.Id];
             var samples = Resources[binding.View.Resource.Id].Samples;
+            var msaa = samples > 1;
             attachments[i] = new AttachmentDescription2
             {
                 SType = StructureType.AttachmentDescription2,
                 Format = resource.Format,
                 Samples = SampleCount(samples),
                 LoadOp = loadVariant ? AttachmentLoadOp.Load : MapLoadOp(binding.Load),
-                StoreOp = MapStoreOp(binding.Store),
+                // The MSAA judgement the v1 path makes, which this one's remarks claim to reproduce
+                // and did not: MSAA colour is resolved rather than sampled, so it is not stored and
+                // stays a colour attachment. It went to SHADER_READ_ONLY_OPTIMAL here, a layout an
+                // image created without SAMPLED usage cannot be in, and validation said so on every
+                // frame of every MSAA pass that also resolved its depth (Studio's lit pass).
+                StoreOp = msaa ? AttachmentStoreOp.DontCare : MapStoreOp(binding.Store),
                 StencilLoadOp = AttachmentLoadOp.DontCare,
                 StencilStoreOp = AttachmentStoreOp.DontCare,
-                InitialLayout = loadVariant || binding.Load == LoadOp.Load
-                    ? ImageLayout.ShaderReadOnlyOptimal
-                    : ImageLayout.Undefined,
-                FinalLayout = ImageLayout.ShaderReadOnlyOptimal,
+                InitialLayout = MsaaAwareInitialLayout(msaa, loadVariant || binding.Load == LoadOp.Load),
+                FinalLayout = msaa ? ImageLayout.ColorAttachmentOptimal : ImageLayout.ShaderReadOnlyOptimal,
             };
             colorRefs[i] = new AttachmentReference2
             {
@@ -865,9 +879,7 @@ public sealed partial class RenderGraph : IDisposable
                 StoreOp = msaa ? AttachmentStoreOp.DontCare : MapStoreOp(target.Store),
                 StencilLoadOp = AttachmentLoadOp.DontCare,
                 StencilStoreOp = AttachmentStoreOp.DontCare,
-                InitialLayout = loadVariant && !msaa
-                    ? ImageLayout.ShaderReadOnlyOptimal
-                    : ImageLayout.Undefined,
+                InitialLayout = MsaaAwareInitialLayout(msaa, loadVariant),
                 // Non-MSAA → ShaderReadOnly for downstream Reads. MSAA stays a
                 // colour attachment (only the resolve target is sampled).
                 FinalLayout = msaa ? ImageLayout.ColorAttachmentOptimal : ImageLayout.ShaderReadOnlyOptimal,

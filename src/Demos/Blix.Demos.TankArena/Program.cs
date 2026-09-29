@@ -39,18 +39,16 @@ namespace Blix.Demos.TankArena;
 //   • AvoidObstacles is the FIRST pressure on a nav primitive — not yet a primitive
 public static class Program
 {
-    public static void Main(string[] args)
-    {
-        var exitAfterFrames = 0;
-        for (var i = 0; i < args.Length - 1; i++)
-        {
-            if (args[i] == "--frames" && int.TryParse(args[i + 1], out var n)) exitAfterFrames = n;
-        }
-        var debugOverlay = args.Contains("--debug");   // live tuning + diagnostics overlay (` to show)
+    public static int Main(string[] args) => BlixApps.Main(args, Run);
 
-        var loop = new TankArenaLoop(exitAfterFrames, debugOverlay);
-        using var window = new Window(loop, new WindowOptions("Blix — Tank Arena", 1280, 720));
+    private static int Run(AppArgs args)
+    {
+        // --debug is the live tuning + diagnostics overlay (` to show).
+        var options = WindowOptions.FromArgs(args, new WindowOptions("Blix — Tank Arena", 1280, 720));
+        var loop = new TankArenaLoop(options.ExitAfterFrames, options.Diagnostics);
+        using var window = new Window(loop, options);
         window.Run();
+        return 0;
     }
 }
 
@@ -282,9 +280,10 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
     private GraphResourceHandle hdrHandle, sceneDepthHandle, sunShadowHandle;
     private PassHandle shadowPassHandle, scenePassHandle;
     private PipelineHandle skyPipeline, worldPipeline, casterPipeline, presentPipeline;
-    private readonly byte[] worldPush = new byte[160];  // viewProj + camPos + sunDir + sunShadowVP
-    private readonly byte[] skyPush = new byte[96];     // invViewProj + camPos + sunDir
-    private readonly byte[] shadowPush = new byte[64];  // sun shadow VP (caster pass)
+    // Reused every frame. The layouts are the shaders', written by the generator below.
+    private readonly byte[] worldPush = new byte[WorldPush.SizeInBytes];
+    private readonly byte[] skyPush = new byte[SkyPush.SizeInBytes];
+    private readonly byte[] shadowPush = new byte[ShadowPush.SizeInBytes];
     private Matrix4x4 sunShadowVP;
     private static readonly Vector3 SunDir = Vector3.Normalize(new Vector3(0.35f, 0.82f, 0.45f));
     private const int ShadowMapSize = 2048;
@@ -1140,20 +1139,14 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
         var proj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, aspect, 0.3f, 400f);
         viewProj = view * proj;
 
-        // Push payloads. World: viewProj + camPos + sunDir + sun shadow VP (160B).
-        // Sky: invViewProj + camPos + sunDir (96B). Shadow caster: sun VP (64B).
+        // Push payloads, one struct per program's block.
         sunShadowVP = SunShadowVP();
         var camPos = new Vector4(eye, 1f);
         var sun = new Vector4(SunDir, 0f);
         Matrix4x4.Invert(viewProj, out var invViewProj);
-        MemoryMarshal.Write(worldPush.AsSpan(0, 64), in viewProj);
-        MemoryMarshal.Write(worldPush.AsSpan(64, 16), in camPos);
-        MemoryMarshal.Write(worldPush.AsSpan(80, 16), in sun);
-        MemoryMarshal.Write(worldPush.AsSpan(96, 64), in sunShadowVP);
-        MemoryMarshal.Write(skyPush.AsSpan(0, 64), in invViewProj);
-        MemoryMarshal.Write(skyPush.AsSpan(64, 16), in camPos);
-        MemoryMarshal.Write(skyPush.AsSpan(80, 16), in sun);
-        MemoryMarshal.Write(shadowPush.AsSpan(0, 64), in sunShadowVP);
+        new WorldPush { ViewProjection = viewProj, CamPos = camPos, SunDir = sun, SunShadowVP = sunShadowVP }.WriteTo(worldPush);
+        new SkyPush { InvViewProj = invViewProj, CamPos = camPos, SunDir = sun }.WriteTo(skyPush);
+        new ShadowPush { ShadowViewProj = sunShadowVP }.WriteTo(shadowPush);
 
         // Lit world cubes: ground + walls + shells. Tanks draw as their model parts.
         batch.Begin(worldPush);
@@ -1206,7 +1199,7 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
         graph.Pass(scenePassHandle, scope =>
         {
             fullscreen.Draw(scope, skyPipeline, Array.Empty<ShaderTextureBinding>(), skyPush);
-            var shadowBind = new[] { new ShaderTextureBinding("uSunShadowMap", shadowTex, Slot: 0) };
+            var shadowBind = new[] { new ShaderTextureBinding("uSunShadowMap", shadowTex) };
             batch.End(scope, shadowBind);
             foreach (var part in tankParts) part.World.End(scope, shadowBind);
             foreach (var pt in propTypes) pt.Model.DrawScene(scope, shadowBind);
@@ -1220,7 +1213,7 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
                 Target: RenderSurfaceHandle.Default,
                 ClearColors: new GraphicsColor?[] { new GraphicsColor(0f, 0f, 0f, 1f) },
                 ClearDepth: true),
-            pass => fullscreen.Draw(pass, presentPipeline, new[] { new ShaderTextureBinding("uHdr", hdrTex, Slot: 0) }));
+            pass => fullscreen.Draw(pass, presentPipeline, new[] { new ShaderTextureBinding("uHdr", hdrTex) }));
 
         if (exitAfterFrames > 0 && frameCount >= exitAfterFrames) host.RequestClose();
     }
@@ -1299,3 +1292,14 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
         foreach (var pt in propTypes) pt.Model.Dispose();
     }
 }
+
+// Each program's push block, written from its shaders' reflection: fields, offsets and sizes come
+// from the GLSL, and "u" is dropped from each name because these declarations say so.
+[PushConstants("cube.vert", "cube.frag", Prefix = "u")]
+internal partial struct WorldPush;
+
+[PushConstants("sky.vert", "sky.frag", Prefix = "u")]
+internal partial struct SkyPush;
+
+[PushConstants("shadow_caster.vert", "shadow_caster.frag", Prefix = "u")]
+internal partial struct ShadowPush;

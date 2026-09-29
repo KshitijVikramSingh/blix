@@ -351,6 +351,10 @@ public sealed partial class VulkanGraphicsDevice
         // (incl. MoltenVK), but gate on support so we stay portable.
         Vk.GetPhysicalDeviceFeatures(PhysicalDevice, out var supportedFeatures);
         AnisotropySupported = supportedFeatures.SamplerAnisotropy;
+
+        // Kept for CheckDescriptorLimits, which compares every new program against them.
+        Vk.GetPhysicalDeviceProperties(PhysicalDevice, out var limitProps);
+        descriptorLimits = limitProps.Limits;
         if (AnisotropySupported)
         {
             Vk.GetPhysicalDeviceProperties(PhysicalDevice, out var props);
@@ -463,6 +467,11 @@ public sealed partial class VulkanGraphicsDevice
         return true;
     }
 
+    private static int validationErrors;
+
+    /// <summary>Validation-layer errors reported in this process so far, teardown included.</summary>
+    public static int ValidationErrors => Volatile.Read(ref validationErrors);
+
     private static bool ShouldEnableValidation()
     {
         // Opt-in via env var so release runs don't pay validation cost by default.
@@ -483,7 +492,9 @@ public sealed partial class VulkanGraphicsDevice
         void* userData)
     {
         var msg = Marshal.PtrToStringUTF8((nint)data->PMessage) ?? "(no message)";
-        var label = severity.HasFlag(DebugUtilsMessageSeverityFlagsEXT.ErrorBitExt) ? "ERR " : "WARN";
+        var isError = severity.HasFlag(DebugUtilsMessageSeverityFlagsEXT.ErrorBitExt);
+        if (isError) Interlocked.Increment(ref validationErrors);
+        var label = isError ? "ERR " : "WARN";
         Console.Error.WriteLine($"[vk-{label}] {msg}");
         return Vk.False;
     }

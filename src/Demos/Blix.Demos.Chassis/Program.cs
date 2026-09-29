@@ -2,6 +2,7 @@ using Blix;
 using Blix.Core;
 using Blix.Diagnostics;
 using Blix.Graphics;
+using Blix.Runtime.Headless;
 using Blix.Runtime.Silk;
 using ImGuiNET;
 using System.Numerics;
@@ -30,15 +31,15 @@ namespace Blix.Demos.Chassis;
 // with time, so "is it running" is answerable at a glance.
 public static class Program
 {
-    public static int Main(string[] args)
-    {
-        // Two apps in one assembly, which is the app layer working on itself: this project
-        // is a spec for the chassis, and "a declared control reaches the overlay" is a
-        // chassis-level fact that needed somewhere to be checked. It costs no csproj and no
-        // launcher, and the loop below is untouched — which matters, because being NOT
-        // IDebuggable is the thing it exists to prove.
-        if (BlixApps.Dispatch(args) is { } appCode) return appCode;
+    // Two apps in one assembly, which is the app layer working on itself: this project is a
+    // spec for the chassis, and "a declared control reaches the overlay" is a chassis-level
+    // fact that needed somewhere to be checked. It costs no csproj and no launcher, and the
+    // loop below is untouched — which matters, because being NOT IDebuggable is the thing it
+    // exists to prove. Unnamed, the executable runs Run.
+    public static int Main(string[] args) => BlixApps.Main(args, Run);
 
+    private static int Run(AppArgs args)
+    {
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — chassis",
@@ -63,7 +64,7 @@ public static class Program
     /// from a declaration, so nothing would have noticed if the overlay never drew one.
     /// </remarks>
     [BlixApp("chassis-tune", Summary = "declared [Tune] state, rendered by the overlay", Headed = true)]
-    public static void Tuned(string[] args)
+    public static void Tuned(AppArgs args)
     {
         // <b>Diagnostics ON by default here, which every other app leaves off.</b>
         // DebugState.Enabled starts false and the overlay is only laid out when it is true,
@@ -71,6 +72,22 @@ public static class Program
         // error — which is exactly what happened the first time this ran. An app whose whole
         // purpose is to show a declared control opening with that control hidden is not a
         // demonstration of anything.
+        var loop = new TunedLoop();
+
+        // <b>--headless runs this same loop with no window.</b> The same flags mean the same things
+        // (--frames, --dump-frame, --width, --height, --debug), so a dump taken here can be put beside
+        // one taken in a window. Which host runs is the application's decision, not the loop's.
+        if (args.Flag("headless"))
+        {
+            new HeadlessHost(loop, HeadlessOptions.FromArgs(args, HeadlessOptions.Default with
+            {
+                Width = 900,
+                Height = 560,
+                Diagnostics = true,
+            })).Run();
+            return;
+        }
+
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — chassis (declared state)",
@@ -79,7 +96,6 @@ public static class Program
             Diagnostics = true,
         });
 
-        var loop = new TunedLoop();
         using var window = new Window(loop, options);
         window.Run();
     }

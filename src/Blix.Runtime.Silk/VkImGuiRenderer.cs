@@ -312,7 +312,7 @@ public sealed class VkImGuiRenderer : IDisposable
                     }
 
                     var texture = known ? found : fontTexture;
-                    binding = new[] { new ShaderTextureBinding("uFont", texture, Slot: 0) };
+                    binding = new[] { new ShaderTextureBinding("uFont", texture) };
                     bindings[id] = binding;
                 }
 

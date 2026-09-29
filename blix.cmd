@@ -16,9 +16,9 @@ rem registered by the GPU driver rather than found through an environment
 rem variable. So what is left is the part that was always the actual front door —
 rem bootstrap the two tools, then hand over.
 rem
-rem UNVERIFIED. Written from the audit in plan.md stage C, on a machine with no
-rem Windows. It has never been run. Treat a failure here as expected work, not as
-rem a surprise.
+rem The solution build and complete headless gate exercise this launcher in
+rem Windows CI. That proves bootstrap, discovery, build and deviceless execution;
+rem a headed application still needs confirmation on an actual Windows desktop.
 
 setlocal
 set "REPO_ROOT=%~dp0"
@@ -44,10 +44,9 @@ rem == One rule from ./blix is deliberately NOT here =======================
 rem The bash front door also rebuilds these two when their own sources are newer than
 rem their outputs, because a stale resolver and a stale indexer are the one thing blix
 rem cannot report on: each would answer that question with its previous self. Batch has
-rem no plain way to compare timestamps, this file is still UNVERIFIED, and CI drives it
-rem - so an untested construct here would risk the Windows job for a convenience on a
-rem platform nobody yet develops on. Anyone changing Blix.Cli from Windows should build
-rem it themselves, and this note is the reason why.
+rem no plain way to compare timestamps, and CI drives this file through discovery,
+rem launch, and the full headless gate. Keep the bootstrap deliberately smaller than
+rem the bash front door instead of adding an unmeasured timestamp construct here.
 if not exist "%INDEXER%" (
     echo blix: building the app indexer ^(first run^) 1>&2
     dotnet build "%REPO_ROOT%src\Blix.Tools.Apps\Blix.Tools.Apps.csproj" -c "%CONFIG%" --nologo -v:q || exit /b 1

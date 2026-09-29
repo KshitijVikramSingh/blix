@@ -222,12 +222,13 @@ var t = new TestRunner();
     var fixture = new FlagFixture();
     var tunables = new ObjectTunables(fixture);
 
-    var rest = tunables.Apply(new[]
+    var passed = AppArgs.Parse(new[]
     {
         "--weight", "0.25", "--mask-root", "chest", "--lockstep",
         "--mode", "masked", "--instances", "3",
         "--frames", "60", "leftover",
     });
+    tunables.Apply(passed);
 
     t.ExpectTrue("a float flag lands", Math.Abs(fixture.Weight - 0.25f) < 1e-5f);
     t.ExpectTrue("a text flag lands", fixture.MaskRoot == "chest");
@@ -235,9 +236,13 @@ var t = new TestRunner();
     t.ExpectTrue("an enum flag matches by name", fixture.Mode == FlagMode.Masked);
     t.ExpectTrue("an int flag rounds into the member", fixture.Instances == 3);
 
-    // A tool has flags of its own that are not state, and this has no business knowing them.
-    t.ExpectTrue("unrecognised arguments come back", rest.Length == 3 &&
-        rest[0] == "--frames" && rest[1] == "60" && rest[2] == "leftover");
+    // A tool has flags of its own that are not state, and this has no business reading them.
+    t.ExpectTrue("flags that are not declared state are left unread",
+        passed.Unread.SequenceEqual(new[] { "--frames", "60", "leftover" }));
+
+    var explicitFalse = new FlagFixture { Lockstep = true };
+    new ObjectTunables(explicitFalse).Apply(AppArgs.Parse(new[] { "--lockstep=false" }));
+    t.ExpectTrue("--lockstep=false spells the other value", !explicitFalse.Lockstep);
 
     // camelCase and PascalCase both become one spelling, so a member rename is a flag rename
     // rather than two things to remember.
@@ -255,21 +260,21 @@ var t = new TestRunner();
     // The NEGATIVE half, three ways it must refuse rather than quietly carry on.
     var second = new ObjectTunables(new FlagFixture());
     t.ExpectThrows("a non-numeric value for a numeric flag is refused",
-        () => second.Apply(new[] { "--weight", "loud" }));
+        () => second.Apply(AppArgs.Parse(new[] { "--weight", "loud" })));
     t.ExpectThrows("an enum value that is not an option is refused",
-        () => second.Apply(new[] { "--mode", "sideways" }));
+        () => second.Apply(AppArgs.Parse(new[] { "--mode", "sideways" })));
     t.ExpectThrows("a flag with nothing after it is refused",
-        () => second.Apply(new[] { "--mask-root" }));
+        () => second.Apply(AppArgs.Parse(new[] { "--mask-root" })));
 
     // Clamped rather than refused: a range says what a value MEANS, and arguing with a
     // command line about it helps nobody — it is the same clamp the slider gets.
     var third = new FlagFixture();
-    new ObjectTunables(third).Apply(new[] { "--weight", "9" });
+    new ObjectTunables(third).Apply(AppArgs.Parse(new[] { "--weight", "9" }));
     t.ExpectTrue("out of range is clamped, as the slider is", Math.Abs(third.Weight - 1f) < 1e-5f);
 
     // Applying a value it already holds is not a change, whichever door it came through.
     var quiet = new FlagFixture();
-    new ObjectTunables(quiet).Apply(new[] { "--mask-root", "spine" });
+    new ObjectTunables(quiet).Apply(AppArgs.Parse(new[] { "--mask-root", "spine" }));
     t.ExpectTrue("a flag that changes nothing is not a change", quiet.Heard.Count == 0);
 }
 

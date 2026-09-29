@@ -197,7 +197,7 @@ internal sealed partial class SponzaLoop
             staging.Add(new DrawableStaging(
                 mesh.VertexBytes, mesh.VertexCount, lods, material, pipeline, mesh.Bounds,
                 albedo, alphaCutoff, baseColorAlpha,
-                new[] { new ShaderTextureBinding("uAlbedo", albedo, Slot: 0) }, isBlend,
+                new[] { new ShaderTextureBinding("uAlbedo", albedo) }, isBlend,
                 string.IsNullOrEmpty(mesh.Name) ? "primitive" : mesh.Name));
         }
     }

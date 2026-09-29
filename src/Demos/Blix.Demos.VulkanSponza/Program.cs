@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix;
@@ -28,8 +29,7 @@ namespace Blix.Demos.VulkanSponza;
 // coverage so the hero tree isn't overdraw-bound. CPU-phase timing
 // (cpu-wait/encode/submit) is surfaced in the diagnostics overlay.
 //
-// Asset story: BLIX_SPONZA_ASSETS may point at the external cooked pack set;
-// otherwise runtime uses the application's bin-local Assets directory.
+// Asset story: BLIX_SPONZA_ASSETS names the cooked pack set, and is required.
 // Missing-asset startup prints the setup instruction and exits cleanly.
 //
 // ── Executable spec for (engine primitives this demo proves) ──
@@ -44,36 +44,43 @@ namespace Blix.Demos.VulkanSponza;
 //     (this is a research renderer, not a reusable scene renderer)
 public static class Program
 {
-    public static void Main()
+    public static int Main(string[] args) => BlixApps.Main(args, Run);
+
+    private static int Run(AppArgs args)
     {
         // --win W H: the single most informative perf switch this demo has. Fragment and bandwidth
         // cost scale with pixels; geometry cost does not. Halving each side quarters the first and
         // leaves the second alone, so one paired run says which wall the frame is against — a
         // question no amount of per-pass timing can answer on a tile-based GPU, where the
         // timestamps bracket encoder submission rather than execution.
-        var args = Environment.GetCommandLineArgs();
-        var width = 1440;
-        var height = 810;
-        for (var i = 0; i < args.Length - 2; i++)
+        var defaults = new WindowOptions("Blix — Vulkan Sponza", 1440, 810);
+        if (args.Values("win", 2) is [var w, var h])
         {
-            if (args[i] != "--win") continue;
-            if (int.TryParse(args[i + 1], out var w) && int.TryParse(args[i + 2], out var h)
-                && w >= 160 && h >= 120)
+            var width = int.Parse(w, CultureInfo.InvariantCulture);
+            var height = int.Parse(h, CultureInfo.InvariantCulture);
+            if (width < 160 || height < 120)
             {
-                width = w;
-                height = h;
+                throw new AppArgsException($"--win expects at least 160 120, got {width} {height}.");
             }
+
+            defaults = defaults with { Width = width, Height = height };
         }
 
-        var loop = new SponzaLoop();
-        using var window = new Window(loop, new WindowOptions("Blix — Vulkan Sponza", width, height));
+        var loop = new SponzaLoop(args);
+        using var window = new Window(loop, WindowOptions.FromArgs(args, defaults));
         window.Run();
+        return 0;
     }
 }
 
 internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDisposable
 {
     public string DebugName => "vulkan-sponza";
+
+    // Read during OnLoad, because most of what it sets needs the device.
+    private readonly AppArgs args;
+
+    public SponzaLoop(AppArgs args) => this.args = args;
 
     private IRenderHost host = null!;
     private VulkanGraphicsDevice vk = null!;
@@ -924,8 +931,9 @@ internal sealed class FogSettings
     [Tune]              public bool ShowRejection = false;
 }
 
-// Tonemap operators (overlay Render → Tonemap); the enum's int value indexes
-// present.frag's branch, so declaration order must match the shader.
+// Tonemap operators (overlay Render → Tonemap). The value indexes present.frag's branch, so the
+// build checks these names against the //@tune enum{} above uTonemap there.
+[ShaderEnum("present.frag", "uTonemap")]
 internal enum TonemapMode { Reinhard, ACES, AgX, Hejl }
 
 // Sun-shadow tunables (overlay "Shadows" group). Read live by UpdateCascades

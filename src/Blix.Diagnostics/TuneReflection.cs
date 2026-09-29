@@ -1,3 +1,5 @@
+using Blix.Core;
+using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using System.Text;
@@ -408,7 +410,7 @@ public sealed class ObjectTunables
     private readonly Dictionary<TunableField, object> lastSeen = new();
 
     /// <summary>
-    /// Drive declared state from a command line, and hand back what was not recognised.
+    /// Drive declared state from a command line.
     /// </summary>
     /// <remarks>
     /// <b>The second face of one declaration.</b> A panel and a flag are the same member rendered
@@ -419,64 +421,47 @@ public sealed class ObjectTunables
     /// <para>
     /// Flags come from the MEMBER name rather than the label — <c>MaskRoot</c> is
     /// <c>--mask-root</c>, not <c>--Mask root</c> — because a label is for reading and a flag is
-    /// for typing.
+    /// for typing. A bool is true by presence; <c>--lockstep=false</c> spells the other value.
     /// </para>
     /// <para>
-    /// Unrecognised arguments are returned rather than rejected. A tool has flags of its own that
-    /// are not state (<c>--frames</c>, <c>--out</c>), and this has no business knowing them.
+    /// It reads only its own flags from <paramref name="args"/>. A tool has flags of its own that
+    /// are not state (<c>--frames</c>, <c>--out</c>), and anything nobody reads is reported by
+    /// <see cref="BlixApps.Main"/>.
     /// </para>
     /// </remarks>
-    /// <exception cref="ArgumentException">
+    /// <exception cref="AppArgsException">
     /// A declared flag was given a value it cannot hold. Loud, because the alternative is a tool
     /// that silently ran with a default while its command line said otherwise.
     /// </exception>
-    public string[] Apply(string[] args)
+    public void Apply(AppArgs args)
     {
         ArgumentNullException.ThrowIfNull(args);
 
-        var byFlag = new Dictionary<string, TunableField>(StringComparer.OrdinalIgnoreCase);
         foreach (var (_, items) in groups)
         {
-            foreach (var f in items)
+            foreach (var field in items)
             {
-                if (f.Kind != TuneKind.Button) byFlag[FlagFor(f.Name)] = f;
-            }
-        }
+                if (field.Kind == TuneKind.Button) continue;
 
-        var rest = new List<string>();
-        for (var i = 0; i < args.Length; i++)
-        {
-            if (!byFlag.TryGetValue(args[i], out var field))
-            {
-                rest.Add(args[i]);
-                continue;
-            }
+                var flag = FlagFor(field.Name);
+                var name = flag[2..];
+                if (!args.Has(name)) continue;
 
-            var before = Snapshot(field);
-
-            if (field.Kind == TuneKind.Bool)
-            {
-                // Presence is true, which is how every hand-written flag in this tree already
-                // behaves. An explicit "--lockstep false" still works when it is spelled.
-                var explicitValue = i + 1 < args.Length && bool.TryParse(args[i + 1], out var parsed);
-                field.Value = explicitValue && !bool.Parse(args[++i]) ? 0f : 1f;
-            }
-            else
-            {
-                if (i + 1 >= args.Length)
+                var before = Snapshot(field);
+                if (field.Kind == TuneKind.Bool)
                 {
-                    throw new ArgumentException($"{args[i]} needs a value after it.", nameof(args));
+                    field.Value = args.Flag(name) ? 1f : 0f;
+                }
+                else
+                {
+                    AssignFrom(field, flag, args.String(name)!);
                 }
 
-                AssignFrom(field, args[i], args[++i]);
+                var after = Snapshot(field);
+                lastSeen[field] = after;
+                if (!Equals(before, after)) Mark(field, before, after);
             }
-
-            var after = Snapshot(field);
-            lastSeen[field] = after;
-            if (!Equals(before, after)) Mark(field, before, after);
         }
-
-        return rest.ToArray();
     }
 
     /// <summary>Every flag this reports, for a caller that wants to print usage.</summary>
@@ -518,8 +503,8 @@ public sealed class ObjectTunables
 
                 if (at < 0)
                 {
-                    throw new ArgumentException(
-                        $"{flag} is one of {string.Join(", ", names)} — not '{raw}'.", nameof(raw));
+                    throw new AppArgsException(
+                        $"{flag} is one of {string.Join(", ", names)}, not '{raw}'.");
                 }
 
                 field.Value = at;
@@ -528,9 +513,9 @@ public sealed class ObjectTunables
 
             default:
             {
-                if (!float.TryParse(raw, out var number))
+                if (!float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var number))
                 {
-                    throw new ArgumentException($"{flag} takes a number, not '{raw}'.", nameof(raw));
+                    throw new AppArgsException($"{flag} takes a number, not '{raw}'.");
                 }
 
                 // Clamped rather than refused, and the same clamp a slider gets. A range says what

@@ -5,13 +5,15 @@
 // OETF on write — every operator below outputs DISPLAY-LINEAR (operators that
 // natively bake in gamma are linearised so we don't double-encode).
 //
-// uTonemap selects the operator live (overlay -> Post -> Tonemap):
-//   0 Reinhard  1 ACES (Narkowicz)  2 AgX (neutral)  3 Hejl-Dawson
+// uTonemap selects the operator live (overlay -> Post -> Tonemap). The //@tune list above it is
+// the names in value order, and the build checks C#'s TonemapMode against it. ACES is the
+// Narkowicz fit, AgX the neutral look, Hejl the Hejl-Dawson curve.
 
 layout(set = 0, binding = 0) uniform sampler2D uHdr;
 
 layout(push_constant) uniform PushConstants {
     float uExposure;
+    //@tune enum{ Reinhard, ACES, AgX, Hejl }
     uint  uTonemap;
 } pc;
 

@@ -41,17 +41,16 @@ namespace Blix.Demos.Runner;
 //   • runner gameplay: lanes, scoring, speed ramp, procedural spawn/wrap, game-over
 public static class Program
 {
-    public static void Main(string[] args)
-    {
-        var exitAfterFrames = 0; // 0 = interactive; --frames N for the headless gate
-        for (var i = 0; i < args.Length - 1; i++)
-        {
-            if (args[i] == "--frames" && int.TryParse(args[i + 1], out var n)) exitAfterFrames = n;
-        }
+    public static int Main(string[] args) => BlixApps.Main(args, Run);
 
-        var loop = new RunnerLoop(exitAfterFrames);
-        using var window = new Window(loop, new WindowOptions("Blix — Endless Runner", 1280, 720));
+    private static int Run(AppArgs args)
+    {
+        // No --frames is interactive; --frames N is the bounded gate run.
+        var options = WindowOptions.FromArgs(args, new WindowOptions("Blix — Endless Runner", 1280, 720));
+        var loop = new RunnerLoop(options.ExitAfterFrames);
+        using var window = new Window(loop, options);
         window.Run();
+        return 0;
     }
 }
 

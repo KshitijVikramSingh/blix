@@ -1,0 +1,13 @@
+<Project>
+  <!--
+    The repository records one default checkout. BLIX_ROOT is a local override
+    for working against a sibling Blix tree without changing a committed path.
+  -->
+  <PropertyGroup>
+    <BlixCheckout Condition="'$(BLIX_ROOT)' != ''">$(BLIX_ROOT)</BlixCheckout>
+    <BlixCheckout Condition="'$(BlixCheckout)' == ''">$(MSBuildThisFileDirectory)engine/blix</BlixCheckout>
+  </PropertyGroup>
+
+  <!-- Defines stable Blix paths. It adds no engine references or game policy. -->
+  <Import Project="$(BlixCheckout)/build/Blix.Source.props" />
+</Project>
