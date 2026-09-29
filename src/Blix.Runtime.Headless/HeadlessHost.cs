@@ -5,11 +5,17 @@ using Blix.Graphics;
 namespace Blix.Runtime.Headless;
 
 /// <summary>
-/// Runs an <see cref="IGameLoop"/> with no window, no device and no wall clock.
+/// Runs a headless-capable <see cref="IGameLoop"/> with no window, no device and no wall clock.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>The same loop, the same order, the same arguments.</b> Each frame is what a window's is:
+/// <b>The same lifecycle for a loop that can run without a device, not a window removed from any
+/// game.</b> A loop that creates GPU resources, or casts its device to a backend's, cannot run here,
+/// and <see cref="NoGraphicsDevice"/> is what guarantees it finds out at the first such call rather
+/// than drawing nothing quietly. Being headless-capable is something a loop is written to be.
+/// </para>
+/// <para>
+/// <b>The same order, and the same arguments.</b> Each frame is what a window's is:
 /// input held still for the tick, <see cref="IGameLoop.OnUpdate"/>, the loop's diagnostics,
 /// <see cref="IGameLoop.OnRender"/>, then the dump and the frame bound. What differs is only what a
 /// headless run cannot have. There is no device, so <see cref="IGameLoop.OnLoad"/> is handed a

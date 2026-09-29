@@ -1742,6 +1742,7 @@ public sealed partial class VulkanGraphicsDevice
                 {
                     binding = b.Slot;
                     RequireSlotNamedAsBound(prog, sr, b);
+                    if (ImageSlotAt(sr, binding) is { } atSlot) RequireElementInRange(prog, b.Name, element, atSlot);
                 }
 
                 var imageSlotType = ImageSlotTypeAtBinding(sr, binding);
@@ -1814,15 +1815,30 @@ public sealed partial class VulkanGraphicsDevice
             var b = textures[i];
             if (b.Slot != ShaderTextureBinding.ByName) continue;
 
-            var (baseName, _) = SplitArrayName(b);
-            var found = false;
-            for (var setIdx = 0; setIdx < prog.Sets.Length && !found; setIdx++)
+            var (baseName, index) = SplitArrayName(b);
+            var element = index ?? b.ArrayIndex;
+            var inSets = new List<(int Set, DescriptorSetSlot Slot)>();
+            for (var setIdx = 0; setIdx < prog.Sets.Length; setIdx++)
             {
                 if (setIdx == MaterialOwnedSet || prog.Sets[setIdx] is not { } sr) continue;
-                found = ImageSlotNamed(sr, baseName) is not null;
+                if (ImageSlotNamed(sr, baseName) is { } slot) inSets.Add((setIdx, slot));
             }
 
-            if (found) continue;
+            // Vulkan scopes bindings by set, so two sets may both declare uDepth. A name is then not
+            // one binding, and binding it to both would be a guess that happens to be right.
+            if (inSets.Count > 1)
+            {
+                throw new InvalidOperationException(
+                    $"Program '{prog.Name}' has '{baseName}' in more than one descriptor set " +
+                    $"({string.Join(", ", inSets.Select(x => $"set {x.Set} binding {x.Slot.Binding}"))}), " +
+                    "so binding it by name is ambiguous. Rename one of them in the shader.");
+            }
+
+            if (inSets.Count == 1)
+            {
+                RequireElementInRange(prog, baseName, element, inSets[0].Slot);
+                continue;
+            }
 
             var names = prog.Sets
                 .Where((sr, setIdx) => sr is not null && setIdx != MaterialOwnedSet)
@@ -1853,6 +1869,26 @@ public sealed partial class VulkanGraphicsDevice
                 $"Program '{prog.Name}': a texture bound as '{b.Name}' at slot {b.Slot} lands on '{s.Name}'. " +
                 $"Bind it by name, new ShaderTextureBinding(\"{s.Name}\", texture), or fix the slot.");
         }
+    }
+
+    // An array element past the reflected count would be written by Vulkan into nothing it declared.
+    private static void RequireElementInRange(VkShaderProgramEntry prog, string name, int element, DescriptorSetSlot slot)
+    {
+        var count = Math.Max(1, slot.Count);
+        if (element >= 0 && element < count) return;
+        throw new InvalidOperationException(
+            $"Program '{prog.Name}': '{name}' is element {element}, but '{slot.Name ?? name}' has " +
+            (count == 1 ? "no array elements; bind it without an index." : $"{count} elements, 0 to {count - 1}."));
+    }
+
+    private static DescriptorSetSlot? ImageSlotAt(VkShaderSetResources sr, int binding)
+    {
+        foreach (var s in sr.Slots)
+        {
+            if (s.Binding == binding && s.Type is ShaderResourceType.SampledImage or ShaderResourceType.StorageImage) return s;
+        }
+
+        return null;
     }
 
     // "uCascades[2]" is element 2 of uCascades. The index in the name and an explicit ArrayIndex

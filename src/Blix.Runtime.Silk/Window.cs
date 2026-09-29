@@ -45,6 +45,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     private float lastWheel;
     private double totalTime;
     private readonly WindowOptions options;
+    private readonly int validationErrorsBefore;
     private int renderedFrames;
 
     // Who owns each in-flight press. See Blix.Core.GestureOwnership: routing a release by who wants input
@@ -80,6 +81,9 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         BlixWindowOptions? options = null,
         IRuntimeDiagnosticsSink? diagnostics = null)
     {
+        // Validation errors are counted per process; this window answers for the ones after it began.
+        validationErrorsBefore = VulkanGraphicsDevice.ValidationErrors;
+
         // --validate is BLIX_VK_VALIDATE=1 with a verdict attached. It has to be set before anything
         // reads the switch, which is read once for the process.
         if ((options ?? BlixWindowOptions.Default).Validate)
@@ -714,8 +718,10 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         Step("window");
         window.Dispose();
 
-        // Last, because the device's own teardown is where leaks are reported.
-        if (options.Validate && VulkanGraphicsDevice.ValidationErrors is > 0 and var errors)
+        // Last, because the device's own teardown is where leaks are reported. Only the errors raised
+        // since this window was made: two windows in one process, one after the other, each answer
+        // for their own. Two at once would share the count, which the launcher never does.
+        if (options.Validate && VulkanGraphicsDevice.ValidationErrors - validationErrorsBefore is > 0 and var errors)
         {
             BlixApps.ReportFailure($"{errors} Vulkan validation error(s); they are printed above as [vk-ERR ]");
         }

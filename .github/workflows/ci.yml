@@ -96,7 +96,12 @@ jobs:
       - name: Install the Vulkan SDK (glslc, spirv-cross, the loader)
         run: |
           $ErrorActionPreference = 'Stop'
-          $version = '1.3.290.0'
+          # Pinned, and pins rot: LunarG stops serving older installers without notice. 1.3.290.0
+          # began returning 404 on 2026-09-29 (as did 1.4.313.0 and 1.4.321.1), which failed this
+          # job before it built anything. When it happens again, find a live one with
+          #   curl -sI https://sdk.lunarg.com/sdk/download/<v>/windows/VulkanSDK-<v>-Installer.exe
+          # From 1.4.3xx some releases are named vulkansdk-windows-X64-<v>.exe instead.
+          $version = '1.4.309.0'
           $url = "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe"
           Write-Host "Downloading $url"
           Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\vulkan-sdk.exe"

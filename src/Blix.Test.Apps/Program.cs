@@ -124,8 +124,28 @@ public static class Program
             Run(out _, self, BlixApps.Selector, "fixture-mixed", "--count", "2", "--extra", "5") == 7);
         t.Expect("usage is written from the parameters",
             AppParameters.Usage(found.Single(a => a.Name == "fixture-typed").Method)
-                == "--years <int> --tint <text, repeatable> --map-seed <int>=7 --fog --view <lit|shadow-map>=lit [--scale <number>]",
+                == "--years <int> --map-seed <int>=7 --fog --view <lit|shadow-map>=lit [--scale <number>] [--tint <text, repeatable>]",
             AppParameters.Usage(found.Single(a => a.Name == "fixture-typed").Method));
+
+        // The edge cases, each held to the one rule: a declared default wins; without one a
+        // nullable is null, a bool is false, and anything else is required.
+        var repeatedMissing = Run(out var repeatedSays, self, BlixApps.Selector, "fixture-repeated");
+        t.Expect("a repeated option with no default is required", repeatedMissing == 2 &&
+            repeatedSays.Contains("--tag <text, repeatable>", StringComparison.Ordinal), repeatedSays.Trim());
+        t.Expect("and binds every occurrence when given",
+            Run(out _, self, BlixApps.Selector, "fixture-repeated", "--tag", "a", "--tag", "b") == 2);
+        t.Expect("a repeated option defaulting to null is null when absent",
+            Run(out _, self, BlixApps.Selector, "fixture-typed", "--years", "1") == 1 + 7);
+
+        t.Expect("absent: a true-by-default flag is true, bool? and int? are null",
+            Run(out _, self, BlixApps.Selector, "fixture-flags") == 1 + 10);
+        t.Expect("--on=false turns a true-by-default flag off; --maybe=false is false, not absent",
+            Run(out _, self, BlixApps.Selector, "fixture-flags", "--on=false", "--maybe=false", "--seed", "3") == 0 + 30 + 300);
+        t.Expect("a bare --maybe is true", Run(out _, self, BlixApps.Selector, "fixture-flags", "--maybe") == 1 + 20);
+        t.Expect("usage shows the form worth typing for each",
+            AppParameters.Usage(found.Single(a => a.Name == "fixture-flags").Method)
+                == "--on=false [--maybe[=false]] [--seed <int>]",
+            AppParameters.Usage(found.Single(a => a.Name == "fixture-flags").Method));
 
         // ── setup every app shares ──────────────────────────────────────────
         t.Expect("the assembly's startup method is found",
@@ -942,10 +962,18 @@ public static class Program
 
     [BlixApp("fixture-typed", Summary = "takes typed parameters")]
     private static int Typed(
-        int years, IReadOnlyList<string> tint, int mapSeed = 7, bool fog = false,
-        FixtureView view = FixtureView.Lit, float? scale = null) =>
+        int years, int mapSeed = 7, bool fog = false,
+        FixtureView view = FixtureView.Lit, float? scale = null, IReadOnlyList<string>? tint = null) =>
         years + mapSeed + (fog ? 100 : 0) + (view == FixtureView.ShadowMap ? 1000 : 0)
-        + (scale is { } s ? (int)(s * 10) : 0) + tint.Count * 10000;
+        + (scale is { } s ? (int)(s * 10) : 0) + (tint?.Count ?? 0) * 10000;
+
+    [BlixApp("fixture-repeated", Summary = "takes a repeated option with no default")]
+    private static int Repeated(IReadOnlyList<string> tag) => tag.Count;
+
+    // on defaults true, maybe is null when absent, seed is null when absent. The code encodes all three.
+    [BlixApp("fixture-flags", Summary = "takes the flag and nullable edge cases")]
+    private static int Flags(bool on = true, bool? maybe = null, int? seed = null) =>
+        (on ? 1 : 0) + (maybe is null ? 10 : maybe.Value ? 20 : 30) + (seed is { } v ? 100 * v : 0);
 
     [BlixApp("fixture-mixed", Summary = "takes a typed parameter and the view")]
     private static int Mixed(int count, AppArgs args) => count + args.Int("extra", 0);

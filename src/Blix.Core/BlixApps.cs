@@ -62,6 +62,10 @@ public static class BlixApps
         var rest = at < 0 ? args : args.Take(at).Concat(args.Skip(at + 2)).ToArray();
         var parsed = AppArgs.Parse(rest);
         var run = Choose(name, assembly, otherwise);
+
+        // Failures belong to one invocation. Cleared here as well as after reporting, so one that
+        // threw after a host reported a failure cannot hand it to the next call in the process.
+        failures.Clear();
         var startup = FindStartup(assembly);
 
         int code;
@@ -100,6 +104,11 @@ public static class BlixApps
     /// A window run with <c>--validate</c> is the case that needed it: validation errors are known
     /// only once the device is torn down, after the app's own code has returned 0. The reason is
     /// printed after the app returns, and the exit code becomes 1 if it would have been 0.
+    /// <para>
+    /// <b>Scoped to one <see cref="Main"/> call, on one thread at a time.</b> The launcher runs one app
+    /// per process, and the gates use fresh processes, so that is what this is built for. Two calls
+    /// in one process see only their own failures; two running concurrently would share them.
+    /// </para>
     /// </remarks>
     public static void ReportFailure(string reason)
     {

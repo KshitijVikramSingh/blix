@@ -51,17 +51,38 @@ internal static class AppParameterMetadata
             var type = signature.ParameterTypes[i];
             if (type.Name == AppArgs) continue;
 
+            // The same rules as Blix.Core.AppParameters.Describe, which the app suite compares
+            // against this line for every fixture.
             var flag = FlagFor(names[i]);
+            var (hasDefault, value) = defaults[i];
+            var entry = $"--{flag} <{TypeName(type)}>";
+            var isNullable = type.Name == Nullable;
+            var inner = Unwrap(type);
+
             if (type.Name == "System.Boolean")
             {
-                entries.Add($"--{flag}");
-                continue;
+                entries.Add(hasDefault && value is true ? $"--{flag}=false" : $"--{flag}");
             }
-
-            var entry = $"--{flag} <{TypeName(type)}>";
-            entries.Add(!defaults[i].Has ? entry
-                : defaults[i].Value is null ? $"[{entry}]"
-                : $"{entry}={Format(defaults[i].Value!, Unwrap(type))}");
+            else if (isNullable && inner.Name == "System.Boolean")
+            {
+                entries.Add($"[--{flag}[=false]]");
+            }
+            else if (type.Name == ReadOnlyList)
+            {
+                entries.Add(hasDefault ? $"[{entry}]" : entry);
+            }
+            else if (hasDefault && value is not null)
+            {
+                entries.Add($"{entry}={Format(value, inner)}");
+            }
+            else if (hasDefault || isNullable)
+            {
+                entries.Add($"[{entry}]");
+            }
+            else
+            {
+                entries.Add(entry);
+            }
         }
 
         return string.Join(' ', entries);

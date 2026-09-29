@@ -55,6 +55,27 @@ of five were **legibility, not mechanism**.
 
 ---
 
+## Tiers and measurement — parked
+
+Discussed and deliberately not started. Two findings hold whatever shape it takes:
+
+- **Named tiers are small and already needed.** `test <tier>:` lines would let the `demos`
+  gate's deviceless legs run in CI apart from its GPU legs, and would give the RTS's long gate
+  (simulated years, now a shell script) a declared home.
+- **Measurement cannot ride `DebugContext`.** The RTS's sealed `--perf-run` switches its own
+  diagnostics producer off, because keeping it alive cost over 4 ms a wide-village frame and
+  had already skewed two sections' absolute numbers. What it measures instead comes from the
+  device (`LastCpuFrameTiming`, `GpuPassTotals` over the steady window), the game's own
+  stopwatches and counts, and the display's refresh for cadence, summarised as warm-up plus
+  nearest-rank percentiles into one `PERFCASE` line its scripts tabulate. A Blix version would
+  be a cheap channel live only in a measured run, the host's own numbers, and one run record per
+  run, with cases, arms and ABBA ordering left to the project.
+
+Open: whether the engine owns case execution, what an app hands the measurement channel, whether
+Sponza's in-process `--ab` feeds the same records, and whether simulation benches belong at all.
+
+---
+
 ## Acceptance steps that are access, not work
 
 These keep this record open. None can be closed by writing anything.
