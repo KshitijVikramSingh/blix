@@ -42,7 +42,7 @@ an engine-layer migration.
 
 | Responsibility | Projects or directories |
 | --- | --- |
-| Host and application contracts | `Blix.Core` |
+| Host, application and loop contracts | `Blix.Core` |
 | Graphics and audio command vocabulary | `Blix.Graphics`, `Blix.Audio` |
 | Cooked-asset contracts | `Blix.Cooked` |
 | Geometry and collision algorithms | `Blix.Geometry` |
@@ -83,7 +83,9 @@ Several details stop this from being a simplistic layered pyramid:
 
 - `Blix.Core` is the host-contract assembly, not a dependency-free foundation;
   its contracts name graphics and audio handles from `Blix.Graphics` and
-  `Blix.Audio`.
+  `Blix.Audio`. It also carries the loop contract (`IGameLoop`, `Game`, `Time`,
+  `FixedStepClock`), still in the `Blix` namespace, so a program can run a
+  loop without referencing `Blix` and, through it, `Blix.Render` and Vulkan.
 - `Blix.Render` is currently Vulkan-backed. It provides reusable rendering
   mechanisms, but it references `Blix.Graphics.Vulkan`; it is not a second
   backend abstraction.
@@ -356,7 +358,7 @@ backend details.
 | `IUiSource` | `Blix.Core` | The application draws its own interface: `UiName`, `DrawUi()`. No UI types in the signature, so `Blix.Core` declares the hook without depending on a UI library — the application brings its own `ImGui.NET`. Independent of diagnostics: an application that produces none still gets a UI. |
 | `IRuntimeDiagnosticsSink` | `Blix.Core` | Per-frame backend introspection: receives `FrameDebugPacket` + `ResourceRegistrySnapshot`. |
 
-The game implements `IGameLoop` (in `Blix`) and optionally `IUiSource` and `IDebuggable`. The runtime forwards events only when the interface is present.
+The game implements `IGameLoop` (namespace `Blix`, built by `Blix.Core`) and optionally `IUiSource` and `IDebuggable`. The runtime forwards events only when the interface is present.
 
 **`IUiSource` and `IDebugUi` are different hooks, deliberately.** `IUiSource` (`Blix.Core`) is *the application's* interface: it exists whether or not the loop produces diagnostics, and the host builds an ImGui frame for it regardless. `IDebugUi` (`Blix.Diagnostics.Overlay`) is a *diagnostics producer's* panel, drawn by `DebugOverlayUi` inside the overlay under a header keyed on `DebugName`, and visible only when the overlay is. One is an application having a face; the other is a subsystem adding a tab to the inspector.
 

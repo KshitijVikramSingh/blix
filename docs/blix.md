@@ -106,7 +106,7 @@ Nothing references `Blix` from below. No transitive dependency on `Blix.Runtime.
 
 Every public type in `Blix`, one-line each.
 
-**Loop + time:** `IGameLoop`, `Game`, `Time`, `IUpdateable`, `IFixedUpdateable`, `FixedStepClock`
+**Loop + time:** `IGameLoop`, `Game`, `Time`, `IUpdateable`, `IFixedUpdateable`, `FixedStepClock`. These are in the `Blix` namespace but built by `Blix.Core`, so a program can use them without referencing this library.
 
 **Scene primitives:** `GameObject`, `Submesh`, `Transform3D`, `Transform2D`
 
