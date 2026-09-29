@@ -5442,6 +5442,18 @@ static ShaderInterface MinimalShader() => new(new[]
         new[] { new ShaderSampler("uEnv", nameof(SamplerDescription.NearestClamp)) });
     t.ExpectThrows("BM.11 two stages declaring one sampler with different states fail the merge",
         () => ShaderReflection.MergeStages(withState, otherState with { Stage = ShaderStages.Vertex }), mustMention: "uEnv");
+
+    // Arrays and unreadable forms: every separate sampler has stated state, or the build says why not.
+    var array = ShaderSamplers.Scan("//@sampler NearestClamp\nlayout(set = 1, binding = 21) uniform sampler uTaps[4];\n");
+    t.Expect("BM.12 a sampler array is one declaration, and its preset covers every element",
+        array.Count == 1 && array[0].Name == "uTaps" && array[0].Description == SamplerDescription.NearestClamp,
+        string.Join(", ", array));
+    t.ExpectThrows("BM.13 an unannotated sampler array fails the scan, as a single sampler does",
+        () => ShaderSamplers.Scan("layout(set = 1, binding = 21) uniform sampler uTaps[4];\n"), mustMention: "uTaps");
+    t.ExpectThrows("BM.14 two samplers in one declaration are refused, rather than read as none",
+        () => ShaderSamplers.Scan("//@sampler LinearClamp\nuniform sampler uA, uB;\n"), mustMention: "one per line");
+    t.ExpectThrows("BM.15 and refused even with no //@sampler above them, where they used to pass the scan",
+        () => ShaderSamplers.Scan("uniform sampler uA, uB;\n"), mustMention: "one per line");
 }
 
 t.PrintSummary();

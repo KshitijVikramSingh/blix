@@ -38,15 +38,22 @@ public sealed record ShaderSampler(string Name, string Preset)
 /// bindings; a <c>texture2D</c> is read through whichever sampler the shader pairs it with.
 /// </para>
 /// <para>
-/// Both mistakes fail the build rather than a draw: a <c>//@sampler</c> with no <c>uniform sampler</c>
-/// after it, and a <c>uniform sampler</c> with no <c>//@sampler</c> before it.
+/// Every mistake fails the build rather than a draw: a <c>//@sampler</c> with no <c>uniform sampler</c>
+/// after it, a <c>uniform sampler</c> with no <c>//@sampler</c> before it, and a sampler declared in a
+/// form the scan does not read (two names in one declaration). An array, <c>uniform sampler uS[4];</c>,
+/// is one declaration: its preset applies to every element.
 /// </para>
 /// </remarks>
 public static class ShaderSamplers
 {
     private static readonly Regex TagLine = new(@"//@sampler\s+(\S+)\s*$", RegexOptions.Compiled);
+    // One sampler per declaration, optionally an array: `uniform sampler uS;` or `uniform sampler uS[4];`.
+    // An array takes one preset for every element, which is what the layout builds.
     private static readonly Regex SamplerDecl = new(
-        @"^\s*(?:layout\s*\([^)]*\)\s*)?uniform\s+sampler(?:Shadow)?\s+(\w+)\s*;", RegexOptions.Compiled);
+        @"^\s*(?:layout\s*\([^)]*\)\s*)?uniform\s+sampler(?:Shadow)?\s+(\w+)\s*(?:\[\s*\d*\s*\])?\s*;", RegexOptions.Compiled);
+    // Anything that declares a separate sampler at all. A line that matches this and not the one
+    // above (two names in one declaration, say) is refused, so none slips past the scan unstated.
+    private static readonly Regex AnySamplerDecl = new(@"\buniform\s+sampler(?:Shadow)?\s", RegexOptions.Compiled);
 
     /// <summary>Every separate sampler in <paramref name="glslSource"/>, with its declared preset.</summary>
     public static IReadOnlyList<ShaderSampler> Scan(string glslSource)
@@ -74,6 +81,10 @@ public static class ShaderSamplers
             if (trimmed.Length == 0 || trimmed.StartsWith("//", StringComparison.Ordinal)) continue;
 
             var decl = SamplerDecl.Match(raw);
+            if (!decl.Success && AnySamplerDecl.IsMatch(raw))
+                throw new InvalidOperationException(
+                    $"Line {lineNo} declares a separate sampler in a form the scan does not read: \"{trimmed}\". " +
+                    "Declare one per line, 'uniform sampler uName;' or 'uniform sampler uName[N];', each with its //@sampler.");
             if (decl.Success)
             {
                 var name = decl.Groups[1].Value;

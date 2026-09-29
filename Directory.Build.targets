@@ -93,7 +93,10 @@
           AfterTargets="$(BlixShaderAfterTargets)"
           BeforeTargets="$(BlixShaderBeforeTargets)"
           Inputs="@(GlslShader);@(GlslInclude);$(BlixShaderCompilerDll);@(BlixShaderCompilerFile)"
-          Outputs="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv')">
+          Outputs="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv');@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv.tune.json');@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv.samplers.json')">
+    <!-- The two sidecars every compile writes are outputs too, not just the .spv: the sampler one
+         decides a program's layout, and a compile that reported itself up to date with it missing
+         could not heal. Reflection is its own target, conditional on BlixShaderReflect. -->
     <MakeDir Directories="$(BlixShaderOutDir)" />
     <Message Text="Compiling SPIR-V ($(BlixShaderMode)): %(GlslShader.Identity)" Importance="high" />
     <Exec Command="dotnet &quot;$(BlixShaderCompilerDll)&quot; --glslc &quot;$(Glslc)&quot; --input &quot;%(GlslShader.FullPath)&quot; --output &quot;$(BlixShaderOutDir)%(GlslShader.Filename)%(GlslShader.Extension).spv&quot; --include &quot;$(BlixShaderIncludeDir)&quot;" />
