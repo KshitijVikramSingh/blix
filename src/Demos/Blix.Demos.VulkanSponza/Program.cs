@@ -903,7 +903,16 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDisposable
     // shared through TextureRegistry; binding layout and packed values remain owned by Sponza.
     private readonly Dictionary<string, (MaterialHandle Mat, TextureHandle Albedo, float Cutoff, float Alpha)> materialCache = new(StringComparer.Ordinal);
     private (MaterialHandle Mat, TextureHandle Albedo, float Cutoff, float Alpha)? noMaterialCache;
-    public void Dispose() => fullscreen?.Dispose();
+    // The graph owns its passes' render passes and framebuffers and its targets' memory, and only its
+    // Dispose frees them: the device destroys what is in its own tables and nothing else. Sponza
+    // disposed only the fullscreen pass, and validation counted 70 objects alive at vkDestroyDevice
+    // (34 render passes, 17 framebuffers, 19 allocations). Null when the pack set was missing and
+    // OnLoad returned before building it.
+    public void Dispose()
+    {
+        fullscreen?.Dispose();
+        graph?.Dispose();
+    }
 
 }
 
