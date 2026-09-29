@@ -54,6 +54,7 @@ an engine-layer migration.
 | Game-facing types | `Blix` |
 | Blix-owned cooking decisions | `Blix.Recipes` |
 | Desktop composition | `Blix.Runtime.Silk` |
+| Headless composition | `Blix.Runtime.Headless` |
 | Reference rendering pipeline | `Blix.Tools.Studio` |
 | Reusable headed-tool shell | `Blix.Tools.Studio.Shell` |
 | App discovery and launch | `Blix.Cli`, `Blix.Tools.Apps` |

@@ -82,9 +82,20 @@ Stages:
   migrated, Sponza's 52 flags and all ten `cook` verbs included. The three build-infrastructure
   executables (`Blix.Cli`, `Blix.Tools.Apps`, `Blix.Tools.Shader`) keep their own parsing: MSBuild
   and the launcher call them, and none is a Blix app. *Done.*
-- **G3.** The headless host, in its own project, referencing no backend.
-- **G4.** Typed parameters as sugar over the view: kebab-case flags (the squashed form
-  accepted too), a missing default means required, usage recorded in the app index.
+- **G3. The headless host.** `Blix.Runtime.Headless`: `HeadlessHost` runs a loop in a window's
+  order on a fixed step, with a `NoGraphicsDevice` that refuses by name, a recording-only
+  command list, scripted input and the window's sinks; `HeadlessOptions.FromArgs` reads the
+  window's flags plus `--step`. Its closure is Core, Diagnostics, Graphics, Geometry, Cooked and
+  Audio, and `Blix.Test.Apps` pins that neither it nor `Blix.Core` references a backend.
+  `chassis-tune --frames 40 --dump-frame 30`, headed and `--headless`, writes the same schema
+  with the same values and controls; only the overlay's own ImGui draw stats differ. *Done.*
+- **G4. Typed parameters.** `AppParameters` binds an app's parameters from the view:
+  kebab-case flags with the squashed form accepted, no default means required (exit 2, naming
+  it), `bool` is a flag, repeated options as `IReadOnlyList<string>`, and one `AppArgs` mixes
+  in. The indexer validates the same types from metadata and records a usage line `blix ls`
+  prints; `Blix.Test.Apps` checks the index's line against reflection's for every fixture.
+  No in-repo app uses them yet: the RTS scenarios are the consumer, and they migrate later.
+  *Done.*
 - **G5.** A startup hook `Dispatch` runs before any app.
 - **G6.** `blix.project` gate lines carry arguments, one app per line.
 

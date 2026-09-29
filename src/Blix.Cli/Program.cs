@@ -212,7 +212,7 @@ public static class Program
                     apps.Add(new App(
                         project, app.Name, app.Summary, app.Headed, host, assembly,
                         app.IsDefault ? null : app.Name, stale, Declared: true,
-                        SourceProject: index.Project));
+                        SourceProject: index.Project, Usage: app.Usage));
                 }
             }
 
@@ -302,6 +302,7 @@ public static class Program
             var kind = app.Headed ? "  [window]" : string.Empty;
             var summary = app.Summary is null ? string.Empty : $"  {app.Summary}";
             Console.WriteLine($"   {mark} {app.Name.PadRight(width)}{summary}{kind}");
+            if (app.Usage is { } usage) Console.WriteLine($"     {new string(' ', width)}  {usage}");
         }
     }
 
@@ -755,7 +756,7 @@ public static class Program
     private sealed record Index(
         string Assembly, string? AppHost, bool HasEntryPoint, IndexedApp[] Apps, string? Project = null);
 
-    private sealed record IndexedApp(string Name, string? Summary, bool Headed, bool IsDefault);
+    private sealed record IndexedApp(string Name, string? Summary, bool Headed, bool IsDefault, string? Usage = null);
 
     /// <param name="AppHost">The native binary, when the project builds one.</param>
     /// <param name="Assembly">Its dll, which is how an app with no apphost is run.</param>
@@ -766,7 +767,7 @@ public static class Program
     /// and running does not. Null for an index written before the field existed.</param>
     private sealed record App(
         string Project, string Name, string? Summary, bool Headed, string? AppHost, string Assembly,
-        string? Selector, bool Stale, bool Declared, string? SourceProject = null);
+        string? Selector, bool Stale, bool Declared, string? SourceProject = null, string? Usage = null);
 
 
     /// <summary>

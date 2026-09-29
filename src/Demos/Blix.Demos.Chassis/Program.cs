@@ -2,6 +2,7 @@ using Blix;
 using Blix.Core;
 using Blix.Diagnostics;
 using Blix.Graphics;
+using Blix.Runtime.Headless;
 using Blix.Runtime.Silk;
 using ImGuiNET;
 using System.Numerics;
@@ -71,6 +72,22 @@ public static class Program
         // error — which is exactly what happened the first time this ran. An app whose whole
         // purpose is to show a declared control opening with that control hidden is not a
         // demonstration of anything.
+        var loop = new TunedLoop();
+
+        // <b>--headless runs this same loop with no window.</b> The same flags mean the same things
+        // (--frames, --dump-frame, --width, --height, --debug), so a dump taken here can be put beside
+        // one taken in a window. Which host runs is the application's decision, not the loop's.
+        if (args.Flag("headless"))
+        {
+            new HeadlessHost(loop, HeadlessOptions.FromArgs(args, HeadlessOptions.Default with
+            {
+                Width = 900,
+                Height = 560,
+                Diagnostics = true,
+            })).Run();
+            return;
+        }
+
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — chassis (declared state)",
@@ -79,7 +96,6 @@ public static class Program
             Diagnostics = true,
         });
 
-        var loop = new TunedLoop();
         using var window = new Window(loop, options);
         window.Run();
     }

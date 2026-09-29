@@ -159,6 +159,10 @@ public sealed class AppArgs
     /// <summary>The value of <c>--name</c> as a whole number, or <paramref name="fallback"/>.</summary>
     public int Int(string name, int fallback) => Int(name) ?? fallback;
 
+    /// <summary>The value of <c>--name</c> as a whole number that may exceed an int, or null.</summary>
+    public long? Long(string name) => Number<long>(name, "a whole number",
+        s => long.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : (long?)null);
+
     /// <summary>The value of <c>--name</c> as a number, or null.</summary>
     public float? Float(string name) => Number<float>(name, "a number",
         s => float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : (float?)null);
@@ -189,6 +193,27 @@ public sealed class AppArgs
 
         throw new AppArgsException(
             $"--{name} expects one of {string.Join(", ", System.Enum.GetNames<T>())}, got '{text}'.");
+    }
+
+    /// <summary>
+    /// The value of <c>--name</c> as a member of the enum <paramref name="enumType"/>, for a caller
+    /// that has the type rather than a type argument. Null when not passed.
+    /// </summary>
+    public object? Enum(string name, Type enumType)
+    {
+        ArgumentNullException.ThrowIfNull(enumType);
+        if (!enumType.IsEnum) throw new ArgumentException($"{enumType.Name} is not an enum.", nameof(enumType));
+
+        var text = String(name);
+        if (text is null) return null;
+
+        foreach (var member in System.Enum.GetNames(enumType))
+        {
+            if (Key(member) == Key(text)) return System.Enum.Parse(enumType, member);
+        }
+
+        throw new AppArgsException(
+            $"--{name} expects one of {string.Join(", ", System.Enum.GetNames(enumType))}, got '{text}'.");
     }
 
     /// <summary>The value of <c>--name</c> as a member of <typeparamref name="T"/>, or <paramref name="fallback"/>.</summary>

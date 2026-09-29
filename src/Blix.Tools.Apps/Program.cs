@@ -163,7 +163,7 @@ public static class Program
                     }
 
                     Validate(reader, method, where);
-                    apps.Add(Decode(reader, attribute, where));
+                    apps.Add(Decode(reader, attribute, where) with { Usage = NullIfEmpty(AppParameterMetadata.Usage(reader, method)) });
                 }
                 else if (IsAttribute(reader, attribute, RecipeNamespace, RecipeName))
                 {
@@ -310,9 +310,10 @@ public static class Program
         return new AppEntry(name, summary, headed, where, isDefault);
     }
 
-    // The four shapes an app may have (AppArgs or nothing, int or void), checked HERE so a mis-declared app is a build
-    // failure rather than a tool that is quietly unreachable. An app that cannot be
-    // found because it was declared slightly wrong is the worst failure this layer has.
+    // The shapes an app may have, checked HERE so a mis-declared app is a build failure rather
+    // than a tool that is quietly unreachable. It returns int or void and takes AppArgs, typed
+    // parameters a command line can spell, or both. An app that cannot be found because it was
+    // declared slightly wrong is the worst failure this layer has.
     private static void Validate(MetadataReader reader, MethodDefinition method, string where)
     {
         if ((method.Attributes & MethodAttributes.Static) == 0)
@@ -328,15 +329,13 @@ public static class Program
                 $"[BlixApp] on {where}: an app returns int or void, not {signature.ReturnType}.");
         }
 
-        var parameters = signature.ParameterTypes;
-        var ok = parameters.Length == 0
-            || (parameters.Length == 1 && parameters[0] == "Blix.Core.AppArgs");
-        if (!ok)
+        if (AppParameterMetadata.Problem(reader, method) is { } problem)
         {
-            throw new DeclarationException(
-                $"[BlixApp] on {where}: an app takes AppArgs or nothing, not ({string.Join(", ", parameters)}).");
+            throw new DeclarationException($"[BlixApp] on {where}: {problem}");
         }
     }
+
+    private static string? NullIfEmpty(string s) => s.Length == 0 ? null : s;
 
     private static string Describe(MetadataReader reader, MethodDefinition method, MethodDefinitionHandle handle)
     {
@@ -371,7 +370,11 @@ public static class Program
         string Id, string Produces, string Consumes, string Summary, uint Version, string Method);
 
     private sealed record AppEntry(
-        string Name, string? Summary, bool Headed, string Method, bool IsDefault);
+        string Name, string? Summary, bool Headed, string Method, bool IsDefault)
+    {
+        /// <summary>The app's flags, as <c>--years &lt;int&gt;=1 --fog</c>, or null when it has none.</summary>
+        public string? Usage { get; init; }
+    }
 
     // Types as strings, which is all this needs. The full provider contract exists for
     // callers that rebuild real Type objects; here the questions are "is it int" and

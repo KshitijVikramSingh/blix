@@ -291,6 +291,34 @@ visible rather than silently ignored. A value that cannot mean what its reader
 asked for, such as `--frames abc`, is an error: the message names the flag and
 the program exits 2.
 
+## Typed parameters
+
+An app can declare its flags as parameters instead of reading them. This is
+sugar over the same `AppArgs`, not a second parser:
+
+```csharp
+[BlixApp("settlement", Summary = "simulate a settlement")]
+public static int Settlement(int years, int mapSeed = 0, bool fog = false, AppArgs? args = null) => 0;
+```
+
+A parameter is the flag its name spells in kebab case: `mapSeed` is
+`--map-seed`, which also accepts `--mapseed`. A parameter with no default is
+required, and a missing one exits 2 with a message naming it. A `bool` is a flag
+by presence. The types a command line can spell are `int`, `long`, `float`,
+`double`, `bool`, `string`, any enum, the nullable form of the value types (null
+when not passed), and `IReadOnlyList<string>` for a repeated option. One
+`AppArgs` parameter can sit alongside them for whatever the app reads
+dynamically.
+
+The indexer checks the same types from metadata, so a parameter nothing can
+bind is a build failure, and records a usage line that `blix ls` prints under
+the app's summary:
+
+```text
+settlement  simulate a settlement
+            --years <int> --map-seed <int>=0 --fog
+```
+
 ## Headed applications
 
 A headed application lets the runtime read the arguments common to every Blix
@@ -327,6 +355,40 @@ dumping should not be reimplemented in each game or tool.
 an `IGameLoop`, optional `IUiSource`, and a host-owned
 bounded run. `Blix.Tools.View` is the fuller example with Studio composition,
 an interface, input ownership, diagnostics, asset loading, and named views.
+
+## Headless runs
+
+`Blix.Runtime.Headless.HeadlessHost` runs the same `IGameLoop` with no window,
+no device and no wall clock. It references only `Blix.Core` and
+`Blix.Diagnostics`, so a program that uses it links no graphics backend.
+
+```csharp
+if (args.Flag("headless"))
+{
+    new HeadlessHost(loop, HeadlessOptions.FromArgs(args)).Run();
+    return 0;
+}
+```
+
+Each frame runs in a window's order: input held still for the tick,
+`OnUpdate`, the loop's diagnostics, `OnRender`, then the dump and the frame
+bound. `HeadlessOptions.FromArgs` reads `--frames`, `--dump-frame`, `--width`,
+`--height` and `--debug` as a window does, plus `--step`, the seconds per frame;
+time is always that fixed step. A window's own `--title` is left unread.
+
+What a headless run cannot have is stated rather than faked:
+
+- `OnLoad` receives a `NoGraphicsDevice`, which describes itself and refuses to
+  create or destroy anything, naming the call.
+- `OnRender` records into a command list that nothing executes. Diagnostics
+  still count what the loop recorded.
+- Input comes from an optional callback that is handed the frame number and the
+  `InputState` before each tick, which is how a test, a replay or a bot drives a
+  loop.
+
+`chassis-tune --headless` is the executable specification: run with the same
+`--frames` and `--dump-frame`, headed and headless, it writes dumps of the same
+schema with the same values and controls.
 
 ## Verification gates
 

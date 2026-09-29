@@ -4,6 +4,9 @@ using System.Text.Json;
 using Blix.Cooked;
 using Blix.Core;
 using Blix.Cli;
+using Blix.Diagnostics;
+using Blix.Graphics;
+using Blix.Runtime.Headless;
 
 namespace Blix.Test.Apps;
 
@@ -105,6 +108,25 @@ public static class Program
             complaint.Contains("--years", StringComparison.Ordinal)
             && complaint.Contains("'three'", StringComparison.Ordinal), complaint.Trim());
 
+        // ── typed parameters: sugar over the same view ──────────────────────
+        t.Expect("typed parameters bind from their flags",
+            Run(out _, self, BlixApps.Selector, "fixture-typed", "--years", "3", "--map-seed", "40", "--fog",
+                "--view", "shadow-map", "--scale", "0.5", "--tint", "a", "--tint", "b") == 3 + 40 + 100 + 1000 + 5 + 20000,
+            "the fixture sums what it was given");
+        t.Expect("and leave out what has a default",
+            Run(out _, self, BlixApps.Selector, "fixture-typed", "--years", "2") == 2 + 7);
+        t.Expect("a squashed name reaches a kebab parameter",
+            Run(out _, self, BlixApps.Selector, "fixture-typed", "--years", "1", "--mapseed", "40") == 41);
+        var missing = Run(out var needs, self, BlixApps.Selector, "fixture-typed");
+        t.Expect("a parameter with no default is required, and exits 2", missing == 2, $"exit {missing}");
+        t.Expect("naming the flag and its type", needs.Contains("--years <int>", StringComparison.Ordinal), needs.Trim());
+        t.Expect("typed parameters and AppArgs mix",
+            Run(out _, self, BlixApps.Selector, "fixture-mixed", "--count", "2", "--extra", "5") == 7);
+        t.Expect("usage is written from the parameters",
+            AppParameters.Usage(found.Single(a => a.Name == "fixture-typed").Method)
+                == "--years <int> --tint <text, repeatable> --map-seed <int>=7 --fog --view <lit|shadow-map>=lit [--scale <number>]",
+            AppParameters.Usage(found.Single(a => a.Name == "fixture-typed").Method));
+
         // ── failing loudly ──────────────────────────────────────────────────
         t.ExpectThrows("an unknown app names what does exist",
             () => BlixApps.Main(new[] { BlixApps.Selector, "nope" }, assembly: self),
@@ -117,6 +139,9 @@ public static class Program
         // ── is what runs what the sources say? ──────────────────────────────
         FreshnessAnswersHonestly(t);
         ABuildChangesWhatANameMeans(t);
+
+        // ── a loop with no window ───────────────────────────────────────────
+        HeadlessRunsTheSameLoop(t);
 
         t.PrintSummary();
         return t.Failed == 0 ? 0 : 1;
@@ -568,6 +593,87 @@ public static class Program
             mustMention: "--out");
     }
 
+    /// <summary>
+    /// A headless host runs an ordinary loop in the order a window does, on a clock of its own.
+    /// </summary>
+    /// <remarks>
+    /// The loop here is written once and knows nothing about which host runs it, which is the
+    /// claim: symmetry is a property of the host, not something each loop arranges.
+    /// </remarks>
+    private static void HeadlessRunsTheSameLoop(TestRunner t)
+    {
+        // The layering this arc moved the loop contract for. If either assembly ever references a
+        // backend, a headless run links Vulkan again and nothing else would say so.
+        var backends = new[] { "Blix.Graphics.Vulkan", "Blix.Render", "Blix.Runtime.Silk", "Silk.NET.Windowing" };
+        foreach (var assembly in new[] { typeof(IGameLoop).Assembly, typeof(HeadlessHost).Assembly })
+        {
+            var references = assembly.GetReferencedAssemblies().Select(a => a.Name).ToArray();
+            t.Expect($"{assembly.GetName().Name} references no graphics backend",
+                !references.Any(backends.Contains), string.Join(", ", references));
+        }
+        t.Expect("the loop contract lives in Blix.Core", typeof(IGameLoop).Assembly.GetName().Name == "Blix.Core");
+
+        var bounded = new RecordingLoop();
+        new HeadlessHost(bounded, new HeadlessOptions(ExitAfterFrames: 5)).Run();
+        t.Expect("a bounded run stops at the bound", bounded.Renders == 5, $"{bounded.Renders} frames");
+        t.Expect("in a window's order: load, then update before render, then unload",
+            bounded.Calls.First() == "load" && bounded.Calls.Last() == "unload"
+            && bounded.Calls.Skip(1).Take(2).SequenceEqual(new[] { "update", "render" }),
+            string.Join(" ", bounded.Calls.Take(6)));
+        t.Expect("time is a fixed step, never the wall clock",
+            Math.Abs(bounded.LastTime.Total - 5.0 / 60.0) < 1e-9 && Math.Abs(bounded.LastTime.Delta - 1.0 / 60.0) < 1e-12,
+            $"total {bounded.LastTime.Total}, delta {bounded.LastTime.Delta}");
+        t.Expect("the loop is told the size it renders at",
+            bounded.Frame == new RenderFrameContext(1280, 720), bounded.Frame.ToString());
+
+        var closing = new RecordingLoop { CloseAfter = 3 };
+        new HeadlessHost(closing).Run();
+        t.Expect("with no bound, the loop closes the run", closing.Renders == 3, $"{closing.Renders} frames");
+
+        var device = new RecordingLoop { ExitAfterFirstRender = true };
+        new HeadlessHost(device).Run();
+        t.Expect("the device describes itself as absent",
+            device.Device?.Info.Renderer.Contains("headless", StringComparison.Ordinal) == true);
+        t.ExpectThrows("and refuses to make anything, naming the call",
+            () => device.Device!.CreateTexture2D(default!, ReadOnlySpan<byte>.Empty),
+            mustMention: "CreateTexture2D");
+
+        var pressed = new RecordingLoop { CloseAfter = 5 };
+        new HeadlessHost(pressed, input: (frame, input) =>
+        {
+            if (frame == 2) input.RecordKeyDown(Key.Space);
+        }).Run();
+        t.Expect("scripted input presses on exactly one tick, as a device's would",
+            pressed.SpacePressedOn.SequenceEqual(new[] { 2 }), string.Join(",", pressed.SpacePressedOn));
+        t.Expect("and is held afterwards", pressed.SpaceHeldOn.SequenceEqual(new[] { 2, 3, 4 }),
+            string.Join(",", pressed.SpaceHeldOn));
+
+        var args = AppArgs.Parse(new[] { "--frames", "4", "--width", "320", "--height", "200", "--step", "0.5", "--title", "x" });
+        var options = HeadlessOptions.FromArgs(args);
+        t.Expect("the shared flags mean what they mean in a window",
+            options is { ExitAfterFrames: 4, Width: 320, Height: 200, Step: 0.5 }, options.ToString());
+        t.Expect("and a window's own flag is left unread", args.Unread.SequenceEqual(new[] { "--title", "x" }),
+            string.Join(" ", args.Unread));
+
+        // The dump a window writes, from a run that never had one.
+        var debuggable = new DebuggableLoop();
+        var host = new HeadlessHost(debuggable, new HeadlessOptions(ExitAfterFrames: 6, DumpOnFrame: 4));
+        var dump = Path.Combine(host.DumpDirectory!, "frame-000004.json");
+        if (File.Exists(dump)) File.Delete(dump);
+        var wasOut = Console.Out;
+        Console.SetOut(TextWriter.Null);
+        try { host.Run(); } finally { Console.SetOut(wasOut); }
+        t.Expect("--dump-frame writes that frame's dump", File.Exists(dump), dump);
+        if (File.Exists(dump))
+        {
+            var root = JsonDocument.Parse(File.ReadAllText(dump)).RootElement;
+            t.Expect("in the schema a window writes",
+                root.GetProperty("SchemaVersion").GetInt32() == 2);
+            t.Expect("carrying what the loop reported",
+                root.GetRawText().Contains("ticks", StringComparison.Ordinal), "no 'ticks' value in the dump");
+        }
+    }
+
     /// <summary>Run the resolver in process, with everything it printed.</summary>
     private static int Cli(out string printed, params string[] args)
     {
@@ -645,9 +751,19 @@ public static class Program
             $"index {indexed.Length} [{string.Join(", ", indexed.Select(i => i.Name))}] vs " +
             $"reflection {reflected.Length} [{string.Join(", ", reflected.Select(r => r.Name))}]");
 
-        t.Expect("the index knows which app is the entry point",
-            index!.Apps.Count(a => a.IsEntryPoint) == 0,
-            "none of this suite's fixtures is Main, so none should be flagged");
+        t.Expect("the index marks no default where the source declares none",
+            index!.Apps.Count(a => a.IsDefault) == 0,
+            "no fixture here is Default, which is what lets this suite run unnamed");
+
+        // The indexer rebuilds usage from metadata without loading the assembly; reflection builds
+        // it from the loaded method. Two readers of one line, so the line is compared.
+        foreach (var app in found)
+        {
+            var fromReflection = AppParameters.Usage(app.Method);
+            var fromIndex = index.Apps.Single(a => a.Name == app.Name).Usage ?? string.Empty;
+            t.Expect($"{app.Name}: the index's usage is reflection's", fromIndex == fromReflection,
+                $"index '{fromIndex}' vs reflection '{fromReflection}'");
+        }
 
         t.Expect("the index records the assembly it describes",
             index.Assembly == Path.GetFileName(self.Location));
@@ -673,7 +789,7 @@ public static class Program
 
     private sealed record Index(string Assembly, string? AppHost, bool HasEntryPoint, IndexedApp[] Apps);
 
-    private sealed record IndexedApp(string Name, string? Summary, bool Headed, bool IsEntryPoint);
+    private sealed record IndexedApp(string Name, string? Summary, bool Headed, bool IsDefault, string? Usage);
 
     // ── recipe fixtures ─────────────────────────────────────────────────────
     // Two, because one cannot show that ids stay distinct or that two recipes can claim different
@@ -720,6 +836,16 @@ public static class Program
     [BlixApp("fixture-headed", Summary = "declares that it would open a window", Headed = true)]
     private static int Headed(AppArgs args) => 0;
 
+    [BlixApp("fixture-typed", Summary = "takes typed parameters")]
+    private static int Typed(
+        int years, IReadOnlyList<string> tint, int mapSeed = 7, bool fog = false,
+        FixtureView view = FixtureView.Lit, float? scale = null) =>
+        years + mapSeed + (fog ? 100 : 0) + (view == FixtureView.ShadowMap ? 1000 : 0)
+        + (scale is { } s ? (int)(s * 10) : 0) + tint.Count * 10000;
+
+    [BlixApp("fixture-mixed", Summary = "takes a typed parameter and the view")]
+    private static int Mixed(int count, AppArgs args) => count + args.Int("extra", 0);
+
     [BlixApp("fixture-reads-years", Summary = "reads --years and nothing else")]
     private static int ReadsYears(AppArgs args) => args.Int("years", 1);
 }
@@ -728,4 +854,61 @@ internal enum FixtureView
 {
     Lit,
     ShadowMap,
+}
+
+/// <summary>An ordinary loop that writes down what happened to it.</summary>
+internal class RecordingLoop : IGameLoop
+{
+    public List<string> Calls { get; } = new();
+    public List<int> SpacePressedOn { get; } = new();
+    public List<int> SpaceHeldOn { get; } = new();
+    public int Renders { get; private set; }
+    public int CloseAfter { get; init; }
+    public bool ExitAfterFirstRender { get; init; }
+    public Time LastTime { get; private set; }
+    public RenderFrameContext Frame { get; private set; }
+    public IGraphicsDevice? Device { get; private set; }
+    private IRenderHost host = null!;
+    private int updates;
+
+    public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
+    {
+        this.host = host;
+        Device = graphicsDevice;
+        Calls.Add("load");
+    }
+
+    public void OnUpdate(Time time)
+    {
+        Calls.Add("update");
+        if (host.Input[Key.Space].Pressed) SpacePressedOn.Add(updates);
+        if (host.Input[Key.Space].Down) SpaceHeldOn.Add(updates);
+        updates++;
+    }
+
+    public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
+    {
+        Calls.Add("render");
+        LastTime = time;
+        Frame = frame;
+        commandList.Pass(
+            "clear",
+            new RenderPassDescription(
+                Target: RenderSurfaceHandle.Default,
+                ClearColors: new GraphicsColor?[] { new(0f, 0f, 0f, 1f) },
+                ClearDepth: false),
+            _ => { });
+        Renders++;
+        if (ExitAfterFirstRender || (CloseAfter > 0 && Renders >= CloseAfter)) host.RequestClose();
+    }
+
+    public void OnUnload() => Calls.Add("unload");
+}
+
+/// <summary>The same loop, reporting into diagnostics.</summary>
+internal sealed class DebuggableLoop : RecordingLoop, IDebuggable
+{
+    public string DebugName => "headless-fixture";
+
+    public void Debug(DebugContext debug) => debug.Values.Value("ticks", Renders);
 }

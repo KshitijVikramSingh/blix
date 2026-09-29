@@ -151,8 +151,9 @@ public static class BlixApps
     /// The signatures an app may have, checked here and again at build time.
     /// </summary>
     /// <remarks>
-    /// An app takes <see cref="AppArgs"/> or nothing, and returns int or void. The smallest app
-    /// this layer promises to support is a script that reads four files and exits, which should
+    /// An app returns int or void, and takes nothing, an <see cref="AppArgs"/>, typed parameters
+    /// (<see cref="AppParameters"/>), or typed parameters and one <see cref="AppArgs"/>. The smallest
+    /// app this layer promises to support is a script that reads four files and exits, which should
     /// not have to accept arguments it will not read or return a code it has no opinion about.
     /// </remarks>
     private static void Validate(MethodInfo method)
@@ -160,13 +161,20 @@ public static class BlixApps
         var where = $"{method.DeclaringType?.FullName}.{method.Name}";
         var parameters = method.GetParameters();
 
-        var argsOk = parameters.Length == 0
-            || (parameters.Length == 1 && parameters[0].ParameterType == typeof(AppArgs));
-        if (!argsOk)
+        foreach (var parameter in parameters)
         {
-            throw new InvalidOperationException(
-                $"[BlixApp] on {where}: an app takes AppArgs or nothing, not " +
-                $"({string.Join(", ", parameters.Select(p => p.ParameterType.Name))}).");
+            if (parameter.ParameterType.IsByRef || !AppParameters.Supported(parameter.ParameterType))
+            {
+                throw new InvalidOperationException(
+                    $"[BlixApp] on {where}: parameter '{parameter.Name}' is a {parameter.ParameterType.Name}, " +
+                    "which a command line cannot spell. An app takes AppArgs, int, long, float, double, " +
+                    "bool, string, an enum, their nullable forms, or IReadOnlyList<string>.");
+            }
+        }
+
+        if (parameters.Count(p => p.ParameterType == typeof(AppArgs)) > 1)
+        {
+            throw new InvalidOperationException($"[BlixApp] on {where}: an app takes at most one AppArgs.");
         }
 
         if (method.ReturnType != typeof(int) && method.ReturnType != typeof(void))
@@ -178,7 +186,7 @@ public static class BlixApps
 
     private static int Invoke(MethodInfo method, AppArgs args)
     {
-        var parameters = method.GetParameters().Length == 0 ? null : new object[] { args };
+        var parameters = AppParameters.Bind(method, args);
         try
         {
             return method.Invoke(null, parameters) is int code ? code : 0;
