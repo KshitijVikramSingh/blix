@@ -1759,15 +1759,21 @@ public sealed partial class VulkanGraphicsDevice
 
                 var imageSlotType = ImageSlotTypeAtBinding(sr, binding);
                 if (imageSlotType is null) continue;
+                if (imageSlotType == ShaderResourceType.Sampler)
+                {
+                    throw new InvalidOperationException(
+                        $"Program '{prog.Name}': texture '{b.Name}' is bound at binding {binding}, which is a separate " +
+                        "sampler. Samplers are immutable, from the shader's //@sampler; bind the texture to its image.");
+                }
 
                 var tex = textureTable[b.Texture.Id];
-                // Storage images bind as STORAGE_IMAGE in GENERAL layout (no
-                // sampler); sampled images as COMBINED_IMAGE_SAMPLER in
-                // shader-read layout.
+                // Storage images bind in GENERAL layout, sampled ones in shader-read layout. Only a
+                // combined image carries its texture's sampler: a separate image is read through
+                // whichever sampler the shader pairs it with.
                 var isStorage = imageSlotType == ShaderResourceType.StorageImage;
                 imgInfos[writeIdx] = new DescriptorImageInfo
                 {
-                    Sampler = isStorage ? default : tex.Sampler,
+                    Sampler = imageSlotType == ShaderResourceType.SampledImage ? tex.Sampler : default,
                     ImageView = tex.View,
                     ImageLayout = isStorage ? ImageLayout.General : ImageLayout.ShaderReadOnlyOptimal,
                 };
@@ -1778,7 +1784,7 @@ public sealed partial class VulkanGraphicsDevice
                     DstBinding = (uint)binding,
                     // Count>1 sampler arrays (e.g. uSpotShadowMaps[N]).
                     DstArrayElement = (uint)element,
-                    DescriptorType = isStorage ? DescriptorType.StorageImage : DescriptorType.CombinedImageSampler,
+                    DescriptorType = MapDescriptorType(imageSlotType.Value),
                     DescriptorCount = 1,
                     PImageInfo = &imgInfos[writeIdx],
                 };
@@ -1811,7 +1817,7 @@ public sealed partial class VulkanGraphicsDevice
     {
         foreach (var s in sr.Slots)
         {
-            if (s.Name == name && s.Type is ShaderResourceType.SampledImage or ShaderResourceType.StorageImage) return s;
+            if (s.Name == name && IsTextureSlot(s.Type)) return s;
         }
 
         return null;
@@ -1855,7 +1861,7 @@ public sealed partial class VulkanGraphicsDevice
             var names = prog.Sets
                 .Where((sr, setIdx) => sr is not null && setIdx != MaterialOwnedSet)
                 .SelectMany(sr => sr!.Slots)
-                .Where(s => s.Type is ShaderResourceType.SampledImage or ShaderResourceType.StorageImage && s.Name is not null)
+                .Where(s => IsTextureSlot(s.Type) && s.Name is not null)
                 .Select(s => s.Name!)
                 .Distinct()
                 .ToArray();
@@ -1875,7 +1881,7 @@ public sealed partial class VulkanGraphicsDevice
         foreach (var s in sr.Slots)
         {
             if (s.Binding != b.Slot || s.Name is null || s.Name == baseName) continue;
-            if (s.Type is not (ShaderResourceType.SampledImage or ShaderResourceType.StorageImage)) continue;
+            if (!IsTextureSlot(s.Type)) continue;
 
             throw new InvalidOperationException(
                 $"Program '{prog.Name}': a texture bound as '{b.Name}' at slot {b.Slot} lands on '{s.Name}'. " +
@@ -1893,11 +1899,16 @@ public sealed partial class VulkanGraphicsDevice
             (count == 1 ? "no array elements; bind it without an index." : $"{count} elements, 0 to {count - 1}."));
     }
 
+    // A slot a texture binds to: combined, separate or storage. A separate sampler is not one; it is
+    // immutable, built into the layout from the shader's //@sampler, and nothing binds it.
+    private static bool IsTextureSlot(ShaderResourceType type) =>
+        type is ShaderResourceType.SampledImage or ShaderResourceType.SeparateImage or ShaderResourceType.StorageImage;
+
     private static DescriptorSetSlot? ImageSlotAt(VkShaderSetResources sr, int binding)
     {
         foreach (var s in sr.Slots)
         {
-            if (s.Binding == binding && s.Type is ShaderResourceType.SampledImage or ShaderResourceType.StorageImage) return s;
+            if (s.Binding == binding && IsTextureSlot(s.Type)) return s;
         }
 
         return null;
@@ -1931,7 +1942,7 @@ public sealed partial class VulkanGraphicsDevice
         foreach (var s in sr.Slots)
         {
             if (s.Binding != binding) continue;
-            if (s.Type is ShaderResourceType.SampledImage or ShaderResourceType.StorageImage or ShaderResourceType.Sampler)
+            if (IsTextureSlot(s.Type) || s.Type == ShaderResourceType.Sampler)
                 return s.Type;
         }
         return null;

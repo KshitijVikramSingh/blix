@@ -95,7 +95,7 @@
     <!-- Globbed rather than derived from @(GlslShader): only this target knows the variant
          stems. Safe as a glob because it runs after the Exec above, in the same target. -->
     <ItemGroup>
-      <_RunnerShaderOut Include="$(BlixShaderOutDir)*.spv;$(BlixShaderOutDir)*.spv.tune.json;$(BlixShaderOutDir)*.spv.refl.json" />
+      <_RunnerShaderOut Include="$(BlixShaderOutDir)*.spv;$(BlixShaderOutDir)*.spv.tune.json;$(BlixShaderOutDir)*.spv.samplers.json;$(BlixShaderOutDir)*.spv.refl.json" />
     </ItemGroup>
     <ItemGroup>
       <!-- Metadata qualified to the SOURCE item, and read in a second ItemGroup so it is already

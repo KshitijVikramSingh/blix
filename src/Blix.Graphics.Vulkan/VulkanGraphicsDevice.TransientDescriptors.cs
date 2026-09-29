@@ -29,7 +29,7 @@ public sealed partial class VulkanGraphicsDevice
     private unsafe void CreateTransientDescriptorPools()
     {
         transientPools = new DescriptorPool[MaxFramesInFlightConst];
-        var poolSizes = stackalloc DescriptorPoolSize[4];
+        var poolSizes = stackalloc DescriptorPoolSize[7];
         poolSizes[0] = new DescriptorPoolSize { Type = DescriptorType.UniformBuffer, DescriptorCount = TransientPoolPerType };
         poolSizes[1] = new DescriptorPoolSize { Type = DescriptorType.StorageBuffer, DescriptorCount = TransientPoolPerType };
         poolSizes[2] = new DescriptorPoolSize { Type = DescriptorType.CombinedImageSampler, DescriptorCount = TransientPoolPerType };
@@ -37,10 +37,17 @@ public sealed partial class VulkanGraphicsDevice
         // type, not a flavour of UNIFORM_BUFFER. Omitting it allocates sets the pool never budgeted
         // for; the layers say so, and an implementation is entitled to fail the allocation instead.
         poolSizes[3] = new DescriptorPoolSize { Type = DescriptorType.UniformBufferDynamic, DescriptorCount = TransientPoolPerType };
+        // The same holds for every other type a set can carry. Storage images were allocated from pools
+        // with no STORAGE_IMAGE budget, which validation warned about on every compute dispatch, and
+        // separate images and samplers are sets' types now too. An immutable sampler still takes a
+        // SAMPLER descriptor from the pool.
+        poolSizes[4] = new DescriptorPoolSize { Type = DescriptorType.StorageImage, DescriptorCount = TransientPoolPerType };
+        poolSizes[5] = new DescriptorPoolSize { Type = DescriptorType.SampledImage, DescriptorCount = TransientPoolPerType };
+        poolSizes[6] = new DescriptorPoolSize { Type = DescriptorType.Sampler, DescriptorCount = TransientPoolPerType };
         var poolCi = new DescriptorPoolCreateInfo
         {
             SType = StructureType.DescriptorPoolCreateInfo,
-            PoolSizeCount = 4,
+            PoolSizeCount = 7,
             PPoolSizes = poolSizes,
             MaxSets = TransientPoolMaxSets,
         };

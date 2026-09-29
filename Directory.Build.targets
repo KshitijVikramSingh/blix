@@ -261,6 +261,7 @@
     <ItemGroup>
       <_BlixLibShader Include="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv')" />
       <_BlixLibShader Include="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv.tune.json')" />
+      <_BlixLibShader Include="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv.samplers.json')" />
       <!-- Only where reflection is switched on; elsewhere the file is never written. -->
       <_BlixLibShader Condition="'$(BlixShaderReflect)' == 'true'"
                       Include="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv.refl.json')" />

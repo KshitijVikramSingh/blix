@@ -28,10 +28,9 @@
     <GlslShader Include="Shaders\room_shadow.frag" />
     <GlslShader Include="Shaders\room_present.vert" />
     <GlslShader Include="Shaders\room_present.frag" />
-    <GlslInclude Include="..\..\..\Blix.Shaders\pbr.glsl" />
-    <GlslInclude Include="..\..\..\Blix.Shaders\shadow.glsl" />
-    <GlslInclude Include="..\..\..\Blix.Shaders\tonemap.glsl" />
-    <GlslInclude Include="..\..\..\Blix.Shaders\fullscreen.glsl" />
+    <!-- The whole shared library, not the files named: shadow.glsl includes sampling_form.glsl and
+         shadow.sampled.glsl of its own, and a list of names misses them. -->
+    <GlslInclude Include="..\..\..\Blix.Shaders\*.glsl" />
   </ItemGroup>
 
 

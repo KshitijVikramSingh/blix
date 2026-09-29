@@ -5397,6 +5397,53 @@ static ShaderInterface MinimalShader() => new(new[]
         string.Join(", ", reflected.Slots.Select(s => $"{s.Name}@{s.Binding}x{s.Count}")));
 }
 
+// ── Section BM: separate images and declared samplers ──────────────────────────────────────────────
+// A combined sampler2D counts against the per-stage sampler limit (16 on MoltenVK); a texture2D does
+// not, and the few samplers it is read through are declared in the shader with //@sampler and built
+// into the layout. These are the deviceless halves: the scan, the sidecar, and reflection's types.
+{
+    const string Declared = "//@sampler LinearClampMipmap\nlayout(set = 1, binding = 20) uniform sampler uEnv;\n" +
+                            "layout(set = 1, binding = 0) uniform textureCube uIrradiance;\n";
+    var scanned = ShaderSamplers.Scan(Declared);
+    t.Expect("BM.1 //@sampler names the preset of the sampler declared after it",
+        scanned.Count == 1 && scanned[0].Name == "uEnv" && scanned[0].Description == SamplerDescription.LinearClampMipmap,
+        string.Join(", ", scanned));
+    t.ExpectThrows("BM.2 a separate sampler with no //@sampler fails the scan, naming it and the presets",
+        () => ShaderSamplers.Scan("layout(set = 1, binding = 20) uniform sampler uBare;\n"), mustMention: "uBare");
+    t.ExpectThrows("BM.3 a //@sampler followed by anything but a sampler fails",
+        () => ShaderSamplers.Scan("//@sampler LinearClamp\nlayout(set = 1, binding = 0) uniform texture2D uX;\n"),
+        mustMention: "must be followed");
+    t.ExpectThrows("BM.4 an unknown preset fails, listing the ones that exist",
+        () => ShaderSamplers.Scan("//@sampler LinearWobble\nlayout(set = 1, binding = 20) uniform sampler uS;\n"),
+        mustMention: "LinearClampMipmap");
+    t.Expect("BM.5 the presets are SamplerDescription's own, so a new one needs no second list",
+        ShaderSamplers.PresetNames.SequenceEqual(typeof(SamplerDescription)
+            .GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Where(p => p.PropertyType == typeof(SamplerDescription)).Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal)),
+        string.Join(", ", ShaderSamplers.PresetNames));
+    var roundTrip = ShaderSamplerSidecar.FromJson(ShaderSamplerSidecar.ToJson(scanned));
+    t.Expect("BM.6 the sidecar round-trips", roundTrip.SequenceEqual(scanned), string.Join(", ", roundTrip));
+
+    const string Refl =
+        "{\"entryPoints\":[{\"name\":\"main\",\"mode\":\"frag\"}],\"types\":{}," +
+        "\"separate_images\":[{\"type\":\"textureCube\",\"name\":\"uIrradiance\",\"set\":1,\"binding\":0}]," +
+        "\"separate_samplers\":[{\"type\":\"sampler\",\"name\":\"uEnv\",\"set\":1,\"binding\":20}]}";
+    var withState = ShaderReflection.Parse(Refl, "bm.frag", scanned);
+    t.Expect("BM.7 a texture2D reflects as a separate image, not as a combined sampler",
+        withState.Slots.Single(s => s.Name == "uIrradiance").Type == ShaderResourceType.SeparateImage);
+    t.Expect("BM.8 which is a SAMPLED_IMAGE descriptor, and counts against sampled images only",
+        VulkanGraphicsDevice.MapDescriptorType(ShaderResourceType.SeparateImage) == Silk.NET.Vulkan.DescriptorType.SampledImage);
+    t.Expect("BM.9 a separate sampler carries the state its //@sampler declared",
+        withState.Slots.Single(s => s.Name == "uEnv") is { Type: ShaderResourceType.Sampler } env
+        && env.Sampler == SamplerDescription.LinearClampMipmap);
+    t.Expect("BM.10 and none without a sidecar, which the device refuses at program creation",
+        ShaderReflection.Parse(Refl, "bm.frag").Slots.Single(s => s.Name == "uEnv").Sampler is null);
+    var otherState = ShaderReflection.Parse(Refl, "bm.vert",
+        new[] { new ShaderSampler("uEnv", nameof(SamplerDescription.NearestClamp)) });
+    t.ExpectThrows("BM.11 two stages declaring one sampler with different states fail the merge",
+        () => ShaderReflection.MergeStages(withState, otherState with { Stage = ShaderStages.Vertex }), mustMention: "uEnv");
+}
+
 t.PrintSummary();
 return t.Failed;
 

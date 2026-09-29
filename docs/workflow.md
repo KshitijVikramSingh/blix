@@ -141,7 +141,7 @@ The current tree has two marked projects:
 | Project | Folder | Gate |
 | --- | --- | --- |
 | `blix` | repository root | Graphics, Diagnostics, Physics2D, Physics3D, Apps, Studio, Recipes and Input suites |
-| `demos` | `src/Demos` | `Blix.Demos.Character.Probe`, `chassis-tune --headless`, every other headed demo for 45 frames under `--validate`, and Sponza for 45 frames after its textures load (not yet validated; needs `BLIX_SPONZA_ASSETS`) |
+| `demos` | `src/Demos` | `Blix.Demos.Character.Probe`, `chassis-tune --headless`, every other headed demo for 45 frames under `--validate`, and Sponza for 45 frames after its textures load, also validated (needs `BLIX_SPONZA_ASSETS`) |
 
 Project scope follows the current working directory. From the repository root,
 all projects below it are visible. From `src/Demos`, the `demos` marker is the scope

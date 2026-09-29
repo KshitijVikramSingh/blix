@@ -35,8 +35,8 @@ set, the glTF corpus) or measures something, which is work no front door does.
 
 The `demos` project's gate is declared in `src/Demos/blix.project` and run with
 `./blix test demos`: the Character probe, `chassis-tune --headless`, every
-headed demo for 45 frames under `--validate`, and Sponza 45 frames after its
-textures load. It needs a GPU and the validation layers, so it is not part of
+headed demo for 45 frames under `--validate`, and Sponza under `--validate` 45
+frames after its textures load. It needs a GPU and the validation layers, so it is not part of
 the root gate, which stays deviceless for CI.
 
 ## Application families

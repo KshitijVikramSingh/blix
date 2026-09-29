@@ -50,7 +50,7 @@
     <GlslShader Include="Shaders\skinned_shadow_instanced.vert" />
     <!-- Shared GLSL library (src/Blix.Shaders), resolved via the -I path below; listed
          so editing a lib file retriggers the cook. -->
-    <GlslInclude Include="..\..\Blix.Shaders\shadow.glsl" />
+    <GlslInclude Include="..\..\Blix.Shaders\*.glsl" />
   </ItemGroup>
 
 

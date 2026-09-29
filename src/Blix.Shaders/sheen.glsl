@@ -93,11 +93,16 @@ vec3 blix_sheenBrdf(vec3 sheenColor, float sheenRoughness, float NdotH, float Nd
 // A table computed by the cook cannot be wrong in that particular way.
 //
 // u = NdotV, v = sheenRoughness. R channel.
-float blix_sheenAlbedo(sampler2D sheenLut, float NdotV, float sheenRoughness)
-{
-    return texture(sheenLut, vec2(clamp(NdotV, 0.0, 1.0), clamp(sheenRoughness, 0.0, 1.0))).r;
-}
 
+// The sampling functions, in both forms: combined (sampler2D) and separate (texture2D + one sampler).
+// See sampling_form.glsl for why both exist and how the two are spelled.
+#include "sampling_form.glsl"
+#include "sheen.sampled.glsl"
+#define BLIX_SAMPLING_SEPARATE
+#include "sampling_form.glsl"
+#include "sheen.sampled.glsl"
+#undef BLIX_SAMPLING_SEPARATE
+#include "sampling_form.glsl"
 // The factor the base layer is multiplied by, so the pair conserves energy. max
 // over the channels because the sheen layer occludes geometrically, not per
 // wavelength: a red sheen still shadows the blue beneath.

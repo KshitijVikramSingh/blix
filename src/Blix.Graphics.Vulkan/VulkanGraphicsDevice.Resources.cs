@@ -233,9 +233,9 @@ public sealed partial class VulkanGraphicsDevice
     // <b>Said when the program is made, by name.</b> Vulkan leaves a pipeline layout over a
     // per-stage limit undefined, so it can draw correctly on the machine that wrote it and fail on
     // the next one; the only other report is a validation message naming a VkPipelineLayout handle.
-    // MoltenVK reports 16 samplers per stage, Metal's own limit, which Sponza's lit shader exceeds.
-    // A warning rather than a refusal, because the program does run here, and refusing would take
-    // the demo down before the fix it needs (separate images and shared samplers) exists.
+    // MoltenVK reports 16 samplers per stage, Metal's own limit. A warning rather than a refusal,
+    // because such a program does run there. The way inside it is separate images and a few shared
+    // samplers (ShaderResourceType.SeparateImage, //@sampler), which count against different limits.
     private void CheckDescriptorLimits(string program, ShaderInterface shaderInterface)
     {
         if (descriptorLimits.MaxPerStageDescriptorSamplers == 0) return;
@@ -255,9 +255,11 @@ public sealed partial class VulkanGraphicsDevice
                 Console.Error.WriteLine($"[blix] {breach}. Vulkan leaves this undefined: it may draw correctly here and fail on another device.");
             }
 
+            // Vulkan counts a combined image-sampler against BOTH limits; a separate image only against
+            // sampled images, a separate sampler only against samplers.
             Check(Count(ShaderResourceType.SampledImage, ShaderResourceType.Sampler), descriptorLimits.MaxPerStageDescriptorSamplers,
                 "samplers", "maxPerStageDescriptorSamplers");
-            Check(Count(ShaderResourceType.SampledImage), descriptorLimits.MaxPerStageDescriptorSampledImages,
+            Check(Count(ShaderResourceType.SampledImage, ShaderResourceType.SeparateImage), descriptorLimits.MaxPerStageDescriptorSampledImages,
                 "sampled images", "maxPerStageDescriptorSampledImages");
             Check(Count(ShaderResourceType.StorageImage), descriptorLimits.MaxPerStageDescriptorStorageImages,
                 "storage images", "maxPerStageDescriptorStorageImages");
@@ -361,6 +363,9 @@ public sealed partial class VulkanGraphicsDevice
         var resources = new VkShaderSetResources { Set = setIdx, Slots = setSlots };
 
         var bindings = stackalloc DescriptorSetLayoutBinding[Math.Max(1, setSlots.Count)];
+        var immutableCount = setSlots.Where(s => s.Type == ShaderResourceType.Sampler).Sum(s => Math.Max(1, s.Count));
+        var immutable = stackalloc Sampler[Math.Max(1, immutableCount)];
+        var nextImmutable = 0;
         for (var i = 0; i < setSlots.Count; i++)
         {
             var s = setSlots[i];
@@ -377,6 +382,23 @@ public sealed partial class VulkanGraphicsDevice
                 DescriptorCount = (uint)s.Count,
                 StageFlags = MapStageFlags(s.Stages),
             };
+
+            // A separate sampler is built into the layout, from the state the shader declared. There
+            // is no path that binds one per draw, so one with no state is refused here, by name.
+            if (s.Type == ShaderResourceType.Sampler)
+            {
+                if (s.Sampler is not { } state)
+                {
+                    throw new InvalidOperationException(
+                        $"Program '{programName}': sampler '{s.Name ?? $"binding {s.Binding}"}' (set {setIdx}, binding " +
+                        $"{s.Binding}) has no sampler state. Declare it on the line before in the shader, " +
+                        "//@sampler <preset> (Blix.Graphics.ShaderSamplers), and rebuild so its .spv.samplers.json is written.");
+                }
+                var vkSampler = GetOrCreateSampler(state);
+                for (var e = 0; e < Math.Max(1, s.Count); e++) immutable[nextImmutable + e] = vkSampler;
+                bindings[i].PImmutableSamplers = &immutable[nextImmutable];
+                nextImmutable += Math.Max(1, s.Count);
+            }
         }
         var setCi = new DescriptorSetLayoutCreateInfo
         {
@@ -431,6 +453,7 @@ public sealed partial class VulkanGraphicsDevice
         ShaderResourceType.SampledImage => DescriptorType.CombinedImageSampler,
         ShaderResourceType.StorageImage => DescriptorType.StorageImage,
         ShaderResourceType.Sampler => DescriptorType.Sampler,
+        ShaderResourceType.SeparateImage => DescriptorType.SampledImage,
         _ => throw new InvalidOperationException($"Unknown ShaderResourceType {t}"),
     };
 

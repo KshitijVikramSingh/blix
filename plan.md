@@ -110,27 +110,13 @@ native build targets has only ever run on a GitHub runner.
 
 ## Known gaps that are not scheduled
 
-**Sponza's lit shader declares 25 samplers in its fragment stage; MoltenVK allows 16.** The
-device now says so by name when the program is created (`lit`, and `flat`, `depth_prepass` and
-`depth_prepass_mask`, which share its interface), and `--validate` fails a Sponza run on it.
-Sixteen is Metal's limit on sampler objects, not on textures: this device reports 256 sampled
-images per stage (`vulkaninfo`). So the fix is separate images and a few shared samplers in the
-lit shaders, `texture2D`
-plus `sampler` in GLSL. Reflection already parses `separate_images` and `separate_samplers`;
-what has not been checked is that the device binds a separate sampler rather than treating every
-image slot as a combined one. The alternative, Metal argument buffers for all of MoltenVK
-(`MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS`), lifts the limit engine-wide and changes every program's
-binding path, so it is not the first thing to try. Until then Sponza's `demos` leg runs without
-`--validate`.
-
-**Sponza leaks 70 objects at device destruction under `--validate`**
-(`VUID-vkDestroyDevice-device-05137`), which is what is left once the sampler limit is set aside.
-Not yet attributed. The image-layout errors that used to sit beside it are fixed, and they had three
-causes: a depth `LoadOp.Load` asserting the attachment layout where every graph pass leaves depth
-shader-readable; graph targets starting `UNDEFINED`, so a pass loading before any write was invalid
-(targets now start in their resting layout); and storage images bound by name losing their compute
-barriers, plus 2D storage images created `UNDEFINED`. The fixes are byte-identical on the 68-artifact
-lab baseline.
+**A change to Blix.Graphics does not recompile shaders.** `BlixCompileSpirV`'s inputs are the
+shader sources, their includes and the compiler tool's own dll, but the sidecars it writes are
+decided by code in Blix.Graphics (`ShaderTunables`, `ShaderSamplers`), which the tool references
+rather than contains. So changing what a sidecar holds leaves every existing sidecar as the old code
+wrote it until each shader is touched: seen once, when a `[JsonIgnore]` on `ShaderSampler` did not
+reach `lit.frag.spv.samplers.json`. The fix is Blix.Graphics.dll in the inputs; nothing has been
+wrong because of it yet.
 
 **The `demos` gate is not in CI, and now cannot be as it stands.** Its headed legs run each demo
 for 45 frames under `--validate`, which needs a GPU and the validation layers, and CI runners have
