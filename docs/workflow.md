@@ -125,17 +125,23 @@ The marker is intentionally small:
 my-project
 
 test: selftest, asset-check
+test: settlement --years 1 --map-seed 4
 ```
 
-The first non-comment line without a colon is the project name. The optional
-`test:` line lists the apps that form that project's verification gate.
+The first non-comment line without a colon is the project name. `test:` lines
+list the apps that form that project's verification gate, in order, and several
+lines add up. A line of names separated by commas runs each with no arguments. A
+line with an option on it is one leg: its first word is the app and the rest are
+its arguments, with double quotes keeping a value with spaces whole. Arguments
+given to `blix test` itself follow a leg's own, so a single read takes the typed
+value.
 
-The current tree has three marked projects:
+The current tree has two marked projects:
 
 | Project | Folder | Gate |
 | --- | --- | --- |
 | `blix` | repository root | Graphics, Diagnostics, Physics2D, Physics3D, Apps, Studio, Recipes and Input suites |
-| `demos` | `src/Demos` | `Blix.Demos.Character.Probe` |
+| `demos` | `src/Demos` | `Blix.Demos.Character.Probe`, and `chassis-tune --headless --frames 30 --dump-frame 10` |
 
 Project scope follows the current working directory. From the repository root,
 all projects below it are visible. From `src/Demos`, the `demos` marker is the scope
@@ -247,6 +253,21 @@ does not impose a base class or a hosting model.
 
 The declaration belongs on the method it names. The generated index is derived
 from that attribute; do not maintain a parallel app registry.
+
+## Setup every app shares
+
+One static method marked `[BlixStartup]` runs before any app in its assembly,
+including the one `Main` hands to `BlixApps.Main`. It takes `AppArgs` or nothing
+and returns nothing; what it reads counts as read, and an `AppArgsException` it
+throws exits 2. It is where a process culture, a shared lever or an opened log
+belongs, so no app can run without it. At most one is allowed per assembly, and
+the indexer checks both rules at build time. Blix itself sets no culture.
+
+```csharp
+[BlixStartup]
+private static void Startup() =>
+    CultureInfo.DefaultThreadCurrentCulture = CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+```
 
 ## Several apps in one assembly
 

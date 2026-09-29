@@ -127,6 +127,18 @@ public static class Program
                 == "--years <int> --tint <text, repeatable> --map-seed <int>=7 --fog --view <lit|shadow-map>=lit [--scale <number>]",
             AppParameters.Usage(found.Single(a => a.Name == "fixture-typed").Method));
 
+        // ── setup every app shares ──────────────────────────────────────────
+        t.Expect("the assembly's startup method is found",
+            BlixApps.FindStartup(self)?.Name == nameof(Startup));
+        var before = startupRuns;
+        var seen = Run(out var leverNoise, self, BlixApps.Selector, "fixture-sees-startup", "--lever", "5");
+        t.Expect("startup runs before the named app, and what it read reaches it",
+            seen == 5 && startupRuns == before + 1, $"app saw {seen}, startup ran {startupRuns - before} time(s)");
+        t.Expect("and what startup read is not reported unread", leverNoise.Length == 0, leverNoise.Trim());
+        var beforeOtherwise = startupRuns;
+        Run(out _, self, new string[0], otherwise: _ => 0);
+        t.Expect("startup runs before the app Main hands in, too", startupRuns == beforeOtherwise + 1);
+
         // ── failing loudly ──────────────────────────────────────────────────
         t.ExpectThrows("an unknown app names what does exist",
             () => BlixApps.Main(new[] { BlixApps.Selector, "nope" }, assembly: self),
@@ -845,6 +857,21 @@ public static class Program
 
     [BlixApp("fixture-mixed", Summary = "takes a typed parameter and the view")]
     private static int Mixed(int count, AppArgs args) => count + args.Int("extra", 0);
+
+    // Setup every app in this assembly shares. It counts its runs and reads one lever, which is
+    // the shape the RTS needed: a flag that has to be read before whichever scenario runs.
+    private static int startupRuns;
+    private static int startupLever;
+
+    [BlixStartup]
+    private static void Startup(AppArgs args)
+    {
+        startupRuns++;
+        startupLever = args.Int("lever", 0);
+    }
+
+    [BlixApp("fixture-sees-startup", Summary = "returns what startup read")]
+    private static int SeesStartup() => startupLever;
 
     [BlixApp("fixture-reads-years", Summary = "reads --years and nothing else")]
     private static int ReadsYears(AppArgs args) => args.Int("years", 1);

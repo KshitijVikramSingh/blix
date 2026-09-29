@@ -34,6 +34,7 @@ public static class Program
 {
     private const string AttributeNamespace = "Blix.Core";
     private const string AttributeName = "BlixAppAttribute";
+    private const string StartupName = "BlixStartupAttribute";
 
     // <b>Recipes are indexed by the same pass, for the same reason.</b> A cooking recipe has
     // exactly the app layer's discovery problem — it lives with the code it names, it must be
@@ -145,6 +146,7 @@ public static class Program
 
         var apps = new List<AppEntry>();
         var recipes = new List<RecipeEntry>();
+        var startups = new List<string>();
         foreach (var handle in reader.MethodDefinitions)
         {
             var method = reader.GetMethodDefinition(handle);
@@ -165,12 +167,25 @@ public static class Program
                     Validate(reader, method, where);
                     apps.Add(Decode(reader, attribute, where) with { Usage = NullIfEmpty(AppParameterMetadata.Usage(reader, method)) });
                 }
+                else if (IsAttribute(reader, attribute, AttributeNamespace, StartupName))
+                {
+                    ValidateStartup(method, where);
+                    startups.Add(where);
+                }
                 else if (IsAttribute(reader, attribute, RecipeNamespace, RecipeName))
                 {
                     ValidateRecipe(reader, method, where);
                     recipes.Add(DecodeRecipe(reader, attribute, where));
                 }
             }
+        }
+
+        // One runs before every app, so a second is a question with two answers.
+        if (startups.Count > 1)
+        {
+            throw new DeclarationException(
+                $"{startups.Count} [BlixStartup] methods are declared: {string.Join(", ", startups)}. " +
+                "One runs before every app, so there can be only one.");
         }
 
         if (apps.Count(a => a.IsDefault) is > 1 and var defaults)
@@ -336,6 +351,25 @@ public static class Program
     }
 
     private static string? NullIfEmpty(string s) => s.Length == 0 ? null : s;
+
+    // Checked here for the same reason an app's shape is: a startup method that cannot be run is
+    // a build failure, not a surprise on first launch.
+    private static void ValidateStartup(MethodDefinition method, string where)
+    {
+        if ((method.Attributes & MethodAttributes.Static) == 0)
+        {
+            throw new DeclarationException($"[BlixStartup] on {where}: a startup method must be static.");
+        }
+
+        var signature = method.DecodeSignature(new StringTypeProvider(), genericContext: null);
+        var ok = signature.ReturnType == "System.Void"
+            && signature.ParameterTypes is [] or ["Blix.Core.AppArgs"];
+        if (!ok)
+        {
+            throw new DeclarationException(
+                $"[BlixStartup] on {where}: a startup method takes AppArgs or nothing, and returns nothing.");
+        }
+    }
 
     private static string Describe(MetadataReader reader, MethodDefinition method, MethodDefinitionHandle handle)
     {

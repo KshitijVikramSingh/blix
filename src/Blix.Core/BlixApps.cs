@@ -62,10 +62,14 @@ public static class BlixApps
         var rest = at < 0 ? args : args.Take(at).Concat(args.Skip(at + 2)).ToArray();
         var parsed = AppArgs.Parse(rest);
         var run = Choose(name, assembly, otherwise);
+        var startup = FindStartup(assembly);
 
         int code;
         try
         {
+            // Before any app, including the one Main hands in: setup every app shares cannot
+            // depend on which of them was asked for.
+            if (startup is not null) Invoke(startup, parsed);
             code = run(parsed);
         }
         catch (AppArgsException e)
@@ -80,6 +84,44 @@ public static class BlixApps
         }
 
         return code;
+    }
+
+    /// <summary>
+    /// The assembly's <see cref="BlixStartupAttribute"/> method, or null when it declares none.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">More than one is declared, or one has a shape
+    /// a startup method cannot have.</exception>
+    public static MethodInfo? FindStartup(Assembly assembly)
+    {
+        ArgumentNullException.ThrowIfNull(assembly);
+
+        var found = assembly.GetTypes()
+            .SelectMany(t => t.GetMethods(
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.DeclaredOnly))
+            .Where(m => m.GetCustomAttribute<BlixStartupAttribute>() is not null)
+            .ToArray();
+
+        if (found.Length > 1)
+        {
+            throw new InvalidOperationException(
+                $"{assembly.GetName().Name} declares {found.Length} [BlixStartup] methods: " +
+                string.Join(", ", found.Select(m => $"{m.DeclaringType?.FullName}.{m.Name}")) +
+                ". One runs before every app, so there can be only one.");
+        }
+
+        if (found is not [var startup]) return null;
+
+        var parameters = startup.GetParameters();
+        var shapeOk = startup.ReturnType == typeof(void)
+            && (parameters.Length == 0 || (parameters.Length == 1 && parameters[0].ParameterType == typeof(AppArgs)));
+        if (!shapeOk)
+        {
+            throw new InvalidOperationException(
+                $"[BlixStartup] on {startup.DeclaringType?.FullName}.{startup.Name}: a startup method " +
+                "takes AppArgs or nothing, and returns nothing.");
+        }
+
+        return startup;
     }
 
     /// <summary>Every app this assembly declares — the same set the build-time index reports.</summary>

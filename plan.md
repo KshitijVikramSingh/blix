@@ -2,8 +2,11 @@
 
 Stages A–E of the portability and input arc are done and merged (PRs #37–#39).
 Their reasoning lives where it governs behaviour — code comments, `docs/`, and the
-suites that pin it — rather than here, per conventions §9. What follows is what is
-still open, and nothing else.
+suites that pin it — rather than here, per conventions §9. So does the arguments
+and headless-host arc that followed (`AppArgs`, `HeadlessHost`, typed parameters,
+`[BlixStartup]`, gate legs with arguments), recorded in [`docs/workflow.md`](docs/workflow.md)
+and pinned by `Blix.Test.Apps` and the `demos` gate. What follows is what is still open,
+and nothing else.
 
 ---
 
@@ -49,59 +52,6 @@ where you can go. Honest expectation: 4 travelling clips of 76, so this may end 
 **Acceptance is from the chair.** Walk the room: ramps, stairs, ledges, walls. Every
 stage of this arc had at least one fault only a person watching could see, and four
 of five were **legibility, not mechanism**.
-
----
-
-## G — programs take arguments, and run without a window
-
-Two consumers wrote the same glue. The RTS dispatches 36 scenarios through 720 lines of
-hand-written flag parsing; Sponza parses about 52 flags its own way and never calls
-`WindowOptions.FromArgs`, so `--frames` does nothing there. And the RTS's declared apps
-run before its culture is set, which prints "8,65,710 wood" on some machines.
-
-**One parse, many readers.** Blix parses the command line once, culture-invariant, into a
-read-only view. Each layer reads the flags it understands: the window its size and
-`--debug`, a headless host `--frames` and `--dump-frame`, the app everything else. There is
-no central schema. Every read is recorded, and an argument nothing read is a warning
-line, in interactive and bounded runs alike. The `string[]` app signature goes; in-repo
-apps migrate rather than carry it.
-
-**A headless host** runs the same `IGameLoop` with no window and no device: fixed-step
-time, `OnRender` against a recording-only command list, a scriptable `InputState`, and
-the same diagnostics sinks. The same arguments mean the same thing with or without a
-window, and the window adds a few of its own.
-
-Stages:
-
-- **G1. The loop contract moves down.** `IGameLoop`, `Game`, `Time`, `FixedStepClock`,
-  `IUpdateable` and `IFixedUpdateable` are built by `Blix.Core`, still in namespace
-  `Blix`, so a loop no longer drags in `Blix.Render` and Vulkan. *Done.*
-- **G2. The argument view.** `AppArgs` in `Blix.Core`; `BlixApps.Main` is every program's one-line
-  `Main`, runs the named app or the one marked `Default`, and prints what nothing read;
-  `WindowOptions.FromArgs` and `ObjectTunables.Apply` read from it. Every in-repo app
-  migrated, Sponza's 52 flags and all ten `cook` verbs included. The three build-infrastructure
-  executables (`Blix.Cli`, `Blix.Tools.Apps`, `Blix.Tools.Shader`) keep their own parsing: MSBuild
-  and the launcher call them, and none is a Blix app. *Done.*
-- **G3. The headless host.** `Blix.Runtime.Headless`: `HeadlessHost` runs a loop in a window's
-  order on a fixed step, with a `NoGraphicsDevice` that refuses by name, a recording-only
-  command list, scripted input and the window's sinks; `HeadlessOptions.FromArgs` reads the
-  window's flags plus `--step`. Its closure is Core, Diagnostics, Graphics, Geometry, Cooked and
-  Audio, and `Blix.Test.Apps` pins that neither it nor `Blix.Core` references a backend.
-  `chassis-tune --frames 40 --dump-frame 30`, headed and `--headless`, writes the same schema
-  with the same values and controls; only the overlay's own ImGui draw stats differ. *Done.*
-- **G4. Typed parameters.** `AppParameters` binds an app's parameters from the view:
-  kebab-case flags with the squashed form accepted, no default means required (exit 2, naming
-  it), `bool` is a flag, repeated options as `IReadOnlyList<string>`, and one `AppArgs` mixes
-  in. The indexer validates the same types from metadata and records a usage line `blix ls`
-  prints; `Blix.Test.Apps` checks the index's line against reflection's for every fixture.
-  No in-repo app uses them yet: the RTS scenarios are the consumer, and they migrate later.
-  *Done.*
-- **G5.** A startup hook `Dispatch` runs before any app.
-- **G6.** `blix.project` gate lines carry arguments, one app per line.
-
-*Done when* Sponza reads `--frames` through the view, the same loop runs headed and
-headless with the same arguments and writes dumps of the same shape, and a gate line
-passes arguments. The RTS pins its engine and migrates later, not in this arc.
 
 ---
 
