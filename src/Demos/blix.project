@@ -34,6 +34,6 @@ test: room --frames 45 --validate
 # Sponza streams its textures for ~1000 frames before its lit path runs at all, so a frame count
 # ends every run on the flat preview, which is how a crash in the lit path shipped. It closes
 # 45 frames after load instead, and fails rather than passes when BLIX_SPONZA_ASSETS is not set.
-# Not under --validate yet: it exceeds MoltenVK's 16-sampler limit and has open layout errors
-# (both in plan.md).
+# Not under --validate yet: it exceeds MoltenVK's 16-sampler limit and leaks objects at device
+# destruction (both in plan.md).
 test: Blix.Demos.VulkanSponza --frames-after-load 45

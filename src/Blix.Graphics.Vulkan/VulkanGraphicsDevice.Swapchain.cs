@@ -1392,7 +1392,7 @@ public sealed partial class VulkanGraphicsDevice
             for (var i = 0; i < d.Textures.Count; i++)
             {
                 var b = d.Textures[i];
-                if (!IsStorageBinding(prog, b.Slot)) continue;
+                if (!IsStorageBinding(prog, b)) continue;
                 RecordStorageBarrier(cmd, textureTable[b.Texture.Id],
                     ImageLayout.Undefined, ImageLayout.General,
                     PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderReadBit,
@@ -1411,7 +1411,7 @@ public sealed partial class VulkanGraphicsDevice
             for (var i = 0; i < d.Textures.Count; i++)
             {
                 var b = d.Textures[i];
-                if (!IsStorageBinding(prog, b.Slot)) continue;
+                if (!IsStorageBinding(prog, b)) continue;
                 RecordStorageBarrier(cmd, textureTable[b.Texture.Id],
                     ImageLayout.General, ImageLayout.ShaderReadOnlyOptimal,
                     PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderWriteBit,
@@ -1420,13 +1420,19 @@ public sealed partial class VulkanGraphicsDevice
         }
     }
 
-    private static bool IsStorageBinding(VkShaderProgramEntry prog, int binding)
+    // Whether a dispatch's texture is one the program writes, and so needs its layout barriers.
+    // <b>By name as well as by slot.</b> This asked only about Slot, and a texture bound by name has
+    // Slot == ByName, so when the callers moved to names every storage image lost both barriers:
+    // Sponza's froxel grid stayed GENERAL and the lit pass sampled it as SHADER_READ_ONLY_OPTIMAL,
+    // which validation reported on every draw that read it. Resolved the way the binder resolves it.
+    private static bool IsStorageBinding(VkShaderProgramEntry prog, ShaderTextureBinding b)
     {
+        var (baseName, _) = b.Slot == ShaderTextureBinding.ByName ? SplitArrayName(b) : (b.Name, null);
         foreach (var set in prog.Sets)
         {
             if (set is null) continue;
-            foreach (var s in set.Slots)
-                if (s.Binding == binding && s.Type == ShaderResourceType.StorageImage) return true;
+            var slot = b.Slot == ShaderTextureBinding.ByName ? ImageSlotNamed(set, baseName) : ImageSlotAt(set, b.Slot);
+            if (slot is { Type: ShaderResourceType.StorageImage }) return true;
         }
         return false;
     }

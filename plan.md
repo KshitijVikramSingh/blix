@@ -123,14 +123,14 @@ image slot as a combined one. The alternative, Metal argument buffers for all of
 binding path, so it is not the first thing to try. Until then Sponza's `demos` leg runs without
 `--validate`.
 
-**Sponza has image-layout errors under `--validate`, apart from the sampler limit.** Seen once
-the lit path runs (`--frames-after-load 45 --validate`): a depth image sampled while in
-`DEPTH_STENCIL_ATTACHMENT_OPTIMAL`, or undefined, where its descriptor says shader-read
-(`VUID-vkCmdDrawIndexed-imageLayout-00344`, `-DrawIndexedIndirect-imageLayout-00344`,
-`VUID-vkCmdDraw-None-09600`); a render pass whose initial layout is not the image's
-(`VUID-vkCmdBeginRenderPass-initialLayout-00900`); and an object alive at device destruction
-(`VUID-vkDestroyDevice-device-05137`). Not yet attributed to a pass. The 45-frame legs of the
-other demos are clean, so this is either Sponza's own graph or a path only it exercises.
+**Sponza leaks 70 objects at device destruction under `--validate`**
+(`VUID-vkDestroyDevice-device-05137`), which is what is left once the sampler limit is set aside.
+Not yet attributed. The image-layout errors that used to sit beside it are fixed, and they had three
+causes: a depth `LoadOp.Load` asserting the attachment layout where every graph pass leaves depth
+shader-readable; graph targets starting `UNDEFINED`, so a pass loading before any write was invalid
+(targets now start in their resting layout); and storage images bound by name losing their compute
+barriers, plus 2D storage images created `UNDEFINED`. The fixes are byte-identical on the 68-artifact
+lab baseline.
 
 **The `demos` gate is not in CI, and now cannot be as it stands.** Its headed legs run each demo
 for 45 frames under `--validate`, which needs a GPU and the validation layers, and CI runners have

@@ -7,7 +7,10 @@ namespace Blix.Graphics.Vulkan;
 // Graphics-only graphs need no explicit barriers: each pass's render-pass
 // subpass-dependency pair already handles the cross-pass layout transition
 // AND memory-availability barrier (color/depth → ShaderReadOnlyOptimal,
-// ColorAttachmentWrite → ShaderRead). When compute passes start writing,
+// ColorAttachmentWrite → ShaderRead). That holds only because every target
+// rests in one layout between passes (RenderGraph.RestingLayout) and every
+// pass that loads starts from it: a render pass's initial layout is a claim
+// about where the image is, not a transition from wherever it happens to be. When compute passes start writing,
 // inference will emit vkCmdPipelineBarrier ops between compute writes and
 // downstream graphics reads (and vice versa) — compute lives outside the
 // render-pass dependency system.

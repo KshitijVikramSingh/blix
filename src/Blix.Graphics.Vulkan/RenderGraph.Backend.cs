@@ -20,6 +20,7 @@ public sealed partial class RenderGraph : IDisposable
         if (Device is null) return; // Test-mode graph; skip backend phase.
 
         AllocateResources();
+        SettleNewImages();
         BuildPerPassMachinery();
         RegisterPerPassSurfaces();
         if (HasAnyCubeResource()) MoltenVkCubeSmokeGate();
@@ -123,6 +124,8 @@ public sealed partial class RenderGraph : IDisposable
             }
         }
 
+        SettleNewImages();
+
         // 2. Rebuild per-pass framebuffers; RenderPass stays (format-stable).
         // Update each synthetic RenderSurfaceEntry in place so the handle
         // remains live.
@@ -211,6 +214,7 @@ public sealed partial class RenderGraph : IDisposable
                     ImageAspectFlags.ColorBit,
                     $"graph.{declared.Name}",
                     SampleCount(declared.Samples));
+                Unsettled(img, ImageAspectFlags.ColorBit, depth: false, msaa: declared.Samples > 1);
                 entry.Image = img;
                 entry.Memory = mem;
                 entry.WholeImageView = view;
@@ -239,6 +243,7 @@ public sealed partial class RenderGraph : IDisposable
                     ImageAspectFlags.DepthBit,
                     $"graph.{declared.Name}",
                     SampleCount(declared.Samples));
+                Unsettled(img, ImageAspectFlags.DepthBit, depth: true, msaa: declared.Samples > 1);
                 entry.Image = img;
                 entry.Memory = mem;
                 entry.WholeImageView = view;
@@ -369,6 +374,7 @@ public sealed partial class RenderGraph : IDisposable
         var (image, memory, view) = device.AllocateAttachmentImage(
             width, height, format, ColorTargetUsage(msaa), ImageAspectFlags.ColorBit,
             $"graph.{resource.Name}", SampleCount(resource.Samples));
+        Unsettled(image, ImageAspectFlags.ColorBit, depth: false, msaa);
 
         TextureHandle? handle = null;
         if (!msaa)
@@ -423,6 +429,7 @@ public sealed partial class RenderGraph : IDisposable
         var (image, memory, view) = device.AllocateAttachmentImage(
             width, height, device.GraphDepthFormat, usage, ImageAspectFlags.DepthBit,
             $"graph.{resource.Name}", SampleCount(resource.Samples));
+        Unsettled(image, ImageAspectFlags.DepthBit, depth: true, msaa);
 
         TextureHandle? handle = null;
         if (!msaa)
@@ -491,6 +498,7 @@ public sealed partial class RenderGraph : IDisposable
         VulkanGraphicsDevice.ThrowIfNotSuccess(
             device.Vk.BindImageMemory(device.Device, image, memory, 0),
             $"vkBindImageMemory(graph.{resource.Name}.cube)");
+        Unsettled(image, ImageAspectFlags.DepthBit, depth: true, msaa: false, layers: 6);
 
         // Whole-cube view — for sampling via samplerCube.
         var wholeViewCi = MakeViewCi(image, format, ImageViewType.TypeCube,
@@ -634,9 +642,64 @@ public sealed partial class RenderGraph : IDisposable
     // used to be created that way. What it loads is still the samples the pass declared DontCare,
     // so drawing over an MSAA target through the load variant starts from nothing useful.
     private static ImageLayout MsaaAwareInitialLayout(bool msaa, bool loads) =>
-        !loads ? ImageLayout.Undefined
-        : msaa ? ImageLayout.ColorAttachmentOptimal
-        : ImageLayout.ShaderReadOnlyOptimal;
+        !loads ? ImageLayout.Undefined : RestingLayout(depth: false, msaa);
+
+    /// <summary>Where a graph target rests between passes: what every pass leaves it in, and what a load starts from.</summary>
+    /// <remarks>
+    /// A single-sample target ends every pass shader-readable, because something may sample it next. A
+    /// multisampled one is never sampled (it is resolved), so it stays an attachment. One rule for colour
+    /// and depth, for the declared LoadOp.Load and the load variant alike: a render pass's initial layout
+    /// is a claim about where the image already is, not a transition, so it must name this.
+    /// </remarks>
+    private static ImageLayout RestingLayout(bool depth, bool msaa) =>
+        !msaa ? ImageLayout.ShaderReadOnlyOptimal
+        : depth ? ImageLayout.DepthStencilAttachmentOptimal
+        : ImageLayout.ColorAttachmentOptimal;
+
+    // Images allocated since the last SettleNewImages, still UNDEFINED.
+    private readonly List<(Image Image, ImageAspectFlags Aspect, uint Layers, ImageLayout Layout)> unsettled = new();
+
+    private void Unsettled(Image image, ImageAspectFlags aspect, bool depth, bool msaa, uint layers = 1) =>
+        unsettled.Add((image, aspect, layers, RestingLayout(depth, msaa)));
+
+    /// <summary>Puts every newly allocated target into its resting layout, in one submission.</summary>
+    /// <remarks>
+    /// <b>So the first pass that loads a target is valid.</b> A new image is UNDEFINED, and a pass that
+    /// loads before anything has written it asserted a layout the image was not in. Sponza's first
+    /// frames do exactly that: before its scene loads, it fills only the lit pass, which loads the
+    /// depth the pre-pass would have written. What such a load reads is undefined contents, which is
+    /// the application's business; the layout is the graph's, since it is the graph that says where
+    /// its targets rest. Run after the first allocation and after a resize reallocates, never mid-frame.
+    /// </remarks>
+    private unsafe void SettleNewImages()
+    {
+        if (unsettled.Count == 0 || Device is not { } device) return;
+
+        var cmd = device.BeginSingleTimeCommands();
+        var barriers = stackalloc ImageMemoryBarrier[unsettled.Count];
+        for (var i = 0; i < unsettled.Count; i++)
+        {
+            var (image, aspect, layers, layout) = unsettled[i];
+            barriers[i] = new ImageMemoryBarrier
+            {
+                SType = StructureType.ImageMemoryBarrier,
+                OldLayout = ImageLayout.Undefined,
+                NewLayout = layout,
+                SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                Image = image,
+                SubresourceRange = new ImageSubresourceRange(aspect, 0, 1, 0, layers),
+                SrcAccessMask = 0,
+                DstAccessMask = 0,
+            };
+        }
+
+        // The submission waits for the queue to go idle, which orders it before any frame that uses these.
+        device.Vk.CmdPipelineBarrier(cmd, PipelineStageFlags.TopOfPipeBit, PipelineStageFlags.BottomOfPipeBit,
+            0, 0, null, 0, null, (uint)unsettled.Count, barriers);
+        device.EndSingleTimeCommands(cmd);
+        unsettled.Clear();
+    }
 
     /// <summary>
     /// The same pass, built with vkCreateRenderPass2 so its multisampled depth can be resolved.
@@ -879,7 +942,10 @@ public sealed partial class RenderGraph : IDisposable
                 StoreOp = msaa ? AttachmentStoreOp.DontCare : MapStoreOp(target.Store),
                 StencilLoadOp = AttachmentLoadOp.DontCare,
                 StencilStoreOp = AttachmentStoreOp.DontCare,
-                InitialLayout = MsaaAwareInitialLayout(msaa, loadVariant),
+                // A declared LoadOp.Load loads just as the load variant does, so it starts from the same
+                // place. This asked only about the variant, so a declared colour load started UNDEFINED
+                // and what it loaded was undefined.
+                InitialLayout = MsaaAwareInitialLayout(msaa, loadVariant || target.Load == LoadOp.Load),
                 // Non-MSAA → ShaderReadOnly for downstream Reads. MSAA stays a
                 // colour attachment (only the resolve target is sampled).
                 FinalLayout = msaa ? ImageLayout.ColorAttachmentOptimal : ImageLayout.ShaderReadOnlyOptimal,
@@ -903,20 +969,16 @@ public sealed partial class RenderGraph : IDisposable
                 StoreOp = MapStoreOp(pass.Depth.Store),
                 StencilLoadOp = AttachmentLoadOp.DontCare,
                 StencilStoreOp = AttachmentStoreOp.DontCare,
-                // LoadOp.Load preserves a prior pass's depth (depth pre-pass →
-                // lit), so the initial layout must already be the depth layout —
-                // Undefined would discard it. Clear/DontCare start fresh.
-                //
-                // The load VARIANT starts from wherever the declared form's FinalLayout below left
-                // it, which for non-MSAA depth is SHADER_READ_ONLY_OPTIMAL rather than the depth
-                // layout. Getting this wrong loads undefined depth, and undefined depth does not
-                // occlude anything — the gizmos drew straight through the scene and looked exactly
-                // as they had before the test was enabled.
-                InitialLayout = loadVariant
-                    ? (msaaDepth ? ImageLayout.DepthStencilAttachmentOptimal : ImageLayout.ShaderReadOnlyOptimal)
-                    : pass.Depth.Load == LoadOp.Load
-                        ? ImageLayout.DepthStencilAttachmentOptimal
-                        : ImageLayout.Undefined,
+                // A load starts from where the previous pass's FinalLayout below left the image:
+                // SHADER_READ_ONLY_OPTIMAL for single-sample depth, not the depth layout. The load
+                // VARIANT learned this first — getting it wrong loads undefined depth, which occludes
+                // nothing, and the gizmos drew straight through the scene looking exactly as before.
+                // The declared LoadOp.Load (depth pre-pass → lit) did not, and asserted the depth
+                // layout: Sponza's lit pass, on every frame, under validation. Clear/DontCare start
+                // fresh from UNDEFINED.
+                InitialLayout = loadVariant || pass.Depth.Load == LoadOp.Load
+                    ? RestingLayout(depth: true, msaaDepth)
+                    : ImageLayout.Undefined,
                 // Non-MSAA depth stays shader-readable (shadow maps); MSAA
                 // depth isn't sampled, so leave it a depth attachment.
                 FinalLayout = msaaDepth ? ImageLayout.DepthStencilAttachmentOptimal : ImageLayout.ShaderReadOnlyOptimal,
