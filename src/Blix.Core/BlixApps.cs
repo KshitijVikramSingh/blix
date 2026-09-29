@@ -1,24 +1,34 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
 
 namespace Blix.Core;
 
 /// <summary>
-/// In-assembly dispatch: find the <see cref="BlixAppAttribute"/> the launcher asked for and run it.
+/// The one entry point a Blix program has: parse the command line, run the app it names, and say
+/// what nobody read.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>The whole point is that an assembly can hold many apps.</b> An executable carrying thirty-five
-/// scenario runners calls this from <c>Main</c> and deletes its own dispatch — one scenario at a
-/// time, because an undeclared one simply falls through and the hand-written chain keeps handling
-/// it.
+/// <b>An assembly can hold many apps.</b> Each is a <see cref="BlixAppAttribute"/> method, and
+/// <c>Main</c> is one line that hands the command line here:
 /// </para>
 /// <code>
-/// static int Main(string[] args) => BlixApps.Dispatch(args) ?? RunTheApplication(args);
+/// public static int Main(string[] args) => BlixApps.Main(args);
+///
+/// [BlixApp("hello", Default = true, Headed = true)]
+/// static int Hello(AppArgs args) => ...;
+///
+/// [BlixApp("hello-check")]
+/// static int Check() => ...;
 /// </code>
 /// <para>
-/// <b>It returns null rather than exiting</b> when no app was asked for, which is what makes the
-/// migration incremental. A caller that has nothing else to do can write <c>?? 0</c>; one that is
-/// also an application runs it.
+/// <b>Which app runs.</b> The launcher names one with <see cref="Selector"/>. With none named, as
+/// when a published build is started directly, the app marked <see cref="BlixAppAttribute.Default"/>
+/// runs, or <paramref name="otherwise"/> when the program declares no default of its own.
+/// </para>
+/// <para>
+/// <b>After it returns,</b> any argument nothing read is printed as one warning line. A malformed
+/// one (<c>--frames abc</c>) is an <see cref="AppArgsException"/>, printed with exit code 2.
 /// </para>
 /// </remarks>
 public static class BlixApps
@@ -26,49 +36,50 @@ public static class BlixApps
     /// <summary>The argument the launcher passes to name which app to run.</summary>
     public const string Selector = "--blix-app";
 
-    /// <summary>
-    /// Run the app named by <c>--blix-app &lt;name&gt;</c> in <paramref name="args"/>, if there is one.
-    /// </summary>
-    /// <param name="args">The process arguments. The selector and its value are removed before the
-    /// app sees them, so an app's own parsing never has to know this layer exists.</param>
+    /// <summary>Run the app the command line names, or the default one.</summary>
+    /// <param name="args">The process arguments, exactly as <c>Main</c> received them.</param>
+    /// <param name="otherwise">What to run when no app is named and none is marked default.</param>
     /// <param name="assembly">Which assembly to search. Defaults to the caller's.</param>
-    /// <returns>The app's exit code, or null when no app was named.</returns>
+    /// <returns>The app's exit code; 2 when an argument could not be read.</returns>
     /// <exception cref="InvalidOperationException">
-    /// An app was named and there is no such app, or more than one claims the name. Both are loud:
-    /// a tool that silently does nothing because it was declared slightly wrong is the worst
-    /// failure this layer can have.
+    /// An app was named and there is no such app, more than one claims the name, or nothing was
+    /// named and there is nothing to run. All loud: a tool that silently does nothing because it was
+    /// declared slightly wrong is the worst failure this layer can have.
     /// </exception>
-    public static int? Dispatch(string[] args, Assembly? assembly = null)
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static int Main(string[] args, Func<AppArgs, int>? otherwise = null, Assembly? assembly = null)
     {
         ArgumentNullException.ThrowIfNull(args);
+        assembly ??= Assembly.GetCallingAssembly();
 
         var at = Array.IndexOf(args, Selector);
-        if (at < 0) return null;
-        if (at + 1 >= args.Length)
+        if (at >= 0 && at + 1 >= args.Length)
         {
             throw new InvalidOperationException($"{Selector} needs the name of an app after it.");
         }
 
-        var name = args[at + 1];
-        var rest = args.Take(at).Concat(args.Skip(at + 2)).ToArray();
-        var found = Find(assembly ?? Assembly.GetCallingAssembly());
+        var name = at < 0 ? null : args[at + 1];
+        var rest = at < 0 ? args : args.Take(at).Concat(args.Skip(at + 2)).ToArray();
+        var parsed = AppArgs.Parse(rest);
+        var run = Choose(name, assembly, otherwise);
 
-        var matches = found.Where(a => a.Name == name).ToArray();
-        if (matches.Length == 0)
+        int code;
+        try
         {
-            throw new InvalidOperationException(
-                $"No app named '{name}' in {(assembly ?? Assembly.GetCallingAssembly()).GetName().Name}. " +
-                $"It declares {found.Length}: {string.Join(", ", found.Select(a => a.Name).Order())}");
+            code = run(parsed);
+        }
+        catch (AppArgsException e)
+        {
+            Console.Error.WriteLine($"blix: {e.Message}");
+            return 2;
         }
 
-        if (matches.Length > 1)
+        if (parsed.Unread is { Count: > 0 } unread)
         {
-            throw new InvalidOperationException(
-                $"'{name}' is declared {matches.Length} times: " +
-                string.Join(", ", matches.Select(m => $"{m.Method.DeclaringType?.FullName}.{m.Method.Name}")));
+            Console.Error.WriteLine($"blix: warning: nothing read {string.Join(' ', unread)}");
         }
 
-        return Invoke(matches[0].Method, rest);
+        return code;
     }
 
     /// <summary>Every app this assembly declares — the same set the build-time index reports.</summary>
@@ -89,20 +100,60 @@ public static class BlixApps
             {
                 if (method.GetCustomAttribute<BlixAppAttribute>() is not { } app) continue;
                 Validate(method);
-                apps.Add(new DeclaredApp(app.Name, app.Summary, app.Headed, method));
+                apps.Add(new DeclaredApp(app.Name, app.Summary, app.Headed, app.Default, method));
             }
         }
 
         return apps.ToArray();
     }
 
+    private static Func<AppArgs, int> Choose(string? name, Assembly assembly, Func<AppArgs, int>? otherwise)
+    {
+        var found = Find(assembly);
+
+        if (name is null)
+        {
+            var defaults = found.Where(a => a.Default).ToArray();
+            if (defaults.Length > 1)
+            {
+                throw new InvalidOperationException(
+                    $"{assembly.GetName().Name} marks {defaults.Length} apps as the default: " +
+                    string.Join(", ", defaults.Select(d => d.Name)));
+            }
+
+            if (defaults.Length == 1) return a => Invoke(defaults[0].Method, a);
+            if (otherwise is not null) return otherwise;
+
+            throw new InvalidOperationException(
+                $"No app was named and {assembly.GetName().Name} marks none as the default. " +
+                $"It declares {found.Length}: {string.Join(", ", found.Select(a => a.Name).Order())}");
+        }
+
+        var matches = found.Where(a => a.Name == name).ToArray();
+        if (matches.Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"No app named '{name}' in {assembly.GetName().Name}. " +
+                $"It declares {found.Length}: {string.Join(", ", found.Select(a => a.Name).Order())}");
+        }
+
+        if (matches.Length > 1)
+        {
+            throw new InvalidOperationException(
+                $"'{name}' is declared {matches.Length} times: " +
+                string.Join(", ", matches.Select(m => $"{m.Method.DeclaringType?.FullName}.{m.Method.Name}")));
+        }
+
+        return a => Invoke(matches[0].Method, a);
+    }
+
     /// <summary>
     /// The signatures an app may have, checked here and again at build time.
     /// </summary>
     /// <remarks>
-    /// Four shapes, and the reason to allow all four is that the smallest app this layer promises to
-    /// support is a script that reads four files and exits — which should not have to accept
-    /// arguments it will not read, or return a code it has no opinion about.
+    /// An app takes <see cref="AppArgs"/> or nothing, and returns int or void. The smallest app
+    /// this layer promises to support is a script that reads four files and exits, which should
+    /// not have to accept arguments it will not read or return a code it has no opinion about.
     /// </remarks>
     private static void Validate(MethodInfo method)
     {
@@ -110,11 +161,11 @@ public static class BlixApps
         var parameters = method.GetParameters();
 
         var argsOk = parameters.Length == 0
-            || (parameters.Length == 1 && parameters[0].ParameterType == typeof(string[]));
+            || (parameters.Length == 1 && parameters[0].ParameterType == typeof(AppArgs));
         if (!argsOk)
         {
             throw new InvalidOperationException(
-                $"[BlixApp] on {where}: an app takes string[] or nothing, not " +
+                $"[BlixApp] on {where}: an app takes AppArgs or nothing, not " +
                 $"({string.Join(", ", parameters.Select(p => p.ParameterType.Name))}).");
         }
 
@@ -125,13 +176,23 @@ public static class BlixApps
         }
     }
 
-    private static int Invoke(MethodInfo method, string[] args)
+    private static int Invoke(MethodInfo method, AppArgs args)
     {
         var parameters = method.GetParameters().Length == 0 ? null : new object[] { args };
-        var result = method.Invoke(null, parameters);
-        return result is int code ? code : 0;
+        try
+        {
+            return method.Invoke(null, parameters) is int code ? code : 0;
+        }
+        catch (TargetInvocationException e) when (e.InnerException is not null)
+        {
+            // Reflection wraps whatever the app threw. Unwrap it, so an AppArgsException reaches
+            // Main's handler and anything else keeps its own stack.
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e.InnerException).Throw();
+            throw;
+        }
     }
 
     /// <summary>One app, as declared.</summary>
-    public readonly record struct DeclaredApp(string Name, string? Summary, bool Headed, MethodInfo Method);
+    public readonly record struct DeclaredApp(
+        string Name, string? Summary, bool Headed, bool Default, MethodInfo Method);
 }

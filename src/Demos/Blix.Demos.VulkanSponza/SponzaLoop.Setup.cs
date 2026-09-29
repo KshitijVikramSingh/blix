@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix;
@@ -37,168 +38,138 @@ internal sealed partial class SponzaLoop
         renderHeightPx = host.LogicalSize.Height;
 
         // Fog is part of the standard composition; --no-fog retains the unscattered reference path.
-        var cmdArgs = Environment.GetCommandLineArgs();
-        fog.Enabled = !cmdArgs.Contains("--no-fog");
-        if (cmdArgs.Contains("--fog")) fog.Enabled = true;
+        fog.Enabled = !args.Flag("no-fog");
+        if (args.Flag("fog")) fog.Enabled = true;
         // --fog-stress flips fog on/off every ~90 frames so a validation run
         // exercises the compute storage-image layout transitions across the
         // disabled↔enabled boundary (the highest-risk sync path).
-        if (cmdArgs.Contains("--fog-stress")) { fogStress = true; fog.Enabled = true; }
+        if (args.Flag("fog-stress")) { fogStress = true; fog.Enabled = true; }
         // --no-ao: keep both ambient passes in the graph but give the search a zero radius, so a
         // paired run attributes the HORIZON SEARCH specifically rather than the whole feature.
-        if (cmdArgs.Contains("--no-ao")) ambient.Enabled = false;
-        if (cmdArgs.Contains("--no-shadow")) shadows.Enabled = false;
-        if (cmdArgs.Contains("--ao-fullres")) aoScale = 1f;
+        if (args.Flag("no-ao")) ambient.Enabled = false;
+        if (args.Flag("no-shadow")) shadows.Enabled = false;
+        if (args.Flag("ao-fullres")) aoScale = 1f;
         // The incident-light field ships on; --no-incident selects the inline reference path.
-        if (cmdArgs.Contains("--no-incident")) incidentField = false;
-        if (cmdArgs.Contains("--incident")) incidentField = true;
-        if (cmdArgs.Contains("--incident-full")) { incidentField = true; incidentScale = 1f; }
-        for (var i = 0; i + 1 < cmdArgs.Length; i++)
+        if (args.Flag("no-incident")) incidentField = false;
+        if (args.Flag("incident")) incidentField = true;
+        if (args.Flag("incident-full")) { incidentField = true; incidentScale = 1f; }
+        // The resolution knob itself, because "half" is a guess and the error it costs is a
+        // function of how far the coarse texel centre sits from the fine pixel it answers for.
+        if (args.Float("incident-scale") is { } isc)
         {
-            // The resolution knob itself, because "half" is a guess and the error it costs is a
-            // function of how far the coarse texel centre sits from the fine pixel it answers for.
-            if (cmdArgs[i] == "--incident-scale" && float.TryParse(cmdArgs[i + 1], out var isc))
+            incidentField = true;
+            incidentScale = Math.Clamp(isc, 0.25f, 1f);
+        }
+        if (args.Flag("no-prepass")) noPrepass = true;
+        if (args.String("probe") is { } probe) probeName = probe;
+        // The census has to be able to ask about the FIELD rather than about the sleep policy:
+        // with sleeping on, a probe the camera never looked at is zero, and a census of a still
+        // camera's frame is then mostly a count of what the camera did not face.
+        if (args.Float("probe-sleep") is { } ps) probeSleepFrames = MathF.Max(0f, ps);
+        // Zero isolates sky-fed transport from the direct-sun source for probe censuses.
+        if (args.Float("sun-strength") is { } ss) sunStrength = MathF.Max(0f, ss);
+        if (args.Int("ref-bounces") is { } rb) refBounces = Math.Clamp(rb, 1, 8);
+        if (args.String("shadow-maps") is { } shadowMaps)
+        {
+            var sm = shadowMaps.Split(',');
+            if (sm.Length != 3 || !sm.All(v => int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out _)))
             {
-                incidentField = true;
-                incidentScale = Math.Clamp(isc, 0.25f, 1f);
+                throw new AppArgsException($"--shadow-maps expects three sizes like 2048,1024,1024, got '{shadowMaps}'.");
             }
+
+            ShadowMapSizes = sm.Select(v => Math.Clamp(int.Parse(v, CultureInfo.InvariantCulture), 256, 4096)).ToArray();
         }
-        if (cmdArgs.Contains("--no-prepass")) noPrepass = true;
-        for (var i = 0; i < cmdArgs.Length - 1; i++)
-        {
-            if (cmdArgs[i] == "--probe") probeName = cmdArgs[i + 1];
-            // The census has to be able to ask about the FIELD rather than about the sleep policy:
-            // with sleeping on, a probe the camera never looked at is zero, and a census of a still
-            // camera's frame is then mostly a count of what the camera did not face.
-            if (cmdArgs[i] == "--probe-sleep" && float.TryParse(cmdArgs[i + 1], out var ps))
-                probeSleepFrames = MathF.Max(0f, ps);
-            // Zero isolates sky-fed transport from the direct-sun source for probe censuses.
-            if (cmdArgs[i] == "--sun-strength" && float.TryParse(cmdArgs[i + 1], out var ss))
-                sunStrength = MathF.Max(0f, ss);
-            if (cmdArgs[i] == "--ref-bounces" && int.TryParse(cmdArgs[i + 1], out var rb))
-                refBounces = Math.Clamp(rb, 1, 8);
-            if (cmdArgs[i] == "--shadow-maps" && cmdArgs[i + 1].Split(',') is { Length: 3 } sm
-                && int.TryParse(sm[0], out var m0) && int.TryParse(sm[1], out var m1)
-                && int.TryParse(sm[2], out var m2))
-            {
-                ShadowMapSizes = new[]
-                {
-                    Math.Clamp(m0, 256, 4096), Math.Clamp(m1, 256, 4096), Math.Clamp(m2, 256, 4096),
-                };
-            }
-            if (cmdArgs[i] == "--foliage-lod" && float.TryParse(cmdArgs[i + 1], out var fl))
-                FoliageLodMargin = MathF.Max(0.1f, fl);
-            if (cmdArgs[i] == "--shadow-lod" && float.TryParse(cmdArgs[i + 1], out var sl))
-                shadowLodTexels = MathF.Max(0.1f, sl);
-            if (cmdArgs[i] == "--bounce-div" && float.TryParse(cmdArgs[i + 1], out var bd))
-                bounceDiv = Math.Clamp(bd, 0.5f, 8f);
-            // The same axis stated the way it is usually wanted: a multiplier on probe COUNT.
-            // --bounce-x2 is --bounce-div 1.587 without anybody having to know that.
-            if (cmdArgs[i] == "--bounce-x" && float.TryParse(cmdArgs[i + 1], out var bx) && bx > 0f)
-                bounceDiv = 2f / MathF.Cbrt(bx);
-        }
-        for (var i = 0; i + 1 < cmdArgs.Length; i++)
-        {
-            if (cmdArgs[i] == "--inject-feedback" && float.TryParse(cmdArgs[i + 1], out var ifb))
-                injectFeedback = Math.Clamp(ifb, 0f, 4f);
-            if (cmdArgs[i] == "--transport-occlusion" && float.TryParse(cmdArgs[i + 1], out var to))
-                transportOcclusion = Math.Clamp(to, 0f, 1f);
-        }
-        if (cmdArgs.Contains("--sky-no-inject")) skipInject = true;
-        if (cmdArgs.Contains("--sky-no-sample")) skipSkySample = true;
+        if (args.Float("foliage-lod") is { } fl) FoliageLodMargin = MathF.Max(0.1f, fl);
+        if (args.Float("shadow-lod") is { } sl) shadowLodTexels = MathF.Max(0.1f, sl);
+        if (args.Float("bounce-div") is { } bd) bounceDiv = Math.Clamp(bd, 0.5f, 8f);
+        // The same axis stated the way it is usually wanted: a multiplier on probe COUNT.
+        // --bounce-x2 is --bounce-div 1.587 without anybody having to know that.
+        if (args.Float("bounce-x") is { } bx && bx > 0f) bounceDiv = 2f / MathF.Cbrt(bx);
+        if (args.Float("inject-feedback") is { } ifb) injectFeedback = Math.Clamp(ifb, 0f, 4f);
+        if (args.Float("transport-occlusion") is { } to) transportOcclusion = Math.Clamp(to, 0f, 1f);
+        if (args.Flag("sky-no-inject")) skipInject = true;
+        if (args.Flag("sky-no-sample")) skipSkySample = true;
         // Standard rendering uses baked enclosure and dynamic bounce. --no-sky disables both;
         // --sky remains a compatibility no-op for existing invocations.
-        skyVisibilityEnabled = !cmdArgs.Contains("--no-sky");
+        args.Flag("sky");
+        skyVisibilityEnabled = !args.Flag("no-sky");
         if (skyVisibilityEnabled)
         {
             // Exposure accounts for the display level of the physically attenuated composition;
             // transport strength remains one so material albedo is not silently reinterpreted.
             render.Exposure = 1.0f;
         }
-        if (cmdArgs.Contains("--no-mask")) forceOpaqueMask = true;
+        if (args.Flag("no-mask")) forceOpaqueMask = true;
         // The A/B for the single-sample canopy: hashed stochastic cutout against the plain binary
         // one. Re-cooks nothing and rebuilds nothing — it changes one number in the material.
-        if (cmdArgs.Contains("--no-hashed-alpha")) hashedAlpha = false;
-        if (cmdArgs.Contains("--msaa1")) MsaaSamples = 1;
-        if (cmdArgs.Contains("--msaa2")) MsaaSamples = 2;
+        if (args.Flag("no-hashed-alpha")) hashedAlpha = false;
+        if (args.Flag("msaa1")) MsaaSamples = 1;
+        if (args.Flag("msaa2")) MsaaSamples = 2;
         // Present so the sample count can be swept from the command line in BOTH directions. Without
         // it only the non-default could be asked for, so a paired run could not be ordered 4-2-2-4 —
         // and on this machine a single ordering is not a measurement.
-        if (cmdArgs.Contains("--msaa4")) MsaaSamples = 4;
+        if (args.Flag("msaa4")) MsaaSamples = 4;
         // Align shadows and direct light to a detected environment sun by default. --sun-authored
         // opts out; probes without a detectable sun naturally retain the authored direction.
-        if (!cmdArgs.Contains("--sun-authored")) alignSunToProbe = true;
+        if (!args.Flag("sun-authored")) alignSunToProbe = true;
         // --sun-overhead maximizes directly lit courtyard area when isolating base lighting. The
         // cascade fit handles the vertical-light up-vector degeneracy.
-        if (cmdArgs.Contains("--sun-overhead")) sunOverhead = true;
+        if (args.Flag("sun-overhead")) sunOverhead = true;
         // Expose the probe view to automated/headless runs as well as the overlay checkbox.
-        if (cmdArgs.Contains("--show-probes")) showProbes = true;
-        if (cmdArgs.Contains("--probe-carryless")) probeCarryless = true;
+        if (args.Flag("show-probes")) showProbes = true;
+        if (args.Flag("probe-carryless")) probeCarryless = true;
         // GPU isolation submits and waits per pass. It attributes real tile execution but removes
         // overlap, so isolated pass times are not additive components of the normal frame.
-        if (cmdArgs.Contains("--gpu-isolate")) vk.GpuPassIsolation = true;
-        if (cmdArgs.Contains("--no-caster-cull")) shadowCasterCull = false;
-        if (cmdArgs.Contains("--no-foliage")) noFoliage = true;
-        if (cmdArgs.Contains("--probe-reference")) probeReference = true;
-        if (cmdArgs.Contains("--no-sky-bounce")) noSkyBounce = true;
-        for (var i = 0; i < cmdArgs.Length - 1; i++)
-        {
-            if (cmdArgs[i] == "--fog-slices" && int.TryParse(cmdArgs[i + 1], out var fs))
-                froxelGridZ = Math.Clamp(fs, 8, 128);
-        }
+        if (args.Flag("gpu-isolate")) vk.GpuPassIsolation = true;
+        if (args.Flag("no-caster-cull")) shadowCasterCull = false;
+        if (args.Flag("no-foliage")) noFoliage = true;
+        if (args.Flag("probe-reference")) probeReference = true;
+        if (args.Flag("no-sky-bounce")) noSkyBounce = true;
+        if (args.Int("fog-slices") is { } fs) froxelGridZ = Math.Clamp(fs, 8, 128);
         // --orbit: drive the camera on a fixed path so a measurement is of the renderer rather than
         // of one photograph of it. Ignores --cam, which is the still counterpart.
-        if (cmdArgs.Contains("--orbit")) orbit = true;
+        if (args.Flag("orbit")) orbit = true;
         // --cam x,y,z,yaw,pitch — a reproducible viewpoint. Without it every capture and every
         // census speaks only for wherever the camera happens to start, which for a question like
         // "how much of this scene is occluded" is the difference between a measurement and an
         // anecdote.
-        for (var i = 0; i < cmdArgs.Length - 1; i++)
+        if (args.String("cam") is { } cam)
         {
-            if (cmdArgs[i] != "--cam") continue;
-            var parts = cmdArgs[i + 1].Split(',');
-            if (parts.Length >= 5
-                && float.TryParse(parts[0], out var cx) && float.TryParse(parts[1], out var cy)
-                && float.TryParse(parts[2], out var cz) && float.TryParse(parts[3], out var cyaw)
-                && float.TryParse(parts[4], out var cpitch))
+            var parts = cam.Split(',');
+            var numbers = new float[5];
+            if (parts.Length < 5 || !Enumerable.Range(0, 5).All(i =>
+                    float.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out numbers[i])))
             {
-                cameraPosition = new Vector3(cx, cy, cz);
-                camYaw = cyaw * MathF.PI / 180f;
-                camPitch = cpitch * MathF.PI / 180f;
+                throw new AppArgsException($"--cam expects x,y,z,yaw,pitch, got '{cam}'.");
             }
+
+            cameraPosition = new Vector3(numbers[0], numbers[1], numbers[2]);
+            camYaw = numbers[3] * MathF.PI / 180f;
+            camPitch = numbers[4] * MathF.PI / 180f;
         }
-        if (cmdArgs.Contains("--ab-flat")) { abFlat = true; abMode = "flat"; }
-        for (var i = 0; i < cmdArgs.Length - 1; i++)
+        if (args.Flag("ab-flat")) { abFlat = true; abMode = "flat"; }
+        if (args.String("ab") is { } ab)
         {
-            if (cmdArgs[i] != "--ab") continue;
-            abMode = cmdArgs[i + 1];
+            abMode = ab;
             abFlat = abMode == "flat";
         }
-        for (var i = 0; i < cmdArgs.Length - 1; i++)
+        if (args.Float("ao-debug") is { } aoDebugValue) aoDebug = aoDebugValue;
+        if (args.Float("viz") is { } vizValue) vizChannel = vizValue;
+        if (args.Float("ao-radius") is { } aoRadius) ambient.RadiusMetres = aoRadius;
+        // --lod-arms <onPx> <offPx>: the two budgets --ab lod alternates between.
+        if (args.Values("lod-arms", 2) is [var lodOn, var lodOff])
         {
-            if (cmdArgs[i] == "--ao-debug" && float.TryParse(cmdArgs[i + 1], out var aoDebugValue)) aoDebug = aoDebugValue;
-            if (cmdArgs[i] == "--viz" && float.TryParse(cmdArgs[i + 1], out var vizValue)) vizChannel = vizValue;
-            if (cmdArgs[i] == "--ao-radius" && float.TryParse(cmdArgs[i + 1], out var aoRadius)) ambient.RadiusMetres = aoRadius;
-            // --lod-arms <onPx> <offPx>: the two budgets --ab lod alternates between.
-            if (cmdArgs[i] == "--lod-arms" && i + 2 < cmdArgs.Length
-                && float.TryParse(cmdArgs[i + 1], out var lodOn)
-                && float.TryParse(cmdArgs[i + 2], out var lodOff))
-            {
-                lodArmOn = lodOn;
-                lodArmOff = lodOff;
-            }
+            lodArmOn = float.Parse(lodOn, CultureInfo.InvariantCulture);
+            lodArmOff = float.Parse(lodOff, CultureInfo.InvariantCulture);
         }
         // Timing runs require --no-vsync; FIFO quantizes frame periods to refresh intervals and can
         // reverse small A/B differences.
-        if (cmdArgs.Contains("--no-vsync")) vk.VsyncEnabled = false;
+        if (args.Flag("no-vsync")) vk.VsyncEnabled = false;
         // --shot <path>: render --shot-frames frames, write the ambient-visibility buffer and the
         // tonemapped scene beside it, and close. Headless in the sense that matters — nobody has
         // to be watching.
-        for (var i = 0; i < cmdArgs.Length - 1; i++)
-        {
-            if (cmdArgs[i] == "--shot") shotPath = cmdArgs[i + 1];
-            if (cmdArgs[i] == "--shot-frames" && int.TryParse(cmdArgs[i + 1], out var sf)) shotFrame = sf;
-        }
+        if (args.String("shot") is { } shot) shotPath = shot;
+        if (args.Int("shot-frames") is { } sf) shotFrame = sf;
 
         // Seed sun yaw/pitch from the default direction so the Sun controls
         // start matching the baked look.
@@ -293,12 +264,14 @@ internal sealed partial class SponzaLoop
 
         // --tune <uName>=<value>, repeatable. A shader dial that can only be reached from the
         // overlay cannot be measured, because an --ab run has no overlay.
-        var cmdArgsTune = Environment.GetCommandLineArgs();
-        for (var i = 0; i < cmdArgsTune.Length - 1; i++)
+        foreach (var tune in args.All("tune"))
         {
-            if (cmdArgsTune[i] != "--tune") continue;
-            var kv = cmdArgsTune[i + 1].Split('=');
-            if (kv.Length != 2 || !float.TryParse(kv[1], out var tv)) continue;
+            var kv = tune.Split('=');
+            if (kv.Length != 2 || !float.TryParse(kv[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var tv))
+            {
+                throw new AppArgsException($"--tune expects uName=value, got '{tune}'.");
+            }
+
             Console.WriteLine(tunePanel.TrySetValue(kv[0], tv)
                 ? $"[VulkanSponza] tune {kv[0]} = {tv}"
                 : $"[VulkanSponza] tune {kv[0]}: no such shader uniform — ignored.");

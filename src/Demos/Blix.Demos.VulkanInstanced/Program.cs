@@ -27,21 +27,19 @@ namespace Blix.Demos.VulkanInstanced;
 //   • the 5000-cube grid scene + the --frames auto-exit validation harness
 public static class Program
 {
-    public static void Main(string[] args)
+    public static int Main(string[] args) => BlixApps.Main(args, Run);
+
+    private static int Run(AppArgs args)
     {
         // Default: interactive — the window stays open until Esc/close so the
         // 5000-cube field is actually visible. `--frames N` auto-exits after N
         // frames (the headless validation gate uses --frames 8, which is > the
         // frames-in-flight count so both replicated SSBO slots get exercised).
-        var exitAfterFrames = 0;
-        for (var i = 0; i < args.Length - 1; i++)
-        {
-            if (args[i] == "--frames" && int.TryParse(args[i + 1], out var n)) exitAfterFrames = n;
-        }
-
-        var loop = new InstancedLoop(exitAfterFrames);
-        using var window = new Window(loop, new WindowOptions("Blix — Instancing Proof (5000 cubes)", 1280, 720));
+        var options = WindowOptions.FromArgs(args, new WindowOptions("Blix — Instancing Proof (5000 cubes)", 1280, 720));
+        var loop = new InstancedLoop(options.ExitAfterFrames);
+        using var window = new Window(loop, options);
         window.Run();
+        return 0;
     }
 }
 

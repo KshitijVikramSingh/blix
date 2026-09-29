@@ -50,25 +50,24 @@ namespace Blix.Demos.Bulwark;
 //     the skinned-instancing crowd code, camera feel
 public static class Program
 {
-    public static void Main(string[] args)
+    public static int Main(string[] args) => BlixApps.Main(args, Run);
+
+    private static int Run(AppArgs args)
     {
         // --selftest: run the A* / wall-off assertions headless (no window, no Vulkan)
         // and exit with the failure count. The nav lives in the demo (not extracted),
         // so its proof lives here too rather than in Blix.Test.Graphics.
-        if (args.Contains("--selftest"))
+        if (args.Flag("selftest"))
         {
-            Environment.Exit(new BulwarkLoop(0).RunNavSelfTest());
+            return new BulwarkLoop(0).RunNavSelfTest();
         }
 
-        var exitAfterFrames = 0;   // 0 = interactive; --frames N for the headless smoke
-        for (var i = 0; i < args.Length - 1; i++)
-        {
-            if (args[i] == "--frames" && int.TryParse(args[i + 1], out var n)) exitAfterFrames = n;
-        }
-
-        var loop = new BulwarkLoop(exitAfterFrames);
-        using var window = new Window(loop, new WindowOptions("Blix — Bulwark (Tower Defense)", 1280, 720));
+        // No --frames is interactive; --frames N is the bounded smoke run.
+        var options = WindowOptions.FromArgs(args, new WindowOptions("Blix — Bulwark (Tower Defense)", 1280, 720));
+        var loop = new BulwarkLoop(options.ExitAfterFrames);
+        using var window = new Window(loop, options);
         window.Run();
+        return 0;
     }
 }
 

@@ -37,33 +37,35 @@ namespace Blix.Tools.View;
 //     the root delta drives the model — all policy a game would decide for itself.
 public static class Program
 {
-    [BlixApp("view", Summary = "look at a model or rig", Headed = true)]
-    public static void Main(string[] args)
+    public static int Main(string[] args) => BlixApps.Main(args);
+
+    [BlixApp("view", Summary = "look at a model or rig", Headed = true, Default = true)]
+    public static void View(AppArgs args)
     {
         // --model <path> loads a glTF as its authored NODE TREE; --rig <path> loads one as a
         // SKELETON and its clips. Two flags rather than one that guesses, because they are two
         // different questions about an asset and the answer to "which importer" is not something
         // a viewer should infer from whether a file happens to contain a skin.
-        var modelPath = ArgValue(args, "--model");
-        var rigPath = ArgValue(args, "--rig");
+        var modelPath = args.String("model");
+        var rigPath = args.String("rig");
 
         // Saves hunting through seventy-six clips on every launch when you already know which
         // one you came to look at. Falls back to the preferred-name search when absent, and
         // says so rather than silently playing something else when the name does not match.
-        var clipName = ArgValue(args, "--clip");
+        var clipName = args.String("clip");
 
         // --blend / --additive name the SECOND clip and pick the composition with it, because the
         // mode and the clip are one decision: "blend into a run" is not two settings that happen to
         // agree. It also means a bounded run reaches the blend path at all — without a flag, the
         // only way in is a combo box, and a code path a headless run cannot reach is a code path
         // nothing checks.
-        var blendClip = ArgValue(args, "--blend");
-        var additiveClip = ArgValue(args, "--additive");
+        var blendClip = args.String("blend");
+        var additiveClip = args.String("additive");
 
         // --mask names the CLIP a masked layer plays, and picks the composition with it for the
         // same reason --blend does: a mode reachable only through a combo box is a mode no bounded
         // run and no capture can get to, which makes it a mode nothing checks.
-        var maskClip = ArgValue(args, "--mask");
+        var maskClip = args.String("mask");
 
         // Which BONE that layer starts at is not parsed here, and neither is the weight, the
         // falloff, the lockstep or the root drive. Those are declared state on RigAnimation, so
@@ -73,7 +75,7 @@ public static class Program
 
         // --instances N draws N copies of the rig, each on its own clock. One is the ordinary case
         // and takes exactly the same path as eight — there is no single-body shader.
-        var instances = int.TryParse(ArgValue(args, "--instances"), out var n) ? n : 1;
+        var instances = args.Int("instances", 1);
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
             Title = "Blix — model and rig viewer",
@@ -84,16 +86,6 @@ public static class Program
         var loop = new ViewerLoop(modelPath, rigPath, clipName, blendClip, additiveClip, instances, maskClip, args);
         using var window = new Window(loop, options);
         window.Run();
-    }
-
-    private static string? ArgValue(string[] args, string name)
-    {
-        for (var i = 0; i < args.Length - 1; i++)
-        {
-            if (args[i] == name) return args[i + 1];
-        }
-
-        return null;
     }
 }
 
@@ -153,12 +145,12 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         string? additiveClip = null,
         int instances = 1,
         string? maskClip = null,
-        string[]? args = null)
+        AppArgs? args = null)
     {
         this.modelPath = modelPath;
         this.rigPath = rigPath;
         this.clipName = clipName;
-        this.args = args ?? Array.Empty<string>();
+        this.args = args ?? AppArgs.Empty;
         requestedInstances = instances;
         secondClip = blendClip ?? additiveClip ?? maskClip;
         startMode = blendClip is not null ? PoseMode.Blend
@@ -169,7 +161,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
 
     // Kept whole rather than pre-parsed, because the declared flags cannot be applied until the
     // subject they write to exists — and the subject is a rig that has not been loaded yet.
-    private readonly string[] args;
+    private readonly AppArgs args;
 
 
     // <b>Two cameras, one class.</b> The window's view and the panel's viewport each carried their
@@ -516,19 +508,17 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         {
             tunables.Apply(args);
         }
-        catch (ArgumentException bad)
+        catch (AppArgsException bad)
         {
             Console.Error.WriteLine(bad.Message);
-            Environment.Exit(1);
+            Environment.Exit(2);
         }
 
         // Named attachments, applied once the rig is loaded because a name only means something
         // against a rig. An unknown name is reported rather than ignored: a flag that landed and a
         // flag that was dropped look identical from a window.
-        for (var i = 0; i < args.Length - 1; i++)
+        foreach (var wanted in args.All("attach"))
         {
-            if (args[i] != "--attach") continue;
-            var wanted = args[i + 1];
             if (rig.Attachments.Any(a => string.Equals(a.Name, wanted, StringComparison.Ordinal)))
             {
                 visibleAttachments.Add(wanted);

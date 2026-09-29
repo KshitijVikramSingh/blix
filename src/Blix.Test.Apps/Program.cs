@@ -23,12 +23,12 @@ namespace Blix.Test.Apps;
 //   does not exist.
 public static class Program
 {
-    public static int Main(string[] args)
-    {
-        // The dispatch path itself. A selector reaches one of the fixtures below and
-        // this suite never runs; without one, Dispatch returns null and we do.
-        if (BlixApps.Dispatch(args) is { } code) return code;
+    // The dispatch path itself. A selector reaches one of the fixtures below and this suite
+    // never runs; without one, and with no default declared here, the suite is what runs.
+    public static int Main(string[] args) => BlixApps.Main(args, _ => Suite());
 
+    private static int Suite()
+    {
         var t = new TestRunner();
         var self = Assembly.GetExecutingAssembly();
 
@@ -42,6 +42,8 @@ public static class Program
             found.Single(a => a.Name == "fixture-headed").Headed);
         t.Expect("and headless is the default",
             !found.Single(a => a.Name == "fixture-echo").Headed);
+        t.Expect("nothing here is marked default, so the suite runs unnamed",
+            !found.Any(a => a.Default));
 
         // ── the two readers agree ───────────────────────────────────────────
         IndexMatchesReflection(t, self, found);
@@ -67,32 +69,49 @@ public static class Program
         t.Expect("a recipe found by reflection can be run", outcome.Wrote);
         t.Expect("and its outcome comes back", outcome.Detail == "in.fixture-a -> out.fixture");
 
+        // ── the command line, read ──────────────────────────────────────────
+        ArgumentsAreReadNotParsed(t);
+
         // ── dispatch ────────────────────────────────────────────────────────
-        t.Expect("no selector means this is not an app invocation",
-            BlixApps.Dispatch(new[] { "--whatever" }, self) is null);
+        t.Expect("no selector and no default runs what the caller hands in",
+            Run(out _, self, new string[0], otherwise: _ => 42) == 42);
 
         t.Expect("a selector runs the named app and returns its code",
-            BlixApps.Dispatch(new[] { BlixApps.Selector, "fixture-code" }, self) == 7);
+            Run(out _, self, BlixApps.Selector, "fixture-code") == 7);
 
         t.Expect("an app that returns void is a success",
-            BlixApps.Dispatch(new[] { BlixApps.Selector, "fixture-void" }, self) == 0);
+            Run(out _, self, BlixApps.Selector, "fixture-void") == 0);
 
-        t.Expect("an app taking no arguments is still invoked",
-            BlixApps.Dispatch(new[] { BlixApps.Selector, "fixture-void" }, self) == 0);
-
-        // The selector is removed before the app sees it, which is what lets an app's
-        // own parsing stay ignorant of this layer. Echo returns its argument count.
+        // The selector is removed before the app sees it, which is what lets an app's own reading
+        // stay ignorant of this layer. Echo returns its positional count.
         t.Expect("the selector is stripped from the app's arguments",
-            BlixApps.Dispatch(new[] { "a", BlixApps.Selector, "fixture-echo", "b", "c" }, self) == 3,
+            Run(out _, self, "a", BlixApps.Selector, "fixture-echo", "b", "c") == 3,
             "expected the app to see exactly a, b, c");
+
+        // ── what nobody read is said out loud ───────────────────────────────
+        Run(out var typo, self, BlixApps.Selector, "fixture-reads-years", "--years", "3", "--year", "4");
+        t.Expect("an argument nothing read is one warning line",
+            typo.Contains("nothing read --year 4", StringComparison.Ordinal), typo.Trim());
+        t.Expect("and one that was read is not in it",
+            !typo.Contains("--years", StringComparison.Ordinal), typo.Trim());
+
+        Run(out var clean, self, BlixApps.Selector, "fixture-reads-years", "--years", "3");
+        t.Expect("a fully read command line prints nothing", clean.Length == 0, clean.Trim());
+
+        var malformed = Run(out var complaint, self, BlixApps.Selector, "fixture-reads-years", "--years", "three");
+        t.Expect("a value that cannot mean what its reader asked for exits 2",
+            malformed == 2, $"exit {malformed}");
+        t.Expect("and says which flag and what it got",
+            complaint.Contains("--years", StringComparison.Ordinal)
+            && complaint.Contains("'three'", StringComparison.Ordinal), complaint.Trim());
 
         // ── failing loudly ──────────────────────────────────────────────────
         t.ExpectThrows("an unknown app names what does exist",
-            () => BlixApps.Dispatch(new[] { BlixApps.Selector, "nope" }, self),
+            () => BlixApps.Main(new[] { BlixApps.Selector, "nope" }, assembly: self),
             mustMention: "fixture-echo");
 
         t.ExpectThrows("a selector with nothing after it is an error",
-            () => BlixApps.Dispatch(new[] { BlixApps.Selector }, self),
+            () => BlixApps.Main(new[] { BlixApps.Selector }, assembly: self),
             mustMention: BlixApps.Selector);
 
         // ── is what runs what the sources say? ──────────────────────────────
@@ -379,7 +398,7 @@ public static class Program
                 using Blix.Core;
                 public static class P
                 {
-                    public static int Main(string[] args) => BlixApps.Dispatch(args) ?? 0;
+                    public static int Main(string[] args) => BlixApps.Main(args, _ => 0);
 
                     [BlixApp("{{app}}")]
                     public static int Run()
@@ -455,6 +474,98 @@ public static class Program
             try { Directory.Delete(Path.Combine(repo, ".blixtest"), recursive: true); } catch (IOException) { }
             catch (UnauthorizedAccessException) { }
         }
+    }
+
+    /// <summary>Run <see cref="BlixApps.Main"/> in process, with what it wrote to stderr.</summary>
+    private static int Run(out string stderr, Assembly self, params string[] args) =>
+        Run(out stderr, self, args, otherwise: null);
+
+    private static int Run(out string stderr, Assembly self, string[] args, Func<AppArgs, int>? otherwise)
+    {
+        var was = Console.Error;
+        var captured = new StringWriter();
+        Console.SetError(captured);
+        try
+        {
+            return BlixApps.Main(args, otherwise, self);
+        }
+        finally
+        {
+            Console.SetError(was);
+            stderr = captured.ToString();
+        }
+    }
+
+    /// <summary>
+    /// The command line is parsed once and each part is interpreted by whoever reads it.
+    /// </summary>
+    /// <remarks>
+    /// Every case here is one the hand-written parsers in this tree got wrong at least once: a
+    /// flag that swallowed the file after it, a number read in the machine's culture, a repeated
+    /// option where only the first was seen, and a typo that looked accepted.
+    /// </remarks>
+    private static void ArgumentsAreReadNotParsed(TestRunner t)
+    {
+        var both = AppArgs.Parse(new[] { "--width", "640", "--height=480" });
+        t.Expect("--name value and --name=value read the same",
+            both.Int("width") == 640 && both.Int("height") == 480);
+
+        var spelled = AppArgs.Parse(new[] { "--mapseed", "7", "--Drive-Root" });
+        t.Expect("names match without dashes or case",
+            spelled.Int("map-seed") == 7 && spelled.Flag("drive-root"));
+
+        var was = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            // A culture whose decimal separator is a comma, which is the machine the RTS's
+            // "8,65,710 wood" came from.
+            System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("de-DE");
+            var scale = AppArgs.Parse(new[] { "--scale", "1.5" }).Float("scale");
+            t.Expect("numbers are read culture-invariant", scale == 1.5f, $"read {scale}");
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = was;
+        }
+
+        var repeated = AppArgs.Parse(new[] { "--tint", "a=1", "--tint", "b=2" });
+        t.Expect("a repeated option keeps every value", repeated.All("tint").SequenceEqual(new[] { "a=1", "b=2" }));
+        t.Expect("and a single read takes the last",
+            AppArgs.Parse(new[] { "--frames", "1", "--frames", "2" }).Int("frames") == 2);
+
+        var cam = AppArgs.Parse(new[] { "--win", "1280", "720", "scene.glb" });
+        t.Expect("an option can take several values",
+            cam.Values("win", 2) is ["1280", "720"] && cam.Positionals is ["scene.glb"]);
+
+        var flagThenFile = AppArgs.Parse(new[] { "--flip-v", "model.glb" });
+        t.Expect("a flag does not swallow the file after it",
+            flagThenFile.Flag("flip-v") && flagThenFile.Positionals is ["model.glb"]);
+
+        var negative = AppArgs.Parse(new[] { "--offset", "-3" });
+        t.Expect("a negative number is a value, not an option", negative.Int("offset") == -3);
+
+        var terminated = AppArgs.Parse(new[] { "--out", "x", "--", "--not-a-flag" });
+        t.Expect("everything after -- is positional",
+            terminated.String("out") == "x" && terminated.Positionals is ["--not-a-flag"]);
+
+        var verb = AppArgs.Parse(new[] { "batch", "list.tsv", "--quiet" });
+        t.Expect("a leading verb is read as a command",
+            verb.Command() == "batch" && verb.Flag("quiet") && verb.Positionals is ["list.tsv"]);
+
+        var view = AppArgs.Parse(new[] { "--view", "shadow-map" });
+        t.Expect("an enum matches without dashes or case",
+            view.Enum<FixtureView>("view") == FixtureView.ShadowMap);
+
+        var unread = AppArgs.Parse(new[] { "--years", "3", "--year", "4" });
+        unread.Int("years");
+        t.Expect("what nothing read is what is left", unread.Unread is ["--year", "4"]);
+
+        t.ExpectThrows("a value that is not a number is refused, naming the flag",
+            () => AppArgs.Parse(new[] { "--frames", "abc" }).Int("frames"),
+            mustMention: "--frames");
+        t.ExpectThrows("an option with nothing after it is refused",
+            () => AppArgs.Parse(new[] { "--out" }).String("out"),
+            mustMention: "--out");
     }
 
     /// <summary>Run the resolver in process, with everything it printed.</summary>
@@ -550,10 +661,10 @@ public static class Program
     // return a code it has no opinion about.
 
     [BlixApp("fixture-echo", Summary = "returns how many arguments it was given")]
-    private static int Echo(string[] args) => args.Length;
+    private static int Echo(AppArgs args) => args.Positionals.Count;
 
     [BlixApp("fixture-code", Summary = "returns a specific exit code")]
-    private static int Code(string[] args) => 7;
+    private static int Code(AppArgs args) => 7;
 
     [BlixApp("fixture-void", Summary = "takes nothing, returns nothing")]
     private static void Void()
@@ -607,5 +718,14 @@ public static class Program
     }
 
     [BlixApp("fixture-headed", Summary = "declares that it would open a window", Headed = true)]
-    private static int Headed(string[] args) => 0;
+    private static int Headed(AppArgs args) => 0;
+
+    [BlixApp("fixture-reads-years", Summary = "reads --years and nothing else")]
+    private static int ReadsYears(AppArgs args) => args.Int("years", 1);
+}
+
+internal enum FixtureView
+{
+    Lit,
+    ShadowMap,
 }

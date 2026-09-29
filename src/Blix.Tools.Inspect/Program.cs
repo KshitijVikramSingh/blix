@@ -18,10 +18,14 @@ namespace Blix.Tools.Inspect;
 /// </remarks>
 public static class Program
 {
-    [BlixApp("inspect", Summary = "list what is in an asset — source or cooked; reports rather than judges")]
-    public static int Main(string[] args)
+    public static int Main(string[] args) => BlixApps.Main(args);
+
+    [BlixApp("inspect", Summary = "list what is in an asset — source or cooked; reports rather than judges", Default = true)]
+    public static int Inspect(AppArgs args)
     {
-        if (args.Length < 1 || args[0] is "-h" or "--help")
+        var help = args.Flag("help") | args.Flag("h");
+        var paths = args.Positionals;
+        if (paths.Count < 1 || help)
         {
             Console.WriteLine("Usage: blix inspect <file>");
             Console.WriteLine("  A .gltf/.glb  — the node hierarchy, each mesh node's composed-world");
@@ -31,10 +35,10 @@ public static class Program
             Console.WriteLine();
             Console.WriteLine("Reports rather than judging content. Usage and I/O errors still fail.");
             Console.WriteLine("For a verdict, use `blix check`.");
-            return args.Length < 1 ? 1 : 0;
+            return help ? 0 : 1;
         }
 
-        var path = args[0];
+        var path = paths[0];
         if (!File.Exists(path))
         {
             Console.Error.WriteLine($"No file at {path}.");
@@ -44,7 +48,7 @@ public static class Program
         // The common preamble identifies cooked artifacts without a format-specific command flag.
         if (CookedFile.TryReadHeader(path) is { } cooked) return InspectCooked(path, cooked);
 
-        return InspectGltf(new[] { "inspect", path });
+        return InspectGltf(path);
     }
 
     private static int InspectCooked(string path, CookedHeader header)
@@ -137,14 +141,8 @@ public static class Program
         foreach (var r in rows) Console.WriteLine(r);
     }
 
-    private static int InspectGltf(string[] args)
+    private static int InspectGltf(string path)
     {
-        if (args.Length < 2)
-        {
-            Console.Error.WriteLine("Usage: blix inspect <gltf-or-glb>");
-            return 1;
-        }
-        var path = args[1];
         if (!File.Exists(path))
         {
             Console.Error.WriteLine($"File not found: {path}");

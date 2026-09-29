@@ -165,7 +165,7 @@ instead of preserving a second historical account beside it.
 
 ## Shared application arguments
 
-Applications that use `WindowOptions.FromArgs` inherit:
+Windowed applications that use `WindowOptions.FromArgs` inherit:
 
 ```text
 --frames N       close after N rendered frames
@@ -176,7 +176,9 @@ Applications that use `WindowOptions.FromArgs` inherit:
 --dump-frame N   write the diagnostics dump for frame N
 ```
 
-Application-specific arguments remain owned by the application.
+Application-specific arguments remain owned by the application, which reads
+them from the same `AppArgs`. An argument nothing read is reported as one
+warning line when the program exits.
 
 ## Platform notes
 

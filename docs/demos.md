@@ -28,7 +28,7 @@ are also discoverable by their assembly name and by an unambiguous suffix:
 ./blix run Blix.Demos.Runner --frames 120
 ```
 
-A new application needs `[BlixApp]`, `WindowOptions.FromArgs`, and the `./blix`
+A new application needs `BlixApps.Main`, `WindowOptions.FromArgs`, and the `./blix`
 front door — not a launcher of its own. The eleven that used to live under
 `tools/run-*.sh` are gone; what remains there prepares assets (Sponza's pack
 set, the glTF corpus) or measures something, which is work no front door does.

@@ -37,11 +37,14 @@ namespace Blix.Demos.VulkanGraph;
 //   • the 3-pass invert scene as a visual correctness check
 public static class Program
 {
-    public static void Main()
+    public static int Main(string[] args) => BlixApps.Main(args, Run);
+
+    private static int Run(AppArgs args)
     {
         var loop = new GraphLoop();
-        using var window = new Window(loop, new WindowOptions("Blix — Vulkan RenderGraph", 1280, 720));
+        using var window = new Window(loop, WindowOptions.FromArgs(args, new WindowOptions("Blix — Vulkan RenderGraph", 1280, 720)));
         window.Run();
+        return 0;
     }
 }
 

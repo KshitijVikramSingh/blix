@@ -12,19 +12,18 @@ namespace Blix.Tools.Check;
 // asset check.
 public static class Program
 {
-    [BlixApp("check", Summary = "judge model, rig, animation, and cooked-load contracts; exits non-zero")]
-    public static int Main(string[] args)
+    public static int Main(string[] args) => BlixApps.Main(args);
+
+    [BlixApp("check", Summary = "judge model, rig, animation, and cooked-load contracts; exits non-zero", Default = true)]
+    public static int Check(AppArgs args)
     {
         // Import refusals are expected asset verdicts. Other exception types remain tool faults and
         // are not converted into a clean asset report.
         try
         {
-            for (var i = 0; i < args.Length - 1; i++)
-            {
-                if (args[i] == "--model") return InspectModel(args[i + 1]);
-                if (args[i] == "--rig") return InspectRig(args[i + 1], args.Contains("--verbose"));
-                if (args[i] == "--cooked") return JudgeCooked(args[i + 1]);
-            }
+            if (args.String("model") is { } model) return InspectModel(model);
+            if (args.String("rig") is { } rig) return InspectRig(rig, args.Flag("verbose"));
+            if (args.String("cooked") is { } cooked) return JudgeCooked(cooked);
         }
         catch (AssetImportException refused)
         {
@@ -32,7 +31,7 @@ public static class Program
             return 1;
         }
 
-        if (args.Contains("--help") || args.Contains("-h"))
+        if (args.Flag("help") | args.Flag("h"))
         {
             Console.WriteLine("Usage: blix check --model <gltf-or-glb> | --rig <rigged.glb> [--verbose] | --cooked <directory>");
             Console.WriteLine("  --model     import a static or rigged model; report shape and reject unusable clip lengths");

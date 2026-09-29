@@ -58,44 +58,31 @@ public sealed record WindowOptions(string Title, int Width, int Height)
     public int DumpOnFrame { get; init; }
 
     /// <summary>
-    /// Reads the arguments every Blix application shares, leaving the rest to the application.
+    /// Reads the arguments every windowed Blix application shares, leaving the rest to the
+    /// application.
     /// </summary>
     /// <remarks>
-    /// Deliberately does NOT own the whole command line. An application knows its own flags and this does
-    /// not try to; it claims the handful that are about being a Blix application at all, and ignores
-    /// everything else rather than failing on it. Unknown arguments are the application's business.
+    /// Deliberately does NOT own the whole command line. It reads the handful of flags that are
+    /// about being a windowed Blix application at all, from the same <see cref="AppArgs"/> the
+    /// application reads its own from, and anything neither reads is reported by
+    /// <see cref="BlixApps.Main"/> rather than failed on. A value that cannot mean what it says
+    /// (<c>--frames abc</c>) is an error, not a flag quietly skipped.
     /// </remarks>
-    public static WindowOptions FromArgs(string[] args, WindowOptions? defaults = null)
+    public static WindowOptions FromArgs(AppArgs args, WindowOptions? defaults = null)
     {
         ArgumentNullException.ThrowIfNull(args);
         var result = defaults ?? Default;
 
-        for (var i = 0; i < args.Length; i++)
-        {
-            var next = i + 1 < args.Length ? args[i + 1] : null;
-            switch (args[i])
-            {
-                case "--frames" when int.TryParse(next, out var frames) && frames > 0:
-                    result = result with { ExitAfterFrames = frames };
-                    break;
-                case "--dump-frame" when int.TryParse(next, out var dumpFrame) && dumpFrame > 0:
-                    result = result with { DumpOnFrame = dumpFrame };
-                    break;
-                case "--width" when int.TryParse(next, out var width) && width > 0:
-                    result = result with { Width = width };
-                    break;
-                case "--height" when int.TryParse(next, out var height) && height > 0:
-                    result = result with { Height = height };
-                    break;
-                case "--title" when next is not null:
-                    result = result with { Title = next };
-                    break;
-                case "--debug":
-                    result = result with { Diagnostics = true };
-                    break;
-            }
-        }
+        if (args.Int("frames") is { } frames) result = result with { ExitAfterFrames = Positive("frames", frames) };
+        if (args.Int("dump-frame") is { } dumpFrame) result = result with { DumpOnFrame = Positive("dump-frame", dumpFrame) };
+        if (args.Int("width") is { } width) result = result with { Width = Positive("width", width) };
+        if (args.Int("height") is { } height) result = result with { Height = Positive("height", height) };
+        if (args.String("title") is { } title) result = result with { Title = title };
+        if (args.Flag("debug")) result = result with { Diagnostics = true };
 
         return result;
     }
+
+    private static int Positive(string name, int value) =>
+        value > 0 ? value : throw new AppArgsException($"--{name} expects a number above zero, got {value}.");
 }

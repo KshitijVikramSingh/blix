@@ -39,18 +39,16 @@ namespace Blix.Demos.TankArena;
 //   • AvoidObstacles is the FIRST pressure on a nav primitive — not yet a primitive
 public static class Program
 {
-    public static void Main(string[] args)
-    {
-        var exitAfterFrames = 0;
-        for (var i = 0; i < args.Length - 1; i++)
-        {
-            if (args[i] == "--frames" && int.TryParse(args[i + 1], out var n)) exitAfterFrames = n;
-        }
-        var debugOverlay = args.Contains("--debug");   // live tuning + diagnostics overlay (` to show)
+    public static int Main(string[] args) => BlixApps.Main(args, Run);
 
-        var loop = new TankArenaLoop(exitAfterFrames, debugOverlay);
-        using var window = new Window(loop, new WindowOptions("Blix — Tank Arena", 1280, 720));
+    private static int Run(AppArgs args)
+    {
+        // --debug is the live tuning + diagnostics overlay (` to show).
+        var options = WindowOptions.FromArgs(args, new WindowOptions("Blix — Tank Arena", 1280, 720));
+        var loop = new TankArenaLoop(options.ExitAfterFrames, options.Diagnostics);
+        using var window = new Window(loop, options);
         window.Run();
+        return 0;
     }
 }
 

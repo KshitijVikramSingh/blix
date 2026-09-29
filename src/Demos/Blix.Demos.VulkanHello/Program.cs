@@ -26,7 +26,9 @@ namespace Blix.Demos.VulkanHello;
 //   • nothing gameplay — this is the minimal reference call site; keep it minimal
 public static class Program
 {
-    public static void Main(string[] args)
+    public static int Main(string[] args) => BlixApps.Main(args, Run);
+
+    private static int Run(AppArgs args)
     {
         var loop = new HelloLoop();
         // Through FromArgs so the host's shared arguments actually reach it. This demo used to
@@ -42,6 +44,7 @@ public static class Program
         });
         using var window = new Window(loop, options);
         window.Run();
+        return 0;
     }
 }
 

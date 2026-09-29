@@ -1,6 +1,7 @@
 using System.Numerics;
 using Blix;
 using Blix.Cooked;
+using Blix.Core;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 using Blix.Tools.Studio;
@@ -32,9 +33,11 @@ using Blix.Verify;
 //   belongs to a different body.
 public static class Program
 {
-    public static int Main(string[] args)
+    public static int Main(string[] args) => BlixApps.Main(args, Run);
+
+    private static int Run(AppArgs args)
     {
-        var verbose = args.Contains("--verbose");
+        var verbose = args.Flag("verbose");
         var t = new TestRunner();
 
         var shaderDirectory = Path.Combine(AppContext.BaseDirectory, "Shaders");

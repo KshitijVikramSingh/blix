@@ -32,11 +32,14 @@ namespace Blix.Demos.VulkanLit;
 //   • the specific test scene: PBR sphere rig, light placement, camera
 public static class Program
 {
-    public static void Main()
+    public static int Main(string[] args) => BlixApps.Main(args, Run);
+
+    private static int Run(AppArgs args)
     {
         var loop = new LitLoop();
-        using var window = new Window(loop, new WindowOptions("Blix — Vulkan Lit + Shadow + Skinned glTF", 1280, 720));
+        using var window = new Window(loop, WindowOptions.FromArgs(args, new WindowOptions("Blix — Vulkan Lit + Shadow + Skinned glTF", 1280, 720)));
         window.Run();
+        return 0;
     }
 }
 

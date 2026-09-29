@@ -41,18 +41,16 @@ namespace Blix.Demos.VulkanParticles;
 //   • the three effect simulations (fountain / explosion / vortex) + camera controls
 public static class Program
 {
-    public static void Main(string[] args)
-    {
-        var exitAfterFrames = 0;
-        for (var i = 0; i < args.Length - 1; i++)
-        {
-            if (args[i] == "--frames" && int.TryParse(args[i + 1], out var n)) exitAfterFrames = n;
-        }
-        var overlay = args.Contains("--debug");   // opt into the tuning + diagnostics overlay
+    public static int Main(string[] args) => BlixApps.Main(args, Run);
 
-        var loop = new ParticlesLoop(exitAfterFrames, overlay);
-        using var window = new Window(loop, new WindowOptions("Blix — Particles (soft + bloom)", 1280, 720));
+    private static int Run(AppArgs args)
+    {
+        // --debug opts into the tuning + diagnostics overlay.
+        var options = WindowOptions.FromArgs(args, new WindowOptions("Blix — Particles (soft + bloom)", 1280, 720));
+        var loop = new ParticlesLoop(options.ExitAfterFrames, options.Diagnostics);
+        using var window = new Window(loop, options);
         window.Run();
+        return 0;
     }
 }
 

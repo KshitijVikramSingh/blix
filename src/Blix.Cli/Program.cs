@@ -207,25 +207,24 @@ public static class Program
             {
                 foreach (var app in index.Apps)
                 {
-                    // An app declared ON the entry point needs no selector: exec it and it
-                    // simply runs. Only an assembly carrying SEVERAL apps has to be told
-                    // which one, and only those callers need BlixApps.Dispatch at all.
+                    // The default app needs no selector: exec the executable and it is what
+                    // runs. Every other app in the assembly has to be named.
                     apps.Add(new App(
                         project, app.Name, app.Summary, app.Headed, host, assembly,
-                        app.IsEntryPoint ? null : app.Name, stale, Declared: true,
+                        app.IsDefault ? null : app.Name, stale, Declared: true,
                         SourceProject: index.Project));
                 }
             }
 
             // CONVENTION: an executable is runnable, named after itself, unless one of
-            // its declarations already IS the entry point and has given it a better name.
+            // its declarations is its default app and has given it a better name.
             //
             // The condition is the whole rule. Suppressing this whenever an assembly
             // declares anything was too blunt: a project that declares thirty-five tools
             // would lose its application, which is the one app it certainly has. An
             // executable being runnable is simply true, and declaring only ever renames
             // it or adds neighbours.
-            if (index.HasEntryPoint && !index.Apps.Any(a => a.IsEntryPoint))
+            if (index.HasEntryPoint && !index.Apps.Any(a => a.IsDefault))
             {
                 var name = Path.GetFileNameWithoutExtension(index.Assembly);
                 apps.Add(new App(project, name, null, false, host, assembly, null, stale,
@@ -756,7 +755,7 @@ public static class Program
     private sealed record Index(
         string Assembly, string? AppHost, bool HasEntryPoint, IndexedApp[] Apps, string? Project = null);
 
-    private sealed record IndexedApp(string Name, string? Summary, bool Headed, bool IsEntryPoint);
+    private sealed record IndexedApp(string Name, string? Summary, bool Headed, bool IsDefault);
 
     /// <param name="AppHost">The native binary, when the project builds one.</param>
     /// <param name="Assembly">Its dll, which is how an app with no apphost is run.</param>

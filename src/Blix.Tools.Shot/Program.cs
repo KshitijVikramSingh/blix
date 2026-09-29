@@ -1,3 +1,4 @@
+using System.Globalization;
 using Blix.Assets;
 using System.Numerics;
 using Blix;
@@ -32,27 +33,29 @@ namespace Blix.Tools.Shot;
 //   the real radiance and the curve is an offline choice rather than baked in.
 public static class Program
 {
-    [BlixApp("shot", Summary = "render a model or rig to a PNG", Headed = true)]
-    public static int Main(string[] args)
+    public static int Main(string[] args) => BlixApps.Main(args);
+
+    [BlixApp("shot", Summary = "render a model or rig to a PNG", Headed = true, Default = true)]
+    public static int Shot(AppArgs args)
     {
-        var output = ArgValue(args, "--out") ?? "capture.png";
-        var modelPath = ArgValue(args, "--model");
-        var rigPath = ArgValue(args, "--rig");
+        var output = args.String("out", "capture.png");
+        var modelPath = args.String("model");
+        var rigPath = args.String("rig");
 
         // <b>A pose, named by a clip and a time, is a reproducible picture.</b> That pairing is what
         // makes a capture evidence rather than a screenshot: "Walking_A at 0.35 s looked like this"
         // can be re-rendered on any machine and diffed, where "the walk looked wrong" cannot. The
         // frame count is fixed and nothing here reads the clock, so two runs of the same arguments
         // produce the same bytes.
-        var clipName = ArgValue(args, "--clip");
-        var clipTime = double.TryParse(ArgValue(args, "--time"), out var parsed) ? parsed : 0.0;
+        var clipName = args.String("clip");
+        var clipTime = args.Double("time", 0.0);
 
         // <b>--xray, because a skeleton lives inside an opaque mesh.</b> Depth-tested gizmos are the
         // right default — they are what makes a line's position in the scene readable — but they
         // also mean a correct skeleton overlay shows almost nothing: the first capture of the Rogue
         // drew only the root's IK children, which radiate from the feet and read exactly like a
         // collapsed rig. The bones were right and the picture was lying.
-        var xray = args.Contains("--xray");
+        var xray = args.Flag("xray");
 
         // <b>--advance turns "does this motion look right" into an artifact.</b> A capture normally
         // samples one pose and never runs the clock, which is what makes it reproducible. This runs
@@ -62,30 +65,30 @@ public static class Program
         // It exists for the one acceptance criterion a still frame cannot carry: a travelling clip's
         // delta must integrate to a straight line at even spacing across the loop seam. That is a
         // shape, not a number, and the only way to check a shape is to look at one.
-        var advance = double.TryParse(ArgValue(args, "--advance"), out var secs) ? secs : 0.0;
-        var driveRoot = args.Contains("--drive-root");
+        var advance = args.Double("advance", 0.0);
+        var driveRoot = args.Flag("drive-root");
 
         // --instances N is the captured proof that N bodies hold N independent poses from one draw.
         // One palette binding served one pose per frame until recently; three bodies in one PNG at
         // three clip phases is the shape of that gap being closed, and a still frame carries it.
-        var instances = int.TryParse(ArgValue(args, "--instances"), out var n) ? n : 1;
+        var instances = args.Int("instances", 1);
 
         // The negative control. Varied instances SHOULD look different; lockstep ones should differ
         // only by where they stand. A capture that can only ever show "different" proves nothing.
-        var lockstep = args.Contains("--lockstep");
+        var lockstep = args.Flag("lockstep");
 
         // <b>--viewport reads back the PANEL's target rather than the main scene's.</b> The panel
         // itself is an ImGui window and this tool draws no UI, so without this the second camera
         // could only ever be checked by a person looking at a running window — which is exactly the
         // kind of "verified by eye, once" the capture tool exists to replace.
-        var viewport = args.Contains("--viewport");
+        var viewport = args.Flag("viewport");
 
         // <b>--frames-out N writes N PNGs, one per fixed step.</b> A still frame answers "is this
         // pose right"; it cannot answer "is this MOTION right", which is a question about how one
         // frame follows another. A sequence at a fixed timestep is the smallest thing that can —
         // and because the step is fixed and nothing reads a clock, two runs of the same arguments
         // produce the same files, which is what makes a regression diffable rather than arguable.
-        var sequence = int.TryParse(ArgValue(args, "--frames-out"), out var sq) ? Math.Max(0, sq) : 0;
+        var sequence = Math.Max(0, args.Int("frames-out", 0));
 
         // --mask-root paints a mask onto the skeleton overlay. It changes no pose: the question it
         // answers is "which bones does a layer rooted here reach, and how softly does it stop", and
@@ -93,13 +96,13 @@ public static class Program
         // --skeleton-only draws the rig's bones and not its mesh. A mask lives INSIDE a body, and a
         // picture of one through an opaque character is a picture of a character — --xray puts the
         // lines in front of the mesh but does not stop the mesh being the thing you look at.
-        var skeletonOnly = args.Contains("--skeleton-only");
+        var skeletonOnly = args.Flag("skeleton-only");
 
         // A mask is a per-bone colour on a skeleton, and at the default framing a wrist is four
         // pixels. Pulling the eye toward the target is the difference between "the legs are grey"
         // being readable and being asserted — so the one camera knob this tool has is the one the
         // mask needed.
-        var zoom = float.TryParse(ArgValue(args, "--zoom"), out var zf) && zf > 0.05f ? zf : 1f;
+        var zoom = args.Float("zoom") is { } zf && zf > 0.05f ? zf : 1f;
 
         // --mask-root, matching the name RigAnimation's MaskRoot member derives in the viewer. This
         // tool parses it by hand because it has no session — so the two names agree by care rather
@@ -110,15 +113,14 @@ public static class Program
         // pass over the scene colour and asserts its record delegate ran — so the mechanism is
         // checked by something rather than shipped on faith, and deleting the loop that records
         // extensions fails it immediately.
-        var stageSelfTest = args.Contains("--stage-selftest");
+        var stageSelfTest = args.Flag("stage-selftest");
 
         // <b>--tint Name=R,G,B, repeatable.</b> The viewer's materials panel is where a colour is
         // AUDITIONED; this is how the answer gets into a capture, so a kit asset can be shown as a
         // game draws it in something diffable rather than only in a window someone was looking at.
-        // ArgValue returns the first match, which is wrong for a flag that is meant to be given once
-        // per material — so this scans.
-        var maskRoot = ArgValue(args, "--mask-root");
-        var maskFalloff = int.TryParse(ArgValue(args, "--mask-falloff"), out var mf) ? Math.Max(0, mf) : 0;
+        // Given once per material, so every occurrence is read.
+        var maskRoot = args.String("mask-root");
+        var maskFalloff = Math.Max(0, args.Int("mask-falloff", 0));
 
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
@@ -140,16 +142,14 @@ public static class Program
         }
 
         var tints = new StudioTints();
-        for (var i = 0; i < args.Length - 1; i++)
+        foreach (var spec in args.All("tint"))
         {
-            if (args[i] != "--tint") continue;
-            var spec = args[i + 1];
             var eq = spec.IndexOf('=');
             var rgb = eq < 0 ? Array.Empty<string>() : spec[(eq + 1)..].Split(',');
             if (eq <= 0 || rgb.Length != 3
-                || !float.TryParse(rgb[0], out var tr)
-                || !float.TryParse(rgb[1], out var tg)
-                || !float.TryParse(rgb[2], out var tb))
+                || !float.TryParse(rgb[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var tr)
+                || !float.TryParse(rgb[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var tg)
+                || !float.TryParse(rgb[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var tb))
             {
                 Console.Error.WriteLine($"--tint takes Name=R,G,B with three numbers — not '{spec}'.");
                 return 1;
@@ -192,16 +192,6 @@ public static class Program
         Console.Error.WriteLine("nothing was captured.");
         return 1;
     }
-
-    private static string? ArgValue(string[] args, string name)
-    {
-        for (var i = 0; i < args.Length - 1; i++)
-        {
-            if (args[i] == name) return args[i + 1];
-        }
-
-        return null;
-    }
 }
 
 internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
@@ -243,7 +233,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     // Kept whole so the stage's declared knobs can be applied to the scene once it exists. This
     // tool parses its own flags in Main; the stage's it does not parse at all.
-    private readonly string[] args = Array.Empty<string>();
+    private readonly AppArgs args = AppArgs.Empty;
 
     /// <summary>Material colour overrides from --tint, or null to draw what the file said.</summary>
     private readonly StudioTints? tints;
@@ -298,10 +288,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                 nameof(StudioLook.Exposure), nameof(StudioLook.TonemapMode));
             stage.Apply(args);
         }
-        catch (ArgumentException bad)
+        catch (AppArgsException bad)
         {
             Console.Error.WriteLine(bad.Message);
-            Environment.Exit(1);
+            Environment.Exit(2);
         }
     }
 
@@ -362,10 +352,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         bool skeletonOnly = false,
         float zoom = 1f,
         bool stageSelfTest = false,
-        string[]? args = null,
+        AppArgs? args = null,
         StudioTints? tints = null)
     {
-        this.args = args ?? Array.Empty<string>();
+        this.args = args ?? AppArgs.Empty;
         this.tints = tints;
         this.skeletonOnly = skeletonOnly;
         this.stageSelfTest = stageSelfTest;
@@ -566,17 +556,16 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
         boneWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
 
-        for (var i = 0; i < args.Length - 1; i++)
+        foreach (var wanted in args.All("attach"))
         {
-            if (args[i] != "--attach") continue;
-            if (rig.Attachments.Any(a => string.Equals(a.Name, args[i + 1], StringComparison.Ordinal)))
+            if (rig.Attachments.Any(a => string.Equals(a.Name, wanted, StringComparison.Ordinal)))
             {
-                visibleAttachments.Add(args[i + 1]);
+                visibleAttachments.Add(wanted);
             }
             else
             {
                 Console.Error.WriteLine(
-                    $"No attachment named '{args[i + 1]}'. This rig has: " +
+                    $"No attachment named '{wanted}'. This rig has: " +
                     (rig.Attachments.Count == 0 ? "none" : string.Join(", ", rig.Attachments.Select(a => a.Name))));
             }
         }

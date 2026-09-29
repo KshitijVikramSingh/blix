@@ -136,11 +136,9 @@ public static class Program
             : 0;
         var hasEntryPoint = entryToken != 0;
 
-        // Which method IS Main, so the launcher knows when an app needs no selecting.
-        // A [BlixApp] on the entry point is the smallest useful declaration there is —
-        // it renames an executable and gives it a summary, and nothing else changes —
-        // and the launcher must exec it directly rather than passing a selector the
-        // app was never written to strip.
+        // Which method IS Main, only so a [BlixApp] on it can be refused. Main has to take
+        // string[], an app takes AppArgs, and the method Main hands to BlixApps.Main is the
+        // one to declare. An app marked Default is what the executable runs unnamed.
         var entryPoint = hasEntryPoint
             ? MetadataTokens.MethodDefinitionHandle(entryToken & 0x00FFFFFF)
             : default;
@@ -157,8 +155,15 @@ public static class Program
 
                 if (IsAttribute(reader, attribute, AttributeNamespace, AttributeName))
                 {
+                    if (handle == entryPoint)
+                    {
+                        throw new DeclarationException(
+                            $"[BlixApp] on {where}: Main cannot be an app, because it takes string[]. " +
+                            "Declare the method Main hands to BlixApps.Main, with Default = true.");
+                    }
+
                     Validate(reader, method, where);
-                    apps.Add(Decode(reader, attribute, where, isEntryPoint: handle == entryPoint));
+                    apps.Add(Decode(reader, attribute, where));
                 }
                 else if (IsAttribute(reader, attribute, RecipeNamespace, RecipeName))
                 {
@@ -166,6 +171,13 @@ public static class Program
                     recipes.Add(DecodeRecipe(reader, attribute, where));
                 }
             }
+        }
+
+        if (apps.Count(a => a.IsDefault) is > 1 and var defaults)
+        {
+            throw new DeclarationException(
+                $"{defaults} apps are marked Default: " +
+                string.Join(", ", apps.Where(a => a.IsDefault).Select(a => a.Method)));
         }
 
         return (apps, recipes, hasEntryPoint);
@@ -275,8 +287,7 @@ public static class Program
         }
     }
 
-    private static AppEntry Decode(
-        MetadataReader reader, CustomAttribute attribute, string where, bool isEntryPoint)
+    private static AppEntry Decode(MetadataReader reader, CustomAttribute attribute, string where)
     {
         var value = attribute.DecodeValue(new StringTypeProvider());
 
@@ -288,16 +299,18 @@ public static class Program
 
         string? summary = null;
         var headed = false;
+        var isDefault = false;
         foreach (var named in value.NamedArguments)
         {
             if (named.Name == "Summary") summary = named.Value as string;
             else if (named.Name == "Headed") headed = named.Value is true;
+            else if (named.Name == "Default") isDefault = named.Value is true;
         }
 
-        return new AppEntry(name, summary, headed, where, isEntryPoint);
+        return new AppEntry(name, summary, headed, where, isDefault);
     }
 
-    // The four shapes an app may have, checked HERE so a mis-declared app is a build
+    // The four shapes an app may have (AppArgs or nothing, int or void), checked HERE so a mis-declared app is a build
     // failure rather than a tool that is quietly unreachable. An app that cannot be
     // found because it was declared slightly wrong is the worst failure this layer has.
     private static void Validate(MetadataReader reader, MethodDefinition method, string where)
@@ -317,11 +330,11 @@ public static class Program
 
         var parameters = signature.ParameterTypes;
         var ok = parameters.Length == 0
-            || (parameters.Length == 1 && parameters[0] == "System.String[]");
+            || (parameters.Length == 1 && parameters[0] == "Blix.Core.AppArgs");
         if (!ok)
         {
             throw new DeclarationException(
-                $"[BlixApp] on {where}: an app takes string[] or nothing, not ({string.Join(", ", parameters)}).");
+                $"[BlixApp] on {where}: an app takes AppArgs or nothing, not ({string.Join(", ", parameters)}).");
         }
     }
 
@@ -358,7 +371,7 @@ public static class Program
         string Id, string Produces, string Consumes, string Summary, uint Version, string Method);
 
     private sealed record AppEntry(
-        string Name, string? Summary, bool Headed, string Method, bool IsEntryPoint);
+        string Name, string? Summary, bool Headed, string Method, bool IsDefault);
 
     // Types as strings, which is all this needs. The full provider contract exists for
     // callers that rebuild real Type objects; here the questions are "is it int" and

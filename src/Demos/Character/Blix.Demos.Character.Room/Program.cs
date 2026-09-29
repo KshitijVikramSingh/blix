@@ -29,8 +29,10 @@ namespace Blix.Demos.Character.RoomApp;
 //     had a character in it could not tell you whether a fault was the room's.
 public static class Program
 {
-    [BlixApp("room", Summary = "walk the character room — contact, with nothing else in the picture", Headed = true)]
-    public static void Main(string[] args)
+    public static int Main(string[] args) => BlixApps.Main(args);
+
+    [BlixApp("room", Summary = "walk the character room — contact, with nothing else in the picture", Headed = true, Default = true)]
+    public static void Walk(AppArgs args)
     {
         var options = WindowOptions.FromArgs(args, WindowOptions.Default with
         {
@@ -42,19 +44,11 @@ public static class Program
         // --trace <path> starts recording immediately; the panel can start and stop one at any time.
         // A run that reproduces something is worth a file whether or not anyone thought to press a
         // button first.
-        var loop = new RoomLoop(ArgValue(args, "--trace"));
+        var loop = new RoomLoop(args.String("trace"));
         using var window = new Window(loop, options);
         window.Run();
     }
 
-    private static string? ArgValue(string[] args, string name)
-    {
-        for (var i = 0; i < args.Length - 1; i++)
-        {
-            if (args[i] == name) return args[i + 1];
-        }
-        return null;
-    }
 }
 
 internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
