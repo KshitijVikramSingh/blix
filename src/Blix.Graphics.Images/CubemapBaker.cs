@@ -16,8 +16,9 @@ namespace Blix.Graphics.Images;
 // own baker that produces Half[] in the same face order.
 public static class CubemapBaker
 {
-    public static Half[] BakeSky(int faceSize, Vector3 sunDirection)
+    public static Half[] BakeSky(int faceSize, Vector3 sunDirection, ProceduralSkyLook? look = null)
     {
+        var sky = look ?? ProceduralSkyLook.Default;
         var halfsPerFace = faceSize * faceSize * 4;
         var pixels = new Half[halfsPerFace * 6];
         for (var face = 0; face < 6; face++)
@@ -41,7 +42,7 @@ public static class CubemapBaker
                         _ => new Vector3(-u,  v, -1),
                     };
                     dir = Vector3.Normalize(dir);
-                    var color = SampleHdrSky(dir, sunDirection);
+                    var color = SampleHdrSky(dir, sunDirection, sky);
                     var index = faceOffset + (t * faceSize + s) * 4;
                     pixels[index + 0] = (Half)color.X;
                     pixels[index + 1] = (Half)color.Y;
@@ -57,10 +58,10 @@ public static class CubemapBaker
     // punch through tone mapping); horizon warms when sun is low for dawn/dusk.
     // Designed to match the rendered backdrop AND drive IBL faithfully — same
     // values in both roles is the point.
-    private static Vector3 SampleHdrSky(Vector3 dir, Vector3 sunDir)
+    private static Vector3 SampleHdrSky(Vector3 dir, Vector3 sunDir, ProceduralSkyLook sky)
     {
-        var zenith = new Vector3(0.10f, 0.20f, 0.50f);
-        var horizon = new Vector3(0.55f, 0.60f, 0.72f);
+        var zenith = new Vector3(0.10f, 0.20f, 0.50f) * sky.ZenithBrightness;
+        var horizon = new Vector3(0.55f, 0.60f, 0.72f) * sky.HorizonBrightness;
         var ground = new Vector3(0.10f, 0.08f, 0.06f);
 
         Vector3 col;
@@ -84,7 +85,7 @@ public static class CubemapBaker
         // without clipping because storage is half-float, not Rgba8.
         var sunCos = MathF.Max(Vector3.Dot(dir, -sunDir), 0.0f);
         var sunSpot = MathF.Pow(sunCos, 320.0f) * 14.0f;
-        var sunGlow = MathF.Pow(sunCos, 8.0f) * 1.6f;
+        var sunGlow = MathF.Pow(sunCos, sky.HaloTightness) * sky.HaloStrength;
         col += new Vector3(1.0f, 0.94f, 0.82f) * (sunSpot + sunGlow);
 
         return col;
@@ -95,4 +96,19 @@ public static class CubemapBaker
         var t = Math.Clamp((x - a) / (b - a), 0.0f, 1.0f);
         return t * t * (3.0f - 2.0f * t);
     }
+}
+
+/// <summary>The procedural sky's shape: how bright its two bands are, and the sun's halo.</summary>
+/// <param name="HaloStrength">How much the halo around the sun adds, in multiples of reference white.</param>
+/// <param name="HaloTightness">
+/// The halo's falloff exponent. Higher is tighter: at 8 it is still at half strength about 24 degrees
+/// from the sun, which is wide enough to whiten a large patch of sky.
+/// </param>
+/// <param name="HorizonBrightness">Scales the horizon band's colour.</param>
+/// <param name="ZenithBrightness">Scales the zenith band's colour.</param>
+public readonly record struct ProceduralSkyLook(
+    float HaloStrength, float HaloTightness, float HorizonBrightness, float ZenithBrightness)
+{
+    /// <summary>The sky as it was authored before any of this was adjustable.</summary>
+    public static ProceduralSkyLook Default { get; } = new(1.6f, 8f, 1f, 1f);
 }

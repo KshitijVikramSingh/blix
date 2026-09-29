@@ -98,8 +98,10 @@ has not; the shape of what Windows needed should be known before it is copied.
 set on this machine dates from 2026-09-17, and 15 of its 68 artifacts no longer match.
 Every `.log` and `.exit` does, so the pose fingerprints, travel numbers and exit codes
 are unchanged and only pixels moved — the picture was looked at and is right. Bisecting
-which commit moved it was abandoned as not worth the hunt. Re-record with
-`tools/lab-baseline.sh record`; until then the control is expired, not failing.
+which commit moved it was abandoned as not worth the hunt. The stage's sky (drawn from the
+environment it bakes, with that bake's sun no longer upside down) then moved every stage capture on
+purpose, so the pixels are expected to differ everywhere and the `.log`s still to match. Re-record
+with `tools/lab-baseline.sh record`; until then the control is expired, not failing.
 
 ---
 

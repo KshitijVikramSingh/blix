@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>HelloBlix3D</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The application chooses the layers it uses. The stage is Blix.Tools.Studio: a lit,
+         shadowed scene with an orbit camera, and the renderer the view and shot tools stand on. -->
+    <ProjectReference Include="$(BlixSourceRoot)/Blix/Blix.csproj" />
+    <ProjectReference Include="$(BlixSourceRoot)/Blix.Core/Blix.Core.csproj" />
+    <ProjectReference Include="$(BlixSourceRoot)/Blix.Diagnostics/Blix.Diagnostics.csproj" />
+    <ProjectReference Include="$(BlixSourceRoot)/Blix.Graphics.Vulkan/Blix.Graphics.Vulkan.csproj" />
+    <ProjectReference Include="$(BlixSourceRoot)/Blix.Runtime.Silk/Blix.Runtime.Silk.csproj" />
+    <ProjectReference Include="$(BlixSourceRoot)/Blix.Tools.Studio/Blix.Tools.Studio.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Assets/**/*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

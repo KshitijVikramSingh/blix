@@ -599,7 +599,7 @@ internal sealed class ViewerPanels
             var mode = (int)app.Renderer.Look.TonemapMode;
             if (ImGui.Combo("tonemap", ref mode, "ACES\0AgX\0Reinhard\0Neutral\0"))
             {
-                app.Renderer.Look.TonemapMode = mode;
+                app.Renderer.Look.TonemapMode = (Blix.Graphics.Images.TonemapCurve)mode;
             }
         }
 

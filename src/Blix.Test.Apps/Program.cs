@@ -172,6 +172,7 @@ public static class Program
         FreshnessAnswersHonestly(t);
         ABuildChangesWhatANameMeans(t);
         TheExternalStarterBuildsFromCleanState(t);
+        TheExternal3DStarterBuildsFromCleanState(t);
 
         // ── a loop with no window ───────────────────────────────────────────
         HeadlessRunsTheSameLoop(t);
@@ -725,39 +726,9 @@ public static class Program
     /// <summary>
     /// The external starter is a real project, not a collection of plausible snippets.
     /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Copied outside this checkout before it is built. That detail is the assertion: a project
-    /// left under the Blix root would inherit this repository's props and targets automatically,
-    /// hiding a broken source-consumer import behind the environment it is meant to replace.
-    /// </para>
-    /// <para>
-    /// The headed app is only discovered here. The declared gate is deliberately headless, so the
-    /// same check runs on CI machines with no GPU and still proves the whole project path: imported
-    /// build rules, app indexing, project scoping, discovery, dispatch, and a child-process verdict.
-    /// </para>
-    /// </remarks>
-    private static void TheExternalStarterBuildsFromCleanState(TestRunner t)
-    {
-        var repo = RepositoryRoot();
-        if (repo is null)
+    private static void TheExternalStarterBuildsFromCleanState(TestRunner t) =>
+        InStagedExample(t, "K", "hello-blix", staged =>
         {
-            t.Expect("K.0 the starter fixture needs the repository root", false);
-            return;
-        }
-
-        var source = Path.Combine(repo, "examples", "hello-blix");
-        var staged = Path.Combine(
-            Path.GetTempPath(), "blix-external-starter-" + Guid.NewGuid().ToString("N")[..8]);
-        var wasDirectory = Directory.GetCurrentDirectory();
-        var wasBlixRoot = Environment.GetEnvironmentVariable("BLIX_ROOT");
-
-        try
-        {
-            CopyTree(source, staged);
-            Directory.SetCurrentDirectory(staged);
-            Environment.SetEnvironmentVariable("BLIX_ROOT", repo);
-
             var build = Dotnet(
                 "build \"src/HelloBlix/HelloBlix.csproj\" -c Debug --nologo -v:q " +
                 "--disable-build-servers -p:UseSharedCompilation=false -m:1");
@@ -808,6 +779,84 @@ public static class Program
             t.Expect("K.6 a project name does not reach out of the repository you stand in",
                 enclosing != 0 && enclosingOutput.Contains("no project named 'hello-blix'", StringComparison.Ordinal),
                 $"exit {enclosing}. {enclosingOutput.Trim()}");
+        });
+
+    /// <summary>
+    /// The 3D starter is a real project too: a character on the Studio stage, built from outside.
+    /// </summary>
+    /// <remarks>
+    /// Its gate is headless for the same reason the 2D starter's is, so this runs on CI with no GPU.
+    /// What it adds is what a 3D project needs to arrive: a model through the project's own content
+    /// items, and a library's compiled shaders through a reference, neither of which the 2D starter
+    /// has to carry.
+    /// </remarks>
+    private static void TheExternal3DStarterBuildsFromCleanState(TestRunner t) =>
+        InStagedExample(t, "K3", "hello-blix-3d", staged =>
+        {
+            var build = Dotnet(
+                "build \"src/HelloBlix3D/HelloBlix3D.csproj\" -c Debug --nologo -v:q " +
+                "--disable-build-servers -p:UseSharedCompilation=false -m:1");
+            t.Expect("K3.0 the 3D starter builds from a clean staged copy", build == 0,
+                $"dotnet exited {build}");
+            if (build != 0) return;
+
+            var output = Path.Combine(staged, "src", "HelloBlix3D", "bin", "Debug", "net8.0");
+            var character = Path.Combine(output, "Assets", "models", "Rogue.glb");
+            var sky = Path.Combine(output, "Shaders", "studio_sky.frag.spv");
+            t.Expect("K3.1 its character and the stage's shaders arrive beside it",
+                File.Exists(character) && File.Exists(sky),
+                $"character {File.Exists(character)}, stage shaders {File.Exists(sky)}");
+
+            var listed = Cli(out var listing, "ls");
+            var listedLines = listing.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            t.Expect("K3.2 discovery sees the stage and its headless check",
+                listed == 0
+                && listedLines.Any(line => line.TrimStart().StartsWith("hello-3d ", StringComparison.Ordinal))
+                && listedLines.Any(line => line.TrimStart().StartsWith("hello-3d-check ", StringComparison.Ordinal)),
+                listing.Trim());
+
+            var gate = Cli(out var gateOutput, "test");
+            t.Expect("K3.3 its gate reads the character with no GPU and passes",
+                gate == 0, $"exit {gate}. {gateOutput.Trim()}");
+        });
+
+    /// <summary>
+    /// Runs <paramref name="body"/> in a copy of <c>examples/&lt;example&gt;</c> staged outside this
+    /// checkout, with <c>BLIX_ROOT</c> pointing back at it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Copied outside before it is built, and that detail is the assertion: a project left under the
+    /// Blix root would inherit this repository's props and targets automatically, hiding a broken
+    /// source-consumer import behind the environment it is meant to replace.
+    /// </para>
+    /// <para>
+    /// The headed app is only discovered here. The declared gate is deliberately headless, so the
+    /// same check runs on CI machines with no GPU and still proves the whole project path: imported
+    /// build rules, app indexing, project scoping, discovery, dispatch, and a child-process verdict.
+    /// </para>
+    /// </remarks>
+    private static void InStagedExample(TestRunner t, string label, string example, Action<string> body)
+    {
+        var repo = RepositoryRoot();
+        if (repo is null)
+        {
+            t.Expect($"{label}.0 the starter fixture needs the repository root", false);
+            return;
+        }
+
+        var source = Path.Combine(repo, "examples", example);
+        var staged = Path.Combine(
+            Path.GetTempPath(), $"blix-{example}-" + Guid.NewGuid().ToString("N")[..8]);
+        var wasDirectory = Directory.GetCurrentDirectory();
+        var wasBlixRoot = Environment.GetEnvironmentVariable("BLIX_ROOT");
+
+        try
+        {
+            CopyTree(source, staged);
+            Directory.SetCurrentDirectory(staged);
+            Environment.SetEnvironmentVariable("BLIX_ROOT", repo);
+            body(staged);
         }
         finally
         {

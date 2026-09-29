@@ -1,0 +1,4 @@
+<Project>
+  <!-- Adds shared build mechanisms after the application declares its items. -->
+  <Import Project="$(BlixRoot)/build/Blix.Source.targets" />
+</Project>

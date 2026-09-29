@@ -1,0 +1,5 @@
+# The project name is local to this repository.
+hello-blix-3d
+
+# A headless application keeps the normal verification path independent of a GPU.
+test: hello-3d-check

@@ -70,12 +70,15 @@ public sealed class StudioRenderer : IDisposable
     private ShaderProgramHandle litProgram;
     private ShaderProgramHandle shadowProgram;
     private ShaderProgramHandle presentProgram;
+    private ShaderProgramHandle skyProgram;
     private ShaderProgramHandle skinnedProgram;
     private ShaderProgramHandle skinnedShadowProgram;
 
     private PipelineHandle litPipeline;
     private PipelineHandle shadowPipeline;
     private PipelineHandle presentPipeline;
+    private PipelineHandle skyPipeline;
+    private PipelineHandle viewportSkyPipeline;
     private PipelineHandle skinnedPipeline;
 
     // The same program and layout as skinnedPipeline with the culling turned off, for a rig whose
@@ -135,6 +138,20 @@ public sealed class StudioRenderer : IDisposable
     // printed beside the live one rather than left to be discovered.
     private TextureHandle irradianceTexture;
     private TextureHandle prefilteredTexture;
+    // What the sky pass draws: the baked environment cube itself, or the flat grey cube when the
+    // environment is off. Either way it is the thing the lit shader's ambient comes from.
+    private TextureHandle skyTexture;
+
+    // <b>The sky follows the sun and its own settings, once they have stopped moving.</b> The environment is baked from
+    // the sun's direction, so a sun dragged on the panel used to move the light and the shadows and
+    // leave the sky where it was baked. Rebaking on every tick of a drag would make dragging worse
+    // (the RTS's map lab learned the same about slow operations), so the rebake waits until the sun
+    // has held still for a moment.
+    private const double SunSettleSeconds = 0.25;
+    private readonly System.Diagnostics.Stopwatch sunStill = System.Diagnostics.Stopwatch.StartNew();
+    private Vector3 sunSeen;
+    private ProceduralSkyLook skySeen;
+    private ProceduralSkyLook bakedSky;
     private TextureHandle brdfLutTexture;
 
     // EnvironmentBaker may alias the environment, irradiance, and prefiltered handles. Keep unique
@@ -195,6 +212,7 @@ public sealed class StudioRenderer : IDisposable
         var shadowInterface = Reflect("studio_shadow.vert", "studio_shadow.frag");
         var litInterface = Reflect("studio_lit.vert", "studio_lit.frag");
         var presentInterface = Reflect("studio_present.vert", "studio_present.frag");
+        var skyInterface = Reflect("studio_sky.vert", "studio_sky.frag");
 
         // The skinned pair reuses the unskinned FRAGMENT stages, so these differ from the two above
         // by exactly one thing: a set-3 storage buffer the vertex stage reads. That is what makes
@@ -318,6 +336,8 @@ public sealed class StudioRenderer : IDisposable
             Spv("studio_lit.vert"), Spv("studio_lit.frag"), litInterface, "lab.lit");
         presentProgram = vk.CreateShaderProgramFromSpv(
             Spv("studio_present.vert"), Spv("studio_present.frag"), presentInterface, "lab.present");
+        skyProgram = vk.CreateShaderProgramFromSpv(
+            Spv("studio_sky.vert"), Spv("studio_sky.frag"), skyInterface, "lab.sky");
         skinnedProgram = vk.CreateShaderProgramFromSpv(
             Spv("studio_skinned.vert"), Spv("studio_lit.frag"), skinnedInterface, "lab.skinned");
         skinnedShadowProgram = vk.CreateShaderProgramFromSpv(
@@ -357,6 +377,14 @@ public sealed class StudioRenderer : IDisposable
             RasterizerState.NoCulling,
             new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(litPass)), "lab.lit");
+
+        // Depth-tested at the far plane and never written: drawn first, it fills what the pre-pass
+        // left at 1.0 and nothing else, and it cannot occlude anything drawn after it.
+        skyPipeline = vk.CreatePipeline(new PipelineDescription(
+            skyProgram, FullscreenPass.Layout, PrimitiveTopology.Triangles,
+            new DepthState(Enabled: true, WriteEnabled: false, DepthCompare.LessEqual),
+            RasterizerState.NoCulling, new[] { BlendState.Disabled },
+            RenderTarget: graph.GetPassSurface(litPass)), "lab.sky");
 
         // Closed, single-sided rig parts use back-face culling. This reduces fill and makes an
         // inside-out import visible as missing surfaces.
@@ -403,6 +431,11 @@ public sealed class StudioRenderer : IDisposable
             litProgram, VertexPosition3NormalTexture2Color.Layout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.NoCulling, new[] { BlendState.Disabled },
             RenderTarget: viewportSurface), "lab.viewport.lit");
+        viewportSkyPipeline = vk.CreatePipeline(new PipelineDescription(
+            skyProgram, FullscreenPass.Layout, PrimitiveTopology.Triangles,
+            new DepthState(Enabled: true, WriteEnabled: false, DepthCompare.LessEqual),
+            RasterizerState.NoCulling, new[] { BlendState.Disabled },
+            RenderTarget: viewportSurface), "lab.viewport.sky");
         viewportSkinnedPipeline = vk.CreatePipeline(new PipelineDescription(
             skinnedProgram, VertexPosition3NormalTextureSkin4Tangent.Layout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled },
@@ -477,7 +510,9 @@ public sealed class StudioRenderer : IDisposable
         cubeIndices = vk.CreateIndexBuffer(ci, name: "lab.cube.ib");
         cubeIndexCount = ci.Length;
 
-        var (gv, gi) = StudioGeometry.Ground();
+        // As far as the camera can see, so its edge is a horizon against the sky rather than a
+        // corner in the middle of the frame. The camera's far plane is 120 m.
+        var (gv, gi) = StudioGeometry.Ground(extent: 120f);
         groundVertices = vk.CreateVertexBuffer(
             VertexPosition3NormalTexture2Color.CreateBufferData(VertexPosition3NormalTexture2Color.From(gv)), "lab.ground.vb");
         groundIndices = vk.CreateIndexBuffer(gi, name: "lab.ground.ib");
@@ -534,6 +569,7 @@ public sealed class StudioRenderer : IDisposable
         Vector3 viewportCameraPosition = default)
     {
         views ??= Array.Empty<IStudioView>();
+        FollowEnvironment();
         FitCascades();
 
         // Pass 1 — the sun's depth, ONCE PER CASCADE. Every caster is drawn three times; see the
@@ -609,6 +645,10 @@ public sealed class StudioRenderer : IDisposable
             };
             var textures = EnvironmentTextures(shadowTexture);
 
+            // First, because blended surfaces write no depth: a sky drawn after them would paint over
+            // glass. With the pre-pass, geometry depth is already here and the sky only fills the rest.
+            DrawSky(scope, skyPipeline, viewProjection, cameraPosition);
+
             // FURNITURE, and it stays the stage's: a tool does not choose whether the stage has a
             // floor. That is part of what makes it a stage rather than a blank device.
             if (Look.Ground) DrawGround(scope, litPipeline, uniforms, textures);
@@ -647,6 +687,7 @@ public sealed class StudioRenderer : IDisposable
                 };
                 var textures = EnvironmentTextures(shadowTexture);
 
+                DrawSky(scope, viewportSkyPipeline, panelViewProjection, viewportCameraPosition);
                 if (Look.Ground) DrawGround(scope, viewportLitPipeline, uniforms, textures);
 
                 // Record the same views through the second camera; content has one draw description,
@@ -664,7 +705,7 @@ public sealed class StudioRenderer : IDisposable
         // Pass 3 — exposure + tonemap onto the swapchain.
         var present = new ShaderUniform[]
         {
-            new("uParams", new Vector4Uniform(new Vector4(Look.Exposure, Look.TonemapMode, 0f, 0f))),
+            new("uParams", new Vector4Uniform(new Vector4(Look.Exposure, (float)Look.TonemapMode, 0f, 0f))),
         };
         commandList.Pass(
             "lab.present",
@@ -726,6 +767,7 @@ public sealed class StudioRenderer : IDisposable
     private void BakeEnvironment(VulkanGraphicsDevice vk)
     {
         bakedSunDirection = Look.SunDirection;
+        bakedSky = Look.Sky;
 
         if (!Look.ImageBasedLighting)
         {
@@ -736,6 +778,7 @@ public sealed class StudioRenderer : IDisposable
             irradianceTexture = vk.CreateTextureCube(
                 1, TextureFormat.Rgba8, 1, grey, SamplerDescription.LinearClamp, "lab.ibl.off.cube");
             prefilteredTexture = irradianceTexture;
+            skyTexture = irradianceTexture;
             brdfLutTexture = vk.CreateTexture2D(
                 new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.LinearClamp),
                 new byte[] { 255, 255, 255, 255 }, "lab.ibl.off.brdf");
@@ -748,7 +791,11 @@ public sealed class StudioRenderer : IDisposable
             vk,
             new EnvironmentProfile
             {
-                Source = new ProceduralEnvironmentSource(Look.SunDirection),
+                // NEGATED, because the two sides disagree about which way a sun direction points: the
+                // stage's is TOWARD the sun (the lit shader's L), the source's is FROM the sun into the
+                // scene. Passed as it was, the baker drew the sun below the horizon and, reading a high
+                // sun as a set one, warmed the whole horizon with its dusk tint: the "yellow-white" sky.
+                Source = new ProceduralEnvironmentSource(-Look.SunDirection, Look.Sky),
                 SpecularPrefilterBaseSize = Look.EnvFaceSize,
                 SpecularPrefilterMipCount = Look.EnvMipCount,
             },
@@ -764,6 +811,7 @@ public sealed class StudioRenderer : IDisposable
 
         irradianceTexture = probe.DiffuseIrradiance;
         prefilteredTexture = probe.PrefilteredSpecular;
+        skyTexture = probe.EnvCubemap;
         Own(probe.EnvCubemap, probe.DiffuseIrradiance, probe.PrefilteredSpecular, brdfLutTexture);
 
         // From the BAKE, not from the look: if the baker returns fewer mips than were asked for,
@@ -815,6 +863,47 @@ public sealed class StudioRenderer : IDisposable
             cascadeViewProjection[c] = GraphicsMatrices.SunShadowViewProjection(
                 Look.SunDirection, centre, away, side, 0.05f, away * 2f + side);
         }
+    }
+
+    /// <summary>The environment behind everything, through one camera.</summary>
+    private void DrawSky(RenderPassBuilder pass, PipelineHandle pipeline, Matrix4x4 viewProjection, Vector3 cameraPosition)
+    {
+        if (!Matrix4x4.Invert(viewProjection, out var inverse)) return;
+        fullscreen.Draw(
+            pass, pipeline,
+            new[] { new ShaderTextureBinding("uSky", skyTexture) },
+            uniforms: new ShaderUniform[]
+            {
+                new("uInverseViewProjection", new Matrix4x4Uniform(inverse)),
+                new("uCameraPosition", new Vector4Uniform(new Vector4(cameraPosition, 1f))),
+            });
+    }
+
+    /// <summary>Rebakes the environment once the sun and the sky settings have held still somewhere they were not baked at.</summary>
+    /// <remarks>
+    /// Waits for the GPU first: the old textures are bound by frames that may still be in flight, and
+    /// the device frees a texture the moment it is asked to. It happens once per settled change, so
+    /// the wait is not paid while dragging.
+    /// </remarks>
+    private void FollowEnvironment()
+    {
+        if (!Look.ImageBasedLighting) return;
+        var sun = Look.SunDirection;
+        var sky = Look.Sky;
+        if (sun != sunSeen || sky != skySeen)
+        {
+            sunSeen = sun;
+            skySeen = sky;
+            sunStill.Restart();
+            return;
+        }
+
+        if ((sun == bakedSunDirection && sky == bakedSky) || sunStill.Elapsed.TotalSeconds < SunSettleSeconds) return;
+
+        device.WaitIdle();
+        foreach (var t in ownedEnvironmentTextures) device.DestroyTexture(t);
+        ownedEnvironmentTextures.Clear();
+        BakeEnvironment(device);
     }
 
     private void Own(params TextureHandle[] textures)
@@ -877,6 +966,9 @@ public sealed class StudioRenderer : IDisposable
         device.DestroyShaderProgram(litProgram);
         device.DestroyShaderProgram(shadowProgram);
         device.DestroyShaderProgram(presentProgram);
+        device.DestroyPipeline(skyPipeline);
+        device.DestroyPipeline(viewportSkyPipeline);
+        device.DestroyShaderProgram(skyProgram);
         device.DestroyShaderProgram(skinnedProgram);
         device.DestroyShaderProgram(skinnedShadowProgram);
         device.DestroyVertexBuffer(cubeVertices);
