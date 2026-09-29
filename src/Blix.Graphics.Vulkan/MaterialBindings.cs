@@ -194,18 +194,26 @@ public sealed class MaterialBindings
             throw new InvalidOperationException(
                 $"MaterialBindings '{Name}' has no slot at binding {binding}.");
         }
-        if (slot.Type is not (ShaderResourceType.SampledImage or ShaderResourceType.StorageImage or ShaderResourceType.Sampler))
+        if (slot.Type == ShaderResourceType.Sampler)
+        {
+            throw new InvalidOperationException(
+                $"MaterialBindings '{Name}' binding {binding} is a separate sampler, which is immutable (the shader's " +
+                "//@sampler). Bind the texture to its image instead.");
+        }
+        if (slot.Type is not (ShaderResourceType.SampledImage or ShaderResourceType.SeparateImage or ShaderResourceType.StorageImage))
         {
             throw new InvalidOperationException(
                 $"MaterialBindings '{Name}' binding {binding} is {slot.Type}, not an image/sampler slot — use SetUniform instead.");
         }
 
         var tex = device.GetTexture(texture);
+        // As in the per-draw binder: only a combined image carries its texture's sampler, and a storage
+        // image is GENERAL. This wrote every image as COMBINED_IMAGE_SAMPLER whatever the slot was.
         var imgInfo = new DescriptorImageInfo
         {
-            Sampler = tex.Sampler,
+            Sampler = slot.Type == ShaderResourceType.SampledImage ? tex.Sampler : default,
             ImageView = tex.View,
-            ImageLayout = ImageLayout.ShaderReadOnlyOptimal,
+            ImageLayout = slot.Type == ShaderResourceType.StorageImage ? ImageLayout.General : ImageLayout.ShaderReadOnlyOptimal,
         };
         for (var i = 0; i < FramesInFlight; i++)
         {
@@ -215,7 +223,7 @@ public sealed class MaterialBindings
                 DstSet = Sets[i],
                 DstBinding = (uint)binding,
                 DstArrayElement = 0,
-                DescriptorType = DescriptorType.CombinedImageSampler,
+                DescriptorType = MapDescriptorType(slot.Type),
                 DescriptorCount = 1,
                 PImageInfo = &imgInfo,
             };
@@ -334,6 +342,7 @@ public sealed class MaterialBindings
         ShaderResourceType.SampledImage => DescriptorType.CombinedImageSampler,
         ShaderResourceType.StorageImage => DescriptorType.StorageImage,
         ShaderResourceType.Sampler => DescriptorType.Sampler,
+        ShaderResourceType.SeparateImage => DescriptorType.SampledImage,
         _ => throw new InvalidOperationException($"Unknown ShaderResourceType {t}"),
     };
 

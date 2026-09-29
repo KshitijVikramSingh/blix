@@ -1,7 +1,12 @@
 name: CI
 
+# A push to main, and a pull request, each run once. `push` used to have no branch filter, so every
+# push to a PR branch ran twice: once as the branch and once as the PR's merge result. The
+# concurrency group below could not fold them, because the two have different refs. A branch with
+# no PR runs by hand: gh workflow run CI --ref <branch>.
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

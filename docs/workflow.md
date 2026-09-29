@@ -141,7 +141,7 @@ The current tree has two marked projects:
 | Project | Folder | Gate |
 | --- | --- | --- |
 | `blix` | repository root | Graphics, Diagnostics, Physics2D, Physics3D, Apps, Studio, Recipes and Input suites |
-| `demos` | `src/Demos` | `Blix.Demos.Character.Probe`, `chassis-tune --headless`, and every headed demo but Sponza for 45 frames under `--validate` |
+| `demos` | `src/Demos` | `Blix.Demos.Character.Probe`, `chassis-tune --headless`, every other headed demo for 45 frames under `--validate`, and Sponza for 45 frames after its textures load, also validated (needs `BLIX_SPONZA_ASSETS`) |
 
 Project scope follows the current working directory. From the repository root,
 all projects below it are visible. From `src/Demos`, the `demos` marker is the scope
@@ -450,13 +450,23 @@ describe what used to be true. A green gate over stale binaries is not a wrong a
 answer to a question nobody asked — which is why it is said next to the verdict
 rather than thousands of lines above it.
 
-From a nested project, invoke the same root script while keeping that directory
-as the project scope:
+To run a nested project's gate, name it, from anywhere in the tree:
+
+```sh
+./blix test demos
+```
+
+or stand in its folder, which makes it the project in scope:
 
 ```sh
 cd src/Demos
 ../../blix test
 ```
+
+A leading word is always a project's name, because every other argument a gate
+takes is an option for its legs. A word that names no project is an error that
+lists the ones that exist. Before, it reached every leg of the gate you were
+standing in as an argument, and that gate came out green.
 
 The current root gate is declared in `blix.project`. It covers graphics,
 diagnostics, both physics layers, application composition, Studio, and the

@@ -500,7 +500,8 @@ public sealed partial class VulkanGraphicsDevice
 
     // 2D storage image (compute-writable + sampleable). No initial data — a
     // compute dispatch fills it; the dispatch's pre-barrier transitions it from
-    // Undefined to General each frame. Usage STORAGE|SAMPLED.
+    // Undefined to General each frame. Created in ShaderReadOnly, so sampling it
+    // before the first dispatch is valid. Usage STORAGE|SAMPLED.
     public unsafe TextureHandle CreateStorageTexture2D(
         int width, int height, TextureFormat format, SamplerDescription samplerDesc, string? name = null)
     {
@@ -532,6 +533,13 @@ public sealed partial class VulkanGraphicsDevice
         DeviceMemory memory;
         ThrowIfNotSuccess(Vk.AllocateMemory(Device, in allocCi, null, &memory), $"vkAllocateMemory({name}.storage2d)");
         ThrowIfNotSuccess(Vk.BindImageMemory(Device, image, memory, 0), $"vkBindImageMemory({name}.storage2d)");
+
+        // Out of Undefined, as the 3D path does, so it can be sampled before its first compute write.
+        // This one was left Undefined: Sponza's lit pass samples the read half of its bounce pair
+        // before any injection has written it, and validation said so once per image.
+        var settle = BeginSingleTimeCommands();
+        TransitionImageLayout(settle, image, 1, ImageLayout.Undefined, ImageLayout.ShaderReadOnlyOptimal);
+        EndSingleTimeCommands(settle);
 
         var viewCi = new ImageViewCreateInfo
         {

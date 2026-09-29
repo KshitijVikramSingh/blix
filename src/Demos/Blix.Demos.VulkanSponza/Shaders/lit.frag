@@ -42,12 +42,14 @@
 // composite.
 //
 //   set 0 binding 0 : per-frame UBO (viewProj, sun, IBL strength, camera, fog)
-//   set 1 binding 0 : samplerCube uIrradiance      (diffuse IBL)
-//   set 1 binding 1 : samplerCube uPrefilteredEnv  (specular IBL; mip = roughness LOD)
-//   set 1 binding 2 : sampler2D   uBrdfLut         (split-sum BRDF integration)
-//   set 1 binding 3 : sampler2D   uCascadeShadowMaps[3]
-//   set 1 binding 4 : sampler3D   uFroxelGrid      (volumetric fog)
-//   set 1 binding 5 : sampler2D   uAmbientVisibility (GTAO: bent normal + visibility)
+//   set 1           : per-pass textures, all SEPARATE images read through one sampler
+//                     (uLinearClamp, binding 19) -- see the note above that binding. Among them:
+//   set 1 binding 0 : textureCube uIrradiance      (diffuse IBL)
+//   set 1 binding 1 : textureCube uPrefilteredEnv  (specular IBL; mip = roughness LOD)
+//   set 1 binding 2 : texture2D   uBrdfLut         (split-sum BRDF integration)
+//   set 1 binding 3 : texture2D   uCascadeShadowMaps[3]
+//   set 1 binding 4 : texture3D   uFroxelGrid      (volumetric fog)
+//   set 1 binding 5 : texture2D   uAmbientVisibility (GTAO: bent normal + visibility)
 //   set 2 binding 0 : per-material UBO (BaseColorFactor, EmissiveFactor,
 //                                       MaterialParams = alphaCutoff/normalScale/
 //                                       roughness/metallic, MaterialParams2 = the two
@@ -63,53 +65,65 @@
 
 #include "frame.glsl"
 
-layout(set = 1, binding = 0) uniform samplerCube uIrradiance;
-layout(set = 1, binding = 1) uniform samplerCube uPrefilteredEnv;
-layout(set = 1, binding = 2) uniform sampler2D   uBrdfLut;
+layout(set = 1, binding = 0) uniform textureCube uIrradiance;
+layout(set = 1, binding = 1) uniform textureCube uPrefilteredEnv;
+layout(set = 1, binding = 2) uniform texture2D   uBrdfLut;
 // Cascaded sun shadow maps (one depth target per cascade, near→far). Sampled
 // with manual depth comparison + 3×3 PCF; cascade chosen by the fragment's
 // view-space depth. GLSL forbids non-uniform dynamic indexing of a sampler
 // array, so the picker dispatches with constant indices (MoltenVK-safe).
-layout(set = 1, binding = 3) uniform sampler2D   uCascadeShadowMaps[3];
+layout(set = 1, binding = 3) uniform texture2D   uCascadeShadowMaps[3];
 #define CASCADE_COUNT 3
 // Froxel volumetric fog grid: (xy) = screen UV, z = world distance / fogFar.
 // .rgb = integrated in-scattering to that distance, .a = transmittance.
-layout(set = 1, binding = 4) uniform sampler3D   uFroxelGrid;
+layout(set = 1, binding = 4) uniform texture3D   uFroxelGrid;
 // Ambient visibility from the GTAO pass: .xyz = bent normal (WORLD space), .a = visibility.
-layout(set = 1, binding = 5) uniform sampler2D   uAmbientVisibility;
+layout(set = 1, binding = 5) uniform texture2D   uAmbientVisibility;
 // Baked directional sky visibility. The compact SH volumes get coherent hardware trilinear
 // filtering; an octahedral form reconstructed more accurately but doubled the measured frame cost
 // at these frequent call sites. The transport atlas below has different frequency/cost constraints.
-layout(set = 1, binding = 6)  uniform sampler3D uSkyVisibility;   // L0, L1 x/y/z
-layout(set = 1, binding = 14) uniform sampler3D uSkyVisibility1;  // L2 -2,-1,0,+1
-layout(set = 1, binding = 15) uniform sampler3D uSkyVisibility2;  // L2 +2
+layout(set = 1, binding = 6)  uniform texture3D uSkyVisibility;   // L0, L1 x/y/z
+layout(set = 1, binding = 14) uniform texture3D uSkyVisibility1;  // L2 -2,-1,0,+1
+layout(set = 1, binding = 15) uniform texture3D uSkyVisibility2;  // L2 +2
 // Dynamic incident-light atlas: one 8x8 octahedral tile per probe, with a 6x6 directional interior
 // and border ring. Direction matters here because surfaces at one point can face distinct coloured
 // emitters and occluders.
-layout(set = 1, binding = 7) uniform sampler2D uSkyBounce;
-layout(set = 1, binding = 13) uniform sampler2D uSkyBounceDepth;
+layout(set = 1, binding = 7) uniform texture2D uSkyBounce;
+layout(set = 1, binding = 13) uniform texture2D uSkyBounceDepth;
 // Probe-usage writes deliberately happen in compute, not here. Declaring a fragment-stage image3D
 // disabled tile-renderer behavior and measured 35 ms -> 290 ms even with stores removed. The
 // depth-driven compute pass derives the same visible-probe set without fragment scatter.
 // The environment convolved with CHARLIE rather than GGX, and the Charlie lobe's directional
 // albedo. Separate from uPrefilteredEnv on purpose: a GGX cube in sheen's place renders something
 // dimmer and rimless and entirely plausible, which is the failure this whole arc keeps closing.
-layout(set = 1, binding = 8) uniform samplerCube uSheenEnv;
-layout(set = 1, binding = 9) uniform sampler2D   uSheenLut;
-// Declared to keep set 1 layout-compatible with the skybox pipeline in the same pass; the lit
-// shader reads the prefiltered chain, not the raw sky.
-layout(set = 1, binding = 10) uniform samplerCube uEnvCube;
+layout(set = 1, binding = 8) uniform textureCube uSheenEnv;
+layout(set = 1, binding = 9) uniform texture2D   uSheenLut;
+// Not read here: the lit shader reads the prefiltered chain, not the raw sky. Declared because the
+// lit draws are handed the pass's shared binding list, which carries it, and a texture bound by name
+// that the program does not declare is an error. (It used to be for layout compatibility with the
+// skybox, which per-draw descriptor sets made moot.)
+layout(set = 1, binding = 10) uniform textureCube uEnvCube;
 
 // The same density grid the injection pass marches, here as the leak metric's ground truth. It is
 // not in the lit path: nothing outside the `uVizChannel > 20.5` branch samples it.
-layout(set = 1, binding = 16) uniform sampler3D uOccupancy;
+layout(set = 1, binding = 16) uniform texture3D uOccupancy;
 
 // The half-resolution incident-light field: rgb = bounced radiance, a = baked sky visibility.
 // Read instead of recomputing when uIncident.w says the pass ran. See incident.frag.
-layout(set = 1, binding = 17) uniform sampler2D uIncidentField;
+layout(set = 1, binding = 17) uniform texture2D uIncidentField;
 // The pre-pass normal, bound here ONLY so viz channel 22 can show what the incident field reads.
 // Nothing in the lit path samples it: lit.frag has its own, better normal.
-layout(set = 1, binding = 18) uniform sampler2D uPrepassNormalViz;
+layout(set = 1, binding = 18) uniform texture2D uPrepassNormalViz;
+
+// <b>Every set-1 texture above is a separate image, read through this one sampler.</b> As combined
+// samplers they were 19 of this stage's 25, against MoltenVK's 16 per stage; as separate images they
+// count against sampled images (256) instead, and the stage holds 7 samplers: this and set 2's six.
+// One is enough because every one of those textures was created LinearClamp or LinearClampMipmap,
+// which are the same VkSampler: GenerateMipmaps is a texture-creation flag, and every sampler leaves
+// MaxLod unclamped so the texture's own mip count limits it. See docs/renderer.md, "Separate images
+// and samplers".
+//@sampler LinearClamp
+layout(set = 1, binding = 19) uniform sampler uLinearClamp;
 
 layout(set = 2, binding = 0) uniform Material {
     vec4 uBaseColorFactor;
@@ -196,7 +210,7 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
 // Available before material branching so glass reflections and opaque ambient share enclosure.
 float blixSkyVisibility(vec3 worldPos, vec3 dir, float push) {
     if (frame.uSkyMin.w <= 0.5 || frame.uAbFlags2.x > 0.5) return 1.0;
-    return blix_skyVisibility(uSkyVisibility, uSkyVisibility1, uSkyVisibility2,
+    return blix_skyVisibility(uSkyVisibility, uSkyVisibility1, uSkyVisibility2, uLinearClamp,
                               frame.uSkyMin.xyz, frame.uSkyScale.xyz, push,
                               worldPos, dir);
 }
@@ -301,7 +315,7 @@ void main() {
         float lod = roughness * (frame.uEnvMipCount - 1.0);
         // Occluded like every other indirect term. Evaluated along R rather than N because a
         // reflection gathers from where it points, and a window deep inside a room points at a wall.
-        vec3 envRefl = textureLod(uPrefilteredEnv, R, lod).rgb * blixSkyVisibility(vWorldPos, R, 0.0);
+        vec3 envRefl = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), R, lod).rgb * blixSkyVisibility(vWorldPos, R, 0.0);
         float fresnel = 0.04 + 0.96 * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
         // No opacity floor: this branch models Fresnel reflection over the background, without
         // refraction or absorption. Clean head-on glass is therefore nearly transparent.
@@ -336,7 +350,7 @@ void main() {
     float shadowNeed = max(NdotL, mat.uMaterialParams2.z > 0.0 ? backNdotL : 0.0);
     if (frame.uShadowStrength > 0.0 && shadowNeed > 0.0) {
         sunShadow = blix_sun_shadow_cascaded(
-            uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2],
+            uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2], uLinearClamp,
             frame.uCascadeViewProj[0], frame.uCascadeViewProj[1], frame.uCascadeViewProj[2],
             frame.uCascadeTexels.xyz,
             vWorldPos, N, shadowNeed, 2.0, gl_FragCoord.xy,
@@ -398,7 +412,7 @@ void main() {
 
     // How much light the sheen layer takes, so the base layer beneath can be darkened by it.
     // Without this, sheen is added energy and cloth ends up brighter than the light falling on it.
-    float sheenAlbedo  = hasSheen ? blix_sheenAlbedo(uSheenLut, NdotV, sheenRoughness) : 0.0;
+    float sheenAlbedo  = hasSheen ? blix_sheenAlbedo(uSheenLut, uLinearClamp, NdotV, sheenRoughness) : 0.0;
     float sheenScale   = hasSheen ? blix_sheenScaling(sheenColor, sheenAlbedo) : 1.0;
     // And what leaves through the back did not leave through the front.
     float transScale   = blix_diffuseTransmissionScaling(diffTrans);
@@ -446,7 +460,7 @@ void main() {
     // GTAO provides screen-space visibility and a bent normal for opaque surfaces. Transmissive
     // materials are absent from the depth pre-pass, so sampling here would describe geometry behind
     // the pane. The predicate matches the scene's blend classification.
-    vec4 ambientVis = texture(uAmbientVisibility, gl_FragCoord.xy / frame.uFog.xy);
+    vec4 ambientVis = texture(sampler2D(uAmbientVisibility, uLinearClamp), gl_FragCoord.xy / frame.uFog.xy);
     // <b>Named for what it actually tests.</b> This is "did this surface write depth in the
     // pre-pass", which is what makes a screen-space visibility lookup meaningful here -- and the
     // only thing excluded from that pre-pass is a KHR_materials_transmission pane. It was called
@@ -471,7 +485,7 @@ void main() {
     vec3 cubeN   = N;
     vec3 skyVisN = frame.uAmbientGeoNormal > 0.5 ? vizGeometricN : N;   // geometric by default
     vec3 bounceN = frame.uAmbientGeoNormal > 0.5 ? vizGeometricN : N;   // -- see the declaration
-    vec3 irradiance = frame.uAbFlags.z > 0.5 ? vec3(0.2) : texture(uIrradiance, cubeN).rgb;
+    vec3 irradiance = frame.uAbFlags.z > 0.5 ? vec3(0.2) : texture(samplerCube(uIrradiance, uLinearClamp), cubeN).rgb;
 
     // --- Baked sky visibility -------------------------------------------
     // Baked sky visibility supplies building-scale enclosure beyond GTAO's screen-space radius.
@@ -485,7 +499,7 @@ void main() {
     // The incident field carries .a sky visibility and .rgb incoming bounce, replacing two volume
     // reconstructions while leaving material response and direct/specular lighting in this pass.
     vec4 incidentField = frame.uIncident.z > 0.5
-        ? texture(uIncidentField, gl_FragCoord.xy / frame.uFog.xy)
+        ? texture(sampler2D(uIncidentField, uLinearClamp), gl_FragCoord.xy / frame.uFog.xy)
         : vec4(0.0);
     if (frame.uIncident.z > 0.5) {
         skyVisibility = frame.uSkyMin.w > 0.5 ? incidentField.a : 1.0;
@@ -495,7 +509,7 @@ void main() {
         vizProbeUv = probeUv;
         // Fetch once and evaluate for both N and -N; with no positional push both directions share
         // the same three volume texels.
-        skySample = blix_skyFetch(uSkyVisibility, uSkyVisibility1, uSkyVisibility2,
+        skySample = blix_skyFetch(uSkyVisibility, uSkyVisibility1, uSkyVisibility2, uLinearClamp,
                                   frame.uSkyMin.xyz, frame.uSkyScale.xyz, vWorldPos);
         skySampleValid = true;
         skyVisibility = frame.uSkyDropL2 > 0.5
@@ -511,8 +525,8 @@ void main() {
     vec3 specularIBL = vec3(0.0);
     if (frame.uAbFlags.z < 0.5) {
         float lod = roughness * (frame.uEnvMipCount - 1.0);
-        vec3 prefiltered = textureLod(uPrefilteredEnv, R, lod).rgb;
-        vec2 envBrdf = texture(uBrdfLut, vec2(NdotV, roughness)).rg;
+        vec3 prefiltered = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), R, lod).rgb;
+        vec2 envBrdf = texture(sampler2D(uBrdfLut, uLinearClamp), vec2(NdotV, roughness)).rg;
         // The reflected sky is the same sky. Not occluding it leaves a courtyard floor with a
         // mirror of an open horizon it cannot see.
         specularIBL = prefiltered * (F * envBrdf.x + envBrdf.y) * skyVisibility;
@@ -549,7 +563,7 @@ void main() {
             probeConfidence = 1.0;
         } else {
             incident = blix_probeIrradianceEx(
-                uSkyBounce, uSkyBounceDepth, uOccupancy, ivec3(frame.uBounceDims.xyz),
+                uSkyBounce, uSkyBounceDepth, uOccupancy, uLinearClamp, ivec3(frame.uBounceDims.xyz),
                 ivec3(frame.uOccupancyDims.xyz), frame.uSkyMin.xyz, 1.0 / frame.uSkyScale.xyz,
                 vWorldPos, bounceN, frame.uProbeTetrahedral > 0.5,
                 frame.uOccupancyDims.w > 0.5 && frame.uAbFlags2.y < 0.5 ? frame.uProbeOcclusion : 0.0,
@@ -559,7 +573,7 @@ void main() {
         bounce = incident * albedo * (1.0 - metallic) * ao * visibility;
         if (frame.uVizChannel > 20.5 && frame.uOccupancyDims.w > 0.5) {
             vizProbeLeak = blix_probeLeakFraction(
-                uSkyBounceDepth, uOccupancy, ivec3(frame.uBounceDims.xyz),
+                uSkyBounceDepth, uOccupancy, uLinearClamp, ivec3(frame.uBounceDims.xyz),
                 ivec3(frame.uOccupancyDims.xyz), frame.uSkyMin.xyz, 1.0 / frame.uSkyScale.xyz,
                 vWorldPos, bounceN, frame.uProbeTetrahedral > 0.5, frame.uProbeOcclusion);
         }
@@ -570,7 +584,7 @@ void main() {
     vec3 sheenIBL = vec3(0.0);
     if (hasSheen && frame.uAbFlags.z < 0.5) {
         float sheenLod = sheenRoughness * max(frame.uSheenMipCount - 1.0, 0.0);
-        vec3 sheenEnv = textureLod(uSheenEnv, R, sheenLod).rgb;
+        vec3 sheenEnv = textureLod(samplerCube(uSheenEnv, uLinearClamp), R, sheenLod).rgb;
         sheenIBL = sheenEnv * sheenColor * sheenAlbedo * skyVisibility * visibility * ao;
     }
 
@@ -584,7 +598,7 @@ void main() {
         float backVis = skySampleValid
             ? blix_skyEvaluate(skySample, -N)
             : blixSkyVisibility(vWorldPos, -N, 0.0);
-        vec3 backIrradiance = texture(uIrradiance, -cubeN).rgb * backVis;
+        vec3 backIrradiance = texture(samplerCube(uIrradiance, uLinearClamp), -cubeN).rgb * backVis;
         transmittedIBL = blix_diffuseTransmissionAmbient(
             backIrradiance, dtColor, diffTrans) * ao * visibility;
     }
@@ -642,7 +656,7 @@ void main() {
             // 22 shows the pre-pass normal used by the half-resolution incident field. Compare it
             // with geometric channel 1 and shading channel 2 to localize reconstruction faults.
             frame.uVizChannel < 22.5 && frame.uVizChannel > 21.5
-                ? texture(uPrepassNormalViz, gl_FragCoord.xy / frame.uFog.xy).xyz * 0.5 + 0.5 :
+                ? texture(sampler2D(uPrepassNormalViz, uLinearClamp), gl_FragCoord.xy / frame.uFog.xy).xyz * 0.5 + 0.5 :
             // 21 compares the probe blend with an occupancy march: red is leaked weight and green
             // is 0.5 + 0.5*confidence for measured pixels. Reporting both prevents zero-leak scores
             // achieved by rejecting all useful light.
@@ -677,7 +691,7 @@ void main() {
         // The grid's slices are not uniform in distance, so neither is this lookup — the curve is
         // shared with the compute pass rather than restated (see froxel.glsl).
         float w = blix_froxelSliceCoord(dist, frame.uFog.z);
-        vec4 fog = texture(uFroxelGrid, vec3(fuv, w));
+        vec4 fog = texture(sampler3D(uFroxelGrid, uLinearClamp), vec3(fuv, w));
         color = color * fog.a + fog.rgb;
     }
 

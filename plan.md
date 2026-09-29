@@ -5,8 +5,10 @@ Their reasoning lives where it governs behaviour — code comments, `docs/`, and
 suites that pin it — rather than here, per conventions §9. So does the arguments
 and headless-host arc that followed (`AppArgs`, `HeadlessHost`, typed parameters,
 `[BlixStartup]`, gate legs with arguments), recorded in [`docs/workflow.md`](docs/workflow.md)
-and pinned by `Blix.Test.Apps` and the `demos` gate. What follows is what is still open,
-and nothing else.
+and pinned by `Blix.Test.Apps` and the `demos` gate. The same holds for PR #42: the host's frame
+timing (`IRenderHost.Timing`), graph targets' resting layouts, and separate images with
+shader-declared samplers are in [`docs/architecture.md`](docs/architecture.md) and
+[`docs/renderer.md`](docs/renderer.md). What follows is what is still open, and nothing else.
 
 ---
 
@@ -55,27 +57,6 @@ of five were **legibility, not mechanism**.
 
 ---
 
-## Tiers and measurement — parked
-
-Discussed and deliberately not started. Two findings hold whatever shape it takes:
-
-- **Named tiers are small and already needed.** `test <tier>:` lines would let the `demos`
-  gate's deviceless legs run in CI apart from its GPU legs, and would give the RTS's long gate
-  (simulated years, now a shell script) a declared home.
-- **Measurement cannot ride `DebugContext`.** The RTS's sealed `--perf-run` switches its own
-  diagnostics producer off, because keeping it alive cost over 4 ms a wide-village frame and
-  had already skewed two sections' absolute numbers. What it measures instead comes from the
-  device (`LastCpuFrameTiming`, `GpuPassTotals` over the steady window), the game's own
-  stopwatches and counts, and the display's refresh for cadence, summarised as warm-up plus
-  nearest-rank percentiles into one `PERFCASE` line its scripts tabulate. A Blix version would
-  be a cheap channel live only in a measured run, the host's own numbers, and one run record per
-  run, with cases, arms and ABBA ordering left to the project.
-
-Open: whether the engine owns case execution, what an app hands the measurement channel, whether
-Sponza's in-process `--ab` feeds the same records, and whether simulation benches belong at all.
-
----
-
 ## Acceptance steps that are access, not work
 
 These keep this record open. None can be closed by writing anything.
@@ -104,18 +85,6 @@ native build targets has only ever run on a GitHub runner.
 
 ## Known gaps that are not scheduled
 
-**Sponza's lit shader declares 25 samplers in its fragment stage; MoltenVK allows 16.** The
-device now says so by name when the program is created (`lit`, and `flat`, `depth_prepass` and
-`depth_prepass_mask`, which share its interface), and `--validate` fails a Sponza run on it.
-Sixteen is Metal's limit on sampler objects, not on textures: this device reports 256 sampled
-images per stage (`vulkaninfo`). So the fix is separate images and a few shared samplers in the
-lit shaders, `texture2D`
-plus `sampler` in GLSL. Reflection already parses `separate_images` and `separate_samplers`;
-what has not been checked is that the device binds a separate sampler rather than treating every
-image slot as a combined one. The alternative, Metal argument buffers for all of MoltenVK
-(`MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS`), lifts the limit engine-wide and changes every program's
-binding path, so it is not the first thing to try. Until then Sponza is not a `demos` gate leg.
-
 **The `demos` gate is not in CI, and now cannot be as it stands.** Its headed legs run each demo
 for 45 frames under `--validate`, which needs a GPU and the validation layers, and CI runners have
 neither. The root gate is the deviceless one. A CI home for the `demos` gate would first need its
@@ -131,6 +100,23 @@ Every `.log` and `.exit` does, so the pose fingerprints, travel numbers and exit
 are unchanged and only pixels moved — the picture was looked at and is right. Bisecting
 which commit moved it was abandoned as not worth the hunt. Re-record with
 `tools/lab-baseline.sh record`; until then the control is expired, not failing.
+
+---
+
+## Parked
+
+**The RTS moves to this engine on its next pin bump**, and four things will break for it:
+`vk.LastCpuFrameTiming` and the tuple `vk.GpuPassTotals` are gone (read `host.Timing`, whose
+`GpuPassTotals` is live, so copy the entries to start a window); submitted work is literal, so a
+zero-instance draw counts zero and a negative count throws; a `uniform sampler` with no
+`//@sampler` on the line before is a build error; and `blix test <word>` reads a leading word as a
+project name. PR #42 lists the same.
+
+**The teardown SIGSEGV** (exit 139 after a demo's exit line; `UMEntryThunk::Decode` under
+`GetDelegateForFunctionPointer`, with a small number, `0xb`, `0xd` or `0x80000001`, where a function
+pointer belongs). Pre-existing and rare: two legs in one `demos` gate run, then none in fifteen
+targeted reruns and two full gates. `VulkanGraphicsDevice.Init.cs` holds what is known. Waiting for
+a report taken with `BLIX_TEARDOWN_TRACE=1` exported, which names the step; gate legs inherit it.
 
 ---
 

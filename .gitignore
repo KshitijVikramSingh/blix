@@ -13,6 +13,7 @@ obj/
 # BlixStageLibraryShaders fixes the staging, so the sidecars can be what they always were.
 *.spv.tune.json
 *.spv.refl.json
+*.spv.samplers.json
 .vs/
 .vscode/
 *.user

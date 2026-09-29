@@ -23,9 +23,23 @@ public enum ShaderResourceType
 {
     UniformBuffer,
     StorageBuffer,
+    /// <summary>A combined image and sampler: GLSL <c>sampler2D</c>, <c>samplerCube</c>, <c>sampler3D</c>.</summary>
+    /// <remarks>
+    /// Named before the engine could express a separate image, and kept so external code that says
+    /// SampledImage still means what it meant. It is Vulkan's COMBINED_IMAGE_SAMPLER, and it counts
+    /// against the per-stage sampler limit as well as the sampled-image one.
+    /// </remarks>
     SampledImage,
     StorageImage,
+    /// <summary>A separate sampler: GLSL <c>sampler</c>. Immutable, from the shader's <c>//@sampler</c>.</summary>
     Sampler,
+    /// <summary>A separate image: GLSL <c>texture2D</c>, <c>textureCube</c>, <c>texture3D</c>.</summary>
+    /// <remarks>
+    /// Vulkan's SAMPLED_IMAGE. It counts only against sampled images, which is the point of it: a
+    /// stage with twenty of these and two <see cref="Sampler"/>s is inside a 16-sampler limit.
+    /// Read through a sampler the shader pairs it with, so its texture's own sampler is not used.
+    /// </remarks>
+    SeparateImage,
 }
 
 // One descriptor slot inside a set. BlockLayout is required for UniformBuffer
@@ -39,6 +53,9 @@ public enum ShaderResourceType
 //
 // Name is the shader's name for the resource, as reflection reports it (uHdr, and uSpotShadowMaps
 // for an array). A texture bound by name finds its binding through it.
+//
+// Sampler is a Sampler slot's state, from the shader's //@sampler. The device builds it into the set
+// layout as an immutable sampler, so nothing binds it per draw. Null on every other type.
 public sealed record DescriptorSetSlot(
     int Set,
     int Binding,
@@ -46,7 +63,8 @@ public sealed record DescriptorSetSlot(
     ShaderStages Stages,
     int Count = 1,
     UniformBlockLayout? BlockLayout = null,
-    string? Name = null);
+    string? Name = null,
+    SamplerDescription? Sampler = null);
 
 // One push-constant range. Per Vulkan spec, two ranges sharing any stage
 // bit must not have overlapping byte ranges; ranges in disjoint stages may

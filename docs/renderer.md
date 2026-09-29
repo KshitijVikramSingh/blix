@@ -215,6 +215,61 @@ build targets; nothing needs adding to a csproj. The generator reads the
 `.spv.refl.json` and `.spv.tune.json` files the shader build writes, so an IDE
 shows the generated fields once a build has produced them.
 
+### Separate images and samplers
+
+A shader can take a texture in two forms, and they sample identically:
+
+| Form | GLSL | Descriptors | Counts against |
+| --- | --- | --- | --- |
+| Combined | `sampler2D uMap` | one, with the texture's own sampler | samplers **and** sampled images |
+| Separate | `texture2D uMap` plus `sampler uLinearClamp` | an image, and a sampler several images share | sampled images; samplers only for the samplers |
+
+`texture(sampler2D(uMap, uLinearClamp), uv)` compiles to the same sample as
+`texture(uMap, uv)` on a combined sampler with that state. The difference is the
+per-stage limits: MoltenVK allows 16 samplers per stage and 256 sampled images, and
+a combined sampler uses one of each. Keep the combined form until a stage nears 16
+textures. Sponza's lit shader reads 25, so its per-pass set is separate images
+through one sampler, and the stage holds 7 samplers.
+
+**A separate sampler's state is declared in the shader,** on the line before it:
+
+```glsl
+//@sampler LinearClamp
+layout(set = 1, binding = 19) uniform sampler uLinearClamp;
+layout(set = 1, binding = 0) uniform textureCube uIrradiance;
+```
+
+The preset is a `SamplerDescription` preset by name (`LinearClamp`,
+`LinearClampMipmap`, `LinearRepeat`, `NearestClamp`, `PixelatedRepeat`). The shader
+build writes it to `.spv.samplers.json`, and the device builds each one into the
+descriptor-set layout as an immutable sampler, so nothing binds it per draw. A
+`uniform sampler` without `//@sampler`, a `//@sampler` not followed by one, and an
+unknown preset are all build errors.
+
+**A separate image ignores its texture's own sampler.** It is read through
+whichever sampler the shader pairs it with, so a texture created with repeat
+wrapping and read through `uLinearClamp` is clamped. Textures are still bound by
+name, `new ShaderTextureBinding("uIrradiance", texture)`, exactly as for combined.
+Note that `LinearClamp` and `LinearClampMipmap` are the same sampler state:
+`GenerateMipmaps` is a texture-creation flag, and every sampler leaves `MaxLod`
+unclamped so the texture's mip count limits it.
+
+**The library functions come in both forms.** GLSL builds `sampler2D(t, s)` only
+where it samples, so it cannot be passed to a function. The sampling functions in
+`shadow.glsl`, `sky_visibility.glsl`, `probe_volume.glsl` and `sheen.glsl`
+therefore exist as overload pairs, and the separate one takes a single sampler
+after its textures:
+
+```glsl
+blix_sun_shadow_cascaded(uCascade0, uCascade1, uCascade2, vp0, ...);               // combined
+blix_sun_shadow_cascaded(uCascade0, uCascade1, uCascade2, uLinearClamp, vp0, ...); // separate
+```
+
+Each library writes its sampling functions once, in `<lib>.sampled.glsl`, against
+the macros `sampling_form.glsl` defines, and includes that file twice, once per
+form. `ibl.glsl` and `bloom.glsl` are combined only; add the pair the same way when
+a separate-form caller needs one.
+
 Fresh per-frame data has two distinct homes:
 
 - `AllocVertices` returns a `TransientVertexSlice` from a frames-in-flight ring.

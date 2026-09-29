@@ -78,6 +78,22 @@ try
         File.WriteAllText(
             ShaderTunableSidecar.PathFor(output),
             ShaderTunableSidecar.ToJson(ShaderTunables.Scan(preprocessed.ExpandedSource)));
+
+        // The //@sampler sidecar, for the same reasons and from the same source. A separate sampler
+        // with no declared state is a build error here, not a device error at the first draw; the
+        // .spv goes too, so the next build compiles again rather than seeing it up to date.
+        IReadOnlyList<ShaderSampler> samplers;
+        try
+        {
+            samplers = ShaderSamplers.Scan(preprocessed.ExpandedSource);
+        }
+        catch (InvalidOperationException failure)
+        {
+            Console.Error.WriteLine($"{options.Input}: error: {failure.Message}");
+            File.Delete(output);
+            return 1;
+        }
+        File.WriteAllText(ShaderSamplerSidecar.PathFor(output), ShaderSamplerSidecar.ToJson(samplers));
         return 0;
     }
 

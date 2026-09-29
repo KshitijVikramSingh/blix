@@ -27,10 +27,14 @@ public static class ShaderReflection
     public static ReflStage Load(string reflJsonPath)
     {
         ArgumentNullException.ThrowIfNull(reflJsonPath);
-        return Parse(File.ReadAllText(reflJsonPath), reflJsonPath);
+        // The //@sampler sidecar sits beside the same .spv, and gives each separate sampler its state.
+        var samplers = reflJsonPath.EndsWith(".refl.json", StringComparison.Ordinal)
+            ? ShaderSamplerSidecar.Load(reflJsonPath[..^".refl.json".Length])
+            : Array.Empty<ShaderSampler>();
+        return Parse(File.ReadAllText(reflJsonPath), reflJsonPath, samplers);
     }
 
-    public static ReflStage Parse(string json, string? sourceName = null)
+    public static ReflStage Parse(string json, string? sourceName = null, IReadOnlyList<ShaderSampler>? samplers = null)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -49,10 +53,11 @@ public static class ShaderReflection
         // Combined image samplers (GLSL sampler2D/Cube/3D) → SampledImage,
         // matching the engine's SampledImage→CombinedImageSampler mapping.
         AddImageSlots(root, "textures", ShaderResourceType.SampledImage, stage, slots);
-        // Separate images / samplers (rare; not used by current shaders but
-        // cheap to support) and storage images (compute writes).
-        AddImageSlots(root, "separate_images", ShaderResourceType.SampledImage, stage, slots);
-        AddImageSlots(root, "separate_samplers", ShaderResourceType.Sampler, stage, slots);
+        // Separate images and samplers (texture2D + sampler), and storage images (compute writes).
+        // Separate images used to be read as combined, which gave a texture2D the wrong descriptor
+        // type; each is its own kind now. A separate sampler takes its state from //@sampler.
+        AddImageSlots(root, "separate_images", ShaderResourceType.SeparateImage, stage, slots);
+        AddImageSlots(root, "separate_samplers", ShaderResourceType.Sampler, stage, slots, samplers);
         AddImageSlots(root, "images", ShaderResourceType.StorageImage, stage, slots);
 
         var pushConstants = ParsePushConstants(root, types, stage, where);
@@ -105,6 +110,12 @@ public static class ShaderReflection
                     merged[key] = slot;
                     continue;
                 }
+                if (existing.Sampler is { } one && slot.Sampler is { } two && one != two)
+                {
+                    throw new InvalidOperationException(
+                        $"ShaderReflection: sampler '{slot.Name}' at (set={slot.Set}, binding={slot.Binding}) is " +
+                        $"declared with different //@sampler states in different stages.");
+                }
                 if (existing.Type != slot.Type || existing.Count != slot.Count)
                 {
                     throw new InvalidOperationException(
@@ -127,7 +138,7 @@ public static class ShaderReflection
 
                 var fuller = (slot.BlockLayout?.TotalSize ?? 0) > (existing.BlockLayout?.TotalSize ?? 0)
                     ? slot : existing;
-                merged[key] = fuller with { Stages = existing.Stages | slot.Stages };
+                merged[key] = fuller with { Stages = existing.Stages | slot.Stages, Sampler = existing.Sampler ?? slot.Sampler };
             }
         }
 
@@ -240,7 +251,7 @@ public static class ShaderReflection
 
     private static void AddImageSlots(
         JsonElement root, string section, ShaderResourceType type,
-        ShaderStages stage, List<DescriptorSetSlot> outSlots)
+        ShaderStages stage, List<DescriptorSetSlot> outSlots, IReadOnlyList<ShaderSampler>? samplers = null)
     {
         if (!root.TryGetProperty(section, out var arr) || arr.ValueKind != JsonValueKind.Array) return;
         foreach (var r in arr.EnumerateArray())
@@ -254,7 +265,10 @@ public static class ShaderReflection
                 foreach (var d in dims.EnumerateArray()) count *= d.GetInt32();
             }
             var name = r.TryGetProperty("name", out var n) ? n.GetString() : null;
-            outSlots.Add(new DescriptorSetSlot(set, binding, type, stage, Count: count, Name: name));
+            var state = type == ShaderResourceType.Sampler
+                ? samplers?.FirstOrDefault(s => s.Name == name)?.Description
+                : null;
+            outSlots.Add(new DescriptorSetSlot(set, binding, type, stage, Count: count, Name: name, Sampler: state));
         }
     }
 

@@ -87,6 +87,13 @@ public sealed class HeadlessHost : IRenderHost, IDebugHost
     public int? DisplayRefreshHz => null;
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Nothing is submitted, so nothing is reported: no last frame, no timestamps, no totals. Zeros
+    /// would read as a frame that cost nothing, which is a different claim.
+    /// </remarks>
+    public IFrameTiming Timing => FrameTimings.None;
+
+    /// <inheritdoc />
     public DebugContext? CurrentDebug => debugSystem?.Current;
 
     /// <inheritdoc />

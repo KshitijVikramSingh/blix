@@ -323,13 +323,15 @@ internal sealed partial class SponzaLoop
         // wait is the GPU/vsync throttle (high = GPU-bound, can't be cut by
         // batching); submit is queue submit + present enqueue.
         //
-        // The other half — per-pass GPU ms — is surfaced by the runtime under
-        // the `gpu/passes` timer scope (Window drains ConsumeAvailableGpuTimings
-        // each frame); the periodic console sink prints it. We deliberately do
-        // NOT drain it here too — that would race the runtime and steal frames.
-        var cpu = vk.LastCpuFrameTiming;
-        debug.Values.Value("cpu-wait", $"{cpu.WaitMs:0.00}ms");
-        debug.Values.Value("cpu-encode", $"{cpu.EncodeMs:0.00}ms");
-        debug.Values.Value("cpu-submit", $"{cpu.SubmitPresentMs:0.00}ms");
+        // Read from the host's frame timing, which is the backend's own record and is never drained
+        // by reading. Per-pass GPU ms is the runtime's `gpu/passes` timer scope as before.
+        if (host.Timing.LastFrame is { } cpu)
+        {
+            debug.Values.Value("cpu-wait", $"{cpu.WaitMs:0.00}ms");
+            debug.Values.Value("cpu-encode", $"{cpu.EncodeMs:0.00}ms");
+            debug.Values.Value("cpu-submit", $"{cpu.SubmitPresentMs:0.00}ms");
+            debug.Values.Value("submitted", string.Create(Inv,
+                $"{cpu.Work.Draws} draws, {cpu.Work.IndirectDraws} indirect ({cpu.Work.IndirectCommands} records), {cpu.Work.Triangles:N0} tris"));
+        }
     }
 }

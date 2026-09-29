@@ -102,6 +102,11 @@ internal sealed partial class SponzaLoop
         // Post-load frames are the reproducible clock for orbit, capture, and temporal sequences;
         // global frames still account for loading and A/B scheduling.
         if (fullyLoaded) postLoadFrames++;
+        if (framesAfterLoad is { } afterLoad && postLoadFrames == afterLoad)
+        {
+            Console.WriteLine($"[VulkanSponza] Exiting {afterLoad} frame(s) after load, {framesRendered} in all, as asked.");
+            host.RequestClose();
+        }
         if (orbit) ApplyOrbit();
         var stamp = System.Diagnostics.Stopwatch.GetTimestamp();
         if (lastFrameStamp != 0)
@@ -800,7 +805,7 @@ internal sealed partial class SponzaLoop
 
             // Sky after opaque, before blend. Fullscreen triangle; positions are
             // synthesised in skybox.vert, so it binds set-0 perFrame + textures only.
-            fullscreen.Draw(scope, skyPipeline, passBindings, uniforms: perFrame);
+            fullscreen.Draw(scope, skyPipeline, skyBindings, uniforms: perFrame);
             // Blend (glass), depth-test only, after opaque + sky. One indirect
             // draw per (pipeline, material) group, same as opaque.
             foreach (var g in blendGroups)
@@ -1314,6 +1319,11 @@ internal sealed partial class SponzaLoop
             passBindings[froxelGridBinding] =
                 new ShaderTextureBinding("uFroxelGrid", froxelGridTexture);
         }
+        if (skyFroxelGridBinding >= 0)
+        {
+            skyBindings[skyFroxelGridBinding] =
+                new ShaderTextureBinding("uFroxelGrid", froxelGridTexture);
+        }
         Console.WriteLine(
             $"[VulkanSponza] froxel grid {x}x{y}x{froxelGridZ} ({FroxelPixels} px/froxel at {width}x{height})");
     }
@@ -1412,20 +1422,20 @@ internal sealed partial class SponzaLoop
     // --- live GPU pass cost ----------------------------------------------
     // Difference cumulative timestamp totals from the prior sample and smooth that window. Lifetime
     // means include loading and respond too slowly for live controls.
-    private readonly Dictionary<string, (double Ms, long Samples)> gpuPassPrev = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, GpuPassTotal> gpuPassPrev = new(StringComparer.Ordinal);
     private readonly Dictionary<string, double> gpuPassMs = new(StringComparer.Ordinal);
 
     private void SampleGpuPassTimes()
     {
-        if (!vk.GpuTimestampsSupported) return;
-        foreach (var (name, current) in vk.GpuPassTotals)
+        if (!host.Timing.GpuTimestampsSupported) return;
+        foreach (var (name, current) in host.Timing.GpuPassTotals)
         {
             var had = gpuPassPrev.TryGetValue(name, out var previous);
-            gpuPassPrev[name] = (current.TotalMs, current.Samples);
+            gpuPassPrev[name] = current;
             if (!had) continue;
-            var frames = current.Samples - previous.Samples;
-            if (frames <= 0) continue;
-            var perFrame = (current.TotalMs - previous.Ms) / frames;
+            var window = current - previous;
+            if (window.Samples <= 0) continue;
+            var perFrame = window.MeanMs;
             gpuPassMs[name] = gpuPassMs.TryGetValue(name, out var ema)
                 ? ema + (perFrame - ema) * 0.08
                 : perFrame;
@@ -1610,13 +1620,13 @@ internal sealed partial class SponzaLoop
     /// </remarks>
     private void WritePassBreakdown()
     {
-        if (!vk.GpuTimestampsSupported)
+        if (!host.Timing.GpuTimestampsSupported)
         {
             Console.WriteLine("[VulkanSponza] GPU timestamps unsupported on this device — no pass breakdown.");
             return;
         }
 
-        var totals = vk.GpuPassTotals;
+        var totals = host.Timing.GpuPassTotals;
         if (totals.Count == 0)
         {
             Console.WriteLine("[VulkanSponza] no GPU pass timings resolved.");
@@ -1625,10 +1635,10 @@ internal sealed partial class SponzaLoop
 
         Console.WriteLine("[VulkanSponza] GPU ms per pass (mean over resolved frames):");
         double frameTotal = 0;
-        foreach (var entry in totals.OrderByDescending(e => e.Value.Samples > 0 ? e.Value.TotalMs / e.Value.Samples : 0))
+        foreach (var entry in totals.OrderByDescending(e => e.Value.MeanMs))
         {
             if (entry.Value.Samples == 0) continue;
-            var mean = entry.Value.TotalMs / entry.Value.Samples;
+            var mean = entry.Value.MeanMs;
             frameTotal += mean;
             Console.WriteLine($"  {mean,8:0.000} ms  {entry.Key}  (n={entry.Value.Samples})");
         }
@@ -1645,6 +1655,24 @@ internal sealed partial class SponzaLoop
             + $"camera {cameraTriangleSum / tf:N0}"));
         Console.WriteLine(string.Create(Inv,
             $"  shadow maps {ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}, texel {cascadeTexelWorld[0]:0.000}/{cascadeTexelWorld[1]:0.000}/{cascadeTexelWorld[2]:0.000} m, budget {shadowLodTexels:0.0} texels"));
+
+        // What the backend says the last frame submitted, pass by pass, beside what Sponza thinks it
+        // drew. Sponza's figures above are its own culling and LOD choices; these are what reached
+        // the device. Indirect records are counted and their triangles are not, because the GPU
+        // decides what an indirect record draws.
+        if (host.Timing.LastFrame is { } last)
+        {
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] submitted in frame {last.Frame}: {last.Work.Passes} passes, {last.Work.Draws} draws " +
+                $"({last.Work.Triangles:N0} triangles), {last.Work.IndirectDraws} indirect calls reading " +
+                $"{last.Work.IndirectCommands:N0} records, {last.Work.Dispatches} dispatches"));
+            foreach (var (pass, work) in host.Timing.LastFramePasses.OrderBy(p => p.Key, StringComparer.Ordinal))
+            {
+                if (work.Draws == 0 && work.IndirectDraws == 0 && work.Dispatches == 0) continue;
+                Console.WriteLine(string.Create(Inv,
+                    $"  {pass,-22} {work.Draws,5} draws {work.Triangles,12:N0} tris  {work.IndirectDraws,3} indirect {work.IndirectCommands,7:N0} records  {work.Dispatches,2} dispatches"));
+            }
+        }
 
         if (vk.GpuPassIsolation)
         {

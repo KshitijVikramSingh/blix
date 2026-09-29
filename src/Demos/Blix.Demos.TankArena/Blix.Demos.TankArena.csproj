@@ -41,8 +41,10 @@
     <GlslShader Include="Shaders\present.vert" />
     <GlslShader Include="Shaders\present.frag" />
     <!-- Shared GLSL library (src/Blix.Shaders), resolved via the -I path below; listed
-         so editing a lib file retriggers the cook. -->
-    <GlslInclude Include="..\..\Blix.Shaders\shadow.glsl" />
+         so editing a lib file retriggers the cook. The whole library rather than shadow.glsl
+         by name, because a library file includes others of its own (sampling_form.glsl and
+         shadow.sampled.glsl), and a list of names misses them. -->
+    <GlslInclude Include="..\..\Blix.Shaders\*.glsl" />
   </ItemGroup>
 
 

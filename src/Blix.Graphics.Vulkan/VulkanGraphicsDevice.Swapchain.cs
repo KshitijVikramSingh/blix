@@ -88,7 +88,7 @@ public sealed partial class VulkanGraphicsDevice
     // — it fences the CPU against the GPU at every pass boundary and roughly halves the frame rate.
     private bool gpuPassIsolation;
     private Fence isolationFence;
-    private readonly Dictionary<string, (double TotalMs, long Samples)> gpuPassIsolated = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, GpuPassTotal> gpuPassIsolated = new(StringComparer.Ordinal);
     // <b>Frames, so a pass that SKIPS frames can be priced.</b> The per-execution mean is blind to
     // scheduling by construction: run a cascade every fourth frame and it costs exactly what it did
     // per run, while costing a quarter as much per frame. Amortising needs the denominator that
@@ -103,7 +103,7 @@ public sealed partial class VulkanGraphicsDevice
     }
 
     /// <summary>Isolated per-pass GPU milliseconds, cumulative. See GpuPassIsolation.</summary>
-    public IReadOnlyDictionary<string, (double TotalMs, long Samples)> GpuPassIsolatedTotals => gpuPassIsolated;
+    public IReadOnlyDictionary<string, GpuPassTotal> GpuPassIsolatedTotals => gpuPassIsolated;
 
     /// <summary>Frames recorded while isolation was on — the denominator for an amortised cost.</summary>
     public long GpuIsolationFrames => gpuIsolationFrames;
@@ -619,7 +619,7 @@ public sealed partial class VulkanGraphicsDevice
         first = false;
 
         gpuPassIsolated.TryGetValue(passName, out var acc);
-        gpuPassIsolated[passName] = (acc.TotalMs + ms, acc.Samples + 1);
+        gpuPassIsolated[passName] = acc + new GpuPassTotal(ms, 1);
 
         ThrowIfNotSuccess(Vk.ResetCommandBuffer(local, 0), "vkResetCommandBuffer(isolate)");
         var bi = new CommandBufferBeginInfo
@@ -706,8 +706,9 @@ public sealed partial class VulkanGraphicsDevice
 
         ref var f = ref frames[currentFrame];
         // CPU-phase timing: wait (fence/vsync throttle) → encode (record vkCmds)
-        // → submit/present. Surfaced via LastCpuFrameTiming so a diagnostics pass
-        // can isolate the draw-encode cost from the GPU-bound wait.
+        // → submit/present. Surfaced through IFrameTiming.LastFrame so a reader can
+        // isolate the draw-encode cost from the GPU-bound wait.
+        BeginFrameCount();
         var swWait = Stopwatch.GetTimestamp();
         Vk.WaitForFences(Device, 1, in f.InFlight, true, ulong.MaxValue);
 
@@ -782,6 +783,7 @@ public sealed partial class VulkanGraphicsDevice
                 if (canTimeCompute) nextQueryIndex += 2;
 
                 currentPassName = pass.Name;
+                CountPass(pass.Name);
                 // ComputeShaderBit is the compute encoder's boundary the way
                 // ColorAttachmentOutputBit is the render encoder's — same reason, same caveat:
                 // on MoltenVK these bracket the ENCODER, not the shader's execution.
@@ -903,6 +905,7 @@ public sealed partial class VulkanGraphicsDevice
             // Named so a uniform-conflict message can say WHICH two passes disagreed, which is the
             // difference between "something wrote this twice" and "lab.lit and lab.viewport did".
             currentPassName = pass.Name;
+            CountPass(pass.Name);
 
             Vk.CmdBeginRenderPass(f.CommandBuffer, in rpBegin, SubpassContents.Inline);
             // Timestamps INSIDE the pass — MoltenVK resolves counter samplers
@@ -1000,7 +1003,7 @@ public sealed partial class VulkanGraphicsDevice
         }
 
         var submitPresentMs = Stopwatch.GetElapsedTime(swSubmit, Stopwatch.GetTimestamp()).TotalMilliseconds;
-        lastCpuFrameTiming = new VkCpuFrameTiming(waitMs, encodeMs, submitPresentMs);
+        EndFrameCount(waitMs, encodeMs, submitPresentMs);
 
         currentFrame = (currentFrame + 1) % MaxFramesInFlight;
         // Advance the indirect ring in lockstep (only on a real presented frame,
@@ -1194,6 +1197,14 @@ public sealed partial class VulkanGraphicsDevice
             throw new InvalidOperationException(
                 $"DrawIndexed bound a compute pipeline '{pipe.Name}'. Compute pipelines can only be dispatched (RenderCommandList.ComputePass / RenderGraph.Dispatch).");
         }
+        // Cast to uint below, where a negative count becomes four billion. Refused here, by name.
+        if (d.IndexCount < 0 || d.InstanceCount < 0)
+        {
+            throw new InvalidOperationException(
+                $"Draw in pass '{currentPassName}' with pipeline '{pipe.Name}' has a negative count " +
+                $"(IndexCount {d.IndexCount}, InstanceCount {d.InstanceCount}).");
+        }
+        CountDraw(currentPassName, pipe, d.IndexCount, d.InstanceCount);
         var vb = GetVertexBuffer(d.VertexBuffer);
         var ib = GetIndexBuffer(d.IndexBuffer);
         var prog = shaderProgramTable[pipe.ShaderProgram.Id];
@@ -1322,9 +1333,16 @@ public sealed partial class VulkanGraphicsDevice
         Vk.CmdBindIndexBuffer(cmd, ib.Buffer, 0, ib.IndexType);
 
         var indirect = GetIndirectBuffer(d.IndirectBuffer);
+        // Cast to uint below, where a negative count becomes four billion. Refused here, by name.
+        if (d.DrawCount < 0)
+        {
+            throw new InvalidOperationException(
+                $"Indirect draw in pass '{currentPassName}' has a negative DrawCount ({d.DrawCount}).");
+        }
         Vk.CmdDrawIndexedIndirect(
             cmd, indirect.Buffer, (ulong)d.IndirectByteOffset,
             (uint)d.DrawCount, (uint)IndirectCommandStride);
+        CountIndirect(currentPassName, d.DrawCount);
     }
 
     // Name-keyed ShaderUniform → byte offsets across every UBO/SSBO slot
@@ -1372,6 +1390,7 @@ public sealed partial class VulkanGraphicsDevice
                 throw new InvalidOperationException(
                     $"Compute pass '{pass.Name}' contains a {rc.GetType().Name}; compute passes may only contain DispatchCommands.");
             }
+            CountDispatch(pass.Name);
             var pipe = GetPipeline(d.Pipeline);
             if (!pipe.IsCompute)
             {
@@ -1386,7 +1405,7 @@ public sealed partial class VulkanGraphicsDevice
             for (var i = 0; i < d.Textures.Count; i++)
             {
                 var b = d.Textures[i];
-                if (!IsStorageBinding(prog, b.Slot)) continue;
+                if (!IsStorageBinding(prog, b)) continue;
                 RecordStorageBarrier(cmd, textureTable[b.Texture.Id],
                     ImageLayout.Undefined, ImageLayout.General,
                     PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderReadBit,
@@ -1405,7 +1424,7 @@ public sealed partial class VulkanGraphicsDevice
             for (var i = 0; i < d.Textures.Count; i++)
             {
                 var b = d.Textures[i];
-                if (!IsStorageBinding(prog, b.Slot)) continue;
+                if (!IsStorageBinding(prog, b)) continue;
                 RecordStorageBarrier(cmd, textureTable[b.Texture.Id],
                     ImageLayout.General, ImageLayout.ShaderReadOnlyOptimal,
                     PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderWriteBit,
@@ -1414,13 +1433,19 @@ public sealed partial class VulkanGraphicsDevice
         }
     }
 
-    private static bool IsStorageBinding(VkShaderProgramEntry prog, int binding)
+    // Whether a dispatch's texture is one the program writes, and so needs its layout barriers.
+    // <b>By name as well as by slot.</b> This asked only about Slot, and a texture bound by name has
+    // Slot == ByName, so when the callers moved to names every storage image lost both barriers:
+    // Sponza's froxel grid stayed GENERAL and the lit pass sampled it as SHADER_READ_ONLY_OPTIMAL,
+    // which validation reported on every draw that read it. Resolved the way the binder resolves it.
+    private static bool IsStorageBinding(VkShaderProgramEntry prog, ShaderTextureBinding b)
     {
+        var (baseName, _) = b.Slot == ShaderTextureBinding.ByName ? SplitArrayName(b) : (b.Name, null);
         foreach (var set in prog.Sets)
         {
             if (set is null) continue;
-            foreach (var s in set.Slots)
-                if (s.Binding == binding && s.Type == ShaderResourceType.StorageImage) return true;
+            var slot = b.Slot == ShaderTextureBinding.ByName ? ImageSlotNamed(set, baseName) : ImageSlotAt(set, b.Slot);
+            if (slot is { Type: ShaderResourceType.StorageImage }) return true;
         }
         return false;
     }
@@ -1747,15 +1772,21 @@ public sealed partial class VulkanGraphicsDevice
 
                 var imageSlotType = ImageSlotTypeAtBinding(sr, binding);
                 if (imageSlotType is null) continue;
+                if (imageSlotType == ShaderResourceType.Sampler)
+                {
+                    throw new InvalidOperationException(
+                        $"Program '{prog.Name}': texture '{b.Name}' is bound at binding {binding}, which is a separate " +
+                        "sampler. Samplers are immutable, from the shader's //@sampler; bind the texture to its image.");
+                }
 
                 var tex = textureTable[b.Texture.Id];
-                // Storage images bind as STORAGE_IMAGE in GENERAL layout (no
-                // sampler); sampled images as COMBINED_IMAGE_SAMPLER in
-                // shader-read layout.
+                // Storage images bind in GENERAL layout, sampled ones in shader-read layout. Only a
+                // combined image carries its texture's sampler: a separate image is read through
+                // whichever sampler the shader pairs it with.
                 var isStorage = imageSlotType == ShaderResourceType.StorageImage;
                 imgInfos[writeIdx] = new DescriptorImageInfo
                 {
-                    Sampler = isStorage ? default : tex.Sampler,
+                    Sampler = imageSlotType == ShaderResourceType.SampledImage ? tex.Sampler : default,
                     ImageView = tex.View,
                     ImageLayout = isStorage ? ImageLayout.General : ImageLayout.ShaderReadOnlyOptimal,
                 };
@@ -1766,7 +1797,7 @@ public sealed partial class VulkanGraphicsDevice
                     DstBinding = (uint)binding,
                     // Count>1 sampler arrays (e.g. uSpotShadowMaps[N]).
                     DstArrayElement = (uint)element,
-                    DescriptorType = isStorage ? DescriptorType.StorageImage : DescriptorType.CombinedImageSampler,
+                    DescriptorType = MapDescriptorType(imageSlotType.Value),
                     DescriptorCount = 1,
                     PImageInfo = &imgInfos[writeIdx],
                 };
@@ -1799,7 +1830,7 @@ public sealed partial class VulkanGraphicsDevice
     {
         foreach (var s in sr.Slots)
         {
-            if (s.Name == name && s.Type is ShaderResourceType.SampledImage or ShaderResourceType.StorageImage) return s;
+            if (s.Name == name && IsTextureSlot(s.Type)) return s;
         }
 
         return null;
@@ -1843,7 +1874,7 @@ public sealed partial class VulkanGraphicsDevice
             var names = prog.Sets
                 .Where((sr, setIdx) => sr is not null && setIdx != MaterialOwnedSet)
                 .SelectMany(sr => sr!.Slots)
-                .Where(s => s.Type is ShaderResourceType.SampledImage or ShaderResourceType.StorageImage && s.Name is not null)
+                .Where(s => IsTextureSlot(s.Type) && s.Name is not null)
                 .Select(s => s.Name!)
                 .Distinct()
                 .ToArray();
@@ -1863,7 +1894,7 @@ public sealed partial class VulkanGraphicsDevice
         foreach (var s in sr.Slots)
         {
             if (s.Binding != b.Slot || s.Name is null || s.Name == baseName) continue;
-            if (s.Type is not (ShaderResourceType.SampledImage or ShaderResourceType.StorageImage)) continue;
+            if (!IsTextureSlot(s.Type)) continue;
 
             throw new InvalidOperationException(
                 $"Program '{prog.Name}': a texture bound as '{b.Name}' at slot {b.Slot} lands on '{s.Name}'. " +
@@ -1881,11 +1912,16 @@ public sealed partial class VulkanGraphicsDevice
             (count == 1 ? "no array elements; bind it without an index." : $"{count} elements, 0 to {count - 1}."));
     }
 
+    // A slot a texture binds to: combined, separate or storage. A separate sampler is not one; it is
+    // immutable, built into the layout from the shader's //@sampler, and nothing binds it.
+    private static bool IsTextureSlot(ShaderResourceType type) =>
+        type is ShaderResourceType.SampledImage or ShaderResourceType.SeparateImage or ShaderResourceType.StorageImage;
+
     private static DescriptorSetSlot? ImageSlotAt(VkShaderSetResources sr, int binding)
     {
         foreach (var s in sr.Slots)
         {
-            if (s.Binding == binding && s.Type is ShaderResourceType.SampledImage or ShaderResourceType.StorageImage) return s;
+            if (s.Binding == binding && IsTextureSlot(s.Type)) return s;
         }
 
         return null;
@@ -1919,7 +1955,7 @@ public sealed partial class VulkanGraphicsDevice
         foreach (var s in sr.Slots)
         {
             if (s.Binding != binding) continue;
-            if (s.Type is ShaderResourceType.SampledImage or ShaderResourceType.StorageImage or ShaderResourceType.Sampler)
+            if (IsTextureSlot(s.Type) || s.Type == ShaderResourceType.Sampler)
                 return s.Type;
         }
         return null;

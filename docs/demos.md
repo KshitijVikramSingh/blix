@@ -33,10 +33,11 @@ front door — not a launcher of its own. The eleven that used to live under
 `tools/run-*.sh` are gone; what remains there prepares assets (Sponza's pack
 set, the glTF corpus) or measures something, which is work no front door does.
 
-The `demos` project currently declares no `blix test` gate. Bounded demo runs,
-Vulkan validation, deterministic captures, and task-specific scripts are
-separate verification surfaces; none should be described as part of the root
-fast gate unless `blix.project` actually names it.
+The `demos` project's gate is declared in `src/Demos/blix.project` and run with
+`./blix test demos`: the Character probe, `chassis-tune --headless`, every
+headed demo for 45 frames under `--validate`, and Sponza under `--validate` 45
+frames after its textures load. It needs a GPU and the validation layers, so it is not part of
+the root gate, which stays deviceless for CI.
 
 ## Application families
 
@@ -287,14 +288,11 @@ inside the Studio viewer:
   collision and exposes it for inspection.
 - `room-shot` captures that room deterministically.
 - `Blix.Demos.Character.Probe` judges the room's authored claims headlessly and
-  forms the Character project's declared `blix test` gate.
-
-Run from `src/Demos/Character` to use that project scope:
+  is the first leg of the `demos` gate.
 
 ```sh
-cd src/Demos/Character
-../../blix ls
-../../blix test
+./blix run room
+./blix test demos
 ```
 
 The family exists so physics, contact, controller, and camera questions can be
