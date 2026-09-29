@@ -70,11 +70,29 @@
     <SpirvCross Condition="'$(SpirvCross)' == ''">spirv-cross</SpirvCross>
   </PropertyGroup>
 
+  <!-- <b>The compiler is its whole output directory, not its own dll.</b> What a compile writes
+       beside each .spv (the //@tune and //@sampler sidecars) is decided by code in Blix.Graphics,
+       which the tool references rather than contains, so the tool's own dll does not change when
+       that code does, and every shader went on carrying the sidecar the old code wrote until it was
+       touched. Seen once: a [JsonIgnore] on ShaderSampler that did not reach a single sidecar.
+
+       Every dll beside the tool, rather than Blix.Graphics.dll by name, so a dependency the tool
+       gains later is covered too; a list of names is how BG.1's missing includes happened. Globbed
+       in a target, so it runs after this build has rebuilt the tool. The cost is a recompile of a
+       project's shaders when Blix.Graphics changes: measured at 4 s for Sponza's 24, beside a C#
+       rebuild of every dependent that the same change already causes. -->
+  <Target Name="BlixShaderCompilerClosure">
+    <ItemGroup>
+      <BlixShaderCompilerFile Include="$([System.IO.Path]::GetDirectoryName('$(BlixShaderCompilerDll)'))/*.dll" />
+    </ItemGroup>
+  </Target>
+
   <Target Name="BlixCompileSpirV"
           Condition="'@(GlslShader)' != '' AND '$(BlixShaderCustomTarget)' != 'true'"
+          DependsOnTargets="BlixShaderCompilerClosure"
           AfterTargets="$(BlixShaderAfterTargets)"
           BeforeTargets="$(BlixShaderBeforeTargets)"
-          Inputs="@(GlslShader);@(GlslInclude);$(BlixShaderCompilerDll)"
+          Inputs="@(GlslShader);@(GlslInclude);$(BlixShaderCompilerDll);@(BlixShaderCompilerFile)"
           Outputs="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv')">
     <MakeDir Directories="$(BlixShaderOutDir)" />
     <Message Text="Compiling SPIR-V ($(BlixShaderMode)): %(GlslShader.Identity)" Importance="high" />
