@@ -104,6 +104,87 @@ public static class Program
 
     private static string ProjectName(DirectoryInfo root) => Marker(root).Name;
 
+    /// <summary>The project marked with <paramref name="name"/> anywhere in this tree.</summary>
+    /// <remarks>
+    /// The tree is everything under the outermost marker above the working directory, so a
+    /// project's name reaches the same place from its parent, its sibling or inside it. Names
+    /// match without case, as they do in <c>project:app</c>.
+    /// </remarks>
+    private static DirectoryInfo NamedProject(string name)
+    {
+        var tree = Tree();
+        var markers = Markers(tree).ToArray();
+        var found = markers.Where(d => string.Equals(ProjectName(d), name, StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (found.Length == 1) return found[0];
+
+        string Where(DirectoryInfo d)
+        {
+            var at = Path.GetRelativePath(tree.FullName, d.FullName);
+            return at == "." ? "the root" : at;
+        }
+
+        if (found.Length > 1)
+        {
+            throw new BlixCliException(
+                $"more than one project is named '{name}': " +
+                string.Join(", ", found.Select(Where)) + ". Run `blix test` from inside the one you mean.");
+        }
+
+        var known = markers.Length == 0
+            ? "none are marked"
+            : "the projects here are " + string.Join(", ", markers.Select(d => $"{ProjectName(d)} ({Where(d)})"));
+        throw new BlixCliException(
+            $"no project named '{name}' under {tree.FullName}; {known}. `blix test` takes a project's " +
+            "name and then options for its legs.");
+    }
+
+    /// <summary>
+    /// The outermost marked folder at or above the working directory, within its repository, else
+    /// the project root.
+    /// </summary>
+    /// <remarks>
+    /// <b>The walk stops at the repository.</b> A git worktree can sit inside another checkout of
+    /// the same repository (<c>.claude/worktrees/x</c>), and both roots are marked <c>blix</c>, so
+    /// without the stop `blix test demos` in the worktree ran the other checkout's demos. <c>.git</c>
+    /// is a folder in a checkout and a file in a worktree, and either ends the walk.
+    /// </remarks>
+    private static DirectoryInfo Tree()
+    {
+        DirectoryInfo? outermost = null;
+        for (var dir = new DirectoryInfo(Directory.GetCurrentDirectory()); dir is not null; dir = dir.Parent)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "blix.project"))) outermost = dir;
+            var git = Path.Combine(dir.FullName, ".git");
+            if (Directory.Exists(git) || File.Exists(git)) break;
+        }
+
+        return outermost ?? ProjectRoot();
+    }
+
+    /// <summary>Every marked folder under <paramref name="tree"/>, itself included.</summary>
+    /// <remarks>
+    /// Build output and dot-folders are skipped: a bin/ can carry a copied marker, and a checkout's
+    /// .claude/worktrees holds whole other checkouts whose projects share every name with this one.
+    /// </remarks>
+    private static IEnumerable<DirectoryInfo> Markers(DirectoryInfo tree)
+    {
+        var pending = new Stack<DirectoryInfo>();
+        pending.Push(tree);
+        var found = new List<DirectoryInfo>();
+        while (pending.Count > 0)
+        {
+            var dir = pending.Pop();
+            if (File.Exists(Path.Combine(dir.FullName, "blix.project"))) found.Add(dir);
+            foreach (var child in dir.EnumerateDirectories())
+            {
+                if (child.Name.StartsWith('.') || child.Name is "bin" or "obj" or "dist" or "node_modules") continue;
+                pending.Push(child);
+            }
+        }
+
+        return found.OrderBy(d => d.FullName, StringComparer.Ordinal);
+    }
+
     /// <summary>
     /// What <c>blix.project</c> says: a name on the first line, then optional <c>key: value</c> lines.
     /// </summary>
@@ -602,7 +683,29 @@ public static class Program
     /// </remarks>
     private static int Test(string[] args)
     {
-        var root = ProjectRoot();
+        // --build is consumed wherever it appears rather than only in front, because every
+        // argument a gate takes is an option -- there is no app name here to put a boundary
+        // after, so run's positional rule has nothing to bite on. A gate leg is a test suite;
+        // none takes a --build of its own, and one that did would be told this ate it.
+        var build = args.Any(a => a is "--build" or "-b");
+        args = args.Where(a => a is not ("--build" or "-b")).ToArray();
+
+        // <b>A leading word names the project.</b> Every other argument a gate takes is an option,
+        // so a word can only mean this. It used to fall through to every leg as an argument: each
+        // leg warned that it had not read it, and the gate that ran was the one you stood in, which
+        // came out green having tested nothing that was asked. A name that is no project is an
+        // error for the same reason.
+        DirectoryInfo root;
+        if (args.Length > 0 && !args[0].StartsWith('-'))
+        {
+            root = NamedProject(args[0]);
+            args = args[1..];
+        }
+        else
+        {
+            root = ProjectRoot();
+        }
+
         var marker = Marker(root);
 
         if (marker.Gate.Length == 0)
@@ -612,13 +715,6 @@ public static class Program
                 "    test: <app>, <app>, ...\n" +
                 "    test: <app> --option value");
         }
-
-        // --build is consumed wherever it appears rather than only in front, because every
-        // argument a gate takes is an option -- there is no app name here to put a boundary
-        // after, so run's positional rule has nothing to bite on. A gate leg is a test suite;
-        // none takes a --build of its own, and one that did would be told this ate it.
-        var build = args.Any(a => a is "--build" or "-b");
-        args = args.Where(a => a is not ("--build" or "-b")).ToArray();
 
         var apps = Discover(root);
         var failed = new List<string>();
@@ -795,6 +891,7 @@ public static class Program
         to.WriteLine("  blix run --build <app>     build it first (-b); blix's own options go BEFORE the name");
         to.WriteLine("  blix run <project>:<app>   reach across folders");
         to.WriteLine("  blix test [--build]        run this project's gate; -b builds each leg first");
+        to.WriteLine("  blix test <project>        run that project's gate, from anywhere in the tree");
         to.WriteLine("  blix publish <app>         build a distributable; --target <rid>");
         to.WriteLine();
         to.WriteLine("A project is the nearest folder above you with a blix.project marker,");

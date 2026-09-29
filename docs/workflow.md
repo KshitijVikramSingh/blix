@@ -450,13 +450,23 @@ describe what used to be true. A green gate over stale binaries is not a wrong a
 answer to a question nobody asked — which is why it is said next to the verdict
 rather than thousands of lines above it.
 
-From a nested project, invoke the same root script while keeping that directory
-as the project scope:
+To run a nested project's gate, name it, from anywhere in the tree:
+
+```sh
+./blix test demos
+```
+
+or stand in its folder, which makes it the project in scope:
 
 ```sh
 cd src/Demos
 ../../blix test
 ```
+
+A leading word is always a project's name, because every other argument a gate
+takes is an option for its legs. A word that names no project is an error that
+lists the ones that exist. Before, it reached every leg of the gate you were
+standing in as an argument, and that gate came out green.
 
 The current root gate is declared in `blix.project`. It covers graphics,
 diagnostics, both physics layers, application composition, Studio, and the

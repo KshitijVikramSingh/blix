@@ -781,6 +781,33 @@ public static class Program
             var gate = Cli(out var gateOutput, "test");
             t.Expect("K.3 the external project's declared gate runs and passes",
                 gate == 0, $"exit {gate}. {gateOutput.Trim()}");
+
+            // Named from a folder with no marker of its own, the same project's gate runs. A word
+            // that names no project fails, listing what does: it used to reach every leg as an
+            // argument, and the gate that ran instead came out green.
+            Directory.SetCurrentDirectory(Path.Combine(staged, "src"));
+            var named = Cli(out var namedOutput, "test", "hello-blix");
+            t.Expect("K.4 `blix test <project>` runs that project's gate",
+                named == 0 && namedOutput.Contains("=== hello-check", StringComparison.Ordinal),
+                $"exit {named}. {namedOutput.Trim()}");
+            var unknown = Cli(out var unknownOutput, "test", "no-such-project");
+            t.Expect("K.5 and a name that is no project fails, naming the ones that are",
+                unknown != 0 && unknownOutput.Contains("no project named 'no-such-project'", StringComparison.Ordinal)
+                && unknownOutput.Contains("hello-blix", StringComparison.Ordinal)
+                && !unknownOutput.Contains("===", StringComparison.Ordinal),
+                $"exit {unknown}. {unknownOutput.Trim()}");
+
+            // A worktree inside another checkout: the search for a named project stops at its own
+            // repository, or `blix test demos` in the worktree would run the enclosing checkout's.
+            var nested = Path.Combine(staged, "nested");
+            Directory.CreateDirectory(nested);
+            File.WriteAllText(Path.Combine(nested, ".git"), "gitdir: elsewhere\n");
+            File.WriteAllText(Path.Combine(nested, "blix.project"), "nested\n");
+            Directory.SetCurrentDirectory(nested);
+            var enclosing = Cli(out var enclosingOutput, "test", "hello-blix");
+            t.Expect("K.6 a project name does not reach out of the repository you stand in",
+                enclosing != 0 && enclosingOutput.Contains("no project named 'hello-blix'", StringComparison.Ordinal),
+                $"exit {enclosing}. {enclosingOutput.Trim()}");
         }
         finally
         {
