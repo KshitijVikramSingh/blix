@@ -48,15 +48,18 @@ public sealed partial class VulkanGraphicsDevice : IFrameTiming
 
     private void CountPass(string pass) => Count(pass, new SubmittedWork(1, 0, 0, 0, 0, 0, 0));
 
+    // Counted exactly as submitted. A zero-instance draw is legal and draws nothing, so it counts one
+    // draw, zero instances and zero triangles; this used to clamp to one instance and report the
+    // triangles of a draw the GPU never made, in the one API whose job is to say what was submitted.
+    // Negative counts are refused before this is reached (TranslateDrawIndexed).
     private void CountDraw(string pass, VkPipelineEntry pipeline, int indexCount, int instanceCount)
     {
-        var instances = Math.Max(1, instanceCount);
-        var triangles = pipeline.Topology == PrimitiveTopology.Triangles ? (long)(indexCount / 3) * instances : 0;
-        Count(pass, new SubmittedWork(0, 1, instances, triangles, 0, 0, 0));
+        var triangles = pipeline.Topology == PrimitiveTopology.Triangles ? (long)(indexCount / 3) * instanceCount : 0;
+        Count(pass, new SubmittedWork(0, 1, instanceCount, triangles, 0, 0, 0));
     }
 
     private void CountIndirect(string pass, int drawCount) =>
-        Count(pass, new SubmittedWork(0, 0, 0, 0, 1, Math.Max(0, drawCount), 0));
+        Count(pass, new SubmittedWork(0, 0, 0, 0, 1, drawCount, 0));
 
     private void CountDispatch(string pass) => Count(pass, new SubmittedWork(0, 0, 0, 0, 0, 0, 1));
 

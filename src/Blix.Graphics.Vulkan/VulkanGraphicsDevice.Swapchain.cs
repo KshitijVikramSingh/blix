@@ -1197,6 +1197,13 @@ public sealed partial class VulkanGraphicsDevice
             throw new InvalidOperationException(
                 $"DrawIndexed bound a compute pipeline '{pipe.Name}'. Compute pipelines can only be dispatched (RenderCommandList.ComputePass / RenderGraph.Dispatch).");
         }
+        // Cast to uint below, where a negative count becomes four billion. Refused here, by name.
+        if (d.IndexCount < 0 || d.InstanceCount < 0)
+        {
+            throw new InvalidOperationException(
+                $"Draw in pass '{currentPassName}' with pipeline '{pipe.Name}' has a negative count " +
+                $"(IndexCount {d.IndexCount}, InstanceCount {d.InstanceCount}).");
+        }
         CountDraw(currentPassName, pipe, d.IndexCount, d.InstanceCount);
         var vb = GetVertexBuffer(d.VertexBuffer);
         var ib = GetIndexBuffer(d.IndexBuffer);
@@ -1326,6 +1333,12 @@ public sealed partial class VulkanGraphicsDevice
         Vk.CmdBindIndexBuffer(cmd, ib.Buffer, 0, ib.IndexType);
 
         var indirect = GetIndirectBuffer(d.IndirectBuffer);
+        // Cast to uint below, where a negative count becomes four billion. Refused here, by name.
+        if (d.DrawCount < 0)
+        {
+            throw new InvalidOperationException(
+                $"Indirect draw in pass '{currentPassName}' has a negative DrawCount ({d.DrawCount}).");
+        }
         Vk.CmdDrawIndexedIndirect(
             cmd, indirect.Buffer, (ulong)d.IndirectByteOffset,
             (uint)d.DrawCount, (uint)IndirectCommandStride);

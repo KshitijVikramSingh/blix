@@ -384,8 +384,9 @@ reaching for a backend's device: the last frame's CPU phases (wait, encode, subm
 present), the work it submitted in all and per pass (draws, instances, triangles, indirect
 calls and the records they read, dispatches), and cumulative GPU time per pass. It is kept
 whether or not anything reads it, and reading it drains nothing, so it can sit beside the
-overlay's `gpu/passes` scope. A window of GPU time is a later `GpuPassTotals` entry less an
-earlier one. What counts as a window, a warm-up or a percentile is the program's. Comparing the
+overlay's `gpu/passes` scope. `GpuPassTotals` is live rather than a snapshot, so a window of GPU
+time is measured by copying the entries at its start and subtracting them from the same entries
+later. What counts as a window, a warm-up or a percentile is the program's. Comparing the
 submitted counts with what a program thinks it staged is the use they are there for: a draw
 meant and not issued, or issued and not meant, shows up as a difference. A host that submits
 nothing, the headless one, reports `LastFrame` null and no timestamps rather than zeros.

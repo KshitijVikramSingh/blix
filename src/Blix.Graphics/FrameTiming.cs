@@ -8,8 +8,10 @@ namespace Blix.Graphics;
 /// <para>
 /// <b>Facts, not a measurement.</b> Nothing here chooses a window, a percentile or a warm-up, and
 /// nothing is drained by reading it. Which frames count, and what a number is compared with, is
-/// the reader's. A reader that wants the GPU time of a window takes <see cref="GpuPassTotals"/> at
-/// its start and subtracts, which is exact and needs no ownership.
+/// the reader's. A reader that wants the GPU time of a window copies the <see cref="GpuPassTotal"/>
+/// entries it cares about at the window's start and subtracts them from the same entries later,
+/// which is exact and needs no ownership. Copy the entries: the dictionary itself is live, so keeping
+/// a reference to it keeps nothing.
 /// </para>
 /// <para>
 /// <b>Cheap to read and always on.</b> The backend keeps these as it records and submits, whether
@@ -35,12 +37,23 @@ public interface IFrameTiming
     bool GpuTimestampsSupported { get; }
 
     /// <summary>Cumulative GPU time per pass since the host started, and how many resolutions it is over.</summary>
-    /// <remarks>GPU timings resolve a frame or more after submission, so these lag <see cref="LastFrame"/>.</remarks>
+    /// <remarks>
+    /// <para>
+    /// <b>Live, not a snapshot.</b> This is the host's own table, updated as timings resolve, and
+    /// reading it allocates nothing. To measure a window, copy the entries at its start
+    /// (<see cref="GpuPassTotal"/> is a value) and subtract them from the entries at its end.
+    /// </para>
+    /// <para>GPU timings resolve a frame or more after submission, so these lag <see cref="LastFrame"/>.</para>
+    /// </remarks>
     IReadOnlyDictionary<string, GpuPassTotal> GpuPassTotals { get; }
 }
 
 /// <summary>One submitted frame: which, how long its CPU phases took, and what it handed the GPU.</summary>
-/// <param name="Frame">The host's count of frames submitted, starting at 1.</param>
+/// <param name="Frame">
+/// The host's frame sequence number, starting at 1. Not a count of submitted frames: a frame whose
+/// swapchain turned out to be out of date takes a number and submits nothing, so consecutive
+/// submitted frames can skip one. It is the same number GPU pass timings are tagged with.
+/// </param>
 /// <param name="WaitMs">Waiting for the frame slot to come free: GPU throttle and present pacing, together.</param>
 /// <param name="EncodeMs">Recording every command, which is the cost draw count drives.</param>
 /// <param name="SubmitPresentMs">Submitting the frame and queueing it for presentation.</param>

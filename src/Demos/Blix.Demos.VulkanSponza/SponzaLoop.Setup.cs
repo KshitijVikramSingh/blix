@@ -719,11 +719,10 @@ internal sealed partial class SponzaLoop
         // Same reason, different cause: the grid is re-created when the framebuffer changes size.
         froxelGridBinding = Array.FindIndex(passBindings, b => b.Name == "uFroxelGrid");
 
-        // skybox.frag's six, taken from the lit list so the two can never hold different textures.
+        // skybox.frag's two, taken from the lit list so the two can never hold different textures.
         // uSkyBounce's per-frame swap does not reach it (the sky does not read the bounce), and
         // uFroxelGrid's re-creation does, through its own index.
-        string[] skySamples = { "uIrradiance", "uPrefilteredEnv", "uBrdfLut",
-            "uCascadeShadowMaps[0]", "uCascadeShadowMaps[1]", "uCascadeShadowMaps[2]", "uFroxelGrid", "uEnvCube" };
+        string[] skySamples = { "uFroxelGrid", "uEnvCube" };
         skyBindings = skySamples.Select(n => passBindings.Single(b => b.Name == n)).ToArray();
         skyFroxelGridBinding = Array.FindIndex(skyBindings, b => b.Name == "uFroxelGrid");
 
