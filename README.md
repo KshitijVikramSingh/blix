@@ -174,6 +174,7 @@ Windowed applications that use `WindowOptions.FromArgs` inherit:
 --title TEXT     set the window title
 --debug          start with diagnostics visible
 --dump-frame N   write the diagnostics dump for frame N
+--validate       run under the validation layers and fail on any error
 ```
 
 Application-specific arguments remain owned by the application, which reads

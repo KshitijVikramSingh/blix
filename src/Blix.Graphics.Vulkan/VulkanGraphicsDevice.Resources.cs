@@ -217,6 +217,54 @@ public sealed partial class VulkanGraphicsDevice
 
     // Pre-compiled SPIR-V only — no runtime GLSL→SPIR-V (libshaderc) path
     // until we want hot reload.
+    private Silk.NET.Vulkan.PhysicalDeviceLimits descriptorLimits;
+
+    /// <summary>
+    /// Programs whose interface declares more of some descriptor type in one stage than this
+    /// device allows, with what was declared and what is allowed.
+    /// </summary>
+    public IReadOnlyList<string> DescriptorLimitBreaches => descriptorLimitBreaches;
+
+    private readonly List<string> descriptorLimitBreaches = new();
+
+    // <b>Said when the program is made, by name.</b> Vulkan leaves a pipeline layout over a
+    // per-stage limit undefined, so it can draw correctly on the machine that wrote it and fail on
+    // the next one; the only other report is a validation message naming a VkPipelineLayout handle.
+    // MoltenVK reports 16 samplers per stage, Metal's own limit, which Sponza's lit shader exceeds.
+    // A warning rather than a refusal, because the program does run here, and refusing would take
+    // the demo down before the fix it needs (separate images and shared samplers) exists.
+    private void CheckDescriptorLimits(string program, ShaderInterface shaderInterface)
+    {
+        if (descriptorLimits.MaxPerStageDescriptorSamplers == 0) return;
+
+        foreach (var stage in new[] { ShaderStages.Vertex, ShaderStages.Fragment, ShaderStages.Compute })
+        {
+            int Count(params ShaderResourceType[] types) => shaderInterface.Slots
+                .Where(s => (s.Stages & stage) != 0 && types.Contains(s.Type))
+                .Sum(s => Math.Max(1, s.Count));
+
+            void Check(int declared, uint allowed, string what, string limit)
+            {
+                if (declared <= allowed) return;
+                var breach = $"'{program}' declares {declared} {what} in its {stage.ToString().ToLowerInvariant()} stage; " +
+                    $"this device allows {allowed} ({limit})";
+                descriptorLimitBreaches.Add(breach);
+                Console.Error.WriteLine($"[blix] {breach}. Vulkan leaves this undefined: it may draw correctly here and fail on another device.");
+            }
+
+            Check(Count(ShaderResourceType.SampledImage, ShaderResourceType.Sampler), descriptorLimits.MaxPerStageDescriptorSamplers,
+                "samplers", "maxPerStageDescriptorSamplers");
+            Check(Count(ShaderResourceType.SampledImage), descriptorLimits.MaxPerStageDescriptorSampledImages,
+                "sampled images", "maxPerStageDescriptorSampledImages");
+            Check(Count(ShaderResourceType.StorageImage), descriptorLimits.MaxPerStageDescriptorStorageImages,
+                "storage images", "maxPerStageDescriptorStorageImages");
+            Check(Count(ShaderResourceType.UniformBuffer), descriptorLimits.MaxPerStageDescriptorUniformBuffers,
+                "uniform buffers", "maxPerStageDescriptorUniformBuffers");
+            Check(Count(ShaderResourceType.StorageBuffer), descriptorLimits.MaxPerStageDescriptorStorageBuffers,
+                "storage buffers", "maxPerStageDescriptorStorageBuffers");
+        }
+    }
+
     public ShaderProgramHandle CreateShaderProgramFromSpv(
         byte[] vertexSpv,
         byte[] fragmentSpv,
@@ -235,6 +283,7 @@ public sealed partial class VulkanGraphicsDevice
             Name = name ?? "shader",
             Interface = shaderInterface,
         };
+        CheckDescriptorLimits(entry.Name, shaderInterface);
         CreateSetResources(entry);
 
         var id = nextResourceId++;
@@ -258,6 +307,7 @@ public sealed partial class VulkanGraphicsDevice
             Name = name ?? "compute",
             Interface = shaderInterface,
         };
+        CheckDescriptorLimits(entry.Name, shaderInterface);
         CreateSetResources(entry);
 
         var id = nextResourceId++;

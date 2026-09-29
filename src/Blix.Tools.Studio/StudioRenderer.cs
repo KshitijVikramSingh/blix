@@ -56,6 +56,17 @@ public sealed class StudioRenderer : IDisposable
     private PassHandle litPass;
     private PassHandle viewportPass;
 
+    // The viewport's own copies of the lit-family pipelines. A pipeline is compatible only with a
+    // render pass identical to its own but for layouts and load ops, and the viewport's differs
+    // from the lit pass in sample count (the lit pass may be MSAA) and in its subpass dependencies
+    // (the lit pass also waits on a depth pre-pass and on compute). Sharing one set was written
+    // when neither was true, and every panel draw failed validation once they were.
+    private PipelineHandle viewportLitPipeline;
+    private PipelineHandle viewportSkinnedPipeline;
+    private PipelineHandle viewportBlendPipeline;
+    private PipelineHandle viewportSkinnedBlendPipeline;
+    private PipelineHandle viewportSkinnedDoubleSidedPipeline;
+
     private ShaderProgramHandle litProgram;
     private ShaderProgramHandle shadowProgram;
     private ShaderProgramHandle presentProgram;
@@ -228,8 +239,8 @@ public sealed class StudioRenderer : IDisposable
             sceneDepthResolveTarget = graph.DepthTarget("lab-scene-depth-1x", fullSize);
         }
 
-        // The panel is a true second camera with its own half-size colour and depth targets. Matching
-        // scene formats keeps the render passes pipeline-compatible. It carries untonemapped HDR into
+        // The panel is a true second camera with its own half-size colour and depth targets. It
+        // carries untonemapped HDR into
         // ImGui, so values over 1 may clip until the panel earns a dedicated presentation pass.
         var halfSize = new MatchSwapchainGraphSize(0.5f);
         viewportColourTarget = graph.ColorTarget("lab-viewport", TextureFormat.Rgba16F, halfSize);
@@ -265,9 +276,8 @@ public sealed class StudioRenderer : IDisposable
         if (samples > 1) litBuilder = litBuilder.ResolveDepth(sceneDepthResolveTarget);
         litPass = litBuilder
             // Loads what the pre-pass laid down, or clears it itself. The lit pipelines still WRITE
-            // depth either way: with a pre-pass those writes are redundant rather than wrong, and
-            // leaving them on is what lets the panel's viewport — which has no pre-pass of its own —
-            // keep using the same pipelines instead of needing a twin family.
+            // depth either way: with a pre-pass those writes are redundant rather than wrong, and it
+            // keeps the lit family's description identical to the viewport's, which has no pre-pass.
             .Depth(sceneDepthTarget, Look.DepthPrePass ? LoadOp.Load : LoadOp.Clear, StoreOp.Store)
             .Read(cascadeTargets[0])
             .Read(cascadeTargets[1])
@@ -275,8 +285,8 @@ public sealed class StudioRenderer : IDisposable
             .Shader(litInterface)
             .Handle;
 
-        // The viewport reuses the lit interface and pipelines. Per-draw uniform storage keeps its
-        // camera independent, while compatible attachment formats let one pipeline serve both passes.
+        // The viewport reuses the lit interface, with pipelines of its own built against this pass.
+        // Per-draw uniform storage keeps its camera independent.
         viewportPass = graph.GraphicsPass("lab.viewport")
             .Target(viewportColourTarget, LoadOp.Clear, StoreOp.Store)
             .Depth(viewportDepthTarget, LoadOp.Clear, StoreOp.Store)
@@ -387,6 +397,28 @@ public sealed class StudioRenderer : IDisposable
             RasterizerState.NoCulling,
             new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(litPass)), "lab.skinned.doublesided");
+
+        var viewportSurface = graph.GetPassSurface(viewportPass);
+        viewportLitPipeline = vk.CreatePipeline(new PipelineDescription(
+            litProgram, VertexPosition3NormalTexture2Color.Layout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite, RasterizerState.NoCulling, new[] { BlendState.Disabled },
+            RenderTarget: viewportSurface), "lab.viewport.lit");
+        viewportSkinnedPipeline = vk.CreatePipeline(new PipelineDescription(
+            skinnedProgram, VertexPosition3NormalTextureSkin4Tangent.Layout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled },
+            RenderTarget: viewportSurface), "lab.viewport.skinned");
+        viewportBlendPipeline = vk.CreatePipeline(new PipelineDescription(
+            litProgram, VertexPosition3NormalTexture2Color.Layout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualNoWrite, RasterizerState.NoCulling, new[] { BlendState.AlphaBlend },
+            RenderTarget: viewportSurface), "lab.viewport.lit.blend");
+        viewportSkinnedBlendPipeline = vk.CreatePipeline(new PipelineDescription(
+            skinnedProgram, VertexPosition3NormalTextureSkin4Tangent.Layout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualNoWrite, RasterizerState.NoCulling, new[] { BlendState.AlphaBlend },
+            RenderTarget: viewportSurface), "lab.viewport.skinned.blend");
+        viewportSkinnedDoubleSidedPipeline = vk.CreatePipeline(new PipelineDescription(
+            skinnedProgram, VertexPosition3NormalTextureSkin4Tangent.Layout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite, RasterizerState.NoCulling, new[] { BlendState.Disabled },
+            RenderTarget: viewportSurface), "lab.viewport.skinned.doublesided");
 
         // The caster does NOT cull: a one-sided shadow from a back-face-culled caster loses the far
         // side of a limb, and a character's own silhouette is mostly far sides.
@@ -615,13 +647,14 @@ public sealed class StudioRenderer : IDisposable
                 };
                 var textures = EnvironmentTextures(shadowTexture);
 
-                if (Look.Ground) DrawGround(scope, litPipeline, uniforms, textures);
+                if (Look.Ground) DrawGround(scope, viewportLitPipeline, uniforms, textures);
 
-                // Record the same views through the second camera; content has one draw description.
+                // Record the same views through the second camera; content has one draw description,
+                // with the pipelines built for this pass.
                 var draw = new StudioDraw(
-                    scope, StudioPass.Lit, uniforms, textures, litPipeline, skinnedPipeline, whiteTexture,
-                    SkinnedDoubleSidedPipeline: skinnedDoubleSidedPipeline,
-                    BlendPipeline: blendPipeline, SkinnedBlendPipeline: skinnedBlendPipeline);
+                    scope, StudioPass.Lit, uniforms, textures, viewportLitPipeline, viewportSkinnedPipeline, whiteTexture,
+                    SkinnedDoubleSidedPipeline: viewportSkinnedDoubleSidedPipeline,
+                    BlendPipeline: viewportBlendPipeline, SkinnedBlendPipeline: viewportSkinnedBlendPipeline);
                 foreach (var view in views) view.Draw(draw);
             });
         }
@@ -836,6 +869,11 @@ public sealed class StudioRenderer : IDisposable
         device.DestroyPipeline(blendPipeline);
         device.DestroyPipeline(skinnedBlendPipeline);
         device.DestroyPipeline(skinnedShadowPipeline);
+        device.DestroyPipeline(viewportLitPipeline);
+        device.DestroyPipeline(viewportSkinnedPipeline);
+        device.DestroyPipeline(viewportBlendPipeline);
+        device.DestroyPipeline(viewportSkinnedBlendPipeline);
+        device.DestroyPipeline(viewportSkinnedDoubleSidedPipeline);
         device.DestroyShaderProgram(litProgram);
         device.DestroyShaderProgram(shadowProgram);
         device.DestroyShaderProgram(presentProgram);

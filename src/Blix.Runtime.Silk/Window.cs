@@ -24,12 +24,10 @@ namespace Blix.Runtime.Silk;
 // The Vulkan window/runtime adapter. Owns a Silk.NET window in
 // "Vulkan API" mode, pumps the IGameLoop, and wires the diagnostics surface.
 //
-// Scope today: window opens, loop ticks, IDebuggable producers run,
-// console + JSON dump sinks fire. Vulkan instance/surface/swapchain
-// integration lands in the next push — Execute() currently records
-// FrameDebugPacket metadata only and the window has no pixels to
-// present yet. The whole point of this turn is proving the shape
-// of the surface lines up; visible rendering comes after.
+// Owns the Silk window, Vulkan device/surface/swapchain, OpenAL session, input
+// snapshot, optional ImGui and diagnostics surfaces, and the IGameLoop lifecycle.
+// Applications still own their frame topology and recorded rendering work; this
+// class is the desktop composition edge that executes and presents it.
 public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 {
     private readonly IWindow window;
@@ -82,6 +80,19 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         BlixWindowOptions? options = null,
         IRuntimeDiagnosticsSink? diagnostics = null)
     {
+        // --validate is BLIX_VK_VALIDATE=1 with a verdict attached. It has to be set before anything
+        // reads the switch, which is read once for the process.
+        if ((options ?? BlixWindowOptions.Default).Validate)
+        {
+            Environment.SetEnvironmentVariable("BLIX_VK_VALIDATE", "1");
+            if (!RenderCommandDiagnostics.Enabled)
+            {
+                throw new InvalidOperationException(
+                    "--validate was asked for after the validation switch had already been read as off. " +
+                    "Construct the Window before recording any render commands.");
+            }
+        }
+
         // Resolve MoltenVK + libvulkan + validation layers before Silk's
         // first probe. No-op off macOS or when a LunarG SDK is already set up.
         MoltenVkBootstrap.EnsureLoaded();
@@ -127,7 +138,6 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         window.Resize += OnResize;
         window.FramebufferResize += OnFramebufferResize;
         window.FocusChanged += OnFocusChanged;
-        window.Closing += OnClosing;
     }
 
     // Called from OnLoad, not from the constructor: Silk refuses SetWindowIcon on a window it has
@@ -342,11 +352,6 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     private void OnFramebufferResize(Vector2D<int> size)
     {
         graphicsDevice?.SetDefaultRenderSurfaceSize(Math.Max(size.X, 1), Math.Max(size.Y, 1));
-    }
-
-    private void OnClosing()
-    {
-        gameLoop.OnUnload();
     }
 
     private void OnKeyDown(IKeyboard kbd, SilkKey key, int scancode)
@@ -682,6 +687,14 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
         Step("wait-idle");
         graphicsDevice?.WaitIdle();
+
+        // <b>OnUnload runs here, after the GPU is idle, and not when the window starts closing.</b>
+        // Closing can fire before the final submit, so a loop that released its GPU resources in
+        // OnUnload (the natural place) destroyed a pipeline, a buffer and a framebuffer the last
+        // frame still used: Pong did, and validation said so at every exit. The headless host
+        // also calls it last. Now the natural place is also the safe one.
+        Step("unload");
+        gameLoop.OnUnload();
         Step("imgui");
         imguiRenderer?.Dispose();
         Step("line-drawer");
@@ -689,8 +702,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         // The game loop may own GPU resources outside the device's auto-freed
         // tables (e.g. a RenderGraph's render passes + offscreen images). Dispose
         // it here — after WaitIdle so the GPU is done with them, before the device
-        // is torn down so the frees still have a live device. Closing/OnUnload is
-        // too early: it can fire mid-frame before the final submit.
+        // is torn down so the frees still have a live device.
         Step("game-loop");
         (gameLoop as IDisposable)?.Dispose();
         Step("audio");
@@ -701,6 +713,13 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         graphicsDevice?.Dispose();
         Step("window");
         window.Dispose();
+
+        // Last, because the device's own teardown is where leaks are reported.
+        if (options.Validate && VulkanGraphicsDevice.ValidationErrors is > 0 and var errors)
+        {
+            BlixApps.ReportFailure($"{errors} Vulkan validation error(s); they are printed above as [vk-ERR ]");
+        }
+
         Step("done");
     }
 

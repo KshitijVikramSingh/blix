@@ -83,20 +83,23 @@ native build targets has only ever run on a GitHub runner.
 
 ## Known gaps that are not scheduled
 
-**Three demos fail Vulkan validation, and did before the shader-facts work.** Each was measured
-on the commit before it, with `BLIX_VK_VALIDATE=1 ... --frames 45 --debug`:
+**Sponza's lit shader declares 25 samplers in its fragment stage; MoltenVK allows 16.** The
+device now says so by name when the program is created (`lit`, and `flat`, `depth_prepass` and
+`depth_prepass_mask`, which share its interface), and `--validate` fails a Sponza run on it.
+Sixteen is Metal's limit on sampler objects, not on textures: this device reports 256 sampled
+images per stage (`vulkaninfo`). So the fix is separate images and a few shared samplers in the
+lit shaders, `texture2D`
+plus `sampler` in GLSL. Reflection already parses `separate_images` and `separate_samplers`;
+what has not been checked is that the device binds a separate sampler rather than treating every
+image slot as a combined one. The alternative, Metal argument buffers for all of MoltenVK
+(`MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS`), lifts the limit engine-wide and changes every program's
+binding path, so it is not the first thing to try. Until then Sponza is not a `demos` gate leg.
 
-- *Pong* destroys a pipeline, a buffer and a framebuffer at teardown while a command buffer still
-  uses them.
-- *Sponza's* lit program declares 25 samplers in one stage against MoltenVK's limit of 16.
-- *`view`* with `--debug` records a draw whose pipeline was built for 4× MSAA into a 1× pass.
-
-**`demos` has a gate of one probe.** Eleven demos are still verified by being run and
-looked at, which is right for a demo. Future experiments append to that line; the
-gate growing is a consequence, not a plan.
-
-**The `demos` gate is not in CI.** The workflow runs the root gate only. Closing it
-is one step in `ci.yml` — deliberately not taken here rather than slipped in.
+**The `demos` gate is not in CI, and now cannot be as it stands.** Its headed legs run each demo
+for 45 frames under `--validate`, which needs a GPU and the validation layers, and CI runners have
+neither. The root gate is the deviceless one. A CI home for the `demos` gate would first need its
+deviceless legs (the probe, `chassis-tune --headless`) separable from the headed ones, which is
+what named tiers are for.
 
 **Linux is absent from the CI matrix.** A second red job teaches nothing the first
 has not; the shape of what Windows needed should be known before it is copied.

@@ -68,6 +68,15 @@ public sealed record WindowOptions(string Title, int Width, int Height)
     /// <see cref="BlixApps.Main"/> rather than failed on. A value that cannot mean what it says
     /// (<c>--frames abc</c>) is an error, not a flag quietly skipped.
     /// </remarks>
+    /// <summary>
+    /// Run with the Vulkan validation layers, and fail the run if they report any error.
+    /// </summary>
+    /// <remarks>
+    /// <c>BLIX_VK_VALIDATE=1</c> turns the layers on and prints what they say; this also makes what
+    /// they say a verdict, so a bounded run in a gate fails on it instead of scrolling past it.
+    /// </remarks>
+    public bool Validate { get; init; }
+
     public static WindowOptions FromArgs(AppArgs args, WindowOptions? defaults = null)
     {
         ArgumentNullException.ThrowIfNull(args);
@@ -79,6 +88,7 @@ public sealed record WindowOptions(string Title, int Width, int Height)
         if (args.Int("height") is { } height) result = result with { Height = Positive("height", height) };
         if (args.String("title") is { } title) result = result with { Title = title };
         if (args.Flag("debug")) result = result with { Diagnostics = true };
+        if (args.Flag("validate")) result = result with { Validate = true };
 
         return result;
     }

@@ -14,3 +14,20 @@ test: Blix.Demos.Character.Probe
 # window: the same loop the overlay demo shows, run by the headless host for 30 frames with a
 # dump at 10. It needs no GPU, so it belongs in a gate.
 test: chassis-tune --headless --frames 30 --dump-frame 10
+
+# Every headed demo, bounded and under the validation layers, whose errors fail the leg rather
+# than scroll past it. These need a GPU and the layers, so this gate is run where both are; the
+# root gate stays deviceless for CI. Sponza is absent: it needs its external pack set, and it
+# exceeds MoltenVK's 16-sampler limit until its lit shader moves to separate images (plan.md).
+test: Blix.Demos.VulkanHello --frames 45 --validate
+test: Blix.Demos.VulkanGraph --frames 45 --validate
+test: Blix.Demos.VulkanLit --frames 45 --validate
+test: Blix.Demos.VulkanInstanced --frames 45 --validate
+test: Blix.Demos.VulkanParticles --frames 45 --validate
+test: Blix.Demos.Pong --frames 45 --validate
+test: Blix.Demos.Runner --frames 45 --validate
+test: Blix.Demos.TankArena --frames 45 --validate
+test: Blix.Demos.Bulwark --frames 45 --validate
+test: Blix.Demos.Chassis --frames 45 --validate
+test: chassis-tune --frames 45 --validate
+test: room --frames 45 --validate

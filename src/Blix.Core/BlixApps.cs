@@ -83,8 +83,31 @@ public static class BlixApps
             Console.Error.WriteLine($"blix: warning: nothing read {string.Join(' ', unread)}");
         }
 
+        if (failures.Count > 0)
+        {
+            foreach (var failure in failures) Console.Error.WriteLine($"blix: failed: {failure}");
+            failures.Clear();
+            return code == 0 ? 1 : code;
+        }
+
         return code;
     }
+
+    /// <summary>
+    /// Fail this run whatever the app returns, for a verdict only the host can reach.
+    /// </summary>
+    /// <remarks>
+    /// A window run with <c>--validate</c> is the case that needed it: validation errors are known
+    /// only once the device is torn down, after the app's own code has returned 0. The reason is
+    /// printed after the app returns, and the exit code becomes 1 if it would have been 0.
+    /// </remarks>
+    public static void ReportFailure(string reason)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+        failures.Add(reason);
+    }
+
+    private static readonly List<string> failures = new();
 
     /// <summary>
     /// The assembly's <see cref="BlixStartupAttribute"/> method, or null when it declares none.

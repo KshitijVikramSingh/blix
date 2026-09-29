@@ -141,7 +141,7 @@ The current tree has two marked projects:
 | Project | Folder | Gate |
 | --- | --- | --- |
 | `blix` | repository root | Graphics, Diagnostics, Physics2D, Physics3D, Apps, Studio, Recipes and Input suites |
-| `demos` | `src/Demos` | `Blix.Demos.Character.Probe`, and `chassis-tune --headless --frames 30 --dump-frame 10` |
+| `demos` | `src/Demos` | `Blix.Demos.Character.Probe`, `chassis-tune --headless`, and every headed demo but Sponza for 45 frames under `--validate` |
 
 Project scope follows the current working directory. From the repository root,
 all projects below it are visible. From `src/Demos`, the `demos` marker is the scope
@@ -367,6 +367,7 @@ The shared arguments are:
 | `--title TEXT` | Window title |
 | `--debug` | Start with diagnostics visible |
 | `--dump-frame N` | Write the diagnostics JSON dump for frame N |
+| `--validate` | Run under the Vulkan validation layers, and fail the run if they report an error |
 
 `WindowOptions` reads only these; everything else is the application's to read,
 and anything nobody reads is reported. Bounded runs, sizing, diagnostics, and

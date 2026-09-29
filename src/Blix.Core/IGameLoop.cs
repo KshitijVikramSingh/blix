@@ -16,5 +16,7 @@ public interface IGameLoop
 
     void OnResize(int width, int height) { }
 
+    // Called once, when the host is done with the loop and the GPU is idle, so a loop can release
+    // its graphics resources here. The last thing either host calls before tearing down.
     void OnUnload() { }
 }
