@@ -18,9 +18,9 @@ concurrency:
 # around dyld and the other has one that does not need to. A matrix would express
 # that as `if:` on most steps, which is a matrix in name and a fork in fact.
 #
-# Linux is deliberately absent for now. A second red job teaches nothing the first
-# one has not already said, and the shape of what Windows needs should be known
-# before it is copied.
+# Linux is deliberately absent for now. The Windows job establishes one additional
+# source-build and launcher contract; neither that nor the macOS headless gate is
+# evidence for a Linux path that has not been exercised.
 jobs:
   verify:
     name: Build and root gate (macOS)
@@ -72,16 +72,15 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
 
-    # Every one of the seven suites is deviceless -- not one of them creates a
+    # Every one of the eight suites is deviceless -- not one of them creates a
     # VulkanGraphicsDevice or a Window (checked, not assumed). So this runs the WHOLE
     # gate, not a chosen subset, on a runner with no GPU. What it cannot see is
     # pipeline-time breakage, which needs a booted application and stays a pre-commit
     # concern on purpose.
     #
-    # This job is new and has never been green. It exists to be the feedback loop the
-    # Windows audit did not have: `blix.cmd` and the native build's Windows branch were
-    # both written from reading rather than running, and this is what turns them into
-    # ordinary work.
+    # This is the feedback loop the Windows audit did not originally have: `blix.cmd`
+    # and the native build's Windows branch are ordinary exercised code rather than
+    # paths inferred from reading.
     steps:
       - name: Check out Blix
         uses: actions/checkout@v7

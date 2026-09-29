@@ -151,6 +151,7 @@ public static class Program
         // ── is what runs what the sources say? ──────────────────────────────
         FreshnessAnswersHonestly(t);
         ABuildChangesWhatANameMeans(t);
+        TheExternalStarterBuildsFromCleanState(t);
 
         // ── a loop with no window ───────────────────────────────────────────
         HeadlessRunsTheSameLoop(t);
@@ -683,6 +684,97 @@ public static class Program
                 root.GetProperty("SchemaVersion").GetInt32() == 2);
             t.Expect("carrying what the loop reported",
                 root.GetRawText().Contains("ticks", StringComparison.Ordinal), "no 'ticks' value in the dump");
+        }
+    }
+
+    /// <summary>
+    /// The external starter is a real project, not a collection of plausible snippets.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Copied outside this checkout before it is built. That detail is the assertion: a project
+    /// left under the Blix root would inherit this repository's props and targets automatically,
+    /// hiding a broken source-consumer import behind the environment it is meant to replace.
+    /// </para>
+    /// <para>
+    /// The headed app is only discovered here. The declared gate is deliberately headless, so the
+    /// same check runs on CI machines with no GPU and still proves the whole project path: imported
+    /// build rules, app indexing, project scoping, discovery, dispatch, and a child-process verdict.
+    /// </para>
+    /// </remarks>
+    private static void TheExternalStarterBuildsFromCleanState(TestRunner t)
+    {
+        var repo = RepositoryRoot();
+        if (repo is null)
+        {
+            t.Expect("K.0 the starter fixture needs the repository root", false);
+            return;
+        }
+
+        var source = Path.Combine(repo, "examples", "hello-blix");
+        var staged = Path.Combine(
+            Path.GetTempPath(), "blix-external-starter-" + Guid.NewGuid().ToString("N")[..8]);
+        var wasDirectory = Directory.GetCurrentDirectory();
+        var wasBlixRoot = Environment.GetEnvironmentVariable("BLIX_ROOT");
+
+        try
+        {
+            CopyTree(source, staged);
+            Directory.SetCurrentDirectory(staged);
+            Environment.SetEnvironmentVariable("BLIX_ROOT", repo);
+
+            var build = Dotnet(
+                "build \"src/HelloBlix/HelloBlix.csproj\" -c Debug --nologo -v:q " +
+                "--disable-build-servers -p:UseSharedCompilation=false -m:1");
+            t.Expect("K.0 the external starter builds from a clean staged copy", build == 0,
+                $"dotnet exited {build}");
+            if (build != 0) return;
+
+            var output = Path.Combine(staged, "src", "HelloBlix", "bin", "Debug", "net8.0");
+            var index = Path.Combine(output, "HelloBlix.blixapps.json");
+            t.ExpectTrue("K.1 the clean build writes its own application index", File.Exists(index));
+
+            var listed = Cli(out var listing, "ls");
+            var listedLines = listing.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            t.Expect("K.2 discovery sees the headed app and the headless gate",
+                listed == 0
+                && listedLines.Any(line => line.TrimStart().StartsWith("hello ", StringComparison.Ordinal))
+                && listedLines.Any(line => line.TrimStart().StartsWith("hello-check ", StringComparison.Ordinal))
+                && !listing.Contains("HelloBlix", StringComparison.Ordinal),
+                listing.Trim());
+
+            var gate = Cli(out var gateOutput, "test");
+            t.Expect("K.3 the external project's declared gate runs and passes",
+                gate == 0, $"exit {gate}. {gateOutput.Trim()}");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("BLIX_ROOT", wasBlixRoot);
+            Directory.SetCurrentDirectory(wasDirectory);
+            try { Directory.Delete(staged, recursive: true); } catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    /// <summary>Copy a tracked fixture without carrying any build output from its source tree.</summary>
+    private static void CopyTree(string source, string destination)
+    {
+        foreach (var directory in Directory.EnumerateDirectories(source, "*", SearchOption.AllDirectories))
+        {
+            Directory.CreateDirectory(Path.Combine(
+                destination, Path.GetRelativePath(source, directory)));
+        }
+
+        Directory.CreateDirectory(destination);
+        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(source, file);
+            if (relative.Split(Path.DirectorySeparatorChar)
+                .Any(part => part is "bin" or "obj" or "dist")) continue;
+
+            var target = Path.Combine(destination, relative);
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(file, target);
         }
     }
 

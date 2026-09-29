@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BLIX_CHECKOUT="${BLIX_ROOT:-$SCRIPT_DIR/engine/blix}"
+
+exec "$BLIX_CHECKOUT/blix" "$@"

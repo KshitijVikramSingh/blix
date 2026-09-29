@@ -1179,8 +1179,8 @@ public static class Program
     /// silicon, where a valid signature is not optional.
     /// </para>
     /// <para>
-    /// Only attempted where codesign exists, and never fatal: an unsigned bundle still runs on
-    /// the machine that built it, which is where most of them are run.
+    /// Only attempted where codesign exists. When it does exist, failure is fatal: returning a
+    /// bundle whose seal does not verify would contradict the command's artifact contract.
     /// </para>
     /// </remarks>
     private static void SignAppBundle(App app, string dest)
