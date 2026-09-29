@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Populates the Sponza Modern assets from a local copy of the Khronos Intel
-# Sponza repo packs, producing a split layout: raw sources (.png/.bin/.gltf/
-# .hdr) land in a SRC tree and are cooked out-of-place into a COOKED tree of
-# runtime .blix* (the demos read COOKED; SRC is only re-cook input). By default
-# COOKED = src/Demos/Blix.Demos.SponzaModern/Assets and SRC = its "-src" sibling; set
-# BLIX_SPONZA_ASSETS (cooked dir) and/or BLIX_SPONZA_SRC (source dir) to place
-# them elsewhere — e.g. an external SSD. BLIX_SPONZA_SRC=$BLIX_SPONZA_ASSETS
-# keeps the legacy combined layout (raw + cooked in one dir).
+# Extracts the Khronos Intel Sponza packs into a SOURCE tree, then hands over to
+# tools/cook-sponza-modern.sh, which owns every cook flag. This script decides
+# nothing about how a pack is cooked; it only gets the raw files into place.
+#
+#   BLIX_SPONZA_ASSETS  the COOKED tree the demo reads. Required, as it is for
+#                       the cook: there is no default, because the old one was a
+#                       directory belonging to a deleted demo.
+#   BLIX_SPONZA_SRC     the SOURCE tree, defaulting to "<cooked>-src".
 #
 # Usage:
 #   tools/setup-sponza-modern.sh [SOURCE_ROOT]
@@ -31,6 +31,10 @@
 # ship Alembic/USD/blend only and the engine's glTF importer can't load
 # them. They'd need a separate Alembic/USD pipeline that doesn't exist yet.
 #
+# Sky probes are cooked from every .hdr in $BLIX_SPONZA_SRC/textures. None ships
+# with the packs; drop the ones you want there (kloppenheim and the Poly Haven
+# skies the demo knows by name) before running.
+#
 # Where the original packs live:
 #   https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/IntelSponza
 
@@ -38,14 +42,12 @@ set -euo pipefail
 
 SOURCE_ROOT="${1:-$HOME/Downloads}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# COOKED holds the runtime-ready .blix* (the in-repo Assets dir by default, or
-# BLIX_SPONZA_ASSETS when set — e.g. an external SSD the demos read from at
-# runtime, skipping the bin copy). SRC holds the raw sources we extract + cook
-# FROM (.png/.bin/.gltf/.hdr); it defaults to a "-src" sibling of COOKED so the
-# cooked set and raw set stay separated on disk (BLIX_SPONZA_SRC overrides).
-# Set BLIX_SPONZA_SRC=$BLIX_SPONZA_ASSETS for the legacy combined layout (raw +
-# cooked interleaved in one dir).
-COOKED="${BLIX_SPONZA_ASSETS:-$REPO_ROOT/src/Demos/Blix.Demos.SponzaModern/Assets}"
+if [[ -z "${BLIX_SPONZA_ASSETS:-}" ]]; then
+    echo "setup-sponza-modern: BLIX_SPONZA_ASSETS is not set. It names the COOKED tree;" >&2
+    echo "  the raw packs go to BLIX_SPONZA_SRC, defaulting to \"<cooked>-src\"." >&2
+    exit 1
+fi
+COOKED="$BLIX_SPONZA_ASSETS"
 SRC="${BLIX_SPONZA_SRC:-${COOKED%/}-src}"
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/blix-sponza-extract.XXXXXX")"
 trap 'rm -rf "$SCRATCH"' EXIT
@@ -55,7 +57,7 @@ if [[ ! -d "$SOURCE_ROOT" ]]; then
     exit 1
 fi
 
-mkdir -p "$COOKED" "$SRC"
+mkdir -p "$SRC"
 
 # Returns the path to a usable pack source — either an existing directory
 # under SOURCE_ROOT, or a freshly-extracted scratch directory from a sibling
@@ -147,86 +149,7 @@ copy_pack "pkg_b_ivy"          "ivy"         "pkg_b_ivy1"
 copy_pack "pkg_c_trees"        "trees"       "pkg_c_trees"
 copy_pack "pkg_d_10k_candles"  "candles"     "pkg_d_10k_candles"
 
-# Reuse the Walkthrough's HDR sky probe (kloppenheim) so the new demo can
-# bake IBL probes from frame one. Skip if it isn't present.
-WALK_HDR="$REPO_ROOT/src/Demos/Blix.Demos.Walkthrough/Assets/textures/sky_hdr.hdr"
-if [[ -f "$WALK_HDR" ]]; then
-    mkdir -p "$SRC/textures"
-    cp -p "$WALK_HDR" "$SRC/textures/sky_hdr.hdr"
-    echo "  copied: walkthrough sky_hdr.hdr"
-fi
-
-# Cook the HDR sky into a .blixprobe (real GGX-prefiltered specular +
-# irradiance + BRDF LUT) so VulkanSponza gets proper IBL instead of the
-# procedural-sky fallback. Prefer autumn_field (has a sun → high contrast for
-# crisp shadows; the demo aligns its directional sun to it) → rogland overcast
-# (sunless ambient) → sky_hdr. Best-effort: skipped if dotnet/HDR is missing,
-# and the demo falls back to the procedural bake when no probe is present.
-# (autumn_field_4k.hdr / rogland_overcast_4k.hdr are from Poly Haven; drop into
-# $SRC/textures.)
-HDR=""
-for cand in autumn_field_4k rogland_overcast_4k sky_hdr; do
-    if [[ -f "$SRC/textures/$cand.hdr" ]]; then HDR="$SRC/textures/$cand.hdr"; break; fi
-done
-
-# Cook raw sources (in SRC) into runtime .blix* (in COOKED). When SRC != COOKED
-# the cook writes out-of-place via --out, mirroring SRC's structure into COOKED
-# as self-contained mesh metadata plus separately cooked image/probe artifacts;
-# the authored .gltf/.bin/.png/.hdr stay in SRC and never reach COOKED.
-COOK="$REPO_ROOT/src/Blix.Tools.Cook/Blix.Tools.Cook.csproj"
-if command -v dotnet >/dev/null 2>&1 && dotnet build "$COOK" -c Release --nologo -v:q >/dev/null 2>&1; then
-    OUTDIR=""
-    [[ "$SRC" != "$COOKED" ]] && OUTDIR="$COOKED"
-    # Appends --out only when set — keeps empty-array expansion out of the way
-    # under bash 3.2 + set -u.
-    cook_run() {
-        if [[ -n "$OUTDIR" ]]; then
-            dotnet run --project "$COOK" -c Release --no-build -- "$@" --out "$OUTDIR"
-        else
-            dotnet run --project "$COOK" -c Release --no-build -- "$@"
-        fi
-    }
-
-    # IBL probe: GGX-prefiltered specular + diffuse irradiance + BRDF LUT, so
-    # the demo gets real IBL instead of the procedural-sky fallback. Best-effort.
-    if [[ -n "$HDR" ]]; then
-        echo "Cooking IBL probe from $(basename "$HDR") ..."
-        cook_run probe "$HDR" --env-face=512 --prefilter-base=256 --prefilter-mips=5 \
-            && echo "  cooked: $(basename "${HDR%.hdr}.blixprobe")" \
-            || echo "  (probe cook failed — demo will use procedural IBL)"
-    fi
-
-    # Scene textures -> BC7 .blixtex (multi-mip). The demo loads these with no
-    # decode (44s of stb_image decode -> ~1ms lazy index) and ~4x less GPU
-    # memory than RGBA8; falls back to runtime PNG/JPEG decode for any texture
-    # without a .blixtex. Re-cooks only stale outputs.
-    echo "Cooking textures to BC7 .blixtex (multi-mip) ..."
-    cook_run textures "$SRC" \
-        || echo "  (texture cook failed — demo will runtime-decode PNG/JPEG)"
-
-    # Geometry -> .blixmesh (tangent layout + meshoptimizer LOD chains). The demo
-    # loads cooked vertex/index data (skips glTF accessor walking) and picks a
-    # triangle level by distance. Falls back to runtime glTF import for any .gltf
-    # without a .blixmesh.
-    # --flip-v matches the demo's runtime import (AssetImportContext
-    # flipTextureV: true) — Intel Sponza is bottom-up/OpenGL-authored. Without it
-    # the cooked UVs + tangent handedness are wrong and normal maps sample the
-    # flipped V.
-    # --split N spatially partitions primitives over N triangles into chunks
-    # (each its own LOD chain) so per-prim screen-space-error LOD gets
-    # fine-grained. Crack-free via meshopt LockBorder on the duplicated seam
-    # verts. 32k default; foliage split too for now.
-    echo "Cooking geometry to .blixmesh (tangent + LOD chains + spatial split) ..."
-    cook_run mesh "$SRC" --tangents --flip-v --split 32768 \
-        || echo "  (mesh cook failed — demo will runtime-import glTF)"
-else
-    echo "  (no dotnet or cook build failed — demo will runtime-decode assets)"
-fi
-
-if [[ "$SRC" != "$COOKED" ]]; then
-    echo "Cooked (runtime): $(du -sh "$COOKED" 2>/dev/null | cut -f1)  $COOKED"
-    echo "Raw (re-cook src): $(du -sh "$SRC" 2>/dev/null | cut -f1)  $SRC"
-else
-    du -sh "$COOKED" 2>/dev/null | awk '{print "Total: " $1}'
-fi
-echo "Done."
+# Cooking is the cook script's job, so the flags live in one place. It reads the
+# same two variables; SRC is passed explicitly so a defaulted one agrees. Not exec,
+# so the EXIT trap still removes the scratch directory.
+BLIX_SPONZA_SRC="$SRC" "$REPO_ROOT/tools/cook-sponza-modern.sh"

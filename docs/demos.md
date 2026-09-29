@@ -195,14 +195,16 @@ surface remains application-owned and evolves with the experiments. Common
 families include `--ab`, `--viz`, `--tune`, `--shot`, `--probe-reference`, LOD
 controls, shadow controls, and feature toggles.
 
-Sponza assets are not committed. Prepare the configured pack location with:
+Sponza assets are not committed. `BLIX_SPONZA_ASSETS` names the cooked pack set
+and is required. `setup-sponza-modern.sh` extracts the Khronos packs into a
+source tree beside it and runs `cook-sponza-modern.sh`, which owns every cook
+flag; after editing a source pack, re-run the cook alone:
 
 ```sh
-tools/setup-sponza-modern.sh
+export BLIX_SPONZA_ASSETS=/path/to/sponza
+tools/setup-sponza-modern.sh ~/Downloads
 ./blix run Blix.Demos.VulkanSponza
 ```
-
-Set `BLIX_SPONZA_ASSETS` when the cooked pack set lives outside the checkout.
 
 ## Asset and Studio tools
 

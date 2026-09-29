@@ -746,23 +746,28 @@ internal sealed partial class SponzaLoop
         UpdateCamera();
     }
 
-    // Resolve the Sponza glTF: BLIX_SPONZA_ASSETS (the ~19GB pack set on an
-    // external SSD shared across machines) when set, else the bin-local Assets/
-    // copy. Closes the window cleanly when the packs aren't present (a vanilla
-    // checkout that hasn't run setup-sponza-modern.sh) and returns false so
-    // OnLoad bails. The glTF filename varies across Khronos revisions, so glob.
+    // Resolve the Sponza glTF under BLIX_SPONZA_ASSETS, the cooked pack set the two
+    // tools/ scripts prepare. There is no bin-local fallback: it was fed from a directory
+    // belonging to a deleted demo, and a default nothing can populate only ever reports the
+    // wrong missing path. Closes the window cleanly when the packs aren't present and returns
+    // false so OnLoad bails. The glTF filename varies across Khronos revisions, so glob.
     private bool TryLocateSponza(out string assetsRoot, out string gltfPath)
     {
         gltfPath = "";
-        assetsRoot = Environment.GetEnvironmentVariable("BLIX_SPONZA_ASSETS") is { Length: > 0 } env
-            ? env
-            : AppFiles.Assets;
+        assetsRoot = Environment.GetEnvironmentVariable("BLIX_SPONZA_ASSETS") ?? "";
+        if (assetsRoot.Length == 0)
+        {
+            Console.WriteLine("[VulkanSponza] BLIX_SPONZA_ASSETS is not set. It names the cooked pack set;");
+            Console.WriteLine("[VulkanSponza] tools/setup-sponza-modern.sh prepares one from your local Khronos packs.");
+            host.RequestClose();
+            return false;
+        }
         var mainPackDir = Path.Combine(assetsRoot, "main_sponza");
         if (!Directory.Exists(mainPackDir))
         {
             Console.WriteLine($"[VulkanSponza] Main Sponza assets not found at {mainPackDir}.");
-            Console.WriteLine("[VulkanSponza] Run tools/setup-sponza-modern.sh once to populate from your local Khronos packs,");
-            Console.WriteLine("[VulkanSponza] or set BLIX_SPONZA_ASSETS to an existing pack dir (e.g. on an external SSD).");
+            Console.WriteLine("[VulkanSponza] Point BLIX_SPONZA_ASSETS at a cooked pack set, or run");
+            Console.WriteLine("[VulkanSponza] tools/setup-sponza-modern.sh to prepare one there from your local Khronos packs.");
             host.RequestClose();
             return false;
         }

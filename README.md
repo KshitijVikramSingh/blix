@@ -122,9 +122,9 @@ another credible consumer.
 
 ![Intel Sponza rendered in Blix](docs/sponza.jpg)
 
-Sponza's source assets are not committed. `tools/setup-sponza-modern.sh`
-prepares the local asset tree; the application remains runnable through the
-Blix front door once built.
+Sponza's source assets are not committed. With `BLIX_SPONZA_ASSETS` naming
+where the cooked set goes, `tools/setup-sponza-modern.sh` extracts the packs and
+cooks them; the application then runs through the Blix front door.
 
 ## Demos and proving grounds
 

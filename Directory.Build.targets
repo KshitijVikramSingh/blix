@@ -91,6 +91,15 @@
     <BlixAppIndexerDll>$(MSBuildThisFileDirectory)src/Blix.Tools.Apps/bin/$(Configuration)/net8.0/Blix.Tools.Apps.dll</BlixAppIndexerDll>
   </PropertyGroup>
 
+  <!-- Build-only: the indexer is built before any executable that is indexed with it. Without
+       this, the index step ran whatever Blix.Tools.Apps.dll already sat in bin: building one
+       project alone after an indexer change indexed it with the previous indexer, which then
+       refused a signature the new one accepts. It adds no assembly reference and ships nothing. -->
+  <ItemGroup Condition="'$(OutputType)' == 'Exe' AND '$(MSBuildProjectName)' != 'Blix.Tools.Apps' AND '$(BlixSkipAppIndex)' != 'true'">
+    <ProjectReference Include="$(MSBuildThisFileDirectory)src/Blix.Tools.Apps/Blix.Tools.Apps.csproj"
+                      ReferenceOutputAssembly="false" PrivateAssets="all" Private="false" />
+  </ItemGroup>
+
 
   <!-- Cooking assets at build. A project declares what it cooks; the recipe
        decides how.
@@ -112,6 +121,15 @@
   <PropertyGroup>
     <BlixCookDll>$(MSBuildThisFileDirectory)src/Blix.Tools.Cook/bin/$(Configuration)/net8.0/Blix.Tools.Cook.dll</BlixCookDll>
   </PropertyGroup>
+
+  <!-- Build-only, for the same reason as the indexer above: a project that cooks runs the cook
+       tool's dll, and nothing ordered that dll's build before it. On a fresh clone a parallel
+       solution build could reach a demo's cook step while the tool was still compiling, and five
+       demos failed the first build and passed the second. -->
+  <ItemGroup Condition="('@(BlixCook)' != '' OR '@(CookMesh)' != '' OR '@(CookTexture)' != '' OR '@(CookProbe)' != '' OR '@(CookFont)' != '') AND '$(BlixCookCustomTarget)' != 'true' AND '$(MSBuildProjectName)' != 'Blix.Tools.Cook'">
+    <ProjectReference Include="$(MSBuildThisFileDirectory)src/Blix.Tools.Cook/Blix.Tools.Cook.csproj"
+                      ReferenceOutputAssembly="false" PrivateAssets="all" Private="false" />
+  </ItemGroup>
 
   <!-- Sugar for the recipes Blix ships. This file is imported after the project body,
        so the item groups it maps from are already populated. Recipe and Cooked are

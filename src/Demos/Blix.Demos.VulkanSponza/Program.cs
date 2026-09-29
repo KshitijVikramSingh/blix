@@ -29,8 +29,7 @@ namespace Blix.Demos.VulkanSponza;
 // coverage so the hero tree isn't overdraw-bound. CPU-phase timing
 // (cpu-wait/encode/submit) is surfaced in the diagnostics overlay.
 //
-// Asset story: BLIX_SPONZA_ASSETS may point at the external cooked pack set;
-// otherwise runtime uses the application's bin-local Assets directory.
+// Asset story: BLIX_SPONZA_ASSETS names the cooked pack set, and is required.
 // Missing-asset startup prints the setup instruction and exits cleanly.
 //
 // ── Executable spec for (engine primitives this demo proves) ──

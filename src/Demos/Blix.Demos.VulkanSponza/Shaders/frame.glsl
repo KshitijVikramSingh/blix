@@ -12,9 +12,9 @@
 // members now declares all of them, which costs nothing: the block is one buffer either way.
 //
 // <b>The //@tune decorators live here, so whatever scans for them must scan the PREPROCESSED
-// source.</b> ShaderTunables reads text and does not follow includes; SponzaLoop.Setup expands
-// this file into lit.frag before scanning, and the .glsl is staged beside the shaders so that
-// expansion works from the output directory at runtime too.
+// source.</b> The shader tool does, at build time: it expands every include into lit.frag and
+// writes the decorators to lit.frag.spv.tune.json, which SponzaLoop.Setup loads. Nothing reads
+// this file at runtime.
 
 layout(set = 0, binding = 0) uniform Frame {
     mat4  uViewProjection;

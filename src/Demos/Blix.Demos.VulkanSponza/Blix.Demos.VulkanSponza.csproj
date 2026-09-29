@@ -29,19 +29,6 @@
     <RootNamespace>Blix.Demos.VulkanSponza</RootNamespace>
   </PropertyGroup>
 
-  <!-- Link the cooked Sponza pack tree populated by tools/setup-sponza-modern.sh
-       into a bin-local Assets directory when BLIX_SPONZA_ASSETS is not set.
-
-       When BLIX_SPONZA_ASSETS is set (pack set kept on an external SSD
-       shared across machines), skip the copy entirely — the runtime
-       reads straight from that path. See SponzaLoop.Setup.cs. -->
-  <ItemGroup Condition="'$(BLIX_SPONZA_ASSETS)' == ''">
-    <None Include="..\Blix.Demos.SponzaModern\Assets\**\*"
-          Exclude="..\Blix.Demos.SponzaModern\Assets\.gitignore;..\Blix.Demos.SponzaModern\Assets\.gitkeep"
-          Link="Assets\%(RecursiveDir)%(Filename)%(Extension)"
-          CopyToOutputDirectory="PreserveNewest" />
-  </ItemGroup>
-
   <!-- Tool lookup mirrors the other shader-bearing applications. Shared GLSL
        includes are resolved by the repository shader build target. -->
   <PropertyGroup>
