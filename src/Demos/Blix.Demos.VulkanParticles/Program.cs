@@ -459,7 +459,7 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
 
         // 2) Scene: opaque backdrop (depth-tested) then soft particles into HDR.
         var sceneDepthTex = graph.GetDepthTexture(sceneDepthHandle);
-        particleTextures[0] = new ShaderTextureBinding("uSceneDepth", sceneDepthTex, Slot: 0);
+        particleTextures[0] = new ShaderTextureBinding("uSceneDepth", sceneDepthTex);
         foreach (var e in effects) PackEffectPush(e);
         graph.Pass(scenePassHandle, scope =>
         {
@@ -512,8 +512,8 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
                 pass, presentPipeline,
                 new[]
                 {
-                    new ShaderTextureBinding("uHdr", hdrTex, Slot: 0),
-                    new ShaderTextureBinding("uBloom", bloomTex, Slot: 1),
+                    new ShaderTextureBinding("uHdr", hdrTex),
+                    new ShaderTextureBinding("uBloom", bloomTex),
                 },
                 presentPush));
 

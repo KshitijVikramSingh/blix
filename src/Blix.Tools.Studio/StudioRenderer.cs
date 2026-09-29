@@ -643,8 +643,8 @@ public sealed class StudioRenderer : IDisposable
                 pass, presentPipeline,
                 new[]
                 {
-                    new ShaderTextureBinding("uScene", graph.GetColorTexture(sceneColourTarget), Slot: 0),
-                    new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth), Slot: 1),
+                    new ShaderTextureBinding("uScene", graph.GetColorTexture(sceneColourTarget)),
+                    new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                 },
                 pushConstants: null,
                 uniforms: present));
@@ -678,7 +678,7 @@ public sealed class StudioRenderer : IDisposable
             // Lit draws append ground albedo to the pass bindings. The caster declares albedo at
             // slot 0 as well so MASK geometry can discard consistently.
             textures: depthOnly
-                ? new[] { new ShaderTextureBinding("uAlbedo", whiteTexture, Slot: 0) }
+                ? new[] { new ShaderTextureBinding("uAlbedo", whiteTexture) }
                 : AppendAlbedo(textures, whiteTexture),
             pushConstants: push);
     }
@@ -796,19 +796,19 @@ public sealed class StudioRenderer : IDisposable
     {
         var all = new ShaderTextureBinding[pass.Length + 1];
         pass.CopyTo(all, 0);
-        all[^1] = new ShaderTextureBinding("uAlbedo", albedo, Slot: 1);
+        all[^1] = new ShaderTextureBinding("uAlbedo", albedo);
         return all;
     }
 
     /// <summary>What every lit draw binds, before its own albedo. The stage's one answer.</summary>
     private ShaderTextureBinding[] EnvironmentTextures(TextureHandle _) => new[]
     {
-        new ShaderTextureBinding("uCascade0", graph.GetDepthTexture(cascadeTargets[0]), Slot: 0),
-        new ShaderTextureBinding("uCascade1", graph.GetDepthTexture(cascadeTargets[1]), Slot: 5),
-        new ShaderTextureBinding("uCascade2", graph.GetDepthTexture(cascadeTargets[2]), Slot: 6),
-        new ShaderTextureBinding("uIrradiance", irradianceTexture, Slot: 2),
-        new ShaderTextureBinding("uPrefilteredEnv", prefilteredTexture, Slot: 3),
-        new ShaderTextureBinding("uBrdfLut", brdfLutTexture, Slot: 4),
+        new ShaderTextureBinding("uCascade0", graph.GetDepthTexture(cascadeTargets[0])),
+        new ShaderTextureBinding("uCascade1", graph.GetDepthTexture(cascadeTargets[1])),
+        new ShaderTextureBinding("uCascade2", graph.GetDepthTexture(cascadeTargets[2])),
+        new ShaderTextureBinding("uIrradiance", irradianceTexture),
+        new ShaderTextureBinding("uPrefilteredEnv", prefilteredTexture),
+        new ShaderTextureBinding("uBrdfLut", brdfLutTexture),
     };
 
     private static readonly Vector3 GroundColour = new(0.22f, 0.23f, 0.26f);

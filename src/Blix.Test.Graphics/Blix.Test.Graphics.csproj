@@ -8,6 +8,10 @@
     <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
     <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
     <ProjectReference Include="..\Blix.Render\Blix.Render.csproj" />
+    <!-- Section BL runs the shader generator through Roslyn's own driver, so it references the
+         generator as an ordinary assembly and the compiler it runs inside. -->
+    <ProjectReference Include="..\Blix.Shaders.Generator\Blix.Shaders.Generator.csproj" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />
   </ItemGroup>
 
   <!-- Golden reflection fixtures: spirv-cross reflect output for VulkanSponza's

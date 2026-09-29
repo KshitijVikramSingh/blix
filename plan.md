@@ -83,6 +83,14 @@ native build targets has only ever run on a GitHub runner.
 
 ## Known gaps that are not scheduled
 
+**Three demos fail Vulkan validation, and did before the shader-facts work.** Each was measured
+on the commit before it, with `BLIX_VK_VALIDATE=1 ... --frames 45 --debug`:
+
+- *Pong* destroys a pipeline, a buffer and a framebuffer at teardown while a command buffer still
+  uses them.
+- *Sponza's* lit program declares 25 samplers in one stage against MoltenVK's limit of 16.
+- *`view`* with `--debug` records a draw whose pipeline was built for 4× MSAA into a 1× pass.
+
 **`demos` has a gate of one probe.** Eleven demos are still verified by being run and
 looked at, which is right for a demo. Future experiments append to that line; the
 gate growing is a consequence, not a plan.
@@ -105,6 +113,11 @@ which commit moved it was abandoned as not worth the hunt. Re-record with
 ## Deferred until something asks
 
 Probe density, `BakeMerge`, clip-lookup-by-name, further `PropModel` adoption.
+
+**Asset manifests** (finding assets by logical name, declared external asset roots). Every
+in-repo program finds its assets through `AppFiles` and the importer's cooked-sibling lookup,
+and Sponza's external pack set is one required variable. The hand-run preparation steps do not
+fit either: EXR conversion needs Blender, and the sky bake is a scene-level driver by design.
 Each waits for a consumer, which is conventions §5 and §8, and waiting does not keep
 a plan record open. The probe-density measurements and the approaches already refuted
 are in [`docs/renderer.md`](docs/renderer.md) so the same ground is not walked twice.

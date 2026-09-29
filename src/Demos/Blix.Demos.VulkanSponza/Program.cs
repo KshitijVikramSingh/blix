@@ -931,8 +931,9 @@ internal sealed class FogSettings
     [Tune]              public bool ShowRejection = false;
 }
 
-// Tonemap operators (overlay Render → Tonemap); the enum's int value indexes
-// present.frag's branch, so declaration order must match the shader.
+// Tonemap operators (overlay Render → Tonemap). The value indexes present.frag's branch, so the
+// build checks these names against the //@tune enum{} above uTonemap there.
+[ShaderEnum("present.frag", "uTonemap")]
 internal enum TonemapMode { Reinhard, ACES, AgX, Hejl }
 
 // Sun-shadow tunables (overlay "Shadows" group). Read live by UpdateCascades

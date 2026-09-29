@@ -5267,6 +5267,136 @@ static ShaderInterface MinimalShader() => new(new[]
         "identical views merge");
 }
 
+// ============================================================================
+// Section BL — a push-constant struct is written from the shader's reflection.
+// ============================================================================
+//
+// The generator runs inside every shader-bearing project's compiler, so it is exercised here the
+// way a compiler runs it: a snippet, the attribute assembly, and reflection JSON handed in as an
+// AdditionalFile, through Roslyn's own driver. No device and no glslc, so this is part of the
+// deviceless gate, and each refusal is checked by the id and the words a developer will read.
+{
+    static (string Source, string[] Diagnostics, string[] CompileErrors) Generate(string code, params (string Stage, string Json)[] reflections)
+    {
+        var tpa = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator);
+        var references = tpa.Select(p => (Microsoft.CodeAnalysis.MetadataReference)Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(p))
+            .Append(Microsoft.CodeAnalysis.MetadataReference.CreateFromFile(typeof(PushConstantsAttribute).Assembly.Location))
+            .ToArray();
+        var compilation = Microsoft.CodeAnalysis.CSharp.CSharpCompilation.Create("bl",
+            new[] { Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree.ParseText(code) }, references,
+            new Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions(Microsoft.CodeAnalysis.OutputKind.DynamicallyLinkedLibrary));
+
+        var texts = reflections.Select(r => (Microsoft.CodeAnalysis.AdditionalText)new InlineText(
+            r.Stage.EndsWith(".json", StringComparison.Ordinal) ? $"/shaders/{r.Stage}" : $"/shaders/{r.Stage}.spv.refl.json", r.Json));
+        Microsoft.CodeAnalysis.GeneratorDriver driver = Microsoft.CodeAnalysis.CSharp.CSharpGeneratorDriver.Create(
+            new[]
+            {
+                Microsoft.CodeAnalysis.GeneratorExtensions.AsSourceGenerator(new Blix.Shaders.Generator.PushConstantsGenerator()),
+                Microsoft.CodeAnalysis.GeneratorExtensions.AsSourceGenerator(new Blix.Shaders.Generator.ShaderEnumCheck()),
+            }, texts);
+        driver = driver.RunGeneratorsAndUpdateCompilation(compilation, out var output, out var diagnostics);
+
+        var generated = driver.GetRunResult().Results.SelectMany(r => r.GeneratedSources).Select(g => g.SourceText.ToString());
+        var errors = output.GetDiagnostics().Where(d => d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error).Select(d => d.ToString());
+        return (string.Join("\n", generated), diagnostics.Select(d => $"{d.Id}: {d.GetMessage()}").ToArray(), errors.ToArray());
+    }
+
+    static string Block(params (string Name, string Type, int Offset)[] members) =>
+        "{\"types\":{\"_1\":{\"name\":\"PushConstants\",\"members\":[" +
+        string.Join(",", members.Select(m => $"{{\"name\":\"{m.Name}\",\"type\":\"{m.Type}\",\"offset\":{m.Offset}}}")) +
+        "]}},\"push_constants\":[{\"type\":\"_1\",\"name\":\"pc\",\"push_constant\":true}]}";
+
+    const string NoBlock = "{\"types\":{}}";
+    const string Using = "using Blix.Graphics;\n";
+
+    var exact = Generate(Using + "[PushConstants(\"w.vert\")] partial struct W;",
+        ("w.vert", Block(("uModel", "mat4", 0), ("uTint", "vec4", 64))));
+    t.Expect("BL.1 fields come from the shader, with exact names by default",
+        exact.Source.Contains("[global::System.Runtime.InteropServices.FieldOffset(0)] public global::System.Numerics.Matrix4x4 uModel;")
+        && exact.Source.Contains("FieldOffset(64)] public global::System.Numerics.Vector4 uTint;")
+        && exact.Diagnostics.Length == 0 && exact.CompileErrors.Length == 0,
+        string.Join(" | ", exact.Diagnostics.Concat(exact.CompileErrors)));
+    t.Expect("BL.1 and the struct is the block's size", exact.Source.Contains("Size = 80") && exact.Source.Contains("SizeInBytes = 80"));
+
+    var prefixed = Generate(Using + "[PushConstants(\"w.vert\", Prefix = \"u\")] partial struct W;",
+        ("w.vert", Block(("uModel", "mat4", 0))));
+    t.Expect("BL.2 a Prefix stated on the declaration is removed", prefixed.Source.Contains(" Model;") && prefixed.CompileErrors.Length == 0);
+    t.Expect("BL.2 and the rule in force is written beside each field", prefixed.Source.Contains("(Prefix = \"u\")"));
+
+    // GLSL pads a vec3 to 16 where C# packs Vector3 at 12. The offset is the shader's.
+    var padded = Generate(Using + "[PushConstants(\"w.vert\")] partial struct W;",
+        ("w.vert", Block(("uA", "vec3", 0), ("uB", "vec3", 16))));
+    t.Expect("BL.3 offsets are the shader's, padding included",
+        padded.Source.Contains("FieldOffset(16)] public global::System.Numerics.Vector3 uB;"), padded.Source);
+
+    var renamed = Generate(Using + "[PushConstants(\"w.vert\", Prefix = \"u\"), ShaderName(\"uMVP\", \"ModelViewProjection\")] partial struct W;",
+        ("w.vert", Block(("uMVP", "mat4", 0), ("uTint", "vec4", 64))));
+    t.Expect("BL.4 [ShaderName] renames one member and the rule names the rest",
+        renamed.Source.Contains(" ModelViewProjection;") && renamed.Source.Contains(" Tint;"));
+
+    var merged = Generate(Using + "[PushConstants(\"w.vert\", \"w.frag\")] partial struct W;",
+        ("w.vert", Block(("uModel", "mat4", 0))), ("w.frag", Block(("uModel", "mat4", 0), ("uTint", "vec4", 64))));
+    t.Expect("BL.5 stages that agree merge, and a stage may declare more of the block",
+        merged.Source.Contains(" uModel;") && merged.Source.Contains(" uTint;") && merged.Diagnostics.Length == 0);
+
+    var fragmentOnly = Generate(Using + "[PushConstants(\"w.vert\", \"w.frag\")] partial struct W;",
+        ("w.vert", Block(("uModel", "mat4", 0))), ("w.frag", NoBlock));
+    t.Expect("BL.5 a listed stage with no push block is fine", fragmentOnly.Diagnostics.Length == 0 && fragmentOnly.Source.Contains(" uModel;"));
+
+    void Refused(string label, string id, string mustSay, (string Source, string[] Diagnostics, string[] CompileErrors) run) =>
+        t.Expect(label, run.Diagnostics.Any(d => d.StartsWith(id, StringComparison.Ordinal) && d.Contains(mustSay, StringComparison.Ordinal)),
+            string.Join(" | ", run.Diagnostics));
+
+    Refused("BL.6 stages that disagree are refused, naming both", "BLX1005", "'uTint' (vec4 at byte 64) in w.vert",
+        Generate(Using + "[PushConstants(\"w.vert\", \"w.frag\")] partial struct W;",
+            ("w.vert", Block(("uTint", "vec4", 64))), ("w.frag", Block(("uGlow", "vec4", 64)))));
+    Refused("BL.7 a type C# cannot hold is refused, naming it", "BLX1006", "'uNormal' is a mat3",
+        Generate(Using + "[PushConstants(\"w.vert\")] partial struct W;", ("w.vert", Block(("uNormal", "mat3", 0)))));
+    Refused("BL.8 a struct that is not partial is refused", "BLX1001", "must be partial",
+        Generate(Using + "[PushConstants(\"w.vert\")] struct W { }", ("w.vert", Block(("uModel", "mat4", 0)))));
+    Refused("BL.9 a stage with no reflection is refused, naming it", "BLX1003", "'w.frag'",
+        Generate(Using + "[PushConstants(\"w.vert\", \"w.frag\")] partial struct W;", ("w.vert", Block(("uModel", "mat4", 0)))));
+    Refused("BL.10 two members that one rule makes one name are refused, with the rule", "BLX1008", "(Prefix = \"u\")",
+        Generate(Using + "[PushConstants(\"w.vert\", Prefix = \"u\")] partial struct W;",
+            ("w.vert", Block(("uTint", "vec4", 0), ("Tint", "vec4", 16)))));
+    Refused("BL.11 a [ShaderName] for no member is refused, listing the members", "BLX1009", "It has: uModel",
+        Generate(Using + "[PushConstants(\"w.vert\"), ShaderName(\"uNope\", \"X\")] partial struct W;", ("w.vert", Block(("uModel", "mat4", 0)))));
+    Refused("BL.12 a struct that declares its own fields is refused", "BLX1002", "declares the field 'Extra'",
+        Generate(Using + "[PushConstants(\"w.vert\")] partial struct W { public int Extra; }", ("w.vert", Block(("uModel", "mat4", 0)))));
+
+    // Shader enums: checked against the //@tune enum{} the shader declares, never generated.
+    static string Tune(string member, params string[] names) =>
+        $"[{{\"name\":\"{member}\",\"kind\":\"Enum\",\"enumNames\":[{string.Join(",", names.Select(n => $"\"{n}\""))}]}}]";
+
+    var agreeing = Generate(Using + "[ShaderEnum(\"p.frag\", \"uMode\")] enum Mode { Off, BentNormal }",
+        ("p.frag.spv.tune.json", Tune("uMode", "Off", "Bent normal")));
+    t.Expect("BL.13 an enum whose names match the shader's, ignoring case and spaces, builds",
+        agreeing.Diagnostics.Length == 0, string.Join(" | ", agreeing.Diagnostics));
+    Refused("BL.14 a reordered enum is refused, with both lists", "BLX1103", "C# has Off, Hejl, AgX; the shader has Off, AgX, Hejl",
+        Generate(Using + "[ShaderEnum(\"p.frag\", \"uMode\")] enum Mode { Off, Hejl, AgX }",
+            ("p.frag.spv.tune.json", Tune("uMode", "Off", "AgX", "Hejl"))));
+    Refused("BL.15 a shader member with no names is refused, with the line to add", "BLX1102", "//@tune enum{ Off, On }",
+        Generate(Using + "[ShaderEnum(\"p.frag\", \"uMode\")] enum Mode { Off, On }",
+            ("p.frag.spv.tune.json", "[]")));
+    Refused("BL.16 values that are not positions are refused", "BLX1104", "Mode.On is 5",
+        Generate(Using + "[ShaderEnum(\"p.frag\", \"uMode\")] enum Mode { Off, On = 5 }",
+            ("p.frag.spv.tune.json", Tune("uMode", "Off", "On"))));
+    Refused("BL.17 a stage that is not in the project is refused", "BLX1101", "'q.frag'",
+        Generate(Using + "[ShaderEnum(\"q.frag\", \"uMode\")] enum Mode { Off }",
+            ("p.frag.spv.tune.json", Tune("uMode", "Off"))));
+
+    // Binding a texture by name rests on reflection keeping the sampler's name, arrays included.
+    var reflected = ShaderReflection.Parse(
+        "{\"entryPoints\":[{\"name\":\"main\",\"mode\":\"frag\"}],\"types\":{}," +
+        "\"textures\":[{\"type\":\"sampler2D\",\"name\":\"uHdr\",\"set\":0,\"binding\":0}," +
+        "{\"type\":\"sampler2D\",\"name\":\"uCascades\",\"array\":[3],\"array_size_is_literal\":[true],\"set\":0,\"binding\":1}]}",
+        "bl18.frag");
+    t.Expect("BL.18 reflection keeps each sampler's name, and an array's base name",
+        reflected.Slots.Any(s => s.Name == "uHdr" && s.Binding == 0)
+        && reflected.Slots.Any(s => s.Name == "uCascades" && s.Binding == 1 && s.Count == 3),
+        string.Join(", ", reflected.Slots.Select(s => $"{s.Name}@{s.Binding}x{s.Count}")));
+}
+
 t.PrintSummary();
 return t.Failed;
 
@@ -5446,4 +5576,13 @@ sealed class RecordingDevice : IGraphicsDevice
     public void DestroyRenderSurface(RenderSurfaceHandle handle) => throw No();
     public ResourceRegistrySnapshot SnapshotResources() => throw No();
     public void Dispose() { }
+}
+
+/// <summary>Reflection handed to the generator in memory, as the compiler hands it an AdditionalFile.</summary>
+sealed class InlineText(string path, string text) : Microsoft.CodeAnalysis.AdditionalText
+{
+    public override string Path { get; } = path;
+
+    public override Microsoft.CodeAnalysis.Text.SourceText GetText(CancellationToken cancellationToken = default) =>
+        Microsoft.CodeAnalysis.Text.SourceText.From(text);
 }

@@ -217,7 +217,7 @@ public sealed class RoomRenderer : IDisposable
                 new("uSunDirection", new Vector4Uniform(new Vector4(SunDirection, 0f))),
                 new("uSunColour", new Vector4Uniform(new Vector4(SunColour, AmbientStrength))),
             };
-            var textures = new[] { new ShaderTextureBinding("uSunShadowMap", ShadowDepth, Slot: 0) };
+            var textures = new[] { new ShaderTextureBinding("uSunShadowMap", ShadowDepth) };
 
             // One draw per PART, so a part is a thing the frame's draw counts can see. The room is
             // one buffer and the parts are ranges of it, which is what makes "the collider is the
@@ -250,8 +250,8 @@ public sealed class RoomRenderer : IDisposable
                 pass, presentPipeline,
                 new[]
                 {
-                    new ShaderTextureBinding("uScene", SceneColour, Slot: 0),
-                    new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(sceneDepthTarget), Slot: 1),
+                    new ShaderTextureBinding("uScene", SceneColour),
+                    new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(sceneDepthTarget)),
                 },
                 pushConstants: null,
                 uniforms: new ShaderUniform[]

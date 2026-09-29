@@ -188,6 +188,33 @@ descriptor-backed values use transient or persistent material bindings.
 Recorded push data is copied, so callers may safely reuse scratch storage while
 recording subsequent draws.
 
+### Shader facts in C#
+
+Three things a shader declares also have a C# side, and in each case the shader's
+declaration is the one the build reads:
+
+- **Push-constant blocks.** `[PushConstants("a.vert", "a.frag")] partial struct APush;`
+  gets its fields from the stages' reflection, written by `Blix.Shaders.Generator`
+  with the shader's offsets and padding, so `WriteTo(buffer)` or `ToBytes()`
+  produce the bytes the shader reads. Names are exact unless the declaration says
+  otherwise: `Prefix = "u"` drops a prefix where a member has it, and
+  `[ShaderName("uMVP", "ModelViewProjection")]` renames one member. Stages that
+  disagree about the block, a type C# cannot hold, or a stage with no reflection is
+  a build error.
+- **Values that pick a branch.** `[ShaderEnum("present.frag", "uTonemap")]` on a
+  C# enum is checked at build against the `//@tune enum{ … }` above that member.
+  The names must match, ignoring case, spaces, dashes and underscores, in the same
+  order, because the shader compares against positions.
+- **Textures.** `new ShaderTextureBinding("uHdr", texture)` binds by the sampler's
+  reflected name, and `"uCascades[2]"` names one element of an array. A name the
+  program does not have is an error listing the names it has. A binding that also
+  gives a `Slot` must agree with reflection about what that slot is called.
+
+A project with `GlslShader` items gets the generator and its inputs from the shared
+build targets; nothing needs adding to a csproj. The generator reads the
+`.spv.refl.json` and `.spv.tune.json` files the shader build writes, so an IDE
+shows the generated fields once a build has produced them.
+
 Fresh per-frame data has two distinct homes:
 
 - `AllocVertices` returns a `TransientVertexSlice` from a frames-in-flight ring.

@@ -508,7 +508,7 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
 
         // HDR scene pass: procedural sky → lit world (samples the shadow map) → particles.
         var shadowTex = graph.GetDepthTexture(sunShadowHandle);
-        var shadowBind = new[] { new ShaderTextureBinding("uSunShadowMap", shadowTex, Slot: 0) };
+        var shadowBind = new[] { new ShaderTextureBinding("uSunShadowMap", shadowTex) };
         graph.Pass(scenePassHandle, scope =>
         {
             fullscreen.Draw(scope, skyPipeline, Array.Empty<ShaderTextureBinding>(), skyPush);
@@ -545,7 +545,7 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
                 ClearDepth: true),
             pass =>
             {
-                fullscreen.Draw(pass, presentPipeline, new[] { new ShaderTextureBinding("uHdr", hdrTex, Slot: 0) });
+                fullscreen.Draw(pass, presentPipeline, new[] { new ShaderTextureBinding("uHdr", hdrTex) });
                 DrawHud(pass, frame.Width, frame.Height);   // depth-disabled, alpha-blended, on top
             });
 

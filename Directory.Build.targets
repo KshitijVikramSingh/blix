@@ -304,4 +304,23 @@
     <Exec Command="&quot;$(SpirvCross)&quot; &quot;$(BlixShaderOutDir)%(GlslShader.Filename)%(GlslShader.Extension).spv&quot; --reflect --output &quot;$(BlixShaderOutDir)%(GlslShader.Filename)%(GlslShader.Extension).spv.refl.json&quot;" />
   </Target>
 
+  <!-- The reflection reaches C# as well as the runtime. Blix.Shaders.Generator reads it to write
+       the fields of [PushConstants] structs (Blix.Graphics.PushConstantsAttribute), so the C#
+       face of a block is the bytes the shader reads, and checks [ShaderEnum] enums against the
+       //@tune enum{} names the shader declares.
+
+       The files are declared HERE, at evaluation time, from the GlslShader items, and not from a
+       target. The shader targets run before CoreCompile in a real build, so the files exist when
+       the generator reads them; a design-time build never runs those targets, and still sees the
+       files the last build wrote. A file that does not exist yet is simply absent. -->
+  <ItemGroup Condition="'@(GlslShader)' != '' AND '$(MSBuildProjectName)' != 'Blix.Shaders.Generator'">
+    <ProjectReference Include="$(MSBuildThisFileDirectory)src/Blix.Shaders.Generator/Blix.Shaders.Generator.csproj"
+                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" PrivateAssets="all" />
+    <!-- The //@tune sidecar is written for every shader; [ShaderEnum] checks against it. -->
+    <AdditionalFiles Include="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv.tune.json')" />
+  </ItemGroup>
+  <ItemGroup Condition="'@(GlslShader)' != '' AND '$(BlixShaderReflect)' == 'true' AND '$(MSBuildProjectName)' != 'Blix.Shaders.Generator'">
+    <AdditionalFiles Include="@(GlslShader -> '$(BlixShaderOutDir)%(Filename)%(Extension).spv.refl.json')" />
+  </ItemGroup>
+
 </Project>

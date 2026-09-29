@@ -267,7 +267,7 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
                 ClearDepth: true),
             pass => fullscreen.Draw(
                 pass, presentPipeline,
-                new[] { new ShaderTextureBinding("uOffscreen", offscreenColor, Slot: 0) }));
+                new[] { new ShaderTextureBinding("uOffscreen", offscreenColor) }));
     }
 
     private static void PackMatrix(Matrix4x4 m, byte[] target)

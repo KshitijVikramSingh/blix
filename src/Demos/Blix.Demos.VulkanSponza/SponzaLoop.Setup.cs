@@ -676,34 +676,34 @@ internal sealed partial class SponzaLoop
         identityPush = ModelPushBytes(Matrix4x4.Identity);
         passBindings = new[]
         {
-            new ShaderTextureBinding("uIrradiance",     irradianceCubeTexture, Slot: 0),
-            new ShaderTextureBinding("uPrefilteredEnv", envCubeTexture,        Slot: 1),
-            new ShaderTextureBinding("uBrdfLut",        brdfLutTexture,        Slot: 2),
-            new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0]), Slot: 3, ArrayIndex: 0),
-            new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1]), Slot: 3, ArrayIndex: 1),
-            new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2]), Slot: 3, ArrayIndex: 2),
-            new ShaderTextureBinding("uFroxelGrid",           froxelGridTexture, Slot: 4),
-            new ShaderTextureBinding("uAmbientVisibility", graph.GetColorTexture(ambientDenoisedHandle), Slot: 5),
-            new ShaderTextureBinding("uSkyVisibility",  skyVisibilityTextures[0], Slot: 6),
-            new ShaderTextureBinding("uSkyVisibility1", skyVisibilityTextures[1], Slot: 14),
-            new ShaderTextureBinding("uSkyVisibility2", skyVisibilityTextures[2], Slot: 15),
+            new ShaderTextureBinding("uIrradiance",     irradianceCubeTexture),
+            new ShaderTextureBinding("uPrefilteredEnv", envCubeTexture),
+            new ShaderTextureBinding("uBrdfLut",        brdfLutTexture),
+            new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0])),
+            new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1])),
+            new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2])),
+            new ShaderTextureBinding("uFroxelGrid",           froxelGridTexture),
+            new ShaderTextureBinding("uAmbientVisibility", graph.GetColorTexture(ambientDenoisedHandle)),
+            new ShaderTextureBinding("uSkyVisibility",  skyVisibilityTextures[0]),
+            new ShaderTextureBinding("uSkyVisibility1", skyVisibilityTextures[1]),
+            new ShaderTextureBinding("uSkyVisibility2", skyVisibilityTextures[2]),
             // Bound per frame in OnRender, which flips between the pair; this is the initial one.
-            new ShaderTextureBinding("uSkyBounce", bounceReady ? bounceTextures[0] : brdfLutTexture, Slot: 7),
-            new ShaderTextureBinding("uSkyBounceDepth", bounceReady ? bounceDepthTextures[0] : brdfLutTexture, Slot: 13),
+            new ShaderTextureBinding("uSkyBounce", bounceReady ? bounceTextures[0] : brdfLutTexture),
+            new ShaderTextureBinding("uSkyBounceDepth", bounceReady ? bounceDepthTextures[0] : brdfLutTexture),
             // Bound to SOMETHING valid always — a descriptor set with a hole is a device loss, not a
             // dark curtain. uSheenMipCount being zero is what tells the shader not to read them.
-            new ShaderTextureBinding("uSheenEnv", sheenMipCount > 0 ? sheenEnvTexture : envCubeTexture, Slot: 8),
-            new ShaderTextureBinding("uSheenLut", sheenMipCount > 0 ? sheenLutTexture : brdfLutTexture, Slot: 9),
-            new ShaderTextureBinding("uEnvCube", skyCubeTexture, Slot: 10),
+            new ShaderTextureBinding("uSheenEnv", sheenMipCount > 0 ? sheenEnvTexture : envCubeTexture),
+            new ShaderTextureBinding("uSheenLut", sheenMipCount > 0 ? sheenLutTexture : brdfLutTexture),
+            new ShaderTextureBinding("uEnvCube", skyCubeTexture),
             // Ground truth for the leak metric. Same no-holes rule as uSheenEnv above: bound to a
             // valid 3D texture whether or not the volume shipped one, with uOccupancyDims.w the
             // flag that decides whether the shader may read it.
             new ShaderTextureBinding("uOccupancy",
-                occX > 0 ? occupancyTexture : skyVisibilityTextures[0], Slot: 16),
+                occX > 0 ? occupancyTexture : skyVisibilityTextures[0]),
             new ShaderTextureBinding(
-                "uIncidentField", graph.GetColorTexture(incidentFullHandle), Slot: 17),
+                "uIncidentField", graph.GetColorTexture(incidentFullHandle)),
             new ShaderTextureBinding(
-                "uPrepassNormalViz", graph.GetColorTexture(SampleablePrepassNormal), Slot: 18),
+                "uPrepassNormalViz", graph.GetColorTexture(SampleablePrepassNormal)),
         };
 
         // The one binding that is not constant: the lit pass reads whichever of the bounce pair the

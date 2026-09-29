@@ -1095,6 +1095,13 @@ public sealed partial class VulkanGraphicsDevice
             if (f.InFlight.Handle != 0) Vk.DestroyFence(Device, f.InFlight, null);
         }
         frames = Array.Empty<FrameResources>();
+        // Created beside the frame fences and, until this line, never destroyed: every validated
+        // run ended with "1 leaked objects ... VkFence", whether or not isolation was used.
+        if (isolationFence.Handle != 0)
+        {
+            Vk.DestroyFence(Device, isolationFence, null);
+            isolationFence = default;
+        }
         if (commandPool.Handle != 0)
         {
             Vk.DestroyCommandPool(Device, commandPool, null);
@@ -1632,6 +1639,8 @@ public sealed partial class VulkanGraphicsDevice
         var bufInfos = stackalloc DescriptorBufferInfo[maxWritesPerSet];
         var imgInfos = stackalloc DescriptorImageInfo[maxWritesPerSet];
 
+        RequireNamedTextures(prog, textures);
+
         for (var setIdx = 0; setIdx < prog.Sets.Length; setIdx++)
         {
             if (prog.Sets[setIdx] is not { } sr) continue;
@@ -1713,13 +1722,29 @@ public sealed partial class VulkanGraphicsDevice
             for (var i = 0; i < textures.Count; i++)
             {
                 var b = textures[i];
-                if (b.Slot < 0)
+                int binding;
+                var element = b.ArrayIndex;
+                if (b.Slot == ShaderTextureBinding.ByName)
+                {
+                    // Not in this set is fine: RequireNamedTextures has checked it is in one.
+                    var (baseName, index) = SplitArrayName(b);
+                    if (ImageSlotNamed(sr, baseName) is not { } named) continue;
+                    binding = named.Binding;
+                    element = index ?? b.ArrayIndex;
+                }
+                else if (b.Slot < 0)
                 {
                     throw new ArgumentOutOfRangeException(
                         nameof(textures),
                         $"ShaderTextureBinding '{b.Name}' has negative Slot ({b.Slot}).");
                 }
-                var imageSlotType = ImageSlotTypeAtBinding(sr, b.Slot);
+                else
+                {
+                    binding = b.Slot;
+                    RequireSlotNamedAsBound(prog, sr, b);
+                }
+
+                var imageSlotType = ImageSlotTypeAtBinding(sr, binding);
                 if (imageSlotType is null) continue;
 
                 var tex = textureTable[b.Texture.Id];
@@ -1737,9 +1762,9 @@ public sealed partial class VulkanGraphicsDevice
                 {
                     SType = StructureType.WriteDescriptorSet,
                     DstSet = ds,
-                    DstBinding = (uint)b.Slot,
+                    DstBinding = (uint)binding,
                     // Count>1 sampler arrays (e.g. uSpotShadowMaps[N]).
-                    DstArrayElement = (uint)b.ArrayIndex,
+                    DstArrayElement = (uint)element,
                     DescriptorType = isStorage ? DescriptorType.StorageImage : DescriptorType.CombinedImageSampler,
                     DescriptorCount = 1,
                     PImageInfo = &imgInfos[writeIdx],
@@ -1769,6 +1794,90 @@ public sealed partial class VulkanGraphicsDevice
 
     // The image-resource type at a binding (SampledImage / StorageImage /
     // Sampler), or null if the binding isn't an image slot in this set.
+    private static DescriptorSetSlot? ImageSlotNamed(VkShaderSetResources sr, string name)
+    {
+        foreach (var s in sr.Slots)
+        {
+            if (s.Name == name && s.Type is ShaderResourceType.SampledImage or ShaderResourceType.StorageImage) return s;
+        }
+
+        return null;
+    }
+
+    // A texture bound by name must be one of the program's, in some set the draw binds. Checked
+    // before any set is written, so a missing name fails with the program's own list rather than
+    // drawing with nothing bound.
+    private static void RequireNamedTextures(VkShaderProgramEntry prog, IReadOnlyList<ShaderTextureBinding> textures)
+    {
+        for (var i = 0; i < textures.Count; i++)
+        {
+            var b = textures[i];
+            if (b.Slot != ShaderTextureBinding.ByName) continue;
+
+            var (baseName, _) = SplitArrayName(b);
+            var found = false;
+            for (var setIdx = 0; setIdx < prog.Sets.Length && !found; setIdx++)
+            {
+                if (setIdx == MaterialOwnedSet || prog.Sets[setIdx] is not { } sr) continue;
+                found = ImageSlotNamed(sr, baseName) is not null;
+            }
+
+            if (found) continue;
+
+            var names = prog.Sets
+                .Where((sr, setIdx) => sr is not null && setIdx != MaterialOwnedSet)
+                .SelectMany(sr => sr!.Slots)
+                .Where(s => s.Type is ShaderResourceType.SampledImage or ShaderResourceType.StorageImage && s.Name is not null)
+                .Select(s => s.Name!)
+                .Distinct()
+                .ToArray();
+            throw new InvalidOperationException(
+                $"Program '{prog.Name}' has no texture named '{b.Name}'. It has: " +
+                (names.Length == 0 ? "none" : string.Join(", ", names)) + ".");
+        }
+    }
+
+    // A binding that gives both a Slot and a name, where reflection calls that slot something else,
+    // is one of the two being wrong, and drawing with it would sample the wrong texture silently.
+    private static void RequireSlotNamedAsBound(VkShaderProgramEntry prog, VkShaderSetResources sr, ShaderTextureBinding b)
+    {
+        if (string.IsNullOrEmpty(b.Name)) return;
+        var (baseName, _) = SplitArrayName(b);
+
+        foreach (var s in sr.Slots)
+        {
+            if (s.Binding != b.Slot || s.Name is null || s.Name == baseName) continue;
+            if (s.Type is not (ShaderResourceType.SampledImage or ShaderResourceType.StorageImage)) continue;
+
+            throw new InvalidOperationException(
+                $"Program '{prog.Name}': a texture bound as '{b.Name}' at slot {b.Slot} lands on '{s.Name}'. " +
+                $"Bind it by name, new ShaderTextureBinding(\"{s.Name}\", texture), or fix the slot.");
+        }
+    }
+
+    // "uCascades[2]" is element 2 of uCascades. The index in the name and an explicit ArrayIndex
+    // must not say two different things.
+    private static (string BaseName, int? Index) SplitArrayName(ShaderTextureBinding b)
+    {
+        var name = b.Name;
+        var open = name.LastIndexOf('[');
+        if (open <= 0 || !name.EndsWith(']')) return (name, null);
+
+        if (!int.TryParse(name.AsSpan(open + 1, name.Length - open - 2), System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var index))
+        {
+            return (name, null);
+        }
+
+        if (b.ArrayIndex != 0 && b.ArrayIndex != index)
+        {
+            throw new InvalidOperationException(
+                $"Texture '{name}' names element {index} but its ArrayIndex is {b.ArrayIndex}. Say it once.");
+        }
+
+        return (name[..open], index);
+    }
+
     private static ShaderResourceType? ImageSlotTypeAtBinding(VkShaderSetResources sr, int binding)
     {
         foreach (var s in sr.Slots)

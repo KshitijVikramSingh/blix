@@ -480,9 +480,9 @@ internal sealed partial class SponzaLoop
         if (bounceReady && skyBounceBinding >= 0)
         {
             passBindings[skyBounceBinding] = new ShaderTextureBinding(
-                "uSkyBounce", bounceTextures[BounceRead], Slot: 7);
+                "uSkyBounce", bounceTextures[BounceRead]);
             passBindings[skyBounceBinding + 1] = new ShaderTextureBinding(
-                "uSkyBounceDepth", bounceDepthTextures[BounceRead], Slot: 13);
+                "uSkyBounceDepth", bounceDepthTextures[BounceRead]);
         }
 
         // Sun bounce into the probe grid. Cheap enough to redo every frame at this probe count, and
@@ -543,8 +543,8 @@ internal sealed partial class SponzaLoop
             };
             var usageBindings = new[]
             {
-                new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth), Slot: 1),
-                new ShaderTextureBinding("uProbeUsage", probeUsageTexture, Slot: 2),
+                new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
+                new ShaderTextureBinding("uProbeUsage", probeUsageTexture),
             };
             // One invocation per 8x8 pixel block; the shader strides by 8 again inside.
             var groupsX = (frame.Width / 8 + 7) / 8;
@@ -578,7 +578,7 @@ internal sealed partial class SponzaLoop
                     if (skipHiZ) return;
                     fullscreen.Draw(
                         scope, hiZPipelines[levelIndex],
-                        new[] { new ShaderTextureBinding("uSource", source, Slot: 1) },
+                        new[] { new ShaderTextureBinding("uSource", source) },
                         pushConstants: null,
                         uniforms: uniforms);
                 });
@@ -629,10 +629,10 @@ internal sealed partial class SponzaLoop
             for (var level = 0; level < HiZLevels; level++)
             {
                 hiZBindings[level] = new ShaderTextureBinding(
-                    $"uHiZ[{level}]", graph.GetColorTexture(hiZHandles[level]), Slot: 1, ArrayIndex: level);
+                    $"uHiZ[{level}]", graph.GetColorTexture(hiZHandles[level]));
             }
             hiZBindings[HiZLevels] = new ShaderTextureBinding(
-                "uHistory", graph.GetColorTexture(ambientDenoisedHandle), Slot: 2);
+                "uHistory", graph.GetColorTexture(ambientDenoisedHandle));
             graph.Pass(gtaoPassHandle, scope => fullscreen.Draw(
                 scope, gtaoPipeline, hiZBindings, pushConstants: null, uniforms: gtaoUniforms));
             prevAmbientViewProj = viewProj;
@@ -650,9 +650,9 @@ internal sealed partial class SponzaLoop
                 scope, gtaoDenoisePipeline,
                 new[]
                 {
-                    new ShaderTextureBinding("uAmbientRaw", graph.GetColorTexture(ambientHandle), Slot: 1),
+                    new ShaderTextureBinding("uAmbientRaw", graph.GetColorTexture(ambientHandle)),
                     new ShaderTextureBinding(
-                        "uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth), Slot: 2),
+                        "uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                 },
                 pushConstants: null,
                 uniforms: denoiseUniforms));
@@ -690,18 +690,18 @@ internal sealed partial class SponzaLoop
                 new[]
                 {
                     new ShaderTextureBinding(
-                        "uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth), Slot: 1),
+                        "uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                     new ShaderTextureBinding(
-                        "uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal), Slot: 8),
+                        "uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
                     new ShaderTextureBinding("uSkyBounce",
-                        bounceReady ? bounceTextures[BounceRead] : brdfLutTexture, Slot: 2),
+                        bounceReady ? bounceTextures[BounceRead] : brdfLutTexture),
                     new ShaderTextureBinding("uSkyBounceDepth",
-                        bounceReady ? bounceDepthTextures[BounceRead] : brdfLutTexture, Slot: 3),
-                    new ShaderTextureBinding("uSkyVisibility",  skyVisibilityTextures[0], Slot: 4),
-                    new ShaderTextureBinding("uSkyVisibility1", skyVisibilityTextures[1], Slot: 5),
-                    new ShaderTextureBinding("uSkyVisibility2", skyVisibilityTextures[2], Slot: 6),
+                        bounceReady ? bounceDepthTextures[BounceRead] : brdfLutTexture),
+                    new ShaderTextureBinding("uSkyVisibility",  skyVisibilityTextures[0]),
+                    new ShaderTextureBinding("uSkyVisibility1", skyVisibilityTextures[1]),
+                    new ShaderTextureBinding("uSkyVisibility2", skyVisibilityTextures[2]),
                     new ShaderTextureBinding("uOccupancy",
-                        occX > 0 ? occupancyTexture : skyVisibilityTextures[0], Slot: 7),
+                        occX > 0 ? occupancyTexture : skyVisibilityTextures[0]),
                 },
                 pushConstants: null,
                 uniforms: incidentUniforms));
@@ -710,11 +710,11 @@ internal sealed partial class SponzaLoop
                 scope, incidentResolvePipeline,
                 new[]
                 {
-                    new ShaderTextureBinding("uIncidentRaw", graph.GetColorTexture(incidentHandle), Slot: 1),
+                    new ShaderTextureBinding("uIncidentRaw", graph.GetColorTexture(incidentHandle)),
                     new ShaderTextureBinding(
-                        "uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal), Slot: 4),
+                        "uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
                     new ShaderTextureBinding(
-                        "uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth), Slot: 2),
+                        "uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
                 },
                 pushConstants: null,
                 uniforms: new ShaderUniform[]
@@ -787,11 +787,11 @@ internal sealed partial class SponzaLoop
                     textures: new[]
                     {
                         new ShaderTextureBinding("uSkyBounce",
-                            bounceReady ? bounceTextures[BounceRead] : brdfLutTexture, Slot: 0),
-                        new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture, Slot: 1),
-                        new ShaderTextureBinding("uOccupancy", occupancyTexture, Slot: 2),
+                            bounceReady ? bounceTextures[BounceRead] : brdfLutTexture),
+                        new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture),
+                        new ShaderTextureBinding("uOccupancy", occupancyTexture),
                         new ShaderTextureBinding("uSkyBounceDepth",
-                            bounceReady ? bounceDepthTextures[BounceRead] : brdfLutTexture, Slot: 3),
+                            bounceReady ? bounceDepthTextures[BounceRead] : brdfLutTexture),
                     },
                     // null, not an empty array: an empty array still counts as "push constants supplied", and
                     // this shader declares no ranges.
@@ -1312,7 +1312,7 @@ internal sealed partial class SponzaLoop
         if (froxelGridBinding >= 0)
         {
             passBindings[froxelGridBinding] =
-                new ShaderTextureBinding("uFroxelGrid", froxelGridTexture, Slot: 4);
+                new ShaderTextureBinding("uFroxelGrid", froxelGridTexture);
         }
         Console.WriteLine(
             $"[VulkanSponza] froxel grid {x}x{y}x{froxelGridZ} ({FroxelPixels} px/froxel at {width}x{height})");
@@ -1375,38 +1375,38 @@ internal sealed partial class SponzaLoop
     // the same texture the lit pass reads as bounceTextures[BounceRead] after the flip.
     private ShaderTextureBinding[] FroxelBindings() => new[]
     {
-        new ShaderTextureBinding("uGrid", froxelGridTexture, Slot: 1),
-        new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0]), Slot: 2, ArrayIndex: 0),
-        new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1]), Slot: 2, ArrayIndex: 1),
-        new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2]), Slot: 2, ArrayIndex: 2),
-        new ShaderTextureBinding("uSkyVisibility", skyVisibilityTextures[0], Slot: 3),
-        new ShaderTextureBinding("uIrradiance", irradianceCubeTexture, Slot: 4),
+        new ShaderTextureBinding("uGrid", froxelGridTexture),
+        new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0])),
+        new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1])),
+        new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2])),
+        new ShaderTextureBinding("uSkyVisibility", skyVisibilityTextures[0]),
+        new ShaderTextureBinding("uIrradiance", irradianceCubeTexture),
         // Never a hole, even before the first solve: a descriptor set with a gap is a device loss,
         // and uFogParams.z is what tells the shader not to read these.
-        new ShaderTextureBinding("uAtlas", bounceReady ? bounceTextures[bounceWrite] : brdfLutTexture, Slot: 5),
-        new ShaderTextureBinding("uDepthAtlas", bounceReady ? bounceDepthTextures[bounceWrite] : brdfLutTexture, Slot: 6),
-        new ShaderTextureBinding("uScatterPrev", fogScatterTextures[fogScatterWrite ^ 1], Slot: 7),
-        new ShaderTextureBinding("uScatter", fogScatterTextures[fogScatterWrite], Slot: 8),
+        new ShaderTextureBinding("uAtlas", bounceReady ? bounceTextures[bounceWrite] : brdfLutTexture),
+        new ShaderTextureBinding("uDepthAtlas", bounceReady ? bounceDepthTextures[bounceWrite] : brdfLutTexture),
+        new ShaderTextureBinding("uScatterPrev", fogScatterTextures[fogScatterWrite ^ 1]),
+        new ShaderTextureBinding("uScatter", fogScatterTextures[fogScatterWrite]),
         new ShaderTextureBinding("uOccupancy",
-            occX > 0 ? occupancyTexture : skyVisibilityTextures[0], Slot: 9),
+            occX > 0 ? occupancyTexture : skyVisibilityTextures[0]),
     };
 
     private ShaderTextureBinding[] BounceBindings() => new[]
     {
-        new ShaderTextureBinding("uAtlas", bounceTextures[bounceWrite], Slot: 1),
-        new ShaderTextureBinding("uDepthAtlas", bounceDepthTextures[bounceWrite], Slot: 11),
-        new ShaderTextureBinding("uDepthAtlasPrev", bounceDepthTextures[BounceRead], Slot: 12),
-        new ShaderTextureBinding("uOccupancy", occupancyTexture, Slot: 2),
-        new ShaderTextureBinding("uAlbedo", albX > 0 ? albedoTexture : occupancyTexture, Slot: 5),
-        new ShaderTextureBinding("uProbeUsage", probeUsageTexture, Slot: 10),
+        new ShaderTextureBinding("uAtlas", bounceTextures[bounceWrite]),
+        new ShaderTextureBinding("uDepthAtlas", bounceDepthTextures[bounceWrite]),
+        new ShaderTextureBinding("uDepthAtlasPrev", bounceDepthTextures[BounceRead]),
+        new ShaderTextureBinding("uOccupancy", occupancyTexture),
+        new ShaderTextureBinding("uAlbedo", albX > 0 ? albedoTexture : occupancyTexture),
+        new ShaderTextureBinding("uProbeUsage", probeUsageTexture),
         // All SH bands plus irradiance form the injector's distant-sky source term.
-        new ShaderTextureBinding("uSkyVisibility", skyVisibilityTextures[0], Slot: 3),
-        new ShaderTextureBinding("uSkyVisibility1", skyVisibilityTextures[1], Slot: 6),
-        new ShaderTextureBinding("uSkyVisibility2", skyVisibilityTextures[2], Slot: 8),
-        new ShaderTextureBinding("uIrradiance", irradianceCubeTexture, Slot: 9),
+        new ShaderTextureBinding("uSkyVisibility", skyVisibilityTextures[0]),
+        new ShaderTextureBinding("uSkyVisibility1", skyVisibilityTextures[1]),
+        new ShaderTextureBinding("uSkyVisibility2", skyVisibilityTextures[2]),
+        new ShaderTextureBinding("uIrradiance", irradianceCubeTexture),
         // Last frame's solution, which is what turns a rotation of sweeps into successive bounces
         // AND what lets this dispatch run without the lit pass waiting on it.
-        new ShaderTextureBinding("uAtlasPrev", bounceTextures[BounceRead], Slot: 4),
+        new ShaderTextureBinding("uAtlasPrev", bounceTextures[BounceRead]),
     };
 
     // --- live GPU pass cost ----------------------------------------------
@@ -1738,9 +1738,9 @@ internal sealed partial class SponzaLoop
         };
         var bindings = new[]
         {
-            new ShaderTextureBinding("uCurrent", graph.GetColorTexture(hdrHandle), Slot: 1),
-            new ShaderTextureBinding("uHistory", graph.GetColorTexture(taaHandles[taaWrite ^ 1]), Slot: 2),
-            new ShaderTextureBinding("uDepth", graph.GetDepthTexture(SampleableSceneDepth), Slot: 3),
+            new ShaderTextureBinding("uCurrent", graph.GetColorTexture(hdrHandle)),
+            new ShaderTextureBinding("uHistory", graph.GetColorTexture(taaHandles[taaWrite ^ 1])),
+            new ShaderTextureBinding("uDepth", graph.GetDepthTexture(SampleableSceneDepth)),
         };
         graph.Pass(taaPassHandles[taaWrite], scope => fullscreen.Draw(
             scope, taaPipelines[taaWrite], bindings, pushConstants: null, uniforms: uniforms));
@@ -1772,7 +1772,7 @@ internal sealed partial class SponzaLoop
                 ClearDepth: true),
             pass => fullscreen.Draw(
                 pass, presentPipeline,
-                new[] { new ShaderTextureBinding("uHdr", hdrTex, Slot: 0) },
+                new[] { new ShaderTextureBinding("uHdr", hdrTex) },
                 push));
     }
 

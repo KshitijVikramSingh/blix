@@ -253,7 +253,8 @@ public static class ShaderReflection
                 count = 1;
                 foreach (var d in dims.EnumerateArray()) count *= d.GetInt32();
             }
-            outSlots.Add(new DescriptorSetSlot(set, binding, type, stage, Count: count));
+            var name = r.TryGetProperty("name", out var n) ? n.GetString() : null;
+            outSlots.Add(new DescriptorSetSlot(set, binding, type, stage, Count: count, Name: name));
         }
     }
 

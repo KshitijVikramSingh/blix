@@ -489,7 +489,7 @@ internal sealed class PongGame : Game
                 ClearDepth: true),
             pass => fullscreen.Draw(
                 pass, postfxPipeline,
-                new ShaderTextureBinding[] { new("uScene", sceneTex, Slot: 0) },
+                new ShaderTextureBinding[] { new("uScene", sceneTex) },
                 postfxPush));
     }
 

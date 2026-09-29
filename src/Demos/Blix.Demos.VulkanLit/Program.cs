@@ -912,13 +912,13 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         var pointShadowTex = graph.GetDepthCubeTexture(pointShadowCube);
         var shadowBindings = new[]
         {
-            new ShaderTextureBinding("uSunShadowMap", sunShadowTex, Slot: 0),
-            new ShaderTextureBinding("uSpotShadowMaps[0]", spot0ShadowTex, Slot: 1, ArrayIndex: 0),
-            new ShaderTextureBinding("uSpotShadowMaps[1]", spot1ShadowTex, Slot: 1, ArrayIndex: 1),
-            new ShaderTextureBinding("uPointShadowCube", pointShadowTex, Slot: 2),
-            new ShaderTextureBinding("uIrradiance", irradianceCubeTexture, Slot: 3),
-            new ShaderTextureBinding("uPrefilteredEnv", envCubeTexture, Slot: 4),
-            new ShaderTextureBinding("uBrdfLut", brdfLutTexture, Slot: 5),
+            new ShaderTextureBinding("uSunShadowMap", sunShadowTex),
+            new ShaderTextureBinding("uSpotShadowMaps[0]", spot0ShadowTex),
+            new ShaderTextureBinding("uSpotShadowMaps[1]", spot1ShadowTex),
+            new ShaderTextureBinding("uPointShadowCube", pointShadowTex),
+            new ShaderTextureBinding("uIrradiance", irradianceCubeTexture),
+            new ShaderTextureBinding("uPrefilteredEnv", envCubeTexture),
+            new ShaderTextureBinding("uBrdfLut", brdfLutTexture),
         };
         graph.Pass(litPassHandle, scope =>
         {
@@ -1015,8 +1015,8 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
                         pass, presentPipe,
                         new[]
                         {
-                            new ShaderTextureBinding("uHdr", presentTex, Slot: 0),
-                            new ShaderTextureBinding("uBloom", bloomTex, Slot: 1),
+                            new ShaderTextureBinding("uHdr", presentTex),
+                            new ShaderTextureBinding("uBloom", bloomTex),
                         },
                         presentPush);
                 }
@@ -1024,7 +1024,7 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
                 {
                     fullscreen.Draw(
                         pass, presentPipe,
-                        new[] { new ShaderTextureBinding("uOffscreen", presentTex, Slot: 0) });
+                        new[] { new ShaderTextureBinding("uOffscreen", presentTex) });
                 }
             });
     }

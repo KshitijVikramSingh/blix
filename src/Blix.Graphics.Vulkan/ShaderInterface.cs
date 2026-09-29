@@ -36,13 +36,17 @@ public enum ShaderResourceType
 // Count > 1 declares an array binding (e.g. uSpotShadowMaps[4]). The
 // underlying SPIR-V binding must be a sized array of the matching descriptor
 // type.
+//
+// Name is the shader's name for the resource, as reflection reports it (uHdr, and uSpotShadowMaps
+// for an array). A texture bound by name finds its binding through it.
 public sealed record DescriptorSetSlot(
     int Set,
     int Binding,
     ShaderResourceType Type,
     ShaderStages Stages,
     int Count = 1,
-    UniformBlockLayout? BlockLayout = null);
+    UniformBlockLayout? BlockLayout = null,
+    string? Name = null);
 
 // One push-constant range. Per Vulkan spec, two ranges sharing any stage
 // bit must not have overlapping byte ranges; ranges in disjoint stages may
