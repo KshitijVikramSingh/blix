@@ -6,7 +6,7 @@ using Blix.Graphics;
 
 namespace Blix.Assets;
 
-// Engine-native version 12 mesh container. The shared cooked preamble is followed,
+// Engine-native version 13 mesh container. The shared cooked preamble is followed,
 // in order, by counted tables for primitives, materials, images, skins, clips,
 // attachments, static parts, and authored nodes. All values are little-endian.
 //
@@ -33,13 +33,14 @@ public static class BlixMesh
     /// stamps its own, which is what makes "who made this file" answerable.
     /// </summary>
     public const string ShippedRecipe = "gmsh";
-    // Version 12 is the only accepted layout. It includes per-primitive layouts and LOD errors,
+    // Version 13 is the only accepted layout. It includes per-primitive layouts and LOD errors,
     // common provenance, material and image tables (each core channel with its TEXCOORD set, and
     // the normal scale), rig data, attachments/static parts, authored nodes, and the current
     // KHR_materials_* parameter block. v12 mirrors glTF's structure: a node table in every file,
     // meshes stored once and placed by nodes, vertices in mesh space as the complete static (6) or
-    // skinned (7) vertex, skins as joint nodes, clips targeting nodes. Older layouts must be re-cooked.
-    public const uint Version12 = 12;
+    // skinned (7) vertex, skins as joint nodes, clips targeting nodes, and the source attributes the
+    // cook did not carry (v13). Older layouts must be re-cooked.
+    public const uint Version13 = 13;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
     public const uint LayoutPosition3NormalTextureSkin4Tangent = 3; // 80-byte, rigged
@@ -277,6 +278,9 @@ public sealed record BlixMeshNode(string Name, int ParentIndex, Matrix4x4 LocalT
 /// The skin whose bone order its joint indices address, or -1 for a static mesh. A glTF mesh placed
 /// both skinned and unskinned is two meshes here, because the vertices differ.
 /// </param>
+/// <summary>A source vertex attribute the cook did not carry, and on how many primitives.</summary>
+public sealed record BlixMeshIgnored(string Semantic, int Primitives);
+
 public sealed record BlixMeshMesh(string Name, IReadOnlyList<BlixMeshPrimitive> Primitives, int SkinIndex = -1);
 
 public sealed record BlixMeshPrimitive(
@@ -315,6 +319,7 @@ public sealed record BlixMeshPrimitive(
 /// Empty is legal and means exactly what it says — an <c>.obj</c> with no <c>.mtl</c>, or a recipe
 /// that has nothing to record — never "look in the source instead".
 /// </param>
+/// <param name="Ignored">The source's vertex attributes the cook did not carry, with how many primitives had each.</param>
 public sealed record BlixMeshFile(
     IReadOnlyList<BlixMeshNode> Nodes,
     IReadOnlyList<BlixMeshMesh> Meshes,
@@ -322,8 +327,12 @@ public sealed record BlixMeshFile(
     IReadOnlyList<BlixMeshImage>? Images = null,
     IReadOnlyList<BlixMeshSkin>? Skins = null,
     IReadOnlyList<BlixMeshClip>? Clips = null,
-    CookedHeader? Cooked = null)
+    CookedHeader? Cooked = null,
+    IReadOnlyList<BlixMeshIgnored>? Ignored = null)
 {
+    /// <summary>Never null: a file whose cook read every attribute reads as none.</summary>
+    public IReadOnlyList<BlixMeshIgnored> IgnoredTable => Ignored ?? Array.Empty<BlixMeshIgnored>();
+
     /// <summary>A file with no hierarchy of its own: one root node placing one mesh of every primitive.</summary>
     /// <remarks>For a source that has no scene graph, such as an OBJ; glTF always has one.</remarks>
     public static BlixMeshFile Flat(
@@ -464,7 +473,7 @@ public static class BlixMeshWriter
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(file);
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version12, stamp);
+        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version13, stamp);
         using var bw = new BinaryWriter(fs);
 
         bw.Write(file.Nodes.Count);
@@ -567,7 +576,19 @@ public static class BlixMeshWriter
 
         var clips = file.ClipTable;
         bw.Write(clips.Count);
-        foreach (var clip in clips)
+        foreach (var clip in clips) WriteClip(bw, clip);
+
+        var ignored = file.IgnoredTable;
+        bw.Write(ignored.Count);
+        foreach (var i in ignored)
+        {
+            WriteString(bw, i.Semantic);
+            bw.Write(i.Primitives);
+        }
+    }
+
+    private static void WriteClip(BinaryWriter bw, BlixMeshClip clip)
+    {
         {
             var nameBytes = System.Text.Encoding.UTF8.GetBytes(clip.Name);
             bw.Write(nameBytes.Length);
@@ -666,7 +687,7 @@ public static class BlixMeshReader
     /// <summary>Reads the <c>KHR_materials_*</c> block, in the order the writer emits it.</summary>
     /// <remarks>
     /// Positional and exact. There is no length prefix and no field tags, because the format does not
-    /// do optional data — it bumps its version and re-cooks, as it has from v2 to v12 — and a reader
+    /// do optional data — it bumps its version and re-cooks, as it has from v2 to v13 — and a reader
     /// that guessed would turn a format change into silently wrong materials rather than a refusal.
     /// </remarks>
     private static BlixMaterialExtensions ReadExtensions(BinaryReader br)
@@ -706,7 +727,7 @@ public static class BlixMeshReader
         ArgumentNullException.ThrowIfNull(path);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version12, path, ".blixmesh");
+        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version13, path, ".blixmesh");
         return AssetImportException.Refusing(path, () => ReadBody(fs, path, header), ".blixmesh");
     }
 
@@ -865,6 +886,10 @@ public static class BlixMeshReader
                 throw new InvalidDataException($"{path}: clip '{clip.Name}' animates node {track.NodeIndex}, and there are {nodes.Length}.");
         }
 
-        return new BlixMeshFile(nodes, meshes, materials, images, skins, clips, header);
+        var ignoredCount = br.ReadInt32();
+        var ignored = new BlixMeshIgnored[ignoredCount];
+        for (var i = 0; i < ignoredCount; i++) ignored[i] = new BlixMeshIgnored(BlixMeshBinary.ReadString(br), br.ReadInt32());
+
+        return new BlixMeshFile(nodes, meshes, materials, images, skins, clips, header, ignored);
     }
 }

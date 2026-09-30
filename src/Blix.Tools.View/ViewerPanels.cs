@@ -80,7 +80,7 @@ internal sealed class ViewerPanels
         // attached to, and how much of it has to be drawn to show those chains unbroken.
         ImGui.TextDisabled(
             $"{app.Rig.Skeleton.BoneCount} bones ({app.Rig.WeightedBones.Count(b => b)} weighted, " +
-            $"{app.Rig.DeformHierarchy.Count(b => b)} drawn) · {app.Rig.Clips.Count} clips · {app.Rig.Parts.Count} prims");
+            $"{app.Rig.DeformHierarchy.Count(b => b)} drawn) · {app.Rig.Clips.Count} clips · {app.Rig.SkinnedParts.Count()} prims");
 
         var mode = (int)app.Session.Driven.Mode;
         if (ImGui.Combo("compose", ref mode, "single\0blend A to B\0additive B on A\0B masked onto A\0"))

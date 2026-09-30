@@ -32,27 +32,24 @@ public sealed class StudioRenderer : IDisposable
     // Every asset loaded through the stage, with what Studio keeps about it. Released with the stage.
     private readonly StudioAssets assets = new();
 
-    /// <summary>Loads a rigged glTF for this stage: the engine rig, made in the stage's formats.</summary>
+    /// <summary>Loads a model to draw skinned: the engine model, made in the stage's formats.</summary>
     /// <remarks>
     /// The stage applies its own policy to it (the vertex format its skinned pipeline reads, the bone and
-    /// instance caps, its bone buffers, its fallback materials) and keeps that to itself; the rig returned
-    /// is the engine's, and what a tool reads. Owned by the stage: <see cref="Unload(Rig)"/> releases it,
-    /// and so does disposing the stage. Call after <see cref="Load"/>.
+    /// instance caps, its bone buffers, its fallback materials) and keeps that to itself; the model
+    /// returned is the engine's, and what a tool reads. Owned by the stage: <see cref="Unload"/> releases
+    /// it, and so does disposing the stage. Call after <see cref="Load"/>. Refused for a file with no skin.
     /// </remarks>
-    public Rig LoadRig(string path) => assets.Add(StudioRig.Load(device, path, skinnedProgram));
+    public Model LoadRig(string path) => assets.Add(StudioRig.Load(device, path, skinnedProgram));
 
-    /// <summary>Loads a static glTF for this stage: the engine model, its node hierarchy kept.</summary>
+    /// <summary>Loads a model to draw static: its node hierarchy kept, a rigged file's meshes at bind pose.</summary>
     /// <remarks>Owned by the stage, as <see cref="LoadRig"/>. Call after <see cref="Load"/>.</remarks>
     public Model LoadModel(string path) => assets.Add(StudioModel.Load(device, path));
 
-    /// <summary>Releases a rig this stage loaded: its buffers, bone buffers and textures.</summary>
-    public void Unload(Rig rig) => assets.Remove(rig);
-
-    /// <summary>Releases a model this stage loaded.</summary>
+    /// <summary>Releases a model this stage loaded: its buffers, bone buffers and textures.</summary>
     public void Unload(Model model) => assets.Remove(model);
 
     /// <summary>Copies one skin's posed palettes into the buffer the stage's skinned pipeline reads this frame.</summary>
-    public void UploadPalettes(Rig rig, BonePaletteSet palettes, int skin = 0) => assets.For(rig).UploadPalettes(palettes, skin);
+    public void UploadPalettes(Model rig, BonePaletteSet palettes, int skin = 0) => assets.RigFor(rig).UploadPalettes(palettes, skin);
 
     /// <summary>Square shadow map, matching the texel size the lit shader offsets by.</summary>
     public const int ShadowMapSize = 2048;

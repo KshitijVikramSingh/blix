@@ -38,7 +38,7 @@ internal sealed class StudioSelection
     public bool PickThrough(
         in ViewDeclaration view,
         Vector2 pointer,
-        Rig? rig,
+        Model? rig,
         Matrix4x4 rigPlacement,
         IReadOnlyList<Matrix4x4> boneWorlds,
         IReadOnlyList<bool>? boneFilter,
@@ -96,7 +96,7 @@ internal sealed class StudioSelection
     /// </remarks>
     private static int PickBone(
         Ray ray,
-        Rig rig,
+        Model rig,
         Matrix4x4 placement,
         IReadOnlyList<Matrix4x4> boneWorlds,
         IReadOnlyList<bool>? filter,

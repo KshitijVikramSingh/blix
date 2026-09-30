@@ -72,45 +72,19 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
     /// </remarks>
     private GltfModel ImportCooked(string requestedPath, string blixmeshPath, AssetImportContext context)
     {
-        var requested = CookedVertices.Requested(context.IncludeTangents, context.IncludeColour);
         var loadWatch = System.Diagnostics.Stopwatch.StartNew();
-        var cooked = BlixMeshReader.Read(blixmeshPath);
-        var cookedDir = Path.GetDirectoryName(Path.GetFullPath(blixmeshPath)) ?? string.Empty;
-
-        var textureCache = new Dictionary<int, GltfTexture>();
-        var materialCache = new Dictionary<int, GltfMaterial>();
-        GltfShared.LoadImagesFromTable(cooked.ImageTable, cooked.MaterialTable, cookedDir, textureCache);
-
         // Flat: every primitive a node places, moved to where the scene puts it. A skinned mesh reads
         // at its bind pose, as the source's static path always drew one.
-        var world = cooked.WorldTransforms();
+        var data = ModelData.Load(
+            blixmeshPath, new ModelNeeds(context.IncludeTangents, context.IncludeColour, Skinned: false));
         var primitives = new List<GltfPrimitive>();
-        foreach (var (p, node) in cooked.PlacedPrimitives())
+        foreach (var (_, p) in data.Flattened())
         {
-            // The layout this load's pipeline declares, selected from the complete cooked vertex.
-            // UVs are sanitized in the repacked buffer, located by format because their offset
+            // UVs are sanitized in the load's own buffer, located by format because their offset
             // differs between layouts.
-            var (vertexBytes, bounds) = CookedVertices.Repack(
-                p, requested, world[node].IsIdentity ? null : world[node], blixmeshPath);
-            if (ReferenceEquals(vertexBytes, p.VertexBytes)) vertexBytes = (byte[])vertexBytes.Clone();
-            var uvAttr = requested.Attributes.First(a => a.Format == VertexAttributeFormat.Float2);
-            SanitizePackedUVs(
-                vertexBytes, p.VertexCount, stride: requested.Stride,
-                uvOffset: uvAttr.Offset, p.Name);
-
-            var lod0 = p.Lods[0];
-            var lods = new MeshLod[p.Lods.Count];
-            for (var l = 0; l < p.Lods.Count; l++)
-            {
-                lods[l] = new MeshLod(p.Lods[l].Indices16, p.Lods[l].Indices32, p.Lods[l].Error);
-            }
-
-            primitives.Add(new GltfPrimitive(
-                new MeshData(
-                    p.Name, vertexBytes, lod0.Indices16 ?? Array.Empty<ushort>(),
-                    requested, bounds, Indices32: lod0.Indices32, Lods: lods),
-                GltfShared.MaterialFromCooked(
-                    cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache, blixmeshPath)));
+            var uvAttr = p.Mesh.Layout.Attributes.First(a => a.Format == VertexAttributeFormat.Float2);
+            SanitizePackedUVs(p.Mesh.VertexBytes, p.Mesh.VertexCount, stride: p.Mesh.Layout.Stride, uvOffset: uvAttr.Offset, p.Mesh.Name);
+            primitives.Add(new GltfPrimitive(p.Mesh, p.Material));
         }
 
         if (AssetLoadLog.Enabled)
@@ -123,7 +97,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 Mode: AssetLoadMode.Cooked,
                 Bytes: SafeLength(blixmeshPath),
                 LoadMs: loadWatch.Elapsed.TotalMilliseconds,
-                Recipe: cooked.Cooked?.Stamp.Recipe));
+                Recipe: CookedFile.TryReadHeader(blixmeshPath)?.Stamp.Recipe));
         }
 
         return new GltfModel(
@@ -245,41 +219,17 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         return AssetImportException.Refusing(context.SourcePath, () => ImportNodesCore(context));
     }
 
-    /// <summary>The node hierarchy of a COOKED mesh: names, parents, local transforms, and each node's primitives.</summary>
-    /// <remarks>
-    /// The cooked file is glTF's scene graph, so this is a reading rather than a reconstruction:
-    /// vertices are already in mesh space, where a node places them. A skinned mesh reads at its bind
-    /// pose, as the source's hierarchy path always drew one.
-    /// </remarks>
+    /// <summary>The node hierarchy of a COOKED mesh, read through <see cref="ModelData"/>.</summary>
+    /// <remarks>Vertices in mesh space, where each node places them; a skinned mesh reads at its bind pose.</remarks>
     private static GltfNodeModel ImportCookedNodes(string blixmeshPath, bool includeTangents, bool includeColour)
     {
-        var cooked = BlixMeshReader.Read(blixmeshPath);
-        var materialCache = new Dictionary<int, GltfMaterial>();
-        var textureCache = new Dictionary<int, GltfTexture>();
-        var cookedDir = Path.GetDirectoryName(Path.GetFullPath(blixmeshPath)) ?? string.Empty;
-        GltfShared.LoadImagesFromTable(cooked.ImageTable, cooked.MaterialTable, cookedDir, textureCache);
-
-        var layout = CookedVertices.Requested(includeTangents, includeColour);
-        var nodes = new GltfNode[cooked.Nodes.Count];
-        for (var i = 0; i < nodes.Length; i++)
-        {
-            var node = cooked.Nodes[i];
-            var primitives = node.MeshIndex < 0
+        var data = ModelData.Load(blixmeshPath, new ModelNeeds(includeTangents, includeColour, Skinned: false));
+        return new GltfNodeModel(data.Nodes.Select(n => new GltfNode(
+            n.Name, n.ParentIndex, n.Local,
+            n.MeshIndex < 0
                 ? Array.Empty<GltfPrimitive>()
-                : cooked.Meshes[node.MeshIndex].Primitives.Select(p =>
-                {
-                    var (bytes, bounds) = CookedVertices.Repack(p, layout, transform: null, blixmeshPath);
-                    if (ReferenceEquals(bytes, p.VertexBytes)) bytes = (byte[])bytes.Clone();
-                    var lod0 = p.Lods[0];
-                    return new GltfPrimitive(
-                        new MeshData(p.Name, bytes, lod0.Indices16 ?? Array.Empty<ushort>(), layout, bounds, Indices32: lod0.Indices32),
-                        GltfShared.MaterialFromCooked(cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache, blixmeshPath),
-                        MaterialIndex: p.MaterialIndex);
-                }).ToArray();
-            nodes[i] = new GltfNode(node.Name, node.ParentIndex, node.LocalTransform, primitives);
-        }
-
-        return new GltfNodeModel(nodes);
+                : data.Meshes[n.MeshIndex].Primitives
+                    .Select(p => new GltfPrimitive(p.Mesh, p.Material, MaterialIndex: p.MaterialIndex)).ToArray())).ToArray());
     }
 
     private GltfNodeModel ImportNodesCore(AssetImportContext context)

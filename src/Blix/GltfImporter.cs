@@ -66,106 +66,42 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
     /// Bones, clips, attachments, static parts, materials, and image references are reconstructed
     /// entirely from the cooked artifact; the source glTF is not opened.
     /// </remarks>
-    /// <summary>A rig read from the cooked scene graph, derived by the same rules the source path applies.</summary>
+    /// <summary>A rig read through <see cref="ModelData"/>, in the shapes this importer returns.</summary>
     /// <remarks>
-    /// Skinned primitives come from the nodes each skin deforms, in node order; a skin sits where the
-    /// node placing its mesh does. An unskinned mesh node under a joint is that joint's attachment,
-    /// claimed by the first skin whose joints include it, and its transform is composed up to the
-    /// joint; every other unskinned mesh node is a static part at its world transform. Clip tracks
-    /// target nodes, and a rig keeps the ones that are skin 0's joints.
+    /// Skinned primitives are the meshes each skin deforms, in node order; attachments and static parts
+    /// are <see cref="ModelData.Attachments"/> and the unskinned mesh nodes left over, in the colour
+    /// layout RigView draws them with.
     /// </remarks>
     private GltfModel ImportCookedRig(AssetImportContext context, string rigPath, BlixMeshFile cooked)
     {
         var loadWatch = System.Diagnostics.Stopwatch.StartNew();
-        var cookedDir = Path.GetDirectoryName(Path.GetFullPath(rigPath)) ?? string.Empty;
+        var data = ModelData.Load(rigPath, new ModelNeeds(Colour: true, Skinned: true));
 
-        var textureCache = new Dictionary<int, GltfTexture>();
-        var materialCache = new Dictionary<int, GltfMaterial>();
-        GltfShared.LoadImagesFromTable(cooked.ImageTable, cooked.MaterialTable, cookedDir, textureCache);
-
-        var nodes = cooked.Nodes;
-        var world = cooked.WorldTransforms();
-
-        // Skinned vertices as the 80-byte layout skinned pipelines declare; attachments and static
-        // parts as the colour layout RigView draws them with.
-        GltfPrimitive Rebuild(BlixMeshPrimitive p, VertexLayout layout, int skin)
-        {
-            var (bytes, bounds) = CookedVertices.Repack(p, layout, transform: null, rigPath);
-            if (ReferenceEquals(bytes, p.VertexBytes)) bytes = (byte[])bytes.Clone();
-            var lod0 = p.Lods[0];
-            return new GltfPrimitive(
-                new MeshData(p.Name, bytes, lod0.Indices16 ?? Array.Empty<ushort>(), layout, bounds, Indices32: lod0.Indices32),
-                GltfShared.MaterialFromCooked(cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache, rigPath),
-                SkinIndex: skin,
-                MaterialIndex: p.MaterialIndex);
-        }
-
-        GltfPrimitive[] Static(int node) => cooked.Meshes[nodes[node].MeshIndex].Primitives
-            .Select(p => Rebuild(p, VertexPosition3NormalTexture2Color.Layout, 0)).ToArray();
+        GltfPrimitive[] Primitives(int node, int skin) => data.Meshes[data.Nodes[node].MeshIndex].Primitives
+            .Select(p => new GltfPrimitive(p.Mesh, p.Material, SkinIndex: skin, MaterialIndex: p.MaterialIndex)).ToArray();
 
         var skinned = new List<GltfPrimitive>();
-        var bindings = new GltfSkinBinding[cooked.SkinTable.Count];
+        var bindings = new GltfSkinBinding[data.Skins.Count];
         for (var s = 0; s < bindings.Length; s++)
         {
-            var placing = -1;
-            for (var n = 0; n < nodes.Count; n++)
+            for (var n = 0; n < data.Nodes.Count; n++)
             {
-                if (nodes[n].SkinIndex != s || nodes[n].MeshIndex < 0) continue;
-                if (placing < 0) placing = n;
-                skinned.AddRange(cooked.Meshes[nodes[n].MeshIndex].Primitives
-                    .Select(p => Rebuild(p, VertexPosition3NormalTextureSkin4Tangent.Layout, s)));
+                if (data.Nodes[n].SkinIndex == s && data.Nodes[n].MeshIndex >= 0) skinned.AddRange(Primitives(n, s));
             }
 
-            bindings[s] = new GltfSkinBinding(
-                new Skeleton(cooked.SkinTable[s].Bones.Select(b => new Bone(b.Name, b.ParentIndex, b.InverseBindPose)).ToArray()),
-                placing < 0 ? Matrix4x4.Identity : world[placing]);
+            bindings[s] = new GltfSkinBinding(data.Skins[s].Skeleton, data.Placement(s));
         }
 
-        var attachments = new List<GltfAttachment>();
-        var claimed = new HashSet<string>(StringComparer.Ordinal);
-        for (var s = 0; s < bindings.Length; s++)
-        {
-            var boneOfJoint = new Dictionary<int, int>();
-            var bones = cooked.SkinTable[s].Bones;
-            for (var b = 0; b < bones.Length; b++) boneOfJoint[bones[b].NodeIndex] = b;
-
-            for (var n = 0; n < nodes.Count; n++)
-            {
-                if (nodes[n].MeshIndex < 0 || nodes[n].SkinIndex >= 0) continue;
-
-                // Up the chain, composing as we go (row-vector: child local, then parent), until a
-                // joint of this skin; reaching the root means the mesh only shares the file.
-                var local = nodes[n].LocalTransform;
-                var ancestor = nodes[n].ParentIndex;
-                while (ancestor >= 0 && !boneOfJoint.ContainsKey(ancestor))
-                {
-                    local *= nodes[ancestor].LocalTransform;
-                    ancestor = nodes[ancestor].ParentIndex;
-                }
-
-                if (ancestor < 0 || !claimed.Add(nodes[n].Name)) continue;
-                attachments.Add(new GltfAttachment(
-                    nodes[n].Name, nodes[ancestor].Name, boneOfJoint[ancestor], local, Static(n), s));
-            }
-        }
-
-        var staticParts = new List<GltfStaticPart>();
-        for (var n = 0; n < nodes.Count; n++)
-        {
-            if (nodes[n].MeshIndex < 0 || nodes[n].SkinIndex >= 0 || claimed.Contains(nodes[n].Name)) continue;
-            staticParts.Add(new GltfStaticPart(nodes[n].Name, world[n], Static(n)));
-        }
-
-        var boneOfNode = new Dictionary<int, int>();
-        if (cooked.SkinTable.Count > 0)
-        {
-            var bones = cooked.SkinTable[0].Bones;
-            for (var b = 0; b < bones.Length; b++) boneOfNode[bones[b].NodeIndex] = b;
-        }
-
-        var animations = cooked.ClipTable
-            .Select(c => RebuildClip(c with { Tracks = c.Tracks.Where(t => boneOfNode.ContainsKey(t.NodeIndex)).ToArray() }, boneOfNode))
-            .Where(c => c.Tracks.Length > 0)
+        var found = data.Attachments();
+        var attachments = found
+            .Select(a => new GltfAttachment(
+                data.Nodes[a.NodeIndex].Name, data.Nodes[a.JointNode].Name, a.BoneIndex, a.Local,
+                Primitives(a.NodeIndex, 0), a.SkinIndex))
+            .ToArray();
+        var attached = found.Select(a => a.NodeIndex).ToHashSet();
+        var staticParts = Enumerable.Range(0, data.Nodes.Count)
+            .Where(n => data.Nodes[n].MeshIndex >= 0 && data.Nodes[n].SkinIndex < 0 && !attached.Contains(n))
+            .Select(n => new GltfStaticPart(data.Nodes[n].Name, data.World[n], Primitives(n, 0)))
             .ToArray();
 
         if (AssetLoadLog.Enabled)
@@ -180,36 +116,9 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         }
 
         return new GltfModel(
-            skinned.ToArray(), bindings[0].Skeleton, animations, bindings[0].MeshNodeTransform,
-            attachments.ToArray(), staticParts.ToArray(), Array.Empty<GltfIgnored>(), bindings);
+            skinned.ToArray(), bindings[0].Skeleton, data.Clips.ToArray(), bindings[0].MeshNodeTransform,
+            attachments, staticParts, Array.Empty<GltfIgnored>(), bindings);
     }
-
-    /// <summary>
-    /// One clip, from the keyframes it was cooked as.
-    /// </summary>
-    /// <remarks>
-    /// An empty channel array means the channel was absent, which is why it maps back to a null
-    /// curve rather than an empty one — <c>KeyframeVector3Curve</c> refuses to exist with no keys,
-    /// and rightly: a curve with nothing to evaluate is not a curve.
-    /// </remarks>
-    private static AnimationClip RebuildClip(BlixMeshClip clip, IReadOnlyDictionary<int, int> boneOfNode) => new(
-        clip.Name,
-        clip.Tracks.Select(t => new BoneTrack
-        {
-            BoneIndex = boneOfNode[t.NodeIndex],
-            Translation = t.Translation.Length == 0
-                ? null
-                : new KeyframeVector3Curve(
-                    t.Translation.Select(k => new Keyframe<Vector3>(k.Time, k.Value)).ToArray()),
-            Rotation = t.Rotation.Length == 0
-                ? null
-                : new KeyframeQuaternionCurve(
-                    t.Rotation.Select(k => new Keyframe<Quaternion>(k.Time, k.Value)).ToArray()),
-            Scale = t.Scale.Length == 0
-                ? null
-                : new KeyframeVector3Curve(
-                    t.Scale.Select(k => new Keyframe<Vector3>(k.Time, k.Value)).ToArray()),
-        }).ToArray());
 
     private GltfModel ImportCore(AssetImportContext context, bool preferCooked)
     {
@@ -545,6 +454,21 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         }
 
         return found.ToArray();
+    }
+
+    /// <summary>
+    /// Every vertex attribute the cooked vertex does not carry, per the complete layouts: static meshes
+    /// read tangent, colour and the second set; skinned ones read the skinning pairs as well. Public for
+    /// the cook, which records what it did not read.
+    /// </summary>
+    public static GltfIgnored[] UnreadAttributes(ModelRoot model)
+    {
+        ArgumentNullException.ThrowIfNull(model);
+        return GltfShared.CollectIgnored(model.LogicalNodes
+            .Where(node => node.Mesh is not null)
+            .SelectMany(node => node.Mesh!.Primitives.Select(primitive =>
+                (primitive, GltfShared.VertexFeatures.Tangents | GltfShared.VertexFeatures.Colour
+                    | (node.Skin is null ? GltfShared.VertexFeatures.None : GltfShared.VertexFeatures.Skinning)))));
     }
 
     /// <summary>A skin's bones in parent-first order, and the source-joint-to-bone remap. Public for the cook.</summary>

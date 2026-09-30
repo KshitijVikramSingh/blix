@@ -31,28 +31,19 @@ public static class StudioInspection
             : new Vector3(material.BaseColorFactor.X, material.BaseColorFactor.Y, material.BaseColorFactor.Z);
 
     /// <summary>Each part's material name and drawn colour, in part order; names repeat.</summary>
-    public static IEnumerable<(string Name, Vector3 Colour)> Materials(Model model) =>
-        model.Parts.Select(p => (p.Material?.Name ?? string.Empty, BaseColour(p.Material, ModelFallbackColour)));
-
-    /// <summary>Each part's material name and drawn colour: skinned parts, then attachments, then static parts.</summary>
-    public static IEnumerable<(string Name, Vector3 Colour)> Materials(Rig rig) =>
-        rig.Parts.Select(p => p.Material)
-            .Concat(rig.Attachments.Select(a => a.Material))
-            .Concat(rig.StaticParts.Select(p => p.Material))
-            .Select(m => (m?.Name ?? string.Empty, BaseColour(m, RigFallbackColour)));
+    /// <remarks>A model drawn skinned falls back to the rig grey, one drawn static to the model grey.</remarks>
+    public static IEnumerable<(string Name, Vector3 Colour)> Materials(Model model)
+    {
+        var fallback = model.SkinnedParts.Any() ? RigFallbackColour : ModelFallbackColour;
+        return model.Parts.Select(p => (p.Material?.Name ?? string.Empty, BaseColour(p.Material, fallback)));
+    }
 
     /// <summary>Parts whose material names a base-colour texture.</summary>
     public static int TexturedParts(Model model) => model.Parts.Count(p => p.Material?.BaseColorTexture is not null);
 
-    /// <summary>The distinct base-colour images the model's parts use.</summary>
+    /// <summary>The distinct base-colour images the model's parts use, in part order.</summary>
     public static IReadOnlyList<Image> Images(Model model) =>
         Distinct(model.Parts.Select(p => (p.Material, p.Textures)));
-
-    /// <summary>The distinct base-colour images the rig uses: skinned parts, then static parts, then attachments.</summary>
-    public static IReadOnlyList<Image> Images(Rig rig) =>
-        Distinct(rig.Parts.Select(p => (p.Material, p.Textures))
-            .Concat(rig.StaticParts.Select(p => (p.Material, p.Textures)))
-            .Concat(rig.Attachments.Select(a => (a.Material, a.Textures))));
 
     private static IReadOnlyList<Image> Distinct(IEnumerable<(GltfMaterial? Material, MaterialTextures Textures)> parts)
     {

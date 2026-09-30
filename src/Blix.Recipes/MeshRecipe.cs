@@ -221,7 +221,8 @@ public static class MeshRecipe
         BlixMeshWriter.Write(
             outPath,
             new BlixMeshFile(
-                cookedNodes, meshes, CookMaterials(model, imageRows, patch, log), images, skins, clips),
+                cookedNodes, meshes, CookMaterials(model, imageRows, patch, log), images, skins, clips,
+                Ignored: GltfImporter.UnreadAttributes(model).Select(i => new BlixMeshIgnored(i.Semantic, i.Primitives)).ToArray()),
             stamp);
         return primitiveCount;
     }
@@ -1171,7 +1172,7 @@ public static class MeshRecipe
         MaterialPatch? patch = null)
     {
         var header = CookedFile.TryReadHeader(outputPath);
-        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version12 }) return false;
+        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version13 }) return false;
         var stamp = header.Value.Stamp;
         if (!stamp.MatchesProducerAndSource(BlixMesh.ShippedRecipe, MeshRecipeVersion, sourcePath))
             return false;

@@ -127,7 +127,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
     private readonly string? secondClip;
     private readonly int requestedInstances;
     private readonly PoseMode startMode;
-    private Rig? rig;
+    private Model? rig;
     private RigInstances? session;
 
     private Matrix4x4 rigBase = Matrix4x4.Identity;
@@ -259,7 +259,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
 
     internal Matrix4x4 ModelTransform => modelTransform;
 
-    internal Rig? Rig => rig;
+    internal Model? Rig => rig;
 
     /// <summary>Where the rig was read from; null without one.</summary>
     internal string? RigPath => rig is null ? null : rigPath;
@@ -588,7 +588,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         session.Driven.Refresh();
 
 
-        var extent = rig.LongestExtent;
+        var extent = rig.RestExtent;
         rigScale = extent > 0.001f ? 3f / extent : 1f;
         rigBase = Matrix4x4.CreateScale(rigScale)
                   * Matrix4x4.CreateTranslation(0f, -rig.RestBounds.Min.Y * rigScale, 0f);
@@ -601,11 +601,11 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
 
         Console.WriteLine(
             $"rig: {Path.GetFileName(rigPath)} — {rig.Skeleton.BoneCount} bone(s), {rig.Clips.Count} clip(s), " +
-            $"{rig.Parts.Count} primitive(s), {rig.VertexCount} vertices, " +
+            $"{rig.SkinnedParts.Count()} primitive(s), {rig.SkinnedVertexCount} vertices, " +
             $"bounds {rig.RestBounds.Min.Y:0.00}..{rig.RestBounds.Max.Y:0.00} tall, scaled x{rigScale:0.000}");
     }
 
-    private static int NamedClip(Rig rig, string name)
+    private static int NamedClip(Model rig, string name)
     {
         for (var i = 0; i < rig.Clips.Count; i++)
         {
@@ -621,7 +621,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         return 0;
     }
 
-    private static int PreferredClip(Rig rig, string[] names, int fallback)
+    private static int PreferredClip(Model rig, string[] names, int fallback)
     {
         foreach (var wanted in names)
         {
@@ -688,7 +688,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         // Bodies stand in a row across the camera's view, a stride apart, centred on the origin so
         // one body sits where one body always did. Where they stand is the viewer's choice, which is
         // why the session takes it rather than inventing one.
-        var spacing = MathF.Max(1.2f, rig.LongestExtent * rigScale * 0.75f);
+        var spacing = MathF.Max(1.2f, rig.RestExtent * rigScale * 0.75f);
         session.Pack(rigTransform, spacing);
 
         // Sampled in the space the trail is drawn in, so the line is where the body would be.

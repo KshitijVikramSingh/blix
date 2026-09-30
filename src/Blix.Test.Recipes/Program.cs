@@ -93,6 +93,59 @@ public static class Program
         return true;
     }
 
+    private static void ModelDataReadings(TestRunner t)
+    {
+        t.ExpectThrows<AssetImportException>("ModelData.Load refuses a source model, naming the cook",
+            () => Blix.ModelData.Load("some/asset.glb"));
+
+        var rogue = FindFile("Rogue.glb");
+        var morph = FindFile("AnimatedMorphCube.glb");
+        var multiUv = FindFile("MultiUVTest.gltf");
+        if (rogue is null || morph is null || multiUv is null)
+        {
+            Console.WriteLine("  --   ModelData checks skipped: Rogue.glb, AnimatedMorphCube.glb or MultiUVTest.gltf not found");
+            return;
+        }
+
+        // One cooked rig, two readings: skinned vertices for a rig view, bind-pose static ones for a
+        // model view, over the same scene graph.
+        var rig = Path.ChangeExtension(rogue, ".blixmesh");
+        var skinned = Blix.ModelData.Load(rig, new Blix.ModelNeeds(Skinned: true));
+        var asStatic = Blix.ModelData.Load(rig, new Blix.ModelNeeds(Colour: true, Skinned: false));
+        t.Expect("a rigged file read skinned keeps its skinned meshes skinned",
+            skinned.IsRigged && skinned.Meshes.Any(m => m.Skinned && m.Primitives.All(p => p.Mesh.Layout.Stride == 80)),
+            string.Join(",", skinned.Meshes.SelectMany(m => m.Primitives).Select(p => p.Mesh.Layout.Stride).Distinct()));
+        t.Expect("and read static, the same meshes arrive as static geometry at bind pose",
+            asStatic.Meshes.All(m => !m.Skinned) && asStatic.Meshes.SelectMany(m => m.Primitives).All(p => p.Mesh.Layout.Stride == 44),
+            string.Join(",", asStatic.Meshes.SelectMany(m => m.Primitives).Select(p => p.Mesh.Layout.Stride).Distinct()));
+        t.Expect("over one scene graph", skinned.Nodes.Count == asStatic.Nodes.Count && skinned.Skins.Count == asStatic.Skins.Count,
+            $"{skinned.Nodes.Count} vs {asStatic.Nodes.Count} nodes");
+
+        // What the cook did not carry is recorded in the file rather than lost with the source.
+        var temp = Path.Combine(Path.GetTempPath(), "blix-ignored-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            var cube = Path.Combine(temp, "AnimatedMorphCube.glb");
+            File.Copy(morph, cube);
+            MeshRecipe.CookToBlixMesh(cube, Path.ChangeExtension(cube, ".blixmesh"));
+            var morphs = Blix.ModelData.Load(Path.ChangeExtension(cube, ".blixmesh")).Ignored;
+            t.Expect("a cooked file records the source attributes its cook did not carry (morph targets)",
+                morphs.Any(i => i.Semantic == Blix.GltfIgnored.MorphTargets), string.Join(",", morphs.Select(i => i.Semantic)));
+
+            var uv = Path.Combine(temp, "MultiUVTest.gltf");
+            foreach (var f in Directory.EnumerateFiles(Path.GetDirectoryName(multiUv)!)) File.Copy(f, Path.Combine(temp, Path.GetFileName(f)), true);
+            MeshRecipe.CookToBlixMesh(uv, Path.ChangeExtension(uv, ".blixmesh"));
+            var none = Blix.ModelData.Load(Path.ChangeExtension(uv, ".blixmesh")).Ignored;
+            t.Expect("CONTROL and records nothing where it read everything (two UV sets are carried)",
+                none.Count == 0, string.Join(",", none.Select(i => i.Semantic)));
+        }
+        finally
+        {
+            try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
+        }
+    }
+
     private static void CookOnOpen(TestRunner t)
     {
         var rogue = FindFile("Rogue.glb");
@@ -982,6 +1035,9 @@ public static class Program
                 try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
             }
         }
+
+        // ── one ModelData, whatever the file holds ───────────────────────────
+        ModelDataReadings(t);
 
         // ── tools cook on open ───────────────────────────────────────────────
         // The engine reads cooked models; a tool opening a raw one cooks it into a cache first.

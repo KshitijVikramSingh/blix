@@ -63,7 +63,7 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
     // Studio frames its subjects; --cam, or F12's dump of it, puts it back anywhere.
     private readonly CameraController camera = StudioFraming.Around(StudioFraming.SubjectCentre, -16.6f, 12f, 5.18f);
     private readonly Playback playback = new();
-    private Rig rig = null!;
+    private Model rig = null!;
     private RigInstances body = null!;
     private ObjectTunables tunables = null!;
     private Matrix4x4 placement;
@@ -97,7 +97,7 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
         body = new RigInstances(rig, 1);
 
         // Two metres tall, standing on the ground, whatever size it was authored at.
-        var scale = 2f / rig.LongestExtent;
+        var scale = 2f / rig.RestExtent;
         placement = Matrix4x4.CreateScale(scale) * Matrix4x4.CreateTranslation(0f, -rig.RestBounds.Min.Y * scale, 0f);
     }
 

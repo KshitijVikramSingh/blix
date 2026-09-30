@@ -7,10 +7,10 @@ using Blix.Render;
 
 namespace Blix.Tools.Studio;
 
-/// <summary>A rigged glTF as Studio draws it: the engine's <see cref="Rig"/>, with Studio's policy applied.</summary>
+/// <summary>A skinned model as Studio draws it: the engine's <see cref="Model"/>, with Studio's policy applied.</summary>
 /// <remarks>
 /// <b>Policy over residency.</b> Uploading, skins, clips, palette packing and the bone buffers are the
-/// engine's (<see cref="Rig"/>, <see cref="BoneBuffers"/>). This type is what Studio decides on top: the
+/// engine's (<see cref="Model"/>, <see cref="BoneBuffers"/>). This type is what Studio decides on top: the
 /// bone and instance caps its reference row allows, the grey a part without a material is drawn in, that
 /// cooked textures are realised at load rather than streamed (an inspector shows full detail at once),
 /// and the names its resources carry.
@@ -95,7 +95,7 @@ internal sealed class StudioRig : IDisposable
     /// <summary>One skin: the skeleton it poses, the frame its meshes were authored in, and its palette binding.</summary>
     public sealed record SkinSlot(Skeleton Skeleton, Matrix4x4 MeshNodeTransform, MaterialHandle BoneMaterial);
 
-    private Rig rig = null!;
+    private Model rig = null!;
     private BoneBuffers bones = null!;
     private GltfTextureLoader textures = null!;
     private readonly List<Part> parts = new();
@@ -103,8 +103,8 @@ internal sealed class StudioRig : IDisposable
     private readonly List<StaticPart> staticParts = new();
     private readonly List<SkinSlot> skins = new();
 
-    /// <summary>The engine rig this draws.</summary>
-    public Rig Rig => rig;
+    /// <summary>The engine model this draws, loaded skinned.</summary>
+    public Model Model => rig;
 
     public IReadOnlyList<Part> Parts => parts;
 
@@ -127,19 +127,25 @@ internal sealed class StudioRig : IDisposable
     /// </param>
     internal static StudioRig Load(IGraphicsDevice device, string path, ShaderProgramHandle skinnedProgram)
     {
-        // Cooked on open: what Studio shows is the cooked asset, which is what the engine draws.
-        var imported = new GltfImporter().Import(
-            new AssetImportContext(AssetId.Parse("lab.rig"), Blix.Recipes.CookCache.Resolve(path)));
-        ValidatePaletteCapacity(path, imported.SkinsOrEmpty);
+        // Cooked on open: what Studio shows is the cooked asset, which is what the engine draws. Skinned
+        // parts skinned, and the static parts beside them in the colour layout RigView draws them with.
+        var data = ModelData.Load(Blix.Recipes.CookCache.Resolve(path), new ModelNeeds(Colour: true, Skinned: true));
+        if (!data.IsRigged)
+        {
+            throw new AssetImportException(
+                path, null, "no node has a skin, so there is no rig here — open it as a model instead");
+        }
+
+        ValidatePaletteCapacity(path, data.Skins.Select(s => s.Skeleton).ToArray());
 
         var studio = new StudioRig();
         studio.textures = new GltfTextureLoader(device);
-        studio.rig = device.CreateRig(imported, studio.textures, $"lab.rig.{Path.GetFileNameWithoutExtension(path)}");
+        studio.rig = device.CreateModel(data, studio.textures, $"lab.rig.{Path.GetFileNameWithoutExtension(path)}");
         // Realised now, not streamed: an inspector shows the asset as it is from the first frame.
         studio.textures.Drain(double.PositiveInfinity);
         studio.bones = studio.rig.CreateBoneBuffers(skinnedProgram, MaxInstances);
 
-        foreach (var p in studio.rig.Parts)
+        foreach (var p in studio.rig.SkinnedParts)
         {
             var m = p.Material;
             studio.parts.Add(new Part(
@@ -157,19 +163,21 @@ internal sealed class StudioRig : IDisposable
         foreach (var p in studio.rig.StaticParts)
         {
             var m = p.Material;
+            var node = studio.rig.Nodes[p.NodeIndex];
+            var siblings = studio.rig.StaticParts.Where(o => o.NodeIndex == p.NodeIndex).ToList();
             studio.staticParts.Add(new StaticPart(
-                p.Name, p.World, p.Mesh.VertexBuffer, p.Mesh.IndexBuffer, p.Mesh.IndexCount, BaseColourOf(m),
+                siblings.Count > 1 ? $"{node.Name}.{siblings.IndexOf(p)}" : node.Name, node.World, p.Mesh.VertexBuffer, p.Mesh.IndexBuffer, p.Mesh.IndexCount, BaseColourOf(m),
                 m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness, StudioSurface.Of(m, p.Textures),
                 m?.Name ?? string.Empty));
         }
 
         foreach (var a in studio.rig.Attachments)
         {
-            var m = a.Material;
+            var m = a.Part.Material;
             studio.attachments.Add(new Attachment(
-                a.Name, a.JointName, a.JointIndex, a.Local, a.Mesh.VertexBuffer, a.Mesh.IndexBuffer, a.Mesh.IndexCount,
+                a.Name, a.JointName, a.JointIndex, a.Local, a.Part.Mesh.VertexBuffer, a.Part.Mesh.IndexBuffer, a.Part.Mesh.IndexCount,
                 BaseColourOf(m), m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness,
-                StudioSurface.Of(m, a.Textures), m?.Name ?? string.Empty));
+                StudioSurface.Of(m, a.Part.Textures), m?.Name ?? string.Empty));
         }
 
         for (var s = 0; s < studio.rig.Skins.Count; s++)
@@ -185,13 +193,13 @@ internal sealed class StudioRig : IDisposable
     public void UploadPalettes(BonePaletteSet palettes, int skinIndex) => bones.Upload(skinIndex, palettes);
 
     /// <summary>Refuses a rig that cannot fit Studio's maximum instance row.</summary>
-    internal static void ValidatePaletteCapacity(string sourcePath, IReadOnlyList<GltfSkinBinding> skins)
+    internal static void ValidatePaletteCapacity(string sourcePath, IReadOnlyList<Skeleton> skins)
     {
         ArgumentNullException.ThrowIfNull(sourcePath);
         ArgumentNullException.ThrowIfNull(skins);
         for (var skin = 0; skin < skins.Count; skin++)
         {
-            var count = skins[skin].Skeleton.BoneCount;
+            var count = skins[skin].BoneCount;
             if (checked(count * MaxInstances) <= PaletteMatrixCapacity) continue;
             throw new AssetImportException(
                 sourcePath,

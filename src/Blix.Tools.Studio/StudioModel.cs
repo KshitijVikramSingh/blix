@@ -52,15 +52,15 @@ internal sealed class StudioModel : IDisposable
 
     internal static StudioModel Load(IGraphicsDevice device, string path)
     {
-        // includeColour: the stage's static pipeline declares the 36-byte layout, so everything drawn on
-        // it must carry a colour, and COLOR_0 is a base-colour multiplier (conventions §6).
+        // Colour: the stage's static pipeline declares the colour layout, so everything drawn on it must
+        // carry a colour, and COLOR_0 is a base-colour multiplier (conventions §6). Static: a model view
+        // draws a rigged file's skinned meshes at their bind pose.
         // Cooked on open: what Studio shows is the cooked asset, which is what the engine draws.
-        var imported = new GltfStaticImporter().ImportNodes(
-            new AssetImportContext(AssetId.Parse("lab"), Blix.Recipes.CookCache.Resolve(path), includeColour: true));
+        var data = ModelData.Load(Blix.Recipes.CookCache.Resolve(path), new ModelNeeds(Colour: true, Skinned: false));
 
         var studio = new StudioModel();
         studio.textures = new GltfTextureLoader(device);
-        studio.model = device.CreateModel(imported, studio.textures, $"lab.{Path.GetFileNameWithoutExtension(path)}");
+        studio.model = device.CreateModel(data, studio.textures, $"lab.{Path.GetFileNameWithoutExtension(path)}");
         // Realised now, not streamed: an inspector shows the asset as it is from the first frame.
         studio.textures.Drain(double.PositiveInfinity);
 

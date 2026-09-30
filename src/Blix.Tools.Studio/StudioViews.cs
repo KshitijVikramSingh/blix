@@ -47,7 +47,7 @@ public sealed class ModelView : IStudioView
     public Matrix4x4 Transform { get; set; }
 
     private StudioModel Studio(in StudioDraw draw) =>
-        (draw.Assets ?? throw new InvalidOperationException("A ModelView is drawn by the stage that loaded its model.")).For(Model);
+        (draw.Assets ?? throw new InvalidOperationException("A ModelView is drawn by the stage that loaded its model.")).ModelFor(Model);
 
     public void Draw(in StudioDraw draw)
     {
@@ -108,7 +108,7 @@ public sealed class RigView : IStudioView
     private readonly byte[] lit = new byte[StudioPush.LitBytes];
     private readonly byte[] caster = new byte[StudioPush.SkinnedCasterBytes];
 
-    public RigView(Rig rig, int instances = 1)
+    public RigView(Model rig, int instances = 1)
     {
         Rig = rig ?? throw new ArgumentNullException(nameof(rig));
         Instances = instances;
@@ -121,8 +121,8 @@ public sealed class RigView : IStudioView
     private Vector3 Colour(string materialName, Vector3 assetColour) =>
         Tints?.Resolve(materialName, assetColour) ?? assetColour;
 
-    /// <summary>The engine rig drawn: loaded through the stage (<see cref="StudioRenderer.LoadRig"/>).</summary>
-    public Rig Rig { get; }
+    /// <summary>The engine model drawn skinned: loaded through the stage (<see cref="StudioRenderer.LoadRig"/>).</summary>
+    public Model Rig { get; }
 
     /// <summary>How many bodies this draw covers. One takes exactly the same path as eight.</summary>
     public int Instances { get; set; }
@@ -180,7 +180,7 @@ public sealed class RigView : IStudioView
     public Func<int, ISet<string>>? InstanceAttachments { get; set; }
 
     private StudioRig Studio(in StudioDraw draw) =>
-        (draw.Assets ?? throw new InvalidOperationException("A RigView is drawn by the stage that loaded its rig.")).For(Rig);
+        (draw.Assets ?? throw new InvalidOperationException("A RigView is drawn by the stage that loaded its rig.")).RigFor(Rig);
 
     public void Draw(in StudioDraw draw)
     {
