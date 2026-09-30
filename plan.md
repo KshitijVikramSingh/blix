@@ -22,7 +22,10 @@ is the case). Tools that open an arbitrary `.glb` cook it on open into a cache. 
 
 **Done** (branch `cooked-only`): MikkTSpace in the cook (046c780); the complete static vertex,
 `.blixmesh` v11, repacked to the layout a load asks for (2db2e0c); cook-on-open for tools,
-`CookCache` (83cecf5); stage 1 below, the scene-graph `.blixmesh` v12 (b270e8d).
+`CookCache` (83cecf5); stage 1 below, the scene-graph `.blixmesh` v12 (b270e8d); stage 2, one
+`ModelData` and one `Model`, with unread attributes recorded in the file, v13 (7c4dd90). Stage 4 goes
+before 3: v12 dissolved the rig-or-static case that made configuration a prerequisite, and converting
+source paths that stage 4 deletes would be wasted.
 
 **The format mirrors glTF's structure, not its encoding.** "Rig or static" is not a question glTF
 asks: every mesh reaches a scene through a node, and a rigged file is a scene graph in which some node
