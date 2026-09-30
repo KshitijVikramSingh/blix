@@ -1,6 +1,6 @@
 # Blix
 
-The layer game code targets. Owns the loop contract, scene composition, per-object pose, cameras + lights, animation + skeletal animation, physics, geometry + collision, audio, and the glTF importer. Everything below it (`Blix.Core`, `Blix.Graphics`, `Blix.Graphics.Vulkan`, `Blix.Graphics.Images`, `Blix.Render`, `Blix.Assets`, `Blix.Diagnostics`, `Blix.Geometry`) is platform/renderer plumbing.
+The layer game code targets. Owns the loop contract, scene composition, per-object pose, cameras + lights, animation + skeletal animation, physics, geometry + collision, audio, and the glTF importer. Everything below it (`Blix.Core`, `Blix.Graphics`, `Blix.Graphics.Images`, `Blix.Render`, `Blix.Assets`, `Blix.Diagnostics`, `Blix.Geometry`) is platform/renderer plumbing.
 
 This doc is the reference for the `Blix` namespace. For the layers below, see [`architecture.md`](architecture.md) (project graph, host contracts, the Vulkan binding model) and [`renderer.md`](renderer.md) (render graph, shaders, rendering techniques).
 
@@ -16,7 +16,7 @@ Anything richer (a scene graph, parenting, render queues, animation graphs, mult
 using Blix;
 using Blix.Core;
 using Blix.Diagnostics;
-using Blix.Graphics.Vulkan;
+using Blix.Graphics;
 using Blix.Runtime.Silk;
 
 using var window = new Window(new MyGame());
@@ -34,11 +34,10 @@ internal sealed class MyGame : Game, IDebuggable
         var mesh = GraphicsDevice.CreateMesh(/* ... */);
 
         // A GameObject just stores a backend-neutral MaterialHandle. Creating one
-        // is a renderer concern: on the Vulkan device, CreateMaterial allocates a
-        // MaterialBindings against a SPIR-V-reflected descriptor set; you write it
-        // by name and take .Handle. (Full render setup lives in the demos.)
-        var vk = (VulkanGraphicsDevice)GraphicsDevice;
-        MaterialHandle material = vk.CreateMaterial(litShaderProgram, name: "hero.material")
+        // is a renderer concern: CreateMaterial allocates a set of bindings against
+        // the program's SPIR-V-reflected descriptor set; you write it by name and
+        // take .Handle. (Full render setup lives in the demos.)
+        MaterialHandle material = GraphicsDevice.CreateMaterial(litShaderProgram, name: "hero.material")
             .SetUniform(binding: 0, "uTint", Vector4.One)
             .SetTexture(binding: 1, albedoTexture)
             .Handle;
@@ -65,8 +64,8 @@ internal sealed class MyGame : Game, IDebuggable
         var view = camera.GetView();
         var projection = camera.GetProjection(frame.Width / (float)frame.Height);
 
-        // The Vulkan backend drives a declarative RenderGraph: passes declare their
-        // targets + Read edges, materials bind through MaterialBindings, and per-draw
+        // The device drives a declarative RenderGraph: passes declare their
+        // targets + Read edges, materials bind through IMaterialBindings, and per-draw
         // data rides push constants / transient descriptor sets. See the demo programs
         // (src/Demos/Blix.Demos.VulkanLit, src/Demos/Blix.Demos.VulkanSponza) for the full render
         // setup; this doc focuses on the game-layer types above the graphics layers.

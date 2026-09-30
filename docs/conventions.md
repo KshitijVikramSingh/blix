@@ -105,7 +105,7 @@ travel, palette-vs-joint, strip, direction-aware finish, palette stride) ·
     deterministic aliasing, producing a picture internally consistent and wrong.
     It cost two bugs in one session and no instrument saw either.
   - **Sets 2–3 are still per-program-per-frame.** Materials own their buffers
-    through `MaterialBindings`, which is already per-consumer and cannot alias;
+    through `IMaterialBindings`, which is already per-consumer and cannot alias;
     making them dynamic would put an offset at ~33 call sites for no gain.
   - Under `BLIX_VK_VALIDATE=1` the device **throws** when two draws disagree about
     a uniform member *on the static path*, naming both passes. Two draws writing

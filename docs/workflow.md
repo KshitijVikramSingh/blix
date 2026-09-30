@@ -386,8 +386,7 @@ references only `Blix.Core` and `Blix.Diagnostics`, so a program that uses it
 links no graphics backend.
 
 It is not a way to remove the window from an arbitrary game. A loop that
-creates GPU resources in `OnLoad`, or casts its device to `VulkanGraphicsDevice`,
-cannot run headless, and the device it is handed makes sure it finds out at the
+creates GPU resources in `OnLoad`, or builds a `RenderGraph`, cannot run headless, and the device it is handed makes sure it finds out at the
 first such call. Keeping a loop's headless path free of GPU work is a choice the
 loop makes, as Chassis's `chassis-tune` does.
 

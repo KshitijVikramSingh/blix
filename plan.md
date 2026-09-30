@@ -107,12 +107,15 @@ with `tools/lab-baseline.sh record`; until then the control is expired, not fail
 
 ## Parked
 
-**The RTS moves to this engine on its next pin bump**, and four things will break for it:
+**The RTS moves to this engine on its next pin bump**, and five things will break for it:
 `vk.LastCpuFrameTiming` and the tuple `vk.GpuPassTotals` are gone (read `host.Timing`, whose
 `GpuPassTotals` is live, so copy the entries to start a window); submitted work is literal, so a
 zero-instance draw counts zero and a negative count throws; a `uniform sampler` with no
 `//@sampler` on the line before is a build error; and `blix test <word>` reads a leading word as a
-project name. PR #42 lists the same.
+project name. PR #42 lists those four. The fifth: `RenderGraph`, its handles and builders, `TextureView`,
+`ShaderInterface`, `ShaderReflection` and `UniformBlockLayout` are in `Blix.Graphics` now, so a file
+that had only `using Blix.Graphics.Vulkan;` for them needs `using Blix.Graphics;`. Its casts still
+compile, but nothing needs them: take `IGraphicsDevice`, and read isolation from `host.Timing`.
 
 **The teardown SIGSEGV** (exit 139 after a demo's exit line; `UMEntryThunk::Decode` under
 `GetDelegateForFunctionPointer`, with a small number, `0xb`, `0xd` or `0x80000001`, where a function
