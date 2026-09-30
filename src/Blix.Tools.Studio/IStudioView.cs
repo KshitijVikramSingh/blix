@@ -85,7 +85,7 @@ public readonly record struct StudioDraw(
 
     internal ShaderTextureBinding[] WithSurface(in StudioSurface surface) => WithMaterial(
         surface.Textures.Albedo, surface.Textures.Normal, surface.Textures.MetallicRoughness,
-        surface.Textures.Occlusion, surface.EmissiveTextured ? surface.Textures.Emissive : White);
+        surface.Textures.Occlusion, surface.Textures.Emissive);
 
     // Texture lists are retained by reference, so each recorded draw gets its own array.
     internal static ShaderTextureBinding[] Append(

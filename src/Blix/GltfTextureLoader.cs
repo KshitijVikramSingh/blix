@@ -23,7 +23,7 @@ public readonly record struct MaterialTextures(
 //     are sRGB; Normal/MR/Occlusion are linear),
 //   - cooked-`.blixtex` (streamed, mip-chained) vs decoded-PNG routing,
 //   - per-source dedup,
-//   - standard glTF default fallbacks (white / flat-normal / black / neutral),
+//   - standard glTF default fallbacks (white / flat-normal / white / neutral),
 //   - a budgeted mip-upload queue (ResourceUploader) — drive Drain() per frame.
 //
 // It does NOT build the material UBO or descriptor set — binding is the
@@ -44,7 +44,9 @@ public sealed class GltfTextureLoader : IDisposable
 
     private readonly TextureHandle fallbackAlbedo;   // 1×1 white sRGB  → BaseColorFactor drives
     private readonly TextureHandle flatNormal;       // 1×1 (128,128,255) linear → tangent "up"
-    private readonly TextureHandle blackEmissive;    // 1×1 black sRGB  → no glow
+    // 1×1 white sRGB → emissiveFactor alone. glTF's texture MULTIPLIES the factor, so without one
+    // the emission is the factor; black would put out a material that glows by factor alone.
+    private readonly TextureHandle whiteEmissive;
     private readonly TextureHandle defaultMr;        // 1×1 white linear → factors pass through
     private readonly TextureHandle defaultAo;        // 1×1 white linear → no occlusion
     // Every handle this loader created, fallbacks included: what Dispose destroys. A shared registry may
@@ -73,16 +75,16 @@ public sealed class GltfTextureLoader : IDisposable
         flatNormal = device.CreateTexture2D(
             new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.LinearRepeat),
             new byte[] { 128, 128, 255, 255 }, "gltf.default.normal");
-        blackEmissive = device.CreateTexture2D(
+        whiteEmissive = device.CreateTexture2D(
             new TextureDescription(1, 1, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
-            new byte[] { 0, 0, 0, 255 }, "gltf.default.emissive");
+            new byte[] { 255, 255, 255, 255 }, "gltf.default.emissive");
         defaultMr = device.CreateTexture2D(
             new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.LinearRepeat),
             new byte[] { 255, 255, 255, 255 }, "gltf.default.mr");
         defaultAo = device.CreateTexture2D(
             new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.LinearRepeat),
             new byte[] { 255, 255, 255, 255 }, "gltf.default.ao");
-        created.AddRange(new[] { fallbackAlbedo, flatNormal, blackEmissive, defaultMr, defaultAo });
+        created.AddRange(new[] { fallbackAlbedo, flatNormal, whiteEmissive, defaultMr, defaultAo });
     }
 
     /// <summary>Destroys every texture this loader uploaded, and forgets them.</summary>
@@ -111,7 +113,7 @@ public sealed class GltfTextureLoader : IDisposable
         Resolve(material?.BaseColorTexture, fallbackAlbedo, TextureFormat.Rgba8Srgb, "albedo"),
         Resolve(material?.NormalTexture, flatNormal, TextureFormat.Rgba8, "normal"),
         Resolve(material?.MetallicRoughnessTexture, defaultMr, TextureFormat.Rgba8, "mr"),
-        Resolve(material?.EmissiveTexture, blackEmissive, TextureFormat.Rgba8Srgb, "emissive"),
+        Resolve(material?.EmissiveTexture, whiteEmissive, TextureFormat.Rgba8Srgb, "emissive"),
         Resolve(material?.OcclusionTexture, defaultAo, TextureFormat.Rgba8, "ao"),
         // Shares the 1x1 white sRGB fallback with albedo: same format, same meaning here (a
         // multiplier that changes nothing), and one texture rather than a second identical one.
