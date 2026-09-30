@@ -9,16 +9,17 @@ namespace Blix.Recipes;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Project-owned patches record material corrections or additions that are neither source-format
-/// facts nor renderer heuristics. They are applied once while cooking and included in provenance.
+/// An asset's material rules — corrections or additions that are neither source-format facts nor
+/// renderer heuristics — as one entry of a project's <see cref="CookConfig"/> states them. They are
+/// applied once while cooking and included in provenance.
 /// </para>
 /// <para>
 /// Rules match material names, may assert an expected match count, and fail when they match nothing.
-/// The patch hash is recorded in the cooked stamp so tools can identify the exact policy applied.
+/// The entry's hash is recorded in the cooked stamp so tools can identify the exact policy applied.
 /// </para>
 /// <para>
 /// This type owns parsing, matching, application, and refusal mechanics. Asset names, selectors,
-/// intended values, and patch-file ownership remain with the project.
+/// intended values, and the configuration itself remain with the project.
 /// </para>
 /// <para>
 /// Only <c>material</c> rules are implemented. The grammar retains an explicit kind so unsupported
@@ -35,19 +36,22 @@ public sealed class MaterialPatch
         IReadOnlyList<KeyValuePair<string, string>> Assignments,
         int Line);
 
-    private MaterialPatch(string path, string contentHash, string? sourcePin, IReadOnlyList<Rule> rules)
+    private MaterialPatch(string path, string contentHash, string? sourcePin, IReadOnlyList<Rule> rules, string stampKey)
     {
         Path = path;
         FileName = System.IO.Path.GetFileName(path);
         ContentHash = contentHash;
         SourcePin = sourcePin;
         Rules = rules;
+        this.stampKey = stampKey;
     }
+
+    private readonly string stampKey;
 
     public string Path { get; }
     public string FileName { get; }
 
-    /// <summary>Short hash of the patch's own bytes, for the cook stamp.</summary>
+    /// <summary>Short hash of the rules' own text, for the cook stamp.</summary>
     public string ContentHash { get; }
 
     /// <summary>
@@ -61,26 +65,29 @@ public sealed class MaterialPatch
 
     public IReadOnlyList<Rule> Rules { get; }
 
-    /// <summary>What the stamp records, so a cooked artifact can say it was patched and by what.</summary>
-    public string StampFragment => $"patch={FileName}@{ContentHash}";
+    /// <summary>What the stamp records, so a cooked artifact can say what decided it and which version.</summary>
+    public string StampFragment => $"{stampKey}={FileName}@{ContentHash}";
 
-    /// <summary>Reads a patch file. Throws <see cref="InvalidDataException"/> on a malformed line.</summary>
-    public static MaterialPatch Load(string path)
+    /// <summary>Reads rules from text in this grammar; <paramref name="origin"/> names it in refusals.</summary>
+    /// <remarks>Throws <see cref="InvalidDataException"/> on a malformed line, naming it.</remarks>
+    public static MaterialPatch Parse(string text, string origin)
     {
-        ArgumentNullException.ThrowIfNull(path);
-        if (!File.Exists(path)) throw new FileNotFoundException($"No patch file at {path}.", path);
+        ArgumentNullException.ThrowIfNull(text);
+        ArgumentNullException.ThrowIfNull(origin);
+        var lines = text.Split('\n').Select((line, i) => (line, i + 1)).ToArray();
+        return FromLines(origin, lines, Hash(text), "rules");
+    }
 
-        var bytes = File.ReadAllBytes(path);
-        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes))[..8].ToLowerInvariant();
+    /// <summary>The rules of one cook-configuration entry, stamped as that configuration's.</summary>
+    internal static MaterialPatch FromLines(string origin, IReadOnlyList<(string Text, int Number)> lines, string hash, string stampKey)
+    {
         var rules = new List<Rule>();
         string? sourcePin = null;
-        var lines = Encoding.UTF8.GetString(bytes).Split('\n');
-
-        for (var i = 0; i < lines.Length; i++)
+        foreach (var (raw, number) in lines)
         {
             // Everything after '#' is the REASON, and keeping it is the point: a rule whose purpose
             // nobody recorded gets deleted by the next person who tidies up.
-            var line = lines[i];
+            var line = raw;
             var hashAt = line.IndexOf('#');
             if (hashAt >= 0) line = line[..hashAt];
             line = line.Trim();
@@ -90,17 +97,17 @@ public sealed class MaterialPatch
             if (fields[0] == "source")
             {
                 if (fields.Length != 2)
-                    throw new InvalidDataException($"{path}:{i + 1}: 'source' takes exactly one hash.");
+                    throw new InvalidDataException($"{origin}:{number}: 'source' takes exactly one hash.");
                 sourcePin = fields[1];
                 continue;
             }
 
             if (fields[0] != "material")
                 throw new InvalidDataException(
-                    $"{path}:{i + 1}: unknown kind '{fields[0]}'. Only 'material' is understood today.");
+                    $"{origin}:{number}: unknown kind '{fields[0]}'. Only 'material' is understood today.");
             if (fields.Length < 3)
                 throw new InvalidDataException(
-                    $"{path}:{i + 1}: expected 'material <selector> <key>=<value> ...'.");
+                    $"{origin}:{number}: expected 'material <selector> <key>=<value> ...'.");
 
             // A selector may declare how many it expects to match: column_*{8}. A glob that silently
             // grows from eight materials to forty is the over-matching failure this whole file is
@@ -111,7 +118,7 @@ public sealed class MaterialPatch
             if (brace >= 0)
             {
                 if (!selector.EndsWith('}') || !int.TryParse(selector[(brace + 1)..^1], out var n))
-                    throw new InvalidDataException($"{path}:{i + 1}: malformed expected count in '{selector}'.");
+                    throw new InvalidDataException($"{origin}:{number}: malformed expected count in '{selector}'.");
                 expected = n;
                 selector = selector[..brace];
             }
@@ -121,14 +128,17 @@ public sealed class MaterialPatch
             {
                 var eq = f.IndexOf('=');
                 if (eq <= 0 || eq == f.Length - 1)
-                    throw new InvalidDataException($"{path}:{i + 1}: '{f}' is not key=value.");
+                    throw new InvalidDataException($"{origin}:{number}: '{f}' is not key=value.");
                 assignments.Add(new KeyValuePair<string, string>(f[..eq], f[(eq + 1)..]));
             }
-            rules.Add(new Rule("material", selector, expected, assignments, i + 1));
+            rules.Add(new Rule("material", selector, expected, assignments, number));
         }
 
-        return new MaterialPatch(path, hash, sourcePin, rules);
+        return new MaterialPatch(origin, hash, sourcePin, rules, stampKey);
     }
+
+    internal static string Hash(string text) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..8].ToLowerInvariant();
 
     /// <summary>Refuses if the patch pinned a source hash and the source has changed since.</summary>
     public void RequireSource(string actualSourceHash)

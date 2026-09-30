@@ -103,6 +103,10 @@ public sealed record CookRequest(
     public int Number(string name, int fallback = 0) =>
         Options is not null && Options.TryGetValue(name, out var v) && int.TryParse(v, out var n) ? n : fallback;
 
+    /// <summary>Reads a string, or null when absent.</summary>
+    public string? Text(string name) =>
+        Options is not null && Options.TryGetValue(name, out var v) ? v : null;
+
     /// <summary>Reads a float, defaulting when absent or unparseable.</summary>
     public float Real(string name, float fallback = 0f) =>
         Options is not null && Options.TryGetValue(name, out var v)

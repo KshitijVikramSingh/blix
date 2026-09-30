@@ -18,9 +18,17 @@ public static class AssetCook
     /// <summary>What a cook produced.</summary>
     public sealed record Result(string MeshPath, int Primitives, int Images, long SourceBytes, long CookedBytes, TimeSpan TextureTime);
 
+    /// <summary>Cooks <paramref name="entry"/>'s source as its project configuration decides.</summary>
+    public static Result Cook(CookConfig.Entry entry, string outDir, Action<string>? log = null)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        return Cook(entry.Source, outDir, entry.FlipTextureV, entry.SplitTriBudget, entry.SplitFoliage,
+            entry.Materials, log, entry.SplitMaxExtent);
+    }
+
     public static Result Cook(
         string source, string outDir, bool flipTextureV = false, int splitTriBudget = 0, bool splitFoliage = true,
-        MaterialPatch? patch = null, Action<string>? log = null)
+        MaterialPatch? patch = null, Action<string>? log = null, float splitMaxExtent = MeshRecipe.DefaultSplitMaxExtent)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(outDir);
@@ -88,6 +96,7 @@ public static class AssetCook
             flipTextureV: flipTextureV,
             splitTriBudget: splitTriBudget,
             splitFoliage: splitFoliage,
+            splitMaxExtent: splitMaxExtent,
             patch: patch,
             log: log);
 

@@ -145,11 +145,16 @@ APIs still make authored choices that affect the result:
   source images set `SourceRequiredForImagesOnly`. Embedded images are extracted
   and immediately offered to the texture cook. The material channel, not the
   generated filename, determines their texture role.
-- Project-owned material patches are applied to the cooked material table by
-  typed cook drivers. A patch can pin the source hash, assert match counts, and
-  is represented in the mesh stamp by its filename and content hash. It is not
-  a renderer-wide material heuristic and is not an option of the uniform
-  `gmsh` recipe entry point.
+- A project's cook configuration (`CookConfig`, one file the project names)
+  decides each asset it lists: `split`, `split-extent`, `split-foliage`,
+  `flip-v`, and material rules (normal-map convention included) that can pin
+  the source hash and assert match counts. `blix cook asset|mesh|normals
+  --config <file>` and `blix cook project <file> --out <root>` read it; a
+  build names it once with `<BlixCookConfig>`, and every `CookMesh` passes it
+  to `gmsh` as `config=<path>`. Each entry is stamped with the hash of its own
+  text, so an edit re-cooks that asset only. An option beside a configuration
+  is refused; an asset it does not name cooks with glTF's defaults. It is not a
+  renderer-wide material heuristic.
 - `gtex` builds a mip chain down to a four-texel minimum dimension. RGB is
   alpha-weighted so transparent padding does not tint cutouts, then alpha is
   rescaled per mip to preserve threshold coverage. Normal maps use BC5;
@@ -518,9 +523,10 @@ project-owned recipe discovery without making a game part of the engine tree.
 
 Vulkan Sponza is intentionally the exceptional, heavy-asset case. Its sources
 live outside the repository, and `tools/cook-sponza-modern.sh` builds an
-out-of-place shippable tree with `cook asset`, `cook probe`, and `cook sky`.
-That script owns pack selection, material patches, tangent/splitting settings,
-probe orientation, and sky-volume sampling. Those are Sponza packaging and
+out-of-place shippable tree with `cook project`, `cook probe`, and `cook sky`.
+The packs' split and material rules are Sponza's cook configuration
+(`sponza.blixcook`, beside the sources); the script owns probe orientation and
+sky-volume sampling. Those are Sponza packaging and
 research decisions, not defaults for an ordinary Blix application.
 
 ## Invariants and common traps

@@ -415,7 +415,7 @@ public static class MeshRecipe
     /// and cooks them itself as it builds the image table.
     /// </para>
     /// </remarks>
-    /// <param name="patch">The project's material patch, which may declare normal-map conventions.</param>
+    /// <param name="patch">The asset's material rules from the project's cook configuration, which may declare normal-map conventions.</param>
     public static IReadOnlyList<ReferencedImage> ReferencedImages(string gltfPath, MaterialPatch? patch = null)
     {
         ArgumentNullException.ThrowIfNull(gltfPath);
@@ -1118,7 +1118,9 @@ public static class MeshRecipe
     /// Sits beside the typed <see cref="CookToBlixMesh"/> rather than replacing it. The typed form
     /// is the real API and is what the cook driver and the tests use; this one exists so a recipe
     /// can be invoked without the caller knowing which recipe it is, which is what makes a build
-    /// rule and a coverage report possible.
+    /// rule and a coverage report possible. <c>config=&lt;file&gt;</c> names the project's
+    /// <see cref="CookConfig"/>, whose entry for the source decides everything else; without one,
+    /// <c>flipV</c>, <c>split</c>, <c>splitExtent</c> and <c>splitFoliage</c> decide an ad-hoc cook.
     /// </remarks>
     [Recipe(BlixMesh.ShippedRecipe,
         Produces = ".blixmesh",
@@ -1129,12 +1131,30 @@ public static class MeshRecipe
     public static CookOutcome Cook(CookRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        if (request.Text("config") is { } configPath)
+        {
+            // The project's configuration decides; an option beside it would be a second writer.
+            if (request.Options!.Keys.FirstOrDefault(k => k != "config") is { } other)
+            {
+                throw new InvalidDataException(
+                    $"{request.SourcePath}: option '{other}' beside config={configPath}; set it in the configuration's entry.");
+            }
+
+            var entry = CookConfig.Load(configPath).For(request.SourcePath);
+            var cooked = entry is null
+                ? CookShipped(request.SourcePath, request.OutputPath)
+                : CookShipped(request.SourcePath, request.OutputPath, entry.FlipTextureV,
+                    splitTriBudget: entry.SplitTriBudget, splitFoliage: entry.SplitFoliage,
+                    splitMaxExtent: entry.SplitMaxExtent, patch: entry.Materials);
+            return CookOutcome.Written($"{cooked} primitive(s)");
+        }
+
         var count = CookShipped(
             request.SourcePath,
             request.OutputPath,
             flipTextureV: request.Flag("flipV"),
             splitTriBudget: request.Number("split"),
-            splitMaxExtent: request.Number("splitExtent") is var e && e > 0 ? e : DefaultSplitMaxExtent,
+            splitMaxExtent: request.Real("splitExtent") is var e && e > 0 ? e : DefaultSplitMaxExtent,
             splitFoliage: request.Flag("splitFoliage", true));
 
         return CookOutcome.Written($"{count} primitive(s)");
@@ -1145,7 +1165,7 @@ public static class MeshRecipe
     /// </summary>
     /// <remarks>
     /// Centralises the shipped policy that all drivers must share: LOD simplification is always
-    /// enabled, while callers choose source, destination, layout, splitting, and material patches.
+    /// enabled, while callers choose source, destination, layout, splitting, and material rules.
     /// Use <see cref="CookToBlixMesh"/> directly only when an LOD0-only artifact is intentional.
     /// </remarks>
     public static int CookShipped(

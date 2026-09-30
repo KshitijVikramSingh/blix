@@ -132,7 +132,9 @@
          </ItemGroup>
 
        Set BlixCookCustomTarget=true only when a project supplies a different
-       build algorithm. Recipe settings belong in Options.
+       build algorithm. Recipe settings belong in Options, except a mesh's: those
+       are the project's cook configuration, named once, and every CookMesh reads it:
+         <BlixCookConfig>Assets/project.blixcook</BlixCookConfig>
 
        A project's own recipe needs no new target — it adds BlixCook directly:
          <BlixCook Include="Maps/**/*.hmap" Recipe="hmap" Cooked=".blixterrain" />
@@ -140,6 +142,7 @@
   -->
 
   <PropertyGroup>
+    <_BlixCookMeshConfig Condition="'$(BlixCookConfig)' != ''">config=$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/$(BlixCookConfig)')) </_BlixCookMeshConfig>
     <BlixCookDll>$(MSBuildThisFileDirectory)src/Blix.Tools.Cook/bin/$(Configuration)/net8.0/Blix.Tools.Cook.dll</BlixCookDll>
   </PropertyGroup>
 
@@ -158,7 +161,7 @@
        evaluation time to be incremental at all — and incrementality is the entire
        reason this is a build rule instead of a command. -->
   <ItemGroup>
-    <BlixCook Include="@(CookMesh)"    Recipe="gmsh" Cooked=".blixmesh" />
+    <BlixCook Include="@(CookMesh)"    Recipe="gmsh" Cooked=".blixmesh" Options="$(_BlixCookMeshConfig)%(Options)" />
     <BlixCook Include="@(CookTexture)" Recipe="gtex" Cooked=".blixtex" />
     <BlixCook Include="@(CookProbe)"   Recipe="gpro" Cooked=".blixprobe" />
     <BlixCook Include="@(CookFont)"    Recipe="fnt1" Cooked=".blixfont" />
@@ -193,7 +196,7 @@
           Condition="'@(BlixCook)' != '' AND '$(BlixCookCustomTarget)' != 'true' AND Exists('$(BlixCookDll)')"
           DependsOnTargets="BlixCookList"
           BeforeTargets="AssignTargetPaths"
-          Inputs="@(BlixCook);$(BlixCookDll);@(BlixCookRecipeAssembly)"
+          Inputs="@(BlixCook);$(BlixCookDll);@(BlixCookRecipeAssembly);$(BlixCookConfig)"
           Outputs="@(BlixCook -> '%(RootDir)%(Directory)%(Filename)%(Cooked)')">
     <Message Text="Cooking @(BlixCook->Count()) asset(s)" Importance="high" />
     <Exec Command="dotnet &quot;$(BlixCookDll)&quot; batch &quot;$(BlixCookList)&quot;" />

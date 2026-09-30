@@ -541,9 +541,8 @@ public static class Program
                   } ]
                 }
                 """);
-            var directXPatch = Path.Combine(referenceTemp, "directx.blixpatch");
-            File.WriteAllText(directXPatch, "material stone{1} normal=directx\n");
-            var flipped = MeshRecipe.ReferencedImages(named, MaterialPatch.Load(directXPatch));
+            var directXPatch = MaterialPatch.Parse("material stone{1} normal=directx\n", "directx");
+            var flipped = MeshRecipe.ReferencedImages(named, directXPatch);
             t.ExpectTrue("a normal map its patch declares directx is referenced for a green flip",
                 flipped.Contains(new MeshRecipe.ReferencedImage("normal.png", TextureRole.Normal, FlipGreen: true)));
             t.ExpectTrue("and the material's other images are not",
@@ -551,16 +550,14 @@ public static class Program
             t.ExpectTrue("while without a patch the map is read as glTF's convention",
                 MeshRecipe.ReferencedImages(named).Contains(new MeshRecipe.ReferencedImage("normal.png", TextureRole.Normal)));
 
-            var openGlPatch = Path.Combine(referenceTemp, "opengl.blixpatch");
-            File.WriteAllText(openGlPatch, "material stone{1} normal=directx\nmaterial stone normal=opengl\n");
+            var openGlPatch = MaterialPatch.Parse("material stone{1} normal=directx\nmaterial stone normal=opengl\n", "opengl");
             t.ExpectTrue("the last rule to state a material's convention wins",
-                MeshRecipe.ReferencedImages(named, MaterialPatch.Load(openGlPatch))
+                MeshRecipe.ReferencedImages(named, openGlPatch)
                     .Contains(new MeshRecipe.ReferencedImage("normal.png", TextureRole.Normal)));
 
-            var badValue = Path.Combine(referenceTemp, "bad.blixpatch");
-            File.WriteAllText(badValue, "material stone normal=upside\n");
+            var badValue = MaterialPatch.Parse("material stone normal=upside\n", "bad");
             t.ExpectThrows<InvalidDataException>("a convention other than directx or opengl is refused",
-                () => MeshRecipe.ReferencedImages(named, MaterialPatch.Load(badValue)));
+                () => MeshRecipe.ReferencedImages(named, badValue));
 
             var sharedNormal = Path.Combine(referenceTemp, "shared-normal.gltf");
             File.WriteAllText(sharedNormal, """
@@ -576,7 +573,7 @@ public static class Program
                 """);
             t.ExpectThrows<InvalidDataException>(
                 "one normal image declared directx by one material and not by another is refused",
-                () => MeshRecipe.ReferencedImages(sharedNormal, MaterialPatch.Load(directXPatch)));
+                () => MeshRecipe.ReferencedImages(sharedNormal, directXPatch));
 
             var asCooked = Path.Combine(referenceTemp, "normal-as-is.blixtex");
             var greenFlipped = Path.Combine(referenceTemp, "normal-flipped.blixtex");
@@ -1658,15 +1655,7 @@ public static class Program
                     System.Numerics.Vector3.Zero, 1f, BlixMesh.AlphaOpaque, 0.5f, false, 0f),
             };
 
-            string Write(string name, string body)
-            {
-                var f = Path.Combine(patchDir, name);
-                File.WriteAllText(f, body);
-                return f;
-            }
-
-            var applied = MaterialPatch.Load(Write("ok.blixpatch",
-                "material glass transmission=1.0 ior=1.5\nmaterial stone_*{2} metallic=0.0\n")).Apply(table);
+            var applied = MaterialPatch.Parse(origin: "ok", text: "material glass transmission=1.0 ior=1.5\nmaterial stone_*{2} metallic=0.0\n").Apply(table);
             t.Expect("a patch applies a scalar to the material it names",
                 Math.Abs(applied[0].Ext.TransmissionFactor - 1.0f) < 1e-6f,
                 $"{applied[0].Ext.TransmissionFactor}");
@@ -1677,36 +1666,32 @@ public static class Program
                 applied[1].MetallicFactor == 0f && applied[2].MetallicFactor == 0f);
             t.ExpectTrue("and leaves the ones it does not alone", applied[0].MetallicFactor == 0f);
 
-            var missed = Throws(() => MaterialPatch.Load(Write("miss.blixpatch",
-                "material curtain_01 sheen=1,0,0\n")).Apply(table));
+            var missed = Throws(() => MaterialPatch.Parse(origin: "miss", text: "material curtain_01 sheen=1,0,0\n").Apply(table));
             t.ExpectTrue("a rule that matches NOTHING fails the cook", missed is not null);
             t.ExpectTrue("and the refusal names what was there instead",
                 missed?.Contains("stone_wall_01", StringComparison.Ordinal) == true);
 
-            var miscount = Throws(() => MaterialPatch.Load(Write("count.blixpatch",
-                "material stone_*{3} metallic=0.0\n")).Apply(table));
+            var miscount = Throws(() => MaterialPatch.Parse(origin: "count", text: "material stone_*{3} metallic=0.0\n").Apply(table));
             t.ExpectTrue("an expected count that does not hold fails the cook", miscount is not null);
 
-            var stale = MaterialPatch.Load(Write("pin.blixpatch", "source deadbeef\nmaterial glass ior=1.5\n"));
+            var stale = MaterialPatch.Parse(origin: "pin", text: "source deadbeef\nmaterial glass ior=1.5\n");
             t.ExpectTrue("a source pin that no longer matches fails the cook",
                 Throws(() => stale.RequireSource("cafe1234")) is not null);
             t.ExpectTrue("and the same pin passes against the source it was written for",
                 Throws(() => stale.RequireSource("deadbeef")) is null);
 
             t.ExpectTrue("an unknown key is refused rather than ignored",
-                Throws(() => MaterialPatch.Load(Write("bad.blixpatch", "material glass nonsense=1\n")).Apply(table)) is not null);
+                Throws(() => MaterialPatch.Parse(origin: "bad", text: "material glass nonsense=1\n").Apply(table)) is not null);
 
             // A patch may point an extension's texture at an image the asset already carries.
             // The leaf case: transmitted light tinted per texel by the same map the surface uses,
             // stated by the scene instead of assumed by the renderer.
-            var textured = MaterialPatch.Load(Write("tex.blixpatch",
-                "material glass diffuseTransmissionColorTexture=baseColor\n")).Apply(table);
+            var textured = MaterialPatch.Parse(origin: "tex", text: "material glass diffuseTransmissionColorTexture=baseColor\n").Apply(table);
             t.Expect("a patch can point a transmission colour at the base-colour image",
                 textured[0].Ext.DiffuseTransmissionColorImage == table[0].BaseColorImage,
                 $"got image {textured[0].Ext.DiffuseTransmissionColorImage}, base is {table[0].BaseColorImage}");
 
-            var cleared = MaterialPatch.Load(Write("tex0.blixpatch",
-                "material glass diffuseTransmissionColorTexture=none\n")).Apply(table);
+            var cleared = MaterialPatch.Parse(origin: "tex0", text: "material glass diffuseTransmissionColorTexture=none\n").Apply(table);
             t.Expect("and can clear it back to the factor alone",
                 cleared[0].Ext.DiffuseTransmissionColorImage == BlixMesh.NoImage,
                 $"got {cleared[0].Ext.DiffuseTransmissionColorImage}");
@@ -1714,8 +1699,59 @@ public static class Program
             // A path would mean growing this file's image table; refusing says so rather than
             // silently doing nothing, which is how a scene learns the rule.
             t.ExpectTrue("but it cannot introduce an image the asset does not carry",
-                Throws(() => MaterialPatch.Load(Write("texbad.blixpatch",
-                    "material glass diffuseTransmissionColorTexture=leaf.png\n")).Apply(table)) is not null);
+                Throws(() => MaterialPatch.Parse(origin: "texbad", text: "material glass diffuseTransmissionColorTexture=leaf.png\n").Apply(table)) is not null);
+
+            // ── Cook configuration ──────────────────────────────────────────
+            // One file per project decides every asset it names. What is worth asserting: an asset
+            // is decided once, a line is never silently dropped, a mistyped source is not cooked as
+            // the defaults, and an edit to one entry re-stamps that entry and no other.
+            File.WriteAllText(Path.Combine(patchDir, "a.gltf"), "{}");
+            File.WriteAllText(Path.Combine(patchDir, "b.gltf"), "{}");
+            string Config(string name, string body)
+            {
+                var f = Path.Combine(patchDir, name);
+                File.WriteAllText(f, body);
+                return f;
+            }
+
+            const string twoAssets =
+                "# the pack\nasset a.gltf -> packs/a\n  split 4096  # fine LOD\n  material glass ior=1.5\n"
+                + "asset b.gltf\n  flip-v\n  split-foliage off\n  split-extent 2.5\n";
+            var config = CookConfig.Load(Config("pack.blixcook", twoAssets));
+            var entryA = config.For(Path.Combine(patchDir, "a.gltf"));
+            var entryB = config.For(Path.Combine(patchDir, "b.gltf"));
+            t.ExpectTrue("a configuration names each of its assets by source",
+                config.Entries.Count == 2 && entryA is not null && entryB is not null);
+            t.ExpectTrue("an entry carries its output, split and material rules",
+                entryA is { Output: "packs/a", SplitTriBudget: 4096, FlipTextureV: false, Materials.Rules.Count: 1 });
+            t.ExpectTrue("and another entry its own decisions, with no rules at all",
+                entryB is { Output: null, FlipTextureV: true, SplitFoliage: false, SplitMaxExtent: 2.5f, Materials: null });
+            t.ExpectTrue("an asset the configuration does not name is not in it",
+                config.For(Path.Combine(patchDir, "c.gltf")) is null);
+            t.ExpectTrue("its material rules stamp as the configuration's entry",
+                entryA?.Materials?.StampFragment == $"config=pack.blixcook@{entryA?.Hash}");
+
+            var commented = CookConfig.Load(Config("pack2.blixcook", twoAssets.Replace("# fine LOD", "# a different reason")));
+            t.ExpectTrue("a comment edit changes no entry's stamp",
+                commented.Entries[0].Hash == entryA?.Hash && commented.Entries[1].Hash == entryB?.Hash);
+            var edited = CookConfig.Load(Config("pack3.blixcook", twoAssets.Replace("split-extent 2.5", "split-extent 3")));
+            t.ExpectTrue("an edit to one entry re-stamps that entry and no other",
+                edited.Entries[0].Hash == entryA?.Hash && edited.Entries[1].Hash != entryB?.Hash);
+
+            t.ExpectThrows<InvalidDataException>("an asset named twice is refused",
+                () => CookConfig.Load(Config("twice.blixcook", "asset a.gltf\n split 1\nasset ./a.gltf\n")));
+            t.ExpectThrows<InvalidDataException>("a line before any asset is refused",
+                () => CookConfig.Load(Config("orphan.blixcook", "split 4096\nasset a.gltf\n")));
+            t.ExpectThrows<InvalidDataException>("an unknown entry line is refused rather than ignored",
+                () => CookConfig.Load(Config("unknown.blixcook", "asset a.gltf\n  tangents on\n")));
+            t.ExpectThrows<InvalidDataException>("a malformed value is refused",
+                () => CookConfig.Load(Config("value.blixcook", "asset a.gltf\n  split-foliage maybe\n")));
+            t.ExpectThrows<InvalidDataException>("a source that does not exist is refused, not cooked as the defaults",
+                () => CookConfig.Load(Config("missing.blixcook", "asset c.gltf\n  split 4096\n")));
+            t.ExpectThrows<InvalidDataException>("the build's recipe refuses an option beside the configuration",
+                () => MeshRecipe.Cook(new Blix.Cooked.CookRequest(
+                    Path.Combine(patchDir, "a.gltf"), Path.Combine(patchDir, "a.blixmesh"),
+                    new Dictionary<string, string> { ["config"] = Path.Combine(patchDir, "pack.blixcook"), ["split"] = "8" })));
         }
         finally
         {

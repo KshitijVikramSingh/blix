@@ -462,7 +462,7 @@ p99 25.7x. It reads worst on curtains because they are large, smooth and have
 nothing to hide it. Eight competing explanations were refuted by measurement and
 four separate attempts at automatic density heuristics failed — so a fifth is not
 the next idea. The live one is **authored** density as nested uniform volumes,
-following the `.blixpatch` precedent of letting a person state what a bake cannot
+following the material-rule precedent (a project's cook configuration) of letting a person state what a bake cannot
 infer. Recorded here so the refuted ground is not walked again.
 
 Some storage textures and probe resources are device-owned rather than graph
