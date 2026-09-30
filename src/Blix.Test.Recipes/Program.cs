@@ -286,6 +286,118 @@ public static class Program
                 "one logical image cannot claim incompatible material roles",
                 () => MeshRecipe.ReferencedImages(conflict));
 
+            // ── a patch states a normal map's convention, and the cook flips the image once ──
+            // Nothing in a file says a normal map is DirectX-convention (green down); Sponza ships 24
+            // of 30 that way inside glTF, which specifies green up. The patch declares it per
+            // material, and the cooked map comes out in glTF's convention.
+            var named = Path.Combine(referenceTemp, "named.gltf");
+            File.WriteAllText(named, """
+                {
+                  "asset": { "version": "2.0" },
+                  "images": [ { "uri": "shared.png" }, { "uri": "normal.png" } ],
+                  "textures": [ { "source": 0 }, { "source": 1 } ],
+                  "materials": [ {
+                    "name": "stone",
+                    "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } },
+                    "normalTexture": { "index": 1 }
+                  } ]
+                }
+                """);
+            var directXPatch = Path.Combine(referenceTemp, "directx.blixpatch");
+            File.WriteAllText(directXPatch, "material stone{1} normal=directx\n");
+            var flipped = MeshRecipe.ReferencedImages(named, MaterialPatch.Load(directXPatch));
+            t.ExpectTrue("a normal map its patch declares directx is referenced for a green flip",
+                flipped.Contains(new MeshRecipe.ReferencedImage("normal.png", TextureRole.Normal, FlipGreen: true)));
+            t.ExpectTrue("and the material's other images are not",
+                flipped.Contains(new MeshRecipe.ReferencedImage("shared.png", TextureRole.BaseColor)));
+            t.ExpectTrue("while without a patch the map is read as glTF's convention",
+                MeshRecipe.ReferencedImages(named).Contains(new MeshRecipe.ReferencedImage("normal.png", TextureRole.Normal)));
+
+            var openGlPatch = Path.Combine(referenceTemp, "opengl.blixpatch");
+            File.WriteAllText(openGlPatch, "material stone{1} normal=directx\nmaterial stone normal=opengl\n");
+            t.ExpectTrue("the last rule to state a material's convention wins",
+                MeshRecipe.ReferencedImages(named, MaterialPatch.Load(openGlPatch))
+                    .Contains(new MeshRecipe.ReferencedImage("normal.png", TextureRole.Normal)));
+
+            var badValue = Path.Combine(referenceTemp, "bad.blixpatch");
+            File.WriteAllText(badValue, "material stone normal=upside\n");
+            t.ExpectThrows<InvalidDataException>("a convention other than directx or opengl is refused",
+                () => MeshRecipe.ReferencedImages(named, MaterialPatch.Load(badValue)));
+
+            var sharedNormal = Path.Combine(referenceTemp, "shared-normal.gltf");
+            File.WriteAllText(sharedNormal, """
+                {
+                  "asset": { "version": "2.0" },
+                  "images": [ { "uri": "normal.png" } ],
+                  "textures": [ { "source": 0 } ],
+                  "materials": [
+                    { "name": "stone", "normalTexture": { "index": 0 } },
+                    { "name": "plaster", "normalTexture": { "index": 0 } }
+                  ]
+                }
+                """);
+            t.ExpectThrows<InvalidDataException>(
+                "one normal image declared directx by one material and not by another is refused",
+                () => MeshRecipe.ReferencedImages(sharedNormal, MaterialPatch.Load(directXPatch)));
+
+            var asCooked = Path.Combine(referenceTemp, "normal-as-is.blixtex");
+            var greenFlipped = Path.Combine(referenceTemp, "normal-flipped.blixtex");
+            var formatBefore = Environment.GetEnvironmentVariable("BLIX_COOK_FORMAT");
+            try
+            {
+                Environment.SetEnvironmentVariable("BLIX_COOK_FORMAT", "rgba8");
+                var normalPng = Path.Combine(referenceTemp, "normal.png");
+                TextureRecipe.CookOne(normalPng, asCooked, out _, out _, TextureRole.Normal);
+                TextureRecipe.CookOne(normalPng, greenFlipped, out _, out _, TextureRole.Normal, flipGreen: true);
+                var plain = Blix.Graphics.Images.BlixTexReader.Read(asCooked).MipBytes[0];
+                var inverted = Blix.Graphics.Images.BlixTexReader.Read(greenFlipped).MipBytes[0];
+                t.Expect("the flipped cook inverts green and only green",
+                    inverted[0] == plain[0] && inverted[1] == 255 - plain[1] && inverted[2] == plain[2],
+                    $"as cooked {plain[0]},{plain[1]},{plain[2]}; flipped {inverted[0]},{inverted[1]},{inverted[2]}");
+                t.ExpectTrue("a flipped texture is current only for a flipped cook",
+                    TextureRecipe.IsCurrent(normalPng, greenFlipped, TextureRole.Normal, flipGreen: true)
+                    && !TextureRecipe.IsCurrent(normalPng, greenFlipped, TextureRole.Normal));
+                t.ExpectThrows<InvalidDataException>("a green flip on anything but a normal map is refused",
+                    () => TextureRecipe.CookOne(normalPng, greenFlipped, out _, out _, TextureRole.BaseColor, flipGreen: true));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("BLIX_COOK_FORMAT", formatBefore);
+            }
+
+            // ── the convention measure is held to a map whose convention is known by construction ──
+            // A height field's gradient, written as an OpenGL (green up) normal map, must read opengl;
+            // the same map with green inverted must read directx; a flat map must read unclear rather
+            // than pick a side.
+            const int side = 128;
+            var known = new byte[side * side * 4];
+            for (var row = 0; row < side; row++)
+            for (var col = 0; col < side; col++)
+            {
+                // h = sin(u) * cos(v) bumps; slopes per pixel, with v measured UP the image.
+                var u = col * 0.2; var v = (side - row) * 0.15;
+                var dhdu = Math.Cos(u) * Math.Cos(v) * 0.2 * 3;
+                var dhdv = -Math.Sin(u) * Math.Sin(v) * 0.15 * 3;
+                var nx = -dhdu; var ny = -dhdv; var nz = 1.0;
+                var len = Math.Sqrt((nx * nx) + (ny * ny) + (nz * nz));
+                var at = ((row * side) + col) * 4;
+                known[at] = (byte)Math.Round(((nx / len) * 0.5 + 0.5) * 255);
+                known[at + 1] = (byte)Math.Round(((ny / len) * 0.5 + 0.5) * 255);
+                known[at + 2] = (byte)Math.Round(((nz / len) * 0.5 + 0.5) * 255);
+                known[at + 3] = 255;
+            }
+            var asMade = NormalMapConvention.Measure(known, side, side);
+            var greenDown = (byte[])known.Clone();
+            for (var i = 1; i < greenDown.Length; i += 4) greenDown[i] = (byte)(255 - greenDown[i]);
+            var greenDownReading = NormalMapConvention.Measure(greenDown, side, side);
+            var flat = Enumerable.Range(0, side * side).SelectMany(_ => new byte[] { 128, 128, 255, 255 }).ToArray();
+            t.Expect("a height field's gradient written green up measures opengl",
+                asMade.Verdict() == "opengl", $"opengl {asMade.OpenGlCurl:0.0000}, directx {asMade.DirectXCurl:0.0000}");
+            t.Expect("and the same map with green inverted measures directx",
+                greenDownReading.Verdict() == "directx", $"opengl {greenDownReading.OpenGlCurl:0.0000}, directx {greenDownReading.DirectXCurl:0.0000}");
+            t.Expect("while a flat map measures unclear rather than picking a side",
+                NormalMapConvention.Measure(flat, side, side).Verdict() == "unclear", "flat map took a side");
+
             var packaged = Path.Combine(referenceTemp, "out");
             t.Expect("cook asset refuses one destination with incompatible roles",
                 Blix.Tools.Cook.Program.Main(new[] { "asset", conflict, "--out", packaged }) == 1,
