@@ -66,6 +66,14 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
     /// Bones, clips, attachments, static parts, materials, and image references are reconstructed
     /// entirely from the cooked artifact; the source glTF is not opened.
     /// </remarks>
+    /// <summary>A rig read from the cooked scene graph, derived by the same rules the source path applies.</summary>
+    /// <remarks>
+    /// Skinned primitives come from the nodes each skin deforms, in node order; a skin sits where the
+    /// node placing its mesh does. An unskinned mesh node under a joint is that joint's attachment,
+    /// claimed by the first skin whose joints include it, and its transform is composed up to the
+    /// joint; every other unskinned mesh node is a static part at its world transform. Clip tracks
+    /// target nodes, and a rig keeps the ones that are skin 0's joints.
+    /// </remarks>
     private GltfModel ImportCookedRig(AssetImportContext context, string rigPath, BlixMeshFile cooked)
     {
         var loadWatch = System.Diagnostics.Stopwatch.StartNew();
@@ -75,37 +83,89 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         var materialCache = new Dictionary<int, GltfMaterial>();
         GltfShared.LoadImagesFromTable(cooked.ImageTable, cooked.MaterialTable, cookedDir, textureCache);
 
-        GltfPrimitive Rebuild(BlixMeshPrimitive p)
+        var nodes = cooked.Nodes;
+        var world = cooked.WorldTransforms();
+
+        // Skinned vertices as the 80-byte layout skinned pipelines declare; attachments and static
+        // parts as the colour layout RigView draws them with.
+        GltfPrimitive Rebuild(BlixMeshPrimitive p, VertexLayout layout, int skin)
         {
+            var (bytes, bounds) = CookedVertices.Repack(p, layout, transform: null, rigPath);
+            if (ReferenceEquals(bytes, p.VertexBytes)) bytes = (byte[])bytes.Clone();
             var lod0 = p.Lods[0];
             return new GltfPrimitive(
-                new MeshData(
-                    p.Name, p.VertexBytes, lod0.Indices16 ?? Array.Empty<ushort>(),
-                    p.Layout, p.Bounds, Indices32: lod0.Indices32),
+                new MeshData(p.Name, bytes, lod0.Indices16 ?? Array.Empty<ushort>(), layout, bounds, Indices32: lod0.Indices32),
                 GltfShared.MaterialFromCooked(cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache, rigPath),
-                SkinIndex: p.SkinIndex,
+                SkinIndex: skin,
                 MaterialIndex: p.MaterialIndex);
         }
 
-        var bindings = cooked.SkinTable
-            .Select(skin => new GltfSkinBinding(
-                new Skeleton(skin.Bones
-                    .Select(b => new Bone(b.Name, b.ParentIndex, b.InverseBindPose))
-                    .ToArray()),
-                skin.MeshNodeTransform))
-            .ToArray();
+        GltfPrimitive[] Static(int node) => cooked.Meshes[nodes[node].MeshIndex].Primitives
+            .Select(p => Rebuild(p, VertexPosition3NormalTexture2Color.Layout, 0)).ToArray();
 
-        var animations = cooked.ClipTable.Select(RebuildClip).ToArray();
+        var skinned = new List<GltfPrimitive>();
+        var bindings = new GltfSkinBinding[cooked.SkinTable.Count];
+        for (var s = 0; s < bindings.Length; s++)
+        {
+            var placing = -1;
+            for (var n = 0; n < nodes.Count; n++)
+            {
+                if (nodes[n].SkinIndex != s || nodes[n].MeshIndex < 0) continue;
+                if (placing < 0) placing = n;
+                skinned.AddRange(cooked.Meshes[nodes[n].MeshIndex].Primitives
+                    .Select(p => Rebuild(p, VertexPosition3NormalTextureSkin4Tangent.Layout, s)));
+            }
 
-        var attachments = cooked.AttachmentTable
-            .Select(a => new GltfAttachment(
-                a.Name, a.JointName, a.JointIndex, a.LocalTransform,
-                a.Primitives.Select(Rebuild).ToArray(), a.SkinIndex))
-            .ToArray();
+            bindings[s] = new GltfSkinBinding(
+                new Skeleton(cooked.SkinTable[s].Bones.Select(b => new Bone(b.Name, b.ParentIndex, b.InverseBindPose)).ToArray()),
+                placing < 0 ? Matrix4x4.Identity : world[placing]);
+        }
 
-        var staticParts = cooked.StaticPartTable
-            .Select(sp => new GltfStaticPart(
-                sp.Name, sp.WorldTransform, sp.Primitives.Select(Rebuild).ToArray()))
+        var attachments = new List<GltfAttachment>();
+        var claimed = new HashSet<string>(StringComparer.Ordinal);
+        for (var s = 0; s < bindings.Length; s++)
+        {
+            var boneOfJoint = new Dictionary<int, int>();
+            var bones = cooked.SkinTable[s].Bones;
+            for (var b = 0; b < bones.Length; b++) boneOfJoint[bones[b].NodeIndex] = b;
+
+            for (var n = 0; n < nodes.Count; n++)
+            {
+                if (nodes[n].MeshIndex < 0 || nodes[n].SkinIndex >= 0) continue;
+
+                // Up the chain, composing as we go (row-vector: child local, then parent), until a
+                // joint of this skin; reaching the root means the mesh only shares the file.
+                var local = nodes[n].LocalTransform;
+                var ancestor = nodes[n].ParentIndex;
+                while (ancestor >= 0 && !boneOfJoint.ContainsKey(ancestor))
+                {
+                    local *= nodes[ancestor].LocalTransform;
+                    ancestor = nodes[ancestor].ParentIndex;
+                }
+
+                if (ancestor < 0 || !claimed.Add(nodes[n].Name)) continue;
+                attachments.Add(new GltfAttachment(
+                    nodes[n].Name, nodes[ancestor].Name, boneOfJoint[ancestor], local, Static(n), s));
+            }
+        }
+
+        var staticParts = new List<GltfStaticPart>();
+        for (var n = 0; n < nodes.Count; n++)
+        {
+            if (nodes[n].MeshIndex < 0 || nodes[n].SkinIndex >= 0 || claimed.Contains(nodes[n].Name)) continue;
+            staticParts.Add(new GltfStaticPart(nodes[n].Name, world[n], Static(n)));
+        }
+
+        var boneOfNode = new Dictionary<int, int>();
+        if (cooked.SkinTable.Count > 0)
+        {
+            var bones = cooked.SkinTable[0].Bones;
+            for (var b = 0; b < bones.Length; b++) boneOfNode[bones[b].NodeIndex] = b;
+        }
+
+        var animations = cooked.ClipTable
+            .Select(c => RebuildClip(c with { Tracks = c.Tracks.Where(t => boneOfNode.ContainsKey(t.NodeIndex)).ToArray() }, boneOfNode))
+            .Where(c => c.Tracks.Length > 0)
             .ToArray();
 
         if (AssetLoadLog.Enabled)
@@ -120,9 +180,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         }
 
         return new GltfModel(
-            cooked.Primitives.Select(Rebuild).ToArray(),
-            bindings[0].Skeleton, animations, bindings[0].MeshNodeTransform,
-            attachments, staticParts, Array.Empty<GltfIgnored>(), bindings);
+            skinned.ToArray(), bindings[0].Skeleton, animations, bindings[0].MeshNodeTransform,
+            attachments.ToArray(), staticParts.ToArray(), Array.Empty<GltfIgnored>(), bindings);
     }
 
     /// <summary>
@@ -133,11 +192,11 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
     /// curve rather than an empty one — <c>KeyframeVector3Curve</c> refuses to exist with no keys,
     /// and rightly: a curve with nothing to evaluate is not a curve.
     /// </remarks>
-    private static AnimationClip RebuildClip(BlixMeshClip clip) => new(
+    private static AnimationClip RebuildClip(BlixMeshClip clip, IReadOnlyDictionary<int, int> boneOfNode) => new(
         clip.Name,
         clip.Tracks.Select(t => new BoneTrack
         {
-            BoneIndex = t.BoneIndex,
+            BoneIndex = boneOfNode[t.NodeIndex],
             Translation = t.Translation.Length == 0
                 ? null
                 : new KeyframeVector3Curve(
@@ -488,7 +547,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         return found.ToArray();
     }
 
-    private static (Bone[] bones, int[] oldToNew) BuildSkeletonAndOrdering(Skin skin)
+    /// <summary>A skin's bones in parent-first order, and the source-joint-to-bone remap. Public for the cook.</summary>
+    public static (Bone[] bones, int[] oldToNew) BuildSkeletonAndOrdering(Skin skin)
     {
         var joints = skin.Joints;
         var ibmList = skin.InverseBindMatrices;
@@ -636,7 +696,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         return (idx, wt);
     }
 
-    private static MeshData BuildMeshData(string name, MeshPrimitive primitive, int[] oldToNew)
+    /// <summary>A skinned primitive's 80-byte vertices, joints remapped to the skin's bone order. Public for the cook.</summary>
+    public static MeshData BuildMeshData(string name, MeshPrimitive primitive, int[] oldToNew)
     {
         var positions = primitive.GetVertexAccessor("POSITION")?.AsVector3Array()
             ?? throw new InvalidOperationException("glTF mesh primitive missing required POSITION accessor.");
@@ -768,7 +829,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
     // Convert one glTF animation into one engine AnimationClip. Channels targeting
     // non-skin nodes are skipped silently; the per-bone PRS tracks group every
     // channel that targets a single joint into a single BoneTrack.
-    private static AnimationClip BuildAnimationClip(Animation anim, Skin skin, int[] oldToNew)
+    /// <summary>One animation's tracks on <paramref name="skin"/>'s bones. Public for the cook.</summary>
+    public static AnimationClip BuildAnimationClip(Animation anim, Skin skin, int[] oldToNew)
     {
         var jointToIndex = new Dictionary<Node, int>();
         for (var i = 0; i < skin.Joints.Count; i++) jointToIndex[skin.Joints[i]] = i;

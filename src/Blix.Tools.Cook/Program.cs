@@ -470,7 +470,7 @@ public static class Program
         var size = new FileInfo(outPath).Length;
         // Quick LOD readout: levels + triangle reduction on the largest primitive.
         var file = Blix.Assets.BlixMeshReader.Read(outPath);
-        var biggest = file.Primitives.OrderByDescending(p => p.Lods[0].IndexCount).First();
+        var biggest = file.Meshes.SelectMany(m => m.Primitives).OrderByDescending(p => p.Lods[0].IndexCount).First();
         var lodCounts = string.Join("/", biggest.Lods.Select(l => l.IndexCount / 3));
         var splitNote = splitBudget > 0
             ? $", split@{splitBudget / 1000}k → biggest chunk {biggest.Lods[0].IndexCount / 3} tris"

@@ -6,7 +6,7 @@ using Blix.Graphics;
 
 namespace Blix.Assets;
 
-// Engine-native version 11 mesh container. The shared cooked preamble is followed,
+// Engine-native version 12 mesh container. The shared cooked preamble is followed,
 // in order, by counted tables for primitives, materials, images, skins, clips,
 // attachments, static parts, and authored nodes. All values are little-endian.
 //
@@ -33,12 +33,13 @@ public static class BlixMesh
     /// stamps its own, which is what makes "who made this file" answerable.
     /// </summary>
     public const string ShippedRecipe = "gmsh";
-    // Version 11 is the only accepted layout. It includes per-primitive layouts and LOD errors,
+    // Version 12 is the only accepted layout. It includes per-primitive layouts and LOD errors,
     // common provenance, material and image tables (each core channel with its TEXCOORD set, and
     // the normal scale), rig data, attachments/static parts, authored nodes, and the current
-    // KHR_materials_* parameter block. Static primitives carry the complete vertex (layout 6).
-    // Older layouts must be re-cooked.
-    public const uint Version11 = 11;
+    // KHR_materials_* parameter block. v12 mirrors glTF's structure: a node table in every file,
+    // meshes stored once and placed by nodes, vertices in mesh space as the complete static (6) or
+    // skinned (7) vertex, skins as joint nodes, clips targeting nodes. Older layouts must be re-cooked.
+    public const uint Version12 = 12;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
     public const uint LayoutPosition3NormalTextureSkin4Tangent = 3; // 80-byte, rigged
@@ -48,6 +49,7 @@ public static class BlixMesh
     public const uint LayoutPosition3NormalTextureColor = 4;      // 36-byte
     public const uint LayoutPosition3NormalTexture2Color = 5;     // 44-byte, two UV sets
     public const uint LayoutPosition3NormalTangentTexture2Color = 6; // 60-byte, the complete static vertex
+    public const uint LayoutPosition3NormalTextureSkin4Tangent2Color = 7; // 92-byte, the complete skinned vertex
 
     public const int NoMaterial = -1;
 
@@ -80,6 +82,7 @@ public static class BlixMesh
         LayoutPosition3NormalTextureColor => VertexPosition3NormalTextureColor.Layout,
         LayoutPosition3NormalTexture2Color => VertexPosition3NormalTexture2Color.Layout,
         LayoutPosition3NormalTangentTexture2Color => VertexPosition3NormalTangentTexture2Color.Layout,
+        LayoutPosition3NormalTextureSkin4Tangent2Color => VertexPosition3NormalTextureSkin4Tangent2Color.Layout,
         _ => throw new InvalidDataException($"Unrecognised BlixMesh layout id {id}."),
     };
 
@@ -92,6 +95,7 @@ public static class BlixMesh
         36 => LayoutPosition3NormalTextureColor,
         44 => LayoutPosition3NormalTexture2Color,
         60 => LayoutPosition3NormalTangentTexture2Color,
+        92 => LayoutPosition3NormalTextureSkin4Tangent2Color,
         _ => throw new ArgumentException($"No BlixMesh layout id for vertex stride {stride}.", nameof(stride)),
     };
 }
@@ -220,7 +224,9 @@ public sealed record BlixMaterialExtensions(
 /// and a format that reached back for them would invert that. The conversion is one constructor
 /// call at each end, and it is what keeps the file readable by a tool that does not load the engine.
 /// </remarks>
-public sealed record BlixMeshBone(string Name, int ParentIndex, Matrix4x4 InverseBindPose);
+/// <summary>One bone of a skin: its joint node, its parent among the skin's bones, and its inverse bind.</summary>
+/// <param name="NodeIndex">The joint: a row of the file's node table.</param>
+public sealed record BlixMeshBone(string Name, int ParentIndex, Matrix4x4 InverseBindPose, int NodeIndex);
 
 /// <summary>A translation or scale key.</summary>
 public readonly record struct BlixMeshVectorKey(float Time, Vector3 Value);
@@ -228,14 +234,15 @@ public readonly record struct BlixMeshVectorKey(float Time, Vector3 Value);
 /// <summary>A rotation key.</summary>
 public readonly record struct BlixMeshQuaternionKey(float Time, Quaternion Value);
 
-/// <summary>One bone's animation across a clip. An empty channel array means that channel is absent.</summary>
+/// <summary>One node's animation across a clip. An empty channel array means that channel is absent.</summary>
 /// <remarks>
 /// Absent and empty are represented the same way. glTF gives a channel keys or does
 /// not give it at all; a channel with zero keys has no meaning either way, so one representation
 /// covers both and the reader needs no presence flag per channel.
 /// </remarks>
+/// <param name="NodeIndex">The node animated, as glTF's channels target nodes; a rig maps it to its bone.</param>
 public sealed record BlixMeshTrack(
-    int BoneIndex,
+    int NodeIndex,
     BlixMeshVectorKey[] Translation,
     BlixMeshQuaternionKey[] Rotation,
     BlixMeshVectorKey[] Scale);
@@ -247,42 +254,30 @@ public sealed record BlixMeshTrack(
 /// </remarks>
 public sealed record BlixMeshClip(string Name, BlixMeshTrack[] Tracks);
 
-/// <summary>One skin: its bones and the transform its mesh node sat under.</summary>
+/// <summary>One skin: its bones, in hierarchy order — every bone's parent is -1 or strictly below it.</summary>
 /// <remarks>
-/// Files may carry several skins, and each primitive records the skin table row that drives it.
-/// <para>
-/// <paramref name="MeshNodeTransform"/> travels with the skin because it belongs to it: most
-/// authored characters put their axis correction on an ancestor node rather than per-vertex, and a
-/// rig imported without it comes out lying on its side.
-/// </para>
+/// Where the skinned geometry sits is not stored here: it is the world transform of the node that
+/// places the skinned mesh, which the node table already says.
 /// </remarks>
-public sealed record BlixMeshSkin(BlixMeshBone[] Bones, Matrix4x4 MeshNodeTransform);
+public sealed record BlixMeshSkin(BlixMeshBone[] Bones);
 
-/// <summary>One node of the authored hierarchy — what a primitive was called and where it sat.</summary>
+/// <summary>One node of the authored scene graph, as glTF has one in every file.</summary>
 /// <remarks>
 /// Transform-only nodes are kept, not pruned: a parent that carries no geometry is still what a
 /// child's transform is relative to, and dropping it would break the composition it exists for.
 /// </remarks>
-public sealed record BlixMeshNode(string Name, int ParentIndex, Matrix4x4 LocalTransform);
+/// <param name="Name">The authored name; empty when the source gave none.</param>
+/// <param name="MeshIndex">The mesh this node places, or -1.</param>
+/// <param name="SkinIndex">The skin that deforms that mesh, or -1; a skinned mesh is placed by its skin, not its node.</param>
+public sealed record BlixMeshNode(string Name, int ParentIndex, Matrix4x4 LocalTransform, int MeshIndex = -1, int SkinIndex = -1);
 
-/// <summary>Geometry parented to a bone — a cape, a knife in a hand slot.</summary>
-/// <remarks>
-/// Its primitives carry a STATIC layout while the skinned ones beside them carry an 80-byte skinned
-/// layout, which is the whole reason a primitive owns its layout rather than the file.
-/// </remarks>
-public sealed record BlixMeshAttachment(
-    string Name,
-    string JointName,
-    int JointIndex,
-    int SkinIndex,
-    Matrix4x4 LocalTransform,
-    BlixMeshPrimitive[] Primitives);
-
-/// <summary>Unskinned geometry that ships inside a rigged file, at its own world transform.</summary>
-public sealed record BlixMeshStaticPart(
-    string Name,
-    Matrix4x4 WorldTransform,
-    BlixMeshPrimitive[] Primitives);
+/// <summary>A mesh: primitives in mesh space, stored once however many nodes place it.</summary>
+/// <param name="Name">The authored name; empty when the source gave none.</param>
+/// <param name="SkinIndex">
+/// The skin whose bone order its joint indices address, or -1 for a static mesh. A glTF mesh placed
+/// both skinned and unskinned is two meshes here, because the vertices differ.
+/// </param>
+public sealed record BlixMeshMesh(string Name, IReadOnlyList<BlixMeshPrimitive> Primitives, int SkinIndex = -1);
 
 public sealed record BlixMeshPrimitive(
     string Name,
@@ -299,18 +294,7 @@ public sealed record BlixMeshPrimitive(
     int VertexCount,
     byte[] VertexBytes,
     IndexFormat IndexFormat,
-    IReadOnlyList<BlixMeshLod> Lods,
-    /// <summary>Which skin drives this primitive; 0 for a static mesh and for a single-skin rig.</summary>
-    int SkinIndex = 0,
-    /// <summary>
-    /// Which node of the file's table this came from, or -1 when the file has no hierarchy.
-    /// </summary>
-    /// <remarks>
-    /// This makes world-baking reversible. The vertices are already in
-    /// world space; a consumer that needs them in the node's own space composes that node's world
-    /// matrix from the table and applies its inverse.
-    /// </remarks>
-    int NodeIndex = -1);
+    IReadOnlyList<BlixMeshLod> Lods);
 
 /// <param name="Cooked">
 /// The preamble, when this came off disk. Null when it was built in memory on the way to being
@@ -332,39 +316,60 @@ public sealed record BlixMeshPrimitive(
 /// that has nothing to record — never "look in the source instead".
 /// </param>
 public sealed record BlixMeshFile(
-    IReadOnlyList<BlixMeshPrimitive> Primitives,
+    IReadOnlyList<BlixMeshNode> Nodes,
+    IReadOnlyList<BlixMeshMesh> Meshes,
     IReadOnlyList<BlixMeshMaterial>? Materials = null,
     IReadOnlyList<BlixMeshImage>? Images = null,
     IReadOnlyList<BlixMeshSkin>? Skins = null,
     IReadOnlyList<BlixMeshClip>? Clips = null,
-    IReadOnlyList<BlixMeshAttachment>? Attachments = null,
-    IReadOnlyList<BlixMeshStaticPart>? StaticParts = null,
-    IReadOnlyList<BlixMeshNode>? Nodes = null,
     CookedHeader? Cooked = null)
 {
+    /// <summary>A file with no hierarchy of its own: one root node placing one mesh of every primitive.</summary>
+    /// <remarks>For a source that has no scene graph, such as an OBJ; glTF always has one.</remarks>
+    public static BlixMeshFile Flat(
+        string name, IReadOnlyList<BlixMeshPrimitive> primitives,
+        IReadOnlyList<BlixMeshMaterial>? materials = null, IReadOnlyList<BlixMeshImage>? images = null) =>
+        new(new[] { new BlixMeshNode(name, -1, Matrix4x4.Identity, MeshIndex: 0) },
+            new[] { new BlixMeshMesh(name, primitives) }, materials, images);
+
     /// <summary>Never null: a file with no material table reads as an empty one.</summary>
     public IReadOnlyList<BlixMeshMaterial> MaterialTable => Materials ?? Array.Empty<BlixMeshMaterial>();
 
     /// <summary>Never null: a file with no image table reads as an empty one.</summary>
     public IReadOnlyList<BlixMeshImage> ImageTable => Images ?? Array.Empty<BlixMeshImage>();
 
-    /// <summary>Never null: a static mesh reads as no skins.</summary>
+    /// <summary>Never null: a file with no skin reads as none.</summary>
     public IReadOnlyList<BlixMeshSkin> SkinTable => Skins ?? Array.Empty<BlixMeshSkin>();
 
-    /// <summary>Never null: a rig with no animations reads as no clips.</summary>
+    /// <summary>Never null: a file with no animation reads as no clips.</summary>
     public IReadOnlyList<BlixMeshClip> ClipTable => Clips ?? Array.Empty<BlixMeshClip>();
 
-    /// <summary>Never null.</summary>
-    public IReadOnlyList<BlixMeshAttachment> AttachmentTable => Attachments ?? Array.Empty<BlixMeshAttachment>();
-
-    /// <summary>Never null.</summary>
-    public IReadOnlyList<BlixMeshStaticPart> StaticPartTable => StaticParts ?? Array.Empty<BlixMeshStaticPart>();
-
-    /// <summary>Never null: a file cooked before the node table, or with no hierarchy, reads as none.</summary>
-    public IReadOnlyList<BlixMeshNode> NodeTable => Nodes ?? Array.Empty<BlixMeshNode>();
-
-    /// <summary>True when this file carries a skeleton, and therefore skinned vertices.</summary>
+    /// <summary>True when some node's mesh is deformed by a skin.</summary>
     public bool IsRigged => SkinTable.Count > 0;
+
+    /// <summary>Every primitive a node places, in node order, with the placing node; a mesh placed twice appears twice.</summary>
+    public IEnumerable<(BlixMeshPrimitive Primitive, int NodeIndex)> PlacedPrimitives()
+    {
+        for (var i = 0; i < Nodes.Count; i++)
+        {
+            if (Nodes[i].MeshIndex < 0) continue;
+            foreach (var p in Meshes[Nodes[i].MeshIndex].Primitives) yield return (p, i);
+        }
+    }
+
+    /// <summary>Every node's world transform, composed in one forward pass (parents precede children).</summary>
+    public Matrix4x4[] WorldTransforms()
+    {
+        var world = new Matrix4x4[Nodes.Count];
+        for (var i = 0; i < Nodes.Count; i++)
+        {
+            world[i] = Nodes[i].ParentIndex < 0
+                ? Nodes[i].LocalTransform
+                : Nodes[i].LocalTransform * world[Nodes[i].ParentIndex];
+        }
+
+        return world;
+    }
 }
 
 internal static class BlixMeshBinary
@@ -382,8 +387,6 @@ internal static class BlixMeshBinary
         var bounds = new Bounds3(new Vector3(minX, minY, minZ), new Vector3(maxX, maxY, maxZ));
         var vertexCount = br.ReadInt32();
         var vertexBytes = br.ReadBytes(br.ReadInt32());
-        var skinIndex = br.ReadInt32();
-        var nodeIndex = br.ReadInt32();
         var isU32 = br.ReadByte() == BlixMesh.IndexFormatU32;
 
         var lodCount = br.ReadInt32();
@@ -413,7 +416,7 @@ internal static class BlixMeshBinary
 
         return new BlixMeshPrimitive(
             name, layout, materialIndex, bounds, vertexCount, vertexBytes,
-            isU32 ? IndexFormat.UInt32 : IndexFormat.UInt16, lods, skinIndex, nodeIndex);
+            isU32 ? IndexFormat.UInt32 : IndexFormat.UInt16, lods);
     }
 
     internal static Matrix4x4 ReadMatrix(BinaryReader br) => new(
@@ -461,11 +464,27 @@ public static class BlixMeshWriter
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(file);
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version11, stamp);
+        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version12, stamp);
         using var bw = new BinaryWriter(fs);
 
-        bw.Write(file.Primitives.Count);
-        foreach (var p in file.Primitives) WritePrimitive(bw, p);
+        bw.Write(file.Nodes.Count);
+        foreach (var node in file.Nodes)
+        {
+            WriteString(bw, node.Name);
+            bw.Write(node.ParentIndex);
+            WriteMatrix(bw, node.LocalTransform);
+            bw.Write(node.MeshIndex);
+            bw.Write(node.SkinIndex);
+        }
+
+        bw.Write(file.Meshes.Count);
+        foreach (var mesh in file.Meshes)
+        {
+            WriteString(bw, mesh.Name);
+            bw.Write(mesh.SkinIndex);
+            bw.Write(mesh.Primitives.Count);
+            foreach (var p in mesh.Primitives) WritePrimitive(bw, p);
+        }
 
         var materials = file.MaterialTable;
         bw.Write(materials.Count);
@@ -534,7 +553,6 @@ public static class BlixMeshWriter
         bw.Write(skins.Count);
         foreach (var skin in skins)
         {
-            WriteMatrix(bw, skin.MeshNodeTransform);
             bw.Write(skin.Bones.Length);
             foreach (var bone in skin.Bones)
             {
@@ -543,6 +561,7 @@ public static class BlixMeshWriter
                 bw.Write(nameBytes);
                 bw.Write(bone.ParentIndex);
                 WriteMatrix(bw, bone.InverseBindPose);
+                bw.Write(bone.NodeIndex);
             }
         }
 
@@ -556,44 +575,13 @@ public static class BlixMeshWriter
             bw.Write(clip.Tracks.Length);
             foreach (var track in clip.Tracks)
             {
-                bw.Write(track.BoneIndex);
+                bw.Write(track.NodeIndex);
                 WriteVectorKeys(bw, track.Translation);
                 WriteQuaternionKeys(bw, track.Rotation);
                 WriteVectorKeys(bw, track.Scale);
             }
         }
 
-        var attachments = file.AttachmentTable;
-        bw.Write(attachments.Count);
-        foreach (var a in attachments)
-        {
-            WriteString(bw, a.Name);
-            WriteString(bw, a.JointName);
-            bw.Write(a.JointIndex);
-            bw.Write(a.SkinIndex);
-            WriteMatrix(bw, a.LocalTransform);
-            bw.Write(a.Primitives.Length);
-            foreach (var p in a.Primitives) WritePrimitive(bw, p);
-        }
-
-        var staticParts = file.StaticPartTable;
-        bw.Write(staticParts.Count);
-        foreach (var sp in staticParts)
-        {
-            WriteString(bw, sp.Name);
-            WriteMatrix(bw, sp.WorldTransform);
-            bw.Write(sp.Primitives.Length);
-            foreach (var p in sp.Primitives) WritePrimitive(bw, p);
-        }
-
-        var nodes = file.NodeTable;
-        bw.Write(nodes.Count);
-        foreach (var node in nodes)
-        {
-            WriteString(bw, node.Name);
-            bw.Write(node.ParentIndex);
-            WriteMatrix(bw, node.LocalTransform);
-        }
     }
 
     private static void WriteString(BinaryWriter bw, string value)
@@ -616,8 +604,6 @@ public static class BlixMeshWriter
         bw.Write(p.VertexCount);
         bw.Write(p.VertexBytes.Length);
         bw.Write(p.VertexBytes);
-        bw.Write(p.SkinIndex);
-        bw.Write(p.NodeIndex);
         bw.Write((byte)(p.IndexFormat == IndexFormat.UInt32 ? BlixMesh.IndexFormatU32 : BlixMesh.IndexFormatU16));
         if (p.Lods is null || p.Lods.Count == 0)
         {
@@ -680,7 +666,7 @@ public static class BlixMeshReader
     /// <summary>Reads the <c>KHR_materials_*</c> block, in the order the writer emits it.</summary>
     /// <remarks>
     /// Positional and exact. There is no length prefix and no field tags, because the format does not
-    /// do optional data — it bumps its version and re-cooks, as it has from v2 to v11 — and a reader
+    /// do optional data — it bumps its version and re-cooks, as it has from v2 to v12 — and a reader
     /// that guessed would turn a format change into silently wrong materials rather than a refusal.
     /// </remarks>
     private static BlixMaterialExtensions ReadExtensions(BinaryReader br)
@@ -720,7 +706,7 @@ public static class BlixMeshReader
         ArgumentNullException.ThrowIfNull(path);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version11, path, ".blixmesh");
+        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version12, path, ".blixmesh");
         return AssetImportException.Refusing(path, () => ReadBody(fs, path, header), ".blixmesh");
     }
 
@@ -728,15 +714,40 @@ public static class BlixMeshReader
     {
         using var br = new BinaryReader(fs);
 
-        var primitiveCount = br.ReadInt32();
-        if (primitiveCount is < 0 or > 1_000_000)
+        var nodeCount = br.ReadInt32();
+        if (nodeCount is < 0 or > 1_000_000) throw new InvalidDataException($"'{path}' has invalid nodeCount {nodeCount}.");
+        var nodes = new BlixMeshNode[nodeCount];
+        for (var i = 0; i < nodeCount; i++)
         {
-            throw new InvalidDataException(
-                $"'{path}' has invalid primitiveCount {primitiveCount}.");
+            var name = BlixMeshBinary.ReadString(br);
+            var parent = br.ReadInt32();
+
+            // Checked where the file and the offending node can both be named: a parent must already
+            // have been read, or a consumer composing world matrices in one forward pass reads a
+            // transform that does not exist yet.
+            if (parent < -1 || parent >= i)
+            {
+                throw new InvalidDataException(
+                    $"{path}: node {i} ('{name}') has parent {parent}; expected -1 or an index below {i}.");
+            }
+
+            nodes[i] = new BlixMeshNode(name, parent, BlixMeshBinary.ReadMatrix(br), br.ReadInt32(), br.ReadInt32());
         }
 
-        var primitives = new BlixMeshPrimitive[primitiveCount];
-        for (var i = 0; i < primitiveCount; i++) primitives[i] = BlixMeshBinary.ReadPrimitive(br, path);
+        var meshCount = br.ReadInt32();
+        if (meshCount is < 0 or > 1_000_000) throw new InvalidDataException($"'{path}' has invalid meshCount {meshCount}.");
+        var meshes = new BlixMeshMesh[meshCount];
+        for (var i = 0; i < meshCount; i++)
+        {
+            var name = BlixMeshBinary.ReadString(br);
+            var skinIndex = br.ReadInt32();
+            var primitiveCount = br.ReadInt32();
+            if (primitiveCount is < 0 or > 1_000_000)
+                throw new InvalidDataException($"'{path}' mesh {i} has invalid primitiveCount {primitiveCount}.");
+            var primitives = new BlixMeshPrimitive[primitiveCount];
+            for (var k = 0; k < primitiveCount; k++) primitives[k] = BlixMeshBinary.ReadPrimitive(br, path);
+            meshes[i] = new BlixMeshMesh(name, primitives, skinIndex);
+        }
 
         var materialCount = br.ReadInt32();
         var materials = new BlixMeshMaterial[materialCount];
@@ -789,7 +800,6 @@ public static class BlixMeshReader
         var skins = new BlixMeshSkin[skinCount];
         for (var sk = 0; sk < skinCount; sk++)
         {
-        var meshNodeTransform = BlixMeshBinary.ReadMatrix(br);
         var boneCount = br.ReadInt32();
         var bones = new BlixMeshBone[boneCount];
         for (var i = 0; i < boneCount; i++)
@@ -808,10 +818,14 @@ public static class BlixMeshReader
                     $"{path}: bone {i} ('{name}') has parent {parent}; expected -1 or an index below {i}.");
             }
 
-            bones[i] = new BlixMeshBone(name, parent, BlixMeshBinary.ReadMatrix(br));
+            var inverseBind = BlixMeshBinary.ReadMatrix(br);
+            var joint = br.ReadInt32();
+            if (joint < 0 || joint >= nodes.Length)
+                throw new InvalidDataException($"{path}: bone {i} ('{name}') names joint node {joint}, and there are {nodes.Length}.");
+            bones[i] = new BlixMeshBone(name, parent, inverseBind, joint);
         }
 
-        skins[sk] = new BlixMeshSkin(bones, meshNodeTransform);
+        skins[sk] = new BlixMeshSkin(bones);
         }
 
         var clipCount = br.ReadInt32();
@@ -831,53 +845,26 @@ public static class BlixMeshReader
             clips[i] = new BlixMeshClip(name, tracks);
         }
 
-        var attachmentCount = br.ReadInt32();
-        var attachments = new BlixMeshAttachment[attachmentCount];
-        for (var i = 0; i < attachmentCount; i++)
+        // Every cross-reference, refused by name: a node's mesh and skin, a mesh's skin, a track's node.
+        for (var i = 0; i < nodes.Length; i++)
         {
-            var name = BlixMeshBinary.ReadString(br);
-            var jointName = BlixMeshBinary.ReadString(br);
-            var jointIndex = br.ReadInt32();
-            var skinIndex = br.ReadInt32();
-            var local = BlixMeshBinary.ReadMatrix(br);
-            var count = br.ReadInt32();
-            var parts = new BlixMeshPrimitive[count];
-            for (var k = 0; k < count; k++) parts[k] = BlixMeshBinary.ReadPrimitive(br, path);
-            attachments[i] = new BlixMeshAttachment(name, jointName, jointIndex, skinIndex, local, parts);
-        }
-
-        var staticPartCount = br.ReadInt32();
-        var staticParts = new BlixMeshStaticPart[staticPartCount];
-        for (var i = 0; i < staticPartCount; i++)
-        {
-            var name = BlixMeshBinary.ReadString(br);
-            var world = BlixMeshBinary.ReadMatrix(br);
-            var count = br.ReadInt32();
-            var parts = new BlixMeshPrimitive[count];
-            for (var k = 0; k < count; k++) parts[k] = BlixMeshBinary.ReadPrimitive(br, path);
-            staticParts[i] = new BlixMeshStaticPart(name, world, parts);
-        }
-
-        var nodeCount = br.ReadInt32();
-        var nodes = new BlixMeshNode[nodeCount];
-        for (var i = 0; i < nodeCount; i++)
-        {
-            var name = BlixMeshBinary.ReadString(br);
-            var parent = br.ReadInt32();
-
-            // Same invariant as a bone's, checked where the file and the offending node can both be
-            // named: a parent must already have been read, or a consumer composing world matrices in
-            // one forward pass reads a transform that does not exist yet.
-            if (parent < -1 || parent >= i)
-            {
+            var n = nodes[i];
+            if (n.MeshIndex < -1 || n.MeshIndex >= meshes.Length)
+                throw new InvalidDataException($"{path}: node {i} ('{n.Name}') places mesh {n.MeshIndex}, and there are {meshes.Length}.");
+            if (n.SkinIndex < -1 || n.SkinIndex >= skins.Length)
+                throw new InvalidDataException($"{path}: node {i} ('{n.Name}') names skin {n.SkinIndex}, and there are {skins.Length}.");
+            if (n.MeshIndex >= 0 && meshes[n.MeshIndex].SkinIndex != n.SkinIndex)
                 throw new InvalidDataException(
-                    $"{path}: node {i} ('{name}') has parent {parent}; expected -1 or an index below {i}.");
-            }
-
-            nodes[i] = new BlixMeshNode(name, parent, BlixMeshBinary.ReadMatrix(br));
+                    $"{path}: node {i} ('{n.Name}') places mesh {n.MeshIndex} with skin {n.SkinIndex}, and that mesh's vertices are for skin {meshes[n.MeshIndex].SkinIndex}.");
         }
 
-        return new BlixMeshFile(
-            primitives, materials, images, skins, clips, attachments, staticParts, nodes, header);
+        foreach (var clip in clips)
+        foreach (var track in clip.Tracks)
+        {
+            if (track.NodeIndex < 0 || track.NodeIndex >= nodes.Length)
+                throw new InvalidDataException($"{path}: clip '{clip.Name}' animates node {track.NodeIndex}, and there are {nodes.Length}.");
+        }
+
+        return new BlixMeshFile(nodes, meshes, materials, images, skins, clips, header);
     }
 }

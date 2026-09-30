@@ -85,93 +85,124 @@ public static class MeshRecipe
     /// the same source and settings. Recorded in every file it writes, so a re-cook can be told
     /// from a rewrite.
     /// </summary>
-    // Version 7 writes every static primitive as the complete vertex, with MikkTSpace tangents
-    // wherever the source authored none. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
+    // Version 8 writes glTF's scene graph (format v12): meshes once, in mesh space, placed by nodes,
+    // as the complete static or skinned vertex, with MikkTSpace tangents wherever none were authored. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
     // same format bumps this value.
-    public const uint MeshRecipeVersion = 7;
+    public const uint MeshRecipeVersion = 8;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false,
         SimplifyFn? simplify = null, int splitTriBudget = 0, bool splitFoliage = true,
         float splitMaxExtent = DefaultSplitMaxExtent,
-        MaterialPatch? patch = null, Action<string>? log = null, bool staticOnly = false)
+        MaterialPatch? patch = null, Action<string>? log = null)
     {
         ArgumentNullException.ThrowIfNull(gltfPath);
         ArgumentNullException.ThrowIfNull(outPath);
 
-        // One glTF recipe handles both rigged and static content. The rigged importer decides
-        // whether the file forms a supported rig; a named refusal routes it to the static cook.
-        // staticOnly cooks a rigged file as its static node hierarchy, which is what opening it
-        // as a model rather than a rig asks for.
-        if (!staticOnly && TryCookRig(
-                gltfPath, outPath, out var rigPrimitiveCount,
-                flipTextureV, splitTriBudget, splitFoliage, splitMaxExtent,
-                patch, log))
-            return rigPrimitiveCount;
-
-        // Every static primitive carries the complete vertex, so no load ever has to reopen the
-        // source to learn what the cook left out; the loader repacks it into the layout asked for.
-        var layout = VertexPosition3NormalTangentTexture2Color.Layout;
         var model = ModelRoot.Load(gltfPath);
 
-        // Preserve the authored hierarchy even though flat geometry stores world-baked vertices.
-        // Every node is written, including ones carrying no geometry: a parent that holds only a
-        // transform is still what its children are relative to, and pruning it breaks the
-        // composition it exists for.
+        // The scene graph glTF has in every file: every node kept, parents first. A skinned node
+        // places its mesh through its skin; every other mesh node places its mesh by its own world.
         var nodes = CookNodes(model, out var nodeOfLogical);
+        var world = new Matrix4x4[nodes.Count];
+        for (var i = 0; i < nodes.Count; i++)
+        {
+            world[i] = nodes[i].ParentIndex < 0 ? nodes[i].LocalTransform : nodes[i].LocalTransform * world[nodes[i].ParentIndex];
+        }
 
-        var primitives = new List<BlixMeshPrimitive>();
+        // Skins in the order their skinned nodes are met — the binding order a rig reads.
+        var skinOrder = new List<Skin>();
         foreach (var node in model.LogicalNodes)
         {
-            if (node.Mesh is null) continue;
-            // Engine and SharpGLTF both use System.Numerics row-vector form.
-            var world = node.WorldMatrix;
-            var normalMatrix = GltfStaticImporter.ComputeNormalMatrix(world);
-            for (var i = 0; i < node.Mesh.Primitives.Count; i++)
+            if (node.Mesh is not null && node.Skin is not null && !skinOrder.Contains(node.Skin)) skinOrder.Add(node.Skin);
+        }
+
+        if (skinOrder.Count > 0 && flipTextureV)
+        {
+            throw new InvalidDataException(
+                $"'{gltfPath}' is rigged, but flipV only affects static mesh cooking; remove that option "
+                + "rather than stamping a setting this artifact did not apply");
+        }
+
+        // Nodes driven by one skin share one palette and one placement, so their world matrices must
+        // agree; different skins keep independent placements.
+        foreach (var skin in skinOrder)
+        {
+            var group = model.LogicalNodes.Where(n => n.Mesh is not null && n.Skin == skin).ToArray();
+            foreach (var node in group.Skip(1))
             {
-                var prim = node.Mesh.Primitives[i];
-                var meshName = $"{node.Mesh.Name ?? node.Name ?? "gltf_mesh"}.{i}";
-                var meshData = GltfStaticImporter.BuildStaticMeshData(
-                    meshName, prim, world, normalMatrix, flipTextureV, includeTangents: true, includeColour: true);
-                // The builder leaves the tangent zero where the source authored no TANGENT; the cook
-                // fills it with the MikkTSpace frame glTF asks for.
-                if (prim.GetVertexAccessor("TANGENT") is null)
-                    meshData = TangentGeneration.Generate(meshData);
-                var materialIndex = prim.Material?.LogicalIndex ?? BlixMesh.NoMaterial;
-
-                // Spatial split of oversized primitives so per-prim distance LOD
-                // gets fine-grained — a huge floor/wall becomes many chunks, the
-                // far ones coarsen while the near stay dense. Seam verts are
-                // duplicated per chunk + LockBorder-locked (BuildLods) → crack-free
-                // across LOD mismatch. Foliage (non-OPAQUE) optionally excluded so
-                // the impostor track can own it instead.
-                var isFoliage = prim.Material is { Alpha: not SharpGLTF.Schema2.AlphaMode.OPAQUE };
-                var doSplit = splitTriBudget > 0 && (splitFoliage || !isFoliage);
-                var chunks = doSplit
-                    ? SplitPrimitive(meshData, layout.Stride, splitTriBudget, splitMaxExtent)
-                    : new List<MeshData> { meshData };
-
-                foreach (var chunk in chunks)
-                {
-                    primitives.Add(new BlixMeshPrimitive(
-                        Name: chunk.Name,
-                        Layout: layout,
-                        NodeIndex: nodeOfLogical[node.LogicalIndex],
-                        MaterialIndex: materialIndex,
-                        Bounds: chunk.Bounds,
-                        VertexCount: chunk.VertexCount,
-                        VertexBytes: chunk.VertexBytes,
-                        IndexFormat: chunk.IndexFormat,
-                        Lods: BuildLods(chunk, layout.Stride, simplify)));
-                }
+                if (node.WorldMatrix == group[0].WorldMatrix) continue;
+                throw new InvalidDataException(
+                    $"glTF '{gltfPath}' has multiple skinned-mesh nodes sharing ONE skin but with different "
+                    + $"world matrices. Mesh '{node.Mesh!.Name}' transform diverges from '{group[0].Mesh!.Name}'. "
+                    + "Meshes at different places need different skins.");
             }
         }
 
-        // Record byte-affecting settings in stable authored order. Simplification is explicit
-        // because a null simplifier produces an LOD0-only artifact.
-        var parameters = StaticParameters(
-            flipTextureV, splitTriBudget, splitFoliage, splitMaxExtent,
-            simplify is not null, patch);
+        var skins = new List<BlixMeshSkin>();
+        var remaps = new List<int[]>();
+        foreach (var skin in skinOrder)
+        {
+            var (bones, oldToNew) = GltfImporter.BuildSkeletonAndOrdering(skin);
+            var jointOfBone = new int[bones.Length];
+            for (var old = 0; old < oldToNew.Length; old++) jointOfBone[oldToNew[old]] = nodeOfLogical[skin.Joints[old].LogicalIndex];
+            skins.Add(new BlixMeshSkin(bones
+                .Select((b, k) => new BlixMeshBone(b.Name, b.ParentIndex, b.InverseBindPose, jointOfBone[k]))
+                .ToArray()));
+            remaps.Add(oldToNew);
+        }
+
+        // Meshes, once per (glTF mesh, skin) pair: the vertices of a skinned placement address that
+        // skin's bones, so the same glTF mesh placed skinned and unskinned is two meshes here.
+        var meshes = new List<BlixMeshMesh>();
+        var meshOf = new Dictionary<(int Mesh, int Skin), int>();
+        var cookedNodes = nodes.ToArray();
+        var primitiveCount = 0;
+        foreach (var node in model.LogicalNodes)
+        {
+            if (node.Mesh is null) continue;
+            var skinIndex = node.Skin is null ? -1 : skinOrder.IndexOf(node.Skin);
+            var key = (node.Mesh.LogicalIndex, skinIndex);
+            if (!meshOf.TryGetValue(key, out var meshIndex))
+            {
+                meshIndex = meshes.Count;
+                meshOf[key] = meshIndex;
+                var primitives = skinIndex < 0
+                    ? CookStaticMesh(model, node.Mesh, node, world, nodeOfLogical, flipTextureV, simplify, splitTriBudget, splitFoliage, splitMaxExtent)
+                    : CookSkinnedMesh(node.Mesh, remaps[skinIndex]);
+                meshes.Add(new BlixMeshMesh(node.Mesh.Name ?? string.Empty, primitives, skinIndex));
+                primitiveCount += primitives.Count;
+            }
+
+            var at = nodeOfLogical[node.LogicalIndex];
+            cookedNodes[at] = cookedNodes[at] with { MeshIndex = meshIndex, SkinIndex = skinIndex };
+        }
+
+        // Clip tracks address bones against one skeleton, so one clip set is valid only when every
+        // skin resolves each joint to the same parent-first index.
+        var clips = new List<BlixMeshClip>();
+        if (skinOrder.Count > 0 && model.LogicalAnimations.Count > 0)
+        {
+            for (var s = 1; s < skinOrder.Count; s++)
+            {
+                var agree = skinOrder[s].JointsCount == skinOrder[0].JointsCount
+                    && Enumerable.Range(0, skinOrder[s].JointsCount).All(j =>
+                        ReferenceEquals(skinOrder[s].GetJoint(j).Joint, skinOrder[0].GetJoint(j).Joint)
+                        && remaps[s][j] == remaps[0][j]);
+                if (agree) continue;
+                throw new InvalidDataException(
+                    $"'{gltfPath}': this file's {skinOrder.Count} skins order their joints differently, so one set of "
+                    + "animation clips cannot drive them all — clip tracks are bone indices against a "
+                    + "single skeleton. Reading the skins is supported; per-skin clips are not yet.");
+            }
+
+            var nodeOfBone = skins[0].Bones.Select(b => b.NodeIndex).ToArray();
+            foreach (var anim in model.LogicalAnimations)
+            {
+                var clip = GltfImporter.BuildAnimationClip(anim, skinOrder[0], remaps[0]);
+                if (clip.Tracks.Length > 0) clips.Add(CookClip(clip, nodeOfBone));
+            }
+        }
 
         var (images, imageRows) = CookImages(model, gltfPath, outPath, patch);
 
@@ -181,93 +212,8 @@ public static class MeshRecipe
             i => i.Resource.EndsWith(".blixtex", StringComparison.OrdinalIgnoreCase));
 
         var stamp = CookStamp.Of(
-            BlixMesh.ShippedRecipe, MeshRecipeVersion, gltfPath, outPath, parameters,
-            everyImageCooked
-                ? CookedFlags.None
-                : CookedFlags.SourceRequired | CookedFlags.SourceRequiredForImagesOnly);
-
-        BlixMeshWriter.Write(
-            outPath,
-            new BlixMeshFile(primitives, CookMaterials(model, imageRows, patch, log), images, Nodes: nodes),
-            stamp);
-        return primitives.Count;
-    }
-
-    /// <summary>
-    /// Cooks a rigged glTF — skinned vertices, skins and clips — or returns false if it is not one.
-    /// </summary>
-    /// <remarks>
-    /// The vertices come from <see cref="GltfImporter"/> rather than being rebuilt here, and that is
-    /// important: source and cooked paths share joint remapping, influence selection, attachment
-    /// discovery, and static-part handling.
-    /// </remarks>
-    private static bool TryCookRig(
-        string gltfPath, string outPath, out int primitiveCount,
-        bool flipTextureV, int splitTriBudget, bool splitFoliage,
-        float splitMaxExtent,
-        MaterialPatch? patch = null, Action<string>? log = null)
-    {
-        primitiveCount = 0;
-
-        GltfModel rig;
-        try
-        {
-            // Recipes bypass cooked siblings so output is always derived from authored source.
-            rig = new GltfImporter().ImportSource(new AssetImportContext(AssetId.Parse("cook/rig"), gltfPath));
-        }
-        catch (AssetImportException noRig) when (noRig.Message.Contains("no rig here", StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        var skins = rig.SkinsOrEmpty;
-        if (skins.Length == 0) return false;
-
-        var unsupported = new List<string>();
-        if (flipTextureV) unsupported.Add("flipV");
-        if (splitTriBudget != 0) unsupported.Add("split");
-        if (!splitFoliage) unsupported.Add("splitFoliage");
-        if (splitMaxExtent != DefaultSplitMaxExtent) unsupported.Add("splitExtent");
-        if (unsupported.Count > 0)
-        {
-            throw new InvalidDataException(
-                $"'{gltfPath}' is rigged, but {string.Join(", ", unsupported)} "
-                + "only affect static mesh cooking; remove those options rather than stamping "
-                + "settings this artifact did not apply");
-        }
-
-        var model = ModelRoot.Load(gltfPath);
-        var (images, imageRows) = CookImages(model, gltfPath, outPath, patch);
-
-        var primitives = rig.Primitives.Select(CookPrimitive).ToArray();
-
-        var cookedSkins = skins.Select(skin => new BlixMeshSkin(
-            skin.Skeleton.Bones
-                .Select(b => new BlixMeshBone(b.Name, b.ParentIndex, b.InverseBindPose))
-                .ToArray(),
-            skin.MeshNodeTransform)).ToArray();
-
-        var clips = rig.Animations.Select(CookClip).ToArray();
-
-        // Attachments and static parts use static vertex layouts beside skinned primitives. Layout
-        // is therefore stored per primitive rather than once for the whole file.
-        var attachments = rig.AttachmentsOrEmpty.Select(a => new BlixMeshAttachment(
-            a.Name, a.JointName, a.JointIndex, a.SkinIndex, a.LocalTransform,
-            a.Primitives.Select(CookPrimitive).ToArray())).ToArray();
-
-        var staticParts = rig.StaticPartsOrEmpty.Select(sp => new BlixMeshStaticPart(
-            sp.Name, sp.WorldTransform, sp.Primitives.Select(CookPrimitive).ToArray())).ToArray();
-
-        var everyImageCooked = images.All(
-            i => i.Resource.EndsWith(".blixtex", StringComparison.OrdinalIgnoreCase));
-
-        var parameters =
-            $"rig=1 skins={cookedSkins.Length} bones={cookedSkins.Sum(s => s.Bones.Length)} "
-            + $"clips={clips.Length} attachments={attachments.Length} staticParts={staticParts.Length}"
-            + (patch is null ? "" : $" {patch.StampFragment}");
-
-        var stamp = CookStamp.Of(
-            BlixMesh.ShippedRecipe, MeshRecipeVersion, gltfPath, outPath, parameters,
+            BlixMesh.ShippedRecipe, MeshRecipeVersion, gltfPath, outPath,
+            StaticParameters(flipTextureV, splitTriBudget, splitFoliage, splitMaxExtent, simplify is not null, patch),
             everyImageCooked
                 ? CookedFlags.None
                 : CookedFlags.SourceRequired | CookedFlags.SourceRequiredForImagesOnly);
@@ -275,22 +221,133 @@ public static class MeshRecipe
         BlixMeshWriter.Write(
             outPath,
             new BlixMeshFile(
-                primitives, CookMaterials(model, imageRows, patch, log), images, cookedSkins, clips,
-                attachments, staticParts),
+                cookedNodes, meshes, CookMaterials(model, imageRows, patch, log), images, skins, clips),
             stamp);
-
-        primitiveCount = primitives.Length;
-        return true;
+        return primitiveCount;
     }
+
+    /// <summary>A static glTF mesh's primitives, in mesh space, as the complete vertex with LODs.</summary>
+    /// <remarks>
+    /// Splitting and LOD error are spatial, and a mesh-space metre is not a world one under a scaled
+    /// node, so both use the largest world scale among the nodes placing this mesh: the split extent
+    /// is divided by it and the stored error multiplied by it, so both stay in world metres.
+    /// </remarks>
+    private static List<BlixMeshPrimitive> CookStaticMesh(
+        ModelRoot model, Mesh mesh, Node first, Matrix4x4[] world, int[] nodeOfLogical, bool flipTextureV,
+        SimplifyFn? simplify, int splitTriBudget, bool splitFoliage, float splitMaxExtent)
+    {
+        var scale = model.LogicalNodes
+            .Where(n => n.Mesh == mesh && n.Skin is null)
+            .Select(n => MaxScale(world[nodeOfLogical[n.LogicalIndex]]))
+            .DefaultIfEmpty(1f)
+            .Max();
+        var layout = VertexPosition3NormalTangentTexture2Color.Layout;
+        var primitives = new List<BlixMeshPrimitive>();
+        for (var i = 0; i < mesh.Primitives.Count; i++)
+        {
+            var prim = mesh.Primitives[i];
+            var meshName = $"{mesh.Name ?? first.Name ?? "gltf_mesh"}.{i}";
+            var meshData = GltfStaticImporter.BuildStaticMeshData(
+                meshName, prim, Matrix4x4.Identity, Matrix4x4.Identity, flipTextureV, includeTangents: true, includeColour: true);
+            // The builder leaves the tangent zero where the source authored no TANGENT; the cook fills
+            // it with the MikkTSpace frame glTF asks for.
+            if (prim.GetVertexAccessor("TANGENT") is null) meshData = TangentGeneration.Generate(meshData);
+
+            // Spatial split of oversized primitives so per-prim distance LOD gets fine-grained. Seam
+            // vertices are duplicated per chunk and LockBorder-locked, so chunks are crack-free across
+            // LOD mismatch. Foliage (non-OPAQUE) is optionally left whole for the impostor track.
+            var isFoliage = prim.Material is { Alpha: not SharpGLTF.Schema2.AlphaMode.OPAQUE };
+            var doSplit = splitTriBudget > 0 && (splitFoliage || !isFoliage);
+            var chunks = doSplit
+                ? SplitPrimitive(meshData, layout.Stride, splitTriBudget, splitMaxExtent / scale)
+                : new List<MeshData> { meshData };
+
+            foreach (var chunk in chunks)
+            {
+                primitives.Add(new BlixMeshPrimitive(
+                    Name: chunk.Name,
+                    Layout: layout,
+                    MaterialIndex: prim.Material?.LogicalIndex ?? BlixMesh.NoMaterial,
+                    Bounds: chunk.Bounds,
+                    VertexCount: chunk.VertexCount,
+                    VertexBytes: chunk.VertexBytes,
+                    IndexFormat: chunk.IndexFormat,
+                    Lods: BuildLods(chunk, layout.Stride, simplify)
+                        .Select(l => l with { Error = l.Error * scale })
+                        .ToArray()));
+            }
+        }
+
+        return primitives;
+    }
+
+    /// <summary>A skinned glTF mesh's primitives, in mesh space, as the complete skinned vertex.</summary>
+    /// <remarks>
+    /// The vertices come from <see cref="GltfImporter.BuildMeshData"/>, so joint remapping and influence
+    /// selection are the importer's. The second set and the colour are appended before tangents are
+    /// generated, because generation re-welds and renumbers vertices.
+    /// </remarks>
+    private static List<BlixMeshPrimitive> CookSkinnedMesh(Mesh mesh, int[] remap)
+    {
+        var primitives = new List<BlixMeshPrimitive>();
+        for (var i = 0; i < mesh.Primitives.Count; i++)
+        {
+            var prim = mesh.Primitives[i];
+            var skinned = GltfImporter.BuildMeshData($"{mesh.Name ?? "gltf_mesh"}.{i}", prim, remap);
+            var complete = Complete(skinned, prim);
+            if (TangentGeneration.HasNoTangents(complete)) complete = TangentGeneration.Generate(complete);
+            primitives.Add(new BlixMeshPrimitive(
+                Name: complete.Name,
+                Layout: complete.Layout,
+                MaterialIndex: prim.Material?.LogicalIndex ?? BlixMesh.NoMaterial,
+                Bounds: complete.Bounds,
+                VertexCount: complete.VertexCount,
+                VertexBytes: complete.VertexBytes,
+                IndexFormat: complete.IndexFormat,
+                Lods: new[] { new BlixMeshLod(complete.Indices, complete.Indices32) }));
+        }
+
+        return primitives;
+    }
+
+    // The 80-byte skinned vertex widened to 92 with TEXCOORD_1 (uv0 where absent) and COLOR_0 (white
+    // where absent), glTF's defaults, so a skinned mesh carries the whole vertex a static one does.
+    private static MeshData Complete(MeshData skinned, MeshPrimitive prim)
+    {
+        var uv1 = prim.GetVertexAccessor("TEXCOORD_1")?.AsVector2Array();
+        var colours = prim.GetVertexAccessor("COLOR_0")?.AsColorArray();
+        var from = VertexPosition3NormalTextureSkin4Tangent.Layout.Stride;
+        var to = VertexPosition3NormalTextureSkin4Tangent2Color.Layout.Stride;
+        var bytes = new byte[skinned.VertexCount * to];
+        for (var v = 0; v < skinned.VertexCount; v++)
+        {
+            System.Buffer.BlockCopy(skinned.VertexBytes, v * from, bytes, v * to, from);
+            var u = uv1 is null
+                ? new Vector2(BitConverter.ToSingle(skinned.VertexBytes, (v * from) + 24), BitConverter.ToSingle(skinned.VertexBytes, (v * from) + 28))
+                : uv1[v];
+            BitConverter.TryWriteBytes(bytes.AsSpan((v * to) + 80, 4), u.X);
+            BitConverter.TryWriteBytes(bytes.AsSpan((v * to) + 84, 4), u.Y);
+            var colour = colours is null
+                ? VertexPosition3NormalTextureColor.White
+                : VertexPosition3NormalTextureColor.Pack(colours[v].X, colours[v].Y, colours[v].Z, colours[v].W);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan((v * to) + 88, 4), colour);
+        }
+
+        return skinned with { VertexBytes = bytes, Layout = VertexPosition3NormalTextureSkin4Tangent2Color.Layout };
+    }
+
+    private static float MaxScale(in Matrix4x4 m) => MathF.Max(
+        new Vector3(m.M11, m.M12, m.M13).Length(),
+        MathF.Max(new Vector3(m.M21, m.M22, m.M23).Length(), new Vector3(m.M31, m.M32, m.M33).Length()));
 
     /// <summary>
     /// The authored node hierarchy, in an order where every parent precedes its children.
     /// </summary>
     /// <remarks>
-    /// glTF does not promise parents come first, and
-    /// a consumer composing world matrices in one forward pass needs them to — which is the same
-    /// invariant <c>Skeleton</c> enforces on bones, for the same reason. The reader refuses a file
-    /// that violates it, naming the node, so a re-order that went wrong cannot pass quietly.
+    /// glTF does not promise parents come first, and a consumer composing world matrices in one
+    /// forward pass needs them to — the same invariant <c>Skeleton</c> enforces on bones. The reader
+    /// refuses a file that violates it, naming the node. An unnamed node is written as
+    /// <c>node_{logical index}</c>, the one spelling every reader then sees.
     /// </remarks>
     private static IReadOnlyList<BlixMeshNode> CookNodes(ModelRoot model, out int[] nodeOfLogical)
     {
@@ -319,28 +376,6 @@ public static class MeshRecipe
             .ToList();
     }
 
-    /// <summary>One imported primitive as the format stores it, layout and skin included.</summary>
-    private static BlixMeshPrimitive CookPrimitive(GltfPrimitive p)
-    {
-        // A skinned primitive always has a tangent slot, which the importer leaves zero where the
-        // source authored none; the cook fills it with MikkTSpace's frame. The static parts and
-        // attachments beside it use the colour layout, which carries no tangent.
-        var mesh = p.Mesh.Layout.Stride == VertexPosition3NormalTextureSkin4Tangent.Layout.Stride
-                   && TangentGeneration.HasNoTangents(p.Mesh)
-            ? TangentGeneration.Generate(p.Mesh)
-            : p.Mesh;
-        return new BlixMeshPrimitive(
-            Name: mesh.Name,
-            Layout: mesh.Layout,
-            MaterialIndex: p.MaterialIndex,
-            Bounds: mesh.Bounds,
-            VertexCount: mesh.VertexCount,
-            VertexBytes: mesh.VertexBytes,
-            IndexFormat: mesh.IndexFormat,
-            Lods: new[] { new BlixMeshLod(mesh.Indices, mesh.Indices32) },
-            SkinIndex: p.SkinIndex);
-    }
-
     /// <summary>One animation, as keyframes.</summary>
     /// <remarks>
     /// Store source keyframes rather than serializing runtime curve objects. The
@@ -349,10 +384,10 @@ public static class MeshRecipe
     /// arrays back is lossless; writing a serialised "curve" would be inventing a representation
     /// for something that is already one.
     /// </remarks>
-    private static BlixMeshClip CookClip(AnimationClip clip) => new(
+    private static BlixMeshClip CookClip(AnimationClip clip, int[] nodeOfBone) => new(
         clip.Name,
         clip.Tracks.Select(t => new BlixMeshTrack(
-            t.BoneIndex,
+            nodeOfBone[t.BoneIndex],
             VectorKeys(t.Translation),
             QuaternionKeys(t.Rotation),
             VectorKeys(t.Scale))).ToArray());
@@ -1116,10 +1151,9 @@ public static class MeshRecipe
         bool flipTextureV = false,
         int splitTriBudget = 0, bool splitFoliage = true,
         float splitMaxExtent = DefaultSplitMaxExtent,
-        MaterialPatch? patch = null, Action<string>? log = null, bool staticOnly = false) =>
+        MaterialPatch? patch = null, Action<string>? log = null) =>
         CookToBlixMesh(
             sourcePath, outputPath,
-            staticOnly: staticOnly,
             flipTextureV: flipTextureV,
             simplify: DefaultSimplifier(splitTriBudget > 0),
             splitTriBudget: splitTriBudget,
@@ -1134,32 +1168,18 @@ public static class MeshRecipe
         bool flipTextureV = false,
         int splitTriBudget = 0, bool splitFoliage = true,
         float splitMaxExtent = DefaultSplitMaxExtent,
-        MaterialPatch? patch = null, bool staticOnly = false)
+        MaterialPatch? patch = null)
     {
         var header = CookedFile.TryReadHeader(outputPath);
-        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version11 }) return false;
+        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version12 }) return false;
         var stamp = header.Value.Stamp;
         if (!stamp.MatchesProducerAndSource(BlixMesh.ShippedRecipe, MeshRecipeVersion, sourcePath))
             return false;
 
-        if (staticOnly && stamp.Parameters.StartsWith("rig=1 ", StringComparison.Ordinal)) return false;
-        if (!stamp.Parameters.StartsWith("rig=1 ", StringComparison.Ordinal))
-        {
-            return stamp.Parameters == StaticParameters(
-                flipTextureV, splitTriBudget, splitFoliage, splitMaxExtent,
-                simplify: true, patch: patch);
-        }
-
-        // The dynamic counts in a rig stamp are source-derived and therefore covered by the source
-        // identity above. Only caller policy remains to compare here.
-        if (flipTextureV || splitTriBudget != 0 || !splitFoliage
-            || splitMaxExtent != DefaultSplitMaxExtent)
-            return false;
-
-        var patchMarker = " patch=";
-        return patch is null
-            ? !stamp.Parameters.Contains(patchMarker, StringComparison.Ordinal)
-            : stamp.Parameters.EndsWith(" " + patch.StampFragment, StringComparison.Ordinal);
+        // One vocabulary for every file: a rigged one is a scene graph like any other.
+        return stamp.Parameters == StaticParameters(
+            flipTextureV, splitTriBudget, splitFoliage, splitMaxExtent,
+            simplify: true, patch: patch);
     }
 
     private static string StaticParameters(

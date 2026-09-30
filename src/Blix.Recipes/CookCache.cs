@@ -28,11 +28,7 @@ public static class CookCache
             : Path.Combine(PlatformCache(), "blix", "cooked");
 
     /// <summary>A cooked model to load for <paramref name="modelPath"/>, cooking it into the cache if it must.</summary>
-    /// <param name="staticOnly">
-    /// Cook as the static node hierarchy even if the file is rigged: opening an asset as a model rather
-    /// than as a rig. A rig cook never satisfies it.
-    /// </param>
-    public static string Resolve(string modelPath, bool staticOnly = false, Action<string>? log = null)
+    public static string Resolve(string modelPath, Action<string>? log = null)
     {
         ArgumentNullException.ThrowIfNull(modelPath);
         var full = Path.GetFullPath(modelPath);
@@ -40,23 +36,23 @@ public static class CookCache
         if (!File.Exists(full)) throw new FileNotFoundException($"No file at {modelPath}.", modelPath);
 
         var sibling = Path.ChangeExtension(full, ".blixmesh");
-        if (File.Exists(sibling) && MeshRecipe.IsShippedCurrent(full, sibling, staticOnly: staticOnly)) return sibling;
+        if (File.Exists(sibling) && MeshRecipe.IsShippedCurrent(full, sibling)) return sibling;
 
-        var entry = Path.Combine(Root, $"{Key(full)}-{Path.GetFileNameWithoutExtension(full)}{(staticOnly ? "-static" : string.Empty)}");
+        var entry = Path.Combine(Root, $"{Key(full)}-{Path.GetFileNameWithoutExtension(full)}");
         var cooked = Path.Combine(entry, Path.GetFileNameWithoutExtension(full) + ".blixmesh");
-        if (File.Exists(cooked) && MeshRecipe.IsShippedCurrent(full, cooked, staticOnly: staticOnly)) return cooked;
+        if (File.Exists(cooked) && MeshRecipe.IsShippedCurrent(full, cooked)) return cooked;
 
         // One cook per entry at a time: a second tool opening the same file waits for the first
         // rather than writing the same tree beside it.
         Directory.CreateDirectory(entry);
         using var hold = Hold(Path.Combine(entry, ".cooking"));
-        if (File.Exists(cooked) && MeshRecipe.IsShippedCurrent(full, cooked, staticOnly: staticOnly)) return cooked;
+        if (File.Exists(cooked) && MeshRecipe.IsShippedCurrent(full, cooked)) return cooked;
 
         log?.Invoke($"cooking {Path.GetFileName(full)} into {entry}");
         // The engine's one refusal type, naming the file, so a tool reports "blix cannot read this"
         // the same way whether the parser, the importer or the cook said no.
         return Blix.Cooked.AssetImportException.Refusing(
-            modelPath, () => AssetCook.Cook(full, entry, staticOnly: staticOnly).MeshPath);
+            modelPath, () => AssetCook.Cook(full, entry).MeshPath);
     }
 
     private static string Key(string fullPath) =>

@@ -20,7 +20,7 @@ public static class AssetCook
 
     public static Result Cook(
         string source, string outDir, bool flipTextureV = false, int splitTriBudget = 0, bool splitFoliage = true,
-        MaterialPatch? patch = null, Action<string>? log = null, bool staticOnly = false)
+        MaterialPatch? patch = null, Action<string>? log = null)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(outDir);
@@ -89,8 +89,7 @@ public static class AssetCook
             splitTriBudget: splitTriBudget,
             splitFoliage: splitFoliage,
             patch: patch,
-            log: log,
-            staticOnly: staticOnly);
+            log: log);
 
         return new Result(meshOut, count, byUri.Length, sourceBytes, cookedBytes, textureTime);
     }

@@ -81,13 +81,17 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         var materialCache = new Dictionary<int, GltfMaterial>();
         GltfShared.LoadImagesFromTable(cooked.ImageTable, cooked.MaterialTable, cookedDir, textureCache);
 
-        var primitives = new List<GltfPrimitive>(cooked.Primitives.Count);
-        foreach (var p in cooked.Primitives)
+        // Flat: every primitive a node places, moved to where the scene puts it. A skinned mesh reads
+        // at its bind pose, as the source's static path always drew one.
+        var world = cooked.WorldTransforms();
+        var primitives = new List<GltfPrimitive>();
+        foreach (var (p, node) in cooked.PlacedPrimitives())
         {
             // The layout this load's pipeline declares, selected from the complete cooked vertex.
             // UVs are sanitized in the repacked buffer, located by format because their offset
             // differs between layouts.
-            var (vertexBytes, bounds) = CookedVertices.Repack(p, requested, toLocal: null, blixmeshPath);
+            var (vertexBytes, bounds) = CookedVertices.Repack(
+                p, requested, world[node].IsIdentity ? null : world[node], blixmeshPath);
             if (ReferenceEquals(vertexBytes, p.VertexBytes)) vertexBytes = (byte[])vertexBytes.Clone();
             var uvAttr = requested.Attributes.First(a => a.Format == VertexAttributeFormat.Float2);
             SanitizePackedUVs(
@@ -142,23 +146,8 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         if (File.Exists(blixmeshPath))
         {
             // A cooked artifact is usable only when its vertex-affecting recipe settings match the
-            // requested layout and UV convention.
-            // A rigged cooked file holds skinned vertices this importer cannot draw. Refused by
-            // name when asked for directly; when it is merely a sibling, the glTF is walked, which
-            // is what a caller asking the STATIC importer for a rigged asset has always got.
-            if (BlixMeshReader.Read(blixmeshPath).IsRigged)
-            {
-                if (direct)
-                {
-                    throw new AssetImportException(
-                        context.SourcePath, null,
-                        "this .blixmesh holds a rig, so the static importer is the wrong one for it — "
-                        + "load it through GltfImporter");
-                }
-
-                cookedMismatch = "the .blixmesh sibling holds a rig — the glTF was walked as static geometry";
-            }
-            else if (SettingsMismatch(blixmeshPath, context) is { } mismatch)
+            // requested UV convention. A rigged one is: its scene graph reads as static geometry.
+            if (SettingsMismatch(blixmeshPath, context) is { } mismatch)
             {
                 if (direct)
                 {
@@ -256,108 +245,41 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         return AssetImportException.Refusing(context.SourcePath, () => ImportNodesCore(context));
     }
 
-    /// <summary>
-    /// The node hierarchy of a COOKED mesh, with its baked vertices returned to node-local space.
-    /// </summary>
+    /// <summary>The node hierarchy of a COOKED mesh: names, parents, local transforms, and each node's primitives.</summary>
     /// <remarks>
-    /// Reconstructs the node-shaped view used by hierarchy-aware tools: names, parents, pivots,
-    /// and per-node primitives.
-    /// <para>
-    /// The flat cook folds each node's world matrix into its vertices. This hierarchy path applies
-    /// the recorded node's inverse to recover local-space geometry for consumers that need it.
-    /// </para>
-    /// <para>
-    /// A node whose matrix will not invert keeps its baked vertices and is reported. A degenerate
-    /// transform — a zero scale on some axis — has genuinely destroyed information, and returning
-    /// silently wrong geometry would be worse than returning geometry that is merely still baked.
-    /// </para>
+    /// The cooked file is glTF's scene graph, so this is a reading rather than a reconstruction:
+    /// vertices are already in mesh space, where a node places them. A skinned mesh reads at its bind
+    /// pose, as the source's hierarchy path always drew one.
     /// </remarks>
     private static GltfNodeModel ImportCookedNodes(string blixmeshPath, bool includeTangents, bool includeColour)
     {
         var cooked = BlixMeshReader.Read(blixmeshPath);
-        var table = cooked.NodeTable;
-        if (table.Count == 0)
-        {
-            throw new AssetImportException(
-                blixmeshPath, null,
-                "this .blixmesh carries no node table, so there is no hierarchy in it — re-cook it");
-        }
-
-        // World per node, in one forward pass. The reader has already refused a table whose parents
-        // do not precede their children, which is what makes one pass enough.
-        var world = new Matrix4x4[table.Count];
-        for (var i = 0; i < table.Count; i++)
-        {
-            world[i] = table[i].ParentIndex < 0
-                ? table[i].LocalTransform
-                : table[i].LocalTransform * world[table[i].ParentIndex];
-        }
-
-        var byNode = new List<GltfPrimitive>[table.Count];
         var materialCache = new Dictionary<int, GltfMaterial>();
         var textureCache = new Dictionary<int, GltfTexture>();
         var cookedDir = Path.GetDirectoryName(Path.GetFullPath(blixmeshPath)) ?? string.Empty;
         GltfShared.LoadImagesFromTable(cooked.ImageTable, cooked.MaterialTable, cookedDir, textureCache);
 
-        foreach (var p in cooked.Primitives)
+        var layout = CookedVertices.Requested(includeTangents, includeColour);
+        var nodes = new GltfNode[cooked.Nodes.Count];
+        for (var i = 0; i < nodes.Length; i++)
         {
-            if (p.NodeIndex < 0 || p.NodeIndex >= table.Count) continue;
-            (byNode[p.NodeIndex] ??= new List<GltfPrimitive>()).Add(
-                new GltfPrimitive(
-                    Unbake(p, world[p.NodeIndex], blixmeshPath, includeTangents, includeColour),
-                    GltfShared.MaterialFromCooked(
-                        cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache, blixmeshPath),
-                    MaterialIndex: p.MaterialIndex));
-        }
-
-        var nodes = new GltfNode[table.Count];
-        for (var i = 0; i < table.Count; i++)
-        {
-            nodes[i] = new GltfNode(
-                table[i].Name,
-                table[i].ParentIndex,
-                table[i].LocalTransform,
-                byNode[i]?.ToArray() ?? Array.Empty<GltfPrimitive>());
+            var node = cooked.Nodes[i];
+            var primitives = node.MeshIndex < 0
+                ? Array.Empty<GltfPrimitive>()
+                : cooked.Meshes[node.MeshIndex].Primitives.Select(p =>
+                {
+                    var (bytes, bounds) = CookedVertices.Repack(p, layout, transform: null, blixmeshPath);
+                    if (ReferenceEquals(bytes, p.VertexBytes)) bytes = (byte[])bytes.Clone();
+                    var lod0 = p.Lods[0];
+                    return new GltfPrimitive(
+                        new MeshData(p.Name, bytes, lod0.Indices16 ?? Array.Empty<ushort>(), layout, bounds, Indices32: lod0.Indices32),
+                        GltfShared.MaterialFromCooked(cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache, blixmeshPath),
+                        MaterialIndex: p.MaterialIndex);
+                }).ToArray();
+            nodes[i] = new GltfNode(node.Name, node.ParentIndex, node.LocalTransform, primitives);
         }
 
         return new GltfNodeModel(nodes);
-    }
-
-    /// <summary>
-    /// A cooked primitive as node-local geometry, in the layout the CALLER asked for.
-    /// </summary>
-    /// <remarks>
-    /// The cooked vertex is complete, so the requested layout is a selection from real data
-    /// (<see cref="CookedVertices"/>): the second UV set and the colour are the source's, not
-    /// stand-ins.
-    /// <para>
-    /// A node whose world will not invert keeps its baked vertices and is reported: a degenerate
-    /// transform — a zero scale on some axis — has genuinely destroyed information, and returning
-    /// silently wrong geometry would be worse than returning geometry that is merely still baked.
-    /// </para>
-    /// </remarks>
-    private static MeshData Unbake(
-        BlixMeshPrimitive p, in Matrix4x4 world, string path, bool includeTangents, bool includeColour)
-    {
-        var lod0 = p.Lods[0];
-        var invertible = !world.IsIdentity && Matrix4x4.Invert(world, out _);
-        if (!world.IsIdentity && !invertible)
-        {
-            Console.WriteLine(
-                $"[blix] '{p.Name}' in {Path.GetFileName(path)} sits under a transform that will not "
-                + "invert — its vertices stay in world space.");
-        }
-
-        Matrix4x4? toLocal = null;
-        if (invertible && Matrix4x4.Invert(world, out var inverse)) toLocal = inverse;
-
-        var layout = CookedVertices.Requested(includeTangents, includeColour);
-        var (bytes, bounds) = CookedVertices.Repack(p, layout, toLocal, path);
-        if (ReferenceEquals(bytes, p.VertexBytes)) bytes = (byte[])bytes.Clone();
-
-        return new MeshData(
-            p.Name, bytes, lod0.Indices16 ?? Array.Empty<ushort>(), layout, bounds,
-            Indices32: lod0.Indices32);
     }
 
     private GltfNodeModel ImportNodesCore(AssetImportContext context)

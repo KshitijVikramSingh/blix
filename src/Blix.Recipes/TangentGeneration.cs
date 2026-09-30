@@ -28,6 +28,7 @@ public static class TangentGeneration
     {
         if (Same(layout, VertexPosition3NormalTangentTexture2Color.Layout)) return new Offsets(0, 12, 40, 24);
         if (Same(layout, VertexPosition3NormalTangentTexture.Layout)) return new Offsets(0, 12, 40, 24);
+        if (Same(layout, VertexPosition3NormalTextureSkin4Tangent2Color.Layout)) return new Offsets(0, 12, 24, 64);
         if (Same(layout, VertexPosition3NormalTextureSkin4Tangent.Layout)) return new Offsets(0, 12, 24, 64);
         return null;
     }

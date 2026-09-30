@@ -124,13 +124,15 @@ public static class Program
                 CookCache.Resolve(raw) == opened && File.GetLastWriteTimeUtc(opened) == written, "re-cooked");
             t.Expect("a .blixmesh resolves to itself", CookCache.Resolve(opened) == opened, CookCache.Resolve(opened));
 
-            // Rogue ships a rig sibling. Opened as a rig it is used as-is; opened as a model it must
-            // not be, because a rig cook carries no static node hierarchy.
+            // Rogue ships a rig sibling, and one cooked file answers both readings: the scene graph a
+            // rig is, and the static hierarchy a model view wants.
             var rigSibling = Path.ChangeExtension(rogue, ".blixmesh");
             t.Expect("a current cooked sibling is used as-is", CookCache.Resolve(rogue) == rigSibling, CookCache.Resolve(rogue));
-            var asModel = CookCache.Resolve(rogue, staticOnly: true);
-            t.Expect("opened as a model, a rig sibling is not taken: the static cook goes to the cache",
-                asModel != rigSibling && !BlixMeshReader.Read(asModel).IsRigged, asModel);
+            var asModel = new Blix.GltfStaticImporter().ImportNodes(
+                new AssetImportContext(AssetId.Parse("t/rogue-model"), rigSibling, includeColour: true));
+            t.Expect("and the same cooked rig reads as a model, its skinned meshes at bind pose",
+                BlixMeshReader.Read(rigSibling).IsRigged && asModel.Nodes.Any(n => n.Primitives.Length > 0),
+                $"{asModel.Nodes.Length} node(s)");
 
             var broken = Path.Combine(work, "broken.gltf");
             File.WriteAllText(broken, "{ \"asset\": { \"version\": \"2.0\" }, \"meshes\": [ { \"primitives\": [ { \"attributes\": { } } ] } ], \"nodes\": [ { \"mesh\": 0 } ] }");
@@ -708,15 +710,17 @@ public static class Program
                 t.Expect("on primitives that actually carry an albedo", withAlbedo > 0,
                     $"{withAlbedo} of {viaSourceRig.Primitives.Length}");
 
-                // <b>And the static importer declines it by name.</b> A rigged cooked file holds
-                // skinned vertices it cannot draw; silently drawing them at the wrong stride is the
-                // failure this whole session kept meeting.
+                // <b>And the static importer reads the same cooked rig as static geometry.</b> The file
+                // is a scene graph, so a skinned mesh reads at its bind pose — in the static layout it
+                // asked for, never at the skinned stride, which is the failure that once drew garbage.
                 AssetLoadLog.Start();
-                new Blix.GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("t/static"), rig));
+                var asStatic = new Blix.GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("t/static"), rig));
                 var staticReport = AssetLoadLog.Drain().SingleOrDefault(r => r.SourcePath == rig);
-                t.ExpectTrue("the static importer walks the glTF rather than reading a rig",
-                    staticReport is { Mode: AssetLoadMode.Source }
-                    && staticReport.Warning?.Contains("holds a rig", StringComparison.Ordinal) == true);
+                t.ExpectTrue("the static importer reads the cooked rig rather than walking the glTF",
+                    staticReport is { Mode: AssetLoadMode.Cooked });
+                t.Expect("and hands over the static layout, not the skinned one",
+                    asStatic.Primitives.Length > 0 && asStatic.Primitives.All(p => p.Mesh.Layout.Stride == 32),
+                    string.Join(",", asStatic.Primitives.Select(p => p.Mesh.Layout.Stride).Distinct()));
             }
             finally
             {
