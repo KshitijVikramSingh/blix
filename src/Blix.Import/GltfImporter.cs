@@ -10,7 +10,7 @@ namespace Blix.Import;
 
 // Loads a .glb / .gltf file and decodes it into engine-shaped types: skinned
 // `GltfPrimitive[]` (each with vertex layout VertexPosition3NormalTextureSkin4Tangent
-// + a `GltfMaterial` carrying baseColor/normal/metallic-roughness textures), a
+// + a `PbrMaterial` carrying baseColor/normal/metallic-roughness textures), a
 // `GltfSkinBinding[]` with parent-first skeletons and placement transforms, and one
 // `AnimationClip` per glTF animation that touches the shared joint ordering. It also
 // preserves joint attachments and independent static parts from the same file.
@@ -110,10 +110,10 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         // unique source image in parallel before walking primitives -- PNG/JPEG
         // decode is the dominant cost for heavy assets. Same pattern as the
         // static importer; see GltfStaticImporter.PreDecodeImages for rationale.
-        var textureCache = new Dictionary<int, GltfTexture>();
+        var textureCache = new Dictionary<int, TextureData>();
         var gltfDir = Path.GetDirectoryName(Path.GetFullPath(context.SourcePath)) ?? string.Empty;
         GltfShared.PreDecodeImages(model, textureCache, gltfDir, context.SourcePath);
-        var materialCache = new Dictionary<int, GltfMaterial>();
+        var materialCache = new Dictionary<int, PbrMaterial>();
         var primitivesList = new List<GltfPrimitive>();
         var bindings = new List<GltfSkinBinding>();
         var remapsBySkin = new List<int[]>();
@@ -308,8 +308,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         ModelRoot model,
         Skin skin,
         int[] oldToNew,
-        Dictionary<int, GltfMaterial> materialCache,
-        Dictionary<int, GltfTexture> textureCache,
+        Dictionary<int, PbrMaterial> materialCache,
+        Dictionary<int, TextureData> textureCache,
         string containerPath)
     {
         var jointToSkinIndex = new Dictionary<Node, int>();
@@ -367,7 +367,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
     /// read tangent, colour and the second set; skinned ones read the skinning pairs as well. Public for
     /// the cook, which records what it did not read.
     /// </summary>
-    public static GltfIgnored[] UnreadAttributes(ModelRoot model)
+    public static UnreadAttribute[] UnreadAttributes(ModelRoot model)
     {
         ArgumentNullException.ThrowIfNull(model);
         return GltfShared.CollectIgnored(model.LogicalNodes

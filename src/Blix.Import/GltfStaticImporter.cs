@@ -44,8 +44,8 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         var model = AssetImportException.Refusing(
             context.SourcePath, () => ModelRoot.Load(context.SourcePath));
 
-        var textureCache = new Dictionary<int, GltfTexture>();
-        var materialCache = new Dictionary<int, GltfMaterial>();
+        var textureCache = new Dictionary<int, TextureData>();
+        var materialCache = new Dictionary<int, PbrMaterial>();
         var primitives = new List<GltfPrimitive>();
 
         // Parallel texture decode. PNG/JPEG decode via StbImageSharp is the
@@ -126,8 +126,8 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         RefuseCooked(context);
         var model = AssetImportException.Refusing(context.SourcePath, () => ModelRoot.Load(context.SourcePath));
         var gltfDir = Path.GetDirectoryName(Path.GetFullPath(context.SourcePath)) ?? string.Empty;
-        var textureCache = new Dictionary<int, GltfTexture>();
-        var materialCache = new Dictionary<int, GltfMaterial>();
+        var textureCache = new Dictionary<int, TextureData>();
+        var materialCache = new Dictionary<int, PbrMaterial>();
         GltfShared.PreDecodeImages(model, textureCache, gltfDir, context.SourcePath);
 
         var glNodes = model.LogicalNodes.ToList();

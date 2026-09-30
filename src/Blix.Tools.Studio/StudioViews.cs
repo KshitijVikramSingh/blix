@@ -9,8 +9,8 @@ namespace Blix.Tools.Studio;
 internal static class StudioAlpha
 {
     /// <summary>The cutout threshold for MASK; zero for modes where glTF alphaCutoff has no meaning.</summary>
-    public static float CutoffFor(GltfAlphaMode mode, float cutoff) =>
-        mode == GltfAlphaMode.Mask ? cutoff : 0f;
+    public static float CutoffFor(AlphaMode mode, float cutoff) =>
+        mode == AlphaMode.Mask ? cutoff : 0f;
 
     /// <summary>
     /// Whether a part is drawn in the blended group: last, and not into the shadow map.
@@ -19,7 +19,7 @@ internal static class StudioAlpha
     /// Blended parts follow opaque parts but retain asset order within their group. Studio does not
     /// claim depth-correct ordering for overlapping transparent parts.
     /// </remarks>
-    public static bool IsBlended(GltfAlphaMode mode) => mode == GltfAlphaMode.Blend;
+    public static bool IsBlended(AlphaMode mode) => mode == AlphaMode.Blend;
 }
 
 /// <summary>A static glTF on the stage, placed by its authored node hierarchy.</summary>

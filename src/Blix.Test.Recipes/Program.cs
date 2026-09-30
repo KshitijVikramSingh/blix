@@ -170,7 +170,7 @@ public static class Program
             MeshRecipe.CookToBlixMesh(cube, Path.ChangeExtension(cube, ".blixmesh"));
             var morphs = Blix.ModelData.Load(Path.ChangeExtension(cube, ".blixmesh")).Ignored;
             t.Expect("a cooked file records the source attributes its cook did not carry (morph targets)",
-                morphs.Any(i => i.Semantic == Blix.GltfIgnored.MorphTargets), string.Join(",", morphs.Select(i => i.Semantic)));
+                morphs.Any(i => i.Semantic == Blix.UnreadAttribute.MorphTargets), string.Join(",", morphs.Select(i => i.Semantic)));
 
             var uv = Path.Combine(temp, "MultiUVTest.gltf");
             foreach (var f in Directory.EnumerateFiles(Path.GetDirectoryName(multiUv)!)) File.Copy(f, Path.Combine(temp, Path.GetFileName(f)), true);
@@ -1348,9 +1348,9 @@ public static class Program
 
         // ── a texture's identity is the same across independent loads ───────
         // <b>Every upload cache in this tree is keyed by the OBJECT, so nothing can be shared.</b>
-        // GltfTexture is a class with no value equality — its own comment says the cost "nothing
+        // TextureData is a class with no value equality — its own comment says the cost "nothing
         // relied on" — so two imports of one file produce two instances and upload the same pixels
-        // twice, by construction. Three owners hand-roll that key: the engine's GltfTextureLoader,
+        // twice, by construction. Three owners hand-roll that key: the engine's MaterialTextureLoader,
         // the studio, and VulkanSponza.
         //
         // ResourceId is the fix's foundation, and the only thing worth asserting about it is that
@@ -1402,8 +1402,8 @@ public static class Program
         Blix.Graphics.TextureHandle Fake() { uploads++; return default; }
 
         var pixels = new byte[] { 1, 2, 3, 4 };
-        var sameA = Blix.GltfTexture.Rgba8Single("a", pixels, 1, 1, "/assets/x.png");
-        var sameB = Blix.GltfTexture.Rgba8Single("a-again", pixels, 1, 1, "/assets/x.png");
+        var sameA = Blix.TextureData.Rgba8Single("a", pixels, 1, 1, "/assets/x.png");
+        var sameB = Blix.TextureData.Rgba8Single("a-again", pixels, 1, 1, "/assets/x.png");
 
         registry.GetOrAdd(sameA, Blix.Graphics.TextureFormat.Rgba8Srgb, Fake);
         registry.GetOrAdd(sameB, Blix.Graphics.TextureFormat.Rgba8Srgb, Fake);
@@ -1417,8 +1417,8 @@ public static class Program
 
         // Unidentified textures keep the old behaviour exactly: deduplicated per object, never
         // shared with anything else, and never counted as resident bytes.
-        var anonA = Blix.GltfTexture.Rgba8Single("anon", pixels, 1, 1);
-        var anonB = Blix.GltfTexture.Rgba8Single("anon", pixels, 1, 1);
+        var anonA = Blix.TextureData.Rgba8Single("anon", pixels, 1, 1);
+        var anonB = Blix.TextureData.Rgba8Single("anon", pixels, 1, 1);
         registry.GetOrAdd(anonA, Blix.Graphics.TextureFormat.Rgba8Srgb, Fake);
         registry.GetOrAdd(anonA, Blix.Graphics.TextureFormat.Rgba8Srgb, Fake);
         registry.GetOrAdd(anonB, Blix.Graphics.TextureFormat.Rgba8Srgb, Fake);

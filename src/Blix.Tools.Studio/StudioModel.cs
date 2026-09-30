@@ -33,7 +33,7 @@ internal sealed class StudioModel : IDisposable
         int AlbedoUvSet = 0,
         /// <summary>The material's <c>baseColorFactor.a</c>, which the cutout test multiplies in.</summary>
         float BaseAlpha = 1f,
-        GltfAlphaMode AlphaMode = GltfAlphaMode.Opaque,
+        AlphaMode AlphaMode = AlphaMode.Opaque,
         float AlphaCutoff = 0.5f,
         bool DoubleSided = false,
         /// <summary>The material's own name, which is often the only colour information a kit ships.</summary>
@@ -42,7 +42,7 @@ internal sealed class StudioModel : IDisposable
         string MaterialName = "");
 
     private Model model = null!;
-    private GltfTextureLoader textures = null!;
+    private MaterialTextureLoader textures = null!;
     private readonly List<Part> parts = new();
 
     /// <summary>The engine model this draws.</summary>
@@ -59,7 +59,7 @@ internal sealed class StudioModel : IDisposable
         var data = ModelData.Load(Blix.Recipes.CookCache.Resolve(path), new ModelNeeds(Colour: true, Skinned: false));
 
         var studio = new StudioModel();
-        studio.textures = new GltfTextureLoader(device);
+        studio.textures = new MaterialTextureLoader(device);
         studio.model = device.CreateModel(data, studio.textures, $"lab.{Path.GetFileNameWithoutExtension(path)}");
         // Realised now, not streamed: an inspector shows the asset as it is from the first frame.
         studio.textures.Drain(double.PositiveInfinity);
@@ -73,7 +73,7 @@ internal sealed class StudioModel : IDisposable
                 m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness, StudioSurface.Of(m, p.Textures),
                 AlbedoUvSet: m?.BaseColorTexCoord ?? 0,
                 BaseAlpha: m?.BaseColorFactor.W ?? 1f,
-                AlphaMode: m?.AlphaMode ?? GltfAlphaMode.Opaque,
+                AlphaMode: m?.AlphaMode ?? AlphaMode.Opaque,
                 AlphaCutoff: m?.AlphaCutoff ?? 0.5f,
                 DoubleSided: m?.DoubleSided ?? false,
                 MaterialName: m?.Name ?? string.Empty));

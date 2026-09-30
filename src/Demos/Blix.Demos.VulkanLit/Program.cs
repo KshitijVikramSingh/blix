@@ -79,9 +79,9 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
     // Albedo textures + materials.
     private TextureHandle albedoTexture;
     private TextureHandle cesiumAlbedoTexture;
-    // The engine's texture loader, which knows BOTH shapes a GltfTexture arrives in. See the
+    // The engine's texture loader, which knows BOTH shapes a TextureData arrives in. See the
     // comment at its one call site for why this demo stopped resolving its own.
-    private GltfTextureLoader textureLoader = null!;
+    private MaterialTextureLoader textureLoader = null!;
     private MaterialHandle cubeMaterial;
     private MaterialHandle groundMaterial;
     private MaterialHandle cesiumSkinMaterial;   // set 2 (per-material)
@@ -349,16 +349,16 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         // <b>This demo used to resolve its own albedo, and lost the character's texture the first
         // time anything cooked its assets.</b> The csproj declares CookMesh over Assets/models, so
         // a build writes cesium_man.textures/image_0.blixtex beside the .glb; GltfShared then
-        // PREFERS that cooked sibling and hands back a GltfTexture carrying a LazyHandle rather
+        // PREFERS that cooked sibling and hands back a TextureData carrying a LazyHandle rather
         // than MipBytes, in a BC format rather than Rgba8. The local loader tested for MipBytes
         // and Rgba8, matched neither, and returned its neutral fallback -- so Cesium Man went
         // quietly cream-coloured, with no error and nothing in the log.
         //
-        // GltfTextureLoader already handles both shapes: MipBytes uploads directly, LazyHandle
+        // MaterialTextureLoader already handles both shapes: MipBytes uploads directly, LazyHandle
         // allocates the chain and queues per-mip uploads to drain across later frames. Resolving
         // textures is the asset layer's job and this demo had no business having an opinion about
         // it, least of all a partial one.
-        textureLoader = new GltfTextureLoader(device);
+        textureLoader = new MaterialTextureLoader(device);
         cesiumAlbedoTexture = textureLoader.Load(prim.Material).Albedo;
 
         // --- Render graph ------------------------------------------------

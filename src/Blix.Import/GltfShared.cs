@@ -33,7 +33,7 @@ internal static class GltfShared
 
     internal static void PreDecodeImages(
         ModelRoot model,
-        Dictionary<int, GltfTexture> textureCache,
+        Dictionary<int, TextureData> textureCache,
         string gltfDir,
         string containerPath = "")
     {
@@ -93,7 +93,7 @@ internal static class GltfShared
             // the upload queue requests each mip, avoiding an all-textures CPU-byte working set.
             var one = System.Diagnostics.Stopwatch.StartNew();
             var handle = BlixTexReader.ReadHandle(path);
-            textureCache[idx] = new GltfTexture(Path.GetFileNameWithoutExtension(path), handle)
+            textureCache[idx] = new TextureData(Path.GetFileNameWithoutExtension(path), handle)
             {
                 ResourceId = Path.GetFullPath(path),
             };
@@ -118,7 +118,7 @@ internal static class GltfShared
 
         if (sourceImages.Count == 0) return;
 
-        var decoded = new System.Collections.Concurrent.ConcurrentDictionary<int, GltfTexture>();
+        var decoded = new System.Collections.Concurrent.ConcurrentDictionary<int, TextureData>();
         var decodeWatch = System.Diagnostics.Stopwatch.StartNew();
         System.Threading.Tasks.Parallel.ForEach(sourceImages, image =>
         {
@@ -128,7 +128,7 @@ internal static class GltfShared
             var d = mrImageIndices.Contains(image.LogicalIndex)
                 ? ImageLoader.LoadMetallicRoughness(stream)
                 : ImageLoader.LoadRgba32(stream);
-            decoded[image.LogicalIndex] = GltfTexture.Rgba8Single(
+            decoded[image.LogicalIndex] = TextureData.Rgba8Single(
                 image.Name ?? $"image_{image.LogicalIndex}",
                 d.Pixels, d.Width, d.Height,
                 ImageIdentity(image, containerPath, gltfDir));
@@ -203,7 +203,7 @@ internal static class GltfShared
     /// are opt-in on static imports, while the rigged layout always reads tangents and every
     /// contiguous complete JOINTS/WEIGHTS pair before reducing influences to its strongest four.
     /// </remarks>
-    internal static GltfIgnored[] CollectIgnored(ModelRoot model, VertexFeatures features)
+    internal static UnreadAttribute[] CollectIgnored(ModelRoot model, VertexFeatures features)
     {
         ArgumentNullException.ThrowIfNull(model);
         return CollectIgnored(model.LogicalMeshes.SelectMany(
@@ -218,7 +218,7 @@ internal static class GltfShared
     /// and attachments. A primitive used by two different output layouts is audited once for each
     /// layout because either copy may drop a channel.
     /// </remarks>
-    internal static GltfIgnored[] CollectIgnored(
+    internal static UnreadAttribute[] CollectIgnored(
         IEnumerable<(MeshPrimitive Primitive, VertexFeatures Features)> reads)
     {
         ArgumentNullException.ThrowIfNull(reads);
@@ -233,16 +233,16 @@ internal static class GltfShared
 
             if (prim.MorphTargetsCount > 0)
             {
-                counts[GltfIgnored.MorphTargets] = counts.GetValueOrDefault(GltfIgnored.MorphTargets) + 1;
+                counts[UnreadAttribute.MorphTargets] = counts.GetValueOrDefault(UnreadAttribute.MorphTargets) + 1;
             }
         }
 
-        if (counts.Count == 0) return Array.Empty<GltfIgnored>();
+        if (counts.Count == 0) return Array.Empty<UnreadAttribute>();
 
         // Deterministic order, with skin-influence diagnostics first because they are the strongest
         // signal that a static caller may have chosen the wrong importer.
         return counts
-            .Select(kv => new GltfIgnored(kv.Key, kv.Value))
+            .Select(kv => new UnreadAttribute(kv.Key, kv.Value))
             .OrderByDescending(i => i.Semantic.StartsWith("JOINTS_", StringComparison.Ordinal)
                                  || i.Semantic.StartsWith("WEIGHTS_", StringComparison.Ordinal))
             .ThenBy(i => i.Semantic, StringComparer.Ordinal)
@@ -327,10 +327,10 @@ internal static class GltfShared
     /// earlier and more usefully than an exception here would.
     /// </para>
     /// </remarks>
-    internal static GltfMaterial? ExtractMaterial(
+    internal static PbrMaterial? ExtractMaterial(
         SharpGLTF.Schema2.Material? material,
-        Dictionary<int, GltfMaterial> materialCache,
-        Dictionary<int, GltfTexture> textureCache,
+        Dictionary<int, PbrMaterial> materialCache,
+        Dictionary<int, TextureData> textureCache,
         string containerPath = "")
     {
         if (material is null) return null;
@@ -361,7 +361,7 @@ internal static class GltfShared
         var metallicChannel = material.FindChannel("MetallicRoughness");
         var metallic = 1.0f;
         var roughness = 1.0f;
-        GltfTexture? metallicRoughnessTexture = null;
+        TextureData? metallicRoughnessTexture = null;
         if (metallicChannel.HasValue)
         {
             foreach (var p in metallicChannel.Value.Parameters)
@@ -374,7 +374,7 @@ internal static class GltfShared
 
         var occlusionChannel = material.FindChannel("Occlusion");
         var occlusionStrength = 1.0f;
-        GltfTexture? occlusionTexture = null;
+        TextureData? occlusionTexture = null;
         if (occlusionChannel.HasValue)
         {
             foreach (var p in occlusionChannel.Value.Parameters)
@@ -388,7 +388,7 @@ internal static class GltfShared
         var emissiveChannel = material.FindChannel("Emissive");
         var emissiveFactor = Vector3.Zero;
         var emissiveStrength = 1.0f;
-        GltfTexture? emissiveTexture = null;
+        TextureData? emissiveTexture = null;
         if (emissiveChannel.HasValue)
         {
             var c = emissiveChannel.Value.Color;
@@ -404,10 +404,10 @@ internal static class GltfShared
 
         var alphaMode = material.Alpha switch
         {
-            SharpGLTF.Schema2.AlphaMode.OPAQUE => GltfAlphaMode.Opaque,
-            SharpGLTF.Schema2.AlphaMode.MASK   => GltfAlphaMode.Mask,
-            SharpGLTF.Schema2.AlphaMode.BLEND  => GltfAlphaMode.Blend,
-            _                                  => GltfAlphaMode.Opaque,
+            SharpGLTF.Schema2.AlphaMode.OPAQUE => AlphaMode.Opaque,
+            SharpGLTF.Schema2.AlphaMode.MASK   => AlphaMode.Mask,
+            SharpGLTF.Schema2.AlphaMode.BLEND  => AlphaMode.Blend,
+            _                                  => AlphaMode.Opaque,
         };
 
         // Read the KHR_materials_* surface exposed by SharpGLTF by channel and parameter name. A
@@ -417,8 +417,8 @@ internal static class GltfShared
         var ext = ExtractMaterialExtensions(material, textureCache);
         var transmission = ext.TransmissionFactor;
 
-        var result = new GltfMaterial(
-            GltfMaterial.IdentityOf(containerPath, material.LogicalIndex),
+        var result = new PbrMaterial(
+            PbrMaterial.IdentityOf(containerPath, material.LogicalIndex),
             material.Name ?? $"material_{material.LogicalIndex}",
             baseColorFactor,
             baseColorTexture,
@@ -457,11 +457,11 @@ internal static class GltfShared
     /// turned off. Writing zeros here would silently author a different material for every asset in
     /// existence that declines to mention these.
     /// </remarks>
-    private static GltfMaterialExtensions ExtractMaterialExtensions(
+    private static PbrMaterialExtensions ExtractMaterialExtensions(
         SharpGLTF.Schema2.Material material,
-        Dictionary<int, GltfTexture> textureCache)
+        Dictionary<int, TextureData> textureCache)
     {
-        var e = GltfMaterialExtensions.None;
+        var e = PbrMaterialExtensions.None;
 
         float Param(string channel, string name, float fallback)
         {
@@ -478,7 +478,7 @@ internal static class GltfShared
             var col = c.Value.Color;
             return new Vector3(col.X, col.Y, col.Z);
         }
-        GltfTexture? Tex(string channel)
+        TextureData? Tex(string channel)
         {
             var c = material.FindChannel(channel);
             return c.HasValue ? ExtractTexture(c.Value.Texture, textureCache) : null;
@@ -535,9 +535,9 @@ internal static class GltfShared
         };
     }
 
-    internal static GltfTexture? ExtractTexture(
+    internal static TextureData? ExtractTexture(
         SharpGLTF.Schema2.Texture? texture,
-        Dictionary<int, GltfTexture> textureCache)
+        Dictionary<int, TextureData> textureCache)
     {
         if (texture is null) return null;
         var image = texture.PrimaryImage;
@@ -548,7 +548,7 @@ internal static class GltfShared
         using var stream = new MemoryStream(bytes.ToArray());
         var decoded = ImageLoader.LoadRgba32(stream);
 
-        var result = GltfTexture.Rgba8Single(
+        var result = TextureData.Rgba8Single(
             image.Name ?? texture.Name ?? $"image_{image.LogicalIndex}",
             decoded.Pixels, decoded.Width, decoded.Height,
             ImageIdentity(image, containerPath: string.Empty, gltfDir: null));

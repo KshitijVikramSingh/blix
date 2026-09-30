@@ -12,7 +12,7 @@ namespace Blix;
 /// </remarks>
 /// <param name="Semantic">The glTF attribute name, verbatim — <c>TEXCOORD_1</c>, <c>_BATCHID</c>.</param>
 /// <param name="Primitives">How many imported primitive/layout pairs declared it.</param>
-public sealed record GltfIgnored(string Semantic, int Primitives)
+public sealed record UnreadAttribute(string Semantic, int Primitives)
 {
     /// <summary>What the unread attribute represents.</summary>
     public string Explanation => Semantic switch

@@ -12,7 +12,7 @@ namespace Blix;
 public static class ResidencyExtensions
 {
     /// <param name="name">What its GPU resources are named under, for the resource tables and validation.</param>
-    public static Model CreateModel(this IGraphicsDevice device, ModelData model, GltfTextureLoader textures, string name)
+    public static Model CreateModel(this IGraphicsDevice device, ModelData model, MaterialTextureLoader textures, string name)
     {
         ArgumentNullException.ThrowIfNull(device);
         ArgumentNullException.ThrowIfNull(model);

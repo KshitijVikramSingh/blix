@@ -45,7 +45,7 @@ public sealed class Model : IDisposable
 
     /// <summary>One uploaded primitive, in its mesh's space, placed by <see cref="NodeIndex"/>.</summary>
     /// <param name="SkinIndex">The skin that deforms it, or -1 for a static part.</param>
-    public sealed record Part(int NodeIndex, Mesh Mesh, GltfMaterial? Material, MaterialTextures Textures, int SkinIndex = -1);
+    public sealed record Part(int NodeIndex, Mesh Mesh, PbrMaterial? Material, MaterialTextures Textures, int SkinIndex = -1);
 
     /// <summary>One skin: the skeleton it poses and where its geometry sits.</summary>
     public sealed record Skin(Skeleton Skeleton, Matrix4x4 MeshNodeTransform);
@@ -92,7 +92,7 @@ public sealed class Model : IDisposable
     public Matrix4x4 MeshNodeTransform => RequireSkin().MeshNodeTransform;
 
     /// <summary>The source's vertex attributes its cook did not carry, with its reasons.</summary>
-    public IReadOnlyList<GltfIgnored> Ignored { get; private set; } = Array.Empty<GltfIgnored>();
+    public IReadOnlyList<UnreadAttribute> Ignored { get; private set; } = Array.Empty<UnreadAttribute>();
 
     /// <summary>Every clip in the file, ordered by name so two runs list them the same way.</summary>
     public IReadOnlyList<AnimationClip> Clips { get; private set; } = Array.Empty<AnimationClip>();
@@ -196,7 +196,7 @@ public sealed class Model : IDisposable
             nodes[part.NodeIndex].World * placement);
     }
 
-    internal static Model Load(IGraphicsDevice device, ModelData source, GltfTextureLoader textures, string name)
+    internal static Model Load(IGraphicsDevice device, ModelData source, MaterialTextureLoader textures, string name)
     {
         var model = new Model(device, name);
         var world = source.World;

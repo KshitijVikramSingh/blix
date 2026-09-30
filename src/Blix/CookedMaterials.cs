@@ -8,7 +8,7 @@ namespace Blix;
 /// <summary>A cooked mesh's materials and images, read from its own tables: no source involved.</summary>
 /// <remarks>
 /// The engine's half of what the glTF importers used to share: a cooked file's image table resolved
-/// to textures, and its material rows to <see cref="GltfMaterial"/>s. Parsing a source's materials is
+/// to textures, and its material rows to <see cref="PbrMaterial"/>s. Parsing a source's materials is
 /// the cook's, in Blix.Import.
 /// </remarks>
 internal static class CookedMaterials
@@ -36,7 +36,7 @@ internal static class CookedMaterials
         IReadOnlyList<BlixMeshImage> images,
         IReadOnlyList<BlixMeshMaterial> materials,
         string cookedDir,
-        Dictionary<int, GltfTexture> textureCache)
+        Dictionary<int, TextureData> textureCache)
     {
         if (images.Count == 0) return;
 
@@ -73,7 +73,7 @@ internal static class CookedMaterials
 
             if (path.EndsWith(".blixtex", StringComparison.OrdinalIgnoreCase))
             {
-                textureCache[row] = new GltfTexture(entry.Name, BlixTexReader.ReadHandle(path))
+                textureCache[row] = new TextureData(entry.Name, BlixTexReader.ReadHandle(path))
                 {
                     ResourceId = path,
                 };
@@ -94,7 +94,7 @@ internal static class CookedMaterials
                 var d = metallicRoughnessRows.Contains(row)
                     ? ImageLoader.LoadMetallicRoughness(stream)
                     : ImageLoader.LoadRgba32(stream);
-                textureCache[row] = GltfTexture.Rgba8Single(entry.Name, d.Pixels, d.Width, d.Height, path);
+                textureCache[row] = TextureData.Rgba8Single(entry.Name, d.Pixels, d.Width, d.Height, path);
             }
 
             decodedCount++;
@@ -118,19 +118,19 @@ internal static class CookedMaterials
     }
 
 
-    internal static GltfMaterial? MaterialFromCooked(
+    internal static PbrMaterial? MaterialFromCooked(
         IReadOnlyList<BlixMeshMaterial> materials,
         int index,
-        Dictionary<int, GltfMaterial> materialCache,
-        Dictionary<int, GltfTexture> textureCache,
+        Dictionary<int, PbrMaterial> materialCache,
+        Dictionary<int, TextureData> textureCache,
         string cookedPath = "")
     {
         if (index < 0 || index >= materials.Count) return null;
         if (materialCache.TryGetValue(index, out var cached)) return cached;
 
         var m = materials[index];
-        var result = new GltfMaterial(
-            GltfMaterial.IdentityOf(cookedPath, index),
+        var result = new PbrMaterial(
+            PbrMaterial.IdentityOf(cookedPath, index),
             m.Name,
             m.BaseColorFactor,
             Texture(m.BaseColorImage),
@@ -151,9 +151,9 @@ internal static class CookedMaterials
             m.EmissiveStrength,
             m.AlphaMode switch
             {
-                BlixMesh.AlphaMask => GltfAlphaMode.Mask,
-                BlixMesh.AlphaBlend => GltfAlphaMode.Blend,
-                _ => GltfAlphaMode.Opaque,
+                BlixMesh.AlphaMask => AlphaMode.Mask,
+                BlixMesh.AlphaBlend => AlphaMode.Blend,
+                _ => AlphaMode.Opaque,
             },
             m.AlphaCutoff,
             m.DoubleSided,
@@ -165,15 +165,15 @@ internal static class CookedMaterials
         materialCache[index] = result;
         return result;
 
-        GltfTexture? Texture(int image) =>
+        TextureData? Texture(int image) =>
             image >= 0 && textureCache.TryGetValue(image, out var t) ? t : null;
     }
 
 
     /// <summary>The cooked <c>KHR_materials_*</c> block as the engine's, with images resolved.</summary>
-    private static GltfMaterialExtensions CookedExtensions(
+    private static PbrMaterialExtensions CookedExtensions(
         Blix.Assets.BlixMaterialExtensions x,
-        Func<int, GltfTexture?> texture) => new(
+        Func<int, TextureData?> texture) => new(
             TransmissionFactor: x.TransmissionFactor,
             TransmissionTexture: texture(x.TransmissionImage),
             DiffuseTransmissionFactor: x.DiffuseTransmissionFactor,

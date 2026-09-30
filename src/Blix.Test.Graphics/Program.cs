@@ -3891,13 +3891,13 @@ static ShaderInterface MinimalShader() => new(new[]
         t.ExpectTrue("BA.3 a second UV set explains itself as a missing capability",
             uv1.Explanation.Contains("UV", StringComparison.Ordinal));
 
-        var joints1 = new GltfIgnored("JOINTS_1", 3);
+        var joints1 = new UnreadAttribute("JOINTS_1", 3);
         t.ExpectTrue($"BA.3 JOINTS_1 distinguishes static omission from rigged consumption ({joints1.Explanation})",
             joints1.Explanation.Contains("static", StringComparison.Ordinal)
             && joints1.Explanation.Contains("rigged", StringComparison.Ordinal));
 
         t.ExpectTrue("BA.3 and an underscore attribute is named as application-specific",
-            new GltfIgnored("_BATCHID", 1).Explanation.Contains("application-specific", StringComparison.Ordinal));
+            new UnreadAttribute("_BATCHID", 1).Explanation.Contains("application-specific", StringComparison.Ordinal));
 
         // ── BA.4 likely importer-mode mistakes come first ───────────────────
         // A skin channel on a static import is the strongest signal that the caller chose the wrong
@@ -5665,9 +5665,9 @@ static ShaderInterface MinimalShader() => new(new[]
         () => new[] { (a, Matrix4x4.Identity), (other, Matrix4x4.Identity) }.Merge("mixed"), mustMention: "layout");
 
     // A parent translated by +10 on X with a child translated by +1: the child's world is +11, child first.
-    static GltfMaterial Plain(string id, string name) => new(
+    static PbrMaterial Plain(string id, string name) => new(
         id, name, Vector4.One, null, 0, null, 0, 1f, null, 0, 0f, 0.7f, null, 0, 1f, null, 0, Vector3.Zero, 1f,
-        GltfAlphaMode.Opaque, 0.5f, false);
+        AlphaMode.Opaque, 0.5f, false);
     var red = Plain("t#material0", "red");
     var blue = Plain("t#material1", "blue");
     var nodes = new GltfNodeModel(new[]

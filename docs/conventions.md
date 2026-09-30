@@ -157,7 +157,7 @@ symmetry) and **AH.7** (`WorldMatrix` through the GLSL `M*v` path).
 - **Raw is source; cooked is runtime-optimized.** The cooked formats
   (`.blixmesh` / `.blixtex` / `.blixprobe`) are the runtime path for the heavy
   streaming target — produced by the cook tool, streamed through
-  `GltfTextureLoader` + `AsyncLoadQueue` + `MeshBundler`. `VulkanSponza` is the
+  `MaterialTextureLoader` + `AsyncLoadQueue` + `MeshBundler`. `VulkanSponza` is the
   reference.
 - **Importers normalize at the boundary, explicitly.** Authored offsets are
   baked out at import (`ObjImporter.RecenterToOrigin`), not carried as a runtime
@@ -345,7 +345,7 @@ Two more of the same kind, both from the glTF importer:
 
 **Enforced by:** `Blix.Test.Graphics` Section **AZ** (colour is opt-in; the default path
 is byte-identical) · Section **BB** (every skin read, each with its own remap) ·
-`GltfIgnored` (what the engine did not read, said out loud rather than decided quietly).
+`UnreadAttribute` (what the engine did not read, said out loud rather than decided quietly).
 
 ---
 

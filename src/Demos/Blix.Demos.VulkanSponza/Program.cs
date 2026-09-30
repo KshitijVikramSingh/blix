@@ -32,7 +32,7 @@ namespace Blix.Demos.VulkanSponza;
 // Missing-asset startup prints the setup instruction and exits cleanly.
 //
 // ── Executable spec for (engine primitives this demo proves) ──
-//   • Cooked-asset pipeline: .blixmesh/.blixtex/.blixprobe via GltfTextureLoader
+//   • Cooked-asset pipeline: .blixmesh/.blixtex/.blixprobe via MaterialTextureLoader
 //     + AsyncLoadQueue + MeshBundler (one shared VB/IB, draws are sub-ranges)
 //   • GPU-driven indirect draw, screen-space-error LOD over meshopt chains
 //   • RenderGraph at scale: graphics + compute, history reads, cascaded shadows,
@@ -306,7 +306,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // until they finish, the geometry renders flat (lit.vert + flat.frag, no
     // material textures sampled) and shadows/IBL/fog are skipped. The full
     // lit+shadow loop starts once textureLoader.PendingCount hits 0.
-    private GltfTextureLoader textureLoader = null!;
+    private MaterialTextureLoader textureLoader = null!;
     private ShaderProgramHandle flatProgram;
     private PipelineHandle flatPipeline;
     private bool fullyLoaded; // textures all streamed → full render path

@@ -226,7 +226,7 @@ public static class Program
     {
         // The source side carries a resolved texture rather than a table row -- see Img() in the
         // cooked report for why either is worth printing at all.
-        static string Tex(Blix.GltfTexture? t) => t is null ? string.Empty : $" tex:{t.Name}";
+        static string Tex(Blix.TextureData? t) => t is null ? string.Empty : $" tex:{t.Name}";
 
         var seen = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         foreach (var prim in primitives)

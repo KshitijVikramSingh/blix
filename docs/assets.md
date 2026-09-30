@@ -336,7 +336,7 @@ material-preserving OBJ shape. Both validate the vertex-affecting `recenter`
 setting before accepting a sibling. `FontImporter` similarly prefers
 `.blixfont` and otherwise rasterizes the declared TTF sizes.
 
-`GltfIgnored` is a per-import-layout diagnostic. Static imports account for the
+`UnreadAttribute` is a per-import-layout diagnostic. Static imports account for the
 selected tangent or colour/second-UV layout, and rigged imports account for
 contiguous complete influence pairs as well as coloured static parts in the
 same file. The sweep remains subtractive, so unknown application semantics are
@@ -389,12 +389,12 @@ first, then progressively finer levels, and drains work on the render thread.
 The lazy path reads each mip's bytes only when that upload is processed, keeping
 load-time CPU memory bounded.
 
-`GltfTexture.ReleaseCpuMipBytes()` can drop an eager texture's retained byte
+`TextureData.ReleaseCpuMipBytes()` can drop an eager texture's retained byte
 arrays after downstream upload work has captured them, but no current runtime
 caller invokes it. Eager source-decoded textures therefore keep their CPU bytes
-for the lifetime of the `GltfTexture` today.
+for the lifetime of the `TextureData` today.
 
-`GltfTextureLoader` composes that mechanism with glTF policy:
+`MaterialTextureLoader` composes that mechanism with glTF policy:
 
 - base-colour and emissive slots use sRGB formats;
 - normal, metallic/roughness, and occlusion slots use linear formats;
@@ -403,7 +403,7 @@ for the lifetime of the `GltfTexture` today.
   mips over later drains; and
 - source-decoded images take the eager upload path.
 
-Applications call `GltfTextureLoader.Drain(budgetMillis)` from the render loop
+Applications call `MaterialTextureLoader.Drain(budgetMillis)` from the render loop
 and use `PendingCount` to decide when full-detail rendering is ready. The handle
 identity does not change as finer mips arrive. Unuploaded levels are undefined
 and the uploader does not clamp sampler LOD, so current applications hold their
@@ -424,13 +424,13 @@ Textures without a reproducible resource identity fall back to object identity;
 they can deduplicate within one object graph but cannot safely share across
 imports.
 
-A `GltfTextureLoader` creates a private registry unless the caller passes one.
+A `MaterialTextureLoader` creates a private registry unless the caller passes one.
 Sharing is explicit because it also chooses lifetime:
 
 ```csharp
 var shared = new TextureRegistry();
-var worldTextures = new GltfTextureLoader(device, shared);
-var previewTextures = new GltfTextureLoader(device, shared);
+var worldTextures = new MaterialTextureLoader(device, shared);
+var previewTextures = new MaterialTextureLoader(device, shared);
 ```
 
 The registry exposes resident count, identified resident bytes, unidentified
@@ -556,5 +556,5 @@ research decisions, not defaults for an ordinary Blix application.
 | IDs, manifests, and importers | `src/Blix.Assets/` |
 | Deferred CPU handoff | `src/Blix.Render/AsyncLoadQueue.cs` |
 | Budgeted GPU upload | `src/Blix.Render/ResourceUploader.cs` |
-| glTF texture policy and residency identity | `src/Blix/GltfTextureLoader.cs`, `TextureRegistry.cs` |
+| glTF texture policy and residency identity | `src/Blix/MaterialTextureLoader.cs`, `TextureRegistry.cs` |
 | Project-owned recipe fixture | `src/Blix.Test.ProjectRecipes/FixtureRecipe.cs`, `src/Blix.Test.Recipes/Program.cs` |

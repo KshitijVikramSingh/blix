@@ -327,7 +327,7 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
         // One mesh per primitive; all 12 share one skin material + one bone palette.
         var skinned = model.SkinnedPrimitives().ToArray();
         charMeshes = new Mesh[skinned.Length];
-        GltfTexture? albedo = null;
+        TextureData? albedo = null;
         for (var i = 0; i < skinned.Length; i++)
         {
             charMeshes[i] = device.CreateMesh(skinned[i].Mesh, $"rogue.{i}");
@@ -399,7 +399,7 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
         }
     }
 
-    private TextureHandle UploadAlbedo(GltfTexture? tex)
+    private TextureHandle UploadAlbedo(TextureData? tex)
     {
         if (tex?.MipBytes is { Count: > 0 } mips)
         {

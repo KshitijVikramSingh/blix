@@ -165,7 +165,7 @@ internal sealed partial class SponzaLoop
     // and queue its geometry. Each carries its own cooked LOD index chain and
     // selects a level by screen-space error; geometry is concatenated into the
     // shared VB/IB by ConsolidateBuffers, so a draw is just a sub-range.
-    // Materials are cached by GltfMaterial so primitives sharing a material reuse
+    // Materials are cached by PbrMaterial so primitives sharing a material reuse
     // one handle + descriptor set. Called incrementally (time-sliced) during the
     // streaming load — the material's texture read+upload is the bulk of the cost.
     private void StageDrawable(ModelData.Primitive prim)
@@ -181,9 +181,9 @@ internal sealed partial class SponzaLoop
             // Its alphaCutoff (set in BuildMaterial) drives the shader discard.
             var isBlend = (pm?.TransmissionFactor ?? 0f) > 0f;
             var material = GetMaterial(pm, out var albedo, out var alphaCutoff, out var baseColorAlpha);
-            var alphaMode = isBlend ? GltfAlphaMode.Blend
-                : alphaCutoff > 0f ? GltfAlphaMode.Mask
-                : (pm?.AlphaMode ?? GltfAlphaMode.Opaque);
+            var alphaMode = isBlend ? AlphaMode.Blend
+                : alphaCutoff > 0f ? AlphaMode.Mask
+                : (pm?.AlphaMode ?? AlphaMode.Opaque);
             var pipeline = PickPipeline(alphaMode, pm?.DoubleSided ?? false);
 
             sharedLayout = mesh.Layout; // uniform across packs (all cooked --tangents)
@@ -277,7 +277,7 @@ internal sealed partial class SponzaLoop
         Console.WriteLine($"[VulkanSponza] bundled geometry: 1 VB ({bundle.VertexCount} verts); {opaqueDrawables.Count} opaque + {blendDrawables.Count} blend draws; {opaqueGroups.Count} opaque indirect groups.");
     }
 
-    private MaterialHandle GetMaterial(GltfMaterial? gm, out TextureHandle albedo, out float alphaCutoff, out float baseColorAlpha)
+    private MaterialHandle GetMaterial(PbrMaterial? gm, out TextureHandle albedo, out float alphaCutoff, out float baseColorAlpha)
     {
         // An unidentifiable material is never cached — an identity nobody can reproduce is not one,
         // and a shared empty key would merge two unrelated materials into whichever built first.
@@ -306,7 +306,7 @@ internal sealed partial class SponzaLoop
     // MaterialParams (alphaCutoff, normalScale, roughness, metallic) UBO + the
     // five channel textures (defaults when a channel is absent).
     private MaterialHandle BuildMaterial(
-        GltfMaterial? gm, out TextureHandle albedo, out float alphaCutoff, out float baseColorAlpha)
+        PbrMaterial? gm, out TextureHandle albedo, out float alphaCutoff, out float baseColorAlpha)
     {
         // Engine resolves the five channel textures (read/decode/upload/dedup/
         // stream + glTF-default fallbacks + per-slot sRGB policy); the game keeps
@@ -321,8 +321,8 @@ internal sealed partial class SponzaLoop
         // as blend) is treated as cutout at 0.5 so it can depth-write + early-Z instead of
         // overdrawing. Transmissive keeps 0 → no discard, true alpha blend.
         alphaCutoff = (gm?.TransmissionFactor ?? 0f) > 0f ? 0.0f
-            : gm?.AlphaMode == GltfAlphaMode.Mask ? (gm?.AlphaCutoff ?? 0.5f)
-            : gm?.AlphaMode == GltfAlphaMode.Blend ? 0.5f
+            : gm?.AlphaMode == AlphaMode.Mask ? (gm?.AlphaCutoff ?? 0.5f)
+            : gm?.AlphaMode == AlphaMode.Blend ? 0.5f
             : 0.0f;
         // Measurement switch: a zero cutoff makes PickPipeline choose Opaque everywhere, which is
         // what takes the alpha sample out of the shadow casters and the pre-pass as well as the lit
@@ -334,7 +334,7 @@ internal sealed partial class SponzaLoop
         var metallic = gm?.MetallicFactor ?? 0.0f;
         var transmission = gm?.TransmissionFactor ?? 0f;
         // Cloth terms come from imported material extensions authored by the patch.
-        var ext = gm?.Ext ?? Blix.GltfMaterialExtensions.None;
+        var ext = gm?.Ext ?? Blix.PbrMaterialExtensions.None;
         var sheen = ext.SheenColorFactor;
         var sheenRoughness = ext.SheenRoughnessFactor;
         var diffuseTransmission = ext.DiffuseTransmissionFactor;
@@ -369,11 +369,11 @@ internal sealed partial class SponzaLoop
             .Handle;
     }
 
-    private PipelineHandle PickPipeline(GltfAlphaMode mode, bool doubleSided) =>
+    private PipelineHandle PickPipeline(AlphaMode mode, bool doubleSided) =>
         (mode, doubleSided) switch
         {
-            (GltfAlphaMode.Blend, true)  => blendDoubleSidedPipeline,
-            (GltfAlphaMode.Blend, false) => blendSolidPipeline,
+            (AlphaMode.Blend, true)  => blendDoubleSidedPipeline,
+            (AlphaMode.Blend, false) => blendSolidPipeline,
             (_, true)                    => opaqueDoubleSidedPipeline,
             _                            => opaqueSolidPipeline,
         };

@@ -25,7 +25,7 @@ public static class StudioInspection
     public const float FallbackRoughness = 0.7f;
 
     /// <summary>The colour Studio draws <paramref name="material"/> in: its base-colour factor, or <paramref name="fallback"/>.</summary>
-    public static Vector3 BaseColour(GltfMaterial? material, Vector3 fallback) =>
+    public static Vector3 BaseColour(PbrMaterial? material, Vector3 fallback) =>
         material is null
             ? fallback
             : new Vector3(material.BaseColorFactor.X, material.BaseColorFactor.Y, material.BaseColorFactor.Z);
@@ -45,7 +45,7 @@ public static class StudioInspection
     public static IReadOnlyList<Image> Images(Model model) =>
         Distinct(model.Parts.Select(p => (p.Material, p.Textures)));
 
-    private static IReadOnlyList<Image> Distinct(IEnumerable<(GltfMaterial? Material, MaterialTextures Textures)> parts)
+    private static IReadOnlyList<Image> Distinct(IEnumerable<(PbrMaterial? Material, MaterialTextures Textures)> parts)
     {
         var images = new List<Image>();
         foreach (var (material, textures) in parts)

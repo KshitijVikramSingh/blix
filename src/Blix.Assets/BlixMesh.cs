@@ -163,13 +163,13 @@ public sealed record BlixMeshMaterial(
 }
 
 /// <summary>
-/// The cooked mirror of <c>GltfMaterialExtensions</c>: every <c>KHR_materials_*</c> property.
+/// The cooked mirror of <c>PbrMaterialExtensions</c>: every <c>KHR_materials_*</c> property.
 /// </summary>
 /// <remarks>
 /// <para>
 /// A format type rather than the engine one, for the same reason <see cref="BlixMeshMaterial"/> is
-/// not <c>GltfMaterial</c>: the runtime types live in <c>Blix</c>, which references this assembly.
-/// The visible difference is textures — the engine carries a resolved <c>GltfTexture</c>, a file
+/// not <c>PbrMaterial</c>: the runtime types live in <c>Blix</c>, which references this assembly.
+/// The visible difference is textures — the engine carries a resolved <c>TextureData</c>, a file
 /// carries an INDEX into the image table, because a file cannot hold a decoded image and a path is
 /// the thing that survives being written down.
 /// </para>
@@ -221,7 +221,7 @@ public sealed record BlixMaterialExtensions(
 /// <summary>One bone of a cooked skeleton — the format's mirror of the runtime <c>Bone</c>.</summary>
 /// <remarks>
 /// A format type rather than the runtime one, for the same reason <see cref="BlixMeshMaterial"/> is
-/// not <c>GltfMaterial</c>: the runtime types live in <c>Blix</c>, which references this assembly,
+/// not <c>PbrMaterial</c>: the runtime types live in <c>Blix</c>, which references this assembly,
 /// and a format that reached back for them would invert that. The conversion is one constructor
 /// call at each end, and it is what keeps the file readable by a tool that does not load the engine.
 /// </remarks>

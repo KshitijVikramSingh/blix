@@ -8,7 +8,7 @@ namespace Blix;
 /// <remarks>
 /// <para>
 /// The key is (identity, format). Identity is
-/// <see cref="GltfTexture.ResourceId"/> — two loads of one file agree on it. Format is there because
+/// <see cref="TextureData.ResourceId"/> — two loads of one file agree on it. Format is there because
 /// one image can legitimately be resident twice: a base colour wants <c>Rgba8Srgb</c> and the same
 /// picture used as a normal map wants <c>Rgba8</c>, and those are different GPU textures. Keying on
 /// identity alone would hand a shader the wrong colour space; keying on the object gives up on both.
@@ -31,7 +31,7 @@ namespace Blix;
 public sealed class TextureRegistry
 {
     private readonly Dictionary<(string Id, TextureFormat Format), TextureHandle> byIdentity = new();
-    private readonly Dictionary<(GltfTexture Texture, TextureFormat Format), TextureHandle> byObject = new();
+    private readonly Dictionary<(TextureData Texture, TextureFormat Format), TextureHandle> byObject = new();
     private readonly Dictionary<(string Id, TextureFormat Format), long> bytes = new();
 
     /// <summary>Distinct textures resident on the GPU through this registry.</summary>
@@ -66,7 +66,7 @@ public sealed class TextureRegistry
     /// The handle for these pixels at this format, uploading through <paramref name="upload"/> only
     /// if they are not resident already.
     /// </summary>
-    public TextureHandle GetOrAdd(GltfTexture texture, TextureFormat format, Func<TextureHandle> upload)
+    public TextureHandle GetOrAdd(TextureData texture, TextureFormat format, Func<TextureHandle> upload)
     {
         ArgumentNullException.ThrowIfNull(texture);
         ArgumentNullException.ThrowIfNull(upload);

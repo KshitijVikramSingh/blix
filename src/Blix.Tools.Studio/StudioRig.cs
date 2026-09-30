@@ -51,7 +51,7 @@ internal sealed class StudioRig : IDisposable
         int AlbedoUvSet = 0,
         /// <summary>The material's <c>baseColorFactor.a</c>, which the cutout test multiplies in.</summary>
         float BaseAlpha = 1f,
-        GltfAlphaMode AlphaMode = GltfAlphaMode.Opaque,
+        AlphaMode AlphaMode = AlphaMode.Opaque,
         float AlphaCutoff = 0.5f,
         bool DoubleSided = false,
         /// <summary>The material's own name, which application-owned tint policy keys on.</summary>
@@ -97,7 +97,7 @@ internal sealed class StudioRig : IDisposable
 
     private Model rig = null!;
     private BoneBuffers bones = null!;
-    private GltfTextureLoader textures = null!;
+    private MaterialTextureLoader textures = null!;
     private readonly List<Part> parts = new();
     private readonly List<Attachment> attachments = new();
     private readonly List<StaticPart> staticParts = new();
@@ -139,7 +139,7 @@ internal sealed class StudioRig : IDisposable
         ValidatePaletteCapacity(path, data.Skins.Select(s => s.Skeleton).ToArray());
 
         var studio = new StudioRig();
-        studio.textures = new GltfTextureLoader(device);
+        studio.textures = new MaterialTextureLoader(device);
         studio.rig = device.CreateModel(data, studio.textures, $"lab.rig.{Path.GetFileNameWithoutExtension(path)}");
         // Realised now, not streamed: an inspector shows the asset as it is from the first frame.
         studio.textures.Drain(double.PositiveInfinity);
@@ -154,7 +154,7 @@ internal sealed class StudioRig : IDisposable
                 p.SkinIndex,
                 AlbedoUvSet: m?.BaseColorTexCoord ?? 0,
                 BaseAlpha: m?.BaseColorFactor.W ?? 1f,
-                AlphaMode: m?.AlphaMode ?? GltfAlphaMode.Opaque,
+                AlphaMode: m?.AlphaMode ?? AlphaMode.Opaque,
                 AlphaCutoff: m?.AlphaCutoff ?? 0.5f,
                 DoubleSided: m?.DoubleSided ?? false,
                 MaterialName: m?.Name ?? string.Empty));
@@ -209,7 +209,7 @@ internal sealed class StudioRig : IDisposable
         }
     }
 
-    private static Vector3 BaseColourOf(GltfMaterial? m) =>
+    private static Vector3 BaseColourOf(PbrMaterial? m) =>
         StudioInspection.BaseColour(m, StudioInspection.RigFallbackColour);
 
     public void Dispose()

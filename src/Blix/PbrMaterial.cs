@@ -5,13 +5,13 @@ namespace Blix;
 // glTF 2.0 PBR-metallic-roughness material plus the KHR_materials_* values
 // surfaced by the current SharpGLTF boundary. Import preserves parameters;
 // individual renderers decide which ones they implement.
-public sealed record GltfMaterial(
+public sealed record PbrMaterial(
     /// <summary>
     /// Stable origin identity for sharing the same material across loads.
     /// </summary>
     /// <remarks>
     /// Formed as <c>&lt;container&gt;#material&lt;N&gt;</c>, parallel to
-    /// <see cref="GltfTexture.ResourceId"/>.
+    /// <see cref="TextureData.ResourceId"/>.
     /// </remarks>
     /// <para>
     /// Identity is shared engine data; GPU material storage remains renderer-owned because binding
@@ -21,7 +21,7 @@ public sealed record GltfMaterial(
     string Name,
     // BaseColor: linear-space tint multiplied with the sampled albedo texture.
     Vector4 BaseColorFactor,
-    GltfTexture? BaseColorTexture,
+    TextureData? BaseColorTexture,
 
     /// <summary>Which TEXCOORD set <see cref="BaseColorTexture"/> samples. Almost always 0.</summary>
     /// <remarks>
@@ -30,7 +30,7 @@ public sealed record GltfMaterial(
     /// </remarks>
     int BaseColorTexCoord,
     // Tangent-space normal map. Null when the material has none.
-    GltfTexture? NormalTexture,
+    TextureData? NormalTexture,
     /// <summary>Which TEXCOORD set <see cref="NormalTexture"/> samples.</summary>
     int NormalTexCoord,
     /// <summary>
@@ -41,7 +41,7 @@ public sealed record GltfMaterial(
     // B channel = metallic. The PBR fragment shader samples this and multiplies
     // by the factors below. Materials without an explicit MR texture use a
     // default (R=0, G=128, B=0) so factors alone drive the BRDF.
-    GltfTexture? MetallicRoughnessTexture,
+    TextureData? MetallicRoughnessTexture,
     /// <summary>Which TEXCOORD set <see cref="MetallicRoughnessTexture"/> samples.</summary>
     int MetallicRoughnessTexCoord,
     float MetallicFactor,
@@ -49,9 +49,9 @@ public sealed record GltfMaterial(
     // Ambient-occlusion: glTF-spec R channel of the occlusion-roughness-metallic
     // texture (often the same texture as MR with R=AO). When the channel author
     // packed AO into the MR texture, OcclusionTexture and MetallicRoughnessTexture
-    // point at the same GltfTexture and shaders should sample once. Strength is
+    // point at the same TextureData and shaders should sample once. Strength is
     // the multiplier on `(1.0 - sample)` before applying.
-    GltfTexture? OcclusionTexture,
+    TextureData? OcclusionTexture,
     /// <summary>Which TEXCOORD set <see cref="OcclusionTexture"/> samples.</summary>
     int OcclusionTexCoord,
     float OcclusionStrength,
@@ -60,7 +60,7 @@ public sealed record GltfMaterial(
     // EmissiveStrength is KHR_materials_emissive_strength -- multiplier on the
     // EmissiveFactor that lets authors push emission >1.0 for visible-bloom
     // emissives. 1.0 is the spec default (no extension or factor=1).
-    GltfTexture? EmissiveTexture,
+    TextureData? EmissiveTexture,
     /// <summary>Which TEXCOORD set <see cref="EmissiveTexture"/> samples.</summary>
     int EmissiveTexCoord,
     Vector3 EmissiveFactor,
@@ -69,7 +69,7 @@ public sealed record GltfMaterial(
     // BLEND (alpha blend, depth-test-no-write, back-to-front sort). The renderer
     // picks a pipeline per material based on this; AlphaCutoff is only used in
     // MASK mode.
-    GltfAlphaMode AlphaMode,
+    AlphaMode AlphaMode,
     float AlphaCutoff,
     // Whether to draw both faces. Foliage, curtains, and decals typically need
     // this; back-face culling stays the default everywhere else. The renderer
@@ -82,12 +82,12 @@ public sealed record GltfMaterial(
     // existing positional constructors keep compiling.
     float TransmissionFactor = 0f,
 
-    /// <summary>Every <c>KHR_materials_*</c> property the spec defines. Defaults to <see cref="GltfMaterialExtensions.None"/>.</summary>
+    /// <summary>Every <c>KHR_materials_*</c> property the spec defines. Defaults to <see cref="PbrMaterialExtensions.None"/>.</summary>
     /// <remarks>
     /// TransmissionFactor above is kept as its own member rather than folded in, because it predates
     /// this and the pipeline sorts on it; it mirrors <c>Extensions.TransmissionFactor</c>.
     /// </remarks>
-    GltfMaterialExtensions? Extensions = null)
+    PbrMaterialExtensions? Extensions = null)
 {
     /// <summary>The extensions, never null — an absent block reads as every spec default.</summary>
     /// <remarks>
@@ -95,7 +95,7 @@ public sealed record GltfMaterial(
     /// cooked material that has not been re-cooked yet says "no extensions" rather than crashing.
     /// Consumers read THIS, so neither of those cases becomes a null check at the call site.
     /// </remarks>
-    public GltfMaterialExtensions Ext => Extensions ?? GltfMaterialExtensions.None;
+    public PbrMaterialExtensions Ext => Extensions ?? PbrMaterialExtensions.None;
 
     /// <summary>What a material IS, as a string two loads agree on: <c>&lt;container&gt;#material&lt;N&gt;</c>.</summary>
     /// <remarks>
@@ -107,7 +107,7 @@ public sealed record GltfMaterial(
         containerPath.Length == 0 ? string.Empty : $"{Path.GetFullPath(containerPath)}#material{index}";
 }
 
-public enum GltfAlphaMode
+public enum AlphaMode
 {
     Opaque = 0,
     Mask,
@@ -131,37 +131,37 @@ public enum GltfAlphaMode
 /// renderer or baker.
 /// </para>
 /// </remarks>
-public sealed record GltfMaterialExtensions(
+public sealed record PbrMaterialExtensions(
     // KHR_materials_transmission — light refracted THROUGH a thin surface: glass, a window.
     float TransmissionFactor,
-    GltfTexture? TransmissionTexture,
+    TextureData? TransmissionTexture,
 
     // KHR_materials_diffuse_transmission — light SCATTERED through a thin surface. This is the one
     // a leaf and a curtain want: not a clear pane, a sheet that glows when lit from behind.
     float DiffuseTransmissionFactor,
     Vector3 DiffuseTransmissionColorFactor,
-    GltfTexture? DiffuseTransmissionTexture,
-    GltfTexture? DiffuseTransmissionColorTexture,
+    TextureData? DiffuseTransmissionTexture,
+    TextureData? DiffuseTransmissionColorTexture,
 
     // KHR_materials_sheen — the retroreflective rim fabric has and the metallic-roughness lobe
     // cannot express. Velvet, and the reason a curtain reads as cloth rather than painted board.
     Vector3 SheenColorFactor,
     float SheenRoughnessFactor,
-    GltfTexture? SheenColorTexture,
-    GltfTexture? SheenRoughnessTexture,
+    TextureData? SheenColorTexture,
+    TextureData? SheenRoughnessTexture,
 
     // KHR_materials_volume — what happens INSIDE a transmissive body. Meaningless without
     // transmission, per the spec, which is why the two are separate extensions.
     float ThicknessFactor,
     float AttenuationDistance,
     Vector3 AttenuationColor,
-    GltfTexture? ThicknessTexture,
+    TextureData? ThicknessTexture,
 
     // KHR_materials_specular — dielectric F0 strength and tint, without lying about metalness.
     float SpecularFactor,
     Vector3 SpecularColorFactor,
-    GltfTexture? SpecularTexture,
-    GltfTexture? SpecularColorTexture,
+    TextureData? SpecularTexture,
+    TextureData? SpecularColorTexture,
 
     // KHR_materials_ior — 1.5 is the glTF default and the value the base BRDF assumes.
     float IndexOfRefraction,
@@ -170,22 +170,22 @@ public sealed record GltfMaterialExtensions(
     float ClearcoatFactor,
     float ClearcoatRoughnessFactor,
     float ClearcoatNormalScale,
-    GltfTexture? ClearcoatTexture,
-    GltfTexture? ClearcoatRoughnessTexture,
-    GltfTexture? ClearcoatNormalTexture,
+    TextureData? ClearcoatTexture,
+    TextureData? ClearcoatRoughnessTexture,
+    TextureData? ClearcoatNormalTexture,
 
     // KHR_materials_iridescence — thin-film interference: soap, beetle shell, oil.
     float IridescenceFactor,
     float IridescenceIor,
     float IridescenceThicknessMinimum,
     float IridescenceThicknessMaximum,
-    GltfTexture? IridescenceTexture,
-    GltfTexture? IridescenceThicknessTexture,
+    TextureData? IridescenceTexture,
+    TextureData? IridescenceThicknessTexture,
 
     // KHR_materials_anisotropy — a directional specular lobe: brushed metal, hair.
     float AnisotropyStrength,
     float AnisotropyRotation,
-    GltfTexture? AnisotropyTexture,
+    TextureData? AnisotropyTexture,
 
     // KHR_materials_dispersion — wavelength-dependent IOR. Needs transmission to mean anything.
     float Dispersion,
@@ -199,7 +199,7 @@ public sealed record GltfMaterialExtensions(
     /// infinite because that is what the absence of those extensions means; writing 0 would be a
     /// different material, not a neutral one.
     /// </remarks>
-    public static readonly GltfMaterialExtensions None = new(
+    public static readonly PbrMaterialExtensions None = new(
         TransmissionFactor: 0f, TransmissionTexture: null,
         DiffuseTransmissionFactor: 0f, DiffuseTransmissionColorFactor: Vector3.One,
         DiffuseTransmissionTexture: null, DiffuseTransmissionColorTexture: null,

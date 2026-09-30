@@ -36,7 +36,7 @@ public sealed class ModelData
     public sealed record Node(string Name, int ParentIndex, Matrix4x4 Local, int MeshIndex, int SkinIndex);
 
     /// <summary>One primitive of a mesh, in mesh space, with its material.</summary>
-    public sealed record Primitive(MeshData Mesh, GltfMaterial? Material, int MaterialIndex);
+    public sealed record Primitive(MeshData Mesh, PbrMaterial? Material, int MaterialIndex);
 
     /// <summary>A mesh: primitives stored once, however many nodes place it.</summary>
     /// <param name="Skinned">Whether its vertices are skinned in this load (per <see cref="ModelNeeds.Skinned"/>).</param>
@@ -53,7 +53,7 @@ public sealed class ModelData
 
     private ModelData(
         IReadOnlyList<Node> nodes, IReadOnlyList<Mesh> meshes, IReadOnlyList<Skin> skins, IReadOnlyList<AnimationClip> clips,
-        IReadOnlyList<GltfIgnored> ignored, string source)
+        IReadOnlyList<UnreadAttribute> ignored, string source)
     {
         Ignored = ignored;
         Nodes = nodes;
@@ -73,7 +73,7 @@ public sealed class ModelData
     public IReadOnlyList<AnimationClip> Clips { get; }
 
     /// <summary>The source's vertex attributes its cook did not carry.</summary>
-    public IReadOnlyList<GltfIgnored> Ignored { get; }
+    public IReadOnlyList<UnreadAttribute> Ignored { get; }
 
     /// <summary>The cooked file this was read from.</summary>
     public string Source { get; }
@@ -182,8 +182,8 @@ public sealed class ModelData
         var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         var file = BlixMeshReader.Read(path);
         var cookedDir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? string.Empty;
-        var textureCache = new Dictionary<int, GltfTexture>();
-        var materialCache = new Dictionary<int, GltfMaterial>();
+        var textureCache = new Dictionary<int, TextureData>();
+        var materialCache = new Dictionary<int, PbrMaterial>();
         CookedMaterials.LoadImagesFromTable(file.ImageTable, file.MaterialTable, cookedDir, textureCache);
 
         var staticLayout = CookedVertices.Requested(needs.Tangents, needs.Colour);
@@ -233,7 +233,7 @@ public sealed class ModelData
             .ToArray();
 
         var nodes = file.Nodes.Select(n => new Node(n.Name, n.ParentIndex, n.LocalTransform, n.MeshIndex, n.SkinIndex)).ToArray();
-        var ignored = file.IgnoredTable.Select(i => new GltfIgnored(i.Semantic, i.Primitives)).ToArray();
+        var ignored = file.IgnoredTable.Select(i => new UnreadAttribute(i.Semantic, i.Primitives)).ToArray();
         if (AssetLoadLog.Enabled)
         {
             AssetLoadLog.Report(new AssetLoadReport(
