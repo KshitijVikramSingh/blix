@@ -24,10 +24,9 @@ public sealed record DebugKeyEntry(string Binding, string Description, string Pa
 
 /// <summary>Every key an application answers to, gathered in one list the overlay shows.</summary>
 /// <remarks>
-/// <b>Five applications each kept a private list of <c>input[Key.X].Pressed</c> checks</b>, one wrote its
-/// keys into its control labels by hand, and one printed them to the console at startup. A key bound to a
-/// control (<c>Controls.Toggle("Sun", sun, key: Key.Z)</c>) is driven by the engine; a key the application
-/// handles itself is described here, so the list is complete either way.
+/// <b>Two kinds of key, one list.</b> A key bound to a control (<c>Controls.Toggle("Sun", sun, key: Key.Z)</c>)
+/// is driven by the engine; a key the application handles itself is described here. Both appear in the
+/// same list, beside the host's own, so the list is every key the application answers to.
 /// <para>
 /// Declared every frame, like values, so a binding that only holds sometimes (a step key while paused) is
 /// listed only then, and a dump carries the keys of the frame it froze. One check covers both kinds: two

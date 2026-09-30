@@ -616,8 +616,8 @@ internal sealed class ViewerPanels
 
         if (ImGui.CollapsingHeader("gizmos", ImGuiTreeNodeFlags.DefaultOpen))
         {
-            // Depth-tested gizmos are the overlay's switch (Layers tab, "Hidden by the scene"); this panel
-            // kept a copy and wrote it back every frame, which overruled the overlay.
+            // Whether gizmos are depth-tested is the overlay's switch (Layers tab, "Hidden by the scene"),
+            // not this panel's: one writer per setting.
             if (app.Model is not null)
             {
                 ImGui.Checkbox("node pivots", ref ShowPivots);

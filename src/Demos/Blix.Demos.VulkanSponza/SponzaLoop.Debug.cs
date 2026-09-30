@@ -155,7 +155,7 @@ internal sealed partial class SponzaLoop
         // Outlines every opaque primitive NOT at full detail, tinted by how coarse it is, and flashes
         // white the moment one switches level. The question this answers is not "how much does LOD
         // save" — the A/B answers that — but "which piece of wall was it". A layer that starts
-        // hidden, switched in the Layers tab; it used to be a "Show LOD levels" toggle of its own.
+        // hidden, switched in the Layers tab.
         //
         // Level 0 is deliberately not drawn: at a sane budget most of the scene is at full detail,
         // and outlining all of it would bury the handful of primitives the question is about.
@@ -211,8 +211,8 @@ internal sealed partial class SponzaLoop
             debug.Values.Value("probe-refresh", $"{rays} rays every {period:0}f");
         }
 
-        // Per-pass GPU time, the CPU split and what was submitted are the Perf tab's now: Sponza read the
-        // host's timing record for them when the overlay did not.
+        // Per-pass GPU time, the CPU split and what was submitted are on the Perf tab, from the host's
+        // timing record; the values here are Sponza's own.
 
         debug.Values.Value("shadow-map", $"{ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}");
         debug.Values.Value("splits-m", $"{cascadeSplits[1]:0}/{cascadeSplits[2]:0}/{cascadeSplits[3]:0}");

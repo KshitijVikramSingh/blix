@@ -13,11 +13,9 @@ namespace Blix.Diagnostics;
 /// <param name="Geometry">What the pick pass draws to find out whether this is under the cursor.</param>
 /// <param name="Label">What the Selection tab calls it. A path identifies; a name is what a person recognises.</param>
 /// <remarks>
-/// <b>Geometry, not a box, answers a click.</b> Picking used to ray-test these bounds, and a box says where a
-/// thing might be, not where its surface is: Sponza's vaulted ceiling pieces have boxes that are mostly the
-/// air under the vault, so a click on the tree through that air chose the ceiling, and a list of every box
-/// on the ray was 52 long for a pixel that showed a tree against the sky. The pick pass draws the geometry
-/// itself, which is how Unity, Unreal and Blender answer the same question.
+/// <b>Geometry, not a box, answers a click.</b> A box says where a thing might be, not where its surface is: a
+/// vaulted ceiling's box is mostly the air under the vault, and a ray against boxes picks that air. The pick
+/// pass draws the geometry itself, which is how Unity, Unreal and Blender answer the same question.
 /// </remarks>
 public readonly record struct DebugSelectable(
     string EntityPath, Bounds3 Bounds, DebugPickGeometry Geometry, string? Label = null);

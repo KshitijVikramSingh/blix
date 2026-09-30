@@ -4,11 +4,10 @@ namespace Blix.Tools.Studio;
 
 /// <summary>How Studio frames a subject: a <see cref="CameraController"/> orbiting it, with Studio's limits.</summary>
 /// <remarks>
-/// <b>Policy, not a camera.</b> StudioCamera was an orbit camera of Studio's own, with its own pitch
-/// convention (the eye's elevation, so positive looked down) and its own yaw sign. The engine's
-/// <see cref="CameraController"/> does orbiting, flying and zooming as one camera, so what is left for
-/// Studio is only what it decides: subjects stand at the origin about two metres tall, the eye stays above
-/// the floor and within a sensible range, and a drag turns at the rate the viewer was tuned to.
+/// <b>Policy, not a camera.</b> The engine's <see cref="CameraController"/> is the camera; this is only what
+/// Studio decides about it: subjects stand at the origin about two metres tall, the eye stays above the
+/// floor and within a sensible range, and a drag turns at the rate the viewer was tuned to. Placement is in
+/// Studio's own terms (the eye's azimuth and elevation round the subject).
 /// </remarks>
 public static class StudioFraming
 {

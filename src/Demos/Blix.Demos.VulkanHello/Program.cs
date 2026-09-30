@@ -393,7 +393,7 @@ internal sealed class HelloLoop(bool pickCheck = false) : IGameLoop, IDebuggable
         //
         // Trails are also the cheapest possible demonstration that the two axes compose: the points are
         // remembered per path and drawn into whichever view is in scope.
-        // A layer (the Layers tab switches it), where it was a checkbox on this demo's own panel.
+        // A layer: the Layers tab switches it.
         if (!debug.Draw.Layer("trails")) return;
         var corner = new Vector3(0.5f, 0.5f, 0.5f);
         var leftCorner = Vector3.Transform(corner, leftModel);

@@ -209,7 +209,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             // diagnostics are live (no IDebuggable game loop → no overlay).
             lineDrawer = new VkLineDrawer(graphicsDevice);
 
-            // Every application gets the device's contributor; it used to be opt-in, and two did.
+            // Every application gets the device's contributor.
             debugSystem.Register(new GraphicsDeviceContributor(graphicsDevice));
             debugSystem.UseFrameTiming(graphicsDevice);
         }
@@ -253,10 +253,9 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         ApplyDefaultSurfaceSize();
         gameLoop.OnLoad(this, graphicsDevice);
 
-        // <b>The loop is a contributor like any other, registered rather than passed.</b> It used to be
-        // handed to Run() each frame, which ran its Debug() and nothing else: a loop that was also
-        // selectable, inspectable or a geometry source was silently ignored. Registered after OnLoad so
-        // it runs where the passed loop did, after the device and anything the loop registered itself.
+        // <b>The loop is a contributor like any other, registered rather than passed</b>, so every debug
+        // interface it implements is heard (selectable, inspectable, geometry source), not only Debug().
+        // Registered after OnLoad, so it runs after the device and anything the loop registered itself.
         debugSystem?.Register((IDebugContributor)gameLoop);
     }
 

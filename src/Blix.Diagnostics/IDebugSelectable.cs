@@ -15,10 +15,8 @@ namespace Blix.Diagnostics;
 // The answer is exact: no box and no ray is involved. Clicking again at the same
 // spot leaves the hit out and reaches what is behind it.
 //
-// This used to be the application's job (Sponza wrote the ray, the raycast, the
-// multi-select and the highlights), and then a ray against these bounds, which
-// picked the air under a vault: a box says where a thing might be, not where its
-// surface is. Bounds remain, for drawing the highlight only.
+// Bounds are for drawing the highlight only: a box says where a thing might be,
+// not where its surface is, so a ray against boxes picks the air inside them.
 //
 // What stays with the producer is WHAT IS THERE: which entities exist, their
 // geometry, and what selecting one does. Tool and gameplay picking (a viewer's
@@ -30,10 +28,9 @@ public interface IDebugSelectable : IDebugContributor
 
     /// <summary>The CURRENT bounds of one entity this source owns, for the selection highlight.</summary>
     /// <remarks>
-    /// Asked every frame for each selected path, which is what keeps a highlight on a thing that moves:
-    /// the runtime used to copy the bounds at the click and draw that copy for as long as the selection
-    /// lasted. The default walks <see cref="CollectSelectables"/>; a source with many entities and an
-    /// index should answer from it.
+    /// Asked every frame for the selected path, which is what keeps a highlight on a thing that moves.
+    /// The default walks <see cref="CollectSelectables"/>; a source with many entities and an index
+    /// should answer from it.
     /// </remarks>
     bool TryGetBounds(string entityPath, out Blix.Geometry.Bounds3 bounds)
     {

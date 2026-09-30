@@ -192,11 +192,10 @@ public sealed class DebugSystem
 
     /// <summary>How the host's frames went: the device's own record, which the Perf tab reads.</summary>
     /// <remarks>
-    /// <b>The overlay used to show a weaker copy of this.</b> One <c>execute</c> timer where the record
-    /// splits wait, encode and submit; what the application recorded where the record says what reached
-    /// the device; and a single frame's GPU time per pass where the record keeps totals a window can be
-    /// taken from. Sponza read the record itself to get the real figures. Display only: nothing here
-    /// feeds a dump, which is the measurement design's question.
+    /// <b>The Perf tab reads the record, not a copy of it:</b> the wait, encode and submit split of each
+    /// frame, what reached the device, and per-pass GPU totals that a window can be taken from
+    /// (<see cref="GpuPasses"/>). Display only: nothing here feeds a dump, which is the measurement
+    /// design's question.
     /// </remarks>
     public IFrameTiming Timing { get; private set; } = FrameTimings.None;
 
@@ -215,15 +214,15 @@ public sealed class DebugSystem
 
     /// <summary>What is selected, which the inspector shows. Null if nothing.</summary>
     /// <remarks>
-    /// One thing at a time. Persists across frames and survives Freeze. Sponza kept a multi-selection
-    /// of its own beside this; it was dropped rather than promoted, since nothing else wanted one.
+    /// One thing at a time: the debugger's default (conventions §10), revisited when a consumer needs a
+    /// set. Persists across frames and survives Freeze.
     /// </remarks>
     public string? SelectedPath { get; private set; }
 
     /// <summary>The selection's bounds as its source reports them now, or null.</summary>
     /// <remarks>
-    /// Asked, not remembered: this was a copy taken at the click, so a highlight stayed where a moving
-    /// thing had been.
+    /// Asked of the source each time, not remembered from the click, so the highlight stays on a thing
+    /// that moves.
     /// </remarks>
     public Bounds3? SelectedBounds => SelectedPath is { } path && TryGetBounds(path, out var b) ? b : null;
 
@@ -241,8 +240,8 @@ public sealed class DebugSystem
     }
 
     // <b>An edit on the Selection tab belongs to the thing that was selected.</b> Its control has one path
-    // whatever is selected ("selection/LOD/margin"), and a panel edit is held until something overwrites it,
-    // so without this the value dragged on one primitive was handed to every primitive selected after it.
+    // whatever is selected ("selection/LOD/margin"), and a panel edit is held until something overwrites
+    // it, so a change of selection forgets these edits rather than hand them to the next thing selected.
     private void ForgetSelectionEdits()
     {
         foreach (var path in pendingControlValues.Keys.ToArray())

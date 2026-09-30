@@ -166,9 +166,9 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
     // <b>Two cameras, one class.</b> The window's view and the panel's viewport each carried their
     // own yaw/pitch/distance and their own copy of the spherical-to-cartesian arithmetic — the same
     // decision written twice inside one file, which is the §4 bar met without either copy leaving
-    // the building. The engine's CameraController owns the orbit now (StudioFraming its Studio
-    // defaults); where a drag came from stays here, because the two arrive by genuinely different
-    // routes (the host for one, an ImGui item for the other).
+    // the building. The engine's CameraController owns the orbit (StudioFraming its Studio defaults);
+    // where a drag came from stays here, because the two arrive by genuinely different routes (the
+    // host for one, an ImGui item for the other).
     private readonly CameraController camera = StudioFraming.Around(StudioFraming.SubjectCentre, 40.1f, 25.8f, 11f);
 
     // <b>A click is a press that did not become a drag.</b> Left-drag orbits, so selecting on the

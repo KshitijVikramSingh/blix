@@ -5538,9 +5538,8 @@ static ShaderInterface MinimalShader() => new(new[]
 // Section BO — CameraController: one camera, looked, orbited, flown and zoomed.
 // ============================================================================
 //
-// Orbit and fly were two cameras written five times with two conventions for pitch and two for yaw. The
-// controller is one convention (yaw 0 down -Z turning to +X, pitch where it looks, up positive), and these
-// pin it, because every saved --cam viewpoint depends on it meaning what it meant in Sponza.
+// The controller has one convention (yaw 0 down -Z turning to +X, pitch where it looks, up positive), and
+// these pin it: every saved --cam viewpoint depends on it meaning what it means in Sponza.
 {
     static bool Near(Vector3 a, Vector3 b, float e = 1e-4f) => Vector3.Distance(a, b) < e;
     var c = new CameraController(new Camera3D());
@@ -5599,8 +5598,8 @@ static ShaderInterface MinimalShader() => new(new[]
         MathF.Abs(clip.X / clip.W) < 1e-4f && MathF.Abs(clip.Y / clip.W) < 1e-4f && clip.W > 0f, $"{clip.X / clip.W}, {clip.Y / clip.W}");
     t.Expect("BO.5 and a bad aspect cannot break the matrix", look.ViewProjection(0f) == look.ViewProjection(16f / 9f));
 
-    // Sponza built its view with Matrix4x4.CreateLookAt(position, position + forward, up) and now takes the
-    // camera's. They must be the same matrix, or every captured Sponza frame moves.
+    // The camera's view must equal Matrix4x4.CreateLookAt(position, position + forward, up), the view every
+    // captured Sponza frame and saved viewpoint was made with, or those frames move.
     var same = 0f;
     var poses = new Random(11);
     var driven = new CameraController(new Camera3D());

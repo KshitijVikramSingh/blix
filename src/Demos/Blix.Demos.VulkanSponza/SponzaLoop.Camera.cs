@@ -91,7 +91,7 @@ internal sealed partial class SponzaLoop
 
     private void UpdateCamera()
     {
-        // The controller's camera, whose view is the CreateLookAt this used to build (Test.Graphics BO.6).
+        // The controller's camera, whose view equals CreateLookAt(position, position + forward) (Test.Graphics BO.6).
         // Sponza atrium spans tens of metres; the far plane is generous (SponzaCamera).
         var view = camera.Camera.GetView();
         var proj = camera.Camera.GetProjection(aspect);

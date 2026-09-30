@@ -162,7 +162,7 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
     {
         this.host = host;
         device = graphicsDevice;
-        // Held above the emitters and inside a sensible range, as the old orbit clamped it.
+        // Held above the emitters and inside a sensible range.
         camera = new CameraController(new Camera3D { VerticalFieldOfView = MathF.PI / 3f, NearPlane = NearPlane, FarPlane = FarPlane })
         {
             MinPitch = -83f,
@@ -589,8 +589,8 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
             debug.Values.Value("--cam", camera.Pose);
         }
 
-        // Where each effect is anchored, as a layer that starts hidden (the Layers tab switches it).
-        // It was a ShowGizmos setting beside the look's, which put a debug switch among the tuning.
+        // Where each effect is anchored, as a layer that starts hidden (the Layers tab switches it): a
+        // debug switch, kept apart from the look's tuning.
         if (debug.Draw.Layer("emitters", visible: false))
         {
             var c = new GraphicsColor(0.95f, 0.8f, 0.25f, 0.9f);

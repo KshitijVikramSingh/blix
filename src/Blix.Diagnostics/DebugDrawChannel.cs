@@ -67,9 +67,9 @@ public sealed class DebugDrawChannel
     /// <remarks>
     /// <b>Each rectangle is the right one.</b> <see cref="RenderFrameContext"/> is PHYSICAL pixels — 2x
     /// logical on a Retina display — and a pointer arrives in logical ones, which the host passes to
-    /// <see cref="DebugSystem.BeginFrame"/>. This used to take the framebuffer for both, which was fine
-    /// for drawing and off by the backing scale for a click; it did not matter while every application
-    /// built its own pick ray, and would have the moment the engine picked through it.
+    /// <see cref="DebugSystem.BeginFrame"/>. The logical rectangle is what a pick maps a pointer
+    /// through; taking the framebuffer for both would put a Retina click at twice its distance from the
+    /// corner.
     /// </remarks>
     public ViewDeclaration Declare(string name, Matrix4x4 viewProjection) =>
         context.State.Views.Declare(
@@ -132,8 +132,7 @@ public sealed class DebugDrawChannel
     /// <para>
     /// <paramref name="visible"/> is where the layer starts, and it is only read the first time: after
     /// that the switch is the viewer's. A layer declared hidden is listed in the Layers tab from the
-    /// first frame, before it has drawn anything, which is what replaces the "Show …" toggle an
-    /// application used to add for each gizmo it did not want on by default.
+    /// first frame, before it has drawn anything, so a gizmo that starts off needs no toggle of its own.
     /// </para>
     /// </remarks>
     /// <param name="key">A key that switches the layer, as its box in the Layers tab would.</param>

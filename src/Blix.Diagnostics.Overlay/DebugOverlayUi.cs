@@ -745,8 +745,8 @@ public sealed class DebugOverlayUi
     // panel tractable for Sponza, where the flat list grows to 400+ rows.
     private static void DrawLayersTree(DebugState state, IReadOnlyList<DebugDrawCommand> commands)
     {
-        // The two switches above every layer, which were state no panel reached: two applications
-        // kept their own checkbox for depth testing and wrote it back each frame.
+        // The two switches above every layer: whether debug geometry draws at all, and whether the
+        // scene hides it. Both are DebugState's, and this is the one panel that sets them.
         var drawAll = state.ShowDebugDraw;
         if (ImGui.Checkbox("Draw debug geometry", ref drawAll)) state.ShowDebugDraw = drawAll;
         ImGui.SameLine();

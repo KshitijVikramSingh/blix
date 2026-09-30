@@ -12,9 +12,7 @@ namespace Blix;
 /// <b>Orbit and fly are two ways of driving the same camera.</b> The camera has a position, a direction it
 /// looks (yaw and pitch), and a pivot a distance ahead of it. Looking turns it in place and the pivot swings
 /// with the view; orbiting swings the camera round the pivot; moving carries both; zooming closes the
-/// distance. Nothing switches, so orbiting, flying off and orbiting again never jumps. Five applications had
-/// written one or the other by hand (Sponza and VulkanLit a fly camera, Particles and the viewer an orbit,
-/// the viewer twice), with two conventions for pitch and two for yaw between them.
+/// distance. Nothing switches, so orbiting, flying off and orbiting again never jumps.
 /// <para>
 /// <b>It drives a <see cref="Camera3D"/>, not a camera of its own.</b> Every change is written to the
 /// camera's transform, so the lens, the view and projection, the frustum slices and the screen ray all stay

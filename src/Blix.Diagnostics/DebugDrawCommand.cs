@@ -38,9 +38,8 @@ public abstract record DebugDrawCommand(string Path, GraphicsColor Color, ViewId
     /// The system's reply to a pick (the selection highlight), which answers only to the master switch.
     /// </summary>
     /// <remarks>
-    /// A flag on the command rather than a meaning in the path: the highlight used to be recognised by
-    /// its path starting with "selection/", so anything else drawn there would have borrowed the same
-    /// exemption. Only the debug system sets it.
+    /// A flag on the command rather than a meaning in the path, so nothing an application draws can
+    /// borrow the exemption by its name. Only the debug system sets it (conventions §10).
     /// </remarks>
     public bool Feedback { get; init; }
 }
