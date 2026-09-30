@@ -63,6 +63,31 @@ buffer views and sparse data stay behind in the cook.
 
 ---
 
+## H — glTF animation as glTF defines it: nodes, not skin 0's joints
+
+glTF animates NODES. Blix read clips only on skin 0's joints, as bone indices; everything else was
+dropped or refused. A survey of the corpus (94 files added for this arc) found each case live:
+rigid node animation with no skin (AnimatedTriangle, BoxAnimated, CesiumMilkTruck, InterpolationTest),
+tracks on non-joint nodes above joints (BrainStem), skins with different joint lists under one clip set
+(RecursiveSkeletons: 84 skins, refused), and STEP / CUBICSPLINE sampling (refused outright: the cooked
+format stores only time/value keys). Morph weights and KHR_animation_pointer stay out of scope, recorded
+as unread.
+
+1. **Sampling.** `.blixmesh` v14 records each channel's interpolation and CUBICSPLINE's in/out tangents;
+   the curves evaluate STEP and CUBICSPLINE by the spec's formulas. The cook writes tracks for every
+   animated node, not only skin 0's joints.
+2. **One animated hierarchy per model.** Its bones are every skin's joints plus every animated node
+   (static in-between nodes stay offsets). Clips are bone indices against it; one pose drives every skin,
+   each gathering its joints' worlds with its own inverse binds. For a one-skin file with no other
+   animated node it is exactly skin 0's skeleton, so existing consumers see no change.
+3. **Rigid parts follow the pose.** A part under an animated node is placed by that node's posed world;
+   attachments are the special case where the node is a joint. A model with clips is posed whether or
+   not it has a skin.
+4. **Proof.** A conformance check samples every clip in the corpus at several times and holds skinned
+   vertices and rigid part worlds to SharpGLTF's own evaluation (`GetWorldMatrix(animation, time)`).
+
+---
+
 ## F — a body in the character room
 
 The one stage not started. `src/Demos/Character/` holds a shared library — room,

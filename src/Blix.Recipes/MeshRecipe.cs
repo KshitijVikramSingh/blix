@@ -86,10 +86,11 @@ public static class MeshRecipe
     /// the same source and settings. Recorded in every file it writes, so a re-cook can be told
     /// from a rewrite.
     /// </summary>
-    // Version 8 writes glTF's scene graph (format v12): meshes once, in mesh space, placed by nodes,
-    // as the complete static or skinned vertex, with MikkTSpace tangents wherever none were authored. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
+    // Version 9 writes glTF's scene graph (format v14): meshes once, in mesh space, placed by nodes,
+    // as the complete static or skinned vertex, with MikkTSpace tangents wherever none were authored,
+    // and a track for every animated node with its channels' interpolation. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
     // same format bumps this value.
-    public const uint MeshRecipeVersion = 8;
+    public const uint MeshRecipeVersion = 9;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false,
@@ -169,31 +170,12 @@ public static class MeshRecipe
             cookedNodes[at] = cookedNodes[at] with { MeshIndex = meshIndex, SkinIndex = skinIndex };
         }
 
-        // Clip tracks address bones against one skeleton, so one clip set is valid only when every
-        // skin resolves each joint to the same parent-first index.
-        var clips = new List<BlixMeshClip>();
-        if (skinOrder.Count > 0 && model.LogicalAnimations.Count > 0)
-        {
-            for (var s = 1; s < skinOrder.Count; s++)
-            {
-                var agree = skinOrder[s].JointsCount == skinOrder[0].JointsCount
-                    && Enumerable.Range(0, skinOrder[s].JointsCount).All(j =>
-                        ReferenceEquals(skinOrder[s].GetJoint(j).Joint, skinOrder[0].GetJoint(j).Joint)
-                        && remaps[s][j] == remaps[0][j]);
-                if (agree) continue;
-                throw new InvalidDataException(
-                    $"'{gltfPath}': this file's {skinOrder.Count} skins order their joints differently, so one set of "
-                    + "animation clips cannot drive them all — clip tracks are bone indices against a "
-                    + "single skeleton. Reading the skins is supported; per-skin clips are not yet.");
-            }
-
-            var nodeOfBone = skins[0].Bones.Select(b => b.NodeIndex).ToArray();
-            foreach (var anim in model.LogicalAnimations)
-            {
-                var clip = GltfImporter.BuildAnimationClip(anim, skinOrder[0], remaps[0]);
-                if (clip.Tracks.Length > 0) clips.Add(CookClip(clip, nodeOfBone));
-            }
-        }
+        // Clips as glTF has them: channels on NODES — joints, and any other node. Which bones a load
+        // makes of them is the reader's; the cook records every animated node, skinned file or not.
+        var clips = model.LogicalAnimations
+            .Select(anim => CookClip(anim, nodeOfLogical))
+            .Where(c => c.Tracks.Length > 0)
+            .ToList();
 
         var (images, imageRows) = CookImages(model, gltfPath, outPath, patch);
 
@@ -376,23 +358,60 @@ public static class MeshRecipe
     /// arrays back is lossless; writing a serialised "curve" would be inventing a representation
     /// for something that is already one.
     /// </remarks>
-    private static BlixMeshClip CookClip(AnimationClip clip, int[] nodeOfBone) => new(
-        clip.Name,
-        clip.Tracks.Select(t => new BlixMeshTrack(
-            nodeOfBone[t.BoneIndex],
-            VectorKeys(t.Translation),
-            QuaternionKeys(t.Rotation),
-            VectorKeys(t.Scale))).ToArray());
+    // One track per animated node, each channel with its interpolation. Morph-weight channels are
+    // not read (the unread-attribute table says so), and a channel with no target node is skipped.
+    private static BlixMeshClip CookClip(SharpGLTF.Schema2.Animation anim, int[] nodeOfLogical)
+    {
+        var tracks = new SortedDictionary<int, BlixMeshTrack>();
+        foreach (var channel in anim.Channels)
+        {
+            if (channel.TargetNode is null) continue;
+            var node = nodeOfLogical[channel.TargetNode.LogicalIndex];
+            var track = tracks.TryGetValue(node, out var t) ? t
+                : new BlixMeshTrack(node, Array.Empty<BlixMeshVectorKey>(), Array.Empty<BlixMeshQuaternionKey>(), Array.Empty<BlixMeshVectorKey>());
+            switch (channel.TargetNodePath)
+            {
+                case SharpGLTF.Schema2.PropertyPath.translation:
+                {
+                    var (keys, mode) = GltfImporter.SampleKeys(channel.GetTranslationSampler());
+                    track = track with { Translation = VectorKeys(keys), TranslationInterpolation = Mode(mode) };
+                    break;
+                }
+                case SharpGLTF.Schema2.PropertyPath.rotation:
+                {
+                    var (keys, mode) = GltfImporter.SampleKeys(channel.GetRotationSampler());
+                    track = track with
+                    {
+                        Rotation = keys.Select(k => new BlixMeshQuaternionKey((float)k.Time, k.Value, k.InTangent, k.OutTangent)).ToArray(),
+                        RotationInterpolation = Mode(mode),
+                    };
+                    break;
+                }
+                case SharpGLTF.Schema2.PropertyPath.scale:
+                {
+                    var (keys, mode) = GltfImporter.SampleKeys(channel.GetScaleSampler());
+                    track = track with { Scale = VectorKeys(keys), ScaleInterpolation = Mode(mode) };
+                    break;
+                }
+                default:
+                    continue;
+            }
 
-    private static BlixMeshVectorKey[] VectorKeys(IFiniteCurve<Vector3>? curve) =>
-        curve is KeyframeVector3Curve k
-            ? k.Keyframes.Select(x => new BlixMeshVectorKey((float)x.Time, x.Value)).ToArray()
-            : Array.Empty<BlixMeshVectorKey>();
+            tracks[node] = track;
+        }
 
-    private static BlixMeshQuaternionKey[] QuaternionKeys(IFiniteCurve<Quaternion>? curve) =>
-        curve is KeyframeQuaternionCurve k
-            ? k.Keyframes.Select(x => new BlixMeshQuaternionKey((float)x.Time, x.Value)).ToArray()
-            : Array.Empty<BlixMeshQuaternionKey>();
+        return new BlixMeshClip(anim.Name ?? "anim", tracks.Values.ToArray());
+
+        static BlixMeshVectorKey[] VectorKeys(Keyframe<Vector3>[] keys) =>
+            keys.Select(k => new BlixMeshVectorKey((float)k.Time, k.Value, k.InTangent, k.OutTangent)).ToArray();
+
+        static BlixMeshInterpolation Mode(Interpolation mode) => mode switch
+        {
+            Interpolation.Step => BlixMeshInterpolation.Step,
+            Interpolation.CubicSpline => BlixMeshInterpolation.CubicSpline,
+            _ => BlixMeshInterpolation.Linear,
+        };
+    }
 
     /// <summary>
     /// The external images this asset's materials actually reference, with material-channel roles.
@@ -1183,7 +1202,7 @@ public static class MeshRecipe
         MaterialPatch? patch = null)
     {
         var header = CookedFile.TryReadHeader(outputPath);
-        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version13 }) return false;
+        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version14 }) return false;
         var stamp = header.Value.Stamp;
         if (!stamp.MatchesProducerAndSource(BlixMesh.ShippedRecipe, MeshRecipeVersion, sourcePath))
             return false;

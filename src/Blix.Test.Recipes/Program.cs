@@ -132,6 +132,172 @@ public static class Program
             new Skeleton(Array.Empty<Bone>()), Array.Empty<AnimationClip>(), System.Numerics.Matrix4x4.Identity);
     }
 
+    // ── Sampling as glTF defines it ────────────────────────────────────────────
+    // Every channel of every animated file in the corpus, read into Blix's curves by the one sampler
+    // reading (GltfImporter.SampleKeys) and through the cooked file, is held to SharpGLTF's own curve
+    // evaluator at many times — LINEAR, STEP and CUBICSPLINE alike (InterpolationTest has all three).
+    private static void SamplingMatchesGltf(TestRunner t)
+    {
+        // The corpus root: sample-assets/<Name>/<file> is three levels below it.
+        var root = FindFile("InterpolationTest.glb") is { } it ? Path.GetFullPath(Path.Combine(it, "..", "..", "..")) : null;
+        if (root is null)
+        {
+            Console.WriteLine("  --   sampling conformance skipped: corpus not fetched (tools/fetch-gltf-corpus.sh)");
+            return;
+        }
+
+        var files = Directory.EnumerateFiles(root, "*.gl*", SearchOption.AllDirectories)
+            .Where(f => f.EndsWith(".glb", StringComparison.Ordinal) || f.EndsWith(".gltf", StringComparison.Ordinal))
+            .OrderBy(f => f, StringComparer.Ordinal);
+        var modes = new HashSet<Interpolation>();
+        foreach (var file in files)
+        {
+            SharpGLTF.Schema2.ModelRoot gltf;
+            try { gltf = SharpGLTF.Schema2.ModelRoot.Load(file); }
+            catch (Exception) { continue; }
+            if (gltf.LogicalAnimations.Count == 0) continue;
+
+            string cooked;
+            try { cooked = CookCache.Resolve(file); }
+            catch (AssetImportException refused)
+            {
+                // A refused cook is a finding, not a skip: it is how a texture crash hid InterpolationTest.
+                t.Fail($"{Path.GetFileName(file)}: an animated file cooks", refused.Message);
+                continue;
+            }
+            var tracks = BlixMeshReader.Read(cooked).ClipTable.SelectMany(c => c.Tracks).ToArray();
+
+            var worst = 0f;
+            var where = string.Empty;
+            var channels = 0;
+            var lost = 0;
+            foreach (var anim in gltf.LogicalAnimations)
+            foreach (var channel in anim.Channels)
+            {
+                if (channel.TargetNode is null) continue;
+                var path = channel.TargetNodePath;
+                if (path is not (SharpGLTF.Schema2.PropertyPath.translation or SharpGLTF.Schema2.PropertyPath.rotation
+                    or SharpGLTF.Schema2.PropertyPath.scale)) continue;
+                channels++;
+                int count;
+                Interpolation wantMode;
+
+                if (path == SharpGLTF.Schema2.PropertyPath.rotation)
+                {
+                    var sampler = channel.GetRotationSampler();
+                    var (keys, mode) = GltfImporter.SampleKeys(sampler);
+                    (count, wantMode) = (keys.Length, mode);
+                    modes.Add(mode);
+                    var ours = new KeyframeQuaternionCurve(keys, mode);
+                    var theirs = sampler.CreateCurveSampler(true);
+                    foreach (var time in Times(keys[0].Time, keys[^1].Time))
+                    {
+                        var a = ours.Evaluate(time);
+                        // LINEAR rotation is slerp by the spec (Appendix C); SharpGLTF's evaluator differs
+                        // from it by ~2 degrees inside a 90-degree key step, so the formula is the reference.
+                        // CUBICSPLINE likewise: SharpGLTF's rotation spline disagrees with the spec's formula,
+                        // checked by hand from InterpolationTest's raw accessors (t=1.9: z -0.999966, w
+                        // -0.008266, which is what this computes), so the formula is the reference there too.
+                        var b = mode switch
+                        {
+                            Interpolation.Linear => SpecSlerp(keys, time),
+                            Interpolation.CubicSpline => SpecCubic(keys, time),
+                            _ => theirs.GetPoint((float)time),
+                        };
+                        // q and -q are one rotation.
+                        var e = 1f - MathF.Abs(System.Numerics.Quaternion.Dot(
+                            System.Numerics.Quaternion.Normalize(a), System.Numerics.Quaternion.Normalize(b)));
+                        if (e > worst) (worst, where) = (e, $"rotation {mode} at t={time:0.###}: {a} vs {b}");
+                    }
+                }
+                else
+                {
+                    var sampler = path == SharpGLTF.Schema2.PropertyPath.translation ? channel.GetTranslationSampler() : channel.GetScaleSampler();
+                    var (keys, mode) = GltfImporter.SampleKeys(sampler);
+                    (count, wantMode) = (keys.Length, mode);
+                    modes.Add(mode);
+                    var ours = new KeyframeVector3Curve(keys, mode);
+                    var theirs = sampler.CreateCurveSampler(true);
+                    foreach (var time in Times(keys[0].Time, keys[^1].Time))
+                    {
+                        var reference = mode == Interpolation.CubicSpline ? SpecCubicVector(keys, time) : theirs.GetPoint((float)time);
+                        var e = System.Numerics.Vector3.Distance(ours.Evaluate(time), reference);
+                        if (e > worst) (worst, where) = (e, $"{path} {mode} at t={time:0.###}: {ours.Evaluate(time)} vs {reference}");
+                    }
+                }
+
+                // And the cooked file kept it: some track carries this channel with its mode and key count.
+                var kept = tracks.Any(tr => path switch
+                {
+                    SharpGLTF.Schema2.PropertyPath.translation => tr.Translation.Length == count && (int)tr.TranslationInterpolation == (int)wantMode,
+                    SharpGLTF.Schema2.PropertyPath.rotation => tr.Rotation.Length == count && (int)tr.RotationInterpolation == (int)wantMode,
+                    _ => tr.Scale.Length == count && (int)tr.ScaleInterpolation == (int)wantMode,
+                });
+                if (!kept) lost++;
+            }
+
+            if (channels == 0) continue;
+            t.Expect($"{Path.GetFileName(file)}: {channels} channel(s) sample as glTF's and survive the cook",
+                worst < 1e-4f && lost == 0, $"worst {worst:0.######} ({where}), {lost} not in the cooked file");
+        }
+
+        t.Expect("the corpus exercises LINEAR, STEP and CUBICSPLINE", modes.Count == 3, string.Join(",", modes));
+
+        // glTF 2.0 Appendix C: slerp on the shorter arc (the sign of the dot product), linear when the keys
+        // are nearly parallel. Written from the spec rather than taken from System.Numerics, which is what
+        // the engine's curve uses.
+        static System.Numerics.Quaternion SpecSlerp(Keyframe<System.Numerics.Quaternion>[] keys, double time)
+        {
+            if (time <= keys[0].Time) return keys[0].Value;
+            if (time >= keys[^1].Time) return keys[^1].Value;
+            var k = 0;
+            while (time > keys[k + 1].Time) k++;
+            var t = (float)((time - keys[k].Time) / (keys[k + 1].Time - keys[k].Time));
+            var q0 = keys[k].Value;
+            var q1 = keys[k + 1].Value;
+            var d = System.Numerics.Quaternion.Dot(q0, q1);
+            var s = d < 0f ? -1f : 1f;
+            d = MathF.Abs(d);
+            if (d > 0.9995f) return System.Numerics.Quaternion.Normalize(q0 * (1f - t) + q1 * (s * t));
+            var a = MathF.Acos(d);
+            return q0 * (MathF.Sin((1f - t) * a) / MathF.Sin(a)) + q1 * (s * MathF.Sin(t * a) / MathF.Sin(a));
+        }
+
+        // glTF 2.0 Appendix C, CUBICSPLINE: the Hermite basis over (v_k, dt*b_k, v_k+1, dt*a_k+1), a rotation
+        // normalised after. Written from the spec text.
+        static (int K, float U, float Dt) Segment<T>(Keyframe<T>[] keys, double time)
+        {
+            var k = 0;
+            while (k < keys.Length - 2 && time > keys[k + 1].Time) k++;
+            var dt = (float)(keys[k + 1].Time - keys[k].Time);
+            return (k, Math.Clamp((float)((time - keys[k].Time) / dt), 0f, 1f), dt);
+        }
+
+        static System.Numerics.Vector3 SpecCubicVector(Keyframe<System.Numerics.Vector3>[] keys, double time)
+        {
+            if (time <= keys[0].Time) return keys[0].Value;
+            if (time >= keys[^1].Time) return keys[^1].Value;
+            var (k, u, dt) = Segment(keys, time);
+            var (h0, h1, h2, h3) = (2 * u * u * u - 3 * u * u + 1, u * u * u - 2 * u * u + u, -2 * u * u * u + 3 * u * u, u * u * u - u * u);
+            return keys[k].Value * h0 + keys[k].OutTangent * (dt * h1) + keys[k + 1].Value * h2 + keys[k + 1].InTangent * (dt * h3);
+        }
+
+        static System.Numerics.Quaternion SpecCubic(Keyframe<System.Numerics.Quaternion>[] keys, double time)
+        {
+            if (time <= keys[0].Time) return keys[0].Value;
+            if (time >= keys[^1].Time) return keys[^1].Value;
+            var (k, u, dt) = Segment(keys, time);
+            var (h0, h1, h2, h3) = (2 * u * u * u - 3 * u * u + 1, u * u * u - 2 * u * u + u, -2 * u * u * u + 3 * u * u, u * u * u - u * u);
+            return System.Numerics.Quaternion.Normalize(
+                keys[k].Value * h0 + keys[k].OutTangent * (dt * h1) + keys[k + 1].Value * h2 + keys[k + 1].InTangent * (dt * h3));
+        }
+
+        static IEnumerable<double> Times(double from, double to)
+        {
+            for (var i = 0; i <= 40; i++) yield return from + (to - from) * i / 40.0 + (i % 3 == 1 ? 1e-3 : 0);
+        }
+    }
+
     // ── Skins as glTF defines them ─────────────────────────────────────────────
     // glTF places a skinned vertex at sum(w * jointWorld * inverseBind * v), the joint worlds being the
     // scene graph's. This computes that from SharpGLTF's own node matrices — nothing of Blix's — for every
@@ -1187,6 +1353,7 @@ public static class Program
         // ── one ModelData, whatever the file holds ───────────────────────────
         ModelDataReadings(t);
         SkinsMatchGltf(t);
+        SamplingMatchesGltf(t);
 
         // ── tools cook on open ───────────────────────────────────────────────
         // The engine reads cooked models; a tool opening a raw one cooks it into a cache first.

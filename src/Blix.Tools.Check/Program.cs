@@ -316,35 +316,56 @@ public static class Program
 
         Console.WriteLine($"  hierarchy: {roots} root(s), order valid");
 
-        // ── Rest pose ───────────────────────────────────────────────────────
-        // BindWorld × InverseBindPose = I by construction, so every rest palette matrix is the
-        // identity — and a rig whose inverse-bind matrices do not invert its bind pose fails here
-        // rather than as a mesh that explodes the moment it is skinned. This is the single most
-        // valuable check in the file: it is exact, it needs no clip, and it catches a bad export.
-        var rest = skeleton.CreateRestPose();
+        // ── Bind pose ───────────────────────────────────────────────────────
+        // The bind pose rebuilt from the inverse binds, fed back through them, is the identity by
+        // construction — so a rig whose inverse-bind matrices do not invert a consistent bind pose
+        // fails here rather than as a mesh that explodes the moment it is skinned. Measured on the
+        // skeleton WITHOUT its authored rest: glTF's rest is the joint nodes' own transforms and need
+        // not be the bind pose, so a rest palette far from identity is legitimate (reported below).
+        var bindOnly = new Skeleton(skeleton.Bones.Select(b => b with { Rest = null, Offset = null }).ToArray());
         var palette = new BonePalette(skeleton.BoneCount);
         var worlds = new Matrix4x4[skeleton.BoneCount];
-        skeleton.ComputeBonePalette(rest, palette, worlds);
-        var worstRest = 0f;
+        bindOnly.ComputeBonePalette(bindOnly.CreateRestPose(), palette, worlds);
+        var worstBind = 0f;
         for (var i = 0; i < skeleton.BoneCount; i++)
         {
             var m = palette.Matrices[i];
             if (!IsFinite(m))
+            {
+                Console.Error.WriteLine($"  bind palette for bone {i} '{skeleton.Bones[i].Name}' is not finite.");
+                problems++;
+                continue;
+            }
+
+            worstBind = MathF.Max(worstBind, DistanceFromIdentity(m));
+        }
+
+        // A millimetre of float drift over a long bone chain is normal; a centimetre is a rig whose
+        // bind matrices were baked at a different scale from its joints.
+        var bindOk = worstBind < 0.01f;
+        Console.WriteLine(
+            $"  bind palette: worst deviation from identity {worstBind:0.00000}" + (bindOk ? "" : "  ← TOO LARGE"));
+        if (!bindOk) problems++;
+
+        // glTF's rest — the joint nodes' transforms — against that bind pose. A fact, not a verdict.
+        var rest = skeleton.CreateRestPose();
+        skeleton.ComputeBonePalette(rest, palette, worlds);
+        var worstRest = 0f;
+        for (var i = 0; i < skeleton.BoneCount; i++)
+        {
+            if (!IsFinite(palette.Matrices[i]))
             {
                 Console.Error.WriteLine($"  rest palette for bone {i} '{skeleton.Bones[i].Name}' is not finite.");
                 problems++;
                 continue;
             }
 
-            worstRest = MathF.Max(worstRest, DistanceFromIdentity(m));
+            worstRest = MathF.Max(worstRest, DistanceFromIdentity(palette.Matrices[i]));
         }
 
-        // A millimetre of float drift over a long bone chain is normal; a centimetre is a rig whose
-        // bind matrices were baked at a different scale from its joints.
-        var restOk = worstRest < 0.01f;
-        Console.WriteLine(
-            $"  rest palette: worst deviation from identity {worstRest:0.00000}" + (restOk ? "" : "  ← TOO LARGE"));
-        if (!restOk) problems++;
+        Console.WriteLine(worstRest < 0.01f
+            ? "  rest pose: the bind pose"
+            : $"  rest pose: {worstRest:0.00000} from the bind pose (glTF allows it; the rest is the joint nodes')");
 
         // ── World-space joint positions and deformation reach ──────────────
         // Weighted bones deform vertices; promoted ancestors are required to draw those chains

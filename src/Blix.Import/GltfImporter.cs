@@ -718,34 +718,35 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
 
     private static KeyframeVector3Curve BuildVector3Curve(IAnimationSampler<Vector3> sampler, string? animName, string channelName)
     {
-        if (sampler.InterpolationMode != AnimationInterpolationMode.LINEAR)
-        {
-            throw new NotSupportedException(
-                $"glTF animation '{animName}' channel '{channelName}' uses interpolation mode " +
-                $"{sampler.InterpolationMode}; only LINEAR is supported.");
-        }
-        var keys = new List<Keyframe<Vector3>>();
-        foreach (var (time, value) in sampler.GetLinearKeys())
-        {
-            keys.Add(new Keyframe<Vector3>(time, value));
-        }
-        return new KeyframeVector3Curve(keys.ToArray());
+        var (keys, mode) = SampleKeys(sampler);
+        return new KeyframeVector3Curve(keys, mode);
     }
 
     private static KeyframeQuaternionCurve BuildQuaternionCurve(IAnimationSampler<Quaternion> sampler, string? animName, string channelName)
     {
-        if (sampler.InterpolationMode != AnimationInterpolationMode.LINEAR)
+        var (keys, mode) = SampleKeys(sampler);
+        return new KeyframeQuaternionCurve(keys, mode);
+    }
+
+    /// <summary>A glTF sampler's keys and interpolation, as the curves read them: LINEAR, STEP or CUBICSPLINE.</summary>
+    /// <remarks>
+    /// CUBICSPLINE keys carry glTF's in/out tangents (a_k, b_k), per unit of time. The one reading of a
+    /// sampler, shared by the source importer and the cook.
+    /// </remarks>
+    public static (Keyframe<T>[] Keys, Interpolation Mode) SampleKeys<T>(IAnimationSampler<T> sampler)
+    {
+        ArgumentNullException.ThrowIfNull(sampler);
+        switch (sampler.InterpolationMode)
         {
-            throw new NotSupportedException(
-                $"glTF animation '{animName}' channel '{channelName}' uses interpolation mode " +
-                $"{sampler.InterpolationMode}; only LINEAR is supported.");
+            case AnimationInterpolationMode.CUBICSPLINE:
+                return (sampler.GetCubicKeys()
+                    .Select(k => new Keyframe<T>(k.Key, k.Value.Value, k.Value.TangentIn, k.Value.TangentOut)).ToArray(),
+                    Interpolation.CubicSpline);
+            case AnimationInterpolationMode.STEP:
+                return (sampler.GetLinearKeys().Select(k => new Keyframe<T>(k.Key, k.Value)).ToArray(), Interpolation.Step);
+            default:
+                return (sampler.GetLinearKeys().Select(k => new Keyframe<T>(k.Key, k.Value)).ToArray(), Interpolation.Linear);
         }
-        var keys = new List<Keyframe<Quaternion>>();
-        foreach (var (time, value) in sampler.GetLinearKeys())
-        {
-            keys.Add(new Keyframe<Quaternion>(time, value));
-        }
-        return new KeyframeQuaternionCurve(keys.ToArray());
     }
 
     private sealed class TrackBuilder

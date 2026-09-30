@@ -227,11 +227,14 @@ public sealed class ModelData
                 {
                     BoneIndex = boneOfNode[t.NodeIndex],
                     Translation = t.Translation.Length == 0 ? null
-                        : new KeyframeVector3Curve(t.Translation.Select(k => new Keyframe<Vector3>(k.Time, k.Value)).ToArray()),
+                        : new KeyframeVector3Curve(t.Translation.Select(k => new Keyframe<Vector3>(k.Time, k.Value, k.InTangent, k.OutTangent)).ToArray(),
+                            Mode(t.TranslationInterpolation)),
                     Rotation = t.Rotation.Length == 0 ? null
-                        : new KeyframeQuaternionCurve(t.Rotation.Select(k => new Keyframe<Quaternion>(k.Time, k.Value)).ToArray()),
+                        : new KeyframeQuaternionCurve(t.Rotation.Select(k => new Keyframe<Quaternion>(k.Time, k.Value, k.InTangent, k.OutTangent)).ToArray(),
+                            Mode(t.RotationInterpolation)),
                     Scale = t.Scale.Length == 0 ? null
-                        : new KeyframeVector3Curve(t.Scale.Select(k => new Keyframe<Vector3>(k.Time, k.Value)).ToArray()),
+                        : new KeyframeVector3Curve(t.Scale.Select(k => new Keyframe<Vector3>(k.Time, k.Value, k.InTangent, k.OutTangent)).ToArray(),
+                            Mode(t.ScaleInterpolation)),
                 }).ToArray()))
             .Where(c => c.Tracks.Length > 0)
             .ToArray();
@@ -247,6 +250,13 @@ public sealed class ModelData
 
         return new ModelData(nodes, meshes, skins, clips, ignored, path);
     }
+
+    private static Interpolation Mode(BlixMeshInterpolation mode) => mode switch
+    {
+        BlixMeshInterpolation.Step => Interpolation.Step,
+        BlixMeshInterpolation.CubicSpline => Interpolation.CubicSpline,
+        _ => Interpolation.Linear,
+    };
 
     private static Matrix4x4[] ComposeWorld(IReadOnlyList<Node> nodes)
     {

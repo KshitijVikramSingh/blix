@@ -48,7 +48,16 @@ public static class Program
         // The common preamble identifies cooked artifacts without a format-specific command flag.
         if (CookedFile.TryReadHeader(path) is { } cooked) return InspectCooked(path, cooked);
 
-        return InspectGltf(path);
+        try
+        {
+            return InspectGltf(path);
+        }
+        catch (AssetImportException refused)
+        {
+            // Inspecting a source means cooking it on open; a cook that refuses is the report, not a crash.
+            Console.Error.WriteLine($"blix cannot read this: {refused.Message}");
+            return 1;
+        }
     }
 
     private static int InspectCooked(string path, CookedHeader header)

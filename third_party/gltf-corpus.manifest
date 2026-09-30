@@ -44,6 +44,58 @@ sample TextureCoordinateTest    # Which texCoord set each texture names, drawn s
 sample BoxInterleaved           # Interleaved POSITION/NORMAL in one buffer view.
 sample OrientationTest          # Node transform composition. A sign error here reads as "the model is fine, the scene is wrong".
 
+# ── Animation and skins. Added for the node-animation arc: glTF animates NODES — joints, and any ──
+# other node — and until it, Blix read clips only on skin 0's joints and could not animate a
+# rigid part at all. Each line says which reading it separates.
+sample AnimatedTriangle glTF-Embedded AnimatedTriangle.gltf   # Rotation on a plain mesh node, no skin: node animation in its smallest form.
+sample BoxAnimated              # Translation and rotation on a node hierarchy of rigid meshes. A reader that animates only joints draws it frozen.
+sample InterpolationTest        # STEP, LINEAR and CUBICSPLINE on T, R and S, side by side: the sampler, read or not.
+sample CesiumMilkTruck          # Rigid wheels spun by node animation under a moving parent.
+sample SimpleSkin glTF-Embedded SimpleSkin.gltf   # The tutorial skin: two joints, one clip, every value readable by hand.
+sample CesiumMan                # The classic walking skin; joints under a transformed parent.
+sample Fox                      # A skin with three clips, and a mesh node that is not where the skeleton hangs.
+sample BrainStem                # Many meshes on many skins over one skeleton: the multi-skin case that poses every skin from one clip.
+sample RecursiveSkeletons       # Skins that reuse joints of other skins, and joints that are also skinned meshes' parents — the case the tags call issues.
+sample SimpleMorph glTF-Embedded SimpleMorph.gltf   # Morph targets with animated weights. Blix does NOT read morphs; kept so the refusal to mis-read stays checked.
+sample MorphStressTest          # Many morph targets and a weights clip beside ordinary content.
+sample AnimatedColorsCube       # KHR_animation_pointer on a material colour: a channel whose target is not a node.
+# ── Spec breadth. Added for the spec-support audit: one asset per corner a reader can get ──
+# wrong silently. Each is judged against its own README's expected picture.
+sample MetalRoughSpheres        # The metallic x roughness matrix, textured.
+sample MetalRoughSpheresNoTextures # The same matrix from factors alone.
+sample NormalTangentMirrorTest  # Authored tangents with mirrored UVs: the frame's handedness, per seam.
+sample TextureSettingsTest      # Sampler wrap and filter modes, each labelled.
+sample TextureTransformMultiTest # KHR_texture_transform on several channels at once.
+sample TextureEncodingTest      # PNG/JPEG, 8/16-bit, sRGB/linear decode paths.
+sample TextureLinearInterpolationTest # Filtering in linear, not sRGB, space.
+sample VertexColorTest          # COLOR_0 in its encodings next to a textured control.
+sample NegativeScaleTest        # Mirrored nodes: winding and normals under a negative determinant.
+sample MeshPrimitiveModes glTF-Embedded MeshPrimitiveModes.gltf   # POINTS, LINES, LINE_LOOP, LINE_STRIP, TRIANGLE_STRIP, TRIANGLE_FAN.
+sample TriangleWithoutIndices glTF-Embedded TriangleWithoutIndices.gltf   # A primitive with no index accessor.
+sample MultipleScenes glTF-Embedded MultipleScenes.gltf   # Two scenes; which one a reader shows is the default scene's to say.
+sample Cameras glTF-Embedded Cameras.gltf   # Perspective and orthographic cameras, which a viewer may use or ignore but must not mis-read.
+sample SimpleInstancing         # EXT_mesh_gpu_instancing: one mesh drawn many times by one node.
+sample NodeVisibilityTest       # KHR_node_visibility.
+sample EmissiveStrengthTest     # KHR_materials_emissive_strength: emission past 1.0 — the glowing-bulb case.
+sample DamagedHelmet            # Every core PBR channel on one real asset.
+sample BoomBox                  # Occlusion, roughness and metalness packed in one image, beside emission.
+sample Unicode❤♻Test            # A path and names outside ASCII.
+sample CompareBaseColor         # The Compare* PBR tests: one parameter varied per row, each against its README.
+sample CompareMetallic
+sample CompareRoughness
+sample CompareNormal
+sample CompareAmbientOcclusion
+sample CompareAlphaCoverage
+sample CompareEmissiveStrength
+sample CompareSheen
+sample CompareClearcoat
+sample CompareTransmission
+sample CompareVolume
+sample CompareIor
+sample CompareSpecular
+sample CompareIridescence
+sample CompareAnisotropy
+sample CompareDispersion
 # ── Material extensions. Added when the importer went from reading 2 of the 13 that ──
 # SharpGLTF surfaces to reading all of them. Before this the corpus declared NOTHING that
 # exercised a KHR_materials_* extension, which is the §7 failure in its purest form: the

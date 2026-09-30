@@ -39,8 +39,10 @@ public static class BlixMesh
     // KHR_materials_* parameter block. v12 mirrors glTF's structure: a node table in every file,
     // meshes stored once and placed by nodes, vertices in mesh space as the complete static (6) or
     // skinned (7) vertex, skins as joint nodes, clips targeting nodes, and the source attributes the
-    // cook did not carry (v13). Older layouts must be re-cooked.
-    public const uint Version13 = 13;
+    // cook did not carry (v13). v14 gives each track channel its glTF interpolation (LINEAR, STEP or
+    // CUBICSPLINE, with the spline's in/out tangents), and tracks every animated node rather than
+    // only skin 0's joints. Older layouts must be re-cooked.
+    public const uint Version14 = 14;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
     public const uint LayoutPosition3NormalTextureSkin4Tangent = 3; // 80-byte, rigged
@@ -229,11 +231,20 @@ public sealed record BlixMaterialExtensions(
 /// <param name="NodeIndex">The joint: a row of the file's node table.</param>
 public sealed record BlixMeshBone(string Name, int ParentIndex, Matrix4x4 InverseBindPose, int NodeIndex);
 
-/// <summary>A translation or scale key.</summary>
-public readonly record struct BlixMeshVectorKey(float Time, Vector3 Value);
+/// <summary>How a channel reads between keys: glTF's sampler interpolation.</summary>
+public enum BlixMeshInterpolation : byte
+{
+    Linear = 0,
+    Step = 1,
+    CubicSpline = 2,
+}
 
-/// <summary>A rotation key.</summary>
-public readonly record struct BlixMeshQuaternionKey(float Time, Quaternion Value);
+/// <summary>A translation or scale key. The tangents are read, and stored, only in a CUBICSPLINE channel.</summary>
+public readonly record struct BlixMeshVectorKey(float Time, Vector3 Value, Vector3 InTangent = default, Vector3 OutTangent = default);
+
+/// <summary>A rotation key. The tangents are read, and stored, only in a CUBICSPLINE channel.</summary>
+public readonly record struct BlixMeshQuaternionKey(
+    float Time, Quaternion Value, Quaternion InTangent = default, Quaternion OutTangent = default);
 
 /// <summary>One node's animation across a clip. An empty channel array means that channel is absent.</summary>
 /// <remarks>
@@ -241,12 +252,15 @@ public readonly record struct BlixMeshQuaternionKey(float Time, Quaternion Value
 /// not give it at all; a channel with zero keys has no meaning either way, so one representation
 /// covers both and the reader needs no presence flag per channel.
 /// </remarks>
-/// <param name="NodeIndex">The node animated, as glTF's channels target nodes; a rig maps it to its bone.</param>
+/// <param name="NodeIndex">The node animated, as glTF's channels target nodes: a joint or any other node.</param>
 public sealed record BlixMeshTrack(
     int NodeIndex,
     BlixMeshVectorKey[] Translation,
     BlixMeshQuaternionKey[] Rotation,
-    BlixMeshVectorKey[] Scale);
+    BlixMeshVectorKey[] Scale,
+    BlixMeshInterpolation TranslationInterpolation = BlixMeshInterpolation.Linear,
+    BlixMeshInterpolation RotationInterpolation = BlixMeshInterpolation.Linear,
+    BlixMeshInterpolation ScaleInterpolation = BlixMeshInterpolation.Linear);
 
 /// <summary>A named animation. Duration is derived from the keys, never stored.</summary>
 /// <remarks>
@@ -434,32 +448,51 @@ internal static class BlixMeshBinary
         br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle(),
         br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
 
-    internal static BlixMeshVectorKey[] ReadVectorKeys(BinaryReader br)
+    internal static (BlixMeshVectorKey[] Keys, BlixMeshInterpolation Interpolation) ReadVectorKeys(BinaryReader br)
     {
+        var interpolation = ReadInterpolation(br);
         var n = br.ReadInt32();
         var keys = new BlixMeshVectorKey[n];
         for (var i = 0; i < n; i++)
         {
-            keys[i] = new BlixMeshVectorKey(
-                br.ReadSingle(), new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle()));
+            var time = br.ReadSingle();
+            var value = ReadVector3(br);
+            keys[i] = interpolation == BlixMeshInterpolation.CubicSpline
+                ? new BlixMeshVectorKey(time, value, ReadVector3(br), ReadVector3(br))
+                : new BlixMeshVectorKey(time, value);
         }
 
-        return keys;
+        return (keys, interpolation);
     }
 
-    internal static BlixMeshQuaternionKey[] ReadQuaternionKeys(BinaryReader br)
+    internal static (BlixMeshQuaternionKey[] Keys, BlixMeshInterpolation Interpolation) ReadQuaternionKeys(BinaryReader br)
     {
+        var interpolation = ReadInterpolation(br);
         var n = br.ReadInt32();
         var keys = new BlixMeshQuaternionKey[n];
         for (var i = 0; i < n; i++)
         {
-            keys[i] = new BlixMeshQuaternionKey(
-                br.ReadSingle(),
-                new Quaternion(br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle()));
+            var time = br.ReadSingle();
+            var value = ReadQuaternion(br);
+            keys[i] = interpolation == BlixMeshInterpolation.CubicSpline
+                ? new BlixMeshQuaternionKey(time, value, ReadQuaternion(br), ReadQuaternion(br))
+                : new BlixMeshQuaternionKey(time, value);
         }
 
-        return keys;
+        return (keys, interpolation);
     }
+
+    private static BlixMeshInterpolation ReadInterpolation(BinaryReader br)
+    {
+        var raw = br.ReadByte();
+        return raw <= (byte)BlixMeshInterpolation.CubicSpline
+            ? (BlixMeshInterpolation)raw
+            : throw new InvalidDataException($"a track channel names interpolation {raw}; 0-2 are defined.");
+    }
+
+    private static Vector3 ReadVector3(BinaryReader br) => new(br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
+
+    private static Quaternion ReadQuaternion(BinaryReader br) => new(br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
 }
 
 public static class BlixMeshWriter
@@ -473,7 +506,7 @@ public static class BlixMeshWriter
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(file);
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version13, stamp);
+        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version14, stamp);
         using var bw = new BinaryWriter(fs);
 
         bw.Write(file.Nodes.Count);
@@ -597,9 +630,9 @@ public static class BlixMeshWriter
             foreach (var track in clip.Tracks)
             {
                 bw.Write(track.NodeIndex);
-                WriteVectorKeys(bw, track.Translation);
-                WriteQuaternionKeys(bw, track.Rotation);
-                WriteVectorKeys(bw, track.Scale);
+                WriteVectorKeys(bw, track.Translation, track.TranslationInterpolation);
+                WriteQuaternionKeys(bw, track.Rotation, track.RotationInterpolation);
+                WriteVectorKeys(bw, track.Scale, track.ScaleInterpolation);
             }
         }
 
@@ -661,23 +694,31 @@ public static class BlixMeshWriter
         bw.Write(m.M41); bw.Write(m.M42); bw.Write(m.M43); bw.Write(m.M44);
     }
 
-    private static void WriteVectorKeys(BinaryWriter bw, BlixMeshVectorKey[] keys)
+    private static void WriteVectorKeys(BinaryWriter bw, BlixMeshVectorKey[] keys, BlixMeshInterpolation interpolation)
     {
+        bw.Write((byte)interpolation);
         bw.Write(keys.Length);
         foreach (var k in keys)
         {
             bw.Write(k.Time);
             bw.Write(k.Value.X); bw.Write(k.Value.Y); bw.Write(k.Value.Z);
+            if (interpolation != BlixMeshInterpolation.CubicSpline) continue;
+            bw.Write(k.InTangent.X); bw.Write(k.InTangent.Y); bw.Write(k.InTangent.Z);
+            bw.Write(k.OutTangent.X); bw.Write(k.OutTangent.Y); bw.Write(k.OutTangent.Z);
         }
     }
 
-    private static void WriteQuaternionKeys(BinaryWriter bw, BlixMeshQuaternionKey[] keys)
+    private static void WriteQuaternionKeys(BinaryWriter bw, BlixMeshQuaternionKey[] keys, BlixMeshInterpolation interpolation)
     {
+        bw.Write((byte)interpolation);
         bw.Write(keys.Length);
         foreach (var k in keys)
         {
             bw.Write(k.Time);
             bw.Write(k.Value.X); bw.Write(k.Value.Y); bw.Write(k.Value.Z); bw.Write(k.Value.W);
+            if (interpolation != BlixMeshInterpolation.CubicSpline) continue;
+            bw.Write(k.InTangent.X); bw.Write(k.InTangent.Y); bw.Write(k.InTangent.Z); bw.Write(k.InTangent.W);
+            bw.Write(k.OutTangent.X); bw.Write(k.OutTangent.Y); bw.Write(k.OutTangent.Z); bw.Write(k.OutTangent.W);
         }
     }
 }
@@ -727,7 +768,7 @@ public static class BlixMeshReader
         ArgumentNullException.ThrowIfNull(path);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version13, path, ".blixmesh");
+        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version14, path, ".blixmesh");
         return AssetImportException.Refusing(path, () => ReadBody(fs, path, header), ".blixmesh");
     }
 
@@ -859,8 +900,11 @@ public static class BlixMeshReader
             var tracks = new BlixMeshTrack[trackCount];
             for (var t = 0; t < trackCount; t++)
             {
-                tracks[t] = new BlixMeshTrack(
-                    br.ReadInt32(), BlixMeshBinary.ReadVectorKeys(br), BlixMeshBinary.ReadQuaternionKeys(br), BlixMeshBinary.ReadVectorKeys(br));
+                var node = br.ReadInt32();
+                var (translation, translationMode) = BlixMeshBinary.ReadVectorKeys(br);
+                var (rotation, rotationMode) = BlixMeshBinary.ReadQuaternionKeys(br);
+                var (scale, scaleMode) = BlixMeshBinary.ReadVectorKeys(br);
+                tracks[t] = new BlixMeshTrack(node, translation, rotation, scale, translationMode, rotationMode, scaleMode);
             }
 
             clips[i] = new BlixMeshClip(name, tracks);
