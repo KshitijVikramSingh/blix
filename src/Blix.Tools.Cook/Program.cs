@@ -211,104 +211,11 @@ public static class Program
             return 2;
         }
 
-        var sourceDir = Path.GetDirectoryName(Path.GetFullPath(source)) ?? ".";
-        var outputRoot = Path.GetFullPath(outDir);
-        Directory.CreateDirectory(outputRoot);
-
-        IReadOnlyList<Blix.Recipes.MeshRecipe.ReferencedImage> references;
+        Blix.Recipes.AssetCook.Result cooked;
         try
         {
-            references = Blix.Recipes.MeshRecipe.ReferencedImages(source, mesh.Patch);
-        }
-        catch (Exception ex) when (ex is IOException or InvalidDataException or ArgumentException)
-        {
-            Console.Error.WriteLine($"  cannot read asset references: {ex.Message}");
-            return 1;
-        }
-        var byUri = references
-            .GroupBy(reference => reference.Uri, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        Console.WriteLine($"  {byUri.Length} referenced image(s)");
-
-        var invalid = false;
-        foreach (var group in byUri)
-        {
-            var roles = group.Select(reference => (reference.Role, reference.FlipGreen)).Distinct().ToArray();
-            if (roles.Length > 1)
-            {
-                Console.Error.WriteLine(
-                    $"  ambiguous: {group.Key} is used as {string.Join(" and ", roles)}; one "
-                    + ".blixtex cannot preserve both material-channel roles or conventions");
-                invalid = true;
-            }
-
-            var sourcePath = Path.GetFullPath(Path.Combine(sourceDir, group.Key));
-            var outputPath = Path.GetFullPath(
-                Path.Combine(outputRoot, Path.ChangeExtension(group.Key, ".blixtex")));
-            if (!IsWithin(sourceDir, sourcePath) || !IsWithin(outputRoot, outputPath))
-            {
-                Console.Error.WriteLine(
-                    $"  outside tree: {group.Key} does not remain inside both source and output roots");
-                invalid = true;
-            }
-            else if (!File.Exists(sourcePath))
-            {
-                Console.Error.WriteLine($"  missing: {group.Key}");
-                invalid = true;
-            }
-        }
-
-        foreach (var collision in byUri.GroupBy(
-                     group => Path.ChangeExtension(group.Key, ".blixtex"),
-                     StringComparer.OrdinalIgnoreCase).Where(group => group.Count() > 1))
-        {
-            Console.Error.WriteLine(
-                $"  output collision: {string.Join(", ", collision.Select(group => group.Key))} "
-                + $"all map to {collision.Key}");
-            invalid = true;
-        }
-
-        if (invalid) return 1;
-
-        long sourceBytes = 0, cookedBytes = 0;
-        var sw = Stopwatch.StartNew();
-        try
-        {
-            Parallel.ForEach(byUri, group =>
-            {
-                var reference = group.Single();
-                var from = Path.Combine(sourceDir, reference.Uri);
-                var to = Path.Combine(outputRoot, Path.ChangeExtension(reference.Uri, ".blixtex"));
-                Directory.CreateDirectory(Path.GetDirectoryName(to)!);
-                Blix.Recipes.TextureRecipe.CookOne(
-                    from, to, out var inLen, out var outLen, reference.Role, reference.FlipGreen);
-                Interlocked.Add(ref sourceBytes, inLen);
-                Interlocked.Add(ref cookedBytes, outLen);
-            });
-        }
-        catch (AggregateException ex)
-        {
-            foreach (var failure in ex.Flatten().InnerExceptions)
-                Console.Error.WriteLine($"  texture cook failed: {failure.Message}");
-            return 1;
-        }
-        catch (Exception ex) when (ex is IOException or InvalidDataException or NotSupportedException)
-        {
-            Console.Error.WriteLine($"  texture cook failed: {ex.Message}");
-            return 1;
-        }
-
-        Console.WriteLine(
-            $"  textures: {sourceBytes / 1048576.0:F1} MB -> {cookedBytes / 1048576.0:F1} MB in {sw.Elapsed.TotalSeconds:F0}s");
-
-        var meshOut = Path.Combine(outputRoot, Path.GetFileNameWithoutExtension(source) + ".blixmesh");
-        // Use the shared shipped-mesh path so asset trees and direct mesh cooks receive the same LOD
-        // and splitting policy.
-        int count;
-        try
-        {
-            count = Blix.Recipes.MeshRecipe.CookShipped(
-                source, meshOut,
+            cooked = Blix.Recipes.AssetCook.Cook(
+                source, outDir,
                 flipTextureV: mesh.FlipV,
                 splitTriBudget: mesh.SplitBudget,
                 splitFoliage: mesh.SplitFoliage,
@@ -317,9 +224,26 @@ public static class Program
         }
         catch (InvalidDataException ex)
         {
-            Console.Error.WriteLine($"cook refused: {ex.Message}");
+            // A refusal is the recipe working: each problem on its own line, and nothing written.
+            foreach (var line in ex.Message.Split(Environment.NewLine)) Console.Error.WriteLine($"  {line}");
             return 1;
         }
+        catch (AggregateException ex)
+        {
+            foreach (var failure in ex.Flatten().InnerExceptions)
+                Console.Error.WriteLine($"  texture cook failed: {failure.Message}");
+            return 1;
+        }
+        catch (Exception ex) when (ex is IOException or NotSupportedException or ArgumentException)
+        {
+            Console.Error.WriteLine($"  cook failed: {ex.Message}");
+            return 1;
+        }
+
+        Console.WriteLine(
+            $"  textures: {cooked.SourceBytes / 1048576.0:F1} MB -> {cooked.CookedBytes / 1048576.0:F1} MB in {cooked.TextureTime.TotalSeconds:F0}s");
+        var meshOut = cooked.MeshPath;
+        var count = cooked.Primitives;
 
         var header = Blix.Cooked.CookedFile.TryReadHeader(meshOut);
         Console.WriteLine($"  mesh: {count} primitive(s) -> {meshOut}");
@@ -338,13 +262,6 @@ public static class Program
         return 0;
     }
 
-    private static bool IsWithin(string root, string path)
-    {
-        var relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(path));
-        return relative != ".."
-            && !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)
-            && !Path.IsPathRooted(relative);
-    }
 
     /// <summary>Every output path claimed by more than one line, described for a person.</summary>
     /// <remarks>

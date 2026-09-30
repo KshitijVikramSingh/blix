@@ -127,7 +127,9 @@ internal sealed class StudioRig : IDisposable
     /// </param>
     internal static StudioRig Load(IGraphicsDevice device, string path, ShaderProgramHandle skinnedProgram)
     {
-        var imported = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("lab.rig"), path));
+        // Cooked on open: what Studio shows is the cooked asset, which is what the engine draws.
+        var imported = new GltfImporter().Import(
+            new AssetImportContext(AssetId.Parse("lab.rig"), Blix.Recipes.CookCache.Resolve(path)));
         ValidatePaletteCapacity(path, imported.SkinsOrEmpty);
 
         var studio = new StudioRig();

@@ -149,8 +149,10 @@ public static class Program
             return 1;
         }
 
+        // Cooked on open: the hierarchy printed is the one the engine loads.
         var model = new Blix.GltfStaticImporter().ImportNodes(
-            new Blix.Assets.AssetImportContext(Blix.Assets.AssetId.Parse("inspect"), path));
+            new Blix.Assets.AssetImportContext(
+                Blix.Assets.AssetId.Parse("inspect"), Blix.Recipes.CookCache.Resolve(path, staticOnly: true)));
         var nodes = model.Nodes;
 
         // Compose a node's world transform by walking up its parent chain (row-vector:

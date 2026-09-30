@@ -94,14 +94,16 @@ public static class MeshRecipe
         string gltfPath, string outPath, bool flipTextureV = false,
         SimplifyFn? simplify = null, int splitTriBudget = 0, bool splitFoliage = true,
         float splitMaxExtent = DefaultSplitMaxExtent,
-        MaterialPatch? patch = null, Action<string>? log = null)
+        MaterialPatch? patch = null, Action<string>? log = null, bool staticOnly = false)
     {
         ArgumentNullException.ThrowIfNull(gltfPath);
         ArgumentNullException.ThrowIfNull(outPath);
 
         // One glTF recipe handles both rigged and static content. The rigged importer decides
         // whether the file forms a supported rig; a named refusal routes it to the static cook.
-        if (TryCookRig(
+        // staticOnly cooks a rigged file as its static node hierarchy, which is what opening it
+        // as a model rather than a rig asks for.
+        if (!staticOnly && TryCookRig(
                 gltfPath, outPath, out var rigPrimitiveCount,
                 flipTextureV, splitTriBudget, splitFoliage, splitMaxExtent,
                 patch, log))
@@ -564,7 +566,17 @@ public static class MeshRecipe
         static string Convention(bool directX) => directX ? "directx" : "opengl";
     }
 
-    /// <summary>One cooked image has one role; refuse a material graph that says otherwise.</summary>
+    /// <summary>
+    /// The one pair of roles an image may hold at once: occlusion (R) packed with metallic-roughness
+    /// (G, B), glTF's own ORM packing. Both are linear and encode alike, and the metallic-roughness
+    /// role passes an RGB image through untouched, so the occlusion channel survives.
+    /// </summary>
+    private static TextureRole? Packed(TextureRole a, TextureRole b) =>
+        (a, b) is (TextureRole.MetallicRoughness, TextureRole.Linear) or (TextureRole.Linear, TextureRole.MetallicRoughness)
+            ? TextureRole.MetallicRoughness
+            : null;
+
+    /// <summary>One cooked image has one role, save ORM packing; refuse a material graph that says otherwise.</summary>
     private static Dictionary<int, TextureRole> ResolveImageRoles(ModelRoot model)
     {
         var roles = new Dictionary<int, TextureRole>();
@@ -576,7 +588,14 @@ public static class MeshRecipe
                 if (image is null) continue;
 
                 var role = RoleForChannel(channelName);
-                if (roles.TryGetValue(image.LogicalIndex, out var existing) && existing != role)
+                if (roles.TryGetValue(image.LogicalIndex, out var existing) && existing != role
+                    && Packed(existing, role) is { } packed)
+                {
+                    roles[image.LogicalIndex] = packed;
+                    continue;
+                }
+
+                if (roles.TryGetValue(image.LogicalIndex, out existing) && existing != role)
                 {
                     var name = image.Name ?? image.Content.SourcePath ?? $"image {image.LogicalIndex}";
                     throw new InvalidDataException(
@@ -1097,9 +1116,10 @@ public static class MeshRecipe
         bool flipTextureV = false,
         int splitTriBudget = 0, bool splitFoliage = true,
         float splitMaxExtent = DefaultSplitMaxExtent,
-        MaterialPatch? patch = null, Action<string>? log = null) =>
+        MaterialPatch? patch = null, Action<string>? log = null, bool staticOnly = false) =>
         CookToBlixMesh(
             sourcePath, outputPath,
+            staticOnly: staticOnly,
             flipTextureV: flipTextureV,
             simplify: DefaultSimplifier(splitTriBudget > 0),
             splitTriBudget: splitTriBudget,
@@ -1114,7 +1134,7 @@ public static class MeshRecipe
         bool flipTextureV = false,
         int splitTriBudget = 0, bool splitFoliage = true,
         float splitMaxExtent = DefaultSplitMaxExtent,
-        MaterialPatch? patch = null)
+        MaterialPatch? patch = null, bool staticOnly = false)
     {
         var header = CookedFile.TryReadHeader(outputPath);
         if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version11 }) return false;
@@ -1122,6 +1142,7 @@ public static class MeshRecipe
         if (!stamp.MatchesProducerAndSource(BlixMesh.ShippedRecipe, MeshRecipeVersion, sourcePath))
             return false;
 
+        if (staticOnly && stamp.Parameters.StartsWith("rig=1 ", StringComparison.Ordinal)) return false;
         if (!stamp.Parameters.StartsWith("rig=1 ", StringComparison.Ordinal))
         {
             return stamp.Parameters == StaticParameters(

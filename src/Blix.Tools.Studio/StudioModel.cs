@@ -54,8 +54,9 @@ internal sealed class StudioModel : IDisposable
     {
         // includeColour: the stage's static pipeline declares the 36-byte layout, so everything drawn on
         // it must carry a colour, and COLOR_0 is a base-colour multiplier (conventions §6).
+        // Cooked on open: what Studio shows is the cooked asset, which is what the engine draws.
         var imported = new GltfStaticImporter().ImportNodes(
-            new AssetImportContext(AssetId.Parse("lab"), path, includeColour: true));
+            new AssetImportContext(AssetId.Parse("lab"), Blix.Recipes.CookCache.Resolve(path, staticOnly: true), includeColour: true));
 
         var studio = new StudioModel();
         studio.textures = new GltfTextureLoader(device);

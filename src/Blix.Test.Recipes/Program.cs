@@ -93,6 +93,77 @@ public static class Program
         return true;
     }
 
+    private static void CookOnOpen(TestRunner t)
+    {
+        var rogue = FindFile("Rogue.glb");
+        var multiUv = FindFile("MultiUVTest.gltf");
+        if (rogue is null || multiUv is null)
+        {
+            Console.WriteLine("  --   cook-on-open checks skipped: Rogue.glb or MultiUVTest.gltf not found");
+            return;
+        }
+
+        var cache = Path.Combine(Path.GetTempPath(), "blix-cache-" + Guid.NewGuid().ToString("N"));
+        var work = Path.Combine(Path.GetTempPath(), "blix-open-" + Guid.NewGuid().ToString("N"));
+        var before = Environment.GetEnvironmentVariable("BLIX_COOK_CACHE");
+        Directory.CreateDirectory(work);
+        try
+        {
+            Environment.SetEnvironmentVariable("BLIX_COOK_CACHE", cache);
+            foreach (var f in Directory.EnumerateFiles(Path.GetDirectoryName(multiUv)!))
+                File.Copy(f, Path.Combine(work, Path.GetFileName(f)));
+            var raw = Path.Combine(work, "MultiUVTest.gltf");
+
+            var opened = CookCache.Resolve(raw);
+            t.Expect("a raw model with no cooked sibling cooks into the cache",
+                opened.StartsWith(cache, StringComparison.Ordinal) && File.Exists(opened), opened);
+            t.ExpectTrue("and the cache entry stands alone: its images are cooked beside it",
+                CookedFile.TryReadHeader(opened)?.Stamp.Flags == CookedFlags.None);
+            var written = File.GetLastWriteTimeUtc(opened);
+            t.Expect("a second open reuses the entry rather than cooking again",
+                CookCache.Resolve(raw) == opened && File.GetLastWriteTimeUtc(opened) == written, "re-cooked");
+            t.Expect("a .blixmesh resolves to itself", CookCache.Resolve(opened) == opened, CookCache.Resolve(opened));
+
+            // Rogue ships a rig sibling. Opened as a rig it is used as-is; opened as a model it must
+            // not be, because a rig cook carries no static node hierarchy.
+            var rigSibling = Path.ChangeExtension(rogue, ".blixmesh");
+            t.Expect("a current cooked sibling is used as-is", CookCache.Resolve(rogue) == rigSibling, CookCache.Resolve(rogue));
+            var asModel = CookCache.Resolve(rogue, staticOnly: true);
+            t.Expect("opened as a model, a rig sibling is not taken: the static cook goes to the cache",
+                asModel != rigSibling && !BlixMeshReader.Read(asModel).IsRigged, asModel);
+
+            var broken = Path.Combine(work, "broken.gltf");
+            File.WriteAllText(broken, "{ \"asset\": { \"version\": \"2.0\" }, \"meshes\": [ { \"primitives\": [ { \"attributes\": { } } ] } ], \"nodes\": [ { \"mesh\": 0 } ] }");
+            var refusal = t.ExpectThrows<AssetImportException>("a model the cook refuses is refused as AssetImportException",
+                () => CookCache.Resolve(broken));
+            t.Expect("naming the file", refusal?.Message.Contains("broken.gltf", StringComparison.Ordinal) == true, refusal?.Message ?? "(none)");
+
+            // ORM packing: glTF's own case of one image in two channels (R occlusion, G roughness,
+            // B metallic). The cook takes it as metallic-roughness rather than refusing it.
+            var orm = Path.Combine(work, "orm.gltf");
+            File.Copy(Path.Combine(work, "uv0.png"), Path.Combine(work, "orm.png"));
+            File.WriteAllText(orm, """
+                {
+                  "asset": { "version": "2.0" },
+                  "images": [ { "uri": "orm.png" } ],
+                  "textures": [ { "source": 0 } ],
+                  "materials": [ {
+                    "pbrMetallicRoughness": { "metallicRoughnessTexture": { "index": 0 } },
+                    "occlusionTexture": { "index": 0 }
+                  } ]
+                }
+                """);
+            t.ExpectTrue("an image packing occlusion with metallic-roughness cooks as metallic-roughness",
+                MeshRecipe.ReferencedImages(orm).SequenceEqual(new[] { new MeshRecipe.ReferencedImage("orm.png", TextureRole.MetallicRoughness) }));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("BLIX_COOK_CACHE", before);
+            try { Directory.Delete(cache, recursive: true); } catch (IOException) { }
+            try { Directory.Delete(work, recursive: true); } catch (IOException) { }
+        }
+    }
+
     private static void AuthoredMaterialReachesBothPaths(TestRunner t)
     {
         var temp = Path.Combine(Path.GetTempPath(), "blix-authored-" + Guid.NewGuid().ToString("N"));
@@ -907,6 +978,10 @@ public static class Program
                 try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
             }
         }
+
+        // ── tools cook on open ───────────────────────────────────────────────
+        // The engine reads cooked models; a tool opening a raw one cooks it into a cache first.
+        CookOnOpen(t);
 
         // ── generated tangents agree with authored ones ──────────────────────
         // The cook generates MikkTSpace tangents where a source authored none. Held to assets that DID

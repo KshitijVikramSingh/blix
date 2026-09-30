@@ -199,18 +199,13 @@ public static class Program
 
         var problems = 0;
 
-        // A named no-rig refusal selects the static importer; other import failures remain verdicts.
-        GltfModel imported;
-        var rigged = true;
-        try
-        {
-            imported = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("probe"), path));
-        }
-        catch (AssetImportException noRig) when (noRig.Message.Contains("no rig here", StringComparison.Ordinal))
-        {
-            rigged = false;
-            imported = new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("probe"), path));
-        }
+        // Cooked on open, so the probe checks what the engine would draw; the cooked file says
+        // whether it is a rig.
+        var cooked = Blix.Recipes.CookCache.Resolve(path);
+        var rigged = BlixMeshReader.Read(cooked).IsRigged;
+        GltfModel imported = rigged
+            ? new GltfImporter().Import(new AssetImportContext(AssetId.Parse("probe"), cooked))
+            : new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("probe"), cooked));
 
         Console.WriteLine($"{Path.GetFileName(path)}");
         Console.WriteLine(
@@ -260,7 +255,8 @@ public static class Program
         }
 
         var problems = 0;
-        var imported = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("probe.rig"), path));
+        var imported = new GltfImporter().Import(
+            new AssetImportContext(AssetId.Parse("probe.rig"), Blix.Recipes.CookCache.Resolve(path)));
         var skeleton = imported.Skeleton;
 
         Console.WriteLine($"{Path.GetFileName(path)}");
