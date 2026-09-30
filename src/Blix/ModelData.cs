@@ -169,10 +169,7 @@ public sealed class ModelData
     }
 
     /// <summary>Reads a cooked model, its vertices in the layout <paramref name="needs"/> declares.</summary>
-    public static ModelData Load(string path, ModelNeeds needs = default) => Load(path, needs, requested: path);
-
-    /// <param name="requested">What the caller asked for, which the load log reports as its source.</param>
-    internal static ModelData Load(string path, ModelNeeds needs, string requested)
+    public static ModelData Load(string path, ModelNeeds needs = default)
     {
         ArgumentNullException.ThrowIfNull(path);
         if (!path.EndsWith(".blixmesh", StringComparison.OrdinalIgnoreCase))
@@ -187,7 +184,7 @@ public sealed class ModelData
         var cookedDir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? string.Empty;
         var textureCache = new Dictionary<int, GltfTexture>();
         var materialCache = new Dictionary<int, GltfMaterial>();
-        GltfShared.LoadImagesFromTable(file.ImageTable, file.MaterialTable, cookedDir, textureCache);
+        CookedMaterials.LoadImagesFromTable(file.ImageTable, file.MaterialTable, cookedDir, textureCache);
 
         var staticLayout = CookedVertices.Requested(needs.Tangents, needs.Colour);
         var meshes = file.Meshes.Select(m =>
@@ -203,7 +200,7 @@ public sealed class ModelData
                 return new Primitive(
                     new MeshData(p.Name, bytes, lod0.Indices16 ?? Array.Empty<ushort>(), layout, bounds,
                         Indices32: lod0.Indices32, Lods: lods),
-                    GltfShared.MaterialFromCooked(file.MaterialTable, p.MaterialIndex, materialCache, textureCache, path),
+                    CookedMaterials.MaterialFromCooked(file.MaterialTable, p.MaterialIndex, materialCache, textureCache, path),
                     p.MaterialIndex);
             }).ToArray();
             return new Mesh(m.Name, primitives, m.SkinIndex, skinned);
@@ -240,7 +237,7 @@ public sealed class ModelData
         if (AssetLoadLog.Enabled)
         {
             AssetLoadLog.Report(new AssetLoadReport(
-                SourcePath: requested, CookedPath: path, Mode: AssetLoadMode.Cooked,
+                SourcePath: path, CookedPath: path, Mode: AssetLoadMode.Cooked,
                 Bytes: new FileInfo(path).Length, LoadMs: loadWatch.Elapsed.TotalMilliseconds,
                 Recipe: file.Cooked?.Stamp.Recipe));
         }
@@ -264,7 +261,7 @@ public sealed class ModelData
     private static MeshData Moved(MeshData mesh, in Matrix4x4 world)
     {
         var bytes = (byte[])mesh.VertexBytes.Clone();
-        var normalMatrix = GltfStaticImporter.ComputeNormalMatrix(world);
+        var normalMatrix = GraphicsMatrices.NormalMatrix(world);
         var stride = mesh.Layout.Stride;
         var tangentAt = mesh.Layout.Attributes.FirstOrDefault(a => a.Format == VertexAttributeFormat.Float4)?.Offset ?? -1;
         var min = new Vector3(float.MaxValue);

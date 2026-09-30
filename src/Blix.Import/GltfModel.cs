@@ -1,4 +1,4 @@
-namespace Blix;
+namespace Blix.Import;
 
 // Bundle produced by GltfImporter. A single glTF file typically carries several
 // related pieces (a mesh split into primitives, an optional skeleton, zero or more

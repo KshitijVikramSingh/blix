@@ -68,7 +68,7 @@ internal static class CookedVertices
             ? (0, 12, 24, 64, 80, 88)
             : (0, 12, 40, 24, 48, 56);
 
-        var normalMatrix = transform is { } m ? GltfStaticImporter.ComputeNormalMatrix(m) : Matrix4x4.Identity;
+        var normalMatrix = transform is { } m ? GraphicsMatrices.NormalMatrix(m) : Matrix4x4.Identity;
         var bytes = new byte[p.VertexCount * to.Stride];
         var min = new Vector3(float.MaxValue);
         var max = new Vector3(float.MinValue);

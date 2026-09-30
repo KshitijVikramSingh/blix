@@ -1,3 +1,4 @@
+using Blix.Import;
 using Blix.Verify;
 using System.Numerics;
 using Blix;
@@ -4163,11 +4164,13 @@ static ShaderInterface MinimalShader() => new(new[]
         t.ExpectTrue("AX.2 carrying a cost, not just a branch", meshReport.LoadMs > 0 && meshReport.Bytes > 0);
 
         // ── cooked ──────────────────────────────────────────────────────────
-        Blix.Recipes.MeshRecipe.CookToBlixMesh(glb, Path.ChangeExtension(glb, ".blixmesh"));
+        // The engine's reader reports a cooked load; the cook's importer only ever reads the source.
+        var cookedPath = Path.ChangeExtension(glb, ".blixmesh");
+        Blix.Recipes.MeshRecipe.CookToBlixMesh(glb, cookedPath);
         AssetLoadLog.Start();
-        new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("ax/cooked"), glb));
+        Blix.ModelData.Load(cookedPath);
         var afterCook = AssetLoadLog.Drain();
-        var cookedReport = afterCook.SingleOrDefault(r => r.SourcePath == glb);
+        var cookedReport = afterCook.SingleOrDefault(r => r.SourcePath == cookedPath);
 
         t.ExpectTrue("AX.3 a cooked load is reported", cookedReport is not null);
         t.Expect("AX.3 and reports Cooked — the same asset, a different answer",

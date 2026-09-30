@@ -1,6 +1,6 @@
 using System.Numerics;
 
-namespace Blix;
+namespace Blix.Import;
 
 // Node-hierarchy-preserving static glTF import (GltfStaticImporter.ImportNodes).
 // Where the flattened Import bakes each node's WORLD transform into its vertices —

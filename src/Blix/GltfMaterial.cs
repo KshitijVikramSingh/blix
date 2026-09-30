@@ -96,6 +96,15 @@ public sealed record GltfMaterial(
     /// Consumers read THIS, so neither of those cases becomes a null check at the call site.
     /// </remarks>
     public GltfMaterialExtensions Ext => Extensions ?? GltfMaterialExtensions.None;
+
+    /// <summary>What a material IS, as a string two loads agree on: <c>&lt;container&gt;#material&lt;N&gt;</c>.</summary>
+    /// <remarks>
+    /// Empty when the caller cannot say which file it came from — never shared, for the same reason
+    /// an unnamed texture is not: an identity nobody can reproduce is not an identity. One spelling,
+    /// written by the source importer and the cooked reader alike.
+    /// </remarks>
+    public static string IdentityOf(string containerPath, int index) =>
+        containerPath.Length == 0 ? string.Empty : $"{Path.GetFullPath(containerPath)}#material{index}";
 }
 
 public enum GltfAlphaMode

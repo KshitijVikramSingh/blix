@@ -248,7 +248,7 @@ public sealed class Model : IDisposable
         model.Clips = source.Clips.OrderBy(c => c.Name, StringComparer.Ordinal).ToArray();
         var skinnedPrimitives = source.Nodes
             .Where(n => n.MeshIndex >= 0 && source.Meshes[n.MeshIndex].Skinned)
-            .SelectMany(n => source.Meshes[n.MeshIndex].Primitives.Select(p => new GltfPrimitive(p.Mesh, p.Material, SkinIndex: n.SkinIndex)))
+            .SelectMany(n => source.Meshes[n.MeshIndex].Primitives)
             .ToArray();
         var weighted = SkinningAnalysis.FindWeightedBones(model.skins[0].Skeleton, skinnedPrimitives.Select(p => p.Mesh));
         model.WeightedBones = weighted;

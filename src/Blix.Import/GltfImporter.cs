@@ -6,7 +6,7 @@ using Blix.Graphics.Images;
 using SharpGLTF.Schema2;
 using Blix.Cooked;
 
-namespace Blix;
+namespace Blix.Import;
 
 // Loads a .glb / .gltf file and decodes it into engine-shaped types: skinned
 // `GltfPrimitive[]` (each with vertex layout VertexPosition3NormalTextureSkin4Tangent
@@ -45,96 +45,12 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         }
         // Normalize parser failures and the importer's own content refusals into the same
         // path-bearing boundary for callers and diagnostic tools.
-        return AssetImportException.Refusing(context.SourcePath, () => ImportCore(context, preferCooked: true));
+        GltfStaticImporter.RefuseCooked(context);
+        return AssetImportException.Refusing(context.SourcePath, () => ImportCore(context));
     }
 
-    /// <summary>
-    /// Imports the glTF itself, ignoring any cooked artifact beside it.
-    /// </summary>
-    /// <remarks>
-    /// Recipes must use this entry point so their output is derived from authored source rather
-    /// than from a pre-existing cooked sibling. Runtime callers normally use <see cref="Import"/>.
-    /// </remarks>
-    public GltfModel ImportSource(AssetImportContext context)
+    private GltfModel ImportCore(AssetImportContext context)
     {
-        ArgumentNullException.ThrowIfNull(context);
-        return AssetImportException.Refusing(context.SourcePath, () => ImportCore(context, preferCooked: false));
-    }
-
-    /// <summary>Rebuilds a rig from its cooked form — skins, clips, attachments and all.</summary>
-    /// <remarks>
-    /// Bones, clips, attachments, static parts, materials, and image references are reconstructed
-    /// entirely from the cooked artifact; the source glTF is not opened.
-    /// </remarks>
-    /// <summary>A rig read through <see cref="ModelData"/>, in the shapes this importer returns.</summary>
-    /// <remarks>
-    /// Skinned primitives are the meshes each skin deforms, in node order; attachments and static parts
-    /// are <see cref="ModelData.Attachments"/> and the unskinned mesh nodes left over, in the colour
-    /// layout RigView draws them with.
-    /// </remarks>
-    private GltfModel ImportCookedRig(AssetImportContext context, string rigPath, BlixMeshFile cooked)
-    {
-        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
-        var data = ModelData.Load(rigPath, new ModelNeeds(Colour: true, Skinned: true), requested: context.SourcePath);
-
-        GltfPrimitive[] Primitives(int node, int skin) => data.Meshes[data.Nodes[node].MeshIndex].Primitives
-            .Select(p => new GltfPrimitive(p.Mesh, p.Material, SkinIndex: skin, MaterialIndex: p.MaterialIndex)).ToArray();
-
-        var skinned = new List<GltfPrimitive>();
-        var bindings = new GltfSkinBinding[data.Skins.Count];
-        for (var s = 0; s < bindings.Length; s++)
-        {
-            for (var n = 0; n < data.Nodes.Count; n++)
-            {
-                if (data.Nodes[n].SkinIndex == s && data.Nodes[n].MeshIndex >= 0) skinned.AddRange(Primitives(n, s));
-            }
-
-            bindings[s] = new GltfSkinBinding(data.Skins[s].Skeleton, data.Placement(s));
-        }
-
-        var found = data.Attachments();
-        var attachments = found
-            .Select(a => new GltfAttachment(
-                data.Nodes[a.NodeIndex].Name, data.Nodes[a.JointNode].Name, a.BoneIndex, a.Local,
-                Primitives(a.NodeIndex, 0), a.SkinIndex))
-            .ToArray();
-        var attached = found.Select(a => a.NodeIndex).ToHashSet();
-        var staticParts = Enumerable.Range(0, data.Nodes.Count)
-            .Where(n => data.Nodes[n].MeshIndex >= 0 && data.Nodes[n].SkinIndex < 0 && !attached.Contains(n))
-            .Select(n => new GltfStaticPart(data.Nodes[n].Name, data.World[n], Primitives(n, 0)))
-            .ToArray();
-
-        // ModelData.Load reported the cooked load.
-        return new GltfModel(
-            skinned.ToArray(), bindings[0].Skeleton, data.Clips.ToArray(), bindings[0].MeshNodeTransform,
-            attachments, staticParts, Array.Empty<GltfIgnored>(), bindings);
-    }
-
-    private GltfModel ImportCore(AssetImportContext context, bool preferCooked)
-    {
-        // A rigged .blixmesh is self-contained and loads without opening the source glTF.
-        var directRig = Path.GetExtension(context.SourcePath)
-            .Equals(".blixmesh", StringComparison.OrdinalIgnoreCase);
-        var rigPath = directRig
-            ? context.SourcePath
-            : Path.ChangeExtension(context.SourcePath, ".blixmesh");
-        if (preferCooked && File.Exists(rigPath))
-        {
-            var cookedRig = BlixMeshReader.Read(rigPath);
-
-            // A .blixmesh with no skins is a STATIC cook sitting beside a rigged source — which is
-            // the normal state of any file the static cook reached first. It is not this importer's
-            // to read, and saying so beats loading a character with no skeleton.
-            if (cookedRig.IsRigged) return ImportCookedRig(context, rigPath, cookedRig);
-            if (directRig)
-            {
-                throw new AssetImportException(
-                    context.SourcePath, null,
-                    "this .blixmesh carries no skin, so there is no rig in it — " +
-                    "load it as a static model instead (GltfStaticImporter)");
-            }
-        }
-
         var loadWatch = System.Diagnostics.Stopwatch.StartNew();
 
         var model = AssetImportException.Refusing(context.SourcePath, () => ModelRoot.Load(context.SourcePath));

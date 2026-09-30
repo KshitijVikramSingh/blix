@@ -1,3 +1,4 @@
+using Blix.Import;
 using Blix.Assets;
 using System.Diagnostics;
 using Blix.Cooked;
@@ -29,7 +30,7 @@ public static class Program
         foreach (var prim in mesh.Primitives)
         {
             if (prim.GetVertexAccessor("TANGENT") is null || prim.GetVertexAccessor("TEXCOORD_0") is null) continue;
-            var authored = Blix.GltfStaticImporter.BuildStaticMeshData(
+            var authored = Blix.Import.GltfStaticImporter.BuildStaticMeshData(
                 mesh.Name ?? "m", prim, System.Numerics.Matrix4x4.Identity, System.Numerics.Matrix4x4.Identity,
                 includeTangents: true);
             var stripped = (byte[])authored.VertexBytes.Clone();
@@ -91,6 +92,44 @@ public static class Program
         }
 
         return true;
+    }
+
+    // A cooked file read by the engine (ModelData), in the shapes the cook's importer returns for a
+    // source, so a cooked-versus-source comparison compares like with like. Test-side only: the
+    // engine has one reader, and it is ModelData.
+    private static Blix.Import.GltfNodeModel CookedNodes(string blixmesh, bool tangents = false, bool colour = false)
+    {
+        var d = Blix.ModelData.Load(blixmesh, new Blix.ModelNeeds(tangents, colour, Skinned: false));
+        return new Blix.Import.GltfNodeModel(d.Nodes.Select(n => new Blix.Import.GltfNode(
+            n.Name, n.ParentIndex, n.Local,
+            n.MeshIndex < 0
+                ? Array.Empty<Blix.Import.GltfPrimitive>()
+                : d.Meshes[n.MeshIndex].Primitives
+                    .Select(p => new Blix.Import.GltfPrimitive(p.Mesh, p.Material, MaterialIndex: p.MaterialIndex)).ToArray())).ToArray());
+    }
+
+    private static Blix.Import.GltfModel CookedModel(string blixmesh, bool tangents = false, bool colour = false)
+    {
+        var d = Blix.ModelData.Load(blixmesh, new Blix.ModelNeeds(tangents, colour, Skinned: true));
+        if (d.IsRigged)
+        {
+            var skinned = Enumerable.Range(0, d.Skins.Count)
+                .SelectMany(s => d.SkinnedPrimitives(s).Select(p => new Blix.Import.GltfPrimitive(p.Mesh, p.Material, SkinIndex: s, MaterialIndex: p.MaterialIndex)))
+                .ToArray();
+            return new Blix.Import.GltfModel(skinned, d.Skins[0].Skeleton, d.Clips.ToArray(), d.Placement(0));
+        }
+
+        return CookedFlat(blixmesh, tangents, colour);
+    }
+
+    // Every placed primitive in world space, a rigged file's skinned meshes at bind pose: the flat
+    // static reading the source importer's Import gives.
+    private static Blix.Import.GltfModel CookedFlat(string blixmesh, bool tangents = false, bool colour = false)
+    {
+        var flat = Blix.ModelData.Load(blixmesh, new Blix.ModelNeeds(tangents, colour, Skinned: false));
+        return new Blix.Import.GltfModel(
+            flat.Flattened().Select(x => new Blix.Import.GltfPrimitive(x.Primitive.Mesh, x.Primitive.Material)).ToArray(),
+            new Skeleton(Array.Empty<Bone>()), Array.Empty<AnimationClip>(), System.Numerics.Matrix4x4.Identity);
     }
 
     private static void ModelDataReadings(TestRunner t)
@@ -181,8 +220,7 @@ public static class Program
             // rig is, and the static hierarchy a model view wants.
             var rigSibling = Path.ChangeExtension(rogue, ".blixmesh");
             t.Expect("a current cooked sibling is used as-is", CookCache.Resolve(rogue) == rigSibling, CookCache.Resolve(rogue));
-            var asModel = new Blix.GltfStaticImporter().ImportNodes(
-                new AssetImportContext(AssetId.Parse("t/rogue-model"), rigSibling, includeColour: true));
+            var asModel = CookedNodes(rigSibling, colour: true);
             t.Expect("and the same cooked rig reads as a model, its skinned meshes at bind pose",
                 BlixMeshReader.Read(rigSibling).IsRigged && asModel.Nodes.Any(n => n.Primitives.Length > 0),
                 $"{asModel.Nodes.Length} node(s)");
@@ -282,12 +320,11 @@ public static class Program
                 }
                 """);
 
-            var fromSource = new Blix.GltfStaticImporter()
+            var fromSource = new Blix.Import.GltfStaticImporter()
                 .Import(new AssetImportContext(AssetId.Parse("t/authored-src"), gltf)).Primitives[0].Material;
             var cooked = Path.ChangeExtension(gltf, ".blixmesh");
             MeshRecipe.CookToBlixMesh(gltf, cooked);
-            var fromCooked = new Blix.GltfStaticImporter()
-                .Import(new AssetImportContext(AssetId.Parse("t/authored-cooked"), cooked)).Primitives[0].Material;
+            var fromCooked = CookedModel(cooked).Primitives[0].Material;
 
             foreach (var (path, m) in new[] { ("source", fromSource), ("cooked", fromCooked) })
             {
@@ -634,20 +671,27 @@ public static class Program
             Directory.CreateDirectory(rigTemp);
             try
             {
+                // The cooked leg is the engine's reader; the source leg is the cook's importer. Both
+                // must describe the same rig.
+                var cookedRig = Path.ChangeExtension(rig, ".blixmesh");
                 AssetLoadLog.Start();
-                var viaCookedRig = new Blix.GltfImporter()
-                    .Import(new AssetImportContext(AssetId.Parse("t/rig"), rig));
+                var cookedData = Blix.ModelData.Load(cookedRig, new Blix.ModelNeeds(Colour: true, Skinned: true));
                 var rigReports = AssetLoadLog.Drain();
+                var cookedSkeleton = cookedData.Skins[0].Skeleton;
+                var cookedClips = cookedData.Clips;
+                var cookedAttachments = cookedData.Attachments();
+                var cookedPrimitives = Enumerable.Range(0, cookedData.Skins.Count)
+                    .SelectMany(s => cookedData.SkinnedPrimitives(s)).ToArray();
 
-                var meshReport = rigReports.SingleOrDefault(r => r.SourcePath == rig);
+                var meshReport = rigReports.SingleOrDefault(r => r.SourcePath == cookedRig);
                 t.ExpectTrue("a rigged load is reported at all", meshReport is not null);
-                t.Expect("and now reports Cooked", meshReport!.Mode == AssetLoadMode.Cooked, $"got {meshReport.Mode}");
+                t.Expect("and reports Cooked", meshReport!.Mode == AssetLoadMode.Cooked, $"got {meshReport.Mode}");
                 t.ExpectTrue("with a cost attached", meshReport.LoadMs > 0 && meshReport.Bytes > 0);
 
                 // The source leg: the same .glb with no cooked sibling beside it.
                 var loneRig = Path.Combine(rigTemp, Path.GetFileName(rig));
                 File.Copy(rig, loneRig);
-                var viaSourceRig = new Blix.GltfImporter()
+                var viaSourceRig = new Blix.Import.GltfImporter()
                     .Import(new AssetImportContext(AssetId.Parse("t/rig-source"), loneRig));
 
                 t.ExpectThrows<InvalidDataException>(
@@ -657,14 +701,14 @@ public static class Program
                         flipTextureV: true));
 
                 t.Expect("cooked and source agree on bone count",
-                    viaCookedRig.Skeleton.BoneCount == viaSourceRig.Skeleton.BoneCount,
-                    $"cooked {viaCookedRig.Skeleton.BoneCount}, source {viaSourceRig.Skeleton.BoneCount}");
+                    cookedSkeleton.BoneCount == viaSourceRig.Skeleton.BoneCount,
+                    $"cooked {cookedSkeleton.BoneCount}, source {viaSourceRig.Skeleton.BoneCount}");
                 t.Expect("and on clip count",
-                    viaCookedRig.Animations.Length == viaSourceRig.Animations.Length,
-                    $"cooked {viaCookedRig.Animations.Length}, source {viaSourceRig.Animations.Length}");
+                    cookedClips.Count == viaSourceRig.Animations.Length,
+                    $"cooked {cookedClips.Count}, source {viaSourceRig.Animations.Length}");
                 t.Expect("and on attachment count",
-                    viaCookedRig.AttachmentsOrEmpty.Length == viaSourceRig.AttachmentsOrEmpty.Length,
-                    $"cooked {viaCookedRig.AttachmentsOrEmpty.Length}, source {viaSourceRig.AttachmentsOrEmpty.Length}");
+                    cookedAttachments.Count == viaSourceRig.AttachmentsOrEmpty.Length,
+                    $"cooked {cookedAttachments.Count}, source {viaSourceRig.AttachmentsOrEmpty.Length}");
                 // Without this the three counts above can all pass on an asset with no attachments,
                 // which is the case the per-primitive layout migration was made for.
                 t.Expect("on an asset that actually has attachments",
@@ -672,9 +716,9 @@ public static class Program
                     $"{viaSourceRig.AttachmentsOrEmpty.Length} attachments");
 
                 var rigMismatch = new List<string>();
-                for (var i = 0; i < Math.Min(viaCookedRig.Skeleton.BoneCount, viaSourceRig.Skeleton.BoneCount); i++)
+                for (var i = 0; i < Math.Min(cookedSkeleton.BoneCount, viaSourceRig.Skeleton.BoneCount); i++)
                 {
-                    var a = viaCookedRig.Skeleton.Bones[i];
+                    var a = cookedSkeleton.Bones[i];
                     var b = viaSourceRig.Skeleton.Bones[i];
                     if (a.Name != b.Name) rigMismatch.Add($"bone[{i}] {a.Name} vs {b.Name}");
                     if (a.ParentIndex != b.ParentIndex) rigMismatch.Add($"bone[{i}] parent {a.ParentIndex} vs {b.ParentIndex}");
@@ -685,9 +729,9 @@ public static class Program
                     string.Join("; ", rigMismatch.Take(4)));
 
                 var clipMismatch = new List<string>();
-                for (var i = 0; i < Math.Min(viaCookedRig.Animations.Length, viaSourceRig.Animations.Length); i++)
+                for (var i = 0; i < Math.Min(cookedClips.Count, viaSourceRig.Animations.Length); i++)
                 {
-                    var a = viaCookedRig.Animations[i];
+                    var a = cookedClips[i];
                     var b = viaSourceRig.Animations[i];
                     if (a.Name != b.Name) clipMismatch.Add($"clip[{i}] {a.Name} vs {b.Name}");
                     if (Math.Abs(a.Duration - b.Duration) > 1e-6) clipMismatch.Add($"clip '{a.Name}' duration {a.Duration} vs {b.Duration}");
@@ -704,9 +748,9 @@ public static class Program
                 var vertexMismatch = 0;
                 var untangented = 0;
                 const int tangentAt = 64, stride = 80;
-                for (var i = 0; i < Math.Min(viaCookedRig.Primitives.Length, viaSourceRig.Primitives.Length); i++)
+                for (var i = 0; i < Math.Min(cookedPrimitives.Length, viaSourceRig.Primitives.Length); i++)
                 {
-                    var cookedMesh = viaCookedRig.Primitives[i].Mesh;
+                    var cookedMesh = cookedPrimitives[i].Mesh;
                     var sourceMesh = viaSourceRig.Primitives[i].Mesh;
                     var cookedIndices = cookedMesh.Indices32 ?? cookedMesh.Indices.Select(x => (uint)x).ToArray();
                     var sourceIndices = sourceMesh.Indices32 ?? sourceMesh.Indices.Select(x => (uint)x).ToArray();
@@ -740,9 +784,9 @@ public static class Program
                 // here passing — the character was being drawn without its albedo.
                 var matMismatch = new List<string>();
                 var withAlbedo = 0;
-                for (var i = 0; i < Math.Min(viaCookedRig.Primitives.Length, viaSourceRig.Primitives.Length); i++)
+                for (var i = 0; i < Math.Min(cookedPrimitives.Length, viaSourceRig.Primitives.Length); i++)
                 {
-                    var x = viaCookedRig.Primitives[i].Material;
+                    var x = cookedPrimitives[i].Material;
                     var y = viaSourceRig.Primitives[i].Material;
                     if (x is null || y is null)
                     {
@@ -763,17 +807,12 @@ public static class Program
                 t.Expect("on primitives that actually carry an albedo", withAlbedo > 0,
                     $"{withAlbedo} of {viaSourceRig.Primitives.Length}");
 
-                // <b>And the static importer reads the same cooked rig as static geometry.</b> The file
-                // is a scene graph, so a skinned mesh reads at its bind pose — in the static layout it
-                // asked for, never at the skinned stride, which is the failure that once drew garbage.
-                AssetLoadLog.Start();
-                var asStatic = new Blix.GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("t/static"), rig));
-                var staticReport = AssetLoadLog.Drain().SingleOrDefault(r => r.SourcePath == rig);
-                t.ExpectTrue("the static importer reads the cooked rig rather than walking the glTF",
-                    staticReport is { Mode: AssetLoadMode.Cooked });
-                t.Expect("and hands over the static layout, not the skinned one",
-                    asStatic.Primitives.Length > 0 && asStatic.Primitives.All(p => p.Mesh.Layout.Stride == 32),
-                    string.Join(",", asStatic.Primitives.Select(p => p.Mesh.Layout.Stride).Distinct()));
+                // <b>And the importers read sources only.</b> A cooked file is the engine's to read, so
+                // handing one to the cook's importer is refused by name rather than half-read.
+                var refused = t.ExpectThrows<AssetImportException>("the importers refuse a cooked file, naming ModelData",
+                    () => new Blix.Import.GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("t/static"), cookedRig)));
+                t.Expect("naming ModelData.Load", refused?.Message.Contains("ModelData.Load", StringComparison.Ordinal) == true,
+                    refused?.Message ?? "(none)");
             }
             finally
             {
@@ -902,9 +941,8 @@ public static class Program
                 var lone = Path.Combine(temp, Path.GetFileName(cookedAsset));
                 File.Copy(cookedAsset, lone);
 
-                var viaCooked = new Blix.GltfStaticImporter()
-                    .Import(new AssetImportContext(AssetId.Parse("t/kf-cooked"), cookedAsset));
-                var viaSource = new Blix.GltfStaticImporter()
+                var viaCooked = CookedFlat(Path.ChangeExtension(cookedAsset, ".blixmesh"));
+                var viaSource = new Blix.Import.GltfStaticImporter()
                     .Import(new AssetImportContext(AssetId.Parse("t/kf-source"), lone));
 
                 t.Expect("both paths return the same primitive count",
@@ -1004,10 +1042,9 @@ public static class Program
 
                 foreach (var (tangents, colour) in new[] { (false, true), (true, false), (false, false) })
                 {
-                    var fromSource = new Blix.GltfStaticImporter().ImportNodes(
+                    var fromSource = new Blix.Import.GltfStaticImporter().ImportNodes(
                         new AssetImportContext(AssetId.Parse("t/cv-src"), gltf, includeTangents: tangents, includeColour: colour));
-                    var fromCooked = new Blix.GltfStaticImporter().ImportNodes(
-                        new AssetImportContext(AssetId.Parse("t/cv-cooked"), cooked, includeTangents: tangents, includeColour: colour));
+                    var fromCooked = CookedNodes(cooked, tangents, colour);
                     var differ = 0;
                     var compared = 0;
                     var byName = fromSource.Nodes.ToDictionary(n => n.Name, StringComparer.Ordinal);
@@ -1104,14 +1141,12 @@ public static class Program
 
                 // Routed by what the cooked file HOLDS, which is the same rule the judge uses.
                 var rigged = BlixMeshReader.Read(meshCopy).IsRigged;
-                var alone = rigged
-                    ? new Blix.GltfImporter().Import(new AssetImportContext(AssetId.Parse("t/alone"), meshCopy))
-                    : new Blix.GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("t/alone"), meshCopy));
+                var alone = CookedModel(meshCopy);
 
                 // The same asset loaded the ordinary way, in its own tree, to compare against.
                 var besideSource = rigged
-                    ? new Blix.GltfImporter().Import(new AssetImportContext(AssetId.Parse("t/beside"), cookedAsset))
-                    : new Blix.GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("t/beside"), cookedAsset));
+                    ? CookedModel(Path.ChangeExtension(cookedAsset, ".blixmesh"))
+                    : CookedModel(Path.ChangeExtension(cookedAsset, ".blixmesh"));
 
                 t.Expect("a cooked mesh loads with no source anywhere",
                     alone.Primitives.Length == besideSource.Primitives.Length,
@@ -1173,8 +1208,7 @@ public static class Program
                     !Directory.EnumerateFiles(driverOut, "*.gltf", SearchOption.AllDirectories).Any()
                     && !Directory.EnumerateFiles(driverOut, "*.glb", SearchOption.AllDirectories).Any());
 
-                var fromDriver = new Blix.GltfImporter().Import(
-                    new AssetImportContext(AssetId.Parse("t/driver-output"), driverMesh));
+                var fromDriver = CookedModel(driverMesh);
                 t.Expect("the driver's source-free output opens directly",
                     fromDriver.Primitives.Length > 0,
                     $"{fromDriver.Primitives.Length} primitive(s)");
@@ -1329,12 +1363,12 @@ public static class Program
         }
         else
         {
-            var firstLoad = new Blix.GltfImporter()
+            var firstLoad = new Blix.Import.GltfImporter()
                 .Import(new AssetImportContext(AssetId.Parse("t/id-1"), idAsset));
-            var secondLoad = new Blix.GltfImporter()
+            var secondLoad = new Blix.Import.GltfImporter()
                 .Import(new AssetImportContext(AssetId.Parse("t/id-2"), idAsset));
 
-            static string[] Ids(Blix.GltfModel m) => m.Primitives
+            static string[] Ids(Blix.Import.GltfModel m) => m.Primitives
                 .Select(p => p.Material?.BaseColorTexture)
                 .Where(x => x is not null)
                 .Select(x => x!.ResourceId)
@@ -1403,12 +1437,12 @@ public static class Program
         // keeps its own storage and shares only the key. Asserted the same way: two loads agree.
         if (idAsset is not null)
         {
-            var matA = new Blix.GltfImporter()
+            var matA = new Blix.Import.GltfImporter()
                 .Import(new AssetImportContext(AssetId.Parse("t/mat-1"), idAsset));
-            var matB = new Blix.GltfImporter()
+            var matB = new Blix.Import.GltfImporter()
                 .Import(new AssetImportContext(AssetId.Parse("t/mat-2"), idAsset));
 
-            static string[] MaterialIds(Blix.GltfModel m) => m.Primitives
+            static string[] MaterialIds(Blix.Import.GltfModel m) => m.Primitives
                 .Select(p => p.Material)
                 .Where(x => x is not null)
                 .Select(x => x!.ResourceId)
@@ -1458,13 +1492,10 @@ public static class Program
                 var gltf = Path.Combine(nodeTemp, Path.GetFileName(nodeAsset));
                 MeshRecipe.CookToBlixMesh(gltf, Path.ChangeExtension(gltf, ".blixmesh"));
 
-                var importer = new Blix.GltfStaticImporter();
+                var importer = new Blix.Import.GltfStaticImporter();
                 var fromSource = importer.ImportNodes(
                     new AssetImportContext(AssetId.Parse("t/n-src"), gltf, includeColour: true));
-                var fromCooked = importer.ImportNodes(
-                    new AssetImportContext(
-                        AssetId.Parse("t/n-cooked"), Path.ChangeExtension(gltf, ".blixmesh"),
-                        includeColour: true));
+                var fromCooked = CookedNodes(Path.ChangeExtension(gltf, ".blixmesh"), colour: true);
 
                 t.Expect("a cooked mesh yields the same node count",
                     fromCooked.Nodes.Length == fromSource.Nodes.Length,

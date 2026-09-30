@@ -1,5 +1,6 @@
 using System.Numerics;
 using Blix;
+using Blix.Import;
 using Blix.Assets;
 using Blix.Cooked;
 using Blix.Geometry;

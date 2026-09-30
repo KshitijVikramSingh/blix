@@ -6,7 +6,7 @@ using Blix.Graphics.Images;
 using SharpGLTF.Schema2;
 using Blix.Cooked;
 
-namespace Blix;
+namespace Blix.Import;
 
 // Static-mesh sibling of GltfImporter. Loads any .glb/.gltf containing untransformed
 // or transformed mesh nodes (no skinning required) and emits a GltfModel whose
@@ -37,95 +37,9 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         return AssetImportException.Refusing(context.SourcePath, () => ImportCore(context));
     }
 
-    /// <summary>
-    /// Null when the cooked mesh was made with the settings this caller wants; else why not.
-    /// </summary>
-    /// <remarks>
-    /// Only the setting that changes the VERTICES is compared: <c>flipV</c> moves texture coordinates,
-    /// and a mesh cooked the other way is a different answer rather than a slower one. The layout is
-    /// not a setting — a static primitive cooks as the complete vertex and is repacked to whatever a
-    /// load asks for. The remaining stamped parameters (split, foliage, simplify) change how geometry
-    /// is divided or decimated, which every consumer takes as it comes.
-    /// </remarks>
-    private static string? SettingsMismatch(string blixmeshPath, AssetImportContext context)
-    {
-        var stamp = CookedFile.TryReadHeader(blixmeshPath)?.Stamp;
-        if (stamp is null) return null;
-
-        // Rig recipes use a different parameter vocabulary and are handled by GltfImporter.
-        if (!stamp.Value.Parameters.Contains("flipV=", StringComparison.Ordinal)) return null;
-
-        var want = $"flipV={(context.FlipTextureV ? 1 : 0)} ";
-        if (stamp.Value.Parameters.Contains(want, StringComparison.Ordinal)) return null;
-
-        return $"a .blixmesh sibling exists but was cooked with '{stamp.Value.Parameters}' and this "
-             + $"load wants '{want}' — the glTF was walked instead. Re-cook with matching flags.";
-    }
-
-    /// <summary>Loads a cooked mesh and nothing else — no glTF is opened, and none need exist.</summary>
-    /// <remarks>
-    /// The image table gives each material channel a row naming a relative resource, so image
-    /// resolution does not require reopening the source glTF.
-    /// <para>
-    /// The texture cache and <c>MaterialFromCooked</c> use the same image-table row keys.
-    /// </para>
-    /// </remarks>
-    private GltfModel ImportCooked(string requestedPath, string blixmeshPath, AssetImportContext context)
-    {
-        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
-        // Flat: every primitive a node places, moved to where the scene puts it. A skinned mesh reads
-        // at its bind pose, as the source's static path always drew one.
-        var data = ModelData.Load(
-            blixmeshPath, new ModelNeeds(context.IncludeTangents, context.IncludeColour, Skinned: false), requested: requestedPath);
-        var primitives = new List<GltfPrimitive>();
-        foreach (var (_, p) in data.Flattened())
-        {
-            // UVs are sanitized in the load's own buffer, located by format because their offset
-            // differs between layouts.
-            var uvAttr = p.Mesh.Layout.Attributes.First(a => a.Format == VertexAttributeFormat.Float2);
-            SanitizePackedUVs(p.Mesh.VertexBytes, p.Mesh.VertexCount, stride: p.Mesh.Layout.Stride, uvOffset: uvAttr.Offset, p.Mesh.Name);
-            primitives.Add(new GltfPrimitive(p.Mesh, p.Material));
-        }
-
-        // ModelData.Load reported the cooked load.
-        return new GltfModel(
-            primitives.ToArray(),
-            new Skeleton(Array.Empty<Bone>()),
-            Array.Empty<AnimationClip>(),
-            Matrix4x4.Identity);
-    }
-
     private GltfModel ImportCore(AssetImportContext context)
     {
-        // A .blixmesh may be requested directly or discovered as a sibling. It carries geometry,
-        // materials, and image resources and therefore loads without opening a source glTF.
-        string? cookedMismatch = null;
-        var direct = Path.GetExtension(context.SourcePath)
-            .Equals(".blixmesh", StringComparison.OrdinalIgnoreCase);
-        var blixmeshPath = direct
-            ? context.SourcePath
-            : Path.ChangeExtension(context.SourcePath, ".blixmesh");
-        if (File.Exists(blixmeshPath))
-        {
-            // A cooked artifact is usable only when its vertex-affecting recipe settings match the
-            // requested UV convention. A rigged one is: its scene graph reads as static geometry.
-            if (SettingsMismatch(blixmeshPath, context) is { } mismatch)
-            {
-                if (direct)
-                {
-                    // Named directly, so there is no source to fall back to. Refusing by name beats
-                    // drawing something wrong.
-                    throw new AssetImportException(context.SourcePath, null, mismatch);
-                }
-
-                cookedMismatch = mismatch;
-            }
-            else
-            {
-                return ImportCooked(context.SourcePath, blixmeshPath, context);
-            }
-        }
-
+        RefuseCooked(context);
         var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         var model = AssetImportException.Refusing(
             context.SourcePath, () => ModelRoot.Load(context.SourcePath));
@@ -179,7 +93,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 Mode: AssetLoadMode.Source,
                 Bytes: SafeLength(context.SourcePath),
                 LoadMs: loadWatch.Elapsed.TotalMilliseconds,
-                Warning: cookedMismatch ?? "no .blixmesh sibling — glTF accessors were walked"));
+                Warning: "a glTF source read by its accessors — the engine reads cooked models"));
         }
 
         return new GltfModel(
@@ -207,26 +121,9 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         return AssetImportException.Refusing(context.SourcePath, () => ImportNodesCore(context));
     }
 
-    /// <summary>The node hierarchy of a COOKED mesh, read through <see cref="ModelData"/>.</summary>
-    /// <remarks>Vertices in mesh space, where each node places them; a skinned mesh reads at its bind pose.</remarks>
-    private static GltfNodeModel ImportCookedNodes(string blixmeshPath, bool includeTangents, bool includeColour)
-    {
-        var data = ModelData.Load(blixmeshPath, new ModelNeeds(includeTangents, includeColour, Skinned: false));
-        return new GltfNodeModel(data.Nodes.Select(n => new GltfNode(
-            n.Name, n.ParentIndex, n.Local,
-            n.MeshIndex < 0
-                ? Array.Empty<GltfPrimitive>()
-                : data.Meshes[n.MeshIndex].Primitives
-                    .Select(p => new GltfPrimitive(p.Mesh, p.Material, MaterialIndex: p.MaterialIndex)).ToArray())).ToArray());
-    }
-
     private GltfNodeModel ImportNodesCore(AssetImportContext context)
     {
-        if (Path.GetExtension(context.SourcePath).Equals(".blixmesh", StringComparison.OrdinalIgnoreCase))
-        {
-            return ImportCookedNodes(context.SourcePath, context.IncludeTangents, context.IncludeColour);
-        }
-
+        RefuseCooked(context);
         var model = AssetImportException.Refusing(context.SourcePath, () => ModelRoot.Load(context.SourcePath));
         var gltfDir = Path.GetDirectoryName(Path.GetFullPath(context.SourcePath)) ?? string.Empty;
         var textureCache = new Dictionary<int, GltfTexture>();
@@ -262,6 +159,14 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         }
 
         return new GltfNodeModel(nodes, GltfShared.CollectIgnored(model, StaticFeatures(context)));
+    }
+
+    // A cooked file is the engine's to read; this reads sources, for the cook.
+    internal static void RefuseCooked(AssetImportContext context)
+    {
+        if (!Path.GetExtension(context.SourcePath).Equals(".blixmesh", StringComparison.OrdinalIgnoreCase)) return;
+        throw new AssetImportException(
+            context.SourcePath, null, "this is a cooked model — read it with ModelData.Load; this importer reads glTF sources, for the cook");
     }
 
     private static GltfShared.VertexFeatures StaticFeatures(AssetImportContext context) =>
@@ -539,20 +444,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
     }
 
     /// <summary>The inverse-transpose of a model matrix, for transforming normals.</summary>
-    /// <remarks>
-    /// Public because project-owned recipes use the same normal transformation as runtime imports;
-    /// recipe assemblies do not require privileged internal access.
-    /// </remarks>
-    public static Matrix4x4 ComputeNormalMatrix(Matrix4x4 model)
-    {
-        // F-016: engine row-vector convention. For a direction transform,
-        // GraphicsMatrices.TransformDirection treats the matrix as row-vector
-        // and uses the rotation 3x3 (M11-M33). For invariance under non-uniform
-        // scale we need the inverse-transpose. In row-vector form that's
-        // Transpose(Invert(model)).
-        if (!Matrix4x4.Invert(model, out var inverse)) return Matrix4x4.Identity;
-        return Matrix4x4.Transpose(inverse);
-    }
+    public static Matrix4x4 ComputeNormalMatrix(Matrix4x4 model) => GraphicsMatrices.NormalMatrix(model);
 
 
 }

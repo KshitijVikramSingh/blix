@@ -24,6 +24,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Blix\Blix.csproj" />
+    <!-- The cook reads glTF sources through Blix.Import; the engine does not. -->
+    <ProjectReference Include="..\Blix.Import\Blix.Import.csproj" />
     <ProjectReference Include="..\Blix.Assets\Blix.Assets.csproj" />
     <ProjectReference Include="..\Blix.Cooked\Blix.Cooked.csproj" />
     <ProjectReference Include="..\Blix.Geometry\Blix.Geometry.csproj" />

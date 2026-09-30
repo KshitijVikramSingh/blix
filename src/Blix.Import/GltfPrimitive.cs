@@ -1,6 +1,6 @@
 using Blix.Assets;
 
-namespace Blix;
+namespace Blix.Import;
 
 // One primitive imported from a glTF mesh: its skinned vertex+index data plus the
 // material it renders with. A glTF mesh node can split into N primitives — one per

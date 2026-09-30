@@ -1,6 +1,6 @@
 using System.Numerics;
 
-namespace Blix;
+namespace Blix.Import;
 
 /// <summary>
 /// A static mesh parented to a joint: a knife in a hand, a cape on a chest.

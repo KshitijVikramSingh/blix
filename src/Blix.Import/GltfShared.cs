@@ -5,7 +5,7 @@ using Blix.Graphics;
 using Blix.Graphics.Images;
 using SharpGLTF.Schema2;
 
-namespace Blix;
+namespace Blix.Import;
 
 /// <summary>
 /// The parts of reading a glTF that have nothing to do with whether it is rigged.
@@ -284,134 +284,6 @@ internal static class GltfShared
         return suffix.Length > 0 && int.TryParse(suffix, out set) && set >= 0;
     }
 
-    /// <summary>
-    /// Builds a material out of a COOKED table rather than out of the glTF, resolving each channel's
-    /// image through the cache the pre-decode pass already filled.
-    /// </summary>
-    /// <remarks>
-    /// Factors, alpha state, extension values, and image-table rows come from the cooked material
-    /// table. A legacy artifact marked <c>SourceRequiredForImagesOnly</c> may still need source image
-    /// bytes, but current self-contained artifacts resolve their own image resources.
-    /// <para>
-    /// An image index that is not in the cache resolves to null rather than throwing, and the two
-    /// passes agree by construction — <see cref="PreDecodeImages"/> walks
-    /// <see cref="PreDecodeChannels"/>, which is the same five channels the cook records. A miss
-    /// would mean the cooked table and the source have drifted, which the stamp exists to catch
-    /// earlier and more usefully than an exception here would.
-    /// </para>
-    /// </remarks>
-    /// <summary>
-    /// Loads every image a cooked mesh names, from the cooked mesh's own table — no glTF involved.
-    /// </summary>
-    /// <remarks>
-    /// Counterpart to <see cref="PreDecodeImages"/> for source-free cooked loads. Image discovery
-    /// and resource location both come from the cooked image table.
-    /// <para>
-    /// The cache is keyed by image-table row, matching what a cooked material channel stores.
-    /// <see cref="MaterialFromCooked"/> looks its textures up by that same number, so the two agree
-    /// without either of them knowing a glTF logical index exists.
-    /// </para>
-    /// <para>
-    /// A row whose resource is a <c>.blixtex</c> is opened lazily — header and mip table only,
-    /// pixels stay on disk. A row still naming its source image is decoded, and reported on the slow
-    /// path so <c>blix check --cooked</c> can say so. Metallic-roughness images are routed through
-    /// the channel-aware decoder exactly as the glTF path routes them, because a one-channel
-    /// roughness PNG expanded by the ordinary loader reads as matte metal.
-    /// </para>
-    /// </remarks>
-    internal static void LoadImagesFromTable(
-        IReadOnlyList<BlixMeshImage> images,
-        IReadOnlyList<BlixMeshMaterial> materials,
-        string cookedDir,
-        Dictionary<int, GltfTexture> textureCache)
-    {
-        if (images.Count == 0) return;
-
-        var metallicRoughnessRows = new HashSet<int>();
-        foreach (var m in materials)
-        {
-            if (m.MetallicRoughnessImage >= 0) metallicRoughnessRows.Add(m.MetallicRoughnessImage);
-        }
-
-        var cooked = 0;
-        var cookedWatch = System.Diagnostics.Stopwatch.StartNew();
-        var decodedCount = 0;
-
-        for (var row = 0; row < images.Count; row++)
-        {
-            var entry = images[row];
-            var path = Path.GetFullPath(Path.Combine(cookedDir, entry.Resource));
-            var one = System.Diagnostics.Stopwatch.StartNew();
-
-            if (!File.Exists(path))
-            {
-                // A missing image leaves that material channel unbound and is reported without
-                // preventing the rest of the cooked model from loading.
-                if (AssetLoadLog.Enabled)
-                {
-                    AssetLoadLog.Report(new AssetLoadReport(
-                        SourcePath: entry.Resource, CookedPath: null, Mode: AssetLoadMode.Source,
-                        Bytes: 0, LoadMs: 0,
-                        Warning: $"image '{entry.Name}' is missing — the cooked mesh names {entry.Resource}"));
-                }
-
-                continue;
-            }
-
-            if (path.EndsWith(".blixtex", StringComparison.OrdinalIgnoreCase))
-            {
-                textureCache[row] = new GltfTexture(entry.Name, BlixTexReader.ReadHandle(path))
-                {
-                    ResourceId = path,
-                };
-                cooked++;
-                if (AssetLoadLog.Enabled)
-                {
-                    AssetLoadLog.Report(new AssetLoadReport(
-                        SourcePath: entry.Resource, CookedPath: path, Mode: AssetLoadMode.Cooked,
-                        Bytes: FileLength(path), LoadMs: one.Elapsed.TotalMilliseconds,
-                        Recipe: CookedFile.TryReadHeader(path)?.Stamp.Recipe));
-                }
-
-                continue;
-            }
-
-            using (var stream = File.OpenRead(path))
-            {
-                var d = metallicRoughnessRows.Contains(row)
-                    ? ImageLoader.LoadMetallicRoughness(stream)
-                    : ImageLoader.LoadRgba32(stream);
-                textureCache[row] = GltfTexture.Rgba8Single(entry.Name, d.Pixels, d.Width, d.Height, path);
-            }
-
-            decodedCount++;
-            if (AssetLoadLog.Enabled)
-            {
-                AssetLoadLog.Report(new AssetLoadReport(
-                    SourcePath: entry.Resource, CookedPath: null, Mode: AssetLoadMode.Source,
-                    Bytes: FileLength(path), LoadMs: one.Elapsed.TotalMilliseconds,
-                    Warning: "no .blixtex for this image — decoded from source"));
-            }
-        }
-
-        cookedWatch.Stop();
-        if (cooked > 0)
-        {
-            Console.WriteLine(
-                $"  indexed {cooked} cooked .blixtex images in {cookedWatch.ElapsedMilliseconds} ms (lazy)");
-        }
-
-        if (decodedCount > 0) Console.WriteLine($"  decoded {decodedCount} images from source");
-    }
-
-    /// <summary>What a material IS, as a string two loads agree on.</summary>
-    /// <remarks>
-    /// Empty when the caller cannot say which file it came from — never shared, for the same reason
-    /// an unnamed texture is not: an identity nobody can reproduce is not an identity.
-    /// </remarks>
-    private static string MaterialIdentity(string containerPath, int index) =>
-        containerPath.Length == 0 ? string.Empty : $"{Path.GetFullPath(containerPath)}#material{index}";
-
     /// <summary>What a glTF image's pixels ARE, as a string two loads agree on.</summary>
     /// <remarks>
     /// An external image is its own resolved path. An image embedded in a .glb has no path, so it
@@ -439,99 +311,22 @@ internal static class GltfShared
             : $"{Path.GetFullPath(containerPath)}#{image.LogicalIndex}";
     }
 
-    internal static GltfMaterial? MaterialFromCooked(
-        IReadOnlyList<BlixMeshMaterial> materials,
-        int index,
-        Dictionary<int, GltfMaterial> materialCache,
-        Dictionary<int, GltfTexture> textureCache,
-        string cookedPath = "")
-    {
-        if (index < 0 || index >= materials.Count) return null;
-        if (materialCache.TryGetValue(index, out var cached)) return cached;
-
-        var m = materials[index];
-        var result = new GltfMaterial(
-            MaterialIdentity(cookedPath, index),
-            m.Name,
-            m.BaseColorFactor,
-            Texture(m.BaseColorImage),
-            m.BaseColorTexCoord,
-            Texture(m.NormalImage),
-            m.NormalTexCoord,
-            m.NormalScale,
-            Texture(m.MetallicRoughnessImage),
-            m.MetallicRoughnessTexCoord,
-            m.MetallicFactor,
-            m.RoughnessFactor,
-            Texture(m.OcclusionImage),
-            m.OcclusionTexCoord,
-            m.OcclusionStrength,
-            Texture(m.EmissiveImage),
-            m.EmissiveTexCoord,
-            m.EmissiveFactor,
-            m.EmissiveStrength,
-            m.AlphaMode switch
-            {
-                BlixMesh.AlphaMask => GltfAlphaMode.Mask,
-                BlixMesh.AlphaBlend => GltfAlphaMode.Blend,
-                _ => GltfAlphaMode.Opaque,
-            },
-            m.AlphaCutoff,
-            m.DoubleSided,
-            m.TransmissionFactor,
-            // Resolve cooked extension image rows through the same texture cache as core material
-            // channels so source and cooked material shapes agree.
-            CookedExtensions(m.Ext, Texture));
-
-        materialCache[index] = result;
-        return result;
-
-        GltfTexture? Texture(int image) =>
-            image >= 0 && textureCache.TryGetValue(image, out var t) ? t : null;
-    }
-
-
-    /// <summary>The cooked <c>KHR_materials_*</c> block as the engine's, with images resolved.</summary>
-    private static GltfMaterialExtensions CookedExtensions(
-        Blix.Assets.BlixMaterialExtensions x,
-        Func<int, GltfTexture?> texture) => new(
-            TransmissionFactor: x.TransmissionFactor,
-            TransmissionTexture: texture(x.TransmissionImage),
-            DiffuseTransmissionFactor: x.DiffuseTransmissionFactor,
-            DiffuseTransmissionColorFactor: x.DiffuseTransmissionColorFactor,
-            DiffuseTransmissionTexture: texture(x.DiffuseTransmissionImage),
-            DiffuseTransmissionColorTexture: texture(x.DiffuseTransmissionColorImage),
-            SheenColorFactor: x.SheenColorFactor,
-            SheenRoughnessFactor: x.SheenRoughnessFactor,
-            SheenColorTexture: texture(x.SheenColorImage),
-            SheenRoughnessTexture: texture(x.SheenRoughnessImage),
-            ThicknessFactor: x.ThicknessFactor,
-            AttenuationDistance: x.AttenuationDistance,
-            AttenuationColor: x.AttenuationColor,
-            ThicknessTexture: texture(x.ThicknessImage),
-            SpecularFactor: x.SpecularFactor,
-            SpecularColorFactor: x.SpecularColorFactor,
-            SpecularTexture: texture(x.SpecularImage),
-            SpecularColorTexture: texture(x.SpecularColorImage),
-            IndexOfRefraction: x.IndexOfRefraction,
-            ClearcoatFactor: x.ClearcoatFactor,
-            ClearcoatRoughnessFactor: x.ClearcoatRoughnessFactor,
-            ClearcoatNormalScale: x.ClearcoatNormalScale,
-            ClearcoatTexture: texture(x.ClearcoatImage),
-            ClearcoatRoughnessTexture: texture(x.ClearcoatRoughnessImage),
-            ClearcoatNormalTexture: texture(x.ClearcoatNormalImage),
-            IridescenceFactor: x.IridescenceFactor,
-            IridescenceIor: x.IridescenceIor,
-            IridescenceThicknessMinimum: x.IridescenceThicknessMinimum,
-            IridescenceThicknessMaximum: x.IridescenceThicknessMaximum,
-            IridescenceTexture: texture(x.IridescenceImage),
-            IridescenceThicknessTexture: texture(x.IridescenceThicknessImage),
-            AnisotropyStrength: x.AnisotropyStrength,
-            AnisotropyRotation: x.AnisotropyRotation,
-            AnisotropyTexture: texture(x.AnisotropyImage),
-            Dispersion: x.Dispersion,
-            Unlit: x.Unlit);
-
+    /// <summary>
+    /// Builds a material out of a COOKED table rather than out of the glTF, resolving each channel's
+    /// image through the cache the pre-decode pass already filled.
+    /// </summary>
+    /// <remarks>
+    /// Factors, alpha state, extension values, and image-table rows come from the cooked material
+    /// table. A legacy artifact marked <c>SourceRequiredForImagesOnly</c> may still need source image
+    /// bytes, but current self-contained artifacts resolve their own image resources.
+    /// <para>
+    /// An image index that is not in the cache resolves to null rather than throwing, and the two
+    /// passes agree by construction — <see cref="PreDecodeImages"/> walks
+    /// <see cref="PreDecodeChannels"/>, which is the same five channels the cook records. A miss
+    /// would mean the cooked table and the source have drifted, which the stamp exists to catch
+    /// earlier and more usefully than an exception here would.
+    /// </para>
+    /// </remarks>
     internal static GltfMaterial? ExtractMaterial(
         SharpGLTF.Schema2.Material? material,
         Dictionary<int, GltfMaterial> materialCache,
@@ -623,7 +418,7 @@ internal static class GltfShared
         var transmission = ext.TransmissionFactor;
 
         var result = new GltfMaterial(
-            MaterialIdentity(containerPath, material.LogicalIndex),
+            GltfMaterial.IdentityOf(containerPath, material.LogicalIndex),
             material.Name ?? $"material_{material.LogicalIndex}",
             baseColorFactor,
             baseColorTexture,

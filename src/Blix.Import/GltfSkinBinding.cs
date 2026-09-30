@@ -1,6 +1,6 @@
 using System.Numerics;
 
-namespace Blix;
+namespace Blix.Import;
 
 /// <summary>
 /// One glTF skin: the skeleton it defines, and the frame its meshes are authored in.
