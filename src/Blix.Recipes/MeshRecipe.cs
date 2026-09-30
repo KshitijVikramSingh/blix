@@ -127,18 +127,8 @@ public static class MeshRecipe
 
         // Nodes driven by one skin share one palette and one placement, so their world matrices must
         // agree; different skins keep independent placements.
-        foreach (var skin in skinOrder)
-        {
-            var group = model.LogicalNodes.Where(n => n.Mesh is not null && n.Skin == skin).ToArray();
-            foreach (var node in group.Skip(1))
-            {
-                if (node.WorldMatrix == group[0].WorldMatrix) continue;
-                throw new InvalidDataException(
-                    $"glTF '{gltfPath}' has multiple skinned-mesh nodes sharing ONE skin but with different "
-                    + $"world matrices. Mesh '{node.Mesh!.Name}' transform diverges from '{group[0].Mesh!.Name}'. "
-                    + "Meshes at different places need different skins.");
-            }
-        }
+        // One skin may be placed by any number of mesh nodes, wherever they sit: glTF ignores a skinned
+        // mesh node's transform, and the skeleton's placement is read from its joints at load.
 
         var skins = new List<BlixMeshSkin>();
         var remaps = new List<int[]>();

@@ -142,13 +142,14 @@ neither. The root gate is the deviceless one. A CI home for the `demos` gate wou
 deviceless legs (the probe, `chassis-tune --headless`) separable from the headed ones, which is
 what named tiers are for.
 
-**A skin's placement is right in the engine and still the old reading at the source.** `ModelData.Placement`
-places a skeleton at the world of its root joints' parent, as glTF defines it; the importer's source-side
-`GltfModel.MeshNodeTransform` still reads the mesh node's world. Nothing at runtime reads it (the cook stores
-nodes, and the engine derives the placement), so it is a second, disagreeing answer rather than a live bug.
-Two neighbours: the cook refuses one skin placed by two mesh nodes at different worlds, which glTF allows
-because it ignores that transform; and a skin whose root joints hang from different nodes
-(`Animation_Skin_09`) is refused by name, since one placement cannot express it.
+**A clip that animates a non-joint node is not followed.** Skins are read as glTF defines them
+(`JointHierarchy`: placement at the root joints' parent, rest from the joint nodes, in-between nodes as
+fixed offsets, checked vertex-for-vertex against glTF's own sum in `Blix.Test.Recipes`), but the nodes
+between joints and above the roots are taken at rest: clips carry tracks on skin 0's joints only, so a
+track on any other node is not read. The same rule limits multi-skin files: skins that order their joints
+differently cannot share clips, so the cook refuses such a file when it is animated, and poses each such
+skin at its own rest when it is not (`Model.Skin.OwnRest`). Clips that target nodes rather than skin-0
+bone indices would lift both.
 
 **Linux is absent from the CI matrix.** A second red job teaches nothing the first
 has not; the shape of what Windows needed should be known before it is copied.

@@ -132,6 +132,120 @@ public static class Program
             new Skeleton(Array.Empty<Bone>()), Array.Empty<AnimationClip>(), System.Numerics.Matrix4x4.Identity);
     }
 
+    // ── Skins as glTF defines them ─────────────────────────────────────────────
+    // glTF places a skinned vertex at sum(w * jointWorld * inverseBind * v), the joint worlds being the
+    // scene graph's. This computes that from SharpGLTF's own node matrices — nothing of Blix's — for every
+    // source vertex, and holds each cooked vertex, skinned through the engine's rest palette and skeleton
+    // placement, to it. Matched by mesh-space position, because the cook renumbers vertices.
+    //
+    // The assets are the ones that separate the readings: tank.glb (mesh nodes that are not where the
+    // skeleton hangs, and a rest pose that is not its bind pose), two Khronos skin tests (a transformed
+    // mesh node; root joints under different parents), and the Rogue as the ordinary case.
+    private static void SkinsMatchGltf(TestRunner t)
+    {
+        foreach (var name in new[] { "tank.glb", "Animation_Skin_02.gltf", "Animation_Skin_09.gltf", "Rogue.glb", "RiggedFigure.glb", "RiggedSimple.glb", "RiggedSimple_bones300.gltf", "RiggedSimple_cutout.gltf" })
+        {
+            var source = FindFile(name);
+            if (source is null)
+            {
+                Console.WriteLine($"  --   skin conformance skipped for {name}: not found (tools/fetch-gltf-corpus.sh)");
+                continue;
+            }
+
+            var gltf = SharpGLTF.Schema2.ModelRoot.Load(source);
+            var expected = new Dictionary<(int, int, int), List<System.Numerics.Vector3>>();
+            foreach (var node in gltf.LogicalNodes.Where(n => n.Mesh is not null && n.Skin is not null))
+            {
+                var skin = node.Skin;
+                var jointWorlds = skin.Joints.Select(j => j.WorldMatrix).ToArray();
+                var ibms = skin.InverseBindMatrices;
+                foreach (var prim in node.Mesh.Primitives)
+                {
+                    var positions = prim.GetVertexAccessor("POSITION").AsVector3Array();
+                    var joints = prim.GetVertexAccessor("JOINTS_0").AsVector4Array();
+                    var weights = prim.GetVertexAccessor("WEIGHTS_0").AsVector4Array();
+                    for (var v = 0; v < positions.Count; v++)
+                    {
+                        var world = System.Numerics.Vector3.Zero;
+                        var total = 0f;
+                        for (var q = 0; q < 4; q++)
+                        {
+                            var w = weights[v][q];
+                            if (w <= 0f) continue;
+                            var j = (int)joints[v][q];
+                            world += System.Numerics.Vector3.Transform(positions[v], ibms[j] * jointWorlds[j]) * w;
+                            total += w;
+                        }
+
+                        var key = Key(positions[v]);
+                        if (!expected.TryGetValue(key, out var list)) expected[key] = list = new();
+                        list.Add(total > 0f ? world / total : System.Numerics.Vector3.Transform(positions[v], node.WorldMatrix));
+                    }
+                }
+            }
+
+            Blix.ModelData data;
+            try
+            {
+                data = Blix.ModelData.Load(CookCache.Resolve(source), new Blix.ModelNeeds(Skinned: true));
+            }
+            catch (AssetImportException refused)
+            {
+                t.Fail($"{name}: the cooked skin loads", refused.Message);
+                continue;
+            }
+
+            var worst = 0f;
+            var unmatched = 0;
+            var compared = 0;
+            for (var s = 0; s < data.Skins.Count; s++)
+            {
+                var skeleton = data.Skins[s].Skeleton;
+                var palette = new BonePaletteSet(skeleton.BoneCount, 1);
+                palette.Add(skeleton, skeleton.CreateRestPose(), data.Placement(s));
+                foreach (var prim in data.SkinnedPrimitives(s))
+                {
+                    var mesh = prim.Mesh;
+                    var stride = mesh.Layout.Stride;
+                    for (var v = 0; v < mesh.VertexCount; v++)
+                    {
+                        var at = v * stride;
+                        var p = new System.Numerics.Vector3(
+                            BitConverter.ToSingle(mesh.VertexBytes, at), BitConverter.ToSingle(mesh.VertexBytes, at + 4),
+                            BitConverter.ToSingle(mesh.VertexBytes, at + 8));
+                        var world = System.Numerics.Vector3.Zero;
+                        var total = 0f;
+                        for (var q = 0; q < 4; q++)
+                        {
+                            var w = BitConverter.ToSingle(mesh.VertexBytes, at + 48 + q * 4);
+                            if (w <= 0f) continue;
+                            var b = (int)BitConverter.ToSingle(mesh.VertexBytes, at + 32 + q * 4);
+                            world += System.Numerics.Vector3.Transform(p, palette.Matrices[b]) * w;
+                            total += w;
+                        }
+
+                        if (total > 0f) world /= total;
+                        if (!expected.TryGetValue(Key(p), out var candidates)) { unmatched++; continue; }
+                        worst = Math.Max(worst, candidates.Min(c => System.Numerics.Vector3.Distance(c, world)));
+                        compared++;
+                    }
+                }
+            }
+
+            // Relative to the model's size: a millimetre on a character is not a millimetre on a tank.
+            var extent = expected.Values.SelectMany(x => x).Aggregate(
+                (Min: new System.Numerics.Vector3(float.MaxValue), Max: new System.Numerics.Vector3(float.MinValue)),
+                (acc, x) => (System.Numerics.Vector3.Min(acc.Min, x), System.Numerics.Vector3.Max(acc.Max, x)));
+            var size = System.Numerics.Vector3.Distance(extent.Min, extent.Max);
+            t.Expect($"{name}: every cooked skinned vertex lands where glTF puts it at rest",
+                compared > 0 && unmatched == 0 && worst <= size * 1e-4f,
+                $"{compared} compared, {unmatched} unmatched, worst {worst:0.#####} against a {size:0.##}-unit model");
+        }
+
+        static (int, int, int) Key(System.Numerics.Vector3 p) =>
+            ((int)MathF.Round(p.X * 1e4f), (int)MathF.Round(p.Y * 1e4f), (int)MathF.Round(p.Z * 1e4f));
+    }
+
     private static void ModelDataReadings(TestRunner t)
     {
         t.ExpectThrows<AssetImportException>("ModelData.Load refuses a source model, naming the cook",
@@ -1072,6 +1186,7 @@ public static class Program
 
         // ── one ModelData, whatever the file holds ───────────────────────────
         ModelDataReadings(t);
+        SkinsMatchGltf(t);
 
         // ── tools cook on open ───────────────────────────────────────────────
         // The engine reads cooked models; a tool opening a raw one cooks it into a cache first.

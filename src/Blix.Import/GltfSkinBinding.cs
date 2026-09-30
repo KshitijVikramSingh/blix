@@ -12,14 +12,14 @@ namespace Blix.Import;
 /// skin it uses. Each skin therefore produces its own skeleton, palette, and binding index.
 /// </para>
 /// <para>
-/// The mesh-node transform belongs to the skin binding because independently placed skins may use
-/// different authored frames.
+/// The placement belongs to the skin binding because independently placed skins may hang from
+/// different nodes.
 /// </para>
 /// </remarks>
 /// <param name="Skeleton">Bones in topological order, with this skin's own inverse bind matrices.</param>
-/// <param name="MeshNodeTransform">
-/// The shared world matrix of the mesh nodes this skin drives. Composed into the model matrix at
-/// draw time rather than baked into vertices: the inverse binds map MESH-LOCAL vertices into joint
-/// space, so baking it would put the skinning maths in the wrong frame.
+/// <param name="SkeletonPlacement">
+/// Where the skeleton hangs: the world of the node its first root joint hangs from
+/// (<see cref="JointHierarchy"/>). Goes after every bone world. Not the mesh nodes' world — glTF
+/// ignores a skinned mesh node's transform, so any number of them, anywhere, may use one skin.
 /// </param>
-public sealed record GltfSkinBinding(Skeleton Skeleton, Matrix4x4 MeshNodeTransform);
+public sealed record GltfSkinBinding(Skeleton Skeleton, Matrix4x4 SkeletonPlacement);

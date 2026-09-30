@@ -81,27 +81,9 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                 "load it as a static model instead (GltfStaticImporter)");
         }
 
-        // Nodes driven by one skin share one palette and model matrix, so their world matrices must
-        // agree. Different skins retain independent placement transforms.
-        //
-        // Each skin's mesh-node transform is its group's. It is NOT baked into vertices: per the
-        // glTF skinning spec the inverse binds map MESH-LOCAL vertices into joint space, so baking
-        // it would put the skinning maths in the wrong frame. The renderer composes it at draw time
-        //    uModel = userTransform * MeshNodeTransform
-        // F-016: engine row-vector form matches SharpGLTF, so no transpose.
-        foreach (var group in nodesBySkin.Values)
-        {
-            var head = group[0];
-            foreach (var node in group)
-            {
-                if (node.WorldMatrix == head.WorldMatrix) continue;
-                throw new InvalidOperationException(
-                    $"glTF '{context.SourcePath}' has multiple skinned-mesh nodes sharing ONE skin " +
-                    $"but with different world matrices. Mesh '{node.Mesh!.Name}' transform diverges " +
-                    $"from '{head.Mesh!.Name}'. Per-submesh mesh-node transforms aren't supported; " +
-                    $"meshes at different places need different skins, which this importer does read.");
-            }
-        }
+        // A skinned mesh's own node transform is ignored, per glTF: its vertices are placed by the skin's
+        // joints alone, so one skin may be placed by any number of mesh nodes, wherever they sit. Where the
+        // skeleton hangs is the skin's (JointHierarchy.Placement), not any mesh node's.
 
         // Decode every primitive across every skinned-mesh node. Each gets its
         // own MeshData (skinned vertex stream) and the material it references.
@@ -126,7 +108,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             // only within the skin that supplied it.
             var (skinBones, skinRemap) = BuildSkeletonAndOrdering(owner);
             var skinRemaps = skinRemap;
-            bindings.Add(new GltfSkinBinding(new Skeleton(skinBones), group[0].WorldMatrix));
+            bindings.Add(new GltfSkinBinding(new Skeleton(skinBones), PlacementOf(owner, skinBones, skinRemap)));
             remapsBySkin.Add(skinRemaps);
 
             foreach (var node in group)
@@ -254,7 +236,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         }
 
         return new GltfModel(
-            primitives, bindings[0].Skeleton, animations.ToArray(), bindings[0].MeshNodeTransform,
+            primitives, bindings[0].Skeleton, animations.ToArray(), bindings[0].SkeletonPlacement,
             attachments.ToArray(), staticParts.ToArray(), ignored, bindings.ToArray());
     }
 
@@ -442,7 +424,30 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             // engine convention). Pass through without transpose.
             bones[newIdx] = new Bone(joint.Name ?? $"bone_{newIdx}", parentNew, ibm);
         }
-        return (bones, oldToNew);
+
+        // Rest and offset from the scene graph, as the cooked reader derives them: one rule, in the engine.
+        var jointNodes = new int[n];
+        for (var newIdx = 0; newIdx < n; newIdx++) jointNodes[newIdx] = joints[orderNewToOld[newIdx]].LogicalIndex;
+        var hierarchy = Resolve(skin, bones, jointNodes);
+        return (hierarchy.Bones.ToArray(), oldToNew);
+    }
+
+    private static JointHierarchy Resolve(Skin skin, Bone[] bones, int[] jointNodes)
+    {
+        var nodes = skin.LogicalParent.LogicalNodes;
+        return JointHierarchy.Resolve(
+            bones, jointNodes,
+            n => nodes[n].VisualParent?.LogicalIndex ?? -1,
+            n => nodes[n].LocalMatrix,
+            n => nodes[n].WorldMatrix);
+    }
+
+    // Where a skin's skeleton hangs: the same answer the cooked reader gives.
+    private static System.Numerics.Matrix4x4 PlacementOf(Skin skin, Bone[] bones, int[] oldToNew)
+    {
+        var jointNodes = new int[bones.Length];
+        for (var old = 0; old < oldToNew.Length; old++) jointNodes[oldToNew[old]] = skin.Joints[old].LogicalIndex;
+        return Resolve(skin, bones, jointNodes).Placement;
     }
 
     // Pack the mesh primitive's vertex streams into the engine's skinned vertex

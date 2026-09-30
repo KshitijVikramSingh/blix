@@ -47,8 +47,13 @@ public sealed class Model : IDisposable
     /// <param name="SkinIndex">The skin that deforms it, or -1 for a static part.</param>
     public sealed record Part(int NodeIndex, Mesh Mesh, PbrMaterial? Material, MaterialTextures Textures, int SkinIndex = -1);
 
-    /// <summary>One skin: the skeleton it poses and where its geometry sits.</summary>
-    public sealed record Skin(Skeleton Skeleton, Matrix4x4 SkeletonPlacement);
+    /// <summary>One skin: the skeleton it poses and where it hangs.</summary>
+    /// <param name="OwnRest">
+    /// Its own rest pose when its joints are not skin 0's, index for index; null when they are. Clips are
+    /// bone indices against skin 0 (the cook refuses clips over skins that disagree), so a skin whose
+    /// joints differ can only be at its own rest, and a pose of skin 0's would drive the wrong bones.
+    /// </param>
+    public sealed record Skin(Skeleton Skeleton, Matrix4x4 SkeletonPlacement, Pose? OwnRest = null);
 
     /// <summary>A static part a joint carries: placed by the joint's world transform, not skinned.</summary>
     /// <param name="JointIndex">The joint's bone in <paramref name="SkinIndex"/>'s skeleton.</param>
@@ -137,7 +142,8 @@ public sealed class Model : IDisposable
     /// <summary>Packs N posed bodies into one palette set per skin, each body at its placement.</summary>
     /// <remarks>
     /// Per skin, because each has its own inverse binds: one pose gives different palettes for two skins.
-    /// Each body is <c>SkeletonPlacement * placement</c>, so a set holds world-space palettes.
+    /// Each body is <c>SkeletonPlacement * placement</c>, so a set holds world-space palettes. The poses
+    /// are skin 0's; a skin whose joints differ from skin 0's is packed at its own rest (<see cref="Skin.OwnRest"/>).
     /// </remarks>
     public void PackPalettes(IReadOnlyList<Pose> poses, IReadOnlyList<Matrix4x4> placements, IReadOnlyList<BonePaletteSet> into)
     {
@@ -161,7 +167,10 @@ public sealed class Model : IDisposable
         foreach (var set in into) set.Reset();
         for (var body = 0; body < poses.Count; body++)
         {
-            for (var s = 0; s < skins.Count; s++) into[s].Add(skins[s].Skeleton, poses[body], skins[s].SkeletonPlacement * placements[body]);
+            for (var s = 0; s < skins.Count; s++)
+            {
+                into[s].Add(skins[s].Skeleton, skins[s].OwnRest ?? poses[body], skins[s].SkeletonPlacement * placements[body]);
+            }
         }
     }
 
@@ -206,7 +215,12 @@ public sealed class Model : IDisposable
         var max = new Vector3(float.MinValue);
         var partsOfNode = new List<Part>[source.Nodes.Count];
 
-        for (var s = 0; s < source.Skins.Count; s++) model.skins.Add(new Skin(source.Skins[s].Skeleton, source.Placement(s)));
+        for (var s = 0; s < source.Skins.Count; s++)
+        {
+            var own = source.Skins[s];
+            var sharesSkin0 = own.JointNodes.SequenceEqual(source.Skins[0].JointNodes);
+            model.skins.Add(new Skin(own.Skeleton, source.Placement(s), sharesSkin0 ? null : own.Skeleton.CreateRestPose()));
+        }
 
         for (var i = 0; i < source.Nodes.Count; i++)
         {

@@ -40,9 +40,13 @@ public sealed class Skeleton
         Bones = bones;
     }
 
-    // Reconstruct the local-space rest pose from each bone's inverse-bind matrix.
+    // The rest pose: each bone's authored Rest — glTF's joint node transform, what a joint holds when no
+    // track moves it — and, for a bone without one (a hand-built skeleton), a reconstruction from its
+    // inverse-bind matrix. The two are different answers in general: a file's rest need not be its bind
+    // (tank.glb's joints sit up to 95 units from where their inverse binds put them), and only the
+    // authored one is glTF's.
     //
-    // The math: `InverseBindPose` maps a vertex from object-space-at-rest into
+    // The reconstruction's math: `InverseBindPose` maps a vertex from object-space-at-rest into
     // bone-space-at-rest. Its inverse — `BindWorld[i]` — is the bone's object-space
     // transform at the rest pose. The bone-local rest is that transform expressed
     // in the parent's frame:
@@ -67,6 +71,12 @@ public sealed class Skeleton
         var locals = new BoneTransform[Bones.Length];
         for (var i = 0; i < Bones.Length; i++)
         {
+            if (Bones[i].Rest is { } authored)
+            {
+                locals[i] = authored;
+                continue;
+            }
+
             var p = Bones[i].ParentIndex;
             if (p < 0)
             {
@@ -173,10 +183,12 @@ public sealed class Skeleton
                 nameof(outJointWorlds));
         }
 
-        // Row-vector composition (F-016): local[i] · local[parent] · … · local[root].
+        // Row-vector composition (F-016): local[i] · offset[i] · world[parent], the offset being the
+        // non-joint nodes in between (identity for most skeletons).
         for (var i = 0; i < Bones.Length; i++)
         {
             var localMatrix = pose.Locals[i].ToMatrix();
+            if (Bones[i].Offset is { } offset) localMatrix *= offset;
             var p = Bones[i].ParentIndex;
             outJointWorlds[i] = p < 0 ? localMatrix : localMatrix * outJointWorlds[p];
         }

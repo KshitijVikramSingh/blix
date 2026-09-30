@@ -42,8 +42,9 @@ public sealed class ModelData
     /// <param name="Skinned">Whether its vertices are skinned in this load (per <see cref="ModelNeeds.Skinned"/>).</param>
     public sealed record Mesh(string Name, IReadOnlyList<Primitive> Primitives, int SkinIndex, bool Skinned);
 
-    /// <summary>A skin: its skeleton, bones in parent-first order, and each bone's joint node.</summary>
-    public sealed record Skin(Skeleton Skeleton, IReadOnlyList<int> JointNodes);
+    /// <summary>A skin: its skeleton, bones in parent-first order, each bone's joint node, and where it hangs.</summary>
+    /// <param name="Placement">What goes after every bone world (<see cref="JointHierarchy.Placement"/>).</param>
+    public sealed record Skin(Skeleton Skeleton, IReadOnlyList<int> JointNodes, Matrix4x4 Placement);
 
     /// <summary>A static mesh a joint carries: its node, the joint, and its transform relative to that joint.</summary>
     /// <param name="BoneIndex">The joint's bone in <paramref name="SkinIndex"/>'s skeleton.</param>
@@ -82,54 +83,17 @@ public sealed class ModelData
     public bool IsRigged => Skins.Count > 0;
 
     /// <summary>Every node's world transform (row-vector: <c>local * parentWorld</c>).</summary>
-    public IReadOnlyList<Matrix4x4> World => world ??= ComposeWorld();
+    public IReadOnlyList<Matrix4x4> World => world ??= ComposeWorld(Nodes);
 
     /// <summary>
-    /// Where <paramref name="skin"/>'s skeleton hangs in the scene: the world of the node its root joints
-    /// are children of, or identity when they are scene roots.
+    /// Where <paramref name="skin"/>'s skeleton hangs in the scene: the world of the node its first root
+    /// joint hangs from, or identity for a scene root (<see cref="JointHierarchy"/>).
     /// </summary>
     /// <remarks>
-    /// glTF places a skinned vertex by its joints' world transforms alone — <c>sum(w * jointWorld *
-    /// inverseBind * v)</c> — and ignores the transform of the node that places the mesh. A skeleton's
-    /// bone worlds start at its root joints, so this is what goes in front of them. It is not the mesh
-    /// node's world: the two agree in most exports, which is how using that one went unnoticed until a
-    /// file (tank.glb) where they do not put two of its three skins up to 8 units out.
-    /// A skin whose root joints hang from nodes at different worlds cannot be placed by one transform,
-    /// and is refused by name rather than drawn at one of them.
+    /// Not the mesh node's world: glTF places a skinned vertex by its joints alone and ignores that
+    /// transform. The two agree in most exports; tank.glb is one where they do not.
     /// </remarks>
-    public Matrix4x4 Placement(int skin)
-    {
-        var joints = Skins[skin].JointNodes;
-        var isJoint = joints.ToHashSet();
-        Matrix4x4? placement = null;
-        foreach (var joint in joints)
-        {
-            var parent = Nodes[joint].ParentIndex;
-            if (parent >= 0 && isJoint.Contains(parent)) continue;
-            var world = parent >= 0 ? World[parent] : Matrix4x4.Identity;
-            if (placement is { } first && !Near(first, world))
-            {
-                throw new AssetImportException(Source, null,
-                    $"skin {skin}'s root joints hang from nodes at different worlds, and a skeleton is placed by one; " +
-                    "parent the root joints under one node");
-            }
-
-            placement ??= world;
-        }
-
-        return placement ?? Matrix4x4.Identity;
-    }
-
-    private static bool Near(Matrix4x4 a, Matrix4x4 b)
-    {
-        for (var r = 0; r < 4; r++)
-        for (var c = 0; c < 4; c++)
-        {
-            if (MathF.Abs(a[r, c] - b[r, c]) > 1e-4f) return false;
-        }
-
-        return true;
-    }
+    public Matrix4x4 Placement(int skin) => Skins[skin].Placement;
 
     /// <summary>Unskinned mesh nodes under a joint, each claimed by the first skin whose joints include it.</summary>
     /// <remarks>
@@ -239,9 +203,16 @@ public sealed class ModelData
             return new Mesh(m.Name, primitives, m.SkinIndex, skinned);
         }).ToArray();
 
-        var skins = file.SkinTable.Select(s => new Skin(
-            new Skeleton(s.Bones.Select(b => new Bone(b.Name, b.ParentIndex, b.InverseBindPose)).ToArray()),
-            s.Bones.Select(b => b.NodeIndex).ToArray())).ToArray();
+        var nodes = file.Nodes.Select(n => new Node(n.Name, n.ParentIndex, n.LocalTransform, n.MeshIndex, n.SkinIndex)).ToArray();
+        var worlds = ComposeWorld(nodes);
+        var skins = file.SkinTable.Select(s =>
+        {
+            var joints = s.Bones.Select(b => b.NodeIndex).ToArray();
+            var hierarchy = JointHierarchy.Resolve(
+                s.Bones.Select(b => new Bone(b.Name, b.ParentIndex, b.InverseBindPose)).ToArray(), joints,
+                n => nodes[n].ParentIndex, n => nodes[n].Local, n => worlds[n]);
+            return new Skin(new Skeleton(hierarchy.Bones.ToArray()), joints, hierarchy.Placement);
+        }).ToArray();
 
         var boneOfNode = new Dictionary<int, int>();
         if (skins.Length > 0)
@@ -265,7 +236,6 @@ public sealed class ModelData
             .Where(c => c.Tracks.Length > 0)
             .ToArray();
 
-        var nodes = file.Nodes.Select(n => new Node(n.Name, n.ParentIndex, n.LocalTransform, n.MeshIndex, n.SkinIndex)).ToArray();
         var ignored = file.IgnoredTable.Select(i => new UnreadAttribute(i.Semantic, i.Primitives)).ToArray();
         if (AssetLoadLog.Enabled)
         {
@@ -278,12 +248,12 @@ public sealed class ModelData
         return new ModelData(nodes, meshes, skins, clips, ignored, path);
     }
 
-    private Matrix4x4[] ComposeWorld()
+    private static Matrix4x4[] ComposeWorld(IReadOnlyList<Node> nodes)
     {
-        var result = new Matrix4x4[Nodes.Count];
-        for (var i = 0; i < Nodes.Count; i++)
+        var result = new Matrix4x4[nodes.Count];
+        for (var i = 0; i < nodes.Count; i++)
         {
-            result[i] = Nodes[i].ParentIndex < 0 ? Nodes[i].Local : Nodes[i].Local * result[Nodes[i].ParentIndex];
+            result[i] = nodes[i].ParentIndex < 0 ? nodes[i].Local : nodes[i].Local * result[nodes[i].ParentIndex];
         }
 
         return result;
