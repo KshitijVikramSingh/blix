@@ -72,8 +72,8 @@ The important edges in the current project references are:
 applications and tools
   -> Blix / Blix.Tools.Studio / project-specific libraries
   -> Blix.Render + Blix.Assets + Blix.Diagnostics
-  -> Blix.Graphics.Vulkan + Blix.Graphics + Blix.Core
-  -> Blix.Runtime.Silk at the executable composition edge
+  -> Blix.Graphics + Blix.Core
+  -> Blix.Runtime.Silk at the executable composition edge, which brings Blix.Graphics.Vulkan
 
 build-time cooking
   -> Blix.Tools.Cook -> Blix.Recipes -> engine formats and capabilities
@@ -87,9 +87,13 @@ Several details stop this from being a simplistic layered pyramid:
   `Blix.Audio`. It also carries the loop contract (`IGameLoop`, `Game`, `Time`,
   `FixedStepClock`), still in the `Blix` namespace, so a program can run a
   loop without referencing `Blix` and, through it, `Blix.Render` and Vulkan.
-- `Blix.Render` is currently Vulkan-backed. It provides reusable rendering
-  mechanisms, but it references `Blix.Graphics.Vulkan`; it is not a second
-  backend abstraction.
+- Nothing above the host names the backend. Libraries and programs take
+  `IGraphicsDevice`, which is the whole device (shader programs, pipelines,
+  materials, textures, readback), and build a `RenderGraph`, which lives in
+  `Blix.Graphics` and asks the device to realise it. Only `Blix.Runtime.Silk`
+  references `Blix.Graphics.Vulkan`, and Test.Graphics Section BN fails on
+  anything else that names it. A member reached for through a cast is
+  a member the interface is missing.
 - `Blix.Runtime.Silk` is the composition point that wires windowing, Vulkan,
   audio, diagnostics, UI, and the game-facing loop together. Executables
   reference it to construct the host; their domain code then consumes the host
@@ -111,8 +115,8 @@ successive versions of one default renderer.
 
 ### Reusable rendering mechanisms
 
-`Blix.Graphics`, `Blix.Graphics.Vulkan`, `Blix.Render`, and `Blix.Shaders`
-provide the command model, render graph, reflected binding, buffers, upload and
+`Blix.Graphics`, `Blix.Render`, and `Blix.Shaders`, realised by
+`Blix.Graphics.Vulkan`, provide the command model, render graph, reflected binding, buffers, upload and
 batching helpers, fullscreen work, sprites, particles, and shared shader
 vocabulary. These are capabilities. They do not decide which passes an
 application runs or what its authored look should be.
@@ -148,7 +152,7 @@ the getting-started renderer and its current graph is not an engine promise.
 
 ## The Vulkan binding model
 
-The renderer's defining choice is that the binding model is *derived*, not declared by hand. At build time the compiled SPIR-V is reflected (via spirv-cross sidecars) into a `ShaderInterface`: descriptor sets + std140 UBO layouts + push-constant ranges, keyed by the set/binding/member names in the shader. `CreateMaterial(program, setIndex, …)` then allocates a `MaterialBindings` against one reflected set — `SetUniform("uTint", …)` / `SetTexture(binding, …)` write into it by name, and `.Handle` is the backend-neutral `MaterialHandle` a `GameObject` stores. Sets are organised by lifetime (frame-global, per-material, per-draw), and per-draw data rides push constants or a transient descriptor pool refilled each frame. There is no parallel hand-maintained binding table to drift out of sync with the shader source.
+The renderer's defining choice is that the binding model is *derived*, not declared by hand. At build time the compiled SPIR-V is reflected (via spirv-cross sidecars) into a `ShaderInterface`: descriptor sets + std140 UBO layouts + push-constant ranges, keyed by the set/binding/member names in the shader. `CreateMaterial(program, setIndex, …)` then allocates an `IMaterialBindings` against one reflected set — `SetUniform("uTint", …)` / `SetTexture(binding, …)` write into it by name, and `.Handle` is the backend-neutral `MaterialHandle` a `GameObject` stores. Sets are organised by lifetime (frame-global, per-material, per-draw), and per-draw data rides push constants or a transient descriptor pool refilled each frame. There is no parallel hand-maintained binding table to drift out of sync with the shader source.
 
 The Vulkan path is the sole renderer. Reflected descriptors, push constants,
 transient per-draw data, the declarative render graph, glTF/skinning, PBR/IBL,
@@ -232,7 +236,7 @@ have.
 
 ## Reading a frame back
 
-`VulkanGraphicsDevice.ReadTexture` copies a rendered colour texture to CPU bytes. It is
+`IGraphicsDevice.ReadTexture` copies a rendered colour texture to CPU bytes. It is
 the first *pull* in an otherwise push-only device, and Blix had none — colour attachments
 were created without `TransferSrcBit`, so they were not legal copy sources and capture
 was impossible **at the point the image was made**, not at the point somebody asked.

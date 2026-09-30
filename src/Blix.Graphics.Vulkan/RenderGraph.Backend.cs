@@ -9,15 +9,58 @@ namespace Blix.Graphics.Vulkan;
 // resource as a sampleable VkTextureEntry so downstream passes can Read
 // it through the standard texture-binding path.
 
-public sealed partial class RenderGraph : IDisposable
+internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
 {
+    private readonly RenderGraph graph;
+
+    // The graph's declared tables, under the names this code always used for them when it was part of
+    // the graph class itself.
+    private VulkanGraphicsDevice? Device { get; }
+    private Dictionary<int, GraphResourceEntry> Resources => graph.Resources;
+    private Dictionary<int, GraphicsPassEntry> GraphicsPasses => graph.GraphicsPasses;
+    private Dictionary<int, ComputePassEntry> ComputePasses => graph.ComputePasses;
+    private List<int> PassOrder => graph.PassOrder;
+
     internal Dictionary<int, GraphBackendResource> BackendResources { get; } = new();
     internal Dictionary<int, GraphBackendPass> BackendPasses { get; } = new();
     internal bool BackendCompiled { get; private set; }
 
+    // Explicit barriers per pass, inferred at compile. Empty for graphics-only graphs: subpass
+    // dependencies cover cross-pass memory and layout; compute reads and writes add their own.
+    internal Dictionary<int, List<BarrierOp>> PerPassBarriers { get; private set; } = new();
+
+    public ulong MatchSwapchainResourceGeneration { get; private set; }
+
+    internal VulkanRenderGraphBackend(VulkanGraphicsDevice device, RenderGraph graph)
+    {
+        Device = device;
+        this.graph = graph;
+        Device.SwapchainRecreated += OnSwapchainRecreated;
+    }
+
+    public void Compile()
+    {
+        CompileBackend();
+        PerPassBarriers = BarrierInference.Infer(graph);
+    }
+
+    public bool TryGetPassSurface(int passId, out RenderSurfaceHandle surface)
+    {
+        var found = BackendPasses.TryGetValue(passId, out var pass);
+        surface = found ? pass!.SurfaceHandle : default;
+        return found;
+    }
+
+    public bool TryGetSampleable(int resourceId, out TextureHandle? texture)
+    {
+        var found = BackendResources.TryGetValue(resourceId, out var resource);
+        texture = found ? resource!.SampleableHandle : null;
+        return found;
+    }
+
     internal void CompileBackend()
     {
-        if (Device is null) return; // Test-mode graph; skip backend phase.
+        if (Device is null) return;
 
         AllocateResources();
         SettleNewImages();

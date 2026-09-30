@@ -7,7 +7,6 @@ using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Images;
-using Blix.Graphics.Vulkan;
 using Blix.Runtime.Silk;
 
 namespace Blix.Demos.VulkanSponza;

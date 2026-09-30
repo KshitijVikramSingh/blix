@@ -1,7 +1,6 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix.Graphics;
-using Blix.Graphics.Vulkan;
 using Blix.Core;
 
 namespace Blix.Render;
@@ -32,7 +31,7 @@ public sealed class SpriteBatch : IDisposable
     public static ShaderInterface Interface { get; } = ShaderReflection.ForProgram(
         AppFiles.Shaders, "sprite.vert", "sprite.frag");
 
-    private readonly VulkanGraphicsDevice device;
+    private readonly IGraphicsDevice device;
     private readonly IndexBufferHandle indexBuffer;
     private readonly ShaderProgramHandle shader;
     private readonly PipelineHandle pipeline;
@@ -51,7 +50,7 @@ public sealed class SpriteBatch : IDisposable
     // render-pass compatibility requires matching attachment formats). Null
     // targets the swapchain. For an offscreen pass, pass that surface's handle
     // (e.g. graph.GetPassSurface(...) or CreateRenderSurface(...).Handle).
-    public SpriteBatch(VulkanGraphicsDevice device, RenderSurfaceHandle? renderTarget = null)
+    public SpriteBatch(IGraphicsDevice device, RenderSurfaceHandle? renderTarget = null)
     {
         ArgumentNullException.ThrowIfNull(device);
         this.device = device;

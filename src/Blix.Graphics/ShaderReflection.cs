@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace Blix.Graphics.Vulkan;
+namespace Blix.Graphics;
 
 // Loads a `spirv-cross --reflect` JSON sidecar into the engine's existing
 // binding records (DescriptorSetSlot / UniformBlockLayout / PushConstantRange).

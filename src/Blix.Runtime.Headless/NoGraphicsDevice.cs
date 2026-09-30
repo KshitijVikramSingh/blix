@@ -57,6 +57,52 @@ public sealed class NoGraphicsDevice : IGraphicsDevice
     /// <inheritdoc />
     public void DestroyIndexBuffer(IndexBufferHandle handle) => throw Refuse();
 
+    public IndirectBufferHandle CreateIndirectBuffer(int maxDrawCommands, string? name = null) => throw Refuse();
+
+    public void WriteIndirectCommands(IndirectBufferHandle handle, ReadOnlySpan<byte> commands) => throw Refuse();
+
+    public ShaderProgramHandle CreateShaderProgramFromSpv(
+        byte[] vertexSpv, byte[] fragmentSpv, ShaderInterface shaderInterface, string? name = null) => throw Refuse();
+
+    public ShaderProgramHandle CreateComputeShaderProgramFromSpv(
+        byte[] computeSpv, ShaderInterface shaderInterface, string? name = null) => throw Refuse();
+
+    public PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null) => throw Refuse();
+
+    public IMaterialBindings CreateMaterial(
+        ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null) => throw Refuse();
+
+    public void DestroyMaterial(MaterialHandle handle) => throw Refuse();
+
+    public TextureHandle CreateTextureCube(
+        int faceSize, TextureFormat format, int mipCount, ReadOnlySpan<byte> data, SamplerDescription sampler, string name) => throw Refuse();
+
+    public TextureHandle CreateStorageTexture2D(
+        int width, int height, TextureFormat format, SamplerDescription sampler, string? name = null) => throw Refuse();
+
+    public TextureHandle CreateStorageTexture3D(
+        int width, int height, int depth, TextureFormat format, SamplerDescription sampler, string? name = null) => throw Refuse();
+
+    public byte[] ReadTexture(TextureHandle handle, out int width, out int height, out TextureFormat format) => throw Refuse();
+
+    public bool TryGetTextureSize(TextureHandle handle, out int width, out int height) => throw Refuse();
+
+    /// <inheritdoc />
+    /// <remarks>Nothing was submitted, so nothing is waited for.</remarks>
+    public void WaitIdle() { }
+
+    /// <inheritdoc />
+    /// <remarks>One, the frame being stepped: a loop keeping per-slot copies keeps one here.</remarks>
+    public int MaxFramesInFlightCount => 1;
+
+    public int CurrentFrameSlot => 0;
+
+    /// <inheritdoc />
+    /// <remarks>There is no display to wait for; setting it changes nothing.</remarks>
+    public bool VsyncEnabled { get => false; set { } }
+
+    public int MaxMsaaSamples => 1;
+
     /// <inheritdoc />
     public void DestroyShaderProgram(ShaderProgramHandle handle) => throw Refuse();
 

@@ -5,7 +5,6 @@ using Blix.Core;
 using Blix.Diagnostics;
 using Blix.Graphics;
 using Blix.Graphics.Primitives;
-using Blix.Graphics.Vulkan;
 using Blix.Render;
 using Blix.Runtime.Silk;
 
@@ -84,7 +83,7 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
     private readonly Random rng = new(12345);   // deterministic emission
     private readonly ParticleSettings fx = new();
     private ObjectTunables tunables = null!;
-    private VulkanGraphicsDevice vk = null!;
+    private IGraphicsDevice device = null!;
     private IRenderHost host = null!;
 
     // One drawable effect = a batch + its pipeline + sort flag + radial sharpness + its
@@ -155,11 +154,11 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         this.host = host;
-        vk = (VulkanGraphicsDevice)graphicsDevice;
+        device = graphicsDevice;
         var shaderDir = AppFiles.Shaders;
 
         // --- Render graph ------------------------------------------------
-        graph = new RenderGraph(vk);
+        graph = new RenderGraph(device);
         var fullSize = new MatchSwapchainGraphSize(1.0f);
         var bloomSize = new MatchSwapchainGraphSize(BloomScale);
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.Rgba16F, fullSize);
@@ -193,7 +192,7 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
         // its own targets + passes (after the scene pass, so it executes after the
         // scene writes hdr) and stops at a blurred-bright texture; the present pass
         // below composites bloom.Output back over hdr.
-        bloom = new PostChain(vk, graph, hdrHandle, new[]
+        bloom = new PostChain(device, graph, hdrHandle, new[]
         {
             new PostStage("bloom-bright", TextureFormat.Rgba16F, bloomSize, bloomBrightInterface, "uHdr"),
             new PostStage("bloom-blurH", TextureFormat.Rgba16F, bloomSize, bloomBlurInterface, "uSrc"),
@@ -205,11 +204,11 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
         PipelineHandle Pipe(string vert, string frag, ShaderInterface iface, string name,
             VertexLayout layout, DepthState depth, BlendState[] blends, PassHandle pass)
         {
-            var program = vk.CreateShaderProgramFromSpv(
+            var program = device.CreateShaderProgramFromSpv(
                 File.ReadAllBytes(Path.Combine(shaderDir, vert)),
                 File.ReadAllBytes(Path.Combine(shaderDir, frag)),
                 iface, name);
-            return vk.CreatePipeline(new PipelineDescription(
+            return device.CreatePipeline(new PipelineDescription(
                 program, layout, PrimitiveTopology.Triangles, depth,
                 RasterizerState.NoCulling, blends,
                 RenderTarget: graph.GetPassSurface(pass)), name);
@@ -223,7 +222,7 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
         // Soft particle pipelines: two blend states over one soft shader, both via
         // GetOrCreatePipeline. Additive is shared by sparks/explosion/vortex; premultiplied-
         // alpha draws the smoke (the shader outputs premultiplied colour).
-        var softProgram = vk.CreateShaderProgramFromSpv(
+        var softProgram = device.CreateShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "particle_soft.vert.spv")),
             File.ReadAllBytes(Path.Combine(shaderDir, "particle_soft.frag.spv")),
             softInterface, "particle_soft");
@@ -231,8 +230,8 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
             softProgram, ParticleBatch.VertexLayoutDescription, PrimitiveTopology.Triangles,
             DepthState.Disabled, RasterizerState.NoCulling, new[] { blend },
             RenderTarget: graph.GetPassSurface(scenePassHandle));
-        additivePipeline = vk.GetOrCreatePipeline(SoftDesc(BlendState.Additive), "particle.soft.additive");
-        premultPipeline = vk.GetOrCreatePipeline(SoftDesc(BlendState.PremultipliedAlpha), "particle.soft.premult");
+        additivePipeline = device.GetOrCreatePipeline(SoftDesc(BlendState.Additive), "particle.soft.additive");
+        premultPipeline = device.GetOrCreatePipeline(SoftDesc(BlendState.PremultipliedAlpha), "particle.soft.premult");
 
         // The caller brings each bloom stage's pipeline (and thus its shader). Bright
         // and blur share present.vert; bright extracts (bloom_bright.frag), the two
@@ -240,33 +239,33 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
         bloom.BuildPipelines((stage, surface) =>
         {
             var frag = stage.Name == "bloom-bright" ? "bloom_bright.frag.spv" : "bloom_blur.frag.spv";
-            var program = vk.CreateShaderProgramFromSpv(
+            var program = device.CreateShaderProgramFromSpv(
                 File.ReadAllBytes(Path.Combine(shaderDir, "present.vert.spv")),
                 File.ReadAllBytes(Path.Combine(shaderDir, frag)),
                 stage.Interface, stage.Name);
-            return vk.CreatePipeline(new PipelineDescription(
+            return device.CreatePipeline(new PipelineDescription(
                 program, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
                 DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled },
                 RenderTarget: surface), stage.Name);
         });
 
         // Present targets the swapchain (default render target).
-        var presentProgram = vk.CreateShaderProgramFromSpv(
+        var presentProgram = device.CreateShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "present.vert.spv")),
             File.ReadAllBytes(Path.Combine(shaderDir, "present.frag.spv")),
             presentInterface, "present");
-        presentPipeline = vk.CreatePipeline(new PipelineDescription(
+        presentPipeline = device.CreatePipeline(new PipelineDescription(
             presentProgram, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
             DepthState.Disabled, RasterizerState.NoCulling, BlendState.Disabled), "present");
 
         // --- Geometry + batches ------------------------------------------
         BuildOpaqueGeometry();
-        fullscreen = new FullscreenPass(vk, "fullscreen");
+        fullscreen = new FullscreenPass(device, "fullscreen");
 
-        sparks = new ParticleBatch(vk, 8192, "sparks");
-        explosion = new ParticleBatch(vk, 6144, "explosion");
-        vortex = new ParticleBatch(vk, 6144, "vortex");
-        smoke = new ParticleBatch(vk, 2048, "smoke");
+        sparks = new ParticleBatch(device, 8192, "sparks");
+        explosion = new ParticleBatch(device, 6144, "explosion");
+        vortex = new ParticleBatch(device, 6144, "vortex");
+        smoke = new ParticleBatch(device, 2048, "smoke");
         effects = new[]
         {
             new Effect(smoke, sort: true, additive: false) { Pipeline = premultPipeline },
@@ -293,12 +292,12 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
             new(new GraphicsVector3( g, 0,  g), new GraphicsVector3(0, 1, 0), new GraphicsVector2(1, 1)),
             new(new GraphicsVector3(-g, 0,  g), new GraphicsVector3(0, 1, 0), new GraphicsVector2(0, 1)),
         };
-        var groundVB = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(groundVerts), "ground.vb");
-        var groundIB = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2, 0, 2, 3 }, name: "ground.ib");
+        var groundVB = device.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(groundVerts), "ground.vb");
+        var groundIB = device.CreateIndexBuffer(new ushort[] { 0, 1, 2, 0, 2, 3 }, name: "ground.ib");
         opaques.Add(new OpaqueMesh(groundVB, groundIB, 6, Matrix4x4.Identity, new Vector4(0.06f, 0.07f, 0.10f, 1f)));
 
-        var cubeVB = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(Cube.Vertices), "cube.vb");
-        var cubeIB = vk.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
+        var cubeVB = device.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(Cube.Vertices), "cube.vb");
+        var cubeIB = device.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
         Matrix4x4 Block(float sx, float sy, float sz, Vector3 at) =>
             Matrix4x4.CreateScale(sx, sy, sz) * Matrix4x4.CreateTranslation(at);
 

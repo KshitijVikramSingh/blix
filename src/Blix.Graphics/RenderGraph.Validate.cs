@@ -1,4 +1,4 @@
-namespace Blix.Graphics.Vulkan;
+namespace Blix.Graphics;
 
 // Pure-function validation over the graph's pass + resource tables.
 // Checks: non-empty, unique pass names, color-or-depth attachment,

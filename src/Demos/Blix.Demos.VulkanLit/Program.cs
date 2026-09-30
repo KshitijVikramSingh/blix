@@ -5,7 +5,6 @@ using Blix.Core;
 using Blix.Demos.VulkanLit.Debug;
 using Blix.Diagnostics;
 using Blix.Graphics;
-using Blix.Graphics.Vulkan;
 using Blix.Render;
 using Blix.Runtime.Silk;
 
@@ -19,7 +18,7 @@ namespace Blix.Demos.VulkanLit;
 // Render graph: shadow passes (sun + spots + 6 point-cube faces) →
 // lit-scene → bloom (bright/blurH/blurV) → present.
 //
-// Skinning rides the per-frame bone-palette SSBO path: a MaterialBindings
+// Skinning rides the per-frame bone-palette SSBO path: a IMaterialBindings
 // at set 3 with framesInFlight = MaxFramesInFlight, written into
 // CurrentFrameSlot every frame.
 //
@@ -85,7 +84,7 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
     private MaterialHandle groundMaterial;
     private MaterialHandle cesiumSkinMaterial;   // set 2 (per-material)
     private MaterialHandle cesiumBoneMaterial;   // set 3 (per-draw, framesInFlight replicated)
-    private MaterialBindings cesiumBonePalette = null!;  // direct ref for per-frame WriteBuffer
+    private IMaterialBindings cesiumBonePalette = null!;  // direct ref for per-frame WriteBuffer
 
     // Static lit pipeline (cube + ground).
     private ShaderProgramHandle litShaderProgram;
@@ -114,7 +113,7 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
     private Matrix4x4 cesiumUserTransform;
     private byte[] cesiumPalettePayload = null!;
     private double cesiumAnimTime;
-    private VulkanGraphicsDevice vkDevice = null!;
+    private IGraphicsDevice vkDevice = null!;
 
     // Graph + per-pass resources.
     private RenderGraph graph = null!;
@@ -261,20 +260,20 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
     {
         host.SetTitle("Blix — Vulkan Lit + Shadow + Skinned glTF");
         this.host = host;
-        var vk = (VulkanGraphicsDevice)graphicsDevice;
-        vkDevice = vk;
+        var device = graphicsDevice;
+        vkDevice = device;
 
         // --- Geometry: cube + ground -------------------------------------
         var (cubeVerts, cubeIndices) = BuildCube();
-        cubeVB = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(cubeVerts), "cube.vb");
-        cubeIB = vk.CreateIndexBuffer(cubeIndices, name: "cube.ib");
+        cubeVB = device.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(cubeVerts), "cube.vb");
+        cubeIB = device.CreateIndexBuffer(cubeIndices, name: "cube.ib");
 
         var (groundVerts, groundIndices) = BuildGround(extent: 3.0f, y: -0.6f, uvTile: 4.0f);
-        groundVB = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(groundVerts), "ground.vb");
-        groundIB = vk.CreateIndexBuffer(groundIndices, name: "ground.ib");
+        groundVB = device.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(groundVerts), "ground.vb");
+        groundIB = device.CreateIndexBuffer(groundIndices, name: "ground.ib");
 
         var checker = BuildCheckerboard(256, 8);
-        albedoTexture = vk.CreateTexture2D(
+        albedoTexture = device.CreateTexture2D(
             new TextureDescription(256, 256, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
             checker,
             "albedo");
@@ -283,21 +282,21 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         // per-draw metallic/roughness. White albedo so the BRDF response is
         // unambiguous (silver metal vs white dielectric).
         var (sphereVerts, sphereIndices) = BuildSphere(radius: 0.42f, rings: 32, sectors: 48);
-        sphereVB = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(sphereVerts), "sphere.vb");
-        sphereIB = vk.CreateIndexBuffer(sphereIndices, name: "sphere.ib");
+        sphereVB = device.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(sphereVerts), "sphere.vb");
+        sphereIB = device.CreateIndexBuffer(sphereIndices, name: "sphere.ib");
         sphereIndexCount = sphereIndices.Length;
         var white = new byte[4 * 4 * 4];
         Array.Fill(white, (byte)255);
-        whiteTexture = vk.CreateTexture2D(
+        whiteTexture = device.CreateTexture2D(
             new TextureDescription(4, 4, TextureFormat.Rgba8Srgb, SamplerDescription.LinearClamp),
             white, "white");
 
         // Normal maps are LINEAR data (directions), not sRGB. Flat = (0,0,1)
         // encoded as (128,128,255). Ground gets a procedural ripple pattern.
-        flatNormalTexture = vk.CreateTexture2D(
+        flatNormalTexture = device.CreateTexture2D(
             new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.LinearClamp),
             new byte[] { 128, 128, 255, 255 }, "normal.flat");
-        groundNormalTexture = vk.CreateTexture2D(
+        groundNormalTexture = device.CreateTexture2D(
             new TextureDescription(256, 256, TextureFormat.Rgba8, SamplerDescription.LinearRepeat),
             BuildRippleNormalMap(256, freq: 6f, strength: 1.4f), "normal.ground");
 
@@ -305,15 +304,15 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         // Env cube + box-filter mips (the mip chain stands in for prefiltered
         // specular at increasing roughness). Diffuse irradiance via cosine-
         // weighted hemisphere convolution. BRDF split-sum LUT.
-        envCubeTexture = vk.CreateTextureCube(
+        envCubeTexture = device.CreateTextureCube(
             EnvFaceSize, TextureFormat.Rgba8, EnvMips,
             BuildEnvCubeWithMips(EnvFaceSize, EnvMips),
             SamplerDescription.LinearClamp, "ibl.env");
-        irradianceCubeTexture = vk.CreateTextureCube(
+        irradianceCubeTexture = device.CreateTextureCube(
             IrradianceFaceSize, TextureFormat.Rgba8, 1,
             BuildIrradianceCube(IrradianceFaceSize),
             SamplerDescription.LinearClamp, "ibl.irradiance");
-        brdfLutTexture = vk.CreateTexture2D(
+        brdfLutTexture = device.CreateTexture2D(
             new TextureDescription(BrdfLutSize, BrdfLutSize, TextureFormat.Rgba8, SamplerDescription.LinearClamp),
             BuildBrdfLut(BrdfLutSize), "ibl.brdfLut");
         // Two rows of SphereCount, spread in x; metallic row higher.
@@ -347,7 +346,7 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         // which is correct for CesiumMan and silently wrong for any asset large enough to carry
         // 32-bit indices. CreateMesh makes that branch the engine's rather than each caller's.
         var prim = cesiumModel.Primitives[0];
-        cesiumMesh = vk.CreateMesh(prim.Mesh, "cesium");
+        cesiumMesh = device.CreateMesh(prim.Mesh, "cesium");
 
         // Cesium albedo: prefer the glTF's BaseColorTexture; fall back to a
         // neutral white if the material strips out images for some reason.
@@ -363,11 +362,11 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         // allocates the chain and queues per-mip uploads to drain across later frames. Resolving
         // textures is the asset layer's job and this demo had no business having an opinion about
         // it, least of all a partial one.
-        textureLoader = new GltfTextureLoader(vk);
+        textureLoader = new GltfTextureLoader(device);
         cesiumAlbedoTexture = textureLoader.Load(prim.Material).Albedo;
 
         // --- Render graph ------------------------------------------------
-        graph = new RenderGraph(vk);
+        graph = new RenderGraph(device);
 
         var fullSize = new MatchSwapchainGraphSize(1.0f);
         var shadowSize = new FixedGraphSize(ShadowMapSize, ShadowMapSize);
@@ -477,7 +476,7 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         // after the scene writes hdr) and stops at a blurred-bright texture; the
         // present pass below composites bloom.Output back over hdr.
         var bloomSize = new MatchSwapchainGraphSize(BloomScale);
-        bloom = new PostChain(vk, graph, hdrHandle, new[]
+        bloom = new PostChain(device, graph, hdrHandle, new[]
         {
             new PostStage("bloom-bright", TextureFormat.Rgba16F, bloomSize, bloomBrightInterface, "uHdr"),
             new PostStage("bloom-blurH", TextureFormat.Rgba16F, bloomSize, bloomBlurInterface, "uSrc"),
@@ -488,8 +487,8 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         // --- Pipelines --------------------------------------------------
         var shadowVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow.vert.spv"));
         var shadowFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow.frag.spv"));
-        shadowShaderProgram = vk.CreateShaderProgramFromSpv(shadowVertSpv, shadowFragSpv, shadowInterface, "shadow");
-        shadowPipeline = vk.CreatePipeline(new PipelineDescription(
+        shadowShaderProgram = device.CreateShaderProgramFromSpv(shadowVertSpv, shadowFragSpv, shadowInterface, "shadow");
+        shadowPipeline = device.CreatePipeline(new PipelineDescription(
             shadowShaderProgram,
             VertexPosition3NormalTexture.Layout,
             PrimitiveTopology.Triangles,
@@ -499,8 +498,8 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
             RenderTarget: graph.GetPassSurface(shadowPassHandle)), "shadow");
 
         var skinnedShadowVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "skinned_shadow.vert.spv"));
-        skinnedShadowProgram = vk.CreateShaderProgramFromSpv(skinnedShadowVertSpv, shadowFragSpv, skinnedShadowInterface, "skinned_shadow");
-        skinnedShadowPipeline = vk.CreatePipeline(new PipelineDescription(
+        skinnedShadowProgram = device.CreateShaderProgramFromSpv(skinnedShadowVertSpv, shadowFragSpv, skinnedShadowInterface, "skinned_shadow");
+        skinnedShadowPipeline = device.CreatePipeline(new PipelineDescription(
             skinnedShadowProgram,
             VertexPosition3NormalTextureSkin4Tangent.Layout,
             PrimitiveTopology.Triangles,
@@ -514,8 +513,8 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         // depth-only setups, so they're render-pass compatible).
         var pointShadowVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "point_shadow.vert.spv"));
         var pointShadowFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "point_shadow.frag.spv"));
-        pointShadowProgram = vk.CreateShaderProgramFromSpv(pointShadowVertSpv, pointShadowFragSpv, pointShadowInterface, "point_shadow");
-        pointShadowPipeline = vk.CreatePipeline(new PipelineDescription(
+        pointShadowProgram = device.CreateShaderProgramFromSpv(pointShadowVertSpv, pointShadowFragSpv, pointShadowInterface, "point_shadow");
+        pointShadowPipeline = device.CreatePipeline(new PipelineDescription(
             pointShadowProgram,
             VertexPosition3NormalTexture.Layout,
             PrimitiveTopology.Triangles,
@@ -525,8 +524,8 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
             RenderTarget: graph.GetPassSurface(pointFacePassHandles[0])), "point_shadow");
 
         var pointSkinnedShadowVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "point_skinned_shadow.vert.spv"));
-        pointSkinnedShadowProgram = vk.CreateShaderProgramFromSpv(pointSkinnedShadowVertSpv, pointShadowFragSpv, pointSkinnedShadowInterface, "point_skinned_shadow");
-        pointSkinnedShadowPipeline = vk.CreatePipeline(new PipelineDescription(
+        pointSkinnedShadowProgram = device.CreateShaderProgramFromSpv(pointSkinnedShadowVertSpv, pointShadowFragSpv, pointSkinnedShadowInterface, "point_skinned_shadow");
+        pointSkinnedShadowPipeline = device.CreatePipeline(new PipelineDescription(
             pointSkinnedShadowProgram,
             VertexPosition3NormalTextureSkin4Tangent.Layout,
             PrimitiveTopology.Triangles,
@@ -537,8 +536,8 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
 
         var litVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "lit.vert.spv"));
         var litFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "lit.frag.spv"));
-        litShaderProgram = vk.CreateShaderProgramFromSpv(litVertSpv, litFragSpv, litInterface, "lit");
-        litPipeline = vk.CreatePipeline(new PipelineDescription(
+        litShaderProgram = device.CreateShaderProgramFromSpv(litVertSpv, litFragSpv, litInterface, "lit");
+        litPipeline = device.CreatePipeline(new PipelineDescription(
             litShaderProgram,
             VertexPosition3NormalTexture.Layout,
             PrimitiveTopology.Triangles,
@@ -548,8 +547,8 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
             RenderTarget: graph.GetPassSurface(litPassHandle)), "lit");
 
         var skinnedLitVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "skinned_lit.vert.spv"));
-        skinnedLitProgram = vk.CreateShaderProgramFromSpv(skinnedLitVertSpv, litFragSpv, skinnedLitInterface, "skinned_lit");
-        skinnedLitPipeline = vk.CreatePipeline(new PipelineDescription(
+        skinnedLitProgram = device.CreateShaderProgramFromSpv(skinnedLitVertSpv, litFragSpv, skinnedLitInterface, "skinned_lit");
+        skinnedLitPipeline = device.CreatePipeline(new PipelineDescription(
             skinnedLitProgram,
             VertexPosition3NormalTextureSkin4Tangent.Layout,
             PrimitiveTopology.Triangles,
@@ -560,8 +559,8 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
 
         var presentVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.vert.spv"));
         var presentFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.frag.spv"));
-        presentShaderProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, presentFragSpv, presentTonemapInterface, "present");
-        presentPipeline = vk.CreatePipeline(new PipelineDescription(
+        presentShaderProgram = device.CreateShaderProgramFromSpv(presentVertSpv, presentFragSpv, presentTonemapInterface, "present");
+        presentPipeline = device.CreatePipeline(new PipelineDescription(
             presentShaderProgram,
             VertexPosition3NormalTexture.Layout,
             PrimitiveTopology.Triangles,
@@ -572,8 +571,8 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         // Depth-visualizer present pipeline (debug views). Same fullscreen
         // vertex shader + present interface, different fragment shader.
         var presentDepthFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present_depth.frag.spv"));
-        presentDepthProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, presentDepthFragSpv, presentInterface, "present_depth");
-        presentDepthPipeline = vk.CreatePipeline(new PipelineDescription(
+        presentDepthProgram = device.CreateShaderProgramFromSpv(presentVertSpv, presentDepthFragSpv, presentInterface, "present_depth");
+        presentDepthPipeline = device.CreatePipeline(new PipelineDescription(
             presentDepthProgram,
             VertexPosition3NormalTexture.Layout,
             PrimitiveTopology.Triangles,
@@ -588,9 +587,9 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         bloom.BuildPipelines((stage, surface) =>
         {
             var frag = stage.Name == "bloom-bright" ? "bloom_bright.frag.spv" : "bloom_blur.frag.spv";
-            var program = vk.CreateShaderProgramFromSpv(
+            var program = device.CreateShaderProgramFromSpv(
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, frag)), stage.Interface, stage.Name);
-            return vk.CreatePipeline(new PipelineDescription(
+            return device.CreatePipeline(new PipelineDescription(
                 program,
                 VertexPosition3NormalTexture.Layout,
                 PrimitiveTopology.Triangles,
@@ -601,19 +600,19 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         });
 
         // --- Materials --------------------------------------------------
-        cubeMaterial = vk.CreateMaterial(litShaderProgram, name: "cube.material")
+        cubeMaterial = device.CreateMaterial(litShaderProgram, name: "cube.material")
             .SetUniform(binding: 0, "uTint", new Vector4(1.0f, 1.0f, 1.0f, 1.0f))
             .SetTexture(binding: 1, albedoTexture)
             .SetTexture(binding: 2, flatNormalTexture)
             .Handle;
 
-        groundMaterial = vk.CreateMaterial(litShaderProgram, name: "ground.material")
+        groundMaterial = device.CreateMaterial(litShaderProgram, name: "ground.material")
             .SetUniform(binding: 0, "uTint", new Vector4(0.55f, 0.62f, 0.78f, 1.0f))
             .SetTexture(binding: 1, albedoTexture)
             .SetTexture(binding: 2, groundNormalTexture)
             .Handle;
 
-        sphereMaterial = vk.CreateMaterial(litShaderProgram, name: "sphere.material")
+        sphereMaterial = device.CreateMaterial(litShaderProgram, name: "sphere.material")
             .SetUniform(binding: 0, "uTint", new Vector4(0.95f, 0.95f, 0.95f, 1.0f))
             .SetTexture(binding: 1, whiteTexture)
             .SetTexture(binding: 2, flatNormalTexture)
@@ -622,7 +621,7 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         // Cesium per-material set (set 2). Tint from BaseColorFactor when
         // available; the importer hands us the linear-space tint.
         var cesiumTint = prim.Material?.BaseColorFactor ?? new Vector4(1, 1, 1, 1);
-        cesiumSkinMaterial = vk.CreateMaterial(skinnedLitProgram, name: "cesium.skin.material")
+        cesiumSkinMaterial = device.CreateMaterial(skinnedLitProgram, name: "cesium.skin.material")
             .SetUniform(binding: 0, "uTint", cesiumTint)
             .SetTexture(binding: 1, cesiumAlbedoTexture)
             .SetTexture(binding: 2, flatNormalTexture)
@@ -630,15 +629,15 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
 
         // Cesium bone palette (set 3, per-draw SSBO, replicated across
         // frames so per-frame writes don't race with in-flight GPU work).
-        cesiumBonePalette = vk.CreateMaterial(
+        cesiumBonePalette = device.CreateMaterial(
             skinnedLitProgram,
             setIndex: 3,
-            framesInFlight: vk.MaxFramesInFlightCount,
+            framesInFlight: device.MaxFramesInFlightCount,
             name: "cesium.bonepalette");
         cesiumBoneMaterial = cesiumBonePalette.Handle;
 
         // --- Fullscreen triangle (present + bloom passes) ----------------
-        fullscreen = new FullscreenPass(vk, "fullscreen");
+        fullscreen = new FullscreenPass(device, "fullscreen");
 
         // --- Camera + transforms ----------------------------------------
         cameraPosition = new Vector3(3.5f, 2.4f, 4.4f);

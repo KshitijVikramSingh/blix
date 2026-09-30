@@ -7,7 +7,6 @@
     <ProjectReference Include="..\..\Blix.Core\Blix.Core.csproj" />
     <ProjectReference Include="..\..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
     <ProjectReference Include="..\..\Blix.Graphics\Blix.Graphics.csproj" />
-    <ProjectReference Include="..\..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
     <!-- InstancedBatch + SpriteBatch + their .spv ship from Blix.Render via
          content propagation. -->
     <ProjectReference Include="..\..\Blix.Render\Blix.Render.csproj" />

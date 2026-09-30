@@ -37,8 +37,8 @@ The stable split is mechanism in the engine, policy at the call site:
 | --- | --- |
 | `Blix.Core` | Host, input, UI, view, and app contracts |
 | `Blix.Cooked` | Recipe declarations, cooked provenance, load outcomes and refusals |
-| `Blix.Graphics` | Backend-neutral handles, resources, layouts, and recorded commands |
-| `Blix.Graphics.Vulkan` | Vulkan execution, render graphs, pipelines, binding and residency |
+| `Blix.Graphics` | The device contract, handles, resources, layouts, recorded commands, the render graph and shader interfaces |
+| `Blix.Graphics.Vulkan` | The Vulkan device: execution, graph realisation, pipelines, binding and residency |
 | `Blix.Graphics.Images` | Image decode, environment processing, cooked image formats and CPU tonemap |
 | `Blix.Diagnostics` | Values, controls, timing, events, views, selection and history |
 | `Blix.Geometry` | Geometry, intersections, sweeps, and collision worlds |
@@ -98,7 +98,7 @@ provenance, runtime reports, deferred work, and residency ownership.
 ## Rendering: machinery, not a renderer
 
 Blix provides rendering *capabilities* and ships no default renderer.
-`Blix.Graphics`, `Blix.Graphics.Vulkan`, `Blix.Render`, and `Blix.Shaders` give
+`Blix.Graphics`, `Blix.Render`, and `Blix.Shaders` give
 the command model, render graph, reflected binding, buffers, upload and batching
 helpers, fullscreen work, sprites, particles, and a shared shader vocabulary.
 They do not decide which passes an application runs or what it should look like.

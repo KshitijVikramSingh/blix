@@ -18,7 +18,7 @@ the same renderer:
 
 | Role | Owner | Contract |
 | --- | --- | --- |
-| Reusable mechanisms | `Blix.Graphics`, `Blix.Graphics.Vulkan`, `Blix.Render`, `Blix.Shaders` | Commands, resources, graph execution, binding, batches, and shader vocabulary. No authored look or mandatory pass topology. |
+| Reusable mechanisms | `Blix.Graphics`, `Blix.Render`, `Blix.Shaders`, realised by `Blix.Graphics.Vulkan` | Commands, resources, graph execution, binding, batches, and shader vocabulary. No authored look or mandatory pass topology. |
 | Application pipeline | Each game, demo, or tool | Chooses passes, shaders, formats, quality, and presentation for its own needs. |
 | Studio reference rendering pipeline | `Blix.Tools.Studio` | Optional coherent rendering setup for model and rig inspection. `StudioLook` owns its authored defaults. |
 | Research renderer | `Blix.Demos.VulkanSponza` | Heavy-scene experiments, measurements, diagnostics, and promotion decisions. Its graph is not an engine promise. |
@@ -30,13 +30,16 @@ default in `StudioLook` does not impose that choice on a game.
 ## Layer map
 
 - **`Blix.Graphics`** is the backend-independent command and resource
-  vocabulary: opaque handles, `IGraphicsDevice`, `RenderCommandList`, draw and
-  dispatch commands, pipeline descriptions, render surfaces, vertex layouts,
-  shader interfaces, and the GLSL preprocessor.
-- **`Blix.Graphics.Vulkan`** is the only current backend. It owns Vulkan device
-  and swapchain work, `RenderGraph`, SPIR-V reflection, `MaterialBindings`,
+  vocabulary: opaque handles, `IGraphicsDevice` (the whole device, so nothing
+  casts to a backend), `RenderCommandList`, draw and dispatch commands,
+  pipeline descriptions, render surfaces, vertex layouts, `RenderGraph`'s
+  declaration and validation, SPIR-V reflection into `ShaderInterface`,
+  `IMaterialBindings`, and the GLSL preprocessor.
+- **`Blix.Graphics.Vulkan`** is the only current backend, and only
+  `Blix.Runtime.Silk` references it. It owns Vulkan device and swapchain work,
+  realising a `RenderGraph` (images, barriers, execution), `MaterialBindings`,
   transient descriptor and vertex storage, indirect drawing, compute dispatch,
-  timing, and the live resource registry.
+  timing and pass isolation, and the live resource registry.
 - **`Blix.Render`** contains higher-level helpers such as `Mesh`,
   `MeshBundler`, `FullscreenPass`, `PostChain`, `SpriteBatch`, `Font`,
   `ParticleBatch`, `InstanceBuffer`, `InstancedBatch`, and upload queues. It is
@@ -141,7 +144,7 @@ var scene = graph.GraphicsPass("scene")
 ```
 
 Colour and depth sample counts must agree. Clamp an application request to
-`VulkanGraphicsDevice.MaxMsaaSamples`. Depth uses `SAMPLE_ZERO` resolution: an
+`IGraphicsDevice.MaxMsaaSamples`. Depth uses `SAMPLE_ZERO` resolution: an
 average across a silhouette would invent a depth surface that was never drawn.
 
 ### Cross-frame history
@@ -178,7 +181,7 @@ pass.DrawIndexed(
 ```
 
 SPIR-V reflection supplies each `ShaderInterface`: descriptor sets, std140
-uniform layouts, and push-constant ranges. `MaterialBindings` allocates one
+uniform layouts, and push-constant ranges. `IMaterialBindings` allocates one
 reflected set and writes uniforms or textures by their reflected names and
 bindings. There is no second hand-maintained binding table.
 
@@ -275,7 +278,7 @@ Fresh per-frame data has two distinct homes:
 - `AllocVertices` returns a `TransientVertexSlice` from a frames-in-flight ring.
   It is for descriptor-less vertex/index data bound by offset. `SpriteBatch`,
   debug lines, and `ParticleBatch` use it.
-- `MaterialBindings` owns descriptor-backed uniform and storage buffers.
+- `IMaterialBindings` owns descriptor-backed uniform and storage buffers.
   `InstanceBuffer` and bone palettes use it because each frame slot needs both
   storage and a correct descriptor.
 
@@ -491,8 +494,8 @@ come from environment lighting rather than SSR.
 
 - To understand the minimum graph lifecycle, read
   `src/Demos/Blix.Demos.VulkanGraph/`.
-- To build a game renderer, start from the mechanisms in `Blix.Graphics`,
-  `Blix.Graphics.Vulkan`, and `Blix.Render`, then compose passes in the
+- To build a game renderer, start from the mechanisms in `Blix.Graphics` and
+  `Blix.Render`, then compose passes in the
   application.
 - To give a content tool a coherent inspection view, adopt
   `Blix.Tools.Studio` and set structural `StudioLook` choices before loading.

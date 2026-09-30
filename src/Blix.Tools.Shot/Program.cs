@@ -5,7 +5,6 @@ using Blix;
 using Blix.Core;
 using Blix.Graphics;
 using Blix.Graphics.Images;
-using Blix.Graphics.Vulkan;
 using Blix.Tools.Studio;
 using Blix.Diagnostics;
 using Blix.Runtime.Silk;
@@ -200,7 +199,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private readonly string outputPath;
     private readonly int captureOnFrame;
 
-    private VulkanGraphicsDevice device = null!;
+    private IGraphicsDevice device = null!;
     private int frames;
     private Matrix4x4 viewProjection = Matrix4x4.Identity;
 
@@ -382,7 +381,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
-        device = (VulkanGraphicsDevice)graphicsDevice;
+        device = graphicsDevice;
         // <b>Structural settings are read when the graph is built, so they are applied BEFORE it.</b>
         // The full binding below still happens and re-applies them harmlessly; it cannot come first,
         // because the things it also binds do not exist until the renderer has loaded. Without this

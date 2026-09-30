@@ -8,7 +8,6 @@ using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Primitives;
-using Blix.Graphics.Vulkan;
 using Blix.Render;
 using Blix.Runtime.Silk;
 
@@ -97,7 +96,7 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
     private const float CoinScale = 2.0f;        // coin native 0.36 -> ~0.72 across
 
     private readonly int exitAfterFrames;
-    private VulkanGraphicsDevice vk = null!;
+    private IGraphicsDevice device = null!;
     private IRenderHost host = null!;
     private InstancedBatch tileBatch = null!;
     private InstancedBatch obstacleBatch = null!;
@@ -132,7 +131,7 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
     // palette and the pipeline are all still built here, because they are what this game differs in.
     private Mesh[] charMeshes = Array.Empty<Mesh>();
     private MaterialHandle charSkinMaterial;       // set 2: albedo (shared, 1 material)
-    private MaterialBindings charBones = null!;    // set 3: bone palette, framesInFlight
+    private IMaterialBindings charBones = null!;    // set 3: bone palette, framesInFlight
     private Skeleton charSkeleton = null!;
     private ClipPlayer charPlayer = null!;
     private BonePalette charPalette = null!;
@@ -184,10 +183,10 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         this.host = host;
-        vk = (VulkanGraphicsDevice)graphicsDevice;
+        device = graphicsDevice;
 
-        var vb = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(Cube.Vertices), "cube.vb");
-        var ib = vk.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
+        var vb = device.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(Cube.Vertices), "cube.vb");
+        var ib = device.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
         var cube = new Mesh("cube", vb, ib, Cube.Indices.Length,
             new Bounds3(new Vector3(-0.5f), new Vector3(0.5f)));
 
@@ -207,7 +206,7 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
         // different program. InstanceBuffer supplies the unsized set-3 array's length.
         var worldInterface = InstanceBuffer.Size(
             ShaderReflection.ForProgram(shaderDir, "world.vert", "world.FOG.frag"));
-        worldShader = vk.CreateShaderProgramFromSpv(
+        worldShader = device.CreateShaderProgramFromSpv(
             File.ReadAllBytes(ShaderVariantPath.Spv(shaderDir, "world", ".vert", ShaderVariantKey.Base)),
             File.ReadAllBytes(ShaderVariantPath.Spv(shaderDir, "world", ".frag", fog)),
             worldInterface, "runner.world");
@@ -221,14 +220,14 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
             });
         var worldDesc = new PipelineDescription(worldShader, meshLayout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled });
-        var worldPipeline = vk.GetOrCreatePipeline(worldDesc, "runner.world");
+        var worldPipeline = device.GetOrCreatePipeline(worldDesc, "runner.world");
         // Cache self-check: a second GetOrCreatePipeline with a structurally-equal
         // description (note the SEPARATELY-allocated blend array — record equality
         // would miss it; PipelineKey compares blends by value) must return the SAME
         // handle, not rebuild. Proves the cache + key on a live device.
         var worldDescDup = new PipelineDescription(worldShader, meshLayout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled });
-        var worldPipelineDup = vk.GetOrCreatePipeline(worldDescDup, "runner.world");
+        var worldPipelineDup = device.GetOrCreatePipeline(worldDescDup, "runner.world");
         if (worldPipelineDup.Id != worldPipeline.Id)
         {
             throw new InvalidOperationException(
@@ -238,9 +237,9 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
         // and coins use CC0 KayKit prop meshes (flat-tinted through the same shader).
         var barrel = LoadStaticMesh("barrel.glb") ?? cube;
         var coin = LoadStaticMesh("coin.glb") ?? cube;
-        tileBatch = new InstancedBatch(cube, worldPipeline, new InstanceBuffer(vk, worldShader, "tiles"));
-        obstacleBatch = new InstancedBatch(barrel, worldPipeline, new InstanceBuffer(vk, worldShader, "obstacles"));
-        coinBatch = new InstancedBatch(coin, worldPipeline, new InstanceBuffer(vk, worldShader, "coins"));
+        tileBatch = new InstancedBatch(cube, worldPipeline, new InstanceBuffer(device, worldShader, "tiles"));
+        obstacleBatch = new InstancedBatch(barrel, worldPipeline, new InstanceBuffer(device, worldShader, "obstacles"));
+        coinBatch = new InstancedBatch(coin, worldPipeline, new InstanceBuffer(device, worldShader, "coins"));
 
         physics = new PhysicsHost3D { Target = player, Gravity = new Vector3(0f, -55f, 0f), GravityScale = 1f };
         player.Position = new Vector3(LaneX[laneIndex], 0f, 0f);
@@ -260,13 +259,13 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
     // is best-effort — a missing font just means no on-screen text, not a crash.
     private void CreateHud(string shaderDir)
     {
-        hud = new SpriteBatch(vk); // null render target = swapchain
+        hud = new SpriteBatch(device); // null render target = swapchain
         try
         {
             var assets = new AssetDatabase()
                 .RegisterImporter(new FontImporter())
                 .LoadManifest(AppFiles.Asset("manifest.json"));
-            hudFont = Font.Upload(vk, assets.Load<FontData>(AssetId.Parse("fonts/bowlby")));
+            hudFont = Font.Upload(device, assets.Load<FontData>(AssetId.Parse("fonts/bowlby")));
         }
         catch (Exception ex)
         {
@@ -317,10 +316,10 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
             Members: new[] { new UniformBlockMember("bones", 0, charSkeleton.BoneCount * 64, ElementStride: 64) });
         var iface = ShaderReflection.ForProgram(shaderDir, "skinned.vert", "skinned.frag")
             .WithBlockSize(set: 3, binding: 0, charSkeleton.BoneCount * 64);
-        skinnedShader = vk.CreateShaderProgramFromSpv(
+        skinnedShader = device.CreateShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "skinned.vert.spv")),
             File.ReadAllBytes(Path.Combine(shaderDir, "skinned.frag.spv")), iface, "runner.skinned");
-        skinnedPipeline = vk.CreatePipeline(
+        skinnedPipeline = device.CreatePipeline(
             new PipelineDescription(skinnedShader, VertexPosition3NormalTextureSkin4Tangent.Layout,
                 PrimitiveTopology.Triangles, DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled }),
             "runner.skinned");
@@ -331,12 +330,12 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
         GltfTexture? albedo = null;
         for (var i = 0; i < n; i++)
         {
-            charMeshes[i] = vk.CreateMesh(model.Primitives[i].Mesh, $"rogue.{i}");
+            charMeshes[i] = device.CreateMesh(model.Primitives[i].Mesh, $"rogue.{i}");
             albedo ??= model.Primitives[i].Material?.BaseColorTexture;
         }
 
-        charSkinMaterial = vk.CreateMaterial(skinnedShader, name: "rogue.skin").SetTexture(0, UploadAlbedo(albedo)).Handle;
-        charBones = vk.CreateMaterial(skinnedShader, setIndex: 3, framesInFlight: vk.MaxFramesInFlightCount, name: "rogue.bones");
+        charSkinMaterial = device.CreateMaterial(skinnedShader, name: "rogue.skin").SetTexture(0, UploadAlbedo(albedo)).Handle;
+        charBones = device.CreateMaterial(skinnedShader, setIndex: 3, framesInFlight: device.MaxFramesInFlightCount, name: "rogue.bones");
         charLoaded = true;
     }
 
@@ -358,7 +357,7 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
         charPlayer.Advance(time.Delta);
         charSkeleton.ComputeBonePalette(charPlayer.Pose, charPalette);
         PackPalette(charPalette, charPalettePayload);
-        charBones.WriteBuffer(vk.CurrentFrameSlot, 0, charPalettePayload);
+        charBones.WriteBuffer(device.CurrentFrameSlot, 0, charPalettePayload);
 
         var user = Matrix4x4.CreateScale(CharScale)
                  * Matrix4x4.CreateRotationY(CharFacing)
@@ -385,12 +384,12 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
             var model = new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse($"models/{fileName}"), path));
             if (model.Primitives.Length == 0) return null;
             var m = model.Primitives[0].Mesh;
-            var vb = vk.CreateVertexBuffer(
+            var vb = device.CreateVertexBuffer(
                 new VertexBufferData(new VertexBufferDescription(m.Layout, m.VertexCount, GraphicsBufferUsage.Static), m.VertexBytes),
                 $"{fileName}.vb");
             var ib = m.Indices32 is { } u32
-                ? vk.CreateIndexBuffer(u32, name: $"{fileName}.ib")
-                : vk.CreateIndexBuffer(m.Indices, name: $"{fileName}.ib");
+                ? device.CreateIndexBuffer(u32, name: $"{fileName}.ib")
+                : device.CreateIndexBuffer(m.Indices, name: $"{fileName}.ib");
             return new Mesh(fileName, vb, ib, m.IndexCount, m.Bounds);
         }
         catch (Exception ex)
@@ -404,13 +403,13 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
     {
         if (tex?.MipBytes is { Count: > 0 } mips)
         {
-            return vk.CreateTexture2D(
+            return device.CreateTexture2D(
                 new TextureDescription(tex.Width, tex.Height, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
                 mips[0], "rogue.albedo");
         }
         var px = new byte[4 * 4 * 4];
         for (var i = 0; i < px.Length; i += 4) { px[i] = 210; px[i + 1] = 180; px[i + 2] = 140; px[i + 3] = 255; }
-        return vk.CreateTexture2D(
+        return device.CreateTexture2D(
             new TextureDescription(4, 4, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat), px, "rogue.albedo.fallback");
     }
 
@@ -440,16 +439,16 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
         var corners = new float[] { -1f, -1f, 1f,   3f, -1f, 1f,   -1f, 3f, 1f };
         var bytes = new byte[corners.Length * sizeof(float)];
         System.Buffer.BlockCopy(corners, 0, bytes, 0, bytes.Length);
-        skyVb = vk.CreateVertexBuffer(new VertexBufferData(new VertexBufferDescription(fsLayout, 3, GraphicsBufferUsage.Static), bytes), "sky.vb");
-        skyIb = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2 }, name: "sky.ib");
+        skyVb = device.CreateVertexBuffer(new VertexBufferData(new VertexBufferDescription(fsLayout, 3, GraphicsBufferUsage.Static), bytes), "sky.vb");
+        skyIb = device.CreateIndexBuffer(new ushort[] { 0, 1, 2 }, name: "sky.ib");
 
         var shaderDir = AppFiles.Shaders;
         var skyInterface = ShaderReflection.ForProgram(shaderDir, "sky.vert", "sky.frag");
         var vert = File.ReadAllBytes(Path.Combine(shaderDir, "sky.vert.spv"));
         var frag = File.ReadAllBytes(Path.Combine(shaderDir, "sky.frag.spv"));
-        skyProgram = vk.CreateShaderProgramFromSpv(vert, frag, skyInterface, "sky");
+        skyProgram = device.CreateShaderProgramFromSpv(vert, frag, skyInterface, "sky");
 
-        skyPipeline = vk.CreatePipeline(
+        skyPipeline = device.CreatePipeline(
             new PipelineDescription(
                 skyProgram, fsLayout, PrimitiveTopology.Triangles,
                 DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled }),

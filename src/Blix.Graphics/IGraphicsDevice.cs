@@ -61,9 +61,23 @@ public interface IGraphicsDevice : IDisposable
 
     void DestroyIndexBuffer(IndexBufferHandle handle);
 
-    // Shader-program *creation* is backend-specific: the Vulkan backend builds
-    // programs from compiled SPIR-V (VulkanGraphicsDevice.CreateShaderProgramFromSpv),
-    // so it isn't on the backend-neutral contract. Destruction is generic.
+    // A buffer of indirect draw records (IndirectDraw), for GPU-driven submission: the CPU or a compute
+    // pass writes the records, and one DrawIndexedIndirect reads many of them.
+    IndirectBufferHandle CreateIndirectBuffer(int maxDrawCommands, string? name = null);
+
+    void WriteIndirectCommands(IndirectBufferHandle handle, ReadOnlySpan<byte> commands);
+
+    // <b>A program is made from compiled SPIR-V and the interface reflected from it.</b> This used to
+    // be absent, on the grounds that SPIR-V is what the Vulkan backend consumes, so every program that
+    // drew anything had to cast to VulkanGraphicsDevice before its first shader: 67 calls in 13
+    // projects. SPIR-V is Blix's compiled shader format whatever consumes it, and ShaderInterface is
+    // the reflection of that format, so both belong on the device's contract.
+    ShaderProgramHandle CreateShaderProgramFromSpv(
+        byte[] vertexSpv, byte[] fragmentSpv, ShaderInterface shaderInterface, string? name = null);
+
+    ShaderProgramHandle CreateComputeShaderProgramFromSpv(
+        byte[] computeSpv, ShaderInterface shaderInterface, string? name = null);
+
     void DestroyShaderProgram(ShaderProgramHandle handle);
 
     PipelineHandle CreatePipeline(PipelineDescription description, string? name = null);
@@ -77,6 +91,17 @@ public interface IGraphicsDevice : IDisposable
     PipelineHandle GetOrCreatePipeline(PipelineDescription description, string? name = null);
 
     void DestroyPipeline(PipelineHandle handle);
+
+    // A pipeline for a compute program: nothing about rasterisation or vertex input to describe.
+    PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null);
+
+    // A material's own descriptor set for `program` (see IMaterialBindings). setIndex is where the
+    // program declares its material resources, DescriptorSets.Material by convention; framesInFlight
+    // is how many copies to keep when the material is rewritten every frame.
+    IMaterialBindings CreateMaterial(
+        ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null);
+
+    void DestroyMaterial(MaterialHandle handle);
 
     TextureHandle CreateTexture2D(TextureDescription description, ReadOnlySpan<byte> pixels, string? name = null);
 
@@ -160,6 +185,24 @@ public interface IGraphicsDevice : IDisposable
         SamplerDescription sampler,
         string? name = null);
 
+    // A sampleable cube with `mipCount` levels. `data` is face-major then mip-major: for each face in
+    // turn (+X, -X, +Y, -Y, +Z, -Z), its mips 0..mipCount-1 tightly packed, each faceSize >> level wide.
+    TextureHandle CreateTextureCube(
+        int faceSize, TextureFormat format, int mipCount, ReadOnlySpan<byte> data, SamplerDescription sampler, string name);
+
+    // Textures a compute program writes and a later pass samples. No initial data: created ready to
+    // be sampled, so reading one before its first write is valid (and reads nothing useful).
+    TextureHandle CreateStorageTexture2D(int width, int height, TextureFormat format, SamplerDescription sampler, string? name = null);
+
+    TextureHandle CreateStorageTexture3D(
+        int width, int height, int depth, TextureFormat format, SamplerDescription sampler, string? name = null);
+
+    // The texture's pixels, read back to the CPU after the GPU has finished with it. For captures,
+    // checks and tools; it waits for the device, so not for a frame loop.
+    byte[] ReadTexture(TextureHandle handle, out int width, out int height, out TextureFormat format);
+
+    bool TryGetTextureSize(TextureHandle handle, out int width, out int height);
+
     void DestroyTexture(TextureHandle handle);
 
     RenderSurface CreateRenderSurface(RenderSurfaceDescription description);
@@ -167,4 +210,21 @@ public interface IGraphicsDevice : IDisposable
     void DestroyRenderSurface(RenderSurfaceHandle handle);
 
     ResourceRegistrySnapshot SnapshotResources();
+
+    // Waits until the device has finished everything submitted. For teardown, and before freeing a
+    // resource a frame in flight may still read.
+    void WaitIdle();
+
+    // How many frames the device keeps in flight, and which of those slots the frame being recorded
+    // is. A resource rewritten every frame keeps one copy per slot and writes CurrentFrameSlot's.
+    int MaxFramesInFlightCount { get; }
+
+    int CurrentFrameSlot { get; }
+
+    // Whether presentation waits for the display. Off for timing runs, where a refresh-locked
+    // frame period hides the difference being measured.
+    bool VsyncEnabled { get; set; }
+
+    // The most samples a colour and depth target may have on this device (1 when MSAA is unavailable).
+    int MaxMsaaSamples { get; }
 }

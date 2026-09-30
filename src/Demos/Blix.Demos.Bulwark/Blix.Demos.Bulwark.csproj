@@ -6,7 +6,6 @@
     <ProjectReference Include="..\..\Blix.Audio\Blix.Audio.csproj" />
     <ProjectReference Include="..\..\Blix.Core\Blix.Core.csproj" />
     <ProjectReference Include="..\..\Blix.Graphics\Blix.Graphics.csproj" />
-    <ProjectReference Include="..\..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
     <!-- InstancedBatch + its instanced.*.spv ship from Blix.Render via content
          propagation (same as VulkanInstanced). -->
     <ProjectReference Include="..\..\Blix.Render\Blix.Render.csproj" />

@@ -5,7 +5,6 @@ using Blix.Core;
 using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
-using Blix.Graphics.Vulkan;
 using Blix.Tools.Studio;
 using Blix.Runtime.Silk;
 using ImGuiNET;
@@ -348,7 +347,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
     {
         this.host = host;
         panels = new ViewerPanels(this);
-        var vk = (VulkanGraphicsDevice)graphicsDevice;
+        var device = graphicsDevice;
 
         // <b>Structural settings are read when the graph is built, so they are applied BEFORE it.</b>
         // The full binding below still happens and re-applies them harmlessly; it cannot come first,
@@ -362,7 +361,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         // rule the asset refusals follow: say which setting and what to do, and exit non-zero.
         try
         {
-            renderer.Load(vk);
+            renderer.Load(device);
         }
         catch (NotSupportedException refused)
         {
@@ -380,7 +379,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         // window resize but mutates the registered entry in place, so the handle stays valid.
         viewportId = host.RegisterUiTexture(renderer.ViewportColour);
 
-        LoadRig(vk);
+        LoadRig(device);
 
         if (modelPath is null) return;
         if (!File.Exists(modelPath))
@@ -395,7 +394,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         // had opened — which reads as "the viewer is broken" rather than "that file is not a glTF".
         try
         {
-            model = StudioModel.Load(vk, modelPath);
+            model = StudioModel.Load(device, modelPath);
         }
         catch (AssetImportException refused)
         {
@@ -430,7 +429,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
     // descriptor set, and a descriptor set's layout comes from the program that will read it — so a
     // rig cannot build its set-3 buffer until it knows which shader is on the other end. That
     // dependency is why this runs after renderer.Load rather than beside it.
-    private void LoadRig(VulkanGraphicsDevice vk)
+    private void LoadRig(IGraphicsDevice device)
     {
         if (rigPath is null) return;
         if (!File.Exists(rigPath))
@@ -441,7 +440,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
 
         try
         {
-            rig = StudioRig.Load(vk, rigPath, renderer.SkinnedProgram);
+            rig = StudioRig.Load(device, rigPath, renderer.SkinnedProgram);
         }
         catch (AssetImportException refused)
         {

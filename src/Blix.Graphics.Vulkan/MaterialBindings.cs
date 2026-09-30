@@ -12,7 +12,7 @@ namespace Blix.Graphics.Vulkan;
 // matching slot via WriteBuffer(frameSlot, ...) and the bind path picks
 // Sets[frameSlot]. CPU/GPU sync is provided by the swapchain's per-frame
 // fence — no explicit fencing needed here.
-public sealed class MaterialBindings
+public sealed class MaterialBindings : IMaterialBindings
 {
     private readonly VulkanGraphicsDevice device;
     private readonly List<DescriptorSetSlot> slots;
@@ -354,4 +354,14 @@ public sealed class MaterialBindings
             if (Pools[i].Handle != 0) device.Vk.DestroyDescriptorPool(device.Device, Pools[i], null);
         }
     }
+
+    // The neutral face of the same material. Each forwards to the member above, which returns the
+    // concrete type so code inside the backend keeps its fluent chain.
+    IMaterialBindings IMaterialBindings.SetUniform(int binding, string memberName, float value) => SetUniform(binding, memberName, value);
+    IMaterialBindings IMaterialBindings.SetUniform(int binding, string memberName, Vector2 value) => SetUniform(binding, memberName, value);
+    IMaterialBindings IMaterialBindings.SetUniform(int binding, string memberName, Vector3 value) => SetUniform(binding, memberName, value);
+    IMaterialBindings IMaterialBindings.SetUniform(int binding, string memberName, Vector4 value) => SetUniform(binding, memberName, value);
+    IMaterialBindings IMaterialBindings.SetUniform(int binding, string memberName, Matrix4x4 value) => SetUniform(binding, memberName, value);
+    IMaterialBindings IMaterialBindings.SetTexture(int binding, TextureHandle texture) => SetTexture(binding, texture);
+    IMaterialBindings IMaterialBindings.WriteBuffer(int frameSlot, int binding, ReadOnlySpan<byte> payload) => WriteBuffer(frameSlot, binding, payload);
 }

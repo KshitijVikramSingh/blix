@@ -4,7 +4,6 @@ using Blix.Diagnostics;
 using Blix.Core;
 using Blix.Graphics;
 using Blix.Graphics.Images;
-using Blix.Graphics.Vulkan;
 using Blix.Render;
 
 namespace Blix.Tools.Studio;
@@ -46,7 +45,7 @@ public sealed class StudioRenderer : IDisposable
 
     private const int PushBytes = LitPushBytes;
 
-    private VulkanGraphicsDevice device = null!;
+    private IGraphicsDevice device = null!;
     private FullscreenPass fullscreen = null!;
 
     private RenderGraph graph = null!;
@@ -202,14 +201,14 @@ public sealed class StudioRenderer : IDisposable
     /// Optional construction-time declaration of passes that append after Studio lighting and
     /// before presentation.
     /// </param>
-    public void Load(VulkanGraphicsDevice vk, Action<StudioGraph>? extend = null)
+    public void Load(IGraphicsDevice device, Action<StudioGraph>? extend = null)
     {
         // Its own shaders, staged beside the application by the reference, as SpriteBatch and the
         // runtime's ImGui find theirs. The caller used to be told to pass this path, which is how
         // every program standing on the stage came to write it out by hand.
         var shaderDirectory = AppFiles.Shaders;
-        device = vk;
-        fullscreen = new FullscreenPass(vk, "lab.present");
+        this.device = device;
+        fullscreen = new FullscreenPass(device, "lab.present");
 
         ShaderInterface Reflect(params string[] stages) =>
             ShaderReflection.ForProgram(shaderDirectory, stages);
@@ -227,7 +226,7 @@ public sealed class StudioRenderer : IDisposable
         var skinnedShadowInterface = Reflect("studio_skinned_shadow.vert", "studio_skinned_shadow.frag");
 
         // The graph owns colour, depth-only, resolve, and execution dependencies.
-        graph = new RenderGraph(vk);
+        graph = new RenderGraph(device);
         var fullSize = new MatchSwapchainGraphSize(1.0f);
         // Three maps preserve contact-shadow resolution near the subject while retaining reach.
         for (var c = 0; c < CascadeCount; c++)
@@ -239,12 +238,12 @@ public sealed class StudioRenderer : IDisposable
 
         // MSAA changes target sample counts, not the scene-recording path. Colour and depth must
         // agree, and the request is clamped before native render-pass creation.
-        var samples = Math.Clamp(Look.MsaaSamples, 1, vk.MaxMsaaSamples);
+        var samples = Math.Clamp(Look.MsaaSamples, 1, device.MaxMsaaSamples);
         if (samples != Look.MsaaSamples)
         {
             Console.WriteLine(
                 $"msaa: {Look.MsaaSamples}x asked, {samples}x used — this device supports at most " +
-                $"{vk.MaxMsaaSamples}x for colour and depth together.");
+                $"{device.MaxMsaaSamples}x for colour and depth together.");
         }
 
         if (samples > 1)
@@ -335,21 +334,21 @@ public sealed class StudioRenderer : IDisposable
 
                 byte[] Spv(string stage) => File.ReadAllBytes(Path.Combine(shaderDirectory, stage + ".spv"));
 
-        shadowProgram = vk.CreateShaderProgramFromSpv(
+        shadowProgram = device.CreateShaderProgramFromSpv(
             Spv("studio_shadow.vert"), Spv("studio_shadow.frag"), shadowInterface, "lab.shadow");
-        litProgram = vk.CreateShaderProgramFromSpv(
+        litProgram = device.CreateShaderProgramFromSpv(
             Spv("studio_lit.vert"), Spv("studio_lit.frag"), litInterface, "lab.lit");
-        presentProgram = vk.CreateShaderProgramFromSpv(
+        presentProgram = device.CreateShaderProgramFromSpv(
             Spv("studio_present.vert"), Spv("studio_present.frag"), presentInterface, "lab.present");
-        skyProgram = vk.CreateShaderProgramFromSpv(
+        skyProgram = device.CreateShaderProgramFromSpv(
             Spv("studio_sky.vert"), Spv("studio_sky.frag"), skyInterface, "lab.sky");
-        skinnedProgram = vk.CreateShaderProgramFromSpv(
+        skinnedProgram = device.CreateShaderProgramFromSpv(
             Spv("studio_skinned.vert"), Spv("studio_lit.frag"), skinnedInterface, "lab.skinned");
-        skinnedShadowProgram = vk.CreateShaderProgramFromSpv(
+        skinnedShadowProgram = device.CreateShaderProgramFromSpv(
             Spv("studio_skinned_shadow.vert"), Spv("studio_skinned_shadow.frag"), skinnedShadowInterface, "lab.skinned.shadow");
 
 
-        shadowPipeline = vk.CreatePipeline(new PipelineDescription(
+        shadowPipeline = device.CreatePipeline(new PipelineDescription(
             shadowProgram,
             VertexPosition3NormalTexture2Color.Layout,
             PrimitiveTopology.Triangles,
@@ -364,7 +363,7 @@ public sealed class StudioRenderer : IDisposable
             // depth-only surface and this one is the scene's. Two more, which is the cost of the
             // feature stated plainly — this stage is at ten pipelines now, and that number is the
             // thing to watch as the house style grows.
-            prePassPipeline = vk.CreatePipeline(new PipelineDescription(
+            prePassPipeline = device.CreatePipeline(new PipelineDescription(
                 shadowProgram,
                 VertexPosition3NormalTexture2Color.Layout,
                 PrimitiveTopology.Triangles,
@@ -374,7 +373,7 @@ public sealed class StudioRenderer : IDisposable
                 RenderTarget: graph.GetPassSurface(prePass)), "lab.prepass");
         }
 
-        litPipeline = vk.CreatePipeline(new PipelineDescription(
+        litPipeline = device.CreatePipeline(new PipelineDescription(
             litProgram,
             VertexPosition3NormalTexture2Color.Layout,
             PrimitiveTopology.Triangles,
@@ -385,7 +384,7 @@ public sealed class StudioRenderer : IDisposable
 
         // Depth-tested at the far plane and never written: drawn first, it fills what the pre-pass
         // left at 1.0 and nothing else, and it cannot occlude anything drawn after it.
-        skyPipeline = vk.CreatePipeline(new PipelineDescription(
+        skyPipeline = device.CreatePipeline(new PipelineDescription(
             skyProgram, FullscreenPass.Layout, PrimitiveTopology.Triangles,
             new DepthState(Enabled: true, WriteEnabled: false, DepthCompare.LessEqual),
             RasterizerState.NoCulling, new[] { BlendState.Disabled },
@@ -393,7 +392,7 @@ public sealed class StudioRenderer : IDisposable
 
         // Closed, single-sided rig parts use back-face culling. This reduces fill and makes an
         // inside-out import visible as missing surfaces.
-        skinnedPipeline = vk.CreatePipeline(new PipelineDescription(
+        skinnedPipeline = device.CreatePipeline(new PipelineDescription(
             skinnedProgram,
             VertexPosition3NormalTextureSkin4Tangent.Layout,
             PrimitiveTopology.Triangles,
@@ -404,7 +403,7 @@ public sealed class StudioRenderer : IDisposable
 
         // Blended and double-sided materials use uncullled variants; closed single-sided parts use
         // the pipeline above. RigView selects the authored material case per part.
-        blendPipeline = vk.CreatePipeline(new PipelineDescription(
+        blendPipeline = device.CreatePipeline(new PipelineDescription(
             litProgram,
             VertexPosition3NormalTexture2Color.Layout,
             PrimitiveTopology.Triangles,
@@ -413,7 +412,7 @@ public sealed class StudioRenderer : IDisposable
             new[] { BlendState.AlphaBlend },
             RenderTarget: graph.GetPassSurface(litPass)), "lab.lit.blend");
 
-        skinnedBlendPipeline = vk.CreatePipeline(new PipelineDescription(
+        skinnedBlendPipeline = device.CreatePipeline(new PipelineDescription(
             skinnedProgram,
             VertexPosition3NormalTextureSkin4Tangent.Layout,
             PrimitiveTopology.Triangles,
@@ -422,7 +421,7 @@ public sealed class StudioRenderer : IDisposable
             new[] { BlendState.AlphaBlend },
             RenderTarget: graph.GetPassSurface(litPass)), "lab.skinned.blend");
 
-        skinnedDoubleSidedPipeline = vk.CreatePipeline(new PipelineDescription(
+        skinnedDoubleSidedPipeline = device.CreatePipeline(new PipelineDescription(
             skinnedProgram,
             VertexPosition3NormalTextureSkin4Tangent.Layout,
             PrimitiveTopology.Triangles,
@@ -432,35 +431,35 @@ public sealed class StudioRenderer : IDisposable
             RenderTarget: graph.GetPassSurface(litPass)), "lab.skinned.doublesided");
 
         var viewportSurface = graph.GetPassSurface(viewportPass);
-        viewportLitPipeline = vk.CreatePipeline(new PipelineDescription(
+        viewportLitPipeline = device.CreatePipeline(new PipelineDescription(
             litProgram, VertexPosition3NormalTexture2Color.Layout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.NoCulling, new[] { BlendState.Disabled },
             RenderTarget: viewportSurface), "lab.viewport.lit");
-        viewportSkyPipeline = vk.CreatePipeline(new PipelineDescription(
+        viewportSkyPipeline = device.CreatePipeline(new PipelineDescription(
             skyProgram, FullscreenPass.Layout, PrimitiveTopology.Triangles,
             new DepthState(Enabled: true, WriteEnabled: false, DepthCompare.LessEqual),
             RasterizerState.NoCulling, new[] { BlendState.Disabled },
             RenderTarget: viewportSurface), "lab.viewport.sky");
-        viewportSkinnedPipeline = vk.CreatePipeline(new PipelineDescription(
+        viewportSkinnedPipeline = device.CreatePipeline(new PipelineDescription(
             skinnedProgram, VertexPosition3NormalTextureSkin4Tangent.Layout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled },
             RenderTarget: viewportSurface), "lab.viewport.skinned");
-        viewportBlendPipeline = vk.CreatePipeline(new PipelineDescription(
+        viewportBlendPipeline = device.CreatePipeline(new PipelineDescription(
             litProgram, VertexPosition3NormalTexture2Color.Layout, PrimitiveTopology.Triangles,
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling, new[] { BlendState.AlphaBlend },
             RenderTarget: viewportSurface), "lab.viewport.lit.blend");
-        viewportSkinnedBlendPipeline = vk.CreatePipeline(new PipelineDescription(
+        viewportSkinnedBlendPipeline = device.CreatePipeline(new PipelineDescription(
             skinnedProgram, VertexPosition3NormalTextureSkin4Tangent.Layout, PrimitiveTopology.Triangles,
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling, new[] { BlendState.AlphaBlend },
             RenderTarget: viewportSurface), "lab.viewport.skinned.blend");
-        viewportSkinnedDoubleSidedPipeline = vk.CreatePipeline(new PipelineDescription(
+        viewportSkinnedDoubleSidedPipeline = device.CreatePipeline(new PipelineDescription(
             skinnedProgram, VertexPosition3NormalTextureSkin4Tangent.Layout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.NoCulling, new[] { BlendState.Disabled },
             RenderTarget: viewportSurface), "lab.viewport.skinned.doublesided");
 
         // The caster does NOT cull: a one-sided shadow from a back-face-culled caster loses the far
         // side of a limb, and a character's own silhouette is mostly far sides.
-        skinnedShadowPipeline = vk.CreatePipeline(new PipelineDescription(
+        skinnedShadowPipeline = device.CreatePipeline(new PipelineDescription(
             skinnedShadowProgram,
             VertexPosition3NormalTextureSkin4Tangent.Layout,
             PrimitiveTopology.Triangles,
@@ -471,7 +470,7 @@ public sealed class StudioRenderer : IDisposable
 
         if (Look.DepthPrePass)
         {
-            prePassSkinnedPipeline = vk.CreatePipeline(new PipelineDescription(
+            prePassSkinnedPipeline = device.CreatePipeline(new PipelineDescription(
                 skinnedShadowProgram,
                 VertexPosition3NormalTextureSkin4Tangent.Layout,
                 PrimitiveTopology.Triangles,
@@ -484,7 +483,7 @@ public sealed class StudioRenderer : IDisposable
         // FullscreenPass.Layout, not a vertex format: studio_present.vert builds its triangle from
         // gl_VertexIndex and declares no inputs at all, so any attribute here is a promise the shader
         // does not keep — and the validation layers said so on every run.
-        presentPipeline = vk.CreatePipeline(new PipelineDescription(
+        presentPipeline = device.CreatePipeline(new PipelineDescription(
             presentProgram,
             FullscreenPass.Layout,
             PrimitiveTopology.Triangles,
@@ -497,11 +496,11 @@ public sealed class StudioRenderer : IDisposable
             RasterizerState.NoCulling,
             BlendState.Disabled), "lab.present");
 
-        whiteTexture = vk.CreateTexture2D(
+        whiteTexture = device.CreateTexture2D(
             new TextureDescription(1, 1, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
             new byte[] { 255, 255, 255, 255 }, "lab.white");
 
-        BakeEnvironment(vk);
+        BakeEnvironment(device);
 
         // From here a structural change cannot take effect, so say so rather than accept it quietly.
         Look.SealStructural();
@@ -510,17 +509,17 @@ public sealed class StudioRenderer : IDisposable
         // Widened to white. The stage's own furniture has no authored colour and does not want
         // one; it rides the same 36-byte layout so that ONE pipeline draws the ground, the boxes,
         // a model and an attachment — which is why this arc adds no pipeline variant at all.
-        cubeVertices = vk.CreateVertexBuffer(
+        cubeVertices = device.CreateVertexBuffer(
             VertexPosition3NormalTexture2Color.CreateBufferData(VertexPosition3NormalTexture2Color.From(cv)), "lab.cube.vb");
-        cubeIndices = vk.CreateIndexBuffer(ci, name: "lab.cube.ib");
+        cubeIndices = device.CreateIndexBuffer(ci, name: "lab.cube.ib");
         cubeIndexCount = ci.Length;
 
         // As far as the camera can see, so its edge is a horizon against the sky rather than a
         // corner in the middle of the frame. The camera's far plane is 120 m.
         var (gv, gi) = StudioGeometry.Ground(extent: 120f);
-        groundVertices = vk.CreateVertexBuffer(
+        groundVertices = device.CreateVertexBuffer(
             VertexPosition3NormalTexture2Color.CreateBufferData(VertexPosition3NormalTexture2Color.From(gv)), "lab.ground.vb");
-        groundIndices = vk.CreateIndexBuffer(gi, name: "lab.ground.ib");
+        groundIndices = device.CreateIndexBuffer(gi, name: "lab.ground.ib");
         groundIndexCount = gi.Length;
     }
 
@@ -547,7 +546,7 @@ public sealed class StudioRenderer : IDisposable
 
     /// <summary>The program the bone-palette material must be created against.</summary>
     /// <remarks>
-    /// A <c>MaterialBindings</c> takes its descriptor layout from a program's reflected interface, so a
+    /// A <c>IMaterialBindings</c> takes its descriptor layout from a program's reflected interface, so a
     /// rig cannot build its set-3 buffer until it knows which program will read it. Handing the program
     /// out is what keeps the buffer's size a fact from the shader rather than a constant agreed between
     /// two files that can drift apart.
@@ -769,7 +768,7 @@ public sealed class StudioRenderer : IDisposable
     /// The authored sun provides a self-contained procedural environment. With IBL disabled, 1x1
     /// identity textures still satisfy the reflected bindings while the shader uses flat ambient.
     /// </remarks>
-    private void BakeEnvironment(VulkanGraphicsDevice vk)
+    private void BakeEnvironment(IGraphicsDevice device)
     {
         bakedSunDirection = Look.SunDirection;
         bakedSky = Look.Sky;
@@ -780,11 +779,11 @@ public sealed class StudioRenderer : IDisposable
             envMipCeiling = 0f;
             var grey = new byte[6 * 4];
             for (var i = 0; i < grey.Length; i++) grey[i] = 128;
-            irradianceTexture = vk.CreateTextureCube(
+            irradianceTexture = device.CreateTextureCube(
                 1, TextureFormat.Rgba8, 1, grey, SamplerDescription.LinearClamp, "lab.ibl.off.cube");
             prefilteredTexture = irradianceTexture;
             skyTexture = irradianceTexture;
-            brdfLutTexture = vk.CreateTexture2D(
+            brdfLutTexture = device.CreateTexture2D(
                 new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.LinearClamp),
                 new byte[] { 255, 255, 255, 255 }, "lab.ibl.off.brdf");
             Own(irradianceTexture, brdfLutTexture);
@@ -793,7 +792,7 @@ public sealed class StudioRenderer : IDisposable
 
         var watch = System.Diagnostics.Stopwatch.StartNew();
         var probe = EnvironmentBaker.Bake(
-            vk,
+            device,
             new EnvironmentProfile
             {
                 // NEGATED, because the two sides disagree about which way a sun direction points: the
@@ -809,7 +808,7 @@ public sealed class StudioRenderer : IDisposable
         // Cached beside the binary. The table is the same numbers on every run, and the Studio baseline
         // alone launches this tool twenty-three times.
         brdfLutTexture = EnvironmentBaker.BakeBrdfLut(
-            vk, Look.BrdfLutSize, "lab.ibl.brdf",
+            device, Look.BrdfLutSize, "lab.ibl.brdf",
             Path.Combine(AppContext.BaseDirectory, "brdf-cache"));
         watch.Stop();
         bakeMilliseconds = watch.Elapsed.TotalMilliseconds;

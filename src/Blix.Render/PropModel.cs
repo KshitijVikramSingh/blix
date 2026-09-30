@@ -2,7 +2,6 @@ using System.Numerics;
 using Blix.Assets;
 using Blix.Geometry;
 using Blix.Graphics;
-using Blix.Graphics.Vulkan;
 
 namespace Blix.Render;
 
@@ -71,7 +70,7 @@ public sealed class PropModel : IDisposable
         CasterPass[] casterPasses,
         Bounds3 bounds,
         int triangles,
-        VulkanGraphicsDevice sceneDevice,
+        IGraphicsDevice sceneDevice,
         ShaderProgramHandle sceneShader,
         PipelineHandle scenePipeline)
     {
@@ -86,7 +85,7 @@ public sealed class PropModel : IDisposable
         this.scenePipeline = scenePipeline;
     }
 
-    private readonly VulkanGraphicsDevice sceneDevice;
+    private readonly IGraphicsDevice sceneDevice;
     private readonly ShaderProgramHandle sceneShader;
     private readonly PipelineHandle scenePipeline;
 
@@ -169,7 +168,7 @@ public sealed class PropModel : IDisposable
     // where the thing it casts for stands; a caster normalised to its own bounds would
     // sit a few centimetres off and put the shadow beside the trunk.
     public static PropModel Create(
-        VulkanGraphicsDevice device,
+        IGraphicsDevice device,
         string name,
         IEnumerable<(MeshData Mesh, Vector4 Tint)> parts,
         ShaderProgramHandle sceneShader,
@@ -527,7 +526,7 @@ public sealed class PropModel : IDisposable
         return Matrix4x4.CreateTranslation(-centre) * Matrix4x4.CreateScale(scale);
     }
 
-    private static Mesh Upload(VulkanGraphicsDevice device, MeshData mesh)
+    private static Mesh Upload(IGraphicsDevice device, MeshData mesh)
     {
         var vertices = device.CreateVertexBuffer(
             new VertexBufferData(
@@ -601,7 +600,7 @@ public sealed class PropModel : IDisposable
         }
 
         private MeshChunks[] meshes = Array.Empty<MeshChunks>();
-        private VulkanGraphicsDevice device = null!;
+        private IGraphicsDevice device = null!;
         private ShaderProgramHandle shader;
         private PipelineHandle pipeline;
         private string name = string.Empty;
@@ -624,7 +623,7 @@ public sealed class PropModel : IDisposable
         }
 
         public void Create(
-            VulkanGraphicsDevice graphicsDevice,
+            IGraphicsDevice graphicsDevice,
             IReadOnlyList<Mesh> geometry,
             ShaderProgramHandle casterShader,
             PipelineHandle casterPipeline,

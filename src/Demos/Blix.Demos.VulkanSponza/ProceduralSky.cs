@@ -1,6 +1,5 @@
 using System.Numerics;
 using Blix.Graphics;
-using Blix.Graphics.Vulkan;
 
 namespace Blix.Demos.VulkanSponza;
 
@@ -26,7 +25,7 @@ internal static class ProceduralSky
 
     // Bake the three IBL textures for a fixed (bake-time) sun direction. The
     // cubes encode this sun's glow, so live sun changes don't relight the IBL.
-    public static Baked Bake(VulkanGraphicsDevice device, Vector3 sunDirection)
+    public static Baked Bake(IGraphicsDevice device, Vector3 sunDirection)
     {
         ArgumentNullException.ThrowIfNull(device);
         var envCube = device.CreateTextureCube(

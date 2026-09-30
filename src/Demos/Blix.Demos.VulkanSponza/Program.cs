@@ -8,7 +8,6 @@ using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Images;
-using Blix.Graphics.Vulkan;
 using Blix.Render;
 using Blix.Runtime.Silk;
 
@@ -83,7 +82,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDisposable
     public SponzaLoop(AppArgs args) => this.args = args;
 
     private IRenderHost host = null!;
-    private VulkanGraphicsDevice vk = null!;
+    private IGraphicsDevice device = null!;
     private RenderGraph graph = null!;
     private ulong graphResourceGeneration;
 

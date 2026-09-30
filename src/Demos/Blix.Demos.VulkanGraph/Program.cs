@@ -3,7 +3,6 @@ using Blix;
 using Blix.Core;
 using Blix.Diagnostics;
 using Blix.Graphics;
-using Blix.Graphics.Vulkan;
 using Blix.Render;
 using Blix.Runtime.Silk;
 
@@ -95,16 +94,16 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         host.SetTitle("Blix — Vulkan RenderGraph");
-        var vk = (VulkanGraphicsDevice)graphicsDevice;
+        var device = graphicsDevice;
         gpuInfo = graphicsDevice.Info;
 
         // --- Cube geometry + texture ---------------------------------
         var (vertices, indices) = BuildCube();
-        cubeVB = vk.CreateVertexBuffer(VertexPosition3Texture.CreateBufferData(vertices), "cube.vb");
-        cubeIB = vk.CreateIndexBuffer(indices, name: "cube.ib");
+        cubeVB = device.CreateVertexBuffer(VertexPosition3Texture.CreateBufferData(vertices), "cube.vb");
+        cubeIB = device.CreateIndexBuffer(indices, name: "cube.ib");
 
         var checker = BuildUvAwareCheckerboard(256, 8);
-        albedoTexture = vk.CreateTexture2D(
+        albedoTexture = device.CreateTexture2D(
             new TextureDescription(256, 256, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
             checker,
             "cube.albedo");
@@ -113,7 +112,7 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
         // Two graph-owned offscreen color targets at half swapchain res.
         // Pass 1 writes hdr; pass 2 reads hdr and writes inverted; the
         // imperative present pass samples inverted into the swapchain.
-        graph = new RenderGraph(vk);
+        graph = new RenderGraph(device);
 
         var halfSize = new MatchSwapchainGraphSize(0.5f);
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.Rgba16F, halfSize);
@@ -150,8 +149,8 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
         // --- Pipelines (created AFTER Compile so render passes exist) -
         var cubeVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "cube.vert.spv"));
         var cubeFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "cube.frag.spv"));
-        cubeShaderProgram = vk.CreateShaderProgramFromSpv(cubeVertSpv, cubeFragSpv, cubeInterface, "cube");
-        cubePipeline = vk.CreatePipeline(new PipelineDescription(
+        cubeShaderProgram = device.CreateShaderProgramFromSpv(cubeVertSpv, cubeFragSpv, cubeInterface, "cube");
+        cubePipeline = device.CreatePipeline(new PipelineDescription(
             cubeShaderProgram,
             VertexPosition3Texture.Layout,
             PrimitiveTopology.Triangles,
@@ -162,8 +161,8 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
 
         var invertVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "invert.vert.spv"));
         var invertFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "invert.frag.spv"));
-        invertShaderProgram = vk.CreateShaderProgramFromSpv(invertVertSpv, invertFragSpv, invertInterface, "invert");
-        invertPipeline = vk.CreatePipeline(new PipelineDescription(
+        invertShaderProgram = device.CreateShaderProgramFromSpv(invertVertSpv, invertFragSpv, invertInterface, "invert");
+        invertPipeline = device.CreatePipeline(new PipelineDescription(
             invertShaderProgram,
             VertexPosition3Texture.Layout,
             PrimitiveTopology.Triangles,
@@ -174,8 +173,8 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
 
         var presentVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.vert.spv"));
         var presentFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.frag.spv"));
-        presentShaderProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, presentFragSpv, presentInterface, "present");
-        presentPipeline = vk.CreatePipeline(new PipelineDescription(
+        presentShaderProgram = device.CreateShaderProgramFromSpv(presentVertSpv, presentFragSpv, presentInterface, "present");
+        presentPipeline = device.CreatePipeline(new PipelineDescription(
             presentShaderProgram,
             VertexPosition3Texture.Layout,
             PrimitiveTopology.Triangles,
@@ -184,13 +183,13 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
             BlendState.Disabled), "present");
 
         // --- Cube material (set 2) ------------------------------------
-        cubeMaterial = vk.CreateMaterial(cubeShaderProgram, name: "cube.material")
+        cubeMaterial = device.CreateMaterial(cubeShaderProgram, name: "cube.material")
             .SetUniform(binding: 0, "uTint", new Vector4(1.0f, 1.0f, 1.0f, 1.0f))
             .SetTexture(binding: 1, albedoTexture)
             .Handle;
 
         // Fullscreen triangle shared by the invert + present passes.
-        fullscreen = new FullscreenPass(vk, "fullscreen");
+        fullscreen = new FullscreenPass(device, "fullscreen");
 
         // --- Camera ---------------------------------------------------
         var aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;

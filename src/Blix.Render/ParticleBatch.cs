@@ -1,7 +1,6 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix.Graphics;
-using Blix.Graphics.Vulkan;
 
 namespace Blix.Render;
 
@@ -50,7 +49,7 @@ public sealed class ParticleBatch : IDisposable
         public float Life;
     }
 
-    private readonly VulkanGraphicsDevice device;
+    private readonly IGraphicsDevice device;
     private readonly int maxParticles;
     private readonly IndexBufferHandle indexBuffer;   // static base-0 quad indices
     private readonly Particle[] particles;
@@ -60,7 +59,7 @@ public sealed class ParticleBatch : IDisposable
     private int count;
     private bool disposed;
 
-    public ParticleBatch(VulkanGraphicsDevice device, int maxParticles, string? name = null)
+    public ParticleBatch(IGraphicsDevice device, int maxParticles, string? name = null)
     {
         ArgumentNullException.ThrowIfNull(device);
         if (maxParticles <= 0) throw new ArgumentOutOfRangeException(nameof(maxParticles));

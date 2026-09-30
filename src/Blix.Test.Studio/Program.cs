@@ -3,7 +3,6 @@ using Blix;
 using Blix.Cooked;
 using Blix.Core;
 using Blix.Graphics;
-using Blix.Graphics.Vulkan;
 using Blix.Tools.Studio;
 using Blix.Verify;
 
