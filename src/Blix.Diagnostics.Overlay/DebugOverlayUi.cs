@@ -150,6 +150,16 @@ public sealed class DebugOverlayUi
                 ImGui.EndTabItem();
             }
 
+            // Every key the application answers to, in one place: the host's, the ones bound to
+            // controls (which the engine drives), and the ones the application describes and handles
+            // itself (a claim the engine cannot check, so it is marked as one).
+            var keys = interactive ? debugSystem.Current?.Keys.Entries : debugSystem.FrozenFrame?.Keys;
+            if (keys is { Count: > 0 } && ImGui.BeginTabItem("Keys"))
+            {
+                DrawKeys(keys);
+                ImGui.EndTabItem();
+            }
+
             if (HasNonSelectionValues(values, debugSystem.SelectedPath is not null) &&
                 ImGui.BeginTabItem("State"))
             {
@@ -351,6 +361,36 @@ public sealed class DebugOverlayUi
     // "selection/LOD" -> "LOD"; "selection" -> "" (the default group).
     private static string SelectionGroup(string scope) =>
         scope.Length <= SelectionScopeRoot.Length ? string.Empty : scope[(SelectionScopeRoot.Length + 1)..];
+
+    private static void DrawKeys(IReadOnlyList<DebugKeyEntry> keys)
+    {
+        if (!ImGui.BeginTable("keys", 3, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
+        {
+            return;
+        }
+
+        ImGui.TableSetupColumn("Key");
+        ImGui.TableSetupColumn("Does");
+        ImGui.TableSetupColumn("From");
+        ImGui.TableHeadersRow();
+        foreach (var k in keys)
+        {
+            ImGui.TableNextRow();
+            ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted(k.Binding);
+            ImGui.TableSetColumnIndex(1); ImGui.TextUnformatted(k.Description);
+            ImGui.TableSetColumnIndex(2);
+            var from = k.Source switch
+            {
+                DebugKeySource.Host => "host",
+                DebugKeySource.Control => k.Path,
+                _ => $"{k.Path} (declared)",
+            };
+            if (k.Source == DebugKeySource.Declared) ImGui.TextDisabled(from);
+            else ImGui.TextUnformatted(from);
+        }
+
+        ImGui.EndTable();
+    }
 
     // True if any registered contributor wants a custom panel. Cheap
     // walk; used only to gate showing the "Custom" tab so demos without
@@ -1459,6 +1499,8 @@ public sealed class DebugOverlayUi
     private void DrawControl(DebugSystem debugSystem, DebugControlEntry entry, bool interactive)
     {
         ImGui.PushID(entry.Path);
+        // A bound key is written beside the control it drives; the widget's id stays its path.
+        var label = entry.Key is { } key ? $"{entry.Name} [{DebugKeysChannel.Name(key)}]" : entry.Name;
 
         if (!interactive)
         {
@@ -1473,7 +1515,7 @@ public sealed class DebugOverlayUi
             case DebugControlKind.Boolean:
             {
                 var value = (bool)entry.Value;
-                if (ImGui.Checkbox(entry.Name, ref value) && interactive)
+                if (ImGui.Checkbox(label, ref value) && interactive)
                 {
                     debugSystem.SetControlValue(entry.Path, value);
                 }
@@ -1484,7 +1526,7 @@ public sealed class DebugOverlayUi
             case DebugControlKind.Float:
             {
                 var value = (float)entry.Value;
-                if (ImGui.SliderFloat(entry.Name, ref value, entry.Min, entry.Max, "%.2f") && interactive)
+                if (ImGui.SliderFloat(label, ref value, entry.Min, entry.Max, "%.2f") && interactive)
                 {
                     debugSystem.SetControlValue(entry.Path, value);
                 }
@@ -1496,7 +1538,7 @@ public sealed class DebugOverlayUi
             {
                 var value = (int)entry.Value;
                 var options = entry.Options ?? Array.Empty<string>();
-                if (ImGui.Combo(entry.Name, ref value, options.ToArray(), options.Count) && interactive)
+                if (ImGui.Combo(label, ref value, options.ToArray(), options.Count) && interactive)
                 {
                     debugSystem.SetControlValue(entry.Path, value);
                 }
@@ -1506,7 +1548,7 @@ public sealed class DebugOverlayUi
 
             case DebugControlKind.Button:
             {
-                if (ImGui.Button(entry.Name) && interactive)
+                if (ImGui.Button(label) && interactive)
                 {
                     debugSystem.SetControlValue(entry.Path, true);
                 }
@@ -1530,7 +1572,7 @@ public sealed class DebugOverlayUi
 
                 var length = (uint)Math.Max(1, entry.MaxLength);
                 var entered = ImGui.InputText(
-                    entry.Name, ref buffer, length, ImGuiInputTextFlags.EnterReturnsTrue);
+                    label, ref buffer, length, ImGuiInputTextFlags.EnterReturnsTrue);
 
                 if (ImGui.IsItemActive()) textEdits[entry.Path] = buffer;
                 else textEdits.Remove(entry.Path);

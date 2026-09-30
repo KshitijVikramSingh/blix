@@ -28,7 +28,8 @@ public sealed record DebugControlEntry(
     float Min = 0.0f,
     float Max = 1.0f,
     IReadOnlyList<string>? Options = null,
-    int MaxLength = 0);
+    int MaxLength = 0,
+    Blix.Core.Key? Key = null);
 
 public enum DebugStatKind
 {

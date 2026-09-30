@@ -107,14 +107,31 @@ public sealed class DebugSystem
     /// framebuffer for both rectangles, and a click through it on a Retina display lands at twice the
     /// distance from the corner that it should.
     /// </param>
-    public DebugContext BeginFrame(RenderFrameContext frame, (int Width, int Height)? logicalSize = null)
+    /// <param name="input">This tick's input, which drives controls bound to a key. Ignored while frozen.</param>
+    public DebugContext BeginFrame(
+        RenderFrameContext frame, (int Width, int Height)? logicalSize = null, IInputState? input = null)
     {
         frameCounter++;
         frameStartTicks = Stopwatch.GetTimestamp();
         Current = new DebugContext(
             State, frame, logicalSize ?? (frame.Width, frame.Height), pendingControlValues, frameCounter, clock,
-            SelectedPath);
+            SelectedPath, IsFrozen ? null : input, hostKeys, reportedKeyConflicts);
         return Current;
+    }
+
+    // === Keys ===============================================================
+
+    private readonly List<DebugKeyEntry> hostKeys = new();
+    private readonly HashSet<string> reportedKeyConflicts = new(StringComparer.Ordinal);
+
+    /// <summary>The host's own keys, which lead the key list and which nothing else may bind.</summary>
+    public IReadOnlyList<DebugKeyEntry> HostKeys => hostKeys;
+
+    /// <summary>Called by the host, once, for each key or gesture it answers to itself.</summary>
+    public void DeclareHostKey(string binding, string what)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(binding);
+        hostKeys.Add(new DebugKeyEntry(binding, what, $"host/{binding}", DebugKeySource.Host));
     }
 
     public void AddSink(IDebugFrameSink sink)

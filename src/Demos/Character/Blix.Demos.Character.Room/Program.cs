@@ -94,10 +94,6 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
     private bool bodyEnabled = true;
     
     private int selected = -1;
-    private bool showNormals;
-    private bool showBounds = true;
-    private bool showGrid = true;
-    private bool depthTestGizmos = true;
     private float slopeTint;
 
     // Cached per selection rather than per frame: the normals of a part do not change, and
@@ -118,9 +114,9 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
 
         Console.WriteLine($"room — {room.TriangleCount} triangles, {room.Parts.Count} parts, {room.SolidStarts.Count} solids");
 
-        // SAID OUT LOUD, because an instrument nobody knows about is not an instrument. Both of these
-        // produce a file somebody who was not at the keyboard can read, which is the whole point.
-        Console.WriteLine("F12 dumps this frame's full state (camera, body, ground, every contact) to dumps/");
+        // SAID OUT LOUD, because an instrument nobody knows about is not an instrument. It produces a
+        // file somebody who was not at the keyboard can read, which is the whole point. (F12's dump is
+        // in the overlay's key list, with the rest.)
         Console.WriteLine("--trace <path>, or the panel button, records one line per frame to a .jsonl");
 
         if (tracePath is not null) StartTrace(tracePath);
@@ -190,7 +186,10 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
 
     public void Debug(DebugContext debug)
     {
-        debug.State.DepthTestDrawing = depthTestGizmos;
+        // The keys this loop handles itself (ReadInput); G and N are bound on the layers below.
+        debug.Keys.Describe(Key.T, "slope tint on / off");
+        debug.Keys.Describe("1 2 3 4", "camera: orbit, third person, first person, isometric");
+        debug.Keys.Describe(Key.R, "respawn");
         debug.Values.Value("frames", frames);
         debug.Values.Value("camera", camera.Target);
         debug.Stats.Gauge("triangles", room.TriangleCount);
@@ -222,24 +221,26 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
         {
             // A metre grid, so every claim in the panel has something to be read against: a 0.2 m
             // riser and a 0.3 m one are hard to tell apart by eye and trivial against a ruler.
-            if (showGrid)
+            // Grid, bounds and normals are layers: the Layers tab switches them, and G and N do too.
+            // They were checkboxes on this loop's panel with their own keys beside them.
+            if (debug.Draw.Layer("grid", key: Key.G))
             {
-                debug.Draw.Grid("floor", new Vector3(0f, 0.01f, 0f), 28f, 28, new GraphicsColor(0.35f, 0.38f, 0.42f, 1f));
+                debug.Draw.Grid("grid", new Vector3(0f, 0.01f, 0f), 28f, 28, new GraphicsColor(0.35f, 0.38f, 0.42f, 1f));
             }
 
             if (selected >= 0 && selected < room.Parts.Count)
             {
                 var part = room.Parts[selected];
                 var (min, max) = BoundsOf(part);
-                if (showBounds) debug.Draw.Aabb("selected", min, max, new GraphicsColor(1f, 0.82f, 0.25f, 1f));
+                if (debug.Draw.Layer("bounds")) debug.Draw.Aabb("bounds", min, max, new GraphicsColor(1f, 0.82f, 0.25f, 1f));
 
                 // THE WINDING, DRAWN. The probe checks arithmetically that every face's winding
                 // agrees with the normal it declares; this is the same fact at a glance. An arrow
                 // pointing into a solid is a contact normal that will push a body the wrong way.
-                if (showNormals)
+                if (debug.Draw.Layer("normals", visible: false, key: Key.N))
                 {
                     debug.Draw.Normals(
-                        "face-normals", normalPoints, normalDirections, 0.45f,
+                        "normals", normalPoints, normalDirections, 0.45f,
                         new GraphicsColor(0.35f, 0.9f, 1f, 1f));
                 }
             }
@@ -450,12 +451,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
             // normal the collider reads, which is how "is this really a 30 degree ramp" becomes a
             // question you can answer by looking.
             ImGui.SliderFloat("slope tint", ref slopeTint, 0f, 1f);
-            ImGui.Checkbox("grid", ref showGrid);
-            ImGui.SameLine();
-            ImGui.Checkbox("bounds", ref showBounds);
-            ImGui.SameLine();
-            ImGui.Checkbox("normals", ref showNormals);
-            ImGui.Checkbox("depth-test gizmos", ref depthTestGizmos);
+            // Grid, bounds, normals and depth-tested gizmos are the overlay's Layers tab now.
 
             var exposure = renderer.Exposure;
             if (ImGui.SliderFloat("exposure", ref exposure, 0.2f, 3f)) renderer.Exposure = exposure;
@@ -509,8 +505,6 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
     /// </remarks>
     private void ReadInput(IInputState input)
     {
-        if (input[Key.N].Pressed) showNormals = !showNormals;
-        if (input[Key.G].Pressed) showGrid = !showGrid;
         if (input[Key.T].Pressed) slopeTint = slopeTint > 0.5f ? 0f : 1f;
         if (input[Key.Number1].Pressed) camera.Rig = CameraRig.Orbit;
         if (input[Key.Number2].Pressed) camera.Rig = CameraRig.ThirdPerson;

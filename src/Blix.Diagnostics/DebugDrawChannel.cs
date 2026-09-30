@@ -136,10 +136,17 @@ public sealed class DebugDrawChannel
     /// application used to add for each gizmo it did not want on by default.
     /// </para>
     /// </remarks>
-    public bool Layer(string name, bool visible = true)
+    /// <param name="key">A key that switches the layer, as its box in the Layers tab would.</param>
+    public bool Layer(string name, bool visible = true, Key key = Key.Unknown)
     {
         var path = context.BuildPath(name);
         context.State.LayersEnabled.TryAdd(path, visible);
+        if (key != Key.Unknown && context.Keys.Bind(key, $"show {name}", path))
+        {
+            // Its own switch, not its visibility: a hidden parent still hides it, as in the Layers tab.
+            context.State.LayersEnabled[path] = !context.State.LayersEnabled[path];
+        }
+
         return context.State.ShowDebugDraw && context.State.IsPathVisible(path);
     }
 

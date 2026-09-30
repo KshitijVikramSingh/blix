@@ -742,6 +742,17 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
 
     public void Debug(DebugContext debug)
     {
+        // The keys and gestures this viewer handles itself (ReadInput), for the overlay's key list.
+        // Stepping only means anything while a clip is loaded, so it is only listed then.
+        if (session is not null)
+        {
+            debug.Keys.Describe(Key.Space, "pause / play");
+            debug.Keys.Describe("Left / Right", "step a frame back / forward (pauses)");
+        }
+        debug.Keys.Describe("Left-drag", "orbit");
+        debug.Keys.Describe("Click", "pick a bone or node");
+        debug.Keys.Describe("Wheel", "zoom");
+
         // <b>Watching, not rendering.</b> Every member is Bespoke — this viewer's own controls are
         // better than reflection could generate — so nothing is drawn from here. What it takes is
         // the thing a panel cannot do for itself: notice that state moved, and let the session

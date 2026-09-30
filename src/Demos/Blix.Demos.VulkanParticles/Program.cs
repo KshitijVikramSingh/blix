@@ -545,6 +545,15 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
     // --- Diagnostics overlay (` toggles) -----------------------------------
     public void Debug(DebugContext debug)
     {
+        // The keys this loop handles itself (ReadInput): listed whether or not the overlay is up, so
+        // the F1 readout can show them too.
+        debug.Keys.Describe(Key.Space, "auto-orbit on / off");
+        debug.Keys.Describe(Key.R, "reset the camera");
+        debug.Keys.Describe("WASD / arrows", "orbit");
+        debug.Keys.Describe("Q / E", "zoom out / in");
+        debug.Keys.Describe("Left-drag", "orbit");
+        debug.Keys.Describe(Key.Escape, "quit");
+
         // Gizmos and controls only while the overlay is up (--debug, or ` at any time).
         if (!debug.State.ShowOverlay) return;
 

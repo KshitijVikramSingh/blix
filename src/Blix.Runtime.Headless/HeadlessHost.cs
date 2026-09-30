@@ -122,7 +122,7 @@ public sealed class HeadlessHost : IRenderHost, IDebugHost
 
             if (debugSystem is not null)
             {
-                debugSystem.BeginFrame(frame, LogicalSize);
+                debugSystem.BeginFrame(frame, LogicalSize, inputState);
                 using (debugSystem.Current!.Timers.Measure("run-debuggables"))
                 {
                     debugSystem.Run();

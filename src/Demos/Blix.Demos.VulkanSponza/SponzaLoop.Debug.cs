@@ -51,6 +51,15 @@ internal sealed partial class SponzaLoop
     // Controls are read-back: the returned value feeds this frame's render.
     public void Debug(DebugContext debug)
     {
+        // The keys this loop handles itself (Camera.cs), listed with the overlay hidden too.
+        debug.Keys.Describe("WASD", "move");
+        debug.Keys.Describe("Space / LeftControl", "up / down");
+        debug.Keys.Describe("Shift", "held, move three times faster");
+        debug.Keys.Describe("Arrows", "look around");
+        debug.Keys.Describe("Right-drag", "look around");
+        debug.Keys.Describe("Wheel", "move speed");
+        debug.Keys.Describe(Key.Escape, "quit");
+
         // Read-only values run even with the overlay hidden so F12 captures remain self-describing.
         // Controls and gizmos stop here because they are interactive or feed the debug-line pass.
         ReportValues(debug);

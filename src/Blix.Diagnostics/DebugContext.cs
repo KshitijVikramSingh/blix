@@ -10,11 +10,13 @@ public sealed class DebugContext
 
     internal DebugContext(
         DebugState state, RenderFrameContext frame, (int Width, int Height) logicalSize,
-        Dictionary<string, object> pendingControlValues, int frameNumber, Stopwatch clock, string? selectedPath)
+        Dictionary<string, object> pendingControlValues, int frameNumber, Stopwatch clock, string? selectedPath,
+        IInputState? input = null, IReadOnlyList<DebugKeyEntry>? hostKeys = null, HashSet<string>? reportedKeyConflicts = null)
     {
         State = state;
         Frame = frame;
         LogicalSize = logicalSize;
+        Input = input;
         this.pendingControlValues = pendingControlValues;
         FrameNumber = frameNumber;
         SelectedPath = selectedPath;
@@ -24,6 +26,7 @@ public sealed class DebugContext
         Stats = new DebugStatsChannel(this);
         Timers = new DebugTimersChannel(this);
         Events = new DebugEventsChannel(this, clock);
+        Keys = new DebugKeysChannel(this, hostKeys ?? Array.Empty<DebugKeyEntry>(), reportedKeyConflicts ?? new());
     }
 
     public DebugState State { get; }
@@ -43,6 +46,13 @@ public sealed class DebugContext
     public DebugTimersChannel Timers { get; }
 
     public DebugEventsChannel Events { get; }
+
+    /// <summary>Every key the application answers to; see <see cref="DebugKeysChannel"/>.</summary>
+    public DebugKeysChannel Keys { get; }
+
+    // This tick's input, for controls bound to a key. Null while frozen (a frozen panel moves nothing) and
+    // in a context built without a host.
+    internal IInputState? Input { get; }
 
     // Snapshot of DebugSystem.SelectedPath taken at BeginFrame. Producers
     // can read this from inside Debug/EmitGeometry/Inspect to specialise
@@ -129,7 +139,8 @@ public sealed class DebugContext
             Stats.Entries.ToArray(),
             Timers.Entries.ToArray(),
             Events.Entries.ToArray(),
-            selectedPath);
+            selectedPath,
+            Keys.Entries.ToArray());
     }
 
     private void PopScope()

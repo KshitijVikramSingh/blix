@@ -1751,6 +1751,97 @@ var t = new TestRunner();
         margin.Scope == DebugSystem.SelectionScope + "/LOD", margin.Scope);
 }
 
+// -- Keys: bound on controls, driven by the engine ---------------------------
+// Five applications kept private lists of Pressed checks. A key bound to a control does what clicking it
+// would, through the same pending slot, so the panel and the key never disagree.
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+    sys.DeclareHostKey("F12", "dump this frame");
+    var input = new InputState();
+    bool sun = true; int view = 0; bool fired = false; bool layerWanted = true;
+    void Frame(Key? press = null, Action<DebugContext>? extra = null)
+    {
+        if (press is { } k) input.RecordKeyDown(k);
+        input.BeginTick();
+        if (press is { } released) input.RecordKeyUp(released);
+        sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1), input: input);
+        sys.Run(new TestDebuggable("lit", debug =>
+        {
+            sun = debug.Controls.Toggle("Sun", sun, Key.Z);
+            view = debug.Controls.Enum("View", view, new[] { "lit", "albedo", "normals" }, Key.V);
+            fired = debug.Controls.Button("Respawn", Key.R);
+            layerWanted = debug.Draw.Layer("grid", key: Key.G);
+            debug.Keys.Describe(Key.T, "slope tint");
+            extra?.Invoke(debug);
+        }));
+        sys.EndFrame();
+    }
+
+    Frame();
+    t.ExpectTrue("Unpressed, a bound control keeps its value", sun && view == 0 && !fired && layerWanted);
+    Frame(Key.Z);
+    t.ExpectTrue("Pressing its key flips a toggle", !sun);
+    Frame();
+    t.ExpectTrue("And it stays flipped, as a click would leave it", !sun);
+    Frame(Key.V); Frame(Key.V); Frame(Key.V);
+    t.ExpectTrue("An enum's key steps through the options and wraps", view == 0);
+    Frame(Key.R);
+    t.ExpectTrue("A button's key presses it for that frame", fired);
+    Frame();
+    t.ExpectTrue("And only that frame", !fired);
+    Frame(Key.G);
+    t.ExpectTrue("A layer's key switches the layer", !layerWanted && sys.State.LayersEnabled["lit/grid"] == false);
+
+    var keys = sys.LatestFrame!.Keys;
+    t.ExpectTrue("The key list leads with the host's keys",
+        keys[0] is { Binding: "F12", Source: DebugKeySource.Host });
+    t.ExpectTrue("Then the controls' keys, which the engine drives",
+        keys.Any(k => k is { Binding: "Z", Description: "Sun", Path: "lit/Sun", Source: DebugKeySource.Control }));
+    t.ExpectTrue("And the keys the application only describes, marked as its claim",
+        keys.Any(k => k is { Binding: "T", Description: "slope tint", Source: DebugKeySource.Declared }));
+    t.ExpectTrue("A control carries its key, for the label beside it",
+        sys.LatestFrame.Controls.Single(c => c.Name == "Sun").Key == Key.Z);
+
+    // Two claims on one key: an error naming both, once, not every frame.
+    var claims = 0;
+    for (var i = 0; i < 2; i++)
+    {
+        Frame(extra: d => d.Keys.Describe(Key.Z, "zoom"));
+        claims += sys.LatestFrame!.Events.Count(e => e.Message.Contains("'Z' is claimed twice"));
+    }
+    t.ExpectTrue("A key claimed twice is an error naming both, reported once", claims == 1, $"{claims} reports");
+
+    // The host's keys still fire, so both things would happen: refused outright.
+    sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1), input: input);
+    t.ExpectThrows("A host key cannot be bound by anything else",
+        () => sys.Current!.Controls.Toggle("Dump", false, Key.F12), mustMention: "host");
+    t.ExpectThrows("Nor described as the application's",
+        () => sys.Current!.Keys.Describe(Key.F12, "save"), mustMention: "host");
+    sys.EndFrame();
+
+    // A frozen panel moves nothing, and a key is the panel's hand.
+    sys.Freeze();
+    Frame(Key.Z);
+    t.ExpectTrue("While frozen, a bound key does nothing", !sun);
+    sys.Unfreeze();
+}
+
+// -- [Tune(Key = ...)]: a declared key on a declared control -----------------
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+    var keyed = new KeyedTunables();
+    var tunables = new ObjectTunables(keyed);
+    var input = new InputState();
+    input.RecordKeyDown(Key.B);
+    input.BeginTick();
+    sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1), input: input);
+    sys.Run(new TestDebuggable("fx", debug => tunables.BuildControls(debug)));
+    sys.EndFrame();
+    t.ExpectTrue("A [Tune(Key)] bool is flipped by its key", keyed.Bloom);
+    t.ExpectThrows("And a key on a number is refused, where it has no one meaning",
+        () => new ObjectTunables(new BadKeyedTunables()), mustMention: "Key");
+}
+
 // -- WallClockMs monotonic ---------------------------------------------------
 {
     var sys = new DebugSystem(historyCapacity: 4);
@@ -1871,6 +1962,16 @@ sealed class FlagFixture : ITunable
     public readonly List<TunableChange> Heard = new();
 
     public void OnChanged(TunableChange change) => Heard.Add(change);
+}
+
+sealed class KeyedTunables
+{
+    [Tune(Key = Key.B)] public bool Bloom;
+}
+
+sealed class BadKeyedTunables
+{
+    [Tune(0f, 1f, Key = Key.E)] public float Exposure = 0.5f;
 }
 
 sealed class TestDebuggable : IDebuggable

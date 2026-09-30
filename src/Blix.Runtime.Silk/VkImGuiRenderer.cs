@@ -185,7 +185,7 @@ public sealed class VkImGuiRenderer : IDisposable
     /// Deliberately not the panels: the point of the HUD is a measurement the overlay's own cost does not
     /// skew.
     /// </remarks>
-    public void DrawPerfHudText(string text)
+    public void DrawPerfHudText(string text, string? keys = null)
     {
         var dl = ImGui.GetForegroundDrawList();
         var font = ImGui.GetFont();
@@ -194,6 +194,13 @@ public sealed class VkImGuiRenderer : IDisposable
         // 1px drop shadow for legibility over any scene colour (ABGR packing).
         dl.AddText(font, size, pos + new Vector2(1.5f, 1.5f), 0xFF000000u, text);
         dl.AddText(font, size, pos, 0xFFFFFFFFu, text);
+        if (string.IsNullOrEmpty(keys)) return;
+
+        // The key list, smaller, under the readout: the one glance the HUD exists for, with the overlay away.
+        const float keySize = 15f;
+        var keyPos = pos + new Vector2(0f, size + 6f);
+        dl.AddText(font, keySize, keyPos + new Vector2(1f, 1f), 0xFF000000u, keys);
+        dl.AddText(font, keySize, keyPos, 0xFFE0E0E0u, keys);
     }
 
     // Record the current frame's ImGui draw data into the given overlay pass.

@@ -436,6 +436,9 @@ letterboxed image in the UI.
 | Start a new executable | `src/Demos/Blix.Demos.Chassis/` is the smallest working one — 25-line csproj, no shader boilerplate |
 | Expose a value for live tuning in the overlay | `//@tune lo..hi = default` in a GLSL uniform, or `[Tune(min,max)]` on a C# field |
 | Register a debug producer (subsystem, asset, scene instance) | The game loop and the device are registered by the host. Anything else: `debugSystem.Register(contributor)` from `OnLoad` — implement `IDebuggable` / `IDebugGeometrySource` / `IDebugSelectable` / `IDebugInspectable` / `IDebugUi` independently |
+| Give a debug control a key | `debug.Controls.Toggle("Sun", sun, Key.Z)` (also `Enum`, `Button`, `Draw.Layer`, and `[Tune(Key = …)]`): the engine drives it and shows it beside the control and in the Keys tab |
+| List keys the application handles itself | `debug.Keys.Describe(Key.R, "respawn")` or `Describe("Right-drag", "look")` from `Debug()`, every frame; the Keys tab and the F1 readout show them, and a key claimed twice is an error event |
+| See what the frame cost | The overlay's Perf tab: the device's wait/encode/submit split, submitted work, and GPU time per pass over the last 60 frames (`GpuPassWindow`) |
 | Save a frame snapshot to disk | Press `F12` (runtime-owned) — writes `dumps/frame-NNNNNN.json` via `JsonDumpSink` |
 | Toggle the diagnostics overlay | Press `` ` `` (backtick). It starts hidden unless the host's `Diagnostics` option, or `--debug`, says otherwise |
 | Add a reusable shader primitive | `src/Blix.Shaders/<concept>.glsl` (one concept per file, `blix_`-prefixed symbols) |

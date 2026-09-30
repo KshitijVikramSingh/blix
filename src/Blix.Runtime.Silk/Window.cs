@@ -124,6 +124,14 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             jsonDumpSink = new JsonDumpSink();
             debugSystem.AddSink(jsonDumpSink);
             if ((options ?? BlixWindowOptions.Default).Diagnostics) debugSystem.State.ShowOverlay = true;
+
+            // The keys this host answers to itself (OnKeyDown, OnMouseDown). They lead the key list, and
+            // nothing may bind them: they would still fire, and both things would happen.
+            debugSystem.DeclareHostKey("`", "show or hide the diagnostics overlay");
+            debugSystem.DeclareHostKey("F1", "frame-rate readout, while the overlay is hidden");
+            debugSystem.DeclareHostKey("F12", "dump this frame to dumps/frame-NNNNNN.json");
+            debugSystem.DeclareHostKey("LeftAlt", "held, a click picks (with the overlay up)");
+            debugSystem.DeclareHostKey("RightAlt", "held, a click picks (with the overlay up)");
         }
 
         var resolved = options ?? BlixWindowOptions.Default;
@@ -288,7 +296,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
         if (debugSystem is not null)
         {
-            debugSystem.BeginFrame(frame, LogicalSize);
+            debugSystem.BeginFrame(frame, LogicalSize, Input);
             using (debugSystem.Current!.Timers.Measure("run-debuggables"))
             {
                 debugSystem.Run();
@@ -478,6 +486,12 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         if (!buttonsHeld.Press((int)button, UiWantsMouse)) return;
         inputState.RecordMouseDown(MapMouseButton(button));
     }
+
+    // The last frame's key list, one per line, for the F1 readout.
+    private string? HudKeys() =>
+        debugSystem?.LatestFrame?.Keys is { Count: > 0 } keys
+            ? string.Join("\n", keys.Select(k => $"{k.Binding,-10} {k.Description}"))
+            : null;
 
     // Armed from the Selection tab or by holding Alt, and only with the overlay up: the selection is
     // read there, and a hidden debugger taking clicks would be one nobody could see doing it.
@@ -924,7 +938,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
                 // application from being able to prevent the diagnostics panels being built at all.
                 appUi?.DrawUi();
                 if (overlayUp) imguiRenderer.LayoutDiagnostics(debugSystem!);
-                else if (hudUp) imguiRenderer.DrawPerfHudText(hudText);
+                else if (hudUp) imguiRenderer.DrawPerfHudText(hudText, HudKeys());
             });
 
         // Only now do WantCaptureMouse / WantCaptureKeyboard describe anything real.

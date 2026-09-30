@@ -1,3 +1,4 @@
+using Blix.Core;
 using Blix.Diagnostics;
 
 namespace Blix.Demos.VulkanLit.Debug;
@@ -20,7 +21,7 @@ internal sealed class CameraTuningControls : IDebuggable
     public void Debug(DebugContext debug)
     {
         loop.MoveSpeed = debug.Controls.Float("Fly speed", loop.MoveSpeed, 0.3f, 40f);
-        loop.AnimPaused = debug.Controls.Toggle("Pause anim [P]", loop.AnimPaused);
+        loop.AnimPaused = debug.Controls.Toggle("Pause anim", loop.AnimPaused, Key.P);
 
         // FOV exposed in degrees (legible); stored internally in radians.
         // Guarding the writeback prevents float-to-deg-and-back drift from
