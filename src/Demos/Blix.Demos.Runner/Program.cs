@@ -196,7 +196,7 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
         // SSBO (InstanceBuffer) and the staging/draw (InstancedBatch). Fog lives
         // here, in the runner's material. The shader declares InstanceBuffer.Slot at
         // set 3 plus a 112-byte push the runner packs each frame.
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var shaderDir = AppFiles.Shaders;
         // The world fragment shader is cooked in two #define variants (see csproj):
         // base (no fog) and FOG. The runner wants the haze, so it selects the FOG
         // variant by convention via ShaderVariantPath — proving the cook + select
@@ -443,7 +443,7 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
         skyVb = vk.CreateVertexBuffer(new VertexBufferData(new VertexBufferDescription(fsLayout, 3, GraphicsBufferUsage.Static), bytes), "sky.vb");
         skyIb = vk.CreateIndexBuffer(new ushort[] { 0, 1, 2 }, name: "sky.ib");
 
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var shaderDir = AppFiles.Shaders;
         var skyInterface = ShaderReflection.ForProgram(shaderDir, "sky.vert", "sky.frag");
         var vert = File.ReadAllBytes(Path.Combine(shaderDir, "sky.vert.spv"));
         var frag = File.ReadAllBytes(Path.Combine(shaderDir, "sky.frag.spv"));

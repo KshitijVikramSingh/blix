@@ -123,7 +123,7 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
         // Both interfaces are READ from the shaders. What used to be here restated the set,
         // binding, type, stage and block layout of each, and a hand-written stage in one of them
         // was already wider than the shader's (the fragment stage does not read the frame UBO).
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var shaderDir = AppFiles.Shaders;
         var cubeInterface = ShaderReflection.ForProgram(shaderDir, "cube.vert", "cube.frag");
 
         // Each program reads its own shaders. Invert and present were once handed one interface,

@@ -259,7 +259,7 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
                 new VertexAttribute(0, VertexAttributeFormat.Float3, 0),
                 new VertexAttribute(1, VertexAttributeFormat.Float3, 3 * sizeof(float)),
             });
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var shaderDir = AppFiles.Shaders;
         byte[] Spv(string n) => File.ReadAllBytes(Path.Combine(shaderDir, n));
 
         // RenderGraph: sun shadow depth → HDR scene (samples shadow + procedural sky) → present.

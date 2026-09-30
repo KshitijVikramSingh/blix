@@ -84,7 +84,7 @@ internal sealed class InstancedLoop : IGameLoop
                 new VertexAttribute(0, VertexAttributeFormat.Float3, 0),
                 new VertexAttribute(1, VertexAttributeFormat.Float3, 3 * sizeof(float)),
             });
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var shaderDir = AppFiles.Shaders;
         // Read from the shader. InstanceBuffer supplies the one thing it cannot say: how many
         // instances the unsized set-3 array holds.
         var iface = InstanceBuffer.Size(ShaderReflection.ForProgram(shaderDir, "cube.vert", "cube.frag"));

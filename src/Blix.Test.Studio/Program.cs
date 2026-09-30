@@ -40,7 +40,7 @@ public static class Program
         var verbose = args.Flag("verbose");
         var t = new TestRunner();
 
-        var shaderDirectory = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var shaderDirectory = AppFiles.Shaders;
         t.Expect("the studio's shaders are where a consumer would find them",
             Directory.Exists(shaderDirectory), shaderDirectory);
 

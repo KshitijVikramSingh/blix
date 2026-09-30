@@ -348,7 +348,7 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
                 new VertexAttribute(0, VertexAttributeFormat.Float3, 0),
                 new VertexAttribute(1, VertexAttributeFormat.Float3, 3 * sizeof(float)),
             });
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var shaderDir = AppFiles.Shaders;
         Func<string, byte[]> spv = name => File.ReadAllBytes(Path.Combine(shaderDir, name));
 
         // --- Render graph: sun shadow depth pass -> HDR scene pass -> present -------

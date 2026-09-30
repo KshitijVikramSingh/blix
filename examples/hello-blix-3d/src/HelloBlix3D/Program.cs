@@ -90,7 +90,7 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
         tunables.Apply(args);
 
         var vk = (VulkanGraphicsDevice)GraphicsDevice;
-        stage.Load(vk, Path.Combine(AppContext.BaseDirectory, "Shaders"));
+        stage.Load(vk);
         rig = StudioRig.Load(vk, Character, stage.SkinnedProgram);
         body = new RigInstances(rig, 1);
 

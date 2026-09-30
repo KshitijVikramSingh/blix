@@ -177,7 +177,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         device = (VulkanGraphicsDevice)graphicsDevice;
-        renderer.Load(device, Path.Combine(AppContext.BaseDirectory, "Shaders"), room);
+        renderer.Load(device, room);
         renderer.SlopeTint = slopeTint;
 
     }

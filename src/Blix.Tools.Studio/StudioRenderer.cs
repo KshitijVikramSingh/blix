@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix.Diagnostics;
+using Blix.Core;
 using Blix.Graphics;
 using Blix.Graphics.Images;
 using Blix.Graphics.Vulkan;
@@ -201,8 +202,12 @@ public sealed class StudioRenderer : IDisposable
     /// Optional construction-time declaration of passes that append after Studio lighting and
     /// before presentation.
     /// </param>
-    public void Load(VulkanGraphicsDevice vk, string shaderDirectory, Action<StudioGraph>? extend = null)
+    public void Load(VulkanGraphicsDevice vk, Action<StudioGraph>? extend = null)
     {
+        // Its own shaders, staged beside the application by the reference, as SpriteBatch and the
+        // runtime's ImGui find theirs. The caller used to be told to pass this path, which is how
+        // every program standing on the stage came to write it out by hand.
+        var shaderDirectory = AppFiles.Shaders;
         device = vk;
         fullscreen = new FullscreenPass(vk, "lab.present");
 

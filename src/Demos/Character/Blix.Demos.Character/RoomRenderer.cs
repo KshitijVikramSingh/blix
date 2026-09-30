@@ -1,5 +1,6 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
+using Blix.Core;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 using Blix.Render;
@@ -81,8 +82,10 @@ public sealed class RoomRenderer : IDisposable
 
     public TextureHandle ShadowDepth => graph.GetDepthTexture(shadowTarget);
 
-    public void Load(VulkanGraphicsDevice vk, string shaderDirectory, Room room)
+    public void Load(VulkanGraphicsDevice vk, Room room)
     {
+        // Its own shaders, beside the application, as every Blix library finds its own.
+        var shaderDirectory = AppFiles.Shaders;
         device = vk;
         fullscreen = new FullscreenPass(vk, "room.present");
 

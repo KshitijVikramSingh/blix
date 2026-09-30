@@ -163,7 +163,7 @@ internal sealed class PongGame : Game
         // CRT post-FX present pipeline: fullscreen triangle (gl_VertexIndex),
         // offscreen sampled at set 0 / slot 0, params via a fragment push
         // constant. Targets the swapchain (RenderTarget: null).
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var shaderDir = AppFiles.Shaders;
         var postfxInterface = ShaderReflection.ForProgram(shaderDir, "postfx.vert", "postfx.frag");
         postfxPush = new byte[postfxInterface.PushConstants.Sum(r => r.Size)];
         postfxShader = vk.CreateShaderProgramFromSpv(

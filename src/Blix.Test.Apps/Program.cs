@@ -779,6 +779,26 @@ public static class Program
             t.Expect("K.6 a project name does not reach out of the repository you stand in",
                 enclosing != 0 && enclosingOutput.Contains("no project named 'hello-blix'", StringComparison.Ordinal),
                 $"exit {enclosing}. {enclosingOutput.Trim()}");
+
+            // An application's Shaders/ directory is shared with every library it references, so an
+            // app shader named like a library's used to replace it silently at the copy. imgui.frag is
+            // the Silk runtime's own, which this starter references: the build must refuse, naming both.
+            Directory.SetCurrentDirectory(staged);
+            var project = Path.Combine(staged, "src", "HelloBlix");
+            Directory.CreateDirectory(Path.Combine(project, "Shaders"));
+            File.WriteAllText(Path.Combine(project, "Shaders", "imgui.frag"),
+                "#version 450\nlayout(location = 0) out vec4 colour;\nvoid main() { colour = vec4(1.0); }\n");
+            var csproj = Path.Combine(project, "HelloBlix.csproj");
+            File.WriteAllText(csproj, File.ReadAllText(csproj).Replace(
+                "</Project>", "  <ItemGroup><GlslShader Include=\"Shaders/imgui.frag\" /></ItemGroup>\n</Project>"));
+            var collided = Dotnet(
+                "build \"src/HelloBlix/HelloBlix.csproj\" -c Debug --nologo -v:q " +
+                "--disable-build-servers -p:UseSharedCompilation=false -m:1", out var collision);
+            t.Expect("K.7 an application shader named like a library's fails the build, naming both",
+                collided != 0
+                && collision.Contains("Shaders/imgui.frag.spv", StringComparison.Ordinal)
+                && collision.Contains("Blix.Runtime.Silk", StringComparison.Ordinal),
+                $"exit {collided}. {string.Join(" ", collision.Split('\n').Where(l => l.Contains("error", StringComparison.OrdinalIgnoreCase)).Take(2)).Trim()}");
         });
 
     /// <summary>
@@ -908,6 +928,28 @@ public static class Program
             Console.SetError(errWas);
             printed = captured.ToString();
         }
+    }
+
+    /// <summary>The same, keeping what it printed, for a check that has to read the build's own words.</summary>
+    private static int Dotnet(string arguments, out string printed)
+    {
+        var root = Environment.GetEnvironmentVariable("DOTNET_ROOT");
+        var muxer = root is not null && File.Exists(Path.Combine(root, "dotnet"))
+            ? Path.Combine(root, "dotnet")
+            : "dotnet";
+
+        using var process = System.Diagnostics.Process.Start(
+            new System.Diagnostics.ProcessStartInfo(muxer, arguments)
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            })!;
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        process.WaitForExit();
+        printed = output.Result + error.Result;
+        return process.ExitCode;
     }
 
     private static int Dotnet(string arguments)

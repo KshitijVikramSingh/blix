@@ -393,10 +393,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // rule the asset refusals follow: say which setting and what to do, and exit non-zero.
         try
         {
-            renderer.Load(
-                device,
-                Path.Combine(AppContext.BaseDirectory, "Shaders"),
-                stageSelfTest ? ExtendStage : null);
+            renderer.Load(device, stageSelfTest ? ExtendStage : null);
         }
         catch (NotSupportedException refused)
         {

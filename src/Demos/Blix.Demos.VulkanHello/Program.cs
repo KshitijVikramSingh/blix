@@ -113,7 +113,7 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
         // Both interfaces are READ from the shaders rather than restated. The table this
         // replaced declared the frame UBO as Vertex | Fragment; the fragment shader does not
         // touch it, so the hand-written stage was already wider than the truth.
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var shaderDir = AppFiles.Shaders;
         var cubeInterface = ShaderReflection.ForProgram(shaderDir, "cube.vert", "cube.frag");
 
         // Offscreen render target — half-resolution Rgba16F with a depth

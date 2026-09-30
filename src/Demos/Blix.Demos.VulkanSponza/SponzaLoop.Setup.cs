@@ -235,7 +235,7 @@ internal sealed partial class SponzaLoop
         // what its program declares: naming a texture the program lacks throws.
         // So the skybox has its own list of the six textures it samples rather
         // than being handed the lit pass's.
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var shaderDir = AppFiles.Shaders;
         ShaderInterface Reflect(params string[] stages) =>
             ShaderReflection.ForProgram(shaderDir, stages);
 

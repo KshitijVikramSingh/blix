@@ -2,6 +2,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
+using Blix.Core;
 
 namespace Blix.Render;
 
@@ -29,7 +30,7 @@ public sealed class SpriteBatch : IDisposable
     // draws into can declare it via .Shader(SpriteBatch.Interface) — the graph
     // validator requires every graphics pass to declare its shader interfaces.
     public static ShaderInterface Interface { get; } = ShaderReflection.ForProgram(
-        Path.Combine(AppContext.BaseDirectory, "Shaders"), "sprite.vert", "sprite.frag");
+        AppFiles.Shaders, "sprite.vert", "sprite.frag");
 
     private readonly VulkanGraphicsDevice device;
     private readonly IndexBufferHandle indexBuffer;
@@ -73,7 +74,7 @@ public sealed class SpriteBatch : IDisposable
         }
         indexBuffer = device.CreateIndexBuffer(quadIndices, GraphicsBufferUsage.Static, name: "sprite.indices");
 
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var shaderDir = AppFiles.Shaders;
         var vertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "sprite.vert.spv"));
         var fragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "sprite.frag.spv"));
         shader = device.CreateShaderProgramFromSpv(vertSpv, fragSpv, Interface, "sprite");
