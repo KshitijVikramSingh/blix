@@ -28,7 +28,9 @@ before 3: v12 dissolved the rig-or-static case that made configuration a prerequ
 source paths that stage 4 deletes would be wasted. Stage 4 done: runtime loads cooked only (d4bc611),
 `Blix.Import` takes the parsers and SharpGLTF (ddfa39e), the engine's types lose `Gltf` — `PbrMaterial`
 (not `MaterialData`, taken by the `.material` asset record), `TextureData`, `MaterialTextureLoader`,
-`AlphaMode`, `UnreadAttribute` (2b6d43a).
+`AlphaMode`, `UnreadAttribute` (2b6d43a). Stage 3 done: a project's cook configuration (`CookConfig`, `.blixcook`)
+replaces `.blixpatch`, read by `blix cook --config`, `blix cook project` and the build's `<BlixCookConfig>`;
+each entry stamped by its own hash; Sponza's four patches are one `sponza.blixcook` (972d4b1). Next: stage 5.
 
 **The format mirrors glTF's structure, not its encoding.** "Rig or static" is not a question glTF
 asks: every mesh reaches a scene through a node, and a rigged file is a scene graph in which some node
@@ -47,7 +49,7 @@ buffer views and sparse data stay behind in the cook.
    skinning-only members (`CreateBoneBuffers`, palette packing) refuse by name without a skin.
    `device.CreateRig` goes. Drawing skinned, posed or at bind pose is a consumer's choice, not a type.
 3. **A cook configuration per project.** What a project decides about each asset it cooks — material
-   rules and normal-map conventions (today's `.blixpatch`), split, flipV — in one file the project
+   rules and normal-map conventions (once `.blixpatch`), split, flipV — in one file the project
    names, which the build, `blix cook` and the Sponza script all read. The stamp records each entry's
    hash. No configuration means glTF's defaults. It is what a cook UI would one day edit.
 4. **The engine refuses a `.glb`**, naming the cook. The importers and SharpGLTF move out of `Blix`
