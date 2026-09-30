@@ -67,6 +67,9 @@ public readonly record struct StudioDraw(
     /// and nothing else.
     /// </para>
     /// </remarks>
+    /// <summary>The stage's per-asset state, for a stage view (RigView, ModelView) to find its asset's.</summary>
+    internal StudioAssets? Assets { get; init; }
+
     public ShaderTextureBinding[] WithAlbedo(TextureHandle albedo)
     {
         if (Pass == StudioPass.Shadow) return new[] { new ShaderTextureBinding("uAlbedo", albedo) };
@@ -83,13 +86,11 @@ public readonly record struct StudioDraw(
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>This is the rung that decides the shape of everything above it.</b> The renderer used to name
-/// its subjects —
-/// <c>Render(..., StudioModel? model, Matrix4x4 modelTransform, StudioRig? rig, int rigInstances, ...)</c>
-/// — which works exactly as long as there are two of them. The case that broke it is terrain: the
-/// RTS map generator is a tool that needs to show a heightfield, and a heightfield is neither a
-/// model nor a rig. Its only options against that signature were to pretend to be one, or to leave
-/// the stage entirely and write a renderer.
+/// <b>This is the rung that decides the shape of everything above it.</b> The renderer does not name
+/// its subjects: a signature that took a model and a rig would work exactly as long as there are two
+/// kinds. Terrain is the case that shows it: the RTS map generator needs to show a heightfield, which is
+/// neither a model nor a rig, and against such a signature it could only pretend to be one or leave
+/// the stage and write a renderer.
 /// </para>
 /// <para>
 /// So bringing a draw is the ORDINARY case rather than an escape hatch, and bringing a

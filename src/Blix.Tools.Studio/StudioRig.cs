@@ -13,13 +13,13 @@ namespace Blix.Tools.Studio;
 /// engine's (<see cref="Rig"/>, <see cref="BoneBuffers"/>). This type is what Studio decides on top: the
 /// bone and instance caps its reference row allows, the grey a part without a material is drawn in, that
 /// cooked textures are realised at load rather than streamed (an inspector shows full detail at once),
-/// the images its panel lists, and the names its resources carry.
+/// and the names its resources carry.
 /// </remarks>
-public sealed class StudioRig : IDisposable
+internal sealed class StudioRig : IDisposable
 {
     /// <summary>Matches the fixed bound in <c>studio_skinned.vert</c>.</summary>
     /// <remarks>
-    /// Public so Studio's UI and conformance suite can describe the limit. <see cref="Load"/> checks
+    /// Stated to tools as <see cref="StudioRenderer.MaxBones"/>. <see cref="Load"/> checks
     /// every skin before allocating GPU resources; a larger rig is valid engine data but unsupported
     /// by this reference pipeline.
     /// </remarks>
@@ -54,7 +54,7 @@ public sealed class StudioRig : IDisposable
         GltfAlphaMode AlphaMode = GltfAlphaMode.Opaque,
         float AlphaCutoff = 0.5f,
         bool DoubleSided = false,
-        /// <summary>The material's own name — see <see cref="StudioModel.Part.MaterialName"/>.</summary>
+        /// <summary>The material's own name, which application-owned tint policy keys on.</summary>
         string MaterialName = "");
 
     /// <summary>A static mesh carried by a joint — a knife in a hand, a cape on a chest.</summary>
@@ -74,7 +74,7 @@ public sealed class StudioRig : IDisposable
         float Metallic,
         float Roughness,
         TextureHandle Albedo,
-        /// <summary>The material's own name — see <see cref="StudioModel.Part.MaterialName"/>.</summary>
+        /// <summary>The material's own name, which application-owned tint policy keys on.</summary>
         string MaterialName = "");
 
     /// <summary>Static geometry carried by the asset that follows no joint, at its authored world transform.</summary>
@@ -89,18 +89,11 @@ public sealed class StudioRig : IDisposable
         float Metallic,
         float Roughness,
         TextureHandle Albedo,
-        /// <summary>The material's own name — see <see cref="StudioModel.Part.MaterialName"/>.</summary>
+        /// <summary>The material's own name, which application-owned tint policy keys on.</summary>
         string MaterialName = "");
-
-    /// <summary>One image the asset actually ships, with enough to label it in a panel.</summary>
-    public readonly record struct Image(string Name, TextureHandle Texture, int Width, int Height);
 
     /// <summary>One skin: the skeleton it poses, the frame its meshes were authored in, and its palette binding.</summary>
     public sealed record SkinSlot(Skeleton Skeleton, Matrix4x4 MeshNodeTransform, MaterialHandle BoneMaterial);
-
-    // The grey a part with no material is drawn in, and the roughness it assumes: Studio's choice.
-    private static readonly Vector3 FallbackColour = new(0.75f);
-    private const float FallbackRoughness = 0.7f;
 
     private Rig rig = null!;
     private BoneBuffers bones = null!;
@@ -108,16 +101,10 @@ public sealed class StudioRig : IDisposable
     private readonly List<Part> parts = new();
     private readonly List<Attachment> attachments = new();
     private readonly List<StaticPart> staticParts = new();
-    private readonly List<Image> images = new();
     private readonly List<SkinSlot> skins = new();
 
     /// <summary>The engine rig this draws.</summary>
     public Rig Rig => rig;
-
-    public Skeleton Skeleton => rig.Skeleton;
-
-    /// <summary>Every clip in the file, ordered by name so two runs of the viewer list them the same way.</summary>
-    public IReadOnlyList<AnimationClip> Clips => rig.Clips;
 
     public IReadOnlyList<Part> Parts => parts;
 
@@ -125,39 +112,6 @@ public sealed class StudioRig : IDisposable
     public IReadOnlyList<Attachment> Attachments => attachments;
 
     public IReadOnlyList<StaticPart> StaticParts => staticParts;
-
-    /// <summary>Mesh nodes or attributes the importer declined, with their reasons.</summary>
-    public IReadOnlyList<GltfIgnored> Ignored => rig.Ignored;
-
-    /// <summary>Distinct base-colour images, with labels and dimensions for inspection.</summary>
-    public IReadOnlyList<Image> Images => images;
-
-    /// <summary>The skin node's ancestor chain, composed. Goes into uModel BEFORE the user transform.</summary>
-    public Matrix4x4 MeshNodeTransform => rig.MeshNodeTransform;
-
-    public string SourcePath { get; private set; } = string.Empty;
-
-    /// <summary>Bounds of the mesh in its REST pose, in mesh-node space. What the camera frames on.</summary>
-    public Vector3 BoundsMin => rig.RestBounds.Min;
-
-    public Vector3 BoundsMax => rig.RestBounds.Max;
-
-    public int VertexCount => rig.VertexCount;
-
-    /// <summary>Per bone, whether any vertex carries a non-zero weight for it.</summary>
-    /// <remarks>Use <see cref="DeformHierarchy"/> for overlay drawing.</remarks>
-    public IReadOnlyList<bool> WeightedBones => rig.WeightedBones;
-
-    /// <summary>How many bones some vertex weights. The rest are controls the mesh never sees.</summary>
-    public int WeightedBoneCount => rig.WeightedBones.Count(b => b);
-
-    /// <summary>Weighted bones plus every ancestor needed to draw their chains continuously.</summary>
-    public IReadOnlyList<bool> DeformHierarchy => rig.DeformHierarchy;
-
-    /// <summary>How many bones the overlay must draw to show every weighted chain unbroken.</summary>
-    public int DeformHierarchyCount => rig.DeformHierarchy.Count(b => b);
-
-    public float LongestExtent => rig.LongestExtent;
 
     /// <summary>The set-3 palette binding for skin 0. Most rigs have exactly one skin.</summary>
     public MaterialHandle BoneMaterial => skins[0].BoneMaterial;
@@ -171,12 +125,12 @@ public sealed class StudioRig : IDisposable
     /// <param name="skinnedProgram">
     /// The program whose set-3 slot describes the palette buffer: Studio's skinned pipeline.
     /// </param>
-    public static StudioRig Load(IGraphicsDevice device, string path, ShaderProgramHandle skinnedProgram)
+    internal static StudioRig Load(IGraphicsDevice device, string path, ShaderProgramHandle skinnedProgram)
     {
         var imported = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("lab.rig"), path));
         ValidatePaletteCapacity(path, imported.SkinsOrEmpty);
 
-        var studio = new StudioRig { SourcePath = path };
+        var studio = new StudioRig();
         studio.textures = new GltfTextureLoader(device);
         studio.rig = device.CreateRig(imported, studio.textures, $"lab.rig.{Path.GetFileNameWithoutExtension(path)}");
         // Realised now, not streamed: an inspector shows the asset as it is from the first frame.
@@ -188,7 +142,7 @@ public sealed class StudioRig : IDisposable
             var m = p.Material;
             studio.parts.Add(new Part(
                 p.Mesh.VertexBuffer, p.Mesh.IndexBuffer, p.Mesh.IndexCount, BaseColourOf(m),
-                m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? FallbackRoughness, studio.Albedo(m, p.Textures),
+                m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness, p.Textures.Albedo,
                 p.SkinIndex,
                 AlbedoUvSet: m?.BaseColorTexCoord ?? 0,
                 BaseAlpha: m?.BaseColorFactor.W ?? 1f,
@@ -203,7 +157,7 @@ public sealed class StudioRig : IDisposable
             var m = p.Material;
             studio.staticParts.Add(new StaticPart(
                 p.Name, p.World, p.Mesh.VertexBuffer, p.Mesh.IndexBuffer, p.Mesh.IndexCount, BaseColourOf(m),
-                m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? FallbackRoughness, studio.Albedo(m, p.Textures),
+                m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness, p.Textures.Albedo,
                 m?.Name ?? string.Empty));
         }
 
@@ -212,8 +166,8 @@ public sealed class StudioRig : IDisposable
             var m = a.Material;
             studio.attachments.Add(new Attachment(
                 a.Name, a.JointName, a.JointIndex, a.Local, a.Mesh.VertexBuffer, a.Mesh.IndexBuffer, a.Mesh.IndexCount,
-                BaseColourOf(m), m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? FallbackRoughness,
-                studio.Albedo(m, a.Textures), m?.Name ?? string.Empty));
+                BaseColourOf(m), m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness,
+                a.Textures.Albedo, m?.Name ?? string.Empty));
         }
 
         for (var s = 0; s < studio.rig.Skins.Count; s++)
@@ -225,29 +179,8 @@ public sealed class StudioRig : IDisposable
         return studio;
     }
 
-    /// <summary>Copies every live instance palette into skin 0's current-frame buffer.</summary>
-    public void UploadPalettes(BonePaletteSet palettes) => UploadPalettes(palettes, 0);
-
     /// <summary>Copies one skin's live instance palettes into that skin's frame buffer.</summary>
     public void UploadPalettes(BonePaletteSet palettes, int skinIndex) => bones.Upload(skinIndex, palettes);
-
-    /// <summary>Packs N posed bodies into one palette set per skin, at the stride the shader reads.</summary>
-    public void PackPalettes(
-        IReadOnlyList<Pose> poses, IReadOnlyList<Matrix4x4> placements, IReadOnlyList<BonePaletteSet> into) =>
-        rig.PackPalettes(poses, placements, into);
-
-    /// <summary>One palette set per skin, sized for this rig.</summary>
-    public BonePaletteSet[] CreatePaletteSets(int instances) => rig.CreatePaletteSets(instances);
-
-    /// <summary>Computes each bone's object-space world transform under <paramref name="pose"/>.</summary>
-    public static void ComputeBoneWorlds(Skeleton skeleton, Pose pose, Matrix4x4[] outWorlds)
-    {
-        ArgumentNullException.ThrowIfNull(skeleton);
-        skeleton.ComputeBoneWorlds(pose, outWorlds);
-    }
-
-    /// <summary>The clip with this name, ignoring an exporter's `Armature|` prefix; null if absent.</summary>
-    public AnimationClip? Clip(string name) => rig.Clip(name);
 
     /// <summary>Refuses a rig that cannot fit Studio's maximum instance row.</summary>
     internal static void ValidatePaletteCapacity(string sourcePath, IReadOnlyList<GltfSkinBinding> skins)
@@ -267,20 +200,7 @@ public sealed class StudioRig : IDisposable
     }
 
     private static Vector3 BaseColourOf(GltfMaterial? m) =>
-        m is null ? FallbackColour : new Vector3(m.BaseColorFactor.X, m.BaseColorFactor.Y, m.BaseColorFactor.Z);
-
-    // The resolved albedo, and the image it is, listed once for the images panel in the order met.
-    private TextureHandle Albedo(GltfMaterial? material, MaterialTextures resolved)
-    {
-        if (material?.BaseColorTexture is { } texture && images.All(i => i.Texture != resolved.Albedo))
-        {
-            images.Add(new Image(
-                string.IsNullOrEmpty(texture.Name) ? $"albedo {images.Count}" : texture.Name,
-                resolved.Albedo, texture.Width, texture.Height));
-        }
-
-        return resolved.Albedo;
-    }
+        StudioInspection.BaseColour(m, StudioInspection.RigFallbackColour);
 
     public void Dispose()
     {
@@ -290,6 +210,5 @@ public sealed class StudioRig : IDisposable
         parts.Clear();
         attachments.Clear();
         staticParts.Clear();
-        images.Clear();
     }
 }

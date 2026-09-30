@@ -23,6 +23,37 @@ namespace Blix.Tools.Studio;
 /// </remarks>
 public sealed class StudioRenderer : IDisposable
 {
+    /// <summary>The most bones a skin may have for the stage's skinned pipeline.</summary>
+    public const int MaxBones = StudioRig.MaxBones;
+
+    /// <summary>The most bodies one rig's draw can pose independently (the reference row).</summary>
+    public const int MaxInstances = StudioRig.MaxInstances;
+
+    // Every asset loaded through the stage, with what Studio keeps about it. Released with the stage.
+    private readonly StudioAssets assets = new();
+
+    /// <summary>Loads a rigged glTF for this stage: the engine rig, made in the stage's formats.</summary>
+    /// <remarks>
+    /// The stage applies its own policy to it (the vertex format its skinned pipeline reads, the bone and
+    /// instance caps, its bone buffers, its fallback materials) and keeps that to itself; the rig returned
+    /// is the engine's, and what a tool reads. Owned by the stage: <see cref="Unload(Rig)"/> releases it,
+    /// and so does disposing the stage. Call after <see cref="Load"/>.
+    /// </remarks>
+    public Rig LoadRig(string path) => assets.Add(StudioRig.Load(device, path, skinnedProgram));
+
+    /// <summary>Loads a static glTF for this stage: the engine model, its node hierarchy kept.</summary>
+    /// <remarks>Owned by the stage, as <see cref="LoadRig"/>. Call after <see cref="Load"/>.</remarks>
+    public Model LoadModel(string path) => assets.Add(StudioModel.Load(device, path));
+
+    /// <summary>Releases a rig this stage loaded: its buffers, bone buffers and textures.</summary>
+    public void Unload(Rig rig) => assets.Remove(rig);
+
+    /// <summary>Releases a model this stage loaded.</summary>
+    public void Unload(Model model) => assets.Remove(model);
+
+    /// <summary>Copies one skin's posed palettes into the buffer the stage's skinned pipeline reads this frame.</summary>
+    public void UploadPalettes(Rig rig, BonePaletteSet palettes, int skin = 0) => assets.For(rig).UploadPalettes(palettes, skin);
+
     /// <summary>Square shadow map, matching the texel size the lit shader offsets by.</summary>
     public const int ShadowMapSize = 2048;
 
@@ -595,7 +626,7 @@ public sealed class StudioRenderer : IDisposable
                     scope, StudioPass.Shadow, uniforms, Array.Empty<ShaderTextureBinding>(),
                     shadowPipeline, skinnedShadowPipeline, whiteTexture,
                     // The caster pass never culls, so both are the same handle here.
-                    SkinnedDoubleSidedPipeline: skinnedShadowPipeline);
+                    SkinnedDoubleSidedPipeline: skinnedShadowPipeline) { Assets = assets };
                 foreach (var view in views) view.Draw(draw);
             });
         }
@@ -621,7 +652,7 @@ public sealed class StudioRenderer : IDisposable
                 var draw = new StudioDraw(
                     scope, StudioPass.Shadow, uniforms, Array.Empty<ShaderTextureBinding>(),
                     prePassPipeline, prePassSkinnedPipeline, whiteTexture,
-                    SkinnedDoubleSidedPipeline: prePassSkinnedPipeline);
+                    SkinnedDoubleSidedPipeline: prePassSkinnedPipeline) { Assets = assets };
                 foreach (var view in views) view.Draw(draw);
             });
         }
@@ -660,7 +691,7 @@ public sealed class StudioRenderer : IDisposable
             var draw = new StudioDraw(
                 scope, StudioPass.Lit, uniforms, textures, litPipeline, skinnedPipeline, whiteTexture,
                 SkinnedDoubleSidedPipeline: skinnedDoubleSidedPipeline,
-                BlendPipeline: blendPipeline, SkinnedBlendPipeline: skinnedBlendPipeline);
+                BlendPipeline: blendPipeline, SkinnedBlendPipeline: skinnedBlendPipeline) { Assets = assets };
             foreach (var view in views) view.Draw(draw);
         });
 
@@ -699,7 +730,7 @@ public sealed class StudioRenderer : IDisposable
                 var draw = new StudioDraw(
                     scope, StudioPass.Lit, uniforms, textures, viewportLitPipeline, viewportSkinnedPipeline, whiteTexture,
                     SkinnedDoubleSidedPipeline: viewportSkinnedDoubleSidedPipeline,
-                    BlendPipeline: viewportBlendPipeline, SkinnedBlendPipeline: viewportSkinnedBlendPipeline);
+                    BlendPipeline: viewportBlendPipeline, SkinnedBlendPipeline: viewportSkinnedBlendPipeline) { Assets = assets };
                 foreach (var view in views) view.Draw(draw);
             });
         }
@@ -952,6 +983,7 @@ public sealed class StudioRenderer : IDisposable
         // tracked resource tables, so it must release them explicitly.
         graph?.Dispose();
         fullscreen?.Dispose();
+        assets.Dispose();
         if (device is null) return;
 
         device.DestroyPipeline(litPipeline);

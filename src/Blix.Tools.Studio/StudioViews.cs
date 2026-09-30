@@ -28,7 +28,7 @@ public sealed class ModelView : IStudioView
     private readonly byte[] lit = new byte[StudioPush.LitBytes];
     private readonly byte[] caster = new byte[StudioPush.CasterBytes];
 
-    public ModelView(StudioModel model, Matrix4x4 transform)
+    public ModelView(Model model, Matrix4x4 transform)
     {
         Model = model ?? throw new ArgumentNullException(nameof(model));
         Transform = transform == default ? Matrix4x4.Identity : transform;
@@ -41,9 +41,13 @@ public sealed class ModelView : IStudioView
     private Vector3 Colour(string materialName, Vector3 assetColour) =>
         Tints?.Resolve(materialName, assetColour) ?? assetColour;
 
-    public StudioModel Model { get; }
+    /// <summary>The engine model drawn: loaded through the stage (<see cref="StudioRenderer.LoadModel"/>).</summary>
+    public Model Model { get; }
 
     public Matrix4x4 Transform { get; set; }
+
+    private StudioModel Studio(in StudioDraw draw) =>
+        (draw.Assets ?? throw new InvalidOperationException("A ModelView is drawn by the stage that loaded its model.")).For(Model);
 
     public void Draw(in StudioDraw draw)
     {
@@ -51,9 +55,9 @@ public sealed class ModelView : IStudioView
 
         // Draw opaque parts before the non-depth-writing blended group.
         for (var pass = 0; pass < 2; pass++)
-        for (var index = 0; index < Model.Parts.Count; index++)
+        for (var index = 0; index < Studio(draw).Parts.Count; index++)
         {
-            var part = Model.Parts[index];
+            var part = Studio(draw).Parts[index];
             var blended = StudioAlpha.IsBlended(part.AlphaMode);
             if (blended != (pass == 1)) continue;
 
@@ -64,7 +68,7 @@ public sealed class ModelView : IStudioView
             var push = casterOnly ? caster : lit;
 
             var cutoff = StudioAlpha.CutoffFor(part.AlphaMode, part.AlphaCutoff);
-            StudioPush.Matrix(node.WorldTransform * Transform, push);
+            StudioPush.Matrix(node.World * Transform, push);
             if (casterOnly) StudioPush.CasterCutout(push, cutoff, part.BaseAlpha, part.AlbedoUvSet);
             else StudioPush.Material(push, Colour(part.MaterialName, part.BaseColour), part.Metallic, part.Roughness,
                      alphaCutoff: cutoff, baseAlpha: part.BaseAlpha, albedoUvSet: part.AlbedoUvSet);
@@ -104,7 +108,7 @@ public sealed class RigView : IStudioView
     private readonly byte[] lit = new byte[StudioPush.LitBytes];
     private readonly byte[] caster = new byte[StudioPush.SkinnedCasterBytes];
 
-    public RigView(StudioRig rig, int instances = 1)
+    public RigView(Rig rig, int instances = 1)
     {
         Rig = rig ?? throw new ArgumentNullException(nameof(rig));
         Instances = instances;
@@ -117,7 +121,8 @@ public sealed class RigView : IStudioView
     private Vector3 Colour(string materialName, Vector3 assetColour) =>
         Tints?.Resolve(materialName, assetColour) ?? assetColour;
 
-    public StudioRig Rig { get; }
+    /// <summary>The engine rig drawn: loaded through the stage (<see cref="StudioRenderer.LoadRig"/>).</summary>
+    public Rig Rig { get; }
 
     /// <summary>How many bodies this draw covers. One takes exactly the same path as eight.</summary>
     public int Instances { get; set; }
@@ -174,6 +179,9 @@ public sealed class RigView : IStudioView
     /// <remarks>Selection source is caller policy: inventory, state, or a tool control.</remarks>
     public Func<int, ISet<string>>? InstanceAttachments { get; set; }
 
+    private StudioRig Studio(in StudioDraw draw) =>
+        (draw.Assets ?? throw new InvalidOperationException("A RigView is drawn by the stage that loaded its rig.")).For(Rig);
+
     public void Draw(in StudioDraw draw)
     {
         if (Instances <= 0) return;
@@ -183,7 +191,7 @@ public sealed class RigView : IStudioView
 
         // Opaque then blended, for the same reason ModelView sweeps twice.
         for (var pass = 0; pass < 2; pass++)
-        foreach (var part in Rig.Parts)
+        foreach (var part in Studio(draw).Parts)
         {
             var blended = StudioAlpha.IsBlended(part.AlphaMode);
             if (blended != (pass == 1)) continue;
@@ -232,9 +240,9 @@ public sealed class RigView : IStudioView
                 uniforms: draw.Uniforms,
                 textures: draw.WithAlbedo(part.Albedo),
                 // Each part selects its authored skin; skins may share joints but not inverse binds.
-                perDrawMaterial: (uint)part.SkinIndex < (uint)Rig.Skins.Count
-                    ? Rig.Skins[part.SkinIndex].BoneMaterial
-                    : Rig.BoneMaterial,
+                perDrawMaterial: (uint)part.SkinIndex < (uint)Studio(draw).Skins.Count
+                    ? Studio(draw).Skins[part.SkinIndex].BoneMaterial
+                    : Studio(draw).BoneMaterial,
                 pushConstants: push);
         }
 
@@ -246,10 +254,10 @@ public sealed class RigView : IStudioView
     // caller-selected because several authored options may occupy the same joint.
     private void DrawStaticParts(in StudioDraw draw, bool casterOnly)
     {
-        if (Rig.StaticParts.Count == 0) return;
+        if (Studio(draw).StaticParts.Count == 0) return;
 
         var push = casterOnly ? attachCaster : attachLit;
-        foreach (var part in Rig.StaticParts)
+        foreach (var part in Studio(draw).StaticParts)
         {
             // No joint, so no joint world: the node's own world matrix and the body's placement.
             StudioPush.Matrix(part.WorldTransform * Placement, push);
@@ -269,7 +277,7 @@ public sealed class RigView : IStudioView
 
     private void DrawAttachments(in StudioDraw draw, bool casterOnly)
     {
-        if (Rig.Attachments.Count == 0) return;
+        if (Studio(draw).Attachments.Count == 0) return;
         if (InstanceBoneWorlds is null && BoneWorlds is null) return;
 
         var attachPush = casterOnly ? attachCaster : attachLit;
@@ -301,7 +309,7 @@ public sealed class RigView : IStudioView
         Matrix4x4 placement,
         byte[] attachPush)
     {
-        foreach (var attachment in Rig.Attachments)
+        foreach (var attachment in Studio(draw).Attachments)
         {
             if (!visible.Contains(attachment.Name)) continue;
             if ((uint)attachment.JointIndex >= (uint)worlds.Count) continue;

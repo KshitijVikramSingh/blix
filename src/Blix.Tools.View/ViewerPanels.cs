@@ -79,8 +79,8 @@ internal sealed class ViewerPanels
         // Both numbers, because they answer different questions: how much of the app.Rig the mesh is
         // attached to, and how much of it has to be drawn to show those chains unbroken.
         ImGui.TextDisabled(
-            $"{app.Rig.Skeleton.BoneCount} bones ({app.Rig.WeightedBoneCount} weighted, " +
-            $"{app.Rig.DeformHierarchyCount} drawn) · {app.Rig.Clips.Count} clips · {app.Rig.Parts.Count} prims");
+            $"{app.Rig.Skeleton.BoneCount} bones ({app.Rig.WeightedBones.Count(b => b)} weighted, " +
+            $"{app.Rig.DeformHierarchy.Count(b => b)} drawn) · {app.Rig.Clips.Count} clips · {app.Rig.Parts.Count} prims");
 
         var mode = (int)app.Session.Driven.Mode;
         if (ImGui.Combo("compose", ref mode, "single\0blend A to B\0additive B on A\0B masked onto A\0"))
@@ -178,7 +178,7 @@ internal sealed class ViewerPanels
         if (app.Rig is null || app.Session is null) return;
         if (!ImGui.CollapsingHeader("instances", ImGuiTreeNodeFlags.DefaultOpen)) return;
 
-        ImGui.TextDisabled($"{app.Session.Count} of max {StudioRig.MaxInstances} · one draw, one palette buffer");
+        ImGui.TextDisabled($"{app.Session.Count} of max {StudioRenderer.MaxInstances} · one draw, one palette buffer");
 
         if (app.Session.Count <= 1)
         {
@@ -555,13 +555,13 @@ internal sealed class ViewerPanels
         if (app.Selection.Node < 0 || app.Selection.Node >= app.Model.Nodes.Count) return;
 
         var s = app.Model.Nodes[app.Selection.Node];
-        var world = s.WorldTransform * app.ModelTransform;
+        var world = s.World * app.ModelTransform;
         ImGui.TextDisabled($"parent {s.ParentIndex}   prims {s.PrimitiveCount}");
 
         // The composed translation IS the app.Rig pivot — the number a game drives the part about.
         ImGui.Text($"pivot  {world.M41:0.000}, {world.M42:0.000}, {world.M43:0.000}");
 
-        if (Matrix4x4.Decompose(s.LocalTransform, out var ls, out var lr, out var lt))
+        if (Matrix4x4.Decompose(s.Local, out var ls, out var lr, out var lt))
         {
             ImGui.Text($"local T {lt.X:0.000}, {lt.Y:0.000}, {lt.Z:0.000}");
             ImGui.Text($"local S {ls.X:0.000}, {ls.Y:0.000}, {ls.Z:0.000}");
@@ -586,8 +586,8 @@ internal sealed class ViewerPanels
         // Grouped rather than one flat list of knobs. The panel grew a control at a time and had
         // become a wall — which is the same complaint about legibility that got the gizmos
         // depth-tested, one layer up.
-        if (app.Rig is not null) ImGui.TextDisabled(Path.GetFileName(app.Rig.SourcePath));
-        else if (app.Model is not null) ImGui.TextDisabled(Path.GetFileName(app.Model.SourcePath));
+        if (app.RigPath is not null) ImGui.TextDisabled(Path.GetFileName(app.RigPath));
+        else if (app.ModelPath is not null) ImGui.TextDisabled(Path.GetFileName(app.ModelPath));
         else ImGui.TextDisabled("nothing loaded — pass --model <path.glb> or --rig <rigged.glb>");
 
         if (ImGui.CollapsingHeader("image", ImGuiTreeNodeFlags.DefaultOpen))
@@ -808,14 +808,12 @@ internal sealed class ViewerPanels
         materials.Clear();
         if (app.Model is { } model)
         {
-            foreach (var part in model.Parts) Note(part.MaterialName, part.BaseColour);
+            foreach (var (name, colour) in StudioInspection.Materials(model)) Note(name, colour);
         }
 
         if (app.Rig is { } rig)
         {
-            foreach (var part in rig.Parts) Note(part.MaterialName, part.BaseColour);
-            foreach (var a in rig.Attachments) Note(a.MaterialName, a.BaseColour);
-            foreach (var sp in rig.StaticParts) Note(sp.MaterialName, sp.BaseColour);
+            foreach (var (name, colour) in StudioInspection.Materials(rig)) Note(name, colour);
         }
 
         if (materials.Count == 0)

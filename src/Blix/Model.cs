@@ -51,6 +51,17 @@ public sealed class Model : IDisposable
     /// <summary>World-space bounds over every node that has geometry; zero-sized for a model without any.</summary>
     public Bounds3 Bounds { get; private set; } = new(Vector3.Zero, Vector3.Zero);
 
+    /// <summary>The largest bounds dimension, for framing an asset of unknown scale; 1 without parts.</summary>
+    public float LongestExtent
+    {
+        get
+        {
+            if (parts.Count == 0) return 1f;
+            var size = Bounds.Max - Bounds.Min;
+            return MathF.Max(size.X, MathF.Max(size.Y, size.Z));
+        }
+    }
+
     /// <summary>What the pick pass draws for <paramref name="part"/>, placed by <paramref name="placement"/>.</summary>
     public DebugPickGeometry PickGeometry(Part part, Matrix4x4 placement)
     {
