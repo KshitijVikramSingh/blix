@@ -27,7 +27,8 @@ internal sealed class StudioModel : IDisposable
         Vector3 BaseColour,
         float Metallic,
         float Roughness,
-        TextureHandle Albedo,
+        /// <summary>Everything beyond base colour and alpha: textures, normal, occlusion, emission.</summary>
+        StudioSurface Surface,
         /// <summary>Which TEXCOORD set this part's albedo samples — 0 for almost everything.</summary>
         int AlbedoUvSet = 0,
         /// <summary>The material's <c>baseColorFactor.a</c>, which the cutout test multiplies in.</summary>
@@ -68,7 +69,7 @@ internal sealed class StudioModel : IDisposable
             studio.parts.Add(new Part(
                 p.NodeIndex, p.Mesh.VertexBuffer, p.Mesh.IndexBuffer, p.Mesh.IndexCount,
                 StudioInspection.BaseColour(m, StudioInspection.ModelFallbackColour),
-                m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness, p.Textures.Albedo,
+                m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness, StudioSurface.Of(m, p.Textures),
                 AlbedoUvSet: m?.BaseColorTexCoord ?? 0,
                 BaseAlpha: m?.BaseColorFactor.W ?? 1f,
                 AlphaMode: m?.AlphaMode ?? GltfAlphaMode.Opaque,

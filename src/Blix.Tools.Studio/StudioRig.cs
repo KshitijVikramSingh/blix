@@ -43,7 +43,7 @@ internal sealed class StudioRig : IDisposable
         Vector3 BaseColour,
         float Metallic,
         float Roughness,
-        TextureHandle Albedo,
+        StudioSurface Surface,
         /// <summary>Which of <see cref="Skins"/> poses this part.</summary>
         /// <remarks>Skins may share joints while retaining distinct inverse-bind matrices.</remarks>
         int SkinIndex,
@@ -73,7 +73,7 @@ internal sealed class StudioRig : IDisposable
         Vector3 BaseColour,
         float Metallic,
         float Roughness,
-        TextureHandle Albedo,
+        StudioSurface Surface,
         /// <summary>The material's own name, which application-owned tint policy keys on.</summary>
         string MaterialName = "");
 
@@ -88,7 +88,7 @@ internal sealed class StudioRig : IDisposable
         Vector3 BaseColour,
         float Metallic,
         float Roughness,
-        TextureHandle Albedo,
+        StudioSurface Surface,
         /// <summary>The material's own name, which application-owned tint policy keys on.</summary>
         string MaterialName = "");
 
@@ -142,7 +142,7 @@ internal sealed class StudioRig : IDisposable
             var m = p.Material;
             studio.parts.Add(new Part(
                 p.Mesh.VertexBuffer, p.Mesh.IndexBuffer, p.Mesh.IndexCount, BaseColourOf(m),
-                m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness, p.Textures.Albedo,
+                m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness, StudioSurface.Of(m, p.Textures),
                 p.SkinIndex,
                 AlbedoUvSet: m?.BaseColorTexCoord ?? 0,
                 BaseAlpha: m?.BaseColorFactor.W ?? 1f,
@@ -157,7 +157,7 @@ internal sealed class StudioRig : IDisposable
             var m = p.Material;
             studio.staticParts.Add(new StaticPart(
                 p.Name, p.World, p.Mesh.VertexBuffer, p.Mesh.IndexBuffer, p.Mesh.IndexCount, BaseColourOf(m),
-                m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness, p.Textures.Albedo,
+                m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness, StudioSurface.Of(m, p.Textures),
                 m?.Name ?? string.Empty));
         }
 
@@ -167,7 +167,7 @@ internal sealed class StudioRig : IDisposable
             studio.attachments.Add(new Attachment(
                 a.Name, a.JointName, a.JointIndex, a.Local, a.Mesh.VertexBuffer, a.Mesh.IndexBuffer, a.Mesh.IndexCount,
                 BaseColourOf(m), m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness,
-                a.Textures.Albedo, m?.Name ?? string.Empty));
+                StudioSurface.Of(m, a.Textures), m?.Name ?? string.Empty));
         }
 
         for (var s = 0; s < studio.rig.Skins.Count; s++)

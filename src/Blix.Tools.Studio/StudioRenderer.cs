@@ -788,7 +788,7 @@ public sealed class StudioRenderer : IDisposable
             // slot 0 as well so MASK geometry can discard consistently.
             textures: depthOnly
                 ? new[] { new ShaderTextureBinding("uAlbedo", whiteTexture) }
-                : AppendAlbedo(textures, whiteTexture),
+                : StudioDraw.Append(textures, whiteTexture, whiteTexture, whiteTexture, whiteTexture, whiteTexture),
             pushConstants: push);
     }
 
@@ -949,15 +949,7 @@ public sealed class StudioRenderer : IDisposable
         }
     }
 
-    private static ShaderTextureBinding[] AppendAlbedo(ShaderTextureBinding[] pass, TextureHandle albedo)
-    {
-        var all = new ShaderTextureBinding[pass.Length + 1];
-        pass.CopyTo(all, 0);
-        all[^1] = new ShaderTextureBinding("uAlbedo", albedo);
-        return all;
-    }
-
-    /// <summary>What every lit draw binds, before its own albedo. The stage's one answer.</summary>
+    /// <summary>What every lit draw binds, before its own material. The stage's one answer.</summary>
     private ShaderTextureBinding[] EnvironmentTextures(TextureHandle _) => new[]
     {
         new ShaderTextureBinding("uCascade0", graph.GetDepthTexture(cascadeTargets[0])),

@@ -50,12 +50,22 @@ layout(set = 1, binding = 2) uniform samplerCube uIrradiance;
 layout(set = 1, binding = 3) uniform samplerCube uPrefilteredEnv;
 layout(set = 1, binding = 4) uniform sampler2D uBrdfLut;
 
+// The glTF material's other channels. Every draw binds all four; white is inert in each because the
+// push terms that read them (normal scale, occlusion strength, emission) default to zero, and
+// metallic-roughness multiplies its factors. All four sample TEXCOORD_0: the engine's material
+// records a coordinate set for base colour alone.
+layout(set = 1, binding = 7) uniform sampler2D uNormalMap;          // linear, tangent space
+layout(set = 1, binding = 8) uniform sampler2D uMetallicRoughness;  // linear, G = roughness, B = metallic
+layout(set = 1, binding = 9) uniform sampler2D uOcclusion;          // linear, R = occlusion
+layout(set = 1, binding = 10) uniform sampler2D uEmissive;          // sRGB
+
 layout(push_constant) uniform Push {
     mat4 uModel;
     vec4 uBaseColour;
     vec4 uMaterial;
     // glTF lets each texture select its own TEXCOORD set.
-    vec4 uExtra;          // x = albedo UV set
+    vec4 uExtra;          // x = albedo UV set, y = normal scale (0 = no normal map)
+    vec4 uEmission;       // rgb = emissive radiance, a = occlusion strength (0 = no occlusion)
 };
 
 layout(location = 0) in vec3 vWorld;
@@ -68,9 +78,44 @@ layout(location = 4) in vec2 vUv1;
 
 layout(location = 0) out vec4 outColour;
 
+// The surface frame from screen-space derivatives (Schüler 2013, "Followup: Normal Mapping Without
+// Precomputed Tangents"). Studio's static layout carries vertex colour and so no TANGENT, and one rule
+// for every part beats a rule per layout: authored tangents are not read, and a map baked against
+// MikkTSpace can differ slightly across a UV seam.
+//
+// T and B are the true dP/du and dP/dv. The determinant's sign is kept rather than dropped, so the
+// frame does not depend on which way the framebuffer's y runs and follows mirrored UVs.
+mat3 surfaceFrame(vec3 N, vec3 p, vec2 uv)
+{
+    vec3 dp1 = dFdx(p);
+    vec3 dp2 = dFdy(p);
+    vec2 duv1 = dFdx(uv);
+    vec2 duv2 = dFdy(uv);
+    vec3 dp2perp = cross(dp2, N);
+    vec3 dp1perp = cross(N, dp1);
+    float orientation = sign(dot(dp1, dp2perp));
+    vec3 T = (dp2perp * duv1.x + dp1perp * duv2.x) * orientation;
+    vec3 B = (dp2perp * duv1.y + dp1perp * duv2.y) * orientation;
+    float scale = inversesqrt(max(max(dot(T, T), dot(B, B)), 1e-20));
+    // glTF's green axis points up the image, which is toward DECREASING v.
+    return mat3(T * scale, -B * scale, N);
+}
+
 void main()
 {
     vec3 N = normalize(vNormal);
+
+    // The shadow's normal offset uses the geometric normal: it is about where the surface is, and a
+    // normal map only says how it scatters light.
+    vec3 geometric = N;
+    float normalScale = uExtra.y;
+    if (normalScale > 0.0)
+    {
+        // Z is rebuilt from XY: a cooked map is two-channel BC5. The scale bends XY, per glTF.
+        vec2 xy = texture(uNormalMap, vUv).xy * 2.0 - 1.0;
+        vec3 tangentNormal = vec3(xy * normalScale, sqrt(max(1.0 - dot(xy, xy), 0.0)));
+        N = normalize(surfaceFrame(N, vWorld, vUv) * tangentNormal);
+    }
     vec3 V = normalize(uCameraPosition.xyz - vWorld);
     vec3 L = normalize(uSunDirection.xyz);
 
@@ -82,11 +127,12 @@ void main()
         uCascade0, uCascade1, uCascade2,
         uCascadeVP0, uCascadeVP1, uCascadeVP2,
         uCascadeTexels.xyz,
-        vWorld, N, ndotl, 1.5, gl_FragCoord.xy,
+        vWorld, geometric, max(dot(geometric, L), 0.0), 1.5, gl_FragCoord.xy,
         cascade);
 
-    float metallic = clamp(uMaterial.x, 0.0, 1.0);
-    float roughness = clamp(uMaterial.y, 0.04, 1.0);
+    vec4 metallicRoughness = texture(uMetallicRoughness, vUv);
+    float metallic = clamp(uMaterial.x * metallicRoughness.b, 0.0, 1.0);
+    float roughness = clamp(uMaterial.y * metallicRoughness.g, 0.04, 1.0);
     // A zero cutoff lets OPAQUE and MASK share this pipeline. Alpha is texture × baseColorFactor.a ×
     // vertex alpha, per glTF. `discard` prevents early-Z for the whole shader; Studio accepts that
     // cost for its small subjects rather than multiplying pipeline variants. Revisit for large views.
@@ -112,8 +158,11 @@ void main()
         ambient = albedo * uSunColour.a;
     }
 
+    // glTF occlusion darkens indirect light only; the sun is already shadowed.
+    ambient *= 1.0 + uEmission.a * (texture(uOcclusion, vUv).r - 1.0);
+
     // Output the same composed alpha used by MASK; opaque pipelines ignore this channel.
-    vec3 lit = direct + ambient;
+    vec3 lit = direct + ambient + uEmission.rgb * texture(uEmissive, vUv).rgb;
 
     // Cascade diagnostics replace shading with a flat band; shadow remains as brightness.
     if (uCascadeTexels.w > 0.5) lit = blix_cascade_tint(cascade) * mix(0.35, 1.0, shadow);

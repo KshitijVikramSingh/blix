@@ -9,28 +9,25 @@ namespace Blix.Tools.Studio;
 /// <remarks>
 /// <para>
 /// <b>Public because rung two needs it.</b> A tool bringing its own draw — a heightfield, a
-/// navigation mesh, a gizmo — has to write the same 96 bytes the stage's lit shader expects, and
+/// navigation mesh, a gizmo — has to write the same bytes the stage's lit shader expects, and
 /// making it re-derive that layout from a GLSL file would mean the first thing anyone does on this
 /// stage is guess at a memory layout. The one that got this wrong once would look correct and shade
 /// wrong.
 /// </para>
-/// <para>
-/// <c>mat4 model</c>, <c>vec4 baseColour</c>, <c>vec4 (metallic, roughness, stride, _)</c> — 96
-/// bytes, inside the 128-byte floor every Vulkan implementation guarantees, which is why nothing on
-/// this stage needs a per-object descriptor set.
-/// </para>
+/// <para>The layout is stated once, on <see cref="LitBytes"/>.</para>
 /// </remarks>
 public static class StudioPush
 {
     /// <summary>Bytes a lit draw pushes: a model matrix and a material.</summary>
     /// <remarks>
-    /// <b>112 since a texture could name its own UV set.</b> The material vector was full — metallic,
-    /// roughness, palette stride, alpha cutoff — so the selector needed a slot of its own rather than
-    /// the sign of something that already meant a number. Still inside the 128-byte floor every
-    /// Vulkan implementation guarantees, which is why nothing on this stage needs a per-object
-    /// descriptor set.
+    /// <c>mat4 model</c>, <c>vec4 (baseColour, baseAlpha)</c>, <c>vec4 (metallic, roughness, stride,
+    /// alphaCutoff)</c>, <c>vec4 (albedoUvSet, normalScale, _, _)</c>, <c>vec4 (emissive,
+    /// occlusionStrength)</c>. Exactly the 128-byte floor every Vulkan implementation guarantees,
+    /// which is why nothing on this stage needs a per-object descriptor set; a further material term
+    /// needs a block of its own. Push constants belong to the draw, so a term a draw does not write
+    /// is zero for that draw rather than whatever the previous draw left.
     /// </remarks>
-    public const int LitBytes = 112;
+    public const int LitBytes = 128;
 
     /// <summary>Bytes a shadow caster pushes: the model matrix, and what it takes to cut out.</summary>
     /// <remarks>
@@ -63,7 +60,7 @@ public static class StudioPush
     /// <remarks>
     /// Written at the vec4 straight after the matrix, which is where <c>studio_shadow.frag</c> reads
     /// it. Separate from <see cref="Material"/> because a caster's block is 80 bytes and that one
-    /// writes 96 — calling it here would run off the end, which is the same edge the skinned
+    /// writes 128 — calling it here would run off the end, which is the same edge the skinned
     /// caster's 16-byte buffer has always had.
     /// </remarks>
     public static void CasterCutout(byte[] target, float alphaCutoff, float baseAlpha, float albedoUvSet = 0f)
@@ -87,18 +84,27 @@ public static class StudioPush
     /// </param>
     /// <param name="baseAlpha">
     /// The material's <c>baseColorFactor.a</c>, multiplied into the sampled alpha before the test.
-    /// It was hardcoded to 1 here, which silently ignored every material that dimmed its own alpha —
-    /// the generator's AlphaMask_05 is exactly that case and looked identical to AlphaMask_01.
+    /// </param>
+    /// <param name="normalScale">
+    /// How strongly the bound normal map bends the surface normal. <b>Zero ignores the map</b>, which
+    /// is what a draw binding the white stand-in needs.
+    /// </param>
+    /// <param name="emissive">Linear radiance added after lighting, multiplied by the emissive texture.</param>
+    /// <param name="occlusionStrength">
+    /// How much the occlusion texture's red channel darkens ambient light. Zero ignores it.
     /// </param>
     public static void Material(
         byte[] target, Vector3 baseColour, float metallic, float roughness, float stride = 0f,
-        float alphaCutoff = 0f, float baseAlpha = 1f, float albedoUvSet = 0f)
+        float alphaCutoff = 0f, float baseAlpha = 1f, float albedoUvSet = 0f,
+        float normalScale = 0f, Vector3 emissive = default, float occlusionStrength = 0f)
     {
         ArgumentNullException.ThrowIfNull(target);
         var floats = MemoryMarshal.Cast<byte, float>(target.AsSpan());
         if (floats.Length < 24) return;   // a caster's 64 bytes are the matrix and nothing else
         floats[16] = baseColour.X; floats[17] = baseColour.Y; floats[18] = baseColour.Z; floats[19] = baseAlpha;
         floats[20] = metallic; floats[21] = roughness; floats[22] = stride; floats[23] = alphaCutoff;
-        if (floats.Length >= 28) { floats[24] = albedoUvSet; floats[25] = 0f; floats[26] = 0f; floats[27] = 0f; }
+        if (floats.Length < 32) return;
+        floats[24] = albedoUvSet; floats[25] = normalScale; floats[26] = 0f; floats[27] = 0f;
+        floats[28] = emissive.X; floats[29] = emissive.Y; floats[30] = emissive.Z; floats[31] = occlusionStrength;
     }
 }

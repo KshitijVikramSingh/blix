@@ -71,7 +71,9 @@ public sealed class ModelView : IStudioView
             StudioPush.Matrix(node.World * Transform, push);
             if (casterOnly) StudioPush.CasterCutout(push, cutoff, part.BaseAlpha, part.AlbedoUvSet);
             else StudioPush.Material(push, Colour(part.MaterialName, part.BaseColour), part.Metallic, part.Roughness,
-                     alphaCutoff: cutoff, baseAlpha: part.BaseAlpha, albedoUvSet: part.AlbedoUvSet);
+                     alphaCutoff: cutoff, baseAlpha: part.BaseAlpha, albedoUvSet: part.AlbedoUvSet,
+                     normalScale: part.Surface.NormalScale, emissive: part.Surface.Emissive,
+                     occlusionStrength: part.Surface.OcclusionStrength);
 
             // Texture lists are retained by reference, so each recorded draw needs its own array.
             draw.Scope.DrawIndexed(
@@ -81,7 +83,7 @@ public sealed class ModelView : IStudioView
                 indexCount: part.IndexCount,
                 uniforms: draw.Uniforms,
                 // Casters also bind albedo at slot 0 because MASK shadows sample alpha.
-                textures: draw.WithAlbedo(part.Albedo),
+                textures: draw.WithSurface(part.Surface),
                 pushConstants: push);
         }
     }
@@ -220,7 +222,9 @@ public sealed class RigView : IStudioView
                 StudioPush.Material(
                     push, Colour(part.MaterialName, part.BaseColour), part.Metallic, part.Roughness, stride,
                     alphaCutoff: StudioAlpha.CutoffFor(part.AlphaMode, part.AlphaCutoff),
-                    baseAlpha: part.BaseAlpha, albedoUvSet: part.AlbedoUvSet);
+                    baseAlpha: part.BaseAlpha, albedoUvSet: part.AlbedoUvSet,
+                    normalScale: part.Surface.NormalScale, emissive: part.Surface.Emissive,
+                    occlusionStrength: part.Surface.OcclusionStrength);
             }
 
             // BLEND is already unculled. Other double-sided materials use the unculled skinned
@@ -238,7 +242,7 @@ public sealed class RigView : IStudioView
                 indexCount: part.IndexCount,
                 instanceCount: Instances,
                 uniforms: draw.Uniforms,
-                textures: draw.WithAlbedo(part.Albedo),
+                textures: draw.WithSurface(part.Surface),
                 // Each part selects its authored skin; skins may share joints but not inverse binds.
                 perDrawMaterial: (uint)part.SkinIndex < (uint)Studio(draw).Skins.Count
                     ? Studio(draw).Skins[part.SkinIndex].BoneMaterial
@@ -262,7 +266,9 @@ public sealed class RigView : IStudioView
             // No joint, so no joint world: the node's own world matrix and the body's placement.
             StudioPush.Matrix(part.WorldTransform * Placement, push);
             if (casterOnly) StudioPush.CasterCutout(push, 0f, 1f);
-            else StudioPush.Material(push, Colour(part.MaterialName, part.BaseColour), part.Metallic, part.Roughness);
+            else StudioPush.Material(push, Colour(part.MaterialName, part.BaseColour), part.Metallic, part.Roughness,
+                     normalScale: part.Surface.NormalScale, emissive: part.Surface.Emissive,
+                     occlusionStrength: part.Surface.OcclusionStrength);
 
             draw.Scope.DrawIndexed(
                 vertexBuffer: part.Vertices,
@@ -270,7 +276,7 @@ public sealed class RigView : IStudioView
                 pipeline: draw.Pipeline,
                 indexCount: part.IndexCount,
                 uniforms: draw.Uniforms,
-                textures: draw.WithAlbedo(part.Albedo),
+                textures: draw.WithSurface(part.Surface),
                 pushConstants: push);
         }
     }
@@ -321,7 +327,9 @@ public sealed class RigView : IStudioView
 
             StudioPush.Matrix(model, attachPush);
             if (casterOnly) StudioPush.CasterCutout(attachPush, 0f, 1f);
-            else StudioPush.Material(attachPush, Colour(attachment.MaterialName, attachment.BaseColour), attachment.Metallic, attachment.Roughness);
+            else StudioPush.Material(attachPush, Colour(attachment.MaterialName, attachment.BaseColour), attachment.Metallic, attachment.Roughness,
+                     normalScale: attachment.Surface.NormalScale, emissive: attachment.Surface.Emissive,
+                     occlusionStrength: attachment.Surface.OcclusionStrength);
 
             draw.Scope.DrawIndexed(
                 vertexBuffer: attachment.Vertices,
@@ -329,7 +337,7 @@ public sealed class RigView : IStudioView
                 pipeline: draw.Pipeline,
                 indexCount: attachment.IndexCount,
                 uniforms: draw.Uniforms,
-                textures: draw.WithAlbedo(attachment.Albedo),
+                textures: draw.WithSurface(attachment.Surface),
                 pushConstants: attachPush);
         }
     }

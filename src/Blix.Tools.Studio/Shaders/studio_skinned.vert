@@ -45,6 +45,7 @@ layout(push_constant) uniform Push {
     // a program must agree on the push block; when they disagree the reflected total is their SUM,
     // which is how a 112-byte payload came to meet a pipeline declaring 208.
     vec4 uExtra;
+    vec4 uEmission;
 };
 
 layout(location = 0) out vec3 vWorld;

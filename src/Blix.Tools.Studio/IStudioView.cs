@@ -55,28 +55,50 @@ public readonly record struct StudioDraw(
     /// <summary>Its skinned twin.</summary>
     PipelineHandle SkinnedBlendPipeline = default)
 {
-    /// <summary>The pass's textures plus this draw's albedo, at the slot this pass puts it in.</summary>
-    /// <remarks>
-    /// <b>Here because five views were assembling it by hand, and the stage grew a texture.</b> Each
-    /// of them wrote <c>{ draw.Textures[0], uAlbedo }</c> — correct while the lit pass bound exactly
-    /// one texture, and silently one-short the moment it bound four. Every draw on a pipeline must
-    /// bind every texture its shader declares, so the assembly belongs to whoever knows what the
-    /// pass binds, which is the stage and not the view.
-    /// <para>
-    /// The caster takes slot 0 and no shadow map: its shader declares an albedo so it can cut out,
-    /// and nothing else.
-    /// </para>
-    /// </remarks>
     /// <summary>The stage's per-asset state, for a stage view (RigView, ModelView) to find its asset's.</summary>
     internal StudioAssets? Assets { get; init; }
 
-    public ShaderTextureBinding[] WithAlbedo(TextureHandle albedo)
+    /// <summary>The pass's textures plus this draw's albedo, with white in every other material channel.</summary>
+    /// <remarks>
+    /// For a draw with base colour alone. White is inert in the other channels only because the
+    /// matching <see cref="StudioPush.Material"/> terms default to zero; see there.
+    /// </remarks>
+    public ShaderTextureBinding[] WithAlbedo(TextureHandle albedo) =>
+        WithMaterial(albedo, White, White, White, White);
+
+    /// <summary>The pass's textures plus this draw's glTF material channels.</summary>
+    /// <remarks>
+    /// <b>The stage assembles the list because it knows what the pass binds.</b> Every draw on a
+    /// pipeline must bind every texture its shader declares, so a view that built the list itself
+    /// would be one short the next time the pass grew one. The caster pass binds albedo alone: its
+    /// shader declares albedo so it can cut out, and nothing else.
+    /// </remarks>
+    /// <param name="metallicRoughness">glTF packing: green is roughness, blue is metallic, both multiplying the factors.</param>
+    /// <param name="occlusion">Red is ambient occlusion.</param>
+    public ShaderTextureBinding[] WithMaterial(
+        TextureHandle albedo, TextureHandle normal, TextureHandle metallicRoughness,
+        TextureHandle occlusion, TextureHandle emissive)
     {
         if (Pass == StudioPass.Shadow) return new[] { new ShaderTextureBinding("uAlbedo", albedo) };
+        return Append(Textures, albedo, normal, metallicRoughness, occlusion, emissive);
+    }
 
-        var all = new ShaderTextureBinding[Textures.Length + 1];
-        Textures.CopyTo(all, 0);
-        all[^1] = new ShaderTextureBinding("uAlbedo", albedo);
+    internal ShaderTextureBinding[] WithSurface(in StudioSurface surface) => WithMaterial(
+        surface.Textures.Albedo, surface.Textures.Normal, surface.Textures.MetallicRoughness,
+        surface.Textures.Occlusion, surface.EmissiveTextured ? surface.Textures.Emissive : White);
+
+    // Texture lists are retained by reference, so each recorded draw gets its own array.
+    internal static ShaderTextureBinding[] Append(
+        ShaderTextureBinding[] pass, TextureHandle albedo, TextureHandle normal, TextureHandle metallicRoughness,
+        TextureHandle occlusion, TextureHandle emissive)
+    {
+        var all = new ShaderTextureBinding[pass.Length + 5];
+        pass.CopyTo(all, 0);
+        all[^5] = new ShaderTextureBinding("uAlbedo", albedo);
+        all[^4] = new ShaderTextureBinding("uNormalMap", normal);
+        all[^3] = new ShaderTextureBinding("uMetallicRoughness", metallicRoughness);
+        all[^2] = new ShaderTextureBinding("uOcclusion", occlusion);
+        all[^1] = new ShaderTextureBinding("uEmissive", emissive);
         return all;
     }
 }
