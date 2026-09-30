@@ -71,7 +71,7 @@ internal sealed class InstancedLoop : IGameLoop
         var vb = device.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(Cube.Vertices), "cube.vb");
         var ib = device.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
         var cube = new Mesh("cube", vb, ib, Cube.Indices.Length,
-            new Bounds3(new Vector3(-0.5f), new Vector3(0.5f)));
+            new Bounds3(new Vector3(-0.5f), new Vector3(0.5f)), VertexPosition3NormalTexture.Layout);
 
         // Pipeline consumes only position + normal (stride matched to the cube's
         // VertexPosition3NormalTexture so it reads correctly without an

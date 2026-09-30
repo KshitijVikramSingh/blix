@@ -5627,6 +5627,75 @@ static ShaderInterface MinimalShader() => new(new[]
         Vector3.Distance(owned.Forward, Vector3.Normalize(new Vector3(0, -2, -6))) < 1e-4f, owned.Forward.ToString());
 }
 
+// ============================================================================
+// Section BP — the CPU side of residency: node worlds and merges, before any device.
+// ============================================================================
+//
+// A static model is arranged one of three ways by who draws it: per node (a viewer), merged to one mesh
+// an instance can place (a prop), or bundled into shared buffers (a big static scene, MeshBundler). The
+// first two share this arithmetic, which is why it lives on the import side and not in each consumer.
+{
+    static MeshData Quad(string name, float x)
+    {
+        var layout = VertexPosition3NormalTexture.Layout;
+        var floats = new List<float>();
+        foreach (var (px, py) in new[] { (0f, 0f), (1f, 0f), (1f, 1f), (0f, 1f) })
+        {
+            floats.AddRange(new[] { px + x, py, 0f, 0f, 0f, 1f, px, py });
+        }
+        var bytes = new byte[floats.Count * 4];
+        Buffer.BlockCopy(floats.ToArray(), 0, bytes, 0, bytes.Length);
+        return new MeshData(name, bytes, new ushort[] { 0, 1, 2, 0, 2, 3 }, layout,
+            new Bounds3(new Vector3(x, 0, 0), new Vector3(x + 1, 1, 0)));
+    }
+
+    var a = Quad("a", 0f);
+    var b = Quad("b", 0f);
+    var merged = new[] { (a, Matrix4x4.Identity), (b, Matrix4x4.CreateTranslation(5f, 0f, 0f)) }.Merge("ab");
+    t.Expect("BP.1 a merge concatenates vertices and re-bases the second part's indices",
+        merged.VertexCount == 8 && merged.IndexCount == 12 && merged.Indices[6] == 4 && merged.Indices[11] == 7,
+        $"{merged.VertexCount} vertices, indices {string.Join(",", merged.Indices)}");
+    t.Expect("BP.1 each part is moved by its own matrix, and the bounds follow",
+        merged.Bounds.Min == Vector3.Zero && merged.Bounds.Max == new Vector3(6f, 1f, 0f), merged.Bounds.ToString());
+    t.Expect("BP.1 attributes the merge does not move are copied as they were (the uv)",
+        BitConverter.ToSingle(merged.VertexBytes, 4 * 32 + 24) == 0f && BitConverter.ToSingle(merged.VertexBytes, 5 * 32 + 24) == 1f);
+
+    // Past 65535 vertices the indices must widen, or the second part draws the first part's vertices.
+    var big = new MeshData("big", new byte[40000 * 32], new ushort[] { 0, 1, 2 }, VertexPosition3NormalTexture.Layout,
+        new Bounds3(Vector3.Zero, Vector3.Zero));
+    var wide = new[] { (big, Matrix4x4.Identity), (big, Matrix4x4.Identity) }.Merge("wide");
+    t.Expect("BP.2 a merge past 65535 vertices widens to 32-bit indices",
+        wide.IndexFormat == IndexFormat.UInt32 && wide.Indices32![3] == 40000u, wide.IndexFormat.ToString());
+    var other = new MeshData("other", new byte[36], new ushort[] { 0 }, VertexPosition3NormalTexture2Color.Layout,
+        new Bounds3(Vector3.Zero, Vector3.Zero));
+    t.ExpectThrows("BP.2 parts in different vertex layouts are refused, naming them",
+        () => new[] { (a, Matrix4x4.Identity), (other, Matrix4x4.Identity) }.Merge("mixed"), mustMention: "layout");
+
+    // A parent translated by +10 on X with a child translated by +1: the child's world is +11, child first.
+    static GltfMaterial Plain(string id, string name) => new(
+        id, name, Vector4.One, null, 0, null, null, 0f, 0.7f, null, 1f, null, Vector3.Zero, 1f,
+        GltfAlphaMode.Opaque, 0.5f, false);
+    var red = Plain("t#material0", "red");
+    var blue = Plain("t#material1", "blue");
+    var nodes = new GltfNodeModel(new[]
+    {
+        new GltfNode("root", -1, Matrix4x4.CreateTranslation(10f, 0f, 0f), new[] { new GltfPrimitive(a, red) }),
+        new GltfNode("child", 0, Matrix4x4.CreateTranslation(1f, 0f, 0f),
+            new[] { new GltfPrimitive(a, blue), new GltfPrimitive(b, red) }),
+    });
+    var world = nodes.WorldTransforms();
+    t.Expect("BP.3 a node's world is its local composed with every ancestor's",
+        world[1].Translation == new Vector3(11f, 0f, 0f), world[1].Translation.ToString());
+    var byMaterial = nodes.Merged();
+    t.Expect("BP.3 Merged gives one mesh per material, in the order they are first met",
+        byMaterial.Count == 2 && byMaterial[0].Material == red && byMaterial[1].Material == blue
+        && byMaterial[0].Mesh.VertexCount == 8 && byMaterial[1].Mesh.VertexCount == 4,
+        string.Join(", ", byMaterial.Select(m => $"{m.Material?.Name}:{m.Mesh.VertexCount}")));
+    t.Expect("BP.3 each primitive lands at its node's world transform",
+        byMaterial[1].Mesh.Bounds.Min.X == 11f && byMaterial[0].Mesh.Bounds.Max.X == 12f,
+        $"{byMaterial[0].Mesh.Bounds} / {byMaterial[1].Mesh.Bounds}");
+}
+
 t.PrintSummary();
 return t.Failed;
 

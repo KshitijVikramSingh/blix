@@ -188,7 +188,7 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
         var vb = device.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(Cube.Vertices), "cube.vb");
         var ib = device.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
         var cube = new Mesh("cube", vb, ib, Cube.Indices.Length,
-            new Bounds3(new Vector3(-0.5f), new Vector3(0.5f)));
+            new Bounds3(new Vector3(-0.5f), new Vector3(0.5f)), VertexPosition3NormalTexture.Layout);
 
         // The runner supplies its own lit+fog instanced shader (world.vert/frag) +
         // pipeline; the engine's instancing layers only provide the per-instance
@@ -390,7 +390,7 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
             var ib = m.Indices32 is { } u32
                 ? device.CreateIndexBuffer(u32, name: $"{fileName}.ib")
                 : device.CreateIndexBuffer(m.Indices, name: $"{fileName}.ib");
-            return new Mesh(fileName, vb, ib, m.IndexCount, m.Bounds);
+            return new Mesh(fileName, vb, ib, m.IndexCount, m.Bounds, m.Layout);
         }
         catch (Exception ex)
         {

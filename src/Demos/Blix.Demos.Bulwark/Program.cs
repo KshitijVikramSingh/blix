@@ -249,7 +249,7 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
         var vb = device.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(Cube.Vertices), "cube.vb");
         var ib = device.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
         var cube = new Mesh("cube", vb, ib, Cube.Indices.Length,
-            new Bounds3(new Vector3(-0.5f), new Vector3(0.5f)));
+            new Bounds3(new Vector3(-0.5f), new Vector3(0.5f)), VertexPosition3NormalTexture.Layout);
 
         var meshLayout = new VertexLayout(
             Stride: VertexPosition3NormalTexture.Layout.Stride,
