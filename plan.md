@@ -20,23 +20,34 @@ and there is one reader of each fact instead of two (the occlusion strength that
 is the case). Tools that open an arbitrary `.glb` cook it on open into a cache. RTSGame loads no
 `.glb` at runtime.
 
-**The order is set by what the cooked form cannot say yet.** The flat cook writes a 32-byte
-position/normal/uv layout; asked for colour, the cooked loader fills white and copies uv0 into uv1.
-It is invisible today only because Studio reads the source whenever it wants colour. So the format
-has to carry the whole vertex before anything can depend on it:
+**Done** (branch `cooked-only`): MikkTSpace in the cook (046c780); the complete static vertex,
+`.blixmesh` v11, repacked to the layout a load asks for (2db2e0c); cook-on-open for tools,
+`CookCache` (83cecf5).
 
-1. **MikkTSpace in the cook.** `third_party/mikktspace` beside meshopt and bc7, built by
-   `Blix.Recipes`. Generated wherever TANGENT is absent, replacing both fallbacks (an arbitrary axis
-   perpendicular to N on static imports, zero on rigs). Held to a corpus asset with authored
-   tangents: strip them, regenerate, compare.
-2. **One complete cooked vertex.** Position, normal, tangent, uv0, uv1, colour on every static
-   primitive; the loader repacks it into the layout a caller asks for, as `Unbake` does now but
-   from real data. Carries MultiUVTest and the `vertexcolor`/`uv1` lab modes unchanged.
-3. **Cook-on-open for tools.** Studio's viewer and Shot, `inspect`, `check` and the lab baseline's
-   corpus modes cook into a cache keyed by the source's hash and load the result.
+**The format mirrors glTF's structure, not its encoding.** "Rig or static" is not a question glTF
+asks: every mesh reaches a scene through a node, and a rigged file is a scene graph in which some node
+has a skin. It was a split Blix made when it had two importers, and the cooked format inherited it —
+a static cook bakes world transforms into vertices and keeps the hierarchy as a side table that the
+loader un-bakes by inverse (lossy where a transform will not invert); a rig cook keeps no hierarchy at
+all, which is why TankArena still parses `tank.glb` at runtime. What stays Blix's is the encoding:
+the complete vertex, LOD chains, cooked images, patches applied, tangents generated. Accessors,
+buffer views and sparse data stay behind in the cook.
+
+1. **One scene graph in `.blixmesh` (v12).** A node table (hierarchy, local transforms, names) in
+   every file; meshes referenced by nodes, stored once however many nodes place them; vertices in
+   mesh space; skins as joint-node lists with inverse binds; clips targeting nodes. Splitting and LOD
+   error are computed at each node's world scale, so they stay in metres. Read as one `ModelData`.
+2. **One resident `Model`.** `Rig` folds into it: skins and clips are optional parts of a model, and
+   skinning-only members (`CreateBoneBuffers`, palette packing) refuse by name without a skin.
+   `device.CreateRig` goes. Drawing skinned, posed or at bind pose is a consumer's choice, not a type.
+3. **A cook configuration per project.** What a project decides about each asset it cooks — material
+   rules and normal-map conventions (today's `.blixpatch`), split, flipV — in one file the project
+   names, which the build, `blix cook` and the Sponza script all read. The stamp records each entry's
+   hash. No configuration means glTF's defaults. It is what a cook UI would one day edit.
 4. **The engine refuses a `.glb`**, naming the cook. The importers and SharpGLTF move out of `Blix`
-   to the cook side, and the CPU types stop being `Gltf*` (`ModelData`/`RigData`, the rename that
-   was deferred).
+   into a separate `Blix.Import` project the cook depends on; the data types lose `Gltf` (`ModelData`,
+   `MaterialData`, `TextureData`, `MaterialTextureLoader`, …) and load through their own entry points
+   (`ModelData.Load`).
 5. **Studio reads the vertex frame.** A static layout carrying tangent, colour and uv1, so the
    derivative frame in `studio_lit.frag` goes.
 
