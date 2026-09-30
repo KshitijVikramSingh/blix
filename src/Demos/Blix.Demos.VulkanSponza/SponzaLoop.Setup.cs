@@ -133,20 +133,7 @@ internal sealed partial class SponzaLoop
         // census speaks only for wherever the camera happens to start, which for a question like
         // "how much of this scene is occluded" is the difference between a measurement and an
         // anecdote.
-        if (args.String("cam") is { } cam)
-        {
-            var parts = cam.Split(',');
-            var numbers = new float[5];
-            if (parts.Length < 5 || !Enumerable.Range(0, 5).All(i =>
-                    float.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out numbers[i])))
-            {
-                throw new AppArgsException($"--cam expects x,y,z,yaw,pitch, got '{cam}'.");
-            }
-
-            cameraPosition = new Vector3(numbers[0], numbers[1], numbers[2]);
-            camYaw = numbers[3] * MathF.PI / 180f;
-            camPitch = numbers[4] * MathF.PI / 180f;
-        }
+        camera.ReadArgs(args);
         if (args.Flag("ab-flat")) { abFlat = true; abMode = "flat"; }
         if (args.String("ab") is { } ab)
         {
@@ -255,7 +242,7 @@ internal sealed partial class SponzaLoop
         // a load-time scan and why the application used to ship its shader sources at all.
         tunePanel = new ShaderTunablePanel(
             ShaderTunableSidecar.Load(Path.Combine(shaderDir, "lit.frag.spv")));
-        tuneObjects = new ObjectTunables(fog, shadows, render, ambient);
+        tuneObjects = new ObjectTunables(fog, shadows, render, ambient, camera);
 
         // --tune <uName>=<value>, repeatable. A shader dial that can only be reached from the
         // overlay cannot be measured, because an --ab run has no overlay.

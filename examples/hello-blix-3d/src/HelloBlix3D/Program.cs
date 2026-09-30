@@ -59,8 +59,9 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
     public static string Character => AppFiles.Asset("models", "Rogue.glb");
 
     private readonly StudioRenderer stage = new();
-    // Framed on the overlay's camera group and kept, like the look below.
-    private readonly StudioCamera camera = new(yaw: -0.29f, pitch: 0.21f, distance: 5.18f) { FieldOfView = 0.8f };
+    // The engine's camera: look, orbit, fly and zoom (see Drive). Framed round the character the way
+    // Studio frames its subjects; --cam, or F12's dump of it, puts it back anywhere.
+    private readonly CameraController camera = StudioFraming.Around(StudioFraming.SubjectCentre, -16.6f, 12f, 5.18f);
     private readonly Playback playback = new();
     private StudioRig rig = null!;
     private RigInstances body = null!;
@@ -84,9 +85,12 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
         look.Exposure = 0.5f;
         look.TonemapMode = TonemapCurve.Aces;
 
-        // The sun, the shadows, the sky and the camera are the stage's own [Tune] settings; the playback is ours.
+        // The sun, the shadows and the sky are the stage's own [Tune] settings, the camera's lens and feel are its own,
+        // and the playback is ours.
+        camera.FieldOfView = 0.8f;
         tunables = new ObjectTunables(playback, stage.Look, camera);
         tunables.Apply(args);
+        camera.ReadArgs(args);
 
         stage.Load(GraphicsDevice);
         rig = StudioRig.Load(GraphicsDevice, Character, stage.SkinnedProgram);
@@ -99,10 +103,8 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
 
     public override void OnUpdate(Time time)
     {
-        var input = Host.Input;
-        if (input[MouseButton.Left].Down) camera.Orbit(input.MouseDelta.X, input.MouseDelta.Y);
-        if (input.MouseWheel.Y != 0f) camera.Zoom(input.MouseWheel.Y);
-        if (input[Key.Escape].Pressed) Host.RequestClose();
+        camera.Drive(Host, (float)time.Delta);
+        if (Host.Input[Key.Escape].Pressed) Host.RequestClose();
 
         body.Driven.Subject.Clip = rig.Clip(playback.Clip) ?? body.Driven.Subject.Clip;
         body.Driven.Subject.Rate = playback.Speed;
@@ -123,8 +125,7 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
 
     public void Debug(DebugContext debug)
     {
-        debug.Keys.Describe("Left-drag", "orbit the camera");
-        debug.Keys.Describe("Wheel", "zoom");
+        camera.DescribeKeys(debug);
         debug.Keys.Describe(Key.Escape, "quit");
         tunables.BuildControls(debug);
     }

@@ -51,13 +51,11 @@ internal sealed partial class SponzaLoop
     // Controls are read-back: the returned value feeds this frame's render.
     public void Debug(DebugContext debug)
     {
-        // The keys this loop handles itself (Camera.cs), listed with the overlay hidden too.
-        debug.Keys.Describe("WASD", "move");
-        debug.Keys.Describe("Space / LeftControl", "up / down");
-        debug.Keys.Describe("Shift", "held, move three times faster");
+        // The camera's layout and its pasteable pose (--cam, so an observed frame can be replayed by the
+        // headless measurement and capture paths), then the keys this loop handles itself. Listed with
+        // the overlay hidden too, so F12 dumps carry them.
+        camera.DescribeKeys(debug);
         debug.Keys.Describe("Arrows", "look around");
-        debug.Keys.Describe("Right-drag", "look around");
-        debug.Keys.Describe("Wheel", "move speed");
         debug.Keys.Describe(Key.Escape, "quit");
 
         // Read-only values run even with the overlay hidden so F12 captures remain self-describing.
@@ -67,14 +65,6 @@ internal sealed partial class SponzaLoop
 
         // Live tuning, grouped by scope. Controls are read-back: the returned
         // value feeds this frame's render (Debug() runs before OnRender).
-        using (debug.Scope("Camera"))
-        {
-            // Keep the camera value pasteable as --cam so an observed frame can be replayed by the
-            // headless measurement and capture paths.
-            debug.Values.Value("--cam", string.Create(System.Globalization.CultureInfo.InvariantCulture,
-                $"{cameraPosition.X:0.##},{cameraPosition.Y:0.##},{cameraPosition.Z:0.##}," +
-                $"{camYaw * 180f / MathF.PI:0.##},{camPitch * 180f / MathF.PI:0.##}"));
-        }
 
         using (debug.Scope("Sun"))
         {

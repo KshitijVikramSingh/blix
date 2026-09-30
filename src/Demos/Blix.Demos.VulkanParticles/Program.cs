@@ -127,8 +127,18 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
     private readonly ShaderTextureBinding[] particleTextures = new ShaderTextureBinding[1];
 
     // Orbit camera state.
-    private float camYaw = 0.7f, camPitch = 0.30f, camRadius = 10.5f;
+    // The engine's camera controller, orbiting the emitters. Built in OnLoad, where the lens is known.
+    private CameraController camera = null!;
     private bool autoOrbit = true;
+
+    // Where the eye starts, and where R puts it back: round the target, a little above it.
+    private void ResetCamera()
+    {
+        var yaw = 0.7f; var elevation = 0.30f; const float radius = 10.5f;
+        var eye = CamTarget + new Vector3(
+            MathF.Cos(elevation) * MathF.Sin(yaw), MathF.Sin(elevation), MathF.Cos(elevation) * MathF.Cos(yaw)) * radius;
+        camera.LookAt(eye, CamTarget);
+    }
     private static readonly Vector3 CamTarget = new(0f, 2.2f, 0f);
     private Matrix4x4 viewProj;
     private Vector3 camRight, camUp, camPos;
@@ -152,6 +162,16 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
     {
         this.host = host;
         device = graphicsDevice;
+        // Held above the emitters and inside a sensible range, as the old orbit clamped it.
+        camera = new CameraController(new Camera3D { VerticalFieldOfView = MathF.PI / 3f, NearPlane = NearPlane, FarPlane = FarPlane })
+        {
+            MinPitch = -83f,
+            MaxPitch = 11.5f,
+            MinDistance = 4f,
+            MaxDistance = 30f,
+            Sensitivity = 0.006f,
+        };
+        ResetCamera();
         var shaderDir = AppFiles.Shaders;
 
         // --- Render graph ------------------------------------------------
@@ -320,7 +340,7 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
         ReadInput();
 
         var dt = MathF.Min((float)time.Delta, 1f / 30f);   // clamp the first big frame
-        if (autoOrbit) camYaw += dt * 0.25f;
+        if (autoOrbit) camera.OrbitBy(-dt * 0.25f, 0f);
         BuildCamera();
 
         EmitFountain();
@@ -419,18 +439,10 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
 
     private void BuildCamera()
     {
-        camPitch = Math.Clamp(camPitch, -0.2f, 1.45f);
-        camRadius = Math.Clamp(camRadius, 4f, 30f);
-        var cosP = MathF.Cos(camPitch);
-        camPos = CamTarget + new Vector3(
-            camRadius * cosP * MathF.Sin(camYaw),
-            camRadius * MathF.Sin(camPitch),
-            camRadius * cosP * MathF.Cos(camYaw));
-        var view = Matrix4x4.CreateLookAt(camPos, CamTarget, Vector3.UnitY);
-        var proj = GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, aspect, NearPlane, FarPlane);
-        viewProj = view * proj;
+        camPos = camera.Position;
+        viewProj = camera.ViewProjection(aspect);
 
-        var forward = Vector3.Normalize(CamTarget - camPos);
+        var forward = camera.Forward;
         camRight = Vector3.Normalize(Vector3.Cross(forward, Vector3.UnitY));
         camUp = Vector3.Cross(camRight, forward);
     }
@@ -573,7 +585,8 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
         using (debug.Scope("camera"))
         {
             debug.Values.Value("auto-orbit", autoOrbit);
-            debug.Values.Value("radius", camRadius);
+            debug.Values.Value("radius", camera.Distance);
+            debug.Values.Value("--cam", camera.Pose);
         }
 
         // Where each effect is anchored, as a layer that starts hidden (the Layers tab switches it).
@@ -601,25 +614,20 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
 
         if (input[Key.Escape].Pressed) host.RequestClose();
         if (input[Key.Space].Pressed) autoOrbit = !autoOrbit;
-        if (input[Key.R].Pressed) { camYaw = 0.7f; camPitch = 0.30f; camRadius = 10.5f; autoOrbit = true; }
-        if (input[Key.Left].Pressed || input[Key.A].Pressed) { camYaw -= 0.08f; autoOrbit = false; }
-        if (input[Key.Right].Pressed || input[Key.D].Pressed) { camYaw += 0.08f; autoOrbit = false; }
-        if (input[Key.Up].Pressed || input[Key.W].Pressed) { camPitch += 0.06f; autoOrbit = false; }
-        if (input[Key.Down].Pressed || input[Key.S].Pressed) { camPitch -= 0.06f; autoOrbit = false; }
-        if (input[Key.Q].Pressed) camRadius += 0.8f;
-        if (input[Key.E].Pressed) camRadius -= 0.8f;
+        if (input[Key.R].Pressed) { ResetCamera(); autoOrbit = true; }
+        // Keyboard steps round the emitters, a notch per press (the controller turns in radians).
+        if (input[Key.Left].Pressed || input[Key.A].Pressed) { camera.OrbitBy(0.08f, 0f); autoOrbit = false; }
+        if (input[Key.Right].Pressed || input[Key.D].Pressed) { camera.OrbitBy(-0.08f, 0f); autoOrbit = false; }
+        if (input[Key.Up].Pressed || input[Key.W].Pressed) { camera.OrbitBy(0f, -0.06f); autoOrbit = false; }
+        if (input[Key.Down].Pressed || input[Key.S].Pressed) { camera.OrbitBy(0f, 0.06f); autoOrbit = false; }
+        if (input[Key.Q].Pressed) camera.Distance += 0.8f;
+        if (input[Key.E].Pressed) camera.Distance -= 0.8f;
 
-        // The drag is the button's own state now. The `dragging` field this replaces was a copy of
-        // it, kept in step by hand across two callbacks.
-        var dragging = input[MouseButton.Left].Down;
+        // A left drag orbits and the wheel zooms, as everywhere the controller drives; a drag also stops
+        // the auto-orbit, which is this demo's own.
         if (input[MouseButton.Left].Pressed) autoOrbit = false;
-        if (dragging)
-        {
-            camYaw += input.MouseDelta.X * 0.006f;
-            camPitch += input.MouseDelta.Y * 0.006f;
-        }
-
-        camRadius -= input.MouseWheel.Y * 0.9f;
+        if (input[MouseButton.Left].Down && input.MouseDelta != Vector2.Zero) camera.Orbit(input.MouseDelta.X, input.MouseDelta.Y);
+        if (input.MouseWheel.Y != 0f) camera.Zoom(input.MouseWheel.Y);
     }
 
     // Window.Dispose disposes the loop after WaitIdle and before device teardown — the

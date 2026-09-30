@@ -292,7 +292,7 @@ field was.
 ```
 Program            parses args, owns the window
   ViewerLoop       the root: load, update, render, debug, input
-    StudioCamera      x2 — the window's view and the panel's viewport
+    CameraController  x2 — the window's view and the panel's viewport (StudioFraming frames them)
     RigAnimation     clocks, composition, palettes
     StudioSelection   what is selected, and what a click selects
     ViewerPanels   every panel, and the display state they toggle
@@ -306,7 +306,9 @@ them is how a lab grows a framework:
 
 - **Into `Blix.Tools.Studio` requires a second consumer.** `StudioCamera` went because the viewer had
   *two* cameras with duplicated orbit arithmetic — the §4 bar met without either copy leaving the
-  file. `RigAnimation` went because the capture tool had independently grown its own pose composition,
+  file. It has since left Studio altogether: Sponza, VulkanLit and Particles had written the same
+  camera again (fly or orbit, with two pitch conventions between them), so it is the engine's
+  `CameraController` now, driving a `Camera3D`, and `StudioFraming` keeps only Studio's framing. `RigAnimation` went because the capture tool had independently grown its own pose composition,
   root strip, palette packing and distinct-pose count; the viewer runs it live and the capture runs
   it a fixed step at a time, which is one set of decisions on two clocks.
 - **Staying in the executable needs no second consumer at all.** `StudioSelection` and `ViewerPanels`
@@ -431,6 +433,7 @@ letterboxed image in the UI.
 | Give the application its own UI panel | Implement `IUiSource` on the game loop; add an `ImGui.NET` package reference |
 | Add a panel to the diagnostics overlay instead | Implement `IDebugUi` on a registered contributor (`Blix.Diagnostics.Overlay`) |
 | Make things clickable in the overlay | Implement `IDebugSelectable` (on the loop or any contributor), giving each entity its `DebugPickGeometry` and a `Label`. With Pick ticked in the status bar or Alt held, a click selects what is under the cursor, exactly: the host draws every selectable's geometry into that one pixel and reads it back. Click the same spot again for what is behind it. The Selection tab shows `IDebugInspectable.Inspect` output; edits to the selection belong there, declared in `Inspect` and grouped with `debug.Scope(...)` |
+| Give an application a camera to look, orbit, fly and zoom | `Blix.CameraController` over a `Camera3D`: `Drive(host, dt)` for the default layout, `DescribeKeys(debug)` to list it, `ReadArgs(args)` for `--cam x,y,z,yaw,pitch` (degrees), `Pose` to print one |
 | Turn a click into a ray, in any view | `Blix.ViewPicking.RayThrough(view, pointer)` — panels and off-screen targets included. For a game's or a tool's own picking; the overlay's is the engine's |
 | Run bounded (CI, a smoke test, a capture) | `--frames N`, honoured by the host for every application |
 | Start a new executable | `src/Demos/Blix.Demos.Chassis/` is the smallest working one — 25-line csproj, no shader boilerplate |

@@ -707,7 +707,7 @@ internal sealed class ViewerPanels
             app.ViewportId,
             app.ViewportCamera,
             app.Host?.LogicalSize ?? (16, 9),
-            footer: $"frame {app.Frames} · yaw {app.ViewportCamera.Yaw:0.00} · " +
+            footer: $"frame {app.Frames} · yaw {app.ViewportCamera.Yaw:0}° · " +
                     $"{viewport.ImageSize.X:0}x{viewport.ImageSize.Y:0}");
 
         app.ViewportPanelSize = viewport.PanelSize;

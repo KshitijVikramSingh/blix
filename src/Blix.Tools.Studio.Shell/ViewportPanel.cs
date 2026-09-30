@@ -1,5 +1,6 @@
 using System.Numerics;
 using Blix.Tools.Studio;
+using Blix;
 using ImGuiNET;
 
 namespace Blix.Tools.Studio.Shell;
@@ -81,7 +82,7 @@ public sealed class ViewportPanel
     /// whose shape happened not to match.
     /// </param>
     /// <param name="footer">An optional line under the picture. The tool's words, not the shell's.</param>
-    public void Draw(nint textureId, StudioCamera camera, (int Width, int Height) targetSize, string? footer = null)
+    public void Draw(nint textureId, CameraController camera, (int Width, int Height) targetSize, string? footer = null)
     {
         ArgumentNullException.ThrowIfNull(camera);
 
@@ -98,11 +99,17 @@ public sealed class ViewportPanel
             return;
         }
 
+        // Degrees, and orbiting: a panel's camera turns round its subject, so a slider moves the eye
+        // round the pivot rather than turning it in place.
         var yaw = camera.Yaw;
         var pitch = camera.Pitch;
         var distance = camera.Distance;
-        if (ImGui.SliderFloat("yaw", ref yaw, -MathF.PI, MathF.PI)) camera.Yaw = yaw;
-        if (ImGui.SliderFloat("pitch", ref pitch, camera.MinPitch, camera.MaxPitch)) camera.Pitch = pitch;
+        const float toRadians = MathF.PI / 180f;
+        if (ImGui.SliderFloat("yaw", ref yaw, -180f, 180f, "%.0f°")) camera.OrbitBy((yaw - camera.Yaw) * toRadians, 0f);
+        if (ImGui.SliderFloat("pitch", ref pitch, camera.MinPitch, camera.MaxPitch, "%.0f°"))
+        {
+            camera.OrbitBy(0f, (pitch - camera.Pitch) * toRadians);
+        }
         if (ImGui.SliderFloat("dist", ref distance, camera.MinDistance, camera.MaxDistance))
         {
             camera.Distance = distance;

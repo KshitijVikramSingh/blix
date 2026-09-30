@@ -166,9 +166,10 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
     // <b>Two cameras, one class.</b> The window's view and the panel's viewport each carried their
     // own yaw/pitch/distance and their own copy of the spherical-to-cartesian arithmetic — the same
     // decision written twice inside one file, which is the §4 bar met without either copy leaving
-    // the building. StudioCamera owns the orbit; where a drag came from stays here, because the two
-    // arrive by genuinely different routes (the host for one, an ImGui item for the other).
-    private readonly StudioCamera camera = new(yaw: 0.7f, pitch: 0.45f, distance: 11f);
+    // the building. The engine's CameraController owns the orbit now (StudioFraming its Studio
+    // defaults); where a drag came from stays here, because the two arrive by genuinely different
+    // routes (the host for one, an ImGui item for the other).
+    private readonly CameraController camera = StudioFraming.Around(StudioFraming.SubjectCentre, 40.1f, 25.8f, 11f);
 
     // <b>A click is a press that did not become a drag.</b> Left-drag orbits, so selecting on the
     // press would fight the camera and selecting on every release would fire at the end of every
@@ -214,15 +215,18 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
     // proves nothing about views. Starts looking along a different axis so the two pictures are
     // obviously not the same picture.
     private nint viewportId;
-    private readonly StudioCamera viewportCamera = new(yaw: -1.4f, pitch: 0.25f, distance: 7f)
+    // Looking a little higher than the main view, and from the other side, so the two pictures are
+    // obviously not the same picture.
+    private readonly CameraController viewportCamera = PanelCamera();
+
+    private static CameraController PanelCamera()
     {
-        // Looking a little higher than the main view, and from the other side, so the two pictures
-        // are obviously not the same picture.
-        Target = new Vector3(0f, 1.2f, 0f),
-        MinDistance = 2.5f,
-        MaxDistance = 30f,
-        MinPitch = 0.05f,
-    };
+        var c = StudioFraming.Around(new Vector3(0f, 1.2f, 0f), -80.2f, 14.3f, 7f);
+        c.MinDistance = 2.5f;
+        c.MaxDistance = 30f;
+        c.MaxPitch = -2.9f;
+        return c;
+    }
 
     private Matrix4x4 viewportViewProjection = Matrix4x4.Identity;
     private Vector3 viewportCameraPosition;
@@ -305,7 +309,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
 
     internal StudioSelection Selection => selection;
 
-    internal StudioCamera ViewportCamera => viewportCamera;
+    internal CameraController ViewportCamera => viewportCamera;
 
     internal IReadOnlyList<(string Label, nint Id, int Width, int Height)> UiImages => uiImages;
 
@@ -351,6 +355,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         // because the things it also binds do not exist until the renderer has loaded. Without this
         // pass --image-based-lighting parsed, assigned, and changed nothing.
         new ObjectTunables(renderer.Look).Apply(args);
+        camera.ReadArgs(args);
 
         // Shaders arrive from Studio's content propagation — this executable
         // never compiled one.
@@ -632,7 +637,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
 
         // The viewport's own camera. Aspect comes from the PANEL, not the window — that is the
         // whole difference between a second view and a second copy of this one, and it is why
-        // StudioCamera takes the aspect rather than storing it.
+        // the camera controller takes the aspect rather than storing it.
         // <b>The TARGET's aspect, not the panel's.</b> The viewport target is half the swapchain on
         // both sides, so it carries the window's aspect; the panel then letterboxes the picture to
         // that same aspect. Projecting through the panel's aspect instead made three numbers out of

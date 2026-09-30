@@ -186,18 +186,15 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
     private float currentRotY;
     private float currentRotX;
 
-    // Debug state.
-    private Vector3 cameraPosition;
-    private float fovYRadians;
-
-    // Free-fly camera + input.
+    // The engine's camera controller (look, orbit, fly, zoom); the renderer reads the two names below.
     private IRenderHost host = null!;
-    private float camYaw;       // radians, around world +Y
-    private float camPitch;     // radians, around camera right
-    private bool mouseLook;     // true while RMB held (cursor captured)
-    private float moveSpeed = 3.5f;
+    private readonly CameraController camera = new(new Camera3D { VerticalFieldOfView = MathF.PI / 3f, NearPlane = 0.1f, FarPlane = 100f })
+    {
+        MoveSpeed = 3.5f,
+    };
+    private Vector3 cameraPosition => camera.Position;
+    private Vector3 cameraForward => camera.Forward;
     private float aspect = 16f / 9f;
-    private Vector3 cameraForward = -Vector3.UnitZ;
 
     // Debug views: which texture the present pass shows.
     private enum View { Final = 0, SunShadow = 1, SpotShadow = 2, SceneDepth = 3 }
@@ -249,11 +246,11 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
     internal bool  SunEnabled        { get => sunEnabled;      set => sunEnabled = value; }
     internal bool  SpotEnabled       { get => spotEnabled;     set => spotEnabled = value; }
     internal bool  PointEnabled      { get => pointEnabled;    set => pointEnabled = value; }
-    internal float MoveSpeed         { get => moveSpeed;       set => moveSpeed = value; }
+    internal float MoveSpeed         { get => camera.MoveSpeed; set => camera.MoveSpeed = value; }
     internal bool  AnimPaused        { get => animPaused;      set => animPaused = value; }
     internal int   ViewMode          { get => viewMode;        set => viewMode = value; }
     internal int   ShaderDebugMode   { get => shaderDebugMode; set => shaderDebugMode = value; }
-    internal float FovYRadians       { get => fovYRadians;     set => fovYRadians = value; }
+    internal float FovYRadians       { get => camera.FieldOfView; set => camera.FieldOfView = value; }
 
     internal static IReadOnlyList<string> ViewModeLabels       => ViewLabels;
     internal static IReadOnlyList<string> ShaderChannelOptions => ShaderChannelLabels;
@@ -642,15 +639,10 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         fullscreen = new FullscreenPass(device, "fullscreen");
 
         // --- Camera + transforms ----------------------------------------
-        cameraPosition = new Vector3(3.5f, 2.4f, 4.4f);
-        fovYRadians = MathF.PI / 3f;
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
 
-        // Derive initial yaw/pitch from the look-at direction so the
-        // free-fly camera starts pointed at the scene.
-        var dir = Vector3.Normalize(new Vector3(0.3f, 0.4f, 0) - cameraPosition);
-        camYaw = MathF.Atan2(dir.X, -dir.Z);
-        camPitch = MathF.Asin(Math.Clamp(dir.Y, -1f, 1f));
+        // Starts pointed at the scene, which also makes the scene the orbit pivot.
+        camera.LookAt(new Vector3(3.5f, 2.4f, 4.4f), new Vector3(0.3f, 0.4f, 0f));
         UpdateCamera();
 
         // Sun shadow VP — static (sun + scene bounds don't move).
@@ -733,36 +725,13 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         // ample and the cost disappears once PendingCount reaches zero.
         if (textureLoader is not null && textureLoader.PendingCount > 0) textureLoader.Drain(budgetMillis: 4.0);
 
-        // WASD = horizontal-plane move along view forward/right; Space /
-        // LeftControl = world up/down. Full-3D forward (W follows pitch).
-        var move = Vector3.Zero;
-        if (host.Input[Key.W].Down) move += cameraForward;
-        if (host.Input[Key.S].Down) move -= cameraForward;
-        var right = Vector3.Normalize(Vector3.Cross(cameraForward, Vector3.UnitY));
-        if (host.Input[Key.D].Down) move += right;
-        if (host.Input[Key.A].Down) move -= right;
-        if (host.Input[Key.Space].Down) move += Vector3.UnitY;
-        if (host.Input[Key.LeftControl].Down) move -= Vector3.UnitY;
-
-        if (move != Vector3.Zero)
-        {
-            cameraPosition += Vector3.Normalize(move) * moveSpeed * dt;
-        }
+        // The engine's layout: right-drag looks, WASD with Space and Ctrl flies, left-drag orbits the
+        // scene, the wheel zooms (or sets the flying speed while looking).
+        camera.Drive(host, dt);
         UpdateCamera();
     }
 
-    // Recompute forward + viewProj from yaw/pitch/position/aspect.
-    private void UpdateCamera()
-    {
-        var cp = MathF.Cos(camPitch);
-        cameraForward = Vector3.Normalize(new Vector3(
-            cp * MathF.Sin(camYaw),
-            MathF.Sin(camPitch),
-            -cp * MathF.Cos(camYaw)));
-        var view = Matrix4x4.CreateLookAt(cameraPosition, cameraPosition + cameraForward, Vector3.UnitY);
-        var proj = GraphicsMatrices.CreatePerspectiveVulkan(fovYRadians, aspect, 0.1f, 100f);
-        viewProj = view * proj;
-    }
+    private void UpdateCamera() => viewProj = camera.ViewProjection(aspect);
 
     public void OnResize(int width, int height)
     {
@@ -791,31 +760,7 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         if (input[Key.Down].Pressed) exposure = Math.Clamp(exposure * 0.8f, 0.05f, 16f);
         if (input[Key.Escape].Pressed) host.RequestClose();
 
-        // Cursor capture follows the button's own state, rather than a bool kept in step with it
-        // across two callbacks.
-        var look = input[MouseButton.Right].Down;
-        if (look != mouseLook)
-        {
-            mouseLook = look;
-            host.SetCursorCaptured(look);
-        }
-
-        if (mouseLook && input.MouseDelta != Vector2.Zero)
-        {
-            const float sensitivity = 0.0035f;
-            camYaw += input.MouseDelta.X * sensitivity;
-            camPitch -= input.MouseDelta.Y * sensitivity;
-            // Clamp pitch just shy of vertical to avoid gimbal flip.
-            var limit = MathF.PI / 2f - 0.01f;
-            camPitch = Math.Clamp(camPitch, -limit, limit);
-            UpdateCamera();
-        }
-
-        // Scroll adjusts fly speed (1.25×/0.8× per notch), clamped sane.
-        if (input.MouseWheel.Y != 0f)
-        {
-            moveSpeed = Math.Clamp(moveSpeed * (input.MouseWheel.Y > 0 ? 1.25f : 0.8f), 0.3f, 40f);
-        }
+        // The mouse, the cursor capture and the wheel are the camera controller's (Drive, in OnUpdate).
     }
 
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
@@ -1129,9 +1074,7 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         debug.Values.Value("frame", frameCount);
 
         // The keys this loop handles itself (ReadInput, OnUpdate); the rest are bound on controls.
-        debug.Keys.Describe("WASD", "move");
-        debug.Keys.Describe("Space / LeftControl", "up / down");
-        debug.Keys.Describe("Right-drag", "look around");
+        camera.DescribeKeys(debug);
         debug.Keys.Describe("Up / Down", "exposure up / down");
         debug.Keys.Describe(Key.Escape, "quit");
 
@@ -1167,9 +1110,9 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
             // "camera-tuning" scope.
             debug.Values.Value("position", cameraPosition);
             debug.Values.Value("forward", cameraForward);
-            debug.Values.Value("yaw-rad", camYaw);
-            debug.Values.Value("pitch-rad", camPitch);
-            debug.Values.Value("fovY-rad", fovYRadians);
+            debug.Values.Value("yaw-deg", camera.Yaw);
+            debug.Values.Value("pitch-deg", camera.Pitch);
+            debug.Values.Value("fovY-rad", camera.FieldOfView);
             debug.Values.Value("view", ViewLabels[viewMode]);
         }
 
