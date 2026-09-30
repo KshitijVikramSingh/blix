@@ -158,6 +158,74 @@ print(f"  derived MultiUVTest_uv1.gltf ({n} material(s) repointed to texCoord 1)
 PY
 fi
 
+# RiggedSimple carries one skinned cylinder and nothing else, so no rig in the corpus has a static
+# part or an attachment whose material is anything but opaque. This adds quads that differ only in
+# alpha, so a reader that ignores alpha on them draws all of them solid:
+#   static  mask_kept     MASK, alpha 0.7 against a 0.5 cutoff — must survive
+#   static  mask_dropped  MASK, alpha 0.3 — must be discarded, and cast nothing
+#   static  blended       BLEND, alpha 0.5 — must be translucent, and cast nothing
+#   joint   attach_kept / attach_dropped — the same pair riding the bone (shot --attach both)
+# One quad kept beside one dropped is what separates "the cutout works" from "the part was not drawn".
+RS="$DEST/sample-assets/RiggedSimple/RiggedSimple.glb"
+if [ -f "$RS" ] && [ ! -s "$DEST/sample-assets/RiggedSimple/RiggedSimple_cutout.gltf" ]; then
+    python3 - "$RS" <<'PY'
+import base64, json, struct, sys
+p = sys.argv[1]
+raw = open(p, "rb").read()
+json_len = struct.unpack("<I", raw[12:16])[0]
+d = json.loads(raw[20:20 + json_len])
+bin_at = 20 + json_len
+bin_len = struct.unpack("<I", raw[bin_at:bin_at + 4])[0]
+blob = bytearray(raw[bin_at + 8:bin_at + 8 + bin_len])
+if len(d.get("skins", [])) != 1 or len(d.get("buffers", [])) != 1:
+    sys.exit("RiggedSimple changed shape upstream — one skin and one buffer expected")
+
+def view(data, target):
+    while len(blob) % 4: blob.append(0)
+    d["bufferViews"].append({"buffer": 0, "byteOffset": len(blob), "byteLength": len(data), "target": target})
+    blob.extend(data)
+    return len(d["bufferViews"]) - 1
+
+# One quad, 2 x 3 in its node's XY plane, facing +Z; shared by every node that places it.
+pos = [(-1, 0, 0), (1, 0, 0), (1, 3, 0), (-1, 3, 0)]
+positions = view(b"".join(struct.pack("<3f", *v) for v in pos), 34962)
+normals = view(struct.pack("<3f", 0, 0, 1) * 4, 34962)
+indices = view(struct.pack("<6H", 0, 1, 2, 0, 2, 3), 34963)
+d["accessors"] += [
+    {"bufferView": positions, "componentType": 5126, "count": 4, "type": "VEC3", "min": [-1, 0, 0], "max": [1, 3, 0]},
+    {"bufferView": normals, "componentType": 5126, "count": 4, "type": "VEC3"},
+    {"bufferView": indices, "componentType": 5123, "count": 6, "type": "SCALAR"},
+]
+pa, na, ia = len(d["accessors"]) - 3, len(d["accessors"]) - 2, len(d["accessors"]) - 1
+
+def material(name, mode, alpha, colour):
+    m = {"name": name, "alphaMode": mode, "doubleSided": True,
+         "pbrMetallicRoughness": {"baseColorFactor": [*colour, alpha], "metallicFactor": 0.0}}
+    if mode == "MASK": m["alphaCutoff"] = 0.5
+    d["materials"].append(m)
+    d["meshes"].append({"name": name, "primitives": [{"attributes": {"POSITION": pa, "NORMAL": na}, "indices": ia, "material": len(d["materials"]) - 1}]})
+    return len(d["meshes"]) - 1
+
+def node(name, mesh, translation, parent=None):
+    d["nodes"].append({"name": name, "mesh": mesh, "translation": translation})
+    at = len(d["nodes"]) - 1
+    if parent is None: d["scenes"][0]["nodes"].append(at)
+    else: d["nodes"][parent].setdefault("children", []).append(at)
+
+node("mask_kept", material("mask_kept", "MASK", 0.7, (0.9, 0.2, 0.2)), [3, 0, 0])
+node("mask_dropped", material("mask_dropped", "MASK", 0.3, (0.2, 0.2, 0.9)), [5.5, 0, 0])
+node("blended", material("blended", "BLEND", 0.5, (0.9, 0.8, 0.1)), [8, 0, 0])
+joint = d["skins"][0]["joints"][0]
+node("attach_kept", material("attach_kept", "MASK", 0.7, (0.9, 0.2, 0.9)), [0, 0, 2], joint)
+node("attach_dropped", material("attach_dropped", "MASK", 0.3, (0.2, 0.9, 0.9)), [0, 0, -2], joint)
+
+d["buffers"] = [{"byteLength": len(blob), "uri": "data:application/octet-stream;base64," + base64.b64encode(bytes(blob)).decode()}]
+out = p.replace("RiggedSimple.glb", "RiggedSimple_cutout.gltf")
+json.dump(d, open(out, "w"), indent=1)
+print("  derived RiggedSimple_cutout.gltf (3 static quads, 2 attachments, differing only in alpha)")
+PY
+fi
+
 echo
 echo "corpus at $DEST — $((planned - failed)) fetched, $failed missing, $(find "$DEST" -type f | wc -l | tr -d ' ') file(s) total"
 [ "$failed" -eq 0 ]

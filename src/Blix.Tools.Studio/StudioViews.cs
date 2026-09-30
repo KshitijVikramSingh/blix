@@ -189,12 +189,23 @@ public sealed class RigView : IStudioView
         var casterOnly = draw.Pass == StudioPass.Shadow;
         var stride = (float)Rig.Skeleton.BoneCount;
 
-        // Opaque then blended, for the same reason ModelView sweeps twice.
+        // Opaque then blended, for the same reason ModelView sweeps twice — and across all three kinds
+        // of part, so a blended attachment or static part draws after every opaque surface of the body.
         for (var pass = 0; pass < 2; pass++)
+        {
+            var blendedGroup = pass == 1;
+            DrawSkinned(draw, casterOnly, stride, blendedGroup);
+            DrawAttachments(draw, casterOnly, blendedGroup);
+            DrawStaticParts(draw, casterOnly, blendedGroup);
+        }
+    }
+
+    private void DrawSkinned(in StudioDraw draw, bool casterOnly, float stride, bool blendedGroup)
+    {
         foreach (var part in Studio(draw).Parts)
         {
             var blended = StudioAlpha.IsBlended(part.AlphaMode);
-            if (blended != (pass == 1)) continue;
+            if (blended != blendedGroup) continue;
             if (casterOnly && blended) continue;
 
             byte[] push;
@@ -245,29 +256,32 @@ public sealed class RigView : IStudioView
                     : Studio(draw).BoneMaterial,
                 pushConstants: push);
         }
-
-        DrawAttachments(draw, casterOnly);
-        DrawStaticParts(draw, casterOnly);
     }
 
     // Static rig parts use the standard rigid pipeline and are always drawn. Attachments are
     // caller-selected because several authored options may occupy the same joint.
-    private void DrawStaticParts(in StudioDraw draw, bool casterOnly)
+    private void DrawStaticParts(in StudioDraw draw, bool casterOnly, bool blendedGroup)
     {
         if (Studio(draw).StaticParts.Count == 0) return;
 
         var push = casterOnly ? attachCaster : attachLit;
         foreach (var part in Studio(draw).StaticParts)
         {
+            var blended = StudioAlpha.IsBlended(part.AlphaMode);
+            if (blended != blendedGroup) continue;
+            if (casterOnly && blended) continue;
+
             // No joint, so no joint world: the node's own world matrix and the body's placement.
+            var cutoff = StudioAlpha.CutoffFor(part.AlphaMode, part.AlphaCutoff);
             StudioPush.Matrix(part.WorldTransform * Placement, push);
-            if (casterOnly) StudioPush.CasterCutout(push, 0f, 1f);
-            else StudioPush.Material(push, Colour(part.MaterialName, part.BaseColour), part.Metallic, part.Roughness, part.Surface);
+            if (casterOnly) StudioPush.CasterCutout(push, cutoff, part.BaseAlpha, part.AlbedoUvSet);
+            else StudioPush.Material(push, Colour(part.MaterialName, part.BaseColour), part.Metallic, part.Roughness,
+                     part.Surface, alphaCutoff: cutoff, baseAlpha: part.BaseAlpha, albedoUvSet: part.AlbedoUvSet);
 
             draw.Scope.DrawIndexed(
                 vertexBuffer: part.Vertices,
                 indexBuffer: part.Indices,
-                pipeline: draw.Pipeline,
+                pipeline: blended && draw.BlendPipeline.Id != 0 ? draw.BlendPipeline : draw.Pipeline,
                 indexCount: part.IndexCount,
                 uniforms: draw.Uniforms,
                 textures: draw.WithSurface(part.Surface),
@@ -275,7 +289,7 @@ public sealed class RigView : IStudioView
         }
     }
 
-    private void DrawAttachments(in StudioDraw draw, bool casterOnly)
+    private void DrawAttachments(in StudioDraw draw, bool casterOnly, bool blendedGroup)
     {
         if (Studio(draw).Attachments.Count == 0) return;
         if (InstanceBoneWorlds is null && BoneWorlds is null) return;
@@ -297,13 +311,14 @@ public sealed class RigView : IStudioView
                 ? Placements[body]
                 : Placement;
 
-            DrawAttachmentsFor(draw, casterOnly, worlds, visible, placement, attachPush);
+            DrawAttachmentsFor(draw, casterOnly, blendedGroup, worlds, visible, placement, attachPush);
         }
     }
 
     private void DrawAttachmentsFor(
         in StudioDraw draw,
         bool casterOnly,
+        bool blendedGroup,
         IReadOnlyList<Matrix4x4> worlds,
         ISet<string> visible,
         Matrix4x4 placement,
@@ -313,20 +328,26 @@ public sealed class RigView : IStudioView
         {
             if (!visible.Contains(attachment.Name)) continue;
             if ((uint)attachment.JointIndex >= (uint)worlds.Count) continue;
+            var blended = StudioAlpha.IsBlended(attachment.AlphaMode);
+            if (blended != blendedGroup) continue;
+            if (casterOnly && blended) continue;
 
             // local -> joint -> world. Row-vector, left to right, the same direction the hierarchy
             // walk composes in — a transposed multiply here puts the knife in the right place on a
             // rig with no rotation and nowhere near it on one with any.
             var model = attachment.LocalTransform * worlds[attachment.JointIndex] * placement;
 
+            var cutoff = StudioAlpha.CutoffFor(attachment.AlphaMode, attachment.AlphaCutoff);
             StudioPush.Matrix(model, attachPush);
-            if (casterOnly) StudioPush.CasterCutout(attachPush, 0f, 1f);
-            else StudioPush.Material(attachPush, Colour(attachment.MaterialName, attachment.BaseColour), attachment.Metallic, attachment.Roughness, attachment.Surface);
+            if (casterOnly) StudioPush.CasterCutout(attachPush, cutoff, attachment.BaseAlpha, attachment.AlbedoUvSet);
+            else StudioPush.Material(attachPush, Colour(attachment.MaterialName, attachment.BaseColour), attachment.Metallic,
+                     attachment.Roughness, attachment.Surface, alphaCutoff: cutoff, baseAlpha: attachment.BaseAlpha,
+                     albedoUvSet: attachment.AlbedoUvSet);
 
             draw.Scope.DrawIndexed(
                 vertexBuffer: attachment.Vertices,
                 indexBuffer: attachment.Indices,
-                pipeline: draw.Pipeline,
+                pipeline: blended && draw.BlendPipeline.Id != 0 ? draw.BlendPipeline : draw.Pipeline,
                 indexCount: attachment.IndexCount,
                 uniforms: draw.Uniforms,
                 textures: draw.WithSurface(attachment.Surface),

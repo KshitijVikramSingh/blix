@@ -60,7 +60,8 @@ internal sealed class StudioRig : IDisposable
     /// <summary>A static mesh carried by a joint — a knife in a hand, a cape on a chest.</summary>
     /// <remarks>
     /// Attachments use the standard lit pipeline and a model matrix composed from their joint world
-    /// transform; they do not consume the skinned palette as vertex data.
+    /// transform; they do not consume the skinned palette as vertex data. Their alpha is the
+    /// material's, as a skinned part's is: MASK discards, BLEND draws in the blended group.
     /// </remarks>
     public readonly record struct Attachment(
         string Name,
@@ -74,11 +75,17 @@ internal sealed class StudioRig : IDisposable
         float Metallic,
         float Roughness,
         StudioSurface Surface,
+        /// <summary>Which TEXCOORD set this part's albedo samples — 0 for almost everything.</summary>
+        int AlbedoUvSet = 0,
+        /// <summary>The material's <c>baseColorFactor.a</c>, which the cutout test multiplies in.</summary>
+        float BaseAlpha = 1f,
+        AlphaMode AlphaMode = AlphaMode.Opaque,
+        float AlphaCutoff = 0.5f,
         /// <summary>The material's own name, which application-owned tint policy keys on.</summary>
         string MaterialName = "");
 
     /// <summary>Static geometry carried by the asset that follows no joint, at its authored world transform.</summary>
-    /// <remarks>Excluded from the attachment picker.</remarks>
+    /// <remarks>Excluded from the attachment picker. Its alpha is the material's, as an attachment's is.</remarks>
     public readonly record struct StaticPart(
         string Name,
         Matrix4x4 WorldTransform,
@@ -89,6 +96,12 @@ internal sealed class StudioRig : IDisposable
         float Metallic,
         float Roughness,
         StudioSurface Surface,
+        /// <summary>Which TEXCOORD set this part's albedo samples — 0 for almost everything.</summary>
+        int AlbedoUvSet = 0,
+        /// <summary>The material's <c>baseColorFactor.a</c>, which the cutout test multiplies in.</summary>
+        float BaseAlpha = 1f,
+        AlphaMode AlphaMode = AlphaMode.Opaque,
+        float AlphaCutoff = 0.5f,
         /// <summary>The material's own name, which application-owned tint policy keys on.</summary>
         string MaterialName = "");
 
@@ -168,7 +181,11 @@ internal sealed class StudioRig : IDisposable
             studio.staticParts.Add(new StaticPart(
                 siblings.Count > 1 ? $"{node.Name}.{siblings.IndexOf(p)}" : node.Name, node.World, p.Mesh.VertexBuffer, p.Mesh.IndexBuffer, p.Mesh.IndexCount, BaseColourOf(m),
                 m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness, StudioSurface.Of(m, p.Textures),
-                m?.Name ?? string.Empty));
+                AlbedoUvSet: m?.BaseColorTexCoord ?? 0,
+                BaseAlpha: m?.BaseColorFactor.W ?? 1f,
+                AlphaMode: m?.AlphaMode ?? AlphaMode.Opaque,
+                AlphaCutoff: m?.AlphaCutoff ?? 0.5f,
+                MaterialName: m?.Name ?? string.Empty));
         }
 
         foreach (var a in studio.rig.Attachments)
@@ -177,7 +194,12 @@ internal sealed class StudioRig : IDisposable
             studio.attachments.Add(new Attachment(
                 a.Name, a.JointName, a.JointIndex, a.Local, a.Part.Mesh.VertexBuffer, a.Part.Mesh.IndexBuffer, a.Part.Mesh.IndexCount,
                 BaseColourOf(m), m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness,
-                StudioSurface.Of(m, a.Part.Textures), m?.Name ?? string.Empty));
+                StudioSurface.Of(m, a.Part.Textures),
+                AlbedoUvSet: m?.BaseColorTexCoord ?? 0,
+                BaseAlpha: m?.BaseColorFactor.W ?? 1f,
+                AlphaMode: m?.AlphaMode ?? AlphaMode.Opaque,
+                AlphaCutoff: m?.AlphaCutoff ?? 0.5f,
+                MaterialName: m?.Name ?? string.Empty));
         }
 
         for (var s = 0; s < studio.rig.Skins.Count; s++)
