@@ -65,19 +65,17 @@ public sealed class DebugDrawChannel
     /// still happens, and drawing outside a scope still throws.
     /// </remarks>
     /// <remarks>
-    /// <b>Both rectangles are the framebuffer's, which is only right when they agree.</b>
-    /// <see cref="RenderFrameContext"/> is PHYSICAL pixels — 2x logical on a Retina display — and a
-    /// pointer arrives in logical ones. So a view declared this way and then picked through is off by
-    /// the backing scale, which is the exact bug a view carrying both rectangles exists to prevent.
-    /// <para>
-    /// Fine for drawing, where only the matrix matters. An application that PICKS through a view should
-    /// declare it with the overload below, passing <see cref="IRenderHost.LogicalSize"/> for the logical
-    /// rectangle — the host is the only thing that knows the scale.
-    /// </para>
+    /// <b>Each rectangle is the right one.</b> <see cref="RenderFrameContext"/> is PHYSICAL pixels — 2x
+    /// logical on a Retina display — and a pointer arrives in logical ones, which the host passes to
+    /// <see cref="DebugSystem.BeginFrame"/>. This used to take the framebuffer for both, which was fine
+    /// for drawing and off by the backing scale for a click; it did not matter while every application
+    /// built its own pick ray, and would have the moment the engine picked through it.
     /// </remarks>
     public ViewDeclaration Declare(string name, Matrix4x4 viewProjection) =>
         context.State.Views.Declare(
-            name, viewProjection, RenderSurfaceHandle.Default, context.Frame.Width, context.Frame.Height);
+            name, viewProjection, RenderSurfaceHandle.Default,
+            new Rect(0f, 0f, context.LogicalSize.Width, context.LogicalSize.Height),
+            new Rect(0f, 0f, context.Frame.Width, context.Frame.Height));
 
     /// <summary>Declares a view onto an explicit surface and rectangle.</summary>
     public ViewDeclaration Declare(

@@ -99,7 +99,7 @@ public sealed class DebugOverlayUi
                 var openDummy = true;
                 if (ImGui.BeginTabItem("Selection", ref openDummy, tabFlags))
                 {
-                    DrawSelectionTab(debugSystem, selPath, values);
+                    DrawSelectionTab(debugSystem, selPath, values, controls, interactive);
                     ImGui.EndTabItem();
                 }
             }
@@ -141,9 +141,12 @@ public sealed class DebugOverlayUi
                 ImGui.EndTabItem();
             }
 
-            if (controls.Count > 0 && ImGui.BeginTabItem("Controls"))
+            // An edit that applies to the selection lives on the Selection tab and nowhere else: the
+            // same slider in the general list reads as a setting for the whole scene.
+            var generalControls = controls.Where(c => !IsSelectionScope(c.Scope)).ToArray();
+            if (generalControls.Length > 0 && ImGui.BeginTabItem("Controls"))
             {
-                DrawControls(debugSystem, controls, interactive);
+                DrawControls(debugSystem, generalControls, interactive);
                 ImGui.EndTabItem();
             }
 
@@ -226,7 +229,24 @@ public sealed class DebugOverlayUi
         // text length to its left.
         var btnText = interactive ? "Freeze" : "Unfreeze";
         var btnWidth = ImGui.CalcTextSize(btnText).X + ImGui.GetStyle().FramePadding.X * 2.0f;
-        RightAlignNextWidget(btnWidth);
+        // Pick mode sits beside it, and only when something can be picked.
+        var canPick = debugSystem.Contributors.Any(c => c is IDebugSelectable);
+        const string PickLabel = "Pick";
+        var pickWidth = canPick
+            ? ImGui.GetFrameHeight() + ImGui.GetStyle().ItemInnerSpacing.X + ImGui.CalcTextSize(PickLabel).X
+              + ImGui.GetStyle().ItemSpacing.X
+            : 0f;
+        RightAlignNextWidget(btnWidth + pickWidth);
+        if (canPick)
+        {
+            var pick = debugSystem.State.PickMode;
+            if (ImGui.Checkbox(PickLabel, ref pick)) debugSystem.State.PickMode = pick;
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Click to select what is under the pointer. Or hold Alt and click.");
+            }
+            ImGui.SameLine();
+        }
         if (ImGui.SmallButton(btnText))
         {
             if (interactive)
@@ -279,7 +299,9 @@ public sealed class DebugOverlayUi
         return "…" + s[^(max - 1)..];
     }
 
-    private void DrawSelectionTab(DebugSystem debugSystem, string selPath, IReadOnlyList<DebugValueEntry> values)
+    private void DrawSelectionTab(
+        DebugSystem debugSystem, string selPath, IReadOnlyList<DebugValueEntry> values,
+        IReadOnlyList<DebugControlEntry> controls, bool interactive)
     {
         ImGui.TextUnformatted(selPath);
         var clearWidth = ImGui.CalcTextSize("Clear").X + ImGui.GetStyle().FramePadding.X * 2.0f;
@@ -290,14 +312,45 @@ public sealed class DebugOverlayUi
         }
         ImGui.Separator();
 
+        // What an inspector declared for the selection (IDebugInspectable.Inspect, under the selection
+        // scope), grouped by where it declared it: an inspector that writes
+        // `using (debug.Scope("LOD"))` gets a LOD group holding both its readouts and its edits, so an
+        // edit sits beside the numbers it changes. Anything declared at the top goes in the default group,
+        // drawn first and without a heading.
         var hits = SelectionValues(values);
-        if (hits.Count == 0)
+        var edits = controls.Where(c => IsSelectionScope(c.Scope)).ToArray();
+        if (hits.Count == 0 && edits.Length == 0)
         {
             ImGui.TextDisabled("(no inspector data for this entity yet)");
             return;
         }
-        DrawValues(hits);
+
+        var groups = hits.Select(v => SelectionGroup(v.Scope))
+            .Concat(edits.Select(c => SelectionGroup(c.Scope)))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(g => g.Length == 0 ? 0 : 1)
+            .ThenBy(g => g, StringComparer.Ordinal);
+        foreach (var group in groups)
+        {
+            var named = group.Length > 0;
+            if (named && !ImGui.TreeNodeEx(group, ImGuiTreeNodeFlags.DefaultOpen)) continue;
+            foreach (var value in hits)
+            {
+                if (SelectionGroup(value.Scope) == group) ImGui.TextUnformatted($"{value.Name}: {value.Value}");
+            }
+
+            foreach (var edit in edits)
+            {
+                if (SelectionGroup(edit.Scope) == group) DrawControl(debugSystem, edit, interactive);
+            }
+
+            if (named) ImGui.TreePop();
+        }
     }
+
+    // "selection/LOD" -> "LOD"; "selection" -> "" (the default group).
+    private static string SelectionGroup(string scope) =>
+        scope.Length <= SelectionScopeRoot.Length ? string.Empty : scope[(SelectionScopeRoot.Length + 1)..];
 
     // True if any registered contributor wants a custom panel. Cheap
     // walk; used only to gate showing the "Custom" tab so demos without

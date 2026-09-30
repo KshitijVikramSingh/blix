@@ -73,7 +73,7 @@ public static class Program
     }
 }
 
-internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDisposable
+internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelectable, IDebugInspectable, IDisposable
 {
     public string DebugName => "vulkan-sponza";
 
@@ -81,6 +81,26 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDisposable
     private readonly AppArgs args;
 
     public SponzaLoop(AppArgs args) => this.args = args;
+
+    // The engine picks and highlights; these say what there is to pick. See SceneSelection.
+    public void CollectSelectables(List<DebugSelectable> destination) => sceneSelection.CollectSelectables(destination);
+
+    public bool TryGetBounds(string entityPath, out Bounds3 bounds) => sceneSelection.TryGetBounds(entityPath, out bounds);
+
+    // What the primitive is, then the one edit that belongs to it: its LOD margin, which coarsens or
+    // sharpens that primitive alone against the global budget. Declared here so it sits on the
+    // Selection tab beside what it edits. Nothing is saved.
+    public void Inspect(string entityPath, DebugContext debug)
+    {
+        sceneSelection.Inspect(entityPath, debug);
+        if (TryResolveMargin(entityPath, out var margins, out var at))
+        {
+            using (debug.Scope("LOD"))
+            {
+                margins[at] = debug.Controls.Float("margin (×px)", margins[at], 0f, 8f);
+            }
+        }
+    }
 
     private IRenderHost host = null!;
     private IGraphicsDevice device = null!;
@@ -809,15 +829,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDisposable
     private Vector3 foliageCentre;
     private bool foliageValid;
     private bool mouseLook;
-    private float lastMouseX, lastMouseY;   // latest cursor pos (for click-to-pick)
-    // Diagnostics selection: a contributor registered after consolidation so a
-    // left-click ray-picks a primitive and the Selection panel can inspect it.
-    private Blix.Diagnostics.DebugSystem? debugSystem;
+    // What a pick can land on, rebuilt after consolidation. The loop answers the engine's selection
+    // and inspection hooks by handing them to it (below); the engine does the picking.
     private readonly SceneSelection sceneSelection = new();
-    // Live multi-selection (ephemeral): set of picked entity paths + the primary
-    // (last-picked, gets the framework highlight + inspector). Cmd-click adds.
-    private readonly HashSet<string> selection = new();
-    private string? primarySelection;
     // Per-drawable LOD error-margin multipliers (×global px budget), keyed by
     // drawable index — parallel to opaque/blend drawables, default 1.0. Live,
     // ephemeral; edited via the Selection panel, consumed by PickLod.
@@ -838,7 +852,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDisposable
     private const float CameraCullMargin = 0.5f;
     /// <summary>--no-hashed-alpha: use binary rather than hashed cutouts at one sample.</summary>
     private bool hashedAlpha = true;
-    private static readonly GraphicsColor MultiSelectColor = new(0.95f, 0.75f, 0.2f, 1f);
     private Matrix4x4 viewProj;
 
     // Sun travel direction, recomputed from overlay yaw/pitch. A cooked probe with a detected sun
@@ -1008,13 +1021,11 @@ internal sealed class RenderSettings
 
 // Pickable scene primitives for the diagnostics overlay. Built after geometry
 // consolidation: one DebugSelectable per drawable, keyed by a session-stable
-// path. Implements the engine's selection + inspection hooks so a click
-// ray-picks a primitive and the Selection panel shows its identity + LOD info.
-// Selection is live debug state only — nothing persists.
-internal sealed class SceneSelection : IDebugSelectable, IDebugInspectable
+// path. The loop hands the engine's selection and inspection hooks to it, so
+// the engine's pick lands on a primitive and the Selection panel shows its
+// identity and LOD info. Selection is live debug state only — nothing persists.
+internal sealed class SceneSelection
 {
-    public string DebugName => "scene";
-
     private readonly List<DebugSelectable> selectables = new();
     private readonly Dictionary<string, Entry> byPath = new();
     private readonly record struct Entry(string Name, Bounds3 Bounds, int LodLevels, float MaxError);
@@ -1033,7 +1044,7 @@ internal sealed class SceneSelection : IDebugSelectable, IDebugInspectable
 
     public void CollectSelectables(List<DebugSelectable> destination) => destination.AddRange(selectables);
 
-    // Bounds for a path (for the demo to draw multi-select highlights).
+    // By path, which is what keeps the engine's highlight from walking every primitive each frame.
     public bool TryGetBounds(string entityPath, out Bounds3 bounds)
     {
         if (byPath.TryGetValue(entityPath, out var e)) { bounds = e.Bounds; return true; }
@@ -1047,7 +1058,12 @@ internal sealed class SceneSelection : IDebugSelectable, IDebugInspectable
         debug.Values.Value("name", e.Name);
         debug.Values.Value("bounds-min", e.Bounds.Min);
         debug.Values.Value("bounds-max", e.Bounds.Max);
-        debug.Values.Value("lod-levels", e.LodLevels);
-        debug.Values.Value("lod-max-error", e.MaxError);
+        // Grouped with the margin the loop adds to the same scope, so the Selection tab shows the LOD
+        // facts and the edit to them together.
+        using (debug.Scope("LOD"))
+        {
+            debug.Values.Value("levels", e.LodLevels);
+            debug.Values.Value("max-error", e.MaxError);
+        }
     }
 }

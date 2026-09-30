@@ -82,26 +82,6 @@ internal sealed partial class SponzaLoop
         tunePanel.BuildControls(debug);
         tuneObjects.BuildControls(debug);   // [Tune]-tagged CPU settings (Fog, …)
 
-        // --- Live selection (ephemeral) -------------------------------------
-        // Left-click picks a primitive; Cmd-click adds. Drag LOD margin to
-        // coarsen/sharpen the whole selection at once (set-all); nothing is
-        // saved. The framework highlights the primary; tint the rest here.
-        if (selection.Count > 0)
-        {
-            using (debug.Scope("Selection"))
-            {
-                debug.Values.Value("count", selection.Count);
-                var repPath = primarySelection ?? selection.First();
-                var cur = TryResolveMargin(repPath, out var rArr, out var rIdx) ? rArr[rIdx] : 1f;
-                var next = debug.Controls.Float("LOD margin (×px)", cur, 0f, 8f);
-                if (next != cur)
-                {
-                    foreach (var p in selection)
-                        if (TryResolveMargin(p, out var a, out var ix)) a[ix] = next;
-                }
-            }
-        }
-
         using (debug.Scope("Cascades"))
         {
             cullEnabled   = debug.Controls.Toggle("Frustum cull", cullEnabled);
@@ -171,15 +151,6 @@ internal sealed partial class SponzaLoop
         for (var c = 0; c < CascadeCount; c++)
         {
             debug.Draw.Frustum($"cascade/{c}", cascadeViewProj[c], cascadeTints[c]);
-        }
-
-        // Draw secondary selections inside the active view. The framework owns the primary
-        // highlight; these boxes make the rest of a multi-selection visible.
-        foreach (var p in selection)
-        {
-            if (p == primarySelection) continue;
-            if (sceneSelection.TryGetBounds(p, out var b))
-                debug.Draw.Aabb($"sel/{p}", b.Min, b.Max, MultiSelectColor);
         }
 
         // Outlines every opaque primitive NOT at full detail, tinted by how coarse it is, and flashes

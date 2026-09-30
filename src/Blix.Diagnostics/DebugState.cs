@@ -38,6 +38,15 @@ public sealed class DebugState
     /// </remarks>
     public bool ShowOverlay { get; set; }
 
+    /// <summary>Whether a click picks, latched from the Selection tab. Holding Alt arms it too.</summary>
+    /// <remarks>
+    /// <b>The debugger takes a click only when asked.</b> A left click is gameplay input in most games,
+    /// so picking on every click would put a tower down and select it at once. Armed, and with the
+    /// overlay up, the host takes the click whole — the game sees neither the press nor its release —
+    /// and turns it into a selection (<see cref="DebugSystem.Pick"/>). Otherwise it is the game's.
+    /// </remarks>
+    public bool PickMode { get; set; }
+
     /// <summary>Whether debug geometry is drawn at all: the master switch above the layers.</summary>
     public bool ShowDebugDraw { get; set; } = true;
 

@@ -99,11 +99,21 @@ public sealed class DebugSystem
 
     public bool IsFrozen => FrozenFrame is not null;
 
-    public DebugContext BeginFrame(RenderFrameContext frame)
+    /// <summary>Starts a frame.</summary>
+    /// <param name="frame">The framebuffer, in physical pixels.</param>
+    /// <param name="logicalSize">
+    /// The window in the pointer's coordinates, which only the host knows. Without it a view declared by
+    /// the shorthand <see cref="DebugDrawChannel.Declare(string, System.Numerics.Matrix4x4)"/> takes the
+    /// framebuffer for both rectangles, and a click through it on a Retina display lands at twice the
+    /// distance from the corner that it should.
+    /// </param>
+    public DebugContext BeginFrame(RenderFrameContext frame, (int Width, int Height)? logicalSize = null)
     {
         frameCounter++;
         frameStartTicks = Stopwatch.GetTimestamp();
-        Current = new DebugContext(State, frame, pendingControlValues, frameCounter, clock, SelectedPath);
+        Current = new DebugContext(
+            State, frame, logicalSize ?? (frame.Width, frame.Height), pendingControlValues, frameCounter, clock,
+            SelectedPath);
         return Current;
     }
 
@@ -148,38 +158,47 @@ public sealed class DebugSystem
 
     // === Selection ==========================================================
 
-    // Stable identity of the currently-selected entity, null if no
-    // selection. Persists across frames; survives Freeze.
+    /// <summary>What is selected, which the inspector shows. Null if nothing.</summary>
+    /// <remarks>
+    /// One thing at a time. Persists across frames and survives Freeze. Sponza kept a multi-selection
+    /// of its own beside this; it was dropped rather than promoted, since nothing else wanted one.
+    /// </remarks>
     public string? SelectedPath { get; private set; }
 
-    // World-space AABB of the selected entity at the moment Select was
-    // called. Cached so the runtime can auto-emit a highlight outline
-    // without re-walking selectables every frame. Accepts staleness if
-    // the entity moves between selections (re-pick refreshes). For
-    // dynamic scenes this can be lifted later by re-collecting per
-    // frame; for static scenes (Sponza submeshes) it's free fidelity.
-    public Bounds3? SelectedBounds { get; private set; }
+    /// <summary>The selection's bounds as its source reports them now, or null.</summary>
+    /// <remarks>
+    /// Asked, not remembered: this was a copy taken at the click, so a highlight stayed where a moving
+    /// thing had been.
+    /// </remarks>
+    public Bounds3? SelectedBounds => SelectedPath is { } path && TryGetBounds(path, out var b) ? b : null;
 
-    public void Select(string entityPath, Bounds3 bounds)
+    public void Select(string entityPath)
     {
         ArgumentException.ThrowIfNullOrEmpty(entityPath);
         SelectedPath = entityPath;
-        SelectedBounds = bounds;
     }
 
-    public void ClearSelection()
+    public void ClearSelection() => SelectedPath = null;
+
+    /// <summary>The current bounds of any selectable entity, asked of whichever source owns it.</summary>
+    public bool TryGetBounds(string entityPath, out Bounds3 bounds)
     {
-        SelectedPath = null;
-        SelectedBounds = null;
+        for (var i = 0; i < contributors.Count; i++)
+        {
+            if (contributors[i] is IDebugSelectable selectable && selectable.TryGetBounds(entityPath, out bounds))
+            {
+                return true;
+            }
+        }
+
+        bounds = default;
+        return false;
     }
 
     // Walks every registered IDebugSelectable and collects their
     // pickable entries into the shared scratch list. The list is
     // returned by ref-friendly IReadOnlyList; calling again clobbers
     // the previous result, so callers must consume immediately.
-    //
-    // Demo flow: build a screen-ray, call CollectSelectables, raycast
-    // against bounds, call Select on the closest hit.
     public IReadOnlyList<DebugSelectable> CollectSelectables()
     {
         selectableScratch.Clear();
@@ -191,6 +210,74 @@ public sealed class DebugSystem
             }
         }
         return selectableScratch;
+    }
+
+    /// <summary>Selects what is under a pointer, as seen in the last frame drawn.</summary>
+    /// <param name="pointer">In the window's logical coordinates, as the input layer reports it.</param>
+    /// <returns>The path hit, or null.</returns>
+    /// <remarks>
+    /// Through the views of the frame the viewer is looking at, latest declared first, so a panel drawn
+    /// over the main view answers for the pixels it covers. A pointer over no view changes nothing; a
+    /// miss inside a view clears, which is what every viewport does.
+    /// </remarks>
+    public string? Pick(System.Numerics.Vector2 pointer)
+    {
+        var views = LatestFrame?.Views;
+        if (views is null) return null;
+        Ray? ray = null;
+        for (var i = views.Count - 1; i >= 0 && ray is null; i--) ray = ViewPicking.RayThrough(views[i], pointer);
+        if (ray is not { } r) return null;
+
+        if (PickAlong(r, CollectSelectables()) is { } hit)
+        {
+            Select(hit.EntityPath);
+            return hit.EntityPath;
+        }
+
+        ClearSelection();
+        return null;
+    }
+
+    /// <summary>The selectable a ray picks: the nearest box it enters from outside.</summary>
+    /// <remarks>
+    /// <b>Neither rule this replaced was right for the engine.</b> Nearest entry, which the viewer uses
+    /// for a model's nodes, fails from inside anything: a ray starting inside a box enters it at
+    /// distance 0, so standing in Sponza's atrium the enclosing bounds won every click. Sponza answered
+    /// that with the smallest box hit, which picks a small thing behind a wall, where the click cannot
+    /// have been aimed. So: boxes that contain the eye are skipped, the nearest entry of the rest wins,
+    /// and near-equal entries (a thing resting on another) go to the smaller box, which is the more
+    /// specific answer.
+    /// </remarks>
+    public static DebugSelectable? PickAlong(Ray ray, IReadOnlyList<DebugSelectable> candidates)
+    {
+        ArgumentNullException.ThrowIfNull(candidates);
+        DebugSelectable? best = null;
+        var bestTime = float.PositiveInfinity;
+        var bestVolume = float.PositiveInfinity;
+        for (var i = 0; i < candidates.Count; i++)
+        {
+            var candidate = candidates[i];
+            var b = candidate.Bounds;
+            var o = ray.Origin;
+            var containsEye = o.X >= b.Min.X && o.X <= b.Max.X && o.Y >= b.Min.Y && o.Y <= b.Max.Y
+                              && o.Z >= b.Min.Z && o.Z <= b.Max.Z;
+            if (containsEye) continue;
+            if (Intersection.Raycast(ray, b) is not { } hit) continue;
+
+            var size = b.Max - b.Min;
+            var volume = size.X * size.Y * size.Z;
+            var tie = 1e-4f * MathF.Max(1f, bestTime is float.PositiveInfinity ? hit.Time : bestTime);
+            var nearer = hit.Time < bestTime - tie;
+            var level = MathF.Abs(hit.Time - bestTime) <= tie;
+            if (nearer || (level && volume < bestVolume))
+            {
+                best = candidate;
+                bestTime = hit.Time;
+                bestVolume = volume;
+            }
+        }
+
+        return best;
     }
 
     public void Run(params IDebuggable[] debuggables)
@@ -257,6 +344,8 @@ public sealed class DebugSystem
         {
             using (Current.Scope(SelectionScope))
             {
+                // Asked of the source every frame rather than copied at the click, so the box stays on a
+                // thing that moves.
                 if (SelectedBounds is { } bounds)
                 {
                     // Three layered visual cues so the user sees the

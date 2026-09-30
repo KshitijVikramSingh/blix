@@ -80,7 +80,6 @@ internal sealed partial class SponzaLoop
         Add("opaque", opaqueDrawables);
         Add("blend", blendDrawables);
         sceneSelection.Rebuild(items);
-        debugSystem?.Register(sceneSelection);
 
         // Per-drawable LOD margins, default 1.0 (= use the global budget as-is).
         opaqueLodMargins = new float[opaqueDrawables.Count];

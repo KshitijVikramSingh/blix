@@ -176,9 +176,6 @@ internal sealed partial class SponzaLoop
         sunPitch = MathF.Asin(Math.Clamp(sunDirection.Y, -1f, 1f));
         sunYaw = MathF.Atan2(sunDirection.X, -sunDirection.Z);
 
-        // Kept so click-to-pick can CollectSelectables()/Select(); the SceneSelection contributor is
-        // registered after consolidation. The host registers this loop and the device itself.
-        if (host is IDebugHost debugHost && debugHost.System is { } dbg) debugSystem = dbg;
 
         if (!TryLocateSponza(out var assetsRoot, out var gltfPath))
         {

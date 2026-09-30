@@ -1496,10 +1496,15 @@ var t = new TestRunner();
     t.ExpectTrue("Initially no selection",
         sys.SelectedPath is null && sys.SelectedBounds is null);
 
-    sys.Select("scene/foo/sub-3", new Bounds3(new Vector3(-1), new Vector3(1)));
+    var mover = new MovableSelectable("scene/foo/sub-3", new Bounds3(new Vector3(-1), new Vector3(1)));
+    sys.Register(mover);
+    sys.Select("scene/foo/sub-3");
     t.ExpectTrue("Select sets path", sys.SelectedPath == "scene/foo/sub-3");
-    t.ExpectTrue("Select caches bounds",
+    t.ExpectTrue("Its bounds are the source's",
         sys.SelectedBounds is { } b && b.Min == new Vector3(-1) && b.Max == new Vector3(1));
+    // The highlight used to be a copy taken at the click, and stayed where a moving thing had been.
+    mover.Bounds = new Bounds3(new Vector3(4), new Vector3(5));
+    t.ExpectTrue("And follow it when it moves", sys.SelectedBounds is { } moved && moved.Min == new Vector3(4));
 
     // Survives across frames.
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
@@ -1555,7 +1560,9 @@ var t = new TestRunner();
         !sys.LatestFrame!.DrawCommands.Any(c => c.Path.StartsWith("selection/")));
 
     // With selection: inspect fires + highlight aabb appears.
-    sys.Select("scene/foo/sub-0", new Bounds3(new Vector3(-1), new Vector3(1)));
+    sys.Register(new TestSelectable("scene",
+        new DebugSelectable("scene/foo/sub-0", new Bounds3(new Vector3(-1), new Vector3(1)))));
+    sys.Select("scene/foo/sub-0");
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
     // The highlight is drawn into whatever views the frame declared, so the frame needs one. A frame with
     // no views drew no picture, and there is nothing for system feedback to annotate.
@@ -1581,7 +1588,7 @@ var t = new TestRunner();
         ctx.Values.Value("material", "Marble");
         ctx.Values.Value("submesh-index", 0);
     }));
-    sys.Select("scene/foo/sub-0", new Bounds3(new Vector3(-1), new Vector3(1)));
+    sys.Select("scene/foo/sub-0");
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
     sys.Run();
     sys.EndFrame();
@@ -1601,7 +1608,8 @@ var t = new TestRunner();
 // filter check (tested via integration, not here).
 {
     var sys = new DebugSystem(historyCapacity: 4);
-    sys.Select("scene/foo", new Bounds3(new Vector3(0), new Vector3(1)));
+    sys.Register(new TestSelectable("scene", new DebugSelectable("scene/foo", new Bounds3(new Vector3(0), new Vector3(1)))));
+    sys.Select("scene/foo");
     sys.State.LayersEnabled["selection"] = false;
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
     using (sys.Current!.Draw.In("main", Matrix4x4.Identity))
@@ -1621,14 +1629,14 @@ var t = new TestRunner();
 // -- Snapshot captures SelectedPath -----------------------------------------
 {
     var sys = new DebugSystem(historyCapacity: 4);
-    sys.Select("entity-1", new Bounds3(Vector3.Zero, Vector3.One));
+    sys.Select("entity-1");
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
     sys.EndFrame();
     var frame1 = sys.LatestFrame!;
     t.ExpectTrue("DebugFrame.SelectedPath captured", frame1.SelectedPath == "entity-1");
 
     // Changing selection after snapshot doesn't mutate the snapshot.
-    sys.Select("entity-2", new Bounds3(Vector3.Zero, Vector3.One));
+    sys.Select("entity-2");
     t.ExpectTrue("Previous frame's SelectedPath unchanged",
         frame1.SelectedPath == "entity-1");
 }
@@ -1639,7 +1647,7 @@ var t = new TestRunner();
     var tempDir = Path.Combine(Path.GetTempPath(), $"blix-sel-dump-{Guid.NewGuid():N}");
     var sink = new JsonDumpSink(tempDir);
 
-    sys.Select("scene/main/submesh-7", new Bounds3(Vector3.Zero, Vector3.One));
+    sys.Select("scene/main/submesh-7");
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
     sys.EndFrame();
 
@@ -1657,14 +1665,14 @@ var t = new TestRunner();
 // Select() is called mid-frame.
 {
     var sys = new DebugSystem(historyCapacity: 4);
-    sys.Select("entity-1", new Bounds3(Vector3.Zero, Vector3.One));
+    sys.Select("entity-1");
 
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
     t.ExpectTrue("ctx.SelectedPath captured at BeginFrame",
         sys.Current!.SelectedPath == "entity-1");
 
     // Mid-frame Select should NOT affect ctx.SelectedPath this tick.
-    sys.Select("entity-2", new Bounds3(Vector3.Zero, Vector3.One));
+    sys.Select("entity-2");
     t.ExpectTrue("ctx.SelectedPath stable across mid-frame Select",
         sys.Current!.SelectedPath == "entity-1");
     sys.EndFrame();
@@ -1674,6 +1682,73 @@ var t = new TestRunner();
     t.ExpectTrue("Next frame's ctx.SelectedPath has new value",
         sys.Current!.SelectedPath == "entity-2");
     sys.EndFrame();
+}
+
+// -- PickAlong: the nearest box entered from outside -------------------------
+// Neither rule it replaced was right: nearest entry lost to any box the eye stood in (it is entered at
+// distance 0), and smallest-hit picked things behind walls.
+{
+    static DebugSelectable Box(string path, Vector3 min, Vector3 max) => new(path, new Bounds3(min, max));
+    var eye = new Ray(Vector3.Zero, -Vector3.UnitZ);
+    var room = Box("room", new Vector3(-20), new Vector3(20));
+    var chair = Box("chair", new Vector3(-1, -1, -6), new Vector3(1, 1, -4));
+    t.ExpectTrue("Standing inside a box does not pick it",
+        DebugSystem.PickAlong(eye, new[] { room, chair })?.EntityPath == "chair");
+
+    var wall = Box("wall", new Vector3(-5, -5, -3), new Vector3(5, 5, -2.5f));
+    var vase = Box("vase", new Vector3(-0.2f, -0.2f, -8), new Vector3(0.2f, 0.2f, -7.6f));
+    t.ExpectTrue("A small thing behind a wall loses to the wall",
+        DebugSystem.PickAlong(eye, new[] { vase, wall })?.EntityPath == "wall");
+
+    var table = Box("table", new Vector3(-2, -2, -4), new Vector3(2, 2, -3));
+    var cup = Box("cup", new Vector3(-0.1f, -0.1f, -4), new Vector3(0.1f, 0.1f, -3));
+    t.ExpectTrue("Entered at the same distance, the smaller box is the more specific answer",
+        DebugSystem.PickAlong(eye, new[] { table, cup })?.EntityPath == "cup");
+    t.ExpectTrue("And a ray that meets nothing picks nothing",
+        DebugSystem.PickAlong(new Ray(Vector3.Zero, Vector3.UnitZ), new[] { chair, wall }) is null);
+}
+
+// -- Pick: a pointer through the view the frame was drawn in ----------------
+// The engine picks now. The view here is the shorthand declaration on a Retina-shaped frame (logical
+// 640x360 over a 1280x720 framebuffer): the shorthand used to take the framebuffer for both rectangles,
+// and the logical centre would then have landed in the top-left quadrant of the picture.
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+    sys.Register(new TestSelectable("scene",
+        new DebugSelectable("scene/ahead", new Bounds3(new Vector3(-0.5f, -0.5f, -6), new Vector3(0.5f, 0.5f, -5)))));
+    t.ExpectTrue("Before anything is drawn, a pick has nowhere to look", sys.Pick(new Vector2(320, 180)) is null);
+
+    var view = Matrix4x4.CreateLookAt(Vector3.Zero, -Vector3.UnitZ, Vector3.UnitY)
+               * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, 16f / 9f, 0.1f, 100f);
+    sys.BeginFrame(new RenderFrameContext(Width: 1280, Height: 720), logicalSize: (640, 360));
+    sys.Run(new TestDebuggable("scene", debug => { using (debug.Draw.In("main", view)) { } }));
+    sys.EndFrame();
+
+    t.ExpectTrue("A click at the logical centre picks what is in front of the eye",
+        sys.Pick(new Vector2(320, 180)) == "scene/ahead" && sys.SelectedPath == "scene/ahead");
+    t.ExpectTrue("A pointer over no view changes nothing",
+        sys.Pick(new Vector2(900, 500)) is null && sys.SelectedPath == "scene/ahead");
+    t.ExpectTrue("A miss inside the view clears the selection",
+        sys.Pick(new Vector2(4, 4)) is null && sys.SelectedPath is null);
+}
+
+// -- Selection edits are declared under the selection ------------------------
+// The overlay puts anything under the selection scope on the Selection tab, grouped by the scope an
+// inspector declared it in, and keeps it off the Controls tab. What that needs from the core is that an
+// inspector's controls land there, sub-scope and all.
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+    sys.Register(new TestInspectable("scene/foo", (path, ctx) =>
+    {
+        using (ctx.Scope("LOD")) ctx.Controls.Float("margin", 1f, 0f, 8f);
+    }));
+    sys.Select("scene/foo/sub-0");
+    sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
+    sys.Run();
+    var margin = sys.Current!.ControlEntries.Single(c => c.Name == "margin");
+    sys.EndFrame();
+    t.ExpectTrue("An inspector's control is scoped under the selection, by the group it chose",
+        margin.Scope == DebugSystem.SelectionScope + "/LOD", margin.Scope);
 }
 
 // -- WallClockMs monotonic ---------------------------------------------------
@@ -1706,6 +1781,13 @@ static void Spin(double targetMs)
 }
 
 // ---------------------------------------------------------------------------
+
+sealed class MovableSelectable(string path, Bounds3 bounds) : IDebugSelectable
+{
+    public Bounds3 Bounds { get; set; } = bounds;
+    public string DebugName => "movable";
+    public void CollectSelectables(List<DebugSelectable> destination) => destination.Add(new DebugSelectable(path, Bounds));
+}
 
 sealed class TestSelectable : IDebugSelectable
 {

@@ -287,7 +287,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
         if (debugSystem is not null)
         {
-            debugSystem.BeginFrame(frame);
+            debugSystem.BeginFrame(frame, LogicalSize);
             using (debugSystem.Current!.Timers.Measure("run-debuggables"))
             {
                 debugSystem.Run();
@@ -465,8 +465,37 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
     private void OnMouseDown(IMouse mouse, SilkMouseButton button)
     {
+        // A pick is the debugger's gesture, so it is owned like a press the UI took: the game gets
+        // neither the down nor, through GestureOwnership, the up. See DebugState.PickMode.
+        if (button == SilkMouseButton.Left && !UiWantsMouse && PickArmed)
+        {
+            buttonsHeld.Press((int)button, uiWantsInput: true);
+            debugSystem!.Pick(mouse.Position);
+            return;
+        }
+
         if (!buttonsHeld.Press((int)button, UiWantsMouse)) return;
         inputState.RecordMouseDown(MapMouseButton(button));
+    }
+
+    // Armed from the Selection tab or by holding Alt, and only with the overlay up: the selection is
+    // read there, and a hidden debugger taking clicks would be one nobody could see doing it.
+    private bool PickArmed =>
+        debugSystem is { State.ShowOverlay: true } debug
+        && (debug.State.PickMode || AnyKeyDown(SilkKey.AltLeft, SilkKey.AltRight));
+
+    private bool AnyKeyDown(params SilkKey[] keys)
+    {
+        if (input is null) return false;
+        for (var k = 0; k < input.Keyboards.Count; k++)
+        {
+            foreach (var key in keys)
+            {
+                if (input.Keyboards[k].IsKeyPressed(key)) return true;
+            }
+        }
+
+        return false;
     }
 
     private void OnMouseUp(IMouse mouse, SilkMouseButton button)

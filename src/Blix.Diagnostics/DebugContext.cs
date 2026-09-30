@@ -8,10 +8,13 @@ public sealed class DebugContext
     private readonly Stack<string> scopes = new();
     private readonly Dictionary<string, object> pendingControlValues;
 
-    internal DebugContext(DebugState state, RenderFrameContext frame, Dictionary<string, object> pendingControlValues, int frameNumber, Stopwatch clock, string? selectedPath)
+    internal DebugContext(
+        DebugState state, RenderFrameContext frame, (int Width, int Height) logicalSize,
+        Dictionary<string, object> pendingControlValues, int frameNumber, Stopwatch clock, string? selectedPath)
     {
         State = state;
         Frame = frame;
+        LogicalSize = logicalSize;
         this.pendingControlValues = pendingControlValues;
         FrameNumber = frameNumber;
         SelectedPath = selectedPath;
@@ -26,6 +29,9 @@ public sealed class DebugContext
     public DebugState State { get; }
 
     public RenderFrameContext Frame { get; }
+
+    /// <summary>The window in the pointer's coordinates; the framebuffer (<see cref="Frame"/>) is physical.</summary>
+    public (int Width, int Height) LogicalSize { get; }
 
     // Monotonically increasing frame number assigned by DebugSystem.BeginFrame.
     // Producers can read it (e.g. to log "saw this on frame N"); the same

@@ -153,8 +153,6 @@ internal sealed partial class SponzaLoop
     {
         if (input[Key.Escape].Pressed) host.RequestClose();
 
-        (lastMouseX, lastMouseY) = (input.MousePosition.X, input.MousePosition.Y);
-
         // Cursor capture follows the button rather than a bool kept in step with it.
         var look = input[MouseButton.Right].Down;
         if (look != mouseLook)
@@ -173,74 +171,9 @@ internal sealed partial class SponzaLoop
             UpdateCamera();
         }
 
-        if (!mouseLook && input[MouseButton.Left].Pressed) PickAt(lastMouseX, lastMouseY);
-
         if (input.MouseWheel.Y != 0f)
         {
             render.MoveSpeed = Math.Clamp(render.MoveSpeed * (input.MouseWheel.Y > 0 ? 1.25f : 0.8f), 0.3f, 60f);
         }
     }
-
-    // Click-to-pick: build a geometric pick ray (backend-agnostic — no Vulkan-NDC
-    // unproject needed), ray-test every registered selectable's AABB, and select
-    // the smallest-volume hit ("the most specific thing under the cursor", as the
-    // GL demo does). Misses clear the selection.
-    private void PickAt(float mx, float my)
-    {
-        if (debugSystem is null) return;
-        var w = host.LogicalSize.Width;
-        var h = host.LogicalSize.Height;
-        if (w <= 0 || h <= 0) return;
-
-        var nx = 2f * mx / w - 1f;
-        var ny = 1f - 2f * my / h;
-        var right = Vector3.Normalize(Vector3.Cross(cameraForward, Vector3.UnitY));
-        var up = Vector3.Cross(right, cameraForward);
-        var tanV = MathF.Tan(fovYRadians * 0.5f);
-        var dir = Vector3.Normalize(cameraForward + right * (nx * tanV * aspect) + up * (ny * tanV));
-        var ray = new Blix.Geometry.Ray(cameraPosition, dir);
-
-        var selectables = debugSystem.CollectSelectables();
-        DebugSelectable? best = null;
-        var bestVolume = float.PositiveInfinity;
-        for (var i = 0; i < selectables.Count; i++)
-        {
-            var s = selectables[i];
-            if (Blix.Geometry.Intersection.Raycast(ray, s.Bounds) is null) continue;
-            var ext = s.Bounds.Max - s.Bounds.Min;
-            var vol = ext.X * ext.Y * ext.Z;
-            if (vol < bestVolume) { bestVolume = vol; best = s; }
-        }
-
-        // Cmd-click adds/toggles; plain click replaces. The framework tracks one
-        // SelectedPath (the primary, last-picked) for its highlight + inspector;
-        // the full multi-select set lives here and is drawn/edited in Debug().
-        var add = host.Input[Key.LeftSuper].Down || host.Input[Key.RightSuper].Down;
-        if (best is { } pick)
-        {
-            if (add)
-            {
-                if (!selection.Remove(pick.EntityPath)) selection.Add(pick.EntityPath);
-                primarySelection = selection.Contains(pick.EntityPath) ? pick.EntityPath
-                    : (selection.Count > 0 ? selection.First() : null);
-            }
-            else
-            {
-                selection.Clear();
-                selection.Add(pick.EntityPath);
-                primarySelection = pick.EntityPath;
-            }
-        }
-        else if (!add)
-        {
-            selection.Clear();
-            primarySelection = null;
-        }
-
-        if (primarySelection is { } pp && sceneSelection.TryGetBounds(pp, out var pb))
-            debugSystem.Select(pp, pb);
-        else
-            debugSystem.ClearSelection();
-    }
-
 }

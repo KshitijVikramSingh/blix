@@ -430,7 +430,8 @@ letterboxed image in the UI.
 | Show where something has been | `debug.Draw.Trail(name, point, colour, seconds)` |
 | Give the application its own UI panel | Implement `IUiSource` on the game loop; add an `ImGui.NET` package reference |
 | Add a panel to the diagnostics overlay instead | Implement `IDebugUi` on a registered contributor (`Blix.Diagnostics.Overlay`) |
-| Turn a click into a ray, in any view | `Blix.ViewPicking.RayThrough(view, pointer)` — panels and off-screen targets included |
+| Make things clickable in the overlay | Implement `IDebugSelectable` (on the loop or any contributor); the engine picks when Pick is ticked in the overlay's status bar or Alt is held, highlights, and shows `IDebugInspectable.Inspect` output on the Selection tab. Edits to the selection belong there: declare them in `Inspect`, grouped with `debug.Scope(...)` |
+| Turn a click into a ray, in any view | `Blix.ViewPicking.RayThrough(view, pointer)` — panels and off-screen targets included. For a game's or a tool's own picking; the overlay's is the engine's |
 | Run bounded (CI, a smoke test, a capture) | `--frames N`, honoured by the host for every application |
 | Start a new executable | `src/Demos/Blix.Demos.Chassis/` is the smallest working one — 25-line csproj, no shader boilerplate |
 | Expose a value for live tuning in the overlay | `//@tune lo..hi = default` in a GLSL uniform, or `[Tune(min,max)]` on a C# field |
