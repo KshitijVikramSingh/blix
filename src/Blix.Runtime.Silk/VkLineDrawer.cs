@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 using Blix.Render;
+using Blix.Core;
 
 namespace Blix.Runtime.Silk;
 
@@ -47,7 +48,7 @@ public sealed class VkLineDrawer : IDisposable
         for (var i = 0; i < MaxVertexCount; i++) indices[i] = (ushort)i;
         indexBuffer = device.CreateIndexBuffer(indices, GraphicsBufferUsage.Static, name: "debugline.ib");
 
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var shaderDir = AppFiles.Shaders;
         var vertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "debugline.vert.spv"));
         var fragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "debugline.frag.spv"));
         // <b>A push range, where a uniform block used to be.</b> One program draws every declared

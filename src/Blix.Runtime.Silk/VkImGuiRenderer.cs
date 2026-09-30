@@ -6,6 +6,7 @@ using Blix.Diagnostics.Overlay;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 using ImGuiNET;
+using Blix.Core;
 
 namespace Blix.Runtime.Silk;
 
@@ -118,7 +119,7 @@ public sealed class VkImGuiRenderer : IDisposable
                 new ushort[MaxIndices], GraphicsBufferUsage.Dynamic, name: $"imgui.ib.{slot}");
         }
 
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var shaderDir = AppFiles.Shaders;
         var vertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "imgui.vert.spv"));
         var fragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "imgui.frag.spv"));
         var imguiInterface = ShaderReflection.ForProgram(shaderDir, "imgui.vert", "imgui.frag");

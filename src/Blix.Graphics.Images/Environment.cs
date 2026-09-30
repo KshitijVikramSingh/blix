@@ -34,7 +34,7 @@ public sealed record HdrEnvironmentSource(HdrImageData Equirect) : EnvironmentSo
 
 // Procedural-sky source. SunDirection points FROM-sun-INTO-scene (matches
 // Blix's directional-light convention).
-public sealed record ProceduralEnvironmentSource(Vector3 SunDirection) : EnvironmentSource;
+public sealed record ProceduralEnvironmentSource(Vector3 SunDirection, ProceduralSkyLook? Sky = null) : EnvironmentSource;
 
 public sealed record EnvironmentProfile
 {
@@ -398,7 +398,7 @@ public static class EnvironmentBaker
 
     private static EnvironmentProbe BakeFromProcedural(IGraphicsDevice device, EnvironmentProfile profile, ProceduralEnvironmentSource proc, string namePrefix)
     {
-        var pixels = CubemapBaker.BakeSky(profile.EnvCubeFaceSize, proc.SunDirection);
+        var pixels = CubemapBaker.BakeSky(profile.EnvCubeFaceSize, proc.SunDirection, proc.Sky);
         var envCube = device.CreateTextureCubeHdr(
             profile.EnvCubeFaceSize, pixels,
             SamplerDescription.LinearClampMipmap,

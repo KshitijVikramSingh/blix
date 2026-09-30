@@ -362,7 +362,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         // rule the asset refusals follow: say which setting and what to do, and exit non-zero.
         try
         {
-            renderer.Load(vk, Path.Combine(AppContext.BaseDirectory, "Shaders"));
+            renderer.Load(vk);
         }
         catch (NotSupportedException refused)
         {

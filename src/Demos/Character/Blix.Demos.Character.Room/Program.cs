@@ -115,7 +115,7 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
         motor.Teleport(Blix.Demos.Character.Room.SpawnPoint);
         camera.Rig = CameraRig.ThirdPerson;
         var vk = (VulkanGraphicsDevice)graphicsDevice;
-        renderer.Load(vk, Path.Combine(AppContext.BaseDirectory, "Shaders"), room);
+        renderer.Load(vk, room);
 
         Console.WriteLine($"room — {room.TriangleCount} triangles, {room.Parts.Count} parts, {room.SolidStarts.Count} solids");
 

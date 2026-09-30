@@ -1,4 +1,5 @@
 using System.Numerics;
+using Blix.Diagnostics;
 using Blix.Graphics;
 
 namespace Blix.Tools.Studio;
@@ -29,16 +30,16 @@ public sealed class StudioCamera
     public Vector3 Target { get; set; } = new(0f, 1f, 0f);
 
     /// <summary>Rotation about the world Y axis, in radians.</summary>
-    public float Yaw { get; set; }
+    [Tune(-3.1416f, 3.1416f, Group = "camera")] public float Yaw { get; set; }
 
     /// <summary>Elevation, in radians. Clamped by <see cref="Orbit"/> rather than here.</summary>
-    public float Pitch { get; set; } = 0.45f;
+    [Tune(0.08f, 1.45f, Group = "camera")] public float Pitch { get; set; } = 0.45f;
 
     /// <summary>Distance from <see cref="Target"/>.</summary>
-    public float Distance { get; set; } = 11f;
+    [Tune(1f, 120f, Group = "camera")] public float Distance { get; set; } = 11f;
 
     /// <summary>Vertical field of view. Matches what the Studio renderer was built around.</summary>
-    public float FieldOfView { get; set; } = MathF.PI / 3.2f;
+    [Tune(0.3f, 1.8f, Group = "camera")] public float FieldOfView { get; set; } = MathF.PI / 3.2f;
 
     public float NearPlane { get; set; } = 0.1f;
 
@@ -97,7 +98,8 @@ public sealed class StudioCamera
     /// </remarks>
     public void Orbit(float deltaX, float deltaY)
     {
-        Yaw -= deltaX * 0.008f;
+        // Wrapped, so a long drag stays inside the range the overlay's slider shows.
+        Yaw = MathF.IEEERemainder(Yaw - (deltaX * 0.008f), 2f * MathF.PI);
         Pitch = Math.Clamp(Pitch + (deltaY * 0.006f), MinPitch, MaxPitch);
     }
 

@@ -296,6 +296,72 @@
     </ItemGroup>
   </Target>
 
+  <!--
+    Refuse two different compiled shaders that would land on one name.
+
+    <b>An application's Shaders/ directory is shared with every library it references, and the file
+    name is the only namespace.</b> Blix.Render stages sprite.frag, Studio studio_*, the Character
+    room room_*, and nothing but convention kept an application's own sprite.frag from landing on
+    Blix.Render's. MSBuild copies both to the same path and whichever goes last wins, silently: the
+    program then loads a shader it did not write, and the failure appears as a wrong interface at
+    program creation or, worse, as a right interface drawing the wrong thing.
+
+    This is the least that should happen, not the real fix: the real fix is a namespace per
+    library, so the question never arises. Until then a build that would overwrite one shader with
+    another fails, naming both. The same file arriving through two references is one shader and
+    passes; only different sources for one name are refused. Sidecars are checked with the .spv they
+    describe, since a .refl.json from one library beside another library's .spv is the same fault.
+  -->
+  <UsingTask TaskName="BlixFindShaderCollisions"
+             TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <Items ParameterType="Microsoft.Build.Framework.ITaskItem[]" Required="true" />
+      <Collisions ParameterType="System.String" Output="true" />
+    </ParameterGroup>
+    <Task>
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        var byTarget = new Dictionary<string, SortedSet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in Items)
+        {
+            var target = (item.GetMetadata("TargetPath") ?? string.Empty).Replace('\\', '/');
+            if (!target.StartsWith("Shaders/", StringComparison.OrdinalIgnoreCase)) continue;
+            var source = Path.GetFullPath(item.GetMetadata("FullPath"));
+            if (!byTarget.TryGetValue(target, out var sources))
+                byTarget[target] = sources = new SortedSet<string>(StringComparer.Ordinal);
+            sources.Add(source);
+        }
+        Collisions = string.Join(" | ", byTarget
+            .Where(entry => entry.Value.Count > 1)
+            .OrderBy(entry => entry.Key, StringComparer.Ordinal)
+            .Select(entry => entry.Key + " from " + string.Join(" and ", entry.Value)));
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
+  <!-- <b>Asked of the two halves, not of the merged list, because the merge hides the answer.</b>
+       GetCopyToOutputDirectoryItems removes a reference's item when this project has one with the
+       same TargetPath (CopyConflictingTransitiveContent, false by default in .NET 8), so its result
+       never holds both sides of a collision: the application's copy has already won, silently. The
+       two targets it calls return their lists before that removal. They are the SDK's own and
+       underscore-named, so this leans on internals; Blix.Test.Apps K.7 builds a real collision and
+       fails if they ever stop answering. -->
+  <Target Name="BlixCheckShaderCollisions"
+          BeforeTargets="CopyFilesToOutputDirectory"
+          DependsOnTargets="GetCopyToOutputDirectoryItems">
+    <CallTarget Targets="_GetCopyToOutputDirectoryItemsFromTransitiveProjectReferences">
+      <Output TaskParameter="TargetOutputs" ItemName="_BlixShaderCopyCandidate" />
+    </CallTarget>
+    <CallTarget Targets="_GetCopyToOutputDirectoryItemsFromThisProject">
+      <Output TaskParameter="TargetOutputs" ItemName="_BlixShaderCopyCandidate" />
+    </CallTarget>
+    <BlixFindShaderCollisions Items="@(_BlixShaderCopyCandidate)">
+      <Output TaskParameter="Collisions" PropertyName="_BlixShaderCollisions" />
+    </BlixFindShaderCollisions>
+    <Error Condition="'$(_BlixShaderCollisions)' != ''"
+           Text="Two different compiled shaders would be written to one name in this application's Shaders directory, and the second would silently replace the first: $(_BlixShaderCollisions). An application's shaders share that directory with every library it references, so each name must be unique; rename one (Blix's libraries prefix theirs, such as studio_ and room_)." />
+  </Target>
+
   <Target Name="BlixIndexApps"
           Condition="'$(BlixSkipAppIndex)' != 'true' AND '$(OutputType)' != '' AND Exists('$(BlixAppIndexerDll)')"
           AfterTargets="CopyFilesToOutputDirectory"

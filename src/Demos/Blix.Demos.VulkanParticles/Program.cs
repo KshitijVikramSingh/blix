@@ -156,7 +156,7 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
     {
         this.host = host;
         vk = (VulkanGraphicsDevice)graphicsDevice;
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var shaderDir = AppFiles.Shaders;
 
         // --- Render graph ------------------------------------------------
         graph = new RenderGraph(vk);

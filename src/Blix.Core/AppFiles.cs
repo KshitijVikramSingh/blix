@@ -33,6 +33,26 @@ public static class AppFiles
     public static string Asset(params string[] parts) =>
         Path.Combine(new[] { Assets }.Concat(parts).ToArray());
 
+    /// <summary>Where this application's compiled shaders are, its own and every library's it references.</summary>
+    /// <remarks>
+    /// <para>
+    /// Beside the binary, in a build and in a published bundle alike: publishing moves <c>Assets/</c>
+    /// into <c>Contents/Resources</c> for codesign, and leaves <c>Shaders/</c> where it is, because
+    /// nothing in it looks like a nested bundle. A library's shaders land here too, carried by the
+    /// shared shader staging, which is why a library can find its own without being told.
+    /// </para>
+    /// <para>
+    /// Twenty-two places wrote <c>Path.Combine(AppContext.BaseDirectory, "Shaders")</c> by hand, four of
+    /// them inside the engine's own libraries, and one library took the path as an argument so every
+    /// caller had to know where its shaders were. This is the one statement of it.
+    /// </para>
+    /// </remarks>
+    public static string Shaders { get; } = Path.Combine(AppContext.BaseDirectory, "Shaders");
+
+    /// <summary>A file under <see cref="Shaders"/>, such as <c>Shader("lit.frag.spv")</c>.</summary>
+    public static string Shader(params string[] parts) =>
+        Path.Combine(new[] { Shaders }.Concat(parts).ToArray());
+
     private static string ResolveAssets()
     {
         var beside = Path.Combine(AppContext.BaseDirectory, "Assets");

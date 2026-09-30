@@ -5014,8 +5014,13 @@ static ShaderInterface MinimalShader() => new(new[]
 // sees it before a person does.
 {
     var srcDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    // The examples too: they are the code most likely to be copied, and they were not searched.
+    var examplesDir = Path.GetFullPath(Path.Combine(srcDir, "..", "examples"));
     var sources = Directory.Exists(srcDir)
         ? Directory.GetFiles(srcDir, "*.cs", SearchOption.AllDirectories)
+            .Concat(Directory.Exists(examplesDir)
+                ? Directory.GetFiles(examplesDir, "*.cs", SearchOption.AllDirectories)
+                : Array.Empty<string>())
             .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
             .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
             .ToArray()
@@ -5028,6 +5033,7 @@ static ShaderInterface MinimalShader() => new(new[]
     // The hand-rolled form, in either order of quoting, but not AppFiles' own implementation --
     // it is the one place entitled to write it.
     var handRolled = new List<string>();
+    var handRolledShaders = new List<string>();
     var appFilesPath = Path.Combine(srcDir, "Blix.Core", "AppFiles.cs");
     foreach (var file in sources)
     {
@@ -5036,6 +5042,8 @@ static ShaderInterface MinimalShader() => new(new[]
         var lines = text.Split('\n');
         for (var i = 0; i < lines.Length; i++)
         {
+            if (Regex.IsMatch(lines[i], @"AppContext\.BaseDirectory\s*,\s*""Shaders"""))
+                handRolledShaders.Add($"{Path.GetFileName(file)}:{i + 1}");
             if (!Regex.IsMatch(lines[i], @"AppContext\.BaseDirectory\s*,\s*""Assets""")) continue;
             handRolled.Add($"{Path.GetFileName(file)}:{i + 1}");
         }
@@ -5045,12 +5053,26 @@ static ShaderInterface MinimalShader() => new(new[]
         handRolled.Count == 0,
         handRolled.Count == 0 ? "all sites go through AppFiles" : string.Join("; ", handRolled.Take(6)));
 
+    // The same fact for compiled shaders, which stay beside the binary even in a bundle. It had been
+    // written by hand twenty-two times, four of them inside the engine's own libraries.
+    t.Expect("BH.3 no application builds its own shader path from AppContext.BaseDirectory",
+        handRolledShaders.Count == 0,
+        handRolledShaders.Count == 0 ? "all sites go through AppFiles" : string.Join("; ", handRolledShaders.Take(6)));
+
     // And the resolver itself answers, so the check above is not passing because nothing asks.
     t.Expect("BH.2 AppFiles resolves an Assets path",
         AppFiles.Assets.EndsWith("Assets", StringComparison.Ordinal), AppFiles.Assets);
     t.Expect("BH.2 AppFiles.Asset appends beneath it",
         AppFiles.Asset("models", "x.glb") == Path.Combine(AppFiles.Assets, "models", "x.glb"),
         AppFiles.Asset("models", "x.glb"));
+    t.Expect("BH.4 AppFiles resolves the Shaders directory beside the binary",
+        // Asked by parts rather than by writing the path out, which BH.3 would rightly refuse. It did,
+        // the first time: the only hand-built shader path it found was this line's, which is how it
+        // is known to see one.
+        Path.GetFileName(AppFiles.Shaders) == "Shaders"
+        && Path.GetDirectoryName(AppFiles.Shaders) == Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory)
+        && AppFiles.Shader("lit.frag.spv") == Path.Combine(AppFiles.Shaders, "lit.frag.spv"),
+        AppFiles.Shaders);
 }
 
 // ============================================================================

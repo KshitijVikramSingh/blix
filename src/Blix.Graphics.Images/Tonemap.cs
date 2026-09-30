@@ -80,4 +80,22 @@ public static class Tonemap
         < 2.5f => Reinhard(hdr),
         _ => Neutral(hdr),
     };
+
+    /// <summary>The same selector, by name.</summary>
+    public static Vector3 Apply(Vector3 hdr, TonemapCurve curve) => Apply(hdr, (float)curve);
+}
+
+/// <summary>The engine's tonemap curves, in the order <c>blix_tonemap</c> selects them.</summary>
+/// <remarks>
+/// A name for the number the uniform already carries: cast to float to send it. A setting declared
+/// as this type is a dropdown on the overlay and takes names on the command line
+/// (<c>--tonemap-mode Neutral</c>), where the float it replaces was a slider with three meaningless
+/// positions between every pair of curves.
+/// </remarks>
+public enum TonemapCurve
+{
+    Aces,
+    AgX,
+    Reinhard,
+    Neutral,
 }

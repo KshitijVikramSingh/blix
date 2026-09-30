@@ -1,5 +1,6 @@
 using System.Numerics;
 using Blix.Diagnostics;
+using Blix.Graphics.Images;
 
 namespace Blix.Tools.Studio;
 
@@ -59,6 +60,16 @@ public sealed class StudioLook : ITunable
     /// <summary>Whether the floor is drawn. Off is how you look at a thing against nothing.</summary>
     /// <remarks>The floor is lit geometry that receives shadows; the overlaid grid is a gizmo.</remarks>
     [Tune(Group = "stage")] public bool Ground { get; set; } = true;
+
+    // The procedural sky the stage is lit by and drawn in front of. Changing one rebakes the
+    // environment once it has held still, as the sun does; see StudioRenderer.FollowEnvironment.
+    [Tune(0, 3, Group = "sky")] public float HaloStrength { get; set; } = ProceduralSkyLook.Default.HaloStrength;
+    [Tune(1, 128, Group = "sky")] public float HaloTightness { get; set; } = ProceduralSkyLook.Default.HaloTightness;
+    [Tune(0, 2, Group = "sky")] public float HorizonBrightness { get; set; } = ProceduralSkyLook.Default.HorizonBrightness;
+    [Tune(0, 2, Group = "sky")] public float ZenithBrightness { get; set; } = ProceduralSkyLook.Default.ZenithBrightness;
+
+    /// <summary>The sky those four settings describe.</summary>
+    public ProceduralSkyLook Sky => new(HaloStrength, HaloTightness, HorizonBrightness, ZenithBrightness);
 
     // ── structural: read when the graph is built, never again ────────────────────────────────
 
@@ -164,21 +175,33 @@ public sealed class StudioLook : ITunable
     [Tune(0, 4, Group = "present")] public float Exposure { get; set; } = 1.0f;
 
     /// <summary>0 = ACES, 1 = AgX, 2 = Reinhard, 3 = neutral. Matches blix_tonemap.</summary>
-    [Tune(0, 3, Group = "present")] public float TonemapMode { get; set; }
+    [Tune(Group = "present")] public TonemapCurve TonemapMode { get; set; }
 
-    /// <summary>Direction TOWARD the sun. Derived from the two angles.</summary>
-    public Vector3 SunDirection { get; private set; } = Vector3.Normalize(new Vector3(0.45f, 0.8f, 0.35f));
+    /// <summary>Direction TOWARD the sun, from the two angles.</summary>
+    /// <remarks>
+    /// <b>Computed on every read, not stored.</b> It was a stored value that the panel's change
+    /// notification recomputed, so code that set <see cref="SunElevation"/> directly (an application
+    /// keeping the value it tuned) moved nothing: the angle changed and the sun stayed. Nothing about
+    /// this is expensive enough to cache, and a value that cannot go stale needs no one to remember.
+    /// </remarks>
+    public Vector3 SunDirection
+    {
+        get
+        {
+            var elevation = SunElevation * (MathF.PI / 180f);
+            var azimuth = SunAzimuth * (MathF.PI / 180f);
+            var horizontal = MathF.Cos(elevation);
+            return Vector3.Normalize(new Vector3(
+                horizontal * MathF.Sin(azimuth),
+                MathF.Sin(elevation),
+                horizontal * MathF.Cos(azimuth)));
+        }
+    }
 
-    /// <summary>Derived: the tint this stage was authored with, scaled by <see cref="SunIntensity"/>.</summary>
-    public Vector3 SunColour { get; private set; } = new(3.2f, 3.05f, 2.75f);
+    /// <summary>The tint this stage was authored with, scaled by <see cref="SunIntensity"/>.</summary>
+    public Vector3 SunColour => SunTint * SunIntensity;
 
     private static readonly Vector3 SunTint = new(3.2f, 3.05f, 2.75f);
-
-    /// <summary>
-    /// Derives the look once, so the declared angles and the derived vector agree from frame one.
-    /// </summary>
-    /// <remarks>Construction computes derived vectors immediately; UI values and rendering agree.</remarks>
-    public StudioLook() => Recompute();
 
     private bool structuralSealed;
 
@@ -199,21 +222,6 @@ public sealed class StudioLook : ITunable
             "does nothing. Set it before the renderer loads (the command line does).");
     }
 
-    /// <summary>A declared value moved. Recompute what is derived from it.</summary>
-    public void OnChanged(TunableChange change) => Recompute();
-
-    /// <summary>Derive the sun's vectors from its angles. Also run once at construction.</summary>
-    public void Recompute()
-    {
-        var elevation = SunElevation * (MathF.PI / 180f);
-        var azimuth = SunAzimuth * (MathF.PI / 180f);
-        var horizontal = MathF.Cos(elevation);
-
-        SunDirection = Vector3.Normalize(new Vector3(
-            horizontal * MathF.Sin(azimuth),
-            MathF.Sin(elevation),
-            horizontal * MathF.Cos(azimuth)));
-
-        SunColour = SunTint * SunIntensity;
-    }
+    /// <summary>A declared value moved. Nothing to do: what is derived from it is computed when read.</summary>
+    public void OnChanged(TunableChange change) { }
 }

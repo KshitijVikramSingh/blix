@@ -423,7 +423,7 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         // The shader is the source of truth for all of it EXCEPT the length of the bone palette:
         // it is declared unsized, so the count is this demo's (`cesiumSkeleton.BoneCount`) and
         // is stated once, where it is known.
-        var shaderDir = Path.Combine(AppContext.BaseDirectory, "Shaders");
+        var shaderDir = AppFiles.Shaders;
         ShaderInterface Reflect(params string[] stages) => ShaderReflection.ForProgram(shaderDir, stages);
         ShaderInterface Skinned(ShaderInterface iface) =>
             iface.WithBlockSize(set: 3, binding: 0, cesiumSkeleton.BoneCount * 64);
