@@ -9,9 +9,11 @@ namespace Blix.Diagnostics;
 // entities (GltfSceneInstance and its submeshes) appends N.
 //
 // Picking flow: the engine picks. With the overlay up and pick mode armed (the
-// Selection tab, or Alt held), a click becomes a ray through the view it
-// landed in (Blix.ViewPicking.RayThrough), every source's bounds are tested,
-// and the nearest box in front of the eye is selected (DebugSystem.PickAlong).
+// Pick switch in the status bar, or Alt held), a click becomes a ray through
+// the view it landed in (Blix.ViewPicking.RayThrough), and every box it crosses
+// is listed on the Selections tab, nearest entry first (DebugSystem.PickAlong).
+// The reader chooses from the list: boxes say where a thing might be, not where
+// its surface is, so no rule for choosing one box was right everywhere.
 // This used to be the application's job: Sponza wrote the ray, the raycast,
 // the multi-select and the secondary highlights itself, around a runtime that
 // held one path and a copy of its bounds.

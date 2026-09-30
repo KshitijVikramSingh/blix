@@ -13,4 +13,6 @@ namespace Blix.Diagnostics;
 //
 // Bounds is world-space AABB. Refined picking (OBB / mesh) is a future
 // extension — Phase 10 ray-tests AABBs only.
-public readonly record struct DebugSelectable(string EntityPath, Blix.Geometry.Bounds3 Bounds);
+// Label is what the Selections tab lists it as: a path identifies, a name is what a person recognises
+// ("scene/opaque/12" is the tree nobody could find in a pick list). Defaults to the path.
+public readonly record struct DebugSelectable(string EntityPath, Blix.Geometry.Bounds3 Bounds, string? Label = null);

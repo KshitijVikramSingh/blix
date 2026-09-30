@@ -27,10 +27,8 @@ public sealed class DebugOverlayUi
     // committed value on each one. See DebugControlKind.Text below.
     private readonly Dictionary<string, string> textEdits = new(StringComparer.Ordinal);
 
-    // Track the path we showed the Selection tab for last frame so we can
-    // auto-focus the tab when a new pick happens. Without this, picking
-    // doesn't pull the user's attention to the new info.
-    private string? lastRenderedSelection;
+    // The pick list last shown, by reference: a new click makes a new list, which brings the tab forward.
+    private IReadOnlyList<DebugSystem.PickCandidate>? lastRenderedPick;
 
     // Builds the diagnostics window for the current frame. Call between
     // ImGui.NewFrame() and ImGui.Render().
@@ -86,24 +84,22 @@ public sealed class DebugOverlayUi
 
         if (ImGui.BeginTabBar("DiagnosticsTabs", ImGuiTabBarFlags.Reorderable))
         {
-            // Selection tab — only visible when something is selected;
-            // auto-focuses on a fresh pick so the user's attention goes
-            // to the new info without a manual tab click. The flag-
-            // taking BeginTabItem requires a ref-bool "open" param; the
-            // close X it shows is harmless — we re-pass true every
-            // frame so a click reopens the tab on the next render.
-            if (debugSystem.SelectedPath is { } selPath)
+            // Selections tab — what the last click crossed, and the details of the one chosen from it.
+            // Shown while there is either; a fresh click brings it forward. Its close box forgets both.
+            var pickList = debugSystem.PickList;
+            if (pickList.Count > 0 || debugSystem.SelectedPath is not null)
             {
-                var newPick = debugSystem.SelectedPath != lastRenderedSelection;
+                var newPick = !ReferenceEquals(pickList, lastRenderedPick);
                 var tabFlags = newPick ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
-                var openDummy = true;
-                if (ImGui.BeginTabItem("Selection", ref openDummy, tabFlags))
+                var open = true;
+                if (ImGui.BeginTabItem("Selections", ref open, tabFlags))
                 {
-                    DrawSelectionTab(debugSystem, selPath, values, controls, interactive);
+                    DrawSelectionsTab(debugSystem, pickList, values, controls, interactive);
                     ImGui.EndTabItem();
                 }
+                if (!open) debugSystem.ClearPick();
             }
-            lastRenderedSelection = debugSystem.SelectedPath;
+            lastRenderedPick = pickList;
 
             if (ImGui.BeginTabItem("Perf"))
             {
@@ -141,7 +137,7 @@ public sealed class DebugOverlayUi
                 ImGui.EndTabItem();
             }
 
-            // An edit that applies to the selection lives on the Selection tab and nowhere else: the
+            // An edit that applies to the selection lives on the Selections tab and nowhere else: the
             // same slider in the general list reads as a setting for the whole scene.
             var generalControls = controls.Where(c => !IsSelectionScope(c.Scope)).ToArray();
             if (generalControls.Length > 0 && ImGui.BeginTabItem("Controls"))
@@ -253,7 +249,7 @@ public sealed class DebugOverlayUi
             if (ImGui.Checkbox(PickLabel, ref pick)) debugSystem.State.PickMode = pick;
             if (ImGui.IsItemHovered())
             {
-                ImGui.SetTooltip("Click to select what is under the pointer. Or hold Alt and click.");
+                ImGui.SetTooltip("Click to list what is under the pointer on the Selections tab. Or hold Alt and click.");
             }
             ImGui.SameLine();
         }
@@ -309,10 +305,35 @@ public sealed class DebugOverlayUi
         return "…" + s[^(max - 1)..];
     }
 
-    private void DrawSelectionTab(
-        DebugSystem debugSystem, string selPath, IReadOnlyList<DebugValueEntry> values,
+    private void DrawSelectionsTab(
+        DebugSystem debugSystem, IReadOnlyList<DebugSystem.PickCandidate> pickList, IReadOnlyList<DebugValueEntry> values,
         IReadOnlyList<DebugControlEntry> controls, bool interactive)
     {
+        // What the click crossed, nearest entry first. Boxes, so the list says what the ray passed
+        // through, not what it hit: the reader, who can see the picture, chooses.
+        if (pickList.Count == 0)
+        {
+            ImGui.TextDisabled("(nothing was under the last click)");
+        }
+        else
+        {
+            ImGui.TextDisabled($"under the click, nearest first ({pickList.Count}):");
+            if (ImGui.BeginChild("pick-list", new Vector2(0f, MathF.Min(pickList.Count, 8) * ImGui.GetTextLineHeightWithSpacing() + 6f)))
+            {
+                foreach (var candidate in pickList)
+                {
+                    var chosen = candidate.EntityPath == debugSystem.SelectedPath;
+                    if (ImGui.Selectable($"{candidate.Label}   {candidate.Distance:0.0} m##{candidate.EntityPath}", chosen))
+                    {
+                        debugSystem.Select(candidate.EntityPath);
+                    }
+                }
+            }
+            ImGui.EndChild();
+        }
+
+        if (debugSystem.SelectedPath is not { } selPath) return;
+        ImGui.Separator();
         ImGui.TextUnformatted(selPath);
         var clearWidth = ImGui.CalcTextSize("Clear").X + ImGui.GetStyle().FramePadding.X * 2.0f;
         RightAlignNextWidget(clearWidth);

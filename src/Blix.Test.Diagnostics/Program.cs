@@ -1684,39 +1684,35 @@ var t = new TestRunner();
     sys.EndFrame();
 }
 
-// -- PickAlong: the nearest box entered from outside -------------------------
-// Neither rule it replaced was right: nearest entry lost to any box the eye stood in (it is entered at
-// distance 0), and smallest-hit picked things behind walls.
+// -- PickAlong: everything the ray crosses, nearest entry first --------------
+// A list, not a verdict: every rule that chose one box was wrong somewhere in Sponza (a vault's box is
+// mostly air), so the click reports what it crossed and the reader chooses.
 {
-    static DebugSelectable Box(string path, Vector3 min, Vector3 max) => new(path, new Bounds3(min, max));
+    static DebugSelectable Box(string path, Vector3 min, Vector3 max, string? label = null) => new(path, new Bounds3(min, max), label);
     var eye = new Ray(Vector3.Zero, -Vector3.UnitZ);
     var room = Box("room", new Vector3(-20), new Vector3(20));
-    var chair = Box("chair", new Vector3(-1, -1, -6), new Vector3(1, 1, -4));
-    t.ExpectTrue("Standing inside a box does not pick it",
-        DebugSystem.PickAlong(eye, new[] { room, chair })?.EntityPath == "chair");
-
-    var wall = Box("wall", new Vector3(-5, -5, -3), new Vector3(5, 5, -2.5f));
-    var vase = Box("vase", new Vector3(-0.2f, -0.2f, -8), new Vector3(0.2f, 0.2f, -7.6f));
-    t.ExpectTrue("A small thing behind a wall loses to the wall",
-        DebugSystem.PickAlong(eye, new[] { vase, wall })?.EntityPath == "wall");
-
-    var table = Box("table", new Vector3(-2, -2, -4), new Vector3(2, 2, -3));
-    var cup = Box("cup", new Vector3(-0.1f, -0.1f, -4), new Vector3(0.1f, 0.1f, -3));
-    t.ExpectTrue("Entered at the same distance, the smaller box is the more specific answer",
-        DebugSystem.PickAlong(eye, new[] { table, cup })?.EntityPath == "cup");
-    t.ExpectTrue("And a ray that meets nothing picks nothing",
-        DebugSystem.PickAlong(new Ray(Vector3.Zero, Vector3.UnitZ), new[] { chair, wall }) is null);
+    var vault = Box("vault", new Vector3(-5, -5, -3), new Vector3(5, 5, -2.5f), "ceiling_1stfloor_01");
+    var tree = Box("tree", new Vector3(-1, -1, -8), new Vector3(1, 1, -6));
+    var aside = Box("aside", new Vector3(10, 10, -8), new Vector3(11, 11, -6));
+    var list = DebugSystem.PickAlong(eye, new[] { tree, aside, room, vault });
+    t.ExpectTrue("Every box the ray crosses is listed, nearest entry first, the one around the eye at 0",
+        list.Select(c => c.EntityPath).SequenceEqual(new[] { "room", "vault", "tree" }),
+        string.Join(", ", list.Select(c => $"{c.EntityPath}@{c.Distance}")));
+    t.ExpectTrue("Each carries its label for the list, or its path when it has none",
+        list[1].Label == "ceiling_1stfloor_01" && list[2].Label == "tree");
+    t.ExpectTrue("And a ray that meets nothing lists nothing",
+        DebugSystem.PickAlong(new Ray(Vector3.Zero, Vector3.UnitZ), new[] { vault, tree }).Count == 0);
 }
 
 // -- Pick: a pointer through the view the frame was drawn in ----------------
-// The engine picks now. The view here is the shorthand declaration on a Retina-shaped frame (logical
-// 640x360 over a 1280x720 framebuffer): the shorthand used to take the framebuffer for both rectangles,
-// and the logical centre would then have landed in the top-left quadrant of the picture.
+// The view here is the shorthand declaration on a Retina-shaped frame (logical 640x360 over a 1280x720
+// framebuffer): the shorthand used to take the framebuffer for both rectangles, and the logical centre
+// would then have landed in the top-left quadrant of the picture.
 {
     var sys = new DebugSystem(historyCapacity: 4);
     sys.Register(new TestSelectable("scene",
         new DebugSelectable("scene/ahead", new Bounds3(new Vector3(-0.5f, -0.5f, -6), new Vector3(0.5f, 0.5f, -5)))));
-    t.ExpectTrue("Before anything is drawn, a pick has nowhere to look", sys.Pick(new Vector2(320, 180)) is null);
+    t.ExpectTrue("Before anything is drawn, a pick has nowhere to look", sys.Pick(new Vector2(320, 180)).Count == 0);
 
     var view = Matrix4x4.CreateLookAt(Vector3.Zero, -Vector3.UnitZ, Vector3.UnitY)
                * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, 16f / 9f, 0.1f, 100f);
@@ -1724,12 +1720,19 @@ var t = new TestRunner();
     sys.Run(new TestDebuggable("scene", debug => { using (debug.Draw.In("main", view)) { } }));
     sys.EndFrame();
 
-    t.ExpectTrue("A click at the logical centre picks what is in front of the eye",
-        sys.Pick(new Vector2(320, 180)) == "scene/ahead" && sys.SelectedPath == "scene/ahead");
+    sys.Select("scene/ahead");
+    var picked = sys.Pick(new Vector2(320, 180));
+    t.ExpectTrue("A click at the logical centre lists what is in front of the eye",
+        picked.Count == 1 && picked[0].EntityPath == "scene/ahead" && ReferenceEquals(picked, sys.PickList));
+    t.ExpectTrue("And selects nothing itself: a new click clears the last choice", sys.SelectedPath is null);
+    sys.Select(picked[0].EntityPath);
     t.ExpectTrue("A pointer over no view changes nothing",
-        sys.Pick(new Vector2(900, 500)) is null && sys.SelectedPath == "scene/ahead");
-    t.ExpectTrue("A miss inside the view clears the selection",
-        sys.Pick(new Vector2(4, 4)) is null && sys.SelectedPath is null);
+        ReferenceEquals(sys.Pick(new Vector2(900, 500)), picked) && sys.SelectedPath == "scene/ahead");
+    t.ExpectTrue("A click on empty space inside the view lists nothing", sys.Pick(new Vector2(4, 4)).Count == 0);
+    sys.Select("scene/ahead");
+    sys.ClearPick();
+    t.ExpectTrue("Closing the Selections tab forgets the list and the choice",
+        sys.PickList.Count == 0 && sys.SelectedPath is null);
 }
 
 // -- Selection edits are declared under the selection ------------------------
@@ -1749,6 +1752,20 @@ var t = new TestRunner();
     sys.EndFrame();
     t.ExpectTrue("An inspector's control is scoped under the selection, by the group it chose",
         margin.Scope == DebugSystem.SelectionScope + "/LOD", margin.Scope);
+
+    // An edit on the Selection tab is the selected thing's. The control's path is the same whatever is
+    // selected, so an edit left standing was handed to every primitive selected after it.
+    sys.SetControlValue(margin.Path, 3f);
+    sys.Select("scene/foo/sub-1");
+    var carried = 0f;
+    sys.Register(new TestInspectable("scene/foo", (path, ctx) =>
+    {
+        using (ctx.Scope("LOD")) carried = ctx.Controls.Float("margin", 1f, 0f, 8f);
+    }));
+    sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
+    sys.Run();
+    sys.EndFrame();
+    t.ExpectTrue("And an edit made on one selection is not carried to the next", carried == 1f, carried.ToString());
 }
 
 // -- Keys: bound on controls, driven by the engine ---------------------------
@@ -1966,7 +1983,7 @@ sealed class FlagFixture : ITunable
 
 sealed class KeyedTunables
 {
-    [Tune(Key = Key.B)] public bool Bloom;
+    [Tune(Key = Key.B)] public bool Bloom = false;
 }
 
 sealed class BadKeyedTunables

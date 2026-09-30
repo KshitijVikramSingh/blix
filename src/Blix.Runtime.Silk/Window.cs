@@ -493,8 +493,8 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             ? string.Join("\n", keys.Select(k => $"{k.Binding,-10} {k.Description}"))
             : null;
 
-    // Armed from the Selection tab or by holding Alt, and only with the overlay up: the selection is
-    // read there, and a hidden debugger taking clicks would be one nobody could see doing it.
+    // Armed from the Pick switch or by holding Alt, and only with the overlay up: the pick list is read
+    // there, and a hidden debugger taking clicks would be one nobody could see doing it.
     private bool PickArmed =>
         debugSystem is { State.ShowOverlay: true } debug
         && (debug.State.PickMode || AnyKeyDown(SilkKey.AltLeft, SilkKey.AltRight));

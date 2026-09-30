@@ -215,10 +215,29 @@ public sealed class DebugSystem
     public void Select(string entityPath)
     {
         ArgumentException.ThrowIfNullOrEmpty(entityPath);
+        if (entityPath != SelectedPath) ForgetSelectionEdits();
         SelectedPath = entityPath;
     }
 
-    public void ClearSelection() => SelectedPath = null;
+    public void ClearSelection()
+    {
+        if (SelectedPath is not null) ForgetSelectionEdits();
+        SelectedPath = null;
+    }
+
+    // <b>An edit on the Selections tab belongs to the thing that was selected.</b> Its control has one path
+    // whatever is selected ("selection/LOD/margin"), and a panel edit is held until something overwrites it,
+    // so without this the value dragged on one primitive was handed to every primitive selected after it.
+    private void ForgetSelectionEdits()
+    {
+        foreach (var path in pendingControlValues.Keys.ToArray())
+        {
+            if (path == SelectionScope || path.StartsWith(SelectionScope + "/", StringComparison.Ordinal))
+            {
+                pendingControlValues.Remove(path);
+            }
+        }
+    }
 
     /// <summary>The current bounds of any selectable entity, asked of whichever source owns it.</summary>
     public bool TryGetBounds(string entityPath, out Bounds3 bounds)
@@ -252,72 +271,65 @@ public sealed class DebugSystem
         return selectableScratch;
     }
 
-    /// <summary>Selects what is under a pointer, as seen in the last frame drawn.</summary>
+    /// <summary>One entry of the pick list: a selectable the ray crossed, and how far along it the ray entered.</summary>
+    public readonly record struct PickCandidate(string EntityPath, string Label, float Distance);
+
+    /// <summary>What the last click crossed, nearest entry first. Empty before a click, or after a miss.</summary>
+    /// <remarks>
+    /// <b>A list, not a verdict.</b> Selectables are boxes, and a box says where a thing might be, not
+    /// where its surface is: a vaulted ceiling's box is mostly the air under the vault. Every rule that
+    /// chose one box for the click (nearest entry, smallest box, boxes around the eye skipped) was wrong
+    /// somewhere in Sponza, and the only exact fixes reached across four layers. So the click reports what
+    /// it crossed, and the person who can see the picture chooses from it on the Selections tab.
+    /// </remarks>
+    public IReadOnlyList<PickCandidate> PickList => pickList;
+
+    private List<PickCandidate> pickList = new();
+
+    /// <summary>Lists what is under a pointer, as seen in the last frame drawn, and clears the selection.</summary>
     /// <param name="pointer">In the window's logical coordinates, as the input layer reports it.</param>
-    /// <returns>The path hit, or null.</returns>
     /// <remarks>
     /// Through the views of the frame the viewer is looking at, latest declared first, so a panel drawn
-    /// over the main view answers for the pixels it covers. A pointer over no view changes nothing; a
-    /// miss inside a view clears, which is what every viewport does.
+    /// over the main view answers for the pixels it covers. A pointer over no view changes nothing.
+    /// Nothing is selected by the click itself: a new click is a new question, so the previous answer's
+    /// details go with it.
     /// </remarks>
-    public string? Pick(System.Numerics.Vector2 pointer)
+    public IReadOnlyList<PickCandidate> Pick(System.Numerics.Vector2 pointer)
     {
         var views = LatestFrame?.Views;
-        if (views is null) return null;
+        if (views is null) return pickList;
         Ray? ray = null;
         for (var i = views.Count - 1; i >= 0 && ray is null; i--) ray = ViewPicking.RayThrough(views[i], pointer);
-        if (ray is not { } r) return null;
+        if (ray is not { } r) return pickList;
 
-        if (PickAlong(r, CollectSelectables()) is { } hit)
-        {
-            Select(hit.EntityPath);
-            return hit.EntityPath;
-        }
-
+        pickList = PickAlong(r, CollectSelectables());
         ClearSelection();
-        return null;
+        return pickList;
     }
 
-    /// <summary>The selectable a ray picks: the nearest box it enters from outside.</summary>
-    /// <remarks>
-    /// <b>Neither rule this replaced was right for the engine.</b> Nearest entry, which the viewer uses
-    /// for a model's nodes, fails from inside anything: a ray starting inside a box enters it at
-    /// distance 0, so standing in Sponza's atrium the enclosing bounds won every click. Sponza answered
-    /// that with the smallest box hit, which picks a small thing behind a wall, where the click cannot
-    /// have been aimed. So: boxes that contain the eye are skipped, the nearest entry of the rest wins,
-    /// and near-equal entries (a thing resting on another) go to the smaller box, which is the more
-    /// specific answer.
-    /// </remarks>
-    public static DebugSelectable? PickAlong(Ray ray, IReadOnlyList<DebugSelectable> candidates)
+    /// <summary>Forgets the pick list and the selection: what closing the Selections tab does.</summary>
+    public void ClearPick()
+    {
+        pickList = new List<PickCandidate>();
+        ClearSelection();
+    }
+
+    /// <summary>Every selectable a ray crosses, ordered by where the ray enters it.</summary>
+    /// <remarks>A box the ray starts inside is entered at 0, so it comes first.</remarks>
+    public static List<PickCandidate> PickAlong(Ray ray, IReadOnlyList<DebugSelectable> candidates)
     {
         ArgumentNullException.ThrowIfNull(candidates);
-        DebugSelectable? best = null;
-        var bestTime = float.PositiveInfinity;
-        var bestVolume = float.PositiveInfinity;
+        var hits = new List<PickCandidate>();
         for (var i = 0; i < candidates.Count; i++)
         {
-            var candidate = candidates[i];
-            var b = candidate.Bounds;
-            var o = ray.Origin;
-            var containsEye = o.X >= b.Min.X && o.X <= b.Max.X && o.Y >= b.Min.Y && o.Y <= b.Max.Y
-                              && o.Z >= b.Min.Z && o.Z <= b.Max.Z;
-            if (containsEye) continue;
-            if (Intersection.Raycast(ray, b) is not { } hit) continue;
-
-            var size = b.Max - b.Min;
-            var volume = size.X * size.Y * size.Z;
-            var tie = 1e-4f * MathF.Max(1f, bestTime is float.PositiveInfinity ? hit.Time : bestTime);
-            var nearer = hit.Time < bestTime - tie;
-            var level = MathF.Abs(hit.Time - bestTime) <= tie;
-            if (nearer || (level && volume < bestVolume))
+            if (Intersection.Raycast(ray, candidates[i].Bounds) is { } hit)
             {
-                best = candidate;
-                bestTime = hit.Time;
-                bestVolume = volume;
+                hits.Add(new PickCandidate(candidates[i].EntityPath, candidates[i].Label ?? candidates[i].EntityPath, hit.Time));
             }
         }
 
-        return best;
+        // Stable, so equal entries keep the order their sources listed them in.
+        return hits.OrderBy(h => h.Distance).ToList();
     }
 
     public void Run(params IDebuggable[] debuggables)
