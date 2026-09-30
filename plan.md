@@ -30,7 +30,9 @@ source paths that stage 4 deletes would be wasted. Stage 4 done: runtime loads c
 (not `MaterialData`, taken by the `.material` asset record), `TextureData`, `MaterialTextureLoader`,
 `AlphaMode`, `UnreadAttribute` (2b6d43a). Stage 3 done: a project's cook configuration (`CookConfig`, `.blixcook`)
 replaces `.blixpatch`, read by `blix cook --config`, `blix cook project` and the build's `<BlixCookConfig>`;
-each entry stamped by its own hash; Sponza's four patches are one `sponza.blixcook` (972d4b1). Next: stage 5.
+each entry stamped by its own hash; Sponza's four patches are one `sponza.blixcook` (972d4b1). Stage 5
+done: Studio's static pipeline reads the complete vertex and the cooked tangent frame; the derivative
+frame is gone (81a0f80). **§G is complete.**
 
 **The format mirrors glTF's structure, not its encoding.** "Rig or static" is not a question glTF
 asks: every mesh reaches a scene through a node, and a rigged file is a scene graph in which some node
