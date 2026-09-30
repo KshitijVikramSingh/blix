@@ -17,7 +17,6 @@ internal sealed partial class SponzaLoop
         System.Globalization.CultureInfo.InvariantCulture;
 
     // --- LOD visibility instrument ---------------------------------------
-    private bool showLodBoxes;
     private int[] lodLevels = Array.Empty<int>();
     private float[] lodPopAge = Array.Empty<float>();
     private const float PopHoldSeconds = 1.5f;
@@ -52,12 +51,10 @@ internal sealed partial class SponzaLoop
     // Controls are read-back: the returned value feeds this frame's render.
     public void Debug(DebugContext debug)
     {
-        // Cmd+C toggles this; Debug() runs unconditionally so it re-applies.
-        debug.State.Enabled = overlayEnabled;
         // Read-only values run even with the overlay hidden so F12 captures remain self-describing.
         // Controls and gizmos stop here because they are interactive or feed the debug-line pass.
         ReportValues(debug);
-        if (!overlayEnabled) return;
+        if (!debug.State.ShowOverlay) return;
 
         // Live tuning, grouped by scope. Controls are read-back: the returned
         // value feeds this frame's render (Debug() runs before OnRender).
@@ -124,10 +121,6 @@ internal sealed partial class SponzaLoop
             device.VsyncEnabled = debug.Controls.Toggle("Vsync", device.VsyncEnabled);
             // Visualization channels are named here and share the shader's stable integer IDs.
             vizChannel = debug.Controls.Enum("Show", (int)MathF.Round(vizChannel), VizChannelNames);
-            // Outlines every opaque primitive NOT at full detail, tinted by how coarse it is, and
-            // flashes white the moment one switches level. The question this answers is not "how
-            // much does LOD save" — the A/B answers that — but "which piece of wall was it".
-            showLodBoxes = debug.Controls.Toggle("Show LOD levels", showLodBoxes);
             // Toggle the incident field under a still camera for direct visual comparison with the
             // inline path. Its allocation scale remains a launch flag because graph resources are
             // fixed at compile time.
@@ -189,9 +182,14 @@ internal sealed partial class SponzaLoop
                 debug.Draw.Aabb($"sel/{p}", b.Min, b.Max, MultiSelectColor);
         }
 
+        // Outlines every opaque primitive NOT at full detail, tinted by how coarse it is, and flashes
+        // white the moment one switches level. The question this answers is not "how much does LOD
+        // save" — the A/B answers that — but "which piece of wall was it". A layer that starts
+        // hidden, switched in the Layers tab; it used to be a "Show LOD levels" toggle of its own.
+        //
         // Level 0 is deliberately not drawn: at a sane budget most of the scene is at full detail,
         // and outlining all of it would bury the handful of primitives the question is about.
-        if (showLodBoxes)
+        if (debug.Draw.Layer("lod", visible: false))
         {
             for (var i = 0; i < lodLevels.Length && i < opaqueDrawables.Count; i++)
             {

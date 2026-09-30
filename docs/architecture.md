@@ -426,6 +426,7 @@ letterboxed image in the UI.
 | Bundle meshes into shared buffers / stream glTF textures | `Blix.Render.MeshBundler`, `Blix.Render.AsyncLoadQueue<T>`, `GltfTextureLoader` — `src/Demos/Blix.Demos.VulkanSponza/` composes them |
 | Add a new debug control / stat / timer / event | `IDebuggable.Debug(DebugContext)` — `Blix.Diagnostics` |
 | Draw debug geometry at all | Declare a view, then `using (debug.Draw.In(view))` — drawing outside one throws |
+| Let a gizmo be switched off, or start off | Draw it under a path; the Layers tab switches every path. `debug.Draw.Layer(name, visible: false)` declares one hidden and says whether it is wanted, so costly gizmos can skip their work |
 | Show where something has been | `debug.Draw.Trail(name, point, colour, seconds)` |
 | Give the application its own UI panel | Implement `IUiSource` on the game loop; add an `ImGui.NET` package reference |
 | Add a panel to the diagnostics overlay instead | Implement `IDebugUi` on a registered contributor (`Blix.Diagnostics.Overlay`) |
@@ -433,9 +434,9 @@ letterboxed image in the UI.
 | Run bounded (CI, a smoke test, a capture) | `--frames N`, honoured by the host for every application |
 | Start a new executable | `src/Demos/Blix.Demos.Chassis/` is the smallest working one — 25-line csproj, no shader boilerplate |
 | Expose a value for live tuning in the overlay | `//@tune lo..hi = default` in a GLSL uniform, or `[Tune(min,max)]` on a C# field |
-| Register a debug producer (subsystem, asset, scene instance) | `debugSystem.Register(contributor)` from `OnLoad` — implement `IDebuggable` / `IDebugGeometrySource` / `IDebugSelectable` / `IDebugInspectable` / `IDebugUi` independently |
+| Register a debug producer (subsystem, asset, scene instance) | The game loop and the device are registered by the host. Anything else: `debugSystem.Register(contributor)` from `OnLoad` — implement `IDebuggable` / `IDebugGeometrySource` / `IDebugSelectable` / `IDebugInspectable` / `IDebugUi` independently |
 | Save a frame snapshot to disk | Press `F12` (runtime-owned) — writes `dumps/frame-NNNNNN.json` via `JsonDumpSink` |
-| Toggle the diagnostics overlay | Press `` ` `` (backtick) |
+| Toggle the diagnostics overlay | Press `` ` `` (backtick). It starts hidden unless the host's `Diagnostics` option, or `--debug`, says otherwise |
 | Add a reusable shader primitive | `src/Blix.Shaders/<concept>.glsl` (one concept per file, `blix_`-prefixed symbols) |
 
 ## Build + run

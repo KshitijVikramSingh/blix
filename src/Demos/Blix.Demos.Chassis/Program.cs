@@ -66,12 +66,11 @@ public static class Program
     [BlixApp("chassis-tune", Summary = "declared [Tune] state, rendered by the overlay", Headed = true)]
     public static void Tuned(AppArgs args)
     {
-        // <b>Diagnostics ON by default here, which every other app leaves off.</b>
-        // DebugState.Enabled starts false and the overlay is only laid out when it is true,
-        // so an IDebuggable loop that never sets it produces a window with no panel and no
+        // <b>Diagnostics ON by default here.</b> The overlay starts hidden unless the host is told
+        // otherwise, so an IDebuggable loop that says nothing opens a window with no panel and no
         // error — which is exactly what happened the first time this ran. An app whose whole
         // purpose is to show a declared control opening with that control hidden is not a
-        // demonstration of anything.
+        // demonstration of anything. (` still toggles it.)
         var loop = new TunedLoop();
 
         // <b>--headless runs this same loop with no window.</b> The same flags mean the same things

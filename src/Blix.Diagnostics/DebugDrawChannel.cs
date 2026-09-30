@@ -124,6 +124,27 @@ public sealed class DebugDrawChannel
             "Debug primitives were emitted outside any view. Wrap them in `using (debug.Draw.In(view))`, " +
             "where `view` came from ViewTable.Declare(...).");
 
+    /// <summary>
+    /// Declares a layer at the current scope and says whether anything drawn under it will be seen.
+    /// </summary>
+    /// <remarks>
+    /// Draw under the same name (<c>Aabb("lod/12", …)</c> after <c>Layer("lod")</c>) and the Layers tab
+    /// switches it. Asking first is for a producer whose gizmos cost something to build: it can skip
+    /// the work rather than build primitives the line pass will drop.
+    /// <para>
+    /// <paramref name="visible"/> is where the layer starts, and it is only read the first time: after
+    /// that the switch is the viewer's. A layer declared hidden is listed in the Layers tab from the
+    /// first frame, before it has drawn anything, which is what replaces the "Show …" toggle an
+    /// application used to add for each gizmo it did not want on by default.
+    /// </para>
+    /// </remarks>
+    public bool Layer(string name, bool visible = true)
+    {
+        var path = context.BuildPath(name);
+        context.State.LayersEnabled.TryAdd(path, visible);
+        return context.State.ShowDebugDraw && context.State.IsPathVisible(path);
+    }
+
     private void PopView() => scopes.Pop();
 
     private sealed class ViewScope : IDisposable

@@ -155,11 +155,14 @@ public sealed class DebugOverlayUi
             }
 
             // Layers tab — reads paths from the live context so a new
-            // producer's checkboxes appear immediately, not one frame later.
+            // producer's checkboxes appear immediately, not one frame later,
+            // and from the layers already known, so one hidden or declared
+            // hidden is still there to turn on.
             var liveDraws = debugSystem.Current?.Draw.Commands;
-            if (liveDraws is { Count: > 0 } && ImGui.BeginTabItem("Layers"))
+            if ((liveDraws is { Count: > 0 } || debugSystem.State.LayersEnabled.Count > 0)
+                && ImGui.BeginTabItem("Layers"))
             {
-                DrawLayersTree(debugSystem.State, liveDraws);
+                DrawLayersTree(debugSystem.State, liveDraws ?? Array.Empty<DebugDrawCommand>());
                 ImGui.EndTabItem();
             }
 
@@ -649,6 +652,15 @@ public sealed class DebugOverlayUi
     // panel tractable for Sponza, where the flat list grows to 400+ rows.
     private static void DrawLayersTree(DebugState state, IReadOnlyList<DebugDrawCommand> commands)
     {
+        // The two switches above every layer, which were state no panel reached: two applications
+        // kept their own checkbox for depth testing and wrote it back each frame.
+        var drawAll = state.ShowDebugDraw;
+        if (ImGui.Checkbox("Draw debug geometry", ref drawAll)) state.ShowDebugDraw = drawAll;
+        ImGui.SameLine();
+        var depthTest = state.DepthTestDrawing;
+        if (ImGui.Checkbox("Hidden by the scene", ref depthTest)) state.DepthTestDrawing = depthTest;
+        ImGui.Separator();
+
         // Build a child-map from full paths. Each node tracks its
         // children (next segment) and its leaf count (the number of
         // distinct full paths under it). Leaf count drives the "(N/M)"
@@ -659,6 +671,10 @@ public sealed class DebugOverlayUi
             var path = commands[i].Path;
             if (string.IsNullOrEmpty(path)) continue;
             root.Add(path);
+        }
+        foreach (var known in state.LayersEnabled.Keys)
+        {
+            if (!string.IsNullOrEmpty(known)) root.Ensure(known);
         }
         if (root.Children.Count == 0)
         {
@@ -773,9 +789,11 @@ public sealed class DebugOverlayUi
     {
         foreach (var c in node.Children.Values)
         {
+            // Set rather than removed: a layer declared hidden re-adds its default every frame it
+            // is declared, so removing the entry would undo "All" one frame later.
             if (state.LayersEnabled.TryGetValue(c.FullPath, out var v) && !v)
             {
-                state.LayersEnabled.Remove(c.FullPath);
+                state.LayersEnabled[c.FullPath] = true;
             }
             ClearDescendantFalses(state, c);
         }
@@ -813,6 +831,21 @@ public sealed class DebugOverlayUi
             {
                 walk = walk.Children[segments[i]];
                 walk.LeafCount++;
+            }
+        }
+
+        // A node for a known layer that drew nothing this frame: listed, but no primitive counted.
+        public void Ensure(string path)
+        {
+            var current = this;
+            foreach (var seg in path.Split('/'))
+            {
+                if (!current.Children.TryGetValue(seg, out var child))
+                {
+                    child = new LayerNode(seg, current.FullPath.Length == 0 ? seg : current.FullPath + "/" + seg);
+                    current.Children[seg] = child;
+                }
+                current = child;
             }
         }
 

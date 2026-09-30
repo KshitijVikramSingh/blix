@@ -36,7 +36,9 @@ public static class Program
     private static int Run(AppArgs args)
     {
         var loop = new LitLoop();
-        using var window = new Window(loop, WindowOptions.FromArgs(args, new WindowOptions("Blix — Vulkan Lit + Shadow + Skinned glTF", 1280, 720)));
+        // Opens with the overlay showing: its knobs are what this demo is for. ` hides it.
+        using var window = new Window(loop, WindowOptions.FromArgs(args,
+            new WindowOptions("Blix — Vulkan Lit + Shadow + Skinned glTF", 1280, 720) { Diagnostics = true }));
         window.Run();
         return 0;
     }
@@ -708,12 +710,10 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
 
         // Register the per-knob debug contributors. Each owns a focused
         // slice of the overlay's Controls/Values surface so LitLoop.Debug()
-        // doesn't have to. Engine-default contributors (GraphicsDevice
-        // info + diagnostics) are wired in via the extension method;
-        // game-specific ones are opt-in registrations below.
+        // doesn't have to. The device's own contributor is the host's;
+        // these game-specific ones are registered here.
         if (host is IDebugHost debugHost && debugHost.System is { } debugSystem)
         {
-            graphicsDevice.RegisterDebug(debugSystem);
             debugSystem.Register(new SunControls(this));
             debugSystem.Register(new ToneMapControls(this));
             debugSystem.Register(new LightControls(this));
@@ -1132,9 +1132,6 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
 
     public void Debug(DebugContext debug)
     {
-        // Light up the on-screen diagnostics overlay (toggle visibility with
-        // the ` key).
-        debug.State.Enabled = true;
         debug.Values.Value("frame", frameCount);
 
         // Tunable knobs (view mode, shader channel, sun, tone map, lights,

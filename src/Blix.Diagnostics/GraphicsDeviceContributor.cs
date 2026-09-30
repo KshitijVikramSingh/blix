@@ -8,12 +8,11 @@ namespace Blix.Diagnostics;
 // "draws are happening but the device API rejected something" is the kind
 // of signal that should be one glance away in the overlay's Stats tab.
 //
-// Wired via the IGraphicsDeviceExtensions.RegisterDebug convenience method:
-//
-//     graphicsDevice.RegisterDebug(debugSystem);
-//
-// Demos opt in once and get the surface for free; the diagnostics core
-// owns the contributor lifetime via DebugSystem.Register.
+// Registered by the host whenever diagnostics are live, ahead of the loop, so
+// every application gets it without asking. It used to be opt-in through a
+// RegisterDebug extension, which two of fifteen applications called; the
+// others either went without or copied the vendor and renderer into their
+// own values.
 public sealed class GraphicsDeviceContributor : IDebuggable
 {
     private readonly IGraphicsDevice device;
@@ -67,23 +66,5 @@ public sealed class GraphicsDeviceContributor : IDebuggable
             debug.Events.Warn(label);
             lastReportedError = diag.LastErrorMessage;
         }
-    }
-}
-
-public static class GraphicsDeviceDebugExtensions
-{
-    // Convenience for "engine default" registration. Demos call this once
-    // after constructing their device to wire the vendor/renderer/error
-    // surface into the overlay without writing a contributor themselves.
-    // Idempotent against DebugSystem.Register (the registry de-dupes by
-    // reference), but each call still allocates a fresh contributor, so
-    // call it once per device.
-    public static GraphicsDeviceContributor RegisterDebug(this IGraphicsDevice device, DebugSystem debug)
-    {
-        ArgumentNullException.ThrowIfNull(device);
-        ArgumentNullException.ThrowIfNull(debug);
-        var contributor = new GraphicsDeviceContributor(device);
-        debug.Register(contributor);
-        return contributor;
     }
 }

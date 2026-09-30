@@ -1275,6 +1275,50 @@ var t = new TestRunner();
     t.ExpectTrue("Empty path is visible", state.IsPathVisible(string.Empty));
 }
 
+// -- Layers reach the screen: ShouldDraw is what the line pass asks ---------
+// The Layers tab wrote LayersEnabled and nothing that drew read it, so every switch in it was
+// connected to nothing. These are the answers the line pass now takes per command.
+{
+    var state = new DebugState();
+    var box = new DebugDrawAabb("physics/aabb/box-3", new GraphicsColor(0, 1, 0, 1), default, -Vector3.One, Vector3.One);
+    var pick = new DebugDrawAabb(DebugSystem.SelectionScope + "/bounds", new GraphicsColor(1, 0, 1, 1), default, -Vector3.One, Vector3.One);
+    t.ExpectTrue("A primitive under no switch is drawn", state.ShouldDraw(box));
+    state.LayersEnabled["physics/aabb"] = false;
+    t.ExpectTrue("Unticking its layer stops it being drawn", !state.ShouldDraw(box));
+    t.ExpectTrue("But not the selection highlight, which answers a click", state.ShouldDraw(pick));
+    state.LayersEnabled[DebugSystem.SelectionScope] = false;
+    t.ExpectTrue("Even when its own layer is unticked", state.ShouldDraw(pick));
+    state.LayersEnabled.Clear();
+    state.ShowDebugDraw = false;
+    t.ExpectTrue("The master switch stops everything, the highlight included",
+        !state.ShouldDraw(box) && !state.ShouldDraw(pick));
+    t.ExpectTrue("The overlay starts hidden until a host is told to show it", !new DebugState().ShowOverlay);
+}
+
+// -- Draw.Layer: a layer declared once, hidden by default if asked -----------
+// What replaces the "Show …" toggle an application added for each gizmo it did not want on by default.
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+    bool Declare(bool visible)
+    {
+        var wanted = false;
+        sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
+        sys.Run(new TestDebuggable("scene", debug => wanted = debug.Draw.Layer("lod", visible)));
+        sys.EndFrame();
+        return wanted;
+    }
+
+    t.ExpectTrue("A layer declared hidden is not wanted", !Declare(visible: false));
+    t.ExpectTrue("And is known before it has drawn anything, so the Layers tab can list it",
+        sys.State.LayersEnabled.TryGetValue("scene/lod", out var known) && !known);
+    t.ExpectTrue("Its default is read once: declaring it visible later does not overrule the viewer",
+        !Declare(visible: true));
+    sys.State.LayersEnabled["scene/lod"] = true;
+    t.ExpectTrue("Ticking it in the Layers tab makes it wanted", Declare(visible: false));
+    sys.State.ShowDebugDraw = false;
+    t.ExpectTrue("And the master switch still wins", !Declare(visible: true));
+}
+
 // -- JsonDumpSink: polymorphic draw commands serialise with discriminator ---
 {
     var sys = new DebugSystem(historyCapacity: 4);

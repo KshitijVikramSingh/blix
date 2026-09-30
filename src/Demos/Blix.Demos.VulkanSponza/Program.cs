@@ -52,7 +52,8 @@ public static class Program
         // leaves the second alone, so one paired run says which wall the frame is against — a
         // question no amount of per-pass timing can answer on a tile-based GPU, where the
         // timestamps bracket encoder submission rather than execution.
-        var defaults = new WindowOptions("Blix — Vulkan Sponza", 1440, 810);
+        // Opens with the overlay showing, as a research renderer is mostly read through it. ` hides it.
+        var defaults = new WindowOptions("Blix — Vulkan Sponza", 1440, 810) { Diagnostics = true };
         if (args.Values("win", 2) is [var w, var h])
         {
             var width = int.Parse(w, CultureInfo.InvariantCulture);
@@ -581,9 +582,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDisposable
     private PipelineHandle shadowOpaquePipeline;
     private ShaderProgramHandle shadowMaskProgram;
     private PipelineHandle shadowMaskPipeline;
-    // Diagnostics overlay visibility, toggled with Cmd+C. Applied to
-    // DebugState.Enabled each frame in Debug() (which runs unconditionally).
-    private bool overlayEnabled = true;
 
 
     // IBL textures: a cooked .blixprobe (real GGX prefilter) when present, else

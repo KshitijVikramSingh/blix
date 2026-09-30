@@ -44,9 +44,9 @@ public static class Program
 
     private static int Run(AppArgs args)
     {
-        // --debug opts into the tuning + diagnostics overlay.
+        // --debug opens with the tuning + diagnostics overlay showing; ` toggles it either way.
         var options = WindowOptions.FromArgs(args, new WindowOptions("Blix — Particles (soft + bloom)", 1280, 720));
-        var loop = new ParticlesLoop(options.ExitAfterFrames, options.Diagnostics);
+        var loop = new ParticlesLoop(options.ExitAfterFrames);
         using var window = new Window(loop, options);
         window.Run();
         return 0;
@@ -63,7 +63,6 @@ internal sealed class ParticleSettings
     [Tune(0.1f, 2.0f)] public float FadeDist = 0.55f;
     [Tune(0.5f, 6.0f)] public float SparkSharpness = 3.4f;
     [Tune(0.5f, 4.0f)] public float SmokeSharpness = 1.1f;
-    [Tune]             public bool ShowGizmos = false;
 }
 
 internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
@@ -79,7 +78,6 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
     private const float BloomScale = 0.25f;
 
     private readonly int exitAfterFrames;
-    private readonly bool overlayEnabled;        // --debug: enables the ` overlay
     private readonly Random rng = new(12345);   // deterministic emission
     private readonly ParticleSettings fx = new();
     private ObjectTunables tunables = null!;
@@ -143,10 +141,9 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
     private readonly record struct OpaqueMesh(
         VertexBufferHandle VB, IndexBufferHandle IB, int IndexCount, Matrix4x4 Model, Vector4 Albedo);
 
-    public ParticlesLoop(int exitAfterFrames, bool overlayEnabled)
+    public ParticlesLoop(int exitAfterFrames)
     {
         this.exitAfterFrames = exitAfterFrames;
-        this.overlayEnabled = overlayEnabled;
     }
 
     public string DebugName => "particles";
@@ -548,10 +545,8 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
     // --- Diagnostics overlay (` toggles) -----------------------------------
     public void Debug(DebugContext debug)
     {
-        // The overlay only renders when State.Enabled (the backtick key toggles
-        // State.ShowOverlay, not this). Gate it on --debug; when off, emit nothing.
-        debug.State.Enabled = overlayEnabled;
-        if (!overlayEnabled) return;
+        // Gizmos and controls only while the overlay is up (--debug, or ` at any time).
+        if (!debug.State.ShowOverlay) return;
 
         // Every primitive below belongs to this view. Scoped rather than assigned: the old
         // per-channel matrix meant a frame could only ever be one world seen one way.
@@ -572,12 +567,14 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
             debug.Values.Value("radius", camRadius);
         }
 
-        if (fx.ShowGizmos)
+        // Where each effect is anchored, as a layer that starts hidden (the Layers tab switches it).
+        // It was a ShowGizmos setting beside the look's, which put a debug switch among the tuning.
+        if (debug.Draw.Layer("emitters", visible: false))
         {
             var c = new GraphicsColor(0.95f, 0.8f, 0.25f, 0.9f);
-            debug.Draw.Sphere("fountain", FountainAt + new Vector3(0, 0.2f, 0), 0.4f, c);
-            debug.Draw.Sphere("explosion", ExplosionAt, 0.5f, c);
-            debug.Draw.Sphere("vortex", VortexAt, 1.5f, c);
+            debug.Draw.Sphere("emitters/fountain", FountainAt + new Vector3(0, 0.2f, 0), 0.4f, c);
+            debug.Draw.Sphere("emitters/explosion", ExplosionAt, 0.5f, c);
+            debug.Draw.Sphere("emitters/vortex", VortexAt, 1.5f, c);
         }
     }
 

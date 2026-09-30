@@ -723,6 +723,24 @@ public static class Program
             t.Expect("carrying what the loop reported",
                 root.GetRawText().Contains("ticks", StringComparison.Ordinal), "no 'ticks' value in the dump");
         }
+
+        // The loop is registered, not passed: every debug interface it implements is heard, and its
+        // Debug() runs once a frame rather than once as a contributor and again as the passed loop.
+        var inspectable = new InspectableLoop();
+        var registering = new HeadlessHost(inspectable, new HeadlessOptions(ExitAfterFrames: 3));
+        Console.SetOut(TextWriter.Null);
+        try { registering.Run(); } finally { Console.SetOut(wasOut); }
+        var contributors = registering.System!.Contributors.Select(c => c.DebugName).ToArray();
+        t.Expect("the host registers the device and then the loop, and nothing else",
+            contributors.SequenceEqual(new[] { "gpu", "inspectable-fixture" }), string.Join(", ", contributors));
+        t.Expect("so a loop that is also inspectable is heard as one",
+            registering.System.Contributors.OfType<IDebugInspectable>().Single() == inspectable);
+        t.Expect("and its Debug() runs once a frame", inspectable.Debugs == 3, $"{inspectable.Debugs} calls in 3 frames");
+
+        // Where the overlay starts is the application's to say, once; nothing writes it per frame.
+        t.Expect("the overlay starts hidden", !registering.System.State.ShowOverlay);
+        var shown = new HeadlessHost(new InspectableLoop(), new HeadlessOptions(ExitAfterFrames: 1, Diagnostics: true));
+        t.Expect("and showing when the host is told to (--debug)", shown.System!.State.ShowOverlay);
     }
 
     /// <summary>
@@ -1188,6 +1206,17 @@ internal class RecordingLoop : IGameLoop
 }
 
 /// <summary>The same loop, reporting into diagnostics.</summary>
+internal sealed class InspectableLoop : RecordingLoop, IDebuggable, IDebugInspectable
+{
+    public int Debugs { get; private set; }
+
+    public string DebugName => "inspectable-fixture";
+
+    public void Debug(DebugContext debug) => Debugs++;
+
+    public void Inspect(string entityPath, DebugContext debug) { }
+}
+
 internal sealed class DebuggableLoop : RecordingLoop, IDebuggable
 {
     public string DebugName => "headless-fixture";

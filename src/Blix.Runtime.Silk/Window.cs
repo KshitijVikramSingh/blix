@@ -105,7 +105,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         this.uiSource = gameLoop as IUiSource;
         this.diagnostics = diagnostics;
 
-        if (gameLoop is IDebuggable)
+        if (gameLoop is IDebugContributor)
         {
             debugSystem = new DebugSystem();
             frameRecorder = new DiagnosticsFrameRecorder(debugSystem);
@@ -123,7 +123,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             }
             jsonDumpSink = new JsonDumpSink();
             debugSystem.AddSink(jsonDumpSink);
-            if ((options ?? BlixWindowOptions.Default).Diagnostics) debugSystem.State.Enabled = true;
+            if ((options ?? BlixWindowOptions.Default).Diagnostics) debugSystem.State.ShowOverlay = true;
         }
 
         var resolved = options ?? BlixWindowOptions.Default;
@@ -191,7 +191,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         // An application that produces diagnostics gets a swapchain depth buffer that survives its
         // pass, so debug geometry drawn over the scene can be hidden by it. One without pays nothing.
         graphicsDevice = new VulkanGraphicsDevice(
-            vkSurface, w, h, preserveSwapchainDepth: gameLoop is IDebuggable);
+            vkSurface, w, h, preserveSwapchainDepth: debugSystem is not null);
         Console.WriteLine($"Graphics: {graphicsDevice.Info.Vendor} | {graphicsDevice.Info.Renderer} | {graphicsDevice.Info.Version}");
         if (debugSystem is not null)
         {
@@ -199,6 +199,9 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             // line-pipeline draw on the OverlayRenderPass. Only allocate when
             // diagnostics are live (no IDebuggable game loop → no overlay).
             lineDrawer = new VkLineDrawer(graphicsDevice);
+
+            // Every application gets the device's contributor; it used to be opt-in, and two did.
+            debugSystem.Register(new GraphicsDeviceContributor(graphicsDevice));
         }
 
         // <b>Built for anyone who wants a frame, not only for IDebuggable.</b> This used to live inside
@@ -239,6 +242,12 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
         ApplyDefaultSurfaceSize();
         gameLoop.OnLoad(this, graphicsDevice);
+
+        // <b>The loop is a contributor like any other, registered rather than passed.</b> It used to be
+        // handed to Run() each frame, which ran its Debug() and nothing else: a loop that was also
+        // selectable, inspectable or a geometry source was silently ignored. Registered after OnLoad so
+        // it runs where the passed loop did, after the device and anything the loop registered itself.
+        debugSystem?.Register((IDebugContributor)gameLoop);
     }
 
     private void OnUpdate(double deltaTime)
@@ -276,12 +285,12 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         var time = new Time(totalTime, deltaTime);
         var frame = CreateFrameContext();
 
-        if (debugSystem is not null && gameLoop is IDebuggable debuggable)
+        if (debugSystem is not null)
         {
             debugSystem.BeginFrame(frame);
             using (debugSystem.Current!.Timers.Measure("run-debuggables"))
             {
-                debugSystem.Run(debuggable);
+                debugSystem.Run();
             }
         }
 
@@ -748,7 +757,9 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         var views = ctx.Draw.Views;
         if (views.Count == 0) return;
 
-        var depthTested = debugSystem?.State.DepthTestDrawing ?? true;
+        var state = debugSystem!.State;
+        if (!state.ShowDebugDraw) return;
+        var depthTested = state.DepthTestDrawing;
 
         // One buffer for the whole frame, one span per view. Cleared here because the ranged Submit below
         // deliberately does not reset — see VkLineDrawer.
@@ -762,7 +773,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             for (var i = 0; i < commands.Count; i++)
             {
                 var c = commands[i];
-                if (c.View != view.Id) continue;
+                if (c.View != view.Id || !state.ShouldDraw(c)) continue;
                 switch (c)
                 {
                     case DebugDrawLine d: lineDrawer.Line(d.A, d.B, d.Color); break;
@@ -852,7 +863,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         uiFrameBuilt = false;
         if (imguiRenderer is null) return;
 
-        var overlayUp = debugSystem is { State.Enabled: true, State.ShowOverlay: true };
+        var overlayUp = debugSystem is { State.ShowOverlay: true };
         var hudUp = perfHudVisible && !overlayUp;
         var appUi = uiSource;
         if (!overlayUp && !hudUp && appUi is null) return;

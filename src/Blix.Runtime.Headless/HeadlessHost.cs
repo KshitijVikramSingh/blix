@@ -52,7 +52,7 @@ public sealed class HeadlessHost : IRenderHost, IDebugHost
 
         // The same sinks a window attaches, for the same reason: a dump taken here must be one
         // that can be put beside a dump taken there.
-        if (gameLoop is IDebuggable)
+        if (gameLoop is IDebugContributor)
         {
             debugSystem = new DebugSystem();
             frameRecorder = new DiagnosticsFrameRecorder(debugSystem);
@@ -66,7 +66,7 @@ public sealed class HeadlessHost : IRenderHost, IDebugHost
 
             jsonDumpSink = new JsonDumpSink();
             debugSystem.AddSink(jsonDumpSink);
-            if (this.options.Diagnostics) debugSystem.State.Enabled = true;
+            if (this.options.Diagnostics) debugSystem.State.ShowOverlay = true;
         }
     }
 
@@ -102,7 +102,12 @@ public sealed class HeadlessHost : IRenderHost, IDebugHost
     /// <summary>Run until the frame bound, or until the loop asks to close.</summary>
     public void Run()
     {
-        gameLoop.OnLoad(this, new NoGraphicsDevice());
+        // Registered as a window registers them, the device before OnLoad and the loop after it, so a
+        // dump from here lists the same contributors in the same order as one from there.
+        var device = new NoGraphicsDevice();
+        debugSystem?.Register(new GraphicsDeviceContributor(device));
+        gameLoop.OnLoad(this, device);
+        debugSystem?.Register((IDebugContributor)gameLoop);
 
         var frame = new RenderFrameContext(options.Width, options.Height);
         var total = 0.0;
@@ -115,12 +120,12 @@ public sealed class HeadlessHost : IRenderHost, IDebugHost
             inputState.BeginTick();
             gameLoop.OnUpdate(time);
 
-            if (debugSystem is not null && gameLoop is IDebuggable debuggable)
+            if (debugSystem is not null)
             {
                 debugSystem.BeginFrame(frame);
                 using (debugSystem.Current!.Timers.Measure("run-debuggables"))
                 {
-                    debugSystem.Run(debuggable);
+                    debugSystem.Run();
                 }
             }
 
