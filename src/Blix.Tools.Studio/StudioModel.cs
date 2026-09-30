@@ -12,8 +12,8 @@ namespace Blix.Tools.Studio;
 /// </summary>
 /// <remarks>
 /// <b>Policy over residency.</b> Uploading, the hierarchy, world bounds and textures are the engine's
-/// (<see cref="Model"/>). This is what Studio decides on top: the 36-byte colour layout its static
-/// pipeline reads (the import asks for COLOR_0), the grey a part without a material is drawn in, that
+/// (<see cref="Model"/>). This is what Studio decides on top: the complete 60-byte static vertex its
+/// static pipeline reads (tangent, both UV sets, COLOR_0), the grey a part without a material is drawn in, that
 /// cooked textures are realised at load, and the names its resources carry.
 /// </remarks>
 internal sealed class StudioModel : IDisposable
@@ -52,11 +52,11 @@ internal sealed class StudioModel : IDisposable
 
     internal static StudioModel Load(IGraphicsDevice device, string path)
     {
-        // Colour: the stage's static pipeline declares the colour layout, so everything drawn on it must
-        // carry a colour, and COLOR_0 is a base-colour multiplier (conventions §6). Static: a model view
-        // draws a rigged file's skinned meshes at their bind pose.
+        // Tangents and colour: the stage's static pipeline reads the complete vertex — the cooked tangent
+        // frame for normal maps, and COLOR_0 as a base-colour multiplier (conventions §6). Static: a model
+        // view draws a rigged file's skinned meshes at their bind pose.
         // Cooked on open: what Studio shows is the cooked asset, which is what the engine draws.
-        var data = ModelData.Load(Blix.Recipes.CookCache.Resolve(path), new ModelNeeds(Colour: true, Skinned: false));
+        var data = ModelData.Load(Blix.Recipes.CookCache.Resolve(path), new ModelNeeds(Tangents: true, Colour: true, Skinned: false));
 
         var studio = new StudioModel();
         studio.textures = new MaterialTextureLoader(device);

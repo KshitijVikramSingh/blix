@@ -128,8 +128,8 @@ internal sealed class StudioRig : IDisposable
     internal static StudioRig Load(IGraphicsDevice device, string path, ShaderProgramHandle skinnedProgram)
     {
         // Cooked on open: what Studio shows is the cooked asset, which is what the engine draws. Skinned
-        // parts skinned, and the static parts beside them in the colour layout RigView draws them with.
-        var data = ModelData.Load(Blix.Recipes.CookCache.Resolve(path), new ModelNeeds(Colour: true, Skinned: true));
+        // parts skinned, and the static parts beside them in the complete vertex RigView draws them with.
+        var data = ModelData.Load(Blix.Recipes.CookCache.Resolve(path), new ModelNeeds(Tangents: true, Colour: true, Skinned: true));
         if (!data.IsRigged)
         {
             throw new AssetImportException(

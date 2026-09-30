@@ -38,6 +38,14 @@ public readonly record struct VertexPosition3NormalTangentTexture2Color(
             new VertexAttribute(Location: 5, VertexAttributeFormat.UByte4Norm, Offset: 14 * sizeof(float)),
         ]);
 
+    public static VertexBufferData CreateBufferData(
+        IReadOnlyList<VertexPosition3NormalTangentTexture2Color> vertices,
+        GraphicsBufferUsage usage = GraphicsBufferUsage.Static)
+    {
+        ArgumentNullException.ThrowIfNull(vertices);
+        return new VertexBufferData(new VertexBufferDescription(Layout, vertices.Count, usage), Pack(vertices));
+    }
+
     public static byte[] Pack(IReadOnlyList<VertexPosition3NormalTangentTexture2Color> vertices)
     {
         ArgumentNullException.ThrowIfNull(vertices);

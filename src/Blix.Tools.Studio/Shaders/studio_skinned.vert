@@ -15,7 +15,7 @@ layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
 layout(location = 3) in vec4 aBoneIndices;
 layout(location = 4) in vec4 aBoneWeights;
-layout(location = 5) in vec4 aTangent;      // declared so the Skin4Tangent layout binds; unused here
+layout(location = 5) in vec4 aTangent;      // w is the bitangent's handedness, per glTF
 
 // The PREFIX this stage reads, and nothing after it. studio_lit.frag's Frame block gained three
 // cascade matrices at offset 64 and this one did not, so it still described the pre-cascade
@@ -57,6 +57,7 @@ layout(location = 2) out vec2 vUv;
 // register, which is a bug that looks like a lighting bug.
 layout(location = 3) out vec4 vColour;
 layout(location = 4) out vec2 vUv1;
+layout(location = 5) out vec4 vTangent;
 
 void main()
 {
@@ -94,6 +95,8 @@ void main()
     // Through the skin matrix as well as the model — a bone's rotation turns its normals.
     // Uniform scale only, in this lab as in the unskinned path, so the upper 3x3 suffices.
     vNormal = normalize(mat3(uModel) * (mat3(skin) * aNormal));
+    // The tangent turns with the bone exactly as the normal does; handedness rides along.
+    vTangent = vec4(normalize(mat3(uModel) * (mat3(skin) * aTangent.xyz)), aTangent.w);
 
     vUv = aTexCoord;
     vColour = vec4(1.0);

@@ -1,12 +1,15 @@
 #version 450
 
+// The complete static vertex (VertexPosition3NormalTangentTexture2Color), as the cook writes it.
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec3 aNormal;
-layout(location = 2) in vec2 aTexCoord;
+// Authored or MikkTSpace's, never absent; w is the bitangent's handedness, per glTF.
+layout(location = 2) in vec4 aTangent;
+layout(location = 3) in vec2 aTexCoord;
+layout(location = 4) in vec2 aTexCoord1;
 // Baked ambient occlusion on the nature kit, white everywhere else. UByte4Norm, so the
 // hardware hands it over already expanded to 0..1.
-layout(location = 3) in vec2 aTexCoord1;
-layout(location = 4) in vec4 aColour;
+layout(location = 5) in vec4 aColour;
 
 // Only the member this stage reads. A LEADING PREFIX of the fragment stage's block is legal and
 // costs nothing: std140 puts uViewProjection at offset 0 either way.
@@ -32,6 +35,7 @@ layout(location = 1) out vec3 vNormal;
 layout(location = 2) out vec2 vUv;
 layout(location = 3) out vec4 vColour;
 layout(location = 4) out vec2 vUv1;
+layout(location = 5) out vec4 vTangent;
 
 void main()
 {
@@ -42,6 +46,8 @@ void main()
     // transpose is needed. Stated rather than assumed: non-uniform scale would shear
     // these normals.
     vNormal = normalize(mat3(uModel) * aNormal);
+    // A direction on the surface, so the same upper 3x3 carries it; handedness rides along.
+    vTangent = vec4(normalize(mat3(uModel) * aTangent.xyz), aTangent.w);
 
     vUv = aTexCoord;
     vUv1 = aTexCoord1;

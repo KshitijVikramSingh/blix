@@ -40,6 +40,16 @@ public static class Program
         var output = args.String("out", "capture.png");
         var modelPath = args.String("model");
         var rigPath = args.String("rig");
+        // A subject that is not there is refused, not skipped: an empty stage is lit sky and ground, so it
+        // passes every lit floor, and a mistyped path used to capture it and exit 0.
+        foreach (var (flag, subject) in new[] { ("--model", modelPath), ("--rig", rigPath) })
+        {
+            if (subject is not null && !File.Exists(subject))
+            {
+                Console.Error.WriteLine($"shot: {flag} {subject}: no such file.");
+                return 2;
+            }
+        }
 
         // <b>A pose, named by a clip and a time, is a reproducible picture.</b> That pairing is what
         // makes a capture evidence rather than a screenshot: "Walking_A at 0.35 s looked like this"
