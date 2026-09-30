@@ -1,4 +1,4 @@
-namespace Blix.Graphics.Vulkan;
+namespace Blix.Graphics;
 
 // Declarative render-pass topology baked once, then re-executed per frame.
 // Compile() freezes the graph; Execute() captures per-pass scopes and
@@ -6,11 +6,19 @@ namespace Blix.Graphics.Vulkan;
 //
 // Pass state is stored as mutable class instances; fluent builders mutate
 // them in place until Compile() flips IsCompiled.
-public sealed partial class RenderGraph
+//
+// <b>The graph is the engine's; what realises it is the device's.</b> Declaring
+// targets and passes, validating them, and replaying each frame's scopes are the
+// same for any device, so they live here and name no backend. Allocating the
+// images, building render passes and framebuffers, and reallocating on resize is
+// the backend's, which the device supplies through IRenderGraphDevice. It used
+// to be one class split across files, so the graph's constructor took the Vulkan
+// device and every program that declared a pass had to cast to get one.
+public sealed partial class RenderGraph : IDisposable
 {
-    // Null only in the test ctor — validation runs without a device, but
-    // backend compile/execute will reject null at the call site.
-    internal VulkanGraphicsDevice? Device { get; }
+    // Null only in the test ctor — validation runs without a device, and so
+    // without a backend to allocate anything.
+    internal IRenderGraphBackend? Backend { get; }
 
     // Single id counter so resource and pass handles never collide.
     internal Dictionary<int, GraphResourceEntry> Resources { get; } = new();
@@ -29,13 +37,7 @@ public sealed partial class RenderGraph
     /// resources for a new swapchain. Applications that accumulate temporal data in
     /// graph-owned targets can cache this value and invalidate that history when it changes.
     /// </summary>
-    public ulong MatchSwapchainResourceGeneration { get; private set; }
-
-    // Populated at Compile time. Empty for graphics-only graphs (subpass
-    // deps cover cross-pass memory + layout); compute reads/writes add
-    // explicit vkCmdPipelineBarrier emissions.
-    internal Dictionary<int, List<BarrierOp>> PerPassBarriers { get; private set; } =
-        new Dictionary<int, List<BarrierOp>>();
+    public ulong MatchSwapchainResourceGeneration => Backend?.MatchSwapchainResourceGeneration ?? 0;
 
     // Per-pass scopes captured by graph.Pass(); replayed in graph.Execute()
     // and cleared at the start of every Execute so any pass not re-declared
@@ -46,18 +48,24 @@ public sealed partial class RenderGraph
     // pass declared before a graphics pass that samples its output runs first.
     private readonly Dictionary<int, Blix.Graphics.DispatchCommand> recordedDispatches = new();
 
-    public RenderGraph(VulkanGraphicsDevice device)
+    public RenderGraph(IGraphicsDevice device)
     {
         ArgumentNullException.ThrowIfNull(device);
-        Device = device;
-        Device.SwapchainRecreated += OnSwapchainRecreated;
+        Backend = device is IRenderGraphDevice realises
+            ? realises.CreateRenderGraphBackend(this)
+            : throw new NotSupportedException(
+                $"A render graph needs a device that can realise it, and {device.Info.Renderer} cannot. " +
+                "A program with no GPU (the headless host) declares no graph; give it a path that draws nothing.");
     }
 
     // Test-only ctor — validation paths don't need a device.
     internal RenderGraph()
     {
-        Device = null;
+        Backend = null;
     }
+
+    /// <summary>Frees what the backend allocated for this graph.</summary>
+    public void Dispose() => Backend?.Dispose();
 
     // --- Resource factories -----------------------------------------------
 
@@ -146,9 +154,8 @@ public sealed partial class RenderGraph
     {
         EnsureNotCompiled(nameof(Compile));
         RenderGraphValidation.Validate(this);
-        // Test-mode graphs (parameterless ctor) skip backend allocation.
-        CompileBackend();
-        PerPassBarriers = BarrierInference.Infer(this);
+        // Test-mode graphs (parameterless ctor) have no backend to allocate.
+        Backend?.Compile();
         IsCompiled = true;
     }
 
@@ -162,17 +169,17 @@ public sealed partial class RenderGraph
             throw new InvalidOperationException(
                 "RenderGraph.GetPassSurface called before Compile. Pass render passes don't exist until the graph has been compiled.");
         }
-        if (!BackendPasses.TryGetValue(pass.Id, out var bp))
+        if (Backend is null || !Backend.TryGetPassSurface(pass.Id, out var surface))
         {
             throw new InvalidOperationException(
                 $"Pass handle id {pass.Id} not found in this graph.");
         }
-        if (bp.SurfaceHandle.Id == 0)
+        if (surface.Id == 0)
         {
             throw new InvalidOperationException(
                 $"Pass id {pass.Id} is a compute pass; compute passes don't have render surfaces.");
         }
-        return bp.SurfaceHandle;
+        return surface;
     }
 
     // Sampleable TextureHandle for a graph-managed color target. Available
@@ -184,7 +191,7 @@ public sealed partial class RenderGraph
             throw new InvalidOperationException(
                 "RenderGraph.GetColorTexture called before Compile. Color attachments don't exist as sampleable textures until the graph has been compiled.");
         }
-        if (!BackendResources.TryGetValue(resource.Id, out var br))
+        if (Backend is null || !Backend.TryGetSampleable(resource.Id, out var sampleable))
         {
             throw new InvalidOperationException(
                 $"Graph resource id {resource.Id} has no allocated backend. Was it created via this graph's ColorTarget factory?");
@@ -194,7 +201,7 @@ public sealed partial class RenderGraph
             throw new InvalidOperationException(
                 $"Graph resource id {resource.Id} is not a ColorTarget. Use GetDepthTexture for depth resources.");
         }
-        if (br.SampleableHandle is not { } th)
+        if (sampleable is not { } th)
         {
             throw new InvalidOperationException(
                 $"Graph resource id {resource.Id} has no sampleable handle. Was the resource registered correctly?");
@@ -214,7 +221,7 @@ public sealed partial class RenderGraph
             throw new InvalidOperationException(
                 "RenderGraph.GetDepthTexture called before Compile. Depth attachments don't exist as sampleable textures until the graph has been compiled.");
         }
-        if (!BackendResources.TryGetValue(resource.Id, out var br))
+        if (Backend is null || !Backend.TryGetSampleable(resource.Id, out var sampleable))
         {
             throw new InvalidOperationException(
                 $"Graph resource id {resource.Id} has no allocated backend. Was it created via this graph's DepthTarget factory?");
@@ -224,7 +231,7 @@ public sealed partial class RenderGraph
             throw new InvalidOperationException(
                 $"Graph resource id {resource.Id} is not a DepthTarget. Use GetColorTexture for color resources or GetDepthCubeTexture for depth cubes.");
         }
-        if (br.SampleableHandle is not { } th)
+        if (sampleable is not { } th)
         {
             throw new InvalidOperationException(
                 $"Graph resource id {resource.Id} has no sampleable handle. Was the resource registered correctly?");
@@ -242,7 +249,7 @@ public sealed partial class RenderGraph
             throw new InvalidOperationException(
                 "RenderGraph.GetDepthCubeTexture called before Compile.");
         }
-        if (!BackendResources.TryGetValue(cube.Id, out var br))
+        if (Backend is null || !Backend.TryGetSampleable(cube.Id, out var sampleable))
         {
             throw new InvalidOperationException(
                 $"Graph resource id {cube.Id} has no allocated backend. Was it created via this graph's DepthCube factory?");
@@ -252,7 +259,7 @@ public sealed partial class RenderGraph
             throw new InvalidOperationException(
                 $"Graph resource id {cube.Id} is not a DepthCube.");
         }
-        if (br.SampleableHandle is not { } th)
+        if (sampleable is not { } th)
         {
             throw new InvalidOperationException(
                 $"Graph resource id {cube.Id} has no sampleable handle. Was the resource registered correctly?");
@@ -302,7 +309,7 @@ public sealed partial class RenderGraph
             throw new InvalidOperationException(
                 "RenderGraph.Execute called before Compile. Call graph.Compile() once at engine init.");
         }
-        if (Device is null) return; // Test-mode graph; nothing to execute.
+        if (Backend is null) return; // Test-mode graph; nothing to execute.
 
         foreach (var passId in PassOrder)
         {
@@ -319,8 +326,8 @@ public sealed partial class RenderGraph
             }
 
             if (!recordedScopes.TryGetValue(passId, out var recorded)) continue;
-            if (!BackendPasses.TryGetValue(passId, out var bpass)) continue;
-            if (bpass.SurfaceHandle.Id == 0) continue; // safety: non-graphics
+            if (!Backend.TryGetPassSurface(passId, out var surface)) continue;
+            if (surface.Id == 0) continue; // safety: non-graphics
 
             // ClearColors[]: Clear LoadOp → user override (first slot) or
             // black; Load/DontCare → null.
@@ -342,7 +349,7 @@ public sealed partial class RenderGraph
             var clearDepth = gpass.Depth is { } d && d.Load == LoadOp.Clear;
 
             var desc = new Blix.Graphics.RenderPassDescription(
-                Target: bpass.SurfaceHandle,
+                Target: surface,
                 ClearColors: clearColors,
                 ClearDepth: clearDepth);
             commandList.Pass(gpass.Name, desc, recorded.Scope);

@@ -671,6 +671,8 @@ public static class Program
         t.ExpectThrows("and refuses to make anything, naming the call",
             () => device.Device!.CreateTexture2D(default!, ReadOnlySpan<byte>.Empty),
             mustMention: "CreateTexture2D");
+        t.ExpectThrows("and refuses a render graph when one is made, naming itself",
+            () => new RenderGraph(device.Device!), mustMention: "headless");
 
         // Nothing submitted is reported as nothing, not as a frame that cost nothing: a reader
         // taking LastFrame's zeros for a measurement would publish a free frame.

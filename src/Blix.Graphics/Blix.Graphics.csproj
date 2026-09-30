@@ -6,4 +6,11 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- The render graph's backend is realised in the Vulkan assembly, which reads the graph's declared
+         tables; the graph tests build deviceless graphs through the internal constructor. -->
+    <InternalsVisibleTo Include="Blix.Graphics.Vulkan" />
+    <InternalsVisibleTo Include="Blix.Test.Graphics" />
+  </ItemGroup>
+
 </Project>

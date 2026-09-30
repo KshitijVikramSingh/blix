@@ -995,9 +995,8 @@ static ShaderInterface MinimalShader() => new(new[]
 // ============================================================================
 //
 // Test-mode graphs (constructed via the internal parameterless ctor)
-// have a null Device. Compile() runs validation but SKIPS the backend
-// phase — BackendResources / BackendPasses stay empty, BackendCompiled
-// stays false. This contract lets Section L tests run without a live
+// have no backend at all: the graph and its validation are the engine's, and
+// realising them is the device's. Compile() runs validation and nothing else. This contract lets Section L tests run without a live
 // VkDevice. The real backend (VkImage / VkRenderPass / VkFramebuffer
 // allocation) is exercised by the demo at VB.vii.
 
@@ -1008,9 +1007,9 @@ static ShaderInterface MinimalShader() => new(new[]
     graph.GraphicsPass("p").Target(color, LoadOp.Clear, StoreOp.Store).Shader(MinimalShader());
     graph.Compile();
     t.ExpectTrue("M.1 IsCompiled true after test-mode compile", graph.IsCompiled);
-    t.ExpectTrue("M.1 BackendCompiled false in test mode (no device)", !graph.BackendCompiled);
-    t.ExpectClose("M.1 BackendResources empty in test mode", graph.BackendResources.Count, 0);
-    t.ExpectClose("M.1 BackendPasses empty in test mode", graph.BackendPasses.Count, 0);
+    t.ExpectTrue("M.1 a test-mode graph has no backend to allocate anything", graph.Backend is null);
+    t.ExpectThrows("M.1 so it has no surfaces either, and says which pass was asked for",
+        () => graph.GetPassSurface(new PassHandle(1)), mustMention: "not found");
 }
 
 {
@@ -1047,9 +1046,10 @@ static ShaderInterface MinimalShader() => new(new[]
     var color = graph.ColorTarget("c", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
     graph.GraphicsPass("solo").Target(color, LoadOp.Clear, StoreOp.Store).Shader(MinimalShader());
     graph.Compile();
+    var barriers = BarrierInference.Infer(graph);
     t.ExpectClose("N.1 single-pass graph has one barrier list",
-        graph.PerPassBarriers.Count, 1);
-    foreach (var list in graph.PerPassBarriers.Values)
+        barriers.Count, 1);
+    foreach (var list in barriers.Values)
     {
         t.ExpectClose("N.1 graphics-only pass barriers empty (subpass deps cover)", list.Count, 0);
     }
@@ -1070,10 +1070,11 @@ static ShaderInterface MinimalShader() => new(new[]
         .Read(sceneColor)
         .Shader(MinimalShader());
     graph.Compile();
+    var twoPassBarriers = BarrierInference.Infer(graph);
     t.ExpectClose("N.2 two-pass graph has two barrier lists",
-        graph.PerPassBarriers.Count, 2);
+        twoPassBarriers.Count, 2);
     var total = 0;
-    foreach (var list in graph.PerPassBarriers.Values) total += list.Count;
+    foreach (var list in twoPassBarriers.Values) total += list.Count;
     t.ExpectClose("N.2 graphics-only multi-pass: zero explicit barriers (subpass deps cover)",
         total, 0);
 }

@@ -15,8 +15,12 @@ namespace Blix.Graphics.Vulkan;
 // - VulkanGraphicsDevice.Stubs.cs — IGraphicsDevice resource-creation
 //   methods we haven't lit up yet. Throw NotImplementedException with a
 //   clear "not yet" message rather than silently misbehaving.
-public sealed partial class VulkanGraphicsDevice : IGraphicsDevice
+public sealed partial class VulkanGraphicsDevice : IGraphicsDevice, IRenderGraphDevice
 {
+    // The render graph is the engine's; this is the half of it that exists only on Vulkan.
+    IRenderGraphBackend IRenderGraphDevice.CreateRenderGraphBackend(RenderGraph graph) =>
+        new VulkanRenderGraphBackend(this, graph);
+
     private bool disposed;
     private int defaultSurfaceWidth = 1;
     private int defaultSurfaceHeight = 1;

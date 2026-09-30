@@ -1,4 +1,4 @@
-namespace Blix.Graphics.Vulkan;
+namespace Blix.Graphics;
 
 // Fluent builders for graph pass declarations. Thin proxies — each
 // chained call mutates the underlying entry and returns this. After

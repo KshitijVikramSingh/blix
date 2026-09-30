@@ -1,4 +1,4 @@
-namespace Blix.Graphics.Vulkan;
+namespace Blix.Graphics;
 
 // Public type vocabulary for the render graph. Pure declarations;
 // behavior lives in RenderGraph + builders + backend.
