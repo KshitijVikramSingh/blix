@@ -310,7 +310,6 @@ public static class Program
             count = Blix.Recipes.MeshRecipe.CookShipped(
                 source, meshOut,
                 flipTextureV: mesh.FlipV,
-                includeTangents: mesh.Tangents,
                 splitTriBudget: mesh.SplitBudget,
                 splitFoliage: mesh.SplitFoliage,
                 patch: mesh.Patch,
@@ -392,13 +391,13 @@ public static class Program
     /// <remarks>
     /// <c>--flip-v</c> is opt-in V canonicalisation for bottom-up (OpenGL-authored) sources, baked
     /// into the cooked vertex data; it mirrors AssetImportContext.FlipTextureV on the runtime
-    /// import path. <c>--tangents</c> cooks the layout normal-mapped consumers need.
+    /// import path. There is no tangents flag: every static primitive cooks as the complete vertex.
     /// <c>--split N</c> recursively partitions primitives over N triangles into chunks, each its
     /// own LOD chain, so per-primitive distance LOD gets fine-grained; 0 or absent is off, and
     /// <c>--no-split-foliage</c> leaves masked and blended primitives whole for the impostor track.
     /// A <c>--patch</c> is an explicit input rather than an implicitly discovered neighbour.
     /// </remarks>
-    sealed record MeshFlags(bool FlipV, bool Tangents, int SplitBudget, bool SplitFoliage,
+    sealed record MeshFlags(bool FlipV, int SplitBudget, bool SplitFoliage,
         Blix.Recipes.MaterialPatch? Patch)
     {
         // Null when the patch could not be read, which has already been reported.
@@ -423,7 +422,7 @@ public static class Program
             }
 
             return new MeshFlags(
-                args.Flag("flip-v"), args.Flag("tangents"), args.Int("split", 0),
+                args.Flag("flip-v"), args.Int("split", 0),
                 !args.Flag("no-split-foliage"), patch);
         }
     }
@@ -445,7 +444,7 @@ public static class Program
     Console.WriteLine("                [--prefilter-mips=5] [--brdf-size=256] [--clamp=50]");
     Console.WriteLine("                [--yaw=<degrees>]");
     Console.WriteLine("                             bake an HDR sky to a .blixprobe");
-    Console.WriteLine("    mesh <path> [--flip-v] [--tangents] [--split N] [--no-split-foliage]");
+    Console.WriteLine("    mesh <path> [--flip-v] [--split N] [--no-split-foliage]");
     Console.WriteLine("                             cook a .gltf/.glb (or a tree of them) to .blixmesh");
     Console.WriteLine("    asset <gltf-or-glb> --out <dir> [mesh flags]");
     Console.WriteLine("                             cook one model and its referenced images into an output tree");
@@ -473,10 +472,10 @@ public static class Program
     if (mesh is null) return 1;
     if (args.Positionals is not [var target])
     {
-        Console.Error.WriteLine("Usage: blix cook mesh <gltf-or-directory> [--out <dir>] [--flip-v] [--tangents] [--split N] [--patch <file>]");
+        Console.Error.WriteLine("Usage: blix cook mesh <gltf-or-directory> [--out <dir>] [--flip-v] [--split N] [--patch <file>]");
         return 1;
     }
-    var (flipV, tangents, splitBudget, splitFoliage, patch) = mesh;
+    var (flipV, splitBudget, splitFoliage, patch) = mesh;
 
     string[] sources;
     string inRoot;
@@ -526,7 +525,7 @@ public static class Program
         if (File.Exists(outPath))
         {
             if (Blix.Recipes.MeshRecipe.IsShippedCurrent(
-                    src, outPath, flipV, tangents,
+                    src, outPath, flipV,
                     splitTriBudget: splitBudget, splitFoliage: splitFoliage, patch: patch))
             {
                 Console.WriteLine($"  up-to-date: {outPath}{SourceImageDebtNote(outPath)}");
@@ -541,7 +540,7 @@ public static class Program
         int count;
         try
         {
-            count = Blix.Recipes.MeshRecipe.CookShipped(src, outPath, flipV, tangents,
+            count = Blix.Recipes.MeshRecipe.CookShipped(src, outPath, flipV,
                 splitTriBudget: splitBudget, splitFoliage: splitFoliage,
                 patch: patch, log: Console.WriteLine);
         }
@@ -560,7 +559,7 @@ public static class Program
             ? $", split@{splitBudget / 1000}k → biggest chunk {biggest.Lods[0].IndexCount / 3} tris"
             : "";
         var imageDebt = SourceImageDebtNote(outPath);
-        Console.WriteLine($"  cooked {Path.GetFileName(src)} -> {Path.GetFileName(outPath)} ({count} prims, {size / 1024.0 / 1024.0:0.00} MB, {tangents}-tan) in {sw.ElapsedMilliseconds} ms; LOD tris (biggest prim): {lodCounts}{splitNote}{imageDebt}");
+        Console.WriteLine($"  cooked {Path.GetFileName(src)} -> {Path.GetFileName(outPath)} ({count} prims, {size / 1024.0 / 1024.0:0.00} MB) in {sw.ElapsedMilliseconds} ms; LOD tris (biggest prim): {lodCounts}{splitNote}{imageDebt}");
     }
     return 0;
 }

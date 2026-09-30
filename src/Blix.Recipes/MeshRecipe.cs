@@ -85,13 +85,13 @@ public static class MeshRecipe
     /// the same source and settings. Recorded in every file it writes, so a re-cook can be told
     /// from a rewrite.
     /// </summary>
-    // Version 6 generates MikkTSpace tangents wherever a tangent-bearing layout's source authored
-    // none. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
+    // Version 7 writes every static primitive as the complete vertex, with MikkTSpace tangents
+    // wherever the source authored none. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
     // same format bumps this value.
-    public const uint MeshRecipeVersion = 6;
+    public const uint MeshRecipeVersion = 7;
 
     public static int CookToBlixMesh(
-        string gltfPath, string outPath, bool flipTextureV = false, bool includeTangents = false,
+        string gltfPath, string outPath, bool flipTextureV = false,
         SimplifyFn? simplify = null, int splitTriBudget = 0, bool splitFoliage = true,
         float splitMaxExtent = DefaultSplitMaxExtent,
         MaterialPatch? patch = null, Action<string>? log = null)
@@ -103,13 +103,13 @@ public static class MeshRecipe
         // whether the file forms a supported rig; a named refusal routes it to the static cook.
         if (TryCookRig(
                 gltfPath, outPath, out var rigPrimitiveCount,
-                flipTextureV, includeTangents, splitTriBudget, splitFoliage, splitMaxExtent,
+                flipTextureV, splitTriBudget, splitFoliage, splitMaxExtent,
                 patch, log))
             return rigPrimitiveCount;
 
-        var layout = includeTangents
-            ? VertexPosition3NormalTangentTexture.Layout
-            : VertexPosition3NormalTexture.Layout;
+        // Every static primitive carries the complete vertex, so no load ever has to reopen the
+        // source to learn what the cook left out; the loader repacks it into the layout asked for.
+        var layout = VertexPosition3NormalTangentTexture2Color.Layout;
         var model = ModelRoot.Load(gltfPath);
 
         // Preserve the authored hierarchy even though flat geometry stores world-baked vertices.
@@ -129,10 +129,11 @@ public static class MeshRecipe
             {
                 var prim = node.Mesh.Primitives[i];
                 var meshName = $"{node.Mesh.Name ?? node.Name ?? "gltf_mesh"}.{i}";
-                var meshData = GltfStaticImporter.BuildStaticMeshData(meshName, prim, world, normalMatrix, flipTextureV, includeTangents);
-                // The builder puts an arbitrary axis where the source authored no TANGENT; the cook
-                // replaces it with the MikkTSpace frame glTF asks for.
-                if (includeTangents && prim.GetVertexAccessor("TANGENT") is null)
+                var meshData = GltfStaticImporter.BuildStaticMeshData(
+                    meshName, prim, world, normalMatrix, flipTextureV, includeTangents: true, includeColour: true);
+                // The builder leaves the tangent zero where the source authored no TANGENT; the cook
+                // fills it with the MikkTSpace frame glTF asks for.
+                if (prim.GetVertexAccessor("TANGENT") is null)
                     meshData = TangentGeneration.Generate(meshData);
                 var materialIndex = prim.Material?.LogicalIndex ?? BlixMesh.NoMaterial;
 
@@ -167,7 +168,7 @@ public static class MeshRecipe
         // Record byte-affecting settings in stable authored order. Simplification is explicit
         // because a null simplifier produces an LOD0-only artifact.
         var parameters = StaticParameters(
-            flipTextureV, includeTangents, splitTriBudget, splitFoliage, splitMaxExtent,
+            flipTextureV, splitTriBudget, splitFoliage, splitMaxExtent,
             simplify is not null, patch);
 
         var (images, imageRows) = CookImages(model, gltfPath, outPath, patch);
@@ -200,7 +201,7 @@ public static class MeshRecipe
     /// </remarks>
     private static bool TryCookRig(
         string gltfPath, string outPath, out int primitiveCount,
-        bool flipTextureV, bool includeTangents, int splitTriBudget, bool splitFoliage,
+        bool flipTextureV, int splitTriBudget, bool splitFoliage,
         float splitMaxExtent,
         MaterialPatch? patch = null, Action<string>? log = null)
     {
@@ -222,7 +223,6 @@ public static class MeshRecipe
 
         var unsupported = new List<string>();
         if (flipTextureV) unsupported.Add("flipV");
-        if (includeTangents) unsupported.Add("tangents");
         if (splitTriBudget != 0) unsupported.Add("split");
         if (!splitFoliage) unsupported.Add("splitFoliage");
         if (splitMaxExtent != DefaultSplitMaxExtent) unsupported.Add("splitExtent");
@@ -1077,7 +1077,6 @@ public static class MeshRecipe
             request.SourcePath,
             request.OutputPath,
             flipTextureV: request.Flag("flipV"),
-            includeTangents: request.Flag("tangents"),
             splitTriBudget: request.Number("split"),
             splitMaxExtent: request.Number("splitExtent") is var e && e > 0 ? e : DefaultSplitMaxExtent,
             splitFoliage: request.Flag("splitFoliage", true));
@@ -1095,14 +1094,13 @@ public static class MeshRecipe
     /// </remarks>
     public static int CookShipped(
         string sourcePath, string outputPath,
-        bool flipTextureV = false, bool includeTangents = false,
+        bool flipTextureV = false,
         int splitTriBudget = 0, bool splitFoliage = true,
         float splitMaxExtent = DefaultSplitMaxExtent,
         MaterialPatch? patch = null, Action<string>? log = null) =>
         CookToBlixMesh(
             sourcePath, outputPath,
             flipTextureV: flipTextureV,
-            includeTangents: includeTangents,
             simplify: DefaultSimplifier(splitTriBudget > 0),
             splitTriBudget: splitTriBudget,
             splitFoliage: splitFoliage,
@@ -1113,13 +1111,13 @@ public static class MeshRecipe
     /// <summary>Whether a shipped mesh artifact matches today's recipe, source and options.</summary>
     public static bool IsShippedCurrent(
         string sourcePath, string outputPath,
-        bool flipTextureV = false, bool includeTangents = false,
+        bool flipTextureV = false,
         int splitTriBudget = 0, bool splitFoliage = true,
         float splitMaxExtent = DefaultSplitMaxExtent,
         MaterialPatch? patch = null)
     {
         var header = CookedFile.TryReadHeader(outputPath);
-        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version10 }) return false;
+        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version11 }) return false;
         var stamp = header.Value.Stamp;
         if (!stamp.MatchesProducerAndSource(BlixMesh.ShippedRecipe, MeshRecipeVersion, sourcePath))
             return false;
@@ -1127,13 +1125,13 @@ public static class MeshRecipe
         if (!stamp.Parameters.StartsWith("rig=1 ", StringComparison.Ordinal))
         {
             return stamp.Parameters == StaticParameters(
-                flipTextureV, includeTangents, splitTriBudget, splitFoliage, splitMaxExtent,
+                flipTextureV, splitTriBudget, splitFoliage, splitMaxExtent,
                 simplify: true, patch: patch);
         }
 
         // The dynamic counts in a rig stamp are source-derived and therefore covered by the source
         // identity above. Only caller policy remains to compare here.
-        if (flipTextureV || includeTangents || splitTriBudget != 0 || !splitFoliage
+        if (flipTextureV || splitTriBudget != 0 || !splitFoliage
             || splitMaxExtent != DefaultSplitMaxExtent)
             return false;
 
@@ -1144,9 +1142,9 @@ public static class MeshRecipe
     }
 
     private static string StaticParameters(
-        bool flipTextureV, bool includeTangents, int splitTriBudget, bool splitFoliage,
+        bool flipTextureV, int splitTriBudget, bool splitFoliage,
         float splitMaxExtent, bool simplify, MaterialPatch? patch) =>
-        $"flipV={(flipTextureV ? 1 : 0)} tangents={(includeTangents ? 1 : 0)} "
+        $"flipV={(flipTextureV ? 1 : 0)} "
         + $"split={splitTriBudget}@{splitMaxExtent.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)}m "
         + $"splitFoliage={(splitFoliage ? 1 : 0)} simplify={(simplify ? "yes" : "none")}"
         // Recorded so inspection can attribute authored material changes to their project policy.

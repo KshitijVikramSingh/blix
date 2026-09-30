@@ -129,7 +129,7 @@ cook_pack() {
         # sparse-but-enormous ones a triangle count never touches. It also turns LockBorder on in
         # the simplifier, which is what keeps chunk seams watertight when neighbours pick different
         # levels.
-        dotnet "$COOK" asset "$gltf" --out "$COOKED/$dest" --tangents --split 4096 ${patch_args[@]+"${patch_args[@]}"}
+        dotnet "$COOK" asset "$gltf" --out "$COOKED/$dest" --split 4096 ${patch_args[@]+"${patch_args[@]}"}
         cooked_any=1
         return 0
     done

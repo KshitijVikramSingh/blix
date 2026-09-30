@@ -6,7 +6,7 @@ using Blix.Graphics;
 
 namespace Blix.Assets;
 
-// Engine-native version 10 mesh container. The shared cooked preamble is followed,
+// Engine-native version 11 mesh container. The shared cooked preamble is followed,
 // in order, by counted tables for primitives, materials, images, skins, clips,
 // attachments, static parts, and authored nodes. All values are little-endian.
 //
@@ -33,11 +33,12 @@ public static class BlixMesh
     /// stamps its own, which is what makes "who made this file" answerable.
     /// </summary>
     public const string ShippedRecipe = "gmsh";
-    // Version 10 is the only accepted layout. It includes per-primitive layouts and LOD errors,
+    // Version 11 is the only accepted layout. It includes per-primitive layouts and LOD errors,
     // common provenance, material and image tables (each core channel with its TEXCOORD set, and
     // the normal scale), rig data, attachments/static parts, authored nodes, and the current
-    // KHR_materials_* parameter block. Older layouts must be re-cooked.
-    public const uint Version10 = 10;
+    // KHR_materials_* parameter block. Static primitives carry the complete vertex (layout 6).
+    // Older layouts must be re-cooked.
+    public const uint Version11 = 11;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
     public const uint LayoutPosition3NormalTextureSkin4Tangent = 3; // 80-byte, rigged
@@ -46,6 +47,7 @@ public static class BlixMesh
     // that knew only the skinned layout could store a rig's skeleton and not its cape.
     public const uint LayoutPosition3NormalTextureColor = 4;      // 36-byte
     public const uint LayoutPosition3NormalTexture2Color = 5;     // 44-byte, two UV sets
+    public const uint LayoutPosition3NormalTangentTexture2Color = 6; // 60-byte, the complete static vertex
 
     public const int NoMaterial = -1;
 
@@ -77,6 +79,7 @@ public static class BlixMesh
         LayoutPosition3NormalTextureSkin4Tangent => VertexPosition3NormalTextureSkin4Tangent.Layout,
         LayoutPosition3NormalTextureColor => VertexPosition3NormalTextureColor.Layout,
         LayoutPosition3NormalTexture2Color => VertexPosition3NormalTexture2Color.Layout,
+        LayoutPosition3NormalTangentTexture2Color => VertexPosition3NormalTangentTexture2Color.Layout,
         _ => throw new InvalidDataException($"Unrecognised BlixMesh layout id {id}."),
     };
 
@@ -88,6 +91,7 @@ public static class BlixMesh
         80 => LayoutPosition3NormalTextureSkin4Tangent,
         36 => LayoutPosition3NormalTextureColor,
         44 => LayoutPosition3NormalTexture2Color,
+        60 => LayoutPosition3NormalTangentTexture2Color,
         _ => throw new ArgumentException($"No BlixMesh layout id for vertex stride {stride}.", nameof(stride)),
     };
 }
@@ -457,7 +461,7 @@ public static class BlixMeshWriter
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(file);
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version10, stamp);
+        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version11, stamp);
         using var bw = new BinaryWriter(fs);
 
         bw.Write(file.Primitives.Count);
@@ -676,7 +680,7 @@ public static class BlixMeshReader
     /// <summary>Reads the <c>KHR_materials_*</c> block, in the order the writer emits it.</summary>
     /// <remarks>
     /// Positional and exact. There is no length prefix and no field tags, because the format does not
-    /// do optional data — it bumps its version and re-cooks, as it has from v2 to v10 — and a reader
+    /// do optional data — it bumps its version and re-cooks, as it has from v2 to v11 — and a reader
     /// that guessed would turn a format change into silently wrong materials rather than a refusal.
     /// </remarks>
     private static BlixMaterialExtensions ReadExtensions(BinaryReader br)
@@ -716,7 +720,7 @@ public static class BlixMeshReader
         ArgumentNullException.ThrowIfNull(path);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version10, path, ".blixmesh");
+        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version11, path, ".blixmesh");
         return AssetImportException.Refusing(path, () => ReadBody(fs, path, header), ".blixmesh");
     }
 

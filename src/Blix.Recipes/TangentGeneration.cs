@@ -26,6 +26,7 @@ public static class TangentGeneration
     // layout is refused rather than guessed at by format.
     private static Offsets? OffsetsFor(VertexLayout layout)
     {
+        if (Same(layout, VertexPosition3NormalTangentTexture2Color.Layout)) return new Offsets(0, 12, 40, 24);
         if (Same(layout, VertexPosition3NormalTangentTexture.Layout)) return new Offsets(0, 12, 40, 24);
         if (Same(layout, VertexPosition3NormalTextureSkin4Tangent.Layout)) return new Offsets(0, 12, 24, 64);
         return null;

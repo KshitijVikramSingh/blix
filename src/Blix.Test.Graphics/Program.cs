@@ -3981,10 +3981,10 @@ static ShaderInterface MinimalShader() => new(new[]
         var coloured = BuildGltf(Path.Combine(temp, "coloured.glb"), withColour: true);
         var plain = BuildGltf(Path.Combine(temp, "plain.glb"), withColour: false);
 
-        static MeshData First(string path, bool includeColour)
+        static MeshData First(string path, bool includeColour, bool includeTangents = false)
         {
             var m = new GltfStaticImporter().ImportNodes(
-                new AssetImportContext(AssetId.Parse("az"), path, includeColour: includeColour));
+                new AssetImportContext(AssetId.Parse("az"), path, includeTangents: includeTangents, includeColour: includeColour));
             foreach (var n in m.Nodes)
             {
                 if (n.Primitives.Length > 0) return n.Primitives[0].Mesh;
@@ -4081,27 +4081,17 @@ static ShaderInterface MinimalShader() => new(new[]
             withFlag.IndexCount == withoutFlag.IndexCount,
             $"{withFlag.IndexCount} vs {withoutFlag.IndexCount}");
 
-        // ── AZ.5 the two wide layouts refuse to combine, out loud ───────────
-        //
-        // No vertex type carries both tangents and colour, because nothing has ever wanted both:
-        // tangents are Sponza's normal-mapped interiors and COLOR_0 is the nature kit's occlusion.
-        // The failure mode this prevents is the silent one — returning tangents and dropping the
-        // colour, which looks like an importer that does not read COLOR_0 at all.
-        // The refusal arrives as AssetImportException — the engine's ONE refusal type, which names
-        // the file — with the reason kept on InnerException. It used to escape as a bare
-        // NotSupportedException that named a primitive and no file, because the importers wrapped
-        // only ModelRoot.Load: SharpGLTF's refusals were dressed and Blix's own were not. Asserting
-        // BOTH halves here is what stops the next widening from swallowing the reason.
-        var combined = t.ExpectThrows<AssetImportException>(
-            "AZ.5 tangents and colour together are refused, not silently resolved",
-            () => new GltfStaticImporter().ImportNodes(new AssetImportContext(
-                AssetId.Parse("az"), coloured, includeTangents: true, includeColour: true)));
-        t.Expect("AZ.5 the refusal names the file",
-            combined?.Message.Contains("coloured.glb", StringComparison.Ordinal) == true,
-            combined?.Message ?? "(nothing thrown)");
-        t.Expect("AZ.5 and keeps the reason it was refused for",
-            combined?.InnerException is NotSupportedException,
-            combined?.InnerException?.GetType().Name ?? "(no inner)");
+        // ── AZ.5 the two wide layouts combine into the complete vertex ──────
+        // Tangents and colour together are the 60-byte complete vertex, the one every static cook
+        // writes. The failure this guards is the silent one the old refusal existed for: returning
+        // tangents and dropping the colour, which looks like an importer that does not read COLOR_0.
+        var combined = First(coloured, includeColour: true, includeTangents: true);
+        t.Expect("AZ.5 tangents and colour together give the 60-byte complete vertex",
+            combined.Layout.Stride == 60, $"stride {combined.Layout.Stride}");
+        var combinedColours = new[] { ColourOf(combined, 0).R, ColourOf(combined, 1).R, ColourOf(combined, 2).R };
+        t.Expect("AZ.5 and it carries the authored colour rather than white",
+            Math.Abs(combinedColours[0] - 64) <= 2 && Math.Abs(combinedColours[1] - 128) <= 2
+            && Math.Abs(combinedColours[2] - 191) <= 2, string.Join(",", combinedColours));
 
         // CONTROL for AZ.5: each flag ALONE is accepted, so the refusal above is about the
         // combination and not about tangents having quietly stopped working.

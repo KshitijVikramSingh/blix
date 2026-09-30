@@ -66,6 +66,33 @@ public static class Program
             System.Numerics.Vector3.Normalize(new System.Numerics.Vector3(v.X, v.Y, v.Z));
     }
 
+    // Per triangle corner, because the cook's tangent weld renumbers vertices; floats to a hair (the
+    // cooked path unbakes a node transform the source applied once), the packed colour exactly.
+    private static bool SameCorners(Blix.Assets.MeshData a, Blix.Assets.MeshData b, int colourAt)
+    {
+        var ia = a.Indices32 ?? a.Indices.Select(i => (uint)i).ToArray();
+        var ib = b.Indices32 ?? b.Indices.Select(i => (uint)i).ToArray();
+        if (ia.Length != ib.Length || a.Layout.Stride != b.Layout.Stride) return false;
+        var stride = a.Layout.Stride;
+        for (var c = 0; c < ia.Length; c++)
+        {
+            var va = (int)ia[c] * stride;
+            var vb = (int)ib[c] * stride;
+            for (var at = 0; at < stride; at += 4)
+            {
+                if (at == colourAt)
+                {
+                    if (BitConverter.ToUInt32(a.VertexBytes, va + at) != BitConverter.ToUInt32(b.VertexBytes, vb + at)) return false;
+                    continue;
+                }
+
+                if (Math.Abs(BitConverter.ToSingle(a.VertexBytes, va + at) - BitConverter.ToSingle(b.VertexBytes, vb + at)) > 1e-4f) return false;
+            }
+        }
+
+        return true;
+    }
+
     private static void AuthoredMaterialReachesBothPaths(TestRunner t)
     {
         var temp = Path.Combine(Path.GetTempPath(), "blix-authored-" + Guid.NewGuid().ToString("N"));
@@ -498,10 +525,10 @@ public static class Program
                     .Import(new AssetImportContext(AssetId.Parse("t/rig-source"), loneRig));
 
                 t.ExpectThrows<InvalidDataException>(
-                    "a rigged cook refuses static-only tangent policy",
+                    "a rigged cook refuses static-only vertex policy",
                     () => MeshRecipe.CookShipped(
                         loneRig, Path.Combine(rigTemp, "invalid-options.blixmesh"),
-                        includeTangents: true));
+                        flipTextureV: true));
 
                 t.Expect("cooked and source agree on bone count",
                     viaCookedRig.Skeleton.BoneCount == viaSourceRig.Skeleton.BoneCount,
@@ -827,6 +854,59 @@ public static class Program
         // value, with the channels on DIFFERENT texture-coordinate sets so a swap between two of
         // them fails too, and holds both paths to the file.
         AuthoredMaterialReachesBothPaths(t);
+
+        // ── a cooked mesh carries the whole vertex ───────────────────────────
+        // The flat cook used to write position, normal and uv only; a load asking for colour then
+        // got white and uv0 copied into uv1, which was invisible only while Studio read sources. A
+        // static primitive now cooks as the complete vertex, so a cooked load and a source load of
+        // the same asset, asking for the same layout, must hand over the same vertices.
+        foreach (var asset in new[] { "BoxVertexColors.glb", "MultiUVTest.gltf" })
+        {
+            var source = FindFile(asset);
+            if (source is null) { Console.WriteLine($"  --   complete-vertex check skipped: {asset} not fetched"); continue; }
+            var temp = Path.Combine(Path.GetTempPath(), "blix-complete-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(temp);
+            try
+            {
+                foreach (var f in Directory.EnumerateFiles(Path.GetDirectoryName(source)!))
+                    File.Copy(f, Path.Combine(temp, Path.GetFileName(f)));
+                var gltf = Path.Combine(temp, asset);
+                var cooked = Path.ChangeExtension(gltf, ".blixmesh");
+                MeshRecipe.CookToBlixMesh(gltf, cooked);
+
+                foreach (var (tangents, colour) in new[] { (false, true), (true, false), (false, false) })
+                {
+                    var fromSource = new Blix.GltfStaticImporter().ImportNodes(
+                        new AssetImportContext(AssetId.Parse("t/cv-src"), gltf, includeTangents: tangents, includeColour: colour));
+                    var fromCooked = new Blix.GltfStaticImporter().ImportNodes(
+                        new AssetImportContext(AssetId.Parse("t/cv-cooked"), cooked, includeTangents: tangents, includeColour: colour));
+                    var differ = 0;
+                    var compared = 0;
+                    var byName = fromSource.Nodes.ToDictionary(n => n.Name, StringComparer.Ordinal);
+                    foreach (var node in fromCooked.Nodes)
+                    {
+                        if (!byName.TryGetValue(node.Name, out var twin)) continue;
+                        for (var i = 0; i < Math.Min(node.Primitives.Length, twin.Primitives.Length); i++)
+                        {
+                            var a2 = node.Primitives[i].Mesh;
+                            var b2 = twin.Primitives[i].Mesh;
+                            compared++;
+                            // Tangents are generated by the cook where the source authored none, so
+                            // at the tangent layout only everything else must agree.
+                            if (a2.Layout.Stride != b2.Layout.Stride || a2.IndexCount != b2.IndexCount) { differ++; continue; }
+                            if (!tangents && !SameCorners(a2, b2, colourAt: colour ? 40 : -1)) differ++;
+                        }
+                    }
+
+                    t.Expect($"{asset}: a cooked load equals a source load at the {(tangents ? "tangent" : colour ? "colour" : "plain")} layout",
+                        compared > 0 && differ == 0, $"{differ} of {compared} primitive(s) differ");
+                }
+            }
+            finally
+            {
+                try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
+            }
+        }
 
         // ── generated tangents agree with authored ones ──────────────────────
         // The cook generates MikkTSpace tangents where a source authored none. Held to assets that DID
@@ -1361,21 +1441,20 @@ public static class Program
                 string StampOf(string path) => CookedFile.TryReadHeader(path)?.Stamp.Parameters ?? "";
 
                 var viaShipped = Path.Combine(lodTemp, "shipped.blixmesh");
-                MeshRecipe.CookShipped(lodSource, viaShipped, includeTangents: true);
+                MeshRecipe.CookShipped(lodSource, viaShipped);
                 var shippedStamp = StampOf(viaShipped);
                 t.ExpectTrue("a shipped cook supplies a simplifier",
                     shippedStamp.Contains("simplify=yes", StringComparison.Ordinal));
                 t.ExpectTrue("the shipped mesh is current for the exact options that made it",
-                    MeshRecipe.IsShippedCurrent(
-                        lodSource, viaShipped, includeTangents: true));
-                t.ExpectTrue("and a layout-option change invalidates it",
-                    !MeshRecipe.IsShippedCurrent(lodSource, viaShipped));
+                    MeshRecipe.IsShippedCurrent(lodSource, viaShipped));
+                t.ExpectTrue("and a vertex-option change invalidates it",
+                    !MeshRecipe.IsShippedCurrent(lodSource, viaShipped, flipTextureV: true));
 
                 // The uniform path a build rule invokes must agree with the typed one. They are the
                 // two ways an asset reaches a shipped tree, and they diverged once already.
                 var viaRecipe = Path.Combine(lodTemp, "recipe.blixmesh");
                 MeshRecipe.Cook(new CookRequest(lodSource, viaRecipe,
-                    new Dictionary<string, string> { ["tangents"] = "true" }));
+                    new Dictionary<string, string>()));
                 t.Expect("and the uniform [Recipe] path stamps identically",
                     StampOf(viaRecipe) == shippedStamp, $"'{StampOf(viaRecipe)}' vs '{shippedStamp}'");
 
@@ -1383,7 +1462,7 @@ public static class Program
                 // above passes for a file that has no chain at all, which is exactly the failure
                 // this suite exists to catch.
                 var viaNone = Path.Combine(lodTemp, "none.blixmesh");
-                MeshRecipe.CookToBlixMesh(lodSource, viaNone, includeTangents: true);
+                MeshRecipe.CookToBlixMesh(lodSource, viaNone);
                 t.ExpectTrue("and a cook WITHOUT one is distinguishable",
                     StampOf(viaNone).Contains("simplify=none", StringComparison.Ordinal));
             }
