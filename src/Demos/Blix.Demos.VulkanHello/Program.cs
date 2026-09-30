@@ -82,7 +82,6 @@ internal sealed class HelloLoop(bool pickCheck = false) : IGameLoop, IDebuggable
     private readonly byte[] rightPushBytes = new byte[64];
 
     // State surfaced through IDebuggable — see Debug() below.
-    private GraphicsDeviceInfo? gpuInfo;
     private Vector3 cameraPosition;
     private Vector3 cameraTarget;
     private float fovYRadians;
@@ -98,7 +97,6 @@ internal sealed class HelloLoop(bool pickCheck = false) : IGameLoop, IDebuggable
         this.host = host;
         host.SetTitle("Blix — Vulkan Cube");
         var device = graphicsDevice;
-        gpuInfo = graphicsDevice.Info;
 
         var (vertices, indices) = BuildCube();
         var vertexData = VertexPosition3Texture.CreateBufferData(vertices);
@@ -353,15 +351,7 @@ internal sealed class HelloLoop(bool pickCheck = false) : IGameLoop, IDebuggable
             debug.Values.Value("target", cameraTarget);
             debug.Values.Value("fovY-rad", fovYRadians);
         }
-        if (gpuInfo is { } info)
-        {
-            using (debug.Scope("gpu"))
-            {
-                debug.Values.Value("vendor", info.Vendor);
-                debug.Values.Value("renderer", info.Renderer);
-                debug.Values.Value("version", info.Version);
-            }
-        }
+        // Vendor, renderer and version are the host's device panel ("gpu"), for every application.
 
         debug.Stats.Gauge("triangles", 24);
         debug.Stats.Gauge("vertices", 48);
@@ -403,7 +393,8 @@ internal sealed class HelloLoop(bool pickCheck = false) : IGameLoop, IDebuggable
         //
         // Trails are also the cheapest possible demonstration that the two axes compose: the points are
         // remembered per path and drawn into whichever view is in scope.
-        if (!trailsOn) return;
+        // A layer (the Layers tab switches it), where it was a checkbox on this demo's own panel.
+        if (!debug.Draw.Layer("trails")) return;
         var corner = new Vector3(0.5f, 0.5f, 0.5f);
         var leftCorner = Vector3.Transform(corner, leftModel);
         var rightCorner = Vector3.Transform(corner, rightModel);
@@ -424,7 +415,6 @@ internal sealed class HelloLoop(bool pickCheck = false) : IGameLoop, IDebuggable
     // read it, so typing used to reach the game as well as the field — invisible while the overlay was
     // the only UI, because it has hardly any text fields.
 
-    private bool trailsOn = true;
     private float trailSeconds = 2f;
     private string note = "type here — keys must not reach the game";
 
@@ -440,10 +430,9 @@ internal sealed class HelloLoop(bool pickCheck = false) : IGameLoop, IDebuggable
             return;
         }
 
-        ImGui.Checkbox("corner trails", ref trailsOn);
-        ImGui.SliderFloat("seconds", ref trailSeconds, 0.25f, 8f);
+        // Whether the trails draw is the overlay's Layers tab; how long they last is this panel's.
+        ImGui.SliderFloat("trail seconds", ref trailSeconds, 0.25f, 8f);
         ImGui.InputText("note", ref note, 128);
-        ImGui.TextDisabled($"{(trailsOn ? "tracing" : "off")} · {trailSeconds:0.0}s");
         ImGui.End();
     }
 

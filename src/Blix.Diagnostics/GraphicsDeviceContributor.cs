@@ -31,6 +31,7 @@ public sealed class GraphicsDeviceContributor : IDebuggable
         var info = device.Info;
         debug.Values.Value("vendor", info.Vendor);
         debug.Values.Value("renderer", info.Renderer);
+        debug.Values.Value("version", info.Version);
 
         var diag = device.DiagnosticsSnapshot;
         // Gauge, not Count: FrameErrorCount is the device's own

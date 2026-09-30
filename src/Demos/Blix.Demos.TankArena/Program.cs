@@ -1251,6 +1251,15 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
 
     public void Debug(DebugContext debug)
     {
+        // The keys this game handles itself, listed with the overlay hidden too.
+        debug.Keys.Describe("W / S", "drive forward / reverse");
+        debug.Keys.Describe("A / D", "steer");
+        debug.Keys.Describe("Left / Right", "turn the turret");
+        debug.Keys.Describe("Up / Down", "raise / lower the barrel");
+        debug.Keys.Describe(Key.Space, "fire");
+        debug.Keys.Describe("Enter / R", "restart, once the round is over");
+        debug.Keys.Describe(Key.Escape, "quit");
+
         // Controls and gizmos only while the overlay is up (--debug, or ` at any time).
         if (!debug.State.ShowOverlay) return;
 

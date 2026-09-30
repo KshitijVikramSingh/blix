@@ -202,9 +202,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
     // PICKED through needs its logical rectangle to match the coordinates a pointer arrives in.
     private IRenderHost? host;
 
-    // Mirrors DebugState.DepthTestDrawing so the panel can flip it. Applied in Debug(), which is
-    // the only place with a DebugContext to hand.
-
     // ── Stage A of the view arc ─────────────────────────────────────────────
     // Ids the HOST gave us for textures the UI can draw. Registered once at load rather than per
     // frame: an id is a dictionary entry, and minting one every frame would grow that dictionary
@@ -769,7 +766,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         // is not watched here.
         tunables?.BuildControls(debug);
 
-        debug.State.DepthTestDrawing = panels.DepthTestGizmos;
         debug.Values.Value("frames", frames);
         debug.Values.Value("sun", renderer.Look.SunDirection);
         // <b>The sun the ENVIRONMENT was baked from, beside the live one.</b> The probe is

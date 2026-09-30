@@ -48,7 +48,6 @@ internal sealed class ViewerPanels
     public bool ShowLeafStubs = true;
     public bool DeformBonesOnly = true;
     public float GizmoScale = 1f;
-    public bool DepthTestGizmos = true;
     public bool ShowTrail = true;
     public bool ShowRootTrail = true;
     public float TrailSeconds = 1.5f;
@@ -617,7 +616,8 @@ internal sealed class ViewerPanels
 
         if (ImGui.CollapsingHeader("gizmos", ImGuiTreeNodeFlags.DefaultOpen))
         {
-            ImGui.Checkbox("depth-tested", ref DepthTestGizmos);
+            // Depth-tested gizmos are the overlay's switch (Layers tab, "Hidden by the scene"); this panel
+            // kept a copy and wrote it back every frame, which overruled the overlay.
             if (app.Model is not null)
             {
                 ImGui.Checkbox("node pivots", ref ShowPivots);

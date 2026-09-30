@@ -497,7 +497,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             ? string.Join("\n", keys.Select(k => $"{k.Binding,-10} {k.Description}"))
             : null;
 
-    // Armed from the Pick switch or by holding Alt, and only with the overlay up: the pick list is read
+    // Armed from the Pick switch or by holding Alt, and only with the overlay up: the selection is read
     // there, and a hidden debugger taking clicks would be one nobody could see doing it.
     private bool PickArmed =>
         debugSystem is { State.ShowOverlay: true } debug
@@ -806,7 +806,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             if (ViewPicking.PixelAt(views[v], request.Pointer) is not { } pixel) continue;
             var excluded = new HashSet<string>(request.Excluded, StringComparer.Ordinal);
             var candidates = debug.CollectSelectables().Where(s => !excluded.Contains(s.EntityPath)).ToArray();
-            pickRenderer ??= new PickRenderer(graphicsDevice);
+            pickRenderer ??= new PickRenderer(graphicsDevice!);
             pickRenderer.Record(commandList, views[v], pixel, candidates);
             return new PickInFlight(views[v].Name, request.Pointer, pixel, candidates, excluded.Count);
         }

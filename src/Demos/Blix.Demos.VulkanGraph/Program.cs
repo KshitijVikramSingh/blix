@@ -85,7 +85,6 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
     private float currentRotX;
 
     // Debug state.
-    private GraphicsDeviceInfo? gpuInfo;
     private Vector3 cameraPosition;
     private Vector3 cameraTarget;
     private float fovYRadians;
@@ -95,7 +94,6 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
     {
         host.SetTitle("Blix — Vulkan RenderGraph");
         var device = graphicsDevice;
-        gpuInfo = graphicsDevice.Info;
 
         // --- Cube geometry + texture ---------------------------------
         var (vertices, indices) = BuildCube();
@@ -271,14 +269,7 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
             debug.Values.Value("target", cameraTarget);
             debug.Values.Value("fovY-rad", fovYRadians);
         }
-        if (gpuInfo is { } info)
-        {
-            using (debug.Scope("gpu"))
-            {
-                debug.Values.Value("vendor", info.Vendor);
-                debug.Values.Value("renderer", info.Renderer);
-            }
-        }
+        // Vendor, renderer and version are the host's device panel ("gpu"), for every application.
 
         // Every primitive below belongs to this view. Scoped rather than assigned: the old
         // per-channel matrix meant a frame could only ever be one world seen one way.
