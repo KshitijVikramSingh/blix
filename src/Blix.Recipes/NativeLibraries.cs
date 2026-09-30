@@ -25,7 +25,7 @@ namespace Blix.Recipes;
 internal static class NativeLibraries
 {
     /// <summary>The logical names, as the <c>DllImport</c> attributes spell them.</summary>
-    private static readonly string[] Names = { "meshoptimizer", "blix_bc7" };
+    private static readonly string[] Names = { "meshoptimizer", "blix_bc7", "blix_mikk" };
 
     static NativeLibraries()
     {

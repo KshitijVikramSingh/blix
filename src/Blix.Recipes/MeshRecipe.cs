@@ -85,9 +85,10 @@ public static class MeshRecipe
     /// the same source and settings. Recorded in every file it writes, so a re-cook can be told
     /// from a rewrite.
     /// </summary>
-    // Version 5 uses culture-invariant parameter identity. Format compatibility is versioned
-    // separately by BlixMesh; changing recipe output with the same format bumps this value.
-    public const uint MeshRecipeVersion = 5;
+    // Version 6 generates MikkTSpace tangents wherever a tangent-bearing layout's source authored
+    // none. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
+    // same format bumps this value.
+    public const uint MeshRecipeVersion = 6;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false, bool includeTangents = false,
@@ -129,6 +130,10 @@ public static class MeshRecipe
                 var prim = node.Mesh.Primitives[i];
                 var meshName = $"{node.Mesh.Name ?? node.Name ?? "gltf_mesh"}.{i}";
                 var meshData = GltfStaticImporter.BuildStaticMeshData(meshName, prim, world, normalMatrix, flipTextureV, includeTangents);
+                // The builder puts an arbitrary axis where the source authored no TANGENT; the cook
+                // replaces it with the MikkTSpace frame glTF asks for.
+                if (includeTangents && prim.GetVertexAccessor("TANGENT") is null)
+                    meshData = TangentGeneration.Generate(meshData);
                 var materialIndex = prim.Material?.LogicalIndex ?? BlixMesh.NoMaterial;
 
                 // Spatial split of oversized primitives so per-prim distance LOD
@@ -313,16 +318,26 @@ public static class MeshRecipe
     }
 
     /// <summary>One imported primitive as the format stores it, layout and skin included.</summary>
-    private static BlixMeshPrimitive CookPrimitive(GltfPrimitive p) => new(
-        Name: p.Mesh.Name,
-        Layout: p.Mesh.Layout,
-        MaterialIndex: p.MaterialIndex,
-        Bounds: p.Mesh.Bounds,
-        VertexCount: p.Mesh.VertexCount,
-        VertexBytes: p.Mesh.VertexBytes,
-        IndexFormat: p.Mesh.IndexFormat,
-        Lods: new[] { new BlixMeshLod(p.Mesh.Indices, p.Mesh.Indices32) },
-        SkinIndex: p.SkinIndex);
+    private static BlixMeshPrimitive CookPrimitive(GltfPrimitive p)
+    {
+        // A skinned primitive always has a tangent slot, which the importer leaves zero where the
+        // source authored none; the cook fills it with MikkTSpace's frame. The static parts and
+        // attachments beside it use the colour layout, which carries no tangent.
+        var mesh = p.Mesh.Layout.Stride == VertexPosition3NormalTextureSkin4Tangent.Layout.Stride
+                   && TangentGeneration.HasNoTangents(p.Mesh)
+            ? TangentGeneration.Generate(p.Mesh)
+            : p.Mesh;
+        return new BlixMeshPrimitive(
+            Name: mesh.Name,
+            Layout: mesh.Layout,
+            MaterialIndex: p.MaterialIndex,
+            Bounds: mesh.Bounds,
+            VertexCount: mesh.VertexCount,
+            VertexBytes: mesh.VertexBytes,
+            IndexFormat: mesh.IndexFormat,
+            Lods: new[] { new BlixMeshLod(mesh.Indices, mesh.Indices32) },
+            SkinIndex: p.SkinIndex);
+    }
 
     /// <summary>One animation, as keyframes.</summary>
     /// <remarks>

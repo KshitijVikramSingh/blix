@@ -18,6 +18,54 @@ namespace Blix.Test.Recipes;
 //   fail, because a self-test that only ever prints is a self-test that only ever passes.
 public static class Program
 {
+    /// <summary>Generated tangents held to authored ones: strip, regenerate, compare corner by corner.</summary>
+    /// <returns>(corners compared, direction agreeing within 8 degrees, handedness agreeing).</returns>
+    /// <param name="mirrorV">The control: regenerate from v mirrored, which a convention check must catch.</param>
+    internal static (int Corners, int Direction, int Handedness) CompareWithAuthored(string asset, bool mirrorV = false)
+    {
+        var model = SharpGLTF.Schema2.ModelRoot.Load(asset);
+        int corners = 0, direction = 0, handedness = 0;
+        foreach (var mesh in model.LogicalMeshes)
+        foreach (var prim in mesh.Primitives)
+        {
+            if (prim.GetVertexAccessor("TANGENT") is null || prim.GetVertexAccessor("TEXCOORD_0") is null) continue;
+            var authored = Blix.GltfStaticImporter.BuildStaticMeshData(
+                mesh.Name ?? "m", prim, System.Numerics.Matrix4x4.Identity, System.Numerics.Matrix4x4.Identity,
+                includeTangents: true);
+            var stripped = (byte[])authored.VertexBytes.Clone();
+            for (var v = 0; v < authored.VertexCount; v++)
+            {
+                Array.Clear(stripped, (v * 48) + 24, 16);
+                if (mirrorV) BitConverter.TryWriteBytes(stripped.AsSpan((v * 48) + 44, 4), 1f - BitConverter.ToSingle(stripped, (v * 48) + 44));
+            }
+            var generated = TangentGeneration.Generate(authored with { VertexBytes = stripped });
+
+            var before = authored.Indices32 ?? authored.Indices.Select(i => (uint)i).ToArray();
+            var after = generated.Indices32 ?? generated.Indices.Select(i => (uint)i).ToArray();
+            for (var c = 0; c < before.Length; c++)
+            {
+                var a = Tangent(authored.VertexBytes, before[c]);
+                var g = Tangent(generated.VertexBytes, after[c]);
+                corners++;
+                if (System.Numerics.Vector3.Dot(Vector3Of(a), Vector3Of(g)) > MathF.Cos(8f * MathF.PI / 180f)) direction++;
+                if (MathF.Sign(a.W) == MathF.Sign(g.W)) handedness++;
+            }
+        }
+
+        return (corners, direction, handedness);
+
+        static System.Numerics.Vector4 Tangent(byte[] bytes, uint vertex)
+        {
+            var o = ((int)vertex * 48) + 24;
+            return new System.Numerics.Vector4(
+                BitConverter.ToSingle(bytes, o), BitConverter.ToSingle(bytes, o + 4),
+                BitConverter.ToSingle(bytes, o + 8), BitConverter.ToSingle(bytes, o + 12));
+        }
+
+        static System.Numerics.Vector3 Vector3Of(System.Numerics.Vector4 v) =>
+            System.Numerics.Vector3.Normalize(new System.Numerics.Vector3(v.X, v.Y, v.Z));
+    }
+
     private static void AuthoredMaterialReachesBothPaths(TestRunner t)
     {
         var temp = Path.Combine(Path.GetTempPath(), "blix-authored-" + Guid.NewGuid().ToString("N"));
@@ -496,18 +544,41 @@ public static class Program
                 t.Expect("clips match name, duration and track count", clipMismatch.Count == 0,
                     string.Join("; ", clipMismatch.Take(4)));
 
-                // Vertex bytes, because equal counts are not equal geometry.
+                // Per triangle corner, because equal counts are not equal geometry — and because the
+                // cook generates MikkTSpace tangents where the source authored none, splitting a
+                // vertex wherever its corners' frames disagree. So every corner must agree on every
+                // byte but the tangent's, and the cooked tangent must exist.
                 var vertexMismatch = 0;
+                var untangented = 0;
+                const int tangentAt = 64, stride = 80;
                 for (var i = 0; i < Math.Min(viaCookedRig.Primitives.Length, viaSourceRig.Primitives.Length); i++)
                 {
-                    if (!viaCookedRig.Primitives[i].Mesh.VertexBytes.AsSpan()
-                            .SequenceEqual(viaSourceRig.Primitives[i].Mesh.VertexBytes))
+                    var cookedMesh = viaCookedRig.Primitives[i].Mesh;
+                    var sourceMesh = viaSourceRig.Primitives[i].Mesh;
+                    var cookedIndices = cookedMesh.Indices32 ?? cookedMesh.Indices.Select(x => (uint)x).ToArray();
+                    var sourceIndices = sourceMesh.Indices32 ?? sourceMesh.Indices.Select(x => (uint)x).ToArray();
+                    if (cookedMesh.Layout.Stride != stride || cookedIndices.Length != sourceIndices.Length)
                     {
                         vertexMismatch++;
+                        continue;
                     }
+
+                    var differs = false;
+                    for (var c = 0; c < cookedIndices.Length && !differs; c++)
+                    {
+                        var cv = cookedMesh.VertexBytes.AsSpan((int)cookedIndices[c] * stride, stride);
+                        var sv = sourceMesh.VertexBytes.AsSpan((int)sourceIndices[c] * stride, stride);
+                        differs = !cv[..tangentAt].SequenceEqual(sv[..tangentAt]);
+                    }
+
+                    if (differs) vertexMismatch++;
+                    if (TangentGeneration.HasNoTangents(cookedMesh)) untangented++;
                 }
 
-                t.Expect("skinned vertices are byte-identical", vertexMismatch == 0,
+                t.Expect("every skinned primitive cooks with a tangent frame", untangented == 0,
+                    $"{untangented} primitive(s) still carry zero tangents");
+
+                t.Expect("skinned corners agree on every byte but the generated tangent", vertexMismatch == 0,
                     $"{vertexMismatch} primitive(s) differ");
 
                 // <b>Materials, because equal geometry drawn with a different surface is a
@@ -756,6 +827,25 @@ public static class Program
         // value, with the channels on DIFFERENT texture-coordinate sets so a swap between two of
         // them fails too, and holds both paths to the file.
         AuthoredMaterialReachesBothPaths(t);
+
+        // ── generated tangents agree with authored ones ──────────────────────
+        // The cook generates MikkTSpace tangents where a source authored none. Held to assets that DID
+        // author them: strip, regenerate, compare every triangle corner. Measured at 100.00% on both
+        // (111,348 corners of ClearCoatTest). The control mirrors v first, which flips the frame's
+        // handedness everywhere — a comparison that still passed then could not see a convention error.
+        foreach (var asset in new[] { "ClearCoatTest.glb", "AlphaBlendModeTest.glb" })
+        {
+            var path = FindFile(asset);
+            if (path is null) { Console.WriteLine($"  --   tangent comparison skipped: {asset} not fetched"); continue; }
+            var (corners, direction, handedness) = CompareWithAuthored(path);
+            t.Expect($"generated tangents point where {asset}'s authored ones do",
+                corners > 0 && direction >= corners * 0.995, $"{direction} of {corners} corners within 8 degrees");
+            t.Expect($"and have their handedness",
+                corners > 0 && handedness >= corners * 0.999, $"{handedness} of {corners} corners");
+            var control = CompareWithAuthored(path, mirrorV: true);
+            t.Expect($"CONTROL with v mirrored first, {asset}'s handedness disagrees",
+                control.Handedness < control.Corners * 0.05, $"{control.Handedness} of {control.Corners} corners still agree");
+        }
 
         // ── and the debt is gone, which is the flag's whole point ───────────
         // SourceRequired was set on every .blixmesh from K-A onward. K-F narrowed it to image bytes;

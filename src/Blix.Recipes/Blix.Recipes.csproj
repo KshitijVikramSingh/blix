@@ -66,6 +66,7 @@
   <PropertyGroup>
     <MeshoptSrc>$(MSBuildProjectDirectory)/../../third_party/meshoptimizer/src</MeshoptSrc>
     <Bc7Src>$(MSBuildProjectDirectory)/../../third_party/bc7enc</Bc7Src>
+    <MikkSrc>$(MSBuildProjectDirectory)/../../third_party/mikktspace</MikkSrc>
     <BlixNativeDir>$(MSBuildProjectDirectory)/obj/native/</BlixNativeDir>
   </PropertyGroup>
 
@@ -93,11 +94,13 @@
 
     <BlixMeshoptLib>$(BlixNativeDir)$(BlixLibPrefix)meshoptimizer$(BlixLibExt)</BlixMeshoptLib>
     <BlixBc7Lib>$(BlixNativeDir)$(BlixLibPrefix)blix_bc7$(BlixLibExt)</BlixBc7Lib>
+    <BlixMikkLib>$(BlixNativeDir)$(BlixLibPrefix)blix_mikk$(BlixLibExt)</BlixMikkLib>
   </PropertyGroup>
 
   <ItemGroup>
     <MeshoptCpp Include="$(MeshoptSrc)/*.cpp" />
     <Bc7Cpp Include="$(Bc7Src)/bc7enc.c;$(Bc7Src)/blix_bc7.cpp" />
+    <MikkC Include="$(MikkSrc)/mikktspace.c;$(MikkSrc)/blix_mikk.c" />
   </ItemGroup>
 
   <!-- Rebuilds only when a source is newer than the library. -->
@@ -129,6 +132,23 @@
              Text="Could not build the BC7 native. Texture cooking falls back to the managed encoder, which is correct and slower." />
   </Target>
 
+  <!-- MikkTSpace is C, and built as C: the reference implementation is C89 and not written to
+       compile as C++. No fallback: tangent generation is part of what a cooked mesh IS, so a
+       missing library refuses the cook (MikkTSpaceNative says which file) rather than quietly
+       writing a mesh with a worse frame. -->
+  <Target Name="BuildMikk" BeforeTargets="StageBlixNatives"
+          Inputs="@(MikkC);$(MikkSrc)/mikktspace.h"
+          Outputs="$(BlixMikkLib)">
+    <MakeDir Directories="$(BlixNativeDir)" />
+    <Message Text="Building $(BlixLibPrefix)blix_mikk$(BlixLibExt) (clang)" Importance="high" />
+    <Exec Command="clang -O2 -std=c99 $(BlixSharedFlag) $(BlixPicFlag) @(MikkC->'&quot;%(FullPath)&quot;', ' ') -o &quot;$(BlixMikkLib)&quot; -lm"
+          ContinueOnError="true">
+      <Output TaskParameter="ExitCode" PropertyName="BlixMikkExit" />
+    </Exec>
+    <Warning Condition="'$(BlixMikkExit)' != '0'"
+             Text="Could not build the MikkTSpace native. Cooking a mesh that needs generated tangents will fail with a message naming this target." />
+  </Target>
+
   <!-- ContentWithTargetPath is the item MSBuild carries across a ProjectReference, so
        this is what puts the dylibs beside every consumer's assembly rather than only
        beside this one. -->
@@ -141,6 +161,10 @@
       <ContentWithTargetPath Include="$(BlixBc7Lib)"
                              Condition="Exists('$(BlixBc7Lib)')"
                              TargetPath="$(BlixLibPrefix)blix_bc7$(BlixLibExt)"
+                             CopyToOutputDirectory="PreserveNewest" />
+      <ContentWithTargetPath Include="$(BlixMikkLib)"
+                             Condition="Exists('$(BlixMikkLib)')"
+                             TargetPath="$(BlixLibPrefix)blix_mikk$(BlixLibExt)"
                              CopyToOutputDirectory="PreserveNewest" />
     </ItemGroup>
   </Target>
