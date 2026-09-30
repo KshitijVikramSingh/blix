@@ -5191,7 +5191,7 @@ static ShaderInterface MinimalShader() => new(new[]
 
     // ShaderReflection builds one from the merged stages; that is the constructor's whole job.
     // Everyone else asks it. Test sources are exempt: several exist to exercise the type itself.
-    var owner = Path.Combine(srcDir, "Blix.Graphics.Vulkan", "ShaderReflection.cs");
+    var owner = Path.Combine(srcDir, "Blix.Graphics", "ShaderReflection.cs");
     var restated = new List<string>();
     foreach (var file in sources)
     {
@@ -5635,6 +5635,21 @@ sealed class RecordingDevice : IGraphicsDevice
 
     public GraphicsDeviceInfo Info => throw No();
     public GraphicsDeviceDiagnostics DiagnosticsSnapshot => throw No();
+    public ShaderProgramHandle CreateShaderProgramFromSpv(byte[] vertexSpv, byte[] fragmentSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
+    public ShaderProgramHandle CreateComputeShaderProgramFromSpv(byte[] computeSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
+    public PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null) => throw No();
+    public IMaterialBindings CreateMaterial(ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null) => throw No();
+    public void DestroyMaterial(MaterialHandle handle) => throw No();
+    public TextureHandle CreateTextureCube(int faceSize, TextureFormat format, int mipCount, ReadOnlySpan<byte> data, SamplerDescription sampler, string name) => throw No();
+    public TextureHandle CreateStorageTexture2D(int width, int height, TextureFormat format, SamplerDescription sampler, string? name = null) => throw No();
+    public TextureHandle CreateStorageTexture3D(int width, int height, int depth, TextureFormat format, SamplerDescription sampler, string? name = null) => throw No();
+    public byte[] ReadTexture(TextureHandle handle, out int width, out int height, out TextureFormat format) => throw No();
+    public bool TryGetTextureSize(TextureHandle handle, out int width, out int height) => throw No();
+    public void WaitIdle() => throw No();
+    public int MaxFramesInFlightCount => throw No();
+    public int CurrentFrameSlot => throw No();
+    public bool VsyncEnabled { get => throw No(); set => throw No(); }
+    public int MaxMsaaSamples => throw No();
     public void SetDefaultRenderSurfaceSize(int width, int height) => throw No();
     public void UpdateVertexBuffer(VertexBufferHandle handle, ReadOnlySpan<byte> bytes, int byteOffset = 0) => throw No();
     public void DestroyVertexBuffer(VertexBufferHandle handle) => throw No();

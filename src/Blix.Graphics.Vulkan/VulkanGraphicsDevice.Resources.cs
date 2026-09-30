@@ -12,7 +12,7 @@ public sealed partial class VulkanGraphicsDevice
     // Set 2's layout is owned by the shader program (for pipeline-layout
     // contiguity), but its descriptors + UBO live on MaterialBindings
     // instances. Other set indices flow through the per-draw transient pool.
-    internal const int MaterialOwnedSet = 2;
+    internal const int MaterialOwnedSet = DescriptorSets.Material;
 
     private int nextResourceId = 1;
     private readonly Dictionary<int, VkBufferEntry> vertexBufferTable = new();
@@ -925,6 +925,10 @@ public sealed partial class VulkanGraphicsDevice
     // framesInFlight=1: static set, written once at setup. >1: per-frame
     // replicated (use MaxFramesInFlightCount) — caller writes the matching
     // slot each frame via MaterialBindings.WriteBuffer.
+    IMaterialBindings IGraphicsDevice.CreateMaterial(
+        ShaderProgramHandle program, int setIndex, int framesInFlight, string? name) =>
+        CreateMaterial(program, setIndex, framesInFlight, name);
+
     public MaterialBindings CreateMaterial(
         ShaderProgramHandle programHandle,
         int setIndex = MaterialOwnedSet,

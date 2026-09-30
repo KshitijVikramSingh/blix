@@ -1,4 +1,4 @@
-namespace Blix.Graphics.Vulkan;
+namespace Blix.Graphics;
 
 // Per-program declaration of "which uniform name lives at which byte offset
 // in a UBO." Bridges the name-keyed cross-backend ShaderUniform API to

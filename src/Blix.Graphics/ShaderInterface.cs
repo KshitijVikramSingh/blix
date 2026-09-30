@@ -1,4 +1,4 @@
-namespace Blix.Graphics.Vulkan;
+namespace Blix.Graphics;
 
 // Binding contract for a shader program: descriptor slots and push-constant
 // ranges. Vertex input lives on PipelineDescription.
