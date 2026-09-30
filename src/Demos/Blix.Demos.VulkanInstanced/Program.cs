@@ -5,7 +5,6 @@ using Blix.Core;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Primitives;
-using Blix.Graphics.Vulkan;
 using Blix.Render;
 using Blix.Runtime.Silk;
 
@@ -51,7 +50,7 @@ internal sealed class InstancedLoop : IGameLoop
     private const float Spacing = 1.5f;
 
     private readonly int exitAfterFrames; // 0 = stay open until Esc/close
-    private VulkanGraphicsDevice vk = null!;
+    private IGraphicsDevice device = null!;
     private IRenderHost host = null!;
     private InstanceBuffer instanceBuffer = null!;
     private InstancedBatch batch = null!;
@@ -67,10 +66,10 @@ internal sealed class InstancedLoop : IGameLoop
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         this.host = host;
-        vk = (VulkanGraphicsDevice)graphicsDevice;
+        device = graphicsDevice;
 
-        var vb = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(Cube.Vertices), "cube.vb");
-        var ib = vk.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
+        var vb = device.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(Cube.Vertices), "cube.vb");
+        var ib = device.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
         var cube = new Mesh("cube", vb, ib, Cube.Indices.Length,
             new Bounds3(new Vector3(-0.5f), new Vector3(0.5f)));
 
@@ -88,15 +87,15 @@ internal sealed class InstancedLoop : IGameLoop
         // Read from the shader. InstanceBuffer supplies the one thing it cannot say: how many
         // instances the unsized set-3 array holds.
         var iface = InstanceBuffer.Size(ShaderReflection.ForProgram(shaderDir, "cube.vert", "cube.frag"));
-        var shader = vk.CreateShaderProgramFromSpv(
+        var shader = device.CreateShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "cube.vert.spv")),
             File.ReadAllBytes(Path.Combine(shaderDir, "cube.frag.spv")),
             iface, "cube");
-        var pipeline = vk.CreatePipeline(
+        var pipeline = device.CreatePipeline(
             new PipelineDescription(shader, meshLayout, PrimitiveTopology.Triangles,
                 DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled }),
             "cube");
-        instanceBuffer = new InstanceBuffer(vk, shader, "cubes");
+        instanceBuffer = new InstanceBuffer(device, shader, "cubes");
         batch = new InstancedBatch(cube, pipeline, instanceBuffer);
 
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;

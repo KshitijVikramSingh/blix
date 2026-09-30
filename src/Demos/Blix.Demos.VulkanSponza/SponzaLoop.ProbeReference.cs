@@ -1,5 +1,5 @@
 using System.Numerics;
-using Blix.Graphics.Vulkan;
+using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
 
@@ -185,7 +185,7 @@ internal sealed partial class SponzaLoop
             Console.WriteLine("[VulkanSponza] probe reference: no occupancy grid or no bounce field.");
             return;
         }
-        var irr = vk.ReadTexture(bounceTextures[BounceRead], out var w, out var h, out _);
+        var irr = device.ReadTexture(bounceTextures[BounceRead], out var w, out var h, out _);
         var toSun = -Vector3.Normalize(sunDirection);
         var sunIrr = EffectiveSunIrradiance;
 
@@ -194,7 +194,7 @@ internal sealed partial class SponzaLoop
         // Report closure and visibility beside radiance. A closure mismatch points to different
         // geometry traversal; matching closure with divergent radiance narrows the fault to surface
         // emission/transport. The aggregate closure reference is within 0.002 of the cook's bake.
-        var depth = vk.ReadTexture(bounceDepthTextures[BounceRead], out var dw, out var dh, out _);
+        var depth = device.ReadTexture(bounceDepthTextures[BounceRead], out var dw, out var dh, out _);
         Console.WriteLine("    probe (x,y,z)        world            reference    measured     ratio   closure  expected  vis");
 
         var rng = new Random(12345);

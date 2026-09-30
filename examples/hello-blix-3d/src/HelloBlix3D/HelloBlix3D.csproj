@@ -14,7 +14,6 @@
     <ProjectReference Include="$(BlixSourceRoot)/Blix/Blix.csproj" />
     <ProjectReference Include="$(BlixSourceRoot)/Blix.Core/Blix.Core.csproj" />
     <ProjectReference Include="$(BlixSourceRoot)/Blix.Diagnostics/Blix.Diagnostics.csproj" />
-    <ProjectReference Include="$(BlixSourceRoot)/Blix.Graphics.Vulkan/Blix.Graphics.Vulkan.csproj" />
     <ProjectReference Include="$(BlixSourceRoot)/Blix.Runtime.Silk/Blix.Runtime.Silk.csproj" />
     <ProjectReference Include="$(BlixSourceRoot)/Blix.Tools.Studio/Blix.Tools.Studio.csproj" />
   </ItemGroup>

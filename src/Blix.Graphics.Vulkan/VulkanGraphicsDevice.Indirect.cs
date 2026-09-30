@@ -12,7 +12,7 @@ public sealed partial class VulkanGraphicsDevice
 {
     // VkDrawIndexedIndirectCommand: indexCount, instanceCount, firstIndex,
     // vertexOffset, firstInstance — five uint32s.
-    public const int IndirectCommandStride = 20;
+    public const int IndirectCommandStride = IndirectDraw.RecordStride;
 
     // One MORE slot than frames-in-flight. The indirect buffer is filled in
     // OnRender — BEFORE Execute's vkWaitForFences — so if it were only

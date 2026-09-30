@@ -4,7 +4,6 @@ using Blix.Core;
 using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
-using Blix.Graphics.Vulkan;
 using Blix.Demos.Character;
 using Blix.Runtime.Silk;
 using ImGuiNET;
@@ -114,8 +113,8 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
         this.host = host;
         motor.Teleport(Blix.Demos.Character.Room.SpawnPoint);
         camera.Rig = CameraRig.ThirdPerson;
-        var vk = (VulkanGraphicsDevice)graphicsDevice;
-        renderer.Load(vk, room);
+        var device = graphicsDevice;
+        renderer.Load(device, room);
 
         Console.WriteLine($"room — {room.TriangleCount} triangles, {room.Parts.Count} parts, {room.SolidStarts.Count} solids");
 

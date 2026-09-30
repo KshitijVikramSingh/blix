@@ -5,7 +5,6 @@ using Blix.Assets;
 using Blix.Audio;
 using Blix.Core;
 using Blix.Graphics;
-using Blix.Graphics.Vulkan;
 using Blix.Render;
 using Blix.Runtime.Silk;
 
@@ -139,11 +138,11 @@ internal sealed class PongGame : Game
     {
         Host.SetTitle("Blix · Pong");
 
-        var vk = (VulkanGraphicsDevice)GraphicsDevice;
+        var device = GraphicsDevice;
 
         // Graph: one offscreen color target + a sprite pass that draws into it.
         // The post-FX present (imperative, below) samples it into the swapchain.
-        graph = new RenderGraph(vk);
+        graph = new RenderGraph(device);
         sceneColor = graph.ColorTarget("pong.scene", TextureFormat.Rgba8,
             new FixedGraphSize(OffscreenWidth, OffscreenHeight));
         spritePass = graph.GraphicsPass("pong.sprites")
@@ -154,7 +153,7 @@ internal sealed class PongGame : Game
 
         // SpriteBatch's pipeline bakes against the sprite pass's offscreen
         // surface (Rgba8) for render-pass compatibility.
-        spriteBatch = new SpriteBatch(vk, renderTarget: graph.GetPassSurface(spritePass));
+        spriteBatch = new SpriteBatch(device, renderTarget: graph.GetPassSurface(spritePass));
         whitePixel = GraphicsDevice.CreateTexture2D(
             new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.PixelatedRepeat),
             new byte[] { 255, 255, 255, 255 },
@@ -166,11 +165,11 @@ internal sealed class PongGame : Game
         var shaderDir = AppFiles.Shaders;
         var postfxInterface = ShaderReflection.ForProgram(shaderDir, "postfx.vert", "postfx.frag");
         postfxPush = new byte[postfxInterface.PushConstants.Sum(r => r.Size)];
-        postfxShader = vk.CreateShaderProgramFromSpv(
+        postfxShader = device.CreateShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "postfx.vert.spv")),
             File.ReadAllBytes(Path.Combine(shaderDir, "postfx.frag.spv")),
             postfxInterface, "pong.postfx");
-        postfxPipeline = vk.CreatePipeline(new PipelineDescription(
+        postfxPipeline = device.CreatePipeline(new PipelineDescription(
             postfxShader,
             VertexPosition3Texture.Layout,
             PrimitiveTopology.Triangles,
@@ -180,7 +179,7 @@ internal sealed class PongGame : Game
 
         // Fullscreen triangle for the CRT post-FX present pass (positions are
         // synthesised from gl_VertexIndex; the buffer is never sampled).
-        fullscreen = new FullscreenPass(vk, "pong.fs");
+        fullscreen = new FullscreenPass(device, "pong.fs");
 
         try
         {

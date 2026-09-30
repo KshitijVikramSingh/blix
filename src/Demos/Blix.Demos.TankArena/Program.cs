@@ -7,7 +7,6 @@ using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Primitives;
-using Blix.Graphics.Vulkan;
 using Blix.Render;
 using Blix.Runtime.Silk;
 
@@ -265,7 +264,7 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
     private const float ExplosionKnockback = 10f;     // blast shove on the player
 
     private readonly int exitAfterFrames;
-    private VulkanGraphicsDevice vk = null!;
+    private IGraphicsDevice device = null!;
     private IRenderHost host = null!;
 
     // What the devices did this tick. Safe to read from any helper the update calls, because it
@@ -334,10 +333,10 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         this.host = host;
-        vk = (VulkanGraphicsDevice)graphicsDevice;
+        device = graphicsDevice;
 
-        var vb = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(Cube.Vertices), "cube.vb");
-        var ib = vk.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
+        var vb = device.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(Cube.Vertices), "cube.vb");
+        var ib = device.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
         var cube = new Mesh("cube", vb, ib, Cube.Indices.Length,
             new Bounds3(new Vector3(-0.5f), new Vector3(0.5f)));
 
@@ -352,7 +351,7 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
         Func<string, byte[]> spv = name => File.ReadAllBytes(Path.Combine(shaderDir, name));
 
         // --- Render graph: sun shadow depth pass -> HDR scene pass -> present -------
-        graph = new RenderGraph(vk);
+        graph = new RenderGraph(device);
         var fullSize = new MatchSwapchainGraphSize(1.0f);
         sunShadowHandle = graph.DepthTarget("sun-shadow", new FixedGraphSize(ShadowMapSize, ShadowMapSize));
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.Rgba16F, fullSize);
@@ -378,30 +377,30 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
         graph.Compile();
 
         // Pipelines (after Compile; world/sky/caster target their pass surfaces).
-        var casterShader = vk.CreateShaderProgramFromSpv(spv("shadow_caster.vert.spv"), spv("shadow_caster.frag.spv"), casterIface, "caster");
-        casterPipeline = vk.CreatePipeline(new PipelineDescription(casterShader, meshLayout, PrimitiveTopology.Triangles,
+        var casterShader = device.CreateShaderProgramFromSpv(spv("shadow_caster.vert.spv"), spv("shadow_caster.frag.spv"), casterIface, "caster");
+        casterPipeline = device.CreatePipeline(new PipelineDescription(casterShader, meshLayout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.NoCulling, Array.Empty<BlendState>(),
             RenderTarget: graph.GetPassSurface(shadowPassHandle)), "caster");
-        casterInstances = new InstanceBuffer(vk, casterShader, "casters");
+        casterInstances = new InstanceBuffer(device, casterShader, "casters");
         casterBatch = new InstancedBatch(cube, casterPipeline, casterInstances);
 
-        var worldShader = vk.CreateShaderProgramFromSpv(spv("cube.vert.spv"), spv("cube.frag.spv"), worldIface, "world");
-        worldPipeline = vk.CreatePipeline(new PipelineDescription(worldShader, meshLayout, PrimitiveTopology.Triangles,
+        var worldShader = device.CreateShaderProgramFromSpv(spv("cube.vert.spv"), spv("cube.frag.spv"), worldIface, "world");
+        worldPipeline = device.CreatePipeline(new PipelineDescription(worldShader, meshLayout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(scenePassHandle)), "world");
-        instanceBuffer = new InstanceBuffer(vk, worldShader, "tanks");
+        instanceBuffer = new InstanceBuffer(device, worldShader, "tanks");
         batch = new InstancedBatch(cube, worldPipeline, instanceBuffer);
 
-        var skyShader = vk.CreateShaderProgramFromSpv(spv("sky.vert.spv"), spv("sky.frag.spv"), skyIface, "sky");
-        skyPipeline = vk.CreatePipeline(new PipelineDescription(skyShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
+        var skyShader = device.CreateShaderProgramFromSpv(spv("sky.vert.spv"), spv("sky.frag.spv"), skyIface, "sky");
+        skyPipeline = device.CreatePipeline(new PipelineDescription(skyShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
             DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(scenePassHandle)), "sky");
 
         // Present targets the swapchain (default), copying the HDR scene.
-        var presentShader = vk.CreateShaderProgramFromSpv(spv("present.vert.spv"), spv("present.frag.spv"), presentIface, "present");
-        presentPipeline = vk.CreatePipeline(new PipelineDescription(presentShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
+        var presentShader = device.CreateShaderProgramFromSpv(spv("present.vert.spv"), spv("present.frag.spv"), presentIface, "present");
+        presentPipeline = device.CreatePipeline(new PipelineDescription(presentShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
             DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled }), "present");
-        fullscreen = new FullscreenPass(vk, "fullscreen");
+        fullscreen = new FullscreenPass(device, "fullscreen");
 
         LoadTankParts(worldShader, casterShader);
         propTypes.Add(LoadProp("barrel.glb", targetHeight: 1.4f, explosive: false, worldShader, casterShader));
@@ -448,9 +447,9 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
 
         TankPart Part(MeshData md, Attach attach, Vector4? tint)
         {
-            var mesh = vk.CreateMesh(md);
-            var wInst = new InstanceBuffer(vk, worldShader, $"{md.Name}.w");
-            var cInst = new InstanceBuffer(vk, casterShader, $"{md.Name}.c");
+            var mesh = device.CreateMesh(md);
+            var wInst = new InstanceBuffer(device, worldShader, $"{md.Name}.w");
+            var cInst = new InstanceBuffer(device, casterShader, $"{md.Name}.c");
             return new TankPart
             {
                 Attach = attach,
@@ -547,7 +546,7 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
             return (prim.Mesh, new Vector4(c.X, c.Y, c.Z, 1f));
         });
         var prop = PropModel.Create(
-            vk, file, parts, worldShader, worldPipeline, casterShader, casterPipeline);
+            device, file, parts, worldShader, worldPipeline, casterShader, casterPipeline);
         return new PropType { Name = file, Scale = scale, Radius = radius, Height = targetHeight, Explosive = explosive, Model = prop };
     }
 

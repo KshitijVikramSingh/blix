@@ -1,7 +1,6 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix.Graphics;
-using Blix.Graphics.Vulkan;
 
 namespace Blix.Render;
 
@@ -63,8 +62,8 @@ public sealed class InstanceBuffer : IDisposable
     public static ShaderInterface Size(ShaderInterface reflected) =>
         reflected.WithBlockSize(Slot.Set, Slot.Binding, BlockSize);
 
-    private readonly VulkanGraphicsDevice device;
-    private readonly MaterialBindings ssbo;
+    private readonly IGraphicsDevice device;
+    private readonly IMaterialBindings ssbo;
     private readonly byte[] scratch = new byte[MaxInstances * Stride];
     private bool disposed;
 
@@ -75,7 +74,7 @@ public sealed class InstanceBuffer : IDisposable
     // Slot at set 3. The resulting descriptor set is layout-compatible with any
     // pipeline whose set 3 matches (i.e. any shader composing the same Slot), so the
     // buffer isn't tied to that one pipeline.
-    public InstanceBuffer(VulkanGraphicsDevice device, ShaderProgramHandle shader, string? name = null)
+    public InstanceBuffer(IGraphicsDevice device, ShaderProgramHandle shader, string? name = null)
     {
         ArgumentNullException.ThrowIfNull(device);
         this.device = device;

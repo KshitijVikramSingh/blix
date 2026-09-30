@@ -1,5 +1,4 @@
 using Blix.Graphics;
-using Blix.Graphics.Vulkan;
 
 namespace Blix.Render;
 
@@ -33,12 +32,12 @@ public sealed class FullscreenPass : IDisposable
     public static VertexLayout Layout { get; } =
         new(VertexPosition3NormalTexture.Layout.Stride, Array.Empty<VertexAttribute>());
 
-    private readonly VulkanGraphicsDevice device;
+    private readonly IGraphicsDevice device;
     private readonly VertexBufferHandle vertexBuffer;
     private readonly IndexBufferHandle indexBuffer;
     private bool disposed;
 
-    public FullscreenPass(VulkanGraphicsDevice device, string? name = null)
+    public FullscreenPass(IGraphicsDevice device, string? name = null)
     {
         ArgumentNullException.ThrowIfNull(device);
         this.device = device;

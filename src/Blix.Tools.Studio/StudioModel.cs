@@ -3,7 +3,6 @@ using Blix;
 using Blix.Graphics.Images;
 using Blix.Assets;
 using Blix.Graphics;
-using Blix.Graphics.Vulkan;
 using Blix.Render;
 
 namespace Blix.Tools.Studio;
@@ -64,7 +63,7 @@ public sealed class StudioModel : IDisposable
     /// <summary>One image the asset actually ships, with enough to label it in a panel.</summary>
     public readonly record struct Image(string Name, TextureHandle Texture, int Width, int Height);
 
-    private VulkanGraphicsDevice device = null!;
+    private IGraphicsDevice device = null!;
     private readonly List<TextureHandle> ownedTextures = new();
     private readonly List<Image> images = new();
     // TextureRegistry keys source identity rather than importer object identity.
@@ -104,13 +103,13 @@ public sealed class StudioModel : IDisposable
         }
     }
 
-    public static StudioModel Load(VulkanGraphicsDevice vk, string path)
+    public static StudioModel Load(IGraphicsDevice device, string path)
     {
-        var model = new StudioModel { device = vk, SourcePath = path };
+        var model = new StudioModel { device = device, SourcePath = path };
 
         // A material without a base-colour texture still samples one, so the shader needs no
         // branch: glTF defines the factor as multiplying the texture, and white is the identity.
-        model.white = vk.CreateTexture2D(
+        model.white = device.CreateTexture2D(
             new TextureDescription(1, 1, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
             new byte[] { 255, 255, 255, 255 }, "lab.white");
         model.ownedTextures.Add(model.white);
@@ -148,7 +147,7 @@ public sealed class StudioModel : IDisposable
                 Accumulate(mesh, world[i], ref min, ref max);
 
                 var name = $"lab.{Path.GetFileNameWithoutExtension(path)}.{node.Name}.{model.parts.Count}";
-                var uploaded = vk.CreateMesh(mesh, name);
+                var uploaded = device.CreateMesh(mesh, name);
 
                 var material = primitive.Material;
                 model.parts.Add(new Part(
@@ -162,7 +161,7 @@ public sealed class StudioModel : IDisposable
                             material.BaseColorFactor.X, material.BaseColorFactor.Y, material.BaseColorFactor.Z),
                     Metallic: material?.MetallicFactor ?? 0f,
                     Roughness: material?.RoughnessFactor ?? 0.7f,
-                    Albedo: model.UploadAlbedo(vk, material?.BaseColorTexture),
+                    Albedo: model.UploadAlbedo(device, material?.BaseColorTexture),
                     AlbedoUvSet: material?.BaseColorTexCoord ?? 0,
                     BaseAlpha: material?.BaseColorFactor.W ?? 1f,
                     AlphaMode: material?.AlphaMode ?? GltfAlphaMode.Opaque,
@@ -200,7 +199,7 @@ public sealed class StudioModel : IDisposable
     }
 
     // Uploads a material's base-colour texture once, however many primitives share it.
-    private TextureHandle UploadAlbedo(VulkanGraphicsDevice vk, GltfTexture? texture)
+    private TextureHandle UploadAlbedo(IGraphicsDevice device, GltfTexture? texture)
     {
         if (texture is null) return white;
 
@@ -224,8 +223,8 @@ public sealed class StudioModel : IDisposable
             var description = new TextureDescription(
                 texture.Width, texture.Height, texture.Format, SamplerDescription.LinearRepeat);
             var handle = mips.Count > 1
-                ? vk.CreateTexture2DMipped(description, mips, $"lab.albedo.{texture.Name}")
-                : vk.CreateTexture2D(description, mips[0], $"lab.albedo.{texture.Name}");
+                ? device.CreateTexture2DMipped(description, mips, $"lab.albedo.{texture.Name}")
+                : device.CreateTexture2D(description, mips[0], $"lab.albedo.{texture.Name}");
 
             ownedTextures.Add(handle);
             images.Add(new Image(

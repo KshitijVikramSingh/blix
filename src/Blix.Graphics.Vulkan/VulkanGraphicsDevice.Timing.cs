@@ -34,6 +34,17 @@ public sealed partial class VulkanGraphicsDevice : IFrameTiming
     /// <inheritdoc />
     public IReadOnlyDictionary<string, GpuPassTotal> GpuPassTotals => gpuPassTotals;
 
+    // Isolation is how this device measures when asked to; see GpuPassIsolation for why MoltenVK needs it.
+    bool IFrameTiming.IsolatePasses { get => GpuPassIsolation; set => GpuPassIsolation = value; }
+
+    IReadOnlyDictionary<string, GpuPassTotal> IFrameTiming.IsolatedPassTotals => GpuPassIsolatedTotals;
+
+    long IFrameTiming.IsolatedFrames => GpuIsolationFrames;
+
+    void IFrameTiming.ResetIsolatedTotals() => ResetGpuIsolation();
+
+    double IFrameTiming.MeasureIsolationFloorMs() => MeasureSubmitFloorMs();
+
     private void AccumulateGpuPassTotal(string pass, double elapsedMs)
     {
         var current = gpuPassTotals.TryGetValue(pass, out var found) ? found : default;

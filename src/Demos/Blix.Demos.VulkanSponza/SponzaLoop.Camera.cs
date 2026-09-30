@@ -7,7 +7,6 @@ using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Images;
-using Blix.Graphics.Vulkan;
 using Blix.Runtime.Silk;
 
 namespace Blix.Demos.VulkanSponza;
@@ -31,7 +30,7 @@ internal sealed partial class SponzaLoop
                 // Steady state starts here, so every measurement window does too: the streaming
                 // frames rendered a different (flat) path entirely, and counting them diluted the
                 // amortised cost of everything that only runs once the real path is live.
-                vk.ResetGpuIsolation();
+                host.Timing.ResetIsolatedTotals();
                 triangleFrames = 0;
                 cameraTriangleSum = 0;
                 System.Array.Clear(cascadeTriangleSum);

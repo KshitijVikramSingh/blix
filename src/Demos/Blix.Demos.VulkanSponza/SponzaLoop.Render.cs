@@ -7,7 +7,6 @@ using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Images;
-using Blix.Graphics.Vulkan;
 using Blix.Runtime.Silk;
 
 namespace Blix.Demos.VulkanSponza;
@@ -77,7 +76,7 @@ internal sealed partial class SponzaLoop
         }
         // Write exactly this list's prefix; the buffer is sized to its count,
         // and indirectScratch is sized for the largest (opaque) list.
-        vk.WriteIndirectCommands(buffer, indirectScratch.AsSpan(0, drawables.Count * VulkanGraphicsDevice.IndirectCommandStride));
+        device.WriteIndirectCommands(buffer, indirectScratch.AsSpan(0, drawables.Count * IndirectDraw.RecordStride));
         return visible;
     }
 
@@ -252,7 +251,7 @@ internal sealed partial class SponzaLoop
                     scope.DrawIndexedIndirect(
                         vertexBuffer: sharedVb, indexBuffer: g.IsU32 ? sharedIbU32 : sharedIbU16,
                         pipeline: prepassOpaquePipeline, indirectBuffer: opaqueIndirect,
-                        indirectByteOffset: g.Start * VulkanGraphicsDevice.IndirectCommandStride, drawCount: g.Count,
+                        indirectByteOffset: g.Start * IndirectDraw.RecordStride, drawCount: g.Count,
                         uniforms: perFrame, textures: Array.Empty<ShaderTextureBinding>(),
                         material: null, pushConstants: identityPush);
             });
@@ -262,7 +261,7 @@ internal sealed partial class SponzaLoop
                     scope.DrawIndexedIndirect(
                         vertexBuffer: sharedVb, indexBuffer: g.IsU32 ? sharedIbU32 : sharedIbU16,
                         pipeline: flatPipeline, indirectBuffer: opaqueIndirect,
-                        indirectByteOffset: g.Start * VulkanGraphicsDevice.IndirectCommandStride, drawCount: g.Count,
+                        indirectByteOffset: g.Start * IndirectDraw.RecordStride, drawCount: g.Count,
                         uniforms: perFrame, textures: Array.Empty<ShaderTextureBinding>(),
                         material: null, pushConstants: identityPush);
             }, clearColor: new GraphicsColor(0.05f, 0.07f, 0.10f, 1f));
@@ -348,7 +347,7 @@ internal sealed partial class SponzaLoop
                 foreach (var g in opaqueGroups)
                 {
                     var ib = g.IsU32 ? sharedIbU32 : sharedIbU16;
-                    var byteOffset = g.Start * VulkanGraphicsDevice.IndirectCommandStride;
+                    var byteOffset = g.Start * IndirectDraw.RecordStride;
                     if (g.IsMask)
                     {
                         var rep = opaqueDrawables[g.Start];
@@ -466,7 +465,7 @@ internal sealed partial class SponzaLoop
                     indexBuffer: g.IsU32 ? sharedIbU32 : sharedIbU16,
                     pipeline: g.IsMask ? prepassMaskPipeline : prepassOpaquePipeline,
                     indirectBuffer: opaqueIndirect,
-                    indirectByteOffset: g.Start * VulkanGraphicsDevice.IndirectCommandStride,
+                    indirectByteOffset: g.Start * IndirectDraw.RecordStride,
                     drawCount: g.Count,
                     uniforms: perFrame,
                     textures: Array.Empty<ShaderTextureBinding>(),
@@ -753,7 +752,7 @@ internal sealed partial class SponzaLoop
                     indexBuffer: g.IsU32 ? sharedIbU32 : sharedIbU16,
                     pipeline: pipeline,
                     indirectBuffer: opaqueIndirect,
-                    indirectByteOffset: g.Start * VulkanGraphicsDevice.IndirectCommandStride,
+                    indirectByteOffset: g.Start * IndirectDraw.RecordStride,
                     drawCount: g.Count,
                     uniforms: perFrame,
                     textures: passBindings,
@@ -815,7 +814,7 @@ internal sealed partial class SponzaLoop
                     indexBuffer: g.IsU32 ? sharedIbU32 : sharedIbU16,
                     pipeline: g.Pipeline,
                     indirectBuffer: blendIndirect,
-                    indirectByteOffset: g.Start * VulkanGraphicsDevice.IndirectCommandStride,
+                    indirectByteOffset: g.Start * IndirectDraw.RecordStride,
                     drawCount: g.Count,
                     uniforms: perFrame,
                     textures: passBindings,
@@ -868,7 +867,7 @@ internal sealed partial class SponzaLoop
     {
         if (vizChannel < 20.5f || vizChannel > 21.5f) return;
 
-        var pixels = vk.ReadTexture(
+        var pixels = device.ReadTexture(
             graph.GetColorTexture(hdrHandle), out var width, out var height, out var format);
         if (format != TextureFormat.R11G11B10F) return;
 
@@ -908,7 +907,7 @@ internal sealed partial class SponzaLoop
     /// <summary>The ambient buffer before the denoise: rgb as written, alpha as visibility.</summary>
     private void WriteAmbientRaw(string path)
     {
-        var pixels = vk.ReadTexture(
+        var pixels = device.ReadTexture(
             graph.GetColorTexture(ambientHandle), out var width, out var height, out var format);
         if (format != TextureFormat.Rgba16F) return;
 
@@ -942,7 +941,7 @@ internal sealed partial class SponzaLoop
     private void ProbeReachCensus()
     {
         if (!bounceReady) return;
-        var pixels = vk.ReadTexture(
+        var pixels = device.ReadTexture(
             bounceDepthTextures[BounceRead], out var w, out var h, out var format);
         if (format != TextureFormat.Rgba16F) { Console.WriteLine("[VulkanSponza] probe reach: unexpected format"); return; }
 
@@ -985,7 +984,7 @@ internal sealed partial class SponzaLoop
 
             // The irradiance atlas beside it, same layout: the two are only meaningful together,
             // because every question about the blend is "what weight, times what colour".
-            var irr = vk.ReadTexture(bounceTextures[BounceRead], out var iw, out var ih, out _);
+            var irr = device.ReadTexture(bounceTextures[BounceRead], out var iw, out var ih, out _);
             var ifl = new float[iw * ih * 3];
             for (var i = 0; i < iw * ih; i++)
             {
@@ -1021,7 +1020,7 @@ internal sealed partial class SponzaLoop
     {
         // A level whose texels are coarse enough that a handful covers a typical object.
         const int Level = 3;
-        var pixels = vk.ReadTexture(
+        var pixels = device.ReadTexture(
             graph.GetColorTexture(hiZHandles[Level]), out var w, out var h, out var format);
         if (format != TextureFormat.Rgba16F) return;
 
@@ -1103,7 +1102,7 @@ internal sealed partial class SponzaLoop
         int parentW = 0, parentH = 0;
         for (var level = 0; level < HiZLevels; level++)
         {
-            var pixels = vk.ReadTexture(
+            var pixels = device.ReadTexture(
                 graph.GetColorTexture(hiZHandles[level]), out var w, out var h, out var format);
             if (format != TextureFormat.Rgba16F) { Console.WriteLine("  unexpected format"); return; }
 
@@ -1240,7 +1239,7 @@ internal sealed partial class SponzaLoop
     /// </remarks>
     private void WriteSceneShot(string path)
     {
-        var pixels = vk.ReadTexture(
+        var pixels = device.ReadTexture(
             graph.GetColorTexture(hdrHandle), out var width, out var height, out var format);
         if (format != TextureFormat.R11G11B10F)
         {
@@ -1297,21 +1296,21 @@ internal sealed partial class SponzaLoop
     {
         var (x, y) = FroxelGridSize(width, height);
         if (x == froxelGridX && y == froxelGridY) return;
-        vk.WaitIdle();
+        device.WaitIdle();
         var previous = froxelGridTexture;
         froxelGridX = x;
         froxelGridY = y;
-        froxelGridTexture = vk.CreateStorageTexture3D(
+        froxelGridTexture = device.CreateStorageTexture3D(
             x, y, froxelGridZ, TextureFormat.Rgba16F, SamplerDescription.LinearClamp,
             "sponza.froxel_grid");
-        vk.DestroyTexture(previous);
+        device.DestroyTexture(previous);
         for (var i = 0; i < 2; i++)
         {
             var staleScatter = fogScatterTextures[i];
-            fogScatterTextures[i] = vk.CreateStorageTexture3D(
+            fogScatterTextures[i] = device.CreateStorageTexture3D(
                 x, y, froxelGridZ, TextureFormat.Rgba16F, SamplerDescription.LinearClamp,
                 $"sponza.fog_scatter{i}");
-            vk.DestroyTexture(staleScatter);
+            device.DestroyTexture(staleScatter);
         }
         fogHistoryValid = false;
         if (froxelGridBinding >= 0)
@@ -1464,11 +1463,11 @@ internal sealed partial class SponzaLoop
     private void WriteProbeCensus()
     {
         if (!bounceReady) { Console.WriteLine("[VulkanSponza] probe census: no bounce field."); return; }
-        var irr = vk.ReadTexture(bounceTextures[BounceRead], out var w, out var h, out var format);
+        var irr = device.ReadTexture(bounceTextures[BounceRead], out var w, out var h, out var format);
         if (format != TextureFormat.Rgba16F) { Console.WriteLine("[VulkanSponza] probe census: unexpected atlas format."); return; }
 
         // The depth atlas alongside it, for the ray closure the march parked in its alpha.
-        var depth = vk.ReadTexture(bounceDepthTextures[BounceRead], out var dw, out var dh, out _);
+        var depth = device.ReadTexture(bounceDepthTextures[BounceRead], out var dw, out var dh, out _);
         var closureFlat = new double[dw * dh];
         for (var i = 0; i < dw * dh; i++)
             closureFlat[i] = (float)BitConverter.ToHalf(depth, i * 8 + 6);
@@ -1674,15 +1673,15 @@ internal sealed partial class SponzaLoop
             }
         }
 
-        if (vk.GpuPassIsolation)
+        if (host.Timing.IsolatePasses)
         {
             // Per-run cost describes one execution; per-frame cost includes scheduling frequency.
-            var frames = Math.Max(1, vk.GpuIsolationFrames);
+            var frames = Math.Max(1, host.Timing.IsolatedFrames);
             Console.WriteLine(string.Create(Inv,
                 $"[VulkanSponza] isolated GPU ms per pass over {frames} frames (own command buffer, fence-waited):"));
             Console.WriteLine("     per-run    per-frame   runs/frame  pass");
             double isoTotal = 0;
-            foreach (var e in vk.GpuPassIsolatedTotals
+            foreach (var e in host.Timing.IsolatedPassTotals
                          .Where(e => e.Value.Samples > 0)
                          .OrderByDescending(e => e.Value.TotalMs / frames))
             {
@@ -1697,7 +1696,7 @@ internal sealed partial class SponzaLoop
         }
 
         // Report the submit/fence floor so sub-floor isolated timings are not overinterpreted.
-        var floor = vk.MeasureSubmitFloorMs();
+        var floor = host.Timing.MeasureIsolationFloorMs();
         Console.WriteLine(string.Create(Inv,
             $"  submit+fence floor: {floor:0.000} ms — the smallest pass a per-pass command buffer could resolve; anything under this is below that instrument's noise."));
     }
@@ -1709,7 +1708,7 @@ internal sealed partial class SponzaLoop
     /// </remarks>
     private void WriteAmbientShot(string path)
     {
-        var pixels = vk.ReadTexture(
+        var pixels = device.ReadTexture(
             graph.GetColorTexture(ambientDenoisedHandle), out var width, out var height, out var format);
         if (format != TextureFormat.Rgba16F)
         {

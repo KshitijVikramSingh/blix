@@ -15,8 +15,8 @@ public readonly record struct TransientVertexSlice(
 
 // A GPU buffer of VkDrawIndexedIndirectCommand structs, replicated per
 // frame-in-flight and rewritten each frame (CPU-filled indirect path). Consumed
-// by DrawIndexedIndirectCommand. Vulkan-only; created via
-// VulkanGraphicsDevice.CreateIndirectBuffer.
+// by DrawIndexedIndirectCommand; created via
+// IGraphicsDevice.CreateIndirectBuffer.
 public readonly record struct IndirectBufferHandle(int Id);
 
 public readonly record struct ShaderProgramHandle(int Id);
@@ -26,7 +26,7 @@ public readonly record struct PipelineHandle(int Id);
 public readonly record struct TextureHandle(int Id);
 
 // Opaque per-backend handle for a MaterialBindings instance. Construction
-// goes through the backend (VulkanGraphicsDevice.CreateMaterial).
+// goes through the device (IGraphicsDevice.CreateMaterial).
 public readonly record struct MaterialHandle(int Id);
 
 public readonly record struct RenderSurfaceHandle(int Id)

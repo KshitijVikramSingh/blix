@@ -8,7 +8,6 @@
     <!-- Vulkan is the sole backend post-GL-sunset. SpriteBatch owns its shader
          + pipeline (SPIR-V, ShaderInterface, set-0 binding), so Blix.Render
          depends on the Vulkan backend directly. -->
-    <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
     <ProjectReference Include="..\Blix.Tools.Shader\Blix.Tools.Shader.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" Private="false" />
   </ItemGroup>
 

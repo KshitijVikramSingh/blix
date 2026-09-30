@@ -5,7 +5,6 @@ using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Images;
-using Blix.Graphics.Vulkan;
 using Blix.Demos.Character;
 using Blix.Render;
 using Blix.Runtime.Silk;
@@ -115,7 +114,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private readonly List<Vector3> path = new();
     private Vector3 walked;
 
-    private VulkanGraphicsDevice device = null!;
+    private IGraphicsDevice device = null!;
     private Matrix4x4 viewProjection = Matrix4x4.Identity;
     private float aspect = 16f / 9f;
     private int frames;
@@ -176,7 +175,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
-        device = (VulkanGraphicsDevice)graphicsDevice;
+        device = graphicsDevice;
         renderer.Load(device, room);
         renderer.SlopeTint = slopeTint;
 

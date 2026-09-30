@@ -46,6 +46,33 @@ public interface IFrameTiming
     /// <para>GPU timings resolve a frame or more after submission, so these lag <see cref="LastFrame"/>.</para>
     /// </remarks>
     IReadOnlyDictionary<string, GpuPassTotal> GpuPassTotals { get; }
+
+    /// <summary>
+    /// Whether each pass is submitted and timed on its own, so its GPU time cannot overlap another's.
+    /// </summary>
+    /// <remarks>
+    /// A measurement mode, off by default: it waits for the GPU at every pass boundary, so a frame
+    /// runs far slower, and the numbers ATTRIBUTE rather than decompose. They sum to more than the
+    /// frame, and a pass that normally hides behind another reads as more than its marginal cost.
+    /// Marginal cost is what an A/B is for. A host that cannot isolate passes ignores it.
+    /// </remarks>
+    bool IsolatePasses { get; set; }
+
+    /// <summary>Isolated GPU time per pass, cumulative while <see cref="IsolatePasses"/> was on.</summary>
+    IReadOnlyDictionary<string, GpuPassTotal> IsolatedPassTotals { get; }
+
+    /// <summary>Frames recorded while isolation was on: the denominator for a pass that skips frames.</summary>
+    long IsolatedFrames { get; }
+
+    /// <summary>Discards what isolation has measured, starting a new window (say, once a scene has loaded).</summary>
+    void ResetIsolatedTotals();
+
+    /// <summary>
+    /// The smallest pass cost isolation can resolve here, in milliseconds: an empty submission timed the
+    /// same way. A pass under it cannot be measured by isolation at all; 0 on a host that cannot isolate.
+    /// </summary>
+    /// <remarks>Measured when called, so call it outside a timed window.</remarks>
+    double MeasureIsolationFloorMs();
 }
 
 /// <summary>One submitted frame: which, how long its CPU phases took, and what it handed the GPU.</summary>
@@ -108,5 +135,10 @@ public static class FrameTimings
         public IReadOnlyDictionary<string, SubmittedWork> LastFramePasses => NoPasses;
         public bool GpuTimestampsSupported => false;
         public IReadOnlyDictionary<string, GpuPassTotal> GpuPassTotals => NoTotals;
+        public bool IsolatePasses { get => false; set { } }
+        public IReadOnlyDictionary<string, GpuPassTotal> IsolatedPassTotals => NoTotals;
+        public long IsolatedFrames => 0;
+        public void ResetIsolatedTotals() { }
+        public double MeasureIsolationFloorMs() => 0;
     }
 }

@@ -7,7 +7,6 @@ using Blix.Core;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Primitives;
-using Blix.Graphics.Vulkan;
 using Blix.Render;
 using Blix.Runtime.Silk;
 using Plane = Blix.Geometry.Plane;
@@ -79,7 +78,7 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
     private const float Cell = 2.0f;
 
     private readonly int exitAfterFrames;
-    private VulkanGraphicsDevice vk = null!;
+    private IGraphicsDevice device = null!;
     private IRenderHost host = null!;
     private InstanceBuffer instanceBuffer = null!;
     private InstancedBatch batch = null!;
@@ -228,7 +227,7 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
     private AnimationClip enemyDeath = null!;
     private float enemyDeathHold = 0.8f;   // corpse lingers playing the Death clip, then is removed
     private Matrix4x4 enemyMeshNodeTransform = Matrix4x4.Identity;
-    private MaterialBindings enemyBones = null!;   // set 3 palette SSBO, frames-in-flight; shared by both skinned pipelines
+    private IMaterialBindings enemyBones = null!;   // set 3 palette SSBO, frames-in-flight; shared by both skinned pipelines
     private const int EnemyBones = 15;             // the robot skeleton; the loader asserts it (matches the shaders' BONE_COUNT)
     private const float SkinnedEnemyScale = 1.15f;   // visual dial
     private const float SkinnedEnemyYawFix = 0f;     // model forward → engine; dial if facing is off
@@ -245,10 +244,10 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         this.host = host;
-        vk = (VulkanGraphicsDevice)graphicsDevice;
+        device = graphicsDevice;
 
-        var vb = vk.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(Cube.Vertices), "cube.vb");
-        var ib = vk.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
+        var vb = device.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(Cube.Vertices), "cube.vb");
+        var ib = device.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
         var cube = new Mesh("cube", vb, ib, Cube.Indices.Length,
             new Bounds3(new Vector3(-0.5f), new Vector3(0.5f)));
 
@@ -263,7 +262,7 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
         byte[] Spv(string n) => File.ReadAllBytes(Path.Combine(shaderDir, n));
 
         // RenderGraph: sun shadow depth → HDR scene (samples shadow + procedural sky) → present.
-        graph = new RenderGraph(vk);
+        graph = new RenderGraph(device);
         var fullSize = new MatchSwapchainGraphSize(1.0f);
         sunShadowHandle = graph.DepthTarget("sun-shadow", new FixedGraphSize(ShadowMapSize, ShadowMapSize));
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.Rgba16F, fullSize);
@@ -290,27 +289,27 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
         graph.Compile();
 
         // Pipelines target their pass surfaces (caster→shadow, world/sky/particle→scene).
-        var casterShader = vk.CreateShaderProgramFromSpv(Spv("shadow_caster.vert.spv"), Spv("shadow_caster.frag.spv"), casterIface, "caster");
-        casterPipeline = vk.CreatePipeline(new PipelineDescription(casterShader, meshLayout, PrimitiveTopology.Triangles,
+        var casterShader = device.CreateShaderProgramFromSpv(Spv("shadow_caster.vert.spv"), Spv("shadow_caster.frag.spv"), casterIface, "caster");
+        casterPipeline = device.CreatePipeline(new PipelineDescription(casterShader, meshLayout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.NoCulling, Array.Empty<BlendState>(),
             RenderTarget: graph.GetPassSurface(shadowPassHandle)), "caster");
 
-        var worldShader = vk.CreateShaderProgramFromSpv(Spv("cube.vert.spv"), Spv("cube.frag.spv"), worldIface, "world");
-        worldPipeline = vk.CreatePipeline(new PipelineDescription(worldShader, meshLayout, PrimitiveTopology.Triangles,
+        var worldShader = device.CreateShaderProgramFromSpv(Spv("cube.vert.spv"), Spv("cube.frag.spv"), worldIface, "world");
+        worldPipeline = device.CreatePipeline(new PipelineDescription(worldShader, meshLayout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(scenePassHandle)), "world");
-        instanceBuffer = new InstanceBuffer(vk, worldShader, "bulwark");
+        instanceBuffer = new InstanceBuffer(device, worldShader, "bulwark");
         batch = new InstancedBatch(cube, worldPipeline, instanceBuffer);
 
-        var skyShader = vk.CreateShaderProgramFromSpv(Spv("sky.vert.spv"), Spv("sky.frag.spv"), skyIface, "sky");
-        skyPipeline = vk.CreatePipeline(new PipelineDescription(skyShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
+        var skyShader = device.CreateShaderProgramFromSpv(Spv("sky.vert.spv"), Spv("sky.frag.spv"), skyIface, "sky");
+        skyPipeline = device.CreatePipeline(new PipelineDescription(skyShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
             DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(scenePassHandle)), "sky");
 
-        var presentShader = vk.CreateShaderProgramFromSpv(Spv("present.vert.spv"), Spv("present.frag.spv"), presentIface, "present");
-        presentPipeline = vk.CreatePipeline(new PipelineDescription(presentShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
+        var presentShader = device.CreateShaderProgramFromSpv(Spv("present.vert.spv"), Spv("present.frag.spv"), presentIface, "present");
+        presentPipeline = device.CreatePipeline(new PipelineDescription(presentShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
             DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled }), "present");
-        fullscreen = new FullscreenPass(vk, "fullscreen");
+        fullscreen = new FullscreenPass(device, "fullscreen");
 
         LoadArt(worldShader, worldPipeline, casterShader, casterPipeline);   // world + shadow-caster batches
         LoadSkinnedEnemy(shaderDir);   // M4 Gate A: one animated enemy (best-effort)
@@ -318,11 +317,11 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
         // Particle pipeline: geometry-only ParticleBatch + a minimal additive pipeline
         // (push = view-projection) into the HDR scene pass. No soft-depth / bloom.
         var particleIface = ShaderReflection.ForProgram(shaderDir, "particle.vert", "particle.frag");
-        var particleShader = vk.CreateShaderProgramFromSpv(Spv("particle.vert.spv"), Spv("particle.frag.spv"), particleIface, "particle");
-        particlePipeline = vk.CreatePipeline(new PipelineDescription(particleShader, ParticleBatch.VertexLayoutDescription,
+        var particleShader = device.CreateShaderProgramFromSpv(Spv("particle.vert.spv"), Spv("particle.frag.spv"), particleIface, "particle");
+        particlePipeline = device.CreatePipeline(new PipelineDescription(particleShader, ParticleBatch.VertexLayoutDescription,
             PrimitiveTopology.Triangles, DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Additive },
             RenderTarget: graph.GetPassSurface(scenePassHandle)), "particle");
-        particles = new ParticleBatch(vk, maxParticles: 2048, "bulwark.particles");
+        particles = new ParticleBatch(device, maxParticles: 2048, "bulwark.particles");
 
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         mouseX = host.LogicalSize.Width * 0.5f;
@@ -986,15 +985,15 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
                     return m;
                 }
                 var w = World(idx);
-                return vk.CreateMesh(BakeMerge(meshName, nodes[idx].Primitives.Select(prim => (prim.Mesh, w))));
+                return device.CreateMesh(BakeMerge(meshName, nodes[idx].Primitives.Select(prim => (prim.Mesh, w))));
             }
 
             // Each mesh gets a world batch (lit scene pass) + a caster batch (shadow pass).
             (InstancedBatch World, InstancedBatch Caster) Pair(string file, string node, string name)
             {
                 var m = NodeMesh(file, node, name);
-                return (new InstancedBatch(m, worldPipe, new InstanceBuffer(vk, worldShader, name + ".w")),
-                        new InstancedBatch(m, casterPipe, new InstanceBuffer(vk, casterShader, name + ".c")));
+                return (new InstancedBatch(m, worldPipe, new InstanceBuffer(device, worldShader, name + ".w")),
+                        new InstancedBatch(m, casterPipe, new InstanceBuffer(device, casterShader, name + ".c")));
             }
 
             (turretBaseBatch, turretBaseCaster) = Pair("turret.glb", "Turret_Cannon_Base", "art.turretBase");
@@ -1084,10 +1083,10 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
             // Scene: shadow sampler (set 0, frag) + palette (set 3, vertex), 160B push → cube.frag (shadow-aware).
             var sceneIface = ShaderReflection.ForProgram(shaderDir, "skinned_instanced.vert", "cube.frag")
                 .WithBlockSize(set: 3, binding: 0, MaxAlive * EnemyBones * 64);
-            var sceneShader = vk.CreateShaderProgramFromSpv(
+            var sceneShader = device.CreateShaderProgramFromSpv(
                 File.ReadAllBytes(Path.Combine(shaderDir, "skinned_instanced.vert.spv")),
                 File.ReadAllBytes(Path.Combine(shaderDir, "cube.frag.spv")), sceneIface, "skinned.scene");
-            skinnedPipeline = vk.CreatePipeline(new PipelineDescription(sceneShader,
+            skinnedPipeline = device.CreatePipeline(new PipelineDescription(sceneShader,
                 VertexPosition3NormalTextureSkin4Tangent.Layout, PrimitiveTopology.Triangles,
                 DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled },
                 RenderTarget: graph.GetPassSurface(scenePassHandle)), "skinned.scene");
@@ -1095,10 +1094,10 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
             // Shadow: same set-3 palette (so they share one material), 64B sun-VP push, depth-only.
             var shadowIface = ShaderReflection.ForProgram(shaderDir, "skinned_shadow_instanced.vert", "shadow_caster.frag")
                 .WithBlockSize(set: 3, binding: 0, MaxAlive * EnemyBones * 64);
-            var shadowShader = vk.CreateShaderProgramFromSpv(
+            var shadowShader = device.CreateShaderProgramFromSpv(
                 File.ReadAllBytes(Path.Combine(shaderDir, "skinned_shadow_instanced.vert.spv")),
                 File.ReadAllBytes(Path.Combine(shaderDir, "shadow_caster.frag.spv")), shadowIface, "skinned.shadow");
-            skinnedShadowPipeline = vk.CreatePipeline(new PipelineDescription(shadowShader,
+            skinnedShadowPipeline = device.CreatePipeline(new PipelineDescription(shadowShader,
                 VertexPosition3NormalTextureSkin4Tangent.Layout, PrimitiveTopology.Triangles,
                 DepthState.LessEqualWrite, RasterizerState.NoCulling, Array.Empty<BlendState>(),
                 RenderTarget: graph.GetPassSurface(shadowPassHandle)), "skinned.shadow");
@@ -1107,9 +1106,9 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
             enemyMeshes = new Mesh[n];
             for (var i = 0; i < n; i++)
             {
-                enemyMeshes[i] = vk.CreateMesh(model.Primitives[i].Mesh, $"enemy.{i}");
+                enemyMeshes[i] = device.CreateMesh(model.Primitives[i].Mesh, $"enemy.{i}");
             }
-            enemyBones = vk.CreateMaterial(sceneShader, setIndex: 3, framesInFlight: vk.MaxFramesInFlightCount, name: "enemy.bones");
+            enemyBones = device.CreateMaterial(sceneShader, setIndex: 3, framesInFlight: device.MaxFramesInFlightCount, name: "enemy.bones");
             skinnedLoaded = true;
             Console.WriteLine($"  skinned crowd: {n} prim(s), {enemySkeleton.BoneCount} bones, clip '{enemyWalk.Name}', up to {MaxAlive} instanced");
         }
@@ -1159,7 +1158,7 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
                 f[o + 12] = m.M41; f[o + 13] = m.M42; f[o + 14] = m.M43; f[o + 15] = m.M44;
             }
         }
-        enemyBones.WriteBuffer(vk.CurrentFrameSlot, 0, enemyPalettePayload);
+        enemyBones.WriteBuffer(device.CurrentFrameSlot, 0, enemyPalettePayload);
     }
 
     // Place/scale/face one enemy at a world position (faces the core it marches to).
@@ -1249,13 +1248,13 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
 
     private void CreateHud()
     {
-        hud = new SpriteBatch(vk);   // null render target = swapchain
+        hud = new SpriteBatch(device);   // null render target = swapchain
         try
         {
             var assets = new AssetDatabase()
                 .RegisterImporter(new FontImporter())
                 .LoadManifest(AppFiles.Asset("manifest.json"));
-            hudFont = Font.Upload(vk, assets.Load<FontData>(AssetId.Parse("fonts/bowlby")));
+            hudFont = Font.Upload(device, assets.Load<FontData>(AssetId.Parse("fonts/bowlby")));
         }
         catch (Exception ex)
         {

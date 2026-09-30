@@ -57,6 +57,10 @@ public sealed class NoGraphicsDevice : IGraphicsDevice
     /// <inheritdoc />
     public void DestroyIndexBuffer(IndexBufferHandle handle) => throw Refuse();
 
+    public IndirectBufferHandle CreateIndirectBuffer(int maxDrawCommands, string? name = null) => throw Refuse();
+
+    public void WriteIndirectCommands(IndirectBufferHandle handle, ReadOnlySpan<byte> commands) => throw Refuse();
+
     public ShaderProgramHandle CreateShaderProgramFromSpv(
         byte[] vertexSpv, byte[] fragmentSpv, ShaderInterface shaderInterface, string? name = null) => throw Refuse();
 

@@ -7,7 +7,6 @@ using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Images;
-using Blix.Graphics.Vulkan;
 using Blix.Runtime.Silk;
 
 namespace Blix.Demos.VulkanSponza;
@@ -122,7 +121,7 @@ internal sealed partial class SponzaLoop
         // (uncapped; tears on MoltenVK). Toggling recreates the swapchain.
         using (debug.Scope("Render"))
         {
-            vk.VsyncEnabled = debug.Controls.Toggle("Vsync", vk.VsyncEnabled);
+            device.VsyncEnabled = debug.Controls.Toggle("Vsync", device.VsyncEnabled);
             // Visualization channels are named here and share the shader's stable integer IDs.
             vizChannel = debug.Controls.Enum("Show", (int)MathF.Round(vizChannel), VizChannelNames);
             // Outlines every opaque primitive NOT at full detail, tinted by how coarse it is, and

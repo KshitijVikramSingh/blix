@@ -7,7 +7,6 @@ using Blix.Diagnostics;
 using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Images;
-using Blix.Graphics.Vulkan;
 using Blix.Runtime.Silk;
 
 namespace Blix.Demos.VulkanSponza;
@@ -226,7 +225,7 @@ internal sealed partial class SponzaLoop
         var bundle = Blix.Render.MeshBundler.Bundle(
             ordered.Select(s => new Blix.Render.MeshGeometryInput(
                 s.VertexBytes, s.VertexCount, s.Lods, s.Bounds)).ToList(),
-            sharedLayout, vk, "sponza.shared");
+            sharedLayout, device, "sponza.shared");
         sharedVb = bundle.Vertices;
         sharedIbU16 = bundle.Indices16;
         sharedIbU32 = bundle.Indices32;
@@ -267,12 +266,12 @@ internal sealed partial class SponzaLoop
         // One indirect command per drawable, refilled each frame (camera opaque +
         // one per shadow cascade + blend). indirectScratch is sized for the
         // largest list (opaque) and reused for the smaller fills.
-        opaqueIndirect = vk.CreateIndirectBuffer(opaqueDrawables.Count, "sponza.opaque.indirect");
+        opaqueIndirect = device.CreateIndirectBuffer(opaqueDrawables.Count, "sponza.opaque.indirect");
         for (var c = 0; c < CascadeCount; c++)
-            cascadeIndirect[c] = vk.CreateIndirectBuffer(opaqueDrawables.Count, $"sponza.cascade{c}.indirect");
+            cascadeIndirect[c] = device.CreateIndirectBuffer(opaqueDrawables.Count, $"sponza.cascade{c}.indirect");
         if (blendDrawables.Count > 0)
-            blendIndirect = vk.CreateIndirectBuffer(blendDrawables.Count, "sponza.blend.indirect");
-        indirectScratch = new byte[Math.Max(opaqueDrawables.Count, blendDrawables.Count) * VulkanGraphicsDevice.IndirectCommandStride];
+            blendIndirect = device.CreateIndirectBuffer(blendDrawables.Count, "sponza.blend.indirect");
+        indirectScratch = new byte[Math.Max(opaqueDrawables.Count, blendDrawables.Count) * IndirectDraw.RecordStride];
         staging.Clear();
         Console.WriteLine($"[VulkanSponza] bundled geometry: 1 VB ({bundle.VertexCount} verts); {opaqueDrawables.Count} opaque + {blendDrawables.Count} blend draws; {opaqueGroups.Count} opaque indirect groups.");
     }
@@ -340,7 +339,7 @@ internal sealed partial class SponzaLoop
         var diffuseTransmission = ext.DiffuseTransmissionFactor;
         var diffuseTransmissionColor = ext.DiffuseTransmissionColorFactor;
 
-        return vk.CreateMaterial(litProgram, name: "sponza.material")
+        return device.CreateMaterial(litProgram, name: "sponza.material")
             .SetUniform(binding: 0, "uBaseColorFactor", baseColorFactor)
             .SetUniform(binding: 0, "uEmissiveFactor",
                 new Vector4(emissiveFactor.X, emissiveFactor.Y, emissiveFactor.Z, emissiveStrength))

@@ -5,7 +5,6 @@ using Blix.Assets;
 using Blix.Cooked;
 using Blix.Graphics;
 using Blix.Graphics.Images;
-using Blix.Graphics.Vulkan;
 using Blix.Render;
 
 namespace Blix.Tools.Studio;
@@ -95,15 +94,15 @@ public sealed class StudioRig : IDisposable
     /// <summary>One image the asset actually ships, with enough to label it in a panel.</summary>
     public readonly record struct Image(string Name, TextureHandle Texture, int Width, int Height);
 
-    private VulkanGraphicsDevice device = null!;
+    private IGraphicsDevice device = null!;
     private readonly List<Part> parts = new();
     private readonly List<Attachment> attachments = new();
     private readonly List<TextureHandle> ownedTextures = new();
     private readonly List<Image> images = new();
-    private MaterialBindings bones = null!;
+    private IMaterialBindings bones = null!;
     private readonly List<SkinSlot> skins = new();
     private readonly List<StaticPart> staticParts = new();
-    private readonly List<MaterialBindings> skinBones = new();
+    private readonly List<IMaterialBindings> skinBones = new();
     private byte[] palettePayload = Array.Empty<byte>();
 
     public Skeleton Skeleton { get; private set; } = null!;
@@ -209,9 +208,9 @@ public sealed class StudioRig : IDisposable
     /// The program whose set-3 slot describes the palette buffer. Reflected, so the buffer's size comes
     /// from the shader's own declaration rather than from a number restated here.
     /// </param>
-    public static StudioRig Load(VulkanGraphicsDevice vk, string path, ShaderProgramHandle skinnedProgram)
+    public static StudioRig Load(IGraphicsDevice device, string path, ShaderProgramHandle skinnedProgram)
     {
-        var rig = new StudioRig { device = vk, SourcePath = path };
+        var rig = new StudioRig { device = device, SourcePath = path };
 
         var imported = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("lab.rig"), path));
         ValidatePaletteCapacity(path, imported.SkinsOrEmpty);
@@ -226,7 +225,7 @@ public sealed class StudioRig : IDisposable
         rig.deformHierarchy = SkinningAnalysis.IncludeAncestors(imported.Skeleton, rig.weightedBones);
         rig.DeformHierarchyCount = rig.deformHierarchy.Count(b => b);
 
-        var white = vk.CreateTexture2D(
+        var white = device.CreateTexture2D(
             new TextureDescription(1, 1, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
             new byte[] { 255, 255, 255, 255 }, "lab.rig.white");
         rig.ownedTextures.Add(white);
@@ -245,7 +244,7 @@ public sealed class StudioRig : IDisposable
             // Blix.Render owns the upload; this owns what the upload is FOR. The skinned material,
             // the palette buffer's per-skin stride and the passes stay here, because they are what
             // consumers of a rig actually differ in -- see the Part record below.
-            var partMesh = vk.CreateMesh(mesh, name);
+            var partMesh = device.CreateMesh(mesh, name);
 
             var material = primitive.Material;
             rig.parts.Add(new Part(
@@ -259,7 +258,7 @@ public sealed class StudioRig : IDisposable
                         material.BaseColorFactor.X, material.BaseColorFactor.Y, material.BaseColorFactor.Z),
                 Metallic: material?.MetallicFactor ?? 0f,
                 Roughness: material?.RoughnessFactor ?? 0.7f,
-                Albedo: rig.UploadAlbedo(vk, material?.BaseColorTexture, white, uploaded),
+                Albedo: rig.UploadAlbedo(device, material?.BaseColorTexture, white, uploaded),
                 AlbedoUvSet: material?.BaseColorTexCoord ?? 0,
                 BaseAlpha: material?.BaseColorFactor.W ?? 1f,
                 AlphaMode: material?.AlphaMode ?? GltfAlphaMode.Opaque,
@@ -277,7 +276,7 @@ public sealed class StudioRig : IDisposable
             {
                 var mesh = source.Primitives[p].Mesh;
                 var name = $"lab.rig.{Path.GetFileNameWithoutExtension(path)}.static.{i}.{p}";
-                var staticMesh = vk.CreateMesh(mesh, name);
+                var staticMesh = device.CreateMesh(mesh, name);
                 var material = source.Primitives[p].Material;
                 rig.staticParts.Add(new StaticPart(
                     Name: source.Primitives.Length > 1 ? $"{source.Name}.{p}" : source.Name,
@@ -291,7 +290,7 @@ public sealed class StudioRig : IDisposable
                             material.BaseColorFactor.X, material.BaseColorFactor.Y, material.BaseColorFactor.Z),
                     Metallic: material?.MetallicFactor ?? 0f,
                     Roughness: material?.RoughnessFactor ?? 0.7f,
-                    Albedo: rig.UploadAlbedo(vk, material?.BaseColorTexture, white, uploaded),
+                    Albedo: rig.UploadAlbedo(device, material?.BaseColorTexture, white, uploaded),
                     MaterialName: material?.Name ?? string.Empty));
             }
         }
@@ -303,7 +302,7 @@ public sealed class StudioRig : IDisposable
             {
                 var mesh = source.Primitives[p].Mesh;
                 var name = $"lab.rig.{Path.GetFileNameWithoutExtension(path)}.attach.{i}.{p}";
-                var attachMesh = vk.CreateMesh(mesh, name);
+                var attachMesh = device.CreateMesh(mesh, name);
                 var material = source.Primitives[p].Material;
                 rig.attachments.Add(new Attachment(
                     Name: source.Primitives.Length > 1 ? $"{source.Name}.{p}" : source.Name,
@@ -319,7 +318,7 @@ public sealed class StudioRig : IDisposable
                             material.BaseColorFactor.X, material.BaseColorFactor.Y, material.BaseColorFactor.Z),
                     Metallic: material?.MetallicFactor ?? 0f,
                     Roughness: material?.RoughnessFactor ?? 0.7f,
-                    Albedo: rig.UploadAlbedo(vk, material?.BaseColorTexture, white, uploaded),
+                    Albedo: rig.UploadAlbedo(device, material?.BaseColorTexture, white, uploaded),
                     MaterialName: material?.Name ?? string.Empty));
             }
         }
@@ -336,8 +335,8 @@ public sealed class StudioRig : IDisposable
         var imports = imported.SkinsOrEmpty;
         for (var s = 0; s < imports.Length; s++)
         {
-            var slotBones = vk.CreateMaterial(
-                skinnedProgram, setIndex: 3, framesInFlight: vk.MaxFramesInFlightCount,
+            var slotBones = device.CreateMaterial(
+                skinnedProgram, setIndex: 3, framesInFlight: device.MaxFramesInFlightCount,
                 name: $"lab.rig.bones.{s}");
             rig.skinBones.Add(slotBones);
             rig.skins.Add(new SkinSlot(
@@ -467,7 +466,7 @@ public sealed class StudioRig : IDisposable
     }
 
     private TextureHandle UploadAlbedo(
-        VulkanGraphicsDevice vk,
+        IGraphicsDevice device,
         GltfTexture? texture,
         TextureHandle white,
         TextureRegistry uploaded)
@@ -497,8 +496,8 @@ public sealed class StudioRig : IDisposable
             var description = new TextureDescription(
                 texture.Width, texture.Height, texture.Format, SamplerDescription.LinearRepeat);
             var handle = mips.Count > 1
-                ? vk.CreateTexture2DMipped(description, mips, $"lab.rig.albedo.{texture.Name}")
-                : vk.CreateTexture2D(description, mips[0], $"lab.rig.albedo.{texture.Name}");
+                ? device.CreateTexture2DMipped(description, mips, $"lab.rig.albedo.{texture.Name}")
+                : device.CreateTexture2D(description, mips[0], $"lab.rig.albedo.{texture.Name}");
 
             ownedTextures.Add(handle);
             images.Add(new Image(

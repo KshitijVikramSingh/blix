@@ -5,7 +5,6 @@ using Blix.Core;
 using Blix.Diagnostics;
 using Blix.Graphics;
 using Blix.Graphics.Images;
-using Blix.Graphics.Vulkan;
 using Blix.Runtime.Silk;
 using Blix.Tools.Studio;
 
@@ -89,9 +88,8 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
         tunables = new ObjectTunables(playback, stage.Look, camera);
         tunables.Apply(args);
 
-        var vk = (VulkanGraphicsDevice)GraphicsDevice;
-        stage.Load(vk);
-        rig = StudioRig.Load(vk, Character, stage.SkinnedProgram);
+        stage.Load(GraphicsDevice);
+        rig = StudioRig.Load(GraphicsDevice, Character, stage.SkinnedProgram);
         body = new RigInstances(rig, 1);
 
         // Two metres tall, standing on the ground, whatever size it was authored at.

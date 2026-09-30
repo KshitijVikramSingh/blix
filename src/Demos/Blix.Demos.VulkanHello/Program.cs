@@ -3,7 +3,6 @@ using Blix;
 using Blix.Core;
 using Blix.Diagnostics;
 using Blix.Graphics;
-using Blix.Graphics.Vulkan;
 using Blix.Render;
 using Blix.Runtime.Silk;
 using ImGuiNET;
@@ -91,19 +90,19 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         host.SetTitle("Blix — Vulkan Cube");
-        var vk = (VulkanGraphicsDevice)graphicsDevice;
+        var device = graphicsDevice;
         gpuInfo = graphicsDevice.Info;
 
         var (vertices, indices) = BuildCube();
         var vertexData = VertexPosition3Texture.CreateBufferData(vertices);
-        vertexBuffer = vk.CreateVertexBuffer(vertexData, "cube.vb");
-        indexBuffer = vk.CreateIndexBuffer(indices, name: "cube.ib");
+        vertexBuffer = device.CreateVertexBuffer(vertexData, "cube.vb");
+        indexBuffer = device.CreateIndexBuffer(indices, name: "cube.ib");
 
         // Procedural checkerboard albedo with red/green UV-corner markers so
         // texture orientation is visually verifiable: red marker = UV (0,0)
         // origin, green = UV (1,0). 256×256 RGBA8 sRGB.
         var checker = BuildUvAwareCheckerboard(size: 256, cellCount: 8);
-        albedoTexture = vk.CreateTexture2D(
+        albedoTexture = device.CreateTexture2D(
             new TextureDescription(256, 256, TextureFormat.Rgba8Srgb, SamplerDescription.LinearRepeat),
             checker,
             "cube.albedo");
@@ -120,7 +119,7 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
         // attachment so the cubes' DepthState.LessEqualWrite still
         // depth-tests. The half-res upscale at present time is the visible
         // proof that an intermediate buffer is in the pipeline.
-        var surface = vk.CreateRenderSurface(new RenderSurfaceDescription(
+        var surface = device.CreateRenderSurface(new RenderSurfaceDescription(
             Name: "offscreen",
             Size: new MatchDefaultRenderSurfaceSize(Scale: 0.5f),
             ColorAttachments: new[]
@@ -133,12 +132,12 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
 
         var vertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "cube.vert.spv"));
         var fragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "cube.frag.spv"));
-        shaderProgram = vk.CreateShaderProgramFromSpv(vertSpv, fragSpv, cubeInterface, "cube");
+        shaderProgram = device.CreateShaderProgramFromSpv(vertSpv, fragSpv, cubeInterface, "cube");
 
         // Cube pipeline targets the offscreen surface — different attachment
         // formats (Rgba16F + D32 vs swapchain BGRA + D32) require a render-
         // pass-compatible pipeline, so we bake against the surface's pass.
-        pipeline = vk.CreatePipeline(new PipelineDescription(
+        pipeline = device.CreatePipeline(new PipelineDescription(
             shaderProgram,
             VertexPosition3Texture.Layout,
             PrimitiveTopology.Triangles,
@@ -151,12 +150,12 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
         // different tint. The cube switches between them every 2 seconds
         // (see OnRender) to visually validate that the descriptor-set
         // carrier handles multi-material lookup.
-        whiteMaterial = vk.CreateMaterial(shaderProgram, name: "cube.white")
+        whiteMaterial = device.CreateMaterial(shaderProgram, name: "cube.white")
             .SetUniform(binding: 0, "uTint", new Vector4(1.0f, 1.0f, 1.0f, 1.0f))
             .SetTexture(binding: 1, albedoTexture)
             .Handle;
 
-        redMaterial = vk.CreateMaterial(shaderProgram, name: "cube.red")
+        redMaterial = device.CreateMaterial(shaderProgram, name: "cube.red")
             .SetUniform(binding: 0, "uTint", new Vector4(1.0f, 0.45f, 0.35f, 1.0f))
             .SetTexture(binding: 1, albedoTexture)
             .Handle;
@@ -169,11 +168,11 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
         var presentInterface = ShaderReflection.ForProgram(shaderDir, "present.vert", "present.frag");
         var presentVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.vert.spv"));
         var presentFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.frag.spv"));
-        presentShaderProgram = vk.CreateShaderProgramFromSpv(presentVertSpv, presentFragSpv, presentInterface, "present");
+        presentShaderProgram = device.CreateShaderProgramFromSpv(presentVertSpv, presentFragSpv, presentInterface, "present");
 
         // Present pipeline targets the swapchain (RenderTarget defaults
         // to null → DefaultRenderPass). No depth test — fullscreen quad.
-        presentPipeline = vk.CreatePipeline(new PipelineDescription(
+        presentPipeline = device.CreatePipeline(new PipelineDescription(
             presentShaderProgram,
             VertexPosition3Texture.Layout,
             PrimitiveTopology.Triangles,
@@ -183,7 +182,7 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
 
         // Fullscreen triangle for the present pass (positions synthesised from
         // gl_VertexIndex in present.vert; the buffer is never sampled).
-        fullscreen = new FullscreenPass(vk, "present");
+        fullscreen = new FullscreenPass(device, "present");
 
         // Camera pulled back + raised so both cubes fit. Two cubes at
         // x = ±CubeSeparation; camera at (3.5, 1.9, 4.5) looking at origin.

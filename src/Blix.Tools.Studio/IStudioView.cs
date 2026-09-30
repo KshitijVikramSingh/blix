@@ -1,5 +1,4 @@
 using Blix.Graphics;
-using Blix.Graphics.Vulkan;
 
 namespace Blix.Tools.Studio;
 

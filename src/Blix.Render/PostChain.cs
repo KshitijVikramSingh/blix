@@ -1,5 +1,4 @@
 using Blix.Graphics;
-using Blix.Graphics.Vulkan;
 
 namespace Blix.Render;
 
@@ -48,7 +47,7 @@ public sealed class PostChain : IDisposable
     private bool disposed;
 
     public PostChain(
-        VulkanGraphicsDevice device,
+        IGraphicsDevice device,
         RenderGraph graph,
         GraphResourceHandle input,
         IReadOnlyList<PostStage> stages,

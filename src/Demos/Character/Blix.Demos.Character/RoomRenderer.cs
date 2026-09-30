@@ -2,7 +2,6 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Blix.Core;
 using Blix.Graphics;
-using Blix.Graphics.Vulkan;
 using Blix.Render;
 
 namespace Blix.Demos.Character;
@@ -36,7 +35,7 @@ public sealed class RoomRenderer : IDisposable
     /// </remarks>
     public const int LitPushBytes = 32;
 
-    private VulkanGraphicsDevice device = null!;
+    private IGraphicsDevice device = null!;
     private FullscreenPass fullscreen = null!;
     private RenderGraph graph = null!;
 
@@ -82,12 +81,12 @@ public sealed class RoomRenderer : IDisposable
 
     public TextureHandle ShadowDepth => graph.GetDepthTexture(shadowTarget);
 
-    public void Load(VulkanGraphicsDevice vk, Room room)
+    public void Load(IGraphicsDevice device, Room room)
     {
         // Its own shaders, beside the application, as every Blix library finds its own.
         var shaderDirectory = AppFiles.Shaders;
-        device = vk;
-        fullscreen = new FullscreenPass(vk, "room.present");
+        this.device = device;
+        fullscreen = new FullscreenPass(device, "room.present");
 
         ShaderInterface Reflect(params string[] stages) =>
             ShaderReflection.ForProgram(shaderDirectory, stages);
@@ -96,7 +95,7 @@ public sealed class RoomRenderer : IDisposable
         var litInterface = Reflect("room_lit.vert", "room_lit.frag");
         var presentInterface = Reflect("room_present.vert", "room_present.frag");
 
-        graph = new RenderGraph(vk);
+        graph = new RenderGraph(device);
         var fullSize = new MatchSwapchainGraphSize(1.0f);
         shadowTarget = graph.DepthTarget("room-shadow", new FixedGraphSize(ShadowMapSize, ShadowMapSize));
         sceneColourTarget = graph.ColorTarget("room-hdr", TextureFormat.Rgba16F, fullSize);
@@ -118,18 +117,18 @@ public sealed class RoomRenderer : IDisposable
 
         byte[] Spv(string stage) => File.ReadAllBytes(Path.Combine(shaderDirectory, stage + ".spv"));
 
-        shadowProgram = vk.CreateShaderProgramFromSpv(
+        shadowProgram = device.CreateShaderProgramFromSpv(
             Spv("room_shadow.vert"), Spv("room_shadow.frag"), shadowInterface, "room.shadow");
-        litProgram = vk.CreateShaderProgramFromSpv(
+        litProgram = device.CreateShaderProgramFromSpv(
             Spv("room_lit.vert"), Spv("room_lit.frag"), litInterface, "room.lit");
-        presentProgram = vk.CreateShaderProgramFromSpv(
+        presentProgram = device.CreateShaderProgramFromSpv(
             Spv("room_present.vert"), Spv("room_present.frag"), presentInterface, "room.present");
         // BACK-FACE CULLING on the lit pass, which the preview tool's scene deliberately does not
         // do. Every solid here is closed and the probe says so, so an interior face is never the
         // subject — and culling makes a wrongly-wound face show up as a hole rather than as a
         // surface that merely lights oddly. That is the same fault the probe checks arithmetically;
         // this is the version a person sees without running anything.
-        litPipeline = vk.CreatePipeline(new PipelineDescription(
+        litPipeline = device.CreatePipeline(new PipelineDescription(
             litProgram,
             VertexPosition3NormalTexture.Layout,
             PrimitiveTopology.Triangles,
@@ -140,7 +139,7 @@ public sealed class RoomRenderer : IDisposable
 
         // The caster does NOT cull: a shadow cast by front faces alone loses the far side of every
         // solid, and a room's shadows are mostly far sides.
-        shadowPipeline = vk.CreatePipeline(new PipelineDescription(
+        shadowPipeline = device.CreatePipeline(new PipelineDescription(
             shadowProgram,
             VertexPosition3NormalTexture.Layout,
             PrimitiveTopology.Triangles,
@@ -149,7 +148,7 @@ public sealed class RoomRenderer : IDisposable
             Array.Empty<BlendState>(),
             RenderTarget: graph.GetPassSurface(shadowPass)), "room.shadow");
 
-        presentPipeline = vk.CreatePipeline(new PipelineDescription(
+        presentPipeline = device.CreatePipeline(new PipelineDescription(
             presentProgram,
             FullscreenPass.Layout,
             PrimitiveTopology.Triangles,
@@ -161,12 +160,12 @@ public sealed class RoomRenderer : IDisposable
         // geometry is flat-shaded, so adjacent faces share no normal and therefore no vertex; an
         // index buffer buys nothing here except the ability to draw a sub-range, which is exactly
         // what the per-part draws below need it for.
-        roomVertices = vk.CreateVertexBuffer(
+        roomVertices = device.CreateVertexBuffer(
             VertexPosition3NormalTexture.CreateBufferData(room.Vertices), "room.vb");
 
         var indices = new ushort[room.Vertices.Length];
         for (var i = 0; i < indices.Length; i++) indices[i] = (ushort)i;
-        roomIndices = vk.CreateIndexBuffer(indices, name: "room.ib");
+        roomIndices = device.CreateIndexBuffer(indices, name: "room.ib");
         roomIndexCount = indices.Length;
     }
 

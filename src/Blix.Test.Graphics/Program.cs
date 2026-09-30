@@ -5479,6 +5479,61 @@ static ShaderInterface MinimalShader() => new(new[]
         () => ShaderSamplers.Scan("uniform sampler uA, uB;\n"), mustMention: "one per line");
 }
 
+// ============================================================================
+// Section BN — nothing but the host names the Vulkan device.
+// ============================================================================
+//
+// <b>Because the cast was how every program started.</b> IGraphicsDevice could destroy a shader
+// program but not create one, and the render graph lived in the Vulkan assembly, so each program
+// and library that drew anything opened with `(VulkanGraphicsDevice)GraphicsDevice`: 35 files, and
+// the first line of the 3D starter. The interface is now the whole device and the graph is the
+// engine's, so the cast has no reason left. This check is what keeps it that way: a new member
+// reached for through a cast is a member IGraphicsDevice is missing, and it should be added there.
+//
+// Entitled to the name: the device itself, the host that constructs it, and this suite, which tests
+// the device's internals.
+{
+    var srcDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+    var examplesDir = Path.GetFullPath(Path.Combine(srcDir, "..", "examples"));
+    var sep = Path.DirectorySeparatorChar;
+    var entitled = new[] { "Blix.Graphics.Vulkan", "Blix.Runtime.Silk", "Blix.Test.Graphics" }
+        .Select(p => Path.Combine(srcDir, p) + sep).ToArray();
+    string[] Find(string pattern) => new[] { srcDir, examplesDir }.Where(Directory.Exists)
+        .SelectMany(d => Directory.GetFiles(d, pattern, SearchOption.AllDirectories))
+        .Where(f => !f.Contains($"{sep}obj{sep}", StringComparison.Ordinal) && !f.Contains($"{sep}bin{sep}", StringComparison.Ordinal))
+        .Where(f => !entitled.Any(e => f.StartsWith(e, StringComparison.Ordinal)))
+        .ToArray();
+    var sources = Find("*.cs");
+    var projects = Find("*.csproj");
+
+    // Code, not prose: a comment may say what the device used to be called.
+    var naming = new Regex(@"\bVulkanGraphicsDevice\b|^\s*using\s+Blix\.Graphics\.Vulkan\s*;|\bBlix\.Graphics\.Vulkan\.");
+    bool Names(string line) => !line.TrimStart().StartsWith("//", StringComparison.Ordinal) && naming.IsMatch(line);
+
+    t.Expect("BN.0 CONTROL sources and projects were found to search",
+        sources.Length >= 100 && projects.Length >= 20, $"{sources.Length} source(s), {projects.Length} project(s)");
+    t.Expect("BN.0 CONTROL the pattern sees the cast, the using, and a qualified name, and not a comment",
+        Names("var vk = (VulkanGraphicsDevice)GraphicsDevice;") && Names("using Blix.Graphics.Vulkan;")
+        && Names("x is Blix.Graphics.Vulkan.MaterialBindings") && !Names("// cast to VulkanGraphicsDevice"));
+
+    var named = new List<string>();
+    foreach (var file in sources)
+    {
+        var lines = File.ReadAllLines(file);
+        for (var i = 0; i < lines.Length; i++)
+            if (Names(lines[i])) named.Add($"{Path.GetFileName(file)}:{i + 1}");
+    }
+    t.Expect("BN.1 no library or program names the Vulkan device or its namespace",
+        named.Count == 0,
+        named.Count == 0 ? "all of them take IGraphicsDevice" : string.Join("; ", named.Take(6)));
+
+    // The reference is the door the name comes back through, so it is held to the same rule.
+    var referencing = projects.Where(p => File.ReadAllText(p).Contains("Blix.Graphics.Vulkan.csproj", StringComparison.Ordinal))
+        .Select(Path.GetFileName).ToList();
+    t.Expect("BN.2 no library or program references Blix.Graphics.Vulkan; it arrives with the host",
+        referencing.Count == 0, string.Join("; ", referencing));
+}
+
 t.PrintSummary();
 return t.Failed;
 
@@ -5636,6 +5691,8 @@ sealed class RecordingDevice : IGraphicsDevice
 
     public GraphicsDeviceInfo Info => throw No();
     public GraphicsDeviceDiagnostics DiagnosticsSnapshot => throw No();
+    public IndirectBufferHandle CreateIndirectBuffer(int maxDrawCommands, string? name = null) => throw No();
+    public void WriteIndirectCommands(IndirectBufferHandle handle, ReadOnlySpan<byte> commands) => throw No();
     public ShaderProgramHandle CreateShaderProgramFromSpv(byte[] vertexSpv, byte[] fragmentSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
     public ShaderProgramHandle CreateComputeShaderProgramFromSpv(byte[] computeSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
     public PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null) => throw No();
