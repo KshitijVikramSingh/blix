@@ -1014,6 +1014,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         }
 
         var rgba = new byte[width * height * 4];
+        var lit = 0;
         for (var i = 0; i < width * height; i++)
         {
             var src = i * 8;
@@ -1040,9 +1041,15 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             rgba[dst + 1] = ToSrgbByte(g);
             rgba[dst + 2] = ToSrgbByte(b);
             rgba[dst + 3] = 255;
+            if (rgba[dst] >= 8 || rgba[dst + 1] >= 8 || rgba[dst + 2] >= 8) lit++;
         }
 
         PngWriter.WriteRgba8(path, rgba, width, height);
+
+        // How much of the picture is not black, so a reader can tell a capture of the scene from a
+        // capture of the debug lines alone. The stage's sky and ground fill every frame, so a
+        // stage capture far under full is a read-back that lost the scene, however stable its hash.
+        Console.WriteLine($"{Path.GetFileName(path)}: {lit * 100L / Math.Max(1, width * height)}% of pixels lit");
         return true;
     }
 

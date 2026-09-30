@@ -784,12 +784,10 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
                 Format = resource.Format,
                 Samples = SampleCount(samples),
                 LoadOp = loadVariant ? AttachmentLoadOp.Load : MapLoadOp(binding.Load),
-                // The MSAA judgement the v1 path makes, which this one's remarks claim to reproduce
-                // and did not: MSAA colour is resolved rather than sampled, so it is not stored and
-                // stays a colour attachment. It went to SHADER_READ_ONLY_OPTIMAL here, a layout an
-                // image created without SAMPLED usage cannot be in, and validation said so on every
-                // frame of every MSAA pass that also resolved its depth (Studio's lit pass).
-                StoreOp = msaa ? AttachmentStoreOp.DontCare : MapStoreOp(binding.Store),
+                // The declared store, MSAA or not: see the v1 path. MSAA colour stays a colour
+                // attachment, because it is resolved rather than sampled and an image created
+                // without SAMPLED usage cannot be in SHADER_READ_ONLY_OPTIMAL.
+                StoreOp = MapStoreOp(binding.Store),
                 StencilLoadOp = AttachmentLoadOp.DontCare,
                 StencilStoreOp = AttachmentStoreOp.DontCare,
                 InitialLayout = MsaaAwareInitialLayout(msaa, loadVariant || binding.Load == LoadOp.Load),
@@ -980,9 +978,12 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
                 Format = resource.Format,
                 Samples = SampleCount(samples),
                 LoadOp = loadVariant ? AttachmentLoadOp.Load : MapLoadOp(target.Load),
-                // MSAA colour is resolved (not stored/sampled), so DontCare on
-                // store; non-MSAA stores for downstream sampling.
-                StoreOp = msaa ? AttachmentStoreOp.DontCare : MapStoreOp(target.Store),
+                // The declared store, MSAA or not. The pass's load variant (a debug drawer
+                // re-entering its surface) loads these samples and resolves them again, so a
+                // store the graph discarded on its own authority resolves nothing but the
+                // re-entry's own drawing over the scene. A pass nothing re-enters can declare
+                // DontCare and keep the bandwidth.
+                StoreOp = MapStoreOp(target.Store),
                 StencilLoadOp = AttachmentLoadOp.DontCare,
                 StencilStoreOp = AttachmentStoreOp.DontCare,
                 // A declared LoadOp.Load loads just as the load variant does, so it starts from the same

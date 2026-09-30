@@ -115,6 +115,10 @@ mkdir -p "$RUN"
 have_corpus=1
 [ -d "$CORPUS" ] || have_corpus=0
 skipped=0
+unlit=0
+# Percent of a capture that must be lit. Every mode draws the stage's sky and ground, so a real
+# capture sits near 100; the MSAA read-back fault that lost the scene left about 5 (the lines).
+LIT_FLOOR=50
 
 echo "── recording into $RUN"
 while IFS="$(printf '\t')" read -r name args why; do
@@ -152,7 +156,21 @@ while IFS="$(printf '\t')" read -r name args why; do
         rm -f "$RUN/$name.raw"
         echo "  ok   $name"
     fi
+
+    # A picture with no scene in it hashes as stably as one with, so a stable hash cannot say the
+    # capture saw anything. Shot reports each image's lit fraction; hold every one to the floor.
+    while read -r image percent; do
+        if [ "$percent" -lt "$LIT_FLOOR" ]; then
+            echo "  UNLIT $name — $image is $percent% lit, under the $LIT_FLOOR% floor"
+            unlit=$((unlit + 1))
+        fi
+    done < <(sed -n 's/^\(.*\.png\): \([0-9]*\)% of pixels lit$/\1 \2/p' "$RUN/$name.log")
 done < <(modes)
+
+if [ "$unlit" -gt 0 ]; then
+    echo "REFUSING: $unlit capture(s) hold no scene. The read-back lost the picture; nothing here is a baseline." >&2
+    exit 3
+fi
 
 # Hash everything the run produced. --viewport writes a second PNG nothing named, so the
 # manifest is built by LOOKING at the directory rather than from the mode list: a file a
