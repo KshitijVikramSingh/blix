@@ -17,7 +17,7 @@ namespace Blix.Graphics;
 //     pass; OnPassEnd must follow.
 //   - OnDraw between OnPassEnd and a subsequent OnPassBegin is a bug in
 //     the dispatcher and a recorder may treat it as unscoped.
-//   - Recorders run on the GL thread, synchronous with command recording.
+//   - Recorders run on the frame loop's thread, synchronous with command recording.
 public interface IFrameRecorder
 {
     void OnPassBegin(string passName);

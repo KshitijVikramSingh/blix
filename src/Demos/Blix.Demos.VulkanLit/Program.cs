@@ -727,7 +727,7 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
 
         // The engine's layout: right-drag looks, WASD with Space and Ctrl flies, left-drag orbits the
         // scene, the wheel zooms (or sets the flying speed while looking).
-        camera.Drive(host, dt);
+        camera.DriveDefault(host, dt);
         UpdateCamera();
     }
 
@@ -1074,7 +1074,7 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         debug.Values.Value("frame", frameCount);
 
         // The keys this loop handles itself (ReadInput, OnUpdate); the rest are bound on controls.
-        camera.DescribeKeys(debug);
+        camera.DescribeDefaultKeys(debug);
         debug.Keys.Describe("Up / Down", "exposure up / down");
         debug.Keys.Describe(Key.Escape, "quit");
 

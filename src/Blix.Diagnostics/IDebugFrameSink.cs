@@ -10,8 +10,8 @@ namespace Blix.Diagnostics;
 // Sinks must not mutate the DebugFrame (it's exposed as IReadOnlyList
 // everywhere — but the contract is also documented here). Sinks should
 // be cheap; expensive work (JSON serialization, network I/O) should be
-// offloaded by the sink onto its own thread, since Consume runs on the
-// GL thread.
+// offloaded by the sink onto its own thread, since Consume runs inside
+// the host's frame loop, on its thread.
 public interface IDebugFrameSink
 {
     void Consume(DebugFrame frame);

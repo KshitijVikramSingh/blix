@@ -89,20 +89,17 @@ public sealed class DebugState
     /// producer implements. Every application that wanted a gizmo it could hide grew its own toggle
     /// instead. This is the question the line pass asks now, per command.
     /// <para>
-    /// The selection highlight answers to the master switch only. It is the system's reply to a click,
-    /// and a layer unticked by accident should not make a pick look like it missed.
+    /// The selection highlight (<see cref="DebugDrawCommand.Feedback"/>) answers to the master switch
+    /// only. It is the system's reply to a click, and a layer unticked by accident should not make a
+    /// pick look like it missed.
     /// </para>
     /// </remarks>
     public bool ShouldDraw(DebugDrawCommand command)
     {
         ArgumentNullException.ThrowIfNull(command);
         if (!ShowDebugDraw) return false;
-        return IsSelectionFeedback(command.Path) || IsPathVisible(command.Path);
+        return command.Feedback || IsPathVisible(command.Path);
     }
-
-    private static bool IsSelectionFeedback(string path) =>
-        path == DebugSystem.SelectionScope
-        || path.StartsWith(DebugSystem.SelectionScope + "/", StringComparison.Ordinal);
 
     // Returns true if the command at `path` should be rendered. Walks
     // the path's prefix ladder (e.g. "a/b/c" -> "a/b" -> "a") and

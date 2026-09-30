@@ -27,8 +27,9 @@ namespace Blix;
 /// </para>
 /// <para>
 /// <b>Input is optional.</b> The operations take deltas, because a view drawn into a panel gets its drags
-/// through the UI rather than the host. <see cref="Drive"/> is the host route, with a default layout that
-/// <see cref="DescribeKeys"/> lists.
+/// through the UI rather than the host. <see cref="DriveDefault"/> is the host route, with Blix's default
+/// layout that <see cref="DescribeDefaultKeys"/> lists. A default, not the definition: an application
+/// with another layout calls the operations itself, as the Studio viewport panel does.
 /// </para>
 /// </remarks>
 public sealed class CameraController
@@ -52,21 +53,21 @@ public sealed class CameraController
     public Vector3 Position
     {
         get => position;
-        set { position = value; Apply(); }
+        set { Guard(); position = value; Apply(); }
     }
 
     /// <summary>Turn about world up, in degrees: 0 looks down -Z, positive turns towards +X. Setting it turns in place.</summary>
     public float Yaw
     {
         get => yaw * Rad2Deg;
-        set { yaw = MathF.IEEERemainder(value * Deg2Rad, MathF.Tau); Apply(); }
+        set { Guard(); yaw = MathF.IEEERemainder(value * Deg2Rad, MathF.Tau); Apply(); }
     }
 
     /// <summary>Where the camera looks, in degrees above the horizon, held inside <see cref="MinPitch"/>..<see cref="MaxPitch"/>. Setting it turns in place.</summary>
     public float Pitch
     {
         get => pitch * Rad2Deg;
-        set { pitch = Math.Clamp(value * Deg2Rad, MinPitch * Deg2Rad, MaxPitch * Deg2Rad); Apply(); }
+        set { Guard(); pitch = Math.Clamp(value * Deg2Rad, MinPitch * Deg2Rad, MaxPitch * Deg2Rad); Apply(); }
     }
 
     /// <summary>How far the camera is from its pivot, in metres. Setting it keeps the pivot and moves the camera.</summary>
@@ -81,6 +82,7 @@ public sealed class CameraController
         get => distance;
         set
         {
+            Guard();
             var pivot = Pivot;
             distance = Math.Clamp(value, MinDistance, MaxDistance);
             position = pivot - Forward * distance;
@@ -116,8 +118,12 @@ public sealed class CameraController
     /// <inheritdoc cref="MinDistance"/>
     public float MaxDistance { get; set; } = 500f;
 
-    /// <summary>The direction the camera looks.</summary>
-    public Vector3 Forward => Camera.Transform.Forward;
+    /// <summary>The direction the camera looks, from yaw and pitch: (cos p sin y, sin p, -cos p cos y).</summary>
+    /// <remarks>
+    /// From the pose, not read back from the camera: if it read <c>Camera.Transform</c>, a write that went
+    /// round the controller would half take effect (seen here, not in yaw and pitch). See <see cref="Guard"/>.
+    /// </remarks>
+    public Vector3 Forward => new(MathF.Cos(pitch) * MathF.Sin(yaw), MathF.Sin(pitch), -MathF.Cos(pitch) * MathF.Cos(yaw));
 
     /// <summary>What orbiting turns round and zooming closes on: <see cref="Distance"/> ahead of the camera.</summary>
     public Vector3 Pivot => position + Forward * distance;
@@ -132,6 +138,7 @@ public sealed class CameraController
     /// <summary>Turns in place by these angles, in radians.</summary>
     public void Turn(float yawRadians, float pitchRadians)
     {
+        Guard();
         yaw = MathF.IEEERemainder(yaw + yawRadians, MathF.Tau);
         pitch = Math.Clamp(pitch + pitchRadians, MinPitch * Deg2Rad, MaxPitch * Deg2Rad);
         Apply();
@@ -143,6 +150,7 @@ public sealed class CameraController
     /// <summary>Swings round the pivot by these angles, in radians.</summary>
     public void OrbitBy(float yawRadians, float pitchRadians)
     {
+        Guard();
         var pivot = Pivot;
         Turn(yawRadians, pitchRadians);
         position = pivot - Forward * distance;
@@ -152,6 +160,7 @@ public sealed class CameraController
     /// <summary>Moves by a direction in the camera's own terms (x right, y world up, z forward), for <paramref name="seconds"/>.</summary>
     public void Move(Vector3 local, float seconds, bool fast = false)
     {
+        Guard();
         if (local == Vector3.Zero) return;
         var forward = Forward;
         var right = Vector3.Normalize(Vector3.Cross(forward, Vector3.UnitY));
@@ -163,6 +172,7 @@ public sealed class CameraController
     /// <summary>Closes on the pivot, or backs away, by a wheel notch. The pivot stays put.</summary>
     public void Zoom(float wheelDelta)
     {
+        Guard();
         var pivot = Pivot;
         distance = Math.Clamp(distance * MathF.Pow(0.85f, wheelDelta), MinDistance, MaxDistance);
         position = pivot - Forward * distance;
@@ -172,6 +182,7 @@ public sealed class CameraController
     /// <summary>Looks at <paramref name="pivot"/> from <paramref name="fromDistance"/> away, keeping the direction.</summary>
     public void Focus(Vector3 pivot, float fromDistance)
     {
+        Guard();
         distance = Math.Clamp(fromDistance, MinDistance, MaxDistance);
         position = pivot - Forward * distance;
         Apply();
@@ -180,6 +191,7 @@ public sealed class CameraController
     /// <summary>Stands at <paramref name="from"/> and looks at <paramref name="target"/>, which becomes the pivot.</summary>
     public void LookAt(Vector3 from, Vector3 target)
     {
+        Guard();
         var offset = target - from;
         var length = offset.Length();
         if (length <= 1e-5f) return;
@@ -224,7 +236,7 @@ public sealed class CameraController
     /// The cursor is captured while looking, so a long drag does not run out of screen. A left drag reaches
     /// here only when nothing else took it: the overlay's pick mode and the UI both take theirs first.
     /// </remarks>
-    public void Drive(IRenderHost host, float seconds)
+    public void DriveDefault(IRenderHost host, float seconds)
     {
         ArgumentNullException.ThrowIfNull(host);
         var input = host.Input;
@@ -258,8 +270,8 @@ public sealed class CameraController
 
     private bool cursorCaptured;
 
-    /// <summary>Lists <see cref="Drive"/>'s layout in the overlay's key list, and the pose as a pasteable value.</summary>
-    public void DescribeKeys(DebugContext debug)
+    /// <summary>Lists <see cref="DriveDefault"/>'s layout in the overlay's key list, and the pose as a pasteable value.</summary>
+    public void DescribeDefaultKeys(DebugContext debug)
     {
         ArgumentNullException.ThrowIfNull(debug);
         debug.Keys.Describe("Right-drag", "look around (the wheel sets flying speed meanwhile)");
@@ -271,12 +283,30 @@ public sealed class CameraController
         debug.Values.Value("--cam", Pose);
     }
 
-    // The one place the pose reaches the camera: yaw about world up after pitch about the camera's right,
-    // which is what makes Forward come out as (cos p sin y, sin p, -cos p cos y).
+    // <b>The one place the pose reaches the camera</b>: yaw about world up after pitch about the camera's
+    // right, which makes the camera's own forward come out as Forward (Test.Graphics BO.2, BO.6).
+    // The chain is yaw/pitch -> pose -> Camera3D.Transform -> view, one way, and what was written is
+    // remembered so a second writer is caught (Guard) instead of becoming a second source of truth.
     private void Apply()
     {
-        Camera.Transform.Position = position;
-        Camera.Transform.Rotation = Quaternion.CreateFromYawPitchRoll(-yaw, pitch, 0f);
+        applied = (position, Quaternion.CreateFromYawPitchRoll(-yaw, pitch, 0f));
+        Camera.Transform.Position = applied.Position;
+        Camera.Transform.Rotation = applied.Rotation;
+    }
+
+    private (Vector3 Position, Quaternion Rotation) applied;
+
+    // A camera this steers is this controller's to move. Anything that writes its transform directly has
+    // made a second source of truth, and the next operation would silently undo it or build on half of
+    // it; so the next operation refuses, naming what happened.
+    private void Guard()
+    {
+        if (Camera.Transform.Position != applied.Position || Camera.Transform.Rotation != applied.Rotation)
+        {
+            throw new InvalidOperationException(
+                "The camera's transform was changed outside its CameraController. Move it through the " +
+                "controller (Position, Yaw, Pitch, LookAt, ...), or stop steering it with one.");
+        }
     }
 
     private const float Deg2Rad = MathF.PI / 180f;

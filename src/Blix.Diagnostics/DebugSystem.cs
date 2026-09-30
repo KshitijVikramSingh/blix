@@ -21,7 +21,8 @@ namespace Blix.Diagnostics;
 // Freeze holds a strong reference separately from the ring so a long
 // inspection survives ring overwrite (default 120 frames = ~2s @ 60fps).
 //
-// Not thread-safe. All calls run on the GL thread.
+// Not thread-safe, and not meant to be: it is single-threaded: the host calls it from its frame loop, on the thread that
+// runs the loop, and nothing else calls it.
 public sealed class DebugSystem
 {
     public const int DefaultHistoryCapacity = 120;
@@ -35,6 +36,19 @@ public sealed class DebugSystem
     // draws and routing IDebugInspectable output. Anything under this
     // prefix on the path tree belongs to the current selection.
     public const string SelectionScope = "selection";
+
+    // <b>The selection scope is the system's.</b> Contributors run inside a scope of their own name, so the
+    // only way into the root "selection" scope, whose values and controls the Selection tab shows, would
+    // be a contributor named for it. Refused by name rather than discovered as a panel that shows the
+    // wrong thing.
+    private static void RefuseReservedName(string name)
+    {
+        if (name == SelectionScope)
+        {
+            throw new ArgumentException(
+                $"'{SelectionScope}' is the debug system's own scope (the Selection tab); give the contributor another name.");
+        }
+    }
 
     // Bright magenta — high contrast against Sponza's warm interior
     // lighting AND distinct from the cyan that IDebugGeometrySource
@@ -159,6 +173,7 @@ public sealed class DebugSystem
     public void Register(IDebugContributor contributor)
     {
         ArgumentNullException.ThrowIfNull(contributor);
+        RefuseReservedName(contributor.DebugName);
         if (!contributors.Contains(contributor))
         {
             contributors.Add(contributor);
@@ -332,6 +347,7 @@ public sealed class DebugSystem
 
     public void Run(params IDebuggable[] debuggables)
     {
+        foreach (var passed in debuggables) RefuseReservedName(passed.DebugName);
         if (Current is null)
         {
             throw new InvalidOperationException("BeginFrame must be called before running debug contributors.");
@@ -443,9 +459,11 @@ public sealed class DebugSystem
                     {
                         using (Current.Draw.In(view))
                         {
+                            Current.Draw.EmittingFeedback = true;
                             Current.Draw.Aabb(SelectedPath, bounds.Min, bounds.Max, SelectionHighlightColor);
                             Current.Draw.Sphere(SelectedPath + "/center", center, sphereR, SelectionHighlightColor, segments: 16);
                             Current.Draw.Cross(SelectedPath + "/marker", center, crossSize, SelectionHighlightColor);
+                            Current.Draw.EmittingFeedback = false;
                         }
                     }
                 }

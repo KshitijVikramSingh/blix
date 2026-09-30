@@ -230,6 +230,14 @@ public static class GraphicsMatrices
     //
     // Returns the camera's view-space → Vulkan-clip transform applied as
     // `clip_row = view_row * proj` in .NET (row-vector convention).
+    // <b>This is Blix's clip space, not only Vulkan's.</b> Depth runs 0 (near) to 1 (far) and NDC Y
+    // points down, the same way screen Y does. Blix adopted Vulkan's conventions as its own, and every
+    // layer above the device builds on them: Camera3D, ViewPicking, the pixel crop, SpriteBatch, and
+    // every application's matrices. So it is an engine convention with a backend's name.
+    //
+    // The seam, marked rather than cut: a second backend with other conventions (Metal and D3D put NDC
+    // Y up) would convert at its own edge, with a flipped viewport, so nothing above the device changes.
+    // Renaming this to say "Blix" belongs to the day that backend exists.
     public static Matrix4x4 CreatePerspectiveVulkan(
         float verticalFieldOfView,
         float aspectRatio,

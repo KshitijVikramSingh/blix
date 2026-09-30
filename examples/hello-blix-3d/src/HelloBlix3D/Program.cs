@@ -103,7 +103,7 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
 
     public override void OnUpdate(Time time)
     {
-        camera.Drive(Host, (float)time.Delta);
+        camera.DriveDefault(Host, (float)time.Delta);
         if (Host.Input[Key.Escape].Pressed) Host.RequestClose();
 
         body.Driven.Subject.Clip = rig.Clip(playback.Clip) ?? body.Driven.Subject.Clip;
@@ -125,7 +125,7 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
 
     public void Debug(DebugContext debug)
     {
-        camera.DescribeKeys(debug);
+        camera.DescribeDefaultKeys(debug);
         debug.Keys.Describe(Key.Escape, "quit");
         tunables.BuildControls(debug);
     }

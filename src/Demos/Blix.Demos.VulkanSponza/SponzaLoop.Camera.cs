@@ -44,7 +44,7 @@ internal sealed partial class SponzaLoop
         // The engine's layout: right-drag looks (the wheel sets the speed meanwhile), WASD with Space and
         // Ctrl flies, Shift or Cmd sprints, left-drag orbits, the wheel zooms. Arrow keys stay Sponza's:
         // keyboard look, for when a hand is on the keys.
-        camera.Drive(host, dt);
+        camera.DriveDefault(host, dt);
         const float lookSpeed = 1.8f; // rad/s
         var turn = new Vector2(
             (input[Key.Right].Down ? 1f : 0f) - (input[Key.Left].Down ? 1f : 0f),

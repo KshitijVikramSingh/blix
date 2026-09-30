@@ -10,7 +10,7 @@ namespace Blix.Diagnostics;
 //
 //   [WARN ] uploader: drain budget exceeded by 5.2ms
 //
-// Sinks should be cheap; this one is synchronous on the GL thread. If
+// Sinks should be cheap; this one is synchronous, on the thread running the frame loop. If
 // the console is redirected to a slow target the per-frame cost adds
 // up — that's acceptable for a development tool, and bracket-quoting
 // keeps multi-line messages parseable.

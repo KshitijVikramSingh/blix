@@ -1281,13 +1281,16 @@ var t = new TestRunner();
 {
     var state = new DebugState();
     var box = new DebugDrawAabb("physics/aabb/box-3", new GraphicsColor(0, 1, 0, 1), default, -Vector3.One, Vector3.One);
-    var pick = new DebugDrawAabb(DebugSystem.SelectionScope + "/bounds", new GraphicsColor(1, 0, 1, 1), default, -Vector3.One, Vector3.One);
+    var pick = new DebugDrawAabb(DebugSystem.SelectionScope + "/bounds", new GraphicsColor(1, 0, 1, 1), default, -Vector3.One, Vector3.One) { Feedback = true };
+    // A path that only SAYS selection is not feedback: the exemption is the flag, which only the system sets.
+    var impostor = new DebugDrawAabb(DebugSystem.SelectionScope + "/mine", new GraphicsColor(1, 1, 0, 1), default, -Vector3.One, Vector3.One);
     t.ExpectTrue("A primitive under no switch is drawn", state.ShouldDraw(box));
     state.LayersEnabled["physics/aabb"] = false;
     t.ExpectTrue("Unticking its layer stops it being drawn", !state.ShouldDraw(box));
     t.ExpectTrue("But not the selection highlight, which answers a click", state.ShouldDraw(pick));
     state.LayersEnabled[DebugSystem.SelectionScope] = false;
     t.ExpectTrue("Even when its own layer is unticked", state.ShouldDraw(pick));
+    t.ExpectTrue("While a draw that only has the path answers to that layer like any other", !state.ShouldDraw(impostor));
     state.LayersEnabled.Clear();
     state.ShowDebugDraw = false;
     t.ExpectTrue("The master switch stops everything, the highlight included",
@@ -1624,6 +1627,21 @@ var t = new TestRunner();
     t.ExpectTrue("Highlight includes both AABB and Cross marker",
         sys.LatestFrame!.DrawCommands.Any(c => c is DebugDrawAabb a && a.Path == "selection/scene/foo") &&
         sys.LatestFrame!.DrawCommands.Any(c => c is DebugDrawCross x && x.Path == "selection/scene/foo/marker"));
+}
+
+// -- The selection scope is reserved, and the highlight is flagged, not named -
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+    t.ExpectThrows("A contributor cannot be named for the system's selection scope",
+        () => sys.Register(new TestDebuggable(DebugSystem.SelectionScope)), mustMention: "selection");
+    sys.Register(new TestSelectable("scene", new DebugSelectable("scene/foo", new Bounds3(Vector3.Zero, Vector3.One), TestGeometry.None)));
+    sys.Select("scene/foo");
+    sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
+    using (sys.Current!.Draw.In("main", Matrix4x4.Identity)) sys.Run();
+    sys.EndFrame();
+    var cmds = sys.LatestFrame!.DrawCommands;
+    t.ExpectTrue("The highlight the system draws is flagged as feedback, every piece of it",
+        cmds.Count > 0 && cmds.All(c => c.Feedback), string.Join(", ", cmds.Select(c => $"{c.Path}:{c.Feedback}")));
 }
 
 // -- Snapshot captures SelectedPath -----------------------------------------

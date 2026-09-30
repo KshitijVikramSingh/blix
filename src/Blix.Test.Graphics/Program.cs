@@ -5616,6 +5616,16 @@ static ShaderInterface MinimalShader() => new(new[]
                 same = MathF.Max(same, MathF.Abs(lookAt[r, col] - mine[r, col]));
     }
     t.Expect("BO.6 the camera's view is Sponza's CreateLookAt view at any pose", same < 1e-4f, $"worst {same:E2}");
+
+    // One path from pose to picture: a write that goes round the controller is caught at the next
+    // operation, instead of half taking effect (the camera moved, yaw and pitch did not).
+    var owned = new CameraController(new Camera3D());
+    owned.LookAt(new Vector3(0, 2, 6), Vector3.Zero);
+    owned.Camera.Transform.Position += Vector3.UnitX;
+    t.ExpectThrows("BO.7 a camera moved outside its controller is refused at the next operation",
+        () => owned.Orbit(10f, 0f), mustMention: "outside its CameraController");
+    t.Expect("BO.7 and Forward comes from the pose, not from whatever was written to the camera",
+        Vector3.Distance(owned.Forward, Vector3.Normalize(new Vector3(0, -2, -6))) < 1e-4f, owned.Forward.ToString());
 }
 
 t.PrintSummary();

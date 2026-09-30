@@ -150,6 +150,13 @@ public sealed class DebugDrawChannel
         return context.State.ShowDebugDraw && context.State.IsPathVisible(path);
     }
 
+    // Set by the debug system while it draws the selection highlight, and only then: what marks a command
+    // as the system's reply to a pick (DebugDrawCommand.Feedback) rather than a path an app could also write.
+    internal bool EmittingFeedback { get; set; }
+
+    private void Add(DebugDrawCommand command) =>
+        commands.Add(EmittingFeedback ? command with { Feedback = true } : command);
+
     private void PopView() => scopes.Pop();
 
     private sealed class ViewScope : IDisposable
@@ -169,42 +176,42 @@ public sealed class DebugDrawChannel
 
     public void Line(string name, Vector3 a, Vector3 b, GraphicsColor color)
     {
-        commands.Add(new DebugDrawLine(context.BuildPath(name), color, CurrentView, a, b));
+        Add(new DebugDrawLine(context.BuildPath(name), color, CurrentView, a, b));
     }
 
     public void Aabb(string name, Vector3 min, Vector3 max, GraphicsColor color)
     {
-        commands.Add(new DebugDrawAabb(context.BuildPath(name), color, CurrentView, min, max));
+        Add(new DebugDrawAabb(context.BuildPath(name), color, CurrentView, min, max));
     }
 
     public void Grid(string name, Vector3 center, float size, int divisions, GraphicsColor color)
     {
-        commands.Add(new DebugDrawGrid(context.BuildPath(name), color, CurrentView, center, size, divisions));
+        Add(new DebugDrawGrid(context.BuildPath(name), color, CurrentView, center, size, divisions));
     }
 
     public void Frustum(string name, Matrix4x4 viewProjection, GraphicsColor color)
     {
-        commands.Add(new DebugDrawFrustum(context.BuildPath(name), color, CurrentView, viewProjection));
+        Add(new DebugDrawFrustum(context.BuildPath(name), color, CurrentView, viewProjection));
     }
 
     public void Sphere(string name, Vector3 center, float radius, GraphicsColor color, int segments = 24)
     {
-        commands.Add(new DebugDrawSphere(context.BuildPath(name), color, CurrentView, center, radius, segments));
+        Add(new DebugDrawSphere(context.BuildPath(name), color, CurrentView, center, radius, segments));
     }
 
     public void Plane(string name, Vector3 center, Vector3 normal, float size, GraphicsColor color)
     {
-        commands.Add(new DebugDrawPlane(context.BuildPath(name), color, CurrentView, center, normal, size));
+        Add(new DebugDrawPlane(context.BuildPath(name), color, CurrentView, center, normal, size));
     }
 
     public void Ray(string name, Vector3 origin, Vector3 direction, float length, GraphicsColor color)
     {
-        commands.Add(new DebugDrawRay(context.BuildPath(name), color, CurrentView, origin, direction, length));
+        Add(new DebugDrawRay(context.BuildPath(name), color, CurrentView, origin, direction, length));
     }
 
     public void Capsule(string name, Vector3 a, Vector3 b, float radius, GraphicsColor color, int segments = 16)
     {
-        commands.Add(new DebugDrawCapsule(context.BuildPath(name), color, CurrentView, a, b, radius, segments));
+        Add(new DebugDrawCapsule(context.BuildPath(name), color, CurrentView, a, b, radius, segments));
     }
 
     // Obb takes a transform that maps the unit cube [-1, 1]^3 into world
@@ -213,7 +220,7 @@ public sealed class DebugDrawChannel
     // — keeping the matrix-vs-tuple decision at the producer site.
     public void Obb(string name, Matrix4x4 transform, GraphicsColor color)
     {
-        commands.Add(new DebugDrawObb(context.BuildPath(name), color, CurrentView, transform));
+        Add(new DebugDrawObb(context.BuildPath(name), color, CurrentView, transform));
     }
 
     /// <summary>
@@ -240,29 +247,29 @@ public sealed class DebugDrawChannel
         // sink that is already holding it.
         var points = new Vector3[remembered.Count];
         for (var i = 0; i < points.Length; i++) points[i] = remembered[i];
-        commands.Add(new DebugDrawPolyline(path, color, CurrentView, points));
+        Add(new DebugDrawPolyline(path, color, CurrentView, points));
     }
 
     /// <summary>Draws an explicit path through space, remembering nothing.</summary>
     public void Polyline(string name, IReadOnlyList<Vector3> points, GraphicsColor color)
     {
         ArgumentNullException.ThrowIfNull(points);
-        commands.Add(new DebugDrawPolyline(context.BuildPath(name), color, CurrentView, points));
+        Add(new DebugDrawPolyline(context.BuildPath(name), color, CurrentView, points));
     }
 
     public void Cross(string name, Vector3 center, float size, GraphicsColor color)
     {
-        commands.Add(new DebugDrawCross(context.BuildPath(name), color, CurrentView, center, size));
+        Add(new DebugDrawCross(context.BuildPath(name), color, CurrentView, center, size));
     }
 
     public void Cone(string name, Vector3 apex, Vector3 axis, float length, float halfAngleRad, GraphicsColor color, int segments = 16)
     {
-        commands.Add(new DebugDrawCone(context.BuildPath(name), color, CurrentView, apex, axis, length, halfAngleRad, segments));
+        Add(new DebugDrawCone(context.BuildPath(name), color, CurrentView, apex, axis, length, halfAngleRad, segments));
     }
 
     public void Arrow(string name, Vector3 from, Vector3 to, GraphicsColor color)
     {
-        commands.Add(new DebugDrawArrow(context.BuildPath(name), color, CurrentView, from, to));
+        Add(new DebugDrawArrow(context.BuildPath(name), color, CurrentView, from, to));
     }
 
     // The arrays are held by reference for the lifetime of any frame
@@ -271,13 +278,13 @@ public sealed class DebugDrawChannel
     {
         ArgumentNullException.ThrowIfNull(vertices);
         ArgumentNullException.ThrowIfNull(edges);
-        commands.Add(new DebugDrawMeshWireframe(context.BuildPath(name), color, CurrentView, vertices, edges));
+        Add(new DebugDrawMeshWireframe(context.BuildPath(name), color, CurrentView, vertices, edges));
     }
 
     public void Normals(string name, IReadOnlyList<Vector3> positions, IReadOnlyList<Vector3> normals, float length, GraphicsColor color)
     {
         ArgumentNullException.ThrowIfNull(positions);
         ArgumentNullException.ThrowIfNull(normals);
-        commands.Add(new DebugDrawNormals(context.BuildPath(name), color, CurrentView, positions, normals, length));
+        Add(new DebugDrawNormals(context.BuildPath(name), color, CurrentView, positions, normals, length));
     }
 }

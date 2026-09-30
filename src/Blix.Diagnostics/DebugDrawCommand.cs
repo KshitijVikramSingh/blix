@@ -5,7 +5,7 @@ using Blix.Graphics;
 namespace Blix.Diagnostics;
 
 // Polymorphic primitive for the debug-draw channel. Each command is a
-// sealed derived record so consumers (the GL renderer, JSON dump sink,
+// sealed derived record so consumers (the host's line pass, JSON dump sink,
 // future picking-aware sinks) can pattern-match without a Kind enum or
 // nullable grab-bag fields.
 //
@@ -32,7 +32,18 @@ namespace Blix.Diagnostics;
 // "every primitive in a single frame shares one camera" — an assumption,
 // not a measurement, and the one this whole arc retires. Cost was never the
 // argument: DebugDrawFrustum has always carried a full 4x4 per command.
-public abstract record DebugDrawCommand(string Path, GraphicsColor Color, ViewId View);
+public abstract record DebugDrawCommand(string Path, GraphicsColor Color, ViewId View)
+{
+    /// <summary>
+    /// The system's reply to a pick (the selection highlight), which answers only to the master switch.
+    /// </summary>
+    /// <remarks>
+    /// A flag on the command rather than a meaning in the path: the highlight used to be recognised by
+    /// its path starting with "selection/", so anything else drawn there would have borrowed the same
+    /// exemption. Only the debug system sets it.
+    /// </remarks>
+    public bool Feedback { get; init; }
+}
 
 public sealed record DebugDrawLine(string Path, GraphicsColor Color, ViewId View, Vector3 A, Vector3 B)
     : DebugDrawCommand(Path, Color, View);

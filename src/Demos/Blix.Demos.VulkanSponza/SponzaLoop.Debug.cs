@@ -54,7 +54,7 @@ internal sealed partial class SponzaLoop
         // The camera's layout and its pasteable pose (--cam, so an observed frame can be replayed by the
         // headless measurement and capture paths), then the keys this loop handles itself. Listed with
         // the overlay hidden too, so F12 dumps carry them.
-        camera.DescribeKeys(debug);
+        camera.DescribeDefaultKeys(debug);
         debug.Keys.Describe("Arrows", "look around");
         debug.Keys.Describe(Key.Escape, "quit");
 
