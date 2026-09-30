@@ -481,6 +481,49 @@ and `Blix.Tools.Studio/StudioRenderer.cs` · the active design record at
 
 ---
 
+## 10. Four kinds of thing: mechanism, convention, default, policy
+
+§6 separates mechanism from policy. Two kinds sit between them, and most boundary questions turn
+on telling the four apart, because each carries a different obligation:
+
+| Kind | What it is | Its obligation | Examples |
+|---|---|---|---|
+| **Mechanism** | What must be true for anything to work | Correct, general, no opinion | the pick pass and `RequestPick`/`CompletePick`; `CameraController`'s operations; pose operations; `BonePaletteSet`; `GpuPassWindow`'s differencing |
+| **Convention** | A fact the engine *declares* so every layer can agree | Stated once, named as Blix's, pinned by a test | clip space (depth 0..1, NDC Y down); yaw 0 down -Z and pitch where it looks; the `--cam x,y,z,yaw,pitch` form; the reserved `selection` scope |
+| **Default** | An opinion the engine ships because many applications want the same one | Optional, labelled as a default, and always reachable through mechanism alone | `CameraController.DriveDefault`; the debugger's selection behaviour (one selection, click again to step behind); `GpuPassWindow`'s 60 frames; the Stage's renderer and look |
+| **Policy** | A choice one application makes | Lives in that application | Sponza's experiments; the lab's inspection sessions; a game's object model |
+
+The rules that follow from the table:
+
+- **A convention is Blix's, whatever it was adopted from.** Blix's clip space is Vulkan's, and it
+  is described as Blix's, with the backend seam marked where it is produced
+  (`GraphicsMatrices.CreatePerspectiveVulkan`). A convention presented as a backend's fact reads as
+  a backend leak, and one that is really a backend's fact is one.
+- **A convention is carried by the API, not hidden in a string.** The selection highlight is
+  marked on the draw command (`DebugDrawCommand.Feedback`), not recognised by a path that an
+  application could also write. When a string means more than the API admits, move the meaning
+  into the type and reserve the string.
+- **A default names itself as one.** `DriveDefault`, not `Drive`: the name keeps "the default
+  layout" from quietly becoming "the only interaction model".
+- **A default is reachable through mechanism alone.** Every result a default gives, an application
+  can reach without it: the Studio viewport steers its camera through `OrbitBy`, and a debugger
+  could replace the selection behaviour through `RequestPick`/`CompletePick`. A default that has no
+  such path is policy in the engine.
+- **Mechanism does not live inside a default.** A fixed step that only a convenience base class
+  provides is mechanism in the wrong place: loops that do not use the base class get it wrong.
+- **An engine type with no consumer is policy that nobody took.** A generic "mesh, material and
+  transform" object encodes a drawing strategy, and every application draws differently.
+- **One writer per fact.** Where a convention is carried into state, one path writes it:
+  `CameraController.Apply` is the only writer of its camera's transform, and a second writer is
+  refused at the next operation rather than becoming a second source of truth.
+
+**Enforced by:** `Blix.Test.Graphics` Section **BO** (the camera convention, the pose form, and
+BO.7's one writer) · Section **BN** (nothing above the host names the backend) ·
+`Blix.Test.Diagnostics` (feedback is a flag; the selection scope is reserved) ·
+`VulkanHello --pick-check` in the demos gate (the pick mechanism on a device).
+
+---
+
 ## Where the surface stands
 
 Blix now reaches across the corners it set out to cover — rendering,
