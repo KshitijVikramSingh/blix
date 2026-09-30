@@ -22,75 +22,16 @@ internal static class StudioAlpha
     public static bool IsBlended(AlphaMode mode) => mode == AlphaMode.Blend;
 }
 
-/// <summary>A static glTF on the stage, placed by its authored node hierarchy.</summary>
-public sealed class ModelView : IStudioView
-{
-    private readonly byte[] lit = new byte[StudioPush.LitBytes];
-    private readonly byte[] caster = new byte[StudioPush.CasterBytes];
-
-    public ModelView(Model model, Matrix4x4 transform)
-    {
-        Model = model ?? throw new ArgumentNullException(nameof(model));
-        Transform = transform == default ? Matrix4x4.Identity : transform;
-    }
-
-    /// <summary>Colour overrides by material name, or null to draw what the file said.</summary>
-    /// <remarks>Null preserves authored colour. Overrides are keyed by material name.</remarks>
-    public StudioTints? Tints { get; set; }
-
-    private Vector3 Colour(string materialName, Vector3 assetColour) =>
-        Tints?.Resolve(materialName, assetColour) ?? assetColour;
-
-    /// <summary>The engine model drawn: loaded through the stage (<see cref="StudioRenderer.LoadModel"/>).</summary>
-    public Model Model { get; }
-
-    public Matrix4x4 Transform { get; set; }
-
-    private StudioModel Studio(in StudioDraw draw) =>
-        (draw.Assets ?? throw new InvalidOperationException("A ModelView is drawn by the stage that loaded its model.")).ModelFor(Model);
-
-    public void Draw(in StudioDraw draw)
-    {
-        var casterOnly = draw.Pass == StudioPass.Shadow;
-
-        // Draw opaque parts before the non-depth-writing blended group.
-        for (var pass = 0; pass < 2; pass++)
-        for (var index = 0; index < Studio(draw).Parts.Count; index++)
-        {
-            var part = Studio(draw).Parts[index];
-            var blended = StudioAlpha.IsBlended(part.AlphaMode);
-            if (blended != (pass == 1)) continue;
-
-            // A blended caster would write a solid silhouette into the depth-only shadow map, which
-            // is a transparent surface casting an opaque shadow. Skipped rather than approximated.
-            if (casterOnly && blended) continue;
-            var node = Model.Nodes[part.NodeIndex];
-            var push = casterOnly ? caster : lit;
-
-            var cutoff = StudioAlpha.CutoffFor(part.AlphaMode, part.AlphaCutoff);
-            StudioPush.Matrix(node.World * Transform, push);
-            if (casterOnly) StudioPush.CasterCutout(push, cutoff, part.BaseAlpha, part.AlbedoUvSet);
-            else StudioPush.Material(push, Colour(part.MaterialName, part.BaseColour), part.Metallic, part.Roughness,
-                     part.Surface, alphaCutoff: cutoff, baseAlpha: part.BaseAlpha, albedoUvSet: part.AlbedoUvSet);
-
-            // Texture lists are retained by reference, so each recorded draw needs its own array.
-            draw.Scope.DrawIndexed(
-                vertexBuffer: part.Vertices,
-                indexBuffer: part.Indices,
-                pipeline: blended && draw.BlendPipeline.Id != 0 ? draw.BlendPipeline : draw.Pipeline,
-                indexCount: part.IndexCount,
-                uniforms: draw.Uniforms,
-                // Casters also bind albedo at slot 0 because MASK shadows sample alpha.
-                textures: draw.WithSurface(part.Surface),
-                pushConstants: push);
-        }
-    }
-}
-
 /// <summary>
-/// A rigged glTF on the stage — every primitive drawn once for N instances out of one sliced palette.
+/// A model on the stage: its skinned parts drawn once for N instances out of one sliced palette, and every
+/// other part rigidly — at its node's world, or at the posed joint that carries it.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>One view, as there is one <see cref="Model"/>.</b> A file with no skin has no skinned parts and no
+/// joints, so it draws its static parts at their nodes and nothing else is asked of the caller. A skinned
+/// one is drawn at whatever pose the stage last received (<see cref="StudioRenderer.UploadPalettes"/>).
+/// </para>
 /// <para>
 /// The hierarchy lives in the palette rather than in the transforms, and every primitive of an
 /// instance reads the same slice: a skin that placed its parts individually would tear along their
@@ -103,14 +44,14 @@ public sealed class ModelView : IStudioView
 /// one palette per renderer a frame of lag.
 /// </para>
 /// </remarks>
-public sealed class RigView : IStudioView
+public sealed class ModelView : IStudioView
 {
     private readonly byte[] lit = new byte[StudioPush.LitBytes];
     private readonly byte[] caster = new byte[StudioPush.SkinnedCasterBytes];
 
-    public RigView(Model rig, int instances = 1)
+    public ModelView(Model model, int instances = 1)
     {
-        Rig = rig ?? throw new ArgumentNullException(nameof(rig));
+        Model = model ?? throw new ArgumentNullException(nameof(model));
         Instances = instances;
     }
 
@@ -121,10 +62,10 @@ public sealed class RigView : IStudioView
     private Vector3 Colour(string materialName, Vector3 assetColour) =>
         Tints?.Resolve(materialName, assetColour) ?? assetColour;
 
-    /// <summary>The engine model drawn skinned: loaded through the stage (<see cref="StudioRenderer.LoadRig"/>).</summary>
-    public Model Rig { get; }
+    /// <summary>The engine model drawn: loaded through the stage (<see cref="StudioRenderer.LoadModel"/>).</summary>
+    public Model Model { get; }
 
-    /// <summary>How many bodies this draw covers. One takes exactly the same path as eight.</summary>
+    /// <summary>How many bodies the skinned parts cover. One takes exactly the same path as eight.</summary>
     public int Instances { get; set; }
 
     /// <summary>
@@ -137,18 +78,21 @@ public sealed class RigView : IStudioView
     public IReadOnlyList<Matrix4x4>? BoneWorlds { get; set; }
 
     /// <summary>
-    /// Where the body stands. Composed onto every attachment; the skin gets it through the palette.
+    /// Where the model stands. Composed onto every rigid part; the skin gets it through the palette.
     /// </summary>
     /// <remarks>
-    /// Skinned placement is baked into the palette; rigid attachments need the same placement here.
+    /// Skinned placement is baked into the palette; static parts and attachments need the same placement here.
     /// </remarks>
     public Matrix4x4 Placement { get; set; } = Matrix4x4.Identity;
 
     /// <summary>
-    /// Attachments to draw, by name. Empty by default.
+    /// Which attachments to draw, by name; null draws every one the file carries.
     /// </summary>
-    /// <remarks>Selection is caller policy; Studio does not choose among mutually exclusive gear.</remarks>
-    public HashSet<string> VisibleAttachments { get; } = new(StringComparer.Ordinal);
+    /// <remarks>
+    /// The file's own answer is the default: every mesh a joint carries is part of the model. Choosing
+    /// among mutually exclusive gear is caller policy, and a set here is how a caller states it.
+    /// </remarks>
+    public ISet<string>? VisibleAttachments { get; set; }
 
     /// <summary>
     /// Bone worlds for one instance, asked for at DRAW time. Null draws attachments for instance 0
@@ -177,33 +121,34 @@ public sealed class RigView : IStudioView
     /// <see cref="VisibleAttachments"/>.
     /// </summary>
     /// <remarks>Selection source is caller policy: inventory, state, or a tool control.</remarks>
-    public Func<int, ISet<string>>? InstanceAttachments { get; set; }
+    public Func<int, ISet<string>?>? InstanceAttachments { get; set; }
 
-    private StudioRig Studio(in StudioDraw draw) =>
-        (draw.Assets ?? throw new InvalidOperationException("A RigView is drawn by the stage that loaded its rig.")).RigFor(Rig);
+    private StudioModel Studio(in StudioDraw draw) =>
+        (draw.Assets ?? throw new InvalidOperationException("A ModelView is drawn by the stage that loaded its model.")).For(Model);
 
     public void Draw(in StudioDraw draw)
     {
-        if (Instances <= 0) return;
-
         var casterOnly = draw.Pass == StudioPass.Shadow;
-        var stride = (float)Rig.Skeleton.BoneCount;
 
         // Opaque then blended, for the same reason ModelView sweeps twice — and across all three kinds
         // of part, so a blended attachment or static part draws after every opaque surface of the body.
         for (var pass = 0; pass < 2; pass++)
         {
             var blendedGroup = pass == 1;
-            DrawSkinned(draw, casterOnly, stride, blendedGroup);
+            if (Instances > 0) DrawSkinned(draw, casterOnly, blendedGroup);
             DrawAttachments(draw, casterOnly, blendedGroup);
             DrawStaticParts(draw, casterOnly, blendedGroup);
         }
     }
 
-    private void DrawSkinned(in StudioDraw draw, bool casterOnly, float stride, bool blendedGroup)
+    private void DrawSkinned(in StudioDraw draw, bool casterOnly, bool blendedGroup)
     {
-        foreach (var part in Studio(draw).Parts)
+        var studio = Studio(draw);
+        foreach (var part in studio.SkinnedParts)
         {
+            // The part's OWN skin's bone count: each skin's palettes are packed at its own stride, and
+            // skins of one file need not have the same number of bones.
+            var stride = (float)studio.Skins[part.SkinIndex].Skeleton.BoneCount;
             var blended = StudioAlpha.IsBlended(part.AlphaMode);
             if (blended != blendedGroup) continue;
             if (casterOnly && blended) continue;
@@ -251,9 +196,7 @@ public sealed class RigView : IStudioView
                 uniforms: draw.Uniforms,
                 textures: draw.WithSurface(part.Surface),
                 // Each part selects its authored skin; skins may share joints but not inverse binds.
-                perDrawMaterial: (uint)part.SkinIndex < (uint)Studio(draw).Skins.Count
-                    ? Studio(draw).Skins[part.SkinIndex].BoneMaterial
-                    : Studio(draw).BoneMaterial,
+                perDrawMaterial: studio.Skins[part.SkinIndex].BoneMaterial,
                 pushConstants: push);
         }
     }
@@ -305,7 +248,6 @@ public sealed class RigView : IStudioView
             if (worlds is null) continue;
 
             var visible = InstanceAttachments is null ? VisibleAttachments : InstanceAttachments(body);
-            if (visible is null || visible.Count == 0) continue;
 
             var placement = Placements is not null && (uint)body < (uint)Placements.Count
                 ? Placements[body]
@@ -320,13 +262,13 @@ public sealed class RigView : IStudioView
         bool casterOnly,
         bool blendedGroup,
         IReadOnlyList<Matrix4x4> worlds,
-        ISet<string> visible,
+        ISet<string>? visible,
         Matrix4x4 placement,
         byte[] attachPush)
     {
         foreach (var attachment in Studio(draw).Attachments)
         {
-            if (!visible.Contains(attachment.Name)) continue;
+            if (visible is not null && !visible.Contains(attachment.Name)) continue;
             if ((uint)attachment.JointIndex >= (uint)worlds.Count) continue;
             var blended = StudioAlpha.IsBlended(attachment.AlphaMode);
             if (blended != blendedGroup) continue;

@@ -19,13 +19,8 @@ layout(set = 0, binding = 0) uniform ShadowFrame {
     mat4 uLightViewProjection;
 };
 
-// The palettes: the engine's bone block at set 3 (skinning.glsl), sized here. Reflection reads an
-// unsized array as a zero-byte buffer, and the bone buffer is allocated at the reflected size, so the
-// capacity is a literal: 1024 = StudioRig.MaxBones (128) x StudioRig.MaxInstances (8). Blix.Test.Studio
-// reads the reflected block size and fails if it stops matching the C# constants; StudioRig rejects an
-// asset whose skin cannot fit before allocating its GPU resources. A short write is legal, so a small
-// rig uploads only its live palettes and the tail is never read.
-#define BLIX_BONE_CAPACITY 1024
+// The palettes: the engine's bone block at set 3 (skinning.glsl), unsized. Each rig's buffer is sized
+// by Model.CreateBoneBuffers for its own bones x Studio's instance row, so this shader has no bone cap.
 #include "skinning.glsl"
 
 // <b>Sixteen bytes, and no model matrix.</b> The unskinned caster pushes a mat4 because it has

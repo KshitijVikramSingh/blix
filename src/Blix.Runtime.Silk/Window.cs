@@ -185,8 +185,22 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
     public void Run()
     {
-        window.Run();
+        try
+        {
+            window.Run();
+        }
+        catch
+        {
+            loopFaulted = true;
+            throw;
+        }
     }
+
+    // Set when the loop ended by an exception. Silk still counts itself inside its render loop then, and
+    // refuses the window's Dispose ("cannot call Reset inside of the render loop") — which, from the
+    // using that owns this window, replaced the loop's own exception with that one. Dispose skips the
+    // window's teardown in that case so the fault that ended the loop is the one reported.
+    private bool loopFaulted;
 
     private void OnLoad()
     {
@@ -777,7 +791,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         Step("graphics-device");
         graphicsDevice?.Dispose();
         Step("window");
-        window.Dispose();
+        if (!loopFaulted) window.Dispose();
 
         // Last, because the device's own teardown is where leaks are reported. Only the errors raised
         // since this window was made: two windows in one process, one after the other, each answer

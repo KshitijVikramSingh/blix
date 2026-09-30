@@ -5851,7 +5851,7 @@ sealed class RecordingDevice : IGraphicsDevice
     public ShaderProgramHandle CreateShaderProgramFromSpv(byte[] vertexSpv, byte[] fragmentSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
     public ShaderProgramHandle CreateComputeShaderProgramFromSpv(byte[] computeSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
     public PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null) => throw No();
-    public IMaterialBindings CreateMaterial(ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null) => throw No();
+    public IMaterialBindings CreateMaterial(ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null, IReadOnlyDictionary<int, int>? blockSizes = null) => throw No();
     public void DestroyMaterial(MaterialHandle handle) => throw No();
     public TextureHandle CreateTextureCube(int faceSize, TextureFormat format, int mipCount, ReadOnlySpan<byte> data, SamplerDescription sampler, string name) => throw No();
     public TextureHandle CreateStorageTexture2D(int width, int height, TextureFormat format, SamplerDescription sampler, string? name = null) => throw No();

@@ -41,12 +41,16 @@ public static class Program
     [BlixApp("view", Summary = "look at a model or rig", Headed = true, Default = true)]
     public static void View(AppArgs args)
     {
-        // --model <path> loads a glTF as its authored NODE TREE; --rig <path> loads one as a
-        // SKELETON and its clips. Two flags rather than one that guesses, because they are two
-        // different questions about an asset and the answer to "which importer" is not something
-        // a viewer should infer from whether a file happens to contain a skin.
+        // --model <path> opens any model. One with a skin is posed — its clips, instances and masks
+        // below apply — and one without is shown at its nodes. Not two flags: there is one importer
+        // and one Model, and whether a file has a skin is a fact of the file, not a question for the
+        // person opening it.
         var modelPath = args.String("model");
-        var rigPath = args.String("rig");
+        if (args.String("rig") is not null)
+        {
+            Console.Error.WriteLine("view: --rig is gone: --model opens any file, and one with a skin is posed (--clip, --instances).");
+            Environment.Exit(2);
+        }
 
         // Saves hunting through seventy-six clips on every launch when you already know which
         // one you came to look at. Falls back to the preferred-name search when absent, and
@@ -82,7 +86,7 @@ public static class Program
             Height = 760,
         });
 
-        var loop = new ViewerLoop(modelPath, rigPath, clipName, blendClip, additiveClip, instances, maskClip, args);
+        var loop = new ViewerLoop(modelPath, clipName, blendClip, additiveClip, instances, maskClip, args);
         using var window = new Window(loop, options);
         window.Run();
     }
@@ -122,7 +126,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
     // decisions on a different clock, which is the second consumer §4 asks for. What stays here is
     // the viewer's own policy: which clip a list click assigns to, what the panel shows, and where
     // the camera is.
-    private readonly string? rigPath;
     private readonly string? clipName;
     private readonly string? secondClip;
     private readonly int requestedInstances;
@@ -138,7 +141,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
 
     public ViewerLoop(
         string? modelPath = null,
-        string? rigPath = null,
         string? clipName = null,
         string? blendClip = null,
         string? additiveClip = null,
@@ -147,7 +149,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         AppArgs? args = null)
     {
         this.modelPath = modelPath;
-        this.rigPath = rigPath;
         this.clipName = clipName;
         this.args = args ?? AppArgs.Empty;
         requestedInstances = instances;
@@ -262,7 +263,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
     internal Model? Rig => rig;
 
     /// <summary>Where the rig was read from; null without one.</summary>
-    internal string? RigPath => rig is null ? null : rigPath;
+    internal string? RigPath => rig is null ? null : modelPath;
 
     internal RigInstances? Session => session;
 
@@ -387,8 +388,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         // window resize but mutates the registered entry in place, so the handle stays valid.
         viewportId = host.RegisterUiTexture(renderer.ViewportColour);
 
-        LoadRig(device);
-
         if (modelPath is null) return;
         if (!File.Exists(modelPath))
         {
@@ -396,20 +395,32 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
             return;
         }
 
+        Model loaded;
+
         // <b>The same catch the judge has, for the same reason.</b> AssetImportException is the
         // engine refusing a file by name; anything else escaping here is a fault in this tool.
         // Without it a bad asset took the whole process down with a stack trace AFTER the window
         // had opened — which reads as "the viewer is broken" rather than "that file is not a glTF".
         try
         {
-            model = renderer.LoadModel(modelPath);
+            loaded = renderer.LoadModel(modelPath);
         }
         catch (AssetImportException refused)
         {
             Console.Error.WriteLine($"blix cannot read this: {refused.Message}");
             Environment.Exit(1);
+            return;
         }
 
+        // A model with a skin is posed and framed as a character; one without is framed as a prop.
+        if (loaded.IsSkinned)
+        {
+            rig = loaded;
+            PoseRig();
+            return;
+        }
+
+        model = loaded;
         // The model is the subject now; the box ring is a backdrop that hides it.
 
         // Assets arrive at whatever scale their author used — the Quaternius tank is ~14 units
@@ -433,29 +444,10 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
             $"scaled x{scale:0.000}");
     }
 
-    // <b>Loaded against the renderer's skinned PROGRAM, not just its device.</b> A bone palette is a
-    // descriptor set, and a descriptor set's layout comes from the program that will read it — so a
-    // rig cannot build its set-3 buffer until it knows which shader is on the other end. That
-    // dependency is why this runs after renderer.Load rather than beside it.
-    private void LoadRig(IGraphicsDevice device)
+    // The pose session for a skinned subject: its instances, clips, mask and framing.
+    private void PoseRig()
     {
-        if (rigPath is null) return;
-        if (!File.Exists(rigPath))
-        {
-            Console.Error.WriteLine($"No rig at {rigPath}.");
-            return;
-        }
-
-        try
-        {
-            rig = renderer.LoadRig(rigPath);
-        }
-        catch (AssetImportException refused)
-        {
-            Console.Error.WriteLine($"blix cannot read this: {refused.Message}");
-            Environment.Exit(1);
-        }
-
+        var rig = this.rig!;
         session = new RigInstances(rig, requestedInstances)
         {
             // <b>The viewer's own look, set by the viewer.</b> Each body runs 17% faster than the one
@@ -540,6 +532,13 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
             }
         }
 
+        // Without --attach, everything the file carries is worn: the file's own answer, which the
+        // attachment panel then narrows.
+        if (!args.All("attach").Any())
+        {
+            foreach (var a in rig.Attachments) visibleAttachments.Add(a.Name);
+        }
+
         if (rig.Attachments.Count > 0)
         {
             Console.WriteLine(
@@ -600,7 +599,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         }
 
         Console.WriteLine(
-            $"rig: {Path.GetFileName(rigPath)} — {rig.Skeleton.BoneCount} bone(s), {rig.Clips.Count} clip(s), " +
+            $"rig: {Path.GetFileName(modelPath)} — {rig.Skeleton.BoneCount} bone(s), {rig.Clips.Count} clip(s), " +
             $"{rig.SkinnedParts.Count()} primitive(s), {rig.SkinnedVertexCount} vertices, " +
             $"bounds {rig.RestBounds.Min.Y:0.00}..{rig.RestBounds.Max.Y:0.00} tall, scaled x{rigScale:0.000}");
     }
@@ -676,7 +675,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
 
         session.Advance(delta);
 
-        // <b>Scaled ONCE.</b> RootTravel is already in post-MeshNodeTransform space and rigBase
+        // <b>Scaled ONCE.</b> RootTravel is already in post-SkeletonPlacement space and rigBase
         // already carries the normalising scale, so a `* rigScale` here squared it — the Rogue
         // normalises by 1.372, so the body ran 1.88x too far and the trail agreed with it, which is
         // why two wrong things looked like one right one.
@@ -721,13 +720,13 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         // What this tool puts on the stage. Rebuilt per frame rather than cached, because the
         // instance count follows the session and a stale RigView would draw last frame's crowd.
         views.Clear();
-        if (model is not null) views.Add(new ModelView(model, modelTransform) { Tints = Tints });
+        if (model is not null) views.Add(new ModelView(model) { Placement = modelTransform, Tints = Tints });
         if (rig is not null)
         {
             // <b>The worlds come from the session, not from here.</b> They are already computed once
             // per pose for the skeleton gizmo; an attachment is the second reader of the same
             // number and recomputing them would be a second hierarchy walk for one knife.
-            var rigView = new RigView(rig, session?.PalettesFor(0).Count ?? 0)
+            var rigView = new ModelView(rig, session?.PalettesFor(0).Count ?? 0)
             {
                 BoneWorlds = session?.Driven.BoneWorlds,
                 Placement = rigTransform,
@@ -739,7 +738,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
                 InstanceAttachments = session is null ? null : AttachmentsForInstance,
                 Tints = Tints,
             };
-            foreach (var name in visibleAttachments) rigView.VisibleAttachments.Add(name);
+            rigView.VisibleAttachments = visibleAttachments;
             views.Add(rigView);
         }
 
@@ -939,7 +938,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
             debug,
             rig.Skeleton,
             worlds,
-            rig.MeshNodeTransform * session.Placements[instance],
+            rig.SkeletonPlacement * session.Placements[instance],
             options,
             instance == 0 ? selection.Bone : -1,
             instance == 0 && panels.ShowRestGhost ? session.Driven.RestWorlds : null,

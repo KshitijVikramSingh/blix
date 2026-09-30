@@ -23,33 +23,27 @@ namespace Blix.Tools.Studio;
 /// </remarks>
 public sealed class StudioRenderer : IDisposable
 {
-    /// <summary>The most bones a skin may have for the stage's skinned pipeline.</summary>
-    public const int MaxBones = StudioRig.MaxBones;
+    /// <summary>The most bodies one model's draw can pose independently (the reference row).</summary>
+    public const int MaxInstances = StudioModel.MaxInstances;
 
-    /// <summary>The most bodies one rig's draw can pose independently (the reference row).</summary>
-    public const int MaxInstances = StudioRig.MaxInstances;
-
-    // Every asset loaded through the stage, with what Studio keeps about it. Released with the stage.
+    // Every model loaded through the stage, with what Studio keeps about it. Released with the stage.
     private readonly StudioAssets assets = new();
 
-    /// <summary>Loads a model to draw skinned: the engine model, made in the stage's formats.</summary>
+    /// <summary>Loads a model: the engine model, made in the stage's formats, skinned where a skin deforms it.</summary>
     /// <remarks>
-    /// The stage applies its own policy to it (the vertex format its skinned pipeline reads, the bone and
-    /// instance caps, its bone buffers, its fallback materials) and keeps that to itself; the model
-    /// returned is the engine's, and what a tool reads. Owned by the stage: <see cref="Unload"/> releases
-    /// it, and so does disposing the stage. Call after <see cref="Load"/>. Refused for a file with no skin.
+    /// The stage applies its own policy to it (the vertex formats its pipelines read, the instance row,
+    /// its bone buffers, its fallback materials) and keeps that to itself; the model returned is the
+    /// engine's, and what a tool reads. A skinned model is drawn at whatever pose its palettes were last
+    /// uploaded with (<see cref="UploadPalettes"/>). Owned by the stage: <see cref="Unload"/> releases it,
+    /// and so does disposing the stage. Call after <see cref="Load"/>.
     /// </remarks>
-    public Model LoadRig(string path) => assets.Add(StudioRig.Load(device, path, skinnedProgram));
-
-    /// <summary>Loads a model to draw static: its node hierarchy kept, a rigged file's meshes at bind pose.</summary>
-    /// <remarks>Owned by the stage, as <see cref="LoadRig"/>. Call after <see cref="Load"/>.</remarks>
-    public Model LoadModel(string path) => assets.Add(StudioModel.Load(device, path));
+    public Model LoadModel(string path) => assets.Add(StudioModel.Load(device, path, skinnedProgram));
 
     /// <summary>Releases a model this stage loaded: its buffers, bone buffers and textures.</summary>
     public void Unload(Model model) => assets.Remove(model);
 
     /// <summary>Copies one skin's posed palettes into the buffer the stage's skinned pipeline reads this frame.</summary>
-    public void UploadPalettes(Model rig, BonePaletteSet palettes, int skin = 0) => assets.RigFor(rig).UploadPalettes(palettes, skin);
+    public void UploadPalettes(Model model, BonePaletteSet palettes, int skin = 0) => assets.For(model).UploadPalettes(palettes, skin);
 
     /// <summary>Square shadow map, matching the texel size the lit shader offsets by.</summary>
     public const int ShadowMapSize = 2048;
@@ -430,7 +424,7 @@ public sealed class StudioRenderer : IDisposable
             RenderTarget: graph.GetPassSurface(litPass)), "lab.skinned");
 
         // Blended and double-sided materials use uncullled variants; closed single-sided parts use
-        // the pipeline above. RigView selects the authored material case per part.
+        // the pipeline above. ModelView selects the authored material case per part.
         blendPipeline = device.CreatePipeline(new PipelineDescription(
             litProgram,
             VertexPosition3NormalTangentTexture2Color.Layout,

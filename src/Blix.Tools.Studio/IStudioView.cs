@@ -55,7 +55,7 @@ public readonly record struct StudioDraw(
     /// <summary>Its skinned twin.</summary>
     PipelineHandle SkinnedBlendPipeline = default)
 {
-    /// <summary>The stage's per-asset state, for a stage view (RigView, ModelView) to find its asset's.</summary>
+    /// <summary>The stage's per-asset state, for a stage view (ModelView) to find its asset's.</summary>
     internal StudioAssets? Assets { get; init; }
 
     /// <summary>The pass's textures plus this draw's albedo, with white in every other material channel.</summary>

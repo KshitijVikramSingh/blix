@@ -85,17 +85,50 @@ public sealed class ModelData
     public IReadOnlyList<Matrix4x4> World => world ??= ComposeWorld();
 
     /// <summary>
-    /// Where <paramref name="skin"/>'s geometry sits: the world of the node that places its mesh. The
-    /// cook refused a skin placed at two different worlds, so the first such node speaks for all.
+    /// Where <paramref name="skin"/>'s skeleton hangs in the scene: the world of the node its root joints
+    /// are children of, or identity when they are scene roots.
     /// </summary>
+    /// <remarks>
+    /// glTF places a skinned vertex by its joints' world transforms alone — <c>sum(w * jointWorld *
+    /// inverseBind * v)</c> — and ignores the transform of the node that places the mesh. A skeleton's
+    /// bone worlds start at its root joints, so this is what goes in front of them. It is not the mesh
+    /// node's world: the two agree in most exports, which is how using that one went unnoticed until a
+    /// file (tank.glb) where they do not put two of its three skins up to 8 units out.
+    /// A skin whose root joints hang from nodes at different worlds cannot be placed by one transform,
+    /// and is refused by name rather than drawn at one of them.
+    /// </remarks>
     public Matrix4x4 Placement(int skin)
     {
-        for (var n = 0; n < Nodes.Count; n++)
+        var joints = Skins[skin].JointNodes;
+        var isJoint = joints.ToHashSet();
+        Matrix4x4? placement = null;
+        foreach (var joint in joints)
         {
-            if (Nodes[n].SkinIndex == skin && Nodes[n].MeshIndex >= 0) return World[n];
+            var parent = Nodes[joint].ParentIndex;
+            if (parent >= 0 && isJoint.Contains(parent)) continue;
+            var world = parent >= 0 ? World[parent] : Matrix4x4.Identity;
+            if (placement is { } first && !Near(first, world))
+            {
+                throw new AssetImportException(Source, null,
+                    $"skin {skin}'s root joints hang from nodes at different worlds, and a skeleton is placed by one; " +
+                    "parent the root joints under one node");
+            }
+
+            placement ??= world;
         }
 
-        return Matrix4x4.Identity;
+        return placement ?? Matrix4x4.Identity;
+    }
+
+    private static bool Near(Matrix4x4 a, Matrix4x4 b)
+    {
+        for (var r = 0; r < 4; r++)
+        for (var c = 0; c < 4; c++)
+        {
+            if (MathF.Abs(a[r, c] - b[r, c]) > 1e-4f) return false;
+        }
+
+        return true;
     }
 
     /// <summary>Unskinned mesh nodes under a joint, each claimed by the first skin whose joints include it.</summary>

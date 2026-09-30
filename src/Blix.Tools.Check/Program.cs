@@ -21,8 +21,13 @@ public static class Program
         // are not converted into a clean asset report.
         try
         {
-            if (args.String("model") is { } model) return InspectModel(model);
-            if (args.String("rig") is { } rig) return InspectRig(rig, args.Flag("verbose"));
+            if (args.String("rig") is not null)
+            {
+                Console.Error.WriteLine("check: --rig is gone: --model checks any model, and runs the rig checks on one with a skin.");
+                return 2;
+            }
+
+            if (args.String("model") is { } model) return InspectModel(model, args.Flag("verbose"));
             if (args.String("cooked") is { } cooked) return JudgeCooked(cooked);
         }
         catch (AssetImportException refused)
@@ -33,12 +38,12 @@ public static class Program
 
         if (args.Flag("help") | args.Flag("h"))
         {
-            Console.WriteLine("Usage: blix check --model <gltf-or-glb> | --rig <rigged.glb> [--verbose] | --cooked <directory>");
-            Console.WriteLine("  --model     import a static or rigged model; report shape and reject unusable clip lengths");
+            Console.WriteLine("Usage: blix check --model <gltf-or-glb> [--verbose] | --cooked <directory>");
+            Console.WriteLine("  --model     import a model; report shape and reject unusable clip lengths, and on one");
+            Console.WriteLine("              with a skin check the rig: hierarchy, rest palette, track coverage,");
+            Console.WriteLine("              finiteness across every clip; report root-motion observations");
             Console.WriteLine("  --cooked    load supported meshes under a DIRECTORY and fail if geometry or images");
             Console.WriteLine("              resolve to source, fallback, or missing data");
-            Console.WriteLine("  --rig       check a RIG: hierarchy, rest palette, track coverage,");
-            Console.WriteLine("              finiteness across every clip; report root-motion observations");
             Console.WriteLine("  Exits non-zero when something is wrong. For a plain listing of an");
             Console.WriteLine("  asset's hierarchy and pivots, use: blix inspect <path>");
             return 0;
@@ -46,7 +51,7 @@ public static class Program
 
         // Shader and binding conformance has no asset subject and belongs to Blix.Test.Studio.
         Console.Error.WriteLine(
-            "check needs something to check: --model <path.glb>, --rig <rigged.glb>, or --cooked <directory>.");
+            "check needs something to check: --model <path.glb> or --cooked <directory>.");
         Console.Error.WriteLine(
             "  (the studio's own binding model is checked by `blix test`, not here)");
         return 2;
@@ -183,7 +188,7 @@ public static class Program
         }
     }
 
-    private static int InspectModel(string path)
+    private static int InspectModel(string path, bool verbose)
     {
         if (!File.Exists(path))
         {
@@ -230,28 +235,18 @@ public static class Program
             problems++;
         }
 
-        if (problems == 0) return 0;
-        Console.Error.WriteLine($"{problems} problem(s).");
-        return 1;
+        if (problems > 0) Console.Error.WriteLine($"{problems} problem(s).");
+        // A skin is a fact of the file, so its checks run whenever there is one.
+        var rigVerdict = rigged ? InspectRig(path, verbose) : 0;
+        return problems > 0 ? 1 : rigVerdict;
     }
 
     // Rig checks separate hierarchy, rest-pose, and sampled animation faults before a graphics
     // device is involved. Consumer budgets and naming conventions are deliberately outside it.
     private static int InspectRig(string path, bool verbose)
     {
-        if (!File.Exists(path))
-        {
-            Console.Error.WriteLine($"No rig at {path}.");
-            return 2;
-        }
-
         var problems = 0;
         var imported = ModelData.Load(Blix.Recipes.CookCache.Resolve(path), new ModelNeeds(Colour: true, Skinned: true));
-        if (!imported.IsRigged)
-        {
-            Console.Error.WriteLine($"{Path.GetFileName(path)}: no node has a skin, so there is no rig here — probe it as a model.");
-            return 1;
-        }
 
         var skeleton = imported.Skins[0].Skeleton;
 

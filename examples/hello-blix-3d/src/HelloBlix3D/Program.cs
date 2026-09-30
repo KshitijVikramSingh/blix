@@ -61,6 +61,8 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
     public static string Character => AppFiles.Asset("models", "Rogue.glb");
 
     private readonly StudioRenderer stage = new();
+
+    private static readonly HashSet<string> Unarmed = new(StringComparer.Ordinal);
     // The engine's camera: look, orbit, fly and zoom (see Drive). Framed round the character the way
     // Studio frames its subjects; --cam, or F12's dump of it, puts it back anywhere.
     private readonly CameraController camera = StudioFraming.Around(StudioFraming.SubjectCentre, -16.6f, 12f, 5.18f);
@@ -95,7 +97,7 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
         camera.ReadArgs(args);
 
         stage.Load(GraphicsDevice);
-        rig = stage.LoadRig(Character);
+        rig = stage.LoadModel(Character);
         body = new RigInstances(rig, 1);
 
         // Two metres tall, standing on the ground, whatever size it was authored at.
@@ -119,7 +121,12 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
 
         body.Pack(placement, spacing: 0f);
         stage.UploadPalettes(rig, body.PalettesFor(0));
-        var character = new RigView(rig) { BoneWorlds = body.Driven.BoneWorlds, Placements = body.Placements };
+        // Unarmed: the Rogue's file carries every weapon it can hold, and which one it holds is this
+        // game's to say. An empty set wears none; leaving it unset would wear them all at once.
+        var character = new ModelView(rig)
+        {
+            BoneWorlds = body.Driven.BoneWorlds, Placements = body.Placements, VisibleAttachments = Unarmed,
+        };
         stage.Render(commands, camera.ViewProjection(aspect), camera.Position, new IStudioView[] { character });
     }
 

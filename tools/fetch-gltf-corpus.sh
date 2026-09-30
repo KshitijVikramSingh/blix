@@ -226,6 +226,72 @@ print("  derived RiggedSimple_cutout.gltf (3 static quads, 2 attachments, differ
 PY
 fi
 
+# No rig in the corpus has more than 128 bones — Studio's old palette cap — so this makes one whose
+# vertices are weighted by joints past it: 300 inert joints go in front of RiggedSimple's two, and its
+# JOINTS_0 is rewritten (+300, as unsigned shorts). A correct palette draws it exactly as RiggedSimple;
+# a capped one refuses it, and one that truncated an index would collapse the cylinder.
+RB="$DEST/sample-assets/RiggedSimple/RiggedSimple.glb"
+if [ -f "$RB" ] && [ ! -s "$DEST/sample-assets/RiggedSimple/RiggedSimple_bones300.gltf" ]; then
+    python3 - "$RB" <<'PY'
+import base64, json, struct, sys
+p = sys.argv[1]
+raw = open(p, "rb").read()
+json_len = struct.unpack("<I", raw[12:16])[0]
+d = json.loads(raw[20:20 + json_len])
+bin_at = 20 + json_len
+blob = bytearray(raw[bin_at + 8:bin_at + 8 + struct.unpack("<I", raw[bin_at:bin_at + 4])[0]])
+EXTRA = 300
+skin = d["skins"][0]
+if len(d.get("skins", [])) != 1 or len(skin["joints"]) != 2:
+    sys.exit("RiggedSimple changed shape upstream — one skin of two joints expected")
+
+def view(data, target=None):
+    while len(blob) % 4: blob.append(0)
+    v = {"buffer": 0, "byteOffset": len(blob), "byteLength": len(data)}
+    if target: v["target"] = target
+    d["bufferViews"].append(v)
+    blob.extend(data)
+    return len(d["bufferViews"]) - 1
+
+def read(accessor):
+    a = d["accessors"][accessor]
+    bv = d["bufferViews"][a["bufferView"]]
+    n = {"SCALAR": 1, "VEC4": 4, "MAT4": 16}[a["type"]]
+    fmt = {5126: "f", 5123: "H", 5121: "B"}[a["componentType"]]
+    size = struct.calcsize(fmt) * n
+    stride = bv.get("byteStride", size)
+    at = bv.get("byteOffset", 0) + a.get("byteOffset", 0)
+    return [struct.unpack_from("<" + fmt * n, blob, at + k * stride) for k in range(a["count"])]
+
+# The inert joints: identity nodes beside the root joint, so every root hangs from the same node.
+root_parent = next(i for i, n in enumerate(d["nodes"]) if skin["joints"][0] in n.get("children", []))
+first = len(d["nodes"])
+for k in range(EXTRA):
+    d["nodes"].append({"name": f"inert_{k}"})
+d["nodes"][root_parent]["children"] += list(range(first, first + EXTRA))
+skin["joints"] = list(range(first, first + EXTRA)) + skin["joints"]
+
+ibm = read(skin["inverseBindMatrices"])
+identity = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+ibm_view = view(b"".join(struct.pack("<16f", *m) for m in [identity] * EXTRA + ibm))
+d["accessors"].append({"bufferView": ibm_view, "componentType": 5126, "count": EXTRA + len(ibm), "type": "MAT4"})
+skin["inverseBindMatrices"] = len(d["accessors"]) - 1
+
+for mesh in d["meshes"]:
+    for prim in mesh["primitives"]:
+        joints = read(prim["attributes"]["JOINTS_0"])
+        v = view(b"".join(struct.pack("<4H", *(j + EXTRA for j in q)) for q in joints), 34962)
+        d["accessors"].append({"bufferView": v, "componentType": 5123, "count": len(joints), "type": "VEC4"})
+        prim["attributes"]["JOINTS_0"] = len(d["accessors"]) - 1
+
+# Animation channels target nodes, which did not move; they stay valid as they are.
+d["buffers"] = [{"byteLength": len(blob), "uri": "data:application/octet-stream;base64," + base64.b64encode(bytes(blob)).decode()}]
+out = p.replace("RiggedSimple.glb", "RiggedSimple_bones300.gltf")
+json.dump(d, open(out, "w"), indent=1)
+print(f"  derived RiggedSimple_bones300.gltf ({EXTRA + 2} joints, vertices on joints {EXTRA} and {EXTRA + 1})")
+PY
+fi
+
 echo
 echo "corpus at $DEST — $((planned - failed)) fetched, $failed missing, $(find "$DEST" -type f | wc -l | tr -d ' ') file(s) total"
 [ "$failed" -eq 0 ]

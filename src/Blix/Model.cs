@@ -48,7 +48,7 @@ public sealed class Model : IDisposable
     public sealed record Part(int NodeIndex, Mesh Mesh, PbrMaterial? Material, MaterialTextures Textures, int SkinIndex = -1);
 
     /// <summary>One skin: the skeleton it poses and where its geometry sits.</summary>
-    public sealed record Skin(Skeleton Skeleton, Matrix4x4 MeshNodeTransform);
+    public sealed record Skin(Skeleton Skeleton, Matrix4x4 SkeletonPlacement);
 
     /// <summary>A static part a joint carries: placed by the joint's world transform, not skinned.</summary>
     /// <param name="JointIndex">The joint's bone in <paramref name="SkinIndex"/>'s skeleton.</param>
@@ -89,7 +89,7 @@ public sealed class Model : IDisposable
     public Skeleton Skeleton => RequireSkin().Skeleton;
 
     /// <summary>Skin 0's placement, which goes before a body's own.</summary>
-    public Matrix4x4 MeshNodeTransform => RequireSkin().MeshNodeTransform;
+    public Matrix4x4 SkeletonPlacement => RequireSkin().SkeletonPlacement;
 
     /// <summary>The source's vertex attributes its cook did not carry, with its reasons.</summary>
     public IReadOnlyList<UnreadAttribute> Ignored { get; private set; } = Array.Empty<UnreadAttribute>();
@@ -97,7 +97,7 @@ public sealed class Model : IDisposable
     /// <summary>Every clip in the file, ordered by name so two runs list them the same way.</summary>
     public IReadOnlyList<AnimationClip> Clips { get; private set; } = Array.Empty<AnimationClip>();
 
-    /// <summary>The skinned parts' rest-pose bounds in skin 0's placement; zero-sized without them.</summary>
+    /// <summary>Where the skinned parts sit at their skins' rest pose, each skin placed by its own; zero-sized without them.</summary>
     /// <remarks>Static parts and attachments do not widen it: it describes the body, not its equipment.</remarks>
     public Bounds3 RestBounds { get; private set; } = new(Vector3.Zero, Vector3.Zero);
 
@@ -137,7 +137,7 @@ public sealed class Model : IDisposable
     /// <summary>Packs N posed bodies into one palette set per skin, each body at its placement.</summary>
     /// <remarks>
     /// Per skin, because each has its own inverse binds: one pose gives different palettes for two skins.
-    /// Each body is <c>MeshNodeTransform * placement</c>, so a set holds world-space palettes.
+    /// Each body is <c>SkeletonPlacement * placement</c>, so a set holds world-space palettes.
     /// </remarks>
     public void PackPalettes(IReadOnlyList<Pose> poses, IReadOnlyList<Matrix4x4> placements, IReadOnlyList<BonePaletteSet> into)
     {
@@ -161,7 +161,7 @@ public sealed class Model : IDisposable
         foreach (var set in into) set.Reset();
         for (var body = 0; body < poses.Count; body++)
         {
-            for (var s = 0; s < skins.Count; s++) into[s].Add(skins[s].Skeleton, poses[body], skins[s].MeshNodeTransform * placements[body]);
+            for (var s = 0; s < skins.Count; s++) into[s].Add(skins[s].Skeleton, poses[body], skins[s].SkeletonPlacement * placements[body]);
         }
     }
 
@@ -173,7 +173,8 @@ public sealed class Model : IDisposable
     /// The one place residency needs a program: descriptor sets take their layout from a shader's
     /// reflection, so a bone buffer exists against the program that will read it. A program without set 3
     /// is refused by the device when the buffers are made. <c>skinning.glsl</c> declares the block every
-    /// skinned program reads.
+    /// skinned program reads, unsized; each skin's buffer is sized here, bones x bodies, so the bone count a
+    /// program serves is the device's limit and not a constant in the shader.
     /// </remarks>
     public BoneBuffers CreateBoneBuffers(ShaderProgramHandle program, int maxInstances)
     {
@@ -182,7 +183,8 @@ public sealed class Model : IDisposable
         var bindings = skins
             .Select((s, i) => device.CreateMaterial(
                 program, setIndex: DescriptorSets.Draw, framesInFlight: device.MaxFramesInFlightCount,
-                name: $"{Name}.bones.{i}"))
+                name: $"{Name}.bones.{i}",
+                blockSizes: new Dictionary<int, int> { [0] = checked(s.Skeleton.BoneCount * maxInstances * 64) }))
             .ToArray();
         return new BoneBuffers(device, bindings, skins.Select(s => s.Skeleton.BoneCount).ToArray(), maxInstances);
     }
@@ -243,28 +245,9 @@ public sealed class Model : IDisposable
 
         if (model.parts.Count > 0) model.Bounds = new Bounds3(min, max);
         model.Ignored = source.Ignored;
-        if (!source.IsRigged) return model;
 
-        model.Clips = source.Clips.OrderBy(c => c.Name, StringComparer.Ordinal).ToArray();
-        var skinnedPrimitives = source.Nodes
-            .Where(n => n.MeshIndex >= 0 && source.Meshes[n.MeshIndex].Skinned)
-            .SelectMany(n => source.Meshes[n.MeshIndex].Primitives)
-            .ToArray();
-        var weighted = SkinningAnalysis.FindWeightedBones(model.skins[0].Skeleton, skinnedPrimitives.Select(p => p.Mesh));
-        model.WeightedBones = weighted;
-        model.DeformHierarchy = SkinningAnalysis.IncludeAncestors(model.skins[0].Skeleton, weighted);
-
-        var restMin = new Vector3(float.MaxValue);
-        var restMax = new Vector3(float.MinValue);
-        foreach (var p in skinnedPrimitives)
-        {
-            model.SkinnedVertexCount += p.Mesh.VertexCount;
-            Accumulate(p.Mesh, model.skins[0].MeshNodeTransform, ref restMin, ref restMax);
-        }
-
-        if (skinnedPrimitives.Length > 0) model.RestBounds = new Bounds3(restMin, restMax);
-
-        // Equipment and scenery: the unskinned parts, split by whether a joint carries them.
+        // Equipment and scenery: the unskinned parts, split by whether a joint carries them. For every
+        // model, not only a rigged one: in a file with no skin nothing is carried, so every part is static.
         var carried = source.Attachments();
         var attached = carried.Select(a => a.NodeIndex).ToHashSet();
         foreach (var a in carried)
@@ -283,6 +266,31 @@ public sealed class Model : IDisposable
             if (attached.Contains(n)) continue;
             model.staticParts.AddRange(partsOfNode[n].Where(p => p.SkinIndex < 0));
         }
+
+        if (!source.IsRigged) return model;
+
+        model.Clips = source.Clips.OrderBy(c => c.Name, StringComparer.Ordinal).ToArray();
+        var skinnedPrimitives = source.Nodes
+            .Where(n => n.MeshIndex >= 0 && source.Meshes[n.MeshIndex].Skinned)
+            .SelectMany(n => source.Meshes[n.MeshIndex].Primitives)
+            .ToArray();
+        var weighted = SkinningAnalysis.FindWeightedBones(model.skins[0].Skeleton, skinnedPrimitives.Select(p => p.Mesh));
+        model.WeightedBones = weighted;
+        model.DeformHierarchy = SkinningAnalysis.IncludeAncestors(model.skins[0].Skeleton, weighted);
+
+        var restMin = new Vector3(float.MaxValue);
+        var restMax = new Vector3(float.MinValue);
+        foreach (var mesh in source.Nodes.Where(n => n.MeshIndex >= 0).Select(n => source.Meshes[n.MeshIndex]).Where(m => m.Skinned))
+        {
+            var skin = model.skins[mesh.SkinIndex];
+            foreach (var p in mesh.Primitives)
+            {
+                model.SkinnedVertexCount += p.Mesh.VertexCount;
+                SkinningAnalysis.AccumulateRestBounds(skin.Skeleton, skin.SkeletonPlacement, p.Mesh, ref restMin, ref restMax);
+            }
+        }
+
+        if (skinnedPrimitives.Length > 0) model.RestBounds = new Bounds3(restMin, restMax);
 
         return model;
     }

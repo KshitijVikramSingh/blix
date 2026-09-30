@@ -102,7 +102,7 @@ internal sealed class StudioSelection
         IReadOnlyList<bool>? filter,
         float gizmoScale)
     {
-        var place = rig.MeshNodeTransform * placement;
+        var place = rig.SkeletonPlacement * placement;
         var span = SkeletonGizmo.Span(rig.Skeleton, boneWorlds, place, filter);
 
         // Twice the joint cross's own arm, so a click has to be close but not surgical — the same

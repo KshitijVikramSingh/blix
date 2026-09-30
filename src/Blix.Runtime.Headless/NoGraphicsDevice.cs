@@ -70,7 +70,8 @@ public sealed class NoGraphicsDevice : IGraphicsDevice
     public PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null) => throw Refuse();
 
     public IMaterialBindings CreateMaterial(
-        ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null) => throw Refuse();
+        ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null,
+        IReadOnlyDictionary<int, int>? blockSizes = null) => throw Refuse();
 
     public void DestroyMaterial(MaterialHandle handle) => throw Refuse();
 

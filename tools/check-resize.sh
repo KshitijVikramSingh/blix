@@ -22,7 +22,7 @@ RIG="${1:-src/Demos/Blix.Demos.Runner/Assets/models/Rogue.glb}"
 CLIP="${2:-Running_A}"
 LOG="$(mktemp "${TMPDIR:-/tmp}/blix-resize.XXXXXX")"
 
-./blix view --rig "$RIG" --clip "$CLIP" --instances 3 --frames 1200 > "$LOG" 2>&1 &
+./blix view --model "$RIG" --clip "$CLIP" --instances 3 --frames 1200 > "$LOG" 2>&1 &
 APP=$!
 sleep 12
 for wh in "900 600" "1500 950" "640 480" "1280 800" "1000 700"; do

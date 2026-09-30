@@ -97,9 +97,14 @@ public interface IGraphicsDevice : IDisposable
 
     // A material's own descriptor set for `program` (see IMaterialBindings). setIndex is where the
     // program declares its material resources, DescriptorSets.Material by convention; framesInFlight
-    // is how many copies to keep when the material is rewritten every frame.
+    // is how many copies to keep when the material is rewritten every frame. blockSizes gives each
+    // runtime-sized block in the set (one ending in an unsized array) its bytes, by binding: the
+    // shader owns the layout and the stride, the material owns the count, so one program serves
+    // palettes of any length. Refused: sizing a block the shader already fixed, leaving a
+    // runtime-sized block unsized, and a block past the device's buffer-range limit.
     IMaterialBindings CreateMaterial(
-        ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null);
+        ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null,
+        IReadOnlyDictionary<int, int>? blockSizes = null);
 
     void DestroyMaterial(MaterialHandle handle);
 
