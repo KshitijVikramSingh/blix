@@ -187,9 +187,8 @@ internal sealed partial class SponzaLoop
 
         using (debug.Scope("Indirect"))
         {
-            // Report a windowed injection cost beside the controls that affect it; see
-            // SampleGpuPassTimes.
-            var injectMs = GpuPassMs("sky-inject");
+            // Report a windowed injection cost beside the controls that affect it; see gpuPasses.
+            var injectMs = gpuPasses.MeanMs("sky-inject");
             debug.Values.Value("inject-gpu", lastFramePeriodMs > 0.01
                 ? $"{injectMs:0.00} ms ({injectMs / lastFramePeriodMs * 100.0:0.0}% of a {lastFramePeriodMs:0.0} ms frame)"
                 : $"{injectMs:0.00} ms");
@@ -213,18 +212,8 @@ internal sealed partial class SponzaLoop
             debug.Values.Value("probe-refresh", $"{rays} rays every {period:0}f");
         }
 
-        // Surface the same windowed pass timings used by the exit report. On tile-based GPUs these
-        // bracket encoder submission rather than deferred tiled execution, so they need not sum to
-        // the frame period and very small values are not proof that a pass is free.
-        using (debug.Scope("GPU passes"))
-        {
-            var passTotal = GpuPassTotalMs();
-            debug.Values.Value("encoded-total", $"{passTotal:0.00} ms (not the frame time)");
-            foreach (var (pass, ms) in GpuPassesByCost().Take(8))
-            {
-                debug.Values.Value(pass, $"{ms:0.000} ms");
-            }
-        }
+        // Per-pass GPU time, the CPU split and what was submitted are the Perf tab's now: Sponza read the
+        // host's timing record for them when the overlay did not.
 
         debug.Values.Value("shadow-map", $"{ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}");
         debug.Values.Value("splits-m", $"{cascadeSplits[1]:0}/{cascadeSplits[2]:0}/{cascadeSplits[3]:0}");
@@ -283,23 +272,5 @@ internal sealed partial class SponzaLoop
         debug.Values.Value("lod-popped", $"{popped} this frame, {holding} within {PopHoldSeconds:0.0}s");
         debug.Values.Value("lod-maxlevels", maxLevels);
         debug.Values.Value("lod-hist", $"{hist[0]}/{hist[1]}/{hist[2]}/{hist[3]} (err={render.LodErrorPixels:0.0}px)");
-
-        // --- Perf instrumentation: weigh where the frame actually goes -------
-        // CPU-phase split of the bundled `execute` timer. encode is the only
-        // phase draw-COUNT moves (recording vkCmds → Metal encoder calls), so
-        // it's the number A (batching) / B (GPU-driven indirect) would change;
-        // wait is the GPU/vsync throttle (high = GPU-bound, can't be cut by
-        // batching); submit is queue submit + present enqueue.
-        //
-        // Read from the host's frame timing, which is the backend's own record and is never drained
-        // by reading. Per-pass GPU ms is the runtime's `gpu/passes` timer scope as before.
-        if (host.Timing.LastFrame is { } cpu)
-        {
-            debug.Values.Value("cpu-wait", $"{cpu.WaitMs:0.00}ms");
-            debug.Values.Value("cpu-encode", $"{cpu.EncodeMs:0.00}ms");
-            debug.Values.Value("cpu-submit", $"{cpu.SubmitPresentMs:0.00}ms");
-            debug.Values.Value("submitted", string.Create(Inv,
-                $"{cpu.Work.Draws} draws, {cpu.Work.IndirectDraws} indirect ({cpu.Work.IndirectCommands} records), {cpu.Work.Triangles:N0} tris"));
-        }
     }
 }

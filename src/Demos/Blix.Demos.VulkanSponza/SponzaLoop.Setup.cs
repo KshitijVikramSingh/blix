@@ -32,6 +32,7 @@ internal sealed partial class SponzaLoop
     {
         this.host = host;
         device = graphicsDevice;
+        gpuPasses = new GpuPassWindow(host.Timing);
         textureLoader = new GltfTextureLoader(device);
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         renderHeightPx = host.LogicalSize.Height;

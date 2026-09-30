@@ -147,7 +147,7 @@ internal sealed partial class SponzaLoop
             return;
         }
 
-        SampleGpuPassTimes();
+        gpuPasses.Sample();
 
         // Built once, before the cascades, because they need it too: a caster is culled against
         // where its shadow could FALL, and that is the camera's frustum rather than the light's.
@@ -1419,37 +1419,10 @@ internal sealed partial class SponzaLoop
     };
 
     // --- live GPU pass cost ----------------------------------------------
-    // Difference cumulative timestamp totals from the prior sample and smooth that window. Lifetime
-    // means include loading and respond too slowly for live controls.
-    private readonly Dictionary<string, GpuPassTotal> gpuPassPrev = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, double> gpuPassMs = new(StringComparer.Ordinal);
-
-    private void SampleGpuPassTimes()
-    {
-        if (!host.Timing.GpuTimestampsSupported) return;
-        foreach (var (name, current) in host.Timing.GpuPassTotals)
-        {
-            var had = gpuPassPrev.TryGetValue(name, out var previous);
-            gpuPassPrev[name] = current;
-            if (!had) continue;
-            var window = current - previous;
-            if (window.Samples <= 0) continue;
-            var perFrame = window.MeanMs;
-            gpuPassMs[name] = gpuPassMs.TryGetValue(name, out var ema)
-                ? ema + (perFrame - ema) * 0.08
-                : perFrame;
-        }
-    }
-
-    /// <summary>Windowed GPU milliseconds for one pass, or 0 before it has been resolved twice.</summary>
-    internal double GpuPassMs(string pass) => gpuPassMs.TryGetValue(pass, out var v) ? v : 0.0;
-
-    /// <summary>The heaviest passes by windowed cost, for the overlay's live breakdown.</summary>
-    internal IEnumerable<KeyValuePair<string, double>> GpuPassesByCost() =>
-        gpuPassMs.OrderByDescending(e => e.Value);
-
-    /// <summary>Sum of every pass's windowed cost. NOT the frame time — see WritePassBreakdown.</summary>
-    internal double GpuPassTotalMs() => gpuPassMs.Values.Sum();
+    // The mean of the last 60 frames per pass, taken from the host's cumulative totals: the same window
+    // the overlay's Perf tab shows. It was an exponential average of Sponza's own; lifetime means include
+    // loading and respond too slowly for live controls.
+    private GpuPassWindow gpuPasses = new(FrameTimings.None);
 
     /// <summary>What the probe field actually holds, against what the inputs say it should.</summary>
     /// <remarks>

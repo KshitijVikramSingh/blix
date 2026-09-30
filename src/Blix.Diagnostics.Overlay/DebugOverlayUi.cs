@@ -107,7 +107,7 @@ public sealed class DebugOverlayUi
 
             if (ImGui.BeginTabItem("Perf"))
             {
-                DrawPerfReport(stats, timers);
+                DrawPerfReport(debugSystem, stats, timers);
                 ImGui.EndTabItem();
             }
 
@@ -1027,17 +1027,19 @@ public sealed class DebugOverlayUi
         }
     }
 
-    private void DrawPerfReport(IReadOnlyList<DebugStatEntry> stats, IReadOnlyList<DebugTimerEntry> timers)
+    private void DrawPerfReport(DebugSystem debugSystem, IReadOnlyList<DebugStatEntry> stats, IReadOnlyList<DebugTimerEntry> timers)
     {
         DrawPhasesTable(timers);
         ImGui.Spacing();
-        DrawPassesTable(stats, timers);
+        DrawDeviceFrame(debugSystem.Timing);
+        ImGui.Spacing();
+        DrawPassesTable(stats, timers, debugSystem.Timing, debugSystem.GpuPasses);
         ImGui.Spacing();
         DrawPacksTable(stats);
     }
 
-    // The Window-level phase timers — frame, build-commands, execute,
-    // overlay, run-debuggables, swap. Identified by root-scope timers
+    // The Window-level phase timers — frame, run-debuggables, build-commands,
+    // execute. Identified by root-scope timers
     // (Scope == ""): these are emitted at the top level, not under
     // "passes/" or anywhere else.
     private static void DrawPhasesTable(IReadOnlyList<DebugTimerEntry> timers)
@@ -1069,7 +1071,32 @@ public sealed class DebugOverlayUi
     // scope starts with "passes/" (DiagnosticsFrameRecorder convention)
     // or whose scope is exactly "gpu/passes" (Phase 7 GPU timing,
     // when enabled). Cols: pass, draws, tris, build-ms, gpu-ms.
-    private static void DrawPassesTable(IReadOnlyList<DebugStatEntry> stats, IReadOnlyList<DebugTimerEntry> timers)
+    // What the device says the last frame cost, which "execute" above is one lump of: the wait for the
+    // frame slot (GPU throttle and present pacing), recording the commands, and submitting them. And what
+    // reached the device, which can differ from what was recorded (a zero-instance draw submits nothing).
+    // Live even while frozen: the device keeps no history of these.
+    private static void DrawDeviceFrame(IFrameTiming timing)
+    {
+        if (timing.LastFrame is not { } last) return;
+        if (!ImGui.CollapsingHeader("Device frame", ImGuiTreeNodeFlags.DefaultOpen)) return;
+        ImGui.TextUnformatted(
+            $"wait {last.WaitMs:0.00} ms   encode {last.EncodeMs:0.00} ms   submit {last.SubmitPresentMs:0.00} ms");
+        var w = last.Work;
+        ImGui.TextUnformatted(
+            $"submitted: {w.Passes} passes, {w.Draws} draws, {w.Triangles:N0} tris, " +
+            $"{w.IndirectDraws} indirect ({w.IndirectCommands:N0} records), {w.Dispatches} dispatches");
+        if (timing.IsolatePasses)
+        {
+            ImGui.TextColored(InfoColor,
+                $"passes isolated: each submitted and timed alone ({timing.IsolatedFrames} frames); the frame runs slower");
+        }
+    }
+
+    // One row per pass: what the application recorded, what reached the device, the CPU time to build it,
+    // and its GPU time as a mean over the last frames (GpuPassWindow). With isolation on, the isolated
+    // per-run mean too.
+    private static void DrawPassesTable(
+        IReadOnlyList<DebugStatEntry> stats, IReadOnlyList<DebugTimerEntry> timers, IFrameTiming timing, GpuPassWindow gpu)
     {
         var passes = new SortedSet<string>(StringComparer.Ordinal);
         for (var i = 0; i < stats.Count; i++)
@@ -1081,17 +1108,13 @@ public sealed class DebugOverlayUi
         }
         for (var i = 0; i < timers.Count; i++)
         {
-            var t = timers[i];
-            if (TryExtractSegment(t.Scope, "passes/", out var name))
+            if (TryExtractSegment(timers[i].Scope, "passes/", out var name))
             {
                 passes.Add(name);
             }
-            // GPU timer convention: scope == "gpu/passes", name == passName.
-            if (t.Scope == "gpu/passes")
-            {
-                passes.Add(t.Name);
-            }
         }
+        foreach (var name in timing.LastFramePasses.Keys) passes.Add(name);
+        foreach (var (name, _) in gpu.ByCost()) passes.Add(name);
         if (passes.Count == 0)
         {
             return;
@@ -1100,7 +1123,9 @@ public sealed class DebugOverlayUi
         {
             return;
         }
-        if (!ImGui.BeginTable("perf-passes", 5,
+
+        var isolated = timing.IsolatePasses;
+        if (!ImGui.BeginTable("perf-passes", isolated ? 8 : 7,
             ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
         {
             return;
@@ -1108,57 +1133,45 @@ public sealed class DebugOverlayUi
         ImGui.TableSetupColumn("Pass");
         ImGui.TableSetupColumn("Draws");
         ImGui.TableSetupColumn("Tris");
+        ImGui.TableSetupColumn("Sent draws");
+        ImGui.TableSetupColumn("Sent tris");
         ImGui.TableSetupColumn("CPU ms");
-        ImGui.TableSetupColumn("GPU ms");
+        ImGui.TableSetupColumn($"GPU ms ({gpu.Spanned}f)");
+        if (isolated) ImGui.TableSetupColumn("Isolated ms");
         ImGui.TableHeadersRow();
-        var sawGpuPath = false;
-        var sawNonZeroGpu = false;
         foreach (var pass in passes)
         {
             ImGui.TableNextRow();
             ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted(pass);
             ImGui.TableSetColumnIndex(1); ImGui.Text(FormatStat(stats, $"passes/{pass}/draws", asCount: true));
             ImGui.TableSetColumnIndex(2); ImGui.Text(FormatStat(stats, $"passes/{pass}/triangles", asCount: true));
-            ImGui.TableSetColumnIndex(3); ImGui.Text(FormatTimerMs(timers, $"passes/{pass}/build"));
-
-            // GPU timer path is gpu/passes/<name>. Three possible states:
-            //   - timer absent ("-")     -> GPU timing disabled
-            //   - timer present, ms = 0  -> driver returned zeros
-            //                                (macOS GL through Metal
-            //                                doesn't actually measure
-            //                                per-pass time even when the
-            //                                extension is exposed)
-            //   - timer present, ms > 0  -> working
-            (var gpu, var ms) = LookupTimerMsRaw(timers, $"gpu/passes/{pass}");
-            ImGui.TableSetColumnIndex(4); ImGui.Text(gpu);
-            if (gpu != "-")
+            var sent = timing.LastFramePasses.TryGetValue(pass, out var work);
+            ImGui.TableSetColumnIndex(3); ImGui.Text(sent ? $"{work.Draws + work.IndirectDraws}" : "-");
+            ImGui.TableSetColumnIndex(4); ImGui.Text(sent ? $"{work.Triangles:N0}" : "-");
+            ImGui.TableSetColumnIndex(5); ImGui.Text(FormatTimerMs(timers, $"passes/{pass}/build"));
+            var ms = gpu.MeanMs(pass);
+            ImGui.TableSetColumnIndex(6); ImGui.Text(ms > 0.0 ? $"{ms:0.000}" : "-");
+            if (isolated)
             {
-                sawGpuPath = true;
-                if (ms > 0.0) sawNonZeroGpu = true;
+                var iso = timing.IsolatedPassTotals.TryGetValue(pass, out var total) ? total.MeanMs : 0.0;
+                ImGui.TableSetColumnIndex(7); ImGui.Text(iso > 0.0 ? $"{iso:0.000}" : "-");
             }
         }
         ImGui.EndTable();
 
-        if (!sawGpuPath)
+        if (!timing.GpuTimestampsSupported)
         {
-            ImGui.TextDisabled("GPU ms: timing disabled. Enable via Controls > SponzaModern/Perf > GPU timing.");
+            ImGui.TextDisabled("GPU ms: this device reports no GPU timestamps.");
         }
-        else if (!sawNonZeroGpu)
+        else
         {
+            // Sponza's report carried this and the overlay did not, so the overlay's numbers read as costs.
+            ImGui.PushTextWrapPos(0f);
             ImGui.TextDisabled(
-                "GPU ms: enabled but driver reports 0 for every pass. " +
-                "macOS GL routes timestamps through Metal and reports submit-time, not GPU-execute-time " +
-                "- timings are effectively unusable here. Linux/Windows drivers should populate normally.");
+                "GPU ms attribute, they do not decompose: on a tile-based GPU (Apple, through MoltenVK) a pass's " +
+                "timestamps bracket its encoding, so passes need not sum to the frame. Paired A/B runs give cost.");
+            ImGui.PopTextWrapPos();
         }
-    }
-
-    private static (string formatted, double ms) LookupTimerMsRaw(IReadOnlyList<DebugTimerEntry> timers, string path)
-    {
-        for (var i = 0; i < timers.Count; i++)
-        {
-            if (timers[i].Path == path) return ($"{timers[i].TotalMs:0.00}", timers[i].TotalMs);
-        }
-        return ("-", 0.0);
     }
 
     // Per-pack table — auto-discovers pack names from stats whose scope

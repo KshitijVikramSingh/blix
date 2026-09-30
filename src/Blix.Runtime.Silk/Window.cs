@@ -202,6 +202,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
             // Every application gets the device's contributor; it used to be opt-in, and two did.
             debugSystem.Register(new GraphicsDeviceContributor(graphicsDevice));
+            debugSystem.UseFrameTiming(graphicsDevice);
         }
 
         // <b>Built for anyone who wants a frame, not only for IDebuggable.</b> This used to live inside

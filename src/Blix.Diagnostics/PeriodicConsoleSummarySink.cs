@@ -49,7 +49,8 @@ public sealed class PeriodicConsoleSummarySink : IDebugFrameSink
 
         // Phase timers in canonical order. Skip ones the runtime didn't emit
         // so the line stays clean on minimal demos.
-        var phasePaths = new[] { "frame", "build-commands", "execute", "overlay", "swap", "run-debuggables" };
+        // The phases a host emits. "overlay" and "swap" were listed here long after nothing emitted them.
+        var phasePaths = new[] { "frame", "build-commands", "execute", "run-debuggables" };
         var phaseParts = new List<string>(phasePaths.Length);
         foreach (var path in phasePaths)
         {

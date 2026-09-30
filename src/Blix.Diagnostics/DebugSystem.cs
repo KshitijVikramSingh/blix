@@ -156,6 +156,29 @@ public sealed class DebugSystem
 
     public IReadOnlyList<IDebugContributor> Contributors => contributors;
 
+    // === Frame timing =======================================================
+
+    /// <summary>How the host's frames went: the device's own record, which the Perf tab reads.</summary>
+    /// <remarks>
+    /// <b>The overlay used to show a weaker copy of this.</b> One <c>execute</c> timer where the record
+    /// splits wait, encode and submit; what the application recorded where the record says what reached
+    /// the device; and a single frame's GPU time per pass where the record keeps totals a window can be
+    /// taken from. Sponza read the record itself to get the real figures. Display only: nothing here
+    /// feeds a dump, which is the measurement design's question.
+    /// </remarks>
+    public IFrameTiming Timing { get; private set; } = FrameTimings.None;
+
+    /// <summary>Each pass's GPU time over the last second or so, sampled at every EndFrame.</summary>
+    public GpuPassWindow GpuPasses { get; private set; } = new(FrameTimings.None);
+
+    /// <summary>Called by the host once it has a device.</summary>
+    public void UseFrameTiming(IFrameTiming timing)
+    {
+        ArgumentNullException.ThrowIfNull(timing);
+        Timing = timing;
+        GpuPasses = new GpuPassWindow(timing);
+    }
+
     // === Selection ==========================================================
 
     /// <summary>What is selected, which the inspector shows. Null if nothing.</summary>
@@ -421,6 +444,8 @@ public sealed class DebugSystem
         {
             return;
         }
+
+        GpuPasses.Sample();
 
         // Record the frame-level CPU timer before snapshot so it lands
         // inside the frozen entry list. The measurement spans BeginFrame
