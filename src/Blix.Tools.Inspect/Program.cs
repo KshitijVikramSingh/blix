@@ -149,24 +149,18 @@ public static class Program
             return 1;
         }
 
-        // Cooked on open: the hierarchy printed is the one the engine loads.
-        var model = new Blix.GltfStaticImporter().ImportNodes(
-            new Blix.Assets.AssetImportContext(
-                Blix.Assets.AssetId.Parse("inspect"), Blix.Recipes.CookCache.Resolve(path)));
-        var nodes = model.Nodes;
-
-        // Compose a node's world transform by walking up its parent chain (row-vector:
-        // child = local * parent). ImportNodes keeps every node in LOCAL space, so this
-        // is where the assembled placement comes from.
-        Matrix4x4 World(int i)
-        {
-            var m = nodes[i].LocalTransform;
-            for (var p = nodes[i].ParentIndex; p >= 0; p = nodes[p].ParentIndex) m *= nodes[p].LocalTransform;
-            return m;
-        }
+        // Cooked on open: the hierarchy printed is the one the engine loads. Read static, so a rigged
+        // file's skinned meshes report at their bind pose.
+        var model = Blix.ModelData.Load(Blix.Recipes.CookCache.Resolve(path), new Blix.ModelNeeds(Skinned: false));
+        var nodes = model.Nodes
+            .Select(n => (n.Name, n.ParentIndex, Primitives: n.MeshIndex < 0
+                ? (IReadOnlyList<Blix.ModelData.Primitive>)Array.Empty<Blix.ModelData.Primitive>()
+                : model.Meshes[n.MeshIndex].Primitives))
+            .ToArray();
+        Matrix4x4 World(int i) => model.World[i];
 
         var meshNodes = 0;
-        foreach (var n in nodes) if (n.Primitives.Length > 0) meshNodes++;
+        foreach (var n in nodes) if (n.Primitives.Count > 0) meshNodes++;
         Console.WriteLine($"{Path.GetFileName(path)}: {nodes.Length} nodes, {meshNodes} mesh-bearing");
         Console.WriteLine("  (mesh nodes show composed-world scale/translation [= rig PIVOT] + assembled bounds)");
 
@@ -182,7 +176,7 @@ public static class Program
         {
             var n = nodes[i];
             var indent = new string(' ', 2 + Depth(i) * 2);
-            if (n.Primitives.Length == 0)
+            if (n.Primitives.Count == 0)
             {
                 // Transform-only node — list it (it may be an armature pivot) but keep it terse.
                 Console.WriteLine($"{indent}[{i,3}] {n.Name}  (no mesh, parent={n.ParentIndex})");
@@ -211,7 +205,7 @@ public static class Program
             }
             Matrix4x4.Decompose(w, out var scale, out _, out var trans);
             Console.WriteLine(
-                $"{indent}[{i,3}] {n.Name}  parent={n.ParentIndex} prims={n.Primitives.Length} verts={verts}");
+                $"{indent}[{i,3}] {n.Name}  parent={n.ParentIndex} prims={n.Primitives.Count} verts={verts}");
             Console.WriteLine(
                 $"{indent}      pivot/trans=({trans.X:0.###}, {trans.Y:0.###}, {trans.Z:0.###})  " +
                 $"scale=({scale.X:0.###}, {scale.Y:0.###}, {scale.Z:0.###})");
@@ -219,7 +213,7 @@ public static class Program
                 $"{indent}      bounds X[{min.X:0.##}, {max.X:0.##}]  Y[{min.Y:0.##}, {max.Y:0.##}]  Z[{min.Z:0.##}, {max.Z:0.##}]");
         }
 
-        ReportMaterialExtensions(nodes);
+        ReportMaterialExtensions(nodes.SelectMany(n => n.Primitives));
         return 0;
     }
 
@@ -228,15 +222,14 @@ public static class Program
     /// Materials without extensions stay quiet; declared extension values are printed so source and
     /// cooked interpretations can be compared without rendering.
     /// </remarks>
-    private static void ReportMaterialExtensions(IReadOnlyList<Blix.GltfNode> nodes)
+    private static void ReportMaterialExtensions(IEnumerable<Blix.ModelData.Primitive> primitives)
     {
         // The source side carries a resolved texture rather than a table row -- see Img() in the
         // cooked report for why either is worth printing at all.
         static string Tex(Blix.GltfTexture? t) => t is null ? string.Empty : $" tex:{t.Name}";
 
         var seen = new Dictionary<string, List<string>>(StringComparer.Ordinal);
-        foreach (var n in nodes)
-        foreach (var prim in n.Primitives)
+        foreach (var prim in primitives)
         {
             var m = prim.Material;
             if (m is null || seen.ContainsKey(m.Name)) continue;

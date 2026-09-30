@@ -58,10 +58,11 @@ public static class Program
     /// </remarks>
     private static readonly string[] Judged = { ".gltf", ".glb", ".obj", ".blixmesh" };
 
-    /// <summary>Routes each supported path through its normal source-or-cooked importer.</summary>
+    /// <summary>Loads each supported path the way the engine does: a model from its cooked file.</summary>
     /// <remarks>
-    /// glTF tries the rigged importer first and uses its named no-rig refusal to select the static
-    /// path. OBJ uses <see cref="WavefrontParts"/> because it can round-trip multipart cooked files.
+    /// The engine reads cooked models only, so a glTF is judged by the <c>.blixmesh</c> beside it, and
+    /// one with none is refused. OBJ uses <see cref="WavefrontParts"/>, which still reads a cooked
+    /// sibling when it has one.
     /// </remarks>
     private static void LoadAsUsed(string source)
     {
@@ -75,23 +76,16 @@ public static class Program
             return;
         }
 
-        // A standalone cooked mesh routes by its stored skin table.
-        if (Path.GetExtension(source).Equals(".blixmesh", StringComparison.OrdinalIgnoreCase))
+        var cooked = Path.GetExtension(source).Equals(".blixmesh", StringComparison.OrdinalIgnoreCase)
+            ? source
+            : Path.ChangeExtension(source, ".blixmesh");
+        if (!File.Exists(cooked))
         {
-            var id = AssetId.Parse("check/cooked");
-            if (BlixMeshReader.Read(source).IsRigged) new GltfImporter().Import(new AssetImportContext(id, source));
-            else new GltfStaticImporter().Import(new AssetImportContext(id, source));
-            return;
+            throw new AssetImportException(
+                source, null, "has no cooked .blixmesh beside it, and the engine loads cooked models only — cook it");
         }
 
-        try
-        {
-            new GltfImporter().Import(new AssetImportContext(AssetId.Parse("check/rig"), source));
-        }
-        catch (AssetImportException noSkin) when (noSkin.Message.Contains("no rig here", StringComparison.Ordinal))
-        {
-            new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("check/cooked"), source));
-        }
+        ModelData.Load(cooked, new ModelNeeds(Skinned: true));
     }
 
     /// <summary>Loads every supported asset under a directory and fails on non-cooked loads.</summary>
@@ -199,30 +193,27 @@ public static class Program
 
         var problems = 0;
 
-        // Cooked on open, so the probe checks what the engine would draw; the cooked file says
-        // whether it is a rig.
-        var cooked = Blix.Recipes.CookCache.Resolve(path);
-        var rigged = BlixMeshReader.Read(cooked).IsRigged;
-        GltfModel imported = rigged
-            ? new GltfImporter().Import(new AssetImportContext(AssetId.Parse("probe"), cooked))
-            : new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("probe"), cooked));
+        // Cooked on open, so the probe checks what the engine would draw.
+        var imported = ModelData.Load(Blix.Recipes.CookCache.Resolve(path), new ModelNeeds(Skinned: true));
+        var rigged = imported.IsRigged;
+        var primitives = rigged ? imported.SkinnedPrimitives().Count() : imported.Flattened().Count();
 
         Console.WriteLine($"{Path.GetFileName(path)}");
         Console.WriteLine(
-            $"  {imported.Primitives.Length} primitive(s), " +
+            $"  {primitives} primitive(s), " +
             (rigged
-                ? $"{imported.Skeleton.BoneCount} bone(s), {imported.Animations.Length} clip(s)"
+                ? $"{imported.Skins[0].Skeleton.BoneCount} bone(s), {imported.Clips.Count} clip(s)"
                 : "static — no skin, so no bones or clips to check"));
         if (rigged)
         {
             Console.WriteLine(
-                imported.MeshNodeTransform.IsIdentity
+                imported.Placement(0).IsIdentity
                     ? "  mesh-node transform: identity"
                     : "  mesh-node transform: NOT identity — the asset orients itself at a parent node, " +
                       "so uModel must compose with it");
         }
 
-        foreach (var clip in imported.Animations.OrderBy(c => c.Name, StringComparer.Ordinal))
+        foreach (var clip in imported.Clips.OrderBy(c => c.Name, StringComparer.Ordinal))
         {
             var translation = clip.Tracks.Count(t => t.Translation is not null);
             var rotation = clip.Tracks.Count(t => t.Rotation is not null);
@@ -255,16 +246,32 @@ public static class Program
         }
 
         var problems = 0;
-        var imported = new GltfImporter().Import(
-            new AssetImportContext(AssetId.Parse("probe.rig"), Blix.Recipes.CookCache.Resolve(path)));
-        var skeleton = imported.Skeleton;
+        var imported = ModelData.Load(Blix.Recipes.CookCache.Resolve(path), new ModelNeeds(Colour: true, Skinned: true));
+        if (!imported.IsRigged)
+        {
+            Console.Error.WriteLine($"{Path.GetFileName(path)}: no node has a skin, so there is no rig here — probe it as a model.");
+            return 1;
+        }
 
+        var skeleton = imported.Skins[0].Skeleton;
+
+        // Attachments and static parts as the rig reads them: an unskinned mesh node under a joint,
+        // and every other unskinned mesh node.
+        var carried = imported.Attachments();
+        var carriedNodes = carried.Select(a => a.NodeIndex).ToHashSet();
+        var attachments = carried.Select(a => (
+            Name: imported.Nodes[a.NodeIndex].Name,
+            JointName: imported.Nodes[a.JointNode].Name,
+            JointIndex: a.BoneIndex,
+            Primitives: imported.Meshes[imported.Nodes[a.NodeIndex].MeshIndex].Primitives)).ToArray();
+        var staticParts = Enumerable.Range(0, imported.Nodes.Count)
+            .Where(n => imported.Nodes[n].MeshIndex >= 0 && imported.Nodes[n].SkinIndex < 0 && !carriedNodes.Contains(n))
+            .Select(n => (Name: imported.Nodes[n].Name, Primitives: imported.Meshes[imported.Nodes[n].MeshIndex].Primitives))
+            .ToArray();
         Console.WriteLine($"{Path.GetFileName(path)}");
-        var attachments = imported.AttachmentsOrEmpty;
-        var staticParts = imported.StaticPartsOrEmpty;
         Console.WriteLine(
-            $"  {skeleton.BoneCount} bone(s), {imported.Animations.Length} clip(s), " +
-            $"{imported.Primitives.Length} skinned primitive(s), {attachments.Length} attachment(s), " +
+            $"  {skeleton.BoneCount} bone(s), {imported.Clips.Count} clip(s), " +
+            $"{imported.SkinnedPrimitives().Count()} skinned primitive(s), {attachments.Length} attachment(s), " +
             $"{staticParts.Length} static part(s)");
 
         // ── Static parts and attachments ───────────────────────────────────
@@ -276,7 +283,7 @@ public static class Program
             {
                 var verts = sp.Primitives.Sum(p => p.Mesh.VertexCount);
                 Console.WriteLine(
-                    $"    {sp.Name,-22} static, on no joint      {sp.Primitives.Length} prim, {verts,6} verts");
+                    $"    {sp.Name,-22} static, on no joint      {sp.Primitives.Count} prim, {verts,6} verts");
             }
         }
 
@@ -288,7 +295,7 @@ public static class Program
                 var verts = a.Primitives.Sum(p => p.Mesh.VertexCount);
                 Console.WriteLine(
                     $"    {a.Name,-22} on {a.JointName,-14} bone[{a.JointIndex,2}]  " +
-                    $"{a.Primitives.Length} prim, {verts} verts");
+                    $"{a.Primitives.Count} prim, {verts} verts");
             }
 
             // Several alternatives may share one joint; a caller normally selects one.
@@ -347,7 +354,7 @@ public static class Program
         // ── World-space joint positions and deformation reach ──────────────
         // Weighted bones deform vertices; promoted ancestors are required to draw those chains
         // without gaps. Control bones may appear in neither set.
-        var weighted = SkinningAnalysis.FindWeightedBones(skeleton, imported.Primitives);
+        var weighted = SkinningAnalysis.FindWeightedBones(skeleton, imported.SkinnedPrimitives().Select(p => p.Mesh));
         var deform = SkinningAnalysis.IncludeAncestors(skeleton, weighted);
         var weightedCount = weighted.Count(b => b);
         var deformCount = deform.Count(b => b);
@@ -389,7 +396,7 @@ public static class Program
         var rootBone = RootMotion.DefaultRootBone(skeleton);
         Console.WriteLine($"  root bone: {rootBone} '{skeleton.Bones[rootBone].Name}'");
 
-        foreach (var clip in imported.Animations.OrderBy(c => c.Name, StringComparer.Ordinal))
+        foreach (var clip in imported.Clips.OrderBy(c => c.Name, StringComparer.Ordinal))
         {
             // Zero-length clips are held poses; sample them once at t=0.
             if (clip.Duration <= 0.0)
@@ -495,7 +502,7 @@ public static class Program
         }
 
         Console.WriteLine(
-            $"  {imported.Animations.Length - poses} timed clip(s), {poses} pose(s), " +
+            $"  {imported.Clips.Count - poses} timed clip(s), {poses} pose(s), " +
             $"{travelling} with root travel");
 
         if (problems == 0) return 0;

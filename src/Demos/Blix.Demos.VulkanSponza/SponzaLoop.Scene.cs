@@ -13,22 +13,19 @@ namespace Blix.Demos.VulkanSponza;
 
 internal sealed partial class SponzaLoop
 {
-    // Background, parallel: each pack gets its own importer (no shared state) and
-    // is parsed to CPU geometry/material data. flipTextureV matches the cook's
-    // --flip-v (Intel Sponza is bottom-up); includeTangents forwards the glTF
-    // TANGENT for the lit TBN. Returns models in pack order (main first).
-    private static List<(string Name, GltfModel Model)> ParsePacksParallel(
+    // Background, parallel: each cooked pack is read to CPU geometry/material data, flattened into
+    // world space, with tangents for the lit TBN. Returns primitives in pack order (main first).
+    private static List<(string Name, ModelData.Primitive[] Primitives)> ParsePacksParallel(
         List<(string Name, string Path, string AssetId)> packs)
     {
-        var parsed = new (string Name, GltfModel Model)?[packs.Count];
+        var parsed = new (string Name, ModelData.Primitive[] Primitives)?[packs.Count];
         System.Threading.Tasks.Parallel.For(0, packs.Count, i =>
         {
             var p = packs[i];
             try
             {
-                var model = new GltfStaticImporter().Import(
-                    new AssetImportContext(AssetId.Parse(p.AssetId), p.Path, includeTangents: true));
-                parsed[i] = (p.Name, model);
+                var model = ModelData.Load(p.Path, new ModelNeeds(Tangents: true, Skinned: false));
+                parsed[i] = (p.Name, model.Flattened().Select(x => x.Primitive).ToArray());
             }
             catch (Exception ex)
             {
@@ -171,7 +168,7 @@ internal sealed partial class SponzaLoop
     // Materials are cached by GltfMaterial so primitives sharing a material reuse
     // one handle + descriptor set. Called incrementally (time-sliced) during the
     // streaming load — the material's texture read+upload is the bulk of the cost.
-    private void StageDrawable(GltfPrimitive prim)
+    private void StageDrawable(ModelData.Primitive prim)
     {
         {
             var pm = prim.Material;

@@ -132,6 +132,27 @@ public sealed class ModelData
         return found;
     }
 
+    /// <summary>The primitives <paramref name="skin"/> deforms, in node order: what a skinned draw of it uploads.</summary>
+    public IEnumerable<Primitive> SkinnedPrimitives(int skin = 0)
+    {
+        for (var n = 0; n < Nodes.Count; n++)
+        {
+            if (Nodes[n].SkinIndex != skin || Nodes[n].MeshIndex < 0) continue;
+            foreach (var p in Meshes[Nodes[n].MeshIndex].Primitives) yield return p;
+        }
+    }
+
+    /// <summary>The first node with this name, or -1.</summary>
+    public int FindNode(string name)
+    {
+        for (var n = 0; n < Nodes.Count; n++)
+        {
+            if (string.Equals(Nodes[n].Name, name, StringComparison.Ordinal)) return n;
+        }
+
+        return -1;
+    }
+
     /// <summary>Every primitive a node places, moved to that node's world: the scene as one flat list.</summary>
     /// <remarks>A skinned mesh read skinned stays in mesh space here; only static vertices are moved.</remarks>
     public IEnumerable<(int NodeIndex, Primitive Primitive)> Flattened()
@@ -148,7 +169,10 @@ public sealed class ModelData
     }
 
     /// <summary>Reads a cooked model, its vertices in the layout <paramref name="needs"/> declares.</summary>
-    public static ModelData Load(string path, ModelNeeds needs = default)
+    public static ModelData Load(string path, ModelNeeds needs = default) => Load(path, needs, requested: path);
+
+    /// <param name="requested">What the caller asked for, which the load log reports as its source.</param>
+    internal static ModelData Load(string path, ModelNeeds needs, string requested)
     {
         ArgumentNullException.ThrowIfNull(path);
         if (!path.EndsWith(".blixmesh", StringComparison.OrdinalIgnoreCase))
@@ -158,6 +182,7 @@ public sealed class ModelData
                 "the engine reads cooked models only — cook it (`blix cook asset`), or open it through a tool, which cooks on open");
         }
 
+        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         var file = BlixMeshReader.Read(path);
         var cookedDir = Path.GetDirectoryName(Path.GetFullPath(path)) ?? string.Empty;
         var textureCache = new Dictionary<int, GltfTexture>();
@@ -212,6 +237,14 @@ public sealed class ModelData
 
         var nodes = file.Nodes.Select(n => new Node(n.Name, n.ParentIndex, n.LocalTransform, n.MeshIndex, n.SkinIndex)).ToArray();
         var ignored = file.IgnoredTable.Select(i => new GltfIgnored(i.Semantic, i.Primitives)).ToArray();
+        if (AssetLoadLog.Enabled)
+        {
+            AssetLoadLog.Report(new AssetLoadReport(
+                SourcePath: requested, CookedPath: path, Mode: AssetLoadMode.Cooked,
+                Bytes: new FileInfo(path).Length, LoadMs: loadWatch.Elapsed.TotalMilliseconds,
+                Recipe: file.Cooked?.Stamp.Recipe));
+        }
+
         return new ModelData(nodes, meshes, skins, clips, ignored, path);
     }
 

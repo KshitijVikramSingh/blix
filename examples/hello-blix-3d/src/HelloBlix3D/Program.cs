@@ -34,11 +34,13 @@ public static class Program
     [BlixApp("hello-3d-check", Summary = "read the character headless and check the stage can play it")]
     public static int Check()
     {
-        var character = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("rogue"), Stage.Character));
-        var clips = character.Animations.Select(clip => clip.Name).ToHashSet();
-        var correct = character.Skeleton.BoneCount > 0 && clips.Contains(Playback.Opening);
+        // The same cooked character the stage draws: the stage cooks on open, and so does this.
+        var character = ModelData.Load(Blix.Recipes.CookCache.Resolve(Stage.Character), new ModelNeeds(Skinned: true));
+        var bones = character.IsRigged ? character.Skins[0].Skeleton.BoneCount : 0;
+        var clips = character.Clips.Select(clip => clip.Name).ToHashSet();
+        var correct = bones > 0 && clips.Contains(Playback.Opening);
         Console.WriteLine(correct
-            ? $"hello-3d-check: {character.Skeleton.BoneCount} bones, {clips.Count} clips, opening on {Playback.Opening}"
+            ? $"hello-3d-check: {bones} bones, {clips.Count} clips, opening on {Playback.Opening}"
             : $"hello-3d-check: the character has no bones, or no clip called {Playback.Opening}");
         return correct ? 0 : 1;
     }

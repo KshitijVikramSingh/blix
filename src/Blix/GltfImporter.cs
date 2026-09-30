@@ -75,7 +75,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
     private GltfModel ImportCookedRig(AssetImportContext context, string rigPath, BlixMeshFile cooked)
     {
         var loadWatch = System.Diagnostics.Stopwatch.StartNew();
-        var data = ModelData.Load(rigPath, new ModelNeeds(Colour: true, Skinned: true));
+        var data = ModelData.Load(rigPath, new ModelNeeds(Colour: true, Skinned: true), requested: context.SourcePath);
 
         GltfPrimitive[] Primitives(int node, int skin) => data.Meshes[data.Nodes[node].MeshIndex].Primitives
             .Select(p => new GltfPrimitive(p.Mesh, p.Material, SkinIndex: skin, MaterialIndex: p.MaterialIndex)).ToArray();
@@ -104,17 +104,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             .Select(n => new GltfStaticPart(data.Nodes[n].Name, data.World[n], Primitives(n, 0)))
             .ToArray();
 
-        if (AssetLoadLog.Enabled)
-        {
-            AssetLoadLog.Report(new AssetLoadReport(
-                SourcePath: context.SourcePath,
-                CookedPath: rigPath,
-                Mode: AssetLoadMode.Cooked,
-                Bytes: SourceLength(rigPath),
-                LoadMs: loadWatch.Elapsed.TotalMilliseconds,
-                Recipe: cooked.Cooked?.Stamp.Recipe));
-        }
-
+        // ModelData.Load reported the cooked load.
         return new GltfModel(
             skinned.ToArray(), bindings[0].Skeleton, data.Clips.ToArray(), bindings[0].MeshNodeTransform,
             attachments, staticParts, Array.Empty<GltfIgnored>(), bindings);

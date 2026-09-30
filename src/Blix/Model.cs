@@ -250,7 +250,7 @@ public sealed class Model : IDisposable
             .Where(n => n.MeshIndex >= 0 && source.Meshes[n.MeshIndex].Skinned)
             .SelectMany(n => source.Meshes[n.MeshIndex].Primitives.Select(p => new GltfPrimitive(p.Mesh, p.Material, SkinIndex: n.SkinIndex)))
             .ToArray();
-        var weighted = SkinningAnalysis.FindWeightedBones(model.skins[0].Skeleton, skinnedPrimitives);
+        var weighted = SkinningAnalysis.FindWeightedBones(model.skins[0].Skeleton, skinnedPrimitives.Select(p => p.Mesh));
         model.WeightedBones = weighted;
         model.DeformHierarchy = SkinningAnalysis.IncludeAncestors(model.skins[0].Skeleton, weighted);
 

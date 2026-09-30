@@ -723,11 +723,11 @@ internal sealed partial class SponzaLoop
         }
         meshLoad.Start(() =>
         {
-            var prims = new List<GltfPrimitive>();
-            foreach (var (name, model) in ParsePacksParallel(packsToParse))
+            var prims = new List<ModelData.Primitive>();
+            foreach (var (name, primitives) in ParsePacksParallel(packsToParse))
             {
-                prims.AddRange(model.Primitives);
-                Console.WriteLine($"[VulkanSponza] {name} pack: {model.Primitives.Length} primitives.");
+                prims.AddRange(primitives);
+                Console.WriteLine($"[VulkanSponza] {name} pack: {primitives.Length} primitives.");
             }
             return prims;
         });
@@ -763,7 +763,7 @@ internal sealed partial class SponzaLoop
         var found = FirstAsset(mainPackDir);
         if (found is null)
         {
-            Console.WriteLine($"[VulkanSponza] No .blixmesh or .gltf in {mainPackDir}. Re-run tools/setup-sponza-modern.sh.");
+            Console.WriteLine($"[VulkanSponza] No .blixmesh in {mainPackDir}. Cook it: tools/cook-sponza-modern.sh.");
             host.RequestClose();
             return false;
         }
@@ -866,14 +866,13 @@ internal sealed partial class SponzaLoop
         if (asset is not null) packs.Add((packDirName, asset, assetId));
     }
 
-    /// <summary>Returns the pack's cooked mesh when present, otherwise its source glTF.</summary>
+    /// <summary>Returns the pack's cooked mesh, or null when the pack has not been cooked.</summary>
     /// <remarks>
     /// A cooked pack is self-contained through <c>.blixmesh</c> material/image metadata and sibling
-    /// <c>.blixtex</c> files. Source glTF remains a supported fallback for uncooked checkouts.
+    /// <c>.blixtex</c> files. The engine reads cooked models only, so a pack of sources is not one.
     /// </remarks>
     private static string? FirstAsset(string packDir) =>
-        Directory.EnumerateFiles(packDir, "*.blixmesh", SearchOption.TopDirectoryOnly).FirstOrDefault()
-        ?? Directory.EnumerateFiles(packDir, "*.gltf", SearchOption.TopDirectoryOnly).FirstOrDefault();
+        Directory.EnumerateFiles(packDir, "*.blixmesh", SearchOption.TopDirectoryOnly).FirstOrDefault();
 
     // Procedural-sky IBL fallback (no cooked .blixprobe). The synthesis lives in
     // the demo-owned ProceduralSky helper; this just binds the result.

@@ -76,7 +76,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         // Flat: every primitive a node places, moved to where the scene puts it. A skinned mesh reads
         // at its bind pose, as the source's static path always drew one.
         var data = ModelData.Load(
-            blixmeshPath, new ModelNeeds(context.IncludeTangents, context.IncludeColour, Skinned: false));
+            blixmeshPath, new ModelNeeds(context.IncludeTangents, context.IncludeColour, Skinned: false), requested: requestedPath);
         var primitives = new List<GltfPrimitive>();
         foreach (var (_, p) in data.Flattened())
         {
@@ -87,19 +87,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             primitives.Add(new GltfPrimitive(p.Mesh, p.Material));
         }
 
-        if (AssetLoadLog.Enabled)
-        {
-            // SourcePath remains the caller's requested identity; CookedPath records the artifact
-            // that satisfied it.
-            AssetLoadLog.Report(new AssetLoadReport(
-                SourcePath: requestedPath,
-                CookedPath: blixmeshPath,
-                Mode: AssetLoadMode.Cooked,
-                Bytes: SafeLength(blixmeshPath),
-                LoadMs: loadWatch.Elapsed.TotalMilliseconds,
-                Recipe: CookedFile.TryReadHeader(blixmeshPath)?.Stamp.Recipe));
-        }
-
+        // ModelData.Load reported the cooked load.
         return new GltfModel(
             primitives.ToArray(),
             new Skeleton(Array.Empty<Bone>()),

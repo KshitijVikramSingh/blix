@@ -1,3 +1,4 @@
+using Blix.Assets;
 using Blix.Graphics;
 
 namespace Blix;
@@ -8,15 +9,14 @@ public static class SkinningAnalysis
     /// <summary>Which bones carry at least one non-zero vertex weight.</summary>
     public static bool[] FindWeightedBones(
         Skeleton skeleton,
-        IReadOnlyList<GltfPrimitive> primitives)
+        IEnumerable<MeshData> meshes)
     {
         ArgumentNullException.ThrowIfNull(skeleton);
-        ArgumentNullException.ThrowIfNull(primitives);
+        ArgumentNullException.ThrowIfNull(meshes);
 
         var weighted = new bool[skeleton.BoneCount];
-        foreach (var primitive in primitives)
+        foreach (var mesh in meshes)
         {
-            var mesh = primitive.Mesh;
             var indexAttribute = Attribute(mesh.Layout, location: 3);
             var weightAttribute = Attribute(mesh.Layout, location: 4);
             if (indexAttribute < 0 || weightAttribute < 0) continue;

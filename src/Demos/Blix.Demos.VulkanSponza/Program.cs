@@ -780,7 +780,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // Background pack parse + budgeted main-thread drain (engine primitive):
     // started in OnLoad, drained by TryFinishLoad in OnUpdate. Produces the flat
     // primitive list off-thread; staging runs on the render thread.
-    private readonly Blix.Render.AsyncLoadQueue<GltfPrimitive> meshLoad = new();
+    private readonly Blix.Render.AsyncLoadQueue<ModelData.Primitive> meshLoad = new();
 
     // Per-frame-reused, content-constant buffers built once at load (avoids
     // re-allocating them every frame). identityPush: the per-draw model push

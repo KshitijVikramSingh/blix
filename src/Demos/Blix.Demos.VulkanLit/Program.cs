@@ -323,20 +323,17 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         }
 
         // --- Skinned model: cesium_man.glb -------------------------------
-        var assetPath = AppFiles.Asset("models", "cesium_man.glb");
-        var importer = new GltfImporter();
-        var importCtx = new AssetImportContext(AssetId.Parse("models/cesium_man"), assetPath);
-        var cesiumModel = importer.Import(importCtx);
-        if (cesiumModel.Animations.Length == 0)
+        var cesiumModel = ModelData.Load(AppFiles.Asset("models", "cesium_man.blixmesh"), new ModelNeeds(Skinned: true));
+        if (cesiumModel.Clips.Count == 0)
         {
-            throw new InvalidOperationException("cesium_man.glb has no animations.");
+            throw new InvalidOperationException("cesium_man has no animations.");
         }
-        cesiumSkeleton = cesiumModel.Skeleton;
+        cesiumSkeleton = cesiumModel.Skins[0].Skeleton;
         cesiumRestPose = cesiumSkeleton.CreateRestPose();
         cesiumPose = cesiumSkeleton.CreateRestPose();
         cesiumPalette = new BonePalette(cesiumSkeleton.BoneCount);
-        cesiumAnimation = cesiumModel.Animations[0];
-        cesiumMeshNodeTransform = cesiumModel.MeshNodeTransform;
+        cesiumAnimation = cesiumModel.Clips[0];
+        cesiumMeshNodeTransform = cesiumModel.Placement(0);
         cesiumPalettePayload = new byte[cesiumSkeleton.BoneCount * 64];
 
         // First primitive only — CesiumMan is a single-primitive mesh.
@@ -344,7 +341,7 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         // This upload used to read prim.Mesh.Indices directly and take its Length as the count,
         // which is correct for CesiumMan and silently wrong for any asset large enough to carry
         // 32-bit indices. CreateMesh makes that branch the engine's rather than each caller's.
-        var prim = cesiumModel.Primitives[0];
+        var prim = cesiumModel.SkinnedPrimitives().First();
         cesiumMesh = device.CreateMesh(prim.Mesh, "cesium");
 
         // Cesium albedo: prefer the glTF's BaseColorTexture; fall back to a
