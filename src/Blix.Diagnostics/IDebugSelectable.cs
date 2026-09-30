@@ -9,20 +9,21 @@ namespace Blix.Diagnostics;
 // entities (GltfSceneInstance and its submeshes) appends N.
 //
 // Picking flow: the engine picks. With the overlay up and pick mode armed (the
-// Pick switch in the status bar, or Alt held), a click becomes a ray through
-// the view it landed in (Blix.ViewPicking.RayThrough), and every box it crosses
-// is listed on the Selections tab, nearest entry first (DebugSystem.PickAlong).
-// The reader chooses from the list: boxes say where a thing might be, not where
-// its surface is, so no rule for choosing one box was right everywhere.
-// This used to be the application's job: Sponza wrote the ray, the raycast,
-// the multi-select and the secondary highlights itself, around a runtime that
-// held one path and a copy of its bounds.
+// Pick switch in the status bar, or Alt held), a click asks what is under the
+// cursor, and the host answers by drawing every selectable's geometry into the
+// one pixel under it with an ID per selectable, then reading that pixel back.
+// The answer is exact: no box and no ray is involved. Clicking again at the same
+// spot leaves the hit out and reaches what is behind it.
 //
-// What stays with the producer is WHAT IS THERE: which entities exist, how they
-// are stored, what their bounds mean, and what selecting one does. The engine
-// supplies the ray, the rule and the set; the world is the application's. Tool
-// and gameplay picking (a viewer's joints, a tower-defence grid cell) are not
-// this: they are the application's own, and use ViewPicking directly.
+// This used to be the application's job (Sponza wrote the ray, the raycast, the
+// multi-select and the highlights), and then a ray against these bounds, which
+// picked the air under a vault: a box says where a thing might be, not where its
+// surface is. Bounds remain, for drawing the highlight only.
+//
+// What stays with the producer is WHAT IS THERE: which entities exist, their
+// geometry, and what selecting one does. Tool and gameplay picking (a viewer's
+// joints, a tower-defence grid cell) are not this: they are the application's
+// own, and use ViewPicking directly.
 public interface IDebugSelectable : IDebugContributor
 {
     void CollectSelectables(List<DebugSelectable> destination);

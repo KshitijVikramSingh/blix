@@ -89,7 +89,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
 
     // What the primitive is, then the one edit that belongs to it: its LOD margin, which coarsens or
     // sharpens that primitive alone against the global budget. Declared here so it sits on the
-    // Selections tab beside what it edits. Nothing is saved.
+    // Selection tab beside what it edits. Nothing is saved.
     public void Inspect(string entityPath, DebugContext debug)
     {
         sceneSelection.Inspect(entityPath, debug);
@@ -1031,13 +1031,13 @@ internal sealed class SceneSelection
     private readonly record struct Entry(string Name, Bounds3 Bounds, int LodLevels, float MaxError);
 
     public void Rebuild(
-        IReadOnlyList<(string Path, string Name, Bounds3 Bounds, int LodLevels, float MaxError)> items)
+        IReadOnlyList<(string Path, string Name, Bounds3 Bounds, DebugPickGeometry Geometry, int LodLevels, float MaxError)> items)
     {
         selectables.Clear();
         byPath.Clear();
         foreach (var it in items)
         {
-            selectables.Add(new DebugSelectable(it.Path, it.Bounds, it.Name));
+            selectables.Add(new DebugSelectable(it.Path, it.Bounds, it.Geometry, it.Name));
             byPath[it.Path] = new Entry(it.Name, it.Bounds, it.LodLevels, it.MaxError);
         }
     }

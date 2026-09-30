@@ -66,7 +66,7 @@ internal sealed partial class SponzaLoop
     // panel work. Paths are session-stable (bucket + index); nothing persists.
     private void RegisterSelectables()
     {
-        var items = new List<(string Path, string Name, Bounds3 Bounds, int LodLevels, float MaxError)>(
+        var items = new List<(string Path, string Name, Bounds3 Bounds, DebugPickGeometry Geometry, int LodLevels, float MaxError)>(
             opaqueDrawables.Count + blendDrawables.Count);
         void Add(string bucket, List<Drawable> list)
         {
@@ -74,7 +74,12 @@ internal sealed partial class SponzaLoop
             {
                 var d = list[i];
                 var maxErr = d.LodErrors.Length > 0 ? d.LodErrors[^1] : 0f;
-                items.Add(($"scene/{bucket}/{i}", d.Name, d.Bounds, d.LodIndexCounts.Length, maxErr));
+                // The full-detail range out of the shared buffers, already in world space: what the pick
+                // pass draws to know whether this primitive is under the cursor.
+                var geometry = new DebugPickGeometry(
+                    sharedVb, sharedLayout, SharedIb(d), d.LodFirstIndex[0], d.LodIndexCounts[0], d.BaseVertex,
+                    System.Numerics.Matrix4x4.Identity);
+                items.Add(($"scene/{bucket}/{i}", d.Name, d.Bounds, geometry, d.LodIndexCounts.Length, maxErr));
             }
         }
         Add("opaque", opaqueDrawables);

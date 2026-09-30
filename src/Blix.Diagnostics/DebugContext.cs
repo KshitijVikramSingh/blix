@@ -126,7 +126,7 @@ public sealed class DebugContext
     // List<T> storage that the next frame will append to. Returning the
     // lists by reference would let a later BeginFrame() retroactively
     // mutate a snapshot held by a sink or by Freeze().
-    internal DebugFrame Snapshot(double wallClockMs, string? selectedPath)
+    internal DebugFrame Snapshot(double wallClockMs, string? selectedPath, DebugPick? pick = null)
     {
         return new DebugFrame(
             FrameNumber,
@@ -140,7 +140,8 @@ public sealed class DebugContext
             Timers.Entries.ToArray(),
             Events.Entries.ToArray(),
             selectedPath,
-            Keys.Entries.ToArray());
+            Keys.Entries.ToArray(),
+            pick);
     }
 
     private void PopScope()

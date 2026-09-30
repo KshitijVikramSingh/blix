@@ -46,6 +46,8 @@
     <GlslShader Include="Shaders\debugline.frag" />
     <GlslShader Include="Shaders\imgui.vert" />
     <GlslShader Include="Shaders\imgui.frag" />
+    <GlslShader Include="Shaders\pick.vert" />
+    <GlslShader Include="Shaders\pick.frag" />
   </ItemGroup>
 
 

@@ -139,7 +139,8 @@ internal sealed record JsonDebugFrame(
     JsonTimerEntry[] Timers,
     JsonEventEntry[] Events,
     string? SelectedPath,
-    JsonKeyEntry[] Keys)
+    JsonKeyEntry[] Keys,
+    JsonPick? Pick)
 {
     /// <summary>The current on-disk schema. Bump whenever a field changes shape or leaves.</summary>
     public const int CurrentSchemaVersion = 2;
@@ -167,12 +168,18 @@ internal sealed record JsonDebugFrame(
         Timers: f.Timers.Select(JsonTimerEntry.From).ToArray(),
         Events: f.Events.Select(JsonEventEntry.From).ToArray(),
         SelectedPath: f.SelectedPath,
-        Keys: f.Keys.Select(k => new JsonKeyEntry(k.Binding, k.Description, k.Path, k.Source.ToString())).ToArray());
+        Keys: f.Keys.Select(k => new JsonKeyEntry(k.Binding, k.Description, k.Path, k.Source.ToString())).ToArray(),
+        Pick: f.Pick is { } p
+            ? new JsonPick(p.View, new[] { p.Pointer.X, p.Pointer.Y }, new[] { p.Pixel.X, p.Pixel.Y }, p.Drawn, p.Excluded, p.Hit)
+            : null);
     }
 }
 
 // Added in schema 2 without a bump, which is the rule above: a new field, not a changed one.
 internal sealed record JsonKeyEntry(string Binding, string Description, string Path, string Source);
+
+// Also added without a bump: the last pick, so a wrong-looking one can be checked against numbers.
+internal sealed record JsonPick(string View, float[] Pointer, float[] Pixel, int Drawn, int Excluded, string? Hit);
 
 // A view as it appears on disk: where the world was seen from, and where that picture landed.
 // Target is the raw surface id — opaque, but enough to tell two viewports apart in a dump.

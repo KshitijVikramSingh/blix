@@ -43,7 +43,7 @@ public sealed class DebugState
     /// <b>The debugger takes a click only when asked.</b> A left click is gameplay input in most games,
     /// so picking on every click would put a tower down and select it at once. Armed, and with the
     /// overlay up, the host takes the click whole — the game sees neither the press nor its release —
-    /// and lists what is under it on the Selections tab (<see cref="DebugSystem.Pick"/>). Otherwise it is the game's.
+    /// and asks what is under it (<see cref="DebugSystem.RequestPick"/>). Otherwise it is the game's.
     /// </remarks>
     public bool PickMode { get; set; }
 

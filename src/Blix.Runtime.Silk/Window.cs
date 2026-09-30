@@ -35,6 +35,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     private readonly IUiSource? uiSource;
     private readonly IRuntimeDiagnosticsSink? diagnostics;
     private readonly DebugSystem? debugSystem;
+    private PickRenderer? pickRenderer;
     private readonly DiagnosticsFrameRecorder? frameRecorder;
     private readonly JsonDumpSink? jsonDumpSink;
     private VulkanGraphicsDevice? graphicsDevice;
@@ -304,10 +305,12 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         }
 
         var commandList = new RenderCommandList(frameRecorder);
+        PickInFlight? pick = null;
         using (debugSystem?.Current?.Timers.Measure("build-commands"))
         {
             gameLoop.OnRender(time, frame, commandList);
             AppendDebugLinesPass(commandList);
+            pick = AppendPickPass(commandList);
             AppendImGuiPass(commandList, frame, (float)deltaTime);
         }
 
@@ -318,6 +321,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         }
         // Hand the per-pass/per-draw packet to the overlay's Pipeline tab.
         debugSystem?.SetFramePacket(packet);
+        if (pick is { } answered) CompletePick(answered);
 
         if (debugSystem?.Current is { } ctx)
         {
@@ -479,7 +483,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         if (button == SilkMouseButton.Left && !UiWantsMouse && PickArmed)
         {
             buttonsHeld.Press((int)button, uiWantsInput: true);
-            debugSystem!.Pick(mouse.Position);
+            debugSystem!.RequestPick(mouse.Position);
             return;
         }
 
@@ -760,6 +764,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         imguiRenderer?.Dispose();
         Step("line-drawer");
         lineDrawer?.Dispose();
+        pickRenderer?.Dispose();
         // The game loop may own GPU resources outside the device's auto-freed
         // tables (e.g. a RenderGraph's render passes + offscreen images). Dispose
         // it here — after WaitIdle so the GPU is done with them, before the device
@@ -784,6 +789,37 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         }
 
         Step("done");
+    }
+
+    // A pick recorded into this frame, answered once the frame is submitted.
+    private sealed record PickInFlight(string View, global::System.Numerics.Vector2 Pointer, global::System.Numerics.Vector2 Pixel, DebugSelectable[] Candidates, int Excluded);
+
+    // Records the pick pass for a waiting click, into the view under the pointer: after the application
+    // has drawn and declared its views, so the geometry and the camera are this frame's. A pointer over no
+    // view asks nothing, and the click is dropped.
+    private PickInFlight? AppendPickPass(RenderCommandList commandList)
+    {
+        if (debugSystem is not { Current: { } ctx } debug || !debug.TryTakePickRequest(out var request)) return null;
+        var views = ctx.Draw.Views;
+        for (var v = views.Count - 1; v >= 0; v--)
+        {
+            if (ViewPicking.PixelAt(views[v], request.Pointer) is not { } pixel) continue;
+            var excluded = new HashSet<string>(request.Excluded, StringComparer.Ordinal);
+            var candidates = debug.CollectSelectables().Where(s => !excluded.Contains(s.EntityPath)).ToArray();
+            pickRenderer ??= new PickRenderer(graphicsDevice);
+            pickRenderer.Record(commandList, views[v], pixel, candidates);
+            return new PickInFlight(views[v].Name, request.Pointer, pixel, candidates, excluded.Count);
+        }
+
+        return null;
+    }
+
+    private void CompletePick(PickInFlight pick)
+    {
+        var hit = pickRenderer!.ReadHit();
+        debugSystem!.CompletePick(new DebugPick(
+            pick.View, pick.Pointer, pick.Pixel, pick.Candidates.Length, pick.Excluded,
+            hit >= 0 && hit < pick.Candidates.Length ? pick.Candidates[hit].EntityPath : null));
     }
 
     // Walk the frame's accumulated debug.Draw.* commands, expand them into

@@ -1524,10 +1524,10 @@ var t = new TestRunner();
 {
     var sys = new DebugSystem(historyCapacity: 4);
     var producerA = new TestSelectable("A",
-        new DebugSelectable("a/1", new Bounds3(new Vector3(0), new Vector3(1))),
-        new DebugSelectable("a/2", new Bounds3(new Vector3(2), new Vector3(3))));
+        new DebugSelectable("a/1", new Bounds3(new Vector3(0), new Vector3(1)), TestGeometry.None),
+        new DebugSelectable("a/2", new Bounds3(new Vector3(2), new Vector3(3)), TestGeometry.None));
     var producerB = new TestSelectable("B",
-        new DebugSelectable("b/1", new Bounds3(new Vector3(10), new Vector3(11))));
+        new DebugSelectable("b/1", new Bounds3(new Vector3(10), new Vector3(11)), TestGeometry.None));
     sys.Register(producerA);
     sys.Register(producerB);
 
@@ -1561,7 +1561,7 @@ var t = new TestRunner();
 
     // With selection: inspect fires + highlight aabb appears.
     sys.Register(new TestSelectable("scene",
-        new DebugSelectable("scene/foo/sub-0", new Bounds3(new Vector3(-1), new Vector3(1)))));
+        new DebugSelectable("scene/foo/sub-0", new Bounds3(new Vector3(-1), new Vector3(1)), TestGeometry.None)));
     sys.Select("scene/foo/sub-0");
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
     // The highlight is drawn into whatever views the frame declared, so the frame needs one. A frame with
@@ -1608,7 +1608,7 @@ var t = new TestRunner();
 // filter check (tested via integration, not here).
 {
     var sys = new DebugSystem(historyCapacity: 4);
-    sys.Register(new TestSelectable("scene", new DebugSelectable("scene/foo", new Bounds3(new Vector3(0), new Vector3(1)))));
+    sys.Register(new TestSelectable("scene", new DebugSelectable("scene/foo", new Bounds3(new Vector3(0), new Vector3(1)), TestGeometry.None)));
     sys.Select("scene/foo");
     sys.State.LayersEnabled["selection"] = false;
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
@@ -1684,55 +1684,75 @@ var t = new TestRunner();
     sys.EndFrame();
 }
 
-// -- PickAlong: everything the ray crosses, nearest entry first --------------
-// A list, not a verdict: every rule that chose one box was wrong somewhere in Sponza (a vault's box is
-// mostly air), so the click reports what it crossed and the reader chooses.
-{
-    static DebugSelectable Box(string path, Vector3 min, Vector3 max, string? label = null) => new(path, new Bounds3(min, max), label);
-    var eye = new Ray(Vector3.Zero, -Vector3.UnitZ);
-    var room = Box("room", new Vector3(-20), new Vector3(20));
-    var vault = Box("vault", new Vector3(-5, -5, -3), new Vector3(5, 5, -2.5f), "ceiling_1stfloor_01");
-    var tree = Box("tree", new Vector3(-1, -1, -8), new Vector3(1, 1, -6));
-    var aside = Box("aside", new Vector3(10, 10, -8), new Vector3(11, 11, -6));
-    var list = DebugSystem.PickAlong(eye, new[] { tree, aside, room, vault });
-    t.ExpectTrue("Every box the ray crosses is listed, nearest entry first, the one around the eye at 0",
-        list.Select(c => c.EntityPath).SequenceEqual(new[] { "room", "vault", "tree" }),
-        string.Join(", ", list.Select(c => $"{c.EntityPath}@{c.Distance}")));
-    t.ExpectTrue("Each carries its label for the list, or its path when it has none",
-        list[1].Label == "ceiling_1stfloor_01" && list[2].Label == "tree");
-    t.ExpectTrue("And a ray that meets nothing lists nothing",
-        DebugSystem.PickAlong(new Ray(Vector3.Zero, Vector3.UnitZ), new[] { vault, tree }).Count == 0);
-}
-
-// -- Pick: a pointer through the view the frame was drawn in ----------------
-// The view here is the shorthand declaration on a Retina-shaped frame (logical 640x360 over a 1280x720
-// framebuffer): the shorthand used to take the framebuffer for both rectangles, and the logical centre
-// would then have landed in the top-left quadrant of the picture.
+// -- Picking: a request the host answers from one rendered pixel --------------
+// The pick pass draws every selectable's geometry into the pixel under the cursor; what the core owns is
+// the request, the answer, and clicking again to step behind a hit. The pixel maths is ViewPicking's.
 {
     var sys = new DebugSystem(historyCapacity: 4);
-    sys.Register(new TestSelectable("scene",
-        new DebugSelectable("scene/ahead", new Bounds3(new Vector3(-0.5f, -0.5f, -6), new Vector3(0.5f, 0.5f, -5)))));
-    t.ExpectTrue("Before anything is drawn, a pick has nowhere to look", sys.Pick(new Vector2(320, 180)).Count == 0);
+    t.ExpectTrue("Nothing waits before a click", !sys.TryTakePickRequest(out _));
 
-    var view = Matrix4x4.CreateLookAt(Vector3.Zero, -Vector3.UnitZ, Vector3.UnitY)
-               * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, 16f / 9f, 0.1f, 100f);
-    sys.BeginFrame(new RenderFrameContext(Width: 1280, Height: 720), logicalSize: (640, 360));
-    sys.Run(new TestDebuggable("scene", debug => { using (debug.Draw.In("main", view)) { } }));
-    sys.EndFrame();
+    sys.RequestPick(new Vector2(100, 100));
+    t.ExpectTrue("A click leaves a request for the host, with nothing left out",
+        sys.TryTakePickRequest(out var first) && first.Pointer == new Vector2(100, 100) && first.Excluded.Count == 0);
+    t.ExpectTrue("Which the host takes once", !sys.TryTakePickRequest(out _));
 
-    sys.Select("scene/ahead");
-    var picked = sys.Pick(new Vector2(320, 180));
-    t.ExpectTrue("A click at the logical centre lists what is in front of the eye",
-        picked.Count == 1 && picked[0].EntityPath == "scene/ahead" && ReferenceEquals(picked, sys.PickList));
-    t.ExpectTrue("And selects nothing itself: a new click clears the last choice", sys.SelectedPath is null);
-    sys.Select(picked[0].EntityPath);
-    t.ExpectTrue("A pointer over no view changes nothing",
-        ReferenceEquals(sys.Pick(new Vector2(900, 500)), picked) && sys.SelectedPath == "scene/ahead");
-    t.ExpectTrue("A click on empty space inside the view lists nothing", sys.Pick(new Vector2(4, 4)).Count == 0);
-    sys.Select("scene/ahead");
-    sys.ClearPick();
-    t.ExpectTrue("Closing the Selections tab forgets the list and the choice",
-        sys.PickList.Count == 0 && sys.SelectedPath is null);
+    sys.CompletePick(new DebugPick("main", new Vector2(100, 100), new Vector2(200, 200), Drawn: 5, Excluded: 0, Hit: "tree"));
+    t.ExpectTrue("An answer with a hit selects it", sys.SelectedPath == "tree" && sys.LastPick?.Hit == "tree");
+
+    sys.RequestPick(new Vector2(101, 100));
+    sys.TryTakePickRequest(out var again);
+    t.ExpectTrue("Clicking the same spot again leaves the hit out, to reach what is behind it",
+        again!.Excluded.SequenceEqual(new[] { "tree" }));
+    sys.CompletePick(new DebugPick("main", new Vector2(101, 100), new Vector2(202, 200), 4, 1, "wall"));
+    sys.RequestPick(new Vector2(100, 101));
+    sys.TryTakePickRequest(out var third);
+    t.ExpectTrue("And again leaves both out", third!.Excluded.OrderBy(x => x).SequenceEqual(new[] { "tree", "wall" }));
+
+    sys.CompletePick(new DebugPick("main", new Vector2(100, 101), new Vector2(200, 202), 3, 2, Hit: null));
+    t.ExpectTrue("A miss clears the selection", sys.SelectedPath is null);
+    sys.RequestPick(new Vector2(100, 100));
+    sys.TryTakePickRequest(out var fresh);
+    t.ExpectTrue("And the next click starts over", fresh!.Excluded.Count == 0);
+
+    sys.CompletePick(new DebugPick("main", new Vector2(100, 100), new Vector2(200, 200), 5, 0, "tree"));
+    sys.RequestPick(new Vector2(400, 300));
+    sys.TryTakePickRequest(out var elsewhere);
+    t.ExpectTrue("A click somewhere else starts over too", elsewhere!.Excluded.Count == 0);
+}
+
+// -- ViewPicking: the pixel under a pointer, and the crop that renders only it -
+// The view is Retina-shaped (logical 640x360 over a 1280x720 target), the case the logical/physical split
+// exists for: the logical centre is physical pixel (640, 360).
+{
+    var viewProj = Matrix4x4.CreateLookAt(Vector3.Zero, -Vector3.UnitZ, Vector3.UnitY)
+                   * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, 16f / 9f, 0.1f, 100f);
+    var table = new ViewTable();
+    var view = table.Declare("main", viewProj, RenderSurfaceHandle.Default, new Rect(0, 0, 640, 360), new Rect(0, 0, 1280, 720));
+    t.ExpectTrue("The logical centre is the physical centre pixel on a Retina view",
+        Blix.ViewPicking.PixelAt(view, new Vector2(320, 180)) == new Vector2(640, 360));
+    t.ExpectTrue("A pointer outside the view has no pixel", Blix.ViewPicking.PixelAt(view, new Vector2(700, 10)) is null);
+
+    // Whatever lands on the chosen pixel's centre must land on the 1x1 target's centre, NDC (0, 0), and a
+    // point one pixel over must leave it: that is the whole claim of the crop.
+    Vector2 Ndc(Vector3 world, Matrix4x4 m)
+    {
+        var c = Vector4.Transform(new Vector4(world, 1f), m);
+        return new Vector2(c.X / c.W, c.Y / c.W);
+    }
+    Vector3 ThroughPixel(float px, float py)
+    {
+        var inverse = Matrix4x4.Invert(viewProj, out var inv) ? inv : Matrix4x4.Identity;
+        var ndc = new Vector4(2f * (px + 0.5f) / 1280f - 1f, 2f * (py + 0.5f) / 720f - 1f, 0.5f, 1f);
+        var w = Vector4.Transform(ndc, inverse);
+        return new Vector3(w.X, w.Y, w.Z) / w.W;
+    }
+    var pixel = new Vector2(900, 200);
+    var cropped = viewProj * Blix.ViewPicking.PixelCrop(view, pixel);
+    var centre = Ndc(ThroughPixel(900, 200), cropped);
+    t.ExpectTrue("The crop puts the chosen pixel's centre at the 1x1 target's centre",
+        MathF.Abs(centre.X) < 1e-3f && MathF.Abs(centre.Y) < 1e-3f, centre.ToString());
+    var neighbour = Ndc(ThroughPixel(901, 200), cropped);
+    t.ExpectTrue("And the next pixel over falls outside the target", MathF.Abs(neighbour.X) > 1f, neighbour.ToString());
 }
 
 // -- Selection edits are declared under the selection ------------------------
@@ -1890,11 +1910,17 @@ static void Spin(double targetMs)
 
 // ---------------------------------------------------------------------------
 
+// Deviceless tests never draw, so a selectable's geometry is only something to carry.
+static class TestGeometry
+{
+    public static readonly DebugPickGeometry None = default;
+}
+
 sealed class MovableSelectable(string path, Bounds3 bounds) : IDebugSelectable
 {
     public Bounds3 Bounds { get; set; } = bounds;
     public string DebugName => "movable";
-    public void CollectSelectables(List<DebugSelectable> destination) => destination.Add(new DebugSelectable(path, Bounds));
+    public void CollectSelectables(List<DebugSelectable> destination) => destination.Add(new DebugSelectable(path, Bounds, TestGeometry.None));
 }
 
 sealed class TestSelectable : IDebugSelectable

@@ -225,7 +225,7 @@ public sealed class DebugSystem
         SelectedPath = null;
     }
 
-    // <b>An edit on the Selections tab belongs to the thing that was selected.</b> Its control has one path
+    // <b>An edit on the Selection tab belongs to the thing that was selected.</b> Its control has one path
     // whatever is selected ("selection/LOD/margin"), and a panel edit is held until something overwrites it,
     // so without this the value dragged on one primitive was handed to every primitive selected after it.
     private void ForgetSelectionEdits()
@@ -271,65 +271,63 @@ public sealed class DebugSystem
         return selectableScratch;
     }
 
-    /// <summary>One entry of the pick list: a selectable the ray crossed, and how far along it the ray entered.</summary>
-    public readonly record struct PickCandidate(string EntityPath, string Label, float Distance);
+    // === Picking ============================================================
+    //
+    // A click in pick mode asks what is under the cursor, and the host answers by drawing every
+    // selectable's geometry into one pixel (DebugPickGeometry): the answer is exact, and nothing here
+    // looks at a box. The host takes the request after the frame's views are declared, draws, reads
+    // the pixel back, and completes it.
 
-    /// <summary>What the last click crossed, nearest entry first. Empty before a click, or after a miss.</summary>
+    /// <summary>A pick waiting for the host: where the click was, and what to leave out.</summary>
+    /// <param name="Pointer">In the window's logical coordinates.</param>
+    /// <param name="Excluded">Earlier hits at this spot. Leaving them out is how clicking again steps behind them.</param>
+    public sealed record PickRequest(System.Numerics.Vector2 Pointer, IReadOnlyCollection<string> Excluded);
+
+    // A click this close to the last one, in logical pixels, is "the same spot": it steps behind the hit.
+    private const float SameSpotPixels = 3f;
+    private PickRequest? pendingPick;
+    private System.Numerics.Vector2? lastPickPointer;
+    private readonly HashSet<string> excludedHere = new(StringComparer.Ordinal);
+
+    /// <summary>The last completed pick, whole: view, pixel, how much was drawn, and the hit. In dumps.</summary>
+    public DebugPick? LastPick { get; private set; }
+
+    /// <summary>Asks what is under <paramref name="pointer"/>; the host answers during the next frame.</summary>
     /// <remarks>
-    /// <b>A list, not a verdict.</b> Selectables are boxes, and a box says where a thing might be, not
-    /// where its surface is: a vaulted ceiling's box is mostly the air under the vault. Every rule that
-    /// chose one box for the click (nearest entry, smallest box, boxes around the eye skipped) was wrong
-    /// somewhere in Sponza, and the only exact fixes reached across four layers. So the click reports what
-    /// it crossed, and the person who can see the picture chooses from it on the Selections tab.
+    /// Clicking again at the same spot while its hit is still selected leaves that hit out, so a second
+    /// click on the tree reaches what is behind it. A miss, or a click anywhere else, starts over.
     /// </remarks>
-    public IReadOnlyList<PickCandidate> PickList => pickList;
-
-    private List<PickCandidate> pickList = new();
-
-    /// <summary>Lists what is under a pointer, as seen in the last frame drawn, and clears the selection.</summary>
-    /// <param name="pointer">In the window's logical coordinates, as the input layer reports it.</param>
-    /// <remarks>
-    /// Through the views of the frame the viewer is looking at, latest declared first, so a panel drawn
-    /// over the main view answers for the pixels it covers. A pointer over no view changes nothing.
-    /// Nothing is selected by the click itself: a new click is a new question, so the previous answer's
-    /// details go with it.
-    /// </remarks>
-    public IReadOnlyList<PickCandidate> Pick(System.Numerics.Vector2 pointer)
+    public void RequestPick(System.Numerics.Vector2 pointer)
     {
-        var views = LatestFrame?.Views;
-        if (views is null) return pickList;
-        Ray? ray = null;
-        for (var i = views.Count - 1; i >= 0 && ray is null; i--) ray = ViewPicking.RayThrough(views[i], pointer);
-        if (ray is not { } r) return pickList;
-
-        pickList = PickAlong(r, CollectSelectables());
-        ClearSelection();
-        return pickList;
+        var again = SelectedPath is { } hit && lastPickPointer is { } last
+                    && System.Numerics.Vector2.Distance(last, pointer) <= SameSpotPixels;
+        if (again) excludedHere.Add(SelectedPath!);
+        else excludedHere.Clear();
+        lastPickPointer = pointer;
+        pendingPick = new PickRequest(pointer, excludedHere.ToArray());
     }
 
-    /// <summary>Forgets the pick list and the selection: what closing the Selections tab does.</summary>
-    public void ClearPick()
+    /// <summary>The waiting pick, if any, which the caller now owns.</summary>
+    public bool TryTakePickRequest([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out PickRequest? request)
     {
-        pickList = new List<PickCandidate>();
-        ClearSelection();
+        request = pendingPick;
+        pendingPick = null;
+        return request is not null;
     }
 
-    /// <summary>Every selectable a ray crosses, ordered by where the ray enters it.</summary>
-    /// <remarks>A box the ray starts inside is entered at 0, so it comes first.</remarks>
-    public static List<PickCandidate> PickAlong(Ray ray, IReadOnlyList<DebugSelectable> candidates)
+    /// <summary>The host's answer to a pick: selects the hit, or clears on a miss.</summary>
+    public void CompletePick(DebugPick pick)
     {
-        ArgumentNullException.ThrowIfNull(candidates);
-        var hits = new List<PickCandidate>();
-        for (var i = 0; i < candidates.Count; i++)
+        ArgumentNullException.ThrowIfNull(pick);
+        LastPick = pick;
+        if (pick.Hit is { } hit)
         {
-            if (Intersection.Raycast(ray, candidates[i].Bounds) is { } hit)
-            {
-                hits.Add(new PickCandidate(candidates[i].EntityPath, candidates[i].Label ?? candidates[i].EntityPath, hit.Time));
-            }
+            Select(hit);
+            return;
         }
 
-        // Stable, so equal entries keep the order their sources listed them in.
-        return hits.OrderBy(h => h.Distance).ToList();
+        excludedHere.Clear();
+        ClearSelection();
     }
 
     public void Run(params IDebuggable[] debuggables)
@@ -490,7 +488,7 @@ public sealed class DebugSystem
         // guard, deliberately far longer than any sensible trail duration, not a visual parameter.
         State.Trails.Expire(clock.Elapsed.TotalMilliseconds, TrailStaleSeconds);
 
-        var snapshot = Current.Snapshot(clock.Elapsed.TotalMilliseconds, SelectedPath);
+        var snapshot = Current.Snapshot(clock.Elapsed.TotalMilliseconds, SelectedPath, LastPick);
         History.Push(snapshot);
 
         // Sinks see the snapshot already in History; a sink can therefore
