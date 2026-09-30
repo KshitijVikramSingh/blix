@@ -457,12 +457,17 @@ internal static class GltfShared
             Texture(m.BaseColorImage),
             m.BaseColorTexCoord,
             Texture(m.NormalImage),
+            m.NormalTexCoord,
+            m.NormalScale,
             Texture(m.MetallicRoughnessImage),
+            m.MetallicRoughnessTexCoord,
             m.MetallicFactor,
             m.RoughnessFactor,
             Texture(m.OcclusionImage),
+            m.OcclusionTexCoord,
             m.OcclusionStrength,
             Texture(m.EmissiveImage),
+            m.EmissiveTexCoord,
             m.EmissiveFactor,
             m.EmissiveStrength,
             m.AlphaMode switch
@@ -549,6 +554,14 @@ internal static class GltfShared
         var normalTexture = normalChannel.HasValue
             ? ExtractTexture(normalChannel.Value.Texture, textureCache)
             : null;
+        var normalScale = 1.0f;
+        if (normalChannel.HasValue)
+        {
+            foreach (var p in normalChannel.Value.Parameters)
+            {
+                if (p.Name == "NormalScale") normalScale = (float)Convert.ToDouble(p.Value);
+            }
+        }
 
         var metallicChannel = material.FindChannel("MetallicRoughness");
         var metallic = 1.0f;
@@ -571,7 +584,8 @@ internal static class GltfShared
         {
             foreach (var p in occlusionChannel.Value.Parameters)
             {
-                if (p.Name == "Strength") occlusionStrength = (float)Convert.ToDouble(p.Value);
+                // SharpGLTF's name, not glTF's "strength": a lookup by the spec's word never matched.
+                if (p.Name == "OcclusionStrength") occlusionStrength = (float)Convert.ToDouble(p.Value);
             }
             occlusionTexture = ExtractTexture(occlusionChannel.Value.Texture, textureCache);
         }
@@ -615,12 +629,17 @@ internal static class GltfShared
             baseColorTexture,
             baseColorTexCoord,
             normalTexture,
+            TexCoord(normalChannel),
+            normalScale,
             metallicRoughnessTexture,
+            TexCoord(metallicChannel),
             metallic,
             roughness,
             occlusionTexture,
+            TexCoord(occlusionChannel),
             occlusionStrength,
             emissiveTexture,
+            TexCoord(emissiveChannel),
             emissiveFactor,
             emissiveStrength,
             alphaMode,
@@ -630,6 +649,9 @@ internal static class GltfShared
             ext);
         materialCache[material.LogicalIndex] = result;
         return result;
+
+        static int TexCoord(SharpGLTF.Schema2.MaterialChannel? channel) =>
+            channel.HasValue ? channel.Value.TextureCoordinate : 0;
     }
 
     /// <summary>Reads every <c>KHR_materials_*</c> property SharpGLTF surfaces, by channel and parameter name.</summary>

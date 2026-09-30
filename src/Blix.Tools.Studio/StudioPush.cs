@@ -21,7 +21,7 @@ public static class StudioPush
     /// <summary>Bytes a lit draw pushes: a model matrix and a material.</summary>
     /// <remarks>
     /// <c>mat4 model</c>, <c>vec4 (baseColour, baseAlpha)</c>, <c>vec4 (metallic, roughness, stride,
-    /// alphaCutoff)</c>, <c>vec4 (albedoUvSet, normalScale, _, _)</c>, <c>vec4 (emissive,
+    /// alphaCutoff)</c>, <c>vec4 (albedoUvSet, normalScale, channelUvSets, _)</c>, <c>vec4 (emissive,
     /// occlusionStrength)</c>. Exactly the 128-byte floor every Vulkan implementation guarantees,
     /// which is why nothing on this stage needs a per-object descriptor set; a further material term
     /// needs a block of its own. Push constants belong to the draw, so a term a draw does not write
@@ -93,10 +93,16 @@ public static class StudioPush
     /// <param name="occlusionStrength">
     /// How much the occlusion texture's red channel darkens ambient light. Zero ignores it.
     /// </param>
+    /// <param name="normalUvSet">
+    /// The TEXCOORD set the normal map samples; the next three name the metallic-roughness, occlusion and
+    /// emissive maps'. Any set above 0 reads the stage's second set, the last one its layouts carry.
+    /// Packed one bit per channel into a single float.
+    /// </param>
     public static void Material(
         byte[] target, Vector3 baseColour, float metallic, float roughness, float stride = 0f,
         float alphaCutoff = 0f, float baseAlpha = 1f, float albedoUvSet = 0f,
-        float normalScale = 0f, Vector3 emissive = default, float occlusionStrength = 0f)
+        float normalScale = 0f, Vector3 emissive = default, float occlusionStrength = 0f,
+        int normalUvSet = 0, int metallicRoughnessUvSet = 0, int occlusionUvSet = 0, int emissiveUvSet = 0)
     {
         ArgumentNullException.ThrowIfNull(target);
         var floats = MemoryMarshal.Cast<byte, float>(target.AsSpan());
@@ -104,7 +110,17 @@ public static class StudioPush
         floats[16] = baseColour.X; floats[17] = baseColour.Y; floats[18] = baseColour.Z; floats[19] = baseAlpha;
         floats[20] = metallic; floats[21] = roughness; floats[22] = stride; floats[23] = alphaCutoff;
         if (floats.Length < 32) return;
-        floats[24] = albedoUvSet; floats[25] = normalScale; floats[26] = 0f; floats[27] = 0f;
+        var channelUvSets = (normalUvSet > 0 ? 1 : 0) | (metallicRoughnessUvSet > 0 ? 2 : 0)
+                            | (occlusionUvSet > 0 ? 4 : 0) | (emissiveUvSet > 0 ? 8 : 0);
+        floats[24] = albedoUvSet; floats[25] = normalScale; floats[26] = channelUvSets; floats[27] = 0f;
         floats[28] = emissive.X; floats[29] = emissive.Y; floats[30] = emissive.Z; floats[31] = occlusionStrength;
     }
+
+    /// <summary><see cref="Material"/> with every term a glTF surface carries beyond base colour.</summary>
+    internal static void Material(
+        byte[] target, Vector3 baseColour, float metallic, float roughness, in StudioSurface surface,
+        float stride = 0f, float alphaCutoff = 0f, float baseAlpha = 1f, float albedoUvSet = 0f) =>
+        Material(target, baseColour, metallic, roughness, stride, alphaCutoff, baseAlpha, albedoUvSet,
+            surface.NormalScale, surface.Emissive, surface.OcclusionStrength,
+            surface.NormalUvSet, surface.MetallicRoughnessUvSet, surface.OcclusionUvSet, surface.EmissiveUvSet);
 }

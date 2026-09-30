@@ -23,7 +23,7 @@ layout(push_constant) uniform Push {
     mat4 uModel;
     vec4 uBaseColour;
     vec4 uMaterial;       // x = metallic, y = roughness
-    vec4 uExtra;          // x = which TEXCOORD set the albedo samples, y = normal scale
+    vec4 uExtra;          // x = albedo UV set, y = normal scale, z = other channels' UV sets (see studio_lit.frag)
     vec4 uEmission;       // rgb = emissive radiance, a = occlusion strength
 };
 

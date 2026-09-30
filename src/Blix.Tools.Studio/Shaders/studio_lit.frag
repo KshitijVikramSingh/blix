@@ -52,8 +52,7 @@ layout(set = 1, binding = 4) uniform sampler2D uBrdfLut;
 
 // The glTF material's other channels. Every draw binds all four; white is inert in each because the
 // push terms that read them (normal scale, occlusion strength, emission) default to zero, and
-// metallic-roughness multiplies its factors. All four sample TEXCOORD_0: the engine's material
-// records a coordinate set for base colour alone.
+// metallic-roughness multiplies its factors. Each samples the TEXCOORD set its channel names.
 layout(set = 1, binding = 7) uniform sampler2D uNormalMap;          // linear, tangent space
 layout(set = 1, binding = 8) uniform sampler2D uMetallicRoughness;  // linear, G = roughness, B = metallic
 layout(set = 1, binding = 9) uniform sampler2D uOcclusion;          // linear, R = occlusion
@@ -64,7 +63,9 @@ layout(push_constant) uniform Push {
     vec4 uBaseColour;
     vec4 uMaterial;
     // glTF lets each texture select its own TEXCOORD set.
-    vec4 uExtra;          // x = albedo UV set, y = normal scale (0 = no normal map)
+    // x = albedo UV set, y = normal scale (0 = no normal map), z = the other channels' UV sets, one
+    // bit each: 1 normal, 2 metallic-roughness, 4 occlusion, 8 emissive. A set bit reads TEXCOORD_1.
+    vec4 uExtra;
     vec4 uEmission;       // rgb = emissive radiance, a = occlusion strength (0 = no occlusion)
 };
 
@@ -101,9 +102,15 @@ mat3 surfaceFrame(vec3 N, vec3 p, vec2 uv)
     return mat3(T * scale, -B * scale, N);
 }
 
+vec2 channelUv(int bit)
+{
+    return (int(uExtra.z + 0.5) & bit) != 0 ? vUv1 : vUv;
+}
+
 void main()
 {
     vec3 N = normalize(vNormal);
+    vec2 uvNormal = channelUv(1);
 
     // The shadow's normal offset uses the geometric normal: it is about where the surface is, and a
     // normal map only says how it scatters light.
@@ -112,9 +119,9 @@ void main()
     if (normalScale > 0.0)
     {
         // Z is rebuilt from XY: a cooked map is two-channel BC5. The scale bends XY, per glTF.
-        vec2 xy = texture(uNormalMap, vUv).xy * 2.0 - 1.0;
+        vec2 xy = texture(uNormalMap, uvNormal).xy * 2.0 - 1.0;
         vec3 tangentNormal = vec3(xy * normalScale, sqrt(max(1.0 - dot(xy, xy), 0.0)));
-        N = normalize(surfaceFrame(N, vWorld, vUv) * tangentNormal);
+        N = normalize(surfaceFrame(N, vWorld, uvNormal) * tangentNormal);
     }
     vec3 V = normalize(uCameraPosition.xyz - vWorld);
     vec3 L = normalize(uSunDirection.xyz);
@@ -130,7 +137,7 @@ void main()
         vWorld, geometric, max(dot(geometric, L), 0.0), 1.5, gl_FragCoord.xy,
         cascade);
 
-    vec4 metallicRoughness = texture(uMetallicRoughness, vUv);
+    vec4 metallicRoughness = texture(uMetallicRoughness, channelUv(2));
     float metallic = clamp(uMaterial.x * metallicRoughness.b, 0.0, 1.0);
     float roughness = clamp(uMaterial.y * metallicRoughness.g, 0.04, 1.0);
     // A zero cutoff lets OPAQUE and MASK share this pipeline. Alpha is texture × baseColorFactor.a ×
@@ -159,10 +166,10 @@ void main()
     }
 
     // glTF occlusion darkens indirect light only; the sun is already shadowed.
-    ambient *= 1.0 + uEmission.a * (texture(uOcclusion, vUv).r - 1.0);
+    ambient *= 1.0 + uEmission.a * (texture(uOcclusion, channelUv(4)).r - 1.0);
 
     // Output the same composed alpha used by MASK; opaque pipelines ignore this channel.
-    vec3 lit = direct + ambient + uEmission.rgb * texture(uEmissive, vUv).rgb;
+    vec3 lit = direct + ambient + uEmission.rgb * texture(uEmissive, channelUv(8)).rgb;
 
     // Cascade diagnostics replace shading with a flat band; shadow remains as brightness.
     if (uCascadeTexels.w > 0.5) lit = blix_cascade_tint(cascade) * mix(0.35, 1.0, shadow);

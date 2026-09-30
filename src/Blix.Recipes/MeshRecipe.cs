@@ -633,13 +633,19 @@ public static class MeshRecipe
             cooked[i] = new BlixMeshMaterial(
                 Name: m.Name ?? $"material_{i}",
                 BaseColorFactor: baseColor.HasValue ? baseColor.Value.Color : Vector4.One,
-                BaseColorTexCoord: baseColor.HasValue ? baseColor.Value.TextureCoordinate : 0,
+                BaseColorTexCoord: TexCoord(baseColor),
+                NormalTexCoord: TexCoord(normal),
+                NormalScale: Parameter(normal, "NormalScale", 1f),
+                MetallicRoughnessTexCoord: TexCoord(mr),
+                OcclusionTexCoord: TexCoord(occlusion),
+                EmissiveTexCoord: TexCoord(emissive),
                 // Defaults are the glTF spec's for an absent channel, not zero: a material with no
                 // MetallicRoughness channel is metallic 1 / rough 1, and writing 0 would quietly
                 // turn every such surface into a mirror.
                 MetallicFactor: Parameter(mr, "MetallicFactor", 1f),
                 RoughnessFactor: Parameter(mr, "RoughnessFactor", 1f),
-                OcclusionStrength: Parameter(occlusion, "Strength", 1f),
+                // SharpGLTF's name, not glTF's "strength": a lookup by the spec's word never matched.
+                OcclusionStrength: Parameter(occlusion, "OcclusionStrength", 1f),
                 EmissiveFactor: new Vector3(emissiveColour.X, emissiveColour.Y, emissiveColour.Z),
                 EmissiveStrength: Parameter(emissive, "EmissiveStrength", 1f),
                 AlphaMode: m.Alpha switch
@@ -676,6 +682,8 @@ public static class MeshRecipe
                 ? row
                 : BlixMesh.NoImage;
         }
+
+        static int TexCoord(MaterialChannel? channel) => channel.HasValue ? channel.Value.TextureCoordinate : 0;
 
         float Parameter(MaterialChannel? channel, string name, float fallback)
         {
@@ -1051,7 +1059,7 @@ public static class MeshRecipe
         MaterialPatch? patch = null)
     {
         var header = CookedFile.TryReadHeader(outputPath);
-        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version9 }) return false;
+        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version10 }) return false;
         var stamp = header.Value.Stamp;
         if (!stamp.MatchesProducerAndSource(BlixMesh.ShippedRecipe, MeshRecipeVersion, sourcePath))
             return false;

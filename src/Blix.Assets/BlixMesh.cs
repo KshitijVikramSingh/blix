@@ -6,7 +6,7 @@ using Blix.Graphics;
 
 namespace Blix.Assets;
 
-// Engine-native version 9 mesh container. The shared cooked preamble is followed,
+// Engine-native version 10 mesh container. The shared cooked preamble is followed,
 // in order, by counted tables for primitives, materials, images, skins, clips,
 // attachments, static parts, and authored nodes. All values are little-endian.
 //
@@ -33,10 +33,11 @@ public static class BlixMesh
     /// stamps its own, which is what makes "who made this file" answerable.
     /// </summary>
     public const string ShippedRecipe = "gmsh";
-    // Version 9 is the only accepted layout. It includes per-primitive layouts and LOD errors,
-    // common provenance, material and image tables, rig data, attachments/static parts, authored
-    // nodes, and the current KHR_materials_* parameter block. Older layouts must be re-cooked.
-    public const uint Version9 = 9;
+    // Version 10 is the only accepted layout. It includes per-primitive layouts and LOD errors,
+    // common provenance, material and image tables (each core channel with its TEXCOORD set, and
+    // the normal scale), rig data, attachments/static parts, authored nodes, and the current
+    // KHR_materials_* parameter block. Older layouts must be re-cooked.
+    public const uint Version10 = 10;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
     public const uint LayoutPosition3NormalTextureSkin4Tangent = 3; // 80-byte, rigged
@@ -125,6 +126,11 @@ public sealed record BlixMeshMaterial(
     string Name,
     Vector4 BaseColorFactor,
     int BaseColorTexCoord,
+    int NormalTexCoord,
+    float NormalScale,
+    int MetallicRoughnessTexCoord,
+    int OcclusionTexCoord,
+    int EmissiveTexCoord,
     float MetallicFactor,
     float RoughnessFactor,
     float OcclusionStrength,
@@ -451,7 +457,7 @@ public static class BlixMeshWriter
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(file);
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version9, stamp);
+        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version10, stamp);
         using var bw = new BinaryWriter(fs);
 
         bw.Write(file.Primitives.Count);
@@ -467,6 +473,11 @@ public static class BlixMeshWriter
             bw.Write(m.BaseColorFactor.X); bw.Write(m.BaseColorFactor.Y);
             bw.Write(m.BaseColorFactor.Z); bw.Write(m.BaseColorFactor.W);
             bw.Write(m.BaseColorTexCoord);
+            bw.Write(m.NormalTexCoord);
+            bw.Write(m.NormalScale);
+            bw.Write(m.MetallicRoughnessTexCoord);
+            bw.Write(m.OcclusionTexCoord);
+            bw.Write(m.EmissiveTexCoord);
             bw.Write(m.MetallicFactor);
             bw.Write(m.RoughnessFactor);
             bw.Write(m.OcclusionStrength);
@@ -662,10 +673,10 @@ public static class BlixMeshWriter
 
 public static class BlixMeshReader
 {
-    /// <summary>Reads the v9 <c>KHR_materials_*</c> block, in the order the writer emits it.</summary>
+    /// <summary>Reads the <c>KHR_materials_*</c> block, in the order the writer emits it.</summary>
     /// <remarks>
     /// Positional and exact. There is no length prefix and no field tags, because the format does not
-    /// do optional data — it bumps its version and re-cooks, as it has from v2 to v9 — and a reader
+    /// do optional data — it bumps its version and re-cooks, as it has from v2 to v10 — and a reader
     /// that guessed would turn a format change into silently wrong materials rather than a refusal.
     /// </remarks>
     private static BlixMaterialExtensions ReadExtensions(BinaryReader br)
@@ -705,7 +716,7 @@ public static class BlixMeshReader
         ArgumentNullException.ThrowIfNull(path);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version9, path, ".blixmesh");
+        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version10, path, ".blixmesh");
         return AssetImportException.Refusing(path, () => ReadBody(fs, path, header), ".blixmesh");
     }
 
@@ -731,6 +742,11 @@ public static class BlixMeshReader
             var name = System.Text.Encoding.UTF8.GetString(br.ReadBytes(nameLen));
             var baseColor = new Vector4(br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
             var baseColorTexCoord = br.ReadInt32();
+            var normalTexCoord = br.ReadInt32();
+            var normalScale = br.ReadSingle();
+            var metallicRoughnessTexCoord = br.ReadInt32();
+            var occlusionTexCoord = br.ReadInt32();
+            var emissiveTexCoord = br.ReadInt32();
             var metallic = br.ReadSingle();
             var roughness = br.ReadSingle();
             var occlusionStrength = br.ReadSingle();
@@ -741,7 +757,9 @@ public static class BlixMeshReader
             var doubleSided = br.ReadBoolean();
             var transmission = br.ReadSingle();
             materials[i] = new BlixMeshMaterial(
-                name, baseColor, baseColorTexCoord, metallic, roughness, occlusionStrength,
+                name, baseColor, baseColorTexCoord,
+                normalTexCoord, normalScale, metallicRoughnessTexCoord, occlusionTexCoord, emissiveTexCoord,
+                metallic, roughness, occlusionStrength,
                 emissive, emissiveStrength, alphaMode, alphaCutoff, doubleSided, transmission,
                 BaseColorImage: br.ReadInt32(),
                 NormalImage: br.ReadInt32(),

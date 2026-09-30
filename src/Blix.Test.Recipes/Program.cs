@@ -18,6 +18,95 @@ namespace Blix.Test.Recipes;
 //   fail, because a self-test that only ever prints is a self-test that only ever passes.
 public static class Program
 {
+    private static void AuthoredMaterialReachesBothPaths(TestRunner t)
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "blix-authored-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            // One indexed triangle: POSITION, NORMAL, TEXCOORD_0, TEXCOORD_1, three vertices each.
+            var floats = new float[]
+            {
+                0, 0, 0, 1, 0, 0, 0, 1, 0,          // POSITION
+                0, 0, 1, 0, 0, 1, 0, 0, 1,          // NORMAL
+                0, 0, 1, 0, 0, 1,                   // TEXCOORD_0
+                0, 0, 1, 0, 0, 1,                   // TEXCOORD_1
+            };
+            var bytes = new byte[floats.Length * 4 + 12];
+            Buffer.BlockCopy(floats, 0, bytes, 0, floats.Length * 4);
+            Buffer.BlockCopy(new uint[] { 0, 1, 2 }, 0, bytes, floats.Length * 4, 12);
+            File.WriteAllBytes(Path.Combine(temp, "tri.bin"), bytes);
+            // One image per channel: a cooked image carries one channel's role (sRGB or linear).
+            foreach (var channel in new[] { "base", "normal", "mr", "occlusion", "emissive" })
+            {
+                Blix.Graphics.Images.PngWriter.WriteRgba8(
+                    Path.Combine(temp, channel + ".png"), Enumerable.Repeat((byte)128, 4 * 4 * 4).ToArray(), 4, 4);
+            }
+
+            var gltf = Path.Combine(temp, "authored.gltf");
+            File.WriteAllText(gltf, """
+                {
+                  "asset": { "version": "2.0" },
+                  "scene": 0, "scenes": [ { "nodes": [ 0 ] } ],
+                  "nodes": [ { "mesh": 0 } ],
+                  "meshes": [ { "primitives": [ { "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2, "TEXCOORD_1": 3 }, "indices": 4, "material": 0 } ] } ],
+                  "buffers": [ { "uri": "tri.bin", "byteLength": 132 } ],
+                  "bufferViews": [
+                    { "buffer": 0, "byteOffset": 0, "byteLength": 36 },
+                    { "buffer": 0, "byteOffset": 36, "byteLength": 36 },
+                    { "buffer": 0, "byteOffset": 72, "byteLength": 24 },
+                    { "buffer": 0, "byteOffset": 96, "byteLength": 24 },
+                    { "buffer": 0, "byteOffset": 120, "byteLength": 12 }
+                  ],
+                  "accessors": [
+                    { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [ 0, 0, 0 ], "max": [ 1, 1, 0 ] },
+                    { "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3" },
+                    { "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2" },
+                    { "bufferView": 3, "componentType": 5126, "count": 3, "type": "VEC2" },
+                    { "bufferView": 4, "componentType": 5125, "count": 3, "type": "SCALAR" }
+                  ],
+                  "images": [ { "uri": "base.png" }, { "uri": "normal.png" }, { "uri": "mr.png" }, { "uri": "occlusion.png" }, { "uri": "emissive.png" } ],
+                  "textures": [ { "source": 0 }, { "source": 1 }, { "source": 2 }, { "source": 3 }, { "source": 4 } ],
+                  "materials": [ {
+                    "name": "authored",
+                    "pbrMetallicRoughness": {
+                      "baseColorTexture": { "index": 0, "texCoord": 1 },
+                      "metallicRoughnessTexture": { "index": 2, "texCoord": 0 }
+                    },
+                    "normalTexture": { "index": 1, "texCoord": 1, "scale": 0.5 },
+                    "occlusionTexture": { "index": 3, "texCoord": 1, "strength": 0.25 },
+                    "emissiveTexture": { "index": 4, "texCoord": 0 },
+                    "emissiveFactor": [ 1, 1, 1 ]
+                  } ]
+                }
+                """);
+
+            var fromSource = new Blix.GltfStaticImporter()
+                .Import(new AssetImportContext(AssetId.Parse("t/authored-src"), gltf)).Primitives[0].Material;
+            var cooked = Path.ChangeExtension(gltf, ".blixmesh");
+            MeshRecipe.CookToBlixMesh(gltf, cooked);
+            var fromCooked = new Blix.GltfStaticImporter()
+                .Import(new AssetImportContext(AssetId.Parse("t/authored-cooked"), cooked)).Primitives[0].Material;
+
+            foreach (var (path, m) in new[] { ("source", fromSource), ("cooked", fromCooked) })
+            {
+                t.Expect($"K-F.2 the {path} path reads the authored texture-coordinate sets",
+                    m is { BaseColorTexCoord: 1, NormalTexCoord: 1, MetallicRoughnessTexCoord: 0,
+                        OcclusionTexCoord: 1, EmissiveTexCoord: 0 },
+                    m is null ? "no material" :
+                        $"base {m.BaseColorTexCoord}, normal {m.NormalTexCoord}, mr {m.MetallicRoughnessTexCoord}, " +
+                        $"occlusion {m.OcclusionTexCoord}, emissive {m.EmissiveTexCoord}");
+                t.Expect($"K-F.2 the {path} path reads the authored normal scale and occlusion strength",
+                    m is { NormalScale: 0.5f, OcclusionStrength: 0.25f },
+                    m is null ? "no material" : $"scale {m.NormalScale}, strength {m.OcclusionStrength}");
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
+        }
+    }
+
     public static int Main()
     {
         var t = new TestRunner();
@@ -509,6 +598,11 @@ public static class Program
                     Same("MetallicFactor", a.MetallicFactor == b.MetallicFactor, a.MetallicFactor, b.MetallicFactor);
                     Same("RoughnessFactor", a.RoughnessFactor == b.RoughnessFactor, a.RoughnessFactor, b.RoughnessFactor);
                     Same("OcclusionStrength", a.OcclusionStrength == b.OcclusionStrength, a.OcclusionStrength, b.OcclusionStrength);
+                    Same("NormalScale", a.NormalScale == b.NormalScale, a.NormalScale, b.NormalScale);
+                    Same("NormalTexCoord", a.NormalTexCoord == b.NormalTexCoord, a.NormalTexCoord, b.NormalTexCoord);
+                    Same("MetallicRoughnessTexCoord", a.MetallicRoughnessTexCoord == b.MetallicRoughnessTexCoord, a.MetallicRoughnessTexCoord, b.MetallicRoughnessTexCoord);
+                    Same("OcclusionTexCoord", a.OcclusionTexCoord == b.OcclusionTexCoord, a.OcclusionTexCoord, b.OcclusionTexCoord);
+                    Same("EmissiveTexCoord", a.EmissiveTexCoord == b.EmissiveTexCoord, a.EmissiveTexCoord, b.EmissiveTexCoord);
                     Same("EmissiveFactor", a.EmissiveFactor == b.EmissiveFactor, a.EmissiveFactor, b.EmissiveFactor);
                     Same("EmissiveStrength", a.EmissiveStrength == b.EmissiveStrength, a.EmissiveStrength, b.EmissiveStrength);
                     Same("AlphaMode", a.AlphaMode == b.AlphaMode, a.AlphaMode, b.AlphaMode);
@@ -542,6 +636,14 @@ public static class Program
                 try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
             }
         }
+
+        // ── K-F.2: what a material authors reaches both load paths ────────────
+        // K-F compares the cooked path with the source path, which cannot see a value both read the
+        // same wrong way — and both did: occlusion strength was looked up by glTF's word "strength"
+        // where SharpGLTF names it "OcclusionStrength", so every material read 1. This authors each
+        // value, with the channels on DIFFERENT texture-coordinate sets so a swap between two of
+        // them fails too, and holds both paths to the file.
+        AuthoredMaterialReachesBothPaths(t);
 
         // ── and the debt is gone, which is the flag's whole point ───────────
         // SourceRequired was set on every .blixmesh from K-A onward. K-F narrowed it to image bytes;
@@ -1101,11 +1203,11 @@ public static class Program
         {
             var table = new[]
             {
-                new BlixMeshMaterial("glass", System.Numerics.Vector4.One, 0, 0f, 1f, 1f,
+                new BlixMeshMaterial("glass", System.Numerics.Vector4.One, 0, 0, 1f, 0, 0, 0, 0f, 1f, 1f,
                     System.Numerics.Vector3.Zero, 1f, BlixMesh.AlphaOpaque, 0.5f, false, 0f),
-                new BlixMeshMaterial("stone_wall_01", System.Numerics.Vector4.One, 0, 0.35f, 1f, 1f,
+                new BlixMeshMaterial("stone_wall_01", System.Numerics.Vector4.One, 0, 0, 1f, 0, 0, 0, 0.35f, 1f, 1f,
                     System.Numerics.Vector3.Zero, 1f, BlixMesh.AlphaOpaque, 0.5f, false, 0f),
-                new BlixMeshMaterial("stone_trims_01", System.Numerics.Vector4.One, 0, 0.35f, 1f, 1f,
+                new BlixMeshMaterial("stone_trims_01", System.Numerics.Vector4.One, 0, 0, 1f, 0, 0, 0, 0.35f, 1f, 1f,
                     System.Numerics.Vector3.Zero, 1f, BlixMesh.AlphaOpaque, 0.5f, false, 0f),
             };
 

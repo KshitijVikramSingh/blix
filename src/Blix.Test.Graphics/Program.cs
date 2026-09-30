@@ -5673,7 +5673,7 @@ static ShaderInterface MinimalShader() => new(new[]
 
     // A parent translated by +10 on X with a child translated by +1: the child's world is +11, child first.
     static GltfMaterial Plain(string id, string name) => new(
-        id, name, Vector4.One, null, 0, null, null, 0f, 0.7f, null, 1f, null, Vector3.Zero, 1f,
+        id, name, Vector4.One, null, 0, null, 0, 1f, null, 0, 0f, 0.7f, null, 0, 1f, null, 0, Vector3.Zero, 1f,
         GltfAlphaMode.Opaque, 0.5f, false);
     var red = Plain("t#material0", "red");
     var blue = Plain("t#material1", "blue");

@@ -332,7 +332,7 @@ internal sealed partial class SponzaLoop
         // pass. See --no-mask.
         if (forceOpaqueMask) alphaCutoff = 0f;
         baseColorAlpha = baseColorFactor.W;
-        var normalScale = 1.0f;
+        var normalScale = gm?.NormalScale ?? 1.0f;
         var roughness = gm?.RoughnessFactor ?? 0.8f;
         var metallic = gm?.MetallicFactor ?? 0.0f;
         var transmission = gm?.TransmissionFactor ?? 0f;
