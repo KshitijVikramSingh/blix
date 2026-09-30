@@ -412,8 +412,8 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
             return;
         }
 
-        // A model with a skin is posed and framed as a character; one without is framed as a prop.
-        if (loaded.IsSkinned)
+        // A model with a skin or a clip is posed and framed by its body; one with neither is framed as a prop.
+        if (loaded.IsSkinned || loaded.IsAnimated)
         {
             rig = loaded;
             PoseRig();

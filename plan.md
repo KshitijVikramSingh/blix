@@ -84,7 +84,15 @@ as unread.
    attachments are the special case where the node is a joint. A model with clips is posed whether or
    not it has a skin.
 4. **Proof.** A conformance check samples every clip in the corpus at several times and holds skinned
-   vertices and rigid part worlds to SharpGLTF's own evaluation (`GetWorldMatrix(animation, time)`).
+   vertices and rigid part worlds to the spec: node locals from rest TRS plus spec-sampled channels,
+   composed up the tree in the test. (Not SharpGLTF's evaluator: its cubic rotation disagrees with the
+   spec, checked by hand.)
+
+**Done** (branch `rig-alpha`): stage 1 (762e00a) — sampling, v14, every animated node cooked, 94 corpus
+files. Stages 2-4 — the animated hierarchy (`ModelData.Skeleton`, `Skin.Bones`, palettes gathered),
+rigid parts under any animated node, posing without a skin in the tools, and the conformance check over
+22 animated files (RecursiveSkeletons' 84 skins, BrainStem, InterpolationTest, BoxAnimated, the milk truck).
+Out of scope: morph weights, `KHR_animation_pointer`.
 
 ---
 
@@ -167,14 +175,9 @@ neither. The root gate is the deviceless one. A CI home for the `demos` gate wou
 deviceless legs (the probe, `chassis-tune --headless`) separable from the headed ones, which is
 what named tiers are for.
 
-**A clip that animates a non-joint node is not followed.** Skins are read as glTF defines them
-(`JointHierarchy`: placement at the root joints' parent, rest from the joint nodes, in-between nodes as
-fixed offsets, checked vertex-for-vertex against glTF's own sum in `Blix.Test.Recipes`), but the nodes
-between joints and above the roots are taken at rest: clips carry tracks on skin 0's joints only, so a
-track on any other node is not read. The same rule limits multi-skin files: skins that order their joints
-differently cannot share clips, so the cook refuses such a file when it is animated, and poses each such
-skin at its own rest when it is not (`Model.Skin.OwnRest`). Clips that target nodes rather than skin-0
-bone indices would lift both.
+**No corpus file animates a node between joints or above them with a changing value.** The animated
+hierarchy includes such nodes (BrainStem has three tracks on them), but BrainStem's hold their rest, so
+removing them from the hierarchy fails nothing. A derived asset, as for `RiggedSimple_cutout`, would close it.
 
 **Linux is absent from the CI matrix.** A second red job teaches nothing the first
 has not; the shape of what Windows needed should be known before it is copied.

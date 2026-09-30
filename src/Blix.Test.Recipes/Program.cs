@@ -132,6 +132,272 @@ public static class Program
             new Skeleton(Array.Empty<Bone>()), Array.Empty<AnimationClip>(), System.Numerics.Matrix4x4.Identity);
     }
 
+    // ── Animation as glTF defines it ───────────────────────────────────────────
+    // Every clip of every animated corpus file (and tank.glb, and the Rogue's first clips), at several
+    // times: each node's local is its rest TRS with the clip's channels sampled by the spec's formulas,
+    // composed up the node tree — nothing of Blix's hierarchy, offsets or placement. Skinned vertices are
+    // held to sum(w * jointWorld * inverseBind * v) and every rigid mesh node to its animated world.
+    // Blix's side is what a draw does: the hierarchy's rest pose, the clip sampled into it, bone worlds,
+    // each skin's palette gathered, and each rigid part at its carrying node.
+    private static void AnimationMatchesGltf(TestRunner t)
+    {
+        var root = FindFile("InterpolationTest.glb") is { } it ? Path.GetFullPath(Path.Combine(it, "..", "..", "..")) : null;
+        if (root is null)
+        {
+            Console.WriteLine("  --   animation conformance skipped: corpus not fetched (tools/fetch-gltf-corpus.sh)");
+            return;
+        }
+
+        var files = Directory.EnumerateFiles(root, "*.gl*", SearchOption.AllDirectories)
+            .Where(f => f.EndsWith(".glb", StringComparison.Ordinal) || f.EndsWith(".gltf", StringComparison.Ordinal))
+            .Concat(new[] { FindFile("tank.glb"), FindFile("Rogue.glb") }.OfType<string>())
+            .OrderBy(f => f, StringComparer.Ordinal);
+        foreach (var file in files)
+        {
+            SharpGLTF.Schema2.ModelRoot gltf;
+            try { gltf = SharpGLTF.Schema2.ModelRoot.Load(file); }
+            catch (Exception) { continue; }
+            var animations = gltf.LogicalAnimations
+                .Where(a => a.Channels.Any(c => c.TargetNode is not null && c.TargetNodePath is
+                    SharpGLTF.Schema2.PropertyPath.translation or SharpGLTF.Schema2.PropertyPath.rotation or SharpGLTF.Schema2.PropertyPath.scale))
+                .ToArray();
+            if (animations.Length == 0) continue;
+
+            Blix.ModelData data;
+            try { data = Blix.ModelData.Load(CookCache.Resolve(file), new Blix.ModelNeeds(Skinned: true)); }
+            catch (AssetImportException refused)
+            {
+                t.Fail($"{Path.GetFileName(file)}: an animated file loads", refused.Message);
+                continue;
+            }
+
+            if (data.Clips.Count != animations.Length || data.Skeleton is not { } skeleton)
+            {
+                t.Fail($"{Path.GetFileName(file)}: every animation arrives as a clip",
+                    $"{animations.Length} animation(s), {data.Clips.Count} clip(s), skeleton {(data.Skeleton is null ? "none" : "present")}");
+                continue;
+            }
+
+            var nodes = gltf.LogicalNodes;
+            var attachments = data.Attachments().ToDictionary(a => a.NodeIndex);
+            var worst = 0f;
+            var where = string.Empty;
+            var size = Math.Max(1e-3f, data.Nodes.Count == 0 ? 1f : 1f);
+            var clipCount = Path.GetFileName(file) == "Rogue.glb" ? 4 : animations.Length;
+            for (var c = 0; c < clipCount; c++)
+            {
+                var anim = animations[c];
+                var clip = data.Clips[c];
+                var duration = Math.Max(clip.Duration, 1e-3);
+                foreach (var time in new[] { 0.0, 0.13, 0.37, 0.5, 0.71, 0.93, 1.0 }.Select(f => f * duration))
+                {
+                    // The reference: rest TRS, the channels sampled by the spec, composed up the tree.
+                    var locals = nodes.Select(n => n.LocalMatrix).ToArray();
+                    var trs = nodes.Select(n => n.LocalTransform.GetDecomposed())
+                        .Select(d => (d.Scale, d.Rotation, d.Translation)).ToArray();
+                    var moved = new bool[nodes.Count];
+                    foreach (var channel in anim.Channels)
+                    {
+                        if (channel.TargetNode is null) continue;
+                        var n = channel.TargetNode.LogicalIndex;
+                        switch (channel.TargetNodePath)
+                        {
+                            case SharpGLTF.Schema2.PropertyPath.translation:
+                                trs[n].Translation = SpecVector(GltfImporter.SampleKeys(channel.GetTranslationSampler()), time); moved[n] = true; break;
+                            case SharpGLTF.Schema2.PropertyPath.scale:
+                                trs[n].Scale = SpecVector(GltfImporter.SampleKeys(channel.GetScaleSampler()), time); moved[n] = true; break;
+                            case SharpGLTF.Schema2.PropertyPath.rotation:
+                                trs[n].Rotation = SpecRotation(GltfImporter.SampleKeys(channel.GetRotationSampler()), time); moved[n] = true; break;
+                        }
+                    }
+
+                    for (var n = 0; n < nodes.Count; n++)
+                    {
+                        if (!moved[n]) continue;
+                        locals[n] = System.Numerics.Matrix4x4.CreateScale(trs[n].Scale)
+                            * System.Numerics.Matrix4x4.CreateFromQuaternion(System.Numerics.Quaternion.Normalize(trs[n].Rotation))
+                            * System.Numerics.Matrix4x4.CreateTranslation(trs[n].Translation);
+                    }
+
+                    var worlds = new System.Numerics.Matrix4x4[nodes.Count];
+                    System.Numerics.Matrix4x4 World(int n) => worlds[n] != default ? worlds[n]
+                        : worlds[n] = nodes[n].VisualParent is { } parent ? locals[n] * World(parent.LogicalIndex) : locals[n];
+                    size = Math.Max(size, Enumerable.Range(0, nodes.Count).Max(n => World(n).Translation.Length()));
+
+                    // Blix: the hierarchy posed by the clip, as a draw poses it.
+                    var pose = skeleton.CreateRestPose();
+                    clip.Sample(time, pose);
+                    var bones = new System.Numerics.Matrix4x4[skeleton.BoneCount];
+                    skeleton.ComputeBoneWorlds(pose, bones);
+
+                    // Rigid mesh nodes.
+                    for (var n = 0; n < data.Nodes.Count; n++)
+                    {
+                        if (data.Nodes[n].MeshIndex < 0 || data.Nodes[n].SkinIndex >= 0) continue;
+                        var ours = attachments.TryGetValue(n, out var a)
+                            ? a.Local * bones[a.BoneIndex] * data.SkeletonPlacement
+                            : data.World[n];
+                        var e = MaxDifference(ours, World(SourceNode(gltf, data, n)));
+                        if (e > worst) (worst, where) = (e, $"rigid node '{data.Nodes[n].Name}' in '{clip.Name}' at t={time:0.###}");
+                    }
+
+                    // Skinned vertices.
+                    for (var s = 0; s < data.Skins.Count; s++)
+                    {
+                        var palette = new BonePaletteSet(data.Skins[s].Skeleton.BoneCount, 1);
+                        palette.AddGathered(bones, data.Skins[s].Bones, data.Skins[s].Skeleton, data.SkeletonPlacement);
+                        var skinNode = nodes.First(n => n.Skin is not null && n.Mesh is not null
+                            && data.Nodes[SourceToCooked(gltf, data, n.LogicalIndex)].SkinIndex == s);
+                        var gskin = skinNode.Skin;
+                        var ibm = gskin.InverseBindMatrices;
+                        var reference = new Dictionary<(int, int, int), List<System.Numerics.Vector3>>();
+                        foreach (var node in nodes.Where(n => n.Skin == gskin && n.Mesh is not null))
+                        foreach (var prim in node.Mesh.Primitives)
+                        {
+                            var positions = prim.GetVertexAccessor("POSITION").AsVector3Array();
+                            var joints = prim.GetVertexAccessor("JOINTS_0").AsVector4Array();
+                            var weights = prim.GetVertexAccessor("WEIGHTS_0").AsVector4Array();
+                            for (var v = 0; v < positions.Count; v++)
+                            {
+                                var w = System.Numerics.Vector3.Zero;
+                                var total = 0f;
+                                for (var q = 0; q < 4; q++)
+                                {
+                                    if (weights[v][q] <= 0f) continue;
+                                    var j = (int)joints[v][q];
+                                    w += System.Numerics.Vector3.Transform(positions[v], ibm[j] * World(gskin.Joints[j].LogicalIndex)) * weights[v][q];
+                                    total += weights[v][q];
+                                }
+
+                                if (total <= 0f) continue;
+                                var key = Key(positions[v]);
+                                if (!reference.TryGetValue(key, out var list)) reference[key] = list = new();
+                                list.Add(w / total);
+                            }
+                        }
+
+                        foreach (var prim in data.SkinnedPrimitives(s))
+                        {
+                            var mesh = prim.Mesh;
+                            var stride = mesh.Layout.Stride;
+                            for (var v = 0; v < mesh.VertexCount; v++)
+                            {
+                                var at = v * stride;
+                                var p = new System.Numerics.Vector3(BitConverter.ToSingle(mesh.VertexBytes, at),
+                                    BitConverter.ToSingle(mesh.VertexBytes, at + 4), BitConverter.ToSingle(mesh.VertexBytes, at + 8));
+                                var w = System.Numerics.Vector3.Zero;
+                                var total = 0f;
+                                for (var q = 0; q < 4; q++)
+                                {
+                                    var weight = BitConverter.ToSingle(mesh.VertexBytes, at + 48 + q * 4);
+                                    if (weight <= 0f) continue;
+                                    w += System.Numerics.Vector3.Transform(p, palette.Matrices[(int)BitConverter.ToSingle(mesh.VertexBytes, at + 32 + q * 4)]) * weight;
+                                    total += weight;
+                                }
+
+                                if (total <= 0f || !reference.TryGetValue(Key(p), out var candidates)) continue;
+                                var e = candidates.Min(x => System.Numerics.Vector3.Distance(x, w / total));
+                                if (e > worst) (worst, where) = (e, $"skin {s} vertex in '{clip.Name}' at t={time:0.###}");
+                            }
+                        }
+                    }
+                }
+            }
+
+            t.Expect($"{Path.GetFileName(file)}: {clipCount} clip(s) move every part where glTF puts it",
+                worst <= Math.Max(1e-3f, size * 1e-4f), $"worst {worst:0.#####} against a {size:0.##}-unit scene ({where})");
+        }
+
+        static (int, int, int) Key(System.Numerics.Vector3 p) =>
+            ((int)MathF.Round(p.X * 1e4f), (int)MathF.Round(p.Y * 1e4f), (int)MathF.Round(p.Z * 1e4f));
+
+        static float MaxDifference(System.Numerics.Matrix4x4 a, System.Numerics.Matrix4x4 b)
+        {
+            var d = 0f;
+            for (var r = 0; r < 4; r++)
+            for (var c = 0; c < 4; c++) d = Math.Max(d, MathF.Abs(a[r, c] - b[r, c]));
+            return d;
+        }
+    }
+
+    // Cooked node <-> source node, by name: the cook may order nodes parent-first, and spells an unnamed
+    // node node_{i} by its source index. Equal names pair in order of appearance.
+    private static int SourceNode(SharpGLTF.Schema2.ModelRoot gltf, Blix.ModelData data, int cooked) =>
+        NodePairs(gltf, data).First(p => p.Cooked == cooked).Source;
+
+    private static int SourceToCooked(SharpGLTF.Schema2.ModelRoot gltf, Blix.ModelData data, int source) =>
+        NodePairs(gltf, data).First(p => p.Source == source).Cooked;
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Blix.ModelData, List<(int Cooked, int Source)>> Pairs = new();
+
+    private static List<(int Cooked, int Source)> NodePairs(SharpGLTF.Schema2.ModelRoot gltf, Blix.ModelData data) =>
+        Pairs.GetValue(data, _ =>
+        {
+            var byName = gltf.LogicalNodes.GroupBy(n => n.Name ?? $"node_{n.LogicalIndex}")
+                .ToDictionary(g => g.Key, g => new Queue<int>(g.Select(n => n.LogicalIndex)));
+            var pairs = new List<(int, int)>();
+            for (var c = 0; c < data.Nodes.Count; c++)
+            {
+                if (!byName.TryGetValue(data.Nodes[c].Name, out var queue) || queue.Count == 0)
+                {
+                    throw new InvalidDataException($"cooked node '{data.Nodes[c].Name}' has no source node of that name");
+                }
+
+                pairs.Add((c, queue.Dequeue()));
+            }
+
+            return pairs;
+        });
+
+    // The spec's sampling, written from glTF 2.0 Appendix C: STEP holds the earlier key, LINEAR lerps
+    // (slerps a rotation on the shorter arc), CUBICSPLINE is the Hermite form over dt-scaled tangents.
+    private static System.Numerics.Vector3 SpecVector((Keyframe<System.Numerics.Vector3>[] Keys, Interpolation Mode) sampled, double time)
+    {
+        var (keys, mode) = sampled;
+        if (time <= keys[0].Time) return keys[0].Value;
+        if (time >= keys[^1].Time) return keys[^1].Value;
+        var k = 0;
+        while (time > keys[k + 1].Time) k++;
+        var dt = (float)(keys[k + 1].Time - keys[k].Time);
+        var u = (float)((time - keys[k].Time) / dt);
+        return mode switch
+        {
+            Interpolation.Step => time < keys[k + 1].Time ? keys[k].Value : keys[k + 1].Value,
+            Interpolation.CubicSpline => keys[k].Value * (2 * u * u * u - 3 * u * u + 1) + keys[k].OutTangent * (dt * (u * u * u - 2 * u * u + u))
+                + keys[k + 1].Value * (-2 * u * u * u + 3 * u * u) + keys[k + 1].InTangent * (dt * (u * u * u - u * u)),
+            _ => keys[k].Value + (keys[k + 1].Value - keys[k].Value) * u,
+        };
+    }
+
+    private static System.Numerics.Quaternion SpecRotation((Keyframe<System.Numerics.Quaternion>[] Keys, Interpolation Mode) sampled, double time)
+    {
+        var (keys, mode) = sampled;
+        keys = keys.Select(k => k with { Value = System.Numerics.Quaternion.Normalize(k.Value) }).ToArray();
+        if (time <= keys[0].Time) return keys[0].Value;
+        if (time >= keys[^1].Time) return keys[^1].Value;
+        var k = 0;
+        while (time > keys[k + 1].Time) k++;
+        var dt = (float)(keys[k + 1].Time - keys[k].Time);
+        var u = (float)((time - keys[k].Time) / dt);
+        switch (mode)
+        {
+            case Interpolation.Step:
+                return time < keys[k + 1].Time ? keys[k].Value : keys[k + 1].Value;
+            case Interpolation.CubicSpline:
+                return System.Numerics.Quaternion.Normalize(keys[k].Value * (2 * u * u * u - 3 * u * u + 1) + keys[k].OutTangent * (dt * (u * u * u - 2 * u * u + u))
+                    + keys[k + 1].Value * (-2 * u * u * u + 3 * u * u) + keys[k + 1].InTangent * (dt * (u * u * u - u * u)));
+            default:
+                var q0 = keys[k].Value;
+                var q1 = keys[k + 1].Value;
+                var d = System.Numerics.Quaternion.Dot(q0, q1);
+                var sign = d < 0f ? -1f : 1f;
+                d = MathF.Abs(d);
+                if (d > 0.9995f) return System.Numerics.Quaternion.Normalize(q0 * (1f - u) + q1 * (sign * u));
+                var a = MathF.Acos(d);
+                return q0 * (MathF.Sin((1f - u) * a) / MathF.Sin(a)) + q1 * (sign * MathF.Sin(u * a) / MathF.Sin(a));
+        }
+    }
+
     // ── Sampling as glTF defines it ────────────────────────────────────────────
     // Every channel of every animated file in the corpus, read into Blix's curves by the one sampler
     // reading (GltfImporter.SampleKeys) and through the cooked file, is held to SharpGLTF's own curve
@@ -1354,6 +1620,7 @@ public static class Program
         ModelDataReadings(t);
         SkinsMatchGltf(t);
         SamplingMatchesGltf(t);
+        AnimationMatchesGltf(t);
 
         // ── tools cook on open ───────────────────────────────────────────────
         // The engine reads cooked models; a tool opening a raw one cooks it into a cache first.

@@ -30,6 +30,9 @@ public sealed class Model : IDisposable
     private readonly List<Skin> skins = new();
     private readonly List<Part> staticParts = new();
     private readonly List<Attachment> attachments = new();
+    private Skeleton? skeleton;
+    private Matrix4x4 skeletonPlacement = Matrix4x4.Identity;
+    private Matrix4x4[] worldScratch = Array.Empty<Matrix4x4>();
 
     private Model(IGraphicsDevice device, string name)
     {
@@ -47,16 +50,16 @@ public sealed class Model : IDisposable
     /// <param name="SkinIndex">The skin that deforms it, or -1 for a static part.</param>
     public sealed record Part(int NodeIndex, Mesh Mesh, PbrMaterial? Material, MaterialTextures Textures, int SkinIndex = -1);
 
-    /// <summary>One skin: the skeleton it poses and where it hangs.</summary>
-    /// <param name="OwnRest">
-    /// Its own rest pose when its joints are not skin 0's, index for index; null when they are. Clips are
-    /// bone indices against skin 0 (the cook refuses clips over skins that disagree), so a skin whose
-    /// joints differ can only be at its own rest, and a pose of skin 0's would drive the wrong bones.
-    /// </param>
-    public sealed record Skin(Skeleton Skeleton, Matrix4x4 SkeletonPlacement, Pose? OwnRest = null);
+    /// <summary>One skin: its own skeleton (bone count and inverse binds) and its joints as bones of <see cref="Model.Skeleton"/>.</summary>
+    /// <remarks>
+    /// A skin is posed by the model's one animated hierarchy: its palette is gathered from that pose's
+    /// bone worlds through <paramref name="Bones"/>, so skins with different joint lists move together.
+    /// </remarks>
+    public sealed record Skin(Skeleton Skeleton, IReadOnlyList<int> Bones);
 
-    /// <summary>A static part a joint carries: placed by the joint's world transform, not skinned.</summary>
-    /// <param name="JointIndex">The joint's bone in <paramref name="SkinIndex"/>'s skeleton.</param>
+    /// <summary>A rigid part an animated node carries — a joint, or any node a clip moves — placed by that node's posed world.</summary>
+    /// <param name="JointIndex">That node's bone in <see cref="Model.Skeleton"/>.</param>
+    /// <param name="SkinIndex">The first skin with that node as a joint, or -1.</param>
     public sealed record Attachment(string Name, string JointName, int JointIndex, int SkinIndex, Matrix4x4 Local, Part Part);
 
     /// <summary>The name its GPU resources were created under.</summary>
@@ -84,17 +87,26 @@ public sealed class Model : IDisposable
     /// <summary>The parts a skin deforms.</summary>
     public IEnumerable<Part> SkinnedParts => parts.Where(p => p.SkinIndex >= 0);
 
-    /// <summary>Unskinned parts on no joint, each at its node's world.</summary>
+    /// <summary>Unskinned parts no animated node carries, each at its node's world.</summary>
     public IReadOnlyList<Part> StaticParts => staticParts;
 
-    /// <summary>Unskinned parts a joint carries.</summary>
+    /// <summary>Unskinned parts an animated node carries (<see cref="Attachment"/>).</summary>
     public IReadOnlyList<Attachment> Attachments => attachments;
 
-    /// <summary>Skin 0's skeleton: most rigs have one skin. Multi-skin files read <see cref="Skins"/>.</summary>
-    public Skeleton Skeleton => RequireSkin().Skeleton;
+    /// <summary>Whether a clip moves anything — a skin's joints or any other node.</summary>
+    public bool IsAnimated => Clips.Count > 0;
 
-    /// <summary>Skin 0's placement, which goes before a body's own.</summary>
-    public Matrix4x4 SkeletonPlacement => RequireSkin().SkeletonPlacement;
+    /// <summary>
+    /// The model's animated hierarchy: every skin's joints and every node a clip moves (<see cref="ModelData.Skeleton"/>).
+    /// Poses and clips are against it; for most rigs it is skin 0's skeleton exactly.
+    /// </summary>
+    public Skeleton Skeleton => skeleton
+        ?? throw new InvalidOperationException($"'{Name}' has no skin and no animation, so there is no skeleton to pose.");
+
+    /// <summary>Where the animated hierarchy hangs, which goes before a body's own placement.</summary>
+    public Matrix4x4 SkeletonPlacement => skeleton is not null
+        ? skeletonPlacement
+        : throw new InvalidOperationException($"'{Name}' has no skin and no animation, so there is no skeleton to place.");
 
     /// <summary>The source's vertex attributes its cook did not carry, with its reasons.</summary>
     public IReadOnlyList<UnreadAttribute> Ignored { get; private set; } = Array.Empty<UnreadAttribute>();
@@ -102,12 +114,16 @@ public sealed class Model : IDisposable
     /// <summary>Every clip in the file, ordered by name so two runs list them the same way.</summary>
     public IReadOnlyList<AnimationClip> Clips { get; private set; } = Array.Empty<AnimationClip>();
 
-    /// <summary>Where the skinned parts sit at their skins' rest pose, each skin placed by its own; zero-sized without them.</summary>
+    /// <summary>
+    /// Where the body sits at rest: the skinned parts at their skins' rest pose, or, for a model with no
+    /// skinned parts, its <see cref="Bounds"/>. Static parts and attachments of a skinned model do not
+    /// widen it: it describes the body, not its equipment.
+    /// </summary>
     /// <remarks>Static parts and attachments do not widen it: it describes the body, not its equipment.</remarks>
     public Bounds3 RestBounds { get; private set; } = new(Vector3.Zero, Vector3.Zero);
 
     /// <summary>The largest rest-bounds dimension, for framing a body of unknown scale; 1 without skinned parts.</summary>
-    public float RestExtent => Longest(SkinnedParts.Count(), RestBounds);
+    public float RestExtent => Longest(parts.Count, RestBounds);
 
     /// <summary>Vertices over the skinned parts.</summary>
     public int SkinnedVertexCount { get; private set; }
@@ -132,25 +148,26 @@ public sealed class Model : IDisposable
         return null;
     }
 
-    /// <summary>One palette set per skin, sized for <paramref name="instances"/> bodies.</summary>
+    /// <summary>One palette set per skin, sized for <paramref name="instances"/> bodies. None for a model without a skin.</summary>
     public BonePaletteSet[] CreatePaletteSets(int instances)
     {
-        RequireSkin();
+        _ = Skeleton;
         return skins.Select(s => new BonePaletteSet(s.Skeleton.BoneCount, instances)).ToArray();
     }
 
     /// <summary>Packs N posed bodies into one palette set per skin, each body at its placement.</summary>
     /// <remarks>
     /// Per skin, because each has its own inverse binds: one pose gives different palettes for two skins.
-    /// Each body is <c>SkeletonPlacement * placement</c>, so a set holds world-space palettes. The poses
-    /// are skin 0's; a skin whose joints differ from skin 0's is packed at its own rest (<see cref="Skin.OwnRest"/>).
+    /// The poses are of <see cref="Skeleton"/>, the one animated hierarchy; each skin gathers its joints
+    /// from it (<see cref="Skin.Bones"/>). Each body is <c>SkeletonPlacement * placement</c>, so a set holds
+    /// world-space palettes. A model without a skin has no sets, and nothing is packed.
     /// </remarks>
     public void PackPalettes(IReadOnlyList<Pose> poses, IReadOnlyList<Matrix4x4> placements, IReadOnlyList<BonePaletteSet> into)
     {
         ArgumentNullException.ThrowIfNull(poses);
         ArgumentNullException.ThrowIfNull(placements);
         ArgumentNullException.ThrowIfNull(into);
-        RequireSkin();
+        _ = Skeleton;
         if (poses.Count != placements.Count)
         {
             throw new ArgumentException(
@@ -165,11 +182,14 @@ public sealed class Model : IDisposable
         }
 
         foreach (var set in into) set.Reset();
+        if (worldScratch.Length != Skeleton.BoneCount) worldScratch = new Matrix4x4[Skeleton.BoneCount];
         for (var body = 0; body < poses.Count; body++)
         {
+            // One pose of the hierarchy per body; every skin gathers its joints from it.
+            Skeleton.ComputeBoneWorlds(poses[body], worldScratch);
             for (var s = 0; s < skins.Count; s++)
             {
-                into[s].Add(skins[s].Skeleton, skins[s].OwnRest ?? poses[body], skins[s].SkeletonPlacement * placements[body]);
+                into[s].AddGathered(worldScratch, skins[s].Bones, skins[s].Skeleton, skeletonPlacement * placements[body]);
             }
         }
     }
@@ -215,12 +235,9 @@ public sealed class Model : IDisposable
         var max = new Vector3(float.MinValue);
         var partsOfNode = new List<Part>[source.Nodes.Count];
 
-        for (var s = 0; s < source.Skins.Count; s++)
-        {
-            var own = source.Skins[s];
-            var sharesSkin0 = own.JointNodes.SequenceEqual(source.Skins[0].JointNodes);
-            model.skins.Add(new Skin(own.Skeleton, source.Placement(s), sharesSkin0 ? null : own.Skeleton.CreateRestPose()));
-        }
+        foreach (var own in source.Skins) model.skins.Add(new Skin(own.Skeleton, own.Bones));
+        model.skeleton = source.Skeleton;
+        model.skeletonPlacement = source.SkeletonPlacement;
 
         for (var i = 0; i < source.Nodes.Count; i++)
         {
@@ -281,30 +298,38 @@ public sealed class Model : IDisposable
             model.staticParts.AddRange(partsOfNode[n].Where(p => p.SkinIndex < 0));
         }
 
-        if (!source.IsRigged) return model;
+        if (source.Skeleton is not { } hierarchy) return model;
 
         model.Clips = source.Clips.OrderBy(c => c.Name, StringComparer.Ordinal).ToArray();
-        var skinnedPrimitives = source.Nodes
-            .Where(n => n.MeshIndex >= 0 && source.Meshes[n.MeshIndex].Skinned)
-            .SelectMany(n => source.Meshes[n.MeshIndex].Primitives)
-            .ToArray();
-        var weighted = SkinningAnalysis.FindWeightedBones(model.skins[0].Skeleton, skinnedPrimitives.Select(p => p.Mesh));
-        model.WeightedBones = weighted;
-        model.DeformHierarchy = SkinningAnalysis.IncludeAncestors(model.skins[0].Skeleton, weighted);
 
+        // Weighted bones and rest bounds, per skin, in the hierarchy's bones: the same gather a draw does.
+        var weighted = new bool[hierarchy.BoneCount];
+        var restWorlds = new Matrix4x4[hierarchy.BoneCount];
+        hierarchy.ComputeBoneWorlds(hierarchy.CreateRestPose(), restWorlds);
         var restMin = new Vector3(float.MaxValue);
         var restMax = new Vector3(float.MinValue);
-        foreach (var mesh in source.Nodes.Where(n => n.MeshIndex >= 0).Select(n => source.Meshes[n.MeshIndex]).Where(m => m.Skinned))
+        var anySkinned = false;
+        for (var s = 0; s < model.skins.Count; s++)
         {
-            var skin = model.skins[mesh.SkinIndex];
-            foreach (var p in mesh.Primitives)
+            var skin = model.skins[s];
+            // Skinned vertices only: a load that asked for static geometry has nothing here to bound.
+            var meshes = source.SkinnedPrimitives(s).Select(p => p.Mesh).Where(m => m.Layout.Stride >= 80).ToArray();
+            var own = SkinningAnalysis.FindWeightedBones(skin.Skeleton, meshes);
+            for (var b = 0; b < own.Length; b++) weighted[skin.Bones[b]] |= own[b];
+
+            var palette = new BonePaletteSet(skin.Skeleton.BoneCount, 1);
+            palette.AddGathered(restWorlds, skin.Bones, skin.Skeleton, source.SkeletonPlacement);
+            foreach (var mesh in meshes)
             {
-                model.SkinnedVertexCount += p.Mesh.VertexCount;
-                SkinningAnalysis.AccumulateRestBounds(skin.Skeleton, skin.SkeletonPlacement, p.Mesh, ref restMin, ref restMax);
+                anySkinned = true;
+                model.SkinnedVertexCount += mesh.VertexCount;
+                SkinningAnalysis.AccumulateRestBounds(palette.Matrices, mesh, ref restMin, ref restMax);
             }
         }
 
-        if (skinnedPrimitives.Length > 0) model.RestBounds = new Bounds3(restMin, restMax);
+        model.WeightedBones = weighted;
+        model.DeformHierarchy = SkinningAnalysis.IncludeAncestors(hierarchy, weighted);
+        model.RestBounds = anySkinned && restMin.X <= restMax.X ? new Bounds3(restMin, restMax) : model.Bounds;
 
         return model;
     }

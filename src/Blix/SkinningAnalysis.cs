@@ -43,23 +43,21 @@ public static class SkinningAnalysis
     }
 
     /// <summary>
-    /// Where <paramref name="mesh"/>'s vertices land at <paramref name="skeleton"/>'s rest pose, placed by
-    /// <paramref name="placement"/>, widened into <paramref name="min"/> and <paramref name="max"/>.
+    /// Where <paramref name="mesh"/>'s vertices land under <paramref name="palette"/> (a skin's palette at
+    /// rest), widened into <paramref name="min"/> and <paramref name="max"/>.
     /// </summary>
     /// <remarks>
     /// The skin sum itself — <c>sum(w * v * palette)</c> at the rest palette — rather than the mesh-space
     /// vertices under one transform: a file's rest pose need not be its bind pose, and only the skin
-    /// knows where the rest pose puts them. A vertex with no weight stays where the placement puts it.
+    /// knows where the rest pose puts them. A vertex with no weight is left out: glTF gives it no place.
     /// </remarks>
     public static void AccumulateRestBounds(
-        Skeleton skeleton, Matrix4x4 placement, MeshData mesh, ref Vector3 min, ref Vector3 max)
+        IReadOnlyList<Matrix4x4> palette, MeshData mesh, ref Vector3 min, ref Vector3 max)
     {
-        ArgumentNullException.ThrowIfNull(skeleton);
+        ArgumentNullException.ThrowIfNull(palette);
         ArgumentNullException.ThrowIfNull(mesh);
         var indexAttribute = Attribute(mesh.Layout, location: 3);
         var weightAttribute = Attribute(mesh.Layout, location: 4);
-        var palette = new BonePaletteSet(skeleton.BoneCount, 1);
-        palette.Add(skeleton, skeleton.CreateRestPose(), placement);
 
         var stride = mesh.Layout.Stride;
         for (var vertex = 0; vertex < mesh.VertexCount; vertex++)
@@ -76,12 +74,13 @@ public static class SkinningAnalysis
                 var weight = BitConverter.ToSingle(mesh.VertexBytes, at + weightAttribute + (influence * 4));
                 if (weight <= 0f) continue;
                 var bone = (int)BitConverter.ToSingle(mesh.VertexBytes, at + indexAttribute + (influence * 4));
-                if ((uint)bone >= (uint)skeleton.BoneCount) continue;
-                skinned += Vector3.Transform(p, palette.Matrices[bone]) * weight;
+                if ((uint)bone >= (uint)palette.Count) continue;
+                skinned += Vector3.Transform(p, palette[bone]) * weight;
                 total += weight;
             }
 
-            var world = total > 0f ? skinned / total : Vector3.Transform(p, placement);
+            if (total <= 0f) continue;
+            var world = skinned / total;
             min = Vector3.Min(min, world);
             max = Vector3.Max(max, world);
         }

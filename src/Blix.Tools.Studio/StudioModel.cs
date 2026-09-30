@@ -103,8 +103,8 @@ internal sealed class StudioModel : IDisposable
         /// <summary>The material's own name, which application-owned tint policy keys on.</summary>
         string MaterialName = "");
 
-    /// <summary>One skin: the skeleton it poses, the frame its meshes were authored in, and its palette binding.</summary>
-    public sealed record SkinSlot(Skeleton Skeleton, Matrix4x4 SkeletonPlacement, MaterialHandle BoneMaterial);
+    /// <summary>One skin: its own skeleton (bone count, inverse binds) and its palette binding.</summary>
+    public sealed record SkinSlot(Skeleton Skeleton, MaterialHandle BoneMaterial);
 
     private Model model = null!;
     private BoneBuffers? bones;
@@ -200,7 +200,7 @@ internal sealed class StudioModel : IDisposable
         studio.bones = model.CreateBoneBuffers(skinnedProgram, MaxInstances);
         for (var s = 0; s < model.Skins.Count; s++)
         {
-            studio.skins.Add(new SkinSlot(model.Skins[s].Skeleton, model.Skins[s].SkeletonPlacement, studio.bones.For(s).Handle));
+            studio.skins.Add(new SkinSlot(model.Skins[s].Skeleton, studio.bones.For(s).Handle));
         }
 
         return studio;

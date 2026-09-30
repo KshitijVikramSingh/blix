@@ -105,6 +105,41 @@ public sealed class BonePaletteSet
     }
 
     /// <summary>
+    /// Adds one body for a skin whose joints are bones of a larger posed hierarchy: its palette gathered
+    /// from that hierarchy's bone worlds, through the skin's own inverse binds.
+    /// </summary>
+    /// <param name="boneWorlds">The hierarchy's bone worlds for this body (<see cref="Skeleton.ComputeBoneWorlds"/>).</param>
+    /// <param name="bones">Each of the skin's joints as a hierarchy bone.</param>
+    /// <param name="skin">The skin's own skeleton, whose bones carry its inverse binds.</param>
+    /// <param name="post">What goes after every world: the hierarchy's placement, then the body's.</param>
+    public int AddGathered(IReadOnlyList<Matrix4x4> boneWorlds, IReadOnlyList<int> bones, Skeleton skin, Matrix4x4 post)
+    {
+        ArgumentNullException.ThrowIfNull(boneWorlds);
+        ArgumentNullException.ThrowIfNull(bones);
+        ArgumentNullException.ThrowIfNull(skin);
+        if (skin.BoneCount != BoneCount || bones.Count != BoneCount)
+        {
+            throw new ArgumentException(
+                $"A {skin.BoneCount}-bone skin mapped through {bones.Count} bone(s); this set is packed at a stride of {BoneCount}.",
+                nameof(skin));
+        }
+
+        if (Count >= Capacity)
+        {
+            throw new InvalidOperationException(
+                $"BonePaletteSet is full at {Capacity} instance(s). Size it for the crowd, or stop adding.");
+        }
+
+        var at = Count * BoneCount;
+        for (var b = 0; b < BoneCount; b++)
+        {
+            Matrices[at + b] = skin.Bones[b].InverseBindPose * boneWorlds[bones[b]] * post;
+        }
+
+        return Count++;
+    }
+
+    /// <summary>
     /// A stable hash of one instance's matrices — "is this body in a different pose from that one?"
     /// </summary>
     /// <remarks>

@@ -445,8 +445,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             return;
         }
 
-        // A model with a skin is posed and framed as a character; one without is framed as a prop.
-        if (loaded.IsSkinned)
+        // A model with a skin or a clip is posed and framed by its body; one with neither is framed as a prop.
+        if (loaded.IsSkinned || loaded.IsAnimated)
         {
             rig = loaded;
             PoseRig();
@@ -650,7 +650,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // Pulled in when there is a subject, so it fills the frame rather than sitting in it. A rig
         // is framed higher and closer still: a character's interesting half is above its waist.
         var subject = model is not null || rig is not null;
-        var eye = rig is not null
+        // The character camera is for a body a skin deforms; a posed model with no skin (node animation
+        // only) is a prop that moves, and gets the prop's camera.
+        var character = rig is { IsSkinned: true };
+        var eye = character
             ? new Vector3(2.6f, 2.0f, 3.4f)
             : subject ? new Vector3(3.4f, 2.4f, 4.2f) : new Vector3(6.4f, 4.8f, 7.6f);
 
@@ -661,7 +664,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // The rig's OWN half-height, not a constant that happened to suit one asset. A hardcoded
         // 1.4 m aims over the head of anything shorter, and --zoom then magnifies empty air: the
         // first mask capture centred on the sky with the skeleton falling off the bottom edge.
-        var target = rig is not null
+        var target = character
             ? new Vector3(0f, rigDrawnHeight * 0.5f, 0f)
             : subject ? new Vector3(0f, 0.7f, 0f) : new Vector3(0f, 1f, 0f);
 

@@ -277,7 +277,9 @@ public sealed class ModelView : IStudioView
             // local -> joint -> world. Row-vector, left to right, the same direction the hierarchy
             // walk composes in — a transposed multiply here puts the knife in the right place on a
             // rig with no rotation and nowhere near it on one with any.
-            var model = attachment.LocalTransform * worlds[attachment.JointIndex] * placement;
+            // Bone worlds are in the hierarchy's space, which hangs at SkeletonPlacement: the same
+            // composition a skinned palette gets, so a part and the skin it rides stay together.
+            var model = attachment.LocalTransform * worlds[attachment.JointIndex] * Model.SkeletonPlacement * placement;
 
             var cutoff = StudioAlpha.CutoffFor(attachment.AlphaMode, attachment.AlphaCutoff);
             StudioPush.Matrix(model, attachPush);
