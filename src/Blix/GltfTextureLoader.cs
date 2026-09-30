@@ -30,7 +30,7 @@ public readonly record struct MaterialTextures(
 // renderer's, and (post SPIR-V reflection) the UBO layout is the game's. The
 // caller does `loader.Load(gltfMaterial)` → writes its UBO from the material's
 // scalar factors → binds the returned handles.
-public sealed class GltfTextureLoader
+public sealed class GltfTextureLoader : IDisposable
 {
     private readonly IGraphicsDevice device;
     private readonly ResourceUploader uploader;
@@ -47,6 +47,10 @@ public sealed class GltfTextureLoader
     private readonly TextureHandle blackEmissive;    // 1×1 black sRGB  → no glow
     private readonly TextureHandle defaultMr;        // 1×1 white linear → factors pass through
     private readonly TextureHandle defaultAo;        // 1×1 white linear → no occlusion
+    // Every handle this loader created, fallbacks included: what Dispose destroys. A shared registry may
+    // name handles another loader made; those are that loader's to free.
+    private readonly List<TextureHandle> created = new();
+    private readonly bool ownsRegistry;
 
     /// <param name="shared">
     /// A registry to share with other owners, or null to keep one of this loader's own.
@@ -60,6 +64,7 @@ public sealed class GltfTextureLoader
         ArgumentNullException.ThrowIfNull(device);
         this.device = device;
         registry = shared ?? new TextureRegistry();
+        ownsRegistry = shared is null;
         uploader = new ResourceUploader(device);
 
         fallbackAlbedo = device.CreateTexture2D(
@@ -77,6 +82,21 @@ public sealed class GltfTextureLoader
         defaultAo = device.CreateTexture2D(
             new TextureDescription(1, 1, TextureFormat.Rgba8, SamplerDescription.LinearRepeat),
             new byte[] { 255, 255, 255, 255 }, "gltf.default.ao");
+        created.AddRange(new[] { fallbackAlbedo, flatNormal, blackEmissive, defaultMr, defaultAo });
+    }
+
+    /// <summary>Destroys every texture this loader uploaded, and forgets them.</summary>
+    /// <remarks>
+    /// What an owner that reloads (a viewer opening another file) calls, so textures do not outlive the
+    /// model they were loaded for. Handles it returned are invalid afterwards.
+    /// </remarks>
+    public void Dispose()
+    {
+        foreach (var handle in created) device.DestroyTexture(handle);
+        created.Clear();
+        // A shared registry still names other loaders' textures, which stay theirs; one of its own it
+        // forgets, since every handle in it is now gone.
+        if (ownsRegistry) registry.Clear();
     }
 
     // The upload queue: drive Drain(budgetMs) each frame; PendingCount == 0
@@ -148,6 +168,7 @@ public sealed class GltfTextureLoader
             return fallback;
         }
 
+        created.Add(handle);
         return handle;
     }
 }

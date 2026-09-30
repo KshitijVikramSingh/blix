@@ -28,24 +28,14 @@ layout(set = 0, binding = 0) uniform Frame {
     mat4 uViewProjection;
 };
 
-// The palettes, at set 3 — the engine's per-draw set, written once per frame slot through a
-// MaterialBindings rather than inline like a texture. Set 1 is where the lit pass's inline
-// textures land and set 2 is the per-material set; a palette is neither.
-//
-// FIXED SIZE, and that is not a style choice. spirv-cross reflects a runtime-sized
-// `mat4 m[]` as block_size 0 with an array count of 0, so the sidecar the lab builds its
-// binding model from would describe a zero-byte buffer and the material would allocate one.
-// A literal bound reflects with a real size and a 64-byte element stride, which is what
-// MaterialBindings needs — and a short write is legal, so three 41-bone rigs upload 7,872
-// bytes and the tail is simply never read.
-//
-// 1024 = StudioRig.MaxBones (128) x StudioRig.MaxInstances (8). A literal, because the build's
-// SPIR-V target does not pass -D — so the number does live in two files. Blix.Test.Studio reads
-// the reflected block size and fails if it stops matching the C# constants; StudioRig rejects an
-// asset whose skin cannot fit before allocating its GPU resources.
-layout(std430, set = 3, binding = 0) readonly buffer Bones {
-    mat4 m[1024];
-} bones;
+// The palettes: the engine's bone block at set 3 (skinning.glsl), sized here. Reflection reads an
+// unsized array as a zero-byte buffer, and the bone buffer is allocated at the reflected size, so the
+// capacity is a literal: 1024 = StudioRig.MaxBones (128) x StudioRig.MaxInstances (8). Blix.Test.Studio
+// reads the reflected block size and fails if it stops matching the C# constants; StudioRig rejects an
+// asset whose skin cannot fit before allocating its GPU resources. A short write is legal, so a small
+// rig uploads only its live palettes and the tail is never read.
+#define BLIX_BONE_CAPACITY 1024
+#include "skinning.glsl"
 
 layout(push_constant) uniform Push {
     mat4 uModel;
@@ -84,10 +74,7 @@ void main()
     // The linear-blend skinning sum. Weights come normalised out of the importer; a rig whose
     // weights do not sum to one shrinks toward the origin, which is a thing the lab's skeleton
     // overlay makes visible (mesh drifts, bones do not).
-    mat4 skin = bones.m[base + int(aBoneIndices.x)] * aBoneWeights.x
-              + bones.m[base + int(aBoneIndices.y)] * aBoneWeights.y
-              + bones.m[base + int(aBoneIndices.z)] * aBoneWeights.z
-              + bones.m[base + int(aBoneIndices.w)] * aBoneWeights.w;
+    mat4 skin = blix_skin(aBoneIndices, aBoneWeights, base);
 
     // <b>uModel is identity on every instanced draw, and the multiply stays.</b> Each instance's
     // placement is baked into its palette on the CPU (Bulwark's shape — a world-space palette and
