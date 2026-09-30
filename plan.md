@@ -12,6 +12,36 @@ shader-declared samplers are in [`docs/architecture.md`](docs/architecture.md) a
 
 ---
 
+## G — the engine reads cooked models only
+
+Decided 2026-09-30: the engine stops parsing glTF. Models reach it as `.blixmesh`, so every repair a
+source needs — patches, normal-map conventions, tangents, validation — happens once, in the cook,
+and there is one reader of each fact instead of two (the occlusion strength that both paths misread
+is the case). Tools that open an arbitrary `.glb` cook it on open into a cache. RTSGame loads no
+`.glb` at runtime.
+
+**The order is set by what the cooked form cannot say yet.** The flat cook writes a 32-byte
+position/normal/uv layout; asked for colour, the cooked loader fills white and copies uv0 into uv1.
+It is invisible today only because Studio reads the source whenever it wants colour. So the format
+has to carry the whole vertex before anything can depend on it:
+
+1. **MikkTSpace in the cook.** `third_party/mikktspace` beside meshopt and bc7, built by
+   `Blix.Recipes`. Generated wherever TANGENT is absent, replacing both fallbacks (an arbitrary axis
+   perpendicular to N on static imports, zero on rigs). Held to a corpus asset with authored
+   tangents: strip them, regenerate, compare.
+2. **One complete cooked vertex.** Position, normal, tangent, uv0, uv1, colour on every static
+   primitive; the loader repacks it into the layout a caller asks for, as `Unbake` does now but
+   from real data. Carries MultiUVTest and the `vertexcolor`/`uv1` lab modes unchanged.
+3. **Cook-on-open for tools.** Studio's viewer and Shot, `inspect`, `check` and the lab baseline's
+   corpus modes cook into a cache keyed by the source's hash and load the result.
+4. **The engine refuses a `.glb`**, naming the cook. The importers and SharpGLTF move out of `Blix`
+   to the cook side, and the CPU types stop being `Gltf*` (`ModelData`/`RigData`, the rename that
+   was deferred).
+5. **Studio reads the vertex frame.** A static layout carrying tangent, colour and uv1, so the
+   derivative frame in `studio_lit.frag` goes.
+
+---
+
 ## F — a body in the character room
 
 The one stage not started. `src/Demos/Character/` holds a shared library — room,
