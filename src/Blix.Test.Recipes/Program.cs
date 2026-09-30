@@ -132,6 +132,79 @@ public static class Program
             new Skeleton(Array.Empty<Bone>()), Array.Empty<AnimationClip>(), System.Numerics.Matrix4x4.Identity);
     }
 
+    // ── The corpus, whole ──────────────────────────────────────────────────────
+    // Every file in the conformance corpus is cooked, loaded as the engine loads it, and each clip
+    // sampled — or it is on this list, which says why not. Both directions fail: a file refused that is
+    // not listed, and a listed file that now loads (so the list only shrinks on purpose). Loading is not
+    // reading correctly; the other checks here are about that. This is about never crashing and never
+    // refusing without saying so.
+    private static readonly Dictionary<string, string> ExpectedRefusals = new(StringComparer.Ordinal)
+    {
+        // Not implemented, and refused by name rather than mis-read.
+        ["BoxTexturedKtx2Basis.glb"] = "KHR_texture_basisu",
+        ["BoxVertexColorsDracoRGB.gltf"] = "KHR_draco_mesh_compression",
+        ["CesiumMan.gltf"] = "KHR_draco_mesh_compression",
+        ["BoxWeb3dQuantizedAttributes.gltf"] = "WEB3D_quantized_attributes",
+        // Invalid glTF, which must be refused.
+        ["Mesh_NoPosition_00.gltf"] = "no POSITION",
+        ["Mesh_PrimitiveRestart_00.gltf"] = "primitive restart",
+        // Valid glTF that Blix does not read yet — the spec gaps (plan.md, the spec audit).
+        ["Accessor_Sparse_03.gltf"] = "a sparse accessor with no base buffer view",
+        ["Animation_Skin_03.gltf"] = "a skin with no inverse binds (identity, per the spec)",
+        ["Animation_Skin_06.gltf"] = "a skeleton root the importer rejects",
+        ["TextureEncodingTest.glb"] = "one image used as colour and as data",
+        ["TextureLinearInterpolationTest.glb"] = "one image used as colour and as data",
+        ["TextureTransformMultiTest.glb"] = "KHR_texture_transform (required)",
+        ["TriangleWithoutIndices.gltf"] = "a primitive with no indices",
+    };
+
+    private static void EveryCorpusFileLoads(TestRunner t)
+    {
+        var root = FindFile("InterpolationTest.glb") is { } it ? Path.GetFullPath(Path.Combine(it, "..", "..", "..")) : null;
+        if (root is null)
+        {
+            Console.WriteLine("  --   corpus load check skipped: corpus not fetched (tools/fetch-gltf-corpus.sh)");
+            return;
+        }
+
+        var loaded = 0;
+        var wrong = new List<string>();
+        foreach (var file in Directory.EnumerateFiles(root, "*.gl*", SearchOption.AllDirectories)
+            .Where(f => f.EndsWith(".glb", StringComparison.Ordinal) || f.EndsWith(".gltf", StringComparison.Ordinal))
+            .OrderBy(f => f, StringComparer.Ordinal))
+        {
+            var name = Path.GetFileName(file);
+            var expected = ExpectedRefusals.TryGetValue(name, out var why);
+            try
+            {
+                var data = Blix.ModelData.Load(CookCache.Resolve(file), new Blix.ModelNeeds(Tangents: true, Colour: true, Skinned: true));
+                if (data.Skeleton is { } skeleton)
+                {
+                    foreach (var clip in data.Clips)
+                    {
+                        var pose = skeleton.CreateRestPose();
+                        clip.Sample(clip.Duration * 0.5, pose);
+                        skeleton.ComputeBoneWorlds(pose, new System.Numerics.Matrix4x4[skeleton.BoneCount]);
+                    }
+                }
+
+                loaded++;
+                if (expected) wrong.Add($"{name} loads now — take it off the list ({why})");
+            }
+            catch (AssetImportException refused)
+            {
+                if (!expected) wrong.Add($"{name} refused: {refused.Message.Split('\n')[0]}");
+            }
+            catch (Exception crash) when (crash is not OutOfMemoryException)
+            {
+                wrong.Add($"{name} CRASHED: {crash.GetType().Name}: {crash.Message.Split('\n')[0]}");
+            }
+        }
+
+        t.Expect($"every corpus file loads, or is refused by name for a listed reason ({loaded} loaded, {ExpectedRefusals.Count} listed)",
+            wrong.Count == 0, string.Join(" | ", wrong));
+    }
+
     // ── Animation as glTF defines it ───────────────────────────────────────────
     // Every clip of every animated corpus file (and tank.glb, and the Rogue's first clips), at several
     // times: each node's local is its rest TRS with the clip's channels sampled by the spec's formulas,
@@ -1621,6 +1694,7 @@ public static class Program
         SkinsMatchGltf(t);
         SamplingMatchesGltf(t);
         AnimationMatchesGltf(t);
+        EveryCorpusFileLoads(t);
 
         // ── tools cook on open ───────────────────────────────────────────────
         // The engine reads cooked models; a tool opening a raw one cooks it into a cache first.

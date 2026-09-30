@@ -119,8 +119,8 @@ sample UnlitTest                # KHR_materials_unlit, which is a whole shading 
 generator Mesh_PrimitiveVertexColor 0-5                                   # All six COLOR_0 spellings (float/ushort/ubyte x VEC3/VEC4). Verified byte-identical against a control of 415,625 strongly coloured pixels.
 generator Material_AlphaMask 0-5 Textures/BaseColor_Plane.png             # The cutoff matrix. _05 dims baseColorFactor.a to 0.7, making its EFFECTIVE cutoff 0.571 — which is why ordering these by nominal cutoff is wrong.
 generator Material_AlphaBlend 0-6 Textures/BaseColor_Plane.png            # BLEND. The conformance half; ordering within the blended group is still open.
-generator Material_DoubleSided 0-4 Textures/BaseColor_Plane.png           # doubleSided, which is pipeline state in Vulkan and so cannot be a push constant.
-generator Mesh_PrimitivesUV 0-8                                           # Multiple primitives with differing UV sets, the case a single "does it have UV1" flag gets wrong.
+generator Material_DoubleSided 0-4 Textures/BaseColor_Plane.png Textures/Normal_Plane.png   # doubleSided, which is pipeline state in Vulkan and so cannot be a push constant.
+generator Mesh_PrimitivesUV 0-8 Textures/BaseColor_Plane.png Textures/Normal_Plane.png   # Multiple primitives with differing UV sets, the case a single "does it have UV1" flag gets wrong.
 generator Buffer_Interleaved 0-4 Textures/BaseColor_Grey.png              # Stride. A vertex buffer is walked at the PIPELINE's declared stride, so a mismatch here reads as garbage geometry, not as a missing attribute.
 generator Accessor_Sparse 0-3 Textures/BaseColor_A.png Textures/BaseColor_B.png   # Sparse, in every place the spec allows it.
 generator Node_NegativeScale 0-12 Textures/BaseColor_Nodes.png Textures/MetallicRoughness_Nodes.png Textures/Normal_Nodes.png   # Negative scale flips winding. Culling is pipeline state, so a determinant sign has to reach the pipeline choice.

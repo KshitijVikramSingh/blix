@@ -96,6 +96,34 @@ Out of scope: morph weights, `KHR_animation_pointer`.
 
 ---
 
+## I — glTF spec support: the audit, and what it found
+
+The corpus is 150 files (after §H's additions). `Blix.Test.Recipes` now cooks and loads every one and
+samples every clip: 137 load, 13 are refused for a listed reason (`ExpectedRefusals`), and the list can
+only shrink on purpose. Loading is not reading: a grep of what the reader touches (with a known-positive
+control) found the second half. In a proposed order — correctness of what already loads first, then the
+refusals, then features:
+
+1. **Primitive modes.** Indices are read raw whatever the mode: TRIANGLE_STRIP and TRIANGLE_FAN draw as
+   garbage, POINTS and LINES as triangles, and a primitive without indices is refused
+   (TriangleWithoutIndices). Strips/fans convert to lists at the cook; points/lines need a decision.
+2. **Samplers.** Wrap and filter modes are not read: every texture gets one sampler (TextureSettingsTest).
+3. **One image, two roles.** An image used as colour (sRGB) and as data (linear) is refused
+   (TextureEncodingTest, TextureLinearInterpolationTest); the spec allows it, so it cooks twice.
+4. **Refused valid files.** A sparse accessor with no base buffer view (zeros, per the spec); a skin with
+   no inverse binds (identity); Animation_Skin_06's root.
+5. **KHR_texture_transform** (required by TextureTransformMultiTest, used by two more).
+6. **Scene structure the reader ignores:** scene selection (MultipleScenes), cameras, KHR_node_visibility,
+   EXT_mesh_gpu_instancing, KHR_lights_punctual, KHR_materials_variants.
+7. **Out of scope unless asked:** Draco, meshopt, KTX2/BasisU, WEB3D quantized (refused by name), morph
+   targets and KHR_animation_pointer (recorded as unread), KHR_xmp (metadata).
+
+Material extensions are already broadly read (transmission, diffuse transmission, sheen, volume,
+specular, IOR, clearcoat, iridescence, anisotropy, dispersion, unlit, emissive strength); whether each
+RENDERS right is the Compare* set's job, judged against each README.
+
+---
+
 ## F — a body in the character room
 
 The one stage not started. `src/Demos/Character/` holds a shared library — room,
