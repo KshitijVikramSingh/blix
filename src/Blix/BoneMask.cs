@@ -28,9 +28,21 @@ public sealed class BoneMask
 {
     private readonly float[] weights;
 
-    private BoneMask(float[] weights) => this.weights = weights;
+    private BoneMask(float[] weights, Skeleton? skeleton)
+    {
+        this.weights = weights;
+        Skeleton = skeleton;
+    }
 
     public int BoneCount => weights.Length;
+
+    /// <summary>The skeleton this mask was resolved against, or null for one that names no rig (<see cref="All"/>, <see cref="None"/>).</summary>
+    /// <remarks>
+    /// A subtree is weights by index, and an index means a bone only in the skeleton that resolved it: two
+    /// rigs of the same size share a count, not a meaning. So a mask that came from a skeleton remembers it,
+    /// and <see cref="ValidateFor"/> holds it to that one.
+    /// </remarks>
+    public Skeleton? Skeleton { get; }
 
     /// <summary>How much of a layer reaches this bone.</summary>
     public float this[int bone] => weights[bone];
@@ -42,11 +54,35 @@ public sealed class BoneMask
     {
         var w = new float[boneCount];
         Array.Fill(w, Math.Clamp(weight, 0f, 1f));
-        return new BoneMask(w);
+        return new BoneMask(w, null);
     }
 
     /// <summary>No bone at all. A layer through this changes nothing, bit for bit.</summary>
-    public static BoneMask None(int boneCount) => new(new float[boneCount]);
+    public static BoneMask None(int boneCount) => new(new float[boneCount], null);
+
+    /// <summary>Refuses this mask for <paramref name="skeleton"/> unless it means that skeleton's bones.</summary>
+    /// <remarks>
+    /// A mask resolved against a skeleton is valid for that instance only. One that names no rig is valid for
+    /// any skeleton with as many bones, because uniform weights mean the same thing on every rig. The one rule,
+    /// so every place that knows the skeleton applies the same one.
+    /// </remarks>
+    /// <exception cref="ArgumentException">The mask was resolved against another skeleton, or covers a different number of bones.</exception>
+    public void ValidateFor(Skeleton skeleton, string? paramName = null)
+    {
+        ArgumentNullException.ThrowIfNull(skeleton);
+        if (Skeleton is not null && !ReferenceEquals(Skeleton, skeleton))
+        {
+            throw new ArgumentException(
+                $"the mask was resolved against another skeleton ({Skeleton.BoneCount} bones); a mask's indices mean only that skeleton's bones.",
+                paramName);
+        }
+
+        if (BoneCount != skeleton.BoneCount)
+        {
+            throw new ArgumentException(
+                $"the mask covers {BoneCount} bones and the skeleton has {skeleton.BoneCount}.", paramName);
+        }
+    }
 
     /// <summary>The bone named <paramref name="rootBone"/> and everything beneath it.</summary>
     /// <exception cref="ArgumentException">There is no bone with that name.</exception>
@@ -112,7 +148,7 @@ public sealed class BoneMask
             ancestor = skeleton.Bones[ancestor].ParentIndex;
         }
 
-        return new BoneMask(w);
+        return new BoneMask(w, skeleton);
     }
 
     /// <summary>What this mask does not cover — the lower body, given the upper.</summary>
@@ -124,7 +160,7 @@ public sealed class BoneMask
     {
         var w = new float[weights.Length];
         for (var i = 0; i < weights.Length; i++) w[i] = 1f - weights[i];
-        return new BoneMask(w);
+        return new BoneMask(w, Skeleton);
     }
 
     /// <summary>How many bones this reaches at all — for a panel, and for a probe that judges a mask.</summary>
