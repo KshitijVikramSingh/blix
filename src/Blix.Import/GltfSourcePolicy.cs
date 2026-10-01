@@ -3,8 +3,9 @@ using SharpGLTF.Schema2;
 namespace Blix.Import;
 
 /// <summary>
-/// What a glTF source must not contain for Blix to read it as the file describes: one rule, for the cook and both
-/// source importers, so no path accepts what another refuses.
+/// Source policy the cook and both source importers share, so none accepts what another refuses on these grounds.
+/// Today that is morph targets alone; the cook's other refusals (required extensions it does not read, validation and
+/// its named fallbacks, primitive modes, index counts) are its own (plan.md: the direct importers' entry points).
 /// </summary>
 public static class GltfSourcePolicy
 {
