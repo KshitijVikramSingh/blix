@@ -1973,8 +1973,14 @@ public sealed partial class VulkanGraphicsDevice
         return null;
     }
 
-    // Slices the payload across the shader's declared push-constant ranges
-    // and emits one vkCmdPushConstants per range.
+    // Slices the payload across the shader's declared push-constant ranges and emits it.
+    //
+    // Ranges may OVERLAP: one block declared by two stages at different lengths (Bulwark's skinned vertex
+    // stage reads 164 bytes, the fragment stage it shares 160 of them) is one range per stage, which is
+    // what the pipeline layout needs (VUID-VkPipelineLayoutCreateInfo-pPushConstantRanges-00292: no stage
+    // in two ranges). So the payload is as long as the furthest range reaches, not the ranges' sum, and it
+    // is pushed in segments split at every range boundary, each naming every stage whose range covers it
+    // (VUID-vkCmdPushConstants-offset-01796). For disjoint ranges that is exactly one push per range.
     private unsafe void PushConstantsToCommandBuffer(
         CommandBuffer cmd,
         PipelineLayout layout,
@@ -1988,24 +1994,40 @@ public sealed partial class VulkanGraphicsDevice
         }
 
         var totalDeclared = 0;
-        foreach (var r in ranges) totalDeclared += r.Size;
+        foreach (var r in ranges) totalDeclared = Math.Max(totalDeclared, r.Offset + r.Size);
         if (payload.Length != totalDeclared)
         {
             throw new InvalidOperationException(
                 $"DrawIndexedCommand.PushConstants payload length {payload.Length} does not match the shader's declared total push-constant size {totalDeclared}.");
         }
 
+        var cuts = new SortedSet<int>();
+        foreach (var r in ranges)
+        {
+            cuts.Add(r.Offset);
+            cuts.Add(r.Offset + r.Size);
+        }
+
         fixed (byte* basePtr = payload)
         {
-            foreach (var r in ranges)
+            int? start = null;
+            foreach (var cut in cuts)
             {
-                Vk.CmdPushConstants(
-                    cmd,
-                    layout,
-                    MapStageFlags(r.Stages),
-                    (uint)r.Offset,
-                    (uint)r.Size,
-                    basePtr + r.Offset);
+                if (start is { } from && cut > from)
+                {
+                    var stages = default(ShaderStageFlags);
+                    foreach (var r in ranges)
+                    {
+                        if (r.Offset <= from && cut <= r.Offset + r.Size) stages |= MapStageFlags(r.Stages);
+                    }
+
+                    if (stages != default)
+                    {
+                        Vk.CmdPushConstants(cmd, layout, stages, (uint)from, (uint)(cut - from), basePtr + from);
+                    }
+                }
+
+                start = cut;
             }
         }
     }

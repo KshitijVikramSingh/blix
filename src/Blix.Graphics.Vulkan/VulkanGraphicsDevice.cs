@@ -118,7 +118,8 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice, IRenderGraph
         var vertexBuffers = new List<VertexBufferEntry>(vertexBufferTable.Count);
         foreach (var (id, e) in vertexBufferTable)
         {
-            vertexBuffers.Add(new VertexBufferEntry(new VertexBufferHandle(id), e.Name, (long)e.Size));
+            vertexBuffers.Add(new VertexBufferEntry(
+                new VertexBufferHandle(id), e.Name, (long)e.Size, arenaSlotBuffers.Any(h => h.Id == id)));
         }
 
         var indexBuffers = new List<IndexBufferEntry>(indexBufferTable.Count);
@@ -134,9 +135,10 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice, IRenderGraph
         }
 
         var pipelines = new List<PipelineEntry>(pipelineTable.Count);
+        var cached = pipelineCache.Values.Select(h => h.Id).ToHashSet();
         foreach (var (id, e) in pipelineTable)
         {
-            pipelines.Add(new PipelineEntry(new PipelineHandle(id), e.Name, e.ShaderProgram, e.IsCompute));
+            pipelines.Add(new PipelineEntry(new PipelineHandle(id), e.Name, e.ShaderProgram, e.IsCompute, cached.Contains(id)));
         }
 
         var renderSurfaces = new List<RenderSurfaceEntry>(renderSurfaceTable.Count);
@@ -150,7 +152,9 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice, IRenderGraph
         }
 
         return new ResourceRegistrySnapshot(
-            vertexBuffers, indexBuffers, textures, shaderPrograms, pipelines, renderSurfaces);
+            vertexBuffers, indexBuffers, textures, shaderPrograms, pipelines, renderSurfaces,
+            materialTable.Select(kv => new MaterialEntry(new MaterialHandle(kv.Key), kv.Value.Name)).ToArray(),
+            indirectBufferTable.Select(kv => new IndirectBufferEntry(new IndirectBufferHandle(kv.Key), kv.Value.Name)).ToArray());
     }
 
     // Execute the per-frame command list: walks each pass, builds a

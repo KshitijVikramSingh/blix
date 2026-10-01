@@ -290,13 +290,16 @@ public static class ShaderReflection
 
             int elementStride = 0;
             int size;
+            var runtimeSized = false;
             if (m.TryGetProperty("array", out var dims) && dims.ValueKind == JsonValueKind.Array)
             {
                 // std140 array stride is the per-element span; total size is
-                // stride × element count (every dim multiplied).
+                // stride × element count (every dim multiplied). A 0 dimension is an unsized
+                // array: its stride is known, its count is the application's.
                 elementStride = m.GetProperty("array_stride").GetInt32();
                 var count = 1;
                 foreach (var d in dims.EnumerateArray()) count *= d.GetInt32();
+                runtimeSized = count == 0;
                 size = elementStride * count;
             }
             else if (m.TryGetProperty("matrix_stride", out var ms))
@@ -307,7 +310,7 @@ public static class ShaderReflection
             {
                 size = ScalarOrVectorSize(memberType, where);
             }
-            result[i++] = new UniformBlockMember(name, offset, size, elementStride);
+            result[i++] = new UniformBlockMember(name, offset, size, elementStride, runtimeSized);
         }
         return result;
     }

@@ -37,7 +37,7 @@ public sealed class SpriteBatch : IDisposable
     private readonly PipelineHandle pipeline;
     private readonly byte[] uploadBuffer;
     // Sized from the shader's own push block rather than from a 64 typed here.
-    private readonly byte[] pushConstants = new byte[Interface.PushConstants.Sum(r => r.Size)];
+    private readonly byte[] pushConstants = new byte[Interface.PushConstantBytes];
     private readonly Dictionary<int, (int Width, int Height)> textureDimensionsCache = [];
     private readonly List<SpriteEntry> entries = new(capacity: 64);
 

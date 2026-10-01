@@ -114,6 +114,9 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
     private PipelineHandle depthOnlyPipeline, opaquePipeline;
     private PipelineHandle additivePipeline, premultPipeline;
     private PipelineHandle presentPipeline;
+    // Programs and pipelines this loop owns (not the cached soft ones), and its opaque geometry.
+    private readonly List<(ShaderProgramHandle Program, PipelineHandle Pipeline)> ownedPipelines = new();
+    private readonly List<(VertexBufferHandle Vb, IndexBufferHandle Ib)> ownedGeometry = new();
 
     // Opaque backdrop geometry (drawn in both the depth pre-pass and the scene pass).
     private readonly List<OpaqueMesh> opaques = new();
@@ -225,10 +228,12 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
                 File.ReadAllBytes(Path.Combine(shaderDir, vert)),
                 File.ReadAllBytes(Path.Combine(shaderDir, frag)),
                 iface, name);
-            return device.CreatePipeline(new PipelineDescription(
+            var made = device.CreatePipeline(new PipelineDescription(
                 program, layout, PrimitiveTopology.Triangles, depth,
                 RasterizerState.NoCulling, blends,
                 RenderTarget: graph.GetPassSurface(pass)), name);
+            ownedPipelines.Add((program, made));
+            return made;
         }
 
         depthOnlyPipeline = Pipe("depth_only.vert.spv", "depth_only.frag.spv", depthInterface, "depth_only",
@@ -260,10 +265,12 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
                 File.ReadAllBytes(Path.Combine(shaderDir, "present.vert.spv")),
                 File.ReadAllBytes(Path.Combine(shaderDir, frag)),
                 stage.Interface, stage.Name);
-            return device.CreatePipeline(new PipelineDescription(
+            var made = device.CreatePipeline(new PipelineDescription(
                 program, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
                 DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled },
                 RenderTarget: surface), stage.Name);
+            ownedPipelines.Add((program, made));
+            return made;
         });
 
         // Present targets the swapchain (default render target).
@@ -274,6 +281,7 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
         presentPipeline = device.CreatePipeline(new PipelineDescription(
             presentProgram, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
             DepthState.Disabled, RasterizerState.NoCulling, BlendState.Disabled), "present");
+        ownedPipelines.Add((presentProgram, presentPipeline));
 
         // --- Geometry + batches ------------------------------------------
         BuildOpaqueGeometry();
@@ -312,9 +320,11 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
         var groundVB = device.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(groundVerts), "ground.vb");
         var groundIB = device.CreateIndexBuffer(new ushort[] { 0, 1, 2, 0, 2, 3 }, name: "ground.ib");
         opaques.Add(new OpaqueMesh(groundVB, groundIB, 6, Matrix4x4.Identity, new Vector4(0.06f, 0.07f, 0.10f, 1f)));
+        ownedGeometry.Add((groundVB, groundIB));
 
         var cubeVB = device.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(Cube.Vertices), "cube.vb");
         var cubeIB = device.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
+        ownedGeometry.Add((cubeVB, cubeIB));
         Matrix4x4 Block(float sx, float sy, float sz, Vector3 at) =>
             Matrix4x4.CreateScale(sx, sy, sz) * Matrix4x4.CreateTranslation(at);
 
@@ -630,13 +640,26 @@ internal sealed class ParticlesLoop : IGameLoop, IDebuggable, IDisposable
         if (input.MouseWheel.Y != 0f) camera.Zoom(input.MouseWheel.Y);
     }
 
-    // Window.Dispose disposes the loop after WaitIdle and before device teardown — the
-    // safe point to free the graph's render passes + offscreen images (not in the
-    // device's auto-freed tables). Batch buffers + pipelines live in device tables.
+    // Window.Dispose disposes the loop after WaitIdle and before device teardown: everything this loop
+    // made. The two soft-particle pipelines are cached (GetOrCreatePipeline), so they and their program
+    // are the device's. BLIX_TEARDOWN_TRACE=1 lists whatever is still live after this.
     public void Dispose()
     {
-        graph?.Dispose();
+        foreach (var batch in new[] { sparks, explosion, vortex, smoke }) batch?.Dispose();
         bloom?.Dispose();
         fullscreen?.Dispose();
+        foreach (var (program, pipeline) in ownedPipelines)
+        {
+            device.DestroyPipeline(pipeline);
+            device.DestroyShaderProgram(program);
+        }
+
+        foreach (var (vb, ib) in ownedGeometry)
+        {
+            device.DestroyVertexBuffer(vb);
+            device.DestroyIndexBuffer(ib);
+        }
+
+        graph?.Dispose();
     }
 }

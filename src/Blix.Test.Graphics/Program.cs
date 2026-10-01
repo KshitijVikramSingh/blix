@@ -5167,8 +5167,8 @@ static ShaderInterface MinimalShader() => new(new[]
 //
 // What reflection cannot supply is a runtime-sized block's length -- `InstanceData instances[]`
 // reflects with block_size 0, because the count belongs to the application. That is what
-// ShaderInterface.WithBlockSize is for, and asking for it explicitly is the point: the shader
-// owns the shape, the caller owns the count.
+// ShaderInterface.WithArrayLength is for, and asking for it explicitly is the point: the shader
+// owns the shape (offset and stride), the caller owns the count.
 {
     var srcDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
     var sources = Directory.Exists(srcDir)
@@ -5662,6 +5662,54 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectThrows("BP.2 parts in different vertex layouts are refused, naming them",
         () => new[] { (a, Matrix4x4.Identity), (other, Matrix4x4.Identity) }.Merge("mixed"), mustMention: "layout");
 
+    // Which bytes are which comes from VertexSemantics, never from guessing by format: in the skinned
+    // layouts the first Float4 is the bone indices, and a guess would move them as a tangent.
+    var skinnedMesh = new MeshData("skinned", new byte[VertexPosition3NormalTextureSkin4Tangent.Layout.Stride], new ushort[] { 0, 0, 0 },
+        VertexPosition3NormalTextureSkin4Tangent.Layout, new Bounds3(Vector3.Zero, Vector3.Zero));
+    t.ExpectThrows("BP.2b a skinned mesh is refused by Transformed: its skin places it, and moving it leaves the inverse binds behind",
+        () => skinnedMesh.Transformed(Matrix4x4.CreateTranslation(1f, 0f, 0f)), mustMention: "skinned");
+    var unknownLayout = new VertexLayout(16, new[] { new VertexAttribute(0, VertexAttributeFormat.Float4, 0) });
+    var unknown = new MeshData("unknown", new byte[16], new ushort[] { 0, 0, 0 }, unknownLayout, new Bounds3(Vector3.Zero, Vector3.Zero));
+    t.ExpectThrows("BP.2b a layout that is not one of Blix's is refused rather than guessed at",
+        () => unknown.Transformed(Matrix4x4.Identity), mustMention: "not one of Blix's layouts");
+
+    // A tangent layout: the tangent turns with the mesh, and under a mirror its w flips and the winding reverses.
+    var tangentLayout = VertexPosition3NormalTangentTexture.Layout;
+    var tangentBytes = new byte[3 * tangentLayout.Stride];
+    for (var v = 0; v < 3; v++)
+    {
+        var o = v * tangentLayout.Stride;
+        foreach (var (at, value) in new[] { (12, 0f), (16, 0f), (20, 1f), (24, 1f), (28, 0f), (32, 0f), (36, 1f) })
+            BitConverter.TryWriteBytes(tangentBytes.AsSpan(o + at, 4), value);
+        BitConverter.TryWriteBytes(tangentBytes.AsSpan(o + 0, 4), (float)v);
+    }
+
+    var tangentMesh = new MeshData("tangent", tangentBytes, new ushort[] { 0, 1, 2 }, tangentLayout, new Bounds3(Vector3.Zero, Vector3.One));
+    var turned = tangentMesh.Transformed(Matrix4x4.CreateRotationZ(MathF.PI / 2f));
+    var mirrored = tangentMesh.Transformed(Matrix4x4.CreateScale(-1f, 1f, 1f));
+    t.Expect("BP.2b the tangent turns with the mesh: +X rotated a quarter about Z is +Y",
+        MathF.Abs(BitConverter.ToSingle(turned.VertexBytes, 24)) < 1e-5f && MathF.Abs(BitConverter.ToSingle(turned.VertexBytes, 28) - 1f) < 1e-5f
+        && BitConverter.ToSingle(turned.VertexBytes, 36) == 1f);
+    t.Expect("BP.2b under a mirror the tangent's w flips and the winding reverses",
+        BitConverter.ToSingle(mirrored.VertexBytes, 36) == -1f && mirrored.Indices.SequenceEqual(new ushort[] { 0, 2, 1 }),
+        $"w {BitConverter.ToSingle(mirrored.VertexBytes, 36)}, indices {string.Join(",", mirrored.Indices)}");
+
+    // The table against each layout's own declaration: position Float3, normal Float3, uv Float2, tangent Float4.
+    var tableAgrees = new[]
+    {
+        VertexPosition3NormalTexture.Layout, VertexPosition3NormalTextureColor.Layout, VertexPosition3NormalTexture2Color.Layout,
+        VertexPosition3NormalTangentTexture.Layout, VertexPosition3NormalTangentTexture2Color.Layout,
+        VertexPosition3NormalTextureSkin4Tangent.Layout, VertexPosition3NormalTextureSkin4Tangent2Color.Layout,
+    }.All(layout =>
+    {
+        var sem = VertexSemantics.Of(layout);
+        bool Has(int offset, VertexAttributeFormat format) => offset < 0 || layout.Attributes.Any(x => x.Offset == offset && x.Format == format);
+        return sem is not null && Has(sem.Position, VertexAttributeFormat.Float3) && Has(sem.Normal, VertexAttributeFormat.Float3)
+            && Has(sem.Uv0, VertexAttributeFormat.Float2) && Has(sem.Uv1, VertexAttributeFormat.Float2) && Has(sem.Tangent, VertexAttributeFormat.Float4)
+            && sem.Skinned == layout.Attributes.Count(x => x.Format == VertexAttributeFormat.Float4) >= 3;
+    });
+    t.Expect("BP.2b VertexSemantics names each of Blix's seven layouts' attributes where the layout declares them", tableAgrees);
+
     // A parent translated by +10 on X with a child translated by +1: the child's world is +11, child first.
     static PbrMaterial Plain(string id, string name) => new(
         id, name, Vector4.One, null, 0, null, 0, 1f, null, 0, 0f, 0.7f, null, 0, 1f, null, 0, Vector3.Zero, 1f,
@@ -5685,6 +5733,57 @@ static ShaderInterface MinimalShader() => new(new[]
     t.Expect("BP.3 each primitive lands at its node's world transform",
         byMaterial[1].Mesh.Bounds.Min.X == 11f && byMaterial[0].Mesh.Bounds.Max.X == 12f,
         $"{byMaterial[0].Mesh.Bounds} / {byMaterial[1].Mesh.Bounds}");
+}
+
+// ============================================================================
+// Section BQ — a runtime-sized block is sized by a COUNT; offset and stride are the shader's.
+// ============================================================================
+//
+// `mat4 m[]` reflects with block_size 0 and array [0], but its offset and array_stride are there. Callers
+// used to pass bytes (bones x bodies x 64), restating a stride the shader already declares and assuming
+// the array starts at 0. The JSON below is spirv-cross's own shape: the engine's BlixBones block, and one
+// with a fixed member before its unsized array.
+{
+    const string json = """
+    {
+      "entryPoints": [{ "name": "main", "mode": "vert" }],
+      "types": {
+        "_19": { "name": "BlixBones", "members": [
+          { "name": "m", "type": "mat4", "array": [0], "array_size_is_literal": [true], "offset": 0, "array_stride": 64, "matrix_stride": 16 } ] },
+        "_30": { "name": "Lights", "members": [
+          { "name": "count", "type": "vec4", "offset": 0 },
+          { "name": "lights", "type": "vec4", "array": [0], "array_size_is_literal": [true], "offset": 16, "array_stride": 32 } ] }
+      },
+      "ssbos": [
+        { "type": "_19", "name": "BlixBones", "readonly": true, "block_size": 0, "set": 3, "binding": 0 },
+        { "type": "_30", "name": "Lights", "readonly": true, "block_size": 16, "set": 3, "binding": 1 }
+      ]
+    }
+    """;
+    var reflected = ShaderReflection.MergeStages(ShaderReflection.Parse(json, "bq.vert"));
+    var bones = reflected.Slots.Single(x => x.Binding == 0).BlockLayout!;
+    var lights = reflected.Slots.Single(x => x.Binding == 1).BlockLayout!;
+    t.Expect("BQ.1 reflection marks the unsized array, with the stride the shader gives it",
+        bones.RuntimeArray is { Name: "m", ElementStride: 64, Offset: 0 } && lights.RuntimeArray is { Name: "lights", ElementStride: 32, Offset: 16 },
+        $"{bones.RuntimeArray} / {lights.RuntimeArray}");
+    t.Expect("BQ.1 a count sizes the block from where the array starts: 30 bones is 1920 bytes, 3 lights after a vec4 is 112",
+        bones.SizeFor(30) == 1920 && lights.SizeFor(3) == 112, $"{bones.SizeFor(30)} / {lights.SizeFor(3)}");
+    var sized = reflected.WithArrayLength(3, 1, 3).Slots.Single(x => x.Binding == 1).BlockLayout!;
+    t.Expect("BQ.2 WithArrayLength grows the array member and keeps the fixed one where it was",
+        sized.TotalSize == 112 && sized.Members[0] is { Name: "count", Offset: 0, Size: 16 } && sized.Members[1].Size == 96,
+        $"{sized.TotalSize}: {string.Join(", ", sized.Members)}");
+
+    // A fixed block has no length to give, and asking is refused rather than ignored.
+    const string fixedJson = """
+    {
+      "entryPoints": [{ "name": "main", "mode": "vert" }],
+      "types": { "_5": { "name": "Frame", "members": [ { "name": "vp", "type": "mat4", "offset": 0, "matrix_stride": 16 } ] } },
+      "ubos": [ { "type": "_5", "name": "Frame", "block_size": 64, "set": 0, "binding": 0 } ]
+    }
+    """;
+    var fixedBlock = ShaderReflection.MergeStages(ShaderReflection.Parse(fixedJson, "fixed.vert"));
+    t.ExpectThrows("BQ.3 a block the shader fixes takes no length",
+        () => fixedBlock.WithArrayLength(0, 0, 4), mustMention: "does not end in an unsized array");
 }
 
 t.PrintSummary();
@@ -5846,10 +5945,11 @@ sealed class RecordingDevice : IGraphicsDevice
     public GraphicsDeviceDiagnostics DiagnosticsSnapshot => throw No();
     public IndirectBufferHandle CreateIndirectBuffer(int maxDrawCommands, string? name = null) => throw No();
     public void WriteIndirectCommands(IndirectBufferHandle handle, ReadOnlySpan<byte> commands) => throw No();
+    public void DestroyIndirectBuffer(IndirectBufferHandle handle) => throw No();
     public ShaderProgramHandle CreateShaderProgramFromSpv(byte[] vertexSpv, byte[] fragmentSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
     public ShaderProgramHandle CreateComputeShaderProgramFromSpv(byte[] computeSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
     public PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null) => throw No();
-    public IMaterialBindings CreateMaterial(ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null, IReadOnlyDictionary<int, int>? blockSizes = null) => throw No();
+    public IMaterialBindings CreateMaterial(ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null, IReadOnlyDictionary<int, int>? arrayLengths = null) => throw No();
     public void DestroyMaterial(MaterialHandle handle) => throw No();
     public TextureHandle CreateTextureCube(int faceSize, TextureFormat format, int mipCount, ReadOnlySpan<byte> data, SamplerDescription sampler, string name) => throw No();
     public TextureHandle CreateStorageTexture2D(int width, int height, TextureFormat format, SamplerDescription sampler, string? name = null) => throw No();

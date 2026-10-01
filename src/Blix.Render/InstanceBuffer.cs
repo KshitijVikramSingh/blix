@@ -59,8 +59,19 @@ public sealed class InstanceBuffer : IDisposable
     /// set, the binding, the stage and the stride from the shader and states only the count, in
     /// the one place that already owns it.
     /// </remarks>
-    public static ShaderInterface Size(ShaderInterface reflected) =>
-        reflected.WithBlockSize(Slot.Set, Slot.Binding, BlockSize);
+    /// <exception cref="ArgumentException">The shader's instance stride is not <see cref="Stride"/>: this class packs that many bytes per instance.</exception>
+    public static ShaderInterface Size(ShaderInterface reflected)
+    {
+        var declared = reflected.Slots.FirstOrDefault(s => s.Set == Slot.Set && s.Binding == Slot.Binding)?.BlockLayout?.RuntimeArray;
+        if (declared is { } array && array.ElementStride != Stride)
+        {
+            throw new ArgumentException(
+                $"the shader's instance array has a {array.ElementStride}-byte stride; InstanceBuffer packs {Stride} bytes per instance.",
+                nameof(reflected));
+        }
+
+        return reflected.WithArrayLength(Slot.Set, Slot.Binding, MaxInstances);
+    }
 
     private readonly IGraphicsDevice device;
     private readonly IMaterialBindings ssbo;

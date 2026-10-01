@@ -61,6 +61,8 @@ public sealed class NoGraphicsDevice : IGraphicsDevice
 
     public void WriteIndirectCommands(IndirectBufferHandle handle, ReadOnlySpan<byte> commands) => throw Refuse();
 
+    public void DestroyIndirectBuffer(IndirectBufferHandle handle) => throw Refuse();
+
     public ShaderProgramHandle CreateShaderProgramFromSpv(
         byte[] vertexSpv, byte[] fragmentSpv, ShaderInterface shaderInterface, string? name = null) => throw Refuse();
 
@@ -71,7 +73,7 @@ public sealed class NoGraphicsDevice : IGraphicsDevice
 
     public IMaterialBindings CreateMaterial(
         ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null,
-        IReadOnlyDictionary<int, int>? blockSizes = null) => throw Refuse();
+        IReadOnlyDictionary<int, int>? arrayLengths = null) => throw Refuse();
 
     public void DestroyMaterial(MaterialHandle handle) => throw Refuse();
 

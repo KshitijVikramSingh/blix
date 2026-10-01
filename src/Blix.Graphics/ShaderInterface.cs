@@ -81,15 +81,23 @@ public sealed record ShaderInterface(
     public ShaderInterface(IReadOnlyList<DescriptorSetSlot> slots)
         : this(slots, Array.Empty<PushConstantRange>()) { }
 
+    /// <summary>The bytes a draw's push payload carries: as far as the furthest range reaches.</summary>
+    /// <remarks>
+    /// Not the ranges' sum: one block declared by two stages at different lengths is two overlapping
+    /// ranges (one per stage), and the payload is the block once.
+    /// </remarks>
+    public int PushConstantBytes => PushConstants.Count == 0 ? 0 : PushConstants.Max(r => r.Offset + r.Size);
+
     /// <summary>
-    /// Give a runtime-sized block the length only the application knows.
+    /// Give a runtime-sized block the length only the application knows, as an element count.
     /// </summary>
     /// <remarks>
     /// <para>
     /// <b>The one thing reflection cannot answer.</b> A storage block ending in an unsized array
     /// -- <c>readonly buffer Bones { mat4 m[]; }</c> -- reflects with <c>block_size: 0</c> and
     /// <c>array: [0]</c>, because how many elements there are is not in the shader. It is
-    /// <c>MaxAlive * EnemyBones</c>, and only the caller knows that.
+    /// bones × bodies for a palette, and only the caller knows that. The array's offset and stride ARE
+    /// in the shader, so the caller gives a count and never multiplies by a stride it restated.
     /// </para>
     /// <para>
     /// So this is not an escape hatch from reflection, it is the boundary of what reflection
@@ -101,23 +109,24 @@ public sealed record ShaderInterface(
     /// </remarks>
     /// <param name="set">The descriptor set the block is bound in.</param>
     /// <param name="binding">The binding within that set.</param>
-    /// <param name="totalSize">Bytes for the whole block, elements included.</param>
-    public ShaderInterface WithBlockSize(int set, int binding, int totalSize)
+    /// <param name="elements">How many elements its unsized array holds: the one number reflection cannot give.</param>
+    public ShaderInterface WithArrayLength(int set, int binding, int elements)
     {
-        if (totalSize <= 0) throw new ArgumentOutOfRangeException(nameof(totalSize), totalSize,
-            "a runtime-sized block needs a positive size; that is the number reflection could not give.");
+        if (elements <= 0) throw new ArgumentOutOfRangeException(nameof(elements), elements,
+            "a runtime-sized block needs a positive element count; that is the number reflection could not give.");
 
         var hit = false;
         var slots = Slots.Select(slot =>
         {
             if (slot.Set != set || slot.Binding != binding) return slot;
             hit = true;
-            var members = slot.BlockLayout?.Members ?? Array.Empty<UniformBlockMember>();
-            // One unsized member grows to fill the block; that is what "runtime-sized" means.
-            var grown = members.Count == 1
-                ? new[] { members[0] with { Size = totalSize } }
-                : members;
-            return slot with { BlockLayout = new UniformBlockLayout(totalSize, grown) };
+            var layout = slot.BlockLayout is { RuntimeArray: not null } runtime ? runtime : throw new ArgumentException(
+                $"set {set} binding {binding} does not end in an unsized array, so it has no length to give: " +
+                "its size is the shader's.");
+            // The array's offset and stride are the shader's; the count is the caller's.
+            var bytes = layout.SizeFor(elements);
+            var members = layout.Members.Select(m => m.IsRuntimeSized ? m with { Size = bytes - m.Offset } : m).ToArray();
+            return slot with { BlockLayout = new UniformBlockLayout(bytes, members) };
         }).ToArray();
 
         if (!hit)

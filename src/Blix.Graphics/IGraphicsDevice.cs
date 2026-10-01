@@ -67,6 +67,9 @@ public interface IGraphicsDevice : IDisposable
 
     void WriteIndirectCommands(IndirectBufferHandle handle, ReadOnlySpan<byte> commands);
 
+    // Frees every ring slot of an indirect buffer. Like the other destroys: the GPU must be done with it.
+    void DestroyIndirectBuffer(IndirectBufferHandle handle);
+
     // <b>A program is made from compiled SPIR-V and the interface reflected from it.</b> This used to
     // be absent, on the grounds that SPIR-V is what the Vulkan backend consumes, so every program that
     // drew anything had to cast to VulkanGraphicsDevice before its first shader: 67 calls in 13
@@ -97,14 +100,14 @@ public interface IGraphicsDevice : IDisposable
 
     // A material's own descriptor set for `program` (see IMaterialBindings). setIndex is where the
     // program declares its material resources, DescriptorSets.Material by convention; framesInFlight
-    // is how many copies to keep when the material is rewritten every frame. blockSizes gives each
-    // runtime-sized block in the set (one ending in an unsized array) its bytes, by binding: the
-    // shader owns the layout and the stride, the material owns the count, so one program serves
-    // palettes of any length. Refused: sizing a block the shader already fixed, leaving a
-    // runtime-sized block unsized, and a block past the device's buffer-range limit.
+    // is how many copies to keep when the material is rewritten every frame. arrayLengths gives each
+    // runtime-sized block in the set (one ending in an unsized array) its ELEMENT COUNT, by binding:
+    // the shader owns the layout, the array's offset and its stride, the material owns the count, so
+    // one program serves palettes of any length. Refused: sizing a block the shader already fixed,
+    // leaving a runtime-sized block unsized, and a block past the device's buffer-range limit.
     IMaterialBindings CreateMaterial(
         ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null,
-        IReadOnlyDictionary<int, int>? blockSizes = null);
+        IReadOnlyDictionary<int, int>? arrayLengths = null);
 
     void DestroyMaterial(MaterialHandle handle);
 

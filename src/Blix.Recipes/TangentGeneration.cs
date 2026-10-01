@@ -23,20 +23,10 @@ public static class TangentGeneration
     /// <param name="Uv1">The second TEXCOORD set's offset, or -1 in a layout without one.</param>
     private readonly record struct Offsets(int Position, int Normal, int Uv, int Tangent, int Uv1 = -1);
 
-    // Layouts carry no semantics, so the two that hold a tangent are named here and every other
-    // layout is refused rather than guessed at by format.
-    private static Offsets? OffsetsFor(VertexLayout layout)
-    {
-        if (Same(layout, VertexPosition3NormalTangentTexture2Color.Layout)) return new Offsets(0, 12, 40, 24, 48);
-        if (Same(layout, VertexPosition3NormalTangentTexture.Layout)) return new Offsets(0, 12, 40, 24);
-        if (Same(layout, VertexPosition3NormalTextureSkin4Tangent2Color.Layout)) return new Offsets(0, 12, 24, 64, 80);
-        if (Same(layout, VertexPosition3NormalTextureSkin4Tangent.Layout)) return new Offsets(0, 12, 24, 64);
-        return null;
-    }
-
-    // Structural, because a record holding a list compares the list by reference.
-    private static bool Same(VertexLayout a, VertexLayout b) =>
-        a.Stride == b.Stride && a.Attributes.SequenceEqual(b.Attributes);
+    // From VertexSemantics, the one table of what Blix's layouts' bytes mean; a layout without a
+    // tangent there is refused rather than guessed at by format.
+    private static Offsets? OffsetsFor(VertexLayout layout) =>
+        VertexSemantics.Of(layout) is { Tangent: >= 0 } s ? new Offsets(s.Position, s.Normal, s.Uv0, s.Tangent, s.Uv1) : null;
 
     /// <summary>Whether every tangent in <paramref name="mesh"/> is zero: the rig importer's "none authored".</summary>
     public static bool HasNoTangents(MeshData mesh)

@@ -90,10 +90,13 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
     private float fovYRadians;
     private static readonly Vector3 LightDirection = Vector3.Normalize(new Vector3(0.55f, 1.0f, 0.45f));
 
+    private IGraphicsDevice gpu = null!;   // kept for Dispose
+
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         host.SetTitle("Blix — Vulkan RenderGraph");
         var device = graphicsDevice;
+        gpu = graphicsDevice;
 
         // --- Cube geometry + texture ---------------------------------
         var (vertices, indices) = BuildCube();
@@ -278,10 +281,29 @@ internal sealed class GraphLoop : IGameLoop, IDebuggable, IDisposable
         debug.Draw.Obb("cube/obb", obb, new GraphicsColor(1f, 1f, 1f, 0.85f));
     }
 
+    // Called by the host with the GPU idle: everything this loop made. BLIX_TEARDOWN_TRACE=1 lists
+    // whatever is still live after it.
     public void Dispose()
     {
-        graph?.Dispose();
         fullscreen?.Dispose();
+        if (gpu is not null)
+        {
+            gpu.DestroyMaterial(cubeMaterial);
+            foreach (var (program, pipeline) in new[]
+            {
+                (cubeShaderProgram, cubePipeline), (invertShaderProgram, invertPipeline), (presentShaderProgram, presentPipeline),
+            })
+            {
+                gpu.DestroyPipeline(pipeline);
+                gpu.DestroyShaderProgram(program);
+            }
+
+            gpu.DestroyTexture(albedoTexture);
+            gpu.DestroyVertexBuffer(cubeVB);
+            gpu.DestroyIndexBuffer(cubeIB);
+        }
+
+        graph?.Dispose();
     }
 
     private static (VertexPosition3Texture[] Vertices, ushort[] Indices) BuildCube()

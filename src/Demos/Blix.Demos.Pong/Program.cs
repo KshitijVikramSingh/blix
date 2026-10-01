@@ -164,7 +164,7 @@ internal sealed class PongGame : Game
         // constant. Targets the swapchain (RenderTarget: null).
         var shaderDir = AppFiles.Shaders;
         var postfxInterface = ShaderReflection.ForProgram(shaderDir, "postfx.vert", "postfx.frag");
-        postfxPush = new byte[postfxInterface.PushConstants.Sum(r => r.Size)];
+        postfxPush = new byte[postfxInterface.PushConstantBytes];
         postfxShader = device.CreateShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "postfx.vert.spv")),
             File.ReadAllBytes(Path.Combine(shaderDir, "postfx.frag.spv")),
@@ -209,9 +209,23 @@ internal sealed class PongGame : Game
         ResetBall(serveDir: 0);
     }
 
+    // Called by the host with the GPU idle: everything this game made. BLIX_TEARDOWN_TRACE=1 lists
+    // whatever is still live after it.
     public override void OnUnload()
     {
         spriteBatch?.Dispose();
+        fullscreen?.Dispose();
+        if (GraphicsDevice is { } device)
+        {
+            device.DestroyPipeline(postfxPipeline);
+            device.DestroyShaderProgram(postfxShader);
+            device.DestroyTexture(whitePixel);
+            if (hudFont is not null)
+            {
+                foreach (var size in hudFont.Sizes) device.DestroyTexture(size.Atlas);
+            }
+        }
+
         graph?.Dispose();
         if (AudioDevice is { } audio)
         {

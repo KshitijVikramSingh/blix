@@ -788,6 +788,18 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         audioDevice?.Dispose();
         Step("input");
         input?.Dispose();
+        // What the app left for the device to free: everything above has released its own, so
+        // whatever is still live belongs to the loop. The device frees it either way, which is
+        // exactly why a missing teardown is otherwise invisible. Reported, not judged. It covers every
+        // kind of handle IGraphicsDevice hands out; a new kind must join the snapshot, or a missed
+        // destroy of it reports clean.
+        // Under --validate a leftover is a failure, like a validation error: the gate runs every leg that
+        // way, so a missing teardown fails the leg that has it instead of being printed and scrolled past.
+        if ((trace || options.Validate) && graphicsDevice is not null
+            && ReportLeftovers(graphicsDevice.SnapshotResources(), print: trace) is { Length: > 0 } leftovers && options.Validate)
+        {
+            BlixApps.ReportFailure($"the loop left resources for the device to free: {leftovers} (BLIX_TEARDOWN_TRACE=1 names them)");
+        }
         Step("graphics-device");
         graphicsDevice?.Dispose();
         Step("window");
@@ -802,6 +814,37 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         }
 
         Step("done");
+    }
+
+    // What the loop left, as "3 pipeline(s), 1 material(s)", or empty. Printed (with names) when print is set.
+    private static string ReportLeftovers(ResourceRegistrySnapshot live, bool print)
+    {
+        // Cached pipelines are the device's by contract (GetOrCreatePipeline), and so is the program a
+        // cached pipeline still uses; so are the transient arena's buffers. None is a loop's to destroy.
+        var cachedPrograms = live.Pipelines.Where(p => p.IsCached).Select(p => p.ShaderProgram.Id).ToHashSet();
+        var kinds = new (string Kind, IReadOnlyList<string> Names)[]
+        {
+            ("vertex buffer", live.VertexBuffers.Where(e => !e.IsDeviceOwned).Select(e => e.Name).ToArray()),
+            ("index buffer", live.IndexBuffers.Select(e => e.Name).ToArray()),
+            ("texture", live.Textures.Where(e => e.Kind == TextureKind.UserUploaded).Select(e => e.Name).ToArray()),
+            ("shader program", live.ShaderPrograms.Where(e => !cachedPrograms.Contains(e.Handle.Id)).Select(e => e.Name).ToArray()),
+            ("pipeline", live.Pipelines.Where(e => !e.IsCached).Select(e => e.Name).ToArray()),
+            ("render surface", live.RenderSurfaces.Select(e => e.Name).ToArray()),
+            ("material", live.Materials.Select(e => e.Name).ToArray()),
+            ("indirect buffer", live.IndirectBuffers.Select(e => e.Name).ToArray()),
+        };
+        var total = kinds.Sum(k => k.Names.Count);
+        var summary = string.Join(", ", kinds.Where(k => k.Names.Count > 0).Select(k => $"{k.Names.Count} {k.Kind}(s)"));
+        if (!print) return summary;
+        Console.Error.WriteLine(total == 0
+            ? "[teardown] the loop released everything it made (buffers, textures, programs, pipelines, surfaces, materials, indirect buffers)"
+            : $"[teardown] left for the device to free: {summary}");
+        foreach (var (kind, names) in kinds.Where(k => k.Names.Count > 0))
+        {
+            Console.Error.WriteLine($"[teardown]   {kind}: {string.Join(", ", names.Take(12))}{(names.Count > 12 ? $", … {names.Count - 12} more" : "")}");
+        }
+
+        return summary;
     }
 
     // A pick recorded into this frame, answered once the frame is submitted.

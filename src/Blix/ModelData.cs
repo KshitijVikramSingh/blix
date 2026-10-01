@@ -466,57 +466,8 @@ public sealed class ModelData
         return result;
     }
 
-    // Static vertices moved to a world transform, with the normal (and tangent, where carried)
-    // following. Positions are Float3 at 0 and normals Float3 at 12 in every static layout.
-    private static MeshData Moved(MeshData mesh, in Matrix4x4 world)
-    {
-        var bytes = (byte[])mesh.VertexBytes.Clone();
-        var normalMatrix = GraphicsMatrices.NormalMatrix(world);
-        var mirrors = world.GetDeterminant() < 0f;
-        var stride = mesh.Layout.Stride;
-        var tangentAt = mesh.Layout.Attributes.FirstOrDefault(a => a.Format == VertexAttributeFormat.Float4)?.Offset ?? -1;
-        var min = new Vector3(float.MaxValue);
-        var max = new Vector3(float.MinValue);
-        var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(bytes);
-        for (var v = 0; v < mesh.VertexCount; v++)
-        {
-            var o = v * stride / 4;
-            var p = Vector3.Transform(new Vector3(floats[o], floats[o + 1], floats[o + 2]), world);
-            floats[o] = p.X; floats[o + 1] = p.Y; floats[o + 2] = p.Z;
-            min = Vector3.Min(min, p);
-            max = Vector3.Max(max, p);
-            var n = Vector3.TransformNormal(new Vector3(floats[o + 3], floats[o + 4], floats[o + 5]), normalMatrix);
-            if (n.LengthSquared() > 1e-12f) n = Vector3.Normalize(n);
-            floats[o + 3] = n.X; floats[o + 4] = n.Y; floats[o + 5] = n.Z;
-            if (tangentAt < 0) continue;
-            var t0 = o + (tangentAt / 4);
-            var t = Vector3.TransformNormal(new Vector3(floats[t0], floats[t0 + 1], floats[t0 + 2]), world);
-            if (t.LengthSquared() > 1e-12f) t = Vector3.Normalize(t);
-            floats[t0] = t.X; floats[t0 + 1] = t.Y; floats[t0 + 2] = t.Z;
-            // cross(Mn, Mt) = det(M) * M^-T cross(n, t): a mirror turns the bitangent round, and w puts it back.
-            if (mirrors) floats[t0 + 3] = -floats[t0 + 3];
-        }
-
-        var moved = mesh with { VertexBytes = bytes, Bounds = mesh.VertexCount > 0 ? new Geometry.Bounds3(min, max) : mesh.Bounds };
-        if (!mirrors) return moved;
-
-        // Mirrored positions turn every triangle's winding round; reversing each triangle turns it back.
-        return moved with
-        {
-            Indices = Reversed(mesh.Indices),
-            Indices32 = mesh.Indices32 is { } i32 ? Reversed(i32) : null,
-            Lods = mesh.Lods?.Select(l => l with
-            {
-                Indices16 = l.Indices16 is { } a ? Reversed(a) : null,
-                Indices32 = l.Indices32 is { } b ? Reversed(b) : null,
-            }).ToArray(),
-        };
-    }
-
-    private static T[] Reversed<T>(T[] triangles)
-    {
-        var result = (T[])triangles.Clone();
-        for (var i = 0; i + 2 < result.Length; i += 3) (result[i + 1], result[i + 2]) = (result[i + 2], result[i + 1]);
-        return result;
-    }
+    // Static vertices moved to a world: the one transform every flattening uses (MeshDataExtensions.Transformed),
+    // which reverses the winding and negates the tangent's w under a mirror. The source bounds stand for an empty mesh.
+    private static MeshData Moved(MeshData mesh, in Matrix4x4 world) =>
+        mesh.VertexCount == 0 ? mesh : mesh.Transformed(world);
 }
