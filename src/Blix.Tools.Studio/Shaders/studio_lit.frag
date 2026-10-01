@@ -108,11 +108,16 @@ mat3 surfaceFrame(vec3 N)
 // attribute frame carried through M^-1. In which axes, matters: the cooked frame is MikkTSpace's over (u, 1 - v)
 // (blix_mikk.c), so its bitangent runs UP the image, against glTF's v. M is glTF's, so it is taken into those axes
 // first: [T' B'] = [T B] F M^-1 F, F = diag(1, -1). (Without F a rotation turns the frame the wrong way: measured,
-// 0 of 2770 cooked frames matched, against 2118 with it, every flat normal-mapped one.) A rotation turns the frame
-// with the map, a reflection flips its handedness, a scale stretches it; normalised, as the frame is. Exact where
-// the surface's UV mapping is conformal; on a curved, unevenly mapped surface MikkTSpace's averaged frame is not one
-// 2x2 away from the transformed one, and this is the nearest the frame alone can say. Untransformed maps (M = I)
-// keep the frame bit for bit; a degenerate M (a zero scale samples one texel) has no frame to turn.
+// 0 of 2770 cooked frames matched, against 2118 with it, every flat normal-mapped one.)
+//
+// Then made a tangent frame again, glTF's kind: the tangent normalised and orthogonal to N, the bitangent
+// cross(N, T') with the transformed bitangent's handedness (a reflection in M flips it). Under a non-uniform scale
+// the two transformed vectors are not perpendicular, and normalising each one separately is not a frame (measured:
+// 13666 px off by >16 on the non-conformal fixture). Orthonormalising [T B] M' is Gram-Schmidt of M' applied to an
+// orthonormal frame, which is EXACTLY MikkTSpace over the transformed coordinates wherever the attribute's own UV
+// mapping is conformal (an artist's UVs, stretched by the transform). On a curved surface MikkTSpace's averaged
+// frame is not one 2x2 away from the transformed one, and this is the nearest the frame alone can say.
+// Untransformed maps (M = I) keep the frame bit for bit; a degenerate M (a zero scale samples one texel) has no frame.
 mat3 normalMapFrame(vec3 N)
 {
     mat3 f = surfaceFrame(N);
@@ -123,7 +128,10 @@ mat3 normalMapFrame(vec3 N)
     mat2 i = inverse(M);
     mat2 c = mat2(i[0][0], -i[0][1], -i[1][0], i[1][1]);   // F i F: (r, c) scaled by f_r f_c
     mat2x3 tb = mat2x3(f[0], f[1]) * c;
-    return mat3(normalize(tb[0]), normalize(tb[1]), f[2]);
+    vec3 n = f[2];
+    vec3 t = normalize(tb[0] - n * dot(n, tb[0]));
+    float hand = dot(cross(n, t), tb[1]) < 0.0 ? -1.0 : 1.0;
+    return mat3(t, cross(n, t) * hand, n);
 }
 
 vec2 channelUv(int bit)

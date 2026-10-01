@@ -393,6 +393,19 @@ clean diff and acceptance story of its own.
     unlit included (an unlit material is lit). Sponza TRACED (packed in SponzaLoop.Scene and read by lit.frag):
     emissive strength, transmission and sheen factors, diffuse transmission's factor, colour and colour texture.
     The first name-grep of Sponza missed every `ext.*` read: the trace is the slot the shader reads, not the name.
+  - **Review round (before merge):**
+    - The morph rule is per INSTANCE: a node's own weights win over its mesh's, else zero; an unplaced mesh is not
+      refused. `GltfSourcePolicy` (Blix.Import) is the one rule for the cook AND both source importers, which had
+      accepted what the cook refused. Fixtures `SimpleMorph_nodezero` (loads) and `_meshweights` (refused).
+    - The normal-map frame is Gram-Schmidt of `[T B] F M^-1 F`, not each vector normalised: exactly MikkTSpace over
+      the transformed coordinates wherever the attribute UVs are conformal. The non-conformal pair `_uvxf2`/`_ref`
+      (30 deg, scale (2, 0.5), built attribute-conformal as a real asset is): 13666 px off by >16 before, 257 after,
+      all on curved geometry; 530/530 flat frames exact (CONTROL, each-normalised: 0).
+    - Studio's skinned stage drew TEXCOORD_1 as set 0 and COLOR_0 as white, and ModelData dropped both from skinned
+      meshes whatever was asked: now a skinned load with Colour keeps the 92-byte vertex and Studio reads it.
+      `Fox_uv1colour` (derived) renders 114344 px from Fox; on the old code, byte-identical to Fox (CONTROL).
+    - The table names each cell's instrument; the script measures only the KHR_materials_* rows.
+    - Corpus refusals match their reason against the exception chain's messages, not its stack trace.
 
 - **Later, as their own arcs:** morph targets (deformation + a `weights` clip channel), then
   `KHR_animation_pointer` (not forced into skeletal animation). A skin that mirrors only some joints of one

@@ -457,7 +457,7 @@ public sealed class StudioRenderer : IDisposable
         // inside-out import visible as missing surfaces.
         skinnedPipeline = device.CreatePipeline(new PipelineDescription(
             skinnedProgram,
-            VertexPosition3NormalTextureSkin4Tangent.Layout,
+            VertexPosition3NormalTextureSkin4Tangent2Color.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite,
             RasterizerState.BackFaceCulling,
@@ -477,7 +477,7 @@ public sealed class StudioRenderer : IDisposable
 
         skinnedBlendPipeline = device.CreatePipeline(new PipelineDescription(
             skinnedProgram,
-            VertexPosition3NormalTextureSkin4Tangent.Layout,
+            VertexPosition3NormalTextureSkin4Tangent2Color.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualNoWrite,
             RasterizerState.NoCulling,
@@ -486,7 +486,7 @@ public sealed class StudioRenderer : IDisposable
 
         skinnedDoubleSidedPipeline = device.CreatePipeline(new PipelineDescription(
             skinnedProgram,
-            VertexPosition3NormalTextureSkin4Tangent.Layout,
+            VertexPosition3NormalTextureSkin4Tangent2Color.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite,
             RasterizerState.NoCulling,
@@ -520,7 +520,7 @@ public sealed class StudioRenderer : IDisposable
             RasterizerState.NoCulling, new[] { BlendState.Disabled },
             RenderTarget: viewportSurface), "lab.viewport.sky");
         viewportSkinnedPipeline = device.CreatePipeline(new PipelineDescription(
-            skinnedProgram, VertexPosition3NormalTextureSkin4Tangent.Layout, PrimitiveTopology.Triangles,
+            skinnedProgram, VertexPosition3NormalTextureSkin4Tangent2Color.Layout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled },
             RenderTarget: viewportSurface), "lab.viewport.skinned");
         viewportBlendPipeline = device.CreatePipeline(new PipelineDescription(
@@ -528,17 +528,17 @@ public sealed class StudioRenderer : IDisposable
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling, new[] { BlendState.AlphaBlend },
             RenderTarget: viewportSurface), "lab.viewport.lit.blend");
         viewportSkinnedBlendPipeline = device.CreatePipeline(new PipelineDescription(
-            skinnedProgram, VertexPosition3NormalTextureSkin4Tangent.Layout, PrimitiveTopology.Triangles,
+            skinnedProgram, VertexPosition3NormalTextureSkin4Tangent2Color.Layout, PrimitiveTopology.Triangles,
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling, new[] { BlendState.AlphaBlend },
             RenderTarget: viewportSurface), "lab.viewport.skinned.blend");
         viewportSkinnedDoubleSidedPipeline = device.CreatePipeline(new PipelineDescription(
-            skinnedProgram, VertexPosition3NormalTextureSkin4Tangent.Layout, PrimitiveTopology.Triangles,
+            skinnedProgram, VertexPosition3NormalTextureSkin4Tangent2Color.Layout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.NoCulling, new[] { BlendState.Disabled },
             RenderTarget: viewportSurface), "lab.viewport.skinned.doublesided");
 
         PipelineHandle Skinned(RenderSurfaceHandle target, DepthState depth, RasterizerState raster, BlendState blend, string name) =>
             device.CreatePipeline(new PipelineDescription(
-                skinnedProgram, VertexPosition3NormalTextureSkin4Tangent.Layout, PrimitiveTopology.Triangles,
+                skinnedProgram, VertexPosition3NormalTextureSkin4Tangent2Color.Layout, PrimitiveTopology.Triangles,
                 depth, raster, new[] { blend }, RenderTarget: target), name);
         var clockwiseCulled = new RasterizerState(CullMode.Back, FrontFace.Clockwise);
         var clockwise = new RasterizerState(CullMode.None, FrontFace.Clockwise);
@@ -553,7 +553,7 @@ public sealed class StudioRenderer : IDisposable
         // side of a limb, and a character's own silhouette is mostly far sides.
         skinnedShadowPipeline = device.CreatePipeline(new PipelineDescription(
             skinnedShadowProgram,
-            VertexPosition3NormalTextureSkin4Tangent.Layout,
+            VertexPosition3NormalTextureSkin4Tangent2Color.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite,
             RasterizerState.NoCulling,
@@ -564,7 +564,7 @@ public sealed class StudioRenderer : IDisposable
         {
             prePassSkinnedPipeline = device.CreatePipeline(new PipelineDescription(
                 skinnedShadowProgram,
-                VertexPosition3NormalTextureSkin4Tangent.Layout,
+                VertexPosition3NormalTextureSkin4Tangent2Color.Layout,
                 PrimitiveTopology.Triangles,
                 DepthState.LessEqualWrite,
                 RasterizerState.NoCulling,

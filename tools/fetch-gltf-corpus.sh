@@ -659,6 +659,150 @@ derive(True)
 PY
 fi
 
+# Effective morph weights are per instance: a node's own weights win over its mesh's. Two files pin which side of
+# that the refusal reads. _nodezero: mesh weights nonzero, the node's zero, no animation — every instance is its base,
+# so it loads. _meshweights: mesh weights nonzero, the node has none, no animation — it morphs, so it is refused.
+if [ -f "$SM" ] && [ ! -s "$DEST/sample-assets/SimpleMorph/SimpleMorph_nodezero.gltf" ]; then
+    python3 - "$SM" <<'PY'
+import json, sys
+p = sys.argv[1]
+src = json.load(open(p))
+mesh = src["meshes"][0]
+if not mesh.get("weights") or not any(w != 0 for w in mesh["weights"]):
+    sys.exit("SimpleMorph's mesh has no nonzero default weights — upstream changed shape")
+for name, node_weights in (("SimpleMorph_nodezero.gltf", [0.0] * len(mesh["weights"])), ("SimpleMorph_meshweights.gltf", None)):
+    d = json.loads(json.dumps(src))
+    d.pop("animations", None)
+    for n in d["nodes"]:
+        if n.get("mesh") == 0:
+            n.pop("weights", None)
+            if node_weights is not None:
+                n["weights"] = node_weights
+    json.dump(d, open(p.replace("SimpleMorph.gltf", name), "w"))
+    print(f"  derived {name} (mesh weights {mesh['weights']}, node weights {node_weights}, no animation)")
+PY
+fi
+
+# The same check where it is hard: a NON-conformal transform, 30 degrees and scale (2, 0.5), built the way a real
+# asset is: the attribute is the artist's UV (TEXCOORD_0's values, conformal on these tiles) and the transform
+# stretches the map. _uvxf2: TEXCOORD_1 = TEXCOORD_0 under (M, o). _uvxf2_ref: TEXCOORD_1 = M uv + o precomputed,
+# no transform. Both sample the same texels; the reference's generated tangents are MikkTSpace over the transformed
+# coordinates, which is what a renderer correcting the attribute's frame must arrive at.
+if [ -f "$NX" ] && [ ! -s "$DEST/sample-assets/NormalTangentMirrorTest/NormalTangentMirrorTest_uvxf2.gltf" ]; then
+    python3 - "$NX" <<'PY'
+import base64, json, math, struct, sys, copy
+p = sys.argv[1]
+b = open(p, "rb").read()
+jlen = struct.unpack("<I", b[12:16])[0]
+src = json.loads(b[20:20 + jlen])
+bin_at = 20 + jlen
+blen = struct.unpack("<I", b[bin_at:bin_at + 4])[0]
+blob = b[bin_at + 8:bin_at + 8 + blen]
+theta, scale, offset = math.radians(30.0), (2.0, 0.5), (0.25, 0.1)
+c, s_ = math.cos(theta), math.sin(theta)
+# As the reader applies it (UvTransform.Rows): u' = c sx u + s sy v + ox, v' = -s sx u + c sy v + oy.
+def apply(u, v):
+    return c * scale[0] * u + s_ * scale[1] * v + offset[0], -s_ * scale[0] * u + c * scale[1] * v + offset[1]
+def derive(reference):
+    d = copy.deepcopy(src)
+    d["buffers"][0] = {"byteLength": len(blob), "uri": "data:application/octet-stream;base64," + base64.b64encode(blob).decode()}
+    uv1 = bytearray()
+    done = 0
+    for mesh in d["meshes"]:
+        for prim in mesh["primitives"]:
+            a = prim["attributes"]
+            if "TEXCOORD_0" not in a:
+                continue
+            a.pop("TANGENT", None)
+            acc = d["accessors"][a["TEXCOORD_0"]]
+            if acc["componentType"] != 5126 or acc.get("sparse"):
+                sys.exit("TEXCOORD_0 is not plain float — upstream changed shape")
+            view = d["bufferViews"][acc["bufferView"]]
+            stride = view.get("byteStride", 8)
+            base = view.get("byteOffset", 0) + acc.get("byteOffset", 0)
+            start = len(uv1)
+            for k in range(acc["count"]):
+                u, v = struct.unpack_from("<2f", blob, base + k * stride)
+                if reference:
+                    u, v = apply(u, v)
+                uv1 += struct.pack("<2f", u, v)
+            d["bufferViews"].append({"buffer": 1, "byteOffset": start, "byteLength": len(uv1) - start})
+            d["accessors"].append({"bufferView": len(d["bufferViews"]) - 1, "componentType": 5126, "count": acc["count"], "type": "VEC2"})
+            a["TEXCOORD_1"] = len(d["accessors"]) - 1
+            done += 1
+    if done == 0:
+        sys.exit("NormalTangentMirrorTest has no textured primitive — upstream changed shape")
+    d["buffers"].append({"byteLength": len(uv1), "uri": "data:application/octet-stream;base64," + base64.b64encode(bytes(uv1)).decode()})
+    for m in d["materials"]:
+        if "normalTexture" in m:
+            m["normalTexture"]["texCoord"] = 1
+            if not reference:
+                m["normalTexture"]["extensions"] = {"KHR_texture_transform": {"offset": list(offset), "rotation": theta, "scale": list(scale)}}
+    if not reference:
+        for key in ("extensionsUsed", "extensionsRequired"):
+            d[key] = sorted(set(d.get(key, [])) | {"KHR_texture_transform"})
+    name = "NormalTangentMirrorTest_uvxf2_ref.gltf" if reference else "NormalTangentMirrorTest_uvxf2.gltf"
+    json.dump(d, open(p.replace("NormalTangentMirrorTest.glb", name), "w"))
+    print(f"  derived {name} ({done} primitive(s): no TANGENT, " + ("TEXCOORD_1 = M uv + o precomputed)" if reference else "TEXCOORD_1 = TEXCOORD_0 under 30 deg, scale (2, 0.5))"))
+derive(True)
+derive(False)
+PY
+fi
+
+# A skinned vertex carries TEXCOORD_1 and COLOR_0 as cooked; a renderer reading only the first set and no colour draws
+# such a file as if it had neither. Fox (skinned, textured) with a TEXCOORD_1 turned a quarter from TEXCOORD_0, its
+# base colour read from set 1, and a pink COLOR_0: drawn right it differs from Fox everywhere the fur is.
+FX="$DEST/sample-assets/Fox/Fox.glb"
+if [ -f "$FX" ] && [ ! -s "$DEST/sample-assets/Fox/Fox_uv1colour.gltf" ]; then
+    python3 - "$FX" <<'PY'
+import base64, json, struct, sys
+p = sys.argv[1]
+b = open(p, "rb").read()
+jlen = struct.unpack("<I", b[12:16])[0]
+d = json.loads(b[20:20 + jlen])
+bin_at = 20 + jlen
+blen = struct.unpack("<I", b[bin_at:bin_at + 4])[0]
+blob = b[bin_at + 8:bin_at + 8 + blen]
+d["buffers"][0] = {"byteLength": len(blob), "uri": "data:application/octet-stream;base64," + base64.b64encode(blob).decode()}
+extra = bytearray()
+done = 0
+for mesh in d["meshes"]:
+    for prim in mesh["primitives"]:
+        a = prim["attributes"]
+        if "JOINTS_0" not in a or "TEXCOORD_0" not in a:
+            continue
+        acc = d["accessors"][a["TEXCOORD_0"]]
+        if acc["componentType"] != 5126 or acc.get("sparse"):
+            sys.exit("Fox's TEXCOORD_0 is not plain float — upstream changed shape")
+        view = d["bufferViews"][acc["bufferView"]]
+        stride = view.get("byteStride", 8)
+        base = view.get("byteOffset", 0) + acc.get("byteOffset", 0)
+        start = len(extra)
+        for k in range(acc["count"]):
+            u, v = struct.unpack_from("<2f", blob, base + k * stride)
+            extra += struct.pack("<2f", v, 1.0 - u)
+        d["bufferViews"].append({"buffer": 1, "byteOffset": start, "byteLength": len(extra) - start})
+        d["accessors"].append({"bufferView": len(d["bufferViews"]) - 1, "componentType": 5126, "count": acc["count"], "type": "VEC2"})
+        a["TEXCOORD_1"] = len(d["accessors"]) - 1
+        start = len(extra)
+        for k in range(acc["count"]):
+            extra += bytes([255, 128, 128, 255])
+        d["bufferViews"].append({"buffer": 1, "byteOffset": start, "byteLength": len(extra) - start, "byteStride": 4})
+        d["accessors"].append({"bufferView": len(d["bufferViews"]) - 1, "componentType": 5121, "normalized": True, "count": acc["count"], "type": "VEC4"})
+        a["COLOR_0"] = len(d["accessors"]) - 1
+        done += 1
+if done == 0:
+    sys.exit("Fox has no skinned textured primitive — upstream changed shape")
+d["buffers"].append({"byteLength": len(extra), "uri": "data:application/octet-stream;base64," + base64.b64encode(bytes(extra)).decode()})
+for m in d["materials"]:
+    tex = m.get("pbrMetallicRoughness", {}).get("baseColorTexture")
+    if tex is not None:
+        tex["texCoord"] = 1
+json.dump(d, open(p.replace("Fox.glb", "Fox_uv1colour.gltf"), "w"))
+print(f"  derived Fox_uv1colour.gltf ({done} skinned primitive(s): base colour on a quarter-turned TEXCOORD_1, pink COLOR_0)")
+PY
+fi
+
 echo
 echo "corpus at $DEST — $((planned - failed)) fetched, $failed missing, $(find "$DEST" -type f | wc -l | tr -d ' ') file(s) total"
 [ "$failed" -eq 0 ]

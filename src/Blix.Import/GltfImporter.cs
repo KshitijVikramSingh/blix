@@ -18,7 +18,8 @@ namespace Blix.Import;
 // Current limits:
 // - Multiple skins may share one clip set only when their joint ordering agrees.
 // - LINEAR interpolation only (STEP / CUBICSPLINE rejected at import).
-// - No morph-target weights.
+// - No morph deformation: morph targets that take effect are refused (GltfSourcePolicy, the same rule the
+//   cook applies); where every instance's weights are zero and undriven, the base mesh is read, which is the shape.
 // - At most four skin influences are retained per vertex: the strongest four,
 //   renormalised. Mesh indices use UInt16 or UInt32 as required.
 //
@@ -54,6 +55,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         var loadWatch = System.Diagnostics.Stopwatch.StartNew();
 
         var model = AssetImportException.Refusing(context.SourcePath, () => ModelRoot.Load(context.SourcePath));
+        AssetImportException.Refusing(context.SourcePath, () => { GltfSourcePolicy.RefuseEffectiveMorphTargets(model, context.SourcePath); return 0; });
 
         // Group skinned mesh nodes by their owning skin. Encounter order supplies a stable binding
         // index but carries no semantic priority.

@@ -664,6 +664,87 @@ public static class Program
         t.Expect($"under a texture transform, [T B] F M^-1 F is the map's frame on {withF}/{flat} flat normal-mapped vertices " +
                  $"(CONTROL, without F: {withoutF}/{flat})",
             flat > 100 && withF == flat && withoutF == 0, "");
+
+        // A NON-conformal transform (30 degrees, scale (2, 0.5)), built as a real asset is: the attribute is the
+        // artist's (conformal) UV, the transform stretches the map, and the reference precomputes M uv + o with no
+        // transform, so its generated tangents are MikkTSpace over the transformed coordinates. The corrected
+        // vectors are then no longer perpendicular: the frame is Gram-Schmidt of [T B] F M^-1 F (the tangent
+        // normalised, the bitangent cross(N, T') on the transformed bitangent's side), and it must be the reference's
+        // exactly. CONTROL: normalising each vector separately, which is not a frame, is not.
+        if (FindFile("NormalTangentMirrorTest_uvxf2.gltf") is not { } stretched || FindFile("NormalTangentMirrorTest_uvxf2_ref.gltf") is not { } stretchedRef) return;
+        var r2 = MeshOf(stretchedRef);
+        var x2 = MeshOf(stretched);
+        var sr2 = Blix.Graphics.VertexSemantics.Of(r2.Layout);
+        var sx2 = Blix.Graphics.VertexSemantics.Of(x2.Layout);
+        var (su, sv) = new Blix.UvTransform(new System.Numerics.Vector2(0.25f, 0.1f), MathF.PI / 6f, new System.Numerics.Vector2(2f, 0.5f)).Rows;
+        var det2 = (su.X * sv.Y) - (su.Y * sv.X);
+        float j00 = sv.Y / det2, j01 = -su.Y / det2, j10 = -sv.X / det2, j11 = su.X / det2;
+        var index2 = new Dictionary<(int, int, int, int, int), int>();
+        for (var v = 0; v < r2.VertexCount; v++) index2.TryAdd(Key(r2, v, sr2), v);
+        int flat2 = 0, orthonormal = 0, eachNormalised = 0;
+        for (var v = 0; v < x2.VertexCount; v++)
+        {
+            if (!index2.TryGetValue(Key(x2, v, sx2), out var w)) continue;
+            var n = V3(x2, v, sx2.Normal);
+            if (MathF.Abs(n.Z) < 0.999f) continue;
+            flat2++;
+            var tx = V3(x2, v, sx2.Tangent);
+            var bx = System.Numerics.Vector3.Cross(n, tx) * W(x2, v, sx2.Tangent);
+            var tr = V3(r2, w, sr2.Tangent);
+            var br = System.Numerics.Vector3.Cross(n, tr) * W(r2, w, sr2.Tangent);
+            var t0 = (tx * j00) - (bx * j10);
+            var t1 = (-tx * j01) + (bx * j11);
+            var gt = System.Numerics.Vector3.Normalize(t0 - (n * System.Numerics.Vector3.Dot(n, t0)));
+            var gb = System.Numerics.Vector3.Cross(n, gt) * (System.Numerics.Vector3.Dot(System.Numerics.Vector3.Cross(n, gt), t1) < 0f ? -1f : 1f);
+            bool Same(System.Numerics.Vector3 a, System.Numerics.Vector3 b) => System.Numerics.Vector3.Dot(System.Numerics.Vector3.Normalize(a), b) > 0.999f;
+            if (Same(gt, tr) && Same(gb, br)) orthonormal++;
+            if (Same(t0, tr) && Same(t1, br)) eachNormalised++;
+        }
+
+        t.Expect($"under a non-conformal transform, the orthonormalised frame is the map's on {orthonormal}/{flat2} flat vertices " +
+                 $"(CONTROL, each vector normalised separately: {eachNormalised}/{flat2})",
+            flat2 > 100 && orthonormal == flat2 && eachNormalised < flat2 / 2, "");
+    }
+
+    // Every message in an exception's chain, joined: what a refusal SAYS, without its stack trace, so a reason token
+    // cannot match a method or file name in a frame.
+    private static string MessagesOf(Exception e)
+    {
+        var parts = new List<string>();
+        for (Exception? at = e; at is not null; at = at.InnerException) parts.Add(at.Message);
+        return string.Join(" | ", parts);
+    }
+
+    // One source policy (GltfSourcePolicy): what the cook refuses, the source importers refuse too, or a file the
+    // shipped path calls a different shape would load as its base mesh through a documented API.
+    private static void EveryImporterRefusesWhatTheCookRefuses(TestRunner t)
+    {
+        if (FindFile("AnimatedMorphCube.glb") is not { } morphing || FindFile("SimpleMorph_nodezero.gltf") is not { } zeroed) return;
+        var importers = new (string Name, Func<string, object> Import)[]
+        {
+            ("GltfStaticImporter.Import", f => new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("k3/static"), f))),
+            ("GltfStaticImporter.ImportNodes", f => new GltfStaticImporter().ImportNodes(new AssetImportContext(AssetId.Parse("k3/nodes"), f))),
+            ("GltfImporter.Import", f => new GltfImporter().Import(new AssetImportContext(AssetId.Parse("k3/rig"), f))),
+        };
+        foreach (var (name, import) in importers)
+        {
+            string? refusal = null;
+            try { import(morphing); }
+            catch (AssetImportException refused) { refusal = MessagesOf(refused); }
+            t.Expect($"{name} refuses morph targets that take effect, as the cook does",
+                refusal is not null && refusal.Contains("morph targets", StringComparison.Ordinal), refusal ?? "it loaded");
+        }
+
+        // CONTROL: a file whose every instance is its base is not refused for morphing by the static importers. (The
+        // rigged importer refuses it for having no skin, which is its own rule.)
+        foreach (var (name, import) in importers.Take(2))
+        {
+            string? refusal = null;
+            try { import(zeroed); }
+            catch (AssetImportException refused) { refusal = MessagesOf(refused); }
+            t.Expect($"CONTROL: {name} reads a morph file whose every instance is its base",
+                refusal is null, refusal ?? "");
+        }
     }
 
     // ── A golden that shares nothing with the reader ─────────────────────────────
@@ -1251,6 +1332,9 @@ public static class Program
         // (SimpleMorph_static, whose weights are all zero and undriven, loads: its base IS the render.)
         ["AnimatedMorphCube.glb"] = "morph targets", ["MorphStressTest.glb"] = "morph targets",
         ["MorphPrimitivesTest.glb"] = "morph targets", ["SimpleMorph.gltf"] = "morph targets",
+        // Derived: the mesh's weights nonzero and the node with none, so the mesh's apply (SimpleMorph_nodezero,
+        // whose node zeroes them, loads: every instance is its base).
+        ["SimpleMorph_meshweights.gltf"] = "morph targets",
     };
 
     private static void EveryCorpusFileLoads(TestRunner t)
@@ -1292,7 +1376,7 @@ public static class Program
                 // a refused-or-not check while its listed gap could have quietly closed.
                 var message = refused.Message.Split('\n')[0];
                 if (!expected) wrong.Add($"{name} refused: {message}");
-                else if (!refused.ToString().Contains(why!, StringComparison.OrdinalIgnoreCase)) wrong.Add($"{name} refused, but not for '{why}': {message}");
+                else if (!MessagesOf(refused).Contains(why!, StringComparison.OrdinalIgnoreCase)) wrong.Add($"{name} refused, but not for '{why}': {message}");
             }
             catch (Exception crash) when (crash is not OutOfMemoryException)
             {
@@ -1882,6 +1966,13 @@ public static class Program
         t.Expect("a rigged file read skinned keeps its skinned meshes skinned",
             skinned.IsRigged && skinned.Meshes.Any(m => m.Skinned && m.Primitives.All(p => p.Mesh.Layout.Stride == 80)),
             string.Join(",", skinned.Meshes.SelectMany(m => m.Primitives).Select(p => p.Mesh.Layout.Stride).Distinct()));
+        // Colour asks for COLOR_0 and TEXCOORD_1 in skinned meshes too: the complete vertex as cooked. (Read as 80 bytes
+        // whatever was asked, a skinned material on set 1 sampled set 0 and its vertex colour was white.)
+        var skinnedColour = Blix.ModelData.Load(rig, new Blix.ModelNeeds(Colour: true, Skinned: true));
+        t.Expect("and read with Colour, they keep TEXCOORD_1 and COLOR_0: the complete 92-byte skinned vertex",
+            skinnedColour.Meshes.Where(m => m.Skinned).SelectMany(m => m.Primitives)
+                .All(p => p.Mesh.Layout == Blix.Graphics.VertexPosition3NormalTextureSkin4Tangent2Color.Layout),
+            string.Join(",", skinnedColour.Meshes.SelectMany(m => m.Primitives).Select(p => p.Mesh.Layout.Stride).Distinct()));
         t.Expect("and read static, the same meshes arrive as static geometry at bind pose",
             asStatic.Meshes.All(m => !m.Skinned) && asStatic.Meshes.SelectMany(m => m.Primitives).All(p => p.Mesh.Layout.Stride == 44),
             string.Join(",", asStatic.Meshes.SelectMany(m => m.Primitives).Select(p => p.Mesh.Layout.Stride).Distinct()));
@@ -2493,7 +2584,10 @@ public static class Program
                     var sourceMesh = viaSourceRig.Primitives[i].Mesh;
                     var cookedIndices = cookedMesh.Indices32 ?? cookedMesh.Indices.Select(x => (uint)x).ToArray();
                     var sourceIndices = sourceMesh.Indices32 ?? sourceMesh.Indices.Select(x => (uint)x).ToArray();
-                    if (cookedMesh.Layout.Stride != stride || cookedIndices.Length != sourceIndices.Length)
+                    // Read with Colour, the cooked skinned vertex is the complete 92-byte one, whose first 80 bytes are the
+                    // source importer's 80-byte vertex: the shared prefix is what both readers must agree on.
+                    var cookedStride = cookedMesh.Layout.Stride;
+                    if (cookedStride < stride || cookedIndices.Length != sourceIndices.Length)
                     {
                         vertexMismatch++;
                         continue;
@@ -2502,7 +2596,7 @@ public static class Program
                     var differs = false;
                     for (var c = 0; c < cookedIndices.Length && !differs; c++)
                     {
-                        var cv = cookedMesh.VertexBytes.AsSpan((int)cookedIndices[c] * stride, stride);
+                        var cv = cookedMesh.VertexBytes.AsSpan((int)cookedIndices[c] * cookedStride, stride);
                         var sv = sourceMesh.VertexBytes.AsSpan((int)sourceIndices[c] * stride, stride);
                         differs = !cv[..tangentAt].SequenceEqual(sv[..tangentAt]);
                     }
@@ -2826,6 +2920,7 @@ public static class Program
         GeneratedTangentsFollowTheNormalTexture(t);
         QuantizedAttributesReadAsTheirFloats(t);
         NormalMapFramesFollowTheTextureTransform(t);
+        EveryImporterRefusesWhatTheCookRefuses(t);
         InterpolationGolden(t);
         SceneLevelMatchesGltf(t);
         SceneLevelReachesModelData(t);

@@ -16,6 +16,8 @@ layout(location = 2) in vec2 aTexCoord;
 layout(location = 3) in vec4 aBoneIndices;
 layout(location = 4) in vec4 aBoneWeights;
 layout(location = 5) in vec4 aTangent;      // w is the bitangent's handedness, per glTF
+layout(location = 6) in vec2 aTexCoord1;    // TEXCOORD_1: a second set, or the cook's copy of the first
+layout(location = 7) in vec4 aColour;       // COLOR_0, linear; white where the source has none
 
 // The PREFIX this stage reads, and nothing after it. studio_lit.frag's Frame block gained three
 // cascade matrices at offset 64 and this one did not, so it still described the pre-cascade
@@ -46,18 +48,20 @@ layout(push_constant) uniform Push {
 layout(location = 0) out vec3 vWorld;
 layout(location = 1) out vec3 vNormal;
 layout(location = 2) out vec2 vUv;
-// White: the skinned layout carries no colour attribute and a character has no baked occlusion to
-// carry. Written anyway because this stage shares studio_lit.frag, and a varying the fragment
-// stage reads but no vertex stage writes is undefined — it would read as whatever was in the
-// register, which is a bug that looks like a lighting bug.
+// COLOR_0 and TEXCOORD_1 as the cooked skinned vertex carries them (VertexPosition3NormalTextureSkin4Tangent2Color,
+// locations 6 and 7), passed on exactly as studio_lit.vert passes the static vertex's. This stage once wrote white
+// and aliased TEXCOORD_1 to the first set, so a skinned material naming set 1 sampled set 0, while the cook had
+// built that normal map's tangents over set 1: the texture and its frame were parameterised by different
+// coordinates.
 layout(location = 3) out vec4 vColour;
 layout(location = 4) out vec2 vUv1;
 layout(location = 5) out vec4 vTangent;
 
 void main()
 {
-    // <b>The stride comes from the draw, not from a #define.</b> uMaterial.z carries the RIG's
-    // bone count, so a shader compiled once serves a 15-bone robot and a 41-bone rogue, and the
+    // <b>The stride comes from the draw, not from a #define.</b> uMaterial.z carries the SKIN's
+    // joint count (not its skeleton's bones: BrainStem has 18 and 19), so a shader compiled once serves a
+    // 15-joint robot and a 41-joint rogue, and the
     // packing on the CPU cannot disagree with the reading here — the number travels with the data.
     // That is the one thing this does differently from the two consumers it copies from.
     //
@@ -94,7 +98,7 @@ void main()
     vTangent = vec4(normalize(mat3(uModel) * (mat3(skin) * aTangent.xyz)), aTangent.w);
 
     vUv = aTexCoord;
-    vColour = vec4(1.0);
-    vUv1 = aTexCoord;   // the skinned layout carries one UV set
+    vColour = aColour;
+    vUv1 = aTexCoord1;
     gl_Position = uViewProjection * world;
 }

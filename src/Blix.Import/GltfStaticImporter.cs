@@ -43,6 +43,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         var model = AssetImportException.Refusing(
             context.SourcePath, () => ModelRoot.Load(context.SourcePath));
+        AssetImportException.Refusing(context.SourcePath, () => { GltfSourcePolicy.RefuseEffectiveMorphTargets(model, context.SourcePath); return 0; });
 
         var textureCache = new Dictionary<int, TextureData>();
         var materialCache = new Dictionary<int, PbrMaterial>();
@@ -125,6 +126,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
     {
         RefuseCooked(context);
         var model = AssetImportException.Refusing(context.SourcePath, () => ModelRoot.Load(context.SourcePath));
+        AssetImportException.Refusing(context.SourcePath, () => { GltfSourcePolicy.RefuseEffectiveMorphTargets(model, context.SourcePath); return 0; });
         var gltfDir = Path.GetDirectoryName(Path.GetFullPath(context.SourcePath)) ?? string.Empty;
         var textureCache = new Dictionary<int, TextureData>();
         var materialCache = new Dictionary<int, PbrMaterial>();
