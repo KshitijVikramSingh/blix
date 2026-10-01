@@ -31,13 +31,21 @@ namespace Blix;
 // identically.
 public sealed class BonePaletteSet
 {
+    /// <summary>The skin every body in this set is packed for: what its joint indices mean.</summary>
+    /// <remarks>
+    /// One skin per set, held by the set rather than passed per body. A shader drawing one skinned primitive reads
+    /// every slice as that primitive's skin; two same-sized skins in one buffer would be read as one, and nothing
+    /// could say so.
+    /// </remarks>
+    public SkinBinding Skin { get; }
+
     /// <summary>Matrices per instance: the skin's joint count, not its skeleton's bone count. Instance i occupies <c>[i * JointCount, (i+1) * JointCount)</c>.</summary>
     /// <remarks>
     /// Joints, because a palette has one matrix per skin joint and a skeleton can have bones that are no joint of
     /// this skin (BrainStem: 18 joints, 19 bones). A stride read off the skeleton renders bodies 1 and up from
     /// other bodies' matrices; body 0 hides it, its base being zero either way.
     /// </remarks>
-    public int JointCount { get; }
+    public int JointCount => Skin.JointCount;
 
     /// <summary>How many instances the buffer was sized for.</summary>
     public int Capacity { get; }
@@ -57,11 +65,14 @@ public sealed class BonePaletteSet
     public int LiveMatrixCount => Count * JointCount;
 
 
-    public BonePaletteSet(int jointCount, int capacity)
+    /// <param name="skin">The skin every body is packed for; its joint count is the stride.</param>
+    /// <param name="capacity">How many bodies the set holds.</param>
+    public BonePaletteSet(SkinBinding skin, int capacity)
     {
-        if (jointCount < 0) throw new ArgumentOutOfRangeException(nameof(jointCount), "Joint count must be non-negative.");
+        ArgumentNullException.ThrowIfNull(skin);
         if (capacity < 1) throw new ArgumentOutOfRangeException(nameof(capacity), "Capacity must be at least one.");
-        JointCount = jointCount;
+        Skin = skin;
+        var jointCount = skin.JointCount;
         Capacity = capacity;
         Matrices = new Matrix4x4[capacity * jointCount];
     }
@@ -69,27 +80,19 @@ public sealed class BonePaletteSet
     /// <summary>Forget every written instance. Call once per frame, before the first <see cref="Add"/>.</summary>
     public void Reset() => Count = 0;
 
-    /// <summary>Adds one body for <paramref name="skin"/>, its palette from the skin's skeleton's bone worlds; returns the body's slot.</summary>
+    /// <summary>Adds one body of <see cref="Skin"/>, its palette from the skin's skeleton's bone worlds; returns the body's slot.</summary>
     /// <remarks>
     /// A palette is a binding operation: the joints and their inverse binds are the skin's, the worlds are
     /// its skeleton's. There is no overload taking a skeleton and a pose, because a skeleton cannot say which
     /// skin's binds to apply.
     /// </remarks>
-    /// <param name="skin">The skin being packed; its joint count is this set's stride.</param>
     /// <param name="worlds">This body's bone worlds, of the skin's own skeleton (<see cref="BoneWorlds.Compute"/>).</param>
     /// <param name="post">What goes after every world: the hierarchy's placement, then the body's.</param>
-    /// <exception cref="ArgumentException">The skin's joint count is not this set's stride, or the worlds are another skeleton's.</exception>
+    /// <exception cref="ArgumentException">The worlds are another skeleton's than the skin's.</exception>
     /// <exception cref="InvalidOperationException">The set is full.</exception>
-    public int Add(SkinBinding skin, BoneWorlds worlds, Matrix4x4 post)
+    public int Add(BoneWorlds worlds, Matrix4x4 post)
     {
-        ArgumentNullException.ThrowIfNull(skin);
         ArgumentNullException.ThrowIfNull(worlds);
-        if (skin.JointCount != JointCount)
-        {
-            throw new ArgumentException(
-                $"A {skin.JointCount}-joint skin; this set is packed at a stride of {JointCount}.", nameof(skin));
-        }
-
         if (Count >= Capacity)
         {
             // Loud rather than silently dropping the body. A crowd that quietly stops growing at
@@ -98,7 +101,7 @@ public sealed class BonePaletteSet
                 $"BonePaletteSet is full at {Capacity} instance(s). Size it for the crowd, or stop adding.");
         }
 
-        skin.ComputePalette(worlds, post, Matrices.AsSpan(Count * JointCount, JointCount));
+        Skin.ComputePalette(worlds, post, Matrices.AsSpan(Count * JointCount, JointCount));
         return Count++;
     }
 

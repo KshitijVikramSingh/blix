@@ -45,25 +45,25 @@ public sealed class Skeleton
         return new Pose(locals);
     }
 
-    /// <summary>Computes each joint's object-space transform under <paramref name="pose"/>.</summary>
+    /// <summary>Computes each bone's object-space transform under <paramref name="pose"/>.</summary>
     /// <remarks>
-    /// These are joint transforms for attachments and inspection, not skinning matrices. The
+    /// These are bone worlds for attachments, inspection and a skin's palette (through its binding), not skinning matrices. A bone need be no skin's joint. The
     /// hierarchy-order invariant makes this a single forward walk.
     /// </remarks>
-    public void ComputeBoneWorlds(Pose pose, Matrix4x4[] outJointWorlds)
+    public void ComputeBoneWorlds(Pose pose, Matrix4x4[] outBoneWorlds)
     {
         ArgumentNullException.ThrowIfNull(pose);
-        ArgumentNullException.ThrowIfNull(outJointWorlds);
+        ArgumentNullException.ThrowIfNull(outBoneWorlds);
         if (pose.BoneCount != Bones.Length)
         {
             throw new ArgumentException(
                 $"Pose has {pose.BoneCount} bones; skeleton has {Bones.Length}.", nameof(pose));
         }
-        if (outJointWorlds.Length != Bones.Length)
+        if (outBoneWorlds.Length != Bones.Length)
         {
             throw new ArgumentException(
-                $"Joint-world array has {outJointWorlds.Length} matrices; skeleton has {Bones.Length}.",
-                nameof(outJointWorlds));
+                $"Bone-world array has {outBoneWorlds.Length} matrices; skeleton has {Bones.Length}.",
+                nameof(outBoneWorlds));
         }
 
         // Row-vector composition (F-016): local[i] · offset[i] · world[parent], the offset being the
@@ -73,7 +73,7 @@ public sealed class Skeleton
             var localMatrix = pose.Locals[i].ToMatrix();
             if (Bones[i].Offset is { } offset) localMatrix *= offset;
             var p = Bones[i].ParentIndex;
-            outJointWorlds[i] = p < 0 ? localMatrix : localMatrix * outJointWorlds[p];
+            outBoneWorlds[i] = p < 0 ? localMatrix : localMatrix * outBoneWorlds[p];
         }
     }
 }

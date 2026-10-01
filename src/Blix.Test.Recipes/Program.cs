@@ -348,8 +348,8 @@ public static class Program
                 var oldModel = own.Placement * body;
                 // The demos' path: gathered through the hierarchy, placement baked in.
                 worlds.Compute(pose);
-                var gathered = new Blix.BonePaletteSet(skin.JointCount, 1);
-                gathered.Add(skin, worlds, d.SkeletonPlacement * body);
+                var gathered = new Blix.BonePaletteSet(skin, 1);
+                gathered.Add(worlds, d.SkeletonPlacement * body);
                 foreach (var m in meshes)
                 for (var v = 0; v < m.VertexCount; v++)
                 {
@@ -1298,8 +1298,8 @@ public static class Program
                     // Skinned vertices.
                     for (var s = 0; s < data.Skins.Count; s++)
                     {
-                        var palette = new BonePaletteSet(data.Skins[s].Binding.JointCount, 1);
-                        palette.Add(data.Skins[s].Binding, bones, data.SkeletonPlacement);
+                        var palette = new BonePaletteSet(data.Skins[s].Binding, 1);
+                        palette.Add(bones, data.SkeletonPlacement);
                         var skinNode = nodes.First(n => n.Skin is not null && n.Mesh is not null
                             && data.Nodes[SourceToCooked(gltf, data, n.LogicalIndex)].SkinIndex == s);
                         var gskin = skinNode.Skin;
@@ -1695,8 +1695,8 @@ public static class Program
                 var binding = data.Skins[s].Binding;
                 var restWorlds = new BoneWorlds(binding.Skeleton);
                 restWorlds.Compute(binding.Skeleton.CreateRestPose());
-                var palette = new BonePaletteSet(binding.JointCount, 1);
-                palette.Add(binding, restWorlds, data.SkeletonPlacement);
+                var palette = new BonePaletteSet(binding, 1);
+                palette.Add(restWorlds, data.SkeletonPlacement);
                 foreach (var prim in data.SkinnedPrimitives(s))
                 {
                     var mesh = prim.Mesh;

@@ -195,7 +195,7 @@ public sealed class Model : IDisposable
     public BonePaletteSet[] CreatePaletteSets(int instances)
     {
         _ = Skeleton;
-        return skins.Select(s => new BonePaletteSet(s.JointCount, instances)).ToArray();
+        return skins.Select(s => new BonePaletteSet(s, instances)).ToArray();
     }
 
     /// <summary>Packs N posed bodies into one palette set per skin, each body at its placement.</summary>
@@ -224,6 +224,16 @@ public sealed class Model : IDisposable
                 "sharing one set would draw some bodies at another skin's bind pose.", nameof(into));
         }
 
+        for (var s = 0; s < skins.Count; s++)
+        {
+            if (!ReferenceEquals(into[s].Skin, skins[s]))
+            {
+                throw new ArgumentException(
+                    $"palette set {s} was made for another skin than this model's skin {s}; make them with CreatePaletteSets, in order.",
+                    nameof(into));
+            }
+        }
+
         foreach (var set in into) set.Reset();
         worldScratch ??= new BoneWorlds(Skeleton);
         for (var body = 0; body < poses.Count; body++)
@@ -232,7 +242,7 @@ public sealed class Model : IDisposable
             worldScratch.Compute(poses[body]);
             for (var s = 0; s < skins.Count; s++)
             {
-                into[s].Add(skins[s], worldScratch, skeletonPlacement * placements[body]);
+                into[s].Add(worldScratch, skeletonPlacement * placements[body]);
             }
         }
     }
@@ -245,7 +255,7 @@ public sealed class Model : IDisposable
     /// The one place residency needs a program: descriptor sets take their layout from a shader's
     /// reflection, so a bone buffer exists against the program that will read it. A program without set 3
     /// is refused by the device when the buffers are made. <c>skinning.glsl</c> declares the block every
-    /// skinned program reads, unsized; each skin's buffer is sized here, bones x bodies, so the bone count a
+    /// skinned program reads, unsized; each skin's buffer is sized here, joints x bodies, so the joint count a
     /// program serves is the device's limit and not a constant in the shader.
     /// </remarks>
     public BoneBuffers CreateBoneBuffers(ShaderProgramHandle program, int maxInstances)
@@ -258,7 +268,7 @@ public sealed class Model : IDisposable
                 name: $"{Name}.bones.{i}",
                 arrayLengths: new Dictionary<int, int> { [0] = checked(s.JointCount * maxInstances) }))
             .ToArray();
-        return new BoneBuffers(device, bindings, skins.Select(s => s.JointCount).ToArray(), maxInstances);
+        return new BoneBuffers(device, bindings, skins.ToArray(), maxInstances);
     }
 
     /// <summary>What the pick pass draws for <paramref name="part"/>, placed by <paramref name="placement"/>.</summary>
@@ -370,8 +380,8 @@ public sealed class Model : IDisposable
             var own = SkinningAnalysis.FindWeightedJoints(skin, meshes);
             for (var b = 0; b < own.Length; b++) weighted[skin.Bones[b]] |= own[b];
 
-            var palette = new BonePaletteSet(skin.JointCount, 1);
-            palette.Add(skin, restWorlds, source.SkeletonPlacement);
+            var palette = new BonePaletteSet(skin, 1);
+            palette.Add(restWorlds, source.SkeletonPlacement);
             foreach (var mesh in meshes)
             {
                 anySkinned = true;

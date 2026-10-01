@@ -2580,12 +2580,12 @@ static ShaderInterface MinimalShader() => new(new[]
     var skeleton = new Skeleton(bones);
     var skin = SkinBinding.Direct(skeleton, new[] { Matrix4x4.Identity, Matrix4x4.CreateTranslation(0, -1, 0) });
 
-    // A body's palette into a set: its bone worlds, then the skin's binding over them.
-    static int AddPose(BonePaletteSet set, SkinBinding skin, Pose pose, Matrix4x4 post)
+    // A body's palette into a set: its bone worlds, then the set's skin's binding over them.
+    static int AddPose(BonePaletteSet set, Pose pose, Matrix4x4 post)
     {
-        var worlds = new BoneWorlds(skin.Skeleton);
+        var worlds = new BoneWorlds(set.Skin.Skeleton);
         worlds.Compute(pose);
-        return set.Add(skin, worlds, post);
+        return set.Add(worlds, post);
     }
 
     // The root walks 2 m along +X over 1 s and does NOT return — real root motion.
@@ -2810,7 +2810,7 @@ static ShaderInterface MinimalShader() => new(new[]
     // they disagree the bodies do not vanish, they render as other bodies' poses, smeared.
     // Bulwark and the external RTSGame consumer each carry their own copy of it; this names it once.
     {
-        var set = new BonePaletteSet(skeleton.BoneCount, capacity: 3);
+        var set = new BonePaletteSet(skin, capacity: 3);
         t.ExpectTrue("AQ.15 the buffer is capacity x bone count",
             set.Matrices.Length == 3 * skeleton.BoneCount);
         t.ExpectTrue("AQ.15 and starts with nothing live", set.Count == 0 && set.LiveMatrixCount == 0);
@@ -2823,9 +2823,9 @@ static ShaderInterface MinimalShader() => new(new[]
         b.Locals[0] = b.Locals[0] with { Translation = new Vector3(2f, 0f, 0f) };
         c.Locals[0] = c.Locals[0] with { Translation = new Vector3(3f, 0f, 0f) };
 
-        t.ExpectTrue("AQ.15 Add returns the instance index", AddPose(set, skin, a, Matrix4x4.Identity) == 0);
-        t.ExpectTrue("AQ.15 counting up", AddPose(set, skin, b, Matrix4x4.Identity) == 1);
-        t.ExpectTrue("AQ.15 and again", AddPose(set, skin, c, Matrix4x4.Identity) == 2);
+        t.ExpectTrue("AQ.15 Add returns the instance index", AddPose(set, a, Matrix4x4.Identity) == 0);
+        t.ExpectTrue("AQ.15 counting up", AddPose(set, b, Matrix4x4.Identity) == 1);
+        t.ExpectTrue("AQ.15 and again", AddPose(set, c, Matrix4x4.Identity) == 2);
         t.ExpectTrue("AQ.15 three live instances is three strides of matrices",
             set.LiveMatrixCount == 3 * skeleton.BoneCount);
 
@@ -2840,24 +2840,23 @@ static ShaderInterface MinimalShader() => new(new[]
         // and places the body some other way (the external RTSGame consumer's). The set takes no view; it just composes.
         set.Reset();
         t.ExpectTrue("AQ.16 Reset makes the slots free again", set.Count == 0);
-        AddPose(set, skin, a, Matrix4x4.CreateTranslation(10f, 0f, 0f));
+        AddPose(set, a, Matrix4x4.CreateTranslation(10f, 0f, 0f));
         t.ExpectClose("AQ.16 post-multiply bakes a placement into the palette", set.Matrices[0].M41, 11f);
 
         // Full is an exception, not a silent drop. A crowd that quietly stops growing at capacity
         // shows up as "the last few enemies are invisible", which looks like anything but this.
-        AddPose(set, skin, b, Matrix4x4.Identity);
-        AddPose(set, skin, c, Matrix4x4.Identity);
+        AddPose(set, b, Matrix4x4.Identity);
+        AddPose(set, c, Matrix4x4.Identity);
         var overflowed = false;
-        try { AddPose(set, skin, a, Matrix4x4.Identity); }
+        try { AddPose(set, a, Matrix4x4.Identity); }
         catch (InvalidOperationException) { overflowed = true; }
         t.ExpectTrue("AQ.16 a fourth instance in a set of three throws", overflowed);
 
         // A stride mismatch is the failure this type exists to make impossible, so it is loud.
-        var wrongSized = new Skeleton(new[] { new Bone("only", -1, BoneTransform.Identity) });
-        var rejected = false;
-        try { AddPose(set, SkinBinding.Direct(wrongSized, new[] { Matrix4x4.Identity }), wrongSized.CreateRestPose(), Matrix4x4.Identity); }
-        catch (ArgumentException) { rejected = true; }
-        t.ExpectTrue("AQ.16 and a skin of the wrong joint count is refused", rejected);
+        // A set is one skin's: the stride is that skin's joint count, and no body of another skin can be added,
+        // because Add takes no skin. Two same-sized skins cannot share a buffer by accident.
+        t.Expect("AQ.16 a set is made for one skin, and its stride is that skin's joint count",
+            ReferenceEquals(set.Skin, skin) && set.JointCount == skin.JointCount);
 
         // The worlds must be the skin's own skeleton's. A same-sized rig's are refused by identity: a count
         // check would pass them, and its bone 1 is not this one's.
@@ -2866,10 +2865,10 @@ static ShaderInterface MinimalShader() => new(new[]
         var foreignWorlds = new BoneWorlds(sameSized);
         foreignWorlds.Compute(sameSized.CreateRestPose());
         t.ExpectThrows("AQ.16 bone worlds of another skeleton are refused, even one with as many bones",
-            () => set.Add(skin, foreignWorlds, Matrix4x4.Identity), mustMention: "another skeleton");
+            () => set.Add(foreignWorlds, Matrix4x4.Identity), mustMention: "another skeleton");
         var ownWorlds = new BoneWorlds(skeleton);
         ownWorlds.Compute(skeleton.CreateRestPose());
-        t.Expect("AQ.16 CONTROL: the skin's own skeleton's worlds are taken", set.Add(skin, ownWorlds, Matrix4x4.Identity) == 0);
+        t.Expect("AQ.16 CONTROL: the skin's own skeleton's worlds are taken", set.Add(ownWorlds, Matrix4x4.Identity) == 0);
     }
 
     // ── Instancing is not phase-locked, clip-locked or state-locked ──────────
@@ -2903,7 +2902,7 @@ static ShaderInterface MinimalShader() => new(new[]
 
         var slow = Line("slow", 1f);
         var fast = Line("fast", 5f);
-        var set = new BonePaletteSet(rig.BoneCount, capacity: 3);
+        var set = new BonePaletteSet(rigSkin, capacity: 3);
 
         // Positive: three players, different clips, different phases, different rates.
         var players = new[]
@@ -2915,7 +2914,7 @@ static ShaderInterface MinimalShader() => new(new[]
         players[0].ScrubTo(0.1);
         players[1].ScrubTo(0.4);
         players[2].ScrubTo(0.8);
-        foreach (var p in players) AddPose(set, rigSkin, p.Pose, Matrix4x4.Identity);
+        foreach (var p in players) AddPose(set, p.Pose, Matrix4x4.Identity);
 
         var prints = new[] { set.Fingerprint(0), set.Fingerprint(1), set.Fingerprint(2) };
         t.ExpectTrue("AQ.17 three independently posed bodies give three fingerprints",
@@ -2928,7 +2927,7 @@ static ShaderInterface MinimalShader() => new(new[]
         set.Reset();
         var one = new ClipPlayer(rig, slow);
         one.ScrubTo(0.37);
-        for (var i = 0; i < 3; i++) AddPose(set, rigSkin, one.Pose, Matrix4x4.Identity);
+        for (var i = 0; i < 3; i++) AddPose(set, one.Pose, Matrix4x4.Identity);
         t.ExpectTrue("AQ.17 and one pose in every slot comes back identical",
             set.Fingerprint(0) == set.Fingerprint(1) && set.Fingerprint(1) == set.Fingerprint(2));
 

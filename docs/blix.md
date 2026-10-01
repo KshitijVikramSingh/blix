@@ -528,7 +528,7 @@ public sealed class BonePalette
 
 `Pose` carries no reference to its owning `Skeleton`. Animations produce poses; skeletons hold the hierarchy; `ComputeBoneWorlds` joins them with a bone-count validation at the boundary, and a binding's `ComputePalette` takes `BoneWorlds`, which know the skeleton that composed them, so it refuses another rig's worlds by identity, not merely by size. (A `Pose` itself is indexed locals with no skeleton; that limit is one level down and documented.)
 
-`BonePalette` is a typed wrapper around `Matrix4x4[]` — the GPU-ready output, one matrix per joint. `BonePaletteSet` packs many bodies' palettes for one skin at a stride of its `JointCount`, which need not be the skeleton's `BoneCount` (BrainStem: 18 joints, 19 bones); `Model.PackPalettes` fills one set per skin from poses of `Model.Skeleton`.
+`BonePalette` is a typed wrapper around `Matrix4x4[]` — the GPU-ready output, one matrix per joint. `BonePaletteSet` is made for one `SkinBinding` and packs many bodies' palettes for it at a stride of its `JointCount`, which need not be the skeleton's `BoneCount` (BrainStem: 18 joints, 19 bones). The set holds the skin rather than taking one per body, so two same-sized skins cannot share a buffer, and `BoneBuffers.Upload` refuses a set made for another skin by identity; `Model.PackPalettes` fills one set per skin from poses of `Model.Skeleton`.
 
 ### Matrix convention (F-016)
 
