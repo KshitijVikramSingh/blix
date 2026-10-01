@@ -13,7 +13,9 @@ namespace Blix;
 /// </para>
 /// <list type="bullet">
 /// <item><see cref="Placement"/>: the world of the node the first root joint hangs from (identity for a
-/// scene root). Not the mesh node's world — glTF ignores that transform for a skinned mesh.</item>
+/// scene root). Not the mesh node's world — glTF ignores that transform for a skinned mesh. Identity too when
+/// that world is singular (a zero-scaled parent, which glTF allows): the roots then carry their parents' worlds
+/// whole in their offsets, which is exact, rather than offsets against an inverse that does not exist.</item>
 /// <item>Each bone's rest: its joint node's own local transform, which is what it holds when no track
 /// moves it.</item>
 /// <item>Each bone's offset: the non-joint nodes between it and its parent joint, and for a root whose
@@ -70,8 +72,18 @@ public sealed class JointHierarchy
             if (parents[i] < 0) placement = ParentWorld(jointNodes[i]);
         }
 
+        // The placement is a factoring, not a fact: every root's world is offset * placement, so any invertible
+        // placement gives the same worlds. A singular one has no inverse to express the roots against: Invert
+        // returns false and a matrix of NaNs, and a root hanging from another parent got a NaN offset, which
+        // IsIdentity used to read as identity, so that root was placed silently under the FIRST root's parent.
+        // So factor nothing out: with identity, each root's offset is its own parent's world, exact and finite,
+        // and a zero-scaled part collapses to a point, as glTF says it does.
         var hangs = placement ?? Matrix4x4.Identity;
-        Matrix4x4.Invert(hangs, out var fromPlacement);
+        if (!Matrix4x4.Invert(hangs, out var fromPlacement))
+        {
+            hangs = Matrix4x4.Identity;
+            fromPlacement = Matrix4x4.Identity;
+        }
         var resolved = new Bone[names.Count];
         for (var i = 0; i < names.Count; i++)
         {
@@ -113,7 +125,9 @@ public sealed class JointHierarchy
         for (var r = 0; r < 4; r++)
         for (var c = 0; c < 4; c++)
         {
-            if (MathF.Abs(m[r, c] - (r == c ? 1f : 0f)) > 1e-6f) return false;
+            // Written so a NaN is NOT identity: every comparison with NaN is false, and the old `> 1e-6f` turned a
+            // NaN offset into a dropped one.
+            if (!(MathF.Abs(m[r, c] - (r == c ? 1f : 0f)) <= 1e-6f)) return false;
         }
 
         return true;

@@ -2882,6 +2882,55 @@ static ShaderInterface MinimalShader() => new(new[]
             () => singular.JointBindWorlds(), mustMention: "joint 1 ('child')");
         t.Expect("AQ.16 CONTROL: invertible binds give their bind worlds",
             skin.JointBindWorlds()[1].M42 == 1f);
+
+        // JointHierarchy's placement is a factoring: any invertible one gives the same worlds. A singular one (a
+        // zero-scaled parent, which glTF allows) has no inverse. The case it broke is a second root under ANOTHER
+        // parent: its offset against the singular placement was NaN, read as identity, and the root was placed
+        // under the first root's parent instead. Two roots: A under `firstParent`, B under an ordinary parent.
+        static (JointHierarchy Hierarchy, Matrix4x4[] Scene) Hang(Matrix4x4 firstParent)
+        {
+            var locals = new[]
+            {
+                firstParent, Matrix4x4.CreateTranslation(0f, 1f, 0f), Matrix4x4.CreateTranslation(0f, 1f, 0f),
+                Matrix4x4.CreateTranslation(-3f, 0f, 0f), Matrix4x4.CreateTranslation(0f, 2f, 0f),
+            };
+            var parentOf = new[] { -1, 0, 1, -1, 3 };
+            var scene = new Matrix4x4[locals.Length];
+            for (var n = 0; n < locals.Length; n++) scene[n] = parentOf[n] < 0 ? locals[n] : locals[n] * scene[parentOf[n]];
+            var resolved = JointHierarchy.Resolve(new[] { "rootA", "tipA", "rootB" }, new[] { -1, 0, -1 }, new[] { 1, 2, 4 },
+                n => parentOf[n], n => locals[n], n => scene[n]);
+            return (resolved, scene);
+        }
+
+        static float WorstAgainstScene(JointHierarchy h, Matrix4x4[] scene)
+        {
+            var jointNodes = new[] { 1, 2, 4 };
+            var bones = new Skeleton(h.Bones.ToArray());
+            var worlds = new BoneWorlds(bones);
+            worlds.Compute(bones.CreateRestPose());
+            var worst = 0f;
+            for (var b = 0; b < jointNodes.Length; b++)
+            {
+                var d = worlds[b] * h.Placement - scene[jointNodes[b]];
+                foreach (var v in new[] { d.M11, d.M12, d.M13, d.M14, d.M21, d.M22, d.M23, d.M24, d.M31, d.M32, d.M33, d.M34, d.M41, d.M42, d.M43, d.M44 })
+                {
+                    worst = float.IsFinite(v) ? MathF.Max(worst, MathF.Abs(v)) : float.PositiveInfinity;
+                }
+            }
+
+            return worst;
+        }
+
+        var (ordinary, ordinaryScene) = Hang(Matrix4x4.CreateScale(2f) * Matrix4x4.CreateTranslation(5f, 0f, 0f));
+        t.Expect("AQ.19 CONTROL: an ordinary first parent is the placement, and both roots' worlds are the scene's",
+            ordinary.Placement == ordinaryScene[0] && WorstAgainstScene(ordinary, ordinaryScene) < 1e-5f,
+            $"worst {WorstAgainstScene(ordinary, ordinaryScene)}");
+        var (hidden, hiddenScene) = Hang(Matrix4x4.CreateScale(0f) * Matrix4x4.CreateTranslation(5f, 0f, 0f));
+        t.Expect("AQ.19 a zero-scaled first parent factors nothing out: identity placement, each root offset by its own parent",
+            hidden.Placement == Matrix4x4.Identity && hidden.Bones[0].Offset == hiddenScene[0] && hidden.Bones[2].Offset == hiddenScene[3],
+            $"placement {hidden.Placement}, offsets {hidden.Bones[0].Offset} / {hidden.Bones[2].Offset}");
+        t.Expect("AQ.19 and the root under the other parent is where the scene puts it, not under the zero-scaled one",
+            WorstAgainstScene(hidden, hiddenScene) < 1e-5f, $"worst {WorstAgainstScene(hidden, hiddenScene)}");
     }
 
     // ── Instancing is not phase-locked, clip-locked or state-locked ──────────

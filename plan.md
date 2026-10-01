@@ -349,6 +349,12 @@ clean diff and acceptance story of its own.
       which compiled and became the hierarchy's count. It is equal on every lab rig; on BrainStem (18 joints,
       19 bones) bodies 1 and up shatter. Lab mode `brainstem-inst3` now guards it (control: the old stride's
       render differs from the baseline).
+    - **A singular placement (fixed in #54, found in review):** `JointHierarchy.Resolve` inverted the first root's
+      parent world unchecked. glTF allows a zero-scaled parent, so refusing it was wrong. The inverse is NaN, and
+      `IsIdentity` read a NaN offset as identity (NaN compares false), so a second root under ANOTHER parent was
+      placed silently under the first root's: 8 units off in the AQ.19 fixture (control: the original code fails it).
+      Now a singular placement factors nothing out (identity; each root offset by its own parent, exact), and NaN
+      is never identity.
     - `DemoRigsSkinTheSameThroughModel` resolves skin 0's joint tree independently and asserts the joint-order
       convention (control: disabling it fails cesium_man). The Check tool's output on BrainStem matches main's.
 - **K3 — conformance cleanup.**
@@ -362,8 +368,7 @@ clean diff and acceptance story of its own.
     are refused under that rule; no repo asset has targets.
   - A renderer-support table measured apart from reader support: a `PbrMaterial` field existing is not the
     extension being drawn.
-  - `JointHierarchy.Resolve` inverts the placement (`hangs`) without checking it is invertible: a singular
-    placement makes every root offset meaningless and the resolve carries on. Older than K2; recorded in review.
+
 - **Later, as their own arcs:** morph targets (deformation + a `weights` clip channel), then
   `KHR_animation_pointer` (not forced into skeletal animation). A skin that mirrors only some joints of one
   primitive stays an explicit rendering limitation: no asset, no consumer, no single front face.
