@@ -110,11 +110,10 @@ public sealed class HeadlessHost : IRenderHost, IDebugHost
         debugSystem?.Register((IDebugContributor)gameLoop);
 
         var frame = new RenderFrameContext(options.Width, options.Height);
-        var total = 0.0;
+        var clock = new FrameClock(options.Step);
         while (!closeRequested)
         {
-            total += options.Step;
-            var time = new Time(total, options.Step);
+            var time = clock.Advance(0.0);
 
             input?.Invoke(Frames, inputState);
             inputState.BeginTick();

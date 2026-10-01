@@ -660,6 +660,22 @@ public static class Program
         t.Expect("the loop is told the size it renders at",
             bounded.Frame == new RenderFrameContext(1280, 720), bounded.Frame.ToString());
 
+        // FrameClock: the one sample both hosts' callbacks see. Stepped, a frame advances by exactly the step
+        // whatever was measured, so a bounded run tells its loop the same times every run.
+        var stepped = new FrameClock(0.25);
+        var seen = new[] { stepped.Advance(0.9), stepped.Advance(0.001), stepped.Advance(3.0) };
+        t.Expect("a stepped frame clock advances by its step, whatever the host measured",
+            seen.All(x => x.Delta == 0.25) && seen[^1].Total == 0.75 && stepped.Current == seen[^1],
+            string.Join(" ", seen.Select(x => $"{x.Total}/{x.Delta}")));
+        var measured = new FrameClock();
+        measured.Advance(0.016);
+        var backwards = measured.Advance(-0.5);
+        var nan = measured.Advance(double.NaN);
+        t.Expect("a measured one takes the measured delta, and never runs backwards or on a NaN",
+            backwards.Delta == 0.0 && nan.Delta == 0.0 && nan.Total == 0.016, $"{backwards} {nan}");
+        t.ExpectThrows("a step of zero is refused", () => new FrameClock(0.0), mustMention: "above zero");
+        t.ExpectThrows("and an infinite one", () => new FrameClock(double.PositiveInfinity), mustMention: "above zero");
+
         var closing = new RecordingLoop { CloseAfter = 3 };
         new HeadlessHost(closing).Run();
         t.Expect("with no bound, the loop closes the run", closing.Renders == 3, $"{closing.Renders} frames");

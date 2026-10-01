@@ -44,7 +44,8 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     private VkLineDrawer? lineDrawer;
     private VkImGuiRenderer? imguiRenderer;
     private float lastWheel;
-    private double totalTime;
+    // The frame's one time sample, advanced in OnUpdate and read by OnRender (FrameClock).
+    private FrameClock clock = null!;
     private readonly WindowOptions options;
     private readonly int validationErrorsBefore;
     private int renderedFrames;
@@ -137,6 +138,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
         var resolved = options ?? BlixWindowOptions.Default;
         this.options = resolved;
+        clock = new FrameClock(resolved.Step);
         var silkOptions = SilkWindowOptions.DefaultVulkan with
         {
             Title = resolved.Title,
@@ -275,7 +277,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
     private void OnUpdate(double deltaTime)
     {
-        totalTime += deltaTime;
+        var time = clock.Advance(deltaTime);
 
         // Sampled before the flip, because a pad is state rather than a stream of events and the
         // flip is what turns state into transitions.
@@ -286,7 +288,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         // several updates per rendered frame still reports a press on exactly one of them.
         inputState.BeginTick();
 
-        gameLoop.OnUpdate(new Time(totalTime, deltaTime));
+        gameLoop.OnUpdate(time);
     }
 
     private void OnRender(double deltaTime)
@@ -305,7 +307,9 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             fpsAccumFrames = 0;
         }
 
-        var time = new Time(totalTime, deltaTime);
+        // This frame's sample, the one its update saw. The callback's own delta measures the frame rate
+        // (above) and paces the UI layer's own animation (below), and is not what the loop is told.
+        var time = clock.Current;
         var frame = CreateFrameContext();
 
         if (debugSystem is not null)
@@ -727,7 +731,12 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
     public (int Width, int Height) LogicalSize => (window.Size.X, window.Size.Y);
 
-    public void SetVSync(bool enabled) => window.VSync = enabled;
+    // The present mode is the device's (FIFO when on; mailbox, then immediate, when off). Silk's own
+    // window.VSync is a GL swap interval, and setting only that did nothing on Vulkan.
+    public void SetVSync(bool enabled)
+    {
+        if (graphicsDevice is not null) graphicsDevice.VsyncEnabled = enabled;
+    }
 
     /// <summary>The refresh rate of the monitor this window is on, if the platform reports one.</summary>
     public int? DisplayRefreshHz => window.Monitor?.VideoMode.RefreshRate;

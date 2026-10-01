@@ -164,7 +164,9 @@ Override `protected virtual double FixedStep => 1.0 / 60.0` to change the fixed 
 public readonly record struct Time(double Total, double Delta);
 ```
 
-A passed-by-value struct. `Total` is seconds since startup (monotonically increasing); `Delta` is seconds since the previous tick. The runtime accumulates `Total` from per-frame deltas; no platform clock leaks across the boundary.
+A passed-by-value struct. `Total` is seconds since startup (monotonically increasing); `Delta` is seconds since the previous frame. The host's `FrameClock` takes **one sample per frame**, which `OnUpdate` and `OnRender` both see; no platform clock leaks across the boundary.
+
+**`--step <seconds>` means the same in either host:** every frame advances by exactly that much, whatever the wall clock did, so a bounded run tells its loop the same times every run. Without it a window takes the display's measured frame time; a headless run always has a step (default 1/60 s). It makes the *application's* time deterministic, not execution: work budgeted by a stopwatch (`MaterialTextureLoader.Drain(ms)`, an async load) still runs on the wall clock and can land on a different frame.
 
 `Time` and `RenderFrameContext` are separate because `Time` is a layer-spanning fact ("what frame is the engine on, how long since the last one"), while `RenderFrameContext` is render-side info that only matters when there's a swapchain.
 

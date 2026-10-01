@@ -269,10 +269,24 @@ Stages:
   flags) and the lab three `compose-*` modes, recorded on the old composition and IDENTICAL on the stack;
   CONTROL, the additive weight nudged 1% changes compose-additive alone. `lab-baseline.sh` takes a mode
   regex, so a change to a few modes is proven without opening a window for all of them.
-- **J4 — a deterministic clock in the windowed host** (fixed-step A). `--step` means in a window what it
-  means headless: every frame advances by exactly that much. Fixed-update dispatch (B) is discussed
-  first: who owns the accumulator, what input edges mean when a frame holds two steps, the order
-  within a frame, and RTSGame's tick, read rather than migrated.
+- **J4-A — a deterministic clock in the windowed host** (fixed-step A). `--step` means in a window what it
+  means headless: every frame advances by exactly that much. It promises deterministic APPLICATION time,
+  not execution: wall-clock budgets (a `Drain(ms)`) stay out of scope. One `FrameClock` (Blix.Core) is
+  both hosts' sample, taken once per frame; render reads the sample its update saw, and the callback's own
+  delta is kept for the FPS readout and ImGui only. `SetVSync` now reaches the device (it set Silk's GL flag,
+  a no-op on Vulkan).
+- **J4-A done:** Test.Apps (clock: stepped, measured, negative/NaN clamped, 0/∞ refused) and Test.Input
+  (`--step` parse). Proof: Runner `--step 0.0166 --dump-frame 100`, three runs IDENTICAL (23 m, speed
+  14.467719, 10 coins); CONTROL, measured runs differ (26 m vs 29 m). A focused window takes stray
+  keystrokes: two runs that differed only in lane and coins were contaminated by input, not time.
+- **J4-B — fixed-update dispatch, owned by the host** (decided 2026-10-01). An optional `IFixedGameLoop`
+  (FixedStep, FixedTimeScale, OnFixedUpdate(Time)); `Game` implements it and loses `FixedStepClock`.
+  Order per frame: flip input → OnUpdate (input becomes intents; the scale is chosen) → accumulate
+  `min(delta, 0.25) × scale` and run OnFixedUpdate per whole step → OnRender with
+  `RenderFrameContext.FixedAlpha`. No step cap (30 Hz at 6× is 45 steps); scale 0 is pause; the fixed
+  `Total` is its own simulation clock; `ResetFixedClock(total)` clears the residual. No `FixedInput`: one
+  would be explicit, never a phase-switching `Host.Input`. Presentation that reads simulation state
+  belongs in OnRender; there is no late-update hook.
 
 ---
 
