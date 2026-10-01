@@ -88,9 +88,10 @@ public static class MeshRecipe
     /// </summary>
     // Version 9 writes glTF's scene graph (format v14): meshes once, in mesh space, placed by nodes,
     // as the complete static or skinned vertex, with MikkTSpace tangents wherever none were authored,
-    // and a track for every animated node with its channels' interpolation. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
+    // and a track for every animated node with its channels' interpolation. Version 10 unrolls
+    // TRIANGLE_STRIP / TRIANGLE_FAN and non-indexed primitives into triangle lists, and refuses points and lines. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
     // same format bumps this value.
-    public const uint MeshRecipeVersion = 9;
+    public const uint MeshRecipeVersion = 10;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false,

@@ -353,31 +353,13 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
             uvOffset = 6 * sizeof(float);
         }
 
-        var indicesSrc = primitive.GetIndices();
-        // Pick the narrowest width that fits. UInt16 covers virtually every
-        // authored asset; UInt32 kicks in for large packs like Khronos
-        // Sponza Modern's curtains (66k vertices in a single primitive).
+        // A triangle list whatever the primitive's mode (GltfShared.TriangleIndices), in the narrowest
+        // width that fits. UInt16 covers virtually every authored asset; UInt32 kicks in for large packs
+        // like Khronos Sponza Modern's curtains (66k vertices in a single primitive).
+        var triangles = GltfShared.TriangleIndices(name, primitive);
         var needsUInt32 = vertexCount > ushort.MaxValue;
-        ushort[] indices16;
-        uint[]? indices32;
-        if (needsUInt32)
-        {
-            indices16 = Array.Empty<ushort>();
-            indices32 = new uint[indicesSrc.Count];
-            for (var i = 0; i < indicesSrc.Count; i++)
-            {
-                indices32[i] = indicesSrc[i];
-            }
-        }
-        else
-        {
-            indices32 = null;
-            indices16 = new ushort[indicesSrc.Count];
-            for (var i = 0; i < indicesSrc.Count; i++)
-            {
-                indices16[i] = (ushort)indicesSrc[i];
-            }
-        }
+        var indices32 = needsUInt32 ? triangles : null;
+        var indices16 = needsUInt32 ? Array.Empty<ushort>() : triangles.Select(i => (ushort)i).ToArray();
 
         var bounds = vertexCount == 0 ? Bounds3.Empty : new Bounds3(minB, maxB);
         SanitizePackedUVs(packed, vertexCount, layout.Stride, uvOffset, name);

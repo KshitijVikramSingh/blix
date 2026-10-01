@@ -617,41 +617,12 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                 new GraphicsVector4(t.X, t.Y, t.Z, t.W));
         }
 
-        // Indices: glTF supports unsigned byte / short / int. We pick UInt16
-        // when the vertex count fits, UInt32 otherwise. Mesh primitives
-        // without an index buffer (rare for skinned content) get a
-        // sequential index list synthesised.
-        var rawIndices = primitive.GetIndices();
+        // Indices as a triangle list whatever the primitive's mode (GltfShared.TriangleIndices), in the
+        // narrowest width the vertex count allows.
+        var triangles = GltfShared.TriangleIndices(name, primitive);
         var needsUInt32 = vertexCount > ushort.MaxValue;
-        ushort[] indices16;
-        uint[]? indices32;
-        if (rawIndices is null || rawIndices.Count == 0)
-        {
-            if (needsUInt32)
-            {
-                indices16 = Array.Empty<ushort>();
-                indices32 = new uint[vertexCount];
-                for (var i = 0; i < vertexCount; i++) indices32[i] = (uint)i;
-            }
-            else
-            {
-                indices32 = null;
-                indices16 = new ushort[vertexCount];
-                for (var i = 0; i < vertexCount; i++) indices16[i] = (ushort)i;
-            }
-        }
-        else if (needsUInt32)
-        {
-            indices16 = Array.Empty<ushort>();
-            indices32 = new uint[rawIndices.Count];
-            for (var i = 0; i < rawIndices.Count; i++) indices32[i] = rawIndices[i];
-        }
-        else
-        {
-            indices32 = null;
-            indices16 = new ushort[rawIndices.Count];
-            for (var i = 0; i < rawIndices.Count; i++) indices16[i] = (ushort)rawIndices[i];
-        }
+        var indices32 = needsUInt32 ? triangles : null;
+        var indices16 = needsUInt32 ? Array.Empty<ushort>() : triangles.Select(i => (ushort)i).ToArray();
 
         var bytes = VertexPosition3NormalTextureSkin4Tangent.Pack(vertices);
         return new MeshData(

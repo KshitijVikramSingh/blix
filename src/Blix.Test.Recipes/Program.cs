@@ -132,6 +132,82 @@ public static class Program
             new Skeleton(Array.Empty<Bone>()), Array.Empty<AnimationClip>(), System.Numerics.Matrix4x4.Identity);
     }
 
+    // ── Primitive modes as glTF defines them ───────────────────────────────────
+    // Every triangle-mode primitive in the corpus (TRIANGLES, TRIANGLE_STRIP, TRIANGLE_FAN, indexed or not)
+    // unrolled here from the raw accessors by glTF 2.0 §3.7.2.1 — strip i = (v_i, v_{i+1+i%2}, v_{i+2-i%2}),
+    // fan i = (v_{i+1}, v_{i+2}, v_0) — and held to the cooked triangle list as a set of position triples,
+    // winding kept (the cook renumbers vertices, so indices are not comparable).
+    private static void TriangleModesMatchSpec(TestRunner t)
+    {
+        var modes = new HashSet<SharpGLTF.Schema2.PrimitiveType>();
+        foreach (var name in new[]
+        {
+            "Mesh_PrimitiveMode_04.gltf", "Mesh_PrimitiveMode_05.gltf", "Mesh_PrimitiveMode_06.gltf",
+            "Mesh_PrimitiveMode_11.gltf", "Mesh_PrimitiveMode_12.gltf", "Mesh_PrimitiveMode_13.gltf",
+            "TriangleWithoutIndices.gltf", "Box.glb", "BoxInterleaved.glb", "Fox.glb",
+        })
+        {
+            var file = FindFile(name);
+            if (file is null) continue;
+            var gltf = SharpGLTF.Schema2.ModelRoot.Load(file);
+            var expected = new List<string>();
+            foreach (var mesh in gltf.LogicalMeshes)
+            foreach (var prim in mesh.Primitives)
+            {
+                modes.Add(prim.DrawPrimitiveType);
+                var p = prim.GetVertexAccessor("POSITION").AsVector3Array();
+                var raw = prim.IndexAccessor is { } ia ? ia.AsIndicesArray().Select(i => (int)i).ToArray() : Enumerable.Range(0, p.Count).ToArray();
+                var n = prim.DrawPrimitiveType switch
+                {
+                    SharpGLTF.Schema2.PrimitiveType.TRIANGLES => raw.Length / 3,
+                    _ => Math.Max(0, raw.Length - 2),
+                };
+                for (var i = 0; i < n; i++)
+                {
+                    var (a, b, c) = prim.DrawPrimitiveType switch
+                    {
+                        SharpGLTF.Schema2.PrimitiveType.TRIANGLE_STRIP => (raw[i], raw[i + 1 + i % 2], raw[i + 2 - i % 2]),
+                        SharpGLTF.Schema2.PrimitiveType.TRIANGLE_FAN => (raw[i + 1], raw[i + 2], raw[0]),
+                        _ => (raw[3 * i], raw[3 * i + 1], raw[3 * i + 2]),
+                    };
+                    expected.Add(Triangle(p[a], p[b], p[c]));
+                }
+            }
+
+            var data = Blix.ModelData.Load(CookCache.Resolve(file), new Blix.ModelNeeds(Skinned: true));
+            var cooked = new List<string>();
+            foreach (var prim in data.Meshes.SelectMany(m => m.Primitives))
+            {
+                var mesh = prim.Mesh;
+                var indices = mesh.Indices32 is { } i32 ? i32.Select(i => (int)i).ToArray() : mesh.Indices.Select(i => (int)i).ToArray();
+                System.Numerics.Vector3 At(int v) => new(
+                    BitConverter.ToSingle(mesh.VertexBytes, v * mesh.Layout.Stride),
+                    BitConverter.ToSingle(mesh.VertexBytes, v * mesh.Layout.Stride + 4),
+                    BitConverter.ToSingle(mesh.VertexBytes, v * mesh.Layout.Stride + 8));
+                for (var k = 0; k + 2 < indices.Length; k += 3) cooked.Add(Triangle(At(indices[k]), At(indices[k + 1]), At(indices[k + 2])));
+            }
+
+            expected.Sort(StringComparer.Ordinal);
+            cooked.Sort(StringComparer.Ordinal);
+            t.Expect($"{name}: the cooked triangles are glTF's, winding kept", expected.SequenceEqual(cooked),
+                $"{expected.Count} expected, {cooked.Count} cooked, first difference {expected.Except(cooked).FirstOrDefault() ?? cooked.Except(expected).FirstOrDefault()}");
+        }
+
+        t.Expect("strips and fans are both exercised",
+            modes.Contains(SharpGLTF.Schema2.PrimitiveType.TRIANGLE_STRIP) && modes.Contains(SharpGLTF.Schema2.PrimitiveType.TRIANGLE_FAN),
+            string.Join(",", modes));
+
+        // A triangle as text, rotated so its smallest corner leads: the same triangle in any starting
+        // corner compares equal, and a flipped winding does not.
+        static string Triangle(System.Numerics.Vector3 a, System.Numerics.Vector3 b, System.Numerics.Vector3 c)
+        {
+            string K(System.Numerics.Vector3 v) => $"{MathF.Round(v.X, 4):0.0000},{MathF.Round(v.Y, 4):0.0000},{MathF.Round(v.Z, 4):0.0000}";
+            var corners = new[] { K(a), K(b), K(c) };
+            var start = Array.IndexOf(corners, corners.Min(StringComparer.Ordinal));
+            return $"{corners[start]}|{corners[(start + 1) % 3]}|{corners[(start + 2) % 3]}";
+        }
+    }
+
     // ── The corpus, whole ──────────────────────────────────────────────────────
     // Every file in the conformance corpus is cooked, loaded as the engine loads it, and each clip
     // sampled — or it is on this list, which says why not. Both directions fail: a file refused that is
@@ -148,6 +224,12 @@ public static class Program
         // Invalid glTF, which must be refused.
         ["Mesh_NoPosition_00.gltf"] = "no POSITION",
         ["Mesh_PrimitiveRestart_00.gltf"] = "primitive restart",
+        // Points and lines: Blix draws triangles, and refuses them by name rather than mis-reading them.
+        ["MeshPrimitiveModes.gltf"] = "POINTS and LINES primitives",
+        ["Mesh_PrimitiveMode_00.gltf"] = "POINTS", ["Mesh_PrimitiveMode_07.gltf"] = "POINTS",
+        ["Mesh_PrimitiveMode_01.gltf"] = "LINES", ["Mesh_PrimitiveMode_08.gltf"] = "LINES",
+        ["Mesh_PrimitiveMode_02.gltf"] = "LINE_LOOP", ["Mesh_PrimitiveMode_09.gltf"] = "LINE_LOOP",
+        ["Mesh_PrimitiveMode_03.gltf"] = "LINE_STRIP", ["Mesh_PrimitiveMode_10.gltf"] = "LINE_STRIP",
         // Valid glTF that Blix does not read yet — the spec gaps (plan.md, the spec audit).
         ["Accessor_Sparse_03.gltf"] = "a sparse accessor with no base buffer view",
         ["Animation_Skin_03.gltf"] = "a skin with no inverse binds (identity, per the spec)",
@@ -155,7 +237,6 @@ public static class Program
         ["TextureEncodingTest.glb"] = "one image used as colour and as data",
         ["TextureLinearInterpolationTest.glb"] = "one image used as colour and as data",
         ["TextureTransformMultiTest.glb"] = "KHR_texture_transform (required)",
-        ["TriangleWithoutIndices.gltf"] = "a primitive with no indices",
     };
 
     private static void EveryCorpusFileLoads(TestRunner t)
@@ -1695,6 +1776,7 @@ public static class Program
         SamplingMatchesGltf(t);
         AnimationMatchesGltf(t);
         EveryCorpusFileLoads(t);
+        TriangleModesMatchSpec(t);
 
         // ── tools cook on open ───────────────────────────────────────────────
         // The engine reads cooked models; a tool opening a raw one cooks it into a cache first.

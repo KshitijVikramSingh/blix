@@ -104,9 +104,9 @@ only shrink on purpose. Loading is not reading: a grep of what the reader touche
 control) found the second half. In a proposed order — correctness of what already loads first, then the
 refusals, then features:
 
-1. **Primitive modes.** Indices are read raw whatever the mode: TRIANGLE_STRIP and TRIANGLE_FAN draw as
-   garbage, POINTS and LINES as triangles, and a primitive without indices is refused
-   (TriangleWithoutIndices). Strips/fans convert to lists at the cook; points/lines need a decision.
+1. **Primitive modes — done.** Strips, fans and non-indexed primitives unroll to triangle lists in the
+   cook (recipe 10), checked triangle-for-triangle against the spec's unrolling; points and lines are
+   refused by name (decided: pipelines for them wait for a consumer).
 2. **Samplers.** Wrap and filter modes are not read: every texture gets one sampler (TextureSettingsTest).
 3. **One image, two roles.** An image used as colour (sRGB) and as data (linear) is refused
    (TextureEncodingTest, TextureLinearInterpolationTest); the spec allows it, so it cooks twice.

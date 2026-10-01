@@ -116,6 +116,7 @@ sample UnlitTest                # KHR_materials_unlit, which is a whole shading 
 # Pair every such claim with a control that the renders are not uniformly blank:
 # six identical WHITE images also agree with each other.
 
+generator Mesh_PrimitiveMode 0-15                                        # Every primitive mode, indexed and not: strips and fans unroll to lists, points and lines are refused by name.
 generator Mesh_PrimitiveVertexColor 0-5                                   # All six COLOR_0 spellings (float/ushort/ubyte x VEC3/VEC4). Verified byte-identical against a control of 415,625 strongly coloured pixels.
 generator Material_AlphaMask 0-5 Textures/BaseColor_Plane.png             # The cutoff matrix. _05 dims baseColorFactor.a to 0.7, making its EFFECTIVE cutoff 0.571 — which is why ordering these by nominal cutoff is wrong.
 generator Material_AlphaBlend 0-6 Textures/BaseColor_Plane.png            # BLEND. The conformance half; ordering within the blended group is still open.

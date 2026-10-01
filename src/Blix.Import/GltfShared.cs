@@ -21,6 +21,33 @@ namespace Blix.Import;
 /// </remarks>
 internal static class GltfShared
 {
+    /// <summary>A primitive's triangles as a flat index list, whatever its mode says.</summary>
+    /// <remarks>
+    /// TRIANGLES is read as authored; TRIANGLE_STRIP and TRIANGLE_FAN are unrolled into lists (glTF
+    /// 2.0 §3.7.2.1), and a primitive with no index accessor draws its vertices in order. POINTS and the
+    /// three LINE modes are refused by name: Blix draws triangles, and reading a line's indices as a
+    /// triangle list is the garbage this replaces.
+    /// </remarks>
+    public static uint[] TriangleIndices(string name, MeshPrimitive primitive)
+    {
+        if (primitive.DrawPrimitiveType is PrimitiveType.POINTS or PrimitiveType.LINES
+            or PrimitiveType.LINE_LOOP or PrimitiveType.LINE_STRIP)
+        {
+            throw new InvalidOperationException(
+                $"glTF primitive '{name}' is {primitive.DrawPrimitiveType}; Blix draws triangles, and a point or line primitive is not read.");
+        }
+
+        var list = new List<uint>();
+        foreach (var (a, b, c) in primitive.GetTriangleIndices())
+        {
+            list.Add((uint)a);
+            list.Add((uint)b);
+            list.Add((uint)c);
+        }
+
+        return list.ToArray();
+    }
+
     /// <summary>The material channels worth pre-decoding, in the order a decode pass walks them.</summary>
     internal static readonly string[] PreDecodeChannels =
     {
