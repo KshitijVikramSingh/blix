@@ -83,6 +83,16 @@ public readonly record struct StudioDraw(
         return Append(Textures, albedo, normal, metallicRoughness, occlusion, emissive);
     }
 
+    /// <summary>The pass's uniforms plus this surface's UV transforms; the caster pass reads none of them.</summary>
+    internal ShaderUniform[] WithUv(in StudioSurface surface)
+    {
+        if (Pass == StudioPass.Shadow) return Uniforms;
+        var all = new ShaderUniform[Uniforms.Length + 1];
+        Uniforms.CopyTo(all, 0);
+        all[^1] = new ShaderUniform("uUvRows", new Matrix4x4ArrayUniform(surface.UvRows));
+        return all;
+    }
+
     internal ShaderTextureBinding[] WithSurface(in StudioSurface surface) => WithMaterial(
         surface.Textures.Albedo, surface.Textures.Normal, surface.Textures.MetallicRoughness,
         surface.Textures.Occlusion, surface.Textures.Emissive);

@@ -87,8 +87,14 @@ public sealed record PbrMaterial(
     /// TransmissionFactor above is kept as its own member rather than folded in, because it predates
     /// this and the pipeline sorts on it; it mirrors <c>Extensions.TransmissionFactor</c>.
     /// </remarks>
-    PbrMaterialExtensions? Extensions = null)
+    PbrMaterialExtensions? Extensions = null,
+
+    /// <summary>Each core channel's <c>KHR_texture_transform</c>; null is identity everywhere.</summary>
+    PbrUvTransforms? UvTransforms = null)
 {
+    /// <summary>The channels' UV transforms, never null.</summary>
+    public PbrUvTransforms Uv => UvTransforms ?? PbrUvTransforms.Identity;
+
     /// <summary>The extensions, never null — an absent block reads as every spec default.</summary>
     /// <remarks>
     /// Nullable on the record so the two construction sites that predate it keep compiling, and a
@@ -218,4 +224,44 @@ public sealed record PbrMaterialExtensions(
         AnisotropyStrength: 0f, AnisotropyRotation: 0f, AnisotropyTexture: null,
         Dispersion: 0f,
         Unlit: false);
+}
+
+/// <summary>A <c>KHR_texture_transform</c>: a channel's UVs scaled, rotated, then offset — uv' = T R S uv.</summary>
+/// <remarks>
+/// The spec's rotation maps (u, v) to (cos r u + sin r v, -sin r u + cos r v): counter-clockwise in UV
+/// space, whose V axis points down the image. A shader applies it as two rows (<see cref="Rows"/>).
+/// </remarks>
+public readonly record struct UvTransform(Vector2 Offset, float Rotation, Vector2 Scale)
+{
+    public static UvTransform Identity { get; } = new(Vector2.Zero, 0f, Vector2.One);
+
+    public bool IsIdentity => this == Identity;
+
+    /// <summary>The transform as two rows (a, b, c): u' = a.x u + a.y v + a.z, v' = b.x u + b.y v + b.z.</summary>
+    public (Vector3 U, Vector3 V) Rows
+    {
+        get
+        {
+            var (c, s) = (MathF.Cos(Rotation), MathF.Sin(Rotation));
+            return (new Vector3(c * Scale.X, s * Scale.Y, Offset.X), new Vector3(-s * Scale.X, c * Scale.Y, Offset.Y));
+        }
+    }
+
+    /// <summary>Where <paramref name="uv"/> lands under this transform.</summary>
+    public Vector2 Apply(Vector2 uv)
+    {
+        var (u, v) = Rows;
+        return new Vector2(u.X * uv.X + u.Y * uv.Y + u.Z, v.X * uv.X + v.Y * uv.Y + v.Z);
+    }
+}
+
+/// <summary>The five core channels' UV transforms.</summary>
+public sealed record PbrUvTransforms(
+    UvTransform BaseColor, UvTransform Normal, UvTransform MetallicRoughness, UvTransform Occlusion, UvTransform Emissive)
+{
+    public static PbrUvTransforms Identity { get; } = new(
+        UvTransform.Identity, UvTransform.Identity, UvTransform.Identity, UvTransform.Identity, UvTransform.Identity);
+
+    public bool IsIdentity => BaseColor.IsIdentity && Normal.IsIdentity && MetallicRoughness.IsIdentity
+        && Occlusion.IsIdentity && Emissive.IsIdentity;
 }

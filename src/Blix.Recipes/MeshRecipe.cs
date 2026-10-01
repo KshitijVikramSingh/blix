@@ -102,7 +102,7 @@ public static class MeshRecipe
     // Version 12 reads sparse index accessors, identity inverse binds when a skin has none, and joints with
     // no common root, and refuses an index past the vertices. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
     // same format bumps this value.
-    public const uint MeshRecipeVersion = 12;
+    public const uint MeshRecipeVersion = 13;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false,
@@ -667,7 +667,7 @@ public static class MeshRecipe
     /// </remarks>
     public static readonly IReadOnlySet<string> ReadExtensions = new HashSet<string>(StringComparer.Ordinal)
     {
-        "KHR_mesh_quantization",
+        "KHR_mesh_quantization", "KHR_texture_transform",
         "KHR_materials_transmission", "KHR_materials_diffuse_transmission", "KHR_materials_volume",
         "KHR_materials_ior", "KHR_materials_specular", "KHR_materials_sheen", "KHR_materials_clearcoat",
         "KHR_materials_iridescence", "KHR_materials_anisotropy", "KHR_materials_dispersion",
@@ -832,7 +832,8 @@ public static class MeshRecipe
                 NormalImage: ImageIndex(normal),
                 MetallicRoughnessImage: ImageIndex(mr),
                 OcclusionImage: ImageIndex(occlusion),
-                EmissiveImage: ImageIndex(emissive));
+                EmissiveImage: ImageIndex(emissive),
+                UvTransforms: UvTransforms(baseColor, normal, mr, occlusion, emissive));
         }
 
         // Applied here, once, on the cooked table — so a patched property is indistinguishable at
@@ -850,7 +851,21 @@ public static class MeshRecipe
                 ? row
                 : BlixMesh.NoImage;
 
-        static int TexCoord(MaterialChannel? channel) => channel.HasValue ? channel.Value.TextureCoordinate : 0;
+        // The channel's TEXCOORD set; a KHR_texture_transform texCoord override replaces it (the spec's rule).
+        static int TexCoord(MaterialChannel? channel) =>
+            channel is not { } c ? 0
+            : c.TextureTransform?.TextureCoordinateOverride is { } over ? over
+            : c.TextureCoordinate;
+
+        static BlixMeshUvTransform Uv(MaterialChannel? channel) =>
+            channel?.TextureTransform is { } t ? new BlixMeshUvTransform(t.Offset, t.Rotation, t.Scale) : BlixMeshUvTransform.Identity;
+
+        // Null when every channel is identity, so a material without the extension cooks as it always has.
+        static BlixMeshUvTransforms? UvTransforms(params MaterialChannel?[] channels)
+        {
+            var all = new BlixMeshUvTransforms(Uv(channels[0]), Uv(channels[1]), Uv(channels[2]), Uv(channels[3]), Uv(channels[4]));
+            return all.All.All(t => t == BlixMeshUvTransform.Identity) ? null : all;
+        }
 
         float Parameter(MaterialChannel? channel, string name, float fallback)
         {
@@ -1244,7 +1259,7 @@ public static class MeshRecipe
         MaterialPatch? patch = null)
     {
         var header = CookedFile.TryReadHeader(outputPath);
-        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version15 }) return false;
+        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version16 }) return false;
         var stamp = header.Value.Stamp;
         if (!stamp.MatchesProducerAndSource(BlixMesh.ShippedRecipe, MeshRecipeVersion, sourcePath))
             return false;

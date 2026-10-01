@@ -662,6 +662,8 @@ public sealed class StudioRenderer : IDisposable
                     cascadeSide[2] / Look.ShadowMapSize,
                     Look.ShowCascades ? 1f : 0f))),
                 new("uCameraPosition", new Vector4Uniform(new Vector4(cameraPosition, 1f))),
+                // Identity texture transforms for the stage's furniture; each part states its own (StudioDraw.WithUv).
+                new("uUvRows", new Matrix4x4ArrayUniform(StudioSurface.IdentityUvRows)),
                 new("uSunDirection", new Vector4Uniform(new Vector4(Look.SunDirection, 0f))),
                 new("uSunColour", new Vector4Uniform(new Vector4(Look.SunColour, Look.AmbientStrength))),
                 new("uEnvironment", new Vector4Uniform(new Vector4(envMipCeiling, iblActive ? 1f : 0f, 0f, 0f))),
@@ -899,6 +901,8 @@ public sealed class StudioRenderer : IDisposable
             {
                 new("uInverseViewProjection", new Matrix4x4Uniform(inverse)),
                 new("uCameraPosition", new Vector4Uniform(new Vector4(cameraPosition, 1f))),
+                // Identity texture transforms for the stage's furniture; each part states its own (StudioDraw.WithUv).
+                new("uUvRows", new Matrix4x4ArrayUniform(StudioSurface.IdentityUvRows)),
             });
     }
 

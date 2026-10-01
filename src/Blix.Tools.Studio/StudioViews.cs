@@ -193,7 +193,7 @@ public sealed class ModelView : IStudioView
                 pipeline: skinned,
                 indexCount: part.IndexCount,
                 instanceCount: Instances,
-                uniforms: draw.Uniforms,
+                uniforms: draw.WithUv(part.Surface),
                 textures: draw.WithSurface(part.Surface),
                 // Each part selects its authored skin; skins may share joints but not inverse binds.
                 perDrawMaterial: studio.Skins[part.SkinIndex].BoneMaterial,
@@ -226,7 +226,7 @@ public sealed class ModelView : IStudioView
                 indexBuffer: part.Indices,
                 pipeline: blended && draw.BlendPipeline.Id != 0 ? draw.BlendPipeline : draw.Pipeline,
                 indexCount: part.IndexCount,
-                uniforms: draw.Uniforms,
+                uniforms: draw.WithUv(part.Surface),
                 textures: draw.WithSurface(part.Surface),
                 pushConstants: push);
         }
@@ -293,7 +293,7 @@ public sealed class ModelView : IStudioView
                 indexBuffer: attachment.Indices,
                 pipeline: blended && draw.BlendPipeline.Id != 0 ? draw.BlendPipeline : draw.Pipeline,
                 indexCount: attachment.IndexCount,
-                uniforms: draw.Uniforms,
+                uniforms: draw.WithUv(attachment.Surface),
                 textures: draw.WithSurface(attachment.Surface),
                 pushConstants: attachPush);
         }

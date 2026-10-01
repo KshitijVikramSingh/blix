@@ -138,6 +138,73 @@ public static class Program
     private static SharpGLTF.Schema2.ModelRoot LoadSource(string file) =>
         SharpGLTF.Schema2.ModelRoot.Load(file, new SharpGLTF.Schema2.ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip });
 
+    // ── KHR_texture_transform as glTF defines it ───────────────────────────────
+    // Every core channel in the corpus that carries the extension cooks to exactly its offset, rotation
+    // and scale, with a texCoord override replacing the channel's set; and the engine's UvTransform is the
+    // spec's T * R * S, built here from the spec's three matrices and applied to sample UVs.
+    private static void TextureTransformsMatchGltf(TestRunner t)
+    {
+        var root = FindFile("InterpolationTest.glb") is { } it ? Path.GetFullPath(Path.Combine(it, "..", "..", "..")) : null;
+        if (root is null) return;
+
+        var transformed = 0;
+        var wrong = new List<string>();
+        foreach (var file in Directory.EnumerateFiles(root, "*.gl*", SearchOption.AllDirectories)
+            .Where(f => (f.EndsWith(".glb", StringComparison.Ordinal) || f.EndsWith(".gltf", StringComparison.Ordinal))
+                && !ExpectedRefusals.ContainsKey(Path.GetFileName(f)))
+            .OrderBy(f => f, StringComparer.Ordinal))
+        {
+            var gltf = LoadSource(file);
+            if (!gltf.ExtensionsUsed.Contains("KHR_texture_transform")) continue;
+            var cooked = BlixMeshReader.Read(CookCache.Resolve(file));
+            for (var m = 0; m < gltf.LogicalMaterials.Count; m++)
+            {
+                var row = cooked.MaterialTable[m];
+                var uv = row.UvTransforms ?? BlixMeshUvTransforms.Identity;
+                foreach (var (channel, ours, set) in new[]
+                {
+                    ("BaseColor", uv.BaseColor, row.BaseColorTexCoord), ("Normal", uv.Normal, row.NormalTexCoord),
+                    ("MetallicRoughness", uv.MetallicRoughness, row.MetallicRoughnessTexCoord),
+                    ("Occlusion", uv.Occlusion, row.OcclusionTexCoord), ("Emissive", uv.Emissive, row.EmissiveTexCoord),
+                })
+                {
+                    if (gltf.LogicalMaterials[m].FindChannel(channel) is not { } c || c.TextureTransform is not { } x) continue;
+                    transformed++;
+                    var want = new BlixMeshUvTransform(x.Offset, x.Rotation, x.Scale);
+                    var wantSet = x.TextureCoordinateOverride ?? c.TextureCoordinate;
+                    if (ours != want || set != wantSet)
+                        wrong.Add($"{Path.GetFileName(file)} material {m} {channel}: cooked {ours} set {set}, glTF {want} set {wantSet}");
+                }
+            }
+        }
+
+        t.Expect($"every transformed channel cooks to its glTF transform and texCoord ({transformed} channels)",
+            transformed > 0 && wrong.Count == 0, string.Join(" | ", wrong.Take(4)));
+
+        // The spec's composition, from its three matrices (KHR_texture_transform README): uv' = T R S uv.
+        var sample = new UvTransform(new System.Numerics.Vector2(0.25f, -0.5f), 0.7f, new System.Numerics.Vector2(2f, 0.5f));
+        var (cs, sn) = (MathF.Cos(sample.Rotation), MathF.Sin(sample.Rotation));
+        float[,] T = { { 1, 0, sample.Offset.X }, { 0, 1, sample.Offset.Y }, { 0, 0, 1 } };
+        float[,] R = { { cs, sn, 0 }, { -sn, cs, 0 }, { 0, 0, 1 } };
+        float[,] S = { { sample.Scale.X, 0, 0 }, { 0, sample.Scale.Y, 0 }, { 0, 0, 1 } };
+        static float[,] Mul(float[,] a, float[,] b)
+        {
+            var r = new float[3, 3];
+            for (var i = 0; i < 3; i++) for (var j = 0; j < 3; j++) for (var k = 0; k < 3; k++) r[i, j] += a[i, k] * b[k, j];
+            return r;
+        }
+
+        var M = Mul(Mul(T, R), S);
+        var worstUv = 0f;
+        foreach (var p in new[] { (0f, 0f), (1f, 0f), (0f, 1f), (0.3f, 0.8f) })
+        {
+            var spec = new System.Numerics.Vector2(M[0, 0] * p.Item1 + M[0, 1] * p.Item2 + M[0, 2], M[1, 0] * p.Item1 + M[1, 1] * p.Item2 + M[1, 2]);
+            worstUv = Math.Max(worstUv, System.Numerics.Vector2.Distance(spec, sample.Apply(new System.Numerics.Vector2(p.Item1, p.Item2))));
+        }
+
+        t.Expect("UvTransform applies the spec's T * R * S", worstUv < 1e-5f, $"worst {worstUv}");
+    }
+
     // ── Samplers as glTF defines them ──────────────────────────────────────────
     // Every textured core channel of every corpus file: the cooked row it reads carries exactly that
     // texture's glTF sampler, and the engine maps glTF's codes to its own as the spec defines them.
@@ -295,8 +362,6 @@ public static class Program
         ["Mesh_PrimitiveMode_02.gltf"] = "LINE_LOOP", ["Mesh_PrimitiveMode_09.gltf"] = "LINE_LOOP",
         ["Mesh_PrimitiveMode_03.gltf"] = "LINE_STRIP", ["Mesh_PrimitiveMode_10.gltf"] = "LINE_STRIP",
         // Valid glTF that Blix does not read yet — the spec gaps (plan.md, the spec audit).
-        ["TextureTransformMultiTest.glb"] = "requires KHR_texture_transform, which Blix does not read yet",
-        ["SheenChair.glb"] = "requires KHR_texture_transform, which Blix does not read yet",
     };
 
     private static void EveryCorpusFileLoads(TestRunner t)
@@ -1855,6 +1920,7 @@ public static class Program
         EveryCorpusFileLoads(t);
         TriangleModesMatchSpec(t);
         SamplersMatchGltf(t);
+        TextureTransformsMatchGltf(t);
 
         // ── tools cook on open ───────────────────────────────────────────────
         // The engine reads cooked models; a tool opening a raw one cooks it into a cache first.

@@ -58,6 +58,13 @@ layout(set = 1, binding = 8) uniform sampler2D uMetallicRoughness;  // linear, G
 layout(set = 1, binding = 9) uniform sampler2D uOcclusion;          // linear, R = occlusion
 layout(set = 1, binding = 10) uniform sampler2D uEmissive;          // sRGB
 
+// Each core channel's KHR_texture_transform, as two rows (u' = a.xyz . (u, v, 1), v' = b.xyz . (u, v, 1)):
+// channel c's rows are r = 2c and 2c + 1, held at uUvRows[r / 4][r % 4]. Base colour, normal,
+// metallic-roughness, occlusion, emissive. Per draw (set 1 is per-draw); identity where untransformed.
+layout(set = 1, binding = 11) uniform UvTransforms {
+    mat4 uUvRows[3];
+};
+
 layout(push_constant) uniform Push {
     mat4 uModel;
     vec4 uBaseColour;
@@ -96,10 +103,19 @@ vec2 channelUv(int bit)
     return (int(uExtra.z + 0.5) & bit) != 0 ? vUv1 : vUv;
 }
 
+vec2 uvOf(int channel, vec2 uv)
+{
+    int r = channel * 2;
+    vec4 a = uUvRows[r / 4][r % 4];
+    vec4 b = uUvRows[(r + 1) / 4][(r + 1) % 4];
+    vec3 p = vec3(uv, 1.0);
+    return vec2(dot(a.xyz, p), dot(b.xyz, p));
+}
+
 void main()
 {
     vec3 N = normalize(vNormal);
-    vec2 uvNormal = channelUv(1);
+    vec2 uvNormal = uvOf(1, channelUv(1));
 
     // The shadow's normal offset uses the geometric normal: it is about where the surface is, and a
     // normal map only says how it scatters light.
@@ -126,13 +142,13 @@ void main()
         vWorld, geometric, max(dot(geometric, L), 0.0), 1.5, gl_FragCoord.xy,
         cascade);
 
-    vec4 metallicRoughness = texture(uMetallicRoughness, channelUv(2));
+    vec4 metallicRoughness = texture(uMetallicRoughness, uvOf(2, channelUv(2)));
     float metallic = clamp(uMaterial.x * metallicRoughness.b, 0.0, 1.0);
     float roughness = clamp(uMaterial.y * metallicRoughness.g, 0.04, 1.0);
     // A zero cutoff lets OPAQUE and MASK share this pipeline. Alpha is texture × baseColorFactor.a ×
     // vertex alpha, per glTF. `discard` prevents early-Z for the whole shader; Studio accepts that
     // cost for its small subjects rather than multiplying pipeline variants. Revisit for large views.
-    vec2 uvAlbedo = uExtra.x > 0.5 ? vUv1 : vUv;
+    vec2 uvAlbedo = uvOf(0, uExtra.x > 0.5 ? vUv1 : vUv);
     if (uMaterial.w > 0.0 && texture(uAlbedo, uvAlbedo).a * uBaseColour.a * vColour.a < uMaterial.w) discard;
 
     vec3 albedo = uBaseColour.rgb * texture(uAlbedo, uvAlbedo).rgb * vColour.rgb;
@@ -155,10 +171,10 @@ void main()
     }
 
     // glTF occlusion darkens indirect light only; the sun is already shadowed.
-    ambient *= 1.0 + uEmission.a * (texture(uOcclusion, channelUv(4)).r - 1.0);
+    ambient *= 1.0 + uEmission.a * (texture(uOcclusion, uvOf(3, channelUv(4))).r - 1.0);
 
     // Output the same composed alpha used by MASK; opaque pipelines ignore this channel.
-    vec3 lit = direct + ambient + uEmission.rgb * texture(uEmissive, channelUv(8)).rgb;
+    vec3 lit = direct + ambient + uEmission.rgb * texture(uEmissive, uvOf(4, channelUv(8))).rgb;
 
     // Cascade diagnostics replace shading with a flat band; shadow remains as brightness.
     if (uCascadeTexels.w > 0.5) lit = blix_cascade_tint(cascade) * mix(0.35, 1.0, shadow);

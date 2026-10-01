@@ -121,7 +121,11 @@ refusals, then features:
    binds (identity, §5.27), and joints with no common root (Animation_Skin_06, which SharpGLTF's strict
    validator rejects — sources now load unvalidated, and the cook checks what it needs itself: POSITION,
    index range, required extensions).
-5. **KHR_texture_transform** (required by TextureTransformMultiTest, used by two more).
+5. **KHR_texture_transform — done.** Each core channel's offset/rotation/scale cooks into the material
+   (format v16) and a texCoord override replaces the channel's set; Studio applies them per draw
+   (`uUvRows`, set 1). TextureTransformMultiTest and SheenChair load; the multi-test's checkmarks show,
+   and with the transform bypassed its fail symbols do. Other renderers (Sponza, the demos) read the
+   transforms off PbrMaterial when they want them.
 6. **Scene structure the reader ignores:** scene selection (MultipleScenes), cameras, KHR_node_visibility,
    EXT_mesh_gpu_instancing, KHR_lights_punctual, KHR_materials_variants.
 7. **Out of scope unless asked:** Draco, meshopt, KTX2/BasisU, WEB3D quantized (refused by name), morph

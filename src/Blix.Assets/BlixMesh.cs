@@ -42,8 +42,9 @@ public static class BlixMesh
     // cook did not carry (v13). v14 gives each track channel its glTF interpolation (LINEAR, STEP or
     // CUBICSPLINE, with the spline's in/out tangents), and tracks every animated node rather than
     // only skin 0's joints. v15 makes an image row one image as used — role, normal convention and
-    // glTF sampler — so an image used two ways is two rows. Older layouts must be re-cooked.
-    public const uint Version15 = 15;
+    // glTF sampler — so an image used two ways is two rows. v16 adds each core channel's
+    // KHR_texture_transform to the material. Older layouts must be re-cooked.
+    public const uint Version16 = 16;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
     public const uint LayoutPosition3NormalTextureSkin4Tangent = 3; // 80-byte, rigged
@@ -136,6 +137,25 @@ public sealed record BlixMeshLod(ushort[]? Indices16, uint[]? Indices32, float E
 /// </remarks>
 public sealed record BlixMeshImage(string Name, ulong ContentHash, string Resource, BlixMeshSampler Sampler = default);
 
+/// <summary>A <c>KHR_texture_transform</c>: a channel's UVs scaled, rotated, then offset (uv' = T R S uv).</summary>
+/// <remarks>Its <c>texCoord</c> override is folded into the channel's TEXCOORD index at the cook.</remarks>
+public readonly record struct BlixMeshUvTransform(Vector2 Offset, float Rotation, Vector2 Scale)
+{
+    public static BlixMeshUvTransform Identity { get; } = new(Vector2.Zero, 0f, Vector2.One);
+}
+
+/// <summary>The five core channels' UV transforms.</summary>
+public sealed record BlixMeshUvTransforms(
+    BlixMeshUvTransform BaseColor, BlixMeshUvTransform Normal, BlixMeshUvTransform MetallicRoughness,
+    BlixMeshUvTransform Occlusion, BlixMeshUvTransform Emissive)
+{
+    public static BlixMeshUvTransforms Identity { get; } = new(
+        BlixMeshUvTransform.Identity, BlixMeshUvTransform.Identity, BlixMeshUvTransform.Identity,
+        BlixMeshUvTransform.Identity, BlixMeshUvTransform.Identity);
+
+    public IEnumerable<BlixMeshUvTransform> All => new[] { BaseColor, Normal, MetallicRoughness, Occlusion, Emissive };
+}
+
 /// <summary>A glTF sampler, kept as glTF's own codes: what the file says, for the reader to map.</summary>
 /// <param name="WrapS">10497 REPEAT, 33071 CLAMP_TO_EDGE, 33648 MIRRORED_REPEAT. 0 reads as REPEAT, the spec's default.</param>
 /// <param name="MinFilter">9728/9729 NEAREST/LINEAR, 9984-9987 the four mipmap modes; 0 when unspecified.</param>
@@ -171,7 +191,10 @@ public sealed record BlixMeshMaterial(
     int EmissiveImage = BlixMesh.NoImage,
 
     /// <summary>Every <c>KHR_materials_*</c> property, as cooked. Null for in-memory callers that omit the block.</summary>
-    BlixMaterialExtensions? Extensions = null)
+    BlixMaterialExtensions? Extensions = null,
+
+    /// <summary>Each core channel's <c>KHR_texture_transform</c>; null reads as identity on every channel.</summary>
+    BlixMeshUvTransforms? UvTransforms = null)
 {
     /// <summary>The extensions, never null — an absent block reads as every spec default.</summary>
     public BlixMaterialExtensions Ext => Extensions ?? BlixMaterialExtensions.None;
@@ -461,6 +484,12 @@ internal static class BlixMeshBinary
         br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle(),
         br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
 
+    internal static BlixMeshUvTransforms ReadUvTransforms(BinaryReader br)
+    {
+        BlixMeshUvTransform One() => new(new Vector2(br.ReadSingle(), br.ReadSingle()), br.ReadSingle(), new Vector2(br.ReadSingle(), br.ReadSingle()));
+        return new BlixMeshUvTransforms(One(), One(), One(), One(), One());
+    }
+
     internal static (BlixMeshVectorKey[] Keys, BlixMeshInterpolation Interpolation) ReadVectorKeys(BinaryReader br)
     {
         var interpolation = ReadInterpolation(br);
@@ -519,7 +548,7 @@ public static class BlixMeshWriter
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(file);
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version15, stamp);
+        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version16, stamp);
         using var bw = new BinaryWriter(fs);
 
         bw.Write(file.Nodes.Count);
@@ -589,6 +618,11 @@ public static class BlixMeshWriter
             bw.Write(x.IridescenceImage); bw.Write(x.IridescenceThicknessImage);
             bw.Write(x.AnisotropyStrength); bw.Write(x.AnisotropyRotation); bw.Write(x.AnisotropyImage);
             bw.Write(x.Dispersion); bw.Write(x.Unlit);
+
+            foreach (var t in (m.UvTransforms ?? BlixMeshUvTransforms.Identity).All)
+            {
+                bw.Write(t.Offset.X); bw.Write(t.Offset.Y); bw.Write(t.Rotation); bw.Write(t.Scale.X); bw.Write(t.Scale.Y);
+            }
         }
 
         var images = file.ImageTable;
@@ -783,7 +817,7 @@ public static class BlixMeshReader
         ArgumentNullException.ThrowIfNull(path);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version15, path, ".blixmesh");
+        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version16, path, ".blixmesh");
         return AssetImportException.Refusing(path, () => ReadBody(fs, path, header), ".blixmesh");
     }
 
@@ -858,7 +892,8 @@ public static class BlixMeshReader
                 MetallicRoughnessImage: br.ReadInt32(),
                 OcclusionImage: br.ReadInt32(),
                 EmissiveImage: br.ReadInt32(),
-                Extensions: ReadExtensions(br));
+                Extensions: ReadExtensions(br),
+                UvTransforms: BlixMeshBinary.ReadUvTransforms(br));
         }
 
         var imageCount = br.ReadInt32();

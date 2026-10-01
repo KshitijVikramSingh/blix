@@ -161,13 +161,16 @@ internal static class CookedMaterials
             m.TransmissionFactor,
             // Resolve cooked extension image rows through the same texture cache as core material
             // channels so source and cooked material shapes agree.
-            CookedExtensions(m.Ext, Texture));
+            CookedExtensions(m.Ext, Texture),
+            m.UvTransforms is { } uv ? new PbrUvTransforms(Uv(uv.BaseColor), Uv(uv.Normal), Uv(uv.MetallicRoughness), Uv(uv.Occlusion), Uv(uv.Emissive)) : null);
 
         materialCache[index] = result;
         return result;
 
         TextureData? Texture(int image) =>
             image >= 0 && textureCache.TryGetValue(image, out var t) ? t : null;
+
+        static UvTransform Uv(BlixMeshUvTransform t) => new(t.Offset, t.Rotation, t.Scale);
     }
 
 
