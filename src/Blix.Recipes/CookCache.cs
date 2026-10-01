@@ -33,7 +33,9 @@ public static class CookCache
         ArgumentNullException.ThrowIfNull(modelPath);
         var full = Path.GetFullPath(modelPath);
         if (full.EndsWith(".blixmesh", StringComparison.OrdinalIgnoreCase)) return full;
-        if (!File.Exists(full)) throw new FileNotFoundException($"No file at {modelPath}.", modelPath);
+        // The one refusal type even for the plainest no: a tool catches AssetImportException and lets anything else
+        // crash, so a missing file is a refusal naming the path, not a FileNotFoundException escaping past it.
+        if (!File.Exists(full)) throw new Blix.Cooked.AssetImportException(modelPath, null, "no file there.");
 
         var sibling = Path.ChangeExtension(full, ".blixmesh");
         if (File.Exists(sibling) && MeshRecipe.IsShippedCurrent(full, sibling)) return sibling;

@@ -1,17 +1,18 @@
 namespace Blix;
 
 /// <summary>
-/// A vertex attribute the selected glTF import path did not consume.
+/// A vertex attribute the cook did not carry into the cooked file, recorded in it.
 /// </summary>
 /// <remarks>
 /// <para>
 /// Collection is subtractive, so application-specific semantics and future standard attributes are
-/// surfaced even when the engine has no prewritten list of them. Tangent, colour/second-UV, and
-/// skin-influence channels are judged against the concrete layout used by that import.
+/// surfaced even when the engine has no prewritten list of them. It is judged against the complete
+/// cooked vertex (tangent, two UV sets, colour, and four skin influences), so it is a fact of the file:
+/// a load that asks for a narrower layout chooses less, and loses nothing it would be told about.
 /// </para>
 /// </remarks>
-/// <param name="Semantic">The glTF attribute name, verbatim — <c>TEXCOORD_1</c>, <c>_BATCHID</c>.</param>
-/// <param name="Primitives">How many imported primitive/layout pairs declared it.</param>
+/// <param name="Semantic">The glTF attribute name, verbatim — <c>TEXCOORD_2</c>, <c>_BATCHID</c>.</param>
+/// <param name="Primitives">How many cooked primitives declared it.</param>
 public sealed record UnreadAttribute(string Semantic, int Primitives)
 {
     /// <summary>What the unread attribute represents.</summary>
@@ -19,19 +20,18 @@ public sealed record UnreadAttribute(string Semantic, int Primitives)
     {
         _ when Semantic.StartsWith("JOINTS_", StringComparison.Ordinal)
             || Semantic.StartsWith("WEIGHTS_", StringComparison.Ordinal) =>
-            "skinning influences not consumed by this import path; rigged import reads contiguous "
-            + "complete pairs, while static import does not apply skinning",
-        "TEXCOORD_1" =>
-            "a second UV set not carried by the selected static vertex layout",
+            "skinning influences the cook did not read: on a mesh no skin drives, or a pair that is not "
+            + "complete and contiguous (the four strongest of the complete pairs are kept)",
         _ when Semantic.StartsWith("TEXCOORD_", StringComparison.Ordinal) =>
-            "an additional UV set not represented by the current import layouts",
+            "a UV set beyond the two the cooked vertex carries",
         _ when Semantic.StartsWith("COLOR_", StringComparison.Ordinal) =>
-            "a second vertex colour set",
+            "a vertex colour set beyond COLOR_0, the one the cooked vertex carries",
         MorphTargets =>
-            "morph targets — blend shapes are not applied",
+            "morph targets whose weights are all zero and undriven: the base mesh is the render "
+            + "(where they take effect, the cook refuses the file)",
         _ when Semantic.StartsWith("_", StringComparison.Ordinal) =>
             "an application-specific attribute; the spec reserves the underscore prefix for these",
-        _ => "not read by this importer",
+        _ => "not read by the cook",
     };
 
     /// <summary>
