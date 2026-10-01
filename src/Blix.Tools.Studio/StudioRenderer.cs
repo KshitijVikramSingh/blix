@@ -32,27 +32,24 @@ public sealed class StudioRenderer : IDisposable
     // Every asset loaded through the stage, with what Studio keeps about it. Released with the stage.
     private readonly StudioAssets assets = new();
 
-    /// <summary>Loads a rigged glTF for this stage: the engine rig, made in the stage's formats.</summary>
+    /// <summary>Loads a model to draw skinned: the engine model, made in the stage's formats.</summary>
     /// <remarks>
     /// The stage applies its own policy to it (the vertex format its skinned pipeline reads, the bone and
-    /// instance caps, its bone buffers, its fallback materials) and keeps that to itself; the rig returned
-    /// is the engine's, and what a tool reads. Owned by the stage: <see cref="Unload(Rig)"/> releases it,
-    /// and so does disposing the stage. Call after <see cref="Load"/>.
+    /// instance caps, its bone buffers, its fallback materials) and keeps that to itself; the model
+    /// returned is the engine's, and what a tool reads. Owned by the stage: <see cref="Unload"/> releases
+    /// it, and so does disposing the stage. Call after <see cref="Load"/>. Refused for a file with no skin.
     /// </remarks>
-    public Rig LoadRig(string path) => assets.Add(StudioRig.Load(device, path, skinnedProgram));
+    public Model LoadRig(string path) => assets.Add(StudioRig.Load(device, path, skinnedProgram));
 
-    /// <summary>Loads a static glTF for this stage: the engine model, its node hierarchy kept.</summary>
+    /// <summary>Loads a model to draw static: its node hierarchy kept, a rigged file's meshes at bind pose.</summary>
     /// <remarks>Owned by the stage, as <see cref="LoadRig"/>. Call after <see cref="Load"/>.</remarks>
     public Model LoadModel(string path) => assets.Add(StudioModel.Load(device, path));
 
-    /// <summary>Releases a rig this stage loaded: its buffers, bone buffers and textures.</summary>
-    public void Unload(Rig rig) => assets.Remove(rig);
-
-    /// <summary>Releases a model this stage loaded.</summary>
+    /// <summary>Releases a model this stage loaded: its buffers, bone buffers and textures.</summary>
     public void Unload(Model model) => assets.Remove(model);
 
     /// <summary>Copies one skin's posed palettes into the buffer the stage's skinned pipeline reads this frame.</summary>
-    public void UploadPalettes(Rig rig, BonePaletteSet palettes, int skin = 0) => assets.For(rig).UploadPalettes(palettes, skin);
+    public void UploadPalettes(Model rig, BonePaletteSet palettes, int skin = 0) => assets.RigFor(rig).UploadPalettes(palettes, skin);
 
     /// <summary>Square shadow map, matching the texel size the lit shader offsets by.</summary>
     public const int ShadowMapSize = 2048;
@@ -381,7 +378,7 @@ public sealed class StudioRenderer : IDisposable
 
         shadowPipeline = device.CreatePipeline(new PipelineDescription(
             shadowProgram,
-            VertexPosition3NormalTexture2Color.Layout,
+            VertexPosition3NormalTangentTexture2Color.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite,
             RasterizerState.NoCulling,
@@ -396,7 +393,7 @@ public sealed class StudioRenderer : IDisposable
             // thing to watch as the house style grows.
             prePassPipeline = device.CreatePipeline(new PipelineDescription(
                 shadowProgram,
-                VertexPosition3NormalTexture2Color.Layout,
+                VertexPosition3NormalTangentTexture2Color.Layout,
                 PrimitiveTopology.Triangles,
                 DepthState.LessEqualWrite,
                 RasterizerState.NoCulling,
@@ -406,7 +403,7 @@ public sealed class StudioRenderer : IDisposable
 
         litPipeline = device.CreatePipeline(new PipelineDescription(
             litProgram,
-            VertexPosition3NormalTexture2Color.Layout,
+            VertexPosition3NormalTangentTexture2Color.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite,
             RasterizerState.NoCulling,
@@ -436,7 +433,7 @@ public sealed class StudioRenderer : IDisposable
         // the pipeline above. RigView selects the authored material case per part.
         blendPipeline = device.CreatePipeline(new PipelineDescription(
             litProgram,
-            VertexPosition3NormalTexture2Color.Layout,
+            VertexPosition3NormalTangentTexture2Color.Layout,
             PrimitiveTopology.Triangles,
             DepthState.LessEqualNoWrite,
             RasterizerState.NoCulling,
@@ -463,7 +460,7 @@ public sealed class StudioRenderer : IDisposable
 
         var viewportSurface = graph.GetPassSurface(viewportPass);
         viewportLitPipeline = device.CreatePipeline(new PipelineDescription(
-            litProgram, VertexPosition3NormalTexture2Color.Layout, PrimitiveTopology.Triangles,
+            litProgram, VertexPosition3NormalTangentTexture2Color.Layout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.NoCulling, new[] { BlendState.Disabled },
             RenderTarget: viewportSurface), "lab.viewport.lit");
         viewportSkyPipeline = device.CreatePipeline(new PipelineDescription(
@@ -476,7 +473,7 @@ public sealed class StudioRenderer : IDisposable
             DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled },
             RenderTarget: viewportSurface), "lab.viewport.skinned");
         viewportBlendPipeline = device.CreatePipeline(new PipelineDescription(
-            litProgram, VertexPosition3NormalTexture2Color.Layout, PrimitiveTopology.Triangles,
+            litProgram, VertexPosition3NormalTangentTexture2Color.Layout, PrimitiveTopology.Triangles,
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling, new[] { BlendState.AlphaBlend },
             RenderTarget: viewportSurface), "lab.viewport.lit.blend");
         viewportSkinnedBlendPipeline = device.CreatePipeline(new PipelineDescription(
@@ -537,19 +534,16 @@ public sealed class StudioRenderer : IDisposable
         Look.SealStructural();
 
         var (cv, ci) = StudioGeometry.Cube();
-        // Widened to white. The stage's own furniture has no authored colour and does not want
-        // one; it rides the same 36-byte layout so that ONE pipeline draws the ground, the boxes,
-        // a model and an attachment — which is why this arc adds no pipeline variant at all.
-        cubeVertices = device.CreateVertexBuffer(
-            VertexPosition3NormalTexture2Color.CreateBufferData(VertexPosition3NormalTexture2Color.From(cv)), "lab.cube.vb");
+        // The stage's own furniture rides the complete static vertex a cooked model arrives in, so ONE
+        // pipeline draws the ground, the boxes, a model and an attachment.
+        cubeVertices = device.CreateVertexBuffer(VertexPosition3NormalTangentTexture2Color.CreateBufferData(cv), "lab.cube.vb");
         cubeIndices = device.CreateIndexBuffer(ci, name: "lab.cube.ib");
         cubeIndexCount = ci.Length;
 
         // As far as the camera can see, so its edge is a horizon against the sky rather than a
         // corner in the middle of the frame. The camera's far plane is 120 m.
         var (gv, gi) = StudioGeometry.Ground(extent: 120f);
-        groundVertices = device.CreateVertexBuffer(
-            VertexPosition3NormalTexture2Color.CreateBufferData(VertexPosition3NormalTexture2Color.From(gv)), "lab.ground.vb");
+        groundVertices = device.CreateVertexBuffer(VertexPosition3NormalTangentTexture2Color.CreateBufferData(gv), "lab.ground.vb");
         groundIndices = device.CreateIndexBuffer(gi, name: "lab.ground.ib");
         groundIndexCount = gi.Length;
     }

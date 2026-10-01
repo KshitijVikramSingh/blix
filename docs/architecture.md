@@ -20,7 +20,7 @@ The central ownership rule is:
 - tools are applications over the same libraries, not privileged engine modes.
 
 There is no `SceneRenderer` that owns load, cull, and draw. Vulkan Sponza, for
-example, composes `MeshBundler`, `AsyncLoadQueue`, `GltfTextureLoader`, and
+example, composes `MeshBundler`, `AsyncLoadQueue`, `MaterialTextureLoader`, and
 `RenderGraph`, while retaining its own grouping, culling, LOD, lighting, and
 research policy.
 
@@ -425,7 +425,7 @@ letterboxed image in the UI.
 | Make a `Game` subclass, place an object, animate it, query collisions | [`blix.md`](blix.md) |
 | Add a host facet (audio, gamepads, networking) | `src/Blix.Core/` for the contract, then implement in `src/Blix.Runtime.Silk/` |
 | Understand or extend asset cooking/loading | [`assets.md`](assets.md); runtime types in `src/Blix.Assets/`, recipe contracts in `src/Blix.Cooked/`, transformations in `src/Blix.Recipes/` or a project recipe assembly |
-| Bundle meshes into shared buffers / stream glTF textures | `Blix.Render.MeshBundler`, `Blix.Render.AsyncLoadQueue<T>`, `GltfTextureLoader` — `src/Demos/Blix.Demos.VulkanSponza/` composes them |
+| Bundle meshes into shared buffers / stream glTF textures | `Blix.Render.MeshBundler`, `Blix.Render.AsyncLoadQueue<T>`, `MaterialTextureLoader` — `src/Demos/Blix.Demos.VulkanSponza/` composes them |
 | Add a new debug control / stat / timer / event | `IDebuggable.Debug(DebugContext)` — `Blix.Diagnostics` |
 | Draw debug geometry at all | Declare a view, then `using (debug.Draw.In(view))` — drawing outside one throws |
 | Let a gizmo be switched off, or start off | Draw it under a path; the Layers tab switches every path. `debug.Draw.Layer(name, visible: false)` declares one hidden and says whether it is wanted, so costly gizmos can skip their work |

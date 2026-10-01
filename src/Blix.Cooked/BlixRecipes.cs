@@ -48,7 +48,9 @@ public sealed record FoundRecipe(
     }
 
     /// <summary>Runs it.</summary>
-    public CookOutcome Cook(CookRequest request) => (CookOutcome)Method.Invoke(null, new object[] { request })!;
+    /// <remarks>A recipe's refusal reaches the caller as itself, not wrapped by the reflection call.</remarks>
+    public CookOutcome Cook(CookRequest request) => (CookOutcome)Method.Invoke(
+        null, System.Reflection.BindingFlags.DoNotWrapExceptions, null, new object[] { request }, null)!;
 }
 
 /// <summary>

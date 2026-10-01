@@ -18,7 +18,7 @@ internal readonly record struct StudioSurface(
     MaterialTextures Textures, Vector3 Emissive, float OcclusionStrength, float NormalScale,
     int NormalUvSet, int MetallicRoughnessUvSet, int OcclusionUvSet, int EmissiveUvSet)
 {
-    public static StudioSurface Of(GltfMaterial? material, MaterialTextures textures) => new(
+    public static StudioSurface Of(PbrMaterial? material, MaterialTextures textures) => new(
         textures,
         material is null ? Vector3.Zero : material.EmissiveFactor * material.EmissiveStrength,
         material?.OcclusionTexture is null ? 0f : material.OcclusionStrength,

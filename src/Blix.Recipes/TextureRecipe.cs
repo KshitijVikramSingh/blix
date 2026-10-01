@@ -72,7 +72,7 @@ public static class TextureRecipe
     /// <param name="flipGreen">
     /// Invert the green channel before mipping: a DirectX-convention normal map (green down) made
     /// into the OpenGL convention glTF specifies (green up). Only a normal map may ask; the caller
-    /// states it, from the project's material patch, because nothing in a file says which it is.
+    /// states it, from the project's cook configuration, because nothing in a file says which it is.
     /// </param>
     public static void CookOne(
         string source, string destination, out long sourceLen, out long destLen, TextureRole? role = null,

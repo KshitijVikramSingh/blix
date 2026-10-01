@@ -30,7 +30,7 @@ public readonly record struct MaterialTextures(
 // renderer's, and (post SPIR-V reflection) the UBO layout is the game's. The
 // caller does `loader.Load(gltfMaterial)` → writes its UBO from the material's
 // scalar factors → binds the returned handles.
-public sealed class GltfTextureLoader : IDisposable
+public sealed class MaterialTextureLoader : IDisposable
 {
     private readonly IGraphicsDevice device;
     private readonly ResourceUploader uploader;
@@ -61,7 +61,7 @@ public sealed class GltfTextureLoader : IDisposable
     /// Sharing is explicit because the caller also chooses the associated lifetime scope. Two
     /// loaders given the same registry reuse identified textures; null creates a private scope.
     /// </remarks>
-    public GltfTextureLoader(IGraphicsDevice device, TextureRegistry? shared = null)
+    public MaterialTextureLoader(IGraphicsDevice device, TextureRegistry? shared = null)
     {
         ArgumentNullException.ThrowIfNull(device);
         this.device = device;
@@ -109,7 +109,7 @@ public sealed class GltfTextureLoader : IDisposable
 
     // Resolve a material's five textures to GPU handles (defaults where absent),
     // deduplicated by resource identity and format, with budgeted cooked-mip uploads.
-    public MaterialTextures Load(GltfMaterial? material) => new(
+    public MaterialTextures Load(PbrMaterial? material) => new(
         Resolve(material?.BaseColorTexture, fallbackAlbedo, TextureFormat.Rgba8Srgb, "albedo"),
         Resolve(material?.NormalTexture, flatNormal, TextureFormat.Rgba8, "normal"),
         Resolve(material?.MetallicRoughnessTexture, defaultMr, TextureFormat.Rgba8, "mr"),
@@ -121,7 +121,7 @@ public sealed class GltfTextureLoader : IDisposable
                 "diffuse-transmission colour"));
 
     private TextureHandle Resolve(
-        GltfTexture? tex,
+        TextureData? tex,
         TextureHandle fallback,
         TextureFormat uploadFormat,
         string channelTag)
@@ -132,7 +132,7 @@ public sealed class GltfTextureLoader : IDisposable
     }
 
     private TextureHandle Upload(
-        GltfTexture tex, TextureFormat uploadFormat, string channelTag, TextureHandle fallback)
+        TextureData tex, TextureFormat uploadFormat, string channelTag, TextureHandle fallback)
     {
         var label = $"gltf.{channelTag}.{tex.Name}";
         TextureHandle handle;

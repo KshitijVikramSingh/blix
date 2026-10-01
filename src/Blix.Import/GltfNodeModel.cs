@@ -1,6 +1,6 @@
 using System.Numerics;
 
-namespace Blix;
+namespace Blix.Import;
 
 // Node-hierarchy-preserving static glTF import (GltfStaticImporter.ImportNodes).
 // Where the flattened Import bakes each node's WORLD transform into its vertices —
@@ -15,10 +15,10 @@ public sealed record GltfNode(
     Matrix4x4 LocalTransform,    // relative to the parent (engine row-vector form)
     GltfPrimitive[] Primitives); // node-local-space meshes (empty for transform-only nodes)
 
-public sealed record GltfNodeModel(GltfNode[] Nodes, GltfIgnored[]? Ignored = null)
+public sealed record GltfNodeModel(GltfNode[] Nodes, UnreadAttribute[]? Ignored = null)
 {
     /// <summary>Attributes the file declared that this importer did not read.</summary>
-    public GltfIgnored[] IgnoredOrEmpty => Ignored ?? [];
+    public UnreadAttribute[] IgnoredOrEmpty => Ignored ?? [];
 
     /// <summary>Each node's world transform: its local composed with every ancestor's, child first.</summary>
     /// <remarks>Row-vector form, like every matrix here: <c>world = local * parent * grandparent ...</c>.</remarks>
@@ -43,10 +43,10 @@ public sealed record GltfNodeModel(GltfNode[] Nodes, GltfIgnored[]? Ignored = nu
     /// material changes. Materials are grouped by identity, in the order they are first met. See
     /// <see cref="Blix.Assets.MeshDataExtensions.Merge"/> for what a merge keeps.
     /// </remarks>
-    public IReadOnlyList<(GltfMaterial? Material, Blix.Assets.MeshData Mesh)> Merged(Matrix4x4? root = null, string name = "merged")
+    public IReadOnlyList<(PbrMaterial? Material, Blix.Assets.MeshData Mesh)> Merged(Matrix4x4? root = null, string name = "merged")
     {
         var world = WorldTransforms();
-        var groups = new List<(GltfMaterial? Material, List<(Blix.Assets.MeshData, Matrix4x4)> Parts)>();
+        var groups = new List<(PbrMaterial? Material, List<(Blix.Assets.MeshData, Matrix4x4)> Parts)>();
         for (var i = 0; i < Nodes.Length; i++)
         {
             var at = root is { } r ? world[i] * r : world[i];

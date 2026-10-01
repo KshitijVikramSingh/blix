@@ -1,6 +1,6 @@
 using System.Numerics;
 
-namespace Blix;
+namespace Blix.Import;
 
 /// <summary>
 /// Static geometry belonging to a rigged model that hangs off no joint.

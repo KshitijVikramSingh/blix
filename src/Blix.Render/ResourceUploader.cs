@@ -5,14 +5,14 @@ using Blix.Graphics;
 namespace Blix.Render;
 
 // Budgets GPU-side texture uploads across Drain calls. Backend-agnostic: it drives an
-// IGraphicsDevice and is the upload pump under GltfTextureLoader.
+// IGraphicsDevice and is the upload pump under MaterialTextureLoader.
 //
 // Each texture becomes one work item per mip. Drain always processes at least one pending item, so
 // an individual large mip may exceed the requested budget but a queue cannot stall indefinitely.
 //
 // Mips queue smallest-first and share one stable texture handle. Unuploaded levels remain undefined;
 // this class does not clamp sampler LOD, so callers must gate sampling until the levels they may read
-// are resident. GltfTextureLoader's current consumers wait for PendingCount to reach zero.
+// are resident. MaterialTextureLoader's current consumers wait for PendingCount to reach zero.
 //
 // Deliberate non-goals:
 // - Not a streaming system. Every enqueue is unconditional.

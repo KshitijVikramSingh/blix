@@ -265,7 +265,7 @@ public static class Program
             "skin 1");
     }
 
-    private static GltfSkinBinding SkinWith(int boneCount)
+    private static Skeleton SkinWith(int boneCount)
     {
         var bones = new Bone[boneCount];
         for (var i = 0; i < bones.Length; i++)
@@ -273,7 +273,7 @@ public static class Program
             bones[i] = new Bone($"bone{i}", i - 1, Matrix4x4.Identity);
         }
 
-        return new GltfSkinBinding(new Skeleton(bones), Matrix4x4.Identity);
+        return new Skeleton(bones);
     }
 
     /// <summary>

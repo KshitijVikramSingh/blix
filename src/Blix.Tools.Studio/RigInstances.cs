@@ -15,7 +15,7 @@ namespace Blix.Tools.Studio;
 /// </remarks>
 public sealed class RigInstances : ITunable
 {
-    private readonly Rig rig;
+    private readonly Model rig;
     private readonly RigAnimation[] bodies;
     private readonly BonePaletteSet[] palettesBySkin;
     private readonly List<Matrix4x4> placements = new();
@@ -23,7 +23,7 @@ public sealed class RigInstances : ITunable
     private readonly Matrix4x4[] scratchWorlds;
     private BonePaletteSet? poseCheck;
 
-    public RigInstances(Rig rig, int count)
+    public RigInstances(Model rig, int count)
     {
         ArgumentNullException.ThrowIfNull(rig);
         this.rig = rig;

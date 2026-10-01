@@ -973,19 +973,12 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
 
             Mesh NodeMesh(string file, string nodeName, string meshName)
             {
-                var model = new GltfStaticImporter().ImportNodes(
-                    new AssetImportContext(AssetId.Parse(meshName), Path.Combine(dir, file)));
-                var nodes = model.Nodes;
-                var idx = Array.FindIndex(nodes, n => n.Name == nodeName);
+                var model = ModelData.Load(Path.Combine(dir, Path.ChangeExtension(file, ".blixmesh")), new ModelNeeds(Skinned: false));
+                var idx = model.FindNode(nodeName);
                 if (idx < 0) throw new InvalidOperationException($"node '{nodeName}' not found in {file}");
-                Matrix4x4 World(int i)
-                {
-                    var m = nodes[i].LocalTransform;
-                    for (var p = nodes[i].ParentIndex; p >= 0; p = nodes[p].ParentIndex) m *= nodes[p].LocalTransform;
-                    return m;
-                }
-                var w = World(idx);
-                return device.CreateMesh(BakeMerge(meshName, nodes[idx].Primitives.Select(prim => (prim.Mesh, w))));
+                var w = model.World[idx];
+                return device.CreateMesh(BakeMerge(meshName,
+                    model.Meshes[model.Nodes[idx].MeshIndex].Primitives.Select(prim => (prim.Mesh, w))));
             }
 
             // Each mesh gets a world batch (lit scene pass) + a caster batch (shadow pass).
@@ -1062,19 +1055,18 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
     {
         try
         {
-            var path = AppFiles.Asset("models", "enemy.glb");
-            var model = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("enemy.skinned"), path));
-            if (model.Animations.Length == 0) throw new InvalidOperationException("no animations");
+            var model = ModelData.Load(AppFiles.Asset("models", "enemy.blixmesh"), new ModelNeeds(Skinned: true));
+            if (model.Clips.Count == 0) throw new InvalidOperationException("no animations");
 
-            enemySkeleton = model.Skeleton;
+            enemySkeleton = model.Skins[0].Skeleton;
             if (enemySkeleton.BoneCount != EnemyBones)
                 throw new InvalidOperationException($"expected {EnemyBones} bones, got {enemySkeleton.BoneCount} (update the shaders' BONE_COUNT)");
             enemyRestPose = enemySkeleton.CreateRestPose();
             enemyPose = enemySkeleton.CreateRestPose();
             enemyBonePalette = new BonePalette(EnemyBones);
             enemyPalettePayload = new byte[MaxAlive * EnemyBones * 64];   // one world-space palette per instance
-            enemyMeshNodeTransform = model.MeshNodeTransform;
-            enemyWalk = FindEnemyClip(model, "Walk") ?? FindEnemyClip(model, "Run") ?? model.Animations[0];
+            enemyMeshNodeTransform = model.Placement(0);
+            enemyWalk = FindEnemyClip(model, "Walk") ?? FindEnemyClip(model, "Run") ?? model.Clips[0];
             enemyDeath = FindEnemyClip(model, "Death") ?? enemyWalk;
             enemyDeathHold = (float)(enemyDeath.Duration > 0 ? enemyDeath.Duration : 0.8);
 
@@ -1102,11 +1094,12 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
                 DepthState.LessEqualWrite, RasterizerState.NoCulling, Array.Empty<BlendState>(),
                 RenderTarget: graph.GetPassSurface(shadowPassHandle)), "skinned.shadow");
 
-            var n = model.Primitives.Length;
+            var skinned = model.SkinnedPrimitives().ToArray();
+            var n = skinned.Length;
             enemyMeshes = new Mesh[n];
             for (var i = 0; i < n; i++)
             {
-                enemyMeshes[i] = device.CreateMesh(model.Primitives[i].Mesh, $"enemy.{i}");
+                enemyMeshes[i] = device.CreateMesh(skinned[i].Mesh, $"enemy.{i}");
             }
             enemyBones = device.CreateMaterial(sceneShader, setIndex: 3, framesInFlight: device.MaxFramesInFlightCount, name: "enemy.bones");
             skinnedLoaded = true;
@@ -1119,9 +1112,9 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
         }
     }
 
-    private static AnimationClip? FindEnemyClip(GltfModel model, string contains)
+    private static AnimationClip? FindEnemyClip(ModelData model, string contains)
     {
-        foreach (var c in model.Animations)
+        foreach (var c in model.Clips)
             if (c.Name.Contains(contains, StringComparison.OrdinalIgnoreCase)) return c;
         return null;
     }

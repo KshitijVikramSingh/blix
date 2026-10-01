@@ -5,9 +5,9 @@
 # pack set is ~19 GB and the cooked tree is a fraction of it.
 #
 #   SRC    the raw packs. BLIX_SPONZA_SRC, else a "-src" sibling of COOKED,
-#          else COOKED itself. Accepts either the Khronos download names
-#          (main_sponza/ pkg_a_curtains/ pkg_b_ivy/ pkg_c_trees/) or the
-#          demo's own (main_sponza/ curtains/ ivy/ trees/).
+#          else COOKED itself. Laid out as the demo's own (main_sponza/
+#          curtains/ ivy/ trees/), which tools/setup-sponza-modern.sh makes,
+#          with the project's cook configuration at SRC/sponza.blixcook.
 #   COOKED where the cooked tree goes. BLIX_SPONZA_ASSETS, and there is no
 #          default — see the refusal below.
 #
@@ -86,65 +86,19 @@ fi
 mkdir -p "$COOKED"
 echo "Cooking '$SRC' -> '$COOKED'"
 
-# Each pack: the directory the demo expects, then the source names it may have.
-# Two names because the Khronos downloads and the demo's layout disagree, and
-# renaming 19 GB to satisfy a glob is not a thing to ask of anyone.
-# Second argument is the pack's material patch, or '-' for none. NAMED rather than discovered:
-# a patch that applies because a file happens to sit beside the source is an invisible input, and
-# a declared one that has gone missing should stop the cook rather than quietly not apply. One per
-# pack because a rule matching nothing is an error and Sponza is four separate glTFs — a shared
-# file would fail every curtain rule against the main pack.
-# <b>A pack that matches no directory is an error, not a note.</b> "skipped" scrolled past four
-# times in the misfire above and the run still exited 0.
-cooked_any=0
-
-cook_pack() {
-    dest="$1"; patch="$2"; shift 2
-    for candidate in "$@"; do
-        dir="$SRC/$candidate"
-        [[ -d "$dir" ]] || continue
-        # -print -quit, not `| head -1`: head closes the pipe, find dies of SIGPIPE, and
-        # under pipefail that 141 ends the script. See tools/lab-baseline.sh, which learned it.
-        gltf=$(find "$dir" -maxdepth 1 -name '*.gltf' -print -quit)
-        if [[ -z "$gltf" ]]; then
-            echo "  $dest: no .gltf in $dir — skipped"
-            return 0
-        fi
-        patch_args=()
-        if [[ "$patch" != "-" ]]; then
-            if [[ ! -f "$dir/$patch" ]]; then
-                echo "  $dest: declares patch '$patch' and it is not in $dir" >&2
-                exit 1
-            fi
-            patch_args=(--patch "$dir/$patch")
-        fi
-        echo "── $dest  ($(basename "$gltf"))"
-        # ${x[@]+"${x[@]}"} rather than "${x[@]}": macOS ships bash 3.2, where expanding an EMPTY
-        # array under `set -u` is an unbound-variable error. It failed only for the packs with no
-        # patch — so main_sponza and curtains cooked, ivy and trees silently did not.
-        # <b>--split, because distance LOD is only as fine as the thing it selects over.</b> Without
-        # it a whole Sponza wall is one drawable at one level at one distance, so standing at its
-        # near end holds its far end at full detail. The triangle budget halves dense primitives;
-        # the extent rule (MeshRecipe.DefaultSplitMaxExtent, ~one arcade bay) is what reaches the
-        # sparse-but-enormous ones a triangle count never touches. It also turns LockBorder on in
-        # the simplifier, which is what keeps chunk seams watertight when neighbours pick different
-        # levels.
-        dotnet "$COOK" asset "$gltf" --out "$COOKED/$dest" --tangents --split 4096 ${patch_args[@]+"${patch_args[@]}"}
-        cooked_any=1
-        return 0
-    done
-    echo "  $dest: not present in $SRC — skipped"
-}
-
-cook_pack main_sponza main_sponza.blixpatch main_sponza
-cook_pack curtains    curtains.blixpatch    pkg_a_curtains curtains
-cook_pack ivy         ivy.blixpatch       pkg_b_ivy      pkg_b_ivy1 ivy
-cook_pack trees       trees.blixpatch     pkg_c_trees    trees
-
-if [[ "$cooked_any" -eq 0 ]]; then
-    echo "cook-sponza-modern: no pack cooked — is $SRC the source tree?" >&2
-    exit 3
+# <b>What each pack is cooked with is the project's configuration, not this script's.</b> The split,
+# the material rules and the normal-map conventions live in "$SRC/sponza.blixcook", one entry per
+# pack, beside the sources it names — NAMED rather than discovered: a rule file that applies because
+# it happens to sit beside a source is an invisible input. This used to pass --split and a per-pack
+# --patch here, so the decisions about one asset were split between a shell script and four files.
+# The configuration names the demo's own directory layout (main_sponza/ curtains/ ivy/ trees/); a
+# Khronos download (pkg_a_curtains/ ...) is renamed once by tools/setup-sponza-modern.sh.
+CONFIG="$SRC/sponza.blixcook"
+if [[ ! -f "$CONFIG" ]]; then
+    echo "cook-sponza-modern: no cook configuration at $CONFIG; nothing was cooked." >&2
+    exit 1
 fi
+dotnet "$COOK" project "$CONFIG" --out "$COOKED"
 
 # The sky probe is separate: it is not referenced by any glTF, so no asset cook
 # reaches it. Optional — the demo bakes a procedural sky when it is absent.

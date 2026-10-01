@@ -95,8 +95,8 @@ public static class SkeletonGizmo
     /// what turns "this looks a bit off" into "this bone is 30 degrees out and the rest are fine".
     /// </param>
     /// <param name="include">
-    /// Optional per-bone filter. <see cref="Rig.DeformHierarchy"/> is the one to pass, NOT
-    /// <see cref="Rig.WeightedBones"/>: a joint no vertex weights can still carry a chain that several do,
+    /// Optional per-bone filter. <see cref="Model.DeformHierarchy"/> is the one to pass, NOT
+    /// <see cref="Model.WeightedBones"/>: a joint no vertex weights can still carry a chain that several do,
     /// and filtering on the literal census leaves those chains as floating segments. A rig's IK handles
     /// and roll controls skin nothing and hang off the root, so drawing all of them turns a skeleton
     /// into a starburst at the character's feet. Null draws everything, which is the honest default

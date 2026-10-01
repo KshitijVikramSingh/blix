@@ -44,6 +44,7 @@ public static class Program
             "probe" => CookProbe(args),
             "mesh" => CookMesh(args),
             "asset" => CookAsset(args),
+            "project" => CookProject(args),
             "sky" => CookSky(args),
             "list" => ListRecipes(args),
             "run" => RunRecipe(args),
@@ -56,26 +57,26 @@ public static class Program
         };
     }
 
-    /// <summary>Measures each material's normal-map convention, beside what a patch declares.</summary>
+    /// <summary>Measures each material's normal-map convention, beside what the configuration declares.</summary>
     /// <remarks>
-    /// <c>blix cook normals &lt;gltf&gt; [--patch &lt;file&gt;]</c>. A report: it proposes <c>normal=</c>
-    /// rules and says where a patch disagrees with the pixels, and decides nothing. Exits 1 when a
-    /// clear measurement contradicts the patch, so a pack's patch can be held to its maps.
+    /// <c>blix cook normals &lt;gltf&gt; [--config &lt;file&gt;]</c>. A report: it proposes <c>normal=</c>
+    /// rules and says where the configuration disagrees with the pixels, and decides nothing. Exits 1
+    /// when a clear measurement contradicts the configuration, so a pack's rules can be held to its maps.
     /// </remarks>
     static int SurveyNormals(AppArgs args)
     {
         // Read before the positionals: an option's value counts as positional until it is read.
-        var patchPath = args.String("patch");
+        var configPath = args.String("config");
         if (args.Positionals is not [var source])
         {
-            Console.Error.WriteLine("Usage: blix cook normals <gltf-or-glb> [--patch <file>]");
+            Console.Error.WriteLine("Usage: blix cook normals <gltf-or-glb> [--config <file>]");
             return 2;
         }
 
         Blix.Recipes.MaterialPatch? patch = null;
         try
         {
-            if (patchPath is not null) patch = Blix.Recipes.MaterialPatch.Load(patchPath);
+            if (configPath is not null) patch = Blix.Recipes.CookConfig.Load(configPath).For(source)?.Materials;
             var rows = Blix.Recipes.NormalMapConvention.Survey(source, patch);
             var disagreements = 0;
             Console.WriteLine($"  {"material",-32} {"normal map",-40} {"opengl",8} {"directx",8}  measured  declared");
@@ -92,7 +93,7 @@ public static class Program
             Console.WriteLine(
                 $"  {rows.Count} normal map(s): {rows.Count(r => r.Reading.Verdict() == "directx")} directx, "
                 + $"{rows.Count(r => r.Reading.Verdict() == "opengl")} opengl, "
-                + $"{rows.Count(r => r.Reading.Verdict() == "unclear")} unclear; {disagreements} disagree with the patch");
+                + $"{rows.Count(r => r.Reading.Verdict() == "unclear")} unclear; {disagreements} disagree with the configuration");
             return disagreements == 0 ? 0 : 1;
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or ArgumentException)
@@ -211,80 +212,67 @@ public static class Program
             return 2;
         }
 
-        var sourceDir = Path.GetDirectoryName(Path.GetFullPath(source)) ?? ".";
-        var outputRoot = Path.GetFullPath(outDir);
-        Directory.CreateDirectory(outputRoot);
+        return CookOneAsset(source, outDir, mesh.For(source));
+    }
 
-        IReadOnlyList<Blix.Recipes.MeshRecipe.ReferencedImage> references;
+    /// <summary>Cooks every asset a project's configuration names into one output root.</summary>
+    /// <remarks>
+    /// <c>blix cook project &lt;config&gt; --out &lt;root&gt;</c>. Each entry writes to
+    /// <c>&lt;root&gt;/&lt;output&gt;</c>, or to its source's stem when the entry names no output. Stops at
+    /// the first entry that fails: a pack is shipped whole or not at all.
+    /// </remarks>
+    static int CookProject(AppArgs args)
+    {
+        var outRoot = args.String("out");
+        if (args.Positionals is not [var configPath] || outRoot is null)
+        {
+            Console.Error.WriteLine("Usage: blix cook project <config> --out <root>");
+            return 2;
+        }
+
+        Blix.Recipes.CookConfig config;
         try
         {
-            references = Blix.Recipes.MeshRecipe.ReferencedImages(source, mesh.Patch);
+            config = Blix.Recipes.CookConfig.Load(configPath);
         }
-        catch (Exception ex) when (ex is IOException or InvalidDataException or ArgumentException)
+        catch (Exception ex) when (ex is InvalidDataException or FileNotFoundException)
         {
-            Console.Error.WriteLine($"  cannot read asset references: {ex.Message}");
+            Console.Error.WriteLine($"config: {ex.Message}");
             return 1;
         }
-        var byUri = references
-            .GroupBy(reference => reference.Uri, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        Console.WriteLine($"  {byUri.Length} referenced image(s)");
 
-        var invalid = false;
-        foreach (var group in byUri)
+        var flags = new MeshFlags(false, 0, true, config);
+        foreach (var entry in config.Entries)
         {
-            var roles = group.Select(reference => (reference.Role, reference.FlipGreen)).Distinct().ToArray();
-            if (roles.Length > 1)
-            {
-                Console.Error.WriteLine(
-                    $"  ambiguous: {group.Key} is used as {string.Join(" and ", roles)}; one "
-                    + ".blixtex cannot preserve both material-channel roles or conventions");
-                invalid = true;
-            }
-
-            var sourcePath = Path.GetFullPath(Path.Combine(sourceDir, group.Key));
-            var outputPath = Path.GetFullPath(
-                Path.Combine(outputRoot, Path.ChangeExtension(group.Key, ".blixtex")));
-            if (!IsWithin(sourceDir, sourcePath) || !IsWithin(outputRoot, outputPath))
-            {
-                Console.Error.WriteLine(
-                    $"  outside tree: {group.Key} does not remain inside both source and output roots");
-                invalid = true;
-            }
-            else if (!File.Exists(sourcePath))
-            {
-                Console.Error.WriteLine($"  missing: {group.Key}");
-                invalid = true;
-            }
+            var outDir = Path.Combine(outRoot, entry.Output ?? Path.GetFileNameWithoutExtension(entry.Source));
+            Console.WriteLine($"asset {Path.GetFileName(entry.Source)} -> {outDir}");
+            var result = CookOneAsset(entry.Source, outDir, flags.For(entry.Source));
+            if (result != 0) return result;
         }
 
-        foreach (var collision in byUri.GroupBy(
-                     group => Path.ChangeExtension(group.Key, ".blixtex"),
-                     StringComparer.OrdinalIgnoreCase).Where(group => group.Count() > 1))
-        {
-            Console.Error.WriteLine(
-                $"  output collision: {string.Join(", ", collision.Select(group => group.Key))} "
-                + $"all map to {collision.Key}");
-            invalid = true;
-        }
+        Console.WriteLine($"  {config.Entries.Count} asset(s) cooked under {outRoot}");
+        return 0;
+    }
 
-        if (invalid) return 1;
-
-        long sourceBytes = 0, cookedBytes = 0;
-        var sw = Stopwatch.StartNew();
+    static int CookOneAsset(string source, string outDir, MeshFlags.Decision decision)
+    {
+        Blix.Recipes.AssetCook.Result cooked;
         try
         {
-            Parallel.ForEach(byUri, group =>
-            {
-                var reference = group.Single();
-                var from = Path.Combine(sourceDir, reference.Uri);
-                var to = Path.Combine(outputRoot, Path.ChangeExtension(reference.Uri, ".blixtex"));
-                Directory.CreateDirectory(Path.GetDirectoryName(to)!);
-                Blix.Recipes.TextureRecipe.CookOne(
-                    from, to, out var inLen, out var outLen, reference.Role, reference.FlipGreen);
-                Interlocked.Add(ref sourceBytes, inLen);
-                Interlocked.Add(ref cookedBytes, outLen);
-            });
+            cooked = Blix.Recipes.AssetCook.Cook(
+                source, outDir,
+                flipTextureV: decision.FlipV,
+                splitTriBudget: decision.SplitBudget,
+                splitFoliage: decision.SplitFoliage,
+                patch: decision.Patch,
+                log: Console.WriteLine,
+                splitMaxExtent: decision.SplitMaxExtent);
+        }
+        catch (InvalidDataException ex)
+        {
+            // A refusal is the recipe working: each problem on its own line, and nothing written.
+            foreach (var line in ex.Message.Split(Environment.NewLine)) Console.Error.WriteLine($"  {line}");
+            return 1;
         }
         catch (AggregateException ex)
         {
@@ -292,35 +280,16 @@ public static class Program
                 Console.Error.WriteLine($"  texture cook failed: {failure.Message}");
             return 1;
         }
-        catch (Exception ex) when (ex is IOException or InvalidDataException or NotSupportedException)
+        catch (Exception ex) when (ex is IOException or NotSupportedException or ArgumentException)
         {
-            Console.Error.WriteLine($"  texture cook failed: {ex.Message}");
+            Console.Error.WriteLine($"  cook failed: {ex.Message}");
             return 1;
         }
 
         Console.WriteLine(
-            $"  textures: {sourceBytes / 1048576.0:F1} MB -> {cookedBytes / 1048576.0:F1} MB in {sw.Elapsed.TotalSeconds:F0}s");
-
-        var meshOut = Path.Combine(outputRoot, Path.GetFileNameWithoutExtension(source) + ".blixmesh");
-        // Use the shared shipped-mesh path so asset trees and direct mesh cooks receive the same LOD
-        // and splitting policy.
-        int count;
-        try
-        {
-            count = Blix.Recipes.MeshRecipe.CookShipped(
-                source, meshOut,
-                flipTextureV: mesh.FlipV,
-                includeTangents: mesh.Tangents,
-                splitTriBudget: mesh.SplitBudget,
-                splitFoliage: mesh.SplitFoliage,
-                patch: mesh.Patch,
-                log: Console.WriteLine);
-        }
-        catch (InvalidDataException ex)
-        {
-            Console.Error.WriteLine($"cook refused: {ex.Message}");
-            return 1;
-        }
+            $"  textures: {cooked.SourceBytes / 1048576.0:F1} MB -> {cooked.CookedBytes / 1048576.0:F1} MB in {cooked.TextureTime.TotalSeconds:F0}s");
+        var meshOut = cooked.MeshPath;
+        var count = cooked.Primitives;
 
         var header = Blix.Cooked.CookedFile.TryReadHeader(meshOut);
         Console.WriteLine($"  mesh: {count} primitive(s) -> {meshOut}");
@@ -339,13 +308,6 @@ public static class Program
         return 0;
     }
 
-    private static bool IsWithin(string root, string path)
-    {
-        var relative = Path.GetRelativePath(Path.GetFullPath(root), Path.GetFullPath(path));
-        return relative != ".."
-            && !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)
-            && !Path.IsPathRooted(relative);
-    }
 
     /// <summary>Every output path claimed by more than one line, described for a person.</summary>
     /// <remarks>
@@ -388,45 +350,60 @@ public static class Program
         }
     }
 
-    /// <summary>The flags both mesh-producing drivers take, read once for either.</summary>
+    /// <summary>How each mesh a driver cooks is decided: a project's configuration, or ad-hoc flags.</summary>
     /// <remarks>
-    /// <c>--flip-v</c> is opt-in V canonicalisation for bottom-up (OpenGL-authored) sources, baked
-    /// into the cooked vertex data; it mirrors AssetImportContext.FlipTextureV on the runtime
-    /// import path. <c>--tangents</c> cooks the layout normal-mapped consumers need.
-    /// <c>--split N</c> recursively partitions primitives over N triangles into chunks, each its
-    /// own LOD chain, so per-primitive distance LOD gets fine-grained; 0 or absent is off, and
-    /// <c>--no-split-foliage</c> leaves masked and blended primitives whole for the impostor track.
-    /// A <c>--patch</c> is an explicit input rather than an implicitly discovered neighbour.
+    /// <c>--config &lt;file&gt;</c> names a project's cook configuration (<see cref="Blix.Recipes.CookConfig"/>):
+    /// each source it names cooks as its entry says, and one it does not name with glTF's defaults.
+    /// Without one, <c>--flip-v</c>, <c>--split N</c> and <c>--no-split-foliage</c> decide an ad-hoc
+    /// cook. Both at once is refused: a decision has one writer. There is no tangents flag: every
+    /// static primitive cooks as the complete vertex.
     /// </remarks>
-    sealed record MeshFlags(bool FlipV, bool Tangents, int SplitBudget, bool SplitFoliage,
-        Blix.Recipes.MaterialPatch? Patch)
+    sealed record MeshFlags(bool FlipV, int SplitBudget, bool SplitFoliage, Blix.Recipes.CookConfig? Config)
     {
-        // Null when the patch could not be read, which has already been reported.
+        public readonly record struct Decision(
+            bool FlipV, int SplitBudget, bool SplitFoliage, float SplitMaxExtent, Blix.Recipes.MaterialPatch? Patch);
+
+        /// <summary>What decides <paramref name="source"/>'s cook.</summary>
+        public Decision For(string source) => Config?.For(source) is { } e
+            ? new Decision(e.FlipTextureV, e.SplitTriBudget, e.SplitFoliage, e.SplitMaxExtent, e.Materials)
+            : new Decision(FlipV, SplitBudget, SplitFoliage, Blix.Recipes.MeshRecipe.DefaultSplitMaxExtent, null);
+
+        // Null when the configuration could not be read, or was mixed with flags; already reported.
         public static MeshFlags? Read(AppArgs args)
         {
-            Blix.Recipes.MaterialPatch? patch = null;
-            if (args.String("patch") is { } patchPath)
+            var flipV = args.Flag("flip-v");
+            var split = args.Int("split", 0);
+            var noFoliage = args.Flag("no-split-foliage");
+            Blix.Recipes.CookConfig? config = null;
+            if (args.String("config") is { } configPath)
             {
-                try
+                if (flipV || split != 0 || noFoliage)
                 {
-                    patch = Blix.Recipes.MaterialPatch.Load(patchPath);
-                }
-                catch (Exception ex) when (ex is InvalidDataException or FileNotFoundException)
-                {
-                    // A refused patch is the mechanism working, so it reports like a diagnosis and
-                    // not like a crash: one line naming the file, the line and what it could not find.
-                    Console.Error.WriteLine($"patch: {ex.Message}");
+                    Console.Error.WriteLine(
+                        "config: --flip-v, --split and --no-split-foliage are the configuration's to decide; " +
+                        "set them in its entry rather than on the command line.");
                     return null;
                 }
 
-                Console.WriteLine($"  patch {patch.FileName}@{patch.ContentHash}: {patch.Rules.Count} rule(s)");
+                try
+                {
+                    config = Blix.Recipes.CookConfig.Load(configPath);
+                }
+                catch (Exception ex) when (ex is InvalidDataException or FileNotFoundException)
+                {
+                    // A refused configuration is the mechanism working, so it reports like a diagnosis:
+                    // one line naming the file, the line and what it could not find.
+                    Console.Error.WriteLine($"config: {ex.Message}");
+                    return null;
+                }
+
+                Console.WriteLine($"  config {Path.GetFileName(configPath)}: {config.Entries.Count} asset(s)");
             }
 
-            return new MeshFlags(
-                args.Flag("flip-v"), args.Flag("tangents"), args.Int("split", 0),
-                !args.Flag("no-split-foliage"), patch);
+            return new MeshFlags(flipV, split, !noFoliage, config);
         }
     }
+
 
     static void PrintUsage()
 {
@@ -445,12 +422,14 @@ public static class Program
     Console.WriteLine("                [--prefilter-mips=5] [--brdf-size=256] [--clamp=50]");
     Console.WriteLine("                [--yaw=<degrees>]");
     Console.WriteLine("                             bake an HDR sky to a .blixprobe");
-    Console.WriteLine("    mesh <path> [--flip-v] [--tangents] [--split N] [--no-split-foliage]");
+    Console.WriteLine("    mesh <path> [--config <file> | --flip-v --split N --no-split-foliage]");
     Console.WriteLine("                             cook a .gltf/.glb (or a tree of them) to .blixmesh");
     Console.WriteLine("    asset <gltf-or-glb> --out <dir> [mesh flags]");
     Console.WriteLine("                             cook one model and its referenced images into an output tree");
-    Console.WriteLine("    normals <gltf-or-glb> [--patch <file>]");
-    Console.WriteLine("                             measure each normal map's green convention against the patch");
+    Console.WriteLine("    project <config> --out <root>");
+    Console.WriteLine("                             cook every asset a project's configuration names");
+    Console.WriteLine("    normals <gltf-or-glb> [--config <file>]");
+    Console.WriteLine("                             measure each normal map's green convention against the configuration");
     Console.WriteLine("    sky <dir-or-blixmesh> [--out <file>] [--occupancy N] [--probes N]");
     Console.WriteLine("                            [--rays N] [--albedo N]");
     Console.WriteLine("                             bake scene sky visibility from cooked meshes");
@@ -473,10 +452,9 @@ public static class Program
     if (mesh is null) return 1;
     if (args.Positionals is not [var target])
     {
-        Console.Error.WriteLine("Usage: blix cook mesh <gltf-or-directory> [--out <dir>] [--flip-v] [--tangents] [--split N] [--patch <file>]");
+        Console.Error.WriteLine("Usage: blix cook mesh <gltf-or-directory> [--out <dir>] [--config <file> | --flip-v --split N]");
         return 1;
     }
-    var (flipV, tangents, splitBudget, splitFoliage, patch) = mesh;
 
     string[] sources;
     string inRoot;
@@ -509,6 +487,7 @@ public static class Program
 
     foreach (var src in sources)
     {
+        var (flipV, splitBudget, splitFoliage, splitExtent, patch) = mesh.For(src);
         var outPath = ResolveDest(src, inRoot, outDir, ".blixmesh");
         if (outDir is not null)
         {
@@ -526,8 +505,8 @@ public static class Program
         if (File.Exists(outPath))
         {
             if (Blix.Recipes.MeshRecipe.IsShippedCurrent(
-                    src, outPath, flipV, tangents,
-                    splitTriBudget: splitBudget, splitFoliage: splitFoliage, patch: patch))
+                    src, outPath, flipV,
+                    splitTriBudget: splitBudget, splitFoliage: splitFoliage, splitMaxExtent: splitExtent, patch: patch))
             {
                 Console.WriteLine($"  up-to-date: {outPath}{SourceImageDebtNote(outPath)}");
                 continue;
@@ -541,8 +520,8 @@ public static class Program
         int count;
         try
         {
-            count = Blix.Recipes.MeshRecipe.CookShipped(src, outPath, flipV, tangents,
-                splitTriBudget: splitBudget, splitFoliage: splitFoliage,
+            count = Blix.Recipes.MeshRecipe.CookShipped(src, outPath, flipV,
+                splitTriBudget: splitBudget, splitFoliage: splitFoliage, splitMaxExtent: splitExtent,
                 patch: patch, log: Console.WriteLine);
         }
         catch (InvalidDataException ex)
@@ -554,13 +533,13 @@ public static class Program
         var size = new FileInfo(outPath).Length;
         // Quick LOD readout: levels + triangle reduction on the largest primitive.
         var file = Blix.Assets.BlixMeshReader.Read(outPath);
-        var biggest = file.Primitives.OrderByDescending(p => p.Lods[0].IndexCount).First();
+        var biggest = file.Meshes.SelectMany(m => m.Primitives).OrderByDescending(p => p.Lods[0].IndexCount).First();
         var lodCounts = string.Join("/", biggest.Lods.Select(l => l.IndexCount / 3));
         var splitNote = splitBudget > 0
             ? $", split@{splitBudget / 1000}k → biggest chunk {biggest.Lods[0].IndexCount / 3} tris"
             : "";
         var imageDebt = SourceImageDebtNote(outPath);
-        Console.WriteLine($"  cooked {Path.GetFileName(src)} -> {Path.GetFileName(outPath)} ({count} prims, {size / 1024.0 / 1024.0:0.00} MB, {tangents}-tan) in {sw.ElapsedMilliseconds} ms; LOD tris (biggest prim): {lodCounts}{splitNote}{imageDebt}");
+        Console.WriteLine($"  cooked {Path.GetFileName(src)} -> {Path.GetFileName(outPath)} ({count} prims, {size / 1024.0 / 1024.0:0.00} MB) in {sw.ElapsedMilliseconds} ms; LOD tris (biggest prim): {lodCounts}{splitNote}{imageDebt}");
     }
     return 0;
 }
@@ -727,6 +706,12 @@ public static class Program
     catch (Blix.Cooked.AssetImportException refused)
     {
         Console.Error.WriteLine($"blix cannot read this: {refused.Message}");
+        return 1;
+    }
+    catch (InvalidDataException refused)
+    {
+        // Recipe and configuration validation are content refusals, not tool crashes.
+        Console.Error.WriteLine($"cook refused: {refused.Message}");
         return 1;
     }
 }
@@ -919,6 +904,11 @@ public static class Program
             // quietly shipped without an asset it was told to cook is the thing this whole rule
             // exists to prevent.
             Console.Error.WriteLine($"blix cook: cannot read {source} — {refused.Message}");
+            return 1;
+        }
+        catch (InvalidDataException refused)
+        {
+            Console.Error.WriteLine($"blix cook: refused {source} — {refused.Message}");
             return 1;
         }
     }

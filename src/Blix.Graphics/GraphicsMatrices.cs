@@ -464,4 +464,15 @@ public static class GraphicsMatrices
             d.X * m.M12 + d.Y * m.M22 + d.Z * m.M32,
             d.X * m.M13 + d.Y * m.M23 + d.Z * m.M33);
     }
+
+    /// <summary>The inverse-transpose of a model matrix, for transforming normals under non-uniform scale.</summary>
+    /// <remarks>
+    /// Row-vector form (F-016): <c>Transpose(Invert(model))</c>. Identity when the model does not invert,
+    /// because a degenerate transform has no normal transform to give.
+    /// </remarks>
+    public static System.Numerics.Matrix4x4 NormalMatrix(System.Numerics.Matrix4x4 model)
+    {
+        if (!System.Numerics.Matrix4x4.Invert(model, out var inverse)) return System.Numerics.Matrix4x4.Identity;
+        return System.Numerics.Matrix4x4.Transpose(inverse);
+    }
 }

@@ -20,7 +20,7 @@ namespace Blix;
 // available after ReleaseCpuMipBytes clears this instance's byte references.
 // The type is mutable only for that ownership handoff; it has reference rather
 // than value equality.
-public sealed class GltfTexture
+public sealed class TextureData
 {
     public string Name { get; }
 
@@ -57,7 +57,7 @@ public sealed class GltfTexture
     // load. Mutually exclusive with MipBytes -- exactly one is set.
     public BlixTexLazyHandle? LazyHandle { get; }
 
-    public GltfTexture(string name, TextureFormat format, int width, int height, IReadOnlyList<byte[]> mipBytes)
+    public TextureData(string name, TextureFormat format, int width, int height, IReadOnlyList<byte[]> mipBytes)
     {
         Name = name;
         Format = format;
@@ -67,7 +67,7 @@ public sealed class GltfTexture
         MipCount = mipBytes.Count;
     }
 
-    public GltfTexture(string name, BlixTexLazyHandle lazyHandle)
+    public TextureData(string name, BlixTexLazyHandle lazyHandle)
     {
         Name = name;
         Format = lazyHandle.Format;
@@ -79,7 +79,7 @@ public sealed class GltfTexture
 
     // Factory for the source-decoded, single-mip Rgba8 shape. Cooked-load
     // callers use a constructor that exposes the artifact's full mip chain.
-    public static GltfTexture Rgba8Single(string name, byte[] pixels, int width, int height, string resourceId = "")
+    public static TextureData Rgba8Single(string name, byte[] pixels, int width, int height, string resourceId = "")
         => new(name, TextureFormat.Rgba8, width, height, new[] { pixels }) { ResourceId = resourceId };
 
     // Drops this instance's eager CPU-byte references. The caller is responsible
@@ -99,7 +99,7 @@ public sealed class GltfTexture
             if (MipBytes is null)
             {
                 throw new InvalidOperationException(
-                    $"GltfTexture '{Name}' has had its CPU mip bytes released; cannot read RgbaPixels.");
+                    $"TextureData '{Name}' has had its CPU mip bytes released; cannot read RgbaPixels.");
             }
             return MipBytes[0];
         }

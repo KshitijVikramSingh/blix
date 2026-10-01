@@ -1,4 +1,4 @@
-namespace Blix;
+namespace Blix.Import;
 
 // Bundle produced by GltfImporter. A single glTF file typically carries several
 // related pieces (a mesh split into primitives, an optional skeleton, zero or more
@@ -39,7 +39,7 @@ public sealed record GltfModel(
     /// </summary>
     GltfStaticPart[]? StaticParts = null,
     /// <summary>Attributes the file declared that this importer did not read.</summary>
-    GltfIgnored[]? Ignored = null,
+    UnreadAttribute[]? Ignored = null,
 
     /// <summary>
     /// Every skin the file declares, in the order the importer met them. Null for a single-skin
@@ -58,7 +58,7 @@ public sealed record GltfModel(
     /// <summary>Static parts, never null.</summary>
     public GltfStaticPart[] StaticPartsOrEmpty => StaticParts ?? [];
 
-    public GltfIgnored[] IgnoredOrEmpty => Ignored ?? [];
+    public UnreadAttribute[] IgnoredOrEmpty => Ignored ?? [];
 
     /// <summary>
     /// Every skin, never null. A consumer writes one loop and never branches on how many there are.

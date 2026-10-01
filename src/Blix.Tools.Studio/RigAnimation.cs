@@ -34,13 +34,13 @@ public enum PoseMode
 /// </remarks>
 public sealed class RigAnimation : ITunable
 {
-    private readonly Rig rig;
+    private readonly Model rig;
     private readonly Matrix4x4[] boneWorlds;
     private readonly Matrix4x4[] restWorlds;
     private readonly Matrix4x4[] scratchWorlds;
     private ClipPlayer? secondary;
 
-    public RigAnimation(Rig rig)
+    public RigAnimation(Model rig)
     {
         ArgumentNullException.ThrowIfNull(rig);
         this.rig = rig;

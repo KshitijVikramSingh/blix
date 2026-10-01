@@ -115,7 +115,7 @@ Every public type in `Blix`, one-line each.
 
 **Skeletal animation:** `BoneTransform`, `Bone`, `Skeleton`, `Pose`, `BonePalette`, `AnimationClip`, `BoneTrack`, `ClipAnimation`, `BlendedClipAnimation`, `AdditiveClipAnimation`, `PoseBlend`, `PoseDelta`, `SkinnedGameObject`
 
-**glTF import:** `GltfImporter`, `GltfModel`, `GltfPrimitive`, `GltfMaterial`, `GltfTexture`
+**glTF import:** `GltfImporter`, `GltfModel`, `GltfPrimitive`, `PbrMaterial`, `TextureData`
 
 **Physics:** `PhysicsHost3D`, `PhysicsHost2D`, `PhysicsGameObject`
 
@@ -712,18 +712,18 @@ public sealed record GltfModel(
     AnimationClip[] Animations,
     Matrix4x4 MeshNodeTransform);
 
-public sealed record GltfPrimitive(MeshData Mesh, GltfMaterial? Material);
+public sealed record GltfPrimitive(MeshData Mesh, PbrMaterial? Material);
 
-public sealed record GltfMaterial(
+public sealed record PbrMaterial(
     string Name,
     Vector4 BaseColorFactor,
-    GltfTexture? BaseColorTexture,
-    GltfTexture? NormalTexture,
-    GltfTexture? MetallicRoughnessTexture,
+    TextureData? BaseColorTexture,
+    TextureData? NormalTexture,
+    TextureData? MetallicRoughnessTexture,
     float MetallicFactor,
     float RoughnessFactor);
 
-public sealed record GltfTexture(string Name, byte[] RgbaPixels, int Width, int Height);
+public sealed record TextureData(string Name, byte[] RgbaPixels, int Width, int Height);
 ```
 
 Registered via `assets.RegisterImporter(new GltfImporter())`, manifested via the dispatch key `"rigged-model.gltf"`.

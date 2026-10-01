@@ -6,11 +6,11 @@ using Blix.Graphics.Images;
 using SharpGLTF.Schema2;
 using Blix.Cooked;
 
-namespace Blix;
+namespace Blix.Import;
 
 // Loads a .glb / .gltf file and decodes it into engine-shaped types: skinned
 // `GltfPrimitive[]` (each with vertex layout VertexPosition3NormalTextureSkin4Tangent
-// + a `GltfMaterial` carrying baseColor/normal/metallic-roughness textures), a
+// + a `PbrMaterial` carrying baseColor/normal/metallic-roughness textures), a
 // `GltfSkinBinding[]` with parent-first skeletons and placement transforms, and one
 // `AnimationClip` per glTF animation that touches the shared joint ordering. It also
 // preserves joint attachments and independent static parts from the same file.
@@ -45,138 +45,12 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         }
         // Normalize parser failures and the importer's own content refusals into the same
         // path-bearing boundary for callers and diagnostic tools.
-        return AssetImportException.Refusing(context.SourcePath, () => ImportCore(context, preferCooked: true));
+        GltfStaticImporter.RefuseCooked(context);
+        return AssetImportException.Refusing(context.SourcePath, () => ImportCore(context));
     }
 
-    /// <summary>
-    /// Imports the glTF itself, ignoring any cooked artifact beside it.
-    /// </summary>
-    /// <remarks>
-    /// Recipes must use this entry point so their output is derived from authored source rather
-    /// than from a pre-existing cooked sibling. Runtime callers normally use <see cref="Import"/>.
-    /// </remarks>
-    public GltfModel ImportSource(AssetImportContext context)
+    private GltfModel ImportCore(AssetImportContext context)
     {
-        ArgumentNullException.ThrowIfNull(context);
-        return AssetImportException.Refusing(context.SourcePath, () => ImportCore(context, preferCooked: false));
-    }
-
-    /// <summary>Rebuilds a rig from its cooked form — skins, clips, attachments and all.</summary>
-    /// <remarks>
-    /// Bones, clips, attachments, static parts, materials, and image references are reconstructed
-    /// entirely from the cooked artifact; the source glTF is not opened.
-    /// </remarks>
-    private GltfModel ImportCookedRig(AssetImportContext context, string rigPath, BlixMeshFile cooked)
-    {
-        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
-        var cookedDir = Path.GetDirectoryName(Path.GetFullPath(rigPath)) ?? string.Empty;
-
-        var textureCache = new Dictionary<int, GltfTexture>();
-        var materialCache = new Dictionary<int, GltfMaterial>();
-        GltfShared.LoadImagesFromTable(cooked.ImageTable, cooked.MaterialTable, cookedDir, textureCache);
-
-        GltfPrimitive Rebuild(BlixMeshPrimitive p)
-        {
-            var lod0 = p.Lods[0];
-            return new GltfPrimitive(
-                new MeshData(
-                    p.Name, p.VertexBytes, lod0.Indices16 ?? Array.Empty<ushort>(),
-                    p.Layout, p.Bounds, Indices32: lod0.Indices32),
-                GltfShared.MaterialFromCooked(cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache, rigPath),
-                SkinIndex: p.SkinIndex,
-                MaterialIndex: p.MaterialIndex);
-        }
-
-        var bindings = cooked.SkinTable
-            .Select(skin => new GltfSkinBinding(
-                new Skeleton(skin.Bones
-                    .Select(b => new Bone(b.Name, b.ParentIndex, b.InverseBindPose))
-                    .ToArray()),
-                skin.MeshNodeTransform))
-            .ToArray();
-
-        var animations = cooked.ClipTable.Select(RebuildClip).ToArray();
-
-        var attachments = cooked.AttachmentTable
-            .Select(a => new GltfAttachment(
-                a.Name, a.JointName, a.JointIndex, a.LocalTransform,
-                a.Primitives.Select(Rebuild).ToArray(), a.SkinIndex))
-            .ToArray();
-
-        var staticParts = cooked.StaticPartTable
-            .Select(sp => new GltfStaticPart(
-                sp.Name, sp.WorldTransform, sp.Primitives.Select(Rebuild).ToArray()))
-            .ToArray();
-
-        if (AssetLoadLog.Enabled)
-        {
-            AssetLoadLog.Report(new AssetLoadReport(
-                SourcePath: context.SourcePath,
-                CookedPath: rigPath,
-                Mode: AssetLoadMode.Cooked,
-                Bytes: SourceLength(rigPath),
-                LoadMs: loadWatch.Elapsed.TotalMilliseconds,
-                Recipe: cooked.Cooked?.Stamp.Recipe));
-        }
-
-        return new GltfModel(
-            cooked.Primitives.Select(Rebuild).ToArray(),
-            bindings[0].Skeleton, animations, bindings[0].MeshNodeTransform,
-            attachments, staticParts, Array.Empty<GltfIgnored>(), bindings);
-    }
-
-    /// <summary>
-    /// One clip, from the keyframes it was cooked as.
-    /// </summary>
-    /// <remarks>
-    /// An empty channel array means the channel was absent, which is why it maps back to a null
-    /// curve rather than an empty one — <c>KeyframeVector3Curve</c> refuses to exist with no keys,
-    /// and rightly: a curve with nothing to evaluate is not a curve.
-    /// </remarks>
-    private static AnimationClip RebuildClip(BlixMeshClip clip) => new(
-        clip.Name,
-        clip.Tracks.Select(t => new BoneTrack
-        {
-            BoneIndex = t.BoneIndex,
-            Translation = t.Translation.Length == 0
-                ? null
-                : new KeyframeVector3Curve(
-                    t.Translation.Select(k => new Keyframe<Vector3>(k.Time, k.Value)).ToArray()),
-            Rotation = t.Rotation.Length == 0
-                ? null
-                : new KeyframeQuaternionCurve(
-                    t.Rotation.Select(k => new Keyframe<Quaternion>(k.Time, k.Value)).ToArray()),
-            Scale = t.Scale.Length == 0
-                ? null
-                : new KeyframeVector3Curve(
-                    t.Scale.Select(k => new Keyframe<Vector3>(k.Time, k.Value)).ToArray()),
-        }).ToArray());
-
-    private GltfModel ImportCore(AssetImportContext context, bool preferCooked)
-    {
-        // A rigged .blixmesh is self-contained and loads without opening the source glTF.
-        var directRig = Path.GetExtension(context.SourcePath)
-            .Equals(".blixmesh", StringComparison.OrdinalIgnoreCase);
-        var rigPath = directRig
-            ? context.SourcePath
-            : Path.ChangeExtension(context.SourcePath, ".blixmesh");
-        if (preferCooked && File.Exists(rigPath))
-        {
-            var cookedRig = BlixMeshReader.Read(rigPath);
-
-            // A .blixmesh with no skins is a STATIC cook sitting beside a rigged source — which is
-            // the normal state of any file the static cook reached first. It is not this importer's
-            // to read, and saying so beats loading a character with no skeleton.
-            if (cookedRig.IsRigged) return ImportCookedRig(context, rigPath, cookedRig);
-            if (directRig)
-            {
-                throw new AssetImportException(
-                    context.SourcePath, null,
-                    "this .blixmesh carries no skin, so there is no rig in it — " +
-                    "load it as a static model instead (GltfStaticImporter)");
-            }
-        }
-
         var loadWatch = System.Diagnostics.Stopwatch.StartNew();
 
         var model = AssetImportException.Refusing(context.SourcePath, () => ModelRoot.Load(context.SourcePath));
@@ -236,10 +110,10 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         // unique source image in parallel before walking primitives -- PNG/JPEG
         // decode is the dominant cost for heavy assets. Same pattern as the
         // static importer; see GltfStaticImporter.PreDecodeImages for rationale.
-        var textureCache = new Dictionary<int, GltfTexture>();
+        var textureCache = new Dictionary<int, TextureData>();
         var gltfDir = Path.GetDirectoryName(Path.GetFullPath(context.SourcePath)) ?? string.Empty;
         GltfShared.PreDecodeImages(model, textureCache, gltfDir, context.SourcePath);
-        var materialCache = new Dictionary<int, GltfMaterial>();
+        var materialCache = new Dictionary<int, PbrMaterial>();
         var primitivesList = new List<GltfPrimitive>();
         var bindings = new List<GltfSkinBinding>();
         var remapsBySkin = new List<int[]>();
@@ -434,8 +308,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         ModelRoot model,
         Skin skin,
         int[] oldToNew,
-        Dictionary<int, GltfMaterial> materialCache,
-        Dictionary<int, GltfTexture> textureCache,
+        Dictionary<int, PbrMaterial> materialCache,
+        Dictionary<int, TextureData> textureCache,
         string containerPath)
     {
         var jointToSkinIndex = new Dictionary<Node, int>();
@@ -488,7 +362,23 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         return found.ToArray();
     }
 
-    private static (Bone[] bones, int[] oldToNew) BuildSkeletonAndOrdering(Skin skin)
+    /// <summary>
+    /// Every vertex attribute the cooked vertex does not carry, per the complete layouts: static meshes
+    /// read tangent, colour and the second set; skinned ones read the skinning pairs as well. Public for
+    /// the cook, which records what it did not read.
+    /// </summary>
+    public static UnreadAttribute[] UnreadAttributes(ModelRoot model)
+    {
+        ArgumentNullException.ThrowIfNull(model);
+        return GltfShared.CollectIgnored(model.LogicalNodes
+            .Where(node => node.Mesh is not null)
+            .SelectMany(node => node.Mesh!.Primitives.Select(primitive =>
+                (primitive, GltfShared.VertexFeatures.Tangents | GltfShared.VertexFeatures.Colour
+                    | (node.Skin is null ? GltfShared.VertexFeatures.None : GltfShared.VertexFeatures.Skinning)))));
+    }
+
+    /// <summary>A skin's bones in parent-first order, and the source-joint-to-bone remap. Public for the cook.</summary>
+    public static (Bone[] bones, int[] oldToNew) BuildSkeletonAndOrdering(Skin skin)
     {
         var joints = skin.Joints;
         var ibmList = skin.InverseBindMatrices;
@@ -636,7 +526,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         return (idx, wt);
     }
 
-    private static MeshData BuildMeshData(string name, MeshPrimitive primitive, int[] oldToNew)
+    /// <summary>A skinned primitive's 80-byte vertices, joints remapped to the skin's bone order. Public for the cook.</summary>
+    public static MeshData BuildMeshData(string name, MeshPrimitive primitive, int[] oldToNew)
     {
         var positions = primitive.GetVertexAccessor("POSITION")?.AsVector3Array()
             ?? throw new InvalidOperationException("glTF mesh primitive missing required POSITION accessor.");
@@ -768,7 +659,8 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
     // Convert one glTF animation into one engine AnimationClip. Channels targeting
     // non-skin nodes are skipped silently; the per-bone PRS tracks group every
     // channel that targets a single joint into a single BoneTrack.
-    private static AnimationClip BuildAnimationClip(Animation anim, Skin skin, int[] oldToNew)
+    /// <summary>One animation's tracks on <paramref name="skin"/>'s bones. Public for the cook.</summary>
+    public static AnimationClip BuildAnimationClip(Animation anim, Skin skin, int[] oldToNew)
     {
         var jointToIndex = new Dictionary<Node, int>();
         for (var i = 0; i < skin.Joints.Count; i++) jointToIndex[skin.Joints[i]] = i;

@@ -11,6 +11,8 @@
     <ProjectReference Include="..\Blix\Blix.csproj" />
     <ProjectReference Include="..\Blix.Core\Blix.Core.csproj" />
     <ProjectReference Include="..\Blix.Cooked\Blix.Cooked.csproj" />
+    <!-- A tool cooks on open (CookCache): the engine reads cooked models only. -->
+    <ProjectReference Include="..\Blix.Recipes\Blix.Recipes.csproj" />
   </ItemGroup>
 
   <ItemGroup>

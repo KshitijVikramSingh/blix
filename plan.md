@@ -12,6 +12,57 @@ shader-declared samplers are in [`docs/architecture.md`](docs/architecture.md) a
 
 ---
 
+## G — the engine reads cooked models only
+
+Decided 2026-09-30: the engine stops parsing glTF. Models reach it as `.blixmesh`, so every repair a
+source needs — patches, normal-map conventions, tangents, validation — happens once, in the cook,
+and there is one reader of each fact instead of two (the occlusion strength that both paths misread
+is the case). Tools that open an arbitrary `.glb` cook it on open into a cache. RTSGame loads no
+`.glb` at runtime.
+
+**Done** (branch `cooked-only`): MikkTSpace in the cook (046c780); the complete static vertex,
+`.blixmesh` v11, repacked to the layout a load asks for (2db2e0c); cook-on-open for tools,
+`CookCache` (83cecf5); stage 1 below, the scene-graph `.blixmesh` v12 (b270e8d); stage 2, one
+`ModelData` and one `Model`, with unread attributes recorded in the file, v13 (7c4dd90). Stage 4 goes
+before 3: v12 dissolved the rig-or-static case that made configuration a prerequisite, and converting
+source paths that stage 4 deletes would be wasted. Stage 4 done: runtime loads cooked only (d4bc611),
+`Blix.Import` takes the parsers and SharpGLTF (ddfa39e), the engine's types lose `Gltf` — `PbrMaterial`
+(not `MaterialData`, taken by the `.material` asset record), `TextureData`, `MaterialTextureLoader`,
+`AlphaMode`, `UnreadAttribute` (2b6d43a). Stage 3 done: a project's cook configuration (`CookConfig`, `.blixcook`)
+replaces `.blixpatch`, read by `blix cook --config`, `blix cook project` and the build's `<BlixCookConfig>`;
+each entry stamped by its own hash; Sponza's four patches are one `sponza.blixcook` (972d4b1). Stage 5
+done: Studio's static pipeline reads the complete vertex and the cooked tangent frame; the derivative
+frame is gone (81a0f80). **§G is complete.**
+
+**The format mirrors glTF's structure, not its encoding.** "Rig or static" is not a question glTF
+asks: every mesh reaches a scene through a node, and a rigged file is a scene graph in which some node
+has a skin. It was a split Blix made when it had two importers, and the cooked format inherited it —
+a static cook bakes world transforms into vertices and keeps the hierarchy as a side table that the
+loader un-bakes by inverse (lossy where a transform will not invert); a rig cook keeps no hierarchy at
+all, which is why TankArena still parses `tank.glb` at runtime. What stays Blix's is the encoding:
+the complete vertex, LOD chains, cooked images, patches applied, tangents generated. Accessors,
+buffer views and sparse data stay behind in the cook.
+
+1. **One scene graph in `.blixmesh` (v12).** A node table (hierarchy, local transforms, names) in
+   every file; meshes referenced by nodes, stored once however many nodes place them; vertices in
+   mesh space; skins as joint-node lists with inverse binds; clips targeting nodes. Splitting and LOD
+   error are computed at each node's world scale, so they stay in metres. Read as one `ModelData`.
+2. **One resident `Model`.** `Rig` folds into it: skins and clips are optional parts of a model, and
+   skinning-only members (`CreateBoneBuffers`, palette packing) refuse by name without a skin.
+   `device.CreateRig` goes. Drawing skinned, posed or at bind pose is a consumer's choice, not a type.
+3. **A cook configuration per project.** What a project decides about each asset it cooks — material
+   rules and normal-map conventions (once `.blixpatch`), split, flipV — in one file the project
+   names, which the build, `blix cook` and the Sponza script all read. The stamp records each entry's
+   hash. No configuration means glTF's defaults. It is what a cook UI would one day edit.
+4. **The engine refuses a `.glb`**, naming the cook. The importers and SharpGLTF move out of `Blix`
+   into a separate `Blix.Import` project the cook depends on; the data types lose `Gltf` (`ModelData`,
+   `MaterialData`, `TextureData`, `MaterialTextureLoader`, …) and load through their own entry points
+   (`ModelData.Load`).
+5. **Studio reads the vertex frame.** A static layout carrying tangent, colour and uv1, so the
+   derivative frame in `studio_lit.frag` goes.
+
+---
+
 ## F — a body in the character room
 
 The one stage not started. `src/Demos/Character/` holds a shared library — room,
@@ -93,15 +144,6 @@ what named tiers are for.
 
 **Linux is absent from the CI matrix.** A second red job teaches nothing the first
 has not; the shape of what Windows needed should be known before it is copied.
-
-**The Studio baseline needs re-recording.** `.baseline/` is local and gitignored; the
-set on this machine dates from 2026-09-17, and 15 of its 68 artifacts no longer match.
-Every `.log` and `.exit` does, so the pose fingerprints, travel numbers and exit codes
-are unchanged and only pixels moved — the picture was looked at and is right. Bisecting
-which commit moved it was abandoned as not worth the hunt. The stage's sky (drawn from the
-environment it bakes, with that bake's sun no longer upside down) then moved every stage capture on
-purpose, so the pixels are expected to differ everywhere and the `.log`s still to match. Re-record
-with `tools/lab-baseline.sh record`; until then the control is expired, not failing.
 
 ---
 

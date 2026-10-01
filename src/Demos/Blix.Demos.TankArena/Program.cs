@@ -418,23 +418,15 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
     // stay cheap. Body + turret take the team tint; tracks + gun are constant.
     private void LoadTankParts(ShaderProgramHandle worldShader, ShaderProgramHandle casterShader)
     {
-        var path = AppFiles.Asset("models", "tank.glb");
-        var model = new GltfStaticImporter().ImportNodes(
-            new Blix.Assets.AssetImportContext(Blix.Assets.AssetId.Parse("tank"), path));
-        var nodes = model.Nodes;
+        // The cooked scene graph read static: the tank's skinned meshes arrive at their bind pose.
+        var model = ModelData.Load(AppFiles.Asset("models", "tank.blixmesh"), new ModelNeeds(Skinned: false));
 
-        int Find(string name) => Array.FindIndex(nodes, n => n.Name == name);
-        Matrix4x4 World(int i)
-        {
-            var m = nodes[i].LocalTransform;
-            for (var p = nodes[i].ParentIndex; p >= 0; p = nodes[p].ParentIndex) m *= nodes[p].LocalTransform;
-            return m;
-        }
+        int Find(string name) => model.FindNode(name);
         // Assemble a node's primitives, recentred so `pivot` sits at the origin.
         IEnumerable<(MeshData, Matrix4x4)> Baked(int node, Vector3 pivot)
         {
-            var xform = World(node) * Matrix4x4.CreateTranslation(-pivot);
-            return nodes[node].Primitives.Select(prim => (prim.Mesh, xform));
+            var xform = model.World[node] * Matrix4x4.CreateTranslation(-pivot);
+            return model.Meshes[model.Nodes[node].MeshIndex].Primitives.Select(prim => (prim.Mesh, xform));
         }
 
         var body = BakeMerge("tank.body", Baked(Find("Tank_body"), HullPivotModel));
@@ -522,12 +514,12 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
     // shared PropType; PlaceProps scatters instances.
     private PropType LoadProp(string file, float targetHeight, bool explosive, ShaderProgramHandle worldShader, ShaderProgramHandle casterShader)
     {
-        var path = AppFiles.Asset("models", file);
-        var model = new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse(file), path));
+        var primitives = ModelData.Load(AppFiles.Asset("models", Path.ChangeExtension(file, ".blixmesh")))
+            .Flattened().Select(p => p.Primitive).ToArray();
 
         var min = new Vector3(float.MaxValue);
         var max = new Vector3(float.MinValue);
-        foreach (var prim in model.Primitives)
+        foreach (var prim in primitives)
         {
             min = Vector3.Min(min, prim.Mesh.Bounds.Min);
             max = Vector3.Max(max, prim.Mesh.Bounds.Max);
@@ -538,7 +530,7 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
 
         // Tint per primitive is the material's own base colour: the world shader is
         // tint x lighting, so this reproduces the authored look without a texture.
-        var parts = model.Primitives.Select(prim =>
+        var parts = primitives.Select(prim =>
         {
             var c = prim.Material?.BaseColorFactor ?? new Vector4(0.7f, 0.7f, 0.7f, 1f);
             return (prim.Mesh, new Vector4(c.X, c.Y, c.Z, 1f));

@@ -89,6 +89,8 @@ public sealed class ObjImporter : IAssetImporter<MeshData>
         }
 
         var file = BlixMeshReader.Read(cookedPath);
+        // An OBJ cooks flat (one root node, identity), so the placed primitives are the parts in world space.
+        var placed = file.PlacedPrimitives().Select(x => x.Primitive).ToArray();
         var wanted = $"recenter={(RecenterToOrigin ? 1 : 0)}";
         if (file.Cooked?.Stamp.Parameters.Contains(wanted, StringComparison.Ordinal) != true)
         {
@@ -96,14 +98,14 @@ public sealed class ObjImporter : IAssetImporter<MeshData>
             return null;
         }
 
-        if (file.Primitives.Count != 1)
+        if (placed.Length != 1)
         {
-            why = $"the cooked mesh has {file.Primitives.Count} parts and this reader returns one — "
+            why = $"the cooked mesh has {placed.Length} parts and this reader returns one — "
                 + "load it through WavefrontParts to use the cooked form";
             return null;
         }
 
-        var p = file.Primitives[0];
+        var p = placed[0];
         var lod0 = p.Lods[0];
         return new MeshData(
             p.Name, p.VertexBytes, lod0.Indices16 ?? Array.Empty<ushort>(),

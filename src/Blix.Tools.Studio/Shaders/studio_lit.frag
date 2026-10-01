@@ -76,30 +76,19 @@ layout(location = 2) in vec2 vUv;
 // does not change the attribute's material meaning.
 layout(location = 3) in vec4 vColour;
 layout(location = 4) in vec2 vUv1;
+// The cooked tangent frame: authored or MikkTSpace's, the frame a glTF normal map is baked against.
+layout(location = 5) in vec4 vTangent;
 
 layout(location = 0) out vec4 outColour;
 
-// The surface frame from screen-space derivatives (Schüler 2013, "Followup: Normal Mapping Without
-// Precomputed Tangents"). Studio's static layout carries vertex colour and so no TANGENT, and one rule
-// for every part beats a rule per layout: authored tangents are not read, and a map baked against
-// MikkTSpace can differ slightly across a UV seam.
-//
-// T and B are the true dP/du and dP/dv. The determinant's sign is kept rather than dropped, so the
-// frame does not depend on which way the framebuffer's y runs and follows mirrored UVs.
-mat3 surfaceFrame(vec3 N, vec3 p, vec2 uv)
+// The surface frame glTF defines: the vertex tangent, re-orthogonalised against the interpolated
+// normal, and the bitangent cross(N, T) * w. MikkTSpace's frame reproduced exactly is what a baked map
+// expects, seams and mirrored UVs included. The cook wrote the tangent against TEXCOORD_0, so a normal
+// map naming set 1 is read in set 0's frame.
+mat3 surfaceFrame(vec3 N)
 {
-    vec3 dp1 = dFdx(p);
-    vec3 dp2 = dFdy(p);
-    vec2 duv1 = dFdx(uv);
-    vec2 duv2 = dFdy(uv);
-    vec3 dp2perp = cross(dp2, N);
-    vec3 dp1perp = cross(N, dp1);
-    float orientation = sign(dot(dp1, dp2perp));
-    vec3 T = (dp2perp * duv1.x + dp1perp * duv2.x) * orientation;
-    vec3 B = (dp2perp * duv1.y + dp1perp * duv2.y) * orientation;
-    float scale = inversesqrt(max(max(dot(T, T), dot(B, B)), 1e-20));
-    // glTF's green axis points up the image, which is toward DECREASING v.
-    return mat3(T * scale, -B * scale, N);
+    vec3 T = normalize(vTangent.xyz - N * dot(N, vTangent.xyz));
+    return mat3(T, cross(N, T) * vTangent.w, N);
 }
 
 vec2 channelUv(int bit)
@@ -121,7 +110,7 @@ void main()
         // Z is rebuilt from XY: a cooked map is two-channel BC5. The scale bends XY, per glTF.
         vec2 xy = texture(uNormalMap, uvNormal).xy * 2.0 - 1.0;
         vec3 tangentNormal = vec3(xy * normalScale, sqrt(max(1.0 - dot(xy, xy), 0.0)));
-        N = normalize(surfaceFrame(N, vWorld, uvNormal) * tangentNormal);
+        N = normalize(surfaceFrame(N) * tangentNormal);
     }
     vec3 V = normalize(uCameraPosition.xyz - vWorld);
     vec3 L = normalize(uSunDirection.xyz);

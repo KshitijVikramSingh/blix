@@ -290,12 +290,12 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
     // leaves charLoaded false and the player falls back to the placeholder box.
     private void CreateCharacter(string shaderDir)
     {
-        var path = AppFiles.Asset("models", "Rogue.glb");
-        GltfModel model;
+        var path = AppFiles.Asset("models", "Rogue.blixmesh");
+        ModelData model;
         try
         {
-            model = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("models/rogue"), path));
-            if (model.Animations.Length == 0) throw new InvalidOperationException("no animations");
+            model = ModelData.Load(path, new ModelNeeds(Skinned: true));
+            if (model.Clips.Count == 0) throw new InvalidOperationException("no animations");
         }
         catch (Exception ex)
         {
@@ -303,12 +303,12 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
             return;
         }
 
-        charSkeleton = model.Skeleton;
+        charSkeleton = model.Skins[0].Skeleton;
         charPlayer = new ClipPlayer(charSkeleton);
         charPalette = new BonePalette(charSkeleton.BoneCount);
         charPalettePayload = new byte[charSkeleton.BoneCount * 64];
-        charMeshNodeTransform = model.MeshNodeTransform;
-        charRun = FindClip(model, "Running_A") ?? model.Animations[0];
+        charMeshNodeTransform = model.Placement(0);
+        charRun = FindClip(model, "Running_A") ?? model.Clips[0];
         charJump = FindClip(model, "Jump_Idle") ?? FindClip(model, "Jump_Full_Short") ?? charRun;
 
         var boneLayout = new UniformBlockLayout(
@@ -325,13 +325,13 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
             "runner.skinned");
 
         // One mesh per primitive; all 12 share one skin material + one bone palette.
-        var n = model.Primitives.Length;
-        charMeshes = new Mesh[n];
-        GltfTexture? albedo = null;
-        for (var i = 0; i < n; i++)
+        var skinned = model.SkinnedPrimitives().ToArray();
+        charMeshes = new Mesh[skinned.Length];
+        TextureData? albedo = null;
+        for (var i = 0; i < skinned.Length; i++)
         {
-            charMeshes[i] = device.CreateMesh(model.Primitives[i].Mesh, $"rogue.{i}");
-            albedo ??= model.Primitives[i].Material?.BaseColorTexture;
+            charMeshes[i] = device.CreateMesh(skinned[i].Mesh, $"rogue.{i}");
+            albedo ??= skinned[i].Material?.BaseColorTexture;
         }
 
         charSkinMaterial = device.CreateMaterial(skinnedShader, name: "rogue.skin").SetTexture(0, UploadAlbedo(albedo)).Handle;
@@ -367,9 +367,9 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
         MemoryMarshal.Write(skinnedPush.AsSpan(64, 64), in viewProj);
     }
 
-    private static AnimationClip? FindClip(GltfModel model, string name)
+    private static AnimationClip? FindClip(ModelData model, string name)
     {
-        foreach (var c in model.Animations) if (c.Name == name) return c;
+        foreach (var c in model.Clips) if (c.Name == name) return c;
         return null;
     }
 
@@ -378,12 +378,12 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
     // Returns null on any failure so the caller can fall back to the cube.
     private Mesh? LoadStaticMesh(string fileName)
     {
-        var path = AppFiles.Asset("models", fileName);
+        var path = AppFiles.Asset("models", Path.ChangeExtension(fileName, ".blixmesh"));
         try
         {
-            var model = new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse($"models/{fileName}"), path));
-            if (model.Primitives.Length == 0) return null;
-            var m = model.Primitives[0].Mesh;
+            var primitives = ModelData.Load(path).Flattened().Select(p => p.Primitive).ToArray();
+            if (primitives.Length == 0) return null;
+            var m = primitives[0].Mesh;
             var vb = device.CreateVertexBuffer(
                 new VertexBufferData(new VertexBufferDescription(m.Layout, m.VertexCount, GraphicsBufferUsage.Static), m.VertexBytes),
                 $"{fileName}.vb");
@@ -399,7 +399,7 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
         }
     }
 
-    private TextureHandle UploadAlbedo(GltfTexture? tex)
+    private TextureHandle UploadAlbedo(TextureData? tex)
     {
         if (tex?.MipBytes is { Count: > 0 } mips)
         {

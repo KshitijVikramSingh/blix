@@ -40,6 +40,16 @@ public static class Program
         var output = args.String("out", "capture.png");
         var modelPath = args.String("model");
         var rigPath = args.String("rig");
+        // A subject that is not there is refused, not skipped: an empty stage is lit sky and ground, so it
+        // passes every lit floor, and a mistyped path used to capture it and exit 0.
+        foreach (var (flag, subject) in new[] { ("--model", modelPath), ("--rig", rigPath) })
+        {
+            if (subject is not null && !File.Exists(subject))
+            {
+                Console.Error.WriteLine($"shot: {flag} {subject}: no such file.");
+                return 2;
+            }
+        }
 
         // <b>A pose, named by a clip and a time, is a reproducible picture.</b> That pairing is what
         // makes a capture evidence rather than a screenshot: "Walking_A at 0.35 s looked like this"
@@ -216,7 +226,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private readonly List<Vector3> rootPath = new();
     private Vector3 rootTravel;
     private float rigDrawnHeight = 3f;
-    private Rig? rig;
+    private Model? rig;
     // <b>The same RigAnimation the viewer uses.</b> This tool had its own ClipPlayers, its own
     // BonePaletteSets and its own instance packing, and that class's header claimed both lab
     // executables used it. They did not, and the cost arrived when skins became plural: per-skin
@@ -521,7 +531,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
         player.ScrubTo(clipTime);
 
-        var extent = rig.LongestExtent;
+        var extent = rig.RestExtent;
         var scale = extent > 0.001f ? 3f / extent : 1f;
         var rigBase = Matrix4x4.CreateScale(scale)
                       * Matrix4x4.CreateTranslation(0f, -rig.RestBounds.Min.Y * scale, 0f);
@@ -573,7 +583,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // shader reads, the placement row, and the distinct-pose fingerprint were all reimplemented
         // in this file. They are the same decisions the viewer makes, and writing them twice is how
         // the per-skin packing came to be written twice.
-        rowSpacing = MathF.Max(1.2f, rig.LongestExtent * scale * 0.75f);
+        rowSpacing = MathF.Max(1.2f, rig.RestExtent * scale * 0.75f);
         var spacing = rowSpacing;
 
         // Body phases are set through RigInstances.Step, which Advance drives. A capture is one instant,
@@ -938,7 +948,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     // Instance i's clip: i steps along the rig's own list from whichever clip the subject is on.
     // In order rather than random, so two runs of the same arguments produce the same picture.
-    private static int ClipIndexFor(Rig rig, AnimationClip? subject, int instance)
+    private static int ClipIndexFor(Model rig, AnimationClip? subject, int instance)
     {
         var start = 0;
         for (var i = 0; i < rig.Clips.Count; i++)
@@ -954,7 +964,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     // Rebuilt per call rather than cached, because Debug() runs a handful of times in a bounded run
     // and a 41-matrix walk is not worth a field. Cache it the day a capture has hundreds of bones.
 
-    private static Matrix4x4[] RestWorlds(Rig rig, ClipPlayer player)
+    private static Matrix4x4[] RestWorlds(Model rig, ClipPlayer player)
     {
         var worlds = new Matrix4x4[rig.Skeleton.BoneCount];
         rig.Skeleton.ComputeBoneWorlds(player.RestPose, worlds);

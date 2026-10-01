@@ -16,6 +16,8 @@
     <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
     <ProjectReference Include="..\Blix.Render\Blix.Render.csproj" />
+    <!-- A tool cooks on open (CookCache): the engine reads cooked models only. -->
+    <ProjectReference Include="..\Blix.Recipes\Blix.Recipes.csproj" />
     <ProjectReference Include="..\Blix.Tools.Shader\Blix.Tools.Shader.csproj" ReferenceOutputAssembly="false" PrivateAssets="all" Private="false" />
   </ItemGroup>
 

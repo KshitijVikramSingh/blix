@@ -34,11 +34,13 @@ public static class Program
     [BlixApp("hello-3d-check", Summary = "read the character headless and check the stage can play it")]
     public static int Check()
     {
-        var character = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("rogue"), Stage.Character));
-        var clips = character.Animations.Select(clip => clip.Name).ToHashSet();
-        var correct = character.Skeleton.BoneCount > 0 && clips.Contains(Playback.Opening);
+        // The same cooked character the stage draws: the stage cooks on open, and so does this.
+        var character = ModelData.Load(Blix.Recipes.CookCache.Resolve(Stage.Character), new ModelNeeds(Skinned: true));
+        var bones = character.IsRigged ? character.Skins[0].Skeleton.BoneCount : 0;
+        var clips = character.Clips.Select(clip => clip.Name).ToHashSet();
+        var correct = bones > 0 && clips.Contains(Playback.Opening);
         Console.WriteLine(correct
-            ? $"hello-3d-check: {character.Skeleton.BoneCount} bones, {clips.Count} clips, opening on {Playback.Opening}"
+            ? $"hello-3d-check: {bones} bones, {clips.Count} clips, opening on {Playback.Opening}"
             : $"hello-3d-check: the character has no bones, or no clip called {Playback.Opening}");
         return correct ? 0 : 1;
     }
@@ -63,7 +65,7 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
     // Studio frames its subjects; --cam, or F12's dump of it, puts it back anywhere.
     private readonly CameraController camera = StudioFraming.Around(StudioFraming.SubjectCentre, -16.6f, 12f, 5.18f);
     private readonly Playback playback = new();
-    private Rig rig = null!;
+    private Model rig = null!;
     private RigInstances body = null!;
     private ObjectTunables tunables = null!;
     private Matrix4x4 placement;
@@ -97,7 +99,7 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
         body = new RigInstances(rig, 1);
 
         // Two metres tall, standing on the ground, whatever size it was authored at.
-        var scale = 2f / rig.LongestExtent;
+        var scale = 2f / rig.RestExtent;
         placement = Matrix4x4.CreateScale(scale) * Matrix4x4.CreateTranslation(0f, -rig.RestBounds.Min.Y * scale, 0f);
     }
 

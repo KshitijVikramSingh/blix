@@ -6,7 +6,7 @@ using Blix.Graphics.Images;
 using SharpGLTF.Schema2;
 using Blix.Cooked;
 
-namespace Blix;
+namespace Blix.Import;
 
 // Static-mesh sibling of GltfImporter. Loads any .glb/.gltf containing untransformed
 // or transformed mesh nodes (no skinning required) and emits a GltfModel whose
@@ -37,146 +37,15 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         return AssetImportException.Refusing(context.SourcePath, () => ImportCore(context));
     }
 
-    /// <summary>
-    /// Null when the cooked mesh was made with the settings this caller wants; else why not.
-    /// </summary>
-    /// <remarks>
-    /// Only the settings that change the VERTICES are compared. <c>flipV</c> moves texture
-    /// coordinates and <c>tangents</c> changes the stride and the attribute set — a mesh cooked
-    /// with either the other way is not a slower answer to the question, it is a different one.
-    /// The remaining stamped parameters (split, foliage, simplify) change how geometry is divided
-    /// or decimated, which every consumer takes as it comes.
-    /// </remarks>
-    private static string? SettingsMismatch(string blixmeshPath, AssetImportContext context)
-    {
-        var stamp = CookedFile.TryReadHeader(blixmeshPath)?.Stamp;
-        if (stamp is null) return null;
-
-        // Rig recipes use a different parameter vocabulary and are handled by GltfImporter.
-        if (!stamp.Value.Parameters.Contains("flipV=", StringComparison.Ordinal)) return null;
-
-        var want = $"flipV={(context.FlipTextureV ? 1 : 0)} tangents={(context.IncludeTangents ? 1 : 0)}";
-        if (stamp.Value.Parameters.Contains(want, StringComparison.Ordinal)) return null;
-
-        return $"a .blixmesh sibling exists but was cooked with '{stamp.Value.Parameters}' and this "
-             + $"load wants '{want}' — the glTF was walked instead. Re-cook with matching flags.";
-    }
-
-    /// <summary>Loads a cooked mesh and nothing else — no glTF is opened, and none need exist.</summary>
-    /// <remarks>
-    /// The image table gives each material channel a row naming a relative resource, so image
-    /// resolution does not require reopening the source glTF.
-    /// <para>
-    /// The texture cache and <c>MaterialFromCooked</c> use the same image-table row keys.
-    /// </para>
-    /// </remarks>
-    private GltfModel ImportCooked(string requestedPath, string blixmeshPath)
-    {
-        var loadWatch = System.Diagnostics.Stopwatch.StartNew();
-        var cooked = BlixMeshReader.Read(blixmeshPath);
-        var cookedDir = Path.GetDirectoryName(Path.GetFullPath(blixmeshPath)) ?? string.Empty;
-
-        var textureCache = new Dictionary<int, GltfTexture>();
-        var materialCache = new Dictionary<int, GltfMaterial>();
-        GltfShared.LoadImagesFromTable(cooked.ImageTable, cooked.MaterialTable, cookedDir, textureCache);
-
-        var primitives = new List<GltfPrimitive>(cooked.Primitives.Count);
-        foreach (var p in cooked.Primitives)
-        {
-            // Sanitize the owned cooked buffer in place. Locate UVs by attribute format because
-            // their location differs between the vertex layouts carried by .blixmesh.
-            var uvAttr = p.Layout.Attributes.First(a => a.Format == VertexAttributeFormat.Float2);
-            SanitizePackedUVs(
-                p.VertexBytes, p.VertexCount, stride: p.Layout.Stride,
-                uvOffset: uvAttr.Offset, p.Name);
-
-            var lod0 = p.Lods[0];
-            var lods = new MeshLod[p.Lods.Count];
-            for (var l = 0; l < p.Lods.Count; l++)
-            {
-                lods[l] = new MeshLod(p.Lods[l].Indices16, p.Lods[l].Indices32, p.Lods[l].Error);
-            }
-
-            primitives.Add(new GltfPrimitive(
-                new MeshData(
-                    p.Name, p.VertexBytes, lod0.Indices16 ?? Array.Empty<ushort>(),
-                    p.Layout, p.Bounds, Indices32: lod0.Indices32, Lods: lods),
-                GltfShared.MaterialFromCooked(
-                    cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache, blixmeshPath)));
-        }
-
-        if (AssetLoadLog.Enabled)
-        {
-            // SourcePath remains the caller's requested identity; CookedPath records the artifact
-            // that satisfied it.
-            AssetLoadLog.Report(new AssetLoadReport(
-                SourcePath: requestedPath,
-                CookedPath: blixmeshPath,
-                Mode: AssetLoadMode.Cooked,
-                Bytes: SafeLength(blixmeshPath),
-                LoadMs: loadWatch.Elapsed.TotalMilliseconds,
-                Recipe: cooked.Cooked?.Stamp.Recipe));
-        }
-
-        return new GltfModel(
-            primitives.ToArray(),
-            new Skeleton(Array.Empty<Bone>()),
-            Array.Empty<AnimationClip>(),
-            Matrix4x4.Identity);
-    }
-
     private GltfModel ImportCore(AssetImportContext context)
     {
-        // A .blixmesh may be requested directly or discovered as a sibling. It carries geometry,
-        // materials, and image resources and therefore loads without opening a source glTF.
-        string? cookedMismatch = null;
-        var direct = Path.GetExtension(context.SourcePath)
-            .Equals(".blixmesh", StringComparison.OrdinalIgnoreCase);
-        var blixmeshPath = direct
-            ? context.SourcePath
-            : Path.ChangeExtension(context.SourcePath, ".blixmesh");
-        if (File.Exists(blixmeshPath))
-        {
-            // A cooked artifact is usable only when its vertex-affecting recipe settings match the
-            // requested layout and UV convention.
-            // A rigged cooked file holds skinned vertices this importer cannot draw. Refused by
-            // name when asked for directly; when it is merely a sibling, the glTF is walked, which
-            // is what a caller asking the STATIC importer for a rigged asset has always got.
-            if (BlixMeshReader.Read(blixmeshPath).IsRigged)
-            {
-                if (direct)
-                {
-                    throw new AssetImportException(
-                        context.SourcePath, null,
-                        "this .blixmesh holds a rig, so the static importer is the wrong one for it — "
-                        + "load it through GltfImporter");
-                }
-
-                cookedMismatch = "the .blixmesh sibling holds a rig — the glTF was walked as static geometry";
-            }
-            else if (SettingsMismatch(blixmeshPath, context) is { } mismatch)
-            {
-                if (direct)
-                {
-                    // Named directly, so there is no source to fall back to. Refusing by name beats
-                    // drawing something wrong.
-                    throw new AssetImportException(context.SourcePath, null, mismatch);
-                }
-
-                cookedMismatch = mismatch;
-            }
-            else
-            {
-                return ImportCooked(context.SourcePath, blixmeshPath);
-            }
-        }
-
+        RefuseCooked(context);
         var loadWatch = System.Diagnostics.Stopwatch.StartNew();
         var model = AssetImportException.Refusing(
             context.SourcePath, () => ModelRoot.Load(context.SourcePath));
 
-        var textureCache = new Dictionary<int, GltfTexture>();
-        var materialCache = new Dictionary<int, GltfMaterial>();
+        var textureCache = new Dictionary<int, TextureData>();
+        var materialCache = new Dictionary<int, PbrMaterial>();
         var primitives = new List<GltfPrimitive>();
 
         // Parallel texture decode. PNG/JPEG decode via StbImageSharp is the
@@ -224,7 +93,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 Mode: AssetLoadMode.Source,
                 Bytes: SafeLength(context.SourcePath),
                 LoadMs: loadWatch.Elapsed.TotalMilliseconds,
-                Warning: cookedMismatch ?? "no .blixmesh sibling — glTF accessors were walked"));
+                Warning: "a glTF source read by its accessors — the engine reads cooked models"));
         }
 
         return new GltfModel(
@@ -252,190 +121,13 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         return AssetImportException.Refusing(context.SourcePath, () => ImportNodesCore(context));
     }
 
-    /// <summary>
-    /// The node hierarchy of a COOKED mesh, with its baked vertices returned to node-local space.
-    /// </summary>
-    /// <remarks>
-    /// Reconstructs the node-shaped view used by hierarchy-aware tools: names, parents, pivots,
-    /// and per-node primitives.
-    /// <para>
-    /// The flat cook folds each node's world matrix into its vertices. This hierarchy path applies
-    /// the recorded node's inverse to recover local-space geometry for consumers that need it.
-    /// </para>
-    /// <para>
-    /// A node whose matrix will not invert keeps its baked vertices and is reported. A degenerate
-    /// transform — a zero scale on some axis — has genuinely destroyed information, and returning
-    /// silently wrong geometry would be worse than returning geometry that is merely still baked.
-    /// </para>
-    /// </remarks>
-    private static GltfNodeModel ImportCookedNodes(string blixmeshPath, bool includeColour)
-    {
-        var cooked = BlixMeshReader.Read(blixmeshPath);
-        var table = cooked.NodeTable;
-        if (table.Count == 0)
-        {
-            throw new AssetImportException(
-                blixmeshPath, null,
-                "this .blixmesh carries no node table, so there is no hierarchy in it — re-cook it");
-        }
-
-        // World per node, in one forward pass. The reader has already refused a table whose parents
-        // do not precede their children, which is what makes one pass enough.
-        var world = new Matrix4x4[table.Count];
-        for (var i = 0; i < table.Count; i++)
-        {
-            world[i] = table[i].ParentIndex < 0
-                ? table[i].LocalTransform
-                : table[i].LocalTransform * world[table[i].ParentIndex];
-        }
-
-        var byNode = new List<GltfPrimitive>[table.Count];
-        var materialCache = new Dictionary<int, GltfMaterial>();
-        var textureCache = new Dictionary<int, GltfTexture>();
-        var cookedDir = Path.GetDirectoryName(Path.GetFullPath(blixmeshPath)) ?? string.Empty;
-        GltfShared.LoadImagesFromTable(cooked.ImageTable, cooked.MaterialTable, cookedDir, textureCache);
-
-        foreach (var p in cooked.Primitives)
-        {
-            if (p.NodeIndex < 0 || p.NodeIndex >= table.Count) continue;
-            (byNode[p.NodeIndex] ??= new List<GltfPrimitive>()).Add(
-                new GltfPrimitive(
-                    Unbake(p, world[p.NodeIndex], blixmeshPath, includeColour),
-                    GltfShared.MaterialFromCooked(
-                        cooked.MaterialTable, p.MaterialIndex, materialCache, textureCache, blixmeshPath),
-                    MaterialIndex: p.MaterialIndex));
-        }
-
-        var nodes = new GltfNode[table.Count];
-        for (var i = 0; i < table.Count; i++)
-        {
-            nodes[i] = new GltfNode(
-                table[i].Name,
-                table[i].ParentIndex,
-                table[i].LocalTransform,
-                byNode[i]?.ToArray() ?? Array.Empty<GltfPrimitive>());
-        }
-
-        return new GltfNodeModel(nodes);
-    }
-
-    /// <summary>
-    /// A cooked primitive as node-local geometry, in the layout the CALLER asked for.
-    /// </summary>
-    /// <remarks>
-    /// Converts the cooked vertex stream to the layout requested by the caller. In particular,
-    /// <c>includeColour</c> produces the 44-byte
-    /// <c>VertexPosition3NormalTexture2Color</c> layout rather than exposing the cooked stream's
-    /// stride to a pipeline that declares another one.
-    /// <para>
-    /// The defaults match what the source path uses for an asset that declares neither, so a cooked
-    /// load and a source load agree: uv1 falls back to uv0, and an absent COLOR_0 is white, which is
-    /// glTF's own rule because colour is a multiplier.
-    /// </para>
-    /// <para>
-    /// Attributes are found by FORMAT — first Float3 is position, second is normal, first Float2 is
-    /// the texture coordinate — rather than by location, for the same reason the UV heal is: location
-    /// numbers differ between the layouts this format emits and the formats do not.
-    /// </para>
-    /// </remarks>
-    private static MeshData Unbake(
-        BlixMeshPrimitive p, in Matrix4x4 world, string path, bool includeColour)
-    {
-        var lod0 = p.Lods[0];
-        var indices16 = lod0.Indices16 ?? Array.Empty<ushort>();
-
-        var float3 = p.Layout.Attributes.Where(a => a.Format == VertexAttributeFormat.Float3).ToArray();
-        var float2 = p.Layout.Attributes.FirstOrDefault(a => a.Format == VertexAttributeFormat.Float2);
-        if (float3.Length < 2 || float2 is null)
-        {
-            throw new AssetImportException(
-                path, null,
-                $"primitive '{p.Name}' has a {p.Layout.Stride}-byte layout this reader cannot take apart "
-                + "— it needs a position and a normal (Float3) and a texture coordinate (Float2)");
-        }
-
-        Matrix4x4.Invert(world, out var inverse);
-        var invertible = !world.IsIdentity && Matrix4x4.Invert(world, out inverse);
-        if (!world.IsIdentity && !invertible)
-        {
-            // A degenerate transform — a zero scale on some axis — has genuinely destroyed
-            // information. Leaving the vertices baked is wrong in a way a person can see; returning
-            // silently wrong geometry is wrong in a way nobody can.
-            Console.WriteLine(
-                $"[blix] '{p.Name}' in {Path.GetFileName(path)} sits under a transform that will not "
-                + "invert — its vertices stay in world space.");
-        }
-
-        var normalMatrix = invertible ? ComputeNormalMatrix(inverse) : Matrix4x4.Identity;
-        var source = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(p.VertexBytes);
-        var stride = p.Layout.Stride / sizeof(float);
-        var positionAt = float3[0].Offset / sizeof(float);
-        var normalAt = float3[1].Offset / sizeof(float);
-        var uvAt = float2.Offset / sizeof(float);
-
-        var min = new Vector3(float.MaxValue);
-        var max = new Vector3(float.MinValue);
-        var colourVerts = includeColour ? new VertexPosition3NormalTexture2Color[p.VertexCount] : null;
-        var plainVerts = includeColour ? null : new VertexPosition3NormalTexture[p.VertexCount];
-
-        for (var v = 0; v < p.VertexCount; v++)
-        {
-            var at = v * stride;
-            var position = new Vector3(source[at + positionAt], source[at + positionAt + 1], source[at + positionAt + 2]);
-            var normal = new Vector3(source[at + normalAt], source[at + normalAt + 1], source[at + normalAt + 2]);
-            var uv = new Vector2(source[at + uvAt], source[at + uvAt + 1]);
-
-            if (invertible)
-            {
-                position = Vector3.Transform(position, inverse);
-                normal = Vector3.TransformNormal(normal, normalMatrix);
-                if (normal.LengthSquared() > 1e-12f) normal = Vector3.Normalize(normal);
-            }
-
-            min = Vector3.Min(min, position);
-            max = Vector3.Max(max, position);
-
-            var gp = new GraphicsVector3(position.X, position.Y, position.Z);
-            var gn = new GraphicsVector3(normal.X, normal.Y, normal.Z);
-            var gt = new GraphicsVector2(uv.X, uv.Y);
-
-            if (colourVerts is not null)
-            {
-                // uv1 falls back to uv0 and colour to white — the same defaults the source path
-                // applies to an asset declaring neither.
-                colourVerts[v] = new VertexPosition3NormalTexture2Color(
-                    gp, gn, gt, gt, VertexPosition3NormalTextureColor.White);
-            }
-            else
-            {
-                plainVerts![v] = new VertexPosition3NormalTexture(gp, gn, gt);
-            }
-        }
-
-        var packed = colourVerts is not null
-            ? VertexPosition3NormalTexture2Color.Pack(colourVerts)
-            : VertexPosition3NormalTexture.Pack(plainVerts!);
-        var layout = colourVerts is not null
-            ? VertexPosition3NormalTexture2Color.Layout
-            : VertexPosition3NormalTexture.Layout;
-
-        return new MeshData(
-            p.Name, packed, indices16, layout,
-            p.VertexCount > 0 ? new Bounds3(min, max) : p.Bounds,
-            Indices32: lod0.Indices32);
-    }
-
     private GltfNodeModel ImportNodesCore(AssetImportContext context)
     {
-        if (Path.GetExtension(context.SourcePath).Equals(".blixmesh", StringComparison.OrdinalIgnoreCase))
-        {
-            return ImportCookedNodes(context.SourcePath, context.IncludeColour);
-        }
-
+        RefuseCooked(context);
         var model = AssetImportException.Refusing(context.SourcePath, () => ModelRoot.Load(context.SourcePath));
         var gltfDir = Path.GetDirectoryName(Path.GetFullPath(context.SourcePath)) ?? string.Empty;
-        var textureCache = new Dictionary<int, GltfTexture>();
-        var materialCache = new Dictionary<int, GltfMaterial>();
+        var textureCache = new Dictionary<int, TextureData>();
+        var materialCache = new Dictionary<int, PbrMaterial>();
         GltfShared.PreDecodeImages(model, textureCache, gltfDir, context.SourcePath);
 
         var glNodes = model.LogicalNodes.ToList();
@@ -462,10 +154,19 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
                 }
             }
 
-            nodes[i] = new GltfNode(node.Name ?? $"node{i}", parent, node.LocalMatrix, prims);
+            // The cook's spelling of an unnamed node (MeshRecipe.CookNodes), so both paths agree.
+            nodes[i] = new GltfNode(node.Name ?? $"node_{node.LogicalIndex}", parent, node.LocalMatrix, prims);
         }
 
         return new GltfNodeModel(nodes, GltfShared.CollectIgnored(model, StaticFeatures(context)));
+    }
+
+    // A cooked file is the engine's to read; this reads sources, for the cook.
+    internal static void RefuseCooked(AssetImportContext context)
+    {
+        if (!Path.GetExtension(context.SourcePath).Equals(".blixmesh", StringComparison.OrdinalIgnoreCase)) return;
+        throw new AssetImportException(
+            context.SourcePath, null, "this is a cooked model — read it with ModelData.Load; this importer reads glTF sources, for the cook");
     }
 
     private static GltfShared.VertexFeatures StaticFeatures(AssetImportContext context) =>
@@ -477,14 +178,13 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
     /// <c>VertexPosition3NormalTexture2Color</c> layout. This is opt-in because the importer output
     /// layout must match the pipeline's declared vertex stride and attributes.
     /// </param>
+    /// <remarks>
+    /// With both <paramref name="includeTangents"/> and <paramref name="includeColour"/>, the 60-byte
+    /// complete vertex (<c>VertexPosition3NormalTangentTexture2Color</c>), whose tangent is ZERO where
+    /// the source authored none: the cook fills it with MikkTSpace's frame, and nothing else guesses.
+    /// </remarks>
     public static MeshData BuildStaticMeshData(string name, MeshPrimitive primitive, Matrix4x4 world, Matrix4x4 normalMatrix, bool flipTextureV = false, bool includeTangents = false, bool includeColour = false)
     {
-        if (includeTangents && includeColour)
-        {
-            // No current vertex layout carries both tangent and colour/second-UV attributes.
-            throw new NotSupportedException(
-                $"'{name}': tangents and vertex colour cannot be imported together — no vertex layout carries both.");
-        }
 
         // ── What glTF 2.0 defines, and what this reads ──────────────────────────────────────
         // Spec §3.7.2.1 "Meshes / Overview", the mesh.primitive attribute table:
@@ -531,7 +231,41 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
         byte[] packed;
         VertexLayout layout;
         int uvOffset;
-        if (includeTangents)
+        if (includeTangents && includeColour)
+        {
+            var verts = new VertexPosition3NormalTangentTexture2Color[vertexCount];
+            for (var v = 0; v < vertexCount; v++)
+            {
+                var pWorld = GraphicsMatrices.TransformPoint(world, positions[v]);
+                var nWorld = BuildNormal(v);
+                var tangent = new GraphicsVector4(0f, 0f, 0f, 0f);
+                if (tangents is not null)
+                {
+                    var t = tangents[v];
+                    var tDir = Vector3.Normalize(GraphicsMatrices.TransformDirection(world, new Vector3(t.X, t.Y, t.Z)));
+                    tangent = new GraphicsVector4(tDir.X, tDir.Y, tDir.Z, t.W < 0f ? -1f : 1f);
+                }
+
+                var uv = BuildUv(v);
+                var uv1v = uv1 is null ? uv : new Vector2(uv1[v].X, flipTextureV ? 1.0f - uv1[v].Y : uv1[v].Y);
+                var c = colours is null
+                    ? VertexPosition3NormalTextureColor.White
+                    : VertexPosition3NormalTextureColor.Pack(colours[v].X, colours[v].Y, colours[v].Z, colours[v].W);
+                verts[v] = new VertexPosition3NormalTangentTexture2Color(
+                    new GraphicsVector3(pWorld.X, pWorld.Y, pWorld.Z),
+                    new GraphicsVector3(nWorld.X, nWorld.Y, nWorld.Z),
+                    tangent,
+                    new GraphicsVector2(uv.X, uv.Y),
+                    new GraphicsVector2(uv1v.X, uv1v.Y),
+                    c);
+                minB = Vector3.Min(minB, pWorld);
+                maxB = Vector3.Max(maxB, pWorld);
+            }
+            packed = VertexPosition3NormalTangentTexture2Color.Pack(verts);
+            layout = VertexPosition3NormalTangentTexture2Color.Layout;
+            uvOffset = 10 * sizeof(float);
+        }
+        else if (includeTangents)
         {
             var verts = new VertexPosition3NormalTangentTexture[vertexCount];
             for (var v = 0; v < vertexCount; v++)
@@ -710,20 +444,7 @@ public sealed class GltfStaticImporter : IAssetImporter<GltfModel>
     }
 
     /// <summary>The inverse-transpose of a model matrix, for transforming normals.</summary>
-    /// <remarks>
-    /// Public because project-owned recipes use the same normal transformation as runtime imports;
-    /// recipe assemblies do not require privileged internal access.
-    /// </remarks>
-    public static Matrix4x4 ComputeNormalMatrix(Matrix4x4 model)
-    {
-        // F-016: engine row-vector convention. For a direction transform,
-        // GraphicsMatrices.TransformDirection treats the matrix as row-vector
-        // and uses the rotation 3x3 (M11-M33). For invariance under non-uniform
-        // scale we need the inverse-transpose. In row-vector form that's
-        // Transpose(Invert(model)).
-        if (!Matrix4x4.Invert(model, out var inverse)) return Matrix4x4.Identity;
-        return Matrix4x4.Transpose(inverse);
-    }
+    public static Matrix4x4 ComputeNormalMatrix(Matrix4x4 model) => GraphicsMatrices.NormalMatrix(model);
 
 
 }

@@ -99,11 +99,13 @@ public static class WavefrontParts
             return null;
         }
 
-        var parts = new Part[file.Primitives.Count];
+        // An OBJ cooks flat (one root node, identity), so the placed primitives are the parts in world space.
+        var placed = file.PlacedPrimitives().Select(x => x.Primitive).ToArray();
+        var parts = new Part[placed.Length];
         var materials = file.MaterialTable;
         for (var i = 0; i < parts.Length; i++)
         {
-            var p = file.Primitives[i];
+            var p = placed[i];
             var lod0 = p.Lods[0];
 
             // A primitive whose material index is out of range takes white rather than throwing:
