@@ -424,7 +424,7 @@ public sealed partial class VulkanGraphicsDevice
             // would be one per program per frame slot that nothing ever binds.
             if (IsDynamicUniformSlot(setIdx, s)) continue;
             // A runtime-sized block has no length until a material gives it one (CreateMaterial's
-            // blockSizes), so the program keeps no buffer for it; a draw must bind a material there.
+            // arrayLengths), so the program keeps no buffer for it; a draw must bind a material there.
             if (block.TotalSize == 0) continue;
             var usage = s.Type == ShaderResourceType.StorageBuffer
                 ? BufferUsageFlags.StorageBufferBit
@@ -929,15 +929,15 @@ public sealed partial class VulkanGraphicsDevice
     // replicated (use MaxFramesInFlightCount) — caller writes the matching
     // slot each frame via MaterialBindings.WriteBuffer.
     IMaterialBindings IGraphicsDevice.CreateMaterial(
-        ShaderProgramHandle program, int setIndex, int framesInFlight, string? name, IReadOnlyDictionary<int, int>? blockSizes) =>
-        CreateMaterial(program, setIndex, framesInFlight, name, blockSizes);
+        ShaderProgramHandle program, int setIndex, int framesInFlight, string? name, IReadOnlyDictionary<int, int>? arrayLengths) =>
+        CreateMaterial(program, setIndex, framesInFlight, name, arrayLengths);
 
     public MaterialBindings CreateMaterial(
         ShaderProgramHandle programHandle,
         int setIndex = MaterialOwnedSet,
         int framesInFlight = 1,
         string? name = null,
-        IReadOnlyDictionary<int, int>? blockSizes = null)
+        IReadOnlyDictionary<int, int>? arrayLengths = null)
     {
         if (!shaderProgramTable.TryGetValue(programHandle.Id, out var prog))
         {
@@ -949,7 +949,7 @@ public sealed partial class VulkanGraphicsDevice
                 $"Shader program '{prog.Name}' declares no slots at set {setIndex} — cannot create material for it.");
         }
 
-        var materialInterface = SizedFor(prog, setIndex, blockSizes);
+        var materialInterface = SizedFor(prog, setIndex, arrayLengths);
         var id = nextResourceId++;
         var handle = new MaterialHandle(id);
         var material = new MaterialBindings(
@@ -967,23 +967,23 @@ public sealed partial class VulkanGraphicsDevice
     // The program's interface with this material's runtime-sized blocks given their length, checked
     // against what this device can bind. A zero-byte block is refused here, by name, rather than
     // reaching the allocator as the ErrorOutOfDeviceMemory it used to be.
-    private ShaderInterface SizedFor(VkShaderProgramEntry prog, int setIndex, IReadOnlyDictionary<int, int>? blockSizes)
+    private ShaderInterface SizedFor(VkShaderProgramEntry prog, int setIndex, IReadOnlyDictionary<int, int>? arrayLengths)
     {
         var sized = prog.Interface;
-        foreach (var (binding, bytes) in blockSizes ?? new Dictionary<int, int>())
+        foreach (var (binding, elements) in arrayLengths ?? new Dictionary<int, int>())
         {
             var slot = sized.Slots.FirstOrDefault(s => s.Set == setIndex && s.Binding == binding)
                 ?? throw new ArgumentException(
-                    $"'{prog.Name}' has no binding {binding} in set {setIndex} to size.", nameof(blockSizes));
-            if (slot.BlockLayout is { TotalSize: > 0 } declared)
+                    $"'{prog.Name}' has no binding {binding} in set {setIndex} to size.", nameof(arrayLengths));
+            if (slot.BlockLayout is not { RuntimeArray: not null })
             {
                 throw new ArgumentException(
-                    $"'{prog.Name}' set {setIndex} binding {binding} is {declared.TotalSize} bytes as the shader declares it; " +
-                    "only a runtime-sized block (one ending in an unsized array) takes its size from the material.",
-                    nameof(blockSizes));
+                    $"'{prog.Name}' set {setIndex} binding {binding} is {slot.BlockLayout?.TotalSize ?? 0} bytes as the shader declares it; " +
+                    "only a runtime-sized block (one ending in an unsized array) takes a length from the material.",
+                    nameof(arrayLengths));
             }
 
-            sized = sized.WithBlockSize(setIndex, binding, bytes);
+            sized = sized.WithArrayLength(setIndex, binding, elements);
         }
 
         foreach (var slot in sized.Slots.Where(s => s.Set == setIndex && s.BlockLayout is not null))
@@ -992,7 +992,7 @@ public sealed partial class VulkanGraphicsDevice
             if (bytes == 0)
             {
                 throw new InvalidOperationException(
-                    $"'{prog.Name}' set {setIndex} binding {slot.Binding} is runtime-sized; pass its bytes in blockSizes.");
+                    $"'{prog.Name}' set {setIndex} binding {slot.Binding} is runtime-sized; pass its element count in arrayLengths.");
             }
 
             var (limit, limitName) = slot.Type == ShaderResourceType.StorageBuffer

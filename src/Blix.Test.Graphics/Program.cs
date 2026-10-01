@@ -5167,8 +5167,8 @@ static ShaderInterface MinimalShader() => new(new[]
 //
 // What reflection cannot supply is a runtime-sized block's length -- `InstanceData instances[]`
 // reflects with block_size 0, because the count belongs to the application. That is what
-// ShaderInterface.WithBlockSize is for, and asking for it explicitly is the point: the shader
-// owns the shape, the caller owns the count.
+// ShaderInterface.WithArrayLength is for, and asking for it explicitly is the point: the shader
+// owns the shape (offset and stride), the caller owns the count.
 {
     var srcDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
     var sources = Directory.Exists(srcDir)
@@ -5735,6 +5735,57 @@ static ShaderInterface MinimalShader() => new(new[]
         $"{byMaterial[0].Mesh.Bounds} / {byMaterial[1].Mesh.Bounds}");
 }
 
+// ============================================================================
+// Section BQ — a runtime-sized block is sized by a COUNT; offset and stride are the shader's.
+// ============================================================================
+//
+// `mat4 m[]` reflects with block_size 0 and array [0], but its offset and array_stride are there. Callers
+// used to pass bytes (bones x bodies x 64), restating a stride the shader already declares and assuming
+// the array starts at 0. The JSON below is spirv-cross's own shape: the engine's BlixBones block, and one
+// with a fixed member before its unsized array.
+{
+    const string json = """
+    {
+      "entryPoints": [{ "name": "main", "mode": "vert" }],
+      "types": {
+        "_19": { "name": "BlixBones", "members": [
+          { "name": "m", "type": "mat4", "array": [0], "array_size_is_literal": [true], "offset": 0, "array_stride": 64, "matrix_stride": 16 } ] },
+        "_30": { "name": "Lights", "members": [
+          { "name": "count", "type": "vec4", "offset": 0 },
+          { "name": "lights", "type": "vec4", "array": [0], "array_size_is_literal": [true], "offset": 16, "array_stride": 32 } ] }
+      },
+      "ssbos": [
+        { "type": "_19", "name": "BlixBones", "readonly": true, "block_size": 0, "set": 3, "binding": 0 },
+        { "type": "_30", "name": "Lights", "readonly": true, "block_size": 16, "set": 3, "binding": 1 }
+      ]
+    }
+    """;
+    var reflected = ShaderReflection.MergeStages(ShaderReflection.Parse(json, "bq.vert"));
+    var bones = reflected.Slots.Single(x => x.Binding == 0).BlockLayout!;
+    var lights = reflected.Slots.Single(x => x.Binding == 1).BlockLayout!;
+    t.Expect("BQ.1 reflection marks the unsized array, with the stride the shader gives it",
+        bones.RuntimeArray is { Name: "m", ElementStride: 64, Offset: 0 } && lights.RuntimeArray is { Name: "lights", ElementStride: 32, Offset: 16 },
+        $"{bones.RuntimeArray} / {lights.RuntimeArray}");
+    t.Expect("BQ.1 a count sizes the block from where the array starts: 30 bones is 1920 bytes, 3 lights after a vec4 is 112",
+        bones.SizeFor(30) == 1920 && lights.SizeFor(3) == 112, $"{bones.SizeFor(30)} / {lights.SizeFor(3)}");
+    var sized = reflected.WithArrayLength(3, 1, 3).Slots.Single(x => x.Binding == 1).BlockLayout!;
+    t.Expect("BQ.2 WithArrayLength grows the array member and keeps the fixed one where it was",
+        sized.TotalSize == 112 && sized.Members[0] is { Name: "count", Offset: 0, Size: 16 } && sized.Members[1].Size == 96,
+        $"{sized.TotalSize}: {string.Join(", ", sized.Members)}");
+
+    // A fixed block has no length to give, and asking is refused rather than ignored.
+    const string fixedJson = """
+    {
+      "entryPoints": [{ "name": "main", "mode": "vert" }],
+      "types": { "_5": { "name": "Frame", "members": [ { "name": "vp", "type": "mat4", "offset": 0, "matrix_stride": 16 } ] } },
+      "ubos": [ { "type": "_5", "name": "Frame", "block_size": 64, "set": 0, "binding": 0 } ]
+    }
+    """;
+    var fixedBlock = ShaderReflection.MergeStages(ShaderReflection.Parse(fixedJson, "fixed.vert"));
+    t.ExpectThrows("BQ.3 a block the shader fixes takes no length",
+        () => fixedBlock.WithArrayLength(0, 0, 4), mustMention: "does not end in an unsized array");
+}
+
 t.PrintSummary();
 return t.Failed;
 
@@ -5898,7 +5949,7 @@ sealed class RecordingDevice : IGraphicsDevice
     public ShaderProgramHandle CreateShaderProgramFromSpv(byte[] vertexSpv, byte[] fragmentSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
     public ShaderProgramHandle CreateComputeShaderProgramFromSpv(byte[] computeSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
     public PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null) => throw No();
-    public IMaterialBindings CreateMaterial(ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null, IReadOnlyDictionary<int, int>? blockSizes = null) => throw No();
+    public IMaterialBindings CreateMaterial(ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null, IReadOnlyDictionary<int, int>? arrayLengths = null) => throw No();
     public void DestroyMaterial(MaterialHandle handle) => throw No();
     public TextureHandle CreateTextureCube(int faceSize, TextureFormat format, int mipCount, ReadOnlySpan<byte> data, SamplerDescription sampler, string name) => throw No();
     public TextureHandle CreateStorageTexture2D(int width, int height, TextureFormat format, SamplerDescription sampler, string? name = null) => throw No();

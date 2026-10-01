@@ -259,7 +259,7 @@ public sealed class Model : IDisposable
             .Select((s, i) => device.CreateMaterial(
                 program, setIndex: DescriptorSets.Draw, framesInFlight: device.MaxFramesInFlightCount,
                 name: $"{Name}.bones.{i}",
-                blockSizes: new Dictionary<int, int> { [0] = checked(s.Skeleton.BoneCount * maxInstances * 64) }))
+                arrayLengths: new Dictionary<int, int> { [0] = checked(s.Skeleton.BoneCount * maxInstances) }))
             .ToArray();
         return new BoneBuffers(device, bindings, skins.Select(s => s.Skeleton.BoneCount).ToArray(), maxInstances);
     }

@@ -73,7 +73,7 @@ public sealed class NoGraphicsDevice : IGraphicsDevice
 
     public IMaterialBindings CreateMaterial(
         ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null,
-        IReadOnlyDictionary<int, int>? blockSizes = null) => throw Refuse();
+        IReadOnlyDictionary<int, int>? arrayLengths = null) => throw Refuse();
 
     public void DestroyMaterial(MaterialHandle handle) => throw Refuse();
 

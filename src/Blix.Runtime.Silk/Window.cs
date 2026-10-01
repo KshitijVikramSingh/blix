@@ -793,7 +793,13 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         // exactly why a missing teardown is otherwise invisible. Reported, not judged. It covers every
         // kind of handle IGraphicsDevice hands out; a new kind must join the snapshot, or a missed
         // destroy of it reports clean.
-        if (trace && graphicsDevice is not null) ReportLeftovers(graphicsDevice.SnapshotResources());
+        // Under --validate a leftover is a failure, like a validation error: the gate runs every leg that
+        // way, so a missing teardown fails the leg that has it instead of being printed and scrolled past.
+        if ((trace || options.Validate) && graphicsDevice is not null
+            && ReportLeftovers(graphicsDevice.SnapshotResources(), print: trace) is { Length: > 0 } leftovers && options.Validate)
+        {
+            BlixApps.ReportFailure($"the loop left resources for the device to free: {leftovers} (BLIX_TEARDOWN_TRACE=1 names them)");
+        }
         Step("graphics-device");
         graphicsDevice?.Dispose();
         Step("window");
@@ -810,7 +816,8 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         Step("done");
     }
 
-    private static void ReportLeftovers(ResourceRegistrySnapshot live)
+    // What the loop left, as "3 pipeline(s), 1 material(s)", or empty. Printed (with names) when print is set.
+    private static string ReportLeftovers(ResourceRegistrySnapshot live, bool print)
     {
         // Cached pipelines are the device's by contract (GetOrCreatePipeline), and so is the program a
         // cached pipeline still uses; so are the transient arena's buffers. None is a loop's to destroy.
@@ -827,13 +834,17 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             ("indirect buffer", live.IndirectBuffers.Select(e => e.Name).ToArray()),
         };
         var total = kinds.Sum(k => k.Names.Count);
+        var summary = string.Join(", ", kinds.Where(k => k.Names.Count > 0).Select(k => $"{k.Names.Count} {k.Kind}(s)"));
+        if (!print) return summary;
         Console.Error.WriteLine(total == 0
             ? "[teardown] the loop released everything it made (buffers, textures, programs, pipelines, surfaces, materials, indirect buffers)"
-            : $"[teardown] left for the device to free: {string.Join(", ", kinds.Where(k => k.Names.Count > 0).Select(k => $"{k.Names.Count} {k.Kind}(s)"))}");
+            : $"[teardown] left for the device to free: {summary}");
         foreach (var (kind, names) in kinds.Where(k => k.Names.Count > 0))
         {
             Console.Error.WriteLine($"[teardown]   {kind}: {string.Join(", ", names.Take(12))}{(names.Count > 12 ? $", … {names.Count - 12} more" : "")}");
         }
+
+        return summary;
     }
 
     // A pick recorded into this frame, answered once the frame is submitted.
