@@ -30,7 +30,7 @@ namespace Blix.Demos.TankArena;
 // ── Executable spec for (engine primitives this demo proves) ──
 //   • Transform3D parenting: hull → turret → barrel compose + WorldPosition muzzle
 //   • SetParent(null, keepWorldPose) — the shell detach-and-fly op
-//   • glTF ImportNodes → measured-pivot rig fit (`blix inspect` workflow)
+//   • the cooked scene graph (ModelData nodes) → measured-pivot rig fit (`blix inspect` workflow)
 //   • RenderGraph sun-shadow + HDR, per-part InstancedBatch on one shared pipeline
 // ── Intentionally owns (stays local; don't extract until a 2nd consumer needs it) ──
 //   • enemy AI, obstacle-avoidance steering, turret tracking, combat-feel tuning
@@ -418,8 +418,8 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
     }
 
     // Load the articulated tank model and split it into the four drawable parts
-    // (body / tracks / turret / gun), each baked to its rig pivot. ImportNodes keeps
-    // every node in LOCAL space; we compose each node's world transform, bake
+    // (body / tracks / turret / gun), each baked to its rig pivot. The cooked scene graph
+    // keeps meshes in mesh space with each node's world (ModelData.World); we bake
     // (assemble + recentre-on-pivot) into the part mesh, and hand the rest of the
     // fit (scale / yaw / lift) to the per-frame instance matrix so the live knobs
     // stay cheap. Body + turret take the team tint; tracks + gun are constant.

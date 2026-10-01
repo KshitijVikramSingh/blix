@@ -7,10 +7,11 @@ namespace Blix;
 
 /// <summary>What a load asks of a model's vertices: the layout its pipelines declare.</summary>
 /// <param name="Tangents">Carry the tangent frame (normal-mapped static pipelines).</param>
-/// <param name="Colour">Carry COLOR_0 and the second texture coordinate.</param>
+/// <param name="Colour">Carry COLOR_0 and the second texture coordinate, in static and skinned meshes alike.</param>
 /// <param name="Skinned">
-/// Keep skinned meshes skinned, in the 80-byte layout skinned pipelines read. False reads them as static
-/// geometry at their bind pose, which is what a model view of a rigged file draws.
+/// Keep skinned meshes skinned: in the 80-byte layout skinned pipelines read, or the complete 92-byte one (with
+/// TEXCOORD_1 and COLOR_0) when <paramref name="Colour"/> asks. False reads them as static geometry at their bind
+/// pose, which is what a model view of a rigged file draws.
 /// </param>
 /// <summary>What a <c>KHR_lights_punctual</c> light is.</summary>
 public enum LightType
@@ -331,7 +332,11 @@ public sealed class ModelData
         var meshes = file.Meshes.Select(m =>
         {
             var skinned = m.SkinIndex >= 0 && needs.Skinned;
-            var layout = skinned ? VertexPosition3NormalTextureSkin4Tangent.Layout : staticLayout;
+            // Colour asks for COLOR_0 and TEXCOORD_1 in either kind: the skinned vertex as cooked carries both (the
+            // 92-byte layout), and dropping them here made a skinned material on set 1 sample set 0.
+            var layout = skinned
+                ? (needs.Colour ? VertexPosition3NormalTextureSkin4Tangent2Color.Layout : VertexPosition3NormalTextureSkin4Tangent.Layout)
+                : staticLayout;
             var primitives = m.Primitives.Select(p =>
             {
                 var (bytes, bounds) = CookedVertices.Repack(p, layout, transform: null, path);

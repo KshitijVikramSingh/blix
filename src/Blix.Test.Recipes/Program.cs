@@ -556,6 +556,197 @@ public static class Program
         }
     }
 
+    // KHR_mesh_quantization was accepted with nothing exercising it. NormalTangentTest_quantized (derived by the
+    // fetch script) is NormalTangentTest re-encoded as an optimiser writes it: POSITION as unsigned shorts with the
+    // dequantisation on the node, NORMAL as normalized bytes, TEXCOORD_0 as normalized unsigned shorts. Placed in
+    // the world, every vertex must be the float file's to within one quantisation step. CONTROL: the quantized
+    // file's own (node-local) positions are nowhere near the floats, so it is the node transform that agrees.
+    private static void QuantizedAttributesReadAsTheirFloats(TestRunner t)
+    {
+        if (FindFile("NormalTangentTest_quantized.gltf") is not { } quantized || FindFile("NormalTangentTest.glb") is not { } plain) return;
+        var q = Blix.ModelData.Load(CookCache.Resolve(quantized));
+        var f = Blix.ModelData.Load(CookCache.Resolve(plain));
+        var qm = q.Flattened().Single().Primitive.Mesh;
+        var fm = f.Flattened().Single().Primitive.Mesh;
+        var local = q.Meshes.Single().Primitives.Single().Mesh;
+        t.Expect("a quantized file cooks to the float file's vertex and index counts",
+            qm.VertexCount == fm.VertexCount && qm.IndexCount == fm.IndexCount, $"{qm.VertexCount}/{qm.IndexCount} vs {fm.VertexCount}/{fm.IndexCount}");
+        if (qm.VertexCount != fm.VertexCount) return;
+
+        int At(Blix.Assets.MeshData m, int location) => m.Layout.Attributes.First(a => a.Location == location).Offset;
+        System.Numerics.Vector3 V3(Blix.Assets.MeshData m, int v, int at)
+        {
+            var o = (v * m.Layout.Stride) + at;
+            return new(BitConverter.ToSingle(m.VertexBytes, o), BitConverter.ToSingle(m.VertexBytes, o + 4), BitConverter.ToSingle(m.VertexBytes, o + 8));
+        }
+
+        System.Numerics.Vector2 V2(Blix.Assets.MeshData m, int v, int at)
+        {
+            var o = (v * m.Layout.Stride) + at;
+            return new(BitConverter.ToSingle(m.VertexBytes, o), BitConverter.ToSingle(m.VertexBytes, o + 4));
+        }
+
+        var extent = fm.Bounds.Max - fm.Bounds.Min;
+        var step = MathF.Max(extent.X, MathF.Max(extent.Y, extent.Z)) / 65535f;
+        float worstPosition = 0f, worstNormal = 0f, worstUv = 0f, worstRaw = 0f;
+        for (var v = 0; v < fm.VertexCount; v++)
+        {
+            var fp = V3(fm, v, At(fm, 0));
+            worstPosition = MathF.Max(worstPosition, (V3(qm, v, At(qm, 0)) - fp).Length());
+            worstRaw = MathF.Max(worstRaw, (V3(local, v, At(local, 0)) - fp).Length());
+            worstNormal = MathF.Max(worstNormal, (V3(qm, v, At(qm, 1)) - V3(fm, v, At(fm, 1))).Length());
+            worstUv = MathF.Max(worstUv, (V2(qm, v, At(qm, 2)) - V2(fm, v, At(fm, 2))).Length());
+        }
+
+        t.Expect($"its positions, placed by the node's dequantisation, are the floats' within a step (worst {worstPosition:G3}, step {step:G3})",
+            worstPosition <= step, "");
+        t.Expect($"its normalized-byte normals are the floats' within a byte's precision (worst {worstNormal:G3})",
+            worstNormal <= 0.015f, "");
+        t.Expect($"its normalized-short UVs are the floats' within a short's precision (worst {worstUv:G3})",
+            worstUv <= 2f / 65535f, "");
+        t.Expect($"CONTROL: its node-local positions are the raw integers, nowhere near the floats (worst {worstRaw:G3})",
+            worstRaw > 100f, "");
+    }
+
+    // A normal map under KHR_texture_transform is read in [T B] F M^-1 F (studio_lit.frag, normalMapFrame): the cooked
+    // frame is MikkTSpace's over (u, 1 - v) (blix_mikk.c), so glTF's M is taken into those axes. This pins that
+    // convention where the shader cannot see it. NormalTangentMirrorTest_uvxf (derived) samples the reference's texels
+    // through (M, o) — 30 degrees, scale (1.5, -1.5) — from a TEXCOORD_1 of M^-1 (uv - o); its tangents are generated
+    // over that set. On the flat normal-mapped tiles the correction must give the reference's frame exactly; CONTROL,
+    // the plain [T B] M^-1 (no F) gives it nowhere. (Curved geometry is excluded: there MikkTSpace averages frames
+    // across an uneven mapping, and no single 2x2 relates the two cooks.)
+    private static void NormalMapFramesFollowTheTextureTransform(TestRunner t)
+    {
+        if (FindFile("NormalTangentMirrorTest_uvxf.gltf") is not { } transformed || FindFile("NormalTangentMirrorTest_uvxf_ref.gltf") is not { } reference) return;
+        Blix.Assets.MeshData MeshOf(string f) => Blix.ModelData.Load(CookCache.Resolve(f), new Blix.ModelNeeds(Tangents: true, Colour: true)).Flattened().Single().Primitive.Mesh;
+        var r = MeshOf(reference);
+        var x = MeshOf(transformed);
+        var sr = Blix.Graphics.VertexSemantics.Of(r.Layout);
+        var sx = Blix.Graphics.VertexSemantics.Of(x.Layout);
+        System.Numerics.Vector3 V3(Blix.Assets.MeshData m, int v, int at)
+        {
+            var o = (v * m.Layout.Stride) + at;
+            return new(BitConverter.ToSingle(m.VertexBytes, o), BitConverter.ToSingle(m.VertexBytes, o + 4), BitConverter.ToSingle(m.VertexBytes, o + 8));
+        }
+
+        float W(Blix.Assets.MeshData m, int v, int at) => BitConverter.ToSingle(m.VertexBytes, (v * m.Layout.Stride) + at + 12);
+        (int, int, int, int, int) Key(Blix.Assets.MeshData m, int v, Blix.Graphics.VertexSemantics s)
+        {
+            var p = V3(m, v, s.Position);
+            var o = (v * m.Layout.Stride) + s.Uv0;
+            return ((int)MathF.Round(p.X * 1e4f), (int)MathF.Round(p.Y * 1e4f), (int)MathF.Round(p.Z * 1e4f),
+                (int)MathF.Round(BitConverter.ToSingle(m.VertexBytes, o) * 1e5f), (int)MathF.Round(BitConverter.ToSingle(m.VertexBytes, o + 4) * 1e5f));
+        }
+
+        // M exactly as the reader builds it (UvTransform.Rows), so the test inverts what the shader is handed.
+        var (ru, rv) = new Blix.UvTransform(new System.Numerics.Vector2(0.25f, 0.1f), MathF.PI / 6f, new System.Numerics.Vector2(1.5f, -1.5f)).Rows;
+        var det = (ru.X * rv.Y) - (ru.Y * rv.X);
+        float i00 = rv.Y / det, i01 = -ru.Y / det, i10 = -rv.X / det, i11 = ru.X / det;
+        var index = new Dictionary<(int, int, int, int, int), int>();
+        for (var v = 0; v < r.VertexCount; v++) index.TryAdd(Key(r, v, sr), v);
+
+        int flat = 0, withF = 0, withoutF = 0;
+        for (var v = 0; v < x.VertexCount; v++)
+        {
+            if (!index.TryGetValue(Key(x, v, sx), out var w)) continue;
+            var n = V3(x, v, sx.Normal);
+            if (MathF.Abs(n.Z) < 0.999f) continue;
+            flat++;
+            var tx = V3(x, v, sx.Tangent);
+            var bx = System.Numerics.Vector3.Cross(n, tx) * W(x, v, sx.Tangent);
+            var tr = V3(r, w, sr.Tangent);
+            var br = System.Numerics.Vector3.Cross(n, tr) * W(r, w, sr.Tangent);
+            bool Same(System.Numerics.Vector3 a, System.Numerics.Vector3 b) => System.Numerics.Vector3.Dot(System.Numerics.Vector3.Normalize(a), b) > 0.999f;
+            if (Same((tx * i00) - (bx * i10), tr) && Same((-tx * i01) + (bx * i11), br)) withF++;
+            if (Same((tx * i00) + (bx * i10), tr) && Same((tx * i01) + (bx * i11), br)) withoutF++;
+        }
+
+        t.Expect($"under a texture transform, [T B] F M^-1 F is the map's frame on {withF}/{flat} flat normal-mapped vertices " +
+                 $"(CONTROL, without F: {withoutF}/{flat})",
+            flat > 100 && withF == flat && withoutF == 0, "");
+
+        // A NON-conformal transform (30 degrees, scale (2, 0.5)), built as a real asset is: the attribute is the
+        // artist's (conformal) UV, the transform stretches the map, and the reference precomputes M uv + o with no
+        // transform, so its generated tangents are MikkTSpace over the transformed coordinates. The corrected
+        // vectors are then no longer perpendicular: the frame is Gram-Schmidt of [T B] F M^-1 F (the tangent
+        // normalised, the bitangent cross(N, T') on the transformed bitangent's side), and it must be the reference's
+        // exactly. CONTROL: normalising each vector separately, which is not a frame, is not.
+        if (FindFile("NormalTangentMirrorTest_uvxf2.gltf") is not { } stretched || FindFile("NormalTangentMirrorTest_uvxf2_ref.gltf") is not { } stretchedRef) return;
+        var r2 = MeshOf(stretchedRef);
+        var x2 = MeshOf(stretched);
+        var sr2 = Blix.Graphics.VertexSemantics.Of(r2.Layout);
+        var sx2 = Blix.Graphics.VertexSemantics.Of(x2.Layout);
+        var (su, sv) = new Blix.UvTransform(new System.Numerics.Vector2(0.25f, 0.1f), MathF.PI / 6f, new System.Numerics.Vector2(2f, 0.5f)).Rows;
+        var det2 = (su.X * sv.Y) - (su.Y * sv.X);
+        float j00 = sv.Y / det2, j01 = -su.Y / det2, j10 = -sv.X / det2, j11 = su.X / det2;
+        var index2 = new Dictionary<(int, int, int, int, int), int>();
+        for (var v = 0; v < r2.VertexCount; v++) index2.TryAdd(Key(r2, v, sr2), v);
+        int flat2 = 0, orthonormal = 0, eachNormalised = 0;
+        for (var v = 0; v < x2.VertexCount; v++)
+        {
+            if (!index2.TryGetValue(Key(x2, v, sx2), out var w)) continue;
+            var n = V3(x2, v, sx2.Normal);
+            if (MathF.Abs(n.Z) < 0.999f) continue;
+            flat2++;
+            var tx = V3(x2, v, sx2.Tangent);
+            var bx = System.Numerics.Vector3.Cross(n, tx) * W(x2, v, sx2.Tangent);
+            var tr = V3(r2, w, sr2.Tangent);
+            var br = System.Numerics.Vector3.Cross(n, tr) * W(r2, w, sr2.Tangent);
+            var t0 = (tx * j00) - (bx * j10);
+            var t1 = (-tx * j01) + (bx * j11);
+            var gt = System.Numerics.Vector3.Normalize(t0 - (n * System.Numerics.Vector3.Dot(n, t0)));
+            var gb = System.Numerics.Vector3.Cross(n, gt) * (System.Numerics.Vector3.Dot(System.Numerics.Vector3.Cross(n, gt), t1) < 0f ? -1f : 1f);
+            bool Same(System.Numerics.Vector3 a, System.Numerics.Vector3 b) => System.Numerics.Vector3.Dot(System.Numerics.Vector3.Normalize(a), b) > 0.999f;
+            if (Same(gt, tr) && Same(gb, br)) orthonormal++;
+            if (Same(t0, tr) && Same(t1, br)) eachNormalised++;
+        }
+
+        t.Expect($"under a non-conformal transform, the orthonormalised frame is the map's on {orthonormal}/{flat2} flat vertices " +
+                 $"(CONTROL, each vector normalised separately: {eachNormalised}/{flat2})",
+            flat2 > 100 && orthonormal == flat2 && eachNormalised < flat2 / 2, "");
+    }
+
+    // Every message in an exception's chain, joined: what a refusal SAYS, without its stack trace, so a reason token
+    // cannot match a method or file name in a frame.
+    private static string MessagesOf(Exception e)
+    {
+        var parts = new List<string>();
+        for (Exception? at = e; at is not null; at = at.InnerException) parts.Add(at.Message);
+        return string.Join(" | ", parts);
+    }
+
+    // One source policy (GltfSourcePolicy): what the cook refuses, the source importers refuse too, or a file the
+    // shipped path calls a different shape would load as its base mesh through a documented API.
+    private static void EveryImporterRefusesWhatTheCookRefuses(TestRunner t)
+    {
+        if (FindFile("AnimatedMorphCube.glb") is not { } morphing || FindFile("SimpleMorph_nodezero.gltf") is not { } zeroed) return;
+        var importers = new (string Name, Func<string, object> Import)[]
+        {
+            ("GltfStaticImporter.Import", f => new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("k3/static"), f))),
+            ("GltfStaticImporter.ImportNodes", f => new GltfStaticImporter().ImportNodes(new AssetImportContext(AssetId.Parse("k3/nodes"), f))),
+            ("GltfImporter.Import", f => new GltfImporter().Import(new AssetImportContext(AssetId.Parse("k3/rig"), f))),
+        };
+        foreach (var (name, import) in importers)
+        {
+            string? refusal = null;
+            try { import(morphing); }
+            catch (AssetImportException refused) { refusal = MessagesOf(refused); }
+            t.Expect($"{name} refuses morph targets that take effect, as the cook does",
+                refusal is not null && refusal.Contains("morph targets", StringComparison.Ordinal), refusal ?? "it loaded");
+        }
+
+        // CONTROL: a file whose every instance is its base is not refused for morphing by the static importers. (The
+        // rigged importer refuses it for having no skin, which is its own rule.)
+        foreach (var (name, import) in importers.Take(2))
+        {
+            string? refusal = null;
+            try { import(zeroed); }
+            catch (AssetImportException refused) { refusal = MessagesOf(refused); }
+            t.Expect($"CONTROL: {name} reads a morph file whose every instance is its base",
+                refusal is null, refusal ?? "");
+        }
+    }
+
     // ── A golden that shares nothing with the reader ─────────────────────────────
     // SamplingMatchesGltf and AnimationMatchesGltf evaluate keys independently, but both take the keys
     // through GltfImporter.SampleKeys — so a mis-read of a CUBICSPLINE triple (in, value, out) would sit
@@ -1128,15 +1319,22 @@ public static class Program
         ["CesiumMan.gltf"] = "KHR_draco_mesh_compression",
         ["BoxWeb3dQuantizedAttributes.gltf"] = "WEB3D_quantized_attributes",
         // Invalid glTF, which must be refused.
-        ["Mesh_NoPosition_00.gltf"] = "no POSITION",
-        ["Mesh_PrimitiveRestart_00.gltf"] = "primitive restart",
+        ["Mesh_NoPosition_00.gltf"] = "missing required POSITION",
+        ["Mesh_PrimitiveRestart_00.gltf"] = "restart value",
         // Points and lines: Blix draws triangles, and refuses them by name rather than mis-reading them.
-        ["MeshPrimitiveModes.gltf"] = "POINTS and LINES primitives",
+        ["MeshPrimitiveModes.gltf"] = "is POINTS",
         ["Mesh_PrimitiveMode_00.gltf"] = "POINTS", ["Mesh_PrimitiveMode_07.gltf"] = "POINTS",
         ["Mesh_PrimitiveMode_01.gltf"] = "LINES", ["Mesh_PrimitiveMode_08.gltf"] = "LINES",
         ["Mesh_PrimitiveMode_02.gltf"] = "LINE_LOOP", ["Mesh_PrimitiveMode_09.gltf"] = "LINE_LOOP",
         ["Mesh_PrimitiveMode_03.gltf"] = "LINE_STRIP", ["Mesh_PrimitiveMode_10.gltf"] = "LINE_STRIP",
         // Valid glTF that Blix does not read yet — the spec gaps (plan.md, the spec audit).
+        // Morph targets that take effect: Blix does not deform by them, and the base mesh would be another shape.
+        // (SimpleMorph_static, whose weights are all zero and undriven, loads: its base IS the render.)
+        ["AnimatedMorphCube.glb"] = "morph targets", ["MorphStressTest.glb"] = "morph targets",
+        ["MorphPrimitivesTest.glb"] = "morph targets", ["SimpleMorph.gltf"] = "morph targets",
+        // Derived: the mesh's weights nonzero and the node with none, so the mesh's apply (SimpleMorph_nodezero,
+        // whose node zeroes them, loads: every instance is its base).
+        ["SimpleMorph_meshweights.gltf"] = "morph targets",
     };
 
     private static void EveryCorpusFileLoads(TestRunner t)
@@ -1174,7 +1372,11 @@ public static class Program
             }
             catch (AssetImportException refused)
             {
-                if (!expected) wrong.Add($"{name} refused: {refused.Message.Split('\n')[0]}");
+                // Refused for the LISTED reason, as the claim below says: a file refused for another one passes
+                // a refused-or-not check while its listed gap could have quietly closed.
+                var message = refused.Message.Split('\n')[0];
+                if (!expected) wrong.Add($"{name} refused: {message}");
+                else if (!MessagesOf(refused).Contains(why!, StringComparison.OrdinalIgnoreCase)) wrong.Add($"{name} refused, but not for '{why}': {message}");
             }
             catch (Exception crash) when (crash is not OutOfMemoryException)
             {
@@ -1482,8 +1684,10 @@ public static class Program
             try { cooked = CookCache.Resolve(file); }
             catch (AssetImportException refused)
             {
-                // A refused cook is a finding, not a skip: it is how a texture crash hid InterpolationTest.
-                t.Fail($"{Path.GetFileName(file)}: an animated file cooks", refused.Message);
+                // A refused cook is a finding, not a skip: it is how a texture crash hid InterpolationTest. The one
+                // exemption is a refusal LISTED as deliberate (a morph-weight animation, say), which
+                // EveryCorpusFileLoads holds to its stated reason.
+                if (!ExpectedRefusals.ContainsKey(Path.GetFileName(file))) t.Fail($"{Path.GetFileName(file)}: an animated file cooks", refused.Message);
                 continue;
             }
             var tracks = BlixMeshReader.Read(cooked).ClipTable.SelectMany(c => c.Tracks).ToArray();
@@ -1746,11 +1950,11 @@ public static class Program
             () => Blix.ModelData.Load("some/asset.glb"));
 
         var rogue = FindFile("Rogue.glb");
-        var morph = FindFile("AnimatedMorphCube.glb");
+        var morph = FindFile("SimpleMorph_static.gltf");
         var multiUv = FindFile("MultiUVTest.gltf");
         if (rogue is null || morph is null || multiUv is null)
         {
-            Console.WriteLine("  --   ModelData checks skipped: Rogue.glb, AnimatedMorphCube.glb or MultiUVTest.gltf not found");
+            Console.WriteLine("  --   ModelData checks skipped: Rogue.glb, SimpleMorph_static.gltf or MultiUVTest.gltf not found");
             return;
         }
 
@@ -1762,6 +1966,13 @@ public static class Program
         t.Expect("a rigged file read skinned keeps its skinned meshes skinned",
             skinned.IsRigged && skinned.Meshes.Any(m => m.Skinned && m.Primitives.All(p => p.Mesh.Layout.Stride == 80)),
             string.Join(",", skinned.Meshes.SelectMany(m => m.Primitives).Select(p => p.Mesh.Layout.Stride).Distinct()));
+        // Colour asks for COLOR_0 and TEXCOORD_1 in skinned meshes too: the complete vertex as cooked. (Read as 80 bytes
+        // whatever was asked, a skinned material on set 1 sampled set 0 and its vertex colour was white.)
+        var skinnedColour = Blix.ModelData.Load(rig, new Blix.ModelNeeds(Colour: true, Skinned: true));
+        t.Expect("and read with Colour, they keep TEXCOORD_1 and COLOR_0: the complete 92-byte skinned vertex",
+            skinnedColour.Meshes.Where(m => m.Skinned).SelectMany(m => m.Primitives)
+                .All(p => p.Mesh.Layout == Blix.Graphics.VertexPosition3NormalTextureSkin4Tangent2Color.Layout),
+            string.Join(",", skinnedColour.Meshes.SelectMany(m => m.Primitives).Select(p => p.Mesh.Layout.Stride).Distinct()));
         t.Expect("and read static, the same meshes arrive as static geometry at bind pose",
             asStatic.Meshes.All(m => !m.Skinned) && asStatic.Meshes.SelectMany(m => m.Primitives).All(p => p.Mesh.Layout.Stride == 44),
             string.Join(",", asStatic.Meshes.SelectMany(m => m.Primitives).Select(p => p.Mesh.Layout.Stride).Distinct()));
@@ -1773,11 +1984,12 @@ public static class Program
         Directory.CreateDirectory(temp);
         try
         {
-            var cube = Path.Combine(temp, "AnimatedMorphCube.glb");
+            // Morph targets whose weights are all zero and undriven: the base mesh is the render, so it cooks.
+            var cube = Path.Combine(temp, "SimpleMorph_static.gltf");
             File.Copy(morph, cube);
             MeshRecipe.CookToBlixMesh(cube, Path.ChangeExtension(cube, ".blixmesh"));
             var morphs = Blix.ModelData.Load(Path.ChangeExtension(cube, ".blixmesh")).Ignored;
-            t.Expect("a cooked file records the source attributes its cook did not carry (morph targets)",
+            t.Expect("a cooked file records the source attributes its cook did not carry (morph targets that take no effect)",
                 morphs.Any(i => i.Semantic == Blix.UnreadAttribute.MorphTargets), string.Join(",", morphs.Select(i => i.Semantic)));
 
             var uv = Path.Combine(temp, "MultiUVTest.gltf");
@@ -2372,7 +2584,10 @@ public static class Program
                     var sourceMesh = viaSourceRig.Primitives[i].Mesh;
                     var cookedIndices = cookedMesh.Indices32 ?? cookedMesh.Indices.Select(x => (uint)x).ToArray();
                     var sourceIndices = sourceMesh.Indices32 ?? sourceMesh.Indices.Select(x => (uint)x).ToArray();
-                    if (cookedMesh.Layout.Stride != stride || cookedIndices.Length != sourceIndices.Length)
+                    // Read with Colour, the cooked skinned vertex is the complete 92-byte one, whose first 80 bytes are the
+                    // source importer's 80-byte vertex: the shared prefix is what both readers must agree on.
+                    var cookedStride = cookedMesh.Layout.Stride;
+                    if (cookedStride < stride || cookedIndices.Length != sourceIndices.Length)
                     {
                         vertexMismatch++;
                         continue;
@@ -2381,7 +2596,7 @@ public static class Program
                     var differs = false;
                     for (var c = 0; c < cookedIndices.Length && !differs; c++)
                     {
-                        var cv = cookedMesh.VertexBytes.AsSpan((int)cookedIndices[c] * stride, stride);
+                        var cv = cookedMesh.VertexBytes.AsSpan((int)cookedIndices[c] * cookedStride, stride);
                         var sv = sourceMesh.VertexBytes.AsSpan((int)sourceIndices[c] * stride, stride);
                         differs = !cv[..tangentAt].SequenceEqual(sv[..tangentAt]);
                     }
@@ -2703,6 +2918,9 @@ public static class Program
         ValidatorRejectionsAreAccounted(t);
         IndexCountsAreRefusedNotRepaired(t);
         GeneratedTangentsFollowTheNormalTexture(t);
+        QuantizedAttributesReadAsTheirFloats(t);
+        NormalMapFramesFollowTheTextureTransform(t);
+        EveryImporterRefusesWhatTheCookRefuses(t);
         InterpolationGolden(t);
         SceneLevelMatchesGltf(t);
         SceneLevelReachesModelData(t);

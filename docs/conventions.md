@@ -161,14 +161,14 @@ symmetry) and **AH.7** (`WorldMatrix` through the GLSL `M*v` path).
   reference.
 - **Importers normalize at the boundary, explicitly.** Authored offsets are
   baked out at import (`ObjImporter.RecenterToOrigin`), not carried as a runtime
-  `Pivot`. `ImportNodes` keeps node hierarchy + *local* transforms (for rigs);
-  `Import` world-bakes into one blob. The caller picks which.
-- **Honest about the current line:** small demos still import raw glTF/OBJ at
-  load (`TankArena` runs `ImportNodes` on a `.glb`) — acceptable at demo scale.
-  The cooked pipeline is what the streaming target uses, not a blanket
-  requirement. What is non-negotiable is the *boundary* (no third-party type
-  leaks past import) and that the runtime can **explain** what it loaded
-  (`blix inspect`).
+  `Pivot`. The cooked scene graph keeps the node hierarchy and meshes in mesh
+  space (`ModelData.Nodes`, `World`); a consumer that wants one blob merges the
+  primitives it picks. The caller picks which.
+- **The runtime reads cooked models only.** glTF is parsed once, by the cook
+  (`MeshRecipe`); tools that open a `.glb` cook it on open into a cache, and the
+  demos load `.blixmesh` (`TankArena` reads its tank's nodes through `ModelData`).
+  What is non-negotiable is the *boundary* (no third-party type leaks past the
+  cook) and that the runtime can **explain** what it loaded (`blix inspect`).
 
 **Enforced by:** [`blix.md` §glTF import + §Project dependencies](blix.md) ·
 [`architecture.md`](architecture.md) (cooked-asset pipeline) ·

@@ -476,6 +476,53 @@ When a Sponza result is ready to promote, move the reusable mechanism or shader
 vocabulary into an engine project, give it another credible consumer, and leave
 Sponza with only the scene-specific composition and policy.
 
+## glTF materials: read versus drawn
+
+The reader stores every `KHR_materials_*` extension's values on `PbrMaterial`
+(`PbrMaterialExtensions`), and each renderer decides which it draws. A field
+existing is not the extension being drawn, so the columns below are established
+separately, and each cell names the instrument that establishes it.
+
+- **Studio's `KHR_materials_*` rows are measured** by
+  `tools/studio-material-support.sh`. For each extension, a corpus asset is shot
+  as authored and with the extension stripped, and the renders are compared
+  byte for byte (Studio's are deterministic). The control is the same asset with
+  the extension's materials painted red, which must differ; otherwise the row is
+  reported as unmeasured. That script tests only these twelve rows.
+- **Studio's texture-transform, UV-set and colour rows are pinned elsewhere.**
+  `Blix.Test.Recipes` and the lab modes named in the table pin them, each against a
+  derived fixture with a control.
+- **Sponza is traced**, because its renderer draws only its own pack. A value
+  counts as drawn when `SponzaLoop.Scene` packs it and `lit.frag` reads that
+  slot, or, for vertex attributes, when the layout its `ModelNeeds` asks for
+  carries it. A name search alone missed half of these reads.
+
+| Extension | Read | Studio | Sponza (traced) |
+| --- | --- | --- | --- |
+| `KHR_materials_emissive_strength` | yes | **draws** (script) | **draws** (`uEmissiveFactor.a`) |
+| `KHR_materials_transmission` | yes | ignores (script) | **draws the factor**, as Fresnel glass through the blend pipeline; the texture is not read |
+| `KHR_materials_volume` | yes | ignores (script) | ignores (stated above: a response needs a transmission pass) |
+| `KHR_materials_ior` | yes | ignores (script) | ignores |
+| `KHR_materials_clearcoat` | yes | ignores (script) | ignores |
+| `KHR_materials_sheen` | yes | ignores (script) | **draws the colour and roughness factors**; the textures are not read |
+| `KHR_materials_specular` | yes | ignores (script) | ignores |
+| `KHR_materials_iridescence` | yes | ignores (script) | ignores |
+| `KHR_materials_anisotropy` | yes | ignores (script) | ignores |
+| `KHR_materials_diffuse_transmission` | yes | ignores (script) | **draws the factor, colour factor and colour texture**; the factor texture is not read |
+| `KHR_materials_dispersion` | yes | ignores (script) | ignores |
+| `KHR_materials_unlit` | yes | **ignores: an unlit material is lit** (script) | ignores |
+| `KHR_texture_transform` | yes | **draws**, every core channel; the normal map in its own frame, Gram-Schmidt of `[T B] F M⁻¹ F` (Test.Recipes `NormalMapFramesFollowTheTextureTransform`, conformal and non-conformal; lab `uvtransform`, `nmxf`, `nmxf2`) | ignores: the pack has none, and the loader does not read them |
+| A second UV set (`texCoord: 1`) | yes | **draws**, static and skinned (lab `uv1`, `skinned-uv1colour`) | ignores: its layout (`ModelNeeds(Tangents: true)`) has no second set |
+| `COLOR_0` | yes | **draws**, static and skinned, as a base-colour multiplier (lab `vertexcolor`, `skinned-uv1colour`) | ignores: its layout has no colour |
+
+Two of these will mislead a user, and are worth knowing before a bug report.
+Studio draws a `KHR_materials_unlit` material **lit**. And Studio draws
+transmissive glass as its alpha mode alone says, with no transmission at all:
+it is the inspection renderer, and its transmission column is empty. Either is
+a renderer's choice, as everything in this table is. What the table guarantees
+is that the choice is written down and re-measurable, not inferred from a
+`PbrMaterial` field.
+
 ## Technique ownership at a glance
 
 | Scope | Current examples |

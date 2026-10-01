@@ -105,7 +105,10 @@ public static class MeshRecipe
     // Version 16 (format v18) writes the scene level: scenes, visibility, instances, cameras, lights, variants.
     // Version 17 validates sources (one declared leniency), builds generated tangents over the normal
     // texture's TEXCOORD set, refuses index counts glTF forbids, and accepts extra inverse binds.
-    public const uint MeshRecipeVersion = 17;
+    // Version 18 refuses morph targets that take effect: an instantiated node whose effective weights (its own,
+    // else its mesh's) are not all zero, or a weights animation of such a node (GltfSourcePolicy). No file that
+    // cooks changes, but a cached cook of one that is now refused must not keep loading.
+    public const uint MeshRecipeVersion = 18;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false,
@@ -798,6 +801,7 @@ public static class MeshRecipe
         {
             model = ModelRoot.Load(gltfPath, new SharpGLTF.Schema2.ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip });
             RefuseUnreadExtensions(model, gltfPath);
+            GltfSourcePolicy.RefuseEffectiveMorphTargets(model, gltfPath);
             // Re-read unvalidated ONLY when one of the two named causes is present; a file the validator
             // refuses for anything else is refused. (The cause present may not be the validator's only
             // complaint — what it would have said after the first error is not knowable from here.)
@@ -812,6 +816,7 @@ public static class MeshRecipe
         }
 
         RefuseUnreadExtensions(model, gltfPath);
+        GltfSourcePolicy.RefuseEffectiveMorphTargets(model, gltfPath);
         return model;
     }
 

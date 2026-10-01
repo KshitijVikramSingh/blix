@@ -491,6 +491,318 @@ print(f"  derived RiggedSimple_extraibm.gltf ({acc['count'] + 1} inverse binds f
 PY
 fi
 
+# KHR_mesh_quantization is accepted (MeshRecipe.ReadExtensions) and no corpus file uses it, so the claim
+# had no instrument. NormalTangentTest re-encoded the way an optimiser writes it: POSITION as unsigned
+# shorts with the dequantisation (per-axis scale, then offset) on the mesh's node, NORMAL as normalized
+# bytes, TEXCOORD_0 as normalized unsigned shorts, each padded to a 4-byte stride. The extension is
+# REQUIRED, as it must be: a reader that ignores it would draw the raw integers. The scale is uniform,
+# because the node transform also reaches the normals.
+NQ="$DEST/sample-assets/NormalTangentTest/NormalTangentTest.glb"
+if [ -f "$NQ" ] && [ ! -s "$DEST/sample-assets/NormalTangentTest/NormalTangentTest_quantized.gltf" ]; then
+    python3 - "$NQ" <<'PY'
+import base64, json, struct, sys
+p = sys.argv[1]
+b = open(p, "rb").read()
+jlen = struct.unpack("<I", b[12:16])[0]
+d = json.loads(b[20:20 + jlen])
+bin_at = 20 + jlen
+blen = struct.unpack("<I", b[bin_at:bin_at + 4])[0]
+blob = b[bin_at + 8:bin_at + 8 + blen]
+d["buffers"][0] = {"byteLength": len(blob), "uri": "data:application/octet-stream;base64," + base64.b64encode(blob).decode()}
+if len(d["meshes"]) != 1 or len(d["meshes"][0]["primitives"]) != 1:
+    sys.exit("NormalTangentTest is not one mesh of one primitive — upstream changed shape")
+users = [n for n in d["nodes"] if n.get("mesh") == 0]
+if len(users) != 1 or any(k in users[0] for k in ("matrix", "translation", "rotation", "scale")):
+    sys.exit("NormalTangentTest's mesh node is not a single untransformed node — upstream changed shape")
+prim = d["meshes"][0]["primitives"][0]
+def floats(key, width):
+    acc = d["accessors"][prim["attributes"][key]]
+    if acc["componentType"] != 5126 or acc.get("sparse"):
+        sys.exit(f"{key} is not plain float — upstream changed shape")
+    view = d["bufferViews"][acc["bufferView"]]
+    stride = view.get("byteStride", 4 * width)
+    base = view.get("byteOffset", 0) + acc.get("byteOffset", 0)
+    return [struct.unpack_from(f"<{width}f", blob, base + k * stride) for k in range(acc["count"])]
+pos, nrm, uv = floats("POSITION", 3), floats("NORMAL", 3), floats("TEXCOORD_0", 2)
+if min(min(t) for t in uv) < 0 or max(max(t) for t in uv) > 1:
+    sys.exit("TEXCOORD_0 leaves [0, 1]; normalized shorts cannot hold it — upstream changed shape")
+lo = [min(v[i] for v in pos) for i in range(3)]
+hi = [max(v[i] for v in pos) for i in range(3)]
+# ONE scale for all three axes: the node transform reaches the normals too (through its inverse transpose),
+# so a per-axis scale would bend every normal; a uniform one leaves their directions alone.
+step = max(hi[i] - lo[i] for i in range(3)) / 65535.0
+scale = [step, step, step]
+out = bytearray()
+def view_of(data, stride):
+    while len(out) % 4: out.append(0)
+    start = len(out)
+    out.extend(data)
+    d["bufferViews"].append({"buffer": 1, "byteOffset": start, "byteLength": len(data), "byteStride": stride, "target": 34962})
+    return len(d["bufferViews"]) - 1
+qp = [tuple(max(0, min(65535, round((v[i] - lo[i]) / scale[i]))) for i in range(3)) for v in pos]
+data = b"".join(struct.pack("<3H2x", *q) for q in qp)
+d["accessors"].append({"bufferView": view_of(data, 8), "componentType": 5123, "count": len(qp), "type": "VEC3",
+                       "min": [min(q[i] for q in qp) for i in range(3)], "max": [max(q[i] for q in qp) for i in range(3)]})
+prim["attributes"]["POSITION"] = len(d["accessors"]) - 1
+data = b"".join(struct.pack("<3bx", *(max(-127, min(127, round(c * 127))) for c in v)) for v in nrm)
+d["accessors"].append({"bufferView": view_of(data, 4), "componentType": 5120, "normalized": True, "count": len(nrm), "type": "VEC3"})
+prim["attributes"]["NORMAL"] = len(d["accessors"]) - 1
+data = b"".join(struct.pack("<2H", *(max(0, min(65535, round(c * 65535))) for c in v)) for v in uv)
+d["accessors"].append({"bufferView": view_of(data, 4), "componentType": 5123, "normalized": True, "count": len(uv), "type": "VEC2"})
+prim["attributes"]["TEXCOORD_0"] = len(d["accessors"]) - 1
+users[0]["translation"] = lo
+users[0]["scale"] = scale
+d["buffers"].append({"byteLength": len(out), "uri": "data:application/octet-stream;base64," + base64.b64encode(bytes(out)).decode()})
+for key in ("extensionsUsed", "extensionsRequired"):
+    d[key] = sorted(set(d.get(key, [])) | {"KHR_mesh_quantization"})
+dst = p.replace("NormalTangentTest.glb", "NormalTangentTest_quantized.gltf")
+json.dump(d, open(dst, "w"))
+print(f"  derived NormalTangentTest_quantized.gltf ({len(qp)} vertices: POSITION u16 + node dequantisation, NORMAL i8n, TEXCOORD_0 u16n)")
+PY
+fi
+
+# Morph targets are refused only where they take effect: a nonzero default weight (mesh or node) or a
+# weights animation. With every weight zero and nothing driving them the base mesh IS the render, so such
+# a file loads, its targets recorded as unread. Every corpus morph file moves its targets, so this is the
+# one that must load: SimpleMorph with its weights zeroed and its animation dropped.
+SM="$DEST/sample-assets/SimpleMorph/SimpleMorph.gltf"
+if [ -f "$SM" ] && [ ! -s "$DEST/sample-assets/SimpleMorph/SimpleMorph_static.gltf" ]; then
+    python3 - "$SM" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+if not any("targets" in prim for m in d["meshes"] for prim in m["primitives"]):
+    sys.exit("SimpleMorph has no morph targets — upstream changed shape")
+for m in d["meshes"]:
+    if "weights" in m:
+        m["weights"] = [0.0] * len(m["weights"])
+for n in d["nodes"]:
+    if "weights" in n:
+        n["weights"] = [0.0] * len(n["weights"])
+d.pop("animations", None)
+json.dump(d, open(p.replace("SimpleMorph.gltf", "SimpleMorph_static.gltf"), "w"))
+print("  derived SimpleMorph_static.gltf (morph targets kept, every weight zero, no animation)")
+PY
+fi
+
+# A normal map under KHR_texture_transform is sampled at uv' = M uv + o, while the tangent frame is the attribute's
+# (dP/du, dP/dv): the map's own frame is [T B] M^-1. Two files make that checkable. Both are NormalTangentMirrorTest
+# with its TANGENT dropped (tangents are then generated over the normal texture's set) and the normal texture on
+# TEXCOORD_1. In _uvxf_ref, TEXCOORD_1 is TEXCOORD_0. In _uvxf, TEXCOORD_1 is M^-1 (TEXCOORD_0 - o) and the normal
+# texture carries (M, o), so it samples exactly the reference's texels: a correct renderer draws the two the same.
+# M is conformal (a rotation, a uniform scale and a reflection): generated tangents are orthonormal, so only a
+# conformal M has an exact orthonormal frame to compare against, and the reflection exercises handedness.
+NX="$DEST/sample-assets/NormalTangentMirrorTest/NormalTangentMirrorTest.glb"
+if [ -f "$NX" ] && [ ! -s "$DEST/sample-assets/NormalTangentMirrorTest/NormalTangentMirrorTest_uvxf.gltf" ]; then
+    python3 - "$NX" <<'PY'
+import base64, json, math, struct, sys, copy
+p = sys.argv[1]
+b = open(p, "rb").read()
+jlen = struct.unpack("<I", b[12:16])[0]
+src = json.loads(b[20:20 + jlen])
+bin_at = 20 + jlen
+blen = struct.unpack("<I", b[bin_at:bin_at + 4])[0]
+blob = b[bin_at + 8:bin_at + 8 + blen]
+theta, scale, offset = math.radians(30.0), (1.5, -1.5), (0.25, 0.1)
+c, s_ = math.cos(theta), math.sin(theta)
+# KHR_texture_transform as Blix applies it (UvTransform.Rows, held to the corpus's TextureTransformTest):
+# u' = c sx u + s sy v + ox,  v' = -s sx u + c sy v + oy. (Written from memory of the spec first, with the
+# rotation's sign the other way round: the normal map then landed on other texels, flat tiles and bumps out of
+# place, which no frame correction could fix. The reader's convention is the one this must invert.)
+M = [[c * scale[0], s_ * scale[1]], [-s_ * scale[0], c * scale[1]]]
+det = M[0][0] * M[1][1] - M[0][1] * M[1][0]
+Mi = [[M[1][1] / det, -M[0][1] / det], [-M[1][0] / det, M[0][0] / det]]
+def derive(transformed):
+    d = copy.deepcopy(src)
+    d["buffers"][0] = {"byteLength": len(blob), "uri": "data:application/octet-stream;base64," + base64.b64encode(blob).decode()}
+    uv1 = bytearray()
+    done = 0
+    for mesh in d["meshes"]:
+        for prim in mesh["primitives"]:
+            a = prim["attributes"]
+            if "TEXCOORD_0" not in a:
+                continue
+            a.pop("TANGENT", None)
+            acc = d["accessors"][a["TEXCOORD_0"]]
+            if acc["componentType"] != 5126 or acc.get("sparse"):
+                sys.exit("TEXCOORD_0 is not plain float — upstream changed shape")
+            view = d["bufferViews"][acc["bufferView"]]
+            stride = view.get("byteStride", 8)
+            base = view.get("byteOffset", 0) + acc.get("byteOffset", 0)
+            start = len(uv1)
+            for k in range(acc["count"]):
+                u, v = struct.unpack_from("<2f", blob, base + k * stride)
+                if transformed:
+                    du, dv = u - offset[0], v - offset[1]
+                    u, v = Mi[0][0] * du + Mi[0][1] * dv, Mi[1][0] * du + Mi[1][1] * dv
+                uv1 += struct.pack("<2f", u, v)
+            d["bufferViews"].append({"buffer": 1, "byteOffset": start, "byteLength": len(uv1) - start})
+            d["accessors"].append({"bufferView": len(d["bufferViews"]) - 1, "componentType": 5126, "count": acc["count"], "type": "VEC2"})
+            a["TEXCOORD_1"] = len(d["accessors"]) - 1
+            done += 1
+    if done == 0:
+        sys.exit("NormalTangentMirrorTest has no textured primitive — upstream changed shape")
+    d["buffers"].append({"byteLength": len(uv1), "uri": "data:application/octet-stream;base64," + base64.b64encode(bytes(uv1)).decode()})
+    for m in d["materials"]:
+        if "normalTexture" in m:
+            m["normalTexture"]["texCoord"] = 1
+            if transformed:
+                m["normalTexture"]["extensions"] = {"KHR_texture_transform": {"offset": list(offset), "rotation": theta, "scale": list(scale)}}
+    if transformed:
+        for key in ("extensionsUsed", "extensionsRequired"):
+            d[key] = sorted(set(d.get(key, [])) | {"KHR_texture_transform"})
+    name = "NormalTangentMirrorTest_uvxf.gltf" if transformed else "NormalTangentMirrorTest_uvxf_ref.gltf"
+    json.dump(d, open(p.replace("NormalTangentMirrorTest.glb", name), "w"))
+    print(f"  derived {name} ({done} primitive(s): no TANGENT, normal map on TEXCOORD_1" + (", under (M, o): 30 deg, scale (1.5, -1.5), offset (0.25, 0.1))" if transformed else ")"))
+derive(False)
+derive(True)
+PY
+fi
+
+# Effective morph weights are per instance: a node's own weights win over its mesh's. Two files pin which side of
+# that the refusal reads. _nodezero: mesh weights nonzero, the node's zero, no animation — every instance is its base,
+# so it loads. _meshweights: mesh weights nonzero, the node has none, no animation — it morphs, so it is refused.
+if [ -f "$SM" ] && [ ! -s "$DEST/sample-assets/SimpleMorph/SimpleMorph_nodezero.gltf" ]; then
+    python3 - "$SM" <<'PY'
+import json, sys
+p = sys.argv[1]
+src = json.load(open(p))
+mesh = src["meshes"][0]
+if not mesh.get("weights") or not any(w != 0 for w in mesh["weights"]):
+    sys.exit("SimpleMorph's mesh has no nonzero default weights — upstream changed shape")
+for name, node_weights in (("SimpleMorph_nodezero.gltf", [0.0] * len(mesh["weights"])), ("SimpleMorph_meshweights.gltf", None)):
+    d = json.loads(json.dumps(src))
+    d.pop("animations", None)
+    for n in d["nodes"]:
+        if n.get("mesh") == 0:
+            n.pop("weights", None)
+            if node_weights is not None:
+                n["weights"] = node_weights
+    json.dump(d, open(p.replace("SimpleMorph.gltf", name), "w"))
+    print(f"  derived {name} (mesh weights {mesh['weights']}, node weights {node_weights}, no animation)")
+PY
+fi
+
+# The same check where it is hard: a NON-conformal transform, 30 degrees and scale (2, 0.5), built the way a real
+# asset is: the attribute is the artist's UV (TEXCOORD_0's values, conformal on these tiles) and the transform
+# stretches the map. _uvxf2: TEXCOORD_1 = TEXCOORD_0 under (M, o). _uvxf2_ref: TEXCOORD_1 = M uv + o precomputed,
+# no transform. Both sample the same texels; the reference's generated tangents are MikkTSpace over the transformed
+# coordinates, which is what a renderer correcting the attribute's frame must arrive at.
+if [ -f "$NX" ] && [ ! -s "$DEST/sample-assets/NormalTangentMirrorTest/NormalTangentMirrorTest_uvxf2.gltf" ]; then
+    python3 - "$NX" <<'PY'
+import base64, json, math, struct, sys, copy
+p = sys.argv[1]
+b = open(p, "rb").read()
+jlen = struct.unpack("<I", b[12:16])[0]
+src = json.loads(b[20:20 + jlen])
+bin_at = 20 + jlen
+blen = struct.unpack("<I", b[bin_at:bin_at + 4])[0]
+blob = b[bin_at + 8:bin_at + 8 + blen]
+theta, scale, offset = math.radians(30.0), (2.0, 0.5), (0.25, 0.1)
+c, s_ = math.cos(theta), math.sin(theta)
+# As the reader applies it (UvTransform.Rows): u' = c sx u + s sy v + ox, v' = -s sx u + c sy v + oy.
+def apply(u, v):
+    return c * scale[0] * u + s_ * scale[1] * v + offset[0], -s_ * scale[0] * u + c * scale[1] * v + offset[1]
+def derive(reference):
+    d = copy.deepcopy(src)
+    d["buffers"][0] = {"byteLength": len(blob), "uri": "data:application/octet-stream;base64," + base64.b64encode(blob).decode()}
+    uv1 = bytearray()
+    done = 0
+    for mesh in d["meshes"]:
+        for prim in mesh["primitives"]:
+            a = prim["attributes"]
+            if "TEXCOORD_0" not in a:
+                continue
+            a.pop("TANGENT", None)
+            acc = d["accessors"][a["TEXCOORD_0"]]
+            if acc["componentType"] != 5126 or acc.get("sparse"):
+                sys.exit("TEXCOORD_0 is not plain float — upstream changed shape")
+            view = d["bufferViews"][acc["bufferView"]]
+            stride = view.get("byteStride", 8)
+            base = view.get("byteOffset", 0) + acc.get("byteOffset", 0)
+            start = len(uv1)
+            for k in range(acc["count"]):
+                u, v = struct.unpack_from("<2f", blob, base + k * stride)
+                if reference:
+                    u, v = apply(u, v)
+                uv1 += struct.pack("<2f", u, v)
+            d["bufferViews"].append({"buffer": 1, "byteOffset": start, "byteLength": len(uv1) - start})
+            d["accessors"].append({"bufferView": len(d["bufferViews"]) - 1, "componentType": 5126, "count": acc["count"], "type": "VEC2"})
+            a["TEXCOORD_1"] = len(d["accessors"]) - 1
+            done += 1
+    if done == 0:
+        sys.exit("NormalTangentMirrorTest has no textured primitive — upstream changed shape")
+    d["buffers"].append({"byteLength": len(uv1), "uri": "data:application/octet-stream;base64," + base64.b64encode(bytes(uv1)).decode()})
+    for m in d["materials"]:
+        if "normalTexture" in m:
+            m["normalTexture"]["texCoord"] = 1
+            if not reference:
+                m["normalTexture"]["extensions"] = {"KHR_texture_transform": {"offset": list(offset), "rotation": theta, "scale": list(scale)}}
+    if not reference:
+        for key in ("extensionsUsed", "extensionsRequired"):
+            d[key] = sorted(set(d.get(key, [])) | {"KHR_texture_transform"})
+    name = "NormalTangentMirrorTest_uvxf2_ref.gltf" if reference else "NormalTangentMirrorTest_uvxf2.gltf"
+    json.dump(d, open(p.replace("NormalTangentMirrorTest.glb", name), "w"))
+    print(f"  derived {name} ({done} primitive(s): no TANGENT, " + ("TEXCOORD_1 = M uv + o precomputed)" if reference else "TEXCOORD_1 = TEXCOORD_0 under 30 deg, scale (2, 0.5))"))
+derive(True)
+derive(False)
+PY
+fi
+
+# A skinned vertex carries TEXCOORD_1 and COLOR_0 as cooked; a renderer reading only the first set and no colour draws
+# such a file as if it had neither. Fox (skinned, textured) with a TEXCOORD_1 turned a quarter from TEXCOORD_0, its
+# base colour read from set 1, and a pink COLOR_0: drawn right it differs from Fox everywhere the fur is.
+FX="$DEST/sample-assets/Fox/Fox.glb"
+if [ -f "$FX" ] && [ ! -s "$DEST/sample-assets/Fox/Fox_uv1colour.gltf" ]; then
+    python3 - "$FX" <<'PY'
+import base64, json, struct, sys
+p = sys.argv[1]
+b = open(p, "rb").read()
+jlen = struct.unpack("<I", b[12:16])[0]
+d = json.loads(b[20:20 + jlen])
+bin_at = 20 + jlen
+blen = struct.unpack("<I", b[bin_at:bin_at + 4])[0]
+blob = b[bin_at + 8:bin_at + 8 + blen]
+d["buffers"][0] = {"byteLength": len(blob), "uri": "data:application/octet-stream;base64," + base64.b64encode(blob).decode()}
+extra = bytearray()
+done = 0
+for mesh in d["meshes"]:
+    for prim in mesh["primitives"]:
+        a = prim["attributes"]
+        if "JOINTS_0" not in a or "TEXCOORD_0" not in a:
+            continue
+        acc = d["accessors"][a["TEXCOORD_0"]]
+        if acc["componentType"] != 5126 or acc.get("sparse"):
+            sys.exit("Fox's TEXCOORD_0 is not plain float — upstream changed shape")
+        view = d["bufferViews"][acc["bufferView"]]
+        stride = view.get("byteStride", 8)
+        base = view.get("byteOffset", 0) + acc.get("byteOffset", 0)
+        start = len(extra)
+        for k in range(acc["count"]):
+            u, v = struct.unpack_from("<2f", blob, base + k * stride)
+            extra += struct.pack("<2f", v, 1.0 - u)
+        d["bufferViews"].append({"buffer": 1, "byteOffset": start, "byteLength": len(extra) - start})
+        d["accessors"].append({"bufferView": len(d["bufferViews"]) - 1, "componentType": 5126, "count": acc["count"], "type": "VEC2"})
+        a["TEXCOORD_1"] = len(d["accessors"]) - 1
+        start = len(extra)
+        for k in range(acc["count"]):
+            extra += bytes([255, 128, 128, 255])
+        d["bufferViews"].append({"buffer": 1, "byteOffset": start, "byteLength": len(extra) - start, "byteStride": 4})
+        d["accessors"].append({"bufferView": len(d["bufferViews"]) - 1, "componentType": 5121, "normalized": True, "count": acc["count"], "type": "VEC4"})
+        a["COLOR_0"] = len(d["accessors"]) - 1
+        done += 1
+if done == 0:
+    sys.exit("Fox has no skinned textured primitive — upstream changed shape")
+d["buffers"].append({"byteLength": len(extra), "uri": "data:application/octet-stream;base64," + base64.b64encode(bytes(extra)).decode()})
+for m in d["materials"]:
+    tex = m.get("pbrMetallicRoughness", {}).get("baseColorTexture")
+    if tex is not None:
+        tex["texCoord"] = 1
+json.dump(d, open(p.replace("Fox.glb", "Fox_uv1colour.gltf"), "w"))
+print(f"  derived Fox_uv1colour.gltf ({done} skinned primitive(s): base colour on a quarter-turned TEXCOORD_1, pink COLOR_0)")
+PY
+fi
+
 echo
 echo "corpus at $DEST — $((planned - failed)) fetched, $failed missing, $(find "$DEST" -type f | wc -l | tr -d ' ') file(s) total"
 [ "$failed" -eq 0 ]
