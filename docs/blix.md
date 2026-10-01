@@ -89,7 +89,7 @@ Every public type built by `Blix.csproj` and `Blix.Core.csproj`, one line each.
 
 **Time-driven animation:** `IAnimation`, `AnimationHost`, `FloatAnimation`, `Transform3DAnimation`, `CallbackAnimation`, and the curves: `ICurve<T>`, `IFiniteCurve<T>`, `ConstantCurve<T>`, `LinearCurve`, `LinearVector3Curve`, `SlerpQuaternionCurve`, `LoopCurve<T>`, `Keyframe<T>`, `KeyframeVector3Curve`, `KeyframeQuaternionCurve`, `Interpolation`
 
-**Skeletal animation:** `BoneTransform`, `Bone`, `Skeleton`, `Pose`, `BonePalette`, `BonePaletteSet`, `BoneMask`, `AnimationClip`, `BoneTrack`, `ClipPlayer`, `PoseBlend`, `PoseDelta`, `RootMotion`, `SkinningAnalysis`
+**Skeletal animation:** `BoneTransform`, `Bone`, `Skeleton`, `Pose`, `BonePalette`, `BonePaletteSet`, `BoneMask`, `AnimationClip`, `BoneTrack`, `ClipPlayer`, `PoseStack`, `PoseLayer`, `PoseLayerMode`, `PoseLayerFinish`, `PoseBlend`, `PoseDelta`, `RootMotion`, `SkinningAnalysis`
 
 **Physics:** `PhysicsHost3D`, `PhysicsHost2D`
 
@@ -570,7 +570,27 @@ var upper = BoneMask.Subtree(skeleton, "spine", weight: 1f, falloff: 2);
 - **`PoseDelta.LayerOnto`** applies a clip's offset from rest on top of a base: translation adds, rotation composes, scale multiplies, each scaled by the weight.
 - **`BoneMask`** names bones by a subtree root, not by indices (an asset's numbering must not leak into game code), with an optional falloff up the chain so a boundary does not kink. An unknown bone name throws, naming the bones that exist.
 
-Weights only: a crossfade is the caller moving a weight. Studio's `RigAnimation` composes two players this way; a reusable layer stack is planned ([plan.md](../plan.md) §J3).
+Weights only: a crossfade is the caller moving a weight.
+
+### PoseStack
+
+The composition in reusable form: an ordered stack of layers, each applied onto the result of the layers below it, starting from the rest pose.
+
+```csharp
+var stack = new PoseStack(model.Skeleton);
+stack.Add(walk);                                                    // a ClipPlayer; Blend at weight 1 by default
+var punch = stack.Add(punchPlayer, PoseLayerMode.Blend, 1f, BoneMask.Subtree(model.Skeleton, "spine", falloff: 2));
+punch.OnFinish = PoseLayerFinish.Remove;                            // the default is Hold: keep the last frame
+stack.Advance(time.Delta);                                          // advances every layer's player, then evaluates
+// stack.Pose is the composed pose
+```
+
+- A layer is a source (a `ClipPlayer`, which belongs to that one layer), a mode (`Blend` toward its pose, or `Additive` offset from rest), a weight and an optional `BoneMask`. Each mode is exactly the `PoseBlend` / `PoseDelta` call it stands for.
+- **A flat list, not a blend tree:** no nodes, parameters, states, transitions or durations.
+- `Evaluate()` recomposes without moving any clock, after a weight, mask or mode change. Root motion is the caller's to take from whichever layer drives the body (`ClipPlayer.RootDelta`).
+- It is an `IAnimation` that never finishes, so a stack can sit inside an `AnimationHost` as one entry. It is separate from the host because its layers have an order a host's animations do not.
+
+Studio's `RigAnimation` is a two-layer stack: the subject, and the secondary as a blend, additive or masked layer.
 
 ### Skinned models
 

@@ -584,6 +584,34 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
         player.ScrubTo(clipTime);
 
+        // --blend / --additive / --mask name the SECOND clip and pick the composition with it, as the
+        // viewer's flags do, so a capture reaches every composition path: a mode only a combo box can
+        // reach is a mode nothing checks. The second clip sits at the same time as the first. --weight
+        // is the layer's weight; --mask-root and --mask-falloff shape a masked layer.
+        var second = (Blend: args.String("blend"), Additive: args.String("additive"), Masked: args.String("mask"));
+        if ((second.Blend ?? second.Additive ?? second.Masked) is { } secondName)
+        {
+            var driven = animation.Driven;
+            driven.Secondary.Clip = rig.Clip(secondName);
+            if (driven.Secondary.Clip is null)
+            {
+                Console.Error.WriteLine($"No clip named '{secondName}' in {Path.GetFileName(modelPath)} for the second layer.");
+                Environment.Exit(1);
+            }
+
+            driven.Secondary.ScrubTo(clipTime);
+            driven.Mode = second.Blend is not null ? PoseMode.Blend : second.Additive is not null ? PoseMode.Additive : PoseMode.Masked;
+            driven.Weight = args.Float("weight") ?? 0.5f;
+            if (driven.Mode == PoseMode.Masked && !driven.SetMask(maskRoot ?? string.Empty, maskFalloff))
+            {
+                Console.Error.WriteLine($"--mask needs a --mask-root bone this rig has; '{maskRoot}' is not one.");
+                Environment.Exit(1);
+            }
+
+            driven.Refresh();
+            Console.WriteLine($"composition: {driven.Mode} '{player.Clip?.Name}' + '{secondName}' at weight {driven.Weight:0.###}");
+        }
+
         var extent = rig.RestExtent;
         var scale = extent > 0.001f ? 3f / extent : 1f;
         var rigBase = Matrix4x4.CreateScale(scale)

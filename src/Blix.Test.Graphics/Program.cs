@@ -5848,6 +5848,112 @@ static ShaderInterface MinimalShader() => new(new[]
         $"{string.Join(" ", calls)} | counts {afterOne}, {afterTwo}, {host.Count}");
 }
 
+// ============================================================================
+// Section BS — PoseStack: ordered layers of (source, mode, weight, mask) over rest.
+// ============================================================================
+//
+// Each mode must be exactly the engine call it stands for — the stack owns the order and the rest pose,
+// PoseBlend and PoseDelta own the maths — so a consumer moving onto it changes no bit. Plus stage F's two
+// mask failures: a layer that changes everything, and one that changes nothing.
+{
+    var skeleton = new Skeleton(new[]
+    {
+        new Bone("hips", -1, Matrix4x4.Identity),
+        new Bone("spine", 0, Matrix4x4.Identity),
+        new Bone("leg", 0, Matrix4x4.Identity),
+    });
+
+    static BoneTrack Spin(int bone, float radians) => new()
+    {
+        BoneIndex = bone,
+        Rotation = new KeyframeQuaternionCurve(new[]
+        {
+            new Keyframe<Quaternion>(0.0, Quaternion.Identity),
+            new Keyframe<Quaternion>(1.0, Quaternion.CreateFromAxisAngle(Vector3.UnitY, radians)),
+        }),
+        Translation = new KeyframeVector3Curve(new[]
+        {
+            new Keyframe<Vector3>(0.0, Vector3.Zero),
+            new Keyframe<Vector3>(1.0, new Vector3(radians, 0f, 0f)),
+        }),
+    };
+
+    var walk = new AnimationClip("walk", new[] { Spin(0, 0.4f), Spin(1, 0.2f), Spin(2, 1.1f) });
+    var swing = new AnimationClip("swing", new[] { Spin(0, -0.3f), Spin(1, 1.4f), Spin(2, -0.9f) });
+    ClipPlayer At(AnimationClip clip, double time)
+    {
+        var player = new ClipPlayer(skeleton, clip);
+        player.ScrubTo(time);
+        return player;
+    }
+
+    static bool Same(Pose a, Pose b) => Enumerable.Range(0, a.BoneCount).All(i => a.Locals[i] == b.Locals[i]);
+
+    var a = At(walk, 0.3);
+    var b = At(swing, 0.6);
+    var stack = new PoseStack(skeleton);
+    stack.Add(a);
+    stack.Evaluate();
+    t.Expect("BS.1 one layer at full weight is its player's pose, exactly", Same(stack.Pose, a.Pose));
+
+    var overlay = stack.Add(b, PoseLayerMode.Blend, 0.35f);
+    stack.Evaluate();
+    var lerped = skeleton.CreateRestPose();
+    PoseBlend.Lerp(a.Pose, b.Pose, 0.35f, lerped);
+    t.Expect("BS.2 a blend layer is PoseBlend.Lerp of what is below it toward its own, bit for bit", Same(stack.Pose, lerped));
+
+    var upper = BoneMask.Subtree(skeleton, "spine");
+    overlay.Mask = upper;
+    stack.Evaluate();
+    var masked = skeleton.CreateRestPose();
+    PoseBlend.Lerp(a.Pose, b.Pose, 0.35f, upper, masked);
+    t.Expect("BS.3 with a mask, it is the masked Lerp, bit for bit, and the leg it does not reach is the base's",
+        Same(stack.Pose, masked) && stack.Pose.Locals[2] == a.Pose.Locals[2]);
+
+    overlay.Mask = BoneMask.None(skeleton.BoneCount);
+    overlay.Weight = 1f;
+    stack.Evaluate();
+    var none = Same(stack.Pose, a.Pose);
+    overlay.Mask = BoneMask.All(skeleton.BoneCount);
+    stack.Evaluate();
+    var all = Same(stack.Pose, b.Pose);
+    t.Expect("BS.3 CONTROLS a mask over no bone leaves the base bit for bit; over every bone at full weight it is the layer",
+        none && all, $"none {none}, all {all}");
+
+    overlay.Mask = null;
+    overlay.Mode = PoseLayerMode.Additive;
+    overlay.Weight = 0.6f;
+    stack.Evaluate();
+    var layered = skeleton.CreateRestPose();
+    var rest = skeleton.CreateRestPose();
+    for (var i = 0; i < layered.BoneCount; i++) layered.Locals[i] = PoseDelta.LayerOnto(a.Pose.Locals[i], rest.Locals[i], b.Pose.Locals[i], 0.6f);
+    t.Expect("BS.4 an additive layer is PoseDelta.LayerOnto over the same rest, bit for bit", Same(stack.Pose, layered));
+
+    // A finished one-shot holds its last frame by default, and leaves only when told to.
+    var holdStack = new PoseStack(skeleton);
+    var oneShot = new ClipPlayer(skeleton, swing) { Loop = false };
+    holdStack.Add(oneShot);
+    holdStack.Advance(2.0);
+    // The clip's last frame, sampled directly (a looping player scrubbed to the end would wrap to 0).
+    var end = skeleton.CreateRestPose();
+    swing.Sample(swing.Duration, end);
+    var held = holdStack.Layers.Count == 1 && oneShot.Finished && Same(holdStack.Pose, end);
+    var leaving = new PoseStack(skeleton);
+    var base_ = new ClipPlayer(skeleton, walk);
+    var gone = new ClipPlayer(skeleton, swing) { Loop = false };
+    leaving.Add(base_);
+    leaving.Add(gone).OnFinish = PoseLayerFinish.Remove;
+    leaving.Advance(0.5);
+    var stillThere = leaving.Layers.Count == 2;
+    leaving.Advance(1.0);
+    t.Expect("BS.5 a finished one-shot layer holds its last frame by default, and with Remove leaves on the advance it finished",
+        held && stillThere && leaving.Layers.Count == 1 && ReferenceEquals(leaving.Layers[0].Source, base_),
+        $"held {held}, two before {stillThere}, after {leaving.Layers.Count}");
+
+    t.ExpectThrows("BS.6 a player is one layer's: adding it twice would advance it twice",
+        () => stack.Add(a), mustMention: "already a layer's source");
+}
+
 t.PrintSummary();
 return t.Failed;
 

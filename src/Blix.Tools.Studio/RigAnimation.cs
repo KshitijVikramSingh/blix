@@ -39,6 +39,9 @@ public sealed class RigAnimation : ITunable
     private readonly Matrix4x4[] restWorlds;
     private readonly Matrix4x4[] scratchWorlds;
     private ClipPlayer? secondary;
+    // The composition: the subject at the bottom, and the secondary as a layer when the mode has one.
+    private readonly PoseStack stack;
+    private PoseLayer? overlay;
 
     public RigAnimation(Model rig)
     {
@@ -47,6 +50,8 @@ public sealed class RigAnimation : ITunable
 
         Subject = new ClipPlayer(rig.Skeleton, rig.Clips.Count > 0 ? rig.Clips[0] : null);
         Posed = rig.Skeleton.CreateRestPose();
+        stack = new PoseStack(rig.Skeleton);
+        stack.Add(Subject);
 
         boneWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
         restWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
@@ -196,40 +201,36 @@ public sealed class RigAnimation : ITunable
         RootTurnPathDegrees = 0f;
     }
 
-    // The three composition modes are three ENGINE primitives, not three implementations here.
+    // The composition is a two-layer PoseStack: the subject, and the secondary as a blend or additive
+    // layer, masked or not. What each mode means is this panel's; how layers apply is the engine's.
     private void Compose()
     {
-        switch (Mode)
+        var weight = Math.Clamp(Weight, 0f, 1f);
+        var wanted = Mode switch
         {
-            case PoseMode.Blend:
-                PoseBlend.Lerp(Subject.Pose, Secondary.Pose, Math.Clamp(Weight, 0f, 1f), Posed);
-                break;
+            PoseMode.Blend => (PoseLayerMode.Blend, (BoneMask?)null),
+            // No mask means no layer: A alone, rather than a silent whole-body blend. A mask that
+            // failed to build should look like nothing happening, not like the wrong thing.
+            PoseMode.Masked when Mask is not null => (PoseLayerMode.Blend, Mask),
+            // B layered ON TOP of A: the delta is applied to what the layer below produced.
+            PoseMode.Additive => (PoseLayerMode.Additive, (BoneMask?)null),
+            _ => ((PoseLayerMode, BoneMask?)?)null,
+        };
 
-            case PoseMode.Masked:
-                // No mask means no layer: A alone, rather than a silent whole-body blend. A mask that
-                // failed to build should look like nothing happening, not like the wrong thing.
-                if (Mask is null) Posed.CopyFrom(Subject.Pose);
-                else PoseBlend.Lerp(Subject.Pose, Secondary.Pose, Math.Clamp(Weight, 0f, 1f), Mask, Posed);
-                break;
-
-            case PoseMode.Additive:
-                // B layered ON TOP of A: order matters, because the delta is applied to whatever is
-                // already in the target.
-                for (var i = 0; i < Posed.BoneCount; i++)
-                {
-                    Posed.Locals[i] = PoseDelta.LayerOnto(
-                        Subject.Pose.Locals[i],
-                        Subject.RestPose.Locals[i],
-                        Secondary.Pose.Locals[i],
-                        Math.Clamp(Weight, 0f, 1f));
-                }
-
-                break;
-
-            default:
-                Posed.CopyFrom(Subject.Pose);
-                break;
+        if (wanted is { } layer)
+        {
+            overlay ??= stack.Add(Secondary);
+            (overlay.Mode, overlay.Mask) = layer;
+            overlay.Weight = weight;
         }
+        else if (overlay is not null)
+        {
+            stack.Remove(overlay);
+            overlay = null;
+        }
+
+        stack.Evaluate();
+        Posed.CopyFrom(stack.Pose);
 
         // Driving means the clip stops moving the body and the transform starts. Leaving the root
         // animated AND applying the delta moves a travelling clip twice.

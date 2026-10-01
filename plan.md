@@ -263,6 +263,12 @@ Stages:
   `PoseDelta`, which already do the maths. Studio's `RigAnimation.Compose()` becomes a two-layer stack,
   and the instrument is the lab baseline: IDENTICAL, mode by mode. Plus stage F's controls (a mask set
   to all bones breaks the legs; set to none leaves the walk bit-for-bit unchanged).
+- **J1–J3 done** (`b0f83de`, `394cfcd`, and J3): the scene layer deleted; `IAnimation.Advance(delta)` with
+  Test.Graphics BR; `PoseStack` with Test.Graphics BS (each mode bit-for-bit its engine call, both mask
+  controls, hold/remove). `blix shot` gained `--blend` / `--additive` / `--mask` / `--weight` (the viewer's
+  flags) and the lab three `compose-*` modes, recorded on the old composition and IDENTICAL on the stack;
+  CONTROL, the additive weight nudged 1% changes compose-additive alone. `lab-baseline.sh` takes a mode
+  regex, so a change to a few modes is proven without opening a window for all of them.
 - **J4 — a deterministic clock in the windowed host** (fixed-step A). `--step` means in a window what it
   means headless: every frame advances by exactly that much. Fixed-update dispatch (B) is discussed
   first: who owns the accumulator, what input edges mean when a frame holds two steps, the order

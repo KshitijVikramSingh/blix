@@ -4,6 +4,7 @@
 #
 #   tools/lab-baseline.sh record [dir]     # default .baseline/ (gitignored)
 #   tools/lab-baseline.sh check  [dir]     # re-run and diff against what is recorded
+#   tools/lab-baseline.sh check  [dir] 'blend-.*'   # only the modes matching an extended regex
 #   tools/lab-baseline.sh list             # the modes, and why each is here
 #
 # ── What is hashed, and why it is not just the PNG ─────────────────────────────
@@ -35,6 +36,11 @@ cd "$REPO_ROOT"
 
 ACTION="${1:-record}"
 DIR="${2:-$REPO_ROOT/.baseline}"
+# Optional: an extended regex over mode names. Only matching modes run; `record` adds or replaces just
+# their artifacts in DIR, and `check` compares just theirs. For proving a change to a few modes without
+# running (and opening a window for) all of them; a full check is still the closing gate.
+ONLY="${3:-}"
+selected=()
 # An array, not a string: the front door is a script plus a verb, and "$CAPTURE"
 # as one word would look for a file literally named "blix shot".
 CAPTURE=("$REPO_ROOT/blix" shot)
@@ -56,6 +62,9 @@ tank	--model $TANK	THREE skins and two static mesh nodes. Neither was read befor
 clip	--model $ROGUE --clip Walking_A --time 0.35 --xray	A named pose at a named instant — the smallest reproducible rig picture.
 attach	--model $ROGUE --clip Walking_A --time 0.35 --attach 1H_Crossbow --xray	An attachment following a joint, which is a different thing from a static part.
 mask	--model $ROGUE --clip Walking_A --mask-root spine --mask-falloff 2 --skeleton-only --xray --zoom 2	A layer mask as a picture of the mask, not of what it was used for.
+compose-blend	--model $ROGUE --clip Walking_A --time 0.3 --blend Running_A --weight 0.5	Two clips interpolated by weight (RigAnimation's Blend): half way from a walk to a run, through PoseStack.
+compose-additive	--model $ROGUE --clip Walking_A --time 0.3 --additive Unarmed_Melee_Attack_Punch_A --weight 0.7	A clip's offset from rest layered on a walk (Additive), through PoseStack.
+compose-masked	--model $ROGUE --clip Walking_A --time 0.3 --mask Unarmed_Melee_Attack_Punch_A --mask-root spine --mask-falloff 2 --weight 1	An upper body punching while the legs walk (Masked): the mask's subtree from spine, through PoseStack.
 advance	--model $ROGUE --clip Dodge_Forward --advance 2.0 --drive-root	Root motion integrated over five loop cycles, single body. The travel number in the log is the assertion.
 inst3	--model $ROGUE --instances 3 --xray	Three bodies, three poses, one draw.
 lockstep	--model $ROGUE --instances 3 --lockstep --xray	The negative control for inst3: one clip at one instant must yield ONE distinct pose. Without it "they differ" proves nothing.
@@ -136,8 +145,10 @@ unlit=0
 # capture sits near 100; the MSAA read-back fault that lost the scene left about 5 (the lines).
 LIT_FLOOR=50
 
-echo "── recording into $RUN"
+echo "── recording into $RUN${ONLY:+ (modes matching /$ONLY/ only)}"
 while IFS="$(printf '\t')" read -r name args why; do
+    if [ -n "$ONLY" ] && ! printf '%s' "$name" | grep -qE "^($ONLY)$"; then continue; fi
+    selected+=("$name")
     case "$args" in
     corpus:*)
         args="${args#corpus:}"
@@ -211,8 +222,15 @@ if [ "$skipped" -gt 0 ]; then
     exit 2
 fi
 
-if diff <(sort "$REF") <(sort "$RUN/MANIFEST.sha256") > /tmp/lab-baseline.diff 2>&1; then
-    echo "IDENTICAL — $(wc -l < "$REF" | tr -d ' ') artifact(s) byte-for-byte"
+# A partial run compares only the artifacts of the modes it ran (a mode's files are <name>.*).
+only_these() {
+    if [ -z "$ONLY" ]; then cat; return; fi
+    local pattern
+    pattern="$(printf '%s|' "${selected[@]}")"
+    grep -E "  \./(${pattern%|})\." || true
+}
+if diff <(only_these < "$REF" | sort) <(only_these < "$RUN/MANIFEST.sha256" | sort) > /tmp/lab-baseline.diff 2>&1; then
+    echo "IDENTICAL — $(only_these < "$REF" | wc -l | tr -d ' ') artifact(s) byte-for-byte${ONLY:+ (modes matching /$ONLY/)}"
     exit 0
 fi
 
