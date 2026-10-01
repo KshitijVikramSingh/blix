@@ -89,7 +89,7 @@ Every public type built by `Blix.csproj` and `Blix.Core.csproj`, one line each.
 
 **Time-driven animation:** `IAnimation`, `AnimationHost`, `FloatAnimation`, `Transform3DAnimation`, `CallbackAnimation`, and the curves: `ICurve<T>`, `IFiniteCurve<T>`, `ConstantCurve<T>`, `LinearCurve`, `LinearVector3Curve`, `SlerpQuaternionCurve`, `LoopCurve<T>`, `Keyframe<T>`, `KeyframeVector3Curve`, `KeyframeQuaternionCurve`, `Interpolation`
 
-**Skeletal animation:** `BoneTransform`, `Bone`, `Skeleton`, `SkinBinding`, `Pose`, `BonePalette`, `BonePaletteSet`, `BoneMask`, `AnimationClip`, `BoneTrack`, `ClipPlayer`, `PoseStack`, `PoseLayer`, `PoseLayerMode`, `PoseLayerFinish`, `PoseBlend`, `PoseDelta`, `RootMotion`, `SkinningAnalysis`
+**Skeletal animation:** `BoneTransform`, `Bone`, `Skeleton`, `SkinBinding`, `BoneWorlds`, `Pose`, `BonePalette`, `BonePaletteSet`, `BoneMask`, `AnimationClip`, `BoneTrack`, `ClipPlayer`, `PoseStack`, `PoseLayer`, `PoseLayerMode`, `PoseLayerFinish`, `PoseBlend`, `PoseDelta`, `RootMotion`, `SkinningAnalysis`
 
 **Physics:** `PhysicsHost3D`, `PhysicsHost2D`
 
@@ -487,8 +487,8 @@ public sealed class SkinBinding                    // a skin: which bones are it
     public IReadOnlyList<int> Bones { get; }       // joint j -> bone of Skeleton
     public IReadOnlyList<Matrix4x4> InverseBinds { get; }
     public int JointCount { get; }
-    public void ComputePalette(IReadOnlyList<Matrix4x4> boneWorlds, Matrix4x4 post, Span<Matrix4x4> palette);
-    public void ComputePalette(Pose pose, BonePalette palette, Matrix4x4[]? outBoneWorlds = null);
+    public void ComputePalette(BoneWorlds worlds, Matrix4x4 post, Span<Matrix4x4> palette);
+    public void ComputePalette(Pose pose, BonePalette palette, BoneWorlds? worlds = null);
     public int[] JointParents();
     public Matrix4x4[] JointBindWorlds();
 }
@@ -502,11 +502,19 @@ public sealed class Pose
     public void CopyFrom(Pose other);
 }
 
+public sealed class BoneWorlds                     // a skeleton's bone worlds, knowing whose they are
+{
+    public BoneWorlds(Skeleton skeleton);
+    public Skeleton Skeleton { get; }
+    public Matrix4x4 this[int bone] { get; }
+    public void Compute(Pose pose);
+}
+
 public sealed class BonePalette
 {
     public Matrix4x4[] Matrices { get; }
-    public int BoneCount { get; }
-    public BonePalette(int boneCount);
+    public int JointCount { get; }                 // one matrix per skin joint
+    public BonePalette(int jointCount);
 }
 ```
 
@@ -518,9 +526,9 @@ public sealed class BonePalette
 
 `Skeleton` enforces a **hierarchy-order invariant** at construction: each bone's `ParentIndex` is either `-1` or strictly less than its own index. `ComputeBoneWorlds` walks the array once forward with no recursion and no sorting — every parent's world matrix is already filled when a child reads it.
 
-`Pose` carries no reference to its owning `Skeleton`. Animations produce poses; skeletons hold the hierarchy; `ComputeBoneWorlds` joins them with a bone-count validation at the boundary, and a binding's `ComputePalette` refuses worlds that are not one per bone of its skeleton.
+`Pose` carries no reference to its owning `Skeleton`. Animations produce poses; skeletons hold the hierarchy; `ComputeBoneWorlds` joins them with a bone-count validation at the boundary, and a binding's `ComputePalette` takes `BoneWorlds`, which know the skeleton that composed them, so it refuses another rig's worlds by identity, not merely by size. (A `Pose` itself is indexed locals with no skeleton; that limit is one level down and documented.)
 
-`BonePalette` is a typed wrapper around `Matrix4x4[]` — the GPU-ready output, one matrix per joint. `BonePaletteSet` packs many bodies' palettes for one skin at a stride of its joint count; `Model.PackPalettes` fills one set per skin from poses of `Model.Skeleton`.
+`BonePalette` is a typed wrapper around `Matrix4x4[]` — the GPU-ready output, one matrix per joint. `BonePaletteSet` packs many bodies' palettes for one skin at a stride of its `JointCount`, which need not be the skeleton's `BoneCount` (BrainStem: 18 joints, 19 bones); `Model.PackPalettes` fills one set per skin from poses of `Model.Skeleton`.
 
 ### Matrix convention (F-016)
 

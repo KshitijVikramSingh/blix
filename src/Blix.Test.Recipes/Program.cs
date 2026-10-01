@@ -335,7 +335,7 @@ public static class Program
             var ownWorlds = new System.Numerics.Matrix4x4[ownSkeleton.BoneCount];
             var worst = 0f;
             var vertices = 0;
-            var worlds = new System.Numerics.Matrix4x4[hierarchy.BoneCount];
+            var worlds = new Blix.BoneWorlds(hierarchy);
             foreach (var clip in d.Clips.Take(3))
             foreach (var at in new[] { 0.0, 0.25, 0.5, 0.75, 1.0 })
             {
@@ -347,7 +347,7 @@ public static class Program
                 for (var j = 0; j < skin.JointCount; j++) oldPalette[j] = skin.InverseBinds[j] * ownWorlds[j];
                 var oldModel = own.Placement * body;
                 // The demos' path: gathered through the hierarchy, placement baked in.
-                hierarchy.ComputeBoneWorlds(pose, worlds);
+                worlds.Compute(pose);
                 var gathered = new Blix.BonePaletteSet(skin.JointCount, 1);
                 gathered.Add(skin, worlds, d.SkeletonPlacement * body);
                 foreach (var m in meshes)
@@ -1281,8 +1281,8 @@ public static class Program
                     // Blix: the hierarchy posed by the clip, as a draw poses it.
                     var pose = skeleton.CreateRestPose();
                     clip.Sample(time, pose);
-                    var bones = new System.Numerics.Matrix4x4[skeleton.BoneCount];
-                    skeleton.ComputeBoneWorlds(pose, bones);
+                    var bones = new Blix.BoneWorlds(skeleton);
+                    bones.Compute(pose);
 
                     // Rigid mesh nodes.
                     for (var n = 0; n < data.Nodes.Count; n++)
@@ -1693,8 +1693,8 @@ public static class Program
             {
                 // The skin at the hierarchy's rest, in scene space: the hierarchy's worlds after its placement.
                 var binding = data.Skins[s].Binding;
-                var restWorlds = new System.Numerics.Matrix4x4[binding.Skeleton.BoneCount];
-                binding.Skeleton.ComputeBoneWorlds(binding.Skeleton.CreateRestPose(), restWorlds);
+                var restWorlds = new BoneWorlds(binding.Skeleton);
+                restWorlds.Compute(binding.Skeleton.CreateRestPose());
                 var palette = new BonePaletteSet(binding.JointCount, 1);
                 palette.Add(binding, restWorlds, data.SkeletonPlacement);
                 foreach (var prim in data.SkinnedPrimitives(s))

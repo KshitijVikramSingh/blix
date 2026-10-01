@@ -10,7 +10,10 @@ namespace Blix;
 // any of its children, which is the access pattern ComputeBoneWorlds needs, with no recursion, no sorting
 // and no per-bone lookups. Construction validates it; importers topo-sort their joints first.
 //
-// Multiple roots are supported (`ParentIndex == -1` on more than one bone). glTF allows multi-root skins.
+// Multiple roots are supported (`ParentIndex == -1` on more than one bone): a hierarchy can hold several skins,
+// and nodes a clip moves that hang from no joint. That is not a claim about glTF skins, whose joints MUST share a
+// common root (glTF 2.0 §5.27); Blix reads one that does not only through a named validator fallback
+// (MeshRecipe.ValidatorFallbacks), which is a declared leniency, not conformance.
 public sealed class Skeleton
 {
     public Bone[] Bones { get; }

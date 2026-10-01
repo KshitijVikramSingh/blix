@@ -509,9 +509,9 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
             for (var s = 0; s < enemyPalettes.Length; s++)
             {
                 worldPush.CopyTo(skinnedWorldPush[s], 0);
-                BitConverter.TryWriteBytes(skinnedWorldPush[s].AsSpan(160, 4), enemyPalettes[s].BoneCount);
+                BitConverter.TryWriteBytes(skinnedWorldPush[s].AsSpan(160, 4), enemyPalettes[s].JointCount);
                 shadowPush.CopyTo(skinnedShadowPush[s], 0);
-                BitConverter.TryWriteBytes(skinnedShadowPush[s].AsSpan(64, 4), enemyPalettes[s].BoneCount);
+                BitConverter.TryWriteBytes(skinnedShadowPush[s].AsSpan(64, 4), enemyPalettes[s].JointCount);
             }
         }
 

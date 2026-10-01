@@ -14,16 +14,16 @@ public sealed class BoneBuffers : IDisposable
 {
     private readonly IGraphicsDevice device;
     private readonly IMaterialBindings[] bindings;
-    private readonly int[] boneCounts;
+    private readonly int[] jointCounts;
     private readonly byte[] payload;
 
-    internal BoneBuffers(IGraphicsDevice device, IMaterialBindings[] bindings, int[] boneCounts, int maxInstances)
+    internal BoneBuffers(IGraphicsDevice device, IMaterialBindings[] bindings, int[] jointCounts, int maxInstances)
     {
         this.device = device;
         this.bindings = bindings;
-        this.boneCounts = boneCounts;
+        this.jointCounts = jointCounts;
         MaxInstances = maxInstances;
-        payload = new byte[(boneCounts.Length == 0 ? 0 : boneCounts.Max()) * maxInstances * 64];
+        payload = new byte[(jointCounts.Length == 0 ? 0 : jointCounts.Max()) * maxInstances * 64];
     }
 
     /// <summary>How many bodies each skin's buffer holds.</summary>
@@ -41,10 +41,10 @@ public sealed class BoneBuffers : IDisposable
             throw new ArgumentOutOfRangeException(nameof(skin), skin, $"this rig has {bindings.Length} skin(s).");
         }
 
-        if (palettes.BoneCount != boneCounts[skin])
+        if (palettes.JointCount != jointCounts[skin])
         {
             throw new ArgumentException(
-                $"Palette set is packed at a stride of {palettes.BoneCount}; skin {skin} has {boneCounts[skin]} bones. " +
+                $"Palette set is packed at a stride of {palettes.JointCount}; skin {skin} has {jointCounts[skin]} joints. " +
                 "The shader multiplies by the stride, so a mismatch renders other instances' poses rather than failing.",
                 nameof(palettes));
         }

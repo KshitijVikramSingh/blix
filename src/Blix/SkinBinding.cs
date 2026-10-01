@@ -16,7 +16,8 @@ namespace Blix;
 /// <para>
 /// <b>It keeps the skeleton it indexes.</b> <see cref="Bones"/> are indices into one hierarchy, and an index
 /// means a bone only there; without the skeleton they are indices into some hierarchy somewhere. Recording it
-/// is the fact this type represents, and it is what lets a palette refuse bone worlds of another rig.
+/// is the fact this type represents. Its palette takes <see cref="BoneWorlds"/>, which know their skeleton too,
+/// so worlds of another rig are refused by identity, not merely by size.
 /// </para>
 /// </remarks>
 public sealed class SkinBinding
@@ -109,36 +110,42 @@ public sealed class SkinBinding
     }
 
     /// <summary>Writes the skin's palette from its skeleton's bone worlds: <c>inverseBind[j] · world[bones[j]] · post</c>.</summary>
-    /// <param name="boneWorlds">The worlds of every bone of <see cref="Skeleton"/> (<see cref="Skeleton.ComputeBoneWorlds"/>).</param>
+    /// <param name="worlds">Bone worlds of <see cref="Skeleton"/> itself, not of another rig, however alike.</param>
     /// <param name="post">What goes after every world: the hierarchy's placement, then the body's.</param>
     /// <param name="palette">One matrix per joint.</param>
-    /// <exception cref="ArgumentException">The worlds are not one per bone of this skin's skeleton, or the palette not one per joint.</exception>
-    public void ComputePalette(IReadOnlyList<Matrix4x4> boneWorlds, Matrix4x4 post, Span<Matrix4x4> palette)
+    /// <exception cref="ArgumentException">The worlds are another skeleton's, or the palette is not one per joint.</exception>
+    public void ComputePalette(BoneWorlds worlds, Matrix4x4 post, Span<Matrix4x4> palette)
     {
-        ArgumentNullException.ThrowIfNull(boneWorlds);
-        if (boneWorlds.Count != Skeleton.BoneCount)
-        {
-            throw new ArgumentException(
-                $"{boneWorlds.Count} bone world(s), and this skin's skeleton has {Skeleton.BoneCount} bones; the worlds must be of the skeleton it binds.",
-                nameof(boneWorlds));
-        }
-
+        RequireOwn(worlds, nameof(worlds));
         if (palette.Length != bones.Length)
         {
             throw new ArgumentException($"a palette of {palette.Length} for a {bones.Length}-joint skin.", nameof(palette));
         }
 
-        for (var j = 0; j < bones.Length; j++) palette[j] = inverseBinds[j] * boneWorlds[bones[j]] * post;
+        var w = worlds.AsSpan();
+        for (var j = 0; j < bones.Length; j++) palette[j] = inverseBinds[j] * w[bones[j]] * post;
     }
 
-    /// <summary>Poses the skeleton and writes the palette in one call: its bone worlds, then <see cref="ComputePalette(IReadOnlyList{Matrix4x4}, Matrix4x4, Span{Matrix4x4})"/>.</summary>
-    /// <param name="outBoneWorlds">Receives the bone worlds when given (one per skeleton bone); a scratch array otherwise.</param>
-    public void ComputePalette(Pose pose, BonePalette palette, Matrix4x4[]? outBoneWorlds = null)
+    /// <summary>Poses the skeleton and writes the palette in one call: its bone worlds, then <see cref="ComputePalette(BoneWorlds, Matrix4x4, Span{Matrix4x4})"/>.</summary>
+    /// <param name="worlds">Receives the bone worlds when given (this skin's skeleton's); a scratch set otherwise.</param>
+    public void ComputePalette(Pose pose, BonePalette palette, BoneWorlds? worlds = null)
     {
         ArgumentNullException.ThrowIfNull(pose);
         ArgumentNullException.ThrowIfNull(palette);
-        var worlds = outBoneWorlds ?? new Matrix4x4[Skeleton.BoneCount];
-        Skeleton.ComputeBoneWorlds(pose, worlds);
-        ComputePalette(worlds, Matrix4x4.Identity, palette.Matrices);
+        if (worlds is not null) RequireOwn(worlds, nameof(worlds));
+        var w = worlds ?? new BoneWorlds(Skeleton);
+        w.Compute(pose);
+        ComputePalette(w, Matrix4x4.Identity, palette.Matrices);
+    }
+
+    private void RequireOwn(BoneWorlds worlds, string paramName)
+    {
+        ArgumentNullException.ThrowIfNull(worlds, paramName);
+        if (!ReferenceEquals(worlds.Skeleton, Skeleton))
+        {
+            throw new ArgumentException(
+                $"the bone worlds are another skeleton's ({worlds.Skeleton.BoneCount} bones); a skin's joints are bones of its own skeleton only.",
+                paramName);
+        }
     }
 }

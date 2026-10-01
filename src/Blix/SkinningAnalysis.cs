@@ -94,7 +94,7 @@ public static class SkinningAnalysis
     }
 
     /// <summary>The same over any parent-first tree: a skin's joints (<see cref="SkinBinding.JointParents"/>), say.</summary>
-    /// <exception cref="ArgumentException">A parent does not come before its child.</exception>
+    /// <exception cref="ArgumentException">A parent is below -1 or does not come before its child (<see cref="Skeleton"/>'s invariant).</exception>
     public static bool[] IncludeAncestors(IReadOnlyList<int> parents, IReadOnlyList<bool> weighted)
     {
         ArgumentNullException.ThrowIfNull(parents);
@@ -105,7 +105,11 @@ public static class SkinningAnalysis
 
         for (var i = hierarchy.Length - 1; i >= 0; i--)
         {
-            if (parents[i] >= i) throw new ArgumentException($"node {i}'s parent {parents[i]} does not come before it.", nameof(parents));
+            if (parents[i] < -1 || parents[i] >= i)
+            {
+                throw new ArgumentException($"node {i}'s parent is {parents[i]}; expected -1 (root) or an index below {i}.", nameof(parents));
+            }
+
             if (!hierarchy[i]) continue;
             if (parents[i] >= 0) hierarchy[parents[i]] = true;
         }

@@ -60,7 +60,7 @@ behaviour here, that test should fail first.
   applies the travel twice: double speed, and a snap back once per loop.
   `RootMotion.Strip` reverts every parentless bone to rest, and the pairing is
   the whole division — the clip says how far, the game says where.
-- **N posed bodies share ONE palette buffer, sliced at `i * BoneCount`.** A
+- **N posed bodies share ONE palette buffer, sliced at `i * JointCount`** (the skin's joints, not the skeleton's bones). A
   descriptor set's buffer is not copied at record time, so two draws in a frame
   sharing one palette binding both read the second pose. `BonePaletteSet` owns
   the stride — the sentence a C# packing loop and a GLSL `gl_InstanceIndex *

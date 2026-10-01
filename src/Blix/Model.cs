@@ -32,7 +32,7 @@ public sealed class Model : IDisposable
     private readonly List<Attachment> attachments = new();
     private Skeleton? skeleton;
     private Matrix4x4 skeletonPlacement = Matrix4x4.Identity;
-    private Matrix4x4[] worldScratch = Array.Empty<Matrix4x4>();
+    private BoneWorlds? worldScratch;
 
     private Model(IGraphicsDevice device, string name)
     {
@@ -171,7 +171,7 @@ public sealed class Model : IDisposable
     /// <summary>Vertices over the skinned parts.</summary>
     public int SkinnedVertexCount { get; private set; }
 
-    /// <summary>Per bone of skin 0, whether any vertex weights it.</summary>
+    /// <summary>Per bone of <see cref="Skeleton"/>, whether any vertex of any skin weights it: every skin's weighted joints, gathered into hierarchy bones.</summary>
     public IReadOnlyList<bool> WeightedBones { get; private set; } = Array.Empty<bool>();
 
     /// <summary>The weighted bones plus every ancestor needed to draw their chains unbroken.</summary>
@@ -225,11 +225,11 @@ public sealed class Model : IDisposable
         }
 
         foreach (var set in into) set.Reset();
-        if (worldScratch.Length != Skeleton.BoneCount) worldScratch = new Matrix4x4[Skeleton.BoneCount];
+        worldScratch ??= new BoneWorlds(Skeleton);
         for (var body = 0; body < poses.Count; body++)
         {
             // One pose of the hierarchy per body; every skin gathers its joints from it.
-            Skeleton.ComputeBoneWorlds(poses[body], worldScratch);
+            worldScratch.Compute(poses[body]);
             for (var s = 0; s < skins.Count; s++)
             {
                 into[s].Add(skins[s], worldScratch, skeletonPlacement * placements[body]);
@@ -357,8 +357,8 @@ public sealed class Model : IDisposable
 
         // Weighted bones and rest bounds, per skin, in the hierarchy's bones: the same gather a draw does.
         var weighted = new bool[hierarchy.BoneCount];
-        var restWorlds = new Matrix4x4[hierarchy.BoneCount];
-        hierarchy.ComputeBoneWorlds(hierarchy.CreateRestPose(), restWorlds);
+        var restWorlds = new BoneWorlds(hierarchy);
+        restWorlds.Compute(hierarchy.CreateRestPose());
         var restMin = new Vector3(float.MaxValue);
         var restMax = new Vector3(float.MinValue);
         var anySkinned = false;
@@ -414,7 +414,7 @@ public sealed class Model : IDisposable
 
     private SkinBinding RequireSkin() => skins.Count > 0
         ? skins[0]
-        : throw new InvalidOperationException($"'{Name}' has no skin, so it has no skeleton, palettes or bone buffers.");
+        : throw new InvalidOperationException($"'{Name}' has no skin, so it has no palettes or bone buffers (a clip-only model can still have a skeleton to pose).");
 
     /// <summary>Destroys the uploaded buffers. Textures belong to the loader; bone buffers to their owner.</summary>
     public void Dispose()

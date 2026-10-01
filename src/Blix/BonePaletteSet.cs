@@ -5,7 +5,7 @@ namespace Blix;
 // Several bodies' bone palettes in ONE buffer, so one instanced draw can pose them all.
 //
 // ── The decision being named ────────────────────────────────────────────────
-// Instance `i`'s matrices start at `i * BoneCount`. That single sentence is restated in two
+// Instance `i`'s matrices start at `i * JointCount`. That single sentence is restated in two
 // languages in every consumer — a C# loop that packs at some stride, and a GLSL line that
 // reads `gl_InstanceIndex * BONE_COUNT` — and **nothing checks that the two agree**. When
 // they disagree the bodies do not vanish or throw; they render as other bodies' poses,
@@ -15,8 +15,8 @@ namespace Blix;
 //   • Bulwark packs `i * EnemyBones * 16` floats and hard-codes `#define BONE_COUNT 15` in
 //     two shaders, guarded by a throw at load if the asset disagrees. The throw exists
 //     *because* the number is in three places.
-//   • the external RTSGame consumer packs into `paletteScratch[count * BoneCount ..]` and multiplies
-//     `gl_InstanceIndex * int(uSkin.x)` — same contract, bone count passed as data.
+//   • the external RTSGame consumer packs into `paletteScratch[count * JointCount ..]` and multiplies
+//     `gl_InstanceIndex * int(uSkin.x)` — same contract, joint count passed as data.
 //   • The toolchain lab is the third.
 //
 // ── What is deliberately NOT named ──────────────────────────────────────────
@@ -31,13 +31,18 @@ namespace Blix;
 // identically.
 public sealed class BonePaletteSet
 {
-    /// <summary>Matrices per instance. Instance i occupies <c>[i * BoneCount, (i+1) * BoneCount)</c>.</summary>
-    public int BoneCount { get; }
+    /// <summary>Matrices per instance: the skin's joint count, not its skeleton's bone count. Instance i occupies <c>[i * JointCount, (i+1) * JointCount)</c>.</summary>
+    /// <remarks>
+    /// Joints, because a palette has one matrix per skin joint and a skeleton can have bones that are no joint of
+    /// this skin (BrainStem: 18 joints, 19 bones). A stride read off the skeleton renders bodies 1 and up from
+    /// other bodies' matrices; body 0 hides it, its base being zero either way.
+    /// </remarks>
+    public int JointCount { get; }
 
     /// <summary>How many instances the buffer was sized for.</summary>
     public int Capacity { get; }
 
-    /// <summary>Every instance's matrices, back to back. Length is <c>Capacity * BoneCount</c>.</summary>
+    /// <summary>Every instance's matrices, back to back. Length is <c>Capacity * JointCount</c>.</summary>
     public Matrix4x4[] Matrices { get; }
 
     /// <summary>How many instances have been written since the last <see cref="Reset"/>.</summary>
@@ -49,16 +54,16 @@ public sealed class BonePaletteSet
     /// an instance buffer comes to cost megabytes a frame for nothing — measured elsewhere in this
     /// tree at 3 ms a frame to upload 111 MB of unused tail.
     /// </remarks>
-    public int LiveMatrixCount => Count * BoneCount;
+    public int LiveMatrixCount => Count * JointCount;
 
 
-    public BonePaletteSet(int boneCount, int capacity)
+    public BonePaletteSet(int jointCount, int capacity)
     {
-        if (boneCount < 0) throw new ArgumentOutOfRangeException(nameof(boneCount), "Bone count must be non-negative.");
+        if (jointCount < 0) throw new ArgumentOutOfRangeException(nameof(jointCount), "Joint count must be non-negative.");
         if (capacity < 1) throw new ArgumentOutOfRangeException(nameof(capacity), "Capacity must be at least one.");
-        BoneCount = boneCount;
+        JointCount = jointCount;
         Capacity = capacity;
-        Matrices = new Matrix4x4[capacity * boneCount];
+        Matrices = new Matrix4x4[capacity * jointCount];
     }
 
     /// <summary>Forget every written instance. Call once per frame, before the first <see cref="Add"/>.</summary>
@@ -71,18 +76,18 @@ public sealed class BonePaletteSet
     /// skin's binds to apply.
     /// </remarks>
     /// <param name="skin">The skin being packed; its joint count is this set's stride.</param>
-    /// <param name="boneWorlds">Its skeleton's bone worlds for this body (<see cref="Skeleton.ComputeBoneWorlds"/>).</param>
+    /// <param name="worlds">This body's bone worlds, of the skin's own skeleton (<see cref="BoneWorlds.Compute"/>).</param>
     /// <param name="post">What goes after every world: the hierarchy's placement, then the body's.</param>
-    /// <exception cref="ArgumentException">The skin's joint count is not this set's stride, or the worlds are not of its skeleton.</exception>
+    /// <exception cref="ArgumentException">The skin's joint count is not this set's stride, or the worlds are another skeleton's.</exception>
     /// <exception cref="InvalidOperationException">The set is full.</exception>
-    public int Add(SkinBinding skin, IReadOnlyList<Matrix4x4> boneWorlds, Matrix4x4 post)
+    public int Add(SkinBinding skin, BoneWorlds worlds, Matrix4x4 post)
     {
         ArgumentNullException.ThrowIfNull(skin);
-        ArgumentNullException.ThrowIfNull(boneWorlds);
-        if (skin.JointCount != BoneCount)
+        ArgumentNullException.ThrowIfNull(worlds);
+        if (skin.JointCount != JointCount)
         {
             throw new ArgumentException(
-                $"A {skin.JointCount}-joint skin; this set is packed at a stride of {BoneCount}.", nameof(skin));
+                $"A {skin.JointCount}-joint skin; this set is packed at a stride of {JointCount}.", nameof(skin));
         }
 
         if (Count >= Capacity)
@@ -93,7 +98,7 @@ public sealed class BonePaletteSet
                 $"BonePaletteSet is full at {Capacity} instance(s). Size it for the crowd, or stop adding.");
         }
 
-        skin.ComputePalette(boneWorlds, post, Matrices.AsSpan(Count * BoneCount, BoneCount));
+        skin.ComputePalette(worlds, post, Matrices.AsSpan(Count * JointCount, JointCount));
         return Count++;
     }
 
@@ -141,6 +146,6 @@ public sealed class BonePaletteSet
                 nameof(instance), instance, $"This set holds {Capacity} instance(s).");
         }
 
-        return Matrices.AsSpan(instance * BoneCount, BoneCount);
+        return Matrices.AsSpan(instance * JointCount, JointCount);
     }
 }

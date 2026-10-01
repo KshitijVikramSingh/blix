@@ -2583,8 +2583,8 @@ static ShaderInterface MinimalShader() => new(new[]
     // A body's palette into a set: its bone worlds, then the skin's binding over them.
     static int AddPose(BonePaletteSet set, SkinBinding skin, Pose pose, Matrix4x4 post)
     {
-        var worlds = new Matrix4x4[skin.Skeleton.BoneCount];
-        skin.Skeleton.ComputeBoneWorlds(pose, worlds);
+        var worlds = new BoneWorlds(skin.Skeleton);
+        worlds.Compute(pose);
         return set.Add(skin, worlds, post);
     }
 
@@ -2859,11 +2859,17 @@ static ShaderInterface MinimalShader() => new(new[]
         catch (ArgumentException) { rejected = true; }
         t.ExpectTrue("AQ.16 and a skin of the wrong joint count is refused", rejected);
 
-        // The worlds must be one per bone of the skeleton the skin binds; any other count is refused rather
-        // than read short.
+        // The worlds must be the skin's own skeleton's. A same-sized rig's are refused by identity: a count
+        // check would pass them, and its bone 1 is not this one's.
         set.Reset();
-        t.ExpectThrows<ArgumentException>("AQ.16 bone worlds of another size are refused, not read short",
-            () => set.Add(skin, new Matrix4x4[skeleton.BoneCount + 1], Matrix4x4.Identity));
+        var sameSized = new Skeleton(bones);
+        var foreignWorlds = new BoneWorlds(sameSized);
+        foreignWorlds.Compute(sameSized.CreateRestPose());
+        t.ExpectThrows("AQ.16 bone worlds of another skeleton are refused, even one with as many bones",
+            () => set.Add(skin, foreignWorlds, Matrix4x4.Identity), mustMention: "another skeleton");
+        var ownWorlds = new BoneWorlds(skeleton);
+        ownWorlds.Compute(skeleton.CreateRestPose());
+        t.Expect("AQ.16 CONTROL: the skin's own skeleton's worlds are taken", set.Add(skin, ownWorlds, Matrix4x4.Identity) == 0);
     }
 
     // ── Instancing is not phase-locked, clip-locked or state-locked ──────────
@@ -3427,8 +3433,8 @@ static ShaderInterface MinimalShader() => new(new[]
         var skel = model.Skeleton;
         var skinOf = model.SkinsOrEmpty[0].Binding;
         var rest = skel.CreateRestPose();
-        var palette = new BonePalette(skel.BoneCount);
-        var worlds = new Matrix4x4[skel.BoneCount];
+        var palette = new BonePalette(skinOf.JointCount);
+        var worlds = new BoneWorlds(skel);
         skinOf.ComputePalette(rest, palette, worlds);
 
         // At rest, InverseBindPose · world is the identity for every bone — the invariant
@@ -3474,7 +3480,7 @@ static ShaderInterface MinimalShader() => new(new[]
 
         // The array is the scratch, so a caller that wants the worlds pays no allocation — and one
         // that does not still gets a palette.
-        var noWorlds = new BonePalette(skel.BoneCount);
+        var noWorlds = new BonePalette(skinOf.JointCount);
         skinOf.ComputePalette(posed, noWorlds);
         var same = true;
         for (var i = 0; i < skel.BoneCount; i++)
@@ -3484,8 +3490,8 @@ static ShaderInterface MinimalShader() => new(new[]
 
         t.ExpectTrue("AY.6 asking for the worlds does not change the palette", same);
 
-        t.ExpectThrows<ArgumentException>("AY.6 a wrongly-sized world array is refused, not silently partial",
-            () => skinOf.ComputePalette(posed, palette, new Matrix4x4[skel.BoneCount + 1]));
+        t.ExpectThrows("AY.6 worlds of another skeleton are refused, not silently written",
+            () => skinOf.ComputePalette(posed, palette, new BoneWorlds(new Skeleton(skel.Bones))), mustMention: "another skeleton");
     }
     finally
     {

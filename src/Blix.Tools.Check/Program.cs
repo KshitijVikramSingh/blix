@@ -370,8 +370,8 @@ public static class Program
 
         // glTF's rest (the joint nodes' transforms) against that bind. A fact, not a verdict. The hierarchy's rest
         // worlds, in skin 0's own frame: they hang from the hierarchy's placement and the binds from the skin's.
-        var restWorlds = new Matrix4x4[skeleton.BoneCount];
-        skeleton.ComputeBoneWorlds(skeleton.CreateRestPose(), restWorlds);
+        var restWorlds = new BoneWorlds(skeleton);
+        restWorlds.Compute(skeleton.CreateRestPose());
         Matrix4x4.Invert(imported.Placement(0), out var fromSkinPlacement);
         var toSkinFrame = imported.SkeletonPlacement * fromSkinPlacement;
         var worlds = new Matrix4x4[skin.JointCount];
