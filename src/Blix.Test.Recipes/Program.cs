@@ -1,4 +1,3 @@
-using Blix.Import;
 using Blix.Assets;
 using System.Diagnostics;
 using Blix.Cooked;
@@ -31,14 +30,13 @@ public static class Program
         foreach (var prim in mesh.Primitives)
         {
             if (prim.GetVertexAccessor("TANGENT") is null || prim.GetVertexAccessor("TEXCOORD_0") is null) continue;
-            var authored = Blix.Import.GltfStaticImporter.BuildStaticMeshData(
-                mesh.Name ?? "m", prim, System.Numerics.Matrix4x4.Identity, System.Numerics.Matrix4x4.Identity,
-                includeTangents: true);
+            var authored = Blix.Recipes.GltfVertices.Static(mesh.Name ?? "m", prim);
+            var stride = authored.Layout.Stride;
             var stripped = (byte[])authored.VertexBytes.Clone();
             for (var v = 0; v < authored.VertexCount; v++)
             {
-                Array.Clear(stripped, (v * 48) + 24, 16);
-                if (mirrorV) BitConverter.TryWriteBytes(stripped.AsSpan((v * 48) + 44, 4), 1f - BitConverter.ToSingle(stripped, (v * 48) + 44));
+                Array.Clear(stripped, (v * stride) + 24, 16);
+                if (mirrorV) BitConverter.TryWriteBytes(stripped.AsSpan((v * stride) + 44, 4), 1f - BitConverter.ToSingle(stripped, (v * stride) + 44));
             }
             var generated = TangentGeneration.Generate(authored with { VertexBytes = stripped });
 
@@ -46,8 +44,8 @@ public static class Program
             var after = generated.Indices32 ?? generated.Indices.Select(i => (uint)i).ToArray();
             for (var c = 0; c < before.Length; c++)
             {
-                var a = Tangent(authored.VertexBytes, before[c]);
-                var g = Tangent(generated.VertexBytes, after[c]);
+                var a = Tangent(authored.VertexBytes, before[c], stride);
+                var g = Tangent(generated.VertexBytes, after[c], stride);
                 corners++;
                 if (System.Numerics.Vector3.Dot(Vector3Of(a), Vector3Of(g)) > MathF.Cos(8f * MathF.PI / 180f)) direction++;
                 if (MathF.Sign(a.W) == MathF.Sign(g.W)) handedness++;
@@ -56,9 +54,9 @@ public static class Program
 
         return (corners, direction, handedness);
 
-        static System.Numerics.Vector4 Tangent(byte[] bytes, uint vertex)
+        static System.Numerics.Vector4 Tangent(byte[] bytes, uint vertex, int stride)
         {
-            var o = ((int)vertex * 48) + 24;
+            var o = ((int)vertex * stride) + 24;
             return new System.Numerics.Vector4(
                 BitConverter.ToSingle(bytes, o), BitConverter.ToSingle(bytes, o + 4),
                 BitConverter.ToSingle(bytes, o + 8), BitConverter.ToSingle(bytes, o + 12));
@@ -68,27 +66,28 @@ public static class Program
             System.Numerics.Vector3.Normalize(new System.Numerics.Vector3(v.X, v.Y, v.Z));
     }
 
-    // Per triangle corner, because the cook's tangent weld renumbers vertices; floats to a hair (the
-    // cooked path unbakes a node transform the source applied once), the packed colour exactly.
-    private static bool SameCorners(Blix.Assets.MeshData a, Blix.Assets.MeshData b, int colourAt)
+    // Per triangle corner, because the cook's tangent weld renumbers vertices: every field the narrowed
+    // layout carries (position, normal, UV0, and UV1 with the packed colour where it has them), byte for
+    // byte against the complete vertex. The tangent is not compared, since the cook generates it where
+    // the source authored none.
+    private static bool SameNarrowedCorners(Blix.Assets.MeshData narrowed, Blix.Assets.MeshData complete)
     {
-        var ia = a.Indices32 ?? a.Indices.Select(i => (uint)i).ToArray();
-        var ib = b.Indices32 ?? b.Indices.Select(i => (uint)i).ToArray();
-        if (ia.Length != ib.Length || a.Layout.Stride != b.Layout.Stride) return false;
-        var stride = a.Layout.Stride;
-        for (var c = 0; c < ia.Length; c++)
-        {
-            var va = (int)ia[c] * stride;
-            var vb = (int)ib[c] * stride;
-            for (var at = 0; at < stride; at += 4)
-            {
-                if (at == colourAt)
-                {
-                    if (BitConverter.ToUInt32(a.VertexBytes, va + at) != BitConverter.ToUInt32(b.VertexBytes, vb + at)) return false;
-                    continue;
-                }
+        if (Blix.Graphics.VertexSemantics.Of(narrowed.Layout) is not { } n
+            || Blix.Graphics.VertexSemantics.Of(complete.Layout) is not { Uv1: >= 0 } c) return false;
+        var fields = new List<(int At, int From, int Bytes)> { (n.Position, c.Position, 12), (n.Normal, c.Normal, 12), (n.Uv0, c.Uv0, 8) };
+        // The colour sits right after UV1 in both colour layouts.
+        if (n.Uv1 >= 0) fields.AddRange(new[] { (n.Uv1, c.Uv1, 8), (n.Uv1 + 8, c.Uv1 + 8, 4) });
 
-                if (Math.Abs(BitConverter.ToSingle(a.VertexBytes, va + at) - BitConverter.ToSingle(b.VertexBytes, vb + at)) > 1e-4f) return false;
+        var ia = narrowed.Indices32 ?? narrowed.Indices.Select(i => (uint)i).ToArray();
+        var ib = complete.Indices32 ?? complete.Indices.Select(i => (uint)i).ToArray();
+        if (ia.Length != ib.Length) return false;
+        for (var corner = 0; corner < ia.Length; corner++)
+        {
+            var va = narrowed.VertexBytes.AsSpan((int)ia[corner] * narrowed.Layout.Stride, narrowed.Layout.Stride);
+            var vb = complete.VertexBytes.AsSpan((int)ib[corner] * complete.Layout.Stride, complete.Layout.Stride);
+            foreach (var (at, from, bytes) in fields)
+            {
+                if (!va.Slice(at, bytes).SequenceEqual(vb.Slice(from, bytes))) return false;
             }
         }
 
@@ -545,8 +544,7 @@ public static class Program
             string? refusal = null;
             try
             {
-                Blix.Import.GltfStaticImporter.BuildStaticMeshData("probe", gltf.LogicalMeshes[0].Primitives[0],
-                    System.Numerics.Matrix4x4.Identity, System.Numerics.Matrix4x4.Identity);
+                Blix.Recipes.GltfVertices.Static("probe", gltf.LogicalMeshes[0].Primitives[0]);
             }
             catch (InvalidOperationException e)
             {
@@ -1485,11 +1483,11 @@ public static class Program
                         switch (channel.TargetNodePath)
                         {
                             case SharpGLTF.Schema2.PropertyPath.translation:
-                                trs[n].Translation = SpecVector(GltfImporter.SampleKeys(channel.GetTranslationSampler()), time); moved[n] = true; break;
+                                trs[n].Translation = SpecVector(MeshRecipe.SampleKeys(channel.GetTranslationSampler()), time); moved[n] = true; break;
                             case SharpGLTF.Schema2.PropertyPath.scale:
-                                trs[n].Scale = SpecVector(GltfImporter.SampleKeys(channel.GetScaleSampler()), time); moved[n] = true; break;
+                                trs[n].Scale = SpecVector(MeshRecipe.SampleKeys(channel.GetScaleSampler()), time); moved[n] = true; break;
                             case SharpGLTF.Schema2.PropertyPath.rotation:
-                                trs[n].Rotation = SpecRotation(GltfImporter.SampleKeys(channel.GetRotationSampler()), time); moved[n] = true; break;
+                                trs[n].Rotation = SpecRotation(MeshRecipe.SampleKeys(channel.GetRotationSampler()), time); moved[n] = true; break;
                         }
                     }
 
@@ -1736,7 +1734,7 @@ public static class Program
                 if (path == SharpGLTF.Schema2.PropertyPath.rotation)
                 {
                     var sampler = channel.GetRotationSampler();
-                    var (keys, mode) = GltfImporter.SampleKeys(sampler);
+                    var (keys, mode) = MeshRecipe.SampleKeys(sampler);
                     (count, wantMode) = (keys.Length, mode);
                     modes.Add(mode);
                     var ours = new KeyframeQuaternionCurve(keys, mode);
@@ -1764,7 +1762,7 @@ public static class Program
                 else
                 {
                     var sampler = path == SharpGLTF.Schema2.PropertyPath.translation ? channel.GetTranslationSampler() : channel.GetScaleSampler();
-                    var (keys, mode) = GltfImporter.SampleKeys(sampler);
+                    var (keys, mode) = MeshRecipe.SampleKeys(sampler);
                     (count, wantMode) = (keys.Length, mode);
                     modes.Add(mode);
                     var ours = new KeyframeVector3Curve(keys, mode);
@@ -2905,14 +2903,11 @@ public static class Program
                         for (var i = 0; i < Math.Min(primitives.Count, twin.Primitives.Count); i++)
                         {
                             var a2 = primitives[i].Mesh;
-                            var b2 = Blix.Import.GltfStaticImporter.BuildStaticMeshData(
-                                "reference", twin.Primitives[i], System.Numerics.Matrix4x4.Identity,
-                                System.Numerics.Matrix4x4.Identity, includeTangents: tangents, includeColour: colour);
+                            var b2 = Blix.Recipes.GltfVertices.Static("reference", twin.Primitives[i]);
                             compared++;
                             // Tangents are generated by the cook where the source authored none, so
-                            // at the tangent layout only everything else must agree.
-                            if (a2.Layout.Stride != b2.Layout.Stride || a2.IndexCount != b2.IndexCount) { differ++; continue; }
-                            if (!tangents && !SameCorners(a2, b2, colourAt: colour ? 40 : -1)) differ++;
+                            // the tangent itself is not compared; everything the layout carries is.
+                            if (a2.IndexCount != b2.IndexCount || !SameNarrowedCorners(a2, b2)) differ++;
                         }
                     }
 
@@ -3400,20 +3395,18 @@ public static class Program
                         // <b>The layout has to match too, or the GPU reads garbage.</b> The studio's
                         // stage declares the 44-byte colour layout; handing it a 32-byte vertex once
                         // drew the model as a cloud of shards — the same stride mismatch that once
-                        // drew Sponza as grey triangles. The reference is the vertex builder at that
-                        // layout, in mesh space.
+                        // drew Sponza as grey triangles. The reference is the complete vertex the cook
+                        // builds, in mesh space, compared field by field.
                         var am = aPrims[pi].Mesh;
-                        var bm = Blix.Import.GltfStaticImporter.BuildStaticMeshData(
-                            "reference", bPrims[pi], System.Numerics.Matrix4x4.Identity,
-                            System.Numerics.Matrix4x4.Identity, includeColour: true);
-                        if (am.Layout.Stride != bm.Layout.Stride)
+                        if (am.Layout.Stride != Blix.Graphics.VertexPosition3NormalTexture2Color.Layout.Stride)
                         {
-                            nodeMismatch.Add($"'{a.Name}' stride {am.Layout.Stride} vs {bm.Layout.Stride}");
+                            nodeMismatch.Add($"'{a.Name}' stride {am.Layout.Stride}, not the colour layout's");
                             continue;
                         }
 
                         comparedVerts += am.VertexCount;
-                        if (!SameCorners(am, bm, colourAt: 40)) nodeMismatch.Add($"'{a.Name}'[{pi}] corners differ");
+                        if (!SameNarrowedCorners(am, Blix.Recipes.GltfVertices.Static("reference", bPrims[pi])))
+                            nodeMismatch.Add($"'{a.Name}'[{pi}] corners differ");
                     }
                 }
 

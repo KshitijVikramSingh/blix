@@ -52,7 +52,7 @@ public static class CookCache
 
         log?.Invoke($"cooking {Path.GetFileName(full)} into {entry}");
         // The engine's one refusal type, naming the file, so a tool reports "blix cannot read this"
-        // the same way whether the parser, the importer or the cook said no.
+        // the same way whether the parser or the cook said no.
         return Blix.Cooked.AssetImportException.Refusing(
             modelPath, () => AssetCook.Cook(full, entry).MeshPath);
     }

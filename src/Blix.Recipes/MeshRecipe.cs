@@ -1,6 +1,5 @@
 using System.Numerics;
 using Blix;
-using Blix.Import;
 using Blix.Assets;
 using Blix.Cooked;
 using Blix.Geometry;
@@ -33,10 +32,9 @@ public static class MeshRecipe
     }
 
     // Cook a .gltf/.glb to its .blixmesh sibling. CPU-only -- no GraphicsDevice
-    // required; safe to invoke from the offline cook tool. Walks the same
-    // node/primitive structure the runtime importer does, packs vertices via
-    // BuildStaticMeshData, and serialises each primitive's
-    // (name, materialIndex, bounds, vertexBytes, indices) to disk.
+    // required; safe to invoke from the offline cook tool. Walks the source's
+    // nodes and primitives, packs vertices via GltfVertices, and serialises each
+    // primitive's (name, materialIndex, bounds, vertexBytes, indices) to disk.
     // Target triangle ratios for the LOD chain (relative to full detail). The
     // chain stops early if a level doesn't reduce or falls below MinLodIndices.
     private static readonly float[] LodRatios = { 0.5f, 0.25f, 0.125f };
@@ -106,7 +104,7 @@ public static class MeshRecipe
     // Version 17 validates sources (one declared leniency), builds generated tangents over the normal
     // texture's TEXCOORD set, refuses index counts glTF forbids, and accepts extra inverse binds.
     // Version 18 refuses morph targets that take effect: an instantiated node whose effective weights (its own,
-    // else its mesh's) are not all zero, or a weights animation of such a node (GltfSourcePolicy). No file that
+    // else its mesh's) are not all zero, or a weights animation of such a node (RefuseEffectiveMorphTargets). No file that
     // cooks changes, but a cached cook of one that is now refused must not keep loading.
     public const uint MeshRecipeVersion = 18;
 
@@ -153,7 +151,7 @@ public static class MeshRecipe
         var remaps = new List<int[]>();
         foreach (var skin in skinOrder)
         {
-            var (bones, inverseBinds, oldToNew, _) = GltfImporter.BuildSkeletonAndOrdering(skin);
+            var (bones, inverseBinds, oldToNew, _) = GltfSkeleton.Build(skin);
             var jointOfBone = new int[bones.Length];
             for (var old = 0; old < oldToNew.Length; old++) jointOfBone[oldToNew[old]] = nodeOfLogical[skin.Joints[old].LogicalIndex];
             skins.Add(new BlixMeshSkin(bones
@@ -214,7 +212,7 @@ public static class MeshRecipe
             outPath,
             new BlixMeshFile(
                 cookedNodes, meshes, CookMaterials(model, imageRows, patch, log), images, skins, clips,
-                Ignored: GltfImporter.UnreadAttributes(model).Select(i => new BlixMeshIgnored(i.Semantic, i.Primitives)).ToArray(),
+                Ignored: GltfUnread.Of(model).Select(i => new BlixMeshIgnored(i.Semantic, i.Primitives)).ToArray(),
                 Scenes: model.LogicalScenes
                     .Select(sc => new BlixMeshScene(sc.Name ?? string.Empty, sc.VisualChildren.Select(r => nodeOfLogical[r.LogicalIndex]).ToArray()))
                     .ToArray(),
@@ -258,8 +256,7 @@ public static class MeshRecipe
         {
             var prim = mesh.Primitives[i];
             var meshName = $"{mesh.Name ?? first.Name ?? "gltf_mesh"}.{i}";
-            var meshData = GltfStaticImporter.BuildStaticMeshData(
-                meshName, prim, Matrix4x4.Identity, Matrix4x4.Identity, flipTextureV, includeTangents: true, includeColour: true);
+            var meshData = GltfVertices.Static(meshName, prim, flipTextureV);
             // The builder leaves the tangent zero where the source authored no TANGENT; the cook fills
             // it with the MikkTSpace frame glTF asks for.
             if (prim.GetVertexAccessor("TANGENT") is null) meshData = TangentGeneration.Generate(meshData, NormalUvSet(prim));
@@ -295,8 +292,8 @@ public static class MeshRecipe
 
     /// <summary>A skinned glTF mesh's primitives, in mesh space, as the complete skinned vertex.</summary>
     /// <remarks>
-    /// The vertices come from <see cref="GltfImporter.BuildMeshData"/>, so joint remapping and influence
-    /// selection are the importer's. The second set and the colour are appended before tangents are
+    /// The vertices come from <see cref="GltfVertices.Skinned"/>, which remaps joints and selects
+    /// influences. The second set and the colour are appended before tangents are
     /// generated, because generation re-welds and renumbers vertices.
     /// </remarks>
     private static List<BlixMeshPrimitive> CookSkinnedMesh(Mesh mesh, int[] remap, MaterialVariants variants)
@@ -305,7 +302,7 @@ public static class MeshRecipe
         for (var i = 0; i < mesh.Primitives.Count; i++)
         {
             var prim = mesh.Primitives[i];
-            var skinned = GltfImporter.BuildMeshData($"{mesh.Name ?? "gltf_mesh"}.{i}", prim, remap);
+            var skinned = GltfVertices.Skinned($"{mesh.Name ?? "gltf_mesh"}.{i}", prim, remap);
             var complete = Complete(skinned, prim);
             if (TangentGeneration.HasNoTangents(complete)) complete = TangentGeneration.Generate(complete, NormalUvSet(prim));
             primitives.Add(new BlixMeshPrimitive(
@@ -437,7 +434,7 @@ public static class MeshRecipe
     /// <summary>One animation, as keyframes.</summary>
     /// <remarks>
     /// Store source keyframes rather than serializing runtime curve objects. The
-    /// glTF importer builds exactly two curve types — <c>KeyframeVector3Curve</c> and
+    /// reader builds exactly two curve types — <c>KeyframeVector3Curve</c> and
     /// <c>KeyframeQuaternionCurve</c> — each from a plain array of (time, value). Writing those
     /// arrays back is lossless; writing a serialised "curve" would be inventing a representation
     /// for something that is already one.
@@ -457,13 +454,13 @@ public static class MeshRecipe
             {
                 case SharpGLTF.Schema2.PropertyPath.translation:
                 {
-                    var (keys, mode) = GltfImporter.SampleKeys(channel.GetTranslationSampler());
+                    var (keys, mode) = SampleKeys(channel.GetTranslationSampler());
                     track = track with { Translation = VectorKeys(keys), TranslationInterpolation = Mode(mode) };
                     break;
                 }
                 case SharpGLTF.Schema2.PropertyPath.rotation:
                 {
-                    var (keys, mode) = GltfImporter.SampleKeys(channel.GetRotationSampler());
+                    var (keys, mode) = SampleKeys(channel.GetRotationSampler());
                     track = track with
                     {
                         Rotation = keys.Select(k => new BlixMeshQuaternionKey((float)k.Time, k.Value, k.InTangent, k.OutTangent)).ToArray(),
@@ -473,7 +470,7 @@ public static class MeshRecipe
                 }
                 case SharpGLTF.Schema2.PropertyPath.scale:
                 {
-                    var (keys, mode) = GltfImporter.SampleKeys(channel.GetScaleSampler());
+                    var (keys, mode) = SampleKeys(channel.GetScaleSampler());
                     track = track with { Scale = VectorKeys(keys), ScaleInterpolation = Mode(mode) };
                     break;
                 }
@@ -495,6 +492,24 @@ public static class MeshRecipe
             Interpolation.CubicSpline => BlixMeshInterpolation.CubicSpline,
             _ => BlixMeshInterpolation.Linear,
         };
+    }
+
+    /// <summary>A glTF sampler's keys and interpolation, as the curves read them: LINEAR, STEP or CUBICSPLINE.</summary>
+    /// <remarks>CUBICSPLINE keys carry glTF's in/out tangents (a_k, b_k), per unit of time.</remarks>
+    internal static (Keyframe<T>[] Keys, Interpolation Mode) SampleKeys<T>(IAnimationSampler<T> sampler)
+    {
+        ArgumentNullException.ThrowIfNull(sampler);
+        switch (sampler.InterpolationMode)
+        {
+            case AnimationInterpolationMode.CUBICSPLINE:
+                return (sampler.GetCubicKeys()
+                    .Select(k => new Keyframe<T>(k.Key, k.Value.Value, k.Value.TangentIn, k.Value.TangentOut)).ToArray(),
+                    Interpolation.CubicSpline);
+            case AnimationInterpolationMode.STEP:
+                return (sampler.GetLinearKeys().Select(k => new Keyframe<T>(k.Key, k.Value)).ToArray(), Interpolation.Step);
+            default:
+                return (sampler.GetLinearKeys().Select(k => new Keyframe<T>(k.Key, k.Value)).ToArray(), Interpolation.Linear);
+        }
     }
 
     /// <summary>
@@ -801,7 +816,7 @@ public static class MeshRecipe
         {
             model = ModelRoot.Load(gltfPath, new SharpGLTF.Schema2.ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip });
             RefuseUnreadExtensions(model, gltfPath);
-            GltfSourcePolicy.RefuseEffectiveMorphTargets(model, gltfPath);
+            RefuseEffectiveMorphTargets(model, gltfPath);
             // Re-read unvalidated ONLY when one of the two named causes is present; a file the validator
             // refuses for anything else is refused. (The cause present may not be the validator's only
             // complaint — what it would have said after the first error is not knowable from here.)
@@ -816,7 +831,7 @@ public static class MeshRecipe
         }
 
         RefuseUnreadExtensions(model, gltfPath);
-        GltfSourcePolicy.RefuseEffectiveMorphTargets(model, gltfPath);
+        RefuseEffectiveMorphTargets(model, gltfPath);
         return model;
     }
 
@@ -825,6 +840,49 @@ public static class MeshRecipe
     {
         if (model.LogicalSkins.Any(skin => !HasCommonRoot(skin))) yield return LenientSkinWithoutCommonRoot;
         if (model.LogicalSkins.Any(skin => skin.InverseBindMatrices.Count > skin.Joints.Count)) yield return ValidatorRefusesSpareInverseBinds;
+    }
+
+    /// <summary>
+    /// Refuses morph targets that take effect. Blix does not deform by morph targets, so it draws a mesh's base; that
+    /// is the file's shape exactly where every instance's effective weights are zero and nothing animates them.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Effective weights, per instance.</b> glTF instantiates a mesh at a node with the node's <c>weights</c> when it
+    /// has them, the mesh's otherwise, and zero when neither does. So a mesh whose own defaults are nonzero is still
+    /// drawn as its base by every node that zeroes them, and a mesh no node places is drawn nowhere: neither is refused.
+    /// </para>
+    /// <para>
+    /// <b>Any weights animation is refused,</b> even one whose keys happen to be zero: animated morphing is a dynamic
+    /// semantic Blix does not have, and inspecting keys for a degenerate no-op is not worth the cleverness.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="InvalidDataException">An instance of a mesh with morph targets would not be its base.</exception>
+    private static void RefuseEffectiveMorphTargets(ModelRoot model, string sourcePath)
+    {
+        static bool Morphs(Mesh? mesh) => mesh is not null && mesh.Primitives.Any(p => p.MorphTargetsCount > 0);
+
+        foreach (var node in model.LogicalNodes.Where(n => Morphs(n.Mesh)))
+        {
+            var effective = node.MorphWeights is { Count: > 0 } own ? own : node.Mesh!.MorphWeights;
+            if (effective is not null && effective.Any(w => w != 0f))
+            {
+                Refuse(node.Mesh!, $"node {node.LogicalIndex} ('{node.Name}') instantiates it with weights that are not all zero");
+            }
+        }
+
+        foreach (var animation in model.LogicalAnimations)
+        foreach (var channel in animation.Channels)
+        {
+            if (channel.TargetNodePath == PropertyPath.weights && Morphs(channel.TargetNode?.Mesh))
+            {
+                Refuse(channel.TargetNode!.Mesh!, $"animation '{animation.Name}' drives node {channel.TargetNode.LogicalIndex}'s weights");
+            }
+        }
+
+        void Refuse(Mesh mesh, string why) => throw new InvalidDataException(
+            $"'{sourcePath}' morph targets of mesh {mesh.LogicalIndex} ('{mesh.Name}') take effect ({why}), and Blix does not deform "
+            + "by morph targets; drawing the base mesh would be a different shape than the file describes.");
     }
 
     private static void RefuseUnreadExtensions(ModelRoot model, string gltfPath)
@@ -938,9 +996,9 @@ public static class MeshRecipe
     /// <c>MaterialIndex</c> is the source logical-material index. Compacting the table would change
     /// that index's meaning.
     /// <para>
-    /// This reads the same channels <c>GltfShared.ExtractMaterial</c> does and must keep reading
-    /// them: a property the cook drops is one the loader stops seeing the moment a mesh is cooked,
-    /// which shows up as an asset that renders differently on machines that have cooked it.
+    /// This is the one reading of a glTF material there is: a property it drops is one the loader never
+    /// sees, which shows up as an asset that renders differently from the file it was cooked from
+    /// (Test.Recipes K-F holds it to a reading of the glTF field by field).
     /// </para>
     /// </remarks>
     private static IReadOnlyList<BlixMeshMaterial> CookMaterials(

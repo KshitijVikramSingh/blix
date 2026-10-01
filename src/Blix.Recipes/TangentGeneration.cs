@@ -28,7 +28,7 @@ public static class TangentGeneration
     private static Offsets? OffsetsFor(VertexLayout layout) =>
         VertexSemantics.Of(layout) is { Tangent: >= 0 } s ? new Offsets(s.Position, s.Normal, s.Uv0, s.Tangent, s.Uv1) : null;
 
-    /// <summary>Whether every tangent in <paramref name="mesh"/> is zero: the rig importer's "none authored".</summary>
+    /// <summary>Whether every tangent in <paramref name="mesh"/> is zero: the vertex builder's "none authored".</summary>
     public static bool HasNoTangents(MeshData mesh)
     {
         ArgumentNullException.ThrowIfNull(mesh);
