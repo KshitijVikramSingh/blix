@@ -8,7 +8,7 @@ namespace Blix;
 /// glTF places a skinned vertex by its joints' world transforms alone — <c>sum(w * jointWorld *
 /// inverseBind * v)</c> — and those worlds are the scene graph's, non-joint nodes included. A
 /// <see cref="Skeleton"/> composes bone worlds from its roots down, so it needs three facts from the
-/// graph, and this is the one place that derives them, for the cooked reader and the source importer
+/// graph, and this is the one place that derives them, for the cooked reader and the cook
 /// alike:
 /// </para>
 /// <list type="bullet">

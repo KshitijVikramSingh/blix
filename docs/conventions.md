@@ -170,11 +170,11 @@ symmetry) and **AH.7** (`WorldMatrix` through the GLSL `M*v` path).
   What is non-negotiable is the *boundary* (no third-party type leaks past the
   cook) and that the runtime can **explain** what it loaded (`blix inspect`).
 
-**Enforced by:** [`blix.md` §glTF import + §Project dependencies](blix.md) ·
+**Enforced by:** [`blix.md` §Project dependencies + §Cooked models](blix.md) ·
 [`architecture.md`](architecture.md) (cooked-asset pipeline) ·
-`Blix.Test.Graphics` Section **AI** (`ImportNodes` preserves names / parent /
-local transform) · Section **AJ** (imported nodes compose to the right world
-pose).
+`Blix.Test.Graphics` Section **AI** (the cooked scene graph keeps names / parent /
+local transform) · `Blix.Test.Recipes` (the cooked hierarchy, rig and materials
+held to the glTF itself).
 
 ## 4. Demos are executable specs
 
@@ -313,9 +313,9 @@ questions, and a type that answers both forces every consumer to share one answe
 
 Worked examples, all arrived at by argument rather than by rule:
 
-- `COLOR_0` is read by the importer (mechanism); `includeColour` says whether to, because
-  six applications pin a 32-byte vertex layout and one wants 36.
-- Attachments are collected by the importer (mechanism); which are *visible* is the
+- `COLOR_0` is cooked into every vertex (mechanism); `ModelNeeds.Colour` says whether a load
+  hands it over, because six applications pin a 32-byte vertex layout and one wants 44.
+- Attachments are collected by the reader (mechanism); which are *visible* is the
   caller's, because four of the Rogue's six hang off one hand and a game shows one.
 - Every skin in a file is read (mechanism); which palette a part draws against is
   carried per part, because the file has no opinion about that either.
@@ -394,7 +394,7 @@ per-triangle sorting, order-independent blending are all defensible — so that 
 limitation is stated rather than half-built.
 
 **Enforced by:** `Blix.Test.Graphics` Section **AZ** and **BB** (synthetic fixtures authored for gaps
-no owned asset covers) · the glTF attribute table recorded in `GltfStaticImporter` from the spec
+no owned asset covers) · the glTF attribute table recorded in `GltfVertices` from the spec
 rather than from a sweep of the content.
 
 ---

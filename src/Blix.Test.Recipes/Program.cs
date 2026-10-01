@@ -773,7 +773,7 @@ public static class Program
 
     // ── A golden that shares nothing with the reader ─────────────────────────────
     // SamplingMatchesGltf and AnimationMatchesGltf evaluate keys independently, but both take the keys
-    // through GltfImporter.SampleKeys — so a mis-read of a CUBICSPLINE triple (in, value, out) would sit
+    // through MeshRecipe.SampleKeys — so a mis-read of a CUBICSPLINE triple (in, value, out) would sit
     // on both sides. This one decodes InterpolationTest's accessors from the .glb's own bytes, applies
     // glTF Appendix C by hand, and holds Blix's sampled pose to it; plus one literal from the spec
     // computed by hand (CubicSpline Rotation at t = 1.9).
@@ -1681,7 +1681,7 @@ public static class Program
 
     // ── Sampling as glTF defines it ────────────────────────────────────────────
     // Every channel of every animated file in the corpus, read into Blix's curves by the one sampler
-    // reading (GltfImporter.SampleKeys) and through the cooked file, is held to SharpGLTF's own curve
+    // reading (MeshRecipe.SampleKeys) and through the cooked file, is held to SharpGLTF's own curve
     // evaluator at many times — LINEAR, STEP and CUBICSPLINE alike (InterpolationTest has all three).
     private static void SamplingMatchesGltf(TestRunner t)
     {

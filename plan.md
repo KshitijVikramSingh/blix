@@ -8,18 +8,14 @@ its history in git.
 
 ## Open decisions, and the arcs after them
 
-**The direct source importers' public entry points.** The engine reads cooked models only, and the cook
-(`MeshRecipe.OpenSource`) is its one source reader. `GltfImporter.Import`, `GltfStaticImporter.Import` and
-`ImportNodes` have no consumer outside the tests, which use them as reference readers; the cook uses only
-their static helpers. They still look like user API, which is how a morph file the cook refused came to
-load through them. `GltfSourcePolicy` now holds the morph rule all three share, but growing it into the
-whole of source acceptance would make a vestigial path more authoritative. The open decision: make the
-entry points internal (test oracles), leaving the cook as the only way in, or keep them public and move
-every semantic source refusal (required extensions, validation and its named fallbacks, primitive modes,
-index counts) into the shared policy.
+**OBJ, now that glTF has no importer.** `ObjImporter` has no consumer outside the tests, and
+`WavefrontParts` has one, the Check tool. No recipe cooks an OBJ, so both read the source every time,
+and their cooked-sibling path, with the `recenter` validation in front of it, is reachable only by a file
+no recipe in the tree writes. The open decision: give OBJ a recipe and route it through the cook as glTF
+now is, or retire both readers.
 
 **Later, as their own arcs, when something asks:** morph deformation (targets plus a `weights` clip
-channel; today refused where they take effect, `GltfSourcePolicy`), then `KHR_animation_pointer` (not
+channel; today refused where they take effect, `MeshRecipe.OpenSource`), then `KHR_animation_pointer` (not
 forced into skeletal animation).
 
 ---
@@ -136,7 +132,10 @@ required and no inverse bind; a palette is `SkinBinding.ComputePalette(BoneWorld
 `JointCount` for `BoneCount` on `BonePalette`, `BonePaletteSet` and `BoneBuffers`; `ModelData.Skin(Binding,
 JointNodes, Placement)` and `Model.Skins` as bindings; `FindWeightedJoints`; attachments' `BoneName`/
 `BoneIndex` and `CarrierNode`; masks validated against their skeleton; recipe 18 (a re-cook); and a
-skinned load with `Colour` gets the 92-byte vertex, so its pipeline must declare that layout.
+skinned load with `Colour` gets the 92-byte vertex, so its pipeline must declare that layout. From this
+arc: `Blix.Import` is gone — `GltfImporter`, `GltfStaticImporter` and the `Gltf*` types they returned — so a
+glTF opens by cooking (`CookCache.Resolve`, then `ModelData.Load`); `AssetImportContext` takes an id and a
+path only.
 
 ---
 

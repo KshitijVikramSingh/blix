@@ -60,9 +60,8 @@ public static class BlixMesh
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
     public const uint LayoutPosition3NormalTextureSkin4Tangent = 3; // 80-byte, rigged
-    // The two colour-carrying static layouts. They reach this format through a RIG's attachments
-    // and static parts, which are built by the static mesh path with includeColour — so a format
-    // that knew only the skinned layout could store a rig's skeleton and not its cape.
+    // The two colour-carrying static layouts. The cook writes the complete vertices (6 and 7); these
+    // remain layouts the format can store, and the shapes a load narrows to.
     public const uint LayoutPosition3NormalTextureColor = 4;      // 36-byte
     public const uint LayoutPosition3NormalTexture2Color = 5;     // 44-byte, two UV sets
     public const uint LayoutPosition3NormalTangentTexture2Color = 6; // 60-byte, the complete static vertex

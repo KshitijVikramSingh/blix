@@ -1,6 +1,6 @@
 # Blix
 
-The layer game code targets. Owns the loop contract, scene composition, per-object pose, cameras + lights, animation + skeletal animation, physics, geometry + collision, audio, and the glTF importer. Everything below it (`Blix.Core`, `Blix.Graphics`, `Blix.Graphics.Images`, `Blix.Render`, `Blix.Assets`, `Blix.Diagnostics`, `Blix.Geometry`) is platform/renderer plumbing.
+The layer game code targets. Owns the loop contract, scene composition, per-object pose, cameras + lights, animation + skeletal animation, physics, geometry + collision, audio, and the cooked-model reader. Everything below it (`Blix.Core`, `Blix.Graphics`, `Blix.Graphics.Images`, `Blix.Render`, `Blix.Assets`, `Blix.Diagnostics`, `Blix.Geometry`) is platform/renderer plumbing.
 
 This doc is the reference for the `Blix` namespace. For the layers below, see [`architecture.md`](architecture.md) (project graph, host contracts, the Vulkan binding model) and [`renderer.md`](renderer.md) (render graph, shaders, rendering techniques).
 
@@ -71,7 +71,7 @@ This is the same shaderless application boundary `src/Demos/Blix.Demos.Chassis/P
 - `Blix.Render` — `Mesh`, the uploaded geometry a `Model`'s parts hold
 - `Blix.Assets` — `MeshData` and the cooked `.blixmesh` reader
 
-No glTF parser: the engine reads cooked models only (`ModelData.Load` takes a `.blixmesh`). Parsing glTF sources is `Blix.Import`'s, which the cook and the tools use and a game does not ship.
+No glTF parser: the engine reads cooked models only (`ModelData.Load` takes a `.blixmesh`). Parsing glTF sources is the cook's (`Blix.Recipes`), which the tools use and a game does not ship.
 
 Nothing references `Blix` from below. No transitive dependency on `Blix.Runtime.Silk` or `Blix.Diagnostics` — the layer is platform-free.
 
@@ -632,7 +632,7 @@ The shader side is `skinning.glsl` (set 3, binding 0, unsized): each skin's buff
 
 The engine reads cooked models only. `ModelData.Load(path, needs, scene)` reads a `.blixmesh` — glTF's scene graph as the cook wrote it: nodes, meshes placed by them, skins as joint nodes, clips on nodes, materials and the scene level (scenes, visibility, instances, cameras, lights, material variants). `ModelNeeds` declares the vertex layout the pipelines read. `device.CreateModel(data, textureLoader, name)` makes it resident: one uploaded `Mesh` per primitive with its material and textures, and the skins and clips above.
 
-A tool opens glTF sources by cooking them first (`Blix.Recipes.CookCache.Resolve`); `Blix.Import` holds the source importers the cook uses.
+A tool opens glTF sources by cooking them first (`Blix.Recipes.CookCache.Resolve`): the cook is the one reader of a glTF source.
 
 ### Deliberate limits (skeletal)
 

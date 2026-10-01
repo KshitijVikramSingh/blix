@@ -3,7 +3,7 @@ namespace Blix.Cooked;
 /// <summary>
 /// The engine declining a file: Blix cannot read this, and here is which file and why.
 /// </summary>
-/// <remarks>Lives in Blix.Cooked so source importers and every cooked-format reader can share it.</remarks>
+/// <remarks>Lives in Blix.Cooked so the cook and every cooked-format reader can share it.</remarks>
 public sealed class AssetImportException : Exception
 {
     public AssetImportException(string sourcePath, int? lineNumber, string message)
