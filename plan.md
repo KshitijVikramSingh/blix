@@ -365,6 +365,17 @@ clean diff and acceptance story of its own.
   - The normal map under `KHR_texture_transform`: a derived regression asset (rotation and non-uniform scale),
     and the fix in the normal-map shading path from the channel's full 2×2 linear part and handedness, not
     baked into the mesh (variants can give one mesh several transforms).
+    **Done:** `studio_lit.frag` reads the map in `[T B] F M^-1 F`, F = diag(1, -1): the cooked frame is MikkTSpace's
+    over (u, 1 - v) (`blix_mikk.c`), so glTF's M is taken into those axes; without F, 0 of 2770 cooked frames matched
+    (measured), with it every flat normal-mapped one. Untransformed maps are bit-for-bit (the identity returns early).
+    Instruments: derived `NormalTangentMirrorTest_uvxf` (+ `_ref`), the same texels through (M, o) = 30 deg, scale
+    (1.5, -1.5): renders 17 px above 2 from the reference (was 38742 above 16); Test.Recipes pins the F convention on
+    530/530 flat vertices (CONTROL, without F: 0); lab modes `nmxf`/`nmxf-ref`. Corroborated by an asset not authored
+    here: TextureTransformMultiTest's two rotated "Normal" tiles now match its untransformed sample tile (they were
+    lit from the opposite side). Limits, stated: a conformal M cannot tell M^-1 from M^T (they are proportional), and
+    for a non-conformal M or a curved, unevenly mapped surface the orthonormal frame is the nearest available.
+    Process: the fixture first inverted the spec's rotation as remembered, not the reader's; the bumps then sat on the
+    wrong texels, which no frame could fix. Invert the reader's convention, not a recollection of the spec.
   - Morph targets refused by name when they can take effect: nonzero default weights (mesh or node), or a
     `weights` animation channel. All-zero weights with nothing animating them render as the base geometry,
     which is correct, and load with the targets recorded as unread. Measured: all four corpus morph files

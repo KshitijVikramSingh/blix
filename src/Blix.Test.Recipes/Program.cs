@@ -608,6 +608,64 @@ public static class Program
             worstRaw > 100f, "");
     }
 
+    // A normal map under KHR_texture_transform is read in [T B] F M^-1 F (studio_lit.frag, normalMapFrame): the cooked
+    // frame is MikkTSpace's over (u, 1 - v) (blix_mikk.c), so glTF's M is taken into those axes. This pins that
+    // convention where the shader cannot see it. NormalTangentMirrorTest_uvxf (derived) samples the reference's texels
+    // through (M, o) — 30 degrees, scale (1.5, -1.5) — from a TEXCOORD_1 of M^-1 (uv - o); its tangents are generated
+    // over that set. On the flat normal-mapped tiles the correction must give the reference's frame exactly; CONTROL,
+    // the plain [T B] M^-1 (no F) gives it nowhere. (Curved geometry is excluded: there MikkTSpace averages frames
+    // across an uneven mapping, and no single 2x2 relates the two cooks.)
+    private static void NormalMapFramesFollowTheTextureTransform(TestRunner t)
+    {
+        if (FindFile("NormalTangentMirrorTest_uvxf.gltf") is not { } transformed || FindFile("NormalTangentMirrorTest_uvxf_ref.gltf") is not { } reference) return;
+        Blix.Assets.MeshData MeshOf(string f) => Blix.ModelData.Load(CookCache.Resolve(f), new Blix.ModelNeeds(Tangents: true, Colour: true)).Flattened().Single().Primitive.Mesh;
+        var r = MeshOf(reference);
+        var x = MeshOf(transformed);
+        var sr = Blix.Graphics.VertexSemantics.Of(r.Layout);
+        var sx = Blix.Graphics.VertexSemantics.Of(x.Layout);
+        System.Numerics.Vector3 V3(Blix.Assets.MeshData m, int v, int at)
+        {
+            var o = (v * m.Layout.Stride) + at;
+            return new(BitConverter.ToSingle(m.VertexBytes, o), BitConverter.ToSingle(m.VertexBytes, o + 4), BitConverter.ToSingle(m.VertexBytes, o + 8));
+        }
+
+        float W(Blix.Assets.MeshData m, int v, int at) => BitConverter.ToSingle(m.VertexBytes, (v * m.Layout.Stride) + at + 12);
+        (int, int, int, int, int) Key(Blix.Assets.MeshData m, int v, Blix.Graphics.VertexSemantics s)
+        {
+            var p = V3(m, v, s.Position);
+            var o = (v * m.Layout.Stride) + s.Uv0;
+            return ((int)MathF.Round(p.X * 1e4f), (int)MathF.Round(p.Y * 1e4f), (int)MathF.Round(p.Z * 1e4f),
+                (int)MathF.Round(BitConverter.ToSingle(m.VertexBytes, o) * 1e5f), (int)MathF.Round(BitConverter.ToSingle(m.VertexBytes, o + 4) * 1e5f));
+        }
+
+        // M exactly as the reader builds it (UvTransform.Rows), so the test inverts what the shader is handed.
+        var (ru, rv) = new Blix.UvTransform(new System.Numerics.Vector2(0.25f, 0.1f), MathF.PI / 6f, new System.Numerics.Vector2(1.5f, -1.5f)).Rows;
+        var det = (ru.X * rv.Y) - (ru.Y * rv.X);
+        float i00 = rv.Y / det, i01 = -ru.Y / det, i10 = -rv.X / det, i11 = ru.X / det;
+        var index = new Dictionary<(int, int, int, int, int), int>();
+        for (var v = 0; v < r.VertexCount; v++) index.TryAdd(Key(r, v, sr), v);
+
+        int flat = 0, withF = 0, withoutF = 0;
+        for (var v = 0; v < x.VertexCount; v++)
+        {
+            if (!index.TryGetValue(Key(x, v, sx), out var w)) continue;
+            var n = V3(x, v, sx.Normal);
+            if (MathF.Abs(n.Z) < 0.999f) continue;
+            flat++;
+            var tx = V3(x, v, sx.Tangent);
+            var bx = System.Numerics.Vector3.Cross(n, tx) * W(x, v, sx.Tangent);
+            var tr = V3(r, w, sr.Tangent);
+            var br = System.Numerics.Vector3.Cross(n, tr) * W(r, w, sr.Tangent);
+            bool Same(System.Numerics.Vector3 a, System.Numerics.Vector3 b) => System.Numerics.Vector3.Dot(System.Numerics.Vector3.Normalize(a), b) > 0.999f;
+            if (Same((tx * i00) - (bx * i10), tr) && Same((-tx * i01) + (bx * i11), br)) withF++;
+            if (Same((tx * i00) + (bx * i10), tr) && Same((tx * i01) + (bx * i11), br)) withoutF++;
+        }
+
+        t.Expect($"under a texture transform, [T B] F M^-1 F is the map's frame on {withF}/{flat} flat normal-mapped vertices " +
+                 $"(CONTROL, without F: {withoutF}/{flat})",
+            flat > 100 && withF == flat && withoutF == 0, "");
+    }
+
     // ── A golden that shares nothing with the reader ─────────────────────────────
     // SamplingMatchesGltf and AnimationMatchesGltf evaluate keys independently, but both take the keys
     // through GltfImporter.SampleKeys — so a mis-read of a CUBICSPLINE triple (in, value, out) would sit
@@ -2767,6 +2825,7 @@ public static class Program
         IndexCountsAreRefusedNotRepaired(t);
         GeneratedTangentsFollowTheNormalTexture(t);
         QuantizedAttributesReadAsTheirFloats(t);
+        NormalMapFramesFollowTheTextureTransform(t);
         InterpolationGolden(t);
         SceneLevelMatchesGltf(t);
         SceneLevelReachesModelData(t);

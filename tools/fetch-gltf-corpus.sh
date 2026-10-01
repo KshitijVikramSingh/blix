@@ -585,6 +585,80 @@ print("  derived SimpleMorph_static.gltf (morph targets kept, every weight zero,
 PY
 fi
 
+# A normal map under KHR_texture_transform is sampled at uv' = M uv + o, while the tangent frame is the attribute's
+# (dP/du, dP/dv): the map's own frame is [T B] M^-1. Two files make that checkable. Both are NormalTangentMirrorTest
+# with its TANGENT dropped (tangents are then generated over the normal texture's set) and the normal texture on
+# TEXCOORD_1. In _uvxf_ref, TEXCOORD_1 is TEXCOORD_0. In _uvxf, TEXCOORD_1 is M^-1 (TEXCOORD_0 - o) and the normal
+# texture carries (M, o), so it samples exactly the reference's texels: a correct renderer draws the two the same.
+# M is conformal (a rotation, a uniform scale and a reflection): generated tangents are orthonormal, so only a
+# conformal M has an exact orthonormal frame to compare against, and the reflection exercises handedness.
+NX="$DEST/sample-assets/NormalTangentMirrorTest/NormalTangentMirrorTest.glb"
+if [ -f "$NX" ] && [ ! -s "$DEST/sample-assets/NormalTangentMirrorTest/NormalTangentMirrorTest_uvxf.gltf" ]; then
+    python3 - "$NX" <<'PY'
+import base64, json, math, struct, sys, copy
+p = sys.argv[1]
+b = open(p, "rb").read()
+jlen = struct.unpack("<I", b[12:16])[0]
+src = json.loads(b[20:20 + jlen])
+bin_at = 20 + jlen
+blen = struct.unpack("<I", b[bin_at:bin_at + 4])[0]
+blob = b[bin_at + 8:bin_at + 8 + blen]
+theta, scale, offset = math.radians(30.0), (1.5, -1.5), (0.25, 0.1)
+c, s_ = math.cos(theta), math.sin(theta)
+# KHR_texture_transform as Blix applies it (UvTransform.Rows, held to the corpus's TextureTransformTest):
+# u' = c sx u + s sy v + ox,  v' = -s sx u + c sy v + oy. (Written from memory of the spec first, with the
+# rotation's sign the other way round: the normal map then landed on other texels, flat tiles and bumps out of
+# place, which no frame correction could fix. The reader's convention is the one this must invert.)
+M = [[c * scale[0], s_ * scale[1]], [-s_ * scale[0], c * scale[1]]]
+det = M[0][0] * M[1][1] - M[0][1] * M[1][0]
+Mi = [[M[1][1] / det, -M[0][1] / det], [-M[1][0] / det, M[0][0] / det]]
+def derive(transformed):
+    d = copy.deepcopy(src)
+    d["buffers"][0] = {"byteLength": len(blob), "uri": "data:application/octet-stream;base64," + base64.b64encode(blob).decode()}
+    uv1 = bytearray()
+    done = 0
+    for mesh in d["meshes"]:
+        for prim in mesh["primitives"]:
+            a = prim["attributes"]
+            if "TEXCOORD_0" not in a:
+                continue
+            a.pop("TANGENT", None)
+            acc = d["accessors"][a["TEXCOORD_0"]]
+            if acc["componentType"] != 5126 or acc.get("sparse"):
+                sys.exit("TEXCOORD_0 is not plain float — upstream changed shape")
+            view = d["bufferViews"][acc["bufferView"]]
+            stride = view.get("byteStride", 8)
+            base = view.get("byteOffset", 0) + acc.get("byteOffset", 0)
+            start = len(uv1)
+            for k in range(acc["count"]):
+                u, v = struct.unpack_from("<2f", blob, base + k * stride)
+                if transformed:
+                    du, dv = u - offset[0], v - offset[1]
+                    u, v = Mi[0][0] * du + Mi[0][1] * dv, Mi[1][0] * du + Mi[1][1] * dv
+                uv1 += struct.pack("<2f", u, v)
+            d["bufferViews"].append({"buffer": 1, "byteOffset": start, "byteLength": len(uv1) - start})
+            d["accessors"].append({"bufferView": len(d["bufferViews"]) - 1, "componentType": 5126, "count": acc["count"], "type": "VEC2"})
+            a["TEXCOORD_1"] = len(d["accessors"]) - 1
+            done += 1
+    if done == 0:
+        sys.exit("NormalTangentMirrorTest has no textured primitive — upstream changed shape")
+    d["buffers"].append({"byteLength": len(uv1), "uri": "data:application/octet-stream;base64," + base64.b64encode(bytes(uv1)).decode()})
+    for m in d["materials"]:
+        if "normalTexture" in m:
+            m["normalTexture"]["texCoord"] = 1
+            if transformed:
+                m["normalTexture"]["extensions"] = {"KHR_texture_transform": {"offset": list(offset), "rotation": theta, "scale": list(scale)}}
+    if transformed:
+        for key in ("extensionsUsed", "extensionsRequired"):
+            d[key] = sorted(set(d.get(key, [])) | {"KHR_texture_transform"})
+    name = "NormalTangentMirrorTest_uvxf.gltf" if transformed else "NormalTangentMirrorTest_uvxf_ref.gltf"
+    json.dump(d, open(p.replace("NormalTangentMirrorTest.glb", name), "w"))
+    print(f"  derived {name} ({done} primitive(s): no TANGENT, normal map on TEXCOORD_1" + (", under (M, o): 30 deg, scale (1.5, -1.5), offset (0.25, 0.1))" if transformed else ")"))
+derive(False)
+derive(True)
+PY
+fi
+
 echo
 echo "corpus at $DEST — $((planned - failed)) fetched, $failed missing, $(find "$DEST" -type f | wc -l | tr -d ' ') file(s) total"
 [ "$failed" -eq 0 ]
