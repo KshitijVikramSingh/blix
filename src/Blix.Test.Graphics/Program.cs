@@ -5786,6 +5786,68 @@ static ShaderInterface MinimalShader() => new(new[]
         () => fixedBlock.WithArrayLength(0, 0, 4), mustMention: "does not end in an unsized array");
 }
 
+// ============================================================================
+// Section BR — IAnimation on its own clock, and the host that runs them.
+// ============================================================================
+//
+// An animation advances by the delta it is handed and keeps its own elapsed time: nothing reads an
+// absolute total, so pausing is not advancing, rate is a scaled delta, and restarting is setting
+// Elapsed. The host runs them in the order added and drops the finished in the same tick.
+{
+    var value = -1f;
+    var fade = new FloatAnimation { Curve = new LinearCurve { From = 0f, To = 1f, Duration = 1.0 }, Setter = v => value = v };
+    var midway = fade.Advance(0.5);
+    t.Expect("BR.1 a finite tween writes its curve at its own elapsed time and stays alive before its end",
+        midway && MathF.Abs(value - 0.5f) < 1e-6f, $"alive {midway}, value {value}");
+    var ended = fade.Advance(0.75);
+    t.Expect("BR.1 and on the tick that passes its end it writes the end value and reports done",
+        !ended && value == 1f, $"alive {ended}, value {value}");
+    fade.Elapsed = 0.0;
+    var again = fade.Advance(0.25);
+    t.Expect("BR.1 setting Elapsed restarts it", again && MathF.Abs(value - 0.25f) < 1e-6f, $"{value}");
+
+    var delayed = -1f;
+    var late = new FloatAnimation { Curve = new LinearCurve { From = 2f, To = 4f, Duration = 1.0 }, Setter = v => delayed = v, Delay = 0.5 };
+    late.Advance(0.25);
+    var held = delayed;
+    late.Advance(0.75);
+    t.Expect("BR.2 a Delay holds the curve's start value until it has passed, then runs from there",
+        held == 2f && MathF.Abs(delayed - 3f) < 1e-6f, $"held {held}, then {delayed}");
+
+    var target = new Transform3D();
+    var none = new Transform3DAnimation { Target = target };
+    var forever = new Transform3DAnimation
+    {
+        Target = target,
+        Position = new LinearVector3Curve { From = Vector3.Zero, To = Vector3.UnitX, Duration = 0.5 },
+        Rotation = new ConstantCurve<Quaternion>(Quaternion.Identity),
+    };
+    t.Expect("BR.3 a transform tween with no channels is done at once; one with an infinite channel never is",
+        !none.Advance(0.1) && forever.Advance(10.0) && target.Position == Vector3.UnitX, target.Position.ToString());
+
+    // The host: in order, the finished dropped in the same tick, the survivors' order kept.
+    var calls = new List<string>();
+    var host = new AnimationHost();
+    var ticksLeft = new Dictionary<string, int> { ["a"] = 3, ["b"] = 1, ["c"] = 2 };
+    foreach (var name in new[] { "a", "b", "c" })
+    {
+        host.AddAnimation(new CallbackAnimation(delta =>
+        {
+            calls.Add($"{name}:{delta}");
+            return --ticksLeft[name] > 0;
+        }));
+    }
+
+    host.Advance(0.5);
+    var afterOne = host.Count;
+    host.Advance(0.25);
+    var afterTwo = host.Count;
+    host.Advance(0.25);
+    t.Expect("BR.4 the host advances in the order added, hands every animation its delta, and drops each on the tick it ends",
+        string.Join(" ", calls) == "a:0.5 b:0.5 c:0.5 a:0.25 c:0.25 a:0.25" && afterOne == 2 && afterTwo == 1 && host.Count == 0,
+        $"{string.Join(" ", calls)} | counts {afterOne}, {afterTwo}, {host.Count}");
+}
+
 t.PrintSummary();
 return t.Failed;
 

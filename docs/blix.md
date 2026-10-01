@@ -372,12 +372,12 @@ An animation is a thing that mutates state as a function of time. The engine fac
 ### Contracts
 
 ```csharp
-public interface IAnimation  { bool Sample(Time time); }
+public interface IAnimation  { bool Advance(double delta); }
 public interface ICurve<T>   { T Evaluate(double time); }
 public interface IFiniteCurve<T> : ICurve<T> { double Duration { get; } }
 ```
 
-- **`IAnimation.Sample`** returns `bool`: `true` while running, `false` to be removed. Infinite animations just return `true` forever. Finite animations check whether their curves are still running and return `false` once they've all finished; the host drops them in the same tick.
+- **`IAnimation.Advance`** moves the animation on by `delta` seconds on **its own clock** and returns `true` while running, `false` to be removed. Nothing reads an absolute total: pausing is not advancing it, rate is a scaled delta, and restarting or scrubbing is setting its `Elapsed`. Infinite animations return `true` forever; finite ones return `false` once their curves have all finished, and the host drops them in the same tick.
 - **`ICurve<T>`** is a pure `time → value` function. Deliberately no `Duration` on the base interface — infinite curves (`ConstantCurve`, `LoopCurve`) don't have one.
 - **`IFiniteCurve<T>`** extends with a `Duration` property. Animations test for this interface to know when to self-remove: `curve is IFiniteCurve<T> finite && local >= finite.Duration` means done. Past `Duration`, finite curves still evaluate (clamped at the end value); they just stop claiming to be alive.
 
@@ -414,22 +414,24 @@ new LoopCurve<float>(inner, period: 2.0);
 new FloatAnimation
 {
     Curve = new LinearCurve { From = 0, To = 1, Duration = 0.5 },
-    Setter = v => mainLight.Intensity = v,
-    StartTime = time.Total,
+    Setter = v => fade = v,
+    Delay = 0.25,           // holds the curve's start value this long first
 };
 
 // Drives Position / Rotation / Scale on a Transform3D from independent curves.
 new Transform3DAnimation
 {
-    Target = obj.Transform,
+    Target = door.Transform,
     Position = new LinearVector3Curve { /* ... */ },
     Rotation = null,   // null = leave channel alone
     Scale    = null,
-    StartTime = time.Total,
 };
 
-// Escape hatch for one-offs.
-new CallbackAnimation(time => { /* mutate state */; return continueRunning; });
+// Escape hatch for one-offs: handed the delta, returns "still running?".
+new CallbackAnimation(delta => { /* mutate state */; return continueRunning; });
+
+host.AddAnimation(fadeIn);
+host.Advance(time.Delta);   // in the order added; the finished are dropped this tick
 ```
 
 Typed animations are the goal — concrete classes with named fields, refactorable, IDE-navigable. `CallbackAnimation` is the bridge while a one-off lives in just one place. If the same callback shape appears twice, promote to a typed class.
@@ -438,7 +440,7 @@ Demo-specific animations stay in the demo. A spin animation like `EulerRotationA
 
 ### AnimationHost
 
-The animation-list + iterate-and-remove machinery lives on a reusable `AnimationHost`: `AddAnimation`, and an `Update` that ticks every animation and drops the ones that report done, in place.
+The animation-list + iterate-and-remove machinery lives on a reusable `AnimationHost`: `AddAnimation`, and `Advance(delta)`, which advances every animation in the order added and drops the ones that report done, keeping the survivors' order. It owns no time; it hands each animation the delta it was given.
 
 ```csharp
 public sealed class AnimationHost : IUpdateable { /* ... */ }
@@ -457,8 +459,7 @@ Animations reference their targets via **typed fields**, not property paths or r
 - **No `AnimationSystem` singleton.** Animations attach to hosts; hosts tick themselves.
 - **No sequence / parallel composition primitives.** `Sequence(fadeIn, hold, fadeOut)` and friends compose trivially over `IAnimation` when needed.
 - **No easing functions yet.** Quadratic / cubic / elastic / etc. land when a use case appears.
-- **No `Start(Time)` helper.** Callers set `StartTime` manually at construction.
-- **No pause / resume / scrub.** Lifecycle is just "running or done." Time scale and pause would come from the `Time` side rather than per-animation state.
+- **Time is each animation's own.** Pause, rate, restart and scrub are the caller's, through the delta it passes and the `Elapsed` it can set; there is no global time scale.
 - **No serialised animation assets.** When Material assets demonstrated the value, JSON-defined animations might follow.
 
 ## Skeletal animation
