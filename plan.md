@@ -117,8 +117,10 @@ refusals, then features:
    TextureSettingsTest's single-sided row shows its red X. Found by the sampler capture.
 3c. **Extension texture channels are not cooked.** Only the five core channels get image rows; sheen,
    clearcoat, transmission, iridescence, anisotropy and specular textures are dropped (factors survive).
-4. **Refused valid files.** A sparse accessor with no base buffer view (zeros, per the spec); a skin with
-   no inverse binds (identity); Animation_Skin_06's root.
+4. **Refused valid files — done.** A sparse INDEX accessor (Accessor_Sparse_03), a skin with no inverse
+   binds (identity, §5.27), and joints with no common root (Animation_Skin_06, which SharpGLTF's strict
+   validator rejects — sources now load unvalidated, and the cook checks what it needs itself: POSITION,
+   index range, required extensions).
 5. **KHR_texture_transform** (required by TextureTransformMultiTest, used by two more).
 6. **Scene structure the reader ignores:** scene selection (MultipleScenes), cameras, KHR_node_visibility,
    EXT_mesh_gpu_instancing, KHR_lights_punctual, KHR_materials_variants.

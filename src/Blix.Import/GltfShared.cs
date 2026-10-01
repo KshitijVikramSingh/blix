@@ -37,15 +37,51 @@ internal static class GltfShared
                 $"glTF primitive '{name}' is {primitive.DrawPrimitiveType}; Blix draws triangles, and a point or line primitive is not read.");
         }
 
-        var list = new List<uint>();
-        foreach (var (a, b, c) in primitive.GetTriangleIndices())
+        // The vertex order the mode reads: the index accessor (sparse substitutions applied — an index
+        // accessor may itself be sparse), or the vertices in order when there is none.
+        var count = primitive.GetVertexAccessor("POSITION")?.Count ?? 0;
+        uint[] raw = primitive.IndexAccessor is not { } accessor ? Enumerable.Range(0, count).Select(i => (uint)i).ToArray()
+            : accessor.IsSparse ? accessor.AsScalarArray().Select(v => (uint)MathF.Round(v)).ToArray()
+            : accessor.AsIndicesArray().ToArray();
+        // An index past the vertices reads memory that is not this primitive's: refused, by name. This is
+        // also how primitive restart (an all-ones index, which glTF forbids) is caught.
+        if (raw.FirstOrDefault(i => i >= count) is var beyond && raw.Any(i => i >= count))
         {
-            list.Add((uint)a);
-            list.Add((uint)b);
-            list.Add((uint)c);
+            throw new InvalidOperationException(
+                $"glTF primitive '{name}' indexes vertex {beyond} of {count}; glTF forbids an index past the vertices (and primitive restart).");
         }
 
-        return list.ToArray();
+        // glTF 2.0 §3.7.2.1: strip triangle i is (v_i, v_i+1+i%2, v_i+2-i%2) and fan triangle i is
+        // (v_i+1, v_i+2, v_0), both keeping the first triangle's winding.
+        switch (primitive.DrawPrimitiveType)
+        {
+            case PrimitiveType.TRIANGLE_STRIP:
+            {
+                var list = new uint[Math.Max(0, raw.Length - 2) * 3];
+                for (var i = 0; i + 2 < raw.Length; i++)
+                {
+                    list[i * 3] = raw[i];
+                    list[i * 3 + 1] = raw[i + 1 + i % 2];
+                    list[i * 3 + 2] = raw[i + 2 - i % 2];
+                }
+
+                return list;
+            }
+            case PrimitiveType.TRIANGLE_FAN:
+            {
+                var list = new uint[Math.Max(0, raw.Length - 2) * 3];
+                for (var i = 0; i + 2 < raw.Length; i++)
+                {
+                    list[i * 3] = raw[i + 1];
+                    list[i * 3 + 1] = raw[i + 2];
+                    list[i * 3 + 2] = raw[0];
+                }
+
+                return list;
+            }
+            default:
+                return raw.Length % 3 == 0 ? raw : raw[..(raw.Length - raw.Length % 3)];
+        }
     }
 
     /// <summary>The material channels worth pre-decoding, in the order a decode pass walks them.</summary>

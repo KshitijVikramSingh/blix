@@ -98,9 +98,11 @@ public static class MeshRecipe
     // as the complete static or skinned vertex, with MikkTSpace tangents wherever none were authored,
     // and a track for every animated node with its channels' interpolation. Version 10 unrolls
     // TRIANGLE_STRIP / TRIANGLE_FAN and non-indexed primitives into triangle lists, and refuses points and lines.
-    // Version 11 (format v15) writes an image row per image as used — role, convention and glTF sampler. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
+    // Version 11 (format v15) writes an image row per image as used — role, convention and glTF sampler.
+    // Version 12 reads sparse index accessors, identity inverse binds when a skin has none, and joints with
+    // no common root, and refuses an index past the vertices. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
     // same format bumps this value.
-    public const uint MeshRecipeVersion = 11;
+    public const uint MeshRecipeVersion = 12;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false,
@@ -675,7 +677,10 @@ public static class MeshRecipe
     // Opens a source and refuses it, by name, when it requires an extension the reader does not read.
     private static ModelRoot OpenSource(string gltfPath)
     {
-        var model = ModelRoot.Load(gltfPath);
+        // SharpGLTF's strict validation is skipped: it rejects valid glTF (joints with no common root,
+        // which the Asset Generator's positive Animation_Skin_06 exists to exercise and the spec allows).
+        // What the cook needs checked it checks itself, by name: POSITION, index range, required extensions.
+        var model = ModelRoot.Load(gltfPath, new SharpGLTF.Schema2.ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip });
         var unread = model.ExtensionsRequired.Where(e => !ReadExtensions.Contains(e)).ToArray();
         if (unread.Length > 0)
         {

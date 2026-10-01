@@ -365,6 +365,9 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         var joints = skin.Joints;
         var ibmList = skin.InverseBindMatrices;
         var n = joints.Count;
+        // No inverseBindMatrices accessor means each is the identity (glTF 2.0 §5.27): the joints were
+        // bound where they stand.
+        if (ibmList.Count == 0) ibmList = Enumerable.Repeat(Matrix4x4.Identity, n).ToArray();
         if (ibmList.Count != n)
         {
             throw new InvalidOperationException(

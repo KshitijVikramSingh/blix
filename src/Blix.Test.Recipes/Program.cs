@@ -133,6 +133,11 @@ public static class Program
             new Skeleton(Array.Empty<Bone>()), Array.Empty<AnimationClip>(), System.Numerics.Matrix4x4.Identity);
     }
 
+    // A source as the cook opens it: SharpGLTF's strict validation skipped, because it rejects valid
+    // glTF (Animation_Skin_06's joints have no common root, which the spec allows).
+    private static SharpGLTF.Schema2.ModelRoot LoadSource(string file) =>
+        SharpGLTF.Schema2.ModelRoot.Load(file, new SharpGLTF.Schema2.ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip });
+
     // ── Samplers as glTF defines them ──────────────────────────────────────────
     // Every textured core channel of every corpus file: the cooked row it reads carries exactly that
     // texture's glTF sampler, and the engine maps glTF's codes to its own as the spec defines them.
@@ -149,7 +154,7 @@ public static class Program
                 && !ExpectedRefusals.ContainsKey(Path.GetFileName(f)))
             .OrderBy(f => f, StringComparer.Ordinal))
         {
-            var gltf = SharpGLTF.Schema2.ModelRoot.Load(file);
+            var gltf = LoadSource(file);
             var cooked = BlixMeshReader.Read(CookCache.Resolve(file));
             for (var m = 0; m < gltf.LogicalMaterials.Count; m++)
             {
@@ -200,19 +205,22 @@ public static class Program
         {
             "Mesh_PrimitiveMode_04.gltf", "Mesh_PrimitiveMode_05.gltf", "Mesh_PrimitiveMode_06.gltf",
             "Mesh_PrimitiveMode_11.gltf", "Mesh_PrimitiveMode_12.gltf", "Mesh_PrimitiveMode_13.gltf",
-            "TriangleWithoutIndices.gltf", "Box.glb", "BoxInterleaved.glb", "Fox.glb",
+            "TriangleWithoutIndices.gltf", "Box.glb", "BoxInterleaved.glb", "Fox.glb", "Accessor_Sparse_03.gltf",
         })
         {
             var file = FindFile(name);
             if (file is null) continue;
-            var gltf = SharpGLTF.Schema2.ModelRoot.Load(file);
+            var gltf = LoadSource(file);
             var expected = new List<string>();
             foreach (var mesh in gltf.LogicalMeshes)
             foreach (var prim in mesh.Primitives)
             {
                 modes.Add(prim.DrawPrimitiveType);
                 var p = prim.GetVertexAccessor("POSITION").AsVector3Array();
-                var raw = prim.IndexAccessor is { } ia ? ia.AsIndicesArray().Select(i => (int)i).ToArray() : Enumerable.Range(0, p.Count).ToArray();
+                // Sparse substitutions applied to the indices themselves (Accessor_Sparse_03's index accessor is sparse).
+                var raw = prim.IndexAccessor is not { } ia ? Enumerable.Range(0, p.Count).ToArray()
+                    : ia.IsSparse ? ia.AsScalarArray().Select(v => (int)MathF.Round(v)).ToArray()
+                    : ia.AsIndicesArray().Select(i => (int)i).ToArray();
                 var n = prim.DrawPrimitiveType switch
                 {
                     SharpGLTF.Schema2.PrimitiveType.TRIANGLES => raw.Length / 3,
@@ -287,9 +295,6 @@ public static class Program
         ["Mesh_PrimitiveMode_02.gltf"] = "LINE_LOOP", ["Mesh_PrimitiveMode_09.gltf"] = "LINE_LOOP",
         ["Mesh_PrimitiveMode_03.gltf"] = "LINE_STRIP", ["Mesh_PrimitiveMode_10.gltf"] = "LINE_STRIP",
         // Valid glTF that Blix does not read yet — the spec gaps (plan.md, the spec audit).
-        ["Accessor_Sparse_03.gltf"] = "a sparse accessor with no base buffer view",
-        ["Animation_Skin_03.gltf"] = "a skin with no inverse binds (identity, per the spec)",
-        ["Animation_Skin_06.gltf"] = "a skeleton root the importer rejects",
         ["TextureTransformMultiTest.glb"] = "requires KHR_texture_transform, which Blix does not read yet",
         ["SheenChair.glb"] = "requires KHR_texture_transform, which Blix does not read yet",
     };
@@ -364,7 +369,7 @@ public static class Program
         foreach (var file in files)
         {
             SharpGLTF.Schema2.ModelRoot gltf;
-            try { gltf = SharpGLTF.Schema2.ModelRoot.Load(file); }
+            try { gltf = LoadSource(file); }
             catch (Exception) { continue; }
             var animations = gltf.LogicalAnimations
                 .Where(a => a.Channels.Any(c => c.TargetNode is not null && c.TargetNodePath is
@@ -458,7 +463,8 @@ public static class Program
                         var skinNode = nodes.First(n => n.Skin is not null && n.Mesh is not null
                             && data.Nodes[SourceToCooked(gltf, data, n.LogicalIndex)].SkinIndex == s);
                         var gskin = skinNode.Skin;
-                        var ibm = gskin.InverseBindMatrices;
+                        var ibm = gskin.InverseBindMatrices.Count > 0 ? gskin.InverseBindMatrices
+                            : Enumerable.Repeat(System.Numerics.Matrix4x4.Identity, gskin.Joints.Count).ToArray();
                         var reference = new Dictionary<(int, int, int), List<System.Numerics.Vector3>>();
                         foreach (var node in nodes.Where(n => n.Skin == gskin && n.Mesh is not null))
                         foreach (var prim in node.Mesh.Primitives)
@@ -628,7 +634,7 @@ public static class Program
         foreach (var file in files)
         {
             SharpGLTF.Schema2.ModelRoot gltf;
-            try { gltf = SharpGLTF.Schema2.ModelRoot.Load(file); }
+            try { gltf = LoadSource(file); }
             catch (Exception) { continue; }
             if (gltf.LogicalAnimations.Count == 0) continue;
 
@@ -784,7 +790,8 @@ public static class Program
     // mesh node; root joints under different parents), and the Rogue as the ordinary case.
     private static void SkinsMatchGltf(TestRunner t)
     {
-        foreach (var name in new[] { "tank.glb", "Animation_Skin_02.gltf", "Animation_Skin_09.gltf", "Rogue.glb", "RiggedFigure.glb", "RiggedSimple.glb", "RiggedSimple_bones300.gltf", "RiggedSimple_cutout.gltf" })
+        foreach (var name in new[] { "tank.glb", "Animation_Skin_02.gltf", "Animation_Skin_09.gltf", "Rogue.glb", "RiggedFigure.glb", "RiggedSimple.glb", "RiggedSimple_bones300.gltf", "RiggedSimple_cutout.gltf",
+            "Animation_Skin_03.gltf", "Animation_Skin_06.gltf" })
         {
             var source = FindFile(name);
             if (source is null)
@@ -793,13 +800,16 @@ public static class Program
                 continue;
             }
 
-            var gltf = SharpGLTF.Schema2.ModelRoot.Load(source);
+            // Not strictly validated, as the cook does not: SharpGLTF's validator rejects valid skins (Animation_Skin_06).
+            var gltf = SharpGLTF.Schema2.ModelRoot.Load(source, new SharpGLTF.Schema2.ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip });
             var expected = new Dictionary<(int, int, int), List<System.Numerics.Vector3>>();
             foreach (var node in gltf.LogicalNodes.Where(n => n.Mesh is not null && n.Skin is not null))
             {
                 var skin = node.Skin;
                 var jointWorlds = skin.Joints.Select(j => j.WorldMatrix).ToArray();
-                var ibms = skin.InverseBindMatrices;
+                // Absent inverse binds are identities (glTF 2.0 §5.27).
+                var ibms = skin.InverseBindMatrices.Count > 0 ? skin.InverseBindMatrices
+                    : Enumerable.Repeat(System.Numerics.Matrix4x4.Identity, skin.Joints.Count).ToArray();
                 foreach (var prim in node.Mesh.Primitives)
                 {
                     var positions = prim.GetVertexAccessor("POSITION").AsVector3Array();
