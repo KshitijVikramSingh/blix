@@ -72,7 +72,16 @@ public readonly record struct StudioDraw(
     PipelineHandle MirroredPipeline = default,
 
     /// <summary><see cref="BlendPipeline"/> with clockwise front faces, for a blended part that mirrors.</summary>
-    PipelineHandle MirroredBlendPipeline = default)
+    PipelineHandle MirroredBlendPipeline = default,
+
+    /// <summary>The skinned pipelines with clockwise front faces, for a skin whose palette mirrors.</summary>
+    PipelineHandle MirroredSkinnedPipeline = default,
+
+    /// <summary>Its unculled twin, for a doubleSided part of a mirrored skin.</summary>
+    PipelineHandle MirroredSkinnedDoubleSidedPipeline = default,
+
+    /// <summary>Its blended twin.</summary>
+    PipelineHandle MirroredSkinnedBlendPipeline = default)
 {
     /// <summary>The stage's per-asset state, for a stage view (ModelView) to find its asset's.</summary>
     internal StudioAssets? Assets { get; init; }

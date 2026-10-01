@@ -113,6 +113,13 @@ public sealed class StudioRenderer : IDisposable
     private PipelineHandle skyPipeline;
     private PipelineHandle viewportSkyPipeline;
     private PipelineHandle skinnedPipeline;
+    // A mirrored skin's front faces are clockwise, culled or not (see the rigid mirrored pipelines).
+    private PipelineHandle skinnedMirroredPipeline;
+    private PipelineHandle skinnedMirroredDoubleSidedPipeline;
+    private PipelineHandle skinnedMirroredBlendPipeline;
+    private PipelineHandle viewportSkinnedMirroredPipeline;
+    private PipelineHandle viewportSkinnedMirroredDoubleSidedPipeline;
+    private PipelineHandle viewportSkinnedMirroredBlendPipeline;
 
     // The same program and layout as skinnedPipeline with the culling turned off, for a rig whose
     // material says doubleSided. Two pipelines rather than one, because face culling is pipeline
@@ -522,6 +529,19 @@ public sealed class StudioRenderer : IDisposable
             DepthState.LessEqualWrite, RasterizerState.NoCulling, new[] { BlendState.Disabled },
             RenderTarget: viewportSurface), "lab.viewport.skinned.doublesided");
 
+        PipelineHandle Skinned(RenderSurfaceHandle target, DepthState depth, RasterizerState raster, BlendState blend, string name) =>
+            device.CreatePipeline(new PipelineDescription(
+                skinnedProgram, VertexPosition3NormalTextureSkin4Tangent.Layout, PrimitiveTopology.Triangles,
+                depth, raster, new[] { blend }, RenderTarget: target), name);
+        var clockwiseCulled = new RasterizerState(CullMode.Back, FrontFace.Clockwise);
+        var clockwise = new RasterizerState(CullMode.None, FrontFace.Clockwise);
+        skinnedMirroredPipeline = Skinned(graph.GetPassSurface(litPass), DepthState.LessEqualWrite, clockwiseCulled, BlendState.Disabled, "lab.skinned.mirrored");
+        skinnedMirroredDoubleSidedPipeline = Skinned(graph.GetPassSurface(litPass), DepthState.LessEqualWrite, clockwise, BlendState.Disabled, "lab.skinned.doublesided.mirrored");
+        skinnedMirroredBlendPipeline = Skinned(graph.GetPassSurface(litPass), DepthState.LessEqualNoWrite, clockwise, BlendState.AlphaBlend, "lab.skinned.blend.mirrored");
+        viewportSkinnedMirroredPipeline = Skinned(viewportSurface, DepthState.LessEqualWrite, clockwiseCulled, BlendState.Disabled, "lab.viewport.skinned.mirrored");
+        viewportSkinnedMirroredDoubleSidedPipeline = Skinned(viewportSurface, DepthState.LessEqualWrite, clockwise, BlendState.Disabled, "lab.viewport.skinned.doublesided.mirrored");
+        viewportSkinnedMirroredBlendPipeline = Skinned(viewportSurface, DepthState.LessEqualNoWrite, clockwise, BlendState.AlphaBlend, "lab.viewport.skinned.blend.mirrored");
+
         // The caster does NOT cull: a one-sided shadow from a back-face-culled caster loses the far
         // side of a limb, and a character's own silhouette is mostly far sides.
         skinnedShadowPipeline = device.CreatePipeline(new PipelineDescription(
@@ -726,7 +746,9 @@ public sealed class StudioRenderer : IDisposable
                 SkinnedDoubleSidedPipeline: skinnedDoubleSidedPipeline,
                 BlendPipeline: blendPipeline, SkinnedBlendPipeline: skinnedBlendPipeline,
                 CulledPipeline: litCulledPipeline, MirroredCulledPipeline: litMirroredCulledPipeline,
-                MirroredPipeline: litMirroredPipeline, MirroredBlendPipeline: blendMirroredPipeline) { Assets = assets };
+                MirroredPipeline: litMirroredPipeline, MirroredBlendPipeline: blendMirroredPipeline,
+                MirroredSkinnedPipeline: skinnedMirroredPipeline, MirroredSkinnedDoubleSidedPipeline: skinnedMirroredDoubleSidedPipeline,
+                MirroredSkinnedBlendPipeline: skinnedMirroredBlendPipeline) { Assets = assets };
             foreach (var view in views) view.Draw(draw);
         });
 
@@ -767,7 +789,10 @@ public sealed class StudioRenderer : IDisposable
                     SkinnedDoubleSidedPipeline: viewportSkinnedDoubleSidedPipeline,
                     BlendPipeline: viewportBlendPipeline, SkinnedBlendPipeline: viewportSkinnedBlendPipeline,
                     CulledPipeline: viewportLitCulledPipeline, MirroredCulledPipeline: viewportLitMirroredCulledPipeline,
-                    MirroredPipeline: viewportLitMirroredPipeline, MirroredBlendPipeline: viewportBlendMirroredPipeline) { Assets = assets };
+                    MirroredPipeline: viewportLitMirroredPipeline, MirroredBlendPipeline: viewportBlendMirroredPipeline,
+                    MirroredSkinnedPipeline: viewportSkinnedMirroredPipeline,
+                    MirroredSkinnedDoubleSidedPipeline: viewportSkinnedMirroredDoubleSidedPipeline,
+                    MirroredSkinnedBlendPipeline: viewportSkinnedMirroredBlendPipeline) { Assets = assets };
                 foreach (var view in views) view.Draw(draw);
             });
         }
@@ -1025,6 +1050,9 @@ public sealed class StudioRenderer : IDisposable
         device.DestroyPipeline(shadowPipeline);
         device.DestroyPipeline(presentPipeline);
         device.DestroyPipeline(skinnedPipeline);
+        device.DestroyPipeline(skinnedMirroredPipeline);
+        device.DestroyPipeline(skinnedMirroredDoubleSidedPipeline);
+        device.DestroyPipeline(skinnedMirroredBlendPipeline);
         device.DestroyPipeline(skinnedDoubleSidedPipeline);
         device.DestroyPipeline(blendPipeline);
         device.DestroyPipeline(skinnedBlendPipeline);
@@ -1035,6 +1063,9 @@ public sealed class StudioRenderer : IDisposable
         device.DestroyPipeline(viewportLitMirroredPipeline);
         device.DestroyPipeline(viewportBlendMirroredPipeline);
         device.DestroyPipeline(viewportSkinnedPipeline);
+        device.DestroyPipeline(viewportSkinnedMirroredPipeline);
+        device.DestroyPipeline(viewportSkinnedMirroredDoubleSidedPipeline);
+        device.DestroyPipeline(viewportSkinnedMirroredBlendPipeline);
         device.DestroyPipeline(viewportBlendPipeline);
         device.DestroyPipeline(viewportSkinnedBlendPipeline);
         device.DestroyPipeline(viewportSkinnedDoubleSidedPipeline);

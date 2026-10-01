@@ -102,7 +102,7 @@ public static class MeshRecipe
     // Version 12 reads sparse index accessors, identity inverse binds when a skin has none, and joints with
     // no common root, and refuses an index past the vertices. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
     // same format bumps this value.
-    public const uint MeshRecipeVersion = 14;
+    public const uint MeshRecipeVersion = 15;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false,
@@ -591,12 +591,7 @@ public static class MeshRecipe
     // ones (SharpGLTF's channel keys). The extension textures were dropped until they were listed here —
     // their factors survived, their images did not.
     private static readonly string[] ImageChannels =
-    {
-        "BaseColor", "Normal", "MetallicRoughness", "Occlusion", "Emissive",
-        "ClearCoat", "ClearCoatRoughness", "ClearCoatNormal", "SheenColor", "SheenRoughness",
-        "SpecularColor", "SpecularFactor", "Transmission", "VolumeThickness", "Iridescence",
-        "IridescenceThickness", "Anisotropy", "DiffuseTransmissionFactor", "DiffuseTransmissionColor",
-    };
+        new[] { "BaseColor", "Normal", "MetallicRoughness", "Occlusion", "Emissive" }.Concat(BlixMesh.ExtensionChannels).ToArray();
 
     private static TextureRole RoleForChannel(string channelName) => channelName switch
     {
@@ -856,7 +851,8 @@ public static class MeshRecipe
                 MetallicRoughnessImage: ImageIndex(mr),
                 OcclusionImage: ImageIndex(occlusion),
                 EmissiveImage: ImageIndex(emissive),
-                UvTransforms: UvTransforms(baseColor, normal, mr, occlusion, emissive));
+                UvTransforms: UvTransforms(baseColor, normal, mr, occlusion, emissive),
+                ExtensionUv: ExtensionUv(m));
         }
 
         // Applied here, once, on the cooked table — so a patched property is indistinguishable at
@@ -882,6 +878,17 @@ public static class MeshRecipe
 
         static BlixMeshUvTransform Uv(MaterialChannel? channel) =>
             channel?.TextureTransform is { } t ? new BlixMeshUvTransform(t.Offset, t.Rotation, t.Scale) : BlixMeshUvTransform.Identity;
+
+        // The extension channels' set and transform, in BlixMesh.ExtensionChannels order; null when all default.
+        static IReadOnlyList<BlixMeshChannelUv>? ExtensionUv(Material material)
+        {
+            var all = BlixMesh.ExtensionChannels
+                .Select(key => material.FindChannel(key) is { } c && c.Texture is not null
+                    ? new BlixMeshChannelUv(TexCoord(c), Uv(c))
+                    : BlixMeshChannelUv.Default)
+                .ToArray();
+            return all.All(u => u == BlixMeshChannelUv.Default) ? null : all;
+        }
 
         // Null when every channel is identity, so a material without the extension cooks as it always has.
         static BlixMeshUvTransforms? UvTransforms(params MaterialChannel?[] channels)
@@ -1282,7 +1289,7 @@ public static class MeshRecipe
         MaterialPatch? patch = null)
     {
         var header = CookedFile.TryReadHeader(outputPath);
-        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version16 }) return false;
+        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version17 }) return false;
         var stamp = header.Value.Stamp;
         if (!stamp.MatchesProducerAndSource(BlixMesh.ShippedRecipe, MeshRecipeVersion, sourcePath))
             return false;

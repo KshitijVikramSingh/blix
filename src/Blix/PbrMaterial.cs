@@ -90,8 +90,15 @@ public sealed record PbrMaterial(
     PbrMaterialExtensions? Extensions = null,
 
     /// <summary>Each core channel's <c>KHR_texture_transform</c>; null is identity everywhere.</summary>
-    PbrUvTransforms? UvTransforms = null)
+    PbrUvTransforms? UvTransforms = null,
+
+    /// <summary>The extension channels' TEXCOORD set and transform, by <see cref="PbrExtensionTexture"/>; null is set 0, identity.</summary>
+    IReadOnlyList<PbrTextureUv>? ExtensionUv = null)
 {
+    /// <summary>Which TEXCOORD set <paramref name="channel"/>'s texture samples, and its transform.</summary>
+    public PbrTextureUv UvOf(PbrExtensionTexture channel) =>
+        ExtensionUv is { } all && (int)channel < all.Count ? all[(int)channel] : PbrTextureUv.Default;
+
     /// <summary>The channels' UV transforms, never null.</summary>
     public PbrUvTransforms Uv => UvTransforms ?? PbrUvTransforms.Identity;
 
@@ -264,4 +271,18 @@ public sealed record PbrUvTransforms(
 
     public bool IsIdentity => BaseColor.IsIdentity && Normal.IsIdentity && MetallicRoughness.IsIdentity
         && Occlusion.IsIdentity && Emissive.IsIdentity;
+}
+
+/// <summary>A KHR_materials_* texture channel. The order is the cooked file's (BlixMesh.ExtensionChannels).</summary>
+public enum PbrExtensionTexture
+{
+    Clearcoat, ClearcoatRoughness, ClearcoatNormal, SheenColor, SheenRoughness,
+    SpecularColor, Specular, Transmission, Thickness, Iridescence,
+    IridescenceThickness, Anisotropy, DiffuseTransmission, DiffuseTransmissionColor,
+}
+
+/// <summary>Which TEXCOORD set a texture samples, and its <c>KHR_texture_transform</c>.</summary>
+public readonly record struct PbrTextureUv(int TexCoord, UvTransform Transform)
+{
+    public static PbrTextureUv Default { get; } = new(0, UvTransform.Identity);
 }

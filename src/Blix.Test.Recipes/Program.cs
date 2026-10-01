@@ -256,6 +256,51 @@ public static class Program
         }
 
         t.Expect("UvTransform applies the spec's T * R * S", worstUv < 1e-5f, $"worst {worstUv}");
+
+        // The extension channels: each cooks its TEXCOORD set (override applied) and transform, in the order
+        // the engine's enum reads them — a fact in two places, so it is held to one here.
+        var engineOrder = Enum.GetNames<PbrExtensionTexture>();
+        var keyOf = new Dictionary<string, string>
+        {
+            ["Clearcoat"] = "ClearCoat", ["ClearcoatRoughness"] = "ClearCoatRoughness", ["ClearcoatNormal"] = "ClearCoatNormal",
+            ["SheenColor"] = "SheenColor", ["SheenRoughness"] = "SheenRoughness", ["SpecularColor"] = "SpecularColor",
+            ["Specular"] = "SpecularFactor", ["Transmission"] = "Transmission", ["Thickness"] = "VolumeThickness",
+            ["Iridescence"] = "Iridescence", ["IridescenceThickness"] = "IridescenceThickness", ["Anisotropy"] = "Anisotropy",
+            ["DiffuseTransmission"] = "DiffuseTransmissionFactor", ["DiffuseTransmissionColor"] = "DiffuseTransmissionColor",
+        };
+        t.Expect("the engine's extension-texture order is the cooked file's",
+            engineOrder.Length == BlixMesh.ExtensionChannels.Count
+            && engineOrder.Select((n, i) => keyOf.TryGetValue(n, out var k) && k == BlixMesh.ExtensionChannels[i]).All(x => x),
+            string.Join(",", engineOrder));
+
+        var extensionChannels = 0;
+        var nonDefault = 0;
+        var extensionWrong = new List<string>();
+        foreach (var file in Directory.EnumerateFiles(root, "*.gl*", SearchOption.AllDirectories)
+            .Where(f => (f.EndsWith(".glb", StringComparison.Ordinal) || f.EndsWith(".gltf", StringComparison.Ordinal))
+                && !ExpectedRefusals.ContainsKey(Path.GetFileName(f)))
+            .OrderBy(f => f, StringComparer.Ordinal))
+        {
+            var gltf = LoadSource(file);
+            var cooked = BlixMeshReader.Read(CookCache.Resolve(file));
+            for (var m = 0; m < gltf.LogicalMaterials.Count; m++)
+            {
+                for (var e = 0; e < BlixMesh.ExtensionChannels.Count; e++)
+                {
+                    if (gltf.LogicalMaterials[m].FindChannel(BlixMesh.ExtensionChannels[e]) is not { } c || c.Texture is null) continue;
+                    extensionChannels++;
+                    var want = new BlixMeshChannelUv(
+                        c.TextureTransform?.TextureCoordinateOverride ?? c.TextureCoordinate,
+                        c.TextureTransform is { } x ? new BlixMeshUvTransform(x.Offset, x.Rotation, x.Scale) : BlixMeshUvTransform.Identity);
+                    if (want != BlixMeshChannelUv.Default) nonDefault++;
+                    var got = cooked.MaterialTable[m].ExtensionUv is { } all ? all[e] : BlixMeshChannelUv.Default;
+                    if (got != want) extensionWrong.Add($"{Path.GetFileName(file)} material {m} {BlixMesh.ExtensionChannels[e]}: cooked {got}, glTF {want}");
+                }
+            }
+        }
+
+        t.Expect($"every extension channel cooks its TEXCOORD set and transform ({extensionChannels} channels, {nonDefault} not the default)",
+            extensionChannels > 0 && extensionWrong.Count == 0, string.Join(" | ", extensionWrong.Take(4)));
     }
 
     // ── Samplers as glTF defines them ──────────────────────────────────────────

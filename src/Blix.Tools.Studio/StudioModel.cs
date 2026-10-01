@@ -117,6 +117,14 @@ internal sealed class StudioModel : IDisposable
     private readonly List<Attachment> attachments = new();
     private readonly List<StaticPart> staticParts = new();
     private readonly List<SkinSlot> skins = new();
+    // Per skin: whether its last uploaded palette mirrors (a negative determinant), judged on a bone that
+    // weights vertices — the skin's equivalent of a rigid part's world, for choosing its front face.
+    private bool[] mirrored = Array.Empty<bool>();
+    private int[] probeBone = Array.Empty<int>();
+
+    /// <summary>Whether <paramref name="skin"/> was last uploaded mirrored, so its front faces are clockwise.</summary>
+    /// <remarks>One answer per skin: a rig that mirrors some joints and not others within one primitive cannot be one pipeline.</remarks>
+    public bool IsMirrored(int skin) => (uint)skin < (uint)mirrored.Length && mirrored[skin];
 
     /// <summary>The engine model this draws.</summary>
     public Model Model => model;
@@ -204,6 +212,16 @@ internal sealed class StudioModel : IDisposable
         if (!model.IsSkinned) return studio;
 
         studio.bones = model.CreateBoneBuffers(skinnedProgram, MaxInstances);
+        studio.mirrored = new bool[model.Skins.Count];
+        studio.probeBone = model.Skins.Select(skin =>
+        {
+            for (var j = 0; j < skin.Bones.Count; j++)
+            {
+                if ((uint)skin.Bones[j] < (uint)model.WeightedBones.Count && model.WeightedBones[skin.Bones[j]]) return j;
+            }
+
+            return 0;
+        }).ToArray();
         for (var s = 0; s < model.Skins.Count; s++)
         {
             studio.skins.Add(new SkinSlot(model.Skins[s].Skeleton, studio.bones.For(s).Handle));
@@ -213,9 +231,15 @@ internal sealed class StudioModel : IDisposable
     }
 
     /// <summary>Copies one skin's live instance palettes into that skin's frame buffer.</summary>
-    public void UploadPalettes(BonePaletteSet palettes, int skinIndex) =>
+    public void UploadPalettes(BonePaletteSet palettes, int skinIndex)
+    {
         (bones ?? throw new InvalidOperationException($"'{model.Name}' has no skin, so there is no palette to upload."))
             .Upload(skinIndex, palettes);
+        if (palettes.Count > 0 && (uint)skinIndex < (uint)mirrored.Length)
+        {
+            mirrored[skinIndex] = palettes.Matrices[probeBone[skinIndex]].GetDeterminant() < 0f;
+        }
+    }
 
     public void Dispose()
     {

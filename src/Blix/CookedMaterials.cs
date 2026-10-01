@@ -162,7 +162,8 @@ internal static class CookedMaterials
             // Resolve cooked extension image rows through the same texture cache as core material
             // channels so source and cooked material shapes agree.
             CookedExtensions(m.Ext, Texture),
-            m.UvTransforms is { } uv ? new PbrUvTransforms(Uv(uv.BaseColor), Uv(uv.Normal), Uv(uv.MetallicRoughness), Uv(uv.Occlusion), Uv(uv.Emissive)) : null);
+            m.UvTransforms is { } uv ? new PbrUvTransforms(Uv(uv.BaseColor), Uv(uv.Normal), Uv(uv.MetallicRoughness), Uv(uv.Occlusion), Uv(uv.Emissive)) : null,
+            m.ExtensionUv?.Select(e => new PbrTextureUv(e.TexCoord, Uv(e.Transform))).ToArray());
 
         materialCache[index] = result;
         return result;

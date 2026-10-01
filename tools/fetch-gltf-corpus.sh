@@ -292,6 +292,87 @@ print(f"  derived RiggedSimple_bones300.gltf ({EXTRA + 2} joints, vertices on jo
 PY
 fi
 
+# No corpus file animates a node that is not a joint but sits between joints or above them with a CHANGING
+# value (BrainStem's three such tracks hold still), so nothing proved the animated hierarchy follows one.
+# This puts a translation track on RiggedSimple's Armature (above the skeleton root) and inserts a non-joint
+# "Spacer" between its two joints with a rotation track. glTF allows both, and both must move the skin.
+RA="$DEST/sample-assets/RiggedSimple/RiggedSimple.glb"
+if [ -f "$RA" ] && [ ! -s "$DEST/sample-assets/RiggedSimple/RiggedSimple_animatednodes.gltf" ]; then
+    python3 - "$RA" <<'PY'
+import base64, json, math, struct, sys
+p = sys.argv[1]
+raw = open(p, "rb").read()
+json_len = struct.unpack("<I", raw[12:16])[0]
+d = json.loads(raw[20:20 + json_len])
+bin_at = 20 + json_len
+blob = bytearray(raw[bin_at + 8:bin_at + 8 + struct.unpack("<I", raw[bin_at:bin_at + 4])[0]])
+joints = d["skins"][0]["joints"]
+names = [n.get("name") for n in d["nodes"]]
+if names.count("Armature") != 1 or len(joints) != 2:
+    sys.exit("RiggedSimple changed shape upstream — an Armature node and two joints expected")
+armature, root, child = names.index("Armature"), joints[0], joints[1]
+if child not in d["nodes"][root].get("children", []):
+    sys.exit("RiggedSimple changed shape upstream — the second joint should be a child of the first")
+
+# The Spacer: between the joints, identity at rest, so the rest pose is unchanged.
+spacer = len(d["nodes"])
+d["nodes"].append({"name": "Spacer", "children": [child]})
+d["nodes"][root]["children"] = [spacer if c == child else c for c in d["nodes"][root]["children"]]
+
+def view(data):
+    while len(blob) % 4: blob.append(0)
+    d["bufferViews"].append({"buffer": 0, "byteOffset": len(blob), "byteLength": len(data)})
+    blob.extend(data)
+    return len(d["bufferViews"]) - 1
+
+def accessor(data, count, kind, lo=None, hi=None):
+    a = {"bufferView": view(data), "componentType": 5126, "count": count, "type": kind}
+    if lo is not None: a["min"], a["max"] = lo, hi
+    d["accessors"].append(a)
+    return len(d["accessors"]) - 1
+
+times = [0.0, 0.5, 1.0, 1.5, 2.0]
+t = accessor(struct.pack("<5f", *times), 5, "SCALAR", [0.0], [2.0])
+moves = accessor(b"".join(struct.pack("<3f", x, 0.0, 0.0) for x in [0.0, 1.0, 0.0, -1.0, 0.0]), 5, "VEC3")
+turns = accessor(b"".join(struct.pack("<4f", 0.0, 0.0, math.sin(a / 2), math.cos(a / 2))
+                          for a in [0.0, 0.6, 0.0, -0.6, 0.0]), 5, "VEC4")
+d.setdefault("animations", []).append({
+    "name": "nodes",
+    "samplers": [{"input": t, "output": moves}, {"input": t, "output": turns}],
+    "channels": [{"sampler": 0, "target": {"node": armature, "path": "translation"}},
+                 {"sampler": 1, "target": {"node": spacer, "path": "rotation"}}],
+})
+d["buffers"] = [{"byteLength": len(blob), "uri": "data:application/octet-stream;base64," + base64.b64encode(bytes(blob)).decode()}]
+out = p.replace("RiggedSimple.glb", "RiggedSimple_animatednodes.gltf")
+json.dump(d, open(out, "w"), indent=1)
+print("  derived RiggedSimple_animatednodes.gltf (Armature translated, a non-joint Spacer rotated between the joints)")
+PY
+fi
+
+# A mirrored skin: RiggedSimple under a new scene root scaled (-1, 1, 1). Mirroring reverses winding, so a
+# renderer that culls back faces must flip its front face for the skin as it does for a rigid part. The
+# cylinder is symmetric under this mirror, so at rest it must draw as the unmirrored one does.
+RM="$DEST/sample-assets/RiggedSimple/RiggedSimple.glb"
+if [ -f "$RM" ] && [ ! -s "$DEST/sample-assets/RiggedSimple/RiggedSimple_mirrored.gltf" ]; then
+    python3 - "$RM" <<'PY'
+import base64, json, struct, sys
+p = sys.argv[1]
+raw = open(p, "rb").read()
+json_len = struct.unpack("<I", raw[12:16])[0]
+d = json.loads(raw[20:20 + json_len])
+bin_at = 20 + json_len
+blob = raw[bin_at + 8:bin_at + 8 + struct.unpack("<I", raw[bin_at:bin_at + 4])[0]]
+scene = d["scenes"][d.get("scene", 0)]
+mirror = len(d["nodes"])
+d["nodes"].append({"name": "Mirror", "scale": [-1.0, 1.0, 1.0], "children": list(scene["nodes"])})
+scene["nodes"] = [mirror]
+d["buffers"] = [{"byteLength": len(blob), "uri": "data:application/octet-stream;base64," + base64.b64encode(bytes(blob)).decode()}]
+out = p.replace("RiggedSimple.glb", "RiggedSimple_mirrored.gltf")
+json.dump(d, open(out, "w"), indent=1)
+print("  derived RiggedSimple_mirrored.gltf (the whole scene under a (-1, 1, 1) scale)")
+PY
+fi
+
 echo
 echo "corpus at $DEST — $((planned - failed)) fetched, $failed missing, $(find "$DEST" -type f | wc -l | tr -d ' ') file(s) total"
 [ "$failed" -eq 0 ]

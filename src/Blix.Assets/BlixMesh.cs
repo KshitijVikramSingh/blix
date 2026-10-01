@@ -33,6 +33,15 @@ public static class BlixMesh
     /// stamps its own, which is what makes "who made this file" answerable.
     /// </summary>
     public const string ShippedRecipe = "gmsh";
+
+    /// <summary>The KHR_materials_* texture channels, in the order a material's <c>ExtensionUv</c> lists them.</summary>
+    /// <remarks>SharpGLTF's channel keys; the engine's <c>PbrExtensionTexture</c> follows this order.</remarks>
+    public static readonly IReadOnlyList<string> ExtensionChannels = new[]
+    {
+        "ClearCoat", "ClearCoatRoughness", "ClearCoatNormal", "SheenColor", "SheenRoughness",
+        "SpecularColor", "SpecularFactor", "Transmission", "VolumeThickness", "Iridescence",
+        "IridescenceThickness", "Anisotropy", "DiffuseTransmissionFactor", "DiffuseTransmissionColor",
+    };
     // Version 13 is the only accepted layout. It includes per-primitive layouts and LOD errors,
     // common provenance, material and image tables (each core channel with its TEXCOORD set, and
     // the normal scale), rig data, attachments/static parts, authored nodes, and the current
@@ -43,8 +52,9 @@ public static class BlixMesh
     // CUBICSPLINE, with the spline's in/out tangents), and tracks every animated node rather than
     // only skin 0's joints. v15 makes an image row one image as used — role, normal convention and
     // glTF sampler — so an image used two ways is two rows. v16 adds each core channel's
-    // KHR_texture_transform to the material. Older layouts must be re-cooked.
-    public const uint Version16 = 16;
+    // KHR_texture_transform to the material; v17 each extension channel's TEXCOORD set and transform.
+    // Older layouts must be re-cooked.
+    public const uint Version17 = 17;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
     public const uint LayoutPosition3NormalTextureSkin4Tangent = 3; // 80-byte, rigged
@@ -144,6 +154,12 @@ public readonly record struct BlixMeshUvTransform(Vector2 Offset, float Rotation
     public static BlixMeshUvTransform Identity { get; } = new(Vector2.Zero, 0f, Vector2.One);
 }
 
+/// <summary>Which TEXCOORD set a channel samples, and its <c>KHR_texture_transform</c>.</summary>
+public readonly record struct BlixMeshChannelUv(int TexCoord, BlixMeshUvTransform Transform)
+{
+    public static BlixMeshChannelUv Default { get; } = new(0, BlixMeshUvTransform.Identity);
+}
+
 /// <summary>The five core channels' UV transforms.</summary>
 public sealed record BlixMeshUvTransforms(
     BlixMeshUvTransform BaseColor, BlixMeshUvTransform Normal, BlixMeshUvTransform MetallicRoughness,
@@ -194,7 +210,13 @@ public sealed record BlixMeshMaterial(
     BlixMaterialExtensions? Extensions = null,
 
     /// <summary>Each core channel's <c>KHR_texture_transform</c>; null reads as identity on every channel.</summary>
-    BlixMeshUvTransforms? UvTransforms = null)
+    BlixMeshUvTransforms? UvTransforms = null,
+
+    /// <summary>
+    /// The 14 extension channels' TEXCOORD set and transform, in <see cref="BlixMesh.ExtensionChannels"/> order;
+    /// null when every one is set 0, untransformed.
+    /// </summary>
+    IReadOnlyList<BlixMeshChannelUv>? ExtensionUv = null)
 {
     /// <summary>The extensions, never null — an absent block reads as every spec default.</summary>
     public BlixMaterialExtensions Ext => Extensions ?? BlixMaterialExtensions.None;
@@ -484,6 +506,20 @@ internal static class BlixMeshBinary
         br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle(),
         br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
 
+    internal static IReadOnlyList<BlixMeshChannelUv>? ReadExtensionUv(BinaryReader br)
+    {
+        var n = br.ReadInt32();
+        if (n == 0) return null;
+        var all = new BlixMeshChannelUv[n];
+        for (var i = 0; i < n; i++)
+        {
+            all[i] = new BlixMeshChannelUv(br.ReadInt32(), new BlixMeshUvTransform(
+                new Vector2(br.ReadSingle(), br.ReadSingle()), br.ReadSingle(), new Vector2(br.ReadSingle(), br.ReadSingle())));
+        }
+
+        return all;
+    }
+
     internal static BlixMeshUvTransforms ReadUvTransforms(BinaryReader br)
     {
         BlixMeshUvTransform One() => new(new Vector2(br.ReadSingle(), br.ReadSingle()), br.ReadSingle(), new Vector2(br.ReadSingle(), br.ReadSingle()));
@@ -548,7 +584,7 @@ public static class BlixMeshWriter
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(file);
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version16, stamp);
+        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version17, stamp);
         using var bw = new BinaryWriter(fs);
 
         bw.Write(file.Nodes.Count);
@@ -622,6 +658,15 @@ public static class BlixMeshWriter
             foreach (var t in (m.UvTransforms ?? BlixMeshUvTransforms.Identity).All)
             {
                 bw.Write(t.Offset.X); bw.Write(t.Offset.Y); bw.Write(t.Rotation); bw.Write(t.Scale.X); bw.Write(t.Scale.Y);
+            }
+
+            var extensionUv = m.ExtensionUv ?? Array.Empty<BlixMeshChannelUv>();
+            bw.Write(extensionUv.Count);
+            foreach (var u in extensionUv)
+            {
+                bw.Write(u.TexCoord);
+                bw.Write(u.Transform.Offset.X); bw.Write(u.Transform.Offset.Y); bw.Write(u.Transform.Rotation);
+                bw.Write(u.Transform.Scale.X); bw.Write(u.Transform.Scale.Y);
             }
         }
 
@@ -817,7 +862,7 @@ public static class BlixMeshReader
         ArgumentNullException.ThrowIfNull(path);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version16, path, ".blixmesh");
+        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version17, path, ".blixmesh");
         return AssetImportException.Refusing(path, () => ReadBody(fs, path, header), ".blixmesh");
     }
 
@@ -893,7 +938,8 @@ public static class BlixMeshReader
                 OcclusionImage: br.ReadInt32(),
                 EmissiveImage: br.ReadInt32(),
                 Extensions: ReadExtensions(br),
-                UvTransforms: BlixMeshBinary.ReadUvTransforms(br));
+                UvTransforms: BlixMeshBinary.ReadUvTransforms(br),
+                ExtensionUv: BlixMeshBinary.ReadExtensionUv(br));
         }
 
         var imageCount = br.ReadInt32();

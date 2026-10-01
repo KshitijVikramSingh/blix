@@ -116,7 +116,8 @@ refusals, then features:
 3b. **Single-sided culling, double-sided back faces, mirrored nodes — done.** Studio culls a single-sided
    rigid part's back faces, lights a doubleSided back face with its frame reversed, and gives a mirrored
    part (negative determinant) clockwise front faces whether culled or not; TextureSettingsTest and
-   NegativeScaleTest pass every row. (Skinned parts already culled; a mirrored skin is not handled.)
+   NegativeScaleTest pass every row. A mirrored skin (its palette's determinant negative) takes clockwise
+   skinned pipelines the same way (RiggedSimple_mirrored: identical to the unmirrored rig).
 3c. **Extension texture channels — done.** All 14 KHR_materials_* texture channels cook (colour ones as
    sRGB, the clearcoat normal as a normal map); every textured channel kind in the corpus (16) reaches the
    cooked file. Renderers decide which they draw — Studio draws none of the extensions. Found on the way:
@@ -219,10 +220,6 @@ for 45 frames under `--validate`, which needs a GPU and the validation layers, a
 neither. The root gate is the deviceless one. A CI home for the `demos` gate would first need its
 deviceless legs (the probe, `chassis-tune --headless`) separable from the headed ones, which is
 what named tiers are for.
-
-**No corpus file animates a node between joints or above them with a changing value.** The animated
-hierarchy includes such nodes (BrainStem has three tracks on them), but BrainStem's hold their rest, so
-removing them from the hierarchy fails nothing. A derived asset, as for `RiggedSimple_cutout`, would close it.
 
 **Linux is absent from the CI matrix.** A second red job teaches nothing the first
 has not; the shape of what Windows needed should be known before it is copied.

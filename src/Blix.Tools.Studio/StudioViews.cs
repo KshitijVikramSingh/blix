@@ -180,12 +180,16 @@ public sealed class ModelView : IStudioView
             }
 
             // BLEND is already unculled. Other double-sided materials use the unculled skinned
-            // pipeline; closed single-sided parts retain back-face culling.
+            // pipeline; closed single-sided parts retain back-face culling. A skin whose palette mirrors
+            // takes the clockwise twin of each, as a mirrored rigid part does.
+            var mirrored = studio.IsMirrored(part.SkinIndex);
+            static PipelineHandle Pick(PipelineHandle mirroredOne, PipelineHandle plain, bool mirrored) =>
+                mirrored && mirroredOne.Id != 0 ? mirroredOne : plain;
             var skinned = blended && draw.SkinnedBlendPipeline.Id != 0
-                ? draw.SkinnedBlendPipeline
+                ? Pick(draw.MirroredSkinnedBlendPipeline, draw.SkinnedBlendPipeline, mirrored)
                 : part.DoubleSided && draw.SkinnedDoubleSidedPipeline.Id != 0
-                    ? draw.SkinnedDoubleSidedPipeline
-                    : draw.SkinnedPipeline;
+                    ? Pick(draw.MirroredSkinnedDoubleSidedPipeline, draw.SkinnedDoubleSidedPipeline, mirrored)
+                    : Pick(draw.MirroredSkinnedPipeline, draw.SkinnedPipeline, mirrored);
 
             draw.Scope.DrawIndexedInstanced(
                 vertexBuffer: part.Vertices,
