@@ -92,6 +92,9 @@
     <BlixSharedFlag Condition="$([MSBuild]::IsOSPlatform(OSX))">-dynamiclib</BlixSharedFlag>
     <BlixSharedFlag Condition="'$(BlixSharedFlag)' == ''">-shared</BlixSharedFlag>
     <BlixPicFlag Condition="!$([MSBuild]::IsOSPlatform(Windows))">-fPIC</BlixPicFlag>
+    <!-- C's maths library: its own -lm on Linux and macOS; on Windows it is part of the C runtime and there
+         is no m.lib, so asking for one fails the link (LNK1181). -->
+    <BlixMathLib Condition="!$([MSBuild]::IsOSPlatform(Windows))">-lm</BlixMathLib>
     <BlixMeshoptExport Condition="$([MSBuild]::IsOSPlatform(Windows))">-DMESHOPTIMIZER_API=__declspec(dllexport)</BlixMeshoptExport>
 
     <BlixMeshoptLib>$(BlixNativeDir)$(BlixLibPrefix)meshoptimizer$(BlixLibExt)</BlixMeshoptLib>
@@ -143,7 +146,7 @@
           Outputs="$(BlixMikkLib)">
     <MakeDir Directories="$(BlixNativeDir)" />
     <Message Text="Building $(BlixLibPrefix)blix_mikk$(BlixLibExt) (clang)" Importance="high" />
-    <Exec Command="clang -O2 -std=c99 $(BlixSharedFlag) $(BlixPicFlag) @(MikkC->'&quot;%(FullPath)&quot;', ' ') -o &quot;$(BlixMikkLib)&quot; -lm"
+    <Exec Command="clang -O2 -std=c99 $(BlixSharedFlag) $(BlixPicFlag) @(MikkC->'&quot;%(FullPath)&quot;', ' ') -o &quot;$(BlixMikkLib)&quot; $(BlixMathLib)"
           ContinueOnError="true">
       <Output TaskParameter="ExitCode" PropertyName="BlixMikkExit" />
     </Exec>
