@@ -4,18 +4,18 @@ using Blix.Graphics;
 
 namespace Blix;
 
-/// <summary>Device-independent facts derived from skinned vertex data and its skeleton.</summary>
+/// <summary>Device-independent facts derived from skinned vertex data and its skin.</summary>
 public static class SkinningAnalysis
 {
-    /// <summary>Which bones carry at least one non-zero vertex weight.</summary>
-    public static bool[] FindWeightedBones(
-        Skeleton skeleton,
+    /// <summary>Which of the skin's joints carry at least one non-zero vertex weight, in joint order (a vertex's joint index).</summary>
+    public static bool[] FindWeightedJoints(
+        SkinBinding skin,
         IEnumerable<MeshData> meshes)
     {
-        ArgumentNullException.ThrowIfNull(skeleton);
+        ArgumentNullException.ThrowIfNull(skin);
         ArgumentNullException.ThrowIfNull(meshes);
 
-        var weighted = new bool[skeleton.BoneCount];
+        var weighted = new bool[skin.JointCount];
         foreach (var mesh in meshes)
         {
             var indexAttribute = Attribute(mesh.Layout, location: 3);
@@ -90,16 +90,24 @@ public static class SkinningAnalysis
     public static bool[] IncludeAncestors(Skeleton skeleton, IReadOnlyList<bool> weighted)
     {
         ArgumentNullException.ThrowIfNull(skeleton);
+        return IncludeAncestors(skeleton.Bones.Select(b => b.ParentIndex).ToArray(), weighted);
+    }
+
+    /// <summary>The same over any parent-first tree: a skin's joints (<see cref="SkinBinding.JointParents"/>), say.</summary>
+    /// <exception cref="ArgumentException">A parent does not come before its child.</exception>
+    public static bool[] IncludeAncestors(IReadOnlyList<int> parents, IReadOnlyList<bool> weighted)
+    {
+        ArgumentNullException.ThrowIfNull(parents);
         ArgumentNullException.ThrowIfNull(weighted);
 
-        var hierarchy = new bool[skeleton.BoneCount];
+        var hierarchy = new bool[parents.Count];
         for (var i = 0; i < hierarchy.Length && i < weighted.Count; i++) hierarchy[i] = weighted[i];
 
         for (var i = hierarchy.Length - 1; i >= 0; i--)
         {
+            if (parents[i] >= i) throw new ArgumentException($"node {i}'s parent {parents[i]} does not come before it.", nameof(parents));
             if (!hierarchy[i]) continue;
-            var parent = skeleton.Bones[i].ParentIndex;
-            if (parent >= 0) hierarchy[parent] = true;
+            if (parents[i] >= 0) hierarchy[parents[i]] = true;
         }
 
         return hierarchy;

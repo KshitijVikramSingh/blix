@@ -51,7 +51,6 @@ public sealed class BonePaletteSet
     /// </remarks>
     public int LiveMatrixCount => Count * BoneCount;
 
-    private readonly BonePalette scratch;
 
     public BonePaletteSet(int boneCount, int capacity)
     {
@@ -60,32 +59,32 @@ public sealed class BonePaletteSet
         BoneCount = boneCount;
         Capacity = capacity;
         Matrices = new Matrix4x4[capacity * boneCount];
-        scratch = new BonePalette(boneCount);
     }
 
     /// <summary>Forget every written instance. Call once per frame, before the first <see cref="Add"/>.</summary>
     public void Reset() => Count = 0;
 
-    /// <summary>
-    /// Computes <paramref name="pose"/>'s palette into the next free slot and returns that slot's index.
-    /// </summary>
-    /// <param name="post">
-    /// Multiplied onto every matrix after the palette is built — the caller's chance to bake a world
-    /// placement in (Bulwark's shape). Pass <see cref="Matrix4x4.Identity"/> to keep the palette in
-    /// model space and place the body some other way (the external RTSGame consumer's shape). Row-vector compose: the
-    /// palette is applied first, then this.
-    /// </param>
-    /// <returns>The instance index, which is what a shader's gl_InstanceIndex must equal.</returns>
-    public int Add(Skeleton skeleton, Pose pose, Matrix4x4 post)
+    /// <summary>Adds one body for <paramref name="skin"/>, its palette from the skin's skeleton's bone worlds; returns the body's slot.</summary>
+    /// <remarks>
+    /// A palette is a binding operation: the joints and their inverse binds are the skin's, the worlds are
+    /// its skeleton's. There is no overload taking a skeleton and a pose, because a skeleton cannot say which
+    /// skin's binds to apply.
+    /// </remarks>
+    /// <param name="skin">The skin being packed; its joint count is this set's stride.</param>
+    /// <param name="boneWorlds">Its skeleton's bone worlds for this body (<see cref="Skeleton.ComputeBoneWorlds"/>).</param>
+    /// <param name="post">What goes after every world: the hierarchy's placement, then the body's.</param>
+    /// <exception cref="ArgumentException">The skin's joint count is not this set's stride, or the worlds are not of its skeleton.</exception>
+    /// <exception cref="InvalidOperationException">The set is full.</exception>
+    public int Add(SkinBinding skin, IReadOnlyList<Matrix4x4> boneWorlds, Matrix4x4 post)
     {
-        ArgumentNullException.ThrowIfNull(skeleton);
-        ArgumentNullException.ThrowIfNull(pose);
-        if (skeleton.BoneCount != BoneCount)
+        ArgumentNullException.ThrowIfNull(skin);
+        ArgumentNullException.ThrowIfNull(boneWorlds);
+        if (skin.JointCount != BoneCount)
         {
             throw new ArgumentException(
-                $"Skeleton has {skeleton.BoneCount} bones; this set is packed at a stride of {BoneCount}.",
-                nameof(skeleton));
+                $"A {skin.JointCount}-joint skin; this set is packed at a stride of {BoneCount}.", nameof(skin));
         }
+
         if (Count >= Capacity)
         {
             // Loud rather than silently dropping the body. A crowd that quietly stops growing at
@@ -94,48 +93,7 @@ public sealed class BonePaletteSet
                 $"BonePaletteSet is full at {Capacity} instance(s). Size it for the crowd, or stop adding.");
         }
 
-        skeleton.ComputeBonePalette(pose, scratch);
-        var at = Count * BoneCount;
-        for (var b = 0; b < BoneCount; b++)
-        {
-            Matrices[at + b] = scratch.Matrices[b] * post;
-        }
-
-        return Count++;
-    }
-
-    /// <summary>
-    /// Adds one body for a skin whose joints are bones of a larger posed hierarchy: its palette gathered
-    /// from that hierarchy's bone worlds, through the skin's own inverse binds.
-    /// </summary>
-    /// <param name="boneWorlds">The hierarchy's bone worlds for this body (<see cref="Skeleton.ComputeBoneWorlds"/>).</param>
-    /// <param name="bones">Each of the skin's joints as a hierarchy bone.</param>
-    /// <param name="skin">The skin's own skeleton, whose bones carry its inverse binds.</param>
-    /// <param name="post">What goes after every world: the hierarchy's placement, then the body's.</param>
-    public int AddGathered(IReadOnlyList<Matrix4x4> boneWorlds, IReadOnlyList<int> bones, Skeleton skin, Matrix4x4 post)
-    {
-        ArgumentNullException.ThrowIfNull(boneWorlds);
-        ArgumentNullException.ThrowIfNull(bones);
-        ArgumentNullException.ThrowIfNull(skin);
-        if (skin.BoneCount != BoneCount || bones.Count != BoneCount)
-        {
-            throw new ArgumentException(
-                $"A {skin.BoneCount}-bone skin mapped through {bones.Count} bone(s); this set is packed at a stride of {BoneCount}.",
-                nameof(skin));
-        }
-
-        if (Count >= Capacity)
-        {
-            throw new InvalidOperationException(
-                $"BonePaletteSet is full at {Capacity} instance(s). Size it for the crowd, or stop adding.");
-        }
-
-        var at = Count * BoneCount;
-        for (var b = 0; b < BoneCount; b++)
-        {
-            Matrices[at + b] = skin.Bones[b].InverseBindPose * boneWorlds[bones[b]] * post;
-        }
-
+        skin.ComputePalette(boneWorlds, post, Matrices.AsSpan(Count * BoneCount, BoneCount));
         return Count++;
     }
 
@@ -156,12 +114,15 @@ public sealed class BonePaletteSet
     /// computed separately, which is exactly the claim.
     /// </para>
     /// </remarks>
-    public ulong Fingerprint(int instance)
+    public ulong Fingerprint(int instance) => Fingerprint(Slice(instance));
+
+    /// <summary>The same hash over any matrices: bone worlds, when the question is about poses and not a skin.</summary>
+    public static ulong Fingerprint(ReadOnlySpan<Matrix4x4> matrices)
     {
         // FNV-1a over the raw float bits. Cheap, order-sensitive, and a single changed bone moves it.
         // Read as a float span over the matrices rather than member by member: no per-bone array, and
         // it cannot silently skip a component the way an enumerated list of sixteen names can.
-        var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<Matrix4x4, float>(Slice(instance));
+        var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<Matrix4x4, float>(matrices);
         var hash = 1469598103934665603UL;
         foreach (var value in floats)
         {

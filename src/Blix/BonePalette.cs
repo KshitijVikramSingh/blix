@@ -2,7 +2,7 @@ using System.Numerics;
 
 namespace Blix;
 
-// GPU-ready per-bone matrices, the output of Skeleton.ComputeBonePalette. Each
+// GPU-ready per-joint matrices, the output of SkinBinding.ComputePalette. Each
 // `Matrices[i]` maps a rest-pose vertex through the current pose, ready for the
 // vertex shader's `Σ weight_j × Matrices[BoneIndex_j] × vertex_rest` skinning sum.
 //

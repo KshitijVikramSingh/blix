@@ -89,7 +89,7 @@ Every public type built by `Blix.csproj` and `Blix.Core.csproj`, one line each.
 
 **Time-driven animation:** `IAnimation`, `AnimationHost`, `FloatAnimation`, `Transform3DAnimation`, `CallbackAnimation`, and the curves: `ICurve<T>`, `IFiniteCurve<T>`, `ConstantCurve<T>`, `LinearCurve`, `LinearVector3Curve`, `SlerpQuaternionCurve`, `LoopCurve<T>`, `Keyframe<T>`, `KeyframeVector3Curve`, `KeyframeQuaternionCurve`, `Interpolation`
 
-**Skeletal animation:** `BoneTransform`, `Bone`, `Skeleton`, `Pose`, `BonePalette`, `BonePaletteSet`, `BoneMask`, `AnimationClip`, `BoneTrack`, `ClipPlayer`, `PoseStack`, `PoseLayer`, `PoseLayerMode`, `PoseLayerFinish`, `PoseBlend`, `PoseDelta`, `RootMotion`, `SkinningAnalysis`
+**Skeletal animation:** `BoneTransform`, `Bone`, `Skeleton`, `SkinBinding`, `Pose`, `BonePalette`, `BonePaletteSet`, `BoneMask`, `AnimationClip`, `BoneTrack`, `ClipPlayer`, `PoseStack`, `PoseLayer`, `PoseLayerMode`, `PoseLayerFinish`, `PoseBlend`, `PoseDelta`, `RootMotion`, `SkinningAnalysis`
 
 **Physics:** `PhysicsHost3D`, `PhysicsHost2D`
 
@@ -469,14 +469,28 @@ Vertices moving *relative to each other* within a single mesh, driven by a hiera
 ```csharp
 public readonly record struct BoneTransform(Vector3 Translation, Quaternion Rotation, Vector3 Scale);
 
-public readonly record struct Bone(string Name, int ParentIndex, Matrix4x4 InverseBindPose);
+public readonly record struct Bone(string Name, int ParentIndex, BoneTransform Rest, Matrix4x4? Offset = null);
 
-public sealed class Skeleton
+public sealed class Skeleton                       // a pose hierarchy: what clips, stacks and masks index
 {
     public Bone[] Bones { get; }
     public int BoneCount { get; }
-    public Pose CreateRestPose();
-    public void ComputeBonePalette(Pose pose, BonePalette outPalette);
+    public Pose CreateRestPose();                  // each bone's Rest
+    public void ComputeBoneWorlds(Pose pose, Matrix4x4[] outWorlds);
+}
+
+public sealed class SkinBinding                    // a skin: which bones are its joints, and their binds
+{
+    public SkinBinding(Skeleton skeleton, IReadOnlyList<int> bones, IReadOnlyList<Matrix4x4> inverseBinds);
+    public static SkinBinding Direct(Skeleton skeleton, IReadOnlyList<Matrix4x4> inverseBinds);
+    public Skeleton Skeleton { get; }
+    public IReadOnlyList<int> Bones { get; }       // joint j -> bone of Skeleton
+    public IReadOnlyList<Matrix4x4> InverseBinds { get; }
+    public int JointCount { get; }
+    public void ComputePalette(IReadOnlyList<Matrix4x4> boneWorlds, Matrix4x4 post, Span<Matrix4x4> palette);
+    public void ComputePalette(Pose pose, BonePalette palette, Matrix4x4[]? outBoneWorlds = null);
+    public int[] JointParents();
+    public Matrix4x4[] JointBindWorlds();
 }
 
 public sealed class Pose
@@ -498,17 +512,19 @@ public sealed class BonePalette
 
 `BoneTransform` is the struct form of `Transform3D` — same TRS semantics, value type so a `Pose`'s array of N bone locals doesn't allocate N heap objects. Uses `Translation` (not `Position`) to mark the bone-local domain; reading code disambiguates "this is a bone-local transform inside a skeletal pose" from "this is an object's world position."
 
-`Bone` carries everything bind-time-constant: name, hierarchy via `ParentIndex` (flat-array index, `-1` for root), and the `InverseBindPose` matrix the GPU consumes directly.
+**A skeleton is not a skin.** glTF animates nodes; a skin names some of them as its joints and says, per joint, where a vertex sat relative to it at bind. Two skins can share joints with different binds, and a node a clip moves need be no skin's joint. So `Skeleton` is the pose hierarchy alone, and each skin's joints and inverse binds are a `SkinBinding` over it, which keeps the `Skeleton` it indexes: its joint indices mean bones of that hierarchy and no other. A palette is always a binding operation, `inverseBind[j] · world[bones[j]] · post`; a skeleton cannot compute one, because it cannot say which skin's binds to apply.
 
-`Skeleton` enforces a **hierarchy-order invariant** at construction: each bone's `ParentIndex` is either `-1` or strictly less than its own index. `ComputeBonePalette` walks the array once forward with no recursion and no sorting — every parent's world matrix is already filled when a child reads it.
+`Bone` is name, hierarchy via `ParentIndex` (flat-array index, `-1` for root), `Rest` (what it holds when no track moves it: glTF's joint node transform, required) and `Offset` (the non-joint nodes between it and its parent; null is identity). A hand-built skeleton states its rest; nothing reconstructs it from binds, because a file's rest need not be its bind.
 
-`Pose` carries no reference to its owning `Skeleton`. Animations produce poses; skeletons hold metadata; `ComputeBonePalette` joins them with a bone-count validation at the boundary.
+`Skeleton` enforces a **hierarchy-order invariant** at construction: each bone's `ParentIndex` is either `-1` or strictly less than its own index. `ComputeBoneWorlds` walks the array once forward with no recursion and no sorting — every parent's world matrix is already filled when a child reads it.
 
-`BonePalette` is a typed wrapper around `Matrix4x4[]` — the GPU-ready output. Bind via `new ShaderUniform("uBones", new Matrix4x4ArrayUniform(palette.Matrices))`.
+`Pose` carries no reference to its owning `Skeleton`. Animations produce poses; skeletons hold the hierarchy; `ComputeBoneWorlds` joins them with a bone-count validation at the boundary, and a binding's `ComputePalette` refuses worlds that are not one per bone of its skeleton.
+
+`BonePalette` is a typed wrapper around `Matrix4x4[]` — the GPU-ready output, one matrix per joint. `BonePaletteSet` packs many bodies' palettes for one skin at a stride of its joint count; `Model.PackPalettes` fills one set per skin from poses of `Model.Skeleton`.
 
 ### Matrix convention (F-016)
 
-Skeletal math uses the same convention as the rest of the engine: **`System.Numerics` row-vector form** — translation in `M41/M42/M43`, a vertex flows left-to-right (`v_row * M`, and `M = A * B` applies `A` first). `GraphicsMatrices.CreateModel` (and therefore `BoneTransform.ToMatrix`) is `Scale * Rotation * Translation` in that form. There are **no transposes** in the skeletal path: `Matrix4x4.Decompose` reads `System.Numerics` matrices directly, so `BoneTransform.FromMatrix` decomposes the matrix as-is, and `Skeleton.ComputeBonePalette` composes `child = local * parentWorld` straight (the same walk `Transform3D.WorldMatrix` uses). See [`architecture.md` → Matrices](architecture.md#conventions) for the full convention and the upload→GLSL story; `Blix.Test.Graphics` Section AH pins it.
+Skeletal math uses the same convention as the rest of the engine: **`System.Numerics` row-vector form** — translation in `M41/M42/M43`, a vertex flows left-to-right (`v_row * M`, and `M = A * B` applies `A` first). `GraphicsMatrices.CreateModel` (and therefore `BoneTransform.ToMatrix`) is `Scale * Rotation * Translation` in that form. There are **no transposes** in the skeletal path: `Matrix4x4.Decompose` reads `System.Numerics` matrices directly, so `BoneTransform.FromMatrix` decomposes the matrix as-is, and `Skeleton.ComputeBoneWorlds` composes `child = local * parentWorld` straight (the same walk `Transform3D.WorldMatrix` uses). See [`architecture.md` → Matrices](architecture.md#conventions) for the full convention and the upload→GLSL story; `Blix.Test.Graphics` Section AH pins it.
 
 A manually built inverse-bind matrix is just `GraphicsMatrices.CreateModel(bindPos, bindRot, bindScale)` inverted — no transpose. The cook doesn't transpose either: SharpGLTF already hands back IBMs in this row-vector form, and the `.blixmesh` stores them as read.
 

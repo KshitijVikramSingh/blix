@@ -6,7 +6,7 @@ namespace Blix;
 // Poses carry no reference to their owning Skeleton: a single pose value can be
 // produced by one source (an animation clip, hand authoring, blending of two other
 // poses) and consumed by any skeleton with the matching bone count. Caller is
-// responsible for the count match; Skeleton.ComputeBonePalette validates it at the
+// responsible for the count match; Skeleton.ComputeBoneWorlds validates it at the
 // boundary.
 //
 // SharpGLTF's design embeds the current local transform on each Node directly,

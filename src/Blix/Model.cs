@@ -27,7 +27,7 @@ public sealed class Model : IDisposable
     private readonly IGraphicsDevice device;
     private readonly List<Node> nodes = new();
     private readonly List<Part> parts = new();
-    private readonly List<Skin> skins = new();
+    private readonly List<SkinBinding> skins = new();
     private readonly List<Part> staticParts = new();
     private readonly List<Attachment> attachments = new();
     private Skeleton? skeleton;
@@ -69,13 +69,6 @@ public sealed class Model : IDisposable
 
     /// <summary>A material and its resolved textures.</summary>
     public sealed record PartMaterial(PbrMaterial? Material, MaterialTextures Textures);
-
-    /// <summary>One skin: its own skeleton (bone count and inverse binds) and its joints as bones of <see cref="Model.Skeleton"/>.</summary>
-    /// <remarks>
-    /// A skin is posed by the model's one animated hierarchy: its palette is gathered from that pose's
-    /// bone worlds through <paramref name="Bones"/>, so skins with different joint lists move together.
-    /// </remarks>
-    public sealed record Skin(Skeleton Skeleton, IReadOnlyList<int> Bones);
 
     /// <summary>A rigid part an animated node carries — a joint, or any node a clip moves — placed by that node's posed world.</summary>
     /// <param name="JointIndex">That node's bone in <see cref="Model.Skeleton"/>.</param>
@@ -124,8 +117,12 @@ public sealed class Model : IDisposable
 
     // ── skins ──────────────────────────────────────────────────────────────────────
 
-    /// <summary>The skins, in the order the file met them. Empty for a static model.</summary>
-    public IReadOnlyList<Skin> Skins => skins;
+    /// <summary>The skins, in the order the file met them, each bound to <see cref="Skeleton"/>. Empty for a static model.</summary>
+    /// <remarks>
+    /// A skin is posed by the model's one animated hierarchy: its palette is gathered from that pose's bone
+    /// worlds through its joints and inverse binds, so skins with different joint lists move together.
+    /// </remarks>
+    public IReadOnlyList<SkinBinding> Skins => skins;
 
     /// <summary>Whether a skin deforms some part.</summary>
     public bool IsSkinned => skins.Count > 0;
@@ -198,14 +195,14 @@ public sealed class Model : IDisposable
     public BonePaletteSet[] CreatePaletteSets(int instances)
     {
         _ = Skeleton;
-        return skins.Select(s => new BonePaletteSet(s.Skeleton.BoneCount, instances)).ToArray();
+        return skins.Select(s => new BonePaletteSet(s.JointCount, instances)).ToArray();
     }
 
     /// <summary>Packs N posed bodies into one palette set per skin, each body at its placement.</summary>
     /// <remarks>
     /// Per skin, because each has its own inverse binds: one pose gives different palettes for two skins.
     /// The poses are of <see cref="Skeleton"/>, the one animated hierarchy; each skin gathers its joints
-    /// from it (<see cref="Skin.Bones"/>). Each body is <c>SkeletonPlacement * placement</c>, so a set holds
+    /// from it (<see cref="SkinBinding.Bones"/>). Each body is <c>SkeletonPlacement * placement</c>, so a set holds
     /// world-space palettes. A model without a skin has no sets, and nothing is packed.
     /// </remarks>
     public void PackPalettes(IReadOnlyList<Pose> poses, IReadOnlyList<Matrix4x4> placements, IReadOnlyList<BonePaletteSet> into)
@@ -235,7 +232,7 @@ public sealed class Model : IDisposable
             Skeleton.ComputeBoneWorlds(poses[body], worldScratch);
             for (var s = 0; s < skins.Count; s++)
             {
-                into[s].AddGathered(worldScratch, skins[s].Bones, skins[s].Skeleton, skeletonPlacement * placements[body]);
+                into[s].Add(skins[s], worldScratch, skeletonPlacement * placements[body]);
             }
         }
     }
@@ -259,9 +256,9 @@ public sealed class Model : IDisposable
             .Select((s, i) => device.CreateMaterial(
                 program, setIndex: DescriptorSets.Draw, framesInFlight: device.MaxFramesInFlightCount,
                 name: $"{Name}.bones.{i}",
-                arrayLengths: new Dictionary<int, int> { [0] = checked(s.Skeleton.BoneCount * maxInstances) }))
+                arrayLengths: new Dictionary<int, int> { [0] = checked(s.JointCount * maxInstances) }))
             .ToArray();
-        return new BoneBuffers(device, bindings, skins.Select(s => s.Skeleton.BoneCount).ToArray(), maxInstances);
+        return new BoneBuffers(device, bindings, skins.Select(s => s.JointCount).ToArray(), maxInstances);
     }
 
     /// <summary>What the pick pass draws for <paramref name="part"/>, placed by <paramref name="placement"/>.</summary>
@@ -281,7 +278,7 @@ public sealed class Model : IDisposable
         var max = new Vector3(float.MinValue);
         var partsOfNode = new List<Part>[source.Nodes.Count];
 
-        foreach (var own in source.Skins) model.skins.Add(new Skin(own.Skeleton, own.Bones));
+        foreach (var own in source.Skins) model.skins.Add(own.Binding);
         model.skeleton = source.Skeleton;
         model.skeletonPlacement = source.SkeletonPlacement;
 
@@ -370,11 +367,11 @@ public sealed class Model : IDisposable
             var skin = model.skins[s];
             // Skinned vertices only: a load that asked for static geometry has nothing here to bound.
             var meshes = source.SkinnedPrimitives(s).Select(p => p.Mesh).Where(m => m.Layout.Stride >= 80).ToArray();
-            var own = SkinningAnalysis.FindWeightedBones(skin.Skeleton, meshes);
+            var own = SkinningAnalysis.FindWeightedJoints(skin, meshes);
             for (var b = 0; b < own.Length; b++) weighted[skin.Bones[b]] |= own[b];
 
-            var palette = new BonePaletteSet(skin.Skeleton.BoneCount, 1);
-            palette.AddGathered(restWorlds, skin.Bones, skin.Skeleton, source.SkeletonPlacement);
+            var palette = new BonePaletteSet(skin.JointCount, 1);
+            palette.Add(skin, restWorlds, source.SkeletonPlacement);
             foreach (var mesh in meshes)
             {
                 anySkinned = true;
@@ -415,7 +412,7 @@ public sealed class Model : IDisposable
         return MathF.Max(size.X, MathF.Max(size.Y, size.Z));
     }
 
-    private Skin RequireSkin() => skins.Count > 0
+    private SkinBinding RequireSkin() => skins.Count > 0
         ? skins[0]
         : throw new InvalidOperationException($"'{Name}' has no skin, so it has no skeleton, palettes or bone buffers.");
 

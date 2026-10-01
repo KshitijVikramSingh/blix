@@ -207,7 +207,7 @@ public static class Program
         Console.WriteLine(
             $"  {primitives} primitive(s), " +
             (rigged
-                ? $"{imported.Skins[0].Skeleton.BoneCount} bone(s), {imported.Clips.Count} clip(s)"
+                ? $"{imported.Skins[0].Binding.JointCount} bone(s), {imported.Clips.Count} clip(s)"
                 : "static — no skin, so no bones or clips to check"));
         if (rigged)
         {
@@ -248,10 +248,12 @@ public static class Program
         var problems = 0;
         var imported = ModelData.Load(Blix.Recipes.CookCache.Resolve(path), new ModelNeeds(Colour: true, Skinned: true));
 
-        // Two skeletons, two questions: skin 0's own (its inverse binds, the joints its vertices weight) and
-        // the animated hierarchy clips pose (every skin's joints and every animated node).
-        var skinSkeleton = imported.Skins[0].Skeleton;
-        var skeleton = imported.Skeleton ?? skinSkeleton;
+        // Two things, two questions: skin 0's binding (its joints, their inverse binds, what its vertices weight)
+        // and the animated hierarchy clips pose (every skin's joints and every animated node).
+        var skin = imported.Skins[0].Binding;
+        var skeleton = imported.Skeleton!;
+        var jointParents = skin.JointParents();
+        string JointName(int j) => skeleton.Bones[skin.Bones[j]].Name;
 
         // Attachments and static parts as the rig reads them: an unskinned mesh node under a joint,
         // and every other unskinned mesh node.
@@ -325,17 +327,33 @@ public static class Program
         // fails here rather than as a mesh that explodes the moment it is skinned. Measured on the
         // skeleton WITHOUT its authored rest: glTF's rest is the joint nodes' own transforms and need
         // not be the bind pose, so a rest palette far from identity is legitimate (reported below).
-        var bindOnly = new Skeleton(skinSkeleton.Bones.Select(b => b with { Rest = null, Offset = null }).ToArray());
-        var palette = new BonePalette(skinSkeleton.BoneCount);
-        var worlds = new Matrix4x4[skinSkeleton.BoneCount];
-        bindOnly.ComputeBonePalette(bindOnly.CreateRestPose(), palette, worlds);
+        // Each joint's bind world, re-expressed against its parent joint's as a TRS, recomposed and fed back
+        // through the inverse binds: the identity unless a bind is not a clean TRS of its parent's (shear, or
+        // a scale a rotation cannot carry), which fails here rather than as a mesh that explodes when skinned.
+        // The rest is not involved: glTF's rest is the joint nodes' own and need not be the bind (reported below).
+        var bindWorlds = skin.JointBindWorlds();
+        var recomposed = new Matrix4x4[skin.JointCount];
         var worstBind = 0f;
-        for (var i = 0; i < skinSkeleton.BoneCount; i++)
+        for (var j = 0; j < skin.JointCount; j++)
         {
-            var m = palette.Matrices[i];
+            var parent = jointParents[j];
+            Matrix4x4 local;
+            if (parent < 0)
+            {
+                local = bindWorlds[j];
+            }
+            else
+            {
+                Matrix4x4.Invert(bindWorlds[parent], out var inverseParent);
+                local = bindWorlds[j] * inverseParent;
+            }
+
+            var trs = BoneTransform.FromMatrix(local).ToMatrix();
+            recomposed[j] = parent < 0 ? trs : trs * recomposed[parent];
+            var m = skin.InverseBinds[j] * recomposed[j];
             if (!IsFinite(m))
             {
-                Console.Error.WriteLine($"  bind palette for bone {i} '{skinSkeleton.Bones[i].Name}' is not finite.");
+                Console.Error.WriteLine($"  bind palette for bone {j} '{JointName(j)}' is not finite.");
                 problems++;
                 continue;
             }
@@ -350,20 +368,27 @@ public static class Program
             $"  bind palette: worst deviation from identity {worstBind:0.00000}" + (bindOk ? "" : "  ← TOO LARGE"));
         if (!bindOk) problems++;
 
-        // glTF's rest — the joint nodes' transforms — against that bind pose. A fact, not a verdict.
-        var skinRest = skinSkeleton.CreateRestPose();
-        skinSkeleton.ComputeBonePalette(skinRest, palette, worlds);
+        // glTF's rest (the joint nodes' transforms) against that bind. A fact, not a verdict. The hierarchy's rest
+        // worlds, in skin 0's own frame: they hang from the hierarchy's placement and the binds from the skin's.
+        var restWorlds = new Matrix4x4[skeleton.BoneCount];
+        skeleton.ComputeBoneWorlds(skeleton.CreateRestPose(), restWorlds);
+        Matrix4x4.Invert(imported.Placement(0), out var fromSkinPlacement);
+        var toSkinFrame = imported.SkeletonPlacement * fromSkinPlacement;
+        var worlds = new Matrix4x4[skin.JointCount];
+        for (var j = 0; j < skin.JointCount; j++) worlds[j] = restWorlds[skin.Bones[j]] * toSkinFrame;
+        var palette = new Matrix4x4[skin.JointCount];
+        skin.ComputePalette(restWorlds, toSkinFrame, palette);
         var worstRest = 0f;
-        for (var i = 0; i < skinSkeleton.BoneCount; i++)
+        for (var j = 0; j < skin.JointCount; j++)
         {
-            if (!IsFinite(palette.Matrices[i]))
+            if (!IsFinite(palette[j]))
             {
-                Console.Error.WriteLine($"  rest palette for bone {i} '{skinSkeleton.Bones[i].Name}' is not finite.");
+                Console.Error.WriteLine($"  rest palette for bone {j} '{JointName(j)}' is not finite.");
                 problems++;
                 continue;
             }
 
-            worstRest = MathF.Max(worstRest, DistanceFromIdentity(palette.Matrices[i]));
+            worstRest = MathF.Max(worstRest, DistanceFromIdentity(palette[j]));
         }
 
         Console.WriteLine(worstRest < 0.01f
@@ -373,21 +398,21 @@ public static class Program
         // ── World-space joint positions and deformation reach ──────────────
         // Weighted bones deform vertices; promoted ancestors are required to draw those chains
         // without gaps. Control bones may appear in neither set.
-        var weighted = SkinningAnalysis.FindWeightedBones(skinSkeleton, imported.SkinnedPrimitives().Select(p => p.Mesh));
-        var deform = SkinningAnalysis.IncludeAncestors(skinSkeleton, weighted);
+        var weighted = SkinningAnalysis.FindWeightedJoints(skin, imported.SkinnedPrimitives().Select(p => p.Mesh));
+        var deform = SkinningAnalysis.IncludeAncestors(jointParents, weighted);
         var weightedCount = weighted.Count(b => b);
         var deformCount = deform.Count(b => b);
         Console.WriteLine(
-            $"  weighted bones: {weightedCount}/{skinSkeleton.BoneCount}" +
-            (weightedCount == skinSkeleton.BoneCount
+            $"  weighted bones: {weightedCount}/{skin.JointCount}" +
+            (weightedCount == skin.JointCount
                 ? " (every bone skins something)"
-                : $" — {skinSkeleton.BoneCount - weightedCount} bone(s) no vertex weights") +
+                : $" — {skin.JointCount - weightedCount} bone(s) no vertex weights") +
             (deformCount == weightedCount
                 ? string.Empty
                 : $"; {deformCount} to draw the chains unbroken"));
         var min = new Vector3(float.MaxValue);
         var max = new Vector3(float.MinValue);
-        for (var i = 0; i < skinSkeleton.BoneCount; i++)
+        for (var i = 0; i < skin.JointCount; i++)
         {
             var at = new Vector3(worlds[i].M41, worlds[i].M42, worlds[i].M43);
             min = Vector3.Min(min, at);
@@ -398,11 +423,11 @@ public static class Program
             $"  rest joints: {min.X:0.000},{min.Y:0.000},{min.Z:0.000} .. {max.X:0.000},{max.Y:0.000},{max.Z:0.000}");
         if (verbose)
         {
-            for (var i = 0; i < skinSkeleton.BoneCount; i++)
+            for (var i = 0; i < skin.JointCount; i++)
             {
                 var at = new Vector3(worlds[i].M41, worlds[i].M42, worlds[i].M43);
                 Console.WriteLine(
-                    $"    {i,3} {skinSkeleton.Bones[i].Name,-24} parent {skinSkeleton.Bones[i].ParentIndex,3}  " +
+                    $"    {i,3} {JointName(i),-24} parent {jointParents[i],3}  " +
                     $"{at.X,8:0.000} {at.Y,8:0.000} {at.Z,8:0.000}  " +
                     $"{(weighted[i] ? "weighted" : deform[i] ? "carrier " : "control ")}");
             }

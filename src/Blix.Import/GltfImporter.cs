@@ -106,9 +106,9 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
 
             // Each skin gets its own source-to-parent-first joint remap; an index is meaningful
             // only within the skin that supplied it.
-            var (skinBones, skinRemap) = BuildSkeletonAndOrdering(owner);
+            var (skinBones, inverseBinds, skinRemap, placement) = BuildSkeletonAndOrdering(owner);
             var skinRemaps = skinRemap;
-            bindings.Add(new GltfSkinBinding(new Skeleton(skinBones), PlacementOf(owner, skinBones, skinRemap)));
+            bindings.Add(new GltfSkinBinding(SkinBinding.Direct(new Skeleton(skinBones), inverseBinds), placement));
             remapsBySkin.Add(skinRemaps);
 
             foreach (var node in group)
@@ -303,7 +303,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             if (node.Mesh is null || node.Skin is not null) continue;
 
             // Up the chain, composing as we go. Row-vector order (F-016): a child's local is
-            // pre-multiplied onto what is already accumulated, matching ComputeBonePalette's
+            // pre-multiplied onto what is already accumulated, matching Skeleton.ComputeBoneWorlds's
             // world = local * parentWorld recurrence.
             var local = node.LocalMatrix;
             var ancestor = node.VisualParent;
@@ -359,8 +359,11 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                     | (node.Skin is null ? GltfShared.VertexFeatures.None : GltfShared.VertexFeatures.Skinning)))));
     }
 
-    /// <summary>A skin's bones in parent-first order, and the source-joint-to-bone remap. Public for the cook.</summary>
-    public static (Bone[] bones, int[] oldToNew) BuildSkeletonAndOrdering(Skin skin)
+    /// <summary>
+    /// A skin's joints in parent-first order: as bones (rest and offset from the scene graph), their inverse
+    /// binds index for index, the source-joint-to-bone remap, and where the joints hang. Public for the cook.
+    /// </summary>
+    public static (Bone[] Bones, Matrix4x4[] InverseBinds, int[] OldToNew, Matrix4x4 Placement) BuildSkeletonAndOrdering(Skin skin)
     {
         var joints = skin.Joints;
         var ibmList = skin.InverseBindMatrices;
@@ -415,44 +418,35 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             oldToNew[orderNewToOld[newIdx]] = newIdx;
         }
 
-        // Emit bones in the new (topo-sorted) order with remapped parent indices.
+        // Emit joints in the new (topo-sorted) order with remapped parent indices.
         // IBMs pass through untransposed: SharpGLTF returns System.Numerics
         // row-vector matrices, which is exactly the engine's convention (F-016).
-        var bones = new Bone[n];
+        var names = new string[n];
+        var parents = new int[n];
+        var inverseBinds = new Matrix4x4[n];
+        var jointNodes = new int[n];
         for (var newIdx = 0; newIdx < n; newIdx++)
         {
             var oldIdx = orderNewToOld[newIdx];
-            var joint = joints[oldIdx];
-            var ibm = ibmList[oldIdx];
-            var parentNew = parentOld[oldIdx] >= 0 ? oldToNew[parentOld[oldIdx]] : -1;
-            // F-016: SharpGLTF IBM is already row-vector form (matching the
-            // engine convention). Pass through without transpose.
-            bones[newIdx] = new Bone(joint.Name ?? $"bone_{newIdx}", parentNew, ibm);
+            names[newIdx] = joints[oldIdx].Name ?? $"bone_{newIdx}";
+            parents[newIdx] = parentOld[oldIdx] >= 0 ? oldToNew[parentOld[oldIdx]] : -1;
+            inverseBinds[newIdx] = ibmList[oldIdx];
+            jointNodes[newIdx] = joints[oldIdx].LogicalIndex;
         }
 
-        // Rest and offset from the scene graph, as the cooked reader derives them: one rule, in the engine.
-        var jointNodes = new int[n];
-        for (var newIdx = 0; newIdx < n; newIdx++) jointNodes[newIdx] = joints[orderNewToOld[newIdx]].LogicalIndex;
-        var hierarchy = Resolve(skin, bones, jointNodes);
-        return (hierarchy.Bones.ToArray(), oldToNew);
+        // Rest, offset and placement from the scene graph, as the cooked reader derives them: one rule, in the engine.
+        var hierarchy = Resolve(skin, names, parents, jointNodes);
+        return (hierarchy.Bones.ToArray(), inverseBinds, oldToNew, hierarchy.Placement);
     }
 
-    private static JointHierarchy Resolve(Skin skin, Bone[] bones, int[] jointNodes)
+    private static JointHierarchy Resolve(Skin skin, string[] names, int[] parents, int[] jointNodes)
     {
         var nodes = skin.LogicalParent.LogicalNodes;
         return JointHierarchy.Resolve(
-            bones, jointNodes,
+            names, parents, jointNodes,
             n => nodes[n].VisualParent?.LogicalIndex ?? -1,
             n => nodes[n].LocalMatrix,
             n => nodes[n].WorldMatrix);
-    }
-
-    // Where a skin's skeleton hangs: the same answer the cooked reader gives.
-    private static System.Numerics.Matrix4x4 PlacementOf(Skin skin, Bone[] bones, int[] oldToNew)
-    {
-        var jointNodes = new int[bones.Length];
-        for (var old = 0; old < oldToNew.Length; old++) jointNodes[oldToNew[old]] = skin.Joints[old].LogicalIndex;
-        return Resolve(skin, bones, jointNodes).Placement;
     }
 
     // Pack the mesh primitive's vertex streams into the engine's skinned vertex

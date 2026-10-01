@@ -34,47 +34,50 @@ public sealed class JointHierarchy
     /// <summary>Where the skeleton hangs in the scene: goes after every bone world.</summary>
     public Matrix4x4 Placement { get; }
 
-    /// <summary>The input bones with their rest and offset filled in.</summary>
+    /// <summary>The bones, named and parented as given, with their rest and offset read from the graph.</summary>
     public IReadOnlyList<Bone> Bones { get; }
 
     /// <summary>Reads the joints of one skin.</summary>
-    /// <param name="bones">The skin's bones in hierarchy order, with names, parent bones and inverse binds.</param>
+    /// <param name="names">Each bone's name, in hierarchy order (parents first).</param>
+    /// <param name="parents">Each bone's parent bone, or -1 for a root, index for index with <paramref name="names"/>.</param>
     /// <param name="jointNodes">The scene node of each bone, index for index.</param>
     /// <param name="parentOf">A node's parent node, or -1 for a scene root.</param>
     /// <param name="localOf">A node's local transform (row-vector).</param>
     /// <param name="worldOf">A node's world transform (row-vector: <c>local * parentWorld</c>).</param>
     public static JointHierarchy Resolve(
-        IReadOnlyList<Bone> bones,
+        IReadOnlyList<string> names,
+        IReadOnlyList<int> parents,
         IReadOnlyList<int> jointNodes,
         Func<int, int> parentOf,
         Func<int, Matrix4x4> localOf,
         Func<int, Matrix4x4> worldOf)
     {
-        ArgumentNullException.ThrowIfNull(bones);
+        ArgumentNullException.ThrowIfNull(names);
+        ArgumentNullException.ThrowIfNull(parents);
         ArgumentNullException.ThrowIfNull(jointNodes);
         ArgumentNullException.ThrowIfNull(parentOf);
         ArgumentNullException.ThrowIfNull(localOf);
         ArgumentNullException.ThrowIfNull(worldOf);
-        if (bones.Count != jointNodes.Count)
+        if (names.Count != jointNodes.Count || parents.Count != jointNodes.Count)
         {
-            throw new ArgumentException($"{bones.Count} bone(s) for {jointNodes.Count} joint node(s).", nameof(jointNodes));
+            throw new ArgumentException($"{names.Count} name(s) and {parents.Count} parent(s) for {jointNodes.Count} joint node(s).", nameof(jointNodes));
         }
 
         // The placement: the first root's parent world. Every other root is expressed against it.
         Matrix4x4? placement = null;
-        for (var i = 0; i < bones.Count && placement is null; i++)
+        for (var i = 0; i < names.Count && placement is null; i++)
         {
-            if (bones[i].ParentIndex < 0) placement = ParentWorld(jointNodes[i]);
+            if (parents[i] < 0) placement = ParentWorld(jointNodes[i]);
         }
 
         var hangs = placement ?? Matrix4x4.Identity;
         Matrix4x4.Invert(hangs, out var fromPlacement);
-        var resolved = new Bone[bones.Count];
-        for (var i = 0; i < bones.Count; i++)
+        var resolved = new Bone[names.Count];
+        for (var i = 0; i < names.Count; i++)
         {
             var node = jointNodes[i];
             Matrix4x4 offset;
-            if (bones[i].ParentIndex < 0)
+            if (parents[i] < 0)
             {
                 // local * parentWorld = local * offset * placement.
                 offset = ParentWorld(node) * fromPlacement;
@@ -82,26 +85,22 @@ public sealed class JointHierarchy
             else
             {
                 // The nodes between this joint and its parent joint, nearest first.
-                var parentJoint = jointNodes[bones[i].ParentIndex];
+                var parentJoint = jointNodes[parents[i]];
                 offset = Matrix4x4.Identity;
                 for (var n = parentOf(node); n != parentJoint; n = parentOf(n))
                 {
                     if (n < 0)
                     {
                         throw new ArgumentException(
-                            $"bone {i} ('{bones[i].Name}') names bone {bones[i].ParentIndex} as its parent, but that joint is not its ancestor.",
-                            nameof(bones));
+                            $"bone {i} ('{names[i]}') names bone {parents[i]} as its parent, but that joint is not its ancestor.",
+                            nameof(parents));
                     }
 
                     offset *= localOf(n);
                 }
             }
 
-            resolved[i] = bones[i] with
-            {
-                Rest = BoneTransform.FromMatrix(localOf(node)),
-                Offset = IsIdentity(offset) ? null : offset,
-            };
+            resolved[i] = new Bone(names[i], parents[i], BoneTransform.FromMatrix(localOf(node)), IsIdentity(offset) ? null : offset);
         }
 
         return new JointHierarchy(hangs, resolved);

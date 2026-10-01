@@ -45,9 +45,9 @@ behaviour here, that test should fail first.
   invisible on a full clip and is a character whose legs lag its arms on a
   partial one. `ClipPlayer` owns the reset, the loop wrap and the zero-duration
   guard so it is made once rather than remembered three times.
-- **A palette matrix is not a joint position.** `ComputeBonePalette` produces
-  `InverseBindPose × world` — a *rest vertex's* displacement, exactly zero at
-  rest. Where a joint **is** comes from the hierarchy walk's `world` term alone.
+- **A palette matrix is not a joint position.** `SkinBinding.ComputePalette`
+  produces `inverseBind × world` — a *rest vertex's* displacement, exactly zero at
+  bind. Where a joint **is** comes from the hierarchy walk's `world` term alone.
   Drawing a skeleton from palette translations is correct arithmetic answering
   the wrong question, and it looks like a knot at the origin.
 - **Root motion is a delta, taken across the loop.** `RootMotion` reports the

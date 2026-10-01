@@ -117,7 +117,8 @@ public static class Program
             var skinned = Enumerable.Range(0, d.Skins.Count)
                 .SelectMany(s => d.SkinnedPrimitives(s).Select(p => new Blix.Import.GltfPrimitive(p.Mesh, p.Material, SkinIndex: s, MaterialIndex: p.MaterialIndex)))
                 .ToArray();
-            return new Blix.Import.GltfModel(skinned, d.Skins[0].Skeleton, d.Clips.ToArray(), d.Placement(0));
+            return new Blix.Import.GltfModel(skinned, d.Skeleton!, d.Clips.ToArray(), d.SkeletonPlacement,
+                Skins: d.Skins.Select(k => new Blix.Import.GltfSkinBinding(k.Binding, k.Placement)).ToArray());
         }
 
         return CookedFlat(blixmesh, tangents, colour);
@@ -306,12 +307,12 @@ public static class Program
     // ── Samplers as glTF defines them ──────────────────────────────────────────
     // Every textured core channel of every corpus file: the cooked row it reads carries exactly that
     // texture's glTF sampler, and the engine maps glTF's codes to its own as the spec defines them.
-    // ── The demos' skinning, through Model ──────────────────────────────────────
-    // Runner, VulkanLit and Bulwark used to pack skin 0's palette by hand (Skeleton.ComputeBonePalette)
-    // and place the body with a model matrix of Placement(0) * body; through Model they pack the palette
-    // gathered from the model's animated hierarchy with SkeletonPlacement * body baked in
-    // (Model.PackPalettes: BonePaletteSet.AddGathered). Same pose, both ways, every skinned vertex: the
-    // world positions must agree. Over each demo rig's first clips at five times.
+    // ── The demos' skinning, through the animated hierarchy ─────────────────────
+    // The demos pack palettes gathered from the model's animated hierarchy, SkeletonPlacement * body baked in.
+    // The other way to the same vertices: skin 0's own joint tree, resolved independently from its joints'
+    // nodes (JointHierarchy over JointParents), posed and placed at Placement(0) * body. For these single-skin
+    // rigs the hierarchy must keep skin 0's joint order (the compatibility convention), and every skinned
+    // vertex must land in the same place both ways. Over each demo rig's first clips at five times.
     private static void DemoRigsSkinTheSameThroughModel(TestRunner t)
     {
         var body = System.Numerics.Matrix4x4.CreateScale(1.15f) * System.Numerics.Matrix4x4.CreateRotationY(0.7f)
@@ -321,8 +322,17 @@ public static class Program
             if (FindFile(name) is not { } file) continue;
             var d = Blix.ModelData.Load(file, new Blix.ModelNeeds(Skinned: true));
             var hierarchy = d.Skeleton!;
-            var skin = d.Skins[0];
+            var skin = d.Skins[0].Binding;
             var meshes = d.SkinnedPrimitives(0).Select(p => p.Mesh).ToArray();
+            t.Expect($"{name}: the hierarchy keeps skin 0's joint order (joint j is bone j)",
+                skin.Bones.Select((b, j) => b == j).All(x => x) && skin.JointCount == hierarchy.BoneCount,
+                string.Join(",", skin.Bones.Take(8)));
+            var own = Blix.JointHierarchy.Resolve(
+                Enumerable.Range(0, skin.JointCount).Select(j => hierarchy.Bones[skin.Bones[j]].Name).ToArray(),
+                skin.JointParents(), d.Skins[0].JointNodes,
+                n => d.Nodes[n].ParentIndex, n => d.Nodes[n].Local, n => d.World[n]);
+            var ownSkeleton = new Blix.Skeleton(own.Bones.ToArray());
+            var ownWorlds = new System.Numerics.Matrix4x4[ownSkeleton.BoneCount];
             var worst = 0f;
             var vertices = 0;
             var worlds = new System.Numerics.Matrix4x4[hierarchy.BoneCount];
@@ -331,14 +341,15 @@ public static class Program
             {
                 var pose = hierarchy.CreateRestPose();
                 clip.Sample(clip.Duration * at, pose);
-                // The old path: skin 0's skeleton posed directly (the demos relied on it being the hierarchy).
-                var old = new Blix.BonePaletteSet(skin.Skeleton.BoneCount, 1);
-                old.Add(skin.Skeleton, pose, System.Numerics.Matrix4x4.Identity);
-                var oldModel = d.Placement(0) * body;
-                // The new path: gathered through the hierarchy, placement baked in.
+                // Skin 0's own joint tree, posed with the same locals (joint j is bone j), placed by its own frame.
+                ownSkeleton.ComputeBoneWorlds(pose, ownWorlds);
+                var oldPalette = new System.Numerics.Matrix4x4[skin.JointCount];
+                for (var j = 0; j < skin.JointCount; j++) oldPalette[j] = skin.InverseBinds[j] * ownWorlds[j];
+                var oldModel = own.Placement * body;
+                // The demos' path: gathered through the hierarchy, placement baked in.
                 hierarchy.ComputeBoneWorlds(pose, worlds);
-                var gathered = new Blix.BonePaletteSet(skin.Skeleton.BoneCount, 1);
-                gathered.AddGathered(worlds, skin.Bones, skin.Skeleton, d.SkeletonPlacement * body);
+                var gathered = new Blix.BonePaletteSet(skin.JointCount, 1);
+                gathered.Add(skin, worlds, d.SkeletonPlacement * body);
                 foreach (var m in meshes)
                 for (var v = 0; v < m.VertexCount; v++)
                 {
@@ -357,7 +368,7 @@ public static class Program
                         return sum;
                     }
 
-                    var before = System.Numerics.Vector3.Transform(Skinned(old.Matrices), oldModel);
+                    var before = System.Numerics.Vector3.Transform(Skinned(oldPalette), oldModel);
                     var after = Skinned(gathered.Matrices);
                     worst = MathF.Max(worst, System.Numerics.Vector3.Distance(before, after));
                     vertices++;
@@ -1287,8 +1298,8 @@ public static class Program
                     // Skinned vertices.
                     for (var s = 0; s < data.Skins.Count; s++)
                     {
-                        var palette = new BonePaletteSet(data.Skins[s].Skeleton.BoneCount, 1);
-                        palette.AddGathered(bones, data.Skins[s].Bones, data.Skins[s].Skeleton, data.SkeletonPlacement);
+                        var palette = new BonePaletteSet(data.Skins[s].Binding.JointCount, 1);
+                        palette.Add(data.Skins[s].Binding, bones, data.SkeletonPlacement);
                         var skinNode = nodes.First(n => n.Skin is not null && n.Mesh is not null
                             && data.Nodes[SourceToCooked(gltf, data, n.LogicalIndex)].SkinIndex == s);
                         var gskin = skinNode.Skin;
@@ -1680,9 +1691,12 @@ public static class Program
             var compared = 0;
             for (var s = 0; s < data.Skins.Count; s++)
             {
-                var skeleton = data.Skins[s].Skeleton;
-                var palette = new BonePaletteSet(skeleton.BoneCount, 1);
-                palette.Add(skeleton, skeleton.CreateRestPose(), data.Placement(s));
+                // The skin at the hierarchy's rest, in scene space: the hierarchy's worlds after its placement.
+                var binding = data.Skins[s].Binding;
+                var restWorlds = new System.Numerics.Matrix4x4[binding.Skeleton.BoneCount];
+                binding.Skeleton.ComputeBoneWorlds(binding.Skeleton.CreateRestPose(), restWorlds);
+                var palette = new BonePaletteSet(binding.JointCount, 1);
+                palette.Add(binding, restWorlds, data.SkeletonPlacement);
                 foreach (var prim in data.SkinnedPrimitives(s))
                 {
                     var mesh = prim.Mesh;
@@ -2280,7 +2294,8 @@ public static class Program
                 AssetLoadLog.Start();
                 var cookedData = Blix.ModelData.Load(cookedRig, new Blix.ModelNeeds(Colour: true, Skinned: true));
                 var rigReports = AssetLoadLog.Drain();
-                var cookedSkeleton = cookedData.Skins[0].Skeleton;
+                var cookedSkeleton = cookedData.Skeleton!;
+                var cookedBinds = cookedData.Skins[0].Binding.InverseBinds;
                 var cookedClips = cookedData.Clips;
                 var cookedAttachments = cookedData.Attachments();
                 var cookedPrimitives = Enumerable.Range(0, cookedData.Skins.Count)
@@ -2325,7 +2340,7 @@ public static class Program
                     var b = viaSourceRig.Skeleton.Bones[i];
                     if (a.Name != b.Name) rigMismatch.Add($"bone[{i}] {a.Name} vs {b.Name}");
                     if (a.ParentIndex != b.ParentIndex) rigMismatch.Add($"bone[{i}] parent {a.ParentIndex} vs {b.ParentIndex}");
-                    if (a.InverseBindPose != b.InverseBindPose) rigMismatch.Add($"bone[{i}] inverse bind differs");
+                    if (cookedBinds[i] != viaSourceRig.SkinsOrEmpty[0].Binding.InverseBinds[i]) rigMismatch.Add($"bone[{i}] inverse bind differs");
                 }
 
                 t.Expect("bones match name, parent and inverse bind", rigMismatch.Count == 0,

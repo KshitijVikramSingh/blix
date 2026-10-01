@@ -2,35 +2,27 @@ using System.Numerics;
 
 namespace Blix;
 
-// Per-bone immutable metadata. All fields are bind-time-constant — name, hierarchy,
-// and the inverse-bind matrix don't change as the skeleton is posed; only the Pose
-// carries per-frame state.
+// One bone of a pose hierarchy (Skeleton): its name, its parent, what it holds at rest, and the fixed
+// transform between it and its parent. Immutable; only a Pose carries per-frame state.
 //
-// Mirrors a glTF `Node` that appears in a `Skin.Joints` list, with two structural
-// choices that diverge from SharpGLTF:
+// - Hierarchy is `ParentIndex` (a flat-array index) rather than a parent reference. Traversal is a single
+//   forward walk over the array; `ParentIndex == -1` means root, otherwise the parent appears earlier (the
+//   topology invariant Skeleton enforces at construction).
 //
-// - Hierarchy is `ParentIndex` (a flat-array index) rather than a parent reference.
-//   Inner-loop traversal in ComputeBonePalette / CreateRestPose is a single forward
-//   walk over the array; references would mean pointer chasing per bone.
-//   `ParentIndex == -1` means root; otherwise the parent must appear earlier in the
-//   array (the topology invariant Skeleton enforces at construction).
-//
-// - `InverseBindPose` lives on the Bone struct rather than in a parallel array on
-//   the Skeleton. Bundles all bind-time-constant data together; the GPU consumes it
-//   directly (no decomposition needed), so storing the matrix form is the natural
-//   shape.
-//
-// - `Rest` is the joint node's own local transform — glTF's rest pose, which is what a joint holds when no
-//   track moves it. It need not be the bind pose the inverse binds imply, so an imported skeleton carries
-//   it; a hand-built one leaves it null and its rest is reconstructed from the inverse binds.
+// - `Rest` is what the bone holds when no track moves it: glTF's joint node local transform. Required,
+//   because nothing else can supply it. It used to be optional and rebuilt from inverse binds, but inverse
+//   binds belong to a skin (SkinBinding), not to the hierarchy, and a file's rest need not be its bind.
+//   A hand-built skeleton states its rest; identity is a rest like any other.
 //
 // - `Offset` is the fixed transform between this bone and its parent: the non-joint nodes glTF allows in
-//   between (row-vector, nearest first), or, for a root, from its parent node to the skin's placement.
+//   between (row-vector, nearest first), or, for a root, from its parent node to the hierarchy's placement.
 //   Null is identity. A track writes the joint's own local, so the in-between nodes cannot be folded into
 //   it; they are composed here instead.
+//
+// No inverse bind: the same bone can be a joint of two skins with different binds, and a bone that is no
+// skin's joint has none at all. See SkinBinding.
 public readonly record struct Bone(
     string Name,
     int ParentIndex,
-    Matrix4x4 InverseBindPose,
-    BoneTransform? Rest = null,
+    BoneTransform Rest,
     Matrix4x4? Offset = null);

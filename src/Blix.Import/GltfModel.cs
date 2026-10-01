@@ -39,8 +39,7 @@ public sealed record GltfModel(
     UnreadAttribute[]? Ignored = null,
 
     /// <summary>
-    /// Every skin the file declares, in the order the importer met them. Null for a single-skin
-    /// import, where <see cref="Skeleton"/> and <see cref="SkeletonPlacement"/> already say it all.
+    /// Every skin the file declares, in the order the importer met them, with their inverse binds.
     /// </summary>
     /// <remarks>
     /// The singular <see cref="Skeleton"/> and <see cref="SkeletonPlacement"/> members are
@@ -60,6 +59,9 @@ public sealed record GltfModel(
     /// <summary>
     /// Every skin, never null. A consumer writes one loop and never branches on how many there are.
     /// </summary>
-    public GltfSkinBinding[] SkinsOrEmpty =>
-        Skins ?? [new GltfSkinBinding(Skeleton, SkeletonPlacement)];
+    /// <remarks>
+    /// Empty when no skins were given: a skeleton alone carries no inverse binds, so a binding cannot be made
+    /// up from <see cref="Skeleton"/>. The importer always gives its skins.
+    /// </remarks>
+    public GltfSkinBinding[] SkinsOrEmpty => Skins ?? [];
 }
