@@ -67,6 +67,12 @@ public sealed partial class VulkanGraphicsDevice
         UploadToHostVisibleBuffer(ib.PerSlot[indirectSlot].Memory, commands, 0);
     }
 
+    public void DestroyIndirectBuffer(IndirectBufferHandle handle)
+    {
+        if (!indirectBufferTable.Remove(handle.Id, out var ib)) return;
+        foreach (var e in ib.PerSlot) DestroyVkBufferEntry(e);
+    }
+
     // Read uses the same ring slot the fill wrote this frame.
     internal VkBufferEntry GetIndirectBuffer(IndirectBufferHandle h)
         => indirectBufferTable[h.Id].PerSlot[indirectSlot];

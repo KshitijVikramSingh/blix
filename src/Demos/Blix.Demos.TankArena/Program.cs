@@ -209,6 +209,7 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
     {
         public required Attach Attach;
         public required Vector4? FixedTint;
+        public required Mesh Mesh;               // the part's merged geometry, freed in OnUnload
         public required InstancedBatch World;
         public required InstancedBatch Caster;
         public required InstanceBuffer WorldInstances;
@@ -270,6 +271,8 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
     // does not move until the next one — which is the whole reason the runtime holds it still.
     private IInputState Input => host.Input;
     private InstanceBuffer instanceBuffer = null!;
+    private Mesh cube = null!;
+    private readonly List<ShaderProgramHandle> ownedPrograms = new();
     private InstancedBatch batch = null!;               // lit world (ground/walls/tanks/shells)
     private InstanceBuffer casterInstances = null!;
     private InstancedBatch casterBatch = null!;         // depth-only shadow casters
@@ -335,7 +338,7 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
 
         var vb = device.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(Cube.Vertices), "cube.vb");
         var ib = device.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
-        var cube = new Mesh("cube", vb, ib, Cube.Indices.Length,
+        cube = new Mesh("cube", vb, ib, Cube.Indices.Length,
             new Bounds3(new Vector3(-0.5f), new Vector3(0.5f)), VertexPosition3NormalTexture.Layout);
 
         var meshLayout = new VertexLayout(
@@ -376,6 +379,7 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
 
         // Pipelines (after Compile; world/sky/caster target their pass surfaces).
         var casterShader = device.CreateShaderProgramFromSpv(spv("shadow_caster.vert.spv"), spv("shadow_caster.frag.spv"), casterIface, "caster");
+        ownedPrograms.Add(casterShader);
         casterPipeline = device.CreatePipeline(new PipelineDescription(casterShader, meshLayout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.NoCulling, Array.Empty<BlendState>(),
             RenderTarget: graph.GetPassSurface(shadowPassHandle)), "caster");
@@ -383,6 +387,7 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
         casterBatch = new InstancedBatch(cube, casterPipeline, casterInstances);
 
         var worldShader = device.CreateShaderProgramFromSpv(spv("cube.vert.spv"), spv("cube.frag.spv"), worldIface, "world");
+        ownedPrograms.Add(worldShader);
         worldPipeline = device.CreatePipeline(new PipelineDescription(worldShader, meshLayout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(scenePassHandle)), "world");
@@ -390,12 +395,14 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
         batch = new InstancedBatch(cube, worldPipeline, instanceBuffer);
 
         var skyShader = device.CreateShaderProgramFromSpv(spv("sky.vert.spv"), spv("sky.frag.spv"), skyIface, "sky");
+        ownedPrograms.Add(skyShader);
         skyPipeline = device.CreatePipeline(new PipelineDescription(skyShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
             DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(scenePassHandle)), "sky");
 
         // Present targets the swapchain (default), copying the HDR scene.
         var presentShader = device.CreateShaderProgramFromSpv(spv("present.vert.spv"), spv("present.frag.spv"), presentIface, "present");
+        ownedPrograms.Add(presentShader);
         presentPipeline = device.CreatePipeline(new PipelineDescription(presentShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
             DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled }), "present");
         fullscreen = new FullscreenPass(device, "fullscreen");
@@ -429,11 +436,10 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
             return model.Meshes[model.Nodes[node].MeshIndex].Primitives.Select(prim => (prim.Mesh, xform));
         }
 
-        var body = BakeMerge("tank.body", Baked(Find("Tank_body"), HullPivotModel));
-        var tracks = BakeMerge("tank.tracks",
-            Baked(Find("TrackMesh.L"), HullPivotModel).Concat(Baked(Find("TrackMesh.R"), HullPivotModel)));
-        var turret = BakeMerge("tank.turret", Baked(Find("Tank_Turret"), TurretPivotModel));
-        var gun = BakeMerge("tank.gun", Baked(Find("Tank_Gun"), GunPivotModel));
+        var body = Baked(Find("Tank_body"), HullPivotModel).Merge("tank.body");
+        var tracks = Baked(Find("TrackMesh.L"), HullPivotModel).Concat(Baked(Find("TrackMesh.R"), HullPivotModel)).Merge("tank.tracks");
+        var turret = Baked(Find("Tank_Turret"), TurretPivotModel).Merge("tank.turret");
+        var gun = Baked(Find("Tank_Gun"), GunPivotModel).Merge("tank.gun");
 
         TankPart Part(MeshData md, Attach attach, Vector4? tint)
         {
@@ -446,6 +452,7 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
                 FixedTint = tint,
                 WorldInstances = wInst,
                 CasterInstances = cInst,
+                Mesh = mesh,
                 World = new InstancedBatch(mesh, worldPipeline, wInst),
                 Caster = new InstancedBatch(mesh, casterPipeline, cInst),
             };
@@ -459,59 +466,37 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
         tankParts.Add(Part(gun, Attach.Barrel, gunTint));
     }
 
-    // Transform each part mesh by its bake matrix (positions + normals) and
-    // concatenate into one VertexPosition3NormalTexture mesh, reindexing as we go.
-    // Tank parts are small (<65k verts) so u16 indices always suffice.
-    private static MeshData BakeMerge(string name, IEnumerable<(MeshData Mesh, Matrix4x4 Xform)> parts)
-    {
-        var floats = new List<float>();
-        var indices = new List<ushort>();
-        var min = new Vector3(float.MaxValue);
-        var max = new Vector3(float.MinValue);
-        var vbase = 0;
-        var stride = VertexPosition3NormalTexture.Layout.Stride;
-        foreach (var (md, xform) in parts)
-        {
-            Matrix4x4.Invert(xform, out var inv);
-            var normalMatrix = Matrix4x4.Transpose(inv);
-            for (var v = 0; v < md.VertexCount; v++)
-            {
-                var o = v * stride;
-                var p = new Vector3(
-                    BitConverter.ToSingle(md.VertexBytes, o),
-                    BitConverter.ToSingle(md.VertexBytes, o + 4),
-                    BitConverter.ToSingle(md.VertexBytes, o + 8));
-                var n = new Vector3(
-                    BitConverter.ToSingle(md.VertexBytes, o + 12),
-                    BitConverter.ToSingle(md.VertexBytes, o + 16),
-                    BitConverter.ToSingle(md.VertexBytes, o + 20));
-                var pw = Vector3.Transform(p, xform);
-                var nw = Vector3.Normalize(Vector3.TransformNormal(n, normalMatrix));
-                min = Vector3.Min(min, pw); max = Vector3.Max(max, pw);
-                floats.Add(pw.X); floats.Add(pw.Y); floats.Add(pw.Z);
-                floats.Add(nw.X); floats.Add(nw.Y); floats.Add(nw.Z);
-                floats.Add(BitConverter.ToSingle(md.VertexBytes, o + 24));   // u
-                floats.Add(BitConverter.ToSingle(md.VertexBytes, o + 28));   // v
-            }
-            foreach (var idx in md.Indices)
-            {
-                checked { indices.Add((ushort)(idx + vbase)); }
-            }
-            vbase += md.VertexCount;
-            if (vbase > ushort.MaxValue)
-                throw new InvalidOperationException($"Tank part '{name}' exceeds u16 index range ({vbase} verts).");
-        }
-
-        var bytes = new byte[floats.Count * sizeof(float)];
-        Buffer.BlockCopy(floats.ToArray(), 0, bytes, 0, bytes.Length);
-        return new MeshData(name, bytes, indices.ToArray(),
-            VertexPosition3NormalTexture.Layout, new Bounds3(min, max));
-    }
-
     // Load a static prop model: flat Import (bakes node transforms into one space),
     // uniformly scaled so the model is `targetHeight` game units tall. Each primitive
     // becomes an instanced batch tinted by its material's base colour. Returns the
     // shared PropType; PlaceProps scatters instances.
+    // Called by the host with the GPU idle: everything this loop made. BLIX_TEARDOWN_TRACE=1 lists
+    // whatever is still live after it.
+    public void OnUnload()
+    {
+        foreach (var prop in propTypes) prop.Model.Dispose();
+        foreach (var part in tankParts)
+        {
+            part.WorldInstances.Dispose();
+            part.CasterInstances.Dispose();
+            device.DestroyVertexBuffer(part.Mesh.VertexBuffer);
+            device.DestroyIndexBuffer(part.Mesh.IndexBuffer);
+        }
+
+        fullscreen?.Dispose();
+        foreach (var pipeline in new[] { skyPipeline, worldPipeline, casterPipeline, presentPipeline }) device.DestroyPipeline(pipeline);
+        foreach (var program in ownedPrograms) device.DestroyShaderProgram(program);
+        instanceBuffer?.Dispose();
+        casterInstances?.Dispose();
+        if (cube is not null)
+        {
+            device.DestroyVertexBuffer(cube.VertexBuffer);
+            device.DestroyIndexBuffer(cube.IndexBuffer);
+        }
+
+        graph?.Dispose();
+    }
+
     private PropType LoadProp(string file, float targetHeight, bool explosive, ShaderProgramHandle worldShader, ShaderProgramHandle casterShader)
     {
         var primitives = ModelData.Load(AppFiles.Asset("models", Path.ChangeExtension(file, ".blixmesh")))

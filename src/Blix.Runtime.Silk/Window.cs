@@ -788,6 +788,10 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         audioDevice?.Dispose();
         Step("input");
         input?.Dispose();
+        // What the app left for the device to free: everything above has released its own, so
+        // whatever is still live belongs to the loop. The device frees it either way, which is
+        // exactly why a missing teardown is otherwise invisible. Reported, not judged.
+        if (trace && graphicsDevice is not null) ReportLeftovers(graphicsDevice.SnapshotResources());
         Step("graphics-device");
         graphicsDevice?.Dispose();
         Step("window");
@@ -802,6 +806,30 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         }
 
         Step("done");
+    }
+
+    private static void ReportLeftovers(ResourceRegistrySnapshot live)
+    {
+        // Cached pipelines are the device's by contract (GetOrCreatePipeline), and so is the program a
+        // cached pipeline still uses; so are the transient arena's buffers. None is a loop's to destroy.
+        var cachedPrograms = live.Pipelines.Where(p => p.IsCached).Select(p => p.ShaderProgram.Id).ToHashSet();
+        var kinds = new (string Kind, IReadOnlyList<string> Names)[]
+        {
+            ("vertex buffer", live.VertexBuffers.Where(e => !e.IsDeviceOwned).Select(e => e.Name).ToArray()),
+            ("index buffer", live.IndexBuffers.Select(e => e.Name).ToArray()),
+            ("texture", live.Textures.Where(e => e.Kind == TextureKind.UserUploaded).Select(e => e.Name).ToArray()),
+            ("shader program", live.ShaderPrograms.Where(e => !cachedPrograms.Contains(e.Handle.Id)).Select(e => e.Name).ToArray()),
+            ("pipeline", live.Pipelines.Where(e => !e.IsCached).Select(e => e.Name).ToArray()),
+            ("render surface", live.RenderSurfaces.Select(e => e.Name).ToArray()),
+        };
+        var total = kinds.Sum(k => k.Names.Count);
+        Console.Error.WriteLine(total == 0
+            ? "[teardown] the loop released everything it made"
+            : $"[teardown] left for the device to free: {string.Join(", ", kinds.Where(k => k.Names.Count > 0).Select(k => $"{k.Names.Count} {k.Kind}(s)"))}");
+        foreach (var (kind, names) in kinds.Where(k => k.Names.Count > 0))
+        {
+            Console.Error.WriteLine($"[teardown]   {kind}: {string.Join(", ", names.Take(12))}{(names.Count > 12 ? $", … {names.Count - 12} more" : "")}");
+        }
     }
 
     // A pick recorded into this frame, answered once the frame is submitted.

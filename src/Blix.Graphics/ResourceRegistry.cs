@@ -23,10 +23,12 @@ public enum TextureResidency
 // resource — no fabricated metadata. Buffers expose their GPU byte size (the
 // backend stores bytes, not vertex/index counts); pipelines expose the bind
 // point they were built for (the backend keeps IsCompute, not topology).
+/// <param name="IsDeviceOwned">The device's own (the transient arena's slots): made and freed by it, never a caller's.</param>
 public sealed record VertexBufferEntry(
     VertexBufferHandle Handle,
     string Name,
-    long ByteSize);
+    long ByteSize,
+    bool IsDeviceOwned = false);
 
 public sealed record IndexBufferEntry(
     IndexBufferHandle Handle,
@@ -48,11 +50,13 @@ public sealed record ShaderProgramEntry(
     ShaderProgramHandle Handle,
     string Name);
 
+/// <param name="IsCached">Made by GetOrCreatePipeline: device-owned until teardown, never the caller's to destroy.</param>
 public sealed record PipelineEntry(
     PipelineHandle Handle,
     string Name,
     ShaderProgramHandle ShaderProgram,
-    bool IsCompute);
+    bool IsCompute,
+    bool IsCached = false);
 
 public sealed record RenderSurfaceEntry(
     RenderSurfaceHandle Handle,

@@ -78,15 +78,19 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
 
     // Albedo textures + materials.
     private TextureHandle albedoTexture;
-    private TextureHandle cesiumAlbedoTexture;
     // The engine's texture loader, which knows BOTH shapes a TextureData arrives in. See the
     // comment at its one call site for why this demo stopped resolving its own.
     private MaterialTextureLoader textureLoader = null!;
     private MaterialHandle cubeMaterial;
     private MaterialHandle groundMaterial;
-    private MaterialHandle cesiumSkinMaterial;   // set 2 (per-material)
-    private MaterialHandle cesiumBoneMaterial;   // set 3 (per-draw, framesInFlight replicated)
-    private IMaterialBindings cesiumBonePalette = null!;  // direct ref for per-frame WriteBuffer
+    // The engine's resident Model: its skinned parts, each with a set-2 material of its own (tint +
+    // albedo), and one set-3 bone buffer per skin, shared by the lit and both shadow programs.
+    private Model cesiumModel = null!;
+    private (Model.Part Part, MaterialHandle Material)[] cesiumParts = Array.Empty<(Model.Part, MaterialHandle)>();
+    private BonePaletteSet[] cesiumPalettes = Array.Empty<BonePaletteSet>();
+    private BoneBuffers cesiumBones = null!;
+    private readonly Pose[] cesiumPoses = new Pose[1];
+    private readonly Matrix4x4[] cesiumPlacements = new Matrix4x4[1];
 
     // Static lit pipeline (cube + ground).
     private ShaderProgramHandle litShaderProgram;
@@ -105,15 +109,11 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
     private PipelineHandle skinnedShadowPipeline;
 
     // Skinned model state.
-    private Mesh cesiumMesh = null!;
     private Skeleton cesiumSkeleton = null!;
     private Pose cesiumPose = null!;
     private Pose cesiumRestPose = null!;
-    private BonePalette cesiumPalette = null!;
     private AnimationClip cesiumAnimation = null!;
-    private Matrix4x4 cesiumSkeletonPlacement;
     private Matrix4x4 cesiumUserTransform;
-    private byte[] cesiumPalettePayload = null!;
     private double cesiumAnimTime;
     private IGraphicsDevice vkDevice = null!;
 
@@ -139,6 +139,8 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
 
     // Bloom: bright extract → separable Gaussian (H+V) at quarter res, as a PostChain.
     private PostChain bloom = null!;
+    // What BuildPipelines made for the bloom stages: PostChain draws with them, and this loop owns them.
+    private readonly List<(ShaderProgramHandle Program, PipelineHandle Pipeline)> bloomStages = new();
     private bool bloomEnabled = true;
     private const float BloomScale = 0.25f; // const — sizes graph render targets
     internal float BloomIntensity { get; set; } = 0.7f;
@@ -323,43 +325,22 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         }
 
         // --- Skinned model: cesium_man.glb -------------------------------
-        var cesiumModel = ModelData.Load(AppFiles.Asset("models", "cesium_man.blixmesh"), new ModelNeeds(Skinned: true));
-        if (cesiumModel.Clips.Count == 0)
+        var cesiumData = ModelData.Load(AppFiles.Asset("models", "cesium_man.blixmesh"), new ModelNeeds(Skinned: true));
+        if (cesiumData.Clips.Count == 0)
         {
             throw new InvalidOperationException("cesium_man has no animations.");
         }
-        cesiumSkeleton = cesiumModel.Skins[0].Skeleton;
+
+
+        // Resident through the engine: parts uploaded with their textures (cooked .blixtex chains stream
+        // through the loader), palettes packed per skin, bone buffers sized per skin. The clips are against
+        // the model's animated hierarchy, which is what the demo poses.
+        textureLoader = new MaterialTextureLoader(device);
+        cesiumModel = device.CreateModel(cesiumData, textureLoader, "cesium");
+        cesiumSkeleton = cesiumModel.Skeleton;
         cesiumRestPose = cesiumSkeleton.CreateRestPose();
         cesiumPose = cesiumSkeleton.CreateRestPose();
-        cesiumPalette = new BonePalette(cesiumSkeleton.BoneCount);
         cesiumAnimation = cesiumModel.Clips[0];
-        cesiumSkeletonPlacement = cesiumModel.Placement(0);
-        cesiumPalettePayload = new byte[cesiumSkeleton.BoneCount * 64];
-
-        // First primitive only — CesiumMan is a single-primitive mesh.
-        //
-        // This upload used to read prim.Mesh.Indices directly and take its Length as the count,
-        // which is correct for CesiumMan and silently wrong for any asset large enough to carry
-        // 32-bit indices. CreateMesh makes that branch the engine's rather than each caller's.
-        var prim = cesiumModel.SkinnedPrimitives().First();
-        cesiumMesh = device.CreateMesh(prim.Mesh, "cesium");
-
-        // Cesium albedo: prefer the glTF's BaseColorTexture; fall back to a
-        // neutral white if the material strips out images for some reason.
-        // <b>This demo used to resolve its own albedo, and lost the character's texture the first
-        // time anything cooked its assets.</b> The csproj declares CookMesh over Assets/models, so
-        // a build writes cesium_man.textures/image_0.blixtex beside the .glb; GltfShared then
-        // PREFERS that cooked sibling and hands back a TextureData carrying a LazyHandle rather
-        // than MipBytes, in a BC format rather than Rgba8. The local loader tested for MipBytes
-        // and Rgba8, matched neither, and returned its neutral fallback -- so Cesium Man went
-        // quietly cream-coloured, with no error and nothing in the log.
-        //
-        // MaterialTextureLoader already handles both shapes: MipBytes uploads directly, LazyHandle
-        // allocates the chain and queues per-mip uploads to drain across later frames. Resolving
-        // textures is the asset layer's job and this demo had no business having an opinion about
-        // it, least of all a partial one.
-        textureLoader = new MaterialTextureLoader(device);
-        cesiumAlbedoTexture = textureLoader.Load(prim.Material).Albedo;
 
         // --- Render graph ------------------------------------------------
         graph = new RenderGraph(device);
@@ -415,20 +396,17 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         // and push size that the shaders already declare -- including five distinct push sizes
         // (128, 144, 80, 8, 8) and a two-element sampler array, none of which anything checked.
         //
-        // The shader is the source of truth for all of it EXCEPT the length of the bone palette:
-        // it is declared unsized, so the count is this demo's (`cesiumSkeleton.BoneCount`) and
-        // is stated once, where it is known.
+        // The shader is the source of truth for all of it. The bone palette is declared unsized; each
+        // skin's buffer is sized where it is made (Model.CreateBoneBuffers), not stated here.
         var shaderDir = AppFiles.Shaders;
         ShaderInterface Reflect(params string[] stages) => ShaderReflection.ForProgram(shaderDir, stages);
-        ShaderInterface Skinned(ShaderInterface iface) =>
-            iface.WithBlockSize(set: 3, binding: 0, cesiumSkeleton.BoneCount * 64);
 
         var shadowInterface = Reflect("shadow.vert", "shadow.frag");
         var pointShadowInterface = Reflect("point_shadow.vert", "point_shadow.frag");
         var litInterface = Reflect("lit.vert", "lit.frag");
-        var skinnedShadowInterface = Skinned(Reflect("skinned_shadow.vert", "shadow.frag"));
-        var pointSkinnedShadowInterface = Skinned(Reflect("point_skinned_shadow.vert", "point_shadow.frag"));
-        var skinnedLitInterface = Skinned(Reflect("skinned_lit.vert", "lit.frag"));
+        var skinnedShadowInterface = Reflect("skinned_shadow.vert", "shadow.frag");
+        var pointSkinnedShadowInterface = Reflect("point_skinned_shadow.vert", "point_shadow.frag");
+        var skinnedLitInterface = Reflect("skinned_lit.vert", "lit.frag");
         var presentInterface = Reflect("present.vert", "present_depth.frag");
         var presentTonemapInterface = Reflect("present.vert", "present.frag");
         var bloomBrightInterface = Reflect("present.vert", "bloom_bright.frag");
@@ -585,7 +563,7 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
             var frag = stage.Name == "bloom-bright" ? "bloom_bright.frag.spv" : "bloom_blur.frag.spv";
             var program = device.CreateShaderProgramFromSpv(
                 presentVertSpv, File.ReadAllBytes(Path.Combine(shaderDir, frag)), stage.Interface, stage.Name);
-            return device.CreatePipeline(new PipelineDescription(
+            var pipeline = device.CreatePipeline(new PipelineDescription(
                 program,
                 VertexPosition3NormalTexture.Layout,
                 PrimitiveTopology.Triangles,
@@ -593,6 +571,8 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
                 RasterizerState.NoCulling,
                 new[] { BlendState.Disabled },
                 RenderTarget: surface), stage.Name);
+            bloomStages.Add((program, pipeline));
+            return pipeline;
         });
 
         // --- Materials --------------------------------------------------
@@ -614,23 +594,16 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
             .SetTexture(binding: 2, flatNormalTexture)
             .Handle;
 
-        // Cesium per-material set (set 2). Tint from BaseColorFactor when
-        // available; the importer hands us the linear-space tint.
-        var cesiumTint = prim.Material?.BaseColorFactor ?? new Vector4(1, 1, 1, 1);
-        cesiumSkinMaterial = device.CreateMaterial(skinnedLitProgram, name: "cesium.skin.material")
-            .SetUniform(binding: 0, "uTint", cesiumTint)
-            .SetTexture(binding: 1, cesiumAlbedoTexture)
+        // Each skinned part's set 2: tint from its BaseColorFactor (linear) and its albedo.
+        cesiumParts = cesiumModel.SkinnedParts.Select((part, i) => (part, device.CreateMaterial(skinnedLitProgram, name: $"cesium.skin.material.{i}")
+            .SetUniform(binding: 0, "uTint", part.Material?.BaseColorFactor ?? new Vector4(1, 1, 1, 1))
+            .SetTexture(binding: 1, part.Textures.Albedo)
             .SetTexture(binding: 2, flatNormalTexture)
-            .Handle;
+            .Handle)).ToArray();
 
-        // Cesium bone palette (set 3, per-draw SSBO, replicated across
-        // frames so per-frame writes don't race with in-flight GPU work).
-        cesiumBonePalette = device.CreateMaterial(
-            skinnedLitProgram,
-            setIndex: 3,
-            framesInFlight: device.MaxFramesInFlightCount,
-            name: "cesium.bonepalette");
-        cesiumBoneMaterial = cesiumBonePalette.Handle;
+        // Set 3, per-draw SSBO replicated across frames in flight, one per skin, sized for its bones.
+        cesiumPalettes = cesiumModel.CreatePaletteSets(1);
+        cesiumBones = cesiumModel.CreateBoneBuffers(skinnedLitProgram, maxInstances: 1);
 
         // --- Fullscreen triangle (present + bloom passes) ----------------
         fullscreen = new FullscreenPass(device, "fullscreen");
@@ -784,18 +757,14 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
             : 0.0;
         cesiumPose.CopyFrom(cesiumRestPose);
         cesiumAnimation.Sample(loopedTime, cesiumPose);
-        cesiumSkeleton.ComputeBonePalette(cesiumPose, cesiumPalette);
 
-        // Compose the demo's user transform with the asset's mesh-node
-        // axis correction (Z-up → Y-up for CesiumMan). The bone palette
-        // is mesh-local; uModel takes mesh-local → world.
-        cesiumWorldModel = cesiumSkeletonPlacement * cesiumUserTransform;
-
-        // Pack the palette into the SSBO payload bytes (16 floats × N bones)
-        // and upload to the slot matching this frame.
-        PackPalette(cesiumPalette, cesiumPalettePayload);
-        var frameSlot = vkDevice.CurrentFrameSlot;
-        cesiumBonePalette.WriteBuffer(frameSlot, binding: 0, cesiumPalettePayload);
+        // The palettes carry the whole placement — the asset's own (Z-up → Y-up for CesiumMan) and then
+        // the demo's — so they are world-space and uModel is the identity.
+        cesiumPoses[0] = cesiumPose;
+        cesiumPlacements[0] = cesiumUserTransform;
+        cesiumModel.PackPalettes(cesiumPoses, cesiumPlacements, cesiumPalettes);
+        for (var skin = 0; skin < cesiumPalettes.Length; skin++) cesiumBones.Upload(skin, cesiumPalettes[skin]);
+        cesiumWorldModel = Matrix4x4.Identity;
 
         // Two spot lights, vec4-packed (color pre-multiplied by intensity).
         var perFrame = new ShaderUniform[]
@@ -894,17 +863,21 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
                     material: sphereMaterial,
                     pushConstants: LitPush(sphereModels[SphereCount + i], metallic: 0.0f, roughness: rough));
             }
-            // Skinned cesium: set 2 (skin material) + set 3 (bone palette SSBO).
-            scope.DrawIndexed(
-                vertexBuffer: cesiumMesh.VertexBuffer,
-                indexBuffer: cesiumMesh.IndexBuffer,
-                pipeline: skinnedLitPipeline,
-                indexCount: cesiumMesh.IndexCount,
-                uniforms: perFrame,
-                textures: shadowBindings,
-                material: cesiumSkinMaterial,
-                perDrawMaterial: cesiumBoneMaterial,
-                pushConstants: LitPush(cesiumWorldModel, metallic: 0.0f, roughness: 0.6f));
+            // Skinned cesium: set 2 (each part's skin material) + set 3 (its skin's bone palette).
+            var cesiumPush = LitPush(cesiumWorldModel, metallic: 0.0f, roughness: 0.6f);
+            foreach (var (part, material) in cesiumParts)
+            {
+                scope.DrawIndexed(
+                    vertexBuffer: part.Mesh.VertexBuffer,
+                    indexBuffer: part.Mesh.IndexBuffer,
+                    pipeline: skinnedLitPipeline,
+                    indexCount: part.Mesh.IndexCount,
+                    uniforms: perFrame,
+                    textures: shadowBindings,
+                    material: material,
+                    perDrawMaterial: cesiumBones.For(part.SkinIndex).Handle,
+                    pushConstants: cesiumPush);
+            }
         }, clearColor: new GraphicsColor(0.04f, 0.06f, 0.10f, 1.0f));
 
         // Bloom chain: bright(hdr) → blurH → blurV at quarter res. The chain resolves
@@ -992,15 +965,18 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
                 uniforms: Array.Empty<ShaderUniform>(),
                 textures: Array.Empty<ShaderTextureBinding>(),
                 pushConstants: cubePush);
-            scope.DrawIndexedSkinnedShadow(
-                vertexBuffer: cesiumMesh.VertexBuffer,
-                indexBuffer: cesiumMesh.IndexBuffer,
-                pipeline: skinnedShadowPipeline,
-                indexCount: cesiumMesh.IndexCount,
-                uniforms: Array.Empty<ShaderUniform>(),
-                textures: Array.Empty<ShaderTextureBinding>(),
-                perDrawMaterial: cesiumBoneMaterial,
-                pushConstants: cesiumPush);
+            foreach (var (part, _) in cesiumParts)
+            {
+                scope.DrawIndexedSkinnedShadow(
+                    vertexBuffer: part.Mesh.VertexBuffer,
+                    indexBuffer: part.Mesh.IndexBuffer,
+                    pipeline: skinnedShadowPipeline,
+                    indexCount: part.Mesh.IndexCount,
+                    uniforms: Array.Empty<ShaderUniform>(),
+                    textures: Array.Empty<ShaderTextureBinding>(),
+                    perDrawMaterial: cesiumBones.For(part.SkinIndex).Handle,
+                    pushConstants: cesiumPush);
+            }
         });
     }
 
@@ -1033,15 +1009,18 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
                 uniforms: Array.Empty<ShaderUniform>(),
                 textures: Array.Empty<ShaderTextureBinding>(),
                 pushConstants: cubePush);
-            scope.DrawIndexedSkinnedShadow(
-                vertexBuffer: cesiumMesh.VertexBuffer,
-                indexBuffer: cesiumMesh.IndexBuffer,
-                pipeline: pointSkinnedShadowPipeline,
-                indexCount: cesiumMesh.IndexCount,
-                uniforms: Array.Empty<ShaderUniform>(),
-                textures: Array.Empty<ShaderTextureBinding>(),
-                perDrawMaterial: cesiumBoneMaterial,
-                pushConstants: cesiumPush);
+            foreach (var (part, _) in cesiumParts)
+            {
+                scope.DrawIndexedSkinnedShadow(
+                    vertexBuffer: part.Mesh.VertexBuffer,
+                    indexBuffer: part.Mesh.IndexBuffer,
+                    pipeline: pointSkinnedShadowPipeline,
+                    indexCount: part.Mesh.IndexCount,
+                    uniforms: Array.Empty<ShaderUniform>(),
+                    textures: Array.Empty<ShaderTextureBinding>(),
+                    perDrawMaterial: cesiumBones.For(part.SkinIndex).Handle,
+                    pushConstants: cesiumPush);
+            }
         });
     }
 
@@ -1166,27 +1145,53 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         return view * proj;
     }
 
-    // Direct row-major write — GLSL std430 reads column-major so the
-    // transpose happens implicitly and `mat * v_col` in the shader equals
-    // `v_row * mat` here. Same convention as every other matrix upload.
-    private static void PackPalette(BonePalette palette, byte[] dst)
+    // Called by the host with the GPU idle: everything this loop made. BLIX_TEARDOWN_TRACE=1 lists
+    // whatever is still live after it.
+    public void OnUnload()
     {
-        if (dst.Length != palette.BoneCount * 64)
+        bloom?.Dispose();
+        foreach (var (program, pipeline) in bloomStages)
         {
-            throw new ArgumentException(
-                $"Palette payload size mismatch: {palette.BoneCount} bones expects {palette.BoneCount * 64} bytes, got {dst.Length}.",
-                nameof(dst));
+            vkDevice.DestroyPipeline(pipeline);
+            vkDevice.DestroyShaderProgram(program);
         }
-        var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(dst);
-        for (var i = 0; i < palette.BoneCount; i++)
+
+        fullscreen?.Dispose();
+
+        cesiumBones?.Dispose();
+        foreach (var (_, material) in cesiumParts) vkDevice.DestroyMaterial(material);
+        cesiumModel?.Dispose();
+        textureLoader?.Dispose();
+
+        foreach (var material in new[] { cubeMaterial, groundMaterial, sphereMaterial }) vkDevice.DestroyMaterial(material);
+        foreach (var (program, pipeline) in new[]
         {
-            var m = palette.Matrices[i];
-            var off = i * 16;
-            floats[off + 0]  = m.M11; floats[off + 1]  = m.M12; floats[off + 2]  = m.M13; floats[off + 3]  = m.M14;
-            floats[off + 4]  = m.M21; floats[off + 5]  = m.M22; floats[off + 6]  = m.M23; floats[off + 7]  = m.M24;
-            floats[off + 8]  = m.M31; floats[off + 9]  = m.M32; floats[off + 10] = m.M33; floats[off + 11] = m.M34;
-            floats[off + 12] = m.M41; floats[off + 13] = m.M42; floats[off + 14] = m.M43; floats[off + 15] = m.M44;
+            (litShaderProgram, litPipeline), (shadowShaderProgram, shadowPipeline),
+            (skinnedLitProgram, skinnedLitPipeline), (skinnedShadowProgram, skinnedShadowPipeline),
+            (pointShadowProgram, pointShadowPipeline), (pointSkinnedShadowProgram, pointSkinnedShadowPipeline),
+            (presentShaderProgram, presentPipeline), (presentDepthProgram, presentDepthPipeline),
+        })
+        {
+            vkDevice.DestroyPipeline(pipeline);
+            vkDevice.DestroyShaderProgram(program);
         }
+
+        foreach (var texture in new[]
+        {
+            albedoTexture, whiteTexture, flatNormalTexture, groundNormalTexture,
+            envCubeTexture, irradianceCubeTexture, brdfLutTexture,
+        })
+        {
+            vkDevice.DestroyTexture(texture);
+        }
+
+        foreach (var (vb, ib) in new[] { (cubeVB, cubeIB), (groundVB, groundIB), (sphereVB, sphereIB) })
+        {
+            vkDevice.DestroyVertexBuffer(vb);
+            vkDevice.DestroyIndexBuffer(ib);
+        }
+
+        graph?.Dispose();
     }
 
     private static (VertexPosition3NormalTexture[] Vertices, ushort[] Indices) BuildCube()

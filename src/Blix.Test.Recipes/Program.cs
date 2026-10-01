@@ -306,6 +306,107 @@ public static class Program
     // ── Samplers as glTF defines them ──────────────────────────────────────────
     // Every textured core channel of every corpus file: the cooked row it reads carries exactly that
     // texture's glTF sampler, and the engine maps glTF's codes to its own as the spec defines them.
+    // ── The demos' skinning, through Model ──────────────────────────────────────
+    // Runner, VulkanLit and Bulwark used to pack skin 0's palette by hand (Skeleton.ComputeBonePalette)
+    // and place the body with a model matrix of Placement(0) * body; through Model they pack the palette
+    // gathered from the model's animated hierarchy with SkeletonPlacement * body baked in
+    // (Model.PackPalettes: BonePaletteSet.AddGathered). Same pose, both ways, every skinned vertex: the
+    // world positions must agree. Over each demo rig's first clips at five times.
+    private static void DemoRigsSkinTheSameThroughModel(TestRunner t)
+    {
+        var body = System.Numerics.Matrix4x4.CreateScale(1.15f) * System.Numerics.Matrix4x4.CreateRotationY(0.7f)
+                   * System.Numerics.Matrix4x4.CreateTranslation(3f, 0f, -2f);
+        foreach (var name in new[] { "Rogue.blixmesh", "cesium_man.blixmesh", "enemy.blixmesh" })
+        {
+            if (FindFile(name) is not { } file) continue;
+            var d = Blix.ModelData.Load(file, new Blix.ModelNeeds(Skinned: true));
+            var hierarchy = d.Skeleton!;
+            var skin = d.Skins[0];
+            var meshes = d.SkinnedPrimitives(0).Select(p => p.Mesh).ToArray();
+            var worst = 0f;
+            var vertices = 0;
+            var worlds = new System.Numerics.Matrix4x4[hierarchy.BoneCount];
+            foreach (var clip in d.Clips.Take(3))
+            foreach (var at in new[] { 0.0, 0.25, 0.5, 0.75, 1.0 })
+            {
+                var pose = hierarchy.CreateRestPose();
+                clip.Sample(clip.Duration * at, pose);
+                // The old path: skin 0's skeleton posed directly (the demos relied on it being the hierarchy).
+                var old = new Blix.BonePaletteSet(skin.Skeleton.BoneCount, 1);
+                old.Add(skin.Skeleton, pose, System.Numerics.Matrix4x4.Identity);
+                var oldModel = d.Placement(0) * body;
+                // The new path: gathered through the hierarchy, placement baked in.
+                hierarchy.ComputeBoneWorlds(pose, worlds);
+                var gathered = new Blix.BonePaletteSet(skin.Skeleton.BoneCount, 1);
+                gathered.AddGathered(worlds, skin.Bones, skin.Skeleton, d.SkeletonPlacement * body);
+                foreach (var m in meshes)
+                for (var v = 0; v < m.VertexCount; v++)
+                {
+                    var o = v * m.Layout.Stride;
+                    float F(int k) => BitConverter.ToSingle(m.VertexBytes, o + k);
+                    var position = new System.Numerics.Vector3(F(0), F(4), F(8));
+                    System.Numerics.Vector3 Skinned(System.Numerics.Matrix4x4[] palette)
+                    {
+                        var sum = System.Numerics.Vector3.Zero;
+                        for (var k = 0; k < 4; k++)
+                        {
+                            var weight = F(48 + (k * 4));
+                            if (weight != 0f) sum += System.Numerics.Vector3.Transform(position, palette[(int)F(32 + (k * 4))]) * weight;
+                        }
+
+                        return sum;
+                    }
+
+                    var before = System.Numerics.Vector3.Transform(Skinned(old.Matrices), oldModel);
+                    var after = Skinned(gathered.Matrices);
+                    worst = MathF.Max(worst, System.Numerics.Vector3.Distance(before, after));
+                    vertices++;
+                }
+            }
+
+            var extent = meshes.Aggregate(0f, (e, m) => MathF.Max(e, (m.Bounds.Max - m.Bounds.Min).Length()));
+            t.Expect($"{name}: skinned through Model as the demo drew it ({vertices} vertex-poses, worst {worst:0.######} for a {extent:0.##}-unit mesh)",
+                vertices > 0 && worst <= 1e-4f * MathF.Max(1f, extent * 1.15f), "");
+        }
+    }
+
+    // MeshDataExtensions.Merge (what the instanced demos bake their props with) under a mirroring
+    // transform: each merged triangle's winding agrees with its normals, as Flattened's does. The
+    // same NegativeScale corpus files, each mesh node merged at its world.
+    private static void MergeKeepsFacesUnderMirrors(TestRunner t)
+    {
+        var files = new[] { "NegativeScaleTest.glb" }
+            .Concat(Enumerable.Range(0, 13).Select(i => $"Node_NegativeScale_{i:00}.gltf"))
+            .Select(FindFile).Where(f => f is not null).ToArray();
+        if (files.Length == 0) return;
+        int triangles = 0, agree = 0, nodes = 0;
+        foreach (var file in files)
+        {
+            var d = Blix.ModelData.Load(CookCache.Resolve(file!), new Blix.ModelNeeds(Tangents: true));
+            for (var n = 0; n < d.Nodes.Count; n++)
+            {
+                if (d.Nodes[n].MeshIndex < 0 || d.World[n].GetDeterminant() >= 0f) continue;
+                nodes++;
+                var merged = d.Meshes[d.Nodes[n].MeshIndex].Primitives.Select(p => (p.Mesh, d.World[n])).Merge("merged");
+                var idx = merged.Indices32 ?? merged.Indices.Select(i => (uint)i).ToArray();
+                for (var i = 0; i + 2 < idx.Length; i += 3)
+                {
+                    System.Numerics.Vector3 P(uint v, int at) => new(
+                        BitConverter.ToSingle(merged.VertexBytes, ((int)v * merged.Layout.Stride) + at),
+                        BitConverter.ToSingle(merged.VertexBytes, ((int)v * merged.Layout.Stride) + at + 4),
+                        BitConverter.ToSingle(merged.VertexBytes, ((int)v * merged.Layout.Stride) + at + 8));
+                    var face = System.Numerics.Vector3.Cross(P(idx[i + 1], 0) - P(idx[i], 0), P(idx[i + 2], 0) - P(idx[i], 0));
+                    if (face.LengthSquared() < 1e-12f) continue;
+                    triangles++;
+                    if (System.Numerics.Vector3.Dot(face, P(idx[i], 12) + P(idx[i + 1], 12) + P(idx[i + 2], 12)) > 0f) agree++;
+                }
+            }
+        }
+
+        t.Expect($"a merge of mirrored nodes keeps glTF's front faces: {agree}/{triangles} triangles over {nodes} node(s)",
+            triangles > 0 && agree >= triangles * 0.95, "");
+    }
+
     // ── Validation, audited ──────────────────────────────────────────────────────
     // The cook validates every source with SharpGLTF's strict validator and reads past it for exactly two
     // named causes (MeshRecipe.ValidatorFallbacks): invalid glTF read on purpose (a skin with no common
@@ -2591,6 +2692,8 @@ public static class Program
         SceneLevelMatchesGltf(t);
         SceneLevelReachesModelData(t);
         FlattenKeepsFacesUnderMirrors(t);
+        DemoRigsSkinTheSameThroughModel(t);
+        MergeKeepsFacesUnderMirrors(t);
         EveryTexturedChannelCooks(t);
 
         // ── tools cook on open ───────────────────────────────────────────────

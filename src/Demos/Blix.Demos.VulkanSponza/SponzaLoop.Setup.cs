@@ -23,10 +23,10 @@ internal sealed partial class SponzaLoop
         ShaderProgramHandle program, VertexLayout layout, DepthState depth,
         RasterizerState raster, BlendState[] blend, PassHandle target, string name,
         bool alphaToCoverage = false) =>
-        device.CreatePipeline(new PipelineDescription(
+        Own(device.CreatePipeline(new PipelineDescription(
             program, layout, PrimitiveTopology.Triangles, depth, raster, blend,
             RenderTarget: graph.GetPassSurface(target),
-            AlphaToCoverage: alphaToCoverage), name);
+            AlphaToCoverage: alphaToCoverage), name));
 
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
@@ -434,7 +434,7 @@ internal sealed partial class SponzaLoop
         // shaderDir was resolved above (reflection sidecars live alongside the .spv).
         var litVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "lit.vert.spv"));
         var litFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "lit.frag.spv"));
-        litProgram = device.CreateShaderProgramFromSpv(litVertSpv, litFragSpv, litInterface, "lit");
+        litProgram = Own(device.CreateShaderProgramFromSpv(litVertSpv, litFragSpv, litInterface, "lit"));
         // Opaque + Mask share the no-blend pipeline group. Depth is
         // LessEqual with writes disabled: the depth pre-pass already wrote the complete
         // scene depth, so the lit pass only shades the front-most fragment
@@ -476,20 +476,20 @@ internal sealed partial class SponzaLoop
         // over the sky.
         var skyVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "skybox.vert.spv"));
         var skyFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "skybox.frag.spv"));
-        skyProgram = device.CreateShaderProgramFromSpv(skyVertSpv, skyFragSpv, skyInterface, "skybox");
+        skyProgram = Own(device.CreateShaderProgramFromSpv(skyVertSpv, skyFragSpv, skyInterface, "skybox"));
 
         // One quad per probe, positions synthesised: the vertex buffer exists to satisfy the draw
         // and its contents are never read, exactly as FullscreenPass does for its triangle.
         var probeVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "probe_debug.vert.spv"));
         var probeFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "probe_debug.frag.spv"));
-        probeProgram = device.CreateShaderProgramFromSpv(probeVertSpv, probeFragSpv, probeInterface, "probe_debug");
+        probeProgram = Own(device.CreateShaderProgramFromSpv(probeVertSpv, probeFragSpv, probeInterface, "probe_debug"));
         var probeDummy = new VertexPosition3NormalTexture[4];
         for (var i = 0; i < 4; i++)
             probeDummy[i] = new VertexPosition3NormalTexture(
                 new GraphicsVector3(0, 0, 0), new GraphicsVector3(0, 0, 1), new GraphicsVector2(0, 0));
-        probeVb = device.CreateVertexBuffer(
-            VertexPosition3NormalTexture.CreateBufferData(probeDummy), "probe.vb");
-        probeIb = device.CreateIndexBuffer(new ushort[] { 0, 1, 2, 2, 1, 3 }, name: "probe.ib");
+        probeVb = Own(device.CreateVertexBuffer(
+            VertexPosition3NormalTexture.CreateBufferData(probeDummy), "probe.vb"));
+        probeIb = Own(device.CreateIndexBuffer(new ushort[] { 0, 1, 2, 2, 1, 3 }, name: "probe.ib"));
         skyPipeline = Pipeline(skyProgram,
             VertexPosition3NormalTexture.Layout, // ignored — sky vert synthesises positions
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
@@ -502,14 +502,14 @@ internal sealed partial class SponzaLoop
         // them against cascade 0's surface and reuse across cascades.
         var shadowVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow.vert.spv"));
         var shadowFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow.frag.spv"));
-        shadowOpaqueProgram = device.CreateShaderProgramFromSpv(shadowVertSpv, shadowFragSpv, shadowOpaqueInterface, "shadow.opaque");
+        shadowOpaqueProgram = Own(device.CreateShaderProgramFromSpv(shadowVertSpv, shadowFragSpv, shadowOpaqueInterface, "shadow.opaque"));
         shadowOpaquePipeline = Pipeline(shadowOpaqueProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualWrite, RasterizerState.NoCulling,
             Array.Empty<BlendState>(), cascadePassHandles[0], "shadow.opaque");
 
         var shadowMaskVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow_mask.vert.spv"));
         var shadowMaskFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "shadow_mask.frag.spv"));
-        shadowMaskProgram = device.CreateShaderProgramFromSpv(shadowMaskVertSpv, shadowMaskFragSpv, shadowMaskInterface, "shadow.mask");
+        shadowMaskProgram = Own(device.CreateShaderProgramFromSpv(shadowMaskVertSpv, shadowMaskFragSpv, shadowMaskInterface, "shadow.mask"));
         shadowMaskPipeline = Pipeline(shadowMaskProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualWrite, RasterizerState.NoCulling,
             Array.Empty<BlendState>(), cascadePassHandles[0], "shadow.mask");
@@ -525,36 +525,36 @@ internal sealed partial class SponzaLoop
         // litInterface; flat.frag samples nothing, so set1/set2 stay unbound (as
         // with the pre-pass programs).
         var flatFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "flat.frag.spv"));
-        flatProgram = device.CreateShaderProgramFromSpv(litVertSpv, flatFragSpv, litInterface, "flat");
+        flatProgram = Own(device.CreateShaderProgramFromSpv(litVertSpv, flatFragSpv, litInterface, "flat"));
         flatPipeline = Pipeline(flatProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
             new[] { BlendState.Disabled }, litPassHandle, "flat");
 
         var prepassOpaqueFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "depth_prepass.frag.spv"));
-        prepassOpaqueProgram = device.CreateShaderProgramFromSpv(litVertSpv, prepassOpaqueFragSpv, litInterface, "depth_prepass");
+        prepassOpaqueProgram = Own(device.CreateShaderProgramFromSpv(litVertSpv, prepassOpaqueFragSpv, litInterface, "depth_prepass"));
         prepassOpaquePipeline = Pipeline(prepassOpaqueProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualWrite, RasterizerState.NoCulling,
             new[] { BlendState.Disabled }, depthPrepassHandle, "depth_prepass");
 
         var prepassMaskFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "depth_prepass_mask.frag.spv"));
-        prepassMaskProgram = device.CreateShaderProgramFromSpv(litVertSpv, prepassMaskFragSpv, litInterface, "depth_prepass_mask");
+        prepassMaskProgram = Own(device.CreateShaderProgramFromSpv(litVertSpv, prepassMaskFragSpv, litInterface, "depth_prepass_mask"));
         prepassMaskPipeline = Pipeline(prepassMaskProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualWrite, RasterizerState.NoCulling,
             new[] { BlendState.Disabled }, depthPrepassHandle, "depth_prepass_mask");
 
         var presentVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.vert.spv"));
         var presentFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.frag.spv"));
-        presentProgram = device.CreateShaderProgramFromSpv(presentVertSpv, presentFragSpv, presentInterface, "present");
-        presentPipeline = device.CreatePipeline(new PipelineDescription(
+        presentProgram = Own(device.CreateShaderProgramFromSpv(presentVertSpv, presentFragSpv, presentInterface, "present"));
+        presentPipeline = Own(device.CreatePipeline(new PipelineDescription(
             presentProgram,
             VertexPosition3NormalTexture.Layout,
             PrimitiveTopology.Triangles,
             DepthState.Disabled,
             RasterizerState.NoCulling,
-            BlendState.Disabled), "present");
+            BlendState.Disabled), "present"));
 
         var gtaoFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "gtao.frag.spv"));
-        gtaoProgram = device.CreateShaderProgramFromSpv(presentVertSpv, gtaoFragSpv, gtaoInterface, "gtao");
+        gtaoProgram = Own(device.CreateShaderProgramFromSpv(presentVertSpv, gtaoFragSpv, gtaoInterface, "gtao"));
         // Graph-pass pipelines must be created against the pass surface. Swapchain-present
         // pipelines have no graph render target and are not compatible here.
         gtaoPipeline = Pipeline(gtaoProgram, VertexPosition3NormalTexture.Layout,
@@ -562,7 +562,7 @@ internal sealed partial class SponzaLoop
             new[] { BlendState.Disabled }, gtaoPassHandle, "gtao");
 
         var hiZSpv = File.ReadAllBytes(Path.Combine(shaderDir, "hiz_build.frag.spv"));
-        hiZProgram = device.CreateShaderProgramFromSpv(presentVertSpv, hiZSpv, hiZInterface, "hiz_build");
+        hiZProgram = Own(device.CreateShaderProgramFromSpv(presentVertSpv, hiZSpv, hiZInterface, "hiz_build"));
         for (var level = 0; level < HiZLevels; level++)
         {
             hiZPipelines[level] = Pipeline(hiZProgram, VertexPosition3NormalTexture.Layout,
@@ -574,7 +574,7 @@ internal sealed partial class SponzaLoop
         // compatible with the render pass it was built against and the two resolve passes target
         // different images.
         var taaSpv = File.ReadAllBytes(Path.Combine(shaderDir, "taa.frag.spv"));
-        var taaProgram = device.CreateShaderProgramFromSpv(presentVertSpv, taaSpv, taaInterface, "taa");
+        var taaProgram = Own(device.CreateShaderProgramFromSpv(presentVertSpv, taaSpv, taaInterface, "taa"));
         for (var i = 0; i < 2; i++)
         {
             taaPipelines[i] = Pipeline(taaProgram, VertexPosition3NormalTexture.Layout,
@@ -583,22 +583,22 @@ internal sealed partial class SponzaLoop
         }
 
         var gtaoDenoiseSpv = File.ReadAllBytes(Path.Combine(shaderDir, "gtao_denoise.frag.spv"));
-        gtaoDenoiseProgram = device.CreateShaderProgramFromSpv(
-            presentVertSpv, gtaoDenoiseSpv, gtaoDenoiseInterface, "gtao_denoise");
+        gtaoDenoiseProgram = Own(device.CreateShaderProgramFromSpv(
+            presentVertSpv, gtaoDenoiseSpv, gtaoDenoiseInterface, "gtao_denoise"));
         gtaoDenoisePipeline = Pipeline(gtaoDenoiseProgram, VertexPosition3NormalTexture.Layout,
             DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled }, gtaoDenoisePassHandle, "gtao_denoise");
 
         var incidentSpv = File.ReadAllBytes(Path.Combine(shaderDir, "incident.frag.spv"));
-        var incidentProgram = device.CreateShaderProgramFromSpv(
-            presentVertSpv, incidentSpv, incidentInterface, "incident");
+        var incidentProgram = Own(device.CreateShaderProgramFromSpv(
+            presentVertSpv, incidentSpv, incidentInterface, "incident"));
         incidentPipeline = Pipeline(incidentProgram, VertexPosition3NormalTexture.Layout,
             DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled }, incidentPassHandle, "incident");
 
         var incidentResolveSpv = File.ReadAllBytes(Path.Combine(shaderDir, "incident_resolve.frag.spv"));
-        var incidentResolveProgram = device.CreateShaderProgramFromSpv(
-            presentVertSpv, incidentResolveSpv, incidentResolveInterface, "incident_resolve");
+        var incidentResolveProgram = Own(device.CreateShaderProgramFromSpv(
+            presentVertSpv, incidentResolveSpv, incidentResolveInterface, "incident_resolve"));
         incidentResolvePipeline = Pipeline(incidentResolveProgram, VertexPosition3NormalTexture.Layout,
             DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled }, incidentResolvePassHandle, "incident_resolve");
@@ -615,20 +615,20 @@ internal sealed partial class SponzaLoop
         if (bounceReady)
         {
             var injectSpv = File.ReadAllBytes(Path.Combine(shaderDir, "sky_inject.comp.spv"));
-            injectProgram = device.CreateComputeShaderProgramFromSpv(injectSpv, injectInterface, "sky_inject");
-            injectPipeline = device.CreateComputePipeline(injectProgram, "sky_inject");
+            injectProgram = Own(device.CreateComputeShaderProgramFromSpv(injectSpv, injectInterface, "sky_inject"));
+            injectPipeline = Own(device.CreateComputePipeline(injectProgram, "sky_inject"));
             // Rebuilt each frame around the write/read pair; see BounceBindings.
             injectBindings = BounceBindings();
 
             var usageSpv = File.ReadAllBytes(Path.Combine(shaderDir, "probe_usage.comp.spv"));
-            var usageProgram = device.CreateComputeShaderProgramFromSpv(usageSpv, usageInterface, "probe_usage");
-            probeUsagePipeline = device.CreateComputePipeline(usageProgram, "probe_usage");
+            var usageProgram = Own(device.CreateComputeShaderProgramFromSpv(usageSpv, usageInterface, "probe_usage"));
+            probeUsagePipeline = Own(device.CreateComputePipeline(usageProgram, "probe_usage"));
         }
 
         // --- Froxel fog compute program + grid ---------------------------
         var froxelSpv = File.ReadAllBytes(Path.Combine(shaderDir, "froxel.comp.spv"));
-        froxelProgram = device.CreateComputeShaderProgramFromSpv(froxelSpv, froxelInterface, "froxel");
-        froxelPipeline = device.CreateComputePipeline(froxelProgram, "froxel");
+        froxelProgram = Own(device.CreateComputeShaderProgramFromSpv(froxelSpv, froxelInterface, "froxel"));
+        froxelPipeline = Own(device.CreateComputePipeline(froxelProgram, "froxel"));
         // View-aligned 3D scattering grid, sampled trilinearly by the lit pass. Sized from a
         // swapchain-matched graph target rather than from host.LogicalSize, because that is the
         // logical size and the framebuffer behind it is 2x on a Retina display — the difference
@@ -901,9 +901,9 @@ internal sealed partial class SponzaLoop
             {
                 var volume = Blix.Graphics.Images.BlixSkyVolume.Read(path);
                 for (var t = 0; t < 3; t++)
-                    skyVisibilityTextures[t] = device.CreateTexture3D(
+                    skyVisibilityTextures[t] = Own(device.CreateTexture3D(
                         volume.SizeX, volume.SizeY, volume.SizeZ, TextureFormat.Rgba16F,
-                        SamplerDescription.LinearClamp, volume.ToRgba16F(t), $"sponza.skyvis{t}");
+                        SamplerDescription.LinearClamp, volume.ToRgba16F(t), $"sponza.skyvis{t}"));
                 skyVisibilityTexture = skyVisibilityTextures[0];
                 skyVolumeMin = volume.Min;
                 var span = volume.Max - volume.Min;
@@ -932,9 +932,9 @@ internal sealed partial class SponzaLoop
                     occX = volume.OccupancyX; occY = volume.OccupancyY; occZ = volume.OccupancyZ;
                     occupancyCpu = volume.Occupancy;
                     occCpuX = occX; occCpuY = occY; occCpuZ = occZ;
-                    occupancyTexture = device.CreateTexture3D(
+                    occupancyTexture = Own(device.CreateTexture3D(
                         occX, occY, occZ, TextureFormat.R8,
-                        SamplerDescription.LinearClamp, volume.Occupancy!, "sponza.occupancy");
+                        SamplerDescription.LinearClamp, volume.Occupancy!, "sponza.occupancy"));
                     // Falls back to the occupancy texture's slot being filled by SOMETHING valid
                     // rather than going unbound: a missing albedo grid means an older .blixsky, and
                     // the shader's uAlbedoDims.w tells it to use the flat scalar instead.
@@ -946,9 +946,9 @@ internal sealed partial class SponzaLoop
                         // Albedo is one-to-one with occupancy cells. Nearest sampling preserves the
                         // struck cell's material instead of mixing the one-cell surface shell with
                         // empty space or neighbouring materials.
-                        albedoTexture = device.CreateTexture3D(
+                        albedoTexture = Own(device.CreateTexture3D(
                             albX, albY, albZ, TextureFormat.Rgba8,
-                            SamplerDescription.NearestClamp, volume.Albedo!, "sponza.albedo");
+                            SamplerDescription.NearestClamp, volume.Albedo!, "sponza.albedo"));
                         Console.WriteLine(
                             $"[VulkanSponza]   albedo {albX}x{albY}x{albZ} ({volume.Albedo!.Length / 1024.0 / 1024.0:0.00} MB), so the bounce carries surface colour.");
                     }
@@ -962,16 +962,16 @@ internal sealed partial class SponzaLoop
                     var atlasH = bounceY * bounceZ * OctTile;
                     for (var i = 0; i < bounceTextures.Length; i++)
                     {
-                        bounceTextures[i] = device.CreateStorageTexture2D(
+                        bounceTextures[i] = Own(device.CreateStorageTexture2D(
                             atlasW, atlasH, TextureFormat.Rgba16F,
-                            SamplerDescription.LinearClamp, $"sponza.bounce{i}");
-                        bounceDepthTextures[i] = device.CreateStorageTexture2D(
+                            SamplerDescription.LinearClamp, $"sponza.bounce{i}"));
+                        bounceDepthTextures[i] = Own(device.CreateStorageTexture2D(
                             atlasW, atlasH, TextureFormat.Rgba16F,
-                            SamplerDescription.LinearClamp, $"sponza.bounceDepth{i}");
+                            SamplerDescription.LinearClamp, $"sponza.bounceDepth{i}"));
                     }
-                    probeUsageTexture = device.CreateStorageTexture3D(
+                    probeUsageTexture = Own(device.CreateStorageTexture3D(
                         bounceX, bounceY, bounceZ, TextureFormat.Rgba16F,
-                        SamplerDescription.LinearClamp, "sponza.probeUsage");
+                        SamplerDescription.LinearClamp, "sponza.probeUsage"));
                     Console.WriteLine(
                         $"[VulkanSponza]   bounce probes {bounceX}x{bounceY}x{bounceZ} = " +
                         $"{bounceX * bounceY * bounceZ:N0}, octahedral atlas {atlasW}x{atlasH} " +
@@ -1031,8 +1031,8 @@ internal sealed partial class SponzaLoop
         var open = new byte[4 * 2];
         // L0 for a fully open sphere: integral of Y0 over the sphere = 4*pi*0.282095.
         BitConverter.TryWriteBytes(open.AsSpan(0, 2), (Half)(4f * MathF.PI * 0.282095f));
-        skyVisibilityTexture = device.CreateTexture3D(
-            1, 1, 1, TextureFormat.Rgba16F, SamplerDescription.LinearClamp, open, "sponza.skyvis.open");
+        skyVisibilityTexture = Own(device.CreateTexture3D(
+            1, 1, 1, TextureFormat.Rgba16F, SamplerDescription.LinearClamp, open, "sponza.skyvis.open"));
         skyVolumeLoaded = false;
         Console.WriteLine("[VulkanSponza] sky visibility: none found — every surface sees a full sky.");
     }

@@ -67,6 +67,9 @@ public interface IGraphicsDevice : IDisposable
 
     void WriteIndirectCommands(IndirectBufferHandle handle, ReadOnlySpan<byte> commands);
 
+    // Frees every ring slot of an indirect buffer. Like the other destroys: the GPU must be done with it.
+    void DestroyIndirectBuffer(IndirectBufferHandle handle);
+
     // <b>A program is made from compiled SPIR-V and the interface reflected from it.</b> This used to
     // be absent, on the grounds that SPIR-V is what the Vulkan backend consumes, so every program that
     // drew anything had to cast to VulkanGraphicsDevice before its first shader: 67 calls in 13

@@ -81,6 +81,13 @@ public sealed record ShaderInterface(
     public ShaderInterface(IReadOnlyList<DescriptorSetSlot> slots)
         : this(slots, Array.Empty<PushConstantRange>()) { }
 
+    /// <summary>The bytes a draw's push payload carries: as far as the furthest range reaches.</summary>
+    /// <remarks>
+    /// Not the ranges' sum: one block declared by two stages at different lengths is two overlapping
+    /// ranges (one per stage), and the payload is the block once.
+    /// </remarks>
+    public int PushConstantBytes => PushConstants.Count == 0 ? 0 : PushConstants.Max(r => r.Offset + r.Size);
+
     /// <summary>
     /// Give a runtime-sized block the length only the application knows.
     /// </summary>

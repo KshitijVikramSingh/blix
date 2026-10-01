@@ -925,6 +925,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     public void Dispose()
     {
         fullscreen?.Dispose();
+        ReleaseDeviceResources();
         graph?.Dispose();
     }
 

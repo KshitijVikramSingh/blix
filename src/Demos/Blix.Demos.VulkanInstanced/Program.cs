@@ -54,6 +54,9 @@ internal sealed class InstancedLoop : IGameLoop
     private IRenderHost host = null!;
     private InstanceBuffer instanceBuffer = null!;
     private InstancedBatch batch = null!;
+    private Mesh cube = null!;
+    private ShaderProgramHandle shader;
+    private PipelineHandle pipeline;
     private readonly byte[] pushBytes = new byte[64];   // mat4 view-projection
     private readonly InstanceData[] instances = new InstanceData[InstanceCount];
 
@@ -70,7 +73,7 @@ internal sealed class InstancedLoop : IGameLoop
 
         var vb = device.CreateVertexBuffer(VertexPosition3NormalTexture.CreateBufferData(Cube.Vertices), "cube.vb");
         var ib = device.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
-        var cube = new Mesh("cube", vb, ib, Cube.Indices.Length,
+        cube = new Mesh("cube", vb, ib, Cube.Indices.Length,
             new Bounds3(new Vector3(-0.5f), new Vector3(0.5f)), VertexPosition3NormalTexture.Layout);
 
         // Pipeline consumes only position + normal (stride matched to the cube's
@@ -87,11 +90,11 @@ internal sealed class InstancedLoop : IGameLoop
         // Read from the shader. InstanceBuffer supplies the one thing it cannot say: how many
         // instances the unsized set-3 array holds.
         var iface = InstanceBuffer.Size(ShaderReflection.ForProgram(shaderDir, "cube.vert", "cube.frag"));
-        var shader = device.CreateShaderProgramFromSpv(
+        shader = device.CreateShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "cube.vert.spv")),
             File.ReadAllBytes(Path.Combine(shaderDir, "cube.frag.spv")),
             iface, "cube");
-        var pipeline = device.CreatePipeline(
+        pipeline = device.CreatePipeline(
             new PipelineDescription(shader, meshLayout, PrimitiveTopology.Triangles,
                 DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled }),
             "cube");
@@ -164,10 +167,17 @@ internal sealed class InstancedLoop : IGameLoop
         }
     }
 
-    // No OnUnload disposal: RequestClose() fires the window's Closing before the
-    // current frame's already-recorded draw executes, so disposing the batch here
-    // would free its pipeline out from under that final Execute. Sibling demos
-    // (VulkanHello/VulkanLit) rely on device.Dispose() — which vkDeviceWaitIdle's
-    // and frees every resource table — to clean up at process teardown.
+    // Called by the host with the GPU idle (after the final frame, not at Closing), so freeing the
+    // batch's pipeline here is safe: everything this loop made. BLIX_TEARDOWN_TRACE=1 lists whatever
+    // is still live after it.
+    public void OnUnload()
+    {
+        if (cube is null) return;
+        instanceBuffer.Dispose();
+        device.DestroyPipeline(pipeline);
+        device.DestroyShaderProgram(shader);
+        device.DestroyVertexBuffer(cube.VertexBuffer);
+        device.DestroyIndexBuffer(cube.IndexBuffer);
+    }
 
 }

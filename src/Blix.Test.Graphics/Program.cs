@@ -5846,6 +5846,7 @@ sealed class RecordingDevice : IGraphicsDevice
     public GraphicsDeviceDiagnostics DiagnosticsSnapshot => throw No();
     public IndirectBufferHandle CreateIndirectBuffer(int maxDrawCommands, string? name = null) => throw No();
     public void WriteIndirectCommands(IndirectBufferHandle handle, ReadOnlySpan<byte> commands) => throw No();
+    public void DestroyIndirectBuffer(IndirectBufferHandle handle) => throw No();
     public ShaderProgramHandle CreateShaderProgramFromSpv(byte[] vertexSpv, byte[] fragmentSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
     public ShaderProgramHandle CreateComputeShaderProgramFromSpv(byte[] computeSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
     public PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null) => throw No();

@@ -72,9 +72,11 @@ public sealed class PropModel : IDisposable
         int triangles,
         IGraphicsDevice sceneDevice,
         ShaderProgramHandle sceneShader,
-        PipelineHandle scenePipeline)
+        PipelineHandle scenePipeline,
+        IReadOnlyList<Mesh> uploaded)
     {
         Name = name;
+        this.uploaded = uploaded;
         this.parts = parts;
         this.casterPasses = casterPasses;
         Bounds = bounds;
@@ -86,6 +88,8 @@ public sealed class PropModel : IDisposable
     }
 
     private readonly IGraphicsDevice sceneDevice;
+    // Every mesh this model uploaded, scene and caster, each once (a caster that reuses an upload shares it).
+    private readonly IReadOnlyList<Mesh> uploaded;
     private readonly ShaderProgramHandle sceneShader;
     private readonly PipelineHandle scenePipeline;
 
@@ -212,6 +216,7 @@ public sealed class PropModel : IDisposable
         var built = new List<Part>();
         var meshes = new List<MeshData>();
         var sceneUploads = new List<Mesh>();
+        IEnumerable<(MeshData Source, Mesh Uploaded)> casterUploadsRaw = Array.Empty<(MeshData, Mesh)>();
         var triangles = 0;
         var index = 0;
         var casting = casterShader is not null && casterPipeline is not null;
@@ -256,6 +261,7 @@ public sealed class PropModel : IDisposable
             // so two passes handed the same source want one upload — but each would call Transformed for
             // itself and produce a different object, which a key on the baked mesh would never match.
             var uploads = new List<(MeshData Source, Mesh Uploaded)>();
+            casterUploadsRaw = uploads;
             for (var c = 0; c < casterPassCount; c++)
             {
                 // A null entry means this pass casts from the scene geometry, which is the same thing
@@ -317,7 +323,8 @@ public sealed class PropModel : IDisposable
             triangles,
             device,
             sceneShader,
-            scenePipeline);
+            scenePipeline,
+            sceneUploads.Concat(casterUploadsRaw.Select(u => u.Uploaded)).Distinct().ToArray());
     }
 
     // Drop every copy staged last frame. Call once, before the frame's Adds.
@@ -501,6 +508,13 @@ public sealed class PropModel : IDisposable
         foreach (var pass in casterPasses)
         {
             foreach (var buffer in pass.AllBuffers) buffer.Dispose();
+        }
+
+        // The geometry it uploaded: its own, so its to free (it was the one thing Dispose left behind).
+        foreach (var mesh in uploaded)
+        {
+            sceneDevice.DestroyVertexBuffer(mesh.VertexBuffer);
+            sceneDevice.DestroyIndexBuffer(mesh.IndexBuffer);
         }
     }
 

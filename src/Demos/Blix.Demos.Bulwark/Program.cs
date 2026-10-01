@@ -39,7 +39,8 @@ namespace Blix.Demos.Bulwark;
 //   • Picking: Camera3D.ScreenPointToRay → Intersection.Raycast(ray, ground) → grid cell
 //   • A* grid pathfinding: multi-front, dynamic re-path, wall-off rejection
 //   • Transform3D turret→barrel aim rig (LookAt yaw + parented-barrel muzzle)
-//   • glTF static import (ImportNodes + BakeMerge) AND skinned import (GltfImporter + clips)
+//   • glTF static import (ModelData + MeshDataExtensions.Merge) AND skinned residency (Model: parts,
+//     palettes, bone buffers)
 //   • Skinned-mesh INSTANCING: one [N×bones] world-baked palette indexed by
 //     gl_InstanceIndex → the whole animated crowd in one instanced draw per primitive,
 //     in both the lit scene pass and the shadow caster
@@ -81,6 +82,11 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
     private IGraphicsDevice device = null!;
     private IRenderHost host = null!;
     private InstanceBuffer instanceBuffer = null!;
+    // Everything else this loop makes, registered where it is made and released in OnUnload.
+    private readonly List<ShaderProgramHandle> ownedPrograms = new();
+    private readonly List<Mesh> ownedMeshes = new();
+    private readonly List<InstanceBuffer> ownedInstanceBuffers = new();
+    private readonly List<AudioClipHandle> ownedClips = new();
     private InstancedBatch batch = null!;
     private readonly byte[] pushBytes = new byte[64];          // mat4 view-projection
     private readonly List<InstanceData> instances = new(GridW * GridH + 64);
@@ -215,20 +221,26 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
     private bool skinnedLoaded;
     private PipelineHandle skinnedPipeline;         // scene (lit, instanced)
     private PipelineHandle skinnedShadowPipeline;   // shadow caster (depth-only, instanced)
-    // One Mesh per glTF primitive — see Runner. The palette's per-instance stride, both
-    // pipelines and the shadow caster stay here, which is where this game differs from every
-    // other skinned consumer.
-    private Mesh[] enemyMeshes = Array.Empty<Mesh>();
+    // The engine's resident Model: its skinned parts, palette packing for N bodies, and one set-3 bone
+    // buffer per skin sized for MaxAlive bodies of its bones. Both pipelines, the shadow caster, the
+    // crowd's poses and placements stay here, which is where this game differs from every other
+    // skinned consumer. The shaders read the bone count from the push, so any skeleton works.
+    private Model enemyModel = null!;
+    private MaterialTextureLoader enemyTextures = null!;
+    private BonePaletteSet[] enemyPalettes = Array.Empty<BonePaletteSet>();   // per skin, MaxAlive world-space palettes
+    private BoneBuffers enemyBones = null!;   // set 3, frames-in-flight; shared by both skinned pipelines
+    private readonly Pose[] crowdPoses = new Pose[MaxAlive];
+    private readonly Matrix4x4[] crowdPlacements = new Matrix4x4[MaxAlive];
+    // The world and shadow pushes with the skin's bone count after them (offsets 160 and 64), per skin.
+    private byte[][] skinnedWorldPush = Array.Empty<byte[]>();
+    private byte[][] skinnedShadowPush = Array.Empty<byte[]>();
     private Skeleton enemySkeleton = null!;
-    private Pose enemyRestPose = null!, enemyPose = null!;
-    private BonePalette enemyBonePalette = null!;
-    private byte[] enemyPalettePayload = Array.Empty<byte>();   // [MaxAlive × EnemyBones] world-space mat4s
+    private Pose enemyRestPose = null!;
     private AnimationClip enemyWalk = null!;
     private AnimationClip enemyDeath = null!;
     private float enemyDeathHold = 0.8f;   // corpse lingers playing the Death clip, then is removed
-    private Matrix4x4 enemySkeletonPlacement = Matrix4x4.Identity;
-    private IMaterialBindings enemyBones = null!;   // set 3 palette SSBO, frames-in-flight; shared by both skinned pipelines
-    private const int EnemyBones = 15;             // the robot skeleton; the loader asserts it (matches the shaders' BONE_COUNT)
+    private ShaderProgramHandle skinnedSceneShader;
+    private ShaderProgramHandle skinnedShadowShader;
     private const float SkinnedEnemyScale = 1.15f;   // visual dial
     private const float SkinnedEnemyYawFix = 0f;     // model forward → engine; dial if facing is off
 
@@ -250,6 +262,7 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
         var ib = device.CreateIndexBuffer(Cube.Indices, name: "cube.ib");
         var cube = new Mesh("cube", vb, ib, Cube.Indices.Length,
             new Bounds3(new Vector3(-0.5f), new Vector3(0.5f)), VertexPosition3NormalTexture.Layout);
+        ownedMeshes.Add(cube);
 
         var meshLayout = new VertexLayout(
             Stride: VertexPosition3NormalTexture.Layout.Stride,
@@ -290,11 +303,13 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
 
         // Pipelines target their pass surfaces (caster→shadow, world/sky/particle→scene).
         var casterShader = device.CreateShaderProgramFromSpv(Spv("shadow_caster.vert.spv"), Spv("shadow_caster.frag.spv"), casterIface, "caster");
+        ownedPrograms.Add(casterShader);
         casterPipeline = device.CreatePipeline(new PipelineDescription(casterShader, meshLayout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.NoCulling, Array.Empty<BlendState>(),
             RenderTarget: graph.GetPassSurface(shadowPassHandle)), "caster");
 
         var worldShader = device.CreateShaderProgramFromSpv(Spv("cube.vert.spv"), Spv("cube.frag.spv"), worldIface, "world");
+        ownedPrograms.Add(worldShader);
         worldPipeline = device.CreatePipeline(new PipelineDescription(worldShader, meshLayout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(scenePassHandle)), "world");
@@ -302,11 +317,13 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
         batch = new InstancedBatch(cube, worldPipeline, instanceBuffer);
 
         var skyShader = device.CreateShaderProgramFromSpv(Spv("sky.vert.spv"), Spv("sky.frag.spv"), skyIface, "sky");
+        ownedPrograms.Add(skyShader);
         skyPipeline = device.CreatePipeline(new PipelineDescription(skyShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
             DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(scenePassHandle)), "sky");
 
         var presentShader = device.CreateShaderProgramFromSpv(Spv("present.vert.spv"), Spv("present.frag.spv"), presentIface, "present");
+        ownedPrograms.Add(presentShader);
         presentPipeline = device.CreatePipeline(new PipelineDescription(presentShader, VertexPosition3NormalTexture.Layout, PrimitiveTopology.Triangles,
             DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Disabled }), "present");
         fullscreen = new FullscreenPass(device, "fullscreen");
@@ -318,6 +335,7 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
         // (push = view-projection) into the HDR scene pass. No soft-depth / bloom.
         var particleIface = ShaderReflection.ForProgram(shaderDir, "particle.vert", "particle.frag");
         var particleShader = device.CreateShaderProgramFromSpv(Spv("particle.vert.spv"), Spv("particle.frag.spv"), particleIface, "particle");
+        ownedPrograms.Add(particleShader);
         particlePipeline = device.CreatePipeline(new PipelineDescription(particleShader, ParticleBatch.VertexLayoutDescription,
             PrimitiveTopology.Triangles, DepthState.Disabled, RasterizerState.NoCulling, new[] { BlendState.Additive },
             RenderTarget: graph.GetPassSurface(scenePassHandle)), "particle");
@@ -484,7 +502,18 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
         }
 
         // Pose + upload the whole skinned crowd once (both passes read this palette).
-        if (skinnedLoaded && enemies.Count > 0) WriteCrowdPalette();
+        if (skinnedLoaded && enemies.Count > 0)
+        {
+            WriteCrowdPalette();
+            // The skinned pushes: the shared world/shadow push, then the skin's bone count.
+            for (var s = 0; s < enemyPalettes.Length; s++)
+            {
+                worldPush.CopyTo(skinnedWorldPush[s], 0);
+                BitConverter.TryWriteBytes(skinnedWorldPush[s].AsSpan(160, 4), enemyPalettes[s].BoneCount);
+                shadowPush.CopyTo(skinnedShadowPush[s], 0);
+                BitConverter.TryWriteBytes(skinnedShadowPush[s].AsSpan(64, 4), enemyPalettes[s].BoneCount);
+            }
+        }
 
         // Shadow depth pass: casters block the sun — static props + the skinned crowd.
         graph.Pass(shadowPassHandle, scope =>
@@ -499,9 +528,10 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
             if (skinnedLoaded && enemies.Count > 0)
             {
                 var instN = Math.Min(enemies.Count, MaxAlive);
-                foreach (var mesh in enemyMeshes)
-                    scope.DrawIndexedInstanced(mesh.VertexBuffer, mesh.IndexBuffer, skinnedShadowPipeline, mesh.IndexCount,
-                        instN, Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), enemyBones.Handle, shadowPush);
+                foreach (var part in enemyModel.SkinnedParts)
+                    scope.DrawIndexedInstanced(part.Mesh.VertexBuffer, part.Mesh.IndexBuffer, skinnedShadowPipeline, part.Mesh.IndexCount,
+                        instN, Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), enemyBones.For(part.SkinIndex).Handle,
+                        skinnedShadowPush[part.SkinIndex]);
             }
         });
 
@@ -524,9 +554,10 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
             if (skinnedLoaded && enemies.Count > 0)
             {
                 var instN = Math.Min(enemies.Count, MaxAlive);
-                foreach (var mesh in enemyMeshes)
-                    scope.DrawIndexedInstanced(mesh.VertexBuffer, mesh.IndexBuffer, skinnedPipeline, mesh.IndexCount,
-                        instN, Array.Empty<ShaderUniform>(), shadowBind, enemyBones.Handle, worldPush);
+                foreach (var part in enemyModel.SkinnedParts)
+                    scope.DrawIndexedInstanced(part.Mesh.VertexBuffer, part.Mesh.IndexBuffer, skinnedPipeline, part.Mesh.IndexCount,
+                        instN, Array.Empty<ShaderUniform>(), shadowBind, enemyBones.For(part.SkinIndex).Handle,
+                        skinnedWorldPush[part.SkinIndex]);
             }
             particles.Draw(scope, particlePipeline,
                 camera.Transform.Right, camera.Transform.Up, camera.Transform.Position,
@@ -957,13 +988,10 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
 
     // ── Art (M3): load the CC0 meshes, best-effort ──
     //
-    // Each mesh-bearing node is baked from its composed-world transform into one
-    // VertexPosition3NormalTexture mesh (lifting TankArena's BakeMerge), uploaded through the
-    // engine's CreateMesh, and wrapped in an InstancedBatch on the SHARED cube pipeline. Any
-    // failure leaves artLoaded=false and the demo falls back to primitives.
-    //
-    // BakeMerge itself is still a private copy here and in TankArena, with identical signatures --
-    // a second consumer wanting the same decision, which is §4's bar for extracting it.
+    // Each mesh-bearing node is baked from its composed-world transform into one mesh (the
+    // engine's MeshDataExtensions.Merge), uploaded through CreateMesh, and wrapped in an
+    // InstancedBatch on the SHARED cube pipeline. Any failure leaves artLoaded=false and the demo
+    // falls back to primitives.
     private void LoadArt(ShaderProgramHandle worldShader, PipelineHandle worldPipe,
                          ShaderProgramHandle casterShader, PipelineHandle casterPipe)
     {
@@ -977,16 +1005,21 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
                 var idx = model.FindNode(nodeName);
                 if (idx < 0) throw new InvalidOperationException($"node '{nodeName}' not found in {file}");
                 var w = model.World[idx];
-                return device.CreateMesh(BakeMerge(meshName,
-                    model.Meshes[model.Nodes[idx].MeshIndex].Primitives.Select(prim => (prim.Mesh, w))));
+                var mesh = device.CreateMesh(model.Meshes[model.Nodes[idx].MeshIndex].Primitives
+                    .Select(prim => (prim.Mesh, w)).Merge(meshName));
+                ownedMeshes.Add(mesh);
+                return mesh;
             }
 
             // Each mesh gets a world batch (lit scene pass) + a caster batch (shadow pass).
             (InstancedBatch World, InstancedBatch Caster) Pair(string file, string node, string name)
             {
                 var m = NodeMesh(file, node, name);
-                return (new InstancedBatch(m, worldPipe, new InstanceBuffer(device, worldShader, name + ".w")),
-                        new InstancedBatch(m, casterPipe, new InstanceBuffer(device, casterShader, name + ".c")));
+                var world = new InstanceBuffer(device, worldShader, name + ".w");
+                var caster = new InstanceBuffer(device, casterShader, name + ".c");
+                ownedInstanceBuffers.Add(world);
+                ownedInstanceBuffers.Add(caster);
+                return (new InstancedBatch(m, worldPipe, world), new InstancedBatch(m, casterPipe, caster));
             }
 
             (turretBaseBatch, turretBaseCaster) = Pair("turret.glb", "Turret_Cannon_Base", "art.turretBase");
@@ -1003,52 +1036,6 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
         }
     }
 
-    // Transform each part's primitives by its bake matrix (positions + normals) and
-    // concatenate into one VertexPosition3NormalTexture mesh, reindexing as we go.
-    // (Lifted from TankArena.) These meshes are < 65k verts so u16 indices suffice.
-    private static MeshData BakeMerge(string name, IEnumerable<(MeshData Mesh, Matrix4x4 Xform)> parts)
-    {
-        var floats = new List<float>();
-        var indices = new List<ushort>();
-        var min = new Vector3(float.MaxValue);
-        var max = new Vector3(float.MinValue);
-        var vbase = 0;
-        var stride = VertexPosition3NormalTexture.Layout.Stride;
-        foreach (var (md, xform) in parts)
-        {
-            Matrix4x4.Invert(xform, out var inv);
-            var normalMatrix = Matrix4x4.Transpose(inv);
-            for (var v = 0; v < md.VertexCount; v++)
-            {
-                var o = v * stride;
-                var p = new Vector3(
-                    BitConverter.ToSingle(md.VertexBytes, o),
-                    BitConverter.ToSingle(md.VertexBytes, o + 4),
-                    BitConverter.ToSingle(md.VertexBytes, o + 8));
-                var n = new Vector3(
-                    BitConverter.ToSingle(md.VertexBytes, o + 12),
-                    BitConverter.ToSingle(md.VertexBytes, o + 16),
-                    BitConverter.ToSingle(md.VertexBytes, o + 20));
-                var pw = Vector3.Transform(p, xform);
-                var nw = Vector3.Normalize(Vector3.TransformNormal(n, normalMatrix));
-                min = Vector3.Min(min, pw); max = Vector3.Max(max, pw);
-                floats.Add(pw.X); floats.Add(pw.Y); floats.Add(pw.Z);
-                floats.Add(nw.X); floats.Add(nw.Y); floats.Add(nw.Z);
-                floats.Add(BitConverter.ToSingle(md.VertexBytes, o + 24));   // u
-                floats.Add(BitConverter.ToSingle(md.VertexBytes, o + 28));   // v
-            }
-            foreach (var idx in md.Indices) checked { indices.Add((ushort)(idx + vbase)); }
-            vbase += md.VertexCount;
-            if (vbase > ushort.MaxValue)
-                throw new InvalidOperationException($"art mesh '{name}' exceeds u16 index range ({vbase} verts).");
-        }
-
-        var bytes = new byte[floats.Count * sizeof(float)];
-        Buffer.BlockCopy(floats.ToArray(), 0, bytes, 0, bytes.Length);
-        return new MeshData(name, bytes, indices.ToArray(),
-            VertexPosition3NormalTexture.Layout, new Bounds3(min, max));
-    }
-
     // ── Skinned enemy (M4 Gate A) — full GltfImporter (Skeleton + clips + JOINTS/
     // WEIGHTS); one animated enemy, shadow-aware via the shared cube.frag. ──
     private void LoadSkinnedEnemy(string shaderDir)
@@ -1058,23 +1045,20 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
             var model = ModelData.Load(AppFiles.Asset("models", "enemy.blixmesh"), new ModelNeeds(Skinned: true));
             if (model.Clips.Count == 0) throw new InvalidOperationException("no animations");
 
-            enemySkeleton = model.Skins[0].Skeleton;
-            if (enemySkeleton.BoneCount != EnemyBones)
-                throw new InvalidOperationException($"expected {EnemyBones} bones, got {enemySkeleton.BoneCount} (update the shaders' BONE_COUNT)");
+            enemyTextures = new MaterialTextureLoader(device);
+            enemyModel = device.CreateModel(model, enemyTextures, "enemy");
+            // The clips are against the model's animated hierarchy; every crowd body is one pose of it.
+            enemySkeleton = enemyModel.Skeleton;
             enemyRestPose = enemySkeleton.CreateRestPose();
-            enemyPose = enemySkeleton.CreateRestPose();
-            enemyBonePalette = new BonePalette(EnemyBones);
-            enemyPalettePayload = new byte[MaxAlive * EnemyBones * 64];   // one world-space palette per instance
-            enemySkeletonPlacement = model.Placement(0);
+            for (var i = 0; i < MaxAlive; i++) crowdPoses[i] = enemySkeleton.CreateRestPose();
             enemyWalk = FindEnemyClip(model, "Walk") ?? FindEnemyClip(model, "Run") ?? model.Clips[0];
             enemyDeath = FindEnemyClip(model, "Death") ?? enemyWalk;
             enemyDeathHold = (float)(enemyDeath.Duration > 0 ? enemyDeath.Duration : 0.8);
 
-            // Set 3 b0: a [MaxAlive × EnemyBones] palette SSBO indexed by gl_InstanceIndex. The
-            // shader declares it unsized, so the count below is the one number reflection cannot give.
+            // Set 3 b0: the engine's bone block, [MaxAlive × bones] world-space palettes indexed by
+            // gl_InstanceIndex, unsized in the shader and sized per skin by CreateBoneBuffers.
             // Scene: shadow sampler (set 0, frag) + palette (set 3, vertex), 160B push → cube.frag (shadow-aware).
-            var sceneIface = ShaderReflection.ForProgram(shaderDir, "skinned_instanced.vert", "cube.frag")
-                .WithBlockSize(set: 3, binding: 0, MaxAlive * EnemyBones * 64);
+            var sceneIface = ShaderReflection.ForProgram(shaderDir, "skinned_instanced.vert", "cube.frag");
             var sceneShader = device.CreateShaderProgramFromSpv(
                 File.ReadAllBytes(Path.Combine(shaderDir, "skinned_instanced.vert.spv")),
                 File.ReadAllBytes(Path.Combine(shaderDir, "cube.frag.spv")), sceneIface, "skinned.scene");
@@ -1084,8 +1068,7 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
                 RenderTarget: graph.GetPassSurface(scenePassHandle)), "skinned.scene");
 
             // Shadow: same set-3 palette (so they share one material), 64B sun-VP push, depth-only.
-            var shadowIface = ShaderReflection.ForProgram(shaderDir, "skinned_shadow_instanced.vert", "shadow_caster.frag")
-                .WithBlockSize(set: 3, binding: 0, MaxAlive * EnemyBones * 64);
+            var shadowIface = ShaderReflection.ForProgram(shaderDir, "skinned_shadow_instanced.vert", "shadow_caster.frag");
             var shadowShader = device.CreateShaderProgramFromSpv(
                 File.ReadAllBytes(Path.Combine(shaderDir, "skinned_shadow_instanced.vert.spv")),
                 File.ReadAllBytes(Path.Combine(shaderDir, "shadow_caster.frag.spv")), shadowIface, "skinned.shadow");
@@ -1094,16 +1077,14 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
                 DepthState.LessEqualWrite, RasterizerState.NoCulling, Array.Empty<BlendState>(),
                 RenderTarget: graph.GetPassSurface(shadowPassHandle)), "skinned.shadow");
 
-            var skinned = model.SkinnedPrimitives().ToArray();
-            var n = skinned.Length;
-            enemyMeshes = new Mesh[n];
-            for (var i = 0; i < n; i++)
-            {
-                enemyMeshes[i] = device.CreateMesh(skinned[i].Mesh, $"enemy.{i}");
-            }
-            enemyBones = device.CreateMaterial(sceneShader, setIndex: 3, framesInFlight: device.MaxFramesInFlightCount, name: "enemy.bones");
+            skinnedSceneShader = sceneShader;
+            skinnedShadowShader = shadowShader;
+            enemyPalettes = enemyModel.CreatePaletteSets(MaxAlive);
+            enemyBones = enemyModel.CreateBoneBuffers(sceneShader, MaxAlive);
+            skinnedWorldPush = enemyModel.Skins.Select(_ => new byte[164]).ToArray();
+            skinnedShadowPush = enemyModel.Skins.Select(_ => new byte[68]).ToArray();
             skinnedLoaded = true;
-            Console.WriteLine($"  skinned crowd: {n} prim(s), {enemySkeleton.BoneCount} bones, clip '{enemyWalk.Name}', up to {MaxAlive} instanced");
+            Console.WriteLine($"  skinned crowd: {enemyModel.SkinnedParts.Count()} prim(s), {enemySkeleton.BoneCount} bones, clip '{enemyWalk.Name}', up to {MaxAlive} instanced");
         }
         catch (Exception ex)
         {
@@ -1119,14 +1100,13 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
         return null;
     }
 
-    // Pose every enemy (phase-staggered Walk), bake each palette into WORLD space at its
-    // instance slot in the shared [MaxAlive×EnemyBones] buffer, and upload the block.
+    // Pose every enemy (phase-staggered Walk) and pack each body's palette into WORLD space at its
+    // instance slot (Model.PackPalettes: the skeleton's placement, then the body's), then upload.
     // N skeleton evals/frame (cheap at this crowd size); gl_InstanceIndex reads the slot.
     private void WriteCrowdPalette()
     {
         var walkDur = enemyWalk.Duration > 0 ? enemyWalk.Duration : 1.0;
         var deathDur = enemyDeath.Duration > 0 ? enemyDeath.Duration : 1.0;
-        var f = MemoryMarshal.Cast<byte, float>(enemyPalettePayload.AsSpan());
         var count = Math.Min(enemies.Count, MaxAlive);
         for (var i = 0; i < count; i++)
         {
@@ -1136,22 +1116,14 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
             var (clip, t) = e.Dying
                 ? (enemyDeath, Math.Min(e.DyingTime, deathDur))
                 : (enemyWalk, (gameTime + e.AnimPhase) % walkDur);
-            enemyPose.CopyFrom(enemyRestPose);
-            clip.Sample(t, enemyPose);
-            enemySkeleton.ComputeBonePalette(enemyPose, enemyBonePalette);
-            var model = SkinnedEnemyModel(e.Pos);
-            var slot = i * EnemyBones * 16;
-            for (var b = 0; b < EnemyBones; b++)
-            {
-                var m = enemyBonePalette.Matrices[b] * model;   // world-space skin (row-vector: skin × model)
-                var o = slot + b * 16;
-                f[o + 0] = m.M11; f[o + 1] = m.M12; f[o + 2] = m.M13; f[o + 3] = m.M14;
-                f[o + 4] = m.M21; f[o + 5] = m.M22; f[o + 6] = m.M23; f[o + 7] = m.M24;
-                f[o + 8] = m.M31; f[o + 9] = m.M32; f[o + 10] = m.M33; f[o + 11] = m.M34;
-                f[o + 12] = m.M41; f[o + 13] = m.M42; f[o + 14] = m.M43; f[o + 15] = m.M44;
-            }
+            crowdPoses[i].CopyFrom(enemyRestPose);
+            clip.Sample(t, crowdPoses[i]);
+            crowdPlacements[i] = SkinnedEnemyModel(e.Pos);
         }
-        enemyBones.WriteBuffer(device.CurrentFrameSlot, 0, enemyPalettePayload);
+
+        enemyModel.PackPalettes(
+            new ArraySegment<Pose>(crowdPoses, 0, count), new ArraySegment<Matrix4x4>(crowdPlacements, 0, count), enemyPalettes);
+        for (var s = 0; s < enemyPalettes.Length; s++) enemyBones.Upload(s, enemyPalettes[s]);
     }
 
     // Place/scale/face one enemy at a world position (faces the core it marches to).
@@ -1163,7 +1135,7 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
         var user = Matrix4x4.CreateScale(SkinnedEnemyScale)
                  * Matrix4x4.CreateRotationY(yaw)
                  * Matrix4x4.CreateTranslation(pos.X, 0f, pos.Z);
-        return enemySkeletonPlacement * user;
+        return user;   // the skeleton's own placement goes before this, in PackPalettes
     }
 
     private void PrintStatus(float dt)
@@ -1200,9 +1172,16 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
         try { audio = (host as IAudioHost)?.AudioDevice; }
         catch { audio = null; }
         if (audio is not { } a) return;
-        fireSfx = AudioSource.Create(a, a.CreateClip(SynthBlip(440f, 0.06f, 0.30f, rising: false), "bulwark.fire"), "bulwark.fire");
-        deathSfx = AudioSource.Create(a, a.CreateClip(SynthBlip(180f, 0.18f, 0.50f, rising: false), "bulwark.death"), "bulwark.death");
-        leakSfx = AudioSource.Create(a, a.CreateClip(SynthBlip(90f, 0.32f, 0.60f, rising: false), "bulwark.leak"), "bulwark.leak");
+        AudioClipHandle Clip(AudioClipData samples, string name)
+        {
+            var clip = a.CreateClip(samples, name);
+            ownedClips.Add(clip);
+            return clip;
+        }
+
+        fireSfx = AudioSource.Create(a, Clip(SynthBlip(440f, 0.06f, 0.30f, rising: false), "bulwark.fire"), "bulwark.fire");
+        deathSfx = AudioSource.Create(a, Clip(SynthBlip(180f, 0.18f, 0.50f, rising: false), "bulwark.death"), "bulwark.death");
+        leakSfx = AudioSource.Create(a, Clip(SynthBlip(90f, 0.32f, 0.60f, rising: false), "bulwark.leak"), "bulwark.leak");
     }
 
     private void PlaySfx(AudioSource? source, float pitch)
@@ -1235,6 +1214,55 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
             pcm[i * 2 + 1] = (byte)((s >> 8) & 0xFF);
         }
         return new AudioClipData(SampleRate: rate, Channels: 1, BitsPerSample: 16, PcmData: pcm);
+    }
+
+    // Called by the host with the GPU idle: everything this loop made. BLIX_TEARDOWN_TRACE=1 lists
+    // whatever is still live after it.
+    public void OnUnload()
+    {
+        hud?.Dispose();
+        if (hudFont is not null)
+        {
+            foreach (var size in hudFont.Sizes) device.DestroyTexture(size.Atlas);
+        }
+
+        particles?.Dispose();
+        fullscreen?.Dispose();
+
+        if (skinnedLoaded)
+        {
+            enemyBones.Dispose();
+            enemyModel.Dispose();
+            enemyTextures.Dispose();
+            device.DestroyPipeline(skinnedPipeline);
+            device.DestroyPipeline(skinnedShadowPipeline);
+            device.DestroyShaderProgram(skinnedSceneShader);
+            device.DestroyShaderProgram(skinnedShadowShader);
+        }
+
+        foreach (var pipeline in new[] { casterPipeline, worldPipeline, skyPipeline, presentPipeline, particlePipeline })
+        {
+            device.DestroyPipeline(pipeline);
+        }
+
+        foreach (var program in ownedPrograms) device.DestroyShaderProgram(program);
+        instanceBuffer?.Dispose();
+        foreach (var buffer in ownedInstanceBuffers) buffer.Dispose();
+        foreach (var mesh in ownedMeshes)
+        {
+            device.DestroyVertexBuffer(mesh.VertexBuffer);
+            device.DestroyIndexBuffer(mesh.IndexBuffer);
+        }
+
+        graph?.Dispose();
+
+        if (audio is { } a)
+        {
+            fireSfx?.Dispose(a);
+            deathSfx?.Dispose(a);
+            leakSfx?.Dispose(a);
+            foreach (var clip in ownedClips) a.DeleteClip(clip);
+        }
     }
 
     // ── HUD (SpriteBatch + Font) — composited over the 3D pass ──

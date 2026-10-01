@@ -71,6 +71,7 @@ internal sealed class HelloLoop(bool pickCheck = false) : IGameLoop, IDebuggable
     private ShaderProgramHandle presentShaderProgram;
     private PipelineHandle presentPipeline;
     private FullscreenPass fullscreen = null!;
+    private IGraphicsDevice gpu = null!;   // kept for OnUnload
 
     private int frameCount;
     private Matrix4x4 viewProj;
@@ -92,11 +93,30 @@ internal sealed class HelloLoop(bool pickCheck = false) : IGameLoop, IDebuggable
     private static readonly Vector3 LightDirection = Vector3.Normalize(new Vector3(0.55f, 1.0f, 0.45f));
     private const float CubeSeparation = 1.1f; // ±X distance from origin
 
+    // Called by the host with the GPU idle: everything this loop made. The offscreen surface owns its
+    // colour attachment. BLIX_TEARDOWN_TRACE=1 lists whatever is still live after it.
+    public void OnUnload()
+    {
+        if (gpu is null) return;
+        fullscreen?.Dispose();
+        gpu.DestroyMaterial(whiteMaterial);
+        gpu.DestroyMaterial(redMaterial);
+        gpu.DestroyPipeline(presentPipeline);
+        gpu.DestroyShaderProgram(presentShaderProgram);
+        gpu.DestroyPipeline(pipeline);
+        gpu.DestroyShaderProgram(shaderProgram);
+        gpu.DestroyRenderSurface(offscreenSurface);
+        gpu.DestroyTexture(albedoTexture);
+        gpu.DestroyVertexBuffer(vertexBuffer);
+        gpu.DestroyIndexBuffer(indexBuffer);
+    }
+
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
         this.host = host;
         host.SetTitle("Blix — Vulkan Cube");
         var device = graphicsDevice;
+        gpu = graphicsDevice;
 
         var (vertices, indices) = BuildCube();
         var vertexData = VertexPosition3Texture.CreateBufferData(vertices);
