@@ -790,7 +790,9 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         input?.Dispose();
         // What the app left for the device to free: everything above has released its own, so
         // whatever is still live belongs to the loop. The device frees it either way, which is
-        // exactly why a missing teardown is otherwise invisible. Reported, not judged.
+        // exactly why a missing teardown is otherwise invisible. Reported, not judged. It covers every
+        // kind of handle IGraphicsDevice hands out; a new kind must join the snapshot, or a missed
+        // destroy of it reports clean.
         if (trace && graphicsDevice is not null) ReportLeftovers(graphicsDevice.SnapshotResources());
         Step("graphics-device");
         graphicsDevice?.Dispose();
@@ -821,10 +823,12 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             ("shader program", live.ShaderPrograms.Where(e => !cachedPrograms.Contains(e.Handle.Id)).Select(e => e.Name).ToArray()),
             ("pipeline", live.Pipelines.Where(e => !e.IsCached).Select(e => e.Name).ToArray()),
             ("render surface", live.RenderSurfaces.Select(e => e.Name).ToArray()),
+            ("material", live.Materials.Select(e => e.Name).ToArray()),
+            ("indirect buffer", live.IndirectBuffers.Select(e => e.Name).ToArray()),
         };
         var total = kinds.Sum(k => k.Names.Count);
         Console.Error.WriteLine(total == 0
-            ? "[teardown] the loop released everything it made"
+            ? "[teardown] the loop released everything it made (buffers, textures, programs, pipelines, surfaces, materials, indirect buffers)"
             : $"[teardown] left for the device to free: {string.Join(", ", kinds.Where(k => k.Names.Count > 0).Select(k => $"{k.Names.Count} {k.Kind}(s)"))}");
         foreach (var (kind, names) in kinds.Where(k => k.Names.Count > 0))
         {

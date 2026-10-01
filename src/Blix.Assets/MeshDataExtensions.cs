@@ -37,7 +37,10 @@ public static class MeshDataExtensions
 
     // Transform every vertex of a mesh, returning a new MeshData in the new space: positions through
     // the matrix, normals through its inverse-transpose (so a non-uniform scale does not tilt them), and
-    // the tangent, where the layout carries one (its first Float4 attribute), through the matrix.
+    // the tangent, where the layout carries one, through the matrix. Which bytes are which comes from
+    // VertexSemantics, not from guessing by format: a layout that is not one of Blix's own is refused, and
+    // so is a SKINNED one — its vertices are placed by its skin, and moving them in place would leave the
+    // inverse binds behind (and the first Float4 there is the bone indices, not a tangent).
     //
     // This is the operation that turns an imported asset into one a game can place: authors put a
     // model wherever the model was convenient, and a game wants it normalised once, at load, rather
@@ -55,28 +58,31 @@ public static class MeshDataExtensions
     {
         ArgumentNullException.ThrowIfNull(data);
         var stride = data.Layout.Stride;
-        if (stride < 24)
+        var semantics = VertexSemantics.Of(data.Layout) ?? throw new ArgumentException(
+            $"Mesh '{data.Name}' has a {stride}-byte vertex that is not one of Blix's layouts, so which bytes are its " +
+            "position, normal and tangent is not known; transform it where its layout is.", nameof(data));
+        if (semantics.Skinned)
         {
             throw new ArgumentException(
-                $"Mesh '{data.Name}' has a {stride}-byte vertex; transforming needs a position and a " +
-                "normal in the first 24 bytes.", nameof(data));
+                $"Mesh '{data.Name}' is skinned: its vertices are placed by its skin, and moving them in place would leave " +
+                "the inverse binds behind. Place the skin instead.", nameof(data));
         }
 
         Matrix4x4.Invert(transform, out var inverse);
         var normalMatrix = Matrix4x4.Transpose(inverse);
         var mirrors = transform.GetDeterminant() < 0f;
-        var tangentAt = data.Layout.Attributes.FirstOrDefault(a => a.Format == VertexAttributeFormat.Float4)?.Offset ?? -1;
+        var tangentAt = semantics.Tangent;
         var bytes = (byte[])data.VertexBytes.Clone();
         var min = new Vector3(float.MaxValue);
         var max = new Vector3(float.MinValue);
         for (var v = 0; v < data.VertexCount; v++)
         {
             var at = v * stride;
-            var position = Vector3.Transform(ReadVector3(bytes, at), transform);
-            var normal = Vector3.TransformNormal(ReadVector3(bytes, at + 12), normalMatrix);
+            var position = Vector3.Transform(ReadVector3(bytes, at + semantics.Position), transform);
+            var normal = Vector3.TransformNormal(ReadVector3(bytes, at + semantics.Normal), normalMatrix);
             if (normal.LengthSquared() > 1e-12f) normal = Vector3.Normalize(normal);
-            WriteVector3(bytes, at, position);
-            WriteVector3(bytes, at + 12, normal);
+            WriteVector3(bytes, at + semantics.Position, position);
+            WriteVector3(bytes, at + semantics.Normal, normal);
             min = Vector3.Min(min, position);
             max = Vector3.Max(max, position);
             if (tangentAt < 0) continue;

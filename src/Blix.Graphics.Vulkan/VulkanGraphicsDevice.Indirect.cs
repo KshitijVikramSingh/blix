@@ -30,6 +30,7 @@ public sealed partial class VulkanGraphicsDevice
     private sealed class VkIndirectBuffer
     {
         public VkBufferEntry[] PerSlot = System.Array.Empty<VkBufferEntry>();
+        public string Name = "indirect";
     }
 
     private readonly Dictionary<int, VkIndirectBuffer> indirectBufferTable = new();
@@ -50,7 +51,7 @@ public sealed partial class VulkanGraphicsDevice
                 new byte[bytes], BufferUsageFlags.IndirectBufferBit, $"{name ?? "indirect"}.slot{i}");
         }
         var id = nextResourceId++;
-        indirectBufferTable[id] = new VkIndirectBuffer { PerSlot = perSlot };
+        indirectBufferTable[id] = new VkIndirectBuffer { PerSlot = perSlot, Name = name ?? "indirect" };
         return new IndirectBufferHandle(id);
     }
 

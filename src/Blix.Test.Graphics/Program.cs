@@ -5662,6 +5662,54 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectThrows("BP.2 parts in different vertex layouts are refused, naming them",
         () => new[] { (a, Matrix4x4.Identity), (other, Matrix4x4.Identity) }.Merge("mixed"), mustMention: "layout");
 
+    // Which bytes are which comes from VertexSemantics, never from guessing by format: in the skinned
+    // layouts the first Float4 is the bone indices, and a guess would move them as a tangent.
+    var skinnedMesh = new MeshData("skinned", new byte[VertexPosition3NormalTextureSkin4Tangent.Layout.Stride], new ushort[] { 0, 0, 0 },
+        VertexPosition3NormalTextureSkin4Tangent.Layout, new Bounds3(Vector3.Zero, Vector3.Zero));
+    t.ExpectThrows("BP.2b a skinned mesh is refused by Transformed: its skin places it, and moving it leaves the inverse binds behind",
+        () => skinnedMesh.Transformed(Matrix4x4.CreateTranslation(1f, 0f, 0f)), mustMention: "skinned");
+    var unknownLayout = new VertexLayout(16, new[] { new VertexAttribute(0, VertexAttributeFormat.Float4, 0) });
+    var unknown = new MeshData("unknown", new byte[16], new ushort[] { 0, 0, 0 }, unknownLayout, new Bounds3(Vector3.Zero, Vector3.Zero));
+    t.ExpectThrows("BP.2b a layout that is not one of Blix's is refused rather than guessed at",
+        () => unknown.Transformed(Matrix4x4.Identity), mustMention: "not one of Blix's layouts");
+
+    // A tangent layout: the tangent turns with the mesh, and under a mirror its w flips and the winding reverses.
+    var tangentLayout = VertexPosition3NormalTangentTexture.Layout;
+    var tangentBytes = new byte[3 * tangentLayout.Stride];
+    for (var v = 0; v < 3; v++)
+    {
+        var o = v * tangentLayout.Stride;
+        foreach (var (at, value) in new[] { (12, 0f), (16, 0f), (20, 1f), (24, 1f), (28, 0f), (32, 0f), (36, 1f) })
+            BitConverter.TryWriteBytes(tangentBytes.AsSpan(o + at, 4), value);
+        BitConverter.TryWriteBytes(tangentBytes.AsSpan(o + 0, 4), (float)v);
+    }
+
+    var tangentMesh = new MeshData("tangent", tangentBytes, new ushort[] { 0, 1, 2 }, tangentLayout, new Bounds3(Vector3.Zero, Vector3.One));
+    var turned = tangentMesh.Transformed(Matrix4x4.CreateRotationZ(MathF.PI / 2f));
+    var mirrored = tangentMesh.Transformed(Matrix4x4.CreateScale(-1f, 1f, 1f));
+    t.Expect("BP.2b the tangent turns with the mesh: +X rotated a quarter about Z is +Y",
+        MathF.Abs(BitConverter.ToSingle(turned.VertexBytes, 24)) < 1e-5f && MathF.Abs(BitConverter.ToSingle(turned.VertexBytes, 28) - 1f) < 1e-5f
+        && BitConverter.ToSingle(turned.VertexBytes, 36) == 1f);
+    t.Expect("BP.2b under a mirror the tangent's w flips and the winding reverses",
+        BitConverter.ToSingle(mirrored.VertexBytes, 36) == -1f && mirrored.Indices.SequenceEqual(new ushort[] { 0, 2, 1 }),
+        $"w {BitConverter.ToSingle(mirrored.VertexBytes, 36)}, indices {string.Join(",", mirrored.Indices)}");
+
+    // The table against each layout's own declaration: position Float3, normal Float3, uv Float2, tangent Float4.
+    var tableAgrees = new[]
+    {
+        VertexPosition3NormalTexture.Layout, VertexPosition3NormalTextureColor.Layout, VertexPosition3NormalTexture2Color.Layout,
+        VertexPosition3NormalTangentTexture.Layout, VertexPosition3NormalTangentTexture2Color.Layout,
+        VertexPosition3NormalTextureSkin4Tangent.Layout, VertexPosition3NormalTextureSkin4Tangent2Color.Layout,
+    }.All(layout =>
+    {
+        var sem = VertexSemantics.Of(layout);
+        bool Has(int offset, VertexAttributeFormat format) => offset < 0 || layout.Attributes.Any(x => x.Offset == offset && x.Format == format);
+        return sem is not null && Has(sem.Position, VertexAttributeFormat.Float3) && Has(sem.Normal, VertexAttributeFormat.Float3)
+            && Has(sem.Uv0, VertexAttributeFormat.Float2) && Has(sem.Uv1, VertexAttributeFormat.Float2) && Has(sem.Tangent, VertexAttributeFormat.Float4)
+            && sem.Skinned == layout.Attributes.Count(x => x.Format == VertexAttributeFormat.Float4) >= 3;
+    });
+    t.Expect("BP.2b VertexSemantics names each of Blix's seven layouts' attributes where the layout declares them", tableAgrees);
+
     // A parent translated by +10 on X with a child translated by +1: the child's world is +11, child first.
     static PbrMaterial Plain(string id, string name) => new(
         id, name, Vector4.One, null, 0, null, 0, 1f, null, 0, 0f, 0.7f, null, 0, 1f, null, 0, Vector3.Zero, 1f,

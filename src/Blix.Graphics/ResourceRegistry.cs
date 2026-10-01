@@ -66,6 +66,12 @@ public sealed record RenderSurfaceEntry(
     IReadOnlyList<TextureHandle> ColorAttachments,
     TextureHandle? DepthTexture);
 
+/// <summary>A material (descriptor-set bindings) the device holds.</summary>
+public sealed record MaterialEntry(MaterialHandle Handle, string Name);
+
+/// <summary>An indirect draw buffer (every ring slot of it) the device holds.</summary>
+public sealed record IndirectBufferEntry(IndirectBufferHandle Handle, string Name);
+
 public sealed class ResourceRegistrySnapshot
 {
     private readonly Dictionary<int, VertexBufferEntry> vertexBuffers;
@@ -81,8 +87,12 @@ public sealed class ResourceRegistrySnapshot
         IReadOnlyList<TextureEntry> textureEntries,
         IReadOnlyList<ShaderProgramEntry> shaderProgramEntries,
         IReadOnlyList<PipelineEntry> pipelineEntries,
-        IReadOnlyList<RenderSurfaceEntry> renderSurfaceEntries)
+        IReadOnlyList<RenderSurfaceEntry> renderSurfaceEntries,
+        IReadOnlyList<MaterialEntry>? materialEntries = null,
+        IReadOnlyList<IndirectBufferEntry>? indirectBufferEntries = null)
     {
+        Materials = materialEntries ?? Array.Empty<MaterialEntry>();
+        IndirectBuffers = indirectBufferEntries ?? Array.Empty<IndirectBufferEntry>();
         VertexBuffers = vertexBufferEntries;
         IndexBuffers = indexBufferEntries;
         Textures = textureEntries;
@@ -97,6 +107,12 @@ public sealed class ResourceRegistrySnapshot
         pipelines = pipelineEntries.ToDictionary(entry => entry.Handle.Id);
         renderSurfaces = renderSurfaceEntries.ToDictionary(entry => entry.Handle.Id);
     }
+
+    /// <summary>Every material the device holds; empty from a backend that does not say.</summary>
+    public IReadOnlyList<MaterialEntry> Materials { get; }
+
+    /// <summary>Every indirect buffer the device holds; empty from a backend that does not say.</summary>
+    public IReadOnlyList<IndirectBufferEntry> IndirectBuffers { get; }
 
     public IReadOnlyList<VertexBufferEntry> VertexBuffers { get; }
     public IReadOnlyList<IndexBufferEntry> IndexBuffers { get; }
