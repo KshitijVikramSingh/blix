@@ -1,3 +1,4 @@
+using Blix.Core;
 using Blix.Diagnostics;
 
 namespace Blix.Demos.VulkanLit.Debug;
@@ -19,8 +20,8 @@ internal sealed class LightControls : IDebuggable
 
     public void Debug(DebugContext debug)
     {
-        loop.SpotEnabled = debug.Controls.Toggle("Spot [X]", loop.SpotEnabled);
-        loop.PointEnabled = debug.Controls.Toggle("Point [C]", loop.PointEnabled);
+        loop.SpotEnabled = debug.Controls.Toggle("Spot", loop.SpotEnabled, Key.X);
+        loop.PointEnabled = debug.Controls.Toggle("Point", loop.PointEnabled, Key.C);
 
         debug.Values.Value("spot0-pos", LitLoop.Spot0Position);
         debug.Values.Value("spot1-pos", LitLoop.Spot1Position);

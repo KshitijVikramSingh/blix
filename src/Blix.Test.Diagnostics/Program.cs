@@ -1275,6 +1275,50 @@ var t = new TestRunner();
     t.ExpectTrue("Empty path is visible", state.IsPathVisible(string.Empty));
 }
 
+// -- Layers reach the screen: ShouldDraw is what the line pass asks ---------
+// The Layers tab wrote LayersEnabled and nothing that drew read it, so every switch in it was
+// connected to nothing. These are the answers the line pass now takes per command.
+{
+    var state = new DebugState();
+    var box = new DebugDrawAabb("physics/aabb/box-3", new GraphicsColor(0, 1, 0, 1), default, -Vector3.One, Vector3.One);
+    var pick = new DebugDrawAabb(DebugSystem.SelectionScope + "/bounds", new GraphicsColor(1, 0, 1, 1), default, -Vector3.One, Vector3.One);
+    t.ExpectTrue("A primitive under no switch is drawn", state.ShouldDraw(box));
+    state.LayersEnabled["physics/aabb"] = false;
+    t.ExpectTrue("Unticking its layer stops it being drawn", !state.ShouldDraw(box));
+    t.ExpectTrue("But not the selection highlight, which answers a click", state.ShouldDraw(pick));
+    state.LayersEnabled[DebugSystem.SelectionScope] = false;
+    t.ExpectTrue("Even when its own layer is unticked", state.ShouldDraw(pick));
+    state.LayersEnabled.Clear();
+    state.ShowDebugDraw = false;
+    t.ExpectTrue("The master switch stops everything, the highlight included",
+        !state.ShouldDraw(box) && !state.ShouldDraw(pick));
+    t.ExpectTrue("The overlay starts hidden until a host is told to show it", !new DebugState().ShowOverlay);
+}
+
+// -- Draw.Layer: a layer declared once, hidden by default if asked -----------
+// What replaces the "Show …" toggle an application added for each gizmo it did not want on by default.
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+    bool Declare(bool visible)
+    {
+        var wanted = false;
+        sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
+        sys.Run(new TestDebuggable("scene", debug => wanted = debug.Draw.Layer("lod", visible)));
+        sys.EndFrame();
+        return wanted;
+    }
+
+    t.ExpectTrue("A layer declared hidden is not wanted", !Declare(visible: false));
+    t.ExpectTrue("And is known before it has drawn anything, so the Layers tab can list it",
+        sys.State.LayersEnabled.TryGetValue("scene/lod", out var known) && !known);
+    t.ExpectTrue("Its default is read once: declaring it visible later does not overrule the viewer",
+        !Declare(visible: true));
+    sys.State.LayersEnabled["scene/lod"] = true;
+    t.ExpectTrue("Ticking it in the Layers tab makes it wanted", Declare(visible: false));
+    sys.State.ShowDebugDraw = false;
+    t.ExpectTrue("And the master switch still wins", !Declare(visible: true));
+}
+
 // -- JsonDumpSink: polymorphic draw commands serialise with discriminator ---
 {
     var sys = new DebugSystem(historyCapacity: 4);
@@ -1452,10 +1496,15 @@ var t = new TestRunner();
     t.ExpectTrue("Initially no selection",
         sys.SelectedPath is null && sys.SelectedBounds is null);
 
-    sys.Select("scene/foo/sub-3", new Bounds3(new Vector3(-1), new Vector3(1)));
+    var mover = new MovableSelectable("scene/foo/sub-3", new Bounds3(new Vector3(-1), new Vector3(1)));
+    sys.Register(mover);
+    sys.Select("scene/foo/sub-3");
     t.ExpectTrue("Select sets path", sys.SelectedPath == "scene/foo/sub-3");
-    t.ExpectTrue("Select caches bounds",
+    t.ExpectTrue("Its bounds are the source's",
         sys.SelectedBounds is { } b && b.Min == new Vector3(-1) && b.Max == new Vector3(1));
+    // The highlight used to be a copy taken at the click, and stayed where a moving thing had been.
+    mover.Bounds = new Bounds3(new Vector3(4), new Vector3(5));
+    t.ExpectTrue("And follow it when it moves", sys.SelectedBounds is { } moved && moved.Min == new Vector3(4));
 
     // Survives across frames.
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
@@ -1475,10 +1524,10 @@ var t = new TestRunner();
 {
     var sys = new DebugSystem(historyCapacity: 4);
     var producerA = new TestSelectable("A",
-        new DebugSelectable("a/1", new Bounds3(new Vector3(0), new Vector3(1))),
-        new DebugSelectable("a/2", new Bounds3(new Vector3(2), new Vector3(3))));
+        new DebugSelectable("a/1", new Bounds3(new Vector3(0), new Vector3(1)), TestGeometry.None),
+        new DebugSelectable("a/2", new Bounds3(new Vector3(2), new Vector3(3)), TestGeometry.None));
     var producerB = new TestSelectable("B",
-        new DebugSelectable("b/1", new Bounds3(new Vector3(10), new Vector3(11))));
+        new DebugSelectable("b/1", new Bounds3(new Vector3(10), new Vector3(11)), TestGeometry.None));
     sys.Register(producerA);
     sys.Register(producerB);
 
@@ -1511,7 +1560,9 @@ var t = new TestRunner();
         !sys.LatestFrame!.DrawCommands.Any(c => c.Path.StartsWith("selection/")));
 
     // With selection: inspect fires + highlight aabb appears.
-    sys.Select("scene/foo/sub-0", new Bounds3(new Vector3(-1), new Vector3(1)));
+    sys.Register(new TestSelectable("scene",
+        new DebugSelectable("scene/foo/sub-0", new Bounds3(new Vector3(-1), new Vector3(1)), TestGeometry.None)));
+    sys.Select("scene/foo/sub-0");
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
     // The highlight is drawn into whatever views the frame declared, so the frame needs one. A frame with
     // no views drew no picture, and there is nothing for system feedback to annotate.
@@ -1537,7 +1588,7 @@ var t = new TestRunner();
         ctx.Values.Value("material", "Marble");
         ctx.Values.Value("submesh-index", 0);
     }));
-    sys.Select("scene/foo/sub-0", new Bounds3(new Vector3(-1), new Vector3(1)));
+    sys.Select("scene/foo/sub-0");
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
     sys.Run();
     sys.EndFrame();
@@ -1557,7 +1608,8 @@ var t = new TestRunner();
 // filter check (tested via integration, not here).
 {
     var sys = new DebugSystem(historyCapacity: 4);
-    sys.Select("scene/foo", new Bounds3(new Vector3(0), new Vector3(1)));
+    sys.Register(new TestSelectable("scene", new DebugSelectable("scene/foo", new Bounds3(new Vector3(0), new Vector3(1)), TestGeometry.None)));
+    sys.Select("scene/foo");
     sys.State.LayersEnabled["selection"] = false;
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
     using (sys.Current!.Draw.In("main", Matrix4x4.Identity))
@@ -1577,14 +1629,14 @@ var t = new TestRunner();
 // -- Snapshot captures SelectedPath -----------------------------------------
 {
     var sys = new DebugSystem(historyCapacity: 4);
-    sys.Select("entity-1", new Bounds3(Vector3.Zero, Vector3.One));
+    sys.Select("entity-1");
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
     sys.EndFrame();
     var frame1 = sys.LatestFrame!;
     t.ExpectTrue("DebugFrame.SelectedPath captured", frame1.SelectedPath == "entity-1");
 
     // Changing selection after snapshot doesn't mutate the snapshot.
-    sys.Select("entity-2", new Bounds3(Vector3.Zero, Vector3.One));
+    sys.Select("entity-2");
     t.ExpectTrue("Previous frame's SelectedPath unchanged",
         frame1.SelectedPath == "entity-1");
 }
@@ -1595,7 +1647,7 @@ var t = new TestRunner();
     var tempDir = Path.Combine(Path.GetTempPath(), $"blix-sel-dump-{Guid.NewGuid():N}");
     var sink = new JsonDumpSink(tempDir);
 
-    sys.Select("scene/main/submesh-7", new Bounds3(Vector3.Zero, Vector3.One));
+    sys.Select("scene/main/submesh-7");
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
     sys.EndFrame();
 
@@ -1613,14 +1665,14 @@ var t = new TestRunner();
 // Select() is called mid-frame.
 {
     var sys = new DebugSystem(historyCapacity: 4);
-    sys.Select("entity-1", new Bounds3(Vector3.Zero, Vector3.One));
+    sys.Select("entity-1");
 
     sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
     t.ExpectTrue("ctx.SelectedPath captured at BeginFrame",
         sys.Current!.SelectedPath == "entity-1");
 
     // Mid-frame Select should NOT affect ctx.SelectedPath this tick.
-    sys.Select("entity-2", new Bounds3(Vector3.Zero, Vector3.One));
+    sys.Select("entity-2");
     t.ExpectTrue("ctx.SelectedPath stable across mid-frame Select",
         sys.Current!.SelectedPath == "entity-1");
     sys.EndFrame();
@@ -1630,6 +1682,201 @@ var t = new TestRunner();
     t.ExpectTrue("Next frame's ctx.SelectedPath has new value",
         sys.Current!.SelectedPath == "entity-2");
     sys.EndFrame();
+}
+
+// -- Picking: a request the host answers from one rendered pixel --------------
+// The pick pass draws every selectable's geometry into the pixel under the cursor; what the core owns is
+// the request, the answer, and clicking again to step behind a hit. The pixel maths is ViewPicking's.
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+    t.ExpectTrue("Nothing waits before a click", !sys.TryTakePickRequest(out _));
+
+    sys.RequestPick(new Vector2(100, 100));
+    t.ExpectTrue("A click leaves a request for the host, with nothing left out",
+        sys.TryTakePickRequest(out var first) && first.Pointer == new Vector2(100, 100) && first.Excluded.Count == 0);
+    t.ExpectTrue("Which the host takes once", !sys.TryTakePickRequest(out _));
+
+    sys.CompletePick(new DebugPick("main", new Vector2(100, 100), new Vector2(200, 200), Drawn: 5, Excluded: 0, Hit: "tree"));
+    t.ExpectTrue("An answer with a hit selects it", sys.SelectedPath == "tree" && sys.LastPick?.Hit == "tree");
+
+    sys.RequestPick(new Vector2(101, 100));
+    sys.TryTakePickRequest(out var again);
+    t.ExpectTrue("Clicking the same spot again leaves the hit out, to reach what is behind it",
+        again!.Excluded.SequenceEqual(new[] { "tree" }));
+    sys.CompletePick(new DebugPick("main", new Vector2(101, 100), new Vector2(202, 200), 4, 1, "wall"));
+    sys.RequestPick(new Vector2(100, 101));
+    sys.TryTakePickRequest(out var third);
+    t.ExpectTrue("And again leaves both out", third!.Excluded.OrderBy(x => x).SequenceEqual(new[] { "tree", "wall" }));
+
+    sys.CompletePick(new DebugPick("main", new Vector2(100, 101), new Vector2(200, 202), 3, 2, Hit: null));
+    t.ExpectTrue("A miss clears the selection", sys.SelectedPath is null);
+    sys.RequestPick(new Vector2(100, 100));
+    sys.TryTakePickRequest(out var fresh);
+    t.ExpectTrue("And the next click starts over", fresh!.Excluded.Count == 0);
+
+    sys.CompletePick(new DebugPick("main", new Vector2(100, 100), new Vector2(200, 200), 5, 0, "tree"));
+    sys.RequestPick(new Vector2(400, 300));
+    sys.TryTakePickRequest(out var elsewhere);
+    t.ExpectTrue("A click somewhere else starts over too", elsewhere!.Excluded.Count == 0);
+}
+
+// -- ViewPicking: the pixel under a pointer, and the crop that renders only it -
+// The view is Retina-shaped (logical 640x360 over a 1280x720 target), the case the logical/physical split
+// exists for: the logical centre is physical pixel (640, 360).
+{
+    var viewProj = Matrix4x4.CreateLookAt(Vector3.Zero, -Vector3.UnitZ, Vector3.UnitY)
+                   * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3f, 16f / 9f, 0.1f, 100f);
+    var table = new ViewTable();
+    var view = table.Declare("main", viewProj, RenderSurfaceHandle.Default, new Rect(0, 0, 640, 360), new Rect(0, 0, 1280, 720));
+    t.ExpectTrue("The logical centre is the physical centre pixel on a Retina view",
+        Blix.ViewPicking.PixelAt(view, new Vector2(320, 180)) == new Vector2(640, 360));
+    t.ExpectTrue("A pointer outside the view has no pixel", Blix.ViewPicking.PixelAt(view, new Vector2(700, 10)) is null);
+
+    // Whatever lands on the chosen pixel's centre must land on the 1x1 target's centre, NDC (0, 0), and a
+    // point one pixel over must leave it: that is the whole claim of the crop.
+    Vector2 Ndc(Vector3 world, Matrix4x4 m)
+    {
+        var c = Vector4.Transform(new Vector4(world, 1f), m);
+        return new Vector2(c.X / c.W, c.Y / c.W);
+    }
+    Vector3 ThroughPixel(float px, float py)
+    {
+        var inverse = Matrix4x4.Invert(viewProj, out var inv) ? inv : Matrix4x4.Identity;
+        var ndc = new Vector4(2f * (px + 0.5f) / 1280f - 1f, 2f * (py + 0.5f) / 720f - 1f, 0.5f, 1f);
+        var w = Vector4.Transform(ndc, inverse);
+        return new Vector3(w.X, w.Y, w.Z) / w.W;
+    }
+    var pixel = new Vector2(900, 200);
+    var cropped = viewProj * Blix.ViewPicking.PixelCrop(view, pixel);
+    var centre = Ndc(ThroughPixel(900, 200), cropped);
+    t.ExpectTrue("The crop puts the chosen pixel's centre at the 1x1 target's centre",
+        MathF.Abs(centre.X) < 1e-3f && MathF.Abs(centre.Y) < 1e-3f, centre.ToString());
+    var neighbour = Ndc(ThroughPixel(901, 200), cropped);
+    t.ExpectTrue("And the next pixel over falls outside the target", MathF.Abs(neighbour.X) > 1f, neighbour.ToString());
+}
+
+// -- Selection edits are declared under the selection ------------------------
+// The overlay puts anything under the selection scope on the Selection tab, grouped by the scope an
+// inspector declared it in, and keeps it off the Controls tab. What that needs from the core is that an
+// inspector's controls land there, sub-scope and all.
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+    sys.Register(new TestInspectable("scene/foo", (path, ctx) =>
+    {
+        using (ctx.Scope("LOD")) ctx.Controls.Float("margin", 1f, 0f, 8f);
+    }));
+    sys.Select("scene/foo/sub-0");
+    sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
+    sys.Run();
+    var margin = sys.Current!.ControlEntries.Single(c => c.Name == "margin");
+    sys.EndFrame();
+    t.ExpectTrue("An inspector's control is scoped under the selection, by the group it chose",
+        margin.Scope == DebugSystem.SelectionScope + "/LOD", margin.Scope);
+
+    // An edit on the Selection tab is the selected thing's. The control's path is the same whatever is
+    // selected, so an edit left standing was handed to every primitive selected after it.
+    sys.SetControlValue(margin.Path, 3f);
+    sys.Select("scene/foo/sub-1");
+    var carried = 0f;
+    sys.Register(new TestInspectable("scene/foo", (path, ctx) =>
+    {
+        using (ctx.Scope("LOD")) carried = ctx.Controls.Float("margin", 1f, 0f, 8f);
+    }));
+    sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
+    sys.Run();
+    sys.EndFrame();
+    t.ExpectTrue("And an edit made on one selection is not carried to the next", carried == 1f, carried.ToString());
+}
+
+// -- Keys: bound on controls, driven by the engine ---------------------------
+// Five applications kept private lists of Pressed checks. A key bound to a control does what clicking it
+// would, through the same pending slot, so the panel and the key never disagree.
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+    sys.DeclareHostKey("F12", "dump this frame");
+    var input = new InputState();
+    bool sun = true; int view = 0; bool fired = false; bool layerWanted = true;
+    void Frame(Key? press = null, Action<DebugContext>? extra = null)
+    {
+        if (press is { } k) input.RecordKeyDown(k);
+        input.BeginTick();
+        if (press is { } released) input.RecordKeyUp(released);
+        sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1), input: input);
+        sys.Run(new TestDebuggable("lit", debug =>
+        {
+            sun = debug.Controls.Toggle("Sun", sun, Key.Z);
+            view = debug.Controls.Enum("View", view, new[] { "lit", "albedo", "normals" }, Key.V);
+            fired = debug.Controls.Button("Respawn", Key.R);
+            layerWanted = debug.Draw.Layer("grid", key: Key.G);
+            debug.Keys.Describe(Key.T, "slope tint");
+            extra?.Invoke(debug);
+        }));
+        sys.EndFrame();
+    }
+
+    Frame();
+    t.ExpectTrue("Unpressed, a bound control keeps its value", sun && view == 0 && !fired && layerWanted);
+    Frame(Key.Z);
+    t.ExpectTrue("Pressing its key flips a toggle", !sun);
+    Frame();
+    t.ExpectTrue("And it stays flipped, as a click would leave it", !sun);
+    Frame(Key.V); Frame(Key.V); Frame(Key.V);
+    t.ExpectTrue("An enum's key steps through the options and wraps", view == 0);
+    Frame(Key.R);
+    t.ExpectTrue("A button's key presses it for that frame", fired);
+    Frame();
+    t.ExpectTrue("And only that frame", !fired);
+    Frame(Key.G);
+    t.ExpectTrue("A layer's key switches the layer", !layerWanted && sys.State.LayersEnabled["lit/grid"] == false);
+
+    var keys = sys.LatestFrame!.Keys;
+    t.ExpectTrue("The key list leads with the host's keys",
+        keys[0] is { Binding: "F12", Source: DebugKeySource.Host });
+    t.ExpectTrue("Then the controls' keys, which the engine drives",
+        keys.Any(k => k is { Binding: "Z", Description: "Sun", Path: "lit/Sun", Source: DebugKeySource.Control }));
+    t.ExpectTrue("And the keys the application only describes, marked as its claim",
+        keys.Any(k => k is { Binding: "T", Description: "slope tint", Source: DebugKeySource.Declared }));
+    t.ExpectTrue("A control carries its key, for the label beside it",
+        sys.LatestFrame.Controls.Single(c => c.Name == "Sun").Key == Key.Z);
+
+    // Two claims on one key: an error naming both, once, not every frame.
+    var claims = 0;
+    for (var i = 0; i < 2; i++)
+    {
+        Frame(extra: d => d.Keys.Describe(Key.Z, "zoom"));
+        claims += sys.LatestFrame!.Events.Count(e => e.Message.Contains("'Z' is claimed twice"));
+    }
+    t.ExpectTrue("A key claimed twice is an error naming both, reported once", claims == 1, $"{claims} reports");
+
+    // The host's keys still fire, so both things would happen: refused outright.
+    sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1), input: input);
+    t.ExpectThrows("A host key cannot be bound by anything else",
+        () => sys.Current!.Controls.Toggle("Dump", false, Key.F12), mustMention: "host");
+    t.ExpectThrows("Nor described as the application's",
+        () => sys.Current!.Keys.Describe(Key.F12, "save"), mustMention: "host");
+    sys.EndFrame();
+
+    // A frozen panel moves nothing, and a key is the panel's hand.
+    sys.Freeze();
+    Frame(Key.Z);
+    t.ExpectTrue("While frozen, a bound key does nothing", !sun);
+    sys.Unfreeze();
+}
+
+// -- [Tune(Key = ...)]: a declared key on a declared control -----------------
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+    var keyed = new KeyedTunables();
+    var tunables = new ObjectTunables(keyed);
+    var input = new InputState();
+    input.RecordKeyDown(Key.B);
+    input.BeginTick();
+    sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1), input: input);
+    sys.Run(new TestDebuggable("fx", debug => tunables.BuildControls(debug)));
+    sys.EndFrame();
+    t.ExpectTrue("A [Tune(Key)] bool is flipped by its key", keyed.Bloom);
+    t.ExpectThrows("And a key on a number is refused, where it has no one meaning",
+        () => new ObjectTunables(new BadKeyedTunables()), mustMention: "Key");
 }
 
 // -- WallClockMs monotonic ---------------------------------------------------
@@ -1662,6 +1909,19 @@ static void Spin(double targetMs)
 }
 
 // ---------------------------------------------------------------------------
+
+// Deviceless tests never draw, so a selectable's geometry is only something to carry.
+static class TestGeometry
+{
+    public static readonly DebugPickGeometry None = default;
+}
+
+sealed class MovableSelectable(string path, Bounds3 bounds) : IDebugSelectable
+{
+    public Bounds3 Bounds { get; set; } = bounds;
+    public string DebugName => "movable";
+    public void CollectSelectables(List<DebugSelectable> destination) => destination.Add(new DebugSelectable(path, Bounds, TestGeometry.None));
+}
 
 sealed class TestSelectable : IDebugSelectable
 {
@@ -1745,6 +2005,16 @@ sealed class FlagFixture : ITunable
     public readonly List<TunableChange> Heard = new();
 
     public void OnChanged(TunableChange change) => Heard.Add(change);
+}
+
+sealed class KeyedTunables
+{
+    [Tune(Key = Key.B)] public bool Bloom = false;
+}
+
+sealed class BadKeyedTunables
+{
+    [Tune(0f, 1f, Key = Key.E)] public float Exposure = 0.5f;
 }
 
 sealed class TestDebuggable : IDebuggable

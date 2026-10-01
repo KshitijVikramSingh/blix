@@ -1,3 +1,4 @@
+using Blix.Core;
 using Blix.Diagnostics;
 
 namespace Blix.Demos.VulkanLit.Debug;
@@ -19,7 +20,7 @@ internal sealed class ToneMapControls : IDebuggable
     public void Debug(DebugContext debug)
     {
         loop.Exposure = debug.Controls.Float("Exposure [Up/Dn]", loop.Exposure, 0.001f, 4.0f);
-        loop.BloomEnabled = debug.Controls.Toggle("Bloom [B]", loop.BloomEnabled);
+        loop.BloomEnabled = debug.Controls.Toggle("Bloom", loop.BloomEnabled, Key.B);
         loop.BloomIntensity = debug.Controls.Float("Bloom intensity", loop.BloomIntensity, 0.0f, 2.0f);
     }
 }

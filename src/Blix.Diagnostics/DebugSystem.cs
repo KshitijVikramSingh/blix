@@ -99,12 +99,39 @@ public sealed class DebugSystem
 
     public bool IsFrozen => FrozenFrame is not null;
 
-    public DebugContext BeginFrame(RenderFrameContext frame)
+    /// <summary>Starts a frame.</summary>
+    /// <param name="frame">The framebuffer, in physical pixels.</param>
+    /// <param name="logicalSize">
+    /// The window in the pointer's coordinates, which only the host knows. Without it a view declared by
+    /// the shorthand <see cref="DebugDrawChannel.Declare(string, System.Numerics.Matrix4x4)"/> takes the
+    /// framebuffer for both rectangles, and a click through it on a Retina display lands at twice the
+    /// distance from the corner that it should.
+    /// </param>
+    /// <param name="input">This tick's input, which drives controls bound to a key. Ignored while frozen.</param>
+    public DebugContext BeginFrame(
+        RenderFrameContext frame, (int Width, int Height)? logicalSize = null, IInputState? input = null)
     {
         frameCounter++;
         frameStartTicks = Stopwatch.GetTimestamp();
-        Current = new DebugContext(State, frame, pendingControlValues, frameCounter, clock, SelectedPath);
+        Current = new DebugContext(
+            State, frame, logicalSize ?? (frame.Width, frame.Height), pendingControlValues, frameCounter, clock,
+            SelectedPath, IsFrozen ? null : input, hostKeys, reportedKeyConflicts);
         return Current;
+    }
+
+    // === Keys ===============================================================
+
+    private readonly List<DebugKeyEntry> hostKeys = new();
+    private readonly HashSet<string> reportedKeyConflicts = new(StringComparer.Ordinal);
+
+    /// <summary>The host's own keys, which lead the key list and which nothing else may bind.</summary>
+    public IReadOnlyList<DebugKeyEntry> HostKeys => hostKeys;
+
+    /// <summary>Called by the host, once, for each key or gesture it answers to itself.</summary>
+    public void DeclareHostKey(string binding, string what)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(binding);
+        hostKeys.Add(new DebugKeyEntry(binding, what, $"host/{binding}", DebugKeySource.Host));
     }
 
     public void AddSink(IDebugFrameSink sink)
@@ -146,40 +173,91 @@ public sealed class DebugSystem
 
     public IReadOnlyList<IDebugContributor> Contributors => contributors;
 
+    // === Frame timing =======================================================
+
+    /// <summary>How the host's frames went: the device's own record, which the Perf tab reads.</summary>
+    /// <remarks>
+    /// <b>The overlay used to show a weaker copy of this.</b> One <c>execute</c> timer where the record
+    /// splits wait, encode and submit; what the application recorded where the record says what reached
+    /// the device; and a single frame's GPU time per pass where the record keeps totals a window can be
+    /// taken from. Sponza read the record itself to get the real figures. Display only: nothing here
+    /// feeds a dump, which is the measurement design's question.
+    /// </remarks>
+    public IFrameTiming Timing { get; private set; } = FrameTimings.None;
+
+    /// <summary>Each pass's GPU time over the last second or so, sampled at every EndFrame.</summary>
+    public GpuPassWindow GpuPasses { get; private set; } = new(FrameTimings.None);
+
+    /// <summary>Called by the host once it has a device.</summary>
+    public void UseFrameTiming(IFrameTiming timing)
+    {
+        ArgumentNullException.ThrowIfNull(timing);
+        Timing = timing;
+        GpuPasses = new GpuPassWindow(timing);
+    }
+
     // === Selection ==========================================================
 
-    // Stable identity of the currently-selected entity, null if no
-    // selection. Persists across frames; survives Freeze.
+    /// <summary>What is selected, which the inspector shows. Null if nothing.</summary>
+    /// <remarks>
+    /// One thing at a time. Persists across frames and survives Freeze. Sponza kept a multi-selection
+    /// of its own beside this; it was dropped rather than promoted, since nothing else wanted one.
+    /// </remarks>
     public string? SelectedPath { get; private set; }
 
-    // World-space AABB of the selected entity at the moment Select was
-    // called. Cached so the runtime can auto-emit a highlight outline
-    // without re-walking selectables every frame. Accepts staleness if
-    // the entity moves between selections (re-pick refreshes). For
-    // dynamic scenes this can be lifted later by re-collecting per
-    // frame; for static scenes (Sponza submeshes) it's free fidelity.
-    public Bounds3? SelectedBounds { get; private set; }
+    /// <summary>The selection's bounds as its source reports them now, or null.</summary>
+    /// <remarks>
+    /// Asked, not remembered: this was a copy taken at the click, so a highlight stayed where a moving
+    /// thing had been.
+    /// </remarks>
+    public Bounds3? SelectedBounds => SelectedPath is { } path && TryGetBounds(path, out var b) ? b : null;
 
-    public void Select(string entityPath, Bounds3 bounds)
+    public void Select(string entityPath)
     {
         ArgumentException.ThrowIfNullOrEmpty(entityPath);
+        if (entityPath != SelectedPath) ForgetSelectionEdits();
         SelectedPath = entityPath;
-        SelectedBounds = bounds;
     }
 
     public void ClearSelection()
     {
+        if (SelectedPath is not null) ForgetSelectionEdits();
         SelectedPath = null;
-        SelectedBounds = null;
+    }
+
+    // <b>An edit on the Selection tab belongs to the thing that was selected.</b> Its control has one path
+    // whatever is selected ("selection/LOD/margin"), and a panel edit is held until something overwrites it,
+    // so without this the value dragged on one primitive was handed to every primitive selected after it.
+    private void ForgetSelectionEdits()
+    {
+        foreach (var path in pendingControlValues.Keys.ToArray())
+        {
+            if (path == SelectionScope || path.StartsWith(SelectionScope + "/", StringComparison.Ordinal))
+            {
+                pendingControlValues.Remove(path);
+            }
+        }
+    }
+
+    /// <summary>The current bounds of any selectable entity, asked of whichever source owns it.</summary>
+    public bool TryGetBounds(string entityPath, out Bounds3 bounds)
+    {
+        for (var i = 0; i < contributors.Count; i++)
+        {
+            if (contributors[i] is IDebugSelectable selectable && selectable.TryGetBounds(entityPath, out bounds))
+            {
+                return true;
+            }
+        }
+
+        bounds = default;
+        return false;
     }
 
     // Walks every registered IDebugSelectable and collects their
     // pickable entries into the shared scratch list. The list is
     // returned by ref-friendly IReadOnlyList; calling again clobbers
     // the previous result, so callers must consume immediately.
-    //
-    // Demo flow: build a screen-ray, call CollectSelectables, raycast
-    // against bounds, call Select on the closest hit.
     public IReadOnlyList<DebugSelectable> CollectSelectables()
     {
         selectableScratch.Clear();
@@ -191,6 +269,65 @@ public sealed class DebugSystem
             }
         }
         return selectableScratch;
+    }
+
+    // === Picking ============================================================
+    //
+    // A click in pick mode asks what is under the cursor, and the host answers by drawing every
+    // selectable's geometry into one pixel (DebugPickGeometry): the answer is exact, and nothing here
+    // looks at a box. The host takes the request after the frame's views are declared, draws, reads
+    // the pixel back, and completes it.
+
+    /// <summary>A pick waiting for the host: where the click was, and what to leave out.</summary>
+    /// <param name="Pointer">In the window's logical coordinates.</param>
+    /// <param name="Excluded">Earlier hits at this spot. Leaving them out is how clicking again steps behind them.</param>
+    public sealed record PickRequest(System.Numerics.Vector2 Pointer, IReadOnlyCollection<string> Excluded);
+
+    // A click this close to the last one, in logical pixels, is "the same spot": it steps behind the hit.
+    private const float SameSpotPixels = 3f;
+    private PickRequest? pendingPick;
+    private System.Numerics.Vector2? lastPickPointer;
+    private readonly HashSet<string> excludedHere = new(StringComparer.Ordinal);
+
+    /// <summary>The last completed pick, whole: view, pixel, how much was drawn, and the hit. In dumps.</summary>
+    public DebugPick? LastPick { get; private set; }
+
+    /// <summary>Asks what is under <paramref name="pointer"/>; the host answers during the next frame.</summary>
+    /// <remarks>
+    /// Clicking again at the same spot while its hit is still selected leaves that hit out, so a second
+    /// click on the tree reaches what is behind it. A miss, or a click anywhere else, starts over.
+    /// </remarks>
+    public void RequestPick(System.Numerics.Vector2 pointer)
+    {
+        var again = SelectedPath is { } hit && lastPickPointer is { } last
+                    && System.Numerics.Vector2.Distance(last, pointer) <= SameSpotPixels;
+        if (again) excludedHere.Add(SelectedPath!);
+        else excludedHere.Clear();
+        lastPickPointer = pointer;
+        pendingPick = new PickRequest(pointer, excludedHere.ToArray());
+    }
+
+    /// <summary>The waiting pick, if any, which the caller now owns.</summary>
+    public bool TryTakePickRequest([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out PickRequest? request)
+    {
+        request = pendingPick;
+        pendingPick = null;
+        return request is not null;
+    }
+
+    /// <summary>The host's answer to a pick: selects the hit, or clears on a miss.</summary>
+    public void CompletePick(DebugPick pick)
+    {
+        ArgumentNullException.ThrowIfNull(pick);
+        LastPick = pick;
+        if (pick.Hit is { } hit)
+        {
+            Select(hit);
+            return;
+        }
+
+        excludedHere.Clear();
+        ClearSelection();
     }
 
     public void Run(params IDebuggable[] debuggables)
@@ -257,6 +394,8 @@ public sealed class DebugSystem
         {
             using (Current.Scope(SelectionScope))
             {
+                // Asked of the source every frame rather than copied at the click, so the box stays on a
+                // thing that moves.
                 if (SelectedBounds is { } bounds)
                 {
                     // Three layered visual cues so the user sees the
@@ -333,6 +472,8 @@ public sealed class DebugSystem
             return;
         }
 
+        GpuPasses.Sample();
+
         // Record the frame-level CPU timer before snapshot so it lands
         // inside the frozen entry list. The measurement spans BeginFrame
         // -> here, which includes diagnostic-overlay rendering. That's
@@ -347,7 +488,7 @@ public sealed class DebugSystem
         // guard, deliberately far longer than any sensible trail duration, not a visual parameter.
         State.Trails.Expire(clock.Elapsed.TotalMilliseconds, TrailStaleSeconds);
 
-        var snapshot = Current.Snapshot(clock.Elapsed.TotalMilliseconds, SelectedPath);
+        var snapshot = Current.Snapshot(clock.Elapsed.TotalMilliseconds, SelectedPath, LastPick);
         History.Push(snapshot);
 
         // Sinks see the snapshot already in History; a sink can therefore

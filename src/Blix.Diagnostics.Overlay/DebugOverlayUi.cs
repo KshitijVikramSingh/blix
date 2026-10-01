@@ -27,9 +27,7 @@ public sealed class DebugOverlayUi
     // committed value on each one. See DebugControlKind.Text below.
     private readonly Dictionary<string, string> textEdits = new(StringComparer.Ordinal);
 
-    // Track the path we showed the Selection tab for last frame so we can
-    // auto-focus the tab when a new pick happens. Without this, picking
-    // doesn't pull the user's attention to the new info.
+    // The selection shown last frame, so a new one brings the tab forward.
     private string? lastRenderedSelection;
 
     // Builds the diagnostics window for the current frame. Call between
@@ -86,28 +84,24 @@ public sealed class DebugOverlayUi
 
         if (ImGui.BeginTabBar("DiagnosticsTabs", ImGuiTabBarFlags.Reorderable))
         {
-            // Selection tab — only visible when something is selected;
-            // auto-focuses on a fresh pick so the user's attention goes
-            // to the new info without a manual tab click. The flag-
-            // taking BeginTabItem requires a ref-bool "open" param; the
-            // close X it shows is harmless — we re-pass true every
-            // frame so a click reopens the tab on the next render.
+            // Selection tab — what is selected, its details and its edits. Shown while there is one; a new
+            // selection brings it forward, and its close box clears it.
             if (debugSystem.SelectedPath is { } selPath)
             {
-                var newPick = debugSystem.SelectedPath != lastRenderedSelection;
-                var tabFlags = newPick ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
-                var openDummy = true;
-                if (ImGui.BeginTabItem("Selection", ref openDummy, tabFlags))
+                var tabFlags = selPath != lastRenderedSelection ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
+                var open = true;
+                if (ImGui.BeginTabItem("Selection", ref open, tabFlags))
                 {
-                    DrawSelectionTab(debugSystem, selPath, values);
+                    DrawSelectionTab(debugSystem, selPath, values, controls, interactive);
                     ImGui.EndTabItem();
                 }
+                if (!open) debugSystem.ClearSelection();
             }
             lastRenderedSelection = debugSystem.SelectedPath;
 
             if (ImGui.BeginTabItem("Perf"))
             {
-                DrawPerfReport(stats, timers);
+                DrawPerfReport(debugSystem, stats, timers);
                 ImGui.EndTabItem();
             }
 
@@ -141,9 +135,22 @@ public sealed class DebugOverlayUi
                 ImGui.EndTabItem();
             }
 
-            if (controls.Count > 0 && ImGui.BeginTabItem("Controls"))
+            // An edit that applies to the selection lives on the Selection tab and nowhere else: the
+            // same slider in the general list reads as a setting for the whole scene.
+            var generalControls = controls.Where(c => !IsSelectionScope(c.Scope)).ToArray();
+            if (generalControls.Length > 0 && ImGui.BeginTabItem("Controls"))
             {
-                DrawControls(debugSystem, controls, interactive);
+                DrawControls(debugSystem, generalControls, interactive);
+                ImGui.EndTabItem();
+            }
+
+            // Every key the application answers to, in one place: the host's, the ones bound to
+            // controls (which the engine drives), and the ones the application describes and handles
+            // itself (a claim the engine cannot check, so it is marked as one).
+            var keys = interactive ? debugSystem.Current?.Keys.Entries : debugSystem.FrozenFrame?.Keys;
+            if (keys is { Count: > 0 } && ImGui.BeginTabItem("Keys"))
+            {
+                DrawKeys(keys);
                 ImGui.EndTabItem();
             }
 
@@ -155,11 +162,14 @@ public sealed class DebugOverlayUi
             }
 
             // Layers tab — reads paths from the live context so a new
-            // producer's checkboxes appear immediately, not one frame later.
+            // producer's checkboxes appear immediately, not one frame later,
+            // and from the layers already known, so one hidden or declared
+            // hidden is still there to turn on.
             var liveDraws = debugSystem.Current?.Draw.Commands;
-            if (liveDraws is { Count: > 0 } && ImGui.BeginTabItem("Layers"))
+            if ((liveDraws is { Count: > 0 } || debugSystem.State.LayersEnabled.Count > 0)
+                && ImGui.BeginTabItem("Layers"))
             {
-                DrawLayersTree(debugSystem.State, liveDraws);
+                DrawLayersTree(debugSystem.State, liveDraws ?? Array.Empty<DebugDrawCommand>());
                 ImGui.EndTabItem();
             }
 
@@ -223,7 +233,24 @@ public sealed class DebugOverlayUi
         // text length to its left.
         var btnText = interactive ? "Freeze" : "Unfreeze";
         var btnWidth = ImGui.CalcTextSize(btnText).X + ImGui.GetStyle().FramePadding.X * 2.0f;
-        RightAlignNextWidget(btnWidth);
+        // Pick mode sits beside it, and only when something can be picked.
+        var canPick = debugSystem.Contributors.Any(c => c is IDebugSelectable);
+        const string PickLabel = "Pick";
+        var pickWidth = canPick
+            ? ImGui.GetFrameHeight() + ImGui.GetStyle().ItemInnerSpacing.X + ImGui.CalcTextSize(PickLabel).X
+              + ImGui.GetStyle().ItemSpacing.X
+            : 0f;
+        RightAlignNextWidget(btnWidth + pickWidth);
+        if (canPick)
+        {
+            var pick = debugSystem.State.PickMode;
+            if (ImGui.Checkbox(PickLabel, ref pick)) debugSystem.State.PickMode = pick;
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.SetTooltip("Click to select what is under the pointer; click again for what is behind it. Or hold Alt and click.");
+            }
+            ImGui.SameLine();
+        }
         if (ImGui.SmallButton(btnText))
         {
             if (interactive)
@@ -276,9 +303,17 @@ public sealed class DebugOverlayUi
         return "…" + s[^(max - 1)..];
     }
 
-    private void DrawSelectionTab(DebugSystem debugSystem, string selPath, IReadOnlyList<DebugValueEntry> values)
+    private void DrawSelectionTab(
+        DebugSystem debugSystem, string selPath, IReadOnlyList<DebugValueEntry> values,
+        IReadOnlyList<DebugControlEntry> controls, bool interactive)
     {
         ImGui.TextUnformatted(selPath);
+        if (debugSystem.LastPick is { Hit: { } hit } pick && hit == selPath)
+        {
+            ImGui.TextDisabled(pick.Excluded > 0
+                ? $"under the cursor behind {pick.Excluded} earlier hit(s); click again to go further"
+                : "under the cursor; click the same spot again for what is behind it");
+        }
         var clearWidth = ImGui.CalcTextSize("Clear").X + ImGui.GetStyle().FramePadding.X * 2.0f;
         RightAlignNextWidget(clearWidth);
         if (ImGui.SmallButton("Clear"))
@@ -287,13 +322,74 @@ public sealed class DebugOverlayUi
         }
         ImGui.Separator();
 
+        // What an inspector declared for the selection (IDebugInspectable.Inspect, under the selection
+        // scope), grouped by where it declared it: an inspector that writes
+        // `using (debug.Scope("LOD"))` gets a LOD group holding both its readouts and its edits, so an
+        // edit sits beside the numbers it changes. Anything declared at the top goes in the default group,
+        // drawn first and without a heading.
         var hits = SelectionValues(values);
-        if (hits.Count == 0)
+        var edits = controls.Where(c => IsSelectionScope(c.Scope)).ToArray();
+        if (hits.Count == 0 && edits.Length == 0)
         {
             ImGui.TextDisabled("(no inspector data for this entity yet)");
             return;
         }
-        DrawValues(hits);
+
+        var groups = hits.Select(v => SelectionGroup(v.Scope))
+            .Concat(edits.Select(c => SelectionGroup(c.Scope)))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(g => g.Length == 0 ? 0 : 1)
+            .ThenBy(g => g, StringComparer.Ordinal);
+        foreach (var group in groups)
+        {
+            var named = group.Length > 0;
+            if (named && !ImGui.TreeNodeEx(group, ImGuiTreeNodeFlags.DefaultOpen)) continue;
+            foreach (var value in hits)
+            {
+                if (SelectionGroup(value.Scope) == group) ImGui.TextUnformatted($"{value.Name}: {value.Value}");
+            }
+
+            foreach (var edit in edits)
+            {
+                if (SelectionGroup(edit.Scope) == group) DrawControl(debugSystem, edit, interactive);
+            }
+
+            if (named) ImGui.TreePop();
+        }
+    }
+
+    // "selection/LOD" -> "LOD"; "selection" -> "" (the default group).
+    private static string SelectionGroup(string scope) =>
+        scope.Length <= SelectionScopeRoot.Length ? string.Empty : scope[(SelectionScopeRoot.Length + 1)..];
+
+    private static void DrawKeys(IReadOnlyList<DebugKeyEntry> keys)
+    {
+        if (!ImGui.BeginTable("keys", 3, ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
+        {
+            return;
+        }
+
+        ImGui.TableSetupColumn("Key");
+        ImGui.TableSetupColumn("Does");
+        ImGui.TableSetupColumn("From");
+        ImGui.TableHeadersRow();
+        foreach (var k in keys)
+        {
+            ImGui.TableNextRow();
+            ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted(k.Binding);
+            ImGui.TableSetColumnIndex(1); ImGui.TextUnformatted(k.Description);
+            ImGui.TableSetColumnIndex(2);
+            var from = k.Source switch
+            {
+                DebugKeySource.Host => "host",
+                DebugKeySource.Control => k.Path,
+                _ => $"{k.Path} (declared)",
+            };
+            if (k.Source == DebugKeySource.Declared) ImGui.TextDisabled(from);
+            else ImGui.TextUnformatted(from);
+        }
+
+        ImGui.EndTable();
     }
 
     // True if any registered contributor wants a custom panel. Cheap
@@ -649,6 +745,15 @@ public sealed class DebugOverlayUi
     // panel tractable for Sponza, where the flat list grows to 400+ rows.
     private static void DrawLayersTree(DebugState state, IReadOnlyList<DebugDrawCommand> commands)
     {
+        // The two switches above every layer, which were state no panel reached: two applications
+        // kept their own checkbox for depth testing and wrote it back each frame.
+        var drawAll = state.ShowDebugDraw;
+        if (ImGui.Checkbox("Draw debug geometry", ref drawAll)) state.ShowDebugDraw = drawAll;
+        ImGui.SameLine();
+        var depthTest = state.DepthTestDrawing;
+        if (ImGui.Checkbox("Hidden by the scene", ref depthTest)) state.DepthTestDrawing = depthTest;
+        ImGui.Separator();
+
         // Build a child-map from full paths. Each node tracks its
         // children (next segment) and its leaf count (the number of
         // distinct full paths under it). Leaf count drives the "(N/M)"
@@ -659,6 +764,10 @@ public sealed class DebugOverlayUi
             var path = commands[i].Path;
             if (string.IsNullOrEmpty(path)) continue;
             root.Add(path);
+        }
+        foreach (var known in state.LayersEnabled.Keys)
+        {
+            if (!string.IsNullOrEmpty(known)) root.Ensure(known);
         }
         if (root.Children.Count == 0)
         {
@@ -773,9 +882,11 @@ public sealed class DebugOverlayUi
     {
         foreach (var c in node.Children.Values)
         {
+            // Set rather than removed: a layer declared hidden re-adds its default every frame it
+            // is declared, so removing the entry would undo "All" one frame later.
             if (state.LayersEnabled.TryGetValue(c.FullPath, out var v) && !v)
             {
-                state.LayersEnabled.Remove(c.FullPath);
+                state.LayersEnabled[c.FullPath] = true;
             }
             ClearDescendantFalses(state, c);
         }
@@ -813,6 +924,21 @@ public sealed class DebugOverlayUi
             {
                 walk = walk.Children[segments[i]];
                 walk.LeafCount++;
+            }
+        }
+
+        // A node for a known layer that drew nothing this frame: listed, but no primitive counted.
+        public void Ensure(string path)
+        {
+            var current = this;
+            foreach (var seg in path.Split('/'))
+            {
+                if (!current.Children.TryGetValue(seg, out var child))
+                {
+                    child = new LayerNode(seg, current.FullPath.Length == 0 ? seg : current.FullPath + "/" + seg);
+                    current.Children[seg] = child;
+                }
+                current = child;
             }
         }
 
@@ -941,17 +1067,19 @@ public sealed class DebugOverlayUi
         }
     }
 
-    private void DrawPerfReport(IReadOnlyList<DebugStatEntry> stats, IReadOnlyList<DebugTimerEntry> timers)
+    private void DrawPerfReport(DebugSystem debugSystem, IReadOnlyList<DebugStatEntry> stats, IReadOnlyList<DebugTimerEntry> timers)
     {
         DrawPhasesTable(timers);
         ImGui.Spacing();
-        DrawPassesTable(stats, timers);
+        DrawDeviceFrame(debugSystem.Timing);
+        ImGui.Spacing();
+        DrawPassesTable(stats, timers, debugSystem.Timing, debugSystem.GpuPasses);
         ImGui.Spacing();
         DrawPacksTable(stats);
     }
 
-    // The Window-level phase timers — frame, build-commands, execute,
-    // overlay, run-debuggables, swap. Identified by root-scope timers
+    // The Window-level phase timers — frame, run-debuggables, build-commands,
+    // execute. Identified by root-scope timers
     // (Scope == ""): these are emitted at the top level, not under
     // "passes/" or anywhere else.
     private static void DrawPhasesTable(IReadOnlyList<DebugTimerEntry> timers)
@@ -983,7 +1111,32 @@ public sealed class DebugOverlayUi
     // scope starts with "passes/" (DiagnosticsFrameRecorder convention)
     // or whose scope is exactly "gpu/passes" (Phase 7 GPU timing,
     // when enabled). Cols: pass, draws, tris, build-ms, gpu-ms.
-    private static void DrawPassesTable(IReadOnlyList<DebugStatEntry> stats, IReadOnlyList<DebugTimerEntry> timers)
+    // What the device says the last frame cost, which "execute" above is one lump of: the wait for the
+    // frame slot (GPU throttle and present pacing), recording the commands, and submitting them. And what
+    // reached the device, which can differ from what was recorded (a zero-instance draw submits nothing).
+    // Live even while frozen: the device keeps no history of these.
+    private static void DrawDeviceFrame(IFrameTiming timing)
+    {
+        if (timing.LastFrame is not { } last) return;
+        if (!ImGui.CollapsingHeader("Device frame", ImGuiTreeNodeFlags.DefaultOpen)) return;
+        ImGui.TextUnformatted(
+            $"wait {last.WaitMs:0.00} ms   encode {last.EncodeMs:0.00} ms   submit {last.SubmitPresentMs:0.00} ms");
+        var w = last.Work;
+        ImGui.TextUnformatted(
+            $"submitted: {w.Passes} passes, {w.Draws} draws, {w.Triangles:N0} tris, " +
+            $"{w.IndirectDraws} indirect ({w.IndirectCommands:N0} records), {w.Dispatches} dispatches");
+        if (timing.IsolatePasses)
+        {
+            ImGui.TextColored(InfoColor,
+                $"passes isolated: each submitted and timed alone ({timing.IsolatedFrames} frames); the frame runs slower");
+        }
+    }
+
+    // One row per pass: what the application recorded, what reached the device, the CPU time to build it,
+    // and its GPU time as a mean over the last frames (GpuPassWindow). With isolation on, the isolated
+    // per-run mean too.
+    private static void DrawPassesTable(
+        IReadOnlyList<DebugStatEntry> stats, IReadOnlyList<DebugTimerEntry> timers, IFrameTiming timing, GpuPassWindow gpu)
     {
         var passes = new SortedSet<string>(StringComparer.Ordinal);
         for (var i = 0; i < stats.Count; i++)
@@ -995,17 +1148,13 @@ public sealed class DebugOverlayUi
         }
         for (var i = 0; i < timers.Count; i++)
         {
-            var t = timers[i];
-            if (TryExtractSegment(t.Scope, "passes/", out var name))
+            if (TryExtractSegment(timers[i].Scope, "passes/", out var name))
             {
                 passes.Add(name);
             }
-            // GPU timer convention: scope == "gpu/passes", name == passName.
-            if (t.Scope == "gpu/passes")
-            {
-                passes.Add(t.Name);
-            }
         }
+        foreach (var name in timing.LastFramePasses.Keys) passes.Add(name);
+        foreach (var (name, _) in gpu.ByCost()) passes.Add(name);
         if (passes.Count == 0)
         {
             return;
@@ -1014,7 +1163,9 @@ public sealed class DebugOverlayUi
         {
             return;
         }
-        if (!ImGui.BeginTable("perf-passes", 5,
+
+        var isolated = timing.IsolatePasses;
+        if (!ImGui.BeginTable("perf-passes", isolated ? 8 : 7,
             ImGuiTableFlags.SizingFixedFit | ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders))
         {
             return;
@@ -1022,57 +1173,45 @@ public sealed class DebugOverlayUi
         ImGui.TableSetupColumn("Pass");
         ImGui.TableSetupColumn("Draws");
         ImGui.TableSetupColumn("Tris");
+        ImGui.TableSetupColumn("Sent draws");
+        ImGui.TableSetupColumn("Sent tris");
         ImGui.TableSetupColumn("CPU ms");
-        ImGui.TableSetupColumn("GPU ms");
+        ImGui.TableSetupColumn($"GPU ms ({gpu.Spanned}f)");
+        if (isolated) ImGui.TableSetupColumn("Isolated ms");
         ImGui.TableHeadersRow();
-        var sawGpuPath = false;
-        var sawNonZeroGpu = false;
         foreach (var pass in passes)
         {
             ImGui.TableNextRow();
             ImGui.TableSetColumnIndex(0); ImGui.TextUnformatted(pass);
             ImGui.TableSetColumnIndex(1); ImGui.Text(FormatStat(stats, $"passes/{pass}/draws", asCount: true));
             ImGui.TableSetColumnIndex(2); ImGui.Text(FormatStat(stats, $"passes/{pass}/triangles", asCount: true));
-            ImGui.TableSetColumnIndex(3); ImGui.Text(FormatTimerMs(timers, $"passes/{pass}/build"));
-
-            // GPU timer path is gpu/passes/<name>. Three possible states:
-            //   - timer absent ("-")     -> GPU timing disabled
-            //   - timer present, ms = 0  -> driver returned zeros
-            //                                (macOS GL through Metal
-            //                                doesn't actually measure
-            //                                per-pass time even when the
-            //                                extension is exposed)
-            //   - timer present, ms > 0  -> working
-            (var gpu, var ms) = LookupTimerMsRaw(timers, $"gpu/passes/{pass}");
-            ImGui.TableSetColumnIndex(4); ImGui.Text(gpu);
-            if (gpu != "-")
+            var sent = timing.LastFramePasses.TryGetValue(pass, out var work);
+            ImGui.TableSetColumnIndex(3); ImGui.Text(sent ? $"{work.Draws + work.IndirectDraws}" : "-");
+            ImGui.TableSetColumnIndex(4); ImGui.Text(sent ? $"{work.Triangles:N0}" : "-");
+            ImGui.TableSetColumnIndex(5); ImGui.Text(FormatTimerMs(timers, $"passes/{pass}/build"));
+            var ms = gpu.MeanMs(pass);
+            ImGui.TableSetColumnIndex(6); ImGui.Text(ms > 0.0 ? $"{ms:0.000}" : "-");
+            if (isolated)
             {
-                sawGpuPath = true;
-                if (ms > 0.0) sawNonZeroGpu = true;
+                var iso = timing.IsolatedPassTotals.TryGetValue(pass, out var total) ? total.MeanMs : 0.0;
+                ImGui.TableSetColumnIndex(7); ImGui.Text(iso > 0.0 ? $"{iso:0.000}" : "-");
             }
         }
         ImGui.EndTable();
 
-        if (!sawGpuPath)
+        if (!timing.GpuTimestampsSupported)
         {
-            ImGui.TextDisabled("GPU ms: timing disabled. Enable via Controls > SponzaModern/Perf > GPU timing.");
+            ImGui.TextDisabled("GPU ms: this device reports no GPU timestamps.");
         }
-        else if (!sawNonZeroGpu)
+        else
         {
+            // Sponza's report carried this and the overlay did not, so the overlay's numbers read as costs.
+            ImGui.PushTextWrapPos(0f);
             ImGui.TextDisabled(
-                "GPU ms: enabled but driver reports 0 for every pass. " +
-                "macOS GL routes timestamps through Metal and reports submit-time, not GPU-execute-time " +
-                "- timings are effectively unusable here. Linux/Windows drivers should populate normally.");
+                "GPU ms attribute, they do not decompose: on a tile-based GPU (Apple, through MoltenVK) a pass's " +
+                "timestamps bracket its encoding, so passes need not sum to the frame. Paired A/B runs give cost.");
+            ImGui.PopTextWrapPos();
         }
-    }
-
-    private static (string formatted, double ms) LookupTimerMsRaw(IReadOnlyList<DebugTimerEntry> timers, string path)
-    {
-        for (var i = 0; i < timers.Count; i++)
-        {
-            if (timers[i].Path == path) return ($"{timers[i].TotalMs:0.00}", timers[i].TotalMs);
-        }
-        return ("-", 0.0);
     }
 
     // Per-pack table — auto-discovers pack names from stats whose scope
@@ -1360,6 +1499,8 @@ public sealed class DebugOverlayUi
     private void DrawControl(DebugSystem debugSystem, DebugControlEntry entry, bool interactive)
     {
         ImGui.PushID(entry.Path);
+        // A bound key is written beside the control it drives; the widget's id stays its path.
+        var label = entry.Key is { } key ? $"{entry.Name} [{DebugKeysChannel.Name(key)}]" : entry.Name;
 
         if (!interactive)
         {
@@ -1374,7 +1515,7 @@ public sealed class DebugOverlayUi
             case DebugControlKind.Boolean:
             {
                 var value = (bool)entry.Value;
-                if (ImGui.Checkbox(entry.Name, ref value) && interactive)
+                if (ImGui.Checkbox(label, ref value) && interactive)
                 {
                     debugSystem.SetControlValue(entry.Path, value);
                 }
@@ -1385,7 +1526,7 @@ public sealed class DebugOverlayUi
             case DebugControlKind.Float:
             {
                 var value = (float)entry.Value;
-                if (ImGui.SliderFloat(entry.Name, ref value, entry.Min, entry.Max, "%.2f") && interactive)
+                if (ImGui.SliderFloat(label, ref value, entry.Min, entry.Max, "%.2f") && interactive)
                 {
                     debugSystem.SetControlValue(entry.Path, value);
                 }
@@ -1397,7 +1538,7 @@ public sealed class DebugOverlayUi
             {
                 var value = (int)entry.Value;
                 var options = entry.Options ?? Array.Empty<string>();
-                if (ImGui.Combo(entry.Name, ref value, options.ToArray(), options.Count) && interactive)
+                if (ImGui.Combo(label, ref value, options.ToArray(), options.Count) && interactive)
                 {
                     debugSystem.SetControlValue(entry.Path, value);
                 }
@@ -1407,7 +1548,7 @@ public sealed class DebugOverlayUi
 
             case DebugControlKind.Button:
             {
-                if (ImGui.Button(entry.Name) && interactive)
+                if (ImGui.Button(label) && interactive)
                 {
                     debugSystem.SetControlValue(entry.Path, true);
                 }
@@ -1431,7 +1572,7 @@ public sealed class DebugOverlayUi
 
                 var length = (uint)Math.Max(1, entry.MaxLength);
                 var entered = ImGui.InputText(
-                    entry.Name, ref buffer, length, ImGuiInputTextFlags.EnterReturnsTrue);
+                    label, ref buffer, length, ImGuiInputTextFlags.EnterReturnsTrue);
 
                 if (ImGui.IsItemActive()) textEdits[entry.Path] = buffer;
                 else textEdits.Remove(entry.Path);

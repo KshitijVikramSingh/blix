@@ -121,7 +121,13 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
 
     public string DebugName => "stage";
 
-    public void Debug(DebugContext debug) => tunables.BuildControls(debug);
+    public void Debug(DebugContext debug)
+    {
+        debug.Keys.Describe("Left-drag", "orbit the camera");
+        debug.Keys.Describe("Wheel", "zoom");
+        debug.Keys.Describe(Key.Escape, "quit");
+        tunables.BuildControls(debug);
+    }
 
     public override void OnUnload()
     {

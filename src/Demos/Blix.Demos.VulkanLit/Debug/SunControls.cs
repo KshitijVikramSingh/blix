@@ -1,3 +1,4 @@
+using Blix.Core;
 using System.Numerics;
 using Blix.Diagnostics;
 
@@ -42,7 +43,7 @@ internal sealed class SunControls : IDebuggable
 
         loop.SunIntensity = debug.Controls.Float("Intensity", loop.SunIntensity, 0f, 8f);
         loop.AmbientIntensity = debug.Controls.Float("Ambient (IBL)", loop.AmbientIntensity, 0f, 4f);
-        loop.SunEnabled = debug.Controls.Toggle("Sun [Z]", loop.SunEnabled);
+        loop.SunEnabled = debug.Controls.Toggle("Sun", loop.SunEnabled, Key.Z);
 
         debug.Values.Value("direction", loop.SunDirection);
         debug.Values.Value("ambient-color", loop.AmbientColor);

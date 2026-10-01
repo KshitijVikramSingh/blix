@@ -1,3 +1,4 @@
+using Blix.Core;
 using Blix.Diagnostics;
 
 namespace Blix.Demos.VulkanLit.Debug;
@@ -19,7 +20,7 @@ internal sealed class DebugViewControls : IDebuggable
 
     public void Debug(DebugContext debug)
     {
-        loop.ViewMode = debug.Controls.Enum("View [V]", loop.ViewMode, LitLoop.ViewModeLabels);
+        loop.ViewMode = debug.Controls.Enum("View", loop.ViewMode, LitLoop.ViewModeLabels, Key.V);
         loop.ShaderDebugMode = debug.Controls.Enum("Shader channel", loop.ShaderDebugMode, LitLoop.ShaderChannelOptions);
     }
 }

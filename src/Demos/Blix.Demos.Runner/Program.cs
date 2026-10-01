@@ -809,6 +809,12 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
 
     public void Debug(DebugContext debug)
     {
+        // The keys this game handles itself.
+        debug.Keys.Describe("Left / Right (A / D)", "change lane");
+        debug.Keys.Describe("Up / W / Space", "jump");
+        debug.Keys.Describe("Enter / R", "restart, once the run is over");
+        debug.Keys.Describe(Key.Escape, "quit");
+
         // Every primitive below belongs to this view. Scoped rather than assigned: the old
         // per-channel matrix meant a frame could only ever be one world seen one way.
         using var view = debug.Draw.In("main", viewProj);

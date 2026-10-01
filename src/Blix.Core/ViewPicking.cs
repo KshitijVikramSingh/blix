@@ -79,6 +79,54 @@ public static class ViewPicking
         return IsFinite(ray.Origin) && IsFinite(ray.Direction) ? ray : null;
     }
 
+    /// <summary>
+    /// The physical pixel of this view's target under <paramref name="pointer"/>, or null when the pointer is
+    /// not over the view.
+    /// </summary>
+    /// <remarks>
+    /// The pointer is logical and the target physical, and the two differ by the backing scale on a Retina
+    /// display, which is why the view carries both rectangles. The pixel is in the target's coordinates, so
+    /// a view drawn into a panel names a pixel of its own surface, not of the window.
+    /// </remarks>
+    public static Vector2? PixelAt(in ViewDeclaration view, Vector2 pointer)
+    {
+        var logical = view.LogicalViewport;
+        if (logical.Width <= 0f || logical.Height <= 0f) return null;
+        var u = (pointer.X - logical.X) / logical.Width;
+        var v = (pointer.Y - logical.Y) / logical.Height;
+        if (u < 0f || v < 0f || u >= 1f || v >= 1f) return null;
+        var physical = view.PhysicalViewport;
+        return new Vector2(
+            physical.X + MathF.Floor(u * physical.Width),
+            physical.Y + MathF.Floor(v * physical.Height));
+    }
+
+    /// <summary>
+    /// A matrix that, applied after the view's own, makes one pixel of it fill a 1x1 target.
+    /// </summary>
+    /// <param name="view">The view the pixel belongs to.</param>
+    /// <param name="pixel">A physical pixel of the view's target, from <see cref="PixelAt"/>.</param>
+    /// <remarks>
+    /// <b>How a pick pass renders one pixel of a picture.</b> Draw with <c>model * view.ViewProjection * crop</c>
+    /// into a 1x1 target and the rasteriser samples exactly that pixel's centre, so everything outside it is
+    /// clipped for almost nothing. In clip space it is <c>x' = (x - cx w) Wv</c> (and likewise y), where cx
+    /// is the pixel centre in the view's NDC and Wv the view's width in pixels: the pixel's NDC width is
+    /// 2/Wv, and scaling by Wv makes it 2, the whole target. Row-vector convention, like every matrix here.
+    /// </remarks>
+    public static Matrix4x4 PixelCrop(in ViewDeclaration view, Vector2 pixel)
+    {
+        var physical = view.PhysicalViewport;
+        var width = physical.Width;
+        var height = physical.Height;
+        var cx = 2f * (pixel.X - physical.X + 0.5f) / width - 1f;
+        var cy = 2f * (pixel.Y - physical.Y + 0.5f) / height - 1f;
+        return new Matrix4x4(
+            width, 0f, 0f, 0f,
+            0f, height, 0f, 0f,
+            0f, 0f, 1f, 0f,
+            -cx * width, -cy * height, 0f, 1f);
+    }
+
     private static Vector3 Unproject(Matrix4x4 inverseViewProjection, float ndcX, float ndcY, float ndcZ)
     {
         var p = Vector4.Transform(new Vector4(ndcX, ndcY, ndcZ, 1.0f), inverseViewProjection);

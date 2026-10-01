@@ -54,6 +54,10 @@ public sealed class TuneAttribute : Attribute
     /// <summary>How many characters a string member accepts. Ignored by every other kind.</summary>
     public int MaxLength { get; init; } = 128;
 
+    /// <summary>A key that drives the control: flips a bool, presses an action, steps an enum.</summary>
+    /// <remarks>Listed in the overlay's key list. Refused on a number or a string, where a key has no one meaning.</remarks>
+    public Blix.Core.Key Key { get; init; }
+
     /// <summary>
     /// This value is read once, when the thing that consumes it is BUILT — so a control that moves it
     /// mid-run would be lying.
@@ -174,6 +178,10 @@ public sealed class TunableField
     /// <seealso cref="TuneAttribute.Structural"/>
     public bool Structural { get; internal set; }
 
+    /// <summary>The key that drives it, or <see cref="Blix.Core.Key.Unknown"/>.</summary>
+    /// <seealso cref="TuneAttribute.Key"/>
+    public Blix.Core.Key Key { get; internal set; }
+
     /// <summary>The value now, whichever kind this is — a float, or the string for Text.</summary>
     public object Current => Kind == TuneKind.Text ? Text : Value;
 
@@ -279,7 +287,18 @@ public static class TuneReflection
             // After the chain rather than through five constructors: every branch adds exactly one
             // field, and threading one more argument through all of them to carry a flag that none of
             // them reads would be five edits for one fact.
-            if (result.Count > before) result[^1].Structural = tune.Structural;
+            if (result.Count > before)
+            {
+                result[^1].Structural = tune.Structural;
+                if (tune.Key != Blix.Core.Key.Unknown && result[^1].Kind is not (TuneKind.Bool or TuneKind.Button or TuneKind.Enum))
+                {
+                    throw new InvalidOperationException(
+                        $"[Tune(Key = {tune.Key})] on {type.Name}.{member.Name}: a key can flip a bool, press an " +
+                        "action or step an enum, and this is none of those.");
+                }
+
+                result[^1].Key = tune.Key;
+            }
         }
         foreach (var field in result) field.Initial = field.Current;
         return result;
@@ -624,9 +643,9 @@ public sealed class ObjectTunables
                     {
                         // A button reports the frame it was clicked and nothing else, so the member it is
                         // bound to is true for exactly that frame — no state to hold and none to reset.
-                        TuneKind.Button => debug.Controls.Button(f.Label) ? 1f : 0f,
-                        TuneKind.Bool => debug.Controls.Toggle(f.Label, f.Value != 0f) ? 1f : 0f,
-                        TuneKind.Enum => debug.Controls.Enum(f.Label, (int)f.Value, f.EnumNames!),
+                        TuneKind.Button => debug.Controls.Button(f.Label, f.Key) ? 1f : 0f,
+                        TuneKind.Bool => debug.Controls.Toggle(f.Label, f.Value != 0f, f.Key) ? 1f : 0f,
+                        TuneKind.Enum => debug.Controls.Enum(f.Label, (int)f.Value, f.EnumNames!, f.Key),
                         _ => debug.Controls.Float(f.Label, f.Value, f.Min, f.Max),
                     };
 

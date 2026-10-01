@@ -35,6 +35,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     private readonly IUiSource? uiSource;
     private readonly IRuntimeDiagnosticsSink? diagnostics;
     private readonly DebugSystem? debugSystem;
+    private PickRenderer? pickRenderer;
     private readonly DiagnosticsFrameRecorder? frameRecorder;
     private readonly JsonDumpSink? jsonDumpSink;
     private VulkanGraphicsDevice? graphicsDevice;
@@ -105,7 +106,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         this.uiSource = gameLoop as IUiSource;
         this.diagnostics = diagnostics;
 
-        if (gameLoop is IDebuggable)
+        if (gameLoop is IDebugContributor)
         {
             debugSystem = new DebugSystem();
             frameRecorder = new DiagnosticsFrameRecorder(debugSystem);
@@ -123,7 +124,15 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             }
             jsonDumpSink = new JsonDumpSink();
             debugSystem.AddSink(jsonDumpSink);
-            if ((options ?? BlixWindowOptions.Default).Diagnostics) debugSystem.State.Enabled = true;
+            if ((options ?? BlixWindowOptions.Default).Diagnostics) debugSystem.State.ShowOverlay = true;
+
+            // The keys this host answers to itself (OnKeyDown, OnMouseDown). They lead the key list, and
+            // nothing may bind them: they would still fire, and both things would happen.
+            debugSystem.DeclareHostKey("`", "show or hide the diagnostics overlay");
+            debugSystem.DeclareHostKey("F1", "frame-rate readout, while the overlay is hidden");
+            debugSystem.DeclareHostKey("F12", "dump this frame to dumps/frame-NNNNNN.json");
+            debugSystem.DeclareHostKey("LeftAlt", "held, a click picks (with the overlay up)");
+            debugSystem.DeclareHostKey("RightAlt", "held, a click picks (with the overlay up)");
         }
 
         var resolved = options ?? BlixWindowOptions.Default;
@@ -191,7 +200,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         // An application that produces diagnostics gets a swapchain depth buffer that survives its
         // pass, so debug geometry drawn over the scene can be hidden by it. One without pays nothing.
         graphicsDevice = new VulkanGraphicsDevice(
-            vkSurface, w, h, preserveSwapchainDepth: gameLoop is IDebuggable);
+            vkSurface, w, h, preserveSwapchainDepth: debugSystem is not null);
         Console.WriteLine($"Graphics: {graphicsDevice.Info.Vendor} | {graphicsDevice.Info.Renderer} | {graphicsDevice.Info.Version}");
         if (debugSystem is not null)
         {
@@ -199,6 +208,10 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             // line-pipeline draw on the OverlayRenderPass. Only allocate when
             // diagnostics are live (no IDebuggable game loop → no overlay).
             lineDrawer = new VkLineDrawer(graphicsDevice);
+
+            // Every application gets the device's contributor; it used to be opt-in, and two did.
+            debugSystem.Register(new GraphicsDeviceContributor(graphicsDevice));
+            debugSystem.UseFrameTiming(graphicsDevice);
         }
 
         // <b>Built for anyone who wants a frame, not only for IDebuggable.</b> This used to live inside
@@ -239,6 +252,12 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
         ApplyDefaultSurfaceSize();
         gameLoop.OnLoad(this, graphicsDevice);
+
+        // <b>The loop is a contributor like any other, registered rather than passed.</b> It used to be
+        // handed to Run() each frame, which ran its Debug() and nothing else: a loop that was also
+        // selectable, inspectable or a geometry source was silently ignored. Registered after OnLoad so
+        // it runs where the passed loop did, after the device and anything the loop registered itself.
+        debugSystem?.Register((IDebugContributor)gameLoop);
     }
 
     private void OnUpdate(double deltaTime)
@@ -276,20 +295,22 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         var time = new Time(totalTime, deltaTime);
         var frame = CreateFrameContext();
 
-        if (debugSystem is not null && gameLoop is IDebuggable debuggable)
+        if (debugSystem is not null)
         {
-            debugSystem.BeginFrame(frame);
+            debugSystem.BeginFrame(frame, LogicalSize, Input);
             using (debugSystem.Current!.Timers.Measure("run-debuggables"))
             {
-                debugSystem.Run(debuggable);
+                debugSystem.Run();
             }
         }
 
         var commandList = new RenderCommandList(frameRecorder);
+        PickInFlight? pick = null;
         using (debugSystem?.Current?.Timers.Measure("build-commands"))
         {
             gameLoop.OnRender(time, frame, commandList);
             AppendDebugLinesPass(commandList);
+            pick = AppendPickPass(commandList);
             AppendImGuiPass(commandList, frame, (float)deltaTime);
         }
 
@@ -300,6 +321,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         }
         // Hand the per-pass/per-draw packet to the overlay's Pipeline tab.
         debugSystem?.SetFramePacket(packet);
+        if (pick is { } answered) CompletePick(answered);
 
         if (debugSystem?.Current is { } ctx)
         {
@@ -456,8 +478,43 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
     private void OnMouseDown(IMouse mouse, SilkMouseButton button)
     {
+        // A pick is the debugger's gesture, so it is owned like a press the UI took: the game gets
+        // neither the down nor, through GestureOwnership, the up. See DebugState.PickMode.
+        if (button == SilkMouseButton.Left && !UiWantsMouse && PickArmed)
+        {
+            buttonsHeld.Press((int)button, uiWantsInput: true);
+            debugSystem!.RequestPick(mouse.Position);
+            return;
+        }
+
         if (!buttonsHeld.Press((int)button, UiWantsMouse)) return;
         inputState.RecordMouseDown(MapMouseButton(button));
+    }
+
+    // The last frame's key list, one per line, for the F1 readout.
+    private string? HudKeys() =>
+        debugSystem?.LatestFrame?.Keys is { Count: > 0 } keys
+            ? string.Join("\n", keys.Select(k => $"{k.Binding,-10} {k.Description}"))
+            : null;
+
+    // Armed from the Pick switch or by holding Alt, and only with the overlay up: the selection is read
+    // there, and a hidden debugger taking clicks would be one nobody could see doing it.
+    private bool PickArmed =>
+        debugSystem is { State.ShowOverlay: true } debug
+        && (debug.State.PickMode || AnyKeyDown(SilkKey.AltLeft, SilkKey.AltRight));
+
+    private bool AnyKeyDown(params SilkKey[] keys)
+    {
+        if (input is null) return false;
+        for (var k = 0; k < input.Keyboards.Count; k++)
+        {
+            foreach (var key in keys)
+            {
+                if (input.Keyboards[k].IsKeyPressed(key)) return true;
+            }
+        }
+
+        return false;
     }
 
     private void OnMouseUp(IMouse mouse, SilkMouseButton button)
@@ -707,6 +764,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         imguiRenderer?.Dispose();
         Step("line-drawer");
         lineDrawer?.Dispose();
+        pickRenderer?.Dispose();
         // The game loop may own GPU resources outside the device's auto-freed
         // tables (e.g. a RenderGraph's render passes + offscreen images). Dispose
         // it here — after WaitIdle so the GPU is done with them, before the device
@@ -733,6 +791,37 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         Step("done");
     }
 
+    // A pick recorded into this frame, answered once the frame is submitted.
+    private sealed record PickInFlight(string View, global::System.Numerics.Vector2 Pointer, global::System.Numerics.Vector2 Pixel, DebugSelectable[] Candidates, int Excluded);
+
+    // Records the pick pass for a waiting click, into the view under the pointer: after the application
+    // has drawn and declared its views, so the geometry and the camera are this frame's. A pointer over no
+    // view asks nothing, and the click is dropped.
+    private PickInFlight? AppendPickPass(RenderCommandList commandList)
+    {
+        if (debugSystem is not { Current: { } ctx } debug || !debug.TryTakePickRequest(out var request)) return null;
+        var views = ctx.Draw.Views;
+        for (var v = views.Count - 1; v >= 0; v--)
+        {
+            if (ViewPicking.PixelAt(views[v], request.Pointer) is not { } pixel) continue;
+            var excluded = new HashSet<string>(request.Excluded, StringComparer.Ordinal);
+            var candidates = debug.CollectSelectables().Where(s => !excluded.Contains(s.EntityPath)).ToArray();
+            pickRenderer ??= new PickRenderer(graphicsDevice!);
+            pickRenderer.Record(commandList, views[v], pixel, candidates);
+            return new PickInFlight(views[v].Name, request.Pointer, pixel, candidates, excluded.Count);
+        }
+
+        return null;
+    }
+
+    private void CompletePick(PickInFlight pick)
+    {
+        var hit = pickRenderer!.ReadHit();
+        debugSystem!.CompletePick(new DebugPick(
+            pick.View, pick.Pointer, pick.Pixel, pick.Candidates.Length, pick.Excluded,
+            hit >= 0 && hit < pick.Candidates.Length ? pick.Candidates[hit].EntityPath : null));
+    }
+
     // Walk the frame's accumulated debug.Draw.* commands, expand them into
     // line vertices on the VkLineDrawer, and append a swapchain pass that
     // submits them. The pass has empty ClearColors → the Vulkan backend
@@ -748,7 +837,9 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         var views = ctx.Draw.Views;
         if (views.Count == 0) return;
 
-        var depthTested = debugSystem?.State.DepthTestDrawing ?? true;
+        var state = debugSystem!.State;
+        if (!state.ShowDebugDraw) return;
+        var depthTested = state.DepthTestDrawing;
 
         // One buffer for the whole frame, one span per view. Cleared here because the ranged Submit below
         // deliberately does not reset — see VkLineDrawer.
@@ -762,7 +853,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
             for (var i = 0; i < commands.Count; i++)
             {
                 var c = commands[i];
-                if (c.View != view.Id) continue;
+                if (c.View != view.Id || !state.ShouldDraw(c)) continue;
                 switch (c)
                 {
                     case DebugDrawLine d: lineDrawer.Line(d.A, d.B, d.Color); break;
@@ -852,7 +943,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         uiFrameBuilt = false;
         if (imguiRenderer is null) return;
 
-        var overlayUp = debugSystem is { State.Enabled: true, State.ShowOverlay: true };
+        var overlayUp = debugSystem is { State.ShowOverlay: true };
         var hudUp = perfHudVisible && !overlayUp;
         var appUi = uiSource;
         if (!overlayUp && !hudUp && appUi is null) return;
@@ -883,7 +974,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
                 // application from being able to prevent the diagnostics panels being built at all.
                 appUi?.DrawUi();
                 if (overlayUp) imguiRenderer.LayoutDiagnostics(debugSystem!);
-                else if (hudUp) imguiRenderer.DrawPerfHudText(hudText);
+                else if (hudUp) imguiRenderer.DrawPerfHudText(hudText, HudKeys());
             });
 
         // Only now do WantCaptureMouse / WantCaptureKeyboard describe anything real.

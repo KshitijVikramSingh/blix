@@ -138,7 +138,9 @@ internal sealed record JsonDebugFrame(
     JsonStatEntry[] Stats,
     JsonTimerEntry[] Timers,
     JsonEventEntry[] Events,
-    string? SelectedPath)
+    string? SelectedPath,
+    JsonKeyEntry[] Keys,
+    JsonPick? Pick)
 {
     /// <summary>The current on-disk schema. Bump whenever a field changes shape or leaves.</summary>
     public const int CurrentSchemaVersion = 2;
@@ -165,9 +167,19 @@ internal sealed record JsonDebugFrame(
         Stats: f.Stats.Select(JsonStatEntry.From).ToArray(),
         Timers: f.Timers.Select(JsonTimerEntry.From).ToArray(),
         Events: f.Events.Select(JsonEventEntry.From).ToArray(),
-        SelectedPath: f.SelectedPath);
+        SelectedPath: f.SelectedPath,
+        Keys: f.Keys.Select(k => new JsonKeyEntry(k.Binding, k.Description, k.Path, k.Source.ToString())).ToArray(),
+        Pick: f.Pick is { } p
+            ? new JsonPick(p.View, new[] { p.Pointer.X, p.Pointer.Y }, new[] { p.Pixel.X, p.Pixel.Y }, p.Drawn, p.Excluded, p.Hit)
+            : null);
     }
 }
+
+// Added in schema 2 without a bump, which is the rule above: a new field, not a changed one.
+internal sealed record JsonKeyEntry(string Binding, string Description, string Path, string Source);
+
+// Also added without a bump: the last pick, so a wrong-looking one can be checked against numbers.
+internal sealed record JsonPick(string View, float[] Pointer, float[] Pixel, int Drawn, int Excluded, string? Hit);
 
 // A view as it appears on disk: where the world was seen from, and where that picture landed.
 // Target is the raw surface id — opaque, but enough to tell two viewports apart in a dump.
@@ -201,12 +213,12 @@ internal sealed record JsonValueEntry(string Path, string Scope, string Name, Js
 
 internal sealed record JsonControlEntry(
     string Path, string Scope, string Name,
-    string Kind, JsonNode? Value, float Min, float Max, string[]? Options)
+    string Kind, JsonNode? Value, float Min, float Max, string[]? Options, string? Key)
 {
     public static JsonControlEntry From(DebugControlEntry e) => new(
         e.Path, e.Scope, e.Name,
         e.Kind.ToString(), JsonDumpSink_CaptureBridge.Capture(e.Value), e.Min, e.Max,
-        e.Options?.ToArray());
+        e.Options?.ToArray(), e.Key is { } key ? DebugKeysChannel.Name(key) : null);
 }
 
 // Flat DTO with a Kind discriminator + nullable per-primitive fields.

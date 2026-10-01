@@ -426,16 +426,21 @@ letterboxed image in the UI.
 | Bundle meshes into shared buffers / stream glTF textures | `Blix.Render.MeshBundler`, `Blix.Render.AsyncLoadQueue<T>`, `GltfTextureLoader` — `src/Demos/Blix.Demos.VulkanSponza/` composes them |
 | Add a new debug control / stat / timer / event | `IDebuggable.Debug(DebugContext)` — `Blix.Diagnostics` |
 | Draw debug geometry at all | Declare a view, then `using (debug.Draw.In(view))` — drawing outside one throws |
+| Let a gizmo be switched off, or start off | Draw it under a path; the Layers tab switches every path. `debug.Draw.Layer(name, visible: false)` declares one hidden and says whether it is wanted, so costly gizmos can skip their work |
 | Show where something has been | `debug.Draw.Trail(name, point, colour, seconds)` |
 | Give the application its own UI panel | Implement `IUiSource` on the game loop; add an `ImGui.NET` package reference |
 | Add a panel to the diagnostics overlay instead | Implement `IDebugUi` on a registered contributor (`Blix.Diagnostics.Overlay`) |
-| Turn a click into a ray, in any view | `Blix.ViewPicking.RayThrough(view, pointer)` — panels and off-screen targets included |
+| Make things clickable in the overlay | Implement `IDebugSelectable` (on the loop or any contributor), giving each entity its `DebugPickGeometry` and a `Label`. With Pick ticked in the status bar or Alt held, a click selects what is under the cursor, exactly: the host draws every selectable's geometry into that one pixel and reads it back. Click the same spot again for what is behind it. The Selection tab shows `IDebugInspectable.Inspect` output; edits to the selection belong there, declared in `Inspect` and grouped with `debug.Scope(...)` |
+| Turn a click into a ray, in any view | `Blix.ViewPicking.RayThrough(view, pointer)` — panels and off-screen targets included. For a game's or a tool's own picking; the overlay's is the engine's |
 | Run bounded (CI, a smoke test, a capture) | `--frames N`, honoured by the host for every application |
 | Start a new executable | `src/Demos/Blix.Demos.Chassis/` is the smallest working one — 25-line csproj, no shader boilerplate |
 | Expose a value for live tuning in the overlay | `//@tune lo..hi = default` in a GLSL uniform, or `[Tune(min,max)]` on a C# field |
-| Register a debug producer (subsystem, asset, scene instance) | `debugSystem.Register(contributor)` from `OnLoad` — implement `IDebuggable` / `IDebugGeometrySource` / `IDebugSelectable` / `IDebugInspectable` / `IDebugUi` independently |
+| Register a debug producer (subsystem, asset, scene instance) | The game loop and the device are registered by the host. Anything else: `debugSystem.Register(contributor)` from `OnLoad` — implement `IDebuggable` / `IDebugGeometrySource` / `IDebugSelectable` / `IDebugInspectable` / `IDebugUi` independently |
+| Give a debug control a key | `debug.Controls.Toggle("Sun", sun, Key.Z)` (also `Enum`, `Button`, `Draw.Layer`, and `[Tune(Key = …)]`): the engine drives it and shows it beside the control and in the Keys tab |
+| List keys the application handles itself | `debug.Keys.Describe(Key.R, "respawn")` or `Describe("Right-drag", "look")` from `Debug()`, every frame; the Keys tab and the F1 readout show them, and a key claimed twice is an error event |
+| See what the frame cost | The overlay's Perf tab: the device's wait/encode/submit split, submitted work, and GPU time per pass over the last 60 frames (`GpuPassWindow`) |
 | Save a frame snapshot to disk | Press `F12` (runtime-owned) — writes `dumps/frame-NNNNNN.json` via `JsonDumpSink` |
-| Toggle the diagnostics overlay | Press `` ` `` (backtick) |
+| Toggle the diagnostics overlay | Press `` ` `` (backtick). It starts hidden unless the host's `Diagnostics` option, or `--debug`, says otherwise |
 | Add a reusable shader primitive | `src/Blix.Shaders/<concept>.glsl` (one concept per file, `blix_`-prefixed symbols) |
 
 ## Build + run

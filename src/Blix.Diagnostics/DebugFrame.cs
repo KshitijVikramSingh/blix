@@ -25,8 +25,12 @@ public sealed class DebugFrame
         IReadOnlyList<DebugStatEntry> stats,
         IReadOnlyList<DebugTimerEntry> timers,
         IReadOnlyList<DebugEventEntry> events,
-        string? selectedPath)
+        string? selectedPath,
+        IReadOnlyList<DebugKeyEntry>? keys = null,
+        DebugPick? pick = null)
     {
+        Pick = pick;
+        Keys = keys ?? Array.Empty<DebugKeyEntry>();
         Number = number;
         WallClockMs = wallClockMs;
         Frame = frame;
@@ -39,6 +43,12 @@ public sealed class DebugFrame
         Events = events;
         SelectedPath = selectedPath;
     }
+
+    /// <summary>The last click in pick mode, if any: the ray and what it crossed.</summary>
+    public DebugPick? Pick { get; }
+
+    /// <summary>Every key the frame answered to: the host's, the controls', and the application's own.</summary>
+    public IReadOnlyList<DebugKeyEntry> Keys { get; }
 
     // Monotonically increasing frame number. The first frame is 1; 0 is
     // reserved for "no frame produced yet."

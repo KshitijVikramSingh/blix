@@ -212,6 +212,19 @@ var t = new TestRunner();
         Intersection.Test(sunk, new TriangleMesh3D(new[] { ground })), expectedDepth: 0.15f);
 }
 
+// ── Ray vs box: behind the origin is not a hit ────────────────────────────────────────────────────
+//
+// A box wholly behind a ray was reported as hit at the ray's origin (time 0, the nearest possible), so
+// a nearest-hit query took whatever lay behind the eye. Found by the engine's pick test.
+{
+    var box = new Bounds3(new(-1f, -1f, -6f), new(1f, 1f, -4f));
+    var toward = Intersection.Raycast(new Ray(Vector3.Zero, -Vector3.UnitZ), box);
+    t.ExpectClose("a ray toward a box hits its near face", toward?.Time ?? -1f, 4f);
+    t.ExpectMiss("a ray pointing away from it does not", Intersection.Raycast(new Ray(Vector3.Zero, Vector3.UnitZ), box));
+    var inside = Intersection.Raycast(new Ray(new(0f, 0f, -5f), Vector3.UnitZ), box);
+    t.ExpectClose("from inside it is hit where the ray starts, as before", inside?.Time ?? -1f, 0f);
+}
+
 t.PrintSummary();
 return t.Failed;
 

@@ -686,6 +686,31 @@ public static class Program
         t.Expect("a window between two totals is their difference", window == new GpuPassTotal(8.0, 4), window.ToString());
         t.Expect("and its mean is per resolution", Math.Abs(window.MeanMs - 2.0) < 1e-12, window.MeanMs.ToString());
         t.Expect("an empty window has a mean of zero, not NaN", new GpuPassTotal(0, 0).MeanMs == 0.0);
+        // A window over the totals is the later total less the earlier one, per pass: exact, and stated
+        // as "the last N frames". It replaced an exponential average of Sponza's own.
+        var fake = new FakeTiming();
+        var gpu = new GpuPassWindow(fake, frames: 3);
+        t.Expect("an unsampled window has nothing to say", gpu.ByCost().Count == 0 && gpu.MeanMs("lit") == 0.0);
+        void Frame(double litMs, double? shadowMs = null)
+        {
+            fake.Add("lit", litMs);
+            if (shadowMs is { } s) fake.Add("shadow", s);
+            gpu.Sample();
+        }
+        Frame(2.0); Frame(2.0); Frame(4.0);
+        t.Expect("a full window is the mean of the frames inside it",
+            Math.Abs(gpu.MeanMs("lit") - 3.0) < 1e-9 && gpu.Spanned == 2, $"{gpu.MeanMs("lit")} over {gpu.Spanned}");
+        Frame(4.0);
+        t.Expect("and it rolls: the oldest frame leaves", Math.Abs(gpu.MeanMs("lit") - 4.0) < 1e-9, gpu.MeanMs("lit").ToString());
+        Frame(4.0, shadowMs: 1.0);
+        t.Expect("a pass that first ran inside the window counts from nothing",
+            Math.Abs(gpu.MeanMs("shadow") - 1.0) < 1e-9, gpu.MeanMs("shadow").ToString());
+        t.Expect("heaviest first", gpu.ByCost().Select(p => p.Pass).SequenceEqual(new[] { "lit", "shadow" }),
+            string.Join(", ", gpu.ByCost()));
+        var none = new GpuPassWindow(FrameTimings.None);
+        none.Sample(); none.Sample();
+        t.Expect("a device without timestamps samples nothing", none.Spanned == 0 && none.ByCost().Count == 0);
+
         var both = new SubmittedWork(1, 2, 3, 4, 5, 6, 7) + new SubmittedWork(1, 1, 1, 1, 1, 1, 1);
         t.Expect("submitted work adds field by field", both == new SubmittedWork(2, 3, 4, 5, 6, 7, 8), both.ToString());
 
@@ -723,6 +748,24 @@ public static class Program
             t.Expect("carrying what the loop reported",
                 root.GetRawText().Contains("ticks", StringComparison.Ordinal), "no 'ticks' value in the dump");
         }
+
+        // The loop is registered, not passed: every debug interface it implements is heard, and its
+        // Debug() runs once a frame rather than once as a contributor and again as the passed loop.
+        var inspectable = new InspectableLoop();
+        var registering = new HeadlessHost(inspectable, new HeadlessOptions(ExitAfterFrames: 3));
+        Console.SetOut(TextWriter.Null);
+        try { registering.Run(); } finally { Console.SetOut(wasOut); }
+        var contributors = registering.System!.Contributors.Select(c => c.DebugName).ToArray();
+        t.Expect("the host registers the device and then the loop, and nothing else",
+            contributors.SequenceEqual(new[] { "gpu", "inspectable-fixture" }), string.Join(", ", contributors));
+        t.Expect("so a loop that is also inspectable is heard as one",
+            registering.System.Contributors.OfType<IDebugInspectable>().Single() == inspectable);
+        t.Expect("and its Debug() runs once a frame", inspectable.Debugs == 3, $"{inspectable.Debugs} calls in 3 frames");
+
+        // Where the overlay starts is the application's to say, once; nothing writes it per frame.
+        t.Expect("the overlay starts hidden", !registering.System.State.ShowOverlay);
+        var shown = new HeadlessHost(new InspectableLoop(), new HeadlessOptions(ExitAfterFrames: 1, Diagnostics: true));
+        t.Expect("and showing when the host is told to (--debug)", shown.System!.State.ShowOverlay);
     }
 
     /// <summary>
@@ -1188,6 +1231,35 @@ internal class RecordingLoop : IGameLoop
 }
 
 /// <summary>The same loop, reporting into diagnostics.</summary>
+internal sealed class FakeTiming : IFrameTiming
+{
+    private readonly Dictionary<string, GpuPassTotal> totals = new(StringComparer.Ordinal);
+
+    public void Add(string pass, double ms) =>
+        totals[pass] = (totals.TryGetValue(pass, out var t) ? t : default) + new GpuPassTotal(ms, 1);
+
+    public FrameTiming? LastFrame => null;
+    public IReadOnlyDictionary<string, SubmittedWork> LastFramePasses { get; } = new Dictionary<string, SubmittedWork>();
+    public bool GpuTimestampsSupported => true;
+    public IReadOnlyDictionary<string, GpuPassTotal> GpuPassTotals => totals;
+    public bool IsolatePasses { get; set; }
+    public IReadOnlyDictionary<string, GpuPassTotal> IsolatedPassTotals { get; } = new Dictionary<string, GpuPassTotal>();
+    public long IsolatedFrames => 0;
+    public void ResetIsolatedTotals() { }
+    public double MeasureIsolationFloorMs() => 0;
+}
+
+internal sealed class InspectableLoop : RecordingLoop, IDebuggable, IDebugInspectable
+{
+    public int Debugs { get; private set; }
+
+    public string DebugName => "inspectable-fixture";
+
+    public void Debug(DebugContext debug) => Debugs++;
+
+    public void Inspect(string entityPath, DebugContext debug) { }
+}
+
 internal sealed class DebuggableLoop : RecordingLoop, IDebuggable
 {
     public string DebugName => "headless-fixture";

@@ -1683,6 +1683,11 @@ public static class Intersection
             if (tEnter > tExit) return false;
         }
 
-        return true;
+        // <b>A box wholly behind the origin is not hit.</b> Without this the line through it counted, and
+        // Raycast, which clamps a negative entry to 0 for an origin inside the box, reported every box
+        // behind a ray as hit at its origin: nearest of all. Found when the engine's pick test fired a ray
+        // away from two boxes and picked one. The sphere sweep rejects a negative entry itself, so this
+        // changes nothing there.
+        return tExit >= 0.0f;
     }
 }

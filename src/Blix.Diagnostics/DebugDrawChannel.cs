@@ -65,19 +65,17 @@ public sealed class DebugDrawChannel
     /// still happens, and drawing outside a scope still throws.
     /// </remarks>
     /// <remarks>
-    /// <b>Both rectangles are the framebuffer's, which is only right when they agree.</b>
-    /// <see cref="RenderFrameContext"/> is PHYSICAL pixels — 2x logical on a Retina display — and a
-    /// pointer arrives in logical ones. So a view declared this way and then picked through is off by
-    /// the backing scale, which is the exact bug a view carrying both rectangles exists to prevent.
-    /// <para>
-    /// Fine for drawing, where only the matrix matters. An application that PICKS through a view should
-    /// declare it with the overload below, passing <see cref="IRenderHost.LogicalSize"/> for the logical
-    /// rectangle — the host is the only thing that knows the scale.
-    /// </para>
+    /// <b>Each rectangle is the right one.</b> <see cref="RenderFrameContext"/> is PHYSICAL pixels — 2x
+    /// logical on a Retina display — and a pointer arrives in logical ones, which the host passes to
+    /// <see cref="DebugSystem.BeginFrame"/>. This used to take the framebuffer for both, which was fine
+    /// for drawing and off by the backing scale for a click; it did not matter while every application
+    /// built its own pick ray, and would have the moment the engine picked through it.
     /// </remarks>
     public ViewDeclaration Declare(string name, Matrix4x4 viewProjection) =>
         context.State.Views.Declare(
-            name, viewProjection, RenderSurfaceHandle.Default, context.Frame.Width, context.Frame.Height);
+            name, viewProjection, RenderSurfaceHandle.Default,
+            new Rect(0f, 0f, context.LogicalSize.Width, context.LogicalSize.Height),
+            new Rect(0f, 0f, context.Frame.Width, context.Frame.Height));
 
     /// <summary>Declares a view onto an explicit surface and rectangle.</summary>
     public ViewDeclaration Declare(
@@ -123,6 +121,34 @@ public sealed class DebugDrawChannel
         : throw new InvalidOperationException(
             "Debug primitives were emitted outside any view. Wrap them in `using (debug.Draw.In(view))`, " +
             "where `view` came from ViewTable.Declare(...).");
+
+    /// <summary>
+    /// Declares a layer at the current scope and says whether anything drawn under it will be seen.
+    /// </summary>
+    /// <remarks>
+    /// Draw under the same name (<c>Aabb("lod/12", …)</c> after <c>Layer("lod")</c>) and the Layers tab
+    /// switches it. Asking first is for a producer whose gizmos cost something to build: it can skip
+    /// the work rather than build primitives the line pass will drop.
+    /// <para>
+    /// <paramref name="visible"/> is where the layer starts, and it is only read the first time: after
+    /// that the switch is the viewer's. A layer declared hidden is listed in the Layers tab from the
+    /// first frame, before it has drawn anything, which is what replaces the "Show …" toggle an
+    /// application used to add for each gizmo it did not want on by default.
+    /// </para>
+    /// </remarks>
+    /// <param name="key">A key that switches the layer, as its box in the Layers tab would.</param>
+    public bool Layer(string name, bool visible = true, Key key = Key.Unknown)
+    {
+        var path = context.BuildPath(name);
+        context.State.LayersEnabled.TryAdd(path, visible);
+        if (key != Key.Unknown && context.Keys.Bind(key, $"show {name}", path))
+        {
+            // Its own switch, not its visibility: a hidden parent still hides it, as in the Layers tab.
+            context.State.LayersEnabled[path] = !context.State.LayersEnabled[path];
+        }
+
+        return context.State.ShowDebugDraw && context.State.IsPathVisible(path);
+    }
 
     private void PopView() => scopes.Pop();
 

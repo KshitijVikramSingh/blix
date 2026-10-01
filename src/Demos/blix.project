@@ -19,6 +19,7 @@ test: chassis-tune --headless --frames 30 --dump-frame 10
 # than scroll past it. These need a GPU and the layers, so this gate is run where both are; the
 # root gate stays deviceless for CI.
 test: Blix.Demos.VulkanHello --frames 45 --validate
+test: Blix.Demos.VulkanHello --frames 45 --validate --pick-check
 test: Blix.Demos.VulkanGraph --frames 45 --validate
 test: Blix.Demos.VulkanLit --frames 45 --validate
 test: Blix.Demos.VulkanInstanced --frames 45 --validate

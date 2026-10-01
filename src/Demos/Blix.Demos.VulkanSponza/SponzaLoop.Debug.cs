@@ -17,7 +17,6 @@ internal sealed partial class SponzaLoop
         System.Globalization.CultureInfo.InvariantCulture;
 
     // --- LOD visibility instrument ---------------------------------------
-    private bool showLodBoxes;
     private int[] lodLevels = Array.Empty<int>();
     private float[] lodPopAge = Array.Empty<float>();
     private const float PopHoldSeconds = 1.5f;
@@ -52,12 +51,19 @@ internal sealed partial class SponzaLoop
     // Controls are read-back: the returned value feeds this frame's render.
     public void Debug(DebugContext debug)
     {
-        // Cmd+C toggles this; Debug() runs unconditionally so it re-applies.
-        debug.State.Enabled = overlayEnabled;
+        // The keys this loop handles itself (Camera.cs), listed with the overlay hidden too.
+        debug.Keys.Describe("WASD", "move");
+        debug.Keys.Describe("Space / LeftControl", "up / down");
+        debug.Keys.Describe("Shift", "held, move three times faster");
+        debug.Keys.Describe("Arrows", "look around");
+        debug.Keys.Describe("Right-drag", "look around");
+        debug.Keys.Describe("Wheel", "move speed");
+        debug.Keys.Describe(Key.Escape, "quit");
+
         // Read-only values run even with the overlay hidden so F12 captures remain self-describing.
         // Controls and gizmos stop here because they are interactive or feed the debug-line pass.
         ReportValues(debug);
-        if (!overlayEnabled) return;
+        if (!debug.State.ShowOverlay) return;
 
         // Live tuning, grouped by scope. Controls are read-back: the returned
         // value feeds this frame's render (Debug() runs before OnRender).
@@ -85,26 +91,6 @@ internal sealed partial class SponzaLoop
         tunePanel.BuildControls(debug);
         tuneObjects.BuildControls(debug);   // [Tune]-tagged CPU settings (Fog, …)
 
-        // --- Live selection (ephemeral) -------------------------------------
-        // Left-click picks a primitive; Cmd-click adds. Drag LOD margin to
-        // coarsen/sharpen the whole selection at once (set-all); nothing is
-        // saved. The framework highlights the primary; tint the rest here.
-        if (selection.Count > 0)
-        {
-            using (debug.Scope("Selection"))
-            {
-                debug.Values.Value("count", selection.Count);
-                var repPath = primarySelection ?? selection.First();
-                var cur = TryResolveMargin(repPath, out var rArr, out var rIdx) ? rArr[rIdx] : 1f;
-                var next = debug.Controls.Float("LOD margin (×px)", cur, 0f, 8f);
-                if (next != cur)
-                {
-                    foreach (var p in selection)
-                        if (TryResolveMargin(p, out var a, out var ix)) a[ix] = next;
-                }
-            }
-        }
-
         using (debug.Scope("Cascades"))
         {
             cullEnabled   = debug.Controls.Toggle("Frustum cull", cullEnabled);
@@ -124,10 +110,6 @@ internal sealed partial class SponzaLoop
             device.VsyncEnabled = debug.Controls.Toggle("Vsync", device.VsyncEnabled);
             // Visualization channels are named here and share the shader's stable integer IDs.
             vizChannel = debug.Controls.Enum("Show", (int)MathF.Round(vizChannel), VizChannelNames);
-            // Outlines every opaque primitive NOT at full detail, tinted by how coarse it is, and
-            // flashes white the moment one switches level. The question this answers is not "how
-            // much does LOD save" — the A/B answers that — but "which piece of wall was it".
-            showLodBoxes = debug.Controls.Toggle("Show LOD levels", showLodBoxes);
             // Toggle the incident field under a still camera for direct visual comparison with the
             // inline path. Its allocation scale remains a launch flag because graph resources are
             // fixed at compile time.
@@ -180,18 +162,14 @@ internal sealed partial class SponzaLoop
             debug.Draw.Frustum($"cascade/{c}", cascadeViewProj[c], cascadeTints[c]);
         }
 
-        // Draw secondary selections inside the active view. The framework owns the primary
-        // highlight; these boxes make the rest of a multi-selection visible.
-        foreach (var p in selection)
-        {
-            if (p == primarySelection) continue;
-            if (sceneSelection.TryGetBounds(p, out var b))
-                debug.Draw.Aabb($"sel/{p}", b.Min, b.Max, MultiSelectColor);
-        }
-
+        // Outlines every opaque primitive NOT at full detail, tinted by how coarse it is, and flashes
+        // white the moment one switches level. The question this answers is not "how much does LOD
+        // save" — the A/B answers that — but "which piece of wall was it". A layer that starts
+        // hidden, switched in the Layers tab; it used to be a "Show LOD levels" toggle of its own.
+        //
         // Level 0 is deliberately not drawn: at a sane budget most of the scene is at full detail,
         // and outlining all of it would bury the handful of primitives the question is about.
-        if (showLodBoxes)
+        if (debug.Draw.Layer("lod", visible: false))
         {
             for (var i = 0; i < lodLevels.Length && i < opaqueDrawables.Count; i++)
             {
@@ -218,9 +196,8 @@ internal sealed partial class SponzaLoop
 
         using (debug.Scope("Indirect"))
         {
-            // Report a windowed injection cost beside the controls that affect it; see
-            // SampleGpuPassTimes.
-            var injectMs = GpuPassMs("sky-inject");
+            // Report a windowed injection cost beside the controls that affect it; see gpuPasses.
+            var injectMs = gpuPasses.MeanMs("sky-inject");
             debug.Values.Value("inject-gpu", lastFramePeriodMs > 0.01
                 ? $"{injectMs:0.00} ms ({injectMs / lastFramePeriodMs * 100.0:0.0}% of a {lastFramePeriodMs:0.0} ms frame)"
                 : $"{injectMs:0.00} ms");
@@ -244,18 +221,8 @@ internal sealed partial class SponzaLoop
             debug.Values.Value("probe-refresh", $"{rays} rays every {period:0}f");
         }
 
-        // Surface the same windowed pass timings used by the exit report. On tile-based GPUs these
-        // bracket encoder submission rather than deferred tiled execution, so they need not sum to
-        // the frame period and very small values are not proof that a pass is free.
-        using (debug.Scope("GPU passes"))
-        {
-            var passTotal = GpuPassTotalMs();
-            debug.Values.Value("encoded-total", $"{passTotal:0.00} ms (not the frame time)");
-            foreach (var (pass, ms) in GpuPassesByCost().Take(8))
-            {
-                debug.Values.Value(pass, $"{ms:0.000} ms");
-            }
-        }
+        // Per-pass GPU time, the CPU split and what was submitted are the Perf tab's now: Sponza read the
+        // host's timing record for them when the overlay did not.
 
         debug.Values.Value("shadow-map", $"{ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}");
         debug.Values.Value("splits-m", $"{cascadeSplits[1]:0}/{cascadeSplits[2]:0}/{cascadeSplits[3]:0}");
@@ -314,23 +281,5 @@ internal sealed partial class SponzaLoop
         debug.Values.Value("lod-popped", $"{popped} this frame, {holding} within {PopHoldSeconds:0.0}s");
         debug.Values.Value("lod-maxlevels", maxLevels);
         debug.Values.Value("lod-hist", $"{hist[0]}/{hist[1]}/{hist[2]}/{hist[3]} (err={render.LodErrorPixels:0.0}px)");
-
-        // --- Perf instrumentation: weigh where the frame actually goes -------
-        // CPU-phase split of the bundled `execute` timer. encode is the only
-        // phase draw-COUNT moves (recording vkCmds → Metal encoder calls), so
-        // it's the number A (batching) / B (GPU-driven indirect) would change;
-        // wait is the GPU/vsync throttle (high = GPU-bound, can't be cut by
-        // batching); submit is queue submit + present enqueue.
-        //
-        // Read from the host's frame timing, which is the backend's own record and is never drained
-        // by reading. Per-pass GPU ms is the runtime's `gpu/passes` timer scope as before.
-        if (host.Timing.LastFrame is { } cpu)
-        {
-            debug.Values.Value("cpu-wait", $"{cpu.WaitMs:0.00}ms");
-            debug.Values.Value("cpu-encode", $"{cpu.EncodeMs:0.00}ms");
-            debug.Values.Value("cpu-submit", $"{cpu.SubmitPresentMs:0.00}ms");
-            debug.Values.Value("submitted", string.Create(Inv,
-                $"{cpu.Work.Draws} draws, {cpu.Work.IndirectDraws} indirect ({cpu.Work.IndirectCommands} records), {cpu.Work.Triangles:N0} tris"));
-        }
     }
 }

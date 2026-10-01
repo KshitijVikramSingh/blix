@@ -42,9 +42,9 @@ public static class Program
 
     private static int Run(AppArgs args)
     {
-        // --debug is the live tuning + diagnostics overlay (` to show).
+        // --debug opens with the live tuning + diagnostics overlay showing; ` toggles it either way.
         var options = WindowOptions.FromArgs(args, new WindowOptions("Blix — Tank Arena", 1280, 720));
-        var loop = new TankArenaLoop(options.ExitAfterFrames, options.Diagnostics);
+        var loop = new TankArenaLoop(options.ExitAfterFrames);
         using var window = new Window(loop, options);
         window.Run();
         return 0;
@@ -185,7 +185,6 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
     private readonly TankModelFit fit = new();
     private readonly TankJuice juice = new();
     private ObjectTunables tunables = null!;
-    private readonly bool debugOverlay;
     private float trauma;   // screen-shake accumulator [0,1], decays each frame
 
     // Model-space pivots measured from tank.glb's node transforms (model-world units;
@@ -324,10 +323,9 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
     private int frameCount;
     private readonly Random rng = new(1234);
 
-    public TankArenaLoop(int exitAfterFrames, bool debugOverlay)
+    public TankArenaLoop(int exitAfterFrames)
     {
         this.exitAfterFrames = exitAfterFrames;
-        this.debugOverlay = debugOverlay;
     }
 
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
@@ -1253,10 +1251,17 @@ internal sealed class TankArenaLoop : IGameLoop, IDebuggable, IDisposable
 
     public void Debug(DebugContext debug)
     {
-        // The overlay renders only when Enabled (--debug); the backtick key toggles
-        // ShowOverlay. When off, emit nothing.
-        debug.State.Enabled = debugOverlay;
-        if (!debugOverlay) return;
+        // The keys this game handles itself, listed with the overlay hidden too.
+        debug.Keys.Describe("W / S", "drive forward / reverse");
+        debug.Keys.Describe("A / D", "steer");
+        debug.Keys.Describe("Left / Right", "turn the turret");
+        debug.Keys.Describe("Up / Down", "raise / lower the barrel");
+        debug.Keys.Describe(Key.Space, "fire");
+        debug.Keys.Describe("Enter / R", "restart, once the round is over");
+        debug.Keys.Describe(Key.Escape, "quit");
+
+        // Controls and gizmos only while the overlay is up (--debug, or ` at any time).
+        if (!debug.State.ShowOverlay) return;
 
         tunables.BuildControls(debug);   // live [Tune] sliders: feel + tank-model fit + juice
 

@@ -202,9 +202,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
     // PICKED through needs its logical rectangle to match the coordinates a pointer arrives in.
     private IRenderHost? host;
 
-    // Mirrors DebugState.DepthTestDrawing so the panel can flip it. Applied in Debug(), which is
-    // the only place with a DebugContext to hand.
-
     // ── Stage A of the view arc ─────────────────────────────────────────────
     // Ids the HOST gave us for textures the UI can draw. Registered once at load rather than per
     // frame: an id is a dictionary entry, and minting one every frame would grow that dictionary
@@ -742,6 +739,17 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
 
     public void Debug(DebugContext debug)
     {
+        // The keys and gestures this viewer handles itself (ReadInput), for the overlay's key list.
+        // Stepping only means anything while a clip is loaded, so it is only listed then.
+        if (session is not null)
+        {
+            debug.Keys.Describe(Key.Space, "pause / play");
+            debug.Keys.Describe("Left / Right", "step a frame back / forward (pauses)");
+        }
+        debug.Keys.Describe("Left-drag", "orbit");
+        debug.Keys.Describe("Click", "pick a bone or node");
+        debug.Keys.Describe("Wheel", "zoom");
+
         // <b>Watching, not rendering.</b> Every member is Bespoke — this viewer's own controls are
         // better than reflection could generate — so nothing is drawn from here. What it takes is
         // the thing a panel cannot do for itself: notice that state moved, and let the session
@@ -758,7 +766,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         // is not watched here.
         tunables?.BuildControls(debug);
 
-        debug.State.DepthTestDrawing = panels.DepthTestGizmos;
         debug.Values.Value("frames", frames);
         debug.Values.Value("sun", renderer.Look.SunDirection);
         // <b>The sun the ENVIRONMENT was baked from, beside the live one.</b> The probe is

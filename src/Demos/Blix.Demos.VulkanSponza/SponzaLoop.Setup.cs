@@ -32,6 +32,7 @@ internal sealed partial class SponzaLoop
     {
         this.host = host;
         device = graphicsDevice;
+        gpuPasses = new GpuPassWindow(host.Timing);
         textureLoader = new GltfTextureLoader(device);
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;
         renderHeightPx = host.LogicalSize.Height;
@@ -176,18 +177,6 @@ internal sealed partial class SponzaLoop
         sunPitch = MathF.Asin(Math.Clamp(sunDirection.Y, -1f, 1f));
         sunYaw = MathF.Atan2(sunDirection.X, -sunDirection.Z);
 
-        // Diagnostics overlay: GPU info + this loop's shadow/camera controls,
-        // live values, and cascade gizmos (see Debug()).
-        if (host is IDebugHost debugHost && debugHost.System is { } dbg)
-        {
-            // Only register the GPU contributor. The runtime already runs this
-            // loop's Debug() via Run(debuggable) since it implements IDebuggable
-            // — also registering it would run (and render its controls) twice.
-            graphicsDevice.RegisterDebug(dbg);
-            // Kept so click-to-pick can CollectSelectables()/Select(); the
-            // SceneSelection contributor is registered after consolidation.
-            debugSystem = dbg;
-        }
 
         if (!TryLocateSponza(out var assetsRoot, out var gltfPath))
         {

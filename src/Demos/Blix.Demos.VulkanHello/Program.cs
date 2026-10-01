@@ -29,7 +29,9 @@ public static class Program
 
     private static int Run(AppArgs args)
     {
-        var loop = new HelloLoop();
+        // --pick-check: the device-side proof of the pick pass. A pick at the left cube's centre must
+        // select it, and one at an empty corner must select nothing, or the run fails.
+        var loop = new HelloLoop(pickCheck: args.Flag("pick-check"));
         // Through FromArgs so the host's shared arguments actually reach it. This demo used to
         // construct its options directly, which silently ignored --frames: every "bounded" run of
         // it was really an unbounded one that something else killed, and a killed process never
@@ -47,9 +49,13 @@ public static class Program
     }
 }
 
-internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
+internal sealed class HelloLoop(bool pickCheck = false) : IGameLoop, IDebuggable, IDebugSelectable, IUiSource
 {
     public string DebugName => "vulkan-cube";
+
+    private IRenderHost host = null!;
+    private int pickPhase;
+    private Vector2 cubePixel;
 
     private VertexBufferHandle vertexBuffer;
     private IndexBufferHandle indexBuffer;
@@ -76,7 +82,6 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
     private readonly byte[] rightPushBytes = new byte[64];
 
     // State surfaced through IDebuggable — see Debug() below.
-    private GraphicsDeviceInfo? gpuInfo;
     private Vector3 cameraPosition;
     private Vector3 cameraTarget;
     private float fovYRadians;
@@ -89,9 +94,9 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
 
     public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
+        this.host = host;
         host.SetTitle("Blix — Vulkan Cube");
         var device = graphicsDevice;
-        gpuInfo = graphicsDevice.Info;
 
         var (vertices, indices) = BuildCube();
         var vertexData = VertexPosition3Texture.CreateBufferData(vertices);
@@ -274,8 +279,57 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
         System.Runtime.InteropServices.MemoryMarshal.Write(target, in m);
     }
 
+    // Both cubes are pickable: their geometry is the shared cube, placed by this frame's model matrix.
+    // The bounds only draw the highlight; half a unit cube's diagonal covers every rotation.
+    public void CollectSelectables(List<DebugSelectable> destination)
+    {
+        destination.Add(Cube("cube/left", leftModel, -CubeSeparation));
+        destination.Add(Cube("cube/right", rightModel, CubeSeparation));
+    }
+
+    private DebugSelectable Cube(string path, Matrix4x4 model, float x) => new(
+        path,
+        new Blix.Geometry.Bounds3(new Vector3(x - 0.87f, -0.87f, -0.87f), new Vector3(x + 0.87f, 0.87f, 0.87f)),
+        new DebugPickGeometry(vertexBuffer, VertexPosition3Texture.Layout, indexBuffer, 0, 36, 0, model),
+        path);
+
+    // The pick pass, proved on a device: a pick through the left cube's projected centre selects it, and
+    // one through an empty corner selects nothing. Driven through the same request a click makes.
+    private void RunPickCheck()
+    {
+        if (!pickCheck || host is not IDebugHost { System: { } system }) return;
+        switch (pickPhase)
+        {
+            case 0 when frameCount >= 10:
+                var clip = Vector4.Transform(new Vector4(-CubeSeparation, 0f, 0f, 1f), viewProj);
+                var (w, h) = host.LogicalSize;
+                system.RequestPick(new Vector2((clip.X / clip.W * 0.5f + 0.5f) * w, (clip.Y / clip.W * 0.5f + 0.5f) * h));
+                pickPhase = 1;
+                break;
+            case 1 when system.LastPick is { } cube:
+                if (cube.Hit != "cube/left")
+                {
+                    BlixApps.ReportFailure($"pick-check: the left cube's centre picked '{cube.Hit ?? "nothing"}' at pixel {cube.Pixel}");
+                }
+                cubePixel = cube.Pixel;
+                system.RequestPick(new Vector2(4f, 4f));
+                pickPhase = 2;
+                break;
+            case 2 when system.LastPick is { } corner && corner.Pointer == new Vector2(4f, 4f):
+                if (corner.Hit is not null) BlixApps.ReportFailure($"pick-check: an empty corner picked '{corner.Hit}'");
+                else Console.WriteLine($"[pick-check] left cube picked at pixel {cubePixel}; empty corner at {corner.Pixel} picked nothing");
+                pickPhase = 3;
+                break;
+            case < 3 when frameCount >= 40:
+                BlixApps.ReportFailure($"pick-check: never finished (stopped in phase {pickPhase})");
+                pickPhase = 3;
+                break;
+        }
+    }
+
     public void Debug(DebugContext debug)
     {
+        RunPickCheck();
         debug.Values.Value("frame", frameCount);
 
         using (debug.Scope("light"))
@@ -297,15 +351,7 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
             debug.Values.Value("target", cameraTarget);
             debug.Values.Value("fovY-rad", fovYRadians);
         }
-        if (gpuInfo is { } info)
-        {
-            using (debug.Scope("gpu"))
-            {
-                debug.Values.Value("vendor", info.Vendor);
-                debug.Values.Value("renderer", info.Renderer);
-                debug.Values.Value("version", info.Version);
-            }
-        }
+        // Vendor, renderer and version are the host's device panel ("gpu"), for every application.
 
         debug.Stats.Gauge("triangles", 24);
         debug.Stats.Gauge("vertices", 48);
@@ -347,7 +393,8 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
         //
         // Trails are also the cheapest possible demonstration that the two axes compose: the points are
         // remembered per path and drawn into whichever view is in scope.
-        if (!trailsOn) return;
+        // A layer (the Layers tab switches it), where it was a checkbox on this demo's own panel.
+        if (!debug.Draw.Layer("trails")) return;
         var corner = new Vector3(0.5f, 0.5f, 0.5f);
         var leftCorner = Vector3.Transform(corner, leftModel);
         var rightCorner = Vector3.Transform(corner, rightModel);
@@ -368,7 +415,6 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
     // read it, so typing used to reach the game as well as the field — invisible while the overlay was
     // the only UI, because it has hardly any text fields.
 
-    private bool trailsOn = true;
     private float trailSeconds = 2f;
     private string note = "type here — keys must not reach the game";
 
@@ -384,10 +430,9 @@ internal sealed class HelloLoop : IGameLoop, IDebuggable, IUiSource
             return;
         }
 
-        ImGui.Checkbox("corner trails", ref trailsOn);
-        ImGui.SliderFloat("seconds", ref trailSeconds, 0.25f, 8f);
+        // Whether the trails draw is the overlay's Layers tab; how long they last is this panel's.
+        ImGui.SliderFloat("trail seconds", ref trailSeconds, 0.25f, 8f);
         ImGui.InputText("note", ref note, 128);
-        ImGui.TextDisabled($"{(trailsOn ? "tracing" : "off")} · {trailSeconds:0.0}s");
         ImGui.End();
     }
 
