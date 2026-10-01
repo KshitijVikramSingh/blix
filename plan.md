@@ -122,17 +122,97 @@ refusals, then features:
    sRGB, the clearcoat normal as a normal map); every textured channel kind in the corpus (16) reaches the
    cooked file. Renderers decide which they draw — Studio draws none of the extensions. Found on the way:
    same-named embedded images overwrote each other's cooked file; each extraction now takes a unique stem.
-4. **Refused valid files — done.** A sparse INDEX accessor (Accessor_Sparse_03), a skin with no inverse
-   binds (identity, §5.27), and joints with no common root (Animation_Skin_06, which SharpGLTF's strict
-   validator rejects — sources now load unvalidated, and the cook checks what it needs itself: POSITION,
-   index range, required extensions).
+4. **Refused files — done, and one of them was NOT valid.** A sparse INDEX accessor (Accessor_Sparse_03)
+   and a skin with no inverse binds (identity, §5.27) are valid and load. Animation_Skin_06 is not: its two
+   joints are separate scene roots, and §5.27 says a skin's joints MUST have a common root (the Khronos
+   validator: SKIN_NO_COMMON_ROOT). Commit 8d3b169 called it valid and turned SharpGLTF's validation off
+   to read it — the validator was right. *Corrected (on gltf-scene):* sources are validated strictly again;
+   reading a skin without a common root is a declared COMPATIBILITY POLICY
+   (`MeshRecipe.LenientSkinWithoutCommonRoot`: the joint worlds are still defined by the node graph), and
+   only that file is re-read unvalidated, saying so in the cook log. Anything else the validator refuses is
+   refused. Test.Recipes `ValidatorRejectionsAreAccounted` lists what strict refuses in the corpus (5 files:
+   three unread extensions, primitive restart, Animation_Skin_06) and holds each to a refusal or the
+   declared leniency. With the validator off for a lenient file, three MUSTs it had been checking became
+   Blix's own and are now explicit: a TRIANGLES index count not a non-zero multiple of three (was silently
+   trimmed) and a strip/fan of fewer than three are refused; an inverseBindMatrices accessor with MORE
+   elements than joints is valid (§5.27 says at least n) and loads, the first n read.
 5. **KHR_texture_transform — done.** Each core channel's offset/rotation/scale cooks into the material
    (format v16) and a texCoord override replaces the channel's set; Studio applies them per draw
    (`uUvRows`, set 1). TextureTransformMultiTest and SheenChair load; the multi-test's checkmarks show,
    and with the transform bypassed its fail symbols do. Other renderers (Sponza, the demos) read the
    transforms off PbrMaterial when they want them.
 6. **Scene structure the reader ignores:** scene selection (MultipleScenes), cameras, KHR_node_visibility,
-   EXT_mesh_gpu_instancing, KHR_lights_punctual, KHR_materials_variants.
+   EXT_mesh_gpu_instancing, KHR_lights_punctual, KHR_materials_variants. Branch `gltf-scene` (on rig-alpha).
+   Two of these were silently wrong, not merely absent: both listed as *used*, not required, so they loaded
+   — SimpleInstancing drew one copy of its grid, NodeVisibilityTest drew its hidden nodes. MultipleScenes
+   drew both scenes on top of each other. DirectionalLight (lights *required*) was refused.
+
+   **One format version (v18) for all six**, so Sponza re-cooks once. Every one is a FACT the file states;
+   what a consumer does with it is the consumer's (conventions §10):
+   - *Scenes:* each scene's root nodes and the default (SharpGLTF reads an absent `scene` as 0, which the
+     spec leaves to the client — kept). `ModelData.Load(…, scene:)` picks one, default the file's; nodes
+     outside it are not placed. Node indices stay the file's, so skins and tracks need no remap.
+   - *Visibility:* each node's own `visible`; shown = its own AND every ancestor's (the spec's rule). Hides
+     meshes (and lights), never cameras. Static here: animating it needs `animation_pointer` (item 7).
+   - *Instancing:* each node's instance transforms, applied before its world (row-vector `instance * world`).
+     The non-instanced mesh is not drawn. A skinned instanced node is refused by name (the spec defines none).
+     Per instance mirroring: an instance's own negative scale flips its front face.
+   - *Cameras / lights:* the records and the node that carries each. Studio and `blix shot` can view through a
+     file's camera (`--camera`); nothing draws punctual lights yet — that is a lighting arc a consumer asks for.
+   - *Variants:* variant names and, per primitive, the material each variant maps it to. A resident `Model`
+     keeps every variant's material resolved, so switching is a lookup, not a reload.
+
+   **Done (format v18, recipe 16).** One rule for what a scene draws, on the cooked file
+   (`BlixMeshFile.Placement` / `DrawnPrimitives`), read by `ModelData` and the sky-visibility bake alike —
+   the bake had its own node walk and would have voxelised hidden, out-of-scene and un-instanced geometry.
+   `ModelData.Load(…, scene:)`, `IsPlaced`/`IsShown`/`DrawnWorlds`, `Cameras`/`Lights`/`Variants`,
+   `Primitive.MaterialFor(variant)`; `Model` uploads the placed scene only and carries each node's `Shown`,
+   `Instances`, camera and light, and every variant's material resolved (`Part.MaterialFor`). Studio draws
+   shown nodes, once per instance, in the chosen variant; `blix shot --scene/--variant/--camera`, the viewer's
+   *scene* panel (variant, view through a file camera), `blix inspect`'s *scene level*. Instruments:
+   Test.Recipes `SceneLevelMatchesGltf` (157 scenes, 6 hidden nodes, 125 instances from the raw accessors'
+   T·R·S, 6 cameras, 6 lights, 7 mapped primitives from the JSON), `SceneLevelReachesModelData`,
+   `FlattenKeepsFacesUnderMirrors` (a real control: with the fix off, 24/4228 mirrored triangles face right
+   and 12% of frames, against 4076/4228 and 71%≈76% unmirrored); nine lab modes (instancing, visibility,
+   scenes, scene0, camera-persp, camera-ortho, variant-beach, variant-street, lights). Corpus +3:
+   LightsPunctualLamp, DirectionalLight, MaterialsVariantsShoe.
+
+   **Found while looking at Sponza:** `ModelData.Flattened()` (Sponza's load path) bakes a node's world into
+   the vertices and, for a mirroring world, neither reversed the winding nor negated the tangent's `w`.
+   Sponza has no mirrored node (measured: 0 of 138 mesh nodes), so it never showed; any other flat consumer
+   would draw a mirrored part inside-out with its normal map's bitangent backwards.
+
+   **Sponza against 3b/3c, measured from its sources:** its culling already follows `doubleSided` per material
+   (single-sided → back-face culled, double-sided → unculled with `gl_FrontFacing` flipping N in the lit and
+   pre-pass shaders) — glTF's rule. Shadow casters are unculled on purpose (thin and two-sided casters). One
+   UV set read, no texture transform, one sampler (repeat, trilinear) — so 3c's per-channel sets, transforms
+   and samplers change nothing it draws today. 373 primitives carry an unread TEXCOORD_1 (lightmap UVs). Its
+   main file carries 24 KHR_lights_punctual lights (23 point, 1 sun, all authored at intensity 0) and six
+   cameras: the first real consumer for both, if Sponza wants its lamps or authored views.
+6b. **Review corrections (on gltf-scene).** From an outside review of rig-alpha, each checked against the spec
+   text before changing anything:
+   - *Validation:* see item 4 — strict again, two named fallbacks (`MeshRecipe.ValidatorFallbacks`): the
+     declared leniency (no common root, invalid) and the validator's own over-strictness (spare inverse
+     binds, valid — SharpGLTF demands equality where §5.27 says at least; RiggedSimple_extraibm, derived,
+     its third matrix a 100 m translation that must not be read).
+   - *Generated tangents follow the normal texture's TEXCOORD set* (§3.7.2.1, "texture coordinates
+     associated with the normal texture", its texCoord or a KHR_texture_transform override). They were
+     always built over set 0. NormalTangentMirrorTest_normaluv1 (derived: no TANGENT, normal map on a
+     quarter-turned TEXCOORD_1): 5240/5240 triangles follow set 1; CONTROL, generation forced to set 0 and
+     run: 80/5240. Not handled: a texture transform's ROTATION also turns the frame the map was baked in.
+   - *Index counts refused, not trimmed:* a TRIANGLES list not a non-zero multiple of three, a strip or fan
+     of fewer than three.
+   - *A golden sharing nothing with the reader:* `InterpolationGolden` decodes InterpolationTest's
+     accessors from the .glb's own bytes and evaluates Appendix C by hand — the other two animation
+     references both took keys through `GltfImporter.SampleKeys`, so a mis-read CUBICSPLINE triple would
+     have sat on both sides. 369 points, worst 1e-6; t=1.9 rotation is the hand-computed literal.
+   - *Watched, not done:* `Skeleton` now means two things. A skin's skeleton owns inverse binds; the model's
+     animated hierarchy (`ModelData.Skeleton`, in the multi-skin or node-animated case) is a pose hierarchy
+     with no inverse binds of its own, yet `Bone` carries `InverseBindPose` and the hierarchy inherits skin
+     0's where they exist. The runtime never reads them there (every palette gathers through its own skin),
+     so it works — but the type says otherwise. The split is "pose hierarchy" vs "skin binding"; do it when
+     a consumer is misled by it, or when the next change to Skeleton touches it anyway.
+
 7. **Out of scope unless asked:** Draco, meshopt, KTX2/BasisU, WEB3D quantized (refused by name), morph
    targets and KHR_animation_pointer (recorded as unread), KHR_xmp (metadata).
 

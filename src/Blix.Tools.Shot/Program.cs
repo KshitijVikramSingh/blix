@@ -436,7 +436,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // had opened — which reads as "the viewer is broken" rather than "that file is not a glTF".
         try
         {
-            loaded = renderer.LoadModel(modelPath);
+            var scene = args.Int("scene", -1);
+            loaded = renderer.LoadModel(modelPath, scene >= 0 ? scene : null);
         }
         catch (AssetImportException refused)
         {
@@ -444,6 +445,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             Environment.Exit(1);
             return;
         }
+
+        if (!ApplySceneLevel(loaded)) Environment.Exit(1);
 
         // A model with a skin or a clip is posed and framed by its body; one with neither is framed as a prop.
         if (loaded.IsSkinned || loaded.IsAnimated)
@@ -462,6 +465,58 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             $"model: {Path.GetFileName(modelPath)} — {model.Nodes.Count} node(s), {model.Parts.Count} part(s), " +
             $"{StudioInspection.TexturedParts(model)} textured ({StudioInspection.Images(model).Count} image(s))");
     }
+
+    // The scene level a file states and a capture can choose among: which variant's materials draw, and
+    // which of its cameras (if any) the picture is taken through. Reported, so the log a baseline hashes
+    // says what the picture holds. False when a choice names nothing in the file.
+    private bool ApplySceneLevel(Model loaded)
+    {
+        var shown = loaded.Nodes.Count(n => n.PrimitiveCount > 0 && n.Shown);
+        var hidden = loaded.Nodes.Count(n => n.PrimitiveCount > 0 && !n.Shown);
+        var instanced = loaded.Nodes.Where(n => n.Instances is not null).Sum(n => n.Instances!.Count);
+        Console.WriteLine(
+            $"scene: {(loaded.SceneIndex < 0 ? "none listed" : $"{loaded.SceneIndex} '{loaded.Scenes[loaded.SceneIndex].Name}' of {loaded.Scenes.Count}")}; " +
+            $"{shown} shown and {hidden} hidden mesh node(s); {instanced} instance(s); " +
+            $"{loaded.Cameras.Count} camera(s); {loaded.Lights.Count} light(s); {loaded.Variants.Count} variant(s)");
+
+        if (args.String("variant") is { } wanted)
+        {
+            var v = int.TryParse(wanted, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) ? n : loaded.Variant(wanted);
+            if (v < 0 || v >= loaded.Variants.Count)
+            {
+                Console.Error.WriteLine(
+                    $"--variant {wanted}: '{loaded.Name}' has {(loaded.Variants.Count == 0 ? "no variants" : string.Join(", ", loaded.Variants))}.");
+                return false;
+            }
+
+            renderer.SetVariant(loaded, v);
+            Console.WriteLine($"variant: {v} '{loaded.Variants[v]}'");
+        }
+
+        if (args.String("camera") is { } named)
+        {
+            var c = int.TryParse(named, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) ? n
+                : loaded.Cameras.ToList().FindIndex(k => string.Equals(k.Name, named, StringComparison.OrdinalIgnoreCase));
+            var carrier = c < 0 ? null : loaded.Nodes.FirstOrDefault(k => k.CameraIndex == c);
+            if (carrier is null)
+            {
+                Console.Error.WriteLine(
+                    $"--camera {named}: '{loaded.Name}' has {(loaded.Cameras.Count == 0 ? "no cameras" : string.Join(", ", loaded.Cameras.Select(k => k.Name)))} on its nodes.");
+                return false;
+            }
+
+            cameraNode = carrier.Index;
+            fileCamera = c;
+            var lens = loaded.Cameras[c];
+            Console.WriteLine($"camera: {c} '{lens.Name}' on node '{carrier.Name}' ({(lens.Orthographic ? "orthographic" : "perspective")})");
+        }
+
+        return true;
+    }
+
+    // A file camera (--camera): the node that carries it, and which of the file's cameras it is.
+    private int cameraNode = -1;
+    private int fileCamera = -1;
 
     // Sampled ONCE, at load, and never advanced. A capture that ran the clock would produce a
     // different picture per run — which is precisely what a capture exists not to do.
@@ -698,6 +753,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
         var view = Matrix4x4.CreateLookAt(eye, target, Vector3.UnitY);
         viewProjection = view * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, aspect, 0.1f, 120f);
+        if (cameraNode >= 0 && (model ?? rig) is { } framed)
+        {
+            viewProjection = StudioFraming.ThroughCamera(framed, fileCamera, model is not null ? modelTransform : rigTransform, aspect)!.Value;
+        }
 
         if (rig is not null && animation is not null)
         {
@@ -929,7 +988,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             var origin = new Vector3(world.M41, world.M42, world.M43);
             // Mesh-bearing nodes only. The tank has 96 nodes and 11 meshes — the other 85 are
             // track links and wheel pivots, and a triad on each is noise rather than information.
-            if (node.PrimitiveCount == 0) continue;
+            if (node.PrimitiveCount == 0 || !node.Shown) continue;
             var length = size;
             debug.Draw.Line($"{node.Name}/x", origin,
                 origin + (Vector3.Normalize(new Vector3(world.M11, world.M12, world.M13)) * length),

@@ -75,6 +75,9 @@ sample TriangleWithoutIndices glTF-Embedded TriangleWithoutIndices.gltf   # A pr
 sample MultipleScenes glTF-Embedded MultipleScenes.gltf   # Two scenes; which one a reader shows is the default scene's to say.
 sample Cameras glTF-Embedded Cameras.gltf   # Perspective and orthographic cameras, which a viewer may use or ignore but must not mis-read.
 sample SimpleInstancing         # EXT_mesh_gpu_instancing: one mesh drawn many times by one node.
+sample LightsPunctualLamp       # KHR_lights_punctual: spot and point lights on nodes, with ranges and cones. The only corpus file whose lights are lit.
+sample DirectionalLight         # KHR_lights_punctual: one directional light, aimed by its node.
+sample MaterialsVariantsShoe    # KHR_materials_variants: three named variants, each remapping the primitives' materials.
 sample NodeVisibilityTest       # KHR_node_visibility.
 sample EmissiveStrengthTest     # KHR_materials_emissive_strength: emission past 1.0 — the glowing-bulb case.
 sample DamagedHelmet            # Every core PBR channel on one real asset.

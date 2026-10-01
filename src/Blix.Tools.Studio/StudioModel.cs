@@ -121,6 +121,7 @@ internal sealed class StudioModel : IDisposable
     // weights vertices — the skin's equivalent of a rigid part's world, for choosing its front face.
     private bool[] mirrored = Array.Empty<bool>();
     private int[] probeBone = Array.Empty<int>();
+    private int variant = -1;
 
     /// <summary>Whether <paramref name="skin"/> was last uploaded mirrored, so its front faces are clockwise.</summary>
     /// <remarks>One answer per skin: a rig that mirrors some joints and not others within one primitive cannot be one pipeline.</remarks>
@@ -147,67 +148,21 @@ internal sealed class StudioModel : IDisposable
     /// <param name="skinnedProgram">
     /// The program whose set-3 slot describes the palette buffer: Studio's skinned pipeline.
     /// </param>
-    internal static StudioModel Load(IGraphicsDevice device, string path, ShaderProgramHandle skinnedProgram)
+    /// <param name="scene">The scene to place; null for the file's default.</param>
+    internal static StudioModel Load(IGraphicsDevice device, string path, ShaderProgramHandle skinnedProgram, int? scene = null)
     {
         // Cooked on open: what Studio shows is the cooked asset, which is what the engine draws. Skinned
         // parts skinned; every other part in the complete vertex the static pipeline reads (tangents for
         // normal maps, COLOR_0 as a base-colour multiplier, conventions §6).
-        var data = ModelData.Load(Blix.Recipes.CookCache.Resolve(path), new ModelNeeds(Tangents: true, Colour: true, Skinned: true));
+        var data = ModelData.Load(Blix.Recipes.CookCache.Resolve(path), new ModelNeeds(Tangents: true, Colour: true, Skinned: true), scene);
 
         var studio = new StudioModel();
         studio.textures = new MaterialTextureLoader(device);
         studio.model = device.CreateModel(data, studio.textures, $"lab.{Path.GetFileNameWithoutExtension(path)}");
         // Realised now, not streamed: an inspector shows the asset as it is from the first frame.
         studio.textures.Drain(double.PositiveInfinity);
+        studio.Rebuild();
         var model = studio.model;
-        var fallback = model.IsSkinned ? StudioInspection.RigFallbackColour : StudioInspection.ModelFallbackColour;
-        Vector3 BaseColourOf(PbrMaterial? m) => StudioInspection.BaseColour(m, fallback);
-
-        foreach (var p in model.SkinnedParts)
-        {
-            var m = p.Material;
-            studio.skinnedParts.Add(new SkinnedPart(
-                p.Mesh.VertexBuffer, p.Mesh.IndexBuffer, p.Mesh.IndexCount, BaseColourOf(m),
-                m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness, StudioSurface.Of(m, p.Textures),
-                p.SkinIndex,
-                AlbedoUvSet: m?.BaseColorTexCoord ?? 0,
-                BaseAlpha: m?.BaseColorFactor.W ?? 1f,
-                AlphaMode: m?.AlphaMode ?? AlphaMode.Opaque,
-                AlphaCutoff: m?.AlphaCutoff ?? 0.5f,
-                DoubleSided: m?.DoubleSided ?? false,
-                MaterialName: m?.Name ?? string.Empty));
-        }
-
-        foreach (var p in model.StaticParts)
-        {
-            var m = p.Material;
-            var node = model.Nodes[p.NodeIndex];
-            var siblings = model.StaticParts.Where(o => o.NodeIndex == p.NodeIndex).ToList();
-            studio.staticParts.Add(new StaticPart(
-                siblings.Count > 1 ? $"{node.Name}.{siblings.IndexOf(p)}" : node.Name, node.World, p.Mesh.VertexBuffer, p.Mesh.IndexBuffer, p.Mesh.IndexCount, BaseColourOf(m),
-                m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness, StudioSurface.Of(m, p.Textures),
-                AlbedoUvSet: m?.BaseColorTexCoord ?? 0,
-                BaseAlpha: m?.BaseColorFactor.W ?? 1f,
-                AlphaMode: m?.AlphaMode ?? AlphaMode.Opaque,
-                AlphaCutoff: m?.AlphaCutoff ?? 0.5f,
-                DoubleSided: m?.DoubleSided ?? false,
-                MaterialName: m?.Name ?? string.Empty));
-        }
-
-        foreach (var a in model.Attachments)
-        {
-            var m = a.Part.Material;
-            studio.attachments.Add(new Attachment(
-                a.Name, a.JointName, a.JointIndex, a.Local, a.Part.Mesh.VertexBuffer, a.Part.Mesh.IndexBuffer, a.Part.Mesh.IndexCount,
-                BaseColourOf(m), m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness,
-                StudioSurface.Of(m, a.Part.Textures),
-                AlbedoUvSet: m?.BaseColorTexCoord ?? 0,
-                BaseAlpha: m?.BaseColorFactor.W ?? 1f,
-                AlphaMode: m?.AlphaMode ?? AlphaMode.Opaque,
-                AlphaCutoff: m?.AlphaCutoff ?? 0.5f,
-                DoubleSided: m?.DoubleSided ?? false,
-                MaterialName: m?.Name ?? string.Empty));
-        }
 
         if (!model.IsSkinned) return studio;
 
@@ -228,6 +183,94 @@ internal sealed class StudioModel : IDisposable
         }
 
         return studio;
+    }
+
+    /// <summary>The <c>KHR_materials_variants</c> entry the parts are drawn with; -1 for each primitive's own material.</summary>
+    public int Variant => variant;
+
+    /// <summary>Draws every part with <paramref name="index"/>'s materials from now on (-1: their own).</summary>
+    public void SetVariant(int index)
+    {
+        if (index < -1 || index >= model.Variants.Count)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(index), $"'{model.Name}' has {model.Variants.Count} variant(s); {index} is not one (-1 for none).");
+        }
+
+        variant = index;
+        Rebuild();
+    }
+
+    // Studio's part lists from the engine model: only shown nodes (KHR_node_visibility), a static part or
+    // attachment once per instance (EXT_mesh_gpu_instancing, each instance before the node's transform),
+    // and every material the chosen variant gives (KHR_materials_variants).
+    private void Rebuild()
+    {
+        skinnedParts.Clear();
+        staticParts.Clear();
+        attachments.Clear();
+        var fallback = model.IsSkinned ? StudioInspection.RigFallbackColour : StudioInspection.ModelFallbackColour;
+        Vector3 BaseColourOf(PbrMaterial? m) => StudioInspection.BaseColour(m, fallback);
+
+        foreach (var p in model.SkinnedParts)
+        {
+            if (!model.Nodes[p.NodeIndex].Shown) continue;
+            var (m, tex) = p.MaterialFor(variant);
+            skinnedParts.Add(new SkinnedPart(
+                p.Mesh.VertexBuffer, p.Mesh.IndexBuffer, p.Mesh.IndexCount, BaseColourOf(m),
+                m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness, StudioSurface.Of(m, tex),
+                p.SkinIndex,
+                AlbedoUvSet: m?.BaseColorTexCoord ?? 0,
+                BaseAlpha: m?.BaseColorFactor.W ?? 1f,
+                AlphaMode: m?.AlphaMode ?? AlphaMode.Opaque,
+                AlphaCutoff: m?.AlphaCutoff ?? 0.5f,
+                DoubleSided: m?.DoubleSided ?? false,
+                MaterialName: m?.Name ?? string.Empty));
+        }
+
+        foreach (var p in model.StaticParts)
+        {
+            var node = model.Nodes[p.NodeIndex];
+            if (!node.Shown) continue;
+            var (m, tex) = p.MaterialFor(variant);
+            var siblings = model.StaticParts.Where(o => o.NodeIndex == p.NodeIndex).ToList();
+            var name = siblings.Count > 1 ? $"{node.Name}.{siblings.IndexOf(p)}" : node.Name;
+            var instance = 0;
+            foreach (var world in node.DrawnWorlds)
+            {
+                staticParts.Add(new StaticPart(
+                    node.Instances is null ? name : $"{name}#{instance++}", world, p.Mesh.VertexBuffer, p.Mesh.IndexBuffer, p.Mesh.IndexCount, BaseColourOf(m),
+                    m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness, StudioSurface.Of(m, tex),
+                    AlbedoUvSet: m?.BaseColorTexCoord ?? 0,
+                    BaseAlpha: m?.BaseColorFactor.W ?? 1f,
+                    AlphaMode: m?.AlphaMode ?? AlphaMode.Opaque,
+                    AlphaCutoff: m?.AlphaCutoff ?? 0.5f,
+                    DoubleSided: m?.DoubleSided ?? false,
+                    MaterialName: m?.Name ?? string.Empty));
+            }
+        }
+
+        foreach (var a in model.Attachments)
+        {
+            var node = model.Nodes[a.Part.NodeIndex];
+            if (!node.Shown) continue;
+            var (m, tex) = a.Part.MaterialFor(variant);
+            var instance = 0;
+            foreach (var local in node.Instances?.Select(i => i * a.Local) ?? new[] { a.Local })
+            {
+                attachments.Add(new Attachment(
+                    node.Instances is null ? a.Name : $"{a.Name}#{instance++}", a.JointName, a.JointIndex, local,
+                    a.Part.Mesh.VertexBuffer, a.Part.Mesh.IndexBuffer, a.Part.Mesh.IndexCount,
+                    BaseColourOf(m), m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness,
+                    StudioSurface.Of(m, tex),
+                    AlbedoUvSet: m?.BaseColorTexCoord ?? 0,
+                    BaseAlpha: m?.BaseColorFactor.W ?? 1f,
+                    AlphaMode: m?.AlphaMode ?? AlphaMode.Opaque,
+                    AlphaCutoff: m?.AlphaCutoff ?? 0.5f,
+                    DoubleSided: m?.DoubleSided ?? false,
+                    MaterialName: m?.Name ?? string.Empty));
+            }
+        }
     }
 
     /// <summary>Copies one skin's live instance palettes into that skin's frame buffer.</summary>

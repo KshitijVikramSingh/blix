@@ -37,6 +37,30 @@ public static class StudioFraming
         return controller;
     }
 
+    /// <summary>The view-projection through one of a model's own cameras (glTF: the node looks down -Z, +Y up).</summary>
+    /// <param name="placement">Where the tool drew the model (its fit to the stage); the camera moves with it.</param>
+    /// <param name="aspect">The viewport's, used when the camera states none.</param>
+    /// <returns>Null when no node carries camera <paramref name="camera"/>.</returns>
+    public static Matrix4x4? ThroughCamera(Blix.Model model, int camera, Matrix4x4 placement, float aspect)
+    {
+        if ((uint)camera >= (uint)model.Cameras.Count) return null;
+        var carrier = model.Nodes.FirstOrDefault(n => n.CameraIndex == camera);
+        if (carrier is null) return null;
+        var lens = model.Cameras[camera];
+        var world = carrier.World * placement;
+        var eye = Vector3.Transform(Vector3.Zero, world);
+        var forward = Vector3.Normalize(Vector3.TransformNormal(-Vector3.UnitZ, world));
+        var up = Vector3.Normalize(Vector3.TransformNormal(Vector3.UnitY, world));
+        var view = Matrix4x4.CreateLookAt(eye, eye + forward, up);
+        // The placement's uniform scale, so near, far and an orthographic extent stay where the author put them.
+        var scale = Vector3.TransformNormal(Vector3.UnitX, placement).Length();
+        var near = MathF.Max(lens.ZNear * scale, 1e-4f);
+        var far = float.IsFinite(lens.ZFar) ? lens.ZFar * scale : near * 1e5f;
+        return lens.Orthographic
+            ? view * Blix.Graphics.GraphicsMatrices.CreateOrthographicVulkan(2f * lens.XMag * scale, 2f * lens.YMag * scale, near, far)
+            : view * Blix.Graphics.GraphicsMatrices.CreatePerspectiveVulkan(lens.YFov, lens.AspectRatio > 0f ? lens.AspectRatio : aspect, near, far);
+    }
+
     /// <summary>Studio's subjects stand at the origin; this is where the eye aims by default.</summary>
     public static Vector3 SubjectCentre { get; } = new(0f, 1f, 0f);
 }

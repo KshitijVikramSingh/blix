@@ -133,8 +133,8 @@ public static class Program
             new Skeleton(Array.Empty<Bone>()), Array.Empty<AnimationClip>(), System.Numerics.Matrix4x4.Identity);
     }
 
-    // A source as the cook opens it: SharpGLTF's strict validation skipped, because it rejects valid
-    // glTF (Animation_Skin_06's joints have no common root, which the spec allows).
+    // A source read as a REFERENCE, unvalidated so the declared-lenient files (ReadLeniently) can be read
+    // too. The cook itself validates (MeshRecipe.OpenSource); ValidatorRejectionsAreAccounted audits that.
     private static SharpGLTF.Schema2.ModelRoot LoadSource(string file) =>
         SharpGLTF.Schema2.ModelRoot.Load(file, new SharpGLTF.Schema2.ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip });
 
@@ -306,6 +306,571 @@ public static class Program
     // ── Samplers as glTF defines them ──────────────────────────────────────────
     // Every textured core channel of every corpus file: the cooked row it reads carries exactly that
     // texture's glTF sampler, and the engine maps glTF's codes to its own as the spec defines them.
+    // ── Validation, audited ──────────────────────────────────────────────────────
+    // The cook validates every source with SharpGLTF's strict validator and reads past it for exactly two
+    // named causes (MeshRecipe.ValidatorFallbacks): invalid glTF read on purpose (a skin with no common
+    // root) and valid glTF the validator wrongly refuses (spare inverse binds). This holds the corpus to
+    // that: every file the validator refuses is one Blix refuses too (ExpectedRefusals) or one listed here
+    // with its cause — the cause the cook itself finds in it — and every listed one is still refused by the
+    // validator, so the list cannot outlive its reason.
+    private static readonly Dictionary<string, string> ReadLeniently = new(StringComparer.Ordinal)
+    {
+        ["Animation_Skin_06.gltf"] = MeshRecipe.LenientSkinWithoutCommonRoot,
+        ["RiggedSimple_extraibm.gltf"] = MeshRecipe.ValidatorRefusesSpareInverseBinds,
+    };
+
+    private static void ValidatorRejectionsAreAccounted(TestRunner t)
+    {
+        var root = FindFile("InterpolationTest.glb") is { } it ? Path.GetFullPath(Path.Combine(it, "..", "..", "..")) : null;
+        if (root is null) return;
+
+        var rejected = new List<string>();
+        var wrong = new List<string>();
+        foreach (var file in Directory.EnumerateFiles(root, "*.gl*", SearchOption.AllDirectories)
+            .Where(f => f.EndsWith(".glb", StringComparison.Ordinal) || f.EndsWith(".gltf", StringComparison.Ordinal))
+            .OrderBy(f => f, StringComparer.Ordinal))
+        {
+            var name = Path.GetFileName(file);
+            try
+            {
+                SharpGLTF.Schema2.ModelRoot.Load(file, new SharpGLTF.Schema2.ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Strict });
+                if (ReadLeniently.ContainsKey(name)) wrong.Add($"{name} validates now — take it off the lenient list");
+            }
+            catch (SharpGLTF.Validation.ModelException)
+            {
+                rejected.Add(name);
+                if (!ExpectedRefusals.ContainsKey(name) && !ReadLeniently.ContainsKey(name))
+                    wrong.Add($"{name} is refused by the validator and neither refused nor declared lenient");
+                if (ReadLeniently.TryGetValue(name, out var cause) && !MeshRecipe.ValidatorFallbacks(LoadSource(file)).Contains(cause))
+                    wrong.Add($"{name} is listed for '{cause}', and the cook does not find that in it");
+            }
+        }
+
+        t.Expect($"every file the strict validator refuses is refused by Blix or read past it for a named cause " +
+                 $"({rejected.Count}: {string.Join(", ", rejected)})",
+            wrong.Count == 0 && ReadLeniently.Keys.All(rejected.Contains), string.Join(" | ", wrong));
+    }
+
+    // glTF 2.0 §3.7.2.1's counts, on files the validator never sees (the lenient path reads unvalidated):
+    // a triangle list whose index count is not a multiple of three, and a strip of two, are refused by
+    // name rather than trimmed into something the file did not say.
+    private static void IndexCountsAreRefusedNotRepaired(TestRunner t)
+    {
+        foreach (var (mode, count, label) in new[] { (4, 4, "a 4-index TRIANGLES list"), (5, 2, "a 2-index TRIANGLE_STRIP"), (6, 2, "a 2-index TRIANGLE_FAN") })
+        {
+            var positions = new float[] { 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0 };
+            var indices = new ushort[] { 0, 1, 2, 3 }.Take(count).ToArray();
+            var bytes = positions.SelectMany(BitConverter.GetBytes).Concat(indices.SelectMany(BitConverter.GetBytes)).ToArray();
+            var json = $$"""
+            {"asset":{"version":"2.0"},"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],
+             "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1,"mode":{{mode}}}]}],
+             "buffers":[{"byteLength":{{bytes.Length}},"uri":"data:application/octet-stream;base64,{{Convert.ToBase64String(bytes)}}"}],
+             "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":48},{"buffer":0,"byteOffset":48,"byteLength":{{count * 2}}}],
+             "accessors":[{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+                          {"bufferView":1,"componentType":5123,"count":{{count}},"type":"SCALAR"}]}
+            """;
+            var path = Path.Combine(Path.GetTempPath(), $"blix-indexcount-{mode}.gltf");
+            File.WriteAllText(path, json);
+            var gltf = LoadSource(path);
+            string? refusal = null;
+            try
+            {
+                Blix.Import.GltfStaticImporter.BuildStaticMeshData("probe", gltf.LogicalMeshes[0].Primitives[0],
+                    System.Numerics.Matrix4x4.Identity, System.Numerics.Matrix4x4.Identity);
+            }
+            catch (InvalidOperationException e)
+            {
+                refusal = e.Message;
+            }
+
+            t.Expect($"{label} is refused by name, not trimmed", refusal is not null && refusal.Contains("glTF requires", StringComparison.Ordinal), refusal ?? "it loaded");
+        }
+    }
+
+    // Generated tangents follow "the texture coordinates associated with the normal texture" (glTF 2.0
+    // §3.7.2.1). NormalTangentMirrorTest_normaluv1 (derived by the fetch script) has no TANGENT and its
+    // normal texture on a TEXCOORD_1 turned a quarter from TEXCOORD_0, so a frame over set 1 and a frame
+    // over set 0 are 90 degrees apart. Each cooked tangent is held to its triangle's du direction in BOTH
+    // sets, solved here from positions and UVs: it must follow set 1's, and the CONTROL is set 0's.
+    private static void GeneratedTangentsFollowTheNormalTexture(TestRunner t)
+    {
+        if (FindFile("NormalTangentMirrorTest_normaluv1.gltf") is not { } file) return;
+        var d = Blix.ModelData.Load(CookCache.Resolve(file), new Blix.ModelNeeds(Tangents: true, Colour: true));
+        int triangles = 0, followsSet1 = 0, followsSet0 = 0;
+        foreach (var (_, prim) in d.Flattened())
+        {
+            var m = prim.Mesh;
+            var idx = m.Indices32 ?? m.Indices.Select(i => (uint)i).ToArray();
+            for (var i = 0; i + 2 < idx.Length; i += 3)
+            {
+                var c = new[] { idx[i], idx[i + 1], idx[i + 2] };
+                var p = c.Select(v => Read3(m, v, 0)).ToArray();
+                var tangent = Read3(m, c[0], 24);
+                var t1 = Du(p, c.Select(v => Read2(m, v, 48)).ToArray());
+                var t0 = Du(p, c.Select(v => Read2(m, v, 40)).ToArray());
+                if (t1 is not { } a || t0 is not { } b || tangent.LengthSquared() < 1e-8f) continue;
+                triangles++;
+                var n = System.Numerics.Vector3.Normalize(tangent);
+                if (System.Numerics.Vector3.Dot(n, a) > 0.7f) followsSet1++;
+                if (System.Numerics.Vector3.Dot(n, b) > 0.7f) followsSet0++;
+            }
+        }
+
+        t.Expect($"generated tangents follow the normal texture's TEXCOORD_1 on {followsSet1}/{triangles} triangles " +
+                 $"(CONTROL, TEXCOORD_0's direction: {followsSet0}/{triangles})",
+            triangles > 0 && followsSet1 >= triangles * 0.9 && followsSet0 <= triangles * 0.1, "");
+
+        static System.Numerics.Vector3 Read3(Blix.Assets.MeshData m, uint v, int at)
+        {
+            var o = ((int)v * m.Layout.Stride) + at;
+            return new(BitConverter.ToSingle(m.VertexBytes, o), BitConverter.ToSingle(m.VertexBytes, o + 4), BitConverter.ToSingle(m.VertexBytes, o + 8));
+        }
+
+        static System.Numerics.Vector2 Read2(Blix.Assets.MeshData m, uint v, int at)
+        {
+            var o = ((int)v * m.Layout.Stride) + at;
+            return new(BitConverter.ToSingle(m.VertexBytes, o), BitConverter.ToSingle(m.VertexBytes, o + 4));
+        }
+
+        // The direction u increases across the triangle (the standard tangent-space solve), unit; null when degenerate.
+        static System.Numerics.Vector3? Du(System.Numerics.Vector3[] p, System.Numerics.Vector2[] uv)
+        {
+            var e1 = p[1] - p[0]; var e2 = p[2] - p[0];
+            var d1 = uv[1] - uv[0]; var d2 = uv[2] - uv[0];
+            var det = (d1.X * d2.Y) - (d2.X * d1.Y);
+            if (MathF.Abs(det) < 1e-10f) return null;
+            var du = ((e1 * d2.Y) - (e2 * d1.Y)) / det;
+            return du.LengthSquared() < 1e-12f ? null : System.Numerics.Vector3.Normalize(du);
+        }
+    }
+
+    // ── A golden that shares nothing with the reader ─────────────────────────────
+    // SamplingMatchesGltf and AnimationMatchesGltf evaluate keys independently, but both take the keys
+    // through GltfImporter.SampleKeys — so a mis-read of a CUBICSPLINE triple (in, value, out) would sit
+    // on both sides. This one decodes InterpolationTest's accessors from the .glb's own bytes, applies
+    // glTF Appendix C by hand, and holds Blix's sampled pose to it; plus one literal from the spec
+    // computed by hand (CubicSpline Rotation at t = 1.9).
+    private static void InterpolationGolden(TestRunner t)
+    {
+        if (FindFile("InterpolationTest.glb") is not { } file) return;
+        var bytes = File.ReadAllBytes(file);
+        var jsonLength = (int)BitConverter.ToUInt32(bytes, 12);
+        var json = System.Text.Json.Nodes.JsonNode.Parse(bytes.AsSpan(20, jsonLength))!;
+        var binAt = 20 + jsonLength + 8;
+
+        float[] Floats(int accessor, int components)
+        {
+            var a = json["accessors"]![accessor]!;
+            if (a["componentType"]!.GetValue<int>() != 5126) throw new InvalidDataException("InterpolationTest changed shape: not float");
+            var view = json["bufferViews"]![a["bufferView"]!.GetValue<int>()]!;
+            var start = binAt + (view["byteOffset"]?.GetValue<int>() ?? 0) + (a["byteOffset"]?.GetValue<int>() ?? 0);
+            var stride = view["byteStride"]?.GetValue<int>() ?? components * 4;
+            var count = a["count"]!.GetValue<int>();
+            var result = new float[count * components];
+            for (var k = 0; k < count; k++)
+            for (var c = 0; c < components; c++) result[(k * components) + c] = BitConverter.ToSingle(bytes, start + (k * stride) + (c * 4));
+            return result;
+        }
+
+        var d = Blix.ModelData.Load(CookCache.Resolve(file));
+        var worst = 0f;
+        var where = "";
+        var checkedPoints = 0;
+        System.Numerics.Quaternion? at19 = null;
+        foreach (var anim in json["animations"]!.AsArray())
+        {
+            var channel = anim!["channels"]![0]!;
+            var sampler = anim["samplers"]![channel["sampler"]!.GetValue<int>()]!;
+            var path = channel["target"]!["path"]!.GetValue<string>();
+            var nodeName = json["nodes"]![channel["target"]!["node"]!.GetValue<int>()]!["name"]?.GetValue<string>();
+            var mode = sampler["interpolation"]?.GetValue<string>() ?? "LINEAR";
+            var width = path == "rotation" ? 4 : 3;
+            var times = Floats(sampler["input"]!.GetValue<int>(), 1);
+            var values = Floats(sampler["output"]!.GetValue<int>(), width);
+            var clip = d.Clips.First(c => c.Name == anim["name"]!.GetValue<string>());
+            var bone = d.SkeletonNodes.ToList().IndexOf(d.FindNode(nodeName!));
+            var pose = d.Skeleton!.CreateRestPose();
+            for (var step = 0; step <= 40; step++)
+            {
+                var time = times[0] + ((times[^1] - times[0]) * step / 40f);
+                if (step == 40) time = 1.9f;
+                var want = Spec(time);
+                clip.Sample(time, pose);
+                var local = pose.Locals[bone];
+                var got = path switch
+                {
+                    "translation" => new[] { local.Translation.X, local.Translation.Y, local.Translation.Z },
+                    "scale" => new[] { local.Scale.X, local.Scale.Y, local.Scale.Z },
+                    _ => new[] { local.Rotation.X, local.Rotation.Y, local.Rotation.Z, local.Rotation.W },
+                };
+                // q and -q are one rotation.
+                var sign = width == 4 && got.Zip(want).Sum(x => x.First * x.Second) < 0f ? -1f : 1f;
+                var e = got.Zip(want).Max(x => MathF.Abs((x.First * sign) - x.Second));
+                checkedPoints++;
+                if (e > worst) (worst, where) = (e, $"{anim["name"]} {mode} at t={time:0.###}: [{string.Join(", ", got)}] vs [{string.Join(", ", want)}]");
+                if (mode == "CUBICSPLINE" && path == "rotation" && step == 40) at19 = new System.Numerics.Quaternion(want[0], want[1], want[2], want[3]);
+            }
+
+            float[] Spec(float time)
+            {
+                var n = times.Length;
+                float[] Key(int k, int part) => mode == "CUBICSPLINE"
+                    ? values.Skip(((k * 3) + part) * width).Take(width).ToArray()   // (in a_k, value v_k, out b_k)
+                    : values.Skip(k * width).Take(width).ToArray();
+                const int Value = 1;
+                int VPart() => mode == "CUBICSPLINE" ? Value : 0;
+                if (time <= times[0]) return Normalised(Key(0, VPart()));
+                if (time >= times[^1]) return Normalised(Key(n - 1, VPart()));
+                var k = 0;
+                while (time >= times[k + 1]) k++;
+                var td = times[k + 1] - times[k];
+                var s = (time - times[k]) / td;
+                switch (mode)
+                {
+                    case "STEP":
+                        return Key(k, 0);
+                    case "CUBICSPLINE":
+                    {
+                        var v0 = Key(k, 1); var b0 = Key(k, 2); var a1 = Key(k + 1, 0); var v1 = Key(k + 1, 1);
+                        var s2 = s * s; var s3 = s2 * s;
+                        return Normalised(Enumerable.Range(0, width).Select(c =>
+                            (((2 * s3) - (3 * s2) + 1) * v0[c]) + (td * (s3 - (2 * s2) + s) * b0[c])
+                            + (((-2 * s3) + (3 * s2)) * v1[c]) + (td * (s3 - s2) * a1[c])).ToArray());
+                    }
+                    default:
+                    {
+                        var v0 = Key(k, 0); var v1 = Key(k + 1, 0);
+                        if (width == 3) return Enumerable.Range(0, 3).Select(c => v0[c] + ((v1[c] - v0[c]) * s)).ToArray();
+                        // Appendix C: slerp, the shorter way round.
+                        var q0 = new System.Numerics.Quaternion(v0[0], v0[1], v0[2], v0[3]);
+                        var q1 = new System.Numerics.Quaternion(v1[0], v1[1], v1[2], v1[3]);
+                        var dot = System.Numerics.Quaternion.Dot(q0, q1);
+                        if (dot < 0f) { q1 = -q1; dot = -dot; }
+                        var angle = MathF.Acos(Math.Clamp(dot, -1f, 1f));
+                        var q = angle < 1e-6f ? q0
+                            : (q0 * (MathF.Sin((1 - s) * angle) / MathF.Sin(angle))) + (q1 * (MathF.Sin(s * angle) / MathF.Sin(angle)));
+                        return new[] { q.X, q.Y, q.Z, q.W };
+                    }
+                }
+            }
+
+            float[] Normalised(float[] v)
+            {
+                if (width != 4) return v;
+                var length = MathF.Sqrt(v.Sum(x => x * x));
+                return v.Select(x => x / length).ToArray();
+            }
+        }
+
+        t.Expect($"InterpolationTest's nine channels, decoded from its own bytes and evaluated by Appendix C, are what Blix samples " +
+                 $"({checkedPoints} points, worst {worst:0.######})", checkedPoints > 0 && worst < 1e-4f, where);
+        t.Expect($"and CubicSpline Rotation at t=1.9 is the hand-computed (z -0.999966, w -0.008266): {at19}",
+            at19 is { } q && MathF.Abs(MathF.Abs(q.Z) - 0.999966f) < 2e-5f && MathF.Abs(MathF.Abs(q.W) - 0.008266f) < 2e-5f
+            && MathF.Sign(q.Z) == MathF.Sign(q.W), "");
+    }
+
+    // ── The scene level, as glTF states it ──────────────────────────────────────
+    // Every corpus file's scenes (roots and default), each node's KHR_node_visibility flag, camera and
+    // light, the camera and light tables, EXT_mesh_gpu_instancing transforms rebuilt from the raw
+    // accessors by the extension's T * R * S, and KHR_materials_variants mappings read from the JSON
+    // mapping-by-mapping — held to what the cook wrote.
+    private static void SceneLevelMatchesGltf(TestRunner t)
+    {
+        var root = FindFile("InterpolationTest.glb") is { } it ? Path.GetFullPath(Path.Combine(it, "..", "..", "..")) : null;
+        if (root is null) return;
+
+        int scenes = 0, hidden = 0, instances = 0, cameras = 0, lights = 0, mapped = 0;
+        var wrong = new List<string>();
+        foreach (var file in Directory.EnumerateFiles(root, "*.gl*", SearchOption.AllDirectories)
+            .Where(f => (f.EndsWith(".glb", StringComparison.Ordinal) || f.EndsWith(".gltf", StringComparison.Ordinal))
+                && !ExpectedRefusals.ContainsKey(Path.GetFileName(f)))
+            .OrderBy(f => f, StringComparer.Ordinal))
+        {
+            var name = Path.GetFileName(file);
+            var gltf = LoadSource(file);
+            var cooked = BlixMeshReader.Read(CookCache.Resolve(file));
+            // Cooked nodes are reordered parents-first, by the cook's rule: each logical node in order, its
+            // ancestors placed before it. Rebuilt here, and held to the names, so the mapping is not assumed.
+            var order = new List<int>();
+            void Place(SharpGLTF.Schema2.Node n)
+            {
+                if (order.Contains(n.LogicalIndex)) return;
+                if (n.VisualParent is { } parent) Place(parent);
+                order.Add(n.LogicalIndex);
+            }
+
+            foreach (var n in gltf.LogicalNodes) Place(n);
+            var cookedOf = new Dictionary<int, int>();
+            for (var i = 0; i < order.Count; i++) cookedOf[order[i]] = i;
+            int? Cooked(SharpGLTF.Schema2.Node n) =>
+                cookedOf.TryGetValue(n.LogicalIndex, out var i) && i < cooked.Nodes.Count
+                && cooked.Nodes[i].Name == (n.Name ?? $"node_{n.LogicalIndex}") ? i : null;
+            if (gltf.LogicalNodes.Any(n => Cooked(n) is null)) wrong.Add($"{name}: the cooked node order is not the cook's rule");
+
+            if (cooked.SceneTable.Count != gltf.LogicalScenes.Count) wrong.Add($"{name}: {cooked.SceneTable.Count} scene(s), glTF {gltf.LogicalScenes.Count}");
+            for (var sc = 0; sc < Math.Min(cooked.SceneTable.Count, gltf.LogicalScenes.Count); sc++)
+            {
+                scenes++;
+                var want = gltf.LogicalScenes[sc].VisualChildren.Select(Cooked).ToArray();
+                if (want.All(w => w is not null) && !want.Select(w => w!.Value).SequenceEqual(cooked.SceneTable[sc].Roots))
+                    wrong.Add($"{name} scene {sc}: roots {string.Join(",", cooked.SceneTable[sc].Roots)}, glTF {string.Join(",", want)}");
+            }
+
+            if (cooked.DefaultScene != (gltf.DefaultScene?.LogicalIndex ?? -1)) wrong.Add($"{name}: default scene {cooked.DefaultScene}");
+
+            foreach (var node in gltf.LogicalNodes)
+            {
+                if (Cooked(node) is not { } c) continue;
+                var row = cooked.Nodes[c];
+                var visible = !node.TryGetVisibility(out var v) || v;
+                if (!visible) hidden++;
+                if (row.Visible != visible) wrong.Add($"{name} node '{row.Name}': visible {row.Visible}, glTF {visible}");
+                if (row.CameraIndex != (node.Camera?.LogicalIndex ?? -1)) wrong.Add($"{name} node '{row.Name}': camera {row.CameraIndex}");
+                if (row.LightIndex != (node.PunctualLight?.LogicalIndex ?? -1)) wrong.Add($"{name} node '{row.Name}': light {row.LightIndex}");
+
+                var inst = node.GetGpuInstancing();
+                if ((inst is { Count: > 0 }) != (row.Instances is not null)) { wrong.Add($"{name} node '{row.Name}': instancing presence"); continue; }
+                if (inst is not { Count: > 0 }) continue;
+                var tr = inst.GetAccessor("TRANSLATION")?.AsVector3Array();
+                var ro = inst.GetAccessor("ROTATION")?.AsQuaternionArray();
+                var sca = inst.GetAccessor("SCALE")?.AsVector3Array();
+                for (var k = 0; k < inst.Count; k++)
+                {
+                    instances++;
+                    // Row-vector T * R * S is S * R * T.
+                    var want = System.Numerics.Matrix4x4.CreateScale(sca?[k] ?? System.Numerics.Vector3.One)
+                        * System.Numerics.Matrix4x4.CreateFromQuaternion(ro?[k] ?? System.Numerics.Quaternion.Identity)
+                        * System.Numerics.Matrix4x4.CreateTranslation(tr?[k] ?? System.Numerics.Vector3.Zero);
+                    if (!Near(row.Instances![k], want)) { wrong.Add($"{name} node '{row.Name}' instance {k}"); break; }
+                }
+            }
+
+            for (var ci = 0; ci < gltf.LogicalCameras.Count; ci++)
+            {
+                cameras++;
+                var c = cooked.CameraTable[ci];
+                var ok = gltf.LogicalCameras[ci].Settings switch
+                {
+                    SharpGLTF.Schema2.CameraPerspective p => !c.Orthographic && c.YFov == p.VerticalFOV && c.AspectRatio == (p.AspectRatio ?? 0f) && c.ZNear == p.ZNear,
+                    SharpGLTF.Schema2.CameraOrthographic o => c.Orthographic && c.XMag == o.XMag && c.YMag == o.YMag && c.ZNear == o.ZNear && c.ZFar == o.ZFar,
+                    _ => false,
+                };
+                if (!ok) wrong.Add($"{name} camera {ci}: {c}");
+            }
+
+            for (var li = 0; li < gltf.LogicalPunctualLights.Count; li++)
+            {
+                lights++;
+                var l = gltf.LogicalPunctualLights[li];
+                var c = cooked.LightTable[li];
+                var range = l.Range > 0f && float.IsFinite(l.Range) ? l.Range : float.PositiveInfinity;
+                if (c.Color != l.Color || c.Intensity != l.Intensity || c.Range != range) wrong.Add($"{name} light {li}: {c}");
+            }
+
+            // Variants: each mapping says "these variants give this primitive that material".
+            var json = System.Text.Json.Nodes.JsonNode.Parse(GltfJson(file));
+            var meshes = json?["meshes"]?.AsArray();
+            var variantCount = (json?["extensions"]?["KHR_materials_variants"]?["variants"] as System.Text.Json.Nodes.JsonArray)?.Count ?? 0;
+            if (cooked.VariantTable.Count != variantCount) wrong.Add($"{name}: {cooked.VariantTable.Count} variant(s), JSON {variantCount}");
+            if (variantCount == 0 || meshes is null) continue;
+            foreach (var node in gltf.LogicalNodes)
+            {
+                if (node.Mesh is null || Cooked(node) is not { } c) continue;
+                var cookedMesh = cooked.Meshes[cooked.Nodes[c].MeshIndex];
+                // Primitives are split into chunks by the cook; every chunk of a source primitive keeps its mapping.
+                foreach (var prim in node.Mesh.Primitives)
+                {
+                    var want = Enumerable.Repeat(-1, variantCount).ToArray();
+                    foreach (var mapping in meshes[node.Mesh.LogicalIndex]?["primitives"]?[prim.LogicalIndex]?["extensions"]?["KHR_materials_variants"]?["mappings"]?.AsArray()
+                        ?? new System.Text.Json.Nodes.JsonArray())
+                    foreach (var vi in mapping!["variants"]!.AsArray()) want[vi!.GetValue<int>()] = mapping["material"]!.GetValue<int>();
+                    var chunks = cookedMesh.Primitives.Where(p => p.MaterialIndex == (prim.Material?.LogicalIndex ?? -1)).ToArray();
+                    foreach (var chunk in chunks)
+                    {
+                        mapped++;
+                        if (chunk.VariantMaterials is not { } got || !got.SequenceEqual(want))
+                            wrong.Add($"{name} '{chunk.Name}': variants {(chunk.VariantMaterials is null ? "none" : string.Join(",", chunk.VariantMaterials))}, glTF {string.Join(",", want)}");
+                    }
+                }
+            }
+        }
+
+        t.Expect($"every scene, visibility flag, instance, camera, light and variant mapping is the file's " +
+                 $"({scenes} scenes, {hidden} hidden nodes, {instances} instances, {cameras} cameras, {lights} lights, {mapped} mapped primitives)",
+            wrong.Count == 0 && hidden > 0 && instances > 0 && cameras > 0 && lights > 0 && mapped > 0,
+            string.Join(" | ", wrong.Take(6)));
+
+        static bool Near(System.Numerics.Matrix4x4 a, System.Numerics.Matrix4x4 b)
+        {
+            for (var r = 0; r < 4; r++)
+            for (var c = 0; c < 4; c++)
+            {
+                if (MathF.Abs(a[r, c] - b[r, c]) > 1e-4f) return false;
+            }
+
+            return true;
+        }
+    }
+
+    // A .gltf is its JSON; a .glb holds it as its first chunk.
+    private static byte[] GltfJson(string path)
+    {
+        var bytes = File.ReadAllBytes(path);
+        return bytes.Length >= 20 && BitConverter.ToUInt32(bytes, 0) == 0x46546C67
+            ? bytes.AsSpan(20, (int)BitConverter.ToUInt32(bytes, 12)).ToArray()
+            : bytes;
+    }
+
+    // What ModelData makes of the scene level: one scene placed, hidden nodes not flattened, an instanced
+    // node flattened once per instance. The expected sets are walked here from the source by recursion
+    // over each scene's roots — not the forward pass ModelData uses.
+    private static void SceneLevelReachesModelData(TestRunner t)
+    {
+        if (FindFile("MultipleScenes.gltf") is { } scenes)
+        {
+            var cooked = CookCache.Resolve(scenes);
+            var byDefault = Blix.ModelData.Load(cooked);
+            var first = Blix.ModelData.Load(cooked, scene: 0);
+            string Placed(Blix.ModelData d) => string.Join(",", Enumerable.Range(0, d.Nodes.Count).Where(d.IsPlaced).Select(n => d.Nodes[n].Name));
+            t.Expect($"MultipleScenes places its default scene 1 alone ({Placed(byDefault)}), and scene 0 when asked ({Placed(first)})",
+                byDefault.SceneIndex == 1 && first.SceneIndex == 0 && byDefault.Flattened().Count() == 1 && first.Flattened().Count() == 1
+                && Placed(byDefault) != Placed(first),
+                $"default {byDefault.SceneIndex}");
+            var refused = false;
+            try { Blix.ModelData.Load(cooked, scene: 2); }
+            catch (AssetImportException) { refused = true; }
+            t.Expect("a scene the file does not have is refused by name", refused, "");
+        }
+
+        if (FindFile("NodeVisibilityTest.glb") is { } vis)
+        {
+            var gltf = LoadSource(vis);
+            var wantShown = new HashSet<string>();
+            void Walk(SharpGLTF.Schema2.Node n, bool parentShown)
+            {
+                var shown = parentShown && (!n.TryGetVisibility(out var v) || v);
+                if (shown && n.Mesh is not null) wantShown.Add($"{n.LogicalIndex}");
+                foreach (var c in n.VisualChildren) Walk(c, shown);
+            }
+
+            foreach (var r in gltf.DefaultScene.VisualChildren) Walk(r, true);
+            var d = Blix.ModelData.Load(CookCache.Resolve(vis));
+            var shownMeshes = d.Flattened().Select(x => x.NodeIndex).Distinct().Count();
+            var hiddenMeshes = Enumerable.Range(0, d.Nodes.Count).Count(n => d.Nodes[n].MeshIndex >= 0 && !d.IsShown(n));
+            t.Expect($"NodeVisibilityTest flattens exactly the mesh nodes its hierarchy shows ({shownMeshes} shown, {hiddenMeshes} hidden; glTF {wantShown.Count} shown)",
+                shownMeshes == wantShown.Count && hiddenMeshes > 0, "");
+        }
+
+        if (FindFile("SimpleInstancing.glb") is { } inst)
+        {
+            var d = Blix.ModelData.Load(CookCache.Resolve(inst));
+            var node = Enumerable.Range(0, d.Nodes.Count).First(n => d.Nodes[n].Instances is not null);
+            var count = d.Nodes[node].Instances!.Count;
+            var flat = d.Flattened().ToArray();
+            var perInstance = d.Meshes[d.Nodes[node].MeshIndex].Primitives.Count;
+            // Each flattened copy sits where its instance puts the mesh: its bounds centre is the mesh's moved by instance * world.
+            var mesh = d.Meshes[d.Nodes[node].MeshIndex].Primitives[0].Mesh;
+            var centre = (mesh.Bounds.Min + mesh.Bounds.Max) * 0.5f;
+            var placedRight = d.DrawnWorlds(node).Select((w, k) => (w, k)).Count(x =>
+            {
+                var b = flat[x.k * perInstance].Primitive.Mesh.Bounds;
+                return System.Numerics.Vector3.Distance(System.Numerics.Vector3.Transform(centre, x.w), (b.Min + b.Max) * 0.5f) < 0.05f;
+            });
+            t.Expect($"SimpleInstancing flattens its node once per instance ({flat.Length} for {count} x {perInstance}), each where its instance puts it ({placedRight}/{count})",
+                flat.Length == count * perInstance && count > 1 && placedRight == count, "");
+        }
+
+        if (FindFile("MaterialsVariantsShoe.glb") is { } shoe)
+        {
+            var d = Blix.ModelData.Load(CookCache.Resolve(shoe));
+            var prims = d.Flattened().Select(x => x.Primitive).ToArray();
+            var differ = Enumerable.Range(0, d.Variants.Count)
+                .Select(v => prims.Count(p => p.MaterialFor(v).MaterialIndex != p.MaterialIndex)).ToArray();
+            var resolved = prims.All(p => Enumerable.Range(0, d.Variants.Count).All(v => p.MaterialFor(v).Material is not null));
+            t.Expect($"MaterialsVariantsShoe's {d.Variants.Count} variants ({string.Join(", ", d.Variants)}) each resolve a material per primitive " +
+                     $"(primitives differing from their own: {string.Join("/", differ)})",
+                d.Variants.Count == 3 && resolved && differ.Count(x => x > 0) >= 2, "");
+        }
+    }
+
+    // A flattened mirror keeps glTF's faces: each triangle's winding normal agrees with its authored vertex
+    // normals, and the bitangent cross(N, T) * w agrees with the direction the texture's v runs — on
+    // mirrored nodes as on unmirrored ones. The control is each triangle read reversed, which a flatten
+    // that baked the mirror without reversing the winding would have produced.
+    private static void FlattenKeepsFacesUnderMirrors(TestRunner t)
+    {
+        var files = new[] { "NegativeScaleTest.glb" }
+            .Concat(Enumerable.Range(0, 13).Select(i => $"Node_NegativeScale_{i:00}.gltf"))
+            .Select(FindFile).Where(f => f is not null).ToArray();
+        if (files.Length == 0) return;
+
+        int mirroredTris = 0, faceAgrees = 0, reversedAgrees = 0, frameTris = 0, frameAgrees = 0, plainTris = 0, plainAgrees = 0;
+        int plainFrameTris = 0, plainFrameAgrees = 0;
+        foreach (var file in files)
+        {
+            var d = Blix.ModelData.Load(CookCache.Resolve(file!), new Blix.ModelNeeds(Tangents: true));
+            foreach (var (node, prim) in d.Flattened())
+            {
+                var mirrored = d.World[node].GetDeterminant() < 0f;
+                var m = prim.Mesh;
+                var idx = m.Indices32 ?? m.Indices.Select(i => (uint)i).ToArray();
+                for (var i = 0; i + 2 < idx.Length; i += 3)
+                {
+                    var (p0, n0, t0, uv0) = Vertex(m, idx[i]);
+                    var (p1, n1, _, uv1) = Vertex(m, idx[i + 1]);
+                    var (p2, n2, _, uv2) = Vertex(m, idx[i + 2]);
+                    var face = System.Numerics.Vector3.Cross(p1 - p0, p2 - p0);
+                    if (face.LengthSquared() < 1e-12f) continue;
+                    var normal = n0 + n1 + n2;
+                    var agrees = System.Numerics.Vector3.Dot(face, normal) > 0f;
+                    if (mirrored)
+                    {
+                        mirroredTris++;
+                        if (agrees) faceAgrees++;
+                        if (System.Numerics.Vector3.Dot(-face, normal) > 0f) reversedAgrees++;
+                    }
+                    else
+                    {
+                        plainTris++;
+                        if (agrees) plainAgrees++;
+                    }
+
+                    // The direction v increases across the triangle, from positions and UVs (the standard tangent-space solve).
+                    var e1 = p1 - p0; var e2 = p2 - p0;
+                    var d1 = uv1 - uv0; var d2 = uv2 - uv0;
+                    var det = (d1.X * d2.Y) - (d2.X * d1.Y);
+                    if (MathF.Abs(det) < 1e-8f || t0.W == 0f) continue;
+                    var dv = ((e2 * d1.X) - (e1 * d2.X)) / det;
+                    var bitangent = System.Numerics.Vector3.Cross(n0, new System.Numerics.Vector3(t0.X, t0.Y, t0.Z)) * t0.W;
+                    // glTF's green points up the image, against v: the bitangent opposes dv. The rate is
+                    // compared with the unmirrored nodes', so no sign is assumed.
+                    var opposes = System.Numerics.Vector3.Dot(bitangent, dv) < 0f;
+                    if (mirrored) { frameTris++; if (opposes) frameAgrees++; }
+                    else { plainFrameTris++; if (opposes) plainFrameAgrees++; }
+                }
+            }
+        }
+
+        t.Expect($"flattened mirrored nodes keep glTF's front faces: {faceAgrees}/{mirroredTris} triangles agree with their normals " +
+                 $"(unmirrored {plainAgrees}/{plainTris}; CONTROL, the winding left as baked: {reversedAgrees}/{mirroredTris})",
+            mirroredTris > 0 && faceAgrees >= mirroredTris * 0.95 && reversedAgrees <= mirroredTris * 0.05, "");
+        // Not every triangle's UV solve is clean (seams, sheared and degenerate UVs), so the claim is a
+        // rate: mirrored triangles agree as often as unmirrored ones do. The CONTROL is w left as baked,
+        // which turns each mirrored agreement into a disagreement.
+        var mirroredRate = frameTris == 0 ? 0.0 : frameAgrees / (double)frameTris;
+        var plainRate = plainFrameTris == 0 ? 0.0 : plainFrameAgrees / (double)plainFrameTris;
+        t.Expect($"and their normal-map frame: the bitangent points up the image on {mirroredRate:P0} of mirrored triangles, " +
+                 $"as on {plainRate:P0} of unmirrored (CONTROL, w left as baked: {1 - mirroredRate:P0})",
+            frameTris > 0 && plainFrameTris > 0 && Math.Abs(mirroredRate - plainRate) < 0.1 && Math.Abs((1 - mirroredRate) - plainRate) > 0.3, "");
+
+        static (System.Numerics.Vector3 P, System.Numerics.Vector3 N, System.Numerics.Vector4 T, System.Numerics.Vector2 Uv) Vertex(Blix.Assets.MeshData m, uint v)
+        {
+            var o = (int)v * m.Layout.Stride;
+            float F(int at) => BitConverter.ToSingle(m.VertexBytes, o + at);
+            return (new(F(0), F(4), F(8)), new(F(12), F(16), F(20)), new(F(24), F(28), F(32), F(36)), new(F(40), F(44)));
+        }
+    }
+
     private static void SamplersMatchGltf(TestRunner t)
     {
         var root = FindFile("InterpolationTest.glb") is { } it ? Path.GetFullPath(Path.Combine(it, "..", "..", "..")) : null;
@@ -954,7 +1519,7 @@ public static class Program
     private static void SkinsMatchGltf(TestRunner t)
     {
         foreach (var name in new[] { "tank.glb", "Animation_Skin_02.gltf", "Animation_Skin_09.gltf", "Rogue.glb", "RiggedFigure.glb", "RiggedSimple.glb", "RiggedSimple_bones300.gltf", "RiggedSimple_cutout.gltf",
-            "Animation_Skin_03.gltf", "Animation_Skin_06.gltf" })
+            "Animation_Skin_03.gltf", "Animation_Skin_06.gltf", "RiggedSimple_extraibm.gltf" })
         {
             var source = FindFile(name);
             if (source is null)
@@ -963,7 +1528,7 @@ public static class Program
                 continue;
             }
 
-            // Not strictly validated, as the cook does not: SharpGLTF's validator rejects valid skins (Animation_Skin_06).
+            // Unvalidated, so the declared-lenient Animation_Skin_06 (invalid: no common root) reads as a reference too.
             var gltf = SharpGLTF.Schema2.ModelRoot.Load(source, new SharpGLTF.Schema2.ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip });
             var expected = new Dictionary<(int, int, int), List<System.Numerics.Vector3>>();
             foreach (var node in gltf.LogicalNodes.Where(n => n.Mesh is not null && n.Skin is not null))
@@ -2019,6 +2584,13 @@ public static class Program
         TriangleModesMatchSpec(t);
         SamplersMatchGltf(t);
         TextureTransformsMatchGltf(t);
+        ValidatorRejectionsAreAccounted(t);
+        IndexCountsAreRefusedNotRepaired(t);
+        GeneratedTangentsFollowTheNormalTexture(t);
+        InterpolationGolden(t);
+        SceneLevelMatchesGltf(t);
+        SceneLevelReachesModelData(t);
+        FlattenKeepsFacesUnderMirrors(t);
         EveryTexturedChannelCooks(t);
 
         // ── tools cook on open ───────────────────────────────────────────────

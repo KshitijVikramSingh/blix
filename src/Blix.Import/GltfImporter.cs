@@ -368,10 +368,12 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         // No inverseBindMatrices accessor means each is the identity (glTF 2.0 §5.27): the joints were
         // bound where they stand.
         if (ibmList.Count == 0) ibmList = Enumerable.Repeat(Matrix4x4.Identity, n).ToArray();
-        if (ibmList.Count != n)
+        // glTF 2.0 §5.27: the accessor MUST have at least as many elements as there are joints; the
+        // joints consume the first n, in order, and any beyond are legal and unread.
+        if (ibmList.Count < n)
         {
             throw new InvalidOperationException(
-                $"Skin has {n} joints but {ibmList.Count} inverse-bind matrices.");
+                $"Skin has {n} joints but {ibmList.Count} inverse-bind matrices; glTF requires at least one per joint.");
         }
 
         // Joint → index lookup for parent resolution.

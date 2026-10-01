@@ -41,14 +41,34 @@ public sealed class Model : IDisposable
     }
 
     /// <summary>A node of the scene graph, drawable or not.</summary>
-    /// <param name="Bounds">World-space bounds of its own primitives' vertices; null for a node without any.</param>
+    /// <param name="Bounds">World-space bounds of its own primitives' vertices (every instance); null for a node without any.</param>
+    /// <param name="Shown">Whether it and every ancestor are visible (<c>KHR_node_visibility</c>, <see cref="ModelData.IsShown"/>).</param>
+    /// <param name="Instances">Its <c>EXT_mesh_gpu_instancing</c> transforms, each before <see cref="World"/>; null when not instanced.</param>
+    /// <param name="CameraIndex">The camera it carries (<see cref="Model.Cameras"/>), or -1.</param>
+    /// <param name="LightIndex">The light it carries (<see cref="Model.Lights"/>), or -1.</param>
     public sealed record Node(
         int Index, string Name, int ParentIndex, Matrix4x4 Local, Matrix4x4 World,
-        int PrimitiveCount, int VertexCount, Bounds3? Bounds);
+        int PrimitiveCount, int VertexCount, Bounds3? Bounds,
+        bool Shown = true, IReadOnlyList<Matrix4x4>? Instances = null, int CameraIndex = -1, int LightIndex = -1)
+    {
+        /// <summary>Every world its mesh is drawn at: <see cref="World"/>, or one per instance.</summary>
+        public IEnumerable<Matrix4x4> DrawnWorlds => Instances is { } all ? all.Select(i => i * World) : new[] { World };
+    }
 
     /// <summary>One uploaded primitive, in its mesh's space, placed by <see cref="NodeIndex"/>.</summary>
     /// <param name="SkinIndex">The skin that deforms it, or -1 for a static part.</param>
-    public sealed record Part(int NodeIndex, Mesh Mesh, PbrMaterial? Material, MaterialTextures Textures, int SkinIndex = -1);
+    /// <param name="Variants">Per <see cref="Model.Variants"/> entry, the material that variant gives it, or null to keep its own.</param>
+    public sealed record Part(
+        int NodeIndex, Mesh Mesh, PbrMaterial? Material, MaterialTextures Textures, int SkinIndex = -1,
+        IReadOnlyList<PartMaterial?>? Variants = null)
+    {
+        /// <summary>The material <paramref name="variant"/> draws it with: its own for -1 or a variant that leaves it.</summary>
+        public PartMaterial MaterialFor(int variant) =>
+            Variants is { } v && (uint)variant < (uint)v.Count && v[variant] is { } chosen ? chosen : new PartMaterial(Material, Textures);
+    }
+
+    /// <summary>A material and its resolved textures.</summary>
+    public sealed record PartMaterial(PbrMaterial? Material, MaterialTextures Textures);
 
     /// <summary>One skin: its own skeleton (bone count and inverse binds) and its joints as bones of <see cref="Model.Skeleton"/>.</summary>
     /// <remarks>
@@ -66,6 +86,32 @@ public sealed class Model : IDisposable
     public string Name { get; }
 
     public IReadOnlyList<Node> Nodes => nodes;
+
+    /// <summary>The file's cameras, as authored; a node carries one by <see cref="Node.CameraIndex"/>.</summary>
+    public IReadOnlyList<ModelData.Camera> Cameras { get; private set; } = Array.Empty<ModelData.Camera>();
+
+    /// <summary>The file's punctual lights, as authored; nothing here shades with them.</summary>
+    public IReadOnlyList<ModelData.Light> Lights { get; private set; } = Array.Empty<ModelData.Light>();
+
+    /// <summary>The <c>KHR_materials_variants</c> names (<see cref="Part.MaterialFor"/>).</summary>
+    public IReadOnlyList<string> Variants { get; private set; } = Array.Empty<string>();
+
+    /// <summary>The file's scenes, and the one this model placed (-1 when the file has none).</summary>
+    public IReadOnlyList<ModelData.Scene> Scenes { get; private set; } = Array.Empty<ModelData.Scene>();
+
+    /// <inheritdoc cref="ModelData.SceneIndex"/>
+    public int SceneIndex { get; private set; } = -1;
+
+    /// <summary>The variant named <paramref name="name"/>, or -1.</summary>
+    public int Variant(string name)
+    {
+        for (var v = 0; v < Variants.Count; v++)
+        {
+            if (string.Equals(Variants[v], name, StringComparison.OrdinalIgnoreCase)) return v;
+        }
+
+        return -1;
+    }
 
     /// <summary>Every uploaded part, static and skinned, in node order.</summary>
     public IReadOnlyList<Part> Parts => parts;
@@ -247,18 +293,21 @@ public sealed class Model : IDisposable
             var vertices = 0;
             var count = 0;
             partsOfNode[i] = new List<Part>();
-            if (node.MeshIndex >= 0)
+            // Only the placed scene is uploaded; a hidden node is (visibility can change), and says so.
+            if (node.MeshIndex >= 0 && source.IsPlaced(i))
             {
                 var mesh = source.Meshes[node.MeshIndex];
-                // A skinned part's rest vertices sit where its skin places them; a static one where its node does.
-                var placement = mesh.Skinned ? source.Placement(node.SkinIndex) : world[i];
+                // A skinned part's rest vertices sit where its skin places them; a static one where its node
+                // does, once per instance.
+                var placements = mesh.Skinned ? new[] { source.Placement(node.SkinIndex) } : source.DrawnWorlds(i).ToArray();
                 foreach (var primitive in mesh.Primitives)
                 {
                     vertices += primitive.Mesh.VertexCount;
-                    Accumulate(primitive.Mesh, placement, ref nodeMin, ref nodeMax);
+                    foreach (var placement in placements) Accumulate(primitive.Mesh, placement, ref nodeMin, ref nodeMax);
                     var part = new Part(
                         i, device.CreateMesh(primitive.Mesh, $"{name}.{node.Name}.{model.parts.Count}"), primitive.Material,
-                        textures.Load(primitive.Material), mesh.Skinned ? node.SkinIndex : -1);
+                        textures.Load(primitive.Material), mesh.Skinned ? node.SkinIndex : -1,
+                        primitive.Variants?.Select(v => v is null ? null : new PartMaterial(v.Material, textures.Load(v.Material))).ToArray());
                     model.parts.Add(part);
                     partsOfNode[i].Add(part);
                     count++;
@@ -268,14 +317,21 @@ public sealed class Model : IDisposable
             var hasMesh = count > 0;
             model.nodes.Add(new Node(
                 i, node.Name, node.ParentIndex, node.Local, world[i], count, vertices,
-                hasMesh ? new Bounds3(nodeMin, nodeMax) : null));
-            if (!hasMesh) continue;
+                hasMesh ? new Bounds3(nodeMin, nodeMax) : null,
+                source.IsShown(i), node.Instances, node.CameraIndex, node.LightIndex));
+            // The model's bounds are what it shows: a hidden node's geometry does not frame it.
+            if (!hasMesh || !source.IsShown(i)) continue;
             min = Vector3.Min(min, nodeMin);
             max = Vector3.Max(max, nodeMax);
         }
 
-        if (model.parts.Count > 0) model.Bounds = new Bounds3(min, max);
+        if (min.X <= max.X) model.Bounds = new Bounds3(min, max);
         model.Ignored = source.Ignored;
+        model.Cameras = source.Cameras;
+        model.Lights = source.Lights;
+        model.Variants = source.Variants;
+        model.Scenes = source.Scenes;
+        model.SceneIndex = source.SceneIndex;
 
         // Equipment and scenery: the unskinned parts, split by whether a joint carries them. For every
         // model, not only a rigged one: in a file with no skin nothing is carried, so every part is static.

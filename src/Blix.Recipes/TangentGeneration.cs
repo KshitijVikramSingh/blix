@@ -20,15 +20,16 @@ namespace Blix.Recipes;
 public static class TangentGeneration
 {
     /// <summary>Where a tangent-bearing layout keeps the attributes MikkTSpace reads and writes.</summary>
-    private readonly record struct Offsets(int Position, int Normal, int Uv, int Tangent);
+    /// <param name="Uv1">The second TEXCOORD set's offset, or -1 in a layout without one.</param>
+    private readonly record struct Offsets(int Position, int Normal, int Uv, int Tangent, int Uv1 = -1);
 
     // Layouts carry no semantics, so the two that hold a tangent are named here and every other
     // layout is refused rather than guessed at by format.
     private static Offsets? OffsetsFor(VertexLayout layout)
     {
-        if (Same(layout, VertexPosition3NormalTangentTexture2Color.Layout)) return new Offsets(0, 12, 40, 24);
+        if (Same(layout, VertexPosition3NormalTangentTexture2Color.Layout)) return new Offsets(0, 12, 40, 24, 48);
         if (Same(layout, VertexPosition3NormalTangentTexture.Layout)) return new Offsets(0, 12, 40, 24);
-        if (Same(layout, VertexPosition3NormalTextureSkin4Tangent2Color.Layout)) return new Offsets(0, 12, 24, 64);
+        if (Same(layout, VertexPosition3NormalTextureSkin4Tangent2Color.Layout)) return new Offsets(0, 12, 24, 64, 80);
         if (Same(layout, VertexPosition3NormalTextureSkin4Tangent.Layout)) return new Offsets(0, 12, 24, 64);
         return null;
     }
@@ -56,12 +57,24 @@ public static class TangentGeneration
 
     /// <summary><paramref name="mesh"/> with MikkTSpace tangents, split where corners disagree.</summary>
     /// <remarks>Runs before LODs are built, which is where the cook calls it; a mesh with LODs is refused.</remarks>
-    public static MeshData Generate(MeshData mesh)
+    /// <param name="uvSet">
+    /// The TEXCOORD set the frame is built over. glTF 2.0 §3.7.2.1: generated tangents use "the texture
+    /// coordinates associated with the normal texture" — its <c>texCoord</c>, so the caller passes that set,
+    /// not a default. A frame over another parameterisation is a perfectly good frame the normal map disagrees with.
+    /// </param>
+    public static MeshData Generate(MeshData mesh, int uvSet = 0)
     {
         ArgumentNullException.ThrowIfNull(mesh);
         if (mesh.Lods is { Count: > 1 })
             throw new InvalidOperationException($"'{mesh.Name}': tangents are generated before LODs are built, not after.");
         var at = OffsetsFor(mesh.Layout) ?? throw Unsupported(mesh);
+        if (uvSet != 0)
+        {
+            at = uvSet == 1 && at.Uv1 >= 0
+                ? at with { Uv = at.Uv1 }
+                : throw new InvalidOperationException(
+                    $"'{mesh.Name}': tangents over TEXCOORD_{uvSet} were asked for, and this layout carries {(at.Uv1 >= 0 ? "TEXCOORD_0 and TEXCOORD_1" : "TEXCOORD_0 only")}.");
+        }
 
         var stride = mesh.Layout.Stride;
         var vertices = mesh.VertexCount;
