@@ -362,6 +362,8 @@ clean diff and acceptance story of its own.
     are refused under that rule; no repo asset has targets.
   - A renderer-support table measured apart from reader support: a `PbrMaterial` field existing is not the
     extension being drawn.
+  - `JointHierarchy.Resolve` inverts the placement (`hangs`) without checking it is invertible: a singular
+    placement makes every root offset meaningless and the resolve carries on. Older than K2; recorded in review.
 - **Later, as their own arcs:** morph targets (deformation + a `weights` clip channel), then
   `KHR_animation_pointer` (not forced into skeletal animation). A skin that mirrors only some joints of one
   primitive stays an explicit rendering limitation: no asset, no consumer, no single front face.

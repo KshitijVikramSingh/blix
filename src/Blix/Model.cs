@@ -70,10 +70,11 @@ public sealed class Model : IDisposable
     /// <summary>A material and its resolved textures.</summary>
     public sealed record PartMaterial(PbrMaterial? Material, MaterialTextures Textures);
 
-    /// <summary>A rigid part an animated node carries — a joint, or any node a clip moves — placed by that node's posed world.</summary>
-    /// <param name="JointIndex">That node's bone in <see cref="Model.Skeleton"/>.</param>
+    /// <summary>A rigid part an animated node carries — a skin joint, or any node a clip moves — placed by that node's posed world.</summary>
+    /// <param name="BoneName">The carrying node's name.</param>
+    /// <param name="BoneIndex">The carrying node's bone in <see cref="Model.Skeleton"/>: a hierarchy bone, not a skin joint (the carrier may be no skin's joint).</param>
     /// <param name="SkinIndex">The first skin with that node as a joint, or -1.</param>
-    public sealed record Attachment(string Name, string JointName, int JointIndex, int SkinIndex, Matrix4x4 Local, Part Part);
+    public sealed record Attachment(string Name, string BoneName, int BoneIndex, int SkinIndex, Matrix4x4 Local, Part Part);
 
     /// <summary>The name its GPU resources were created under.</summary>
     public string Name { get; }
@@ -141,7 +142,8 @@ public sealed class Model : IDisposable
 
     /// <summary>
     /// The model's animated hierarchy: every skin's joints and every node a clip moves (<see cref="ModelData.Skeleton"/>).
-    /// Poses and clips are against it; for most rigs it is skin 0's skeleton exactly.
+    /// Poses and clips are against it. For an ordinary single-skin rig its bones are exactly skin 0's joints, in
+    /// that joint order; it is still the model's one hierarchy, and each skin is a binding into it.
     /// </summary>
     public Skeleton Skeleton => skeleton
         ?? throw new InvalidOperationException($"'{Name}' has no skin and no animation, so there is no skeleton to pose.");
@@ -351,7 +353,7 @@ public sealed class Model : IDisposable
             {
                 model.attachments.Add(new Attachment(
                     nodeParts.Count > 1 ? $"{source.Nodes[a.NodeIndex].Name}.{p}" : source.Nodes[a.NodeIndex].Name,
-                    source.Nodes[a.JointNode].Name, a.BoneIndex, a.SkinIndex, a.Local, nodeParts[p]));
+                    source.Nodes[a.CarrierNode].Name, a.BoneIndex, a.SkinIndex, a.Local, nodeParts[p]));
             }
         }
 

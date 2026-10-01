@@ -347,7 +347,7 @@ internal sealed class ViewerPanels
             // wrong bone is the failure this has, and it is invisible unless the bone is written
             // down next to the thing hanging off it.
             ImGui.SameLine();
-            ImGui.TextDisabled($"on {attachment.JointName} [{attachment.JointIndex}]");
+            ImGui.TextDisabled($"on {attachment.BoneName} [{attachment.BoneIndex}]");
         }
 
         // ── per body ────────────────────────────────────────────────────────────────────────
@@ -399,7 +399,7 @@ internal sealed class ViewerPanels
         // Several on one joint is ordinary — four of the Rogue's six share handslot.r — so the
         // overlap a viewer sees with "all" on is expected rather than a bug being demonstrated.
         var crowded = rig.Attachments
-            .GroupBy(a => a.JointName, StringComparer.Ordinal)
+            .GroupBy(a => a.BoneName, StringComparer.Ordinal)
             .Where(g => g.Count() > 1 && g.Count(x => visible.Contains(x.Name)) > 1)
             .ToArray();
         foreach (var g in crowded)

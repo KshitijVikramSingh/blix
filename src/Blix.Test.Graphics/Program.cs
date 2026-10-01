@@ -2811,8 +2811,8 @@ static ShaderInterface MinimalShader() => new(new[]
     // Bulwark and the external RTSGame consumer each carry their own copy of it; this names it once.
     {
         var set = new BonePaletteSet(skin, capacity: 3);
-        t.ExpectTrue("AQ.15 the buffer is capacity x bone count",
-            set.Matrices.Length == 3 * skeleton.BoneCount);
+        t.ExpectTrue("AQ.15 the buffer is capacity x the skin's joint count",
+            set.Matrices.Length == 3 * skin.JointCount);
         t.ExpectTrue("AQ.15 and starts with nothing live", set.Count == 0 && set.LiveMatrixCount == 0);
 
         // Three DIFFERENT poses, so a set that wrote them all to one slot would be caught.
@@ -2827,13 +2827,13 @@ static ShaderInterface MinimalShader() => new(new[]
         t.ExpectTrue("AQ.15 counting up", AddPose(set, b, Matrix4x4.Identity) == 1);
         t.ExpectTrue("AQ.15 and again", AddPose(set, c, Matrix4x4.Identity) == 2);
         t.ExpectTrue("AQ.15 three live instances is three strides of matrices",
-            set.LiveMatrixCount == 3 * skeleton.BoneCount);
+            set.LiveMatrixCount == 3 * skin.JointCount);
 
         // The root bone of each instance sits at i * BoneCount and holds THAT instance's pose.
         // This is the assertion a shader's `base = gl_InstanceIndex * stride` has to match.
         t.ExpectClose("AQ.15 instance 0 at offset 0", set.Matrices[0].M41, 1f);
-        t.ExpectClose("AQ.15 instance 1 one stride along", set.Matrices[skeleton.BoneCount].M41, 2f);
-        t.ExpectClose("AQ.15 instance 2 two strides along", set.Matrices[2 * skeleton.BoneCount].M41, 3f);
+        t.ExpectClose("AQ.15 instance 1 one stride along", set.Matrices[skin.JointCount].M41, 2f);
+        t.ExpectClose("AQ.15 instance 2 two strides along", set.Matrices[2 * skin.JointCount].M41, 3f);
         t.ExpectClose("AQ.15 and Slice agrees with the arithmetic", set.Slice(1)[0].M41, 2f);
 
         // `post` is where a caller bakes a world placement in (Bulwark's shape) or passes identity
@@ -2869,6 +2869,19 @@ static ShaderInterface MinimalShader() => new(new[]
         var ownWorlds = new BoneWorlds(skeleton);
         ownWorlds.Compute(skeleton.CreateRestPose());
         t.Expect("AQ.16 CONTROL: the skin's own skeleton's worlds are taken", set.Add(ownWorlds, Matrix4x4.Identity) == 0);
+
+        // Index-for-index facts refuse a count that does not match, rather than padding or cutting it.
+        t.ExpectThrows("AQ.16 IncludeAncestors refuses flags that are not one per node",
+            () => SkinningAnalysis.IncludeAncestors(new[] { -1, 0, 1 }, new[] { true, false }), mustMention: "index for index");
+        t.Expect("AQ.16 CONTROL: one flag per node promotes the ancestors of a weighted one",
+            SkinningAnalysis.IncludeAncestors(new[] { -1, 0, 1 }, new[] { false, false, true }).SequenceEqual(new[] { true, true, true }));
+
+        // A diagnostic primitive names the fact it could not derive.
+        var singular = SkinBinding.Direct(skeleton, new[] { Matrix4x4.Identity, default(Matrix4x4) });
+        t.ExpectThrows("AQ.16 JointBindWorlds refuses a singular inverse bind, naming the joint",
+            () => singular.JointBindWorlds(), mustMention: "joint 1 ('child')");
+        t.Expect("AQ.16 CONTROL: invertible binds give their bind worlds",
+            skin.JointBindWorlds()[1].M42 == 1f);
     }
 
     // ── Instancing is not phase-locked, clip-locked or state-locked ──────────

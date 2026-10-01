@@ -261,8 +261,8 @@ public static class Program
         var carriedNodes = carried.Select(a => a.NodeIndex).ToHashSet();
         var attachments = carried.Select(a => (
             Name: imported.Nodes[a.NodeIndex].Name,
-            JointName: imported.Nodes[a.JointNode].Name,
-            JointIndex: a.BoneIndex,
+            CarrierName: imported.Nodes[a.CarrierNode].Name,
+            BoneIndex: a.BoneIndex,
             Primitives: imported.Meshes[imported.Nodes[a.NodeIndex].MeshIndex].Primitives)).ToArray();
         var staticParts = Enumerable.Range(0, imported.Nodes.Count)
             .Where(n => imported.Nodes[n].MeshIndex >= 0 && imported.Nodes[n].SkinIndex < 0 && !carriedNodes.Contains(n))
@@ -290,16 +290,16 @@ public static class Program
         if (attachments.Length > 0)
         {
             Console.WriteLine();
-            foreach (var a in attachments.OrderBy(a => a.JointName, StringComparer.Ordinal).ThenBy(a => a.Name, StringComparer.Ordinal))
+            foreach (var a in attachments.OrderBy(a => a.CarrierName, StringComparer.Ordinal).ThenBy(a => a.Name, StringComparer.Ordinal))
             {
                 var verts = a.Primitives.Sum(p => p.Mesh.VertexCount);
                 Console.WriteLine(
-                    $"    {a.Name,-22} on {a.JointName,-14} bone[{a.JointIndex,2}]  " +
+                    $"    {a.Name,-22} on {a.CarrierName,-14} bone[{a.BoneIndex,2}]  " +
                     $"{a.Primitives.Count} prim, {verts} verts");
             }
 
             // Several alternatives may share one joint; a caller normally selects one.
-            var shared = attachments.GroupBy(a => a.JointName, StringComparer.Ordinal)
+            var shared = attachments.GroupBy(a => a.CarrierName, StringComparer.Ordinal)
                 .Where(g => g.Count() > 1)
                 .ToArray();
             foreach (var g in shared)

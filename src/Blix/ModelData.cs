@@ -93,11 +93,11 @@ public sealed class ModelData
     /// <param name="Placement">The world of the node its first root joint hangs from (<see cref="JointHierarchy.Placement"/>).</param>
     public sealed record Skin(SkinBinding Binding, IReadOnlyList<int> JointNodes, Matrix4x4 Placement);
 
-    /// <summary>A rigid mesh an animated node carries: its node, that node, and its transform relative to it.</summary>
-    /// <param name="JointNode">The nearest animated node at or above it — a joint, or any node a clip moves.</param>
-    /// <param name="SkinIndex">The first skin with <paramref name="JointNode"/> as a joint, or -1.</param>
-    /// <param name="BoneIndex">That node's bone in the model's animated <see cref="ModelData.Skeleton"/>.</param>
-    public sealed record Attachment(int NodeIndex, int JointNode, int SkinIndex, int BoneIndex, Matrix4x4 Local);
+    /// <summary>A rigid mesh an animated node carries: its node, the node carrying it, and its transform relative to that.</summary>
+    /// <param name="CarrierNode">The nearest animated node at or above it: a skin joint, or any node a clip moves (which need be no skin's joint).</param>
+    /// <param name="SkinIndex">The first skin with <paramref name="CarrierNode"/> as a joint, or -1.</param>
+    /// <param name="BoneIndex">The carrier's bone in the model's animated <see cref="ModelData.Skeleton"/>: a hierarchy bone, not a skin joint.</param>
+    public sealed record Attachment(int NodeIndex, int CarrierNode, int SkinIndex, int BoneIndex, Matrix4x4 Local);
 
     private Matrix4x4[]? world;
     private readonly bool[] placed;

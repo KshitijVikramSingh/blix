@@ -554,7 +554,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         {
             Console.WriteLine(
                 $"  {rig.Attachments.Count} attachment(s): " +
-                string.Join(", ", rig.Attachments.Select(a => $"{a.Name}@{a.JointName}")) +
+                string.Join(", ", rig.Attachments.Select(a => $"{a.Name}@{a.BoneName}")) +
                 $" — showing {visibleAttachments.Count}");
         }
 

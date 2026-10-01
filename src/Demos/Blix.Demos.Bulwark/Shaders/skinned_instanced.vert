@@ -1,14 +1,14 @@
 #version 450
 
 // Instanced skinned enemy (Bulwark M4 Gate B) — ONE draw for the whole crowd.
-// Each instance's world-space bone palette is uBoneCount mat4s starting at
-// gl_InstanceIndex * uBoneCount in the engine's set-3 bone block (skinning.glsl). The palette is pre-baked
+// Each instance's world-space bone palette is uJointCount mat4s starting at
+// gl_InstanceIndex * uJointCount in the engine's set-3 bone block (skinning.glsl). The palette is pre-baked
 // into WORLD space on the CPU (skin × model per enemy), so there's no per-instance
 // model — the instance is fully described by its palette slot. Lighting/shadow
 // outputs match cube.vert so the shared cube.frag shades it shadow-aware.
 //
-// The bone count is the skin's, pushed per draw (Model.CreateBoneBuffers sizes the block), so the
-// shader serves a skeleton of any size. The row-major bytes read column-major in GLSL = transpose,
+// The stride is the skin's JOINT count (BonePaletteSet.JointCount), pushed per draw (Model.CreateBoneBuffers
+// sizes the block), so the shader serves a skin of any size. Not the skeleton's bone count. The row-major bytes read column-major in GLSL = transpose,
 // so skin * v is the row-vector product (F-016).
 
 #include "skinning.glsl"
@@ -18,7 +18,7 @@ layout(push_constant) uniform Push {
     vec4 uCamPos;
     vec4 uSunDir;
     mat4 uSunShadowVP;
-    int uBoneCount;
+    int uJointCount;
 };
 
 layout(location = 0) in vec3 inPosition;
@@ -36,7 +36,7 @@ layout(location = 3) out vec4 vSunShadowCoord;
 const vec4 kEnemyTint = vec4(0.82, 0.42, 0.30, 1.0);   // Gate B: constant (HP tint = polish)
 
 void main() {
-    mat4 skin = blix_skin(inBoneIndices, inBoneWeights, gl_InstanceIndex * uBoneCount);
+    mat4 skin = blix_skin(inBoneIndices, inBoneWeights, gl_InstanceIndex * uJointCount);
 
     vec4 world = skin * vec4(inPosition, 1.0);
     gl_Position = uViewProjection * world;

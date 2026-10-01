@@ -32,9 +32,9 @@ public static class SkinningAnalysis
                         mesh.VertexBytes, at + weightAttribute + (influence * 4));
                     if (weight <= 0f) continue;
 
-                    var bone = (int)BitConverter.ToSingle(
+                    var joint = (int)BitConverter.ToSingle(
                         mesh.VertexBytes, at + indexAttribute + (influence * 4));
-                    if ((uint)bone < (uint)weighted.Length) weighted[bone] = true;
+                    if ((uint)joint < (uint)weighted.Length) weighted[joint] = true;
                 }
             }
         }
@@ -73,9 +73,9 @@ public static class SkinningAnalysis
             {
                 var weight = BitConverter.ToSingle(mesh.VertexBytes, at + weightAttribute + (influence * 4));
                 if (weight <= 0f) continue;
-                var bone = (int)BitConverter.ToSingle(mesh.VertexBytes, at + indexAttribute + (influence * 4));
-                if ((uint)bone >= (uint)palette.Count) continue;
-                skinned += Vector3.Transform(p, palette[bone]) * weight;
+                var joint = (int)BitConverter.ToSingle(mesh.VertexBytes, at + indexAttribute + (influence * 4));
+                if ((uint)joint >= (uint)palette.Count) continue;
+                skinned += Vector3.Transform(p, palette[joint]) * weight;
                 total += weight;
             }
 
@@ -94,14 +94,20 @@ public static class SkinningAnalysis
     }
 
     /// <summary>The same over any parent-first tree: a skin's joints (<see cref="SkinBinding.JointParents"/>), say.</summary>
-    /// <exception cref="ArgumentException">A parent is below -1 or does not come before its child (<see cref="Skeleton"/>'s invariant).</exception>
+    /// <exception cref="ArgumentException">The flags are not one per node, or a parent is below -1 or does not come before its child (<see cref="Skeleton"/>'s invariant).</exception>
     public static bool[] IncludeAncestors(IReadOnlyList<int> parents, IReadOnlyList<bool> weighted)
     {
         ArgumentNullException.ThrowIfNull(parents);
         ArgumentNullException.ThrowIfNull(weighted);
 
+        // Index for index, or not at all: a short set would read as unweighted nodes and a long one would be cut.
+        if (weighted.Count != parents.Count)
+        {
+            throw new ArgumentException($"{weighted.Count} weighted entr(ies) for {parents.Count} node(s); they correspond index for index.", nameof(weighted));
+        }
+
         var hierarchy = new bool[parents.Count];
-        for (var i = 0; i < hierarchy.Length && i < weighted.Count; i++) hierarchy[i] = weighted[i];
+        for (var i = 0; i < hierarchy.Length; i++) hierarchy[i] = weighted[i];
 
         for (var i = hierarchy.Length - 1; i >= 0; i--)
         {

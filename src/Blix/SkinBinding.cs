@@ -97,6 +97,7 @@ public sealed class SkinBinding
     }
 
     /// <summary>Each joint's world at bind: the inverse of its inverse bind.</summary>
+    /// <exception cref="InvalidOperationException">An inverse bind is singular.</exception>
     /// <remarks>
     /// Matrices in the skin's binding space, not a <see cref="Pose"/>: a pose is a hierarchy's locals, and these
     /// are what the binds imply about where each joint was. Comparing them with the hierarchy's worlds at rest
@@ -105,7 +106,15 @@ public sealed class SkinBinding
     public Matrix4x4[] JointBindWorlds()
     {
         var worlds = new Matrix4x4[inverseBinds.Length];
-        for (var j = 0; j < worlds.Length; j++) Matrix4x4.Invert(inverseBinds[j], out worlds[j]);
+        for (var j = 0; j < worlds.Length; j++)
+        {
+            // A diagnostic primitive says which fact it could not derive, rather than handing back a matrix of NaNs.
+            if (!Matrix4x4.Invert(inverseBinds[j], out worlds[j]))
+            {
+                throw new InvalidOperationException(
+                    $"the inverse bind of joint {j} ('{Skeleton.Bones[bones[j]].Name}') is not invertible, so it implies no bind world.");
+            }
+        }
         return worlds;
     }
 
