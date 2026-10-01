@@ -5846,6 +5846,28 @@ static ShaderInterface MinimalShader() => new(new[]
     t.Expect("BR.4 the host advances in the order added, hands every animation its delta, and drops each on the tick it ends",
         string.Join(" ", calls) == "a:0.5 b:0.5 c:0.5 a:0.25 c:0.25 a:0.25" && afterOne == 2 && afterTwo == 1 && host.Count == 0,
         $"{string.Join(" ", calls)} | counts {afterOne}, {afterTwo}, {host.Count}");
+
+    // Re-entrant adds: one added during an advance starts on the next, behind the survivors. A callback that
+    // adds another every time it runs then adds one per advance, rather than running forever inside one.
+    var order = new List<string>();
+    var reentrant = new AnimationHost();
+    var adds = 0;
+    CallbackAnimation Adder() => new(delta =>
+    {
+        order.Add($"adder{adds}");
+        adds++;
+        reentrant.AddAnimation(Adder());
+        return false;
+    });
+    reentrant.AddAnimation(new CallbackAnimation(_ => { order.Add("keeper"); return true; }));
+    reentrant.AddAnimation(Adder());
+    reentrant.Advance(0.1);
+    var firstTick = string.Join(" ", order);
+    var countAfterFirst = reentrant.Count;
+    reentrant.Advance(0.1);
+    t.Expect("BR.5 an animation added during an advance does not spend that delta, and starts on the next behind the survivors",
+        firstTick == "keeper adder0" && countAfterFirst == 2 && string.Join(" ", order) == "keeper adder0 keeper adder1" && reentrant.Count == 2,
+        $"{string.Join(" ", order)} | counts {countAfterFirst}, {reentrant.Count}");
 }
 
 // ============================================================================
@@ -5952,6 +5974,16 @@ static ShaderInterface MinimalShader() => new(new[]
 
     t.ExpectThrows("BS.6 a player is one layer's: adding it twice would advance it twice",
         () => stack.Add(a), mustMention: "already a layer's source");
+
+    // Same bone count, another rig: locals go by index, so a count match is shape, not meaning.
+    var lookalike = new Skeleton(new[]
+    {
+        new Bone("root", -1, Matrix4x4.Identity),
+        new Bone("tail", 0, Matrix4x4.Identity),
+        new Bone("wing", 0, Matrix4x4.Identity),
+    });
+    t.ExpectThrows("BS.6 a player posing another skeleton is refused, even one with as many bones",
+        () => stack.Add(new ClipPlayer(lookalike, walk)), mustMention: "another skeleton");
 }
 
 t.PrintSummary();

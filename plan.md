@@ -296,6 +296,16 @@ Stages:
   time; alpha; 32 Hz at 6× runs 48 steps in a quarter-second frame and in a two-second stall (CONTROL: 8
   at 1×); pause runs none and holds alpha; a reset drops the residual; bad step or scale refused. Pong
   reads held keys in its step, so the order does not change it.
+- **Review fixes (before merge):** `FixedStepClock` counts its steps up front and refuses a frame that asks
+  for more than it can count. A finite `delta × scale` can overflow to ∞, and past 2^52 steps subtracting a
+  step changes nothing: either way the old loop hung. A reset from inside a step ends that frame's steps.
+  `PoseStack.Add` requires the player's `Skeleton` INSTANCE; a matching bone count is shape, not meaning.
+  `AnimationHost.Advance` runs only the animations present when it began, so one added by a callback starts
+  on the next advance. `Elapsed`'s doc no longer promises a scrub that writes the target. Headless `--step`
+  refuses ∞ while parsing, as the window does.
+- **Open, deliberately not here:** `BoneMask.Subtree(skeleton, …)` forgets which skeleton resolved it, and
+  later checks compare bone counts only. `All(count)`/`None(count)` are rightly skeleton-agnostic, so the
+  fix is a mask that knows its skeleton when it has one, not a blanket rule.
 
 ---
 

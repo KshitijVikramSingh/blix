@@ -27,7 +27,8 @@ public sealed class Transform3DAnimation : IAnimation
     // Seconds before the curves start; until then each channel holds its value at time 0.
     public double Delay { get; init; }
 
-    // Seconds advanced so far. Set it to restart (0) or scrub.
+    // Seconds advanced so far. Setting it moves the clock only: the target is written at the next Advance
+    // (Advance(0) writes it now).
     public double Elapsed { get; set; }
 
     public bool Advance(double delta)

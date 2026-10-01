@@ -483,6 +483,8 @@ var t = new TestRunner();
         Blix.Runtime.Silk.WindowOptions.FromArgs(AppArgs.Parse(Array.Empty<string>())).Step is null);
     t.ExpectThrows("a step of zero is refused by name",
         () => Blix.Runtime.Silk.WindowOptions.FromArgs(AppArgs.Parse(new[] { "--step", "0" })), mustMention: "--step");
+    t.ExpectThrows("and so is an infinite one",
+        () => Blix.Runtime.Silk.WindowOptions.FromArgs(AppArgs.Parse(new[] { "--step", "Infinity" })), mustMention: "--step");
 }
 
 t.PrintSummary();

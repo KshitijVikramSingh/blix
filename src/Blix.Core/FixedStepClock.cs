@@ -28,6 +28,7 @@ public sealed class FixedStepClock
     public const double MaxFrameDelta = 0.25;
 
     private double residual;
+    private int resets;
 
     /// <summary>Simulation time at the last step: where the next step starts.</summary>
     public double Total { get; private set; }
@@ -45,7 +46,10 @@ public sealed class FixedStepClock
     /// Adds a frame's time, at the loop's scale, and calls <see cref="IFixedGameLoop.OnFixedUpdate"/> once per
     /// whole step. The step and scale are read now, after the update that may have changed them.
     /// </summary>
-    /// <exception cref="InvalidOperationException">The step is not a finite number above zero, or the scale is negative or not finite.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The step is not a finite number above zero; the scale is negative or not finite; or the frame, at that
+    /// scale, asks for more steps than can be counted (a finite scale times a finite delta can still overflow).
+    /// </exception>
     public void Run(IFixedGameLoop loop, double frameDelta)
     {
         ArgumentNullException.ThrowIfNull(loop);
@@ -62,12 +66,26 @@ public sealed class FixedStepClock
         }
 
         var delta = double.IsFinite(frameDelta) ? Math.Clamp(frameDelta, 0.0, MaxFrameDelta) : 0.0;
-        residual += delta * scale;
+        var accumulated = residual + (delta * scale);
 
-        var steps = 0;
-        while (residual >= step)
+        // Counted up front, never by subtracting until the residual runs out: past 2^52 steps' worth,
+        // subtracting one step leaves the residual unchanged, and infinity minus a step is infinity. Either
+        // would loop forever, from inputs that each passed the checks above.
+        var wanted = Math.Floor(accumulated / step);
+        if (!double.IsFinite(wanted) || wanted > int.MaxValue)
         {
-            residual -= step;
+            throw new InvalidOperationException(
+                $"FixedTimeScale {scale} over a {delta}s frame asks for {wanted} steps of {step}s; that many cannot be run.");
+        }
+
+        var count = (int)wanted;
+        residual = Math.Max(0.0, accumulated - (count * step));
+
+        // A reset from inside a step ends the run: the time it set has nothing left to step.
+        var resetsBefore = resets;
+        var steps = 0;
+        while (steps < count && resets == resetsBefore)
+        {
             Total += step;
             steps++;
             loop.OnFixedUpdate(new Time(Total, step));
@@ -84,6 +102,7 @@ public sealed class FixedStepClock
         if (!double.IsFinite(total)) throw new ArgumentOutOfRangeException(nameof(total), total, "simulation time must be finite.");
         Total = total;
         residual = 0.0;
+        resets++;
         Alpha = 0.0;
     }
 }

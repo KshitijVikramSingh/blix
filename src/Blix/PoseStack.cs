@@ -96,14 +96,16 @@ public sealed class PoseStack : IAnimation
     public IReadOnlyList<PoseLayer> Layers => layers;
 
     /// <summary>Adds a layer on top.</summary>
-    /// <exception cref="ArgumentException">The player poses another skeleton, or is already a layer's source: the stack advances each player once per advance.</exception>
+    /// <exception cref="ArgumentException">The player poses a different <see cref="Skeleton"/> instance, or is already a layer's source: the stack advances each player once per advance.</exception>
     public PoseLayer Add(ClipPlayer source, PoseLayerMode mode = PoseLayerMode.Blend, float weight = 1f, BoneMask? mask = null)
     {
         ArgumentNullException.ThrowIfNull(source);
-        if (!ReferenceEquals(source.Skeleton, Skeleton) && source.Skeleton.BoneCount != Skeleton.BoneCount)
+        // The same instance, not the same count: locals are applied by index, and two rigs of 60 bones each
+        // share a shape, not a meaning. Bone 12 of one is not bone 12 of the other.
+        if (!ReferenceEquals(source.Skeleton, Skeleton))
         {
             throw new ArgumentException(
-                $"the player poses a {source.Skeleton.BoneCount}-bone skeleton and this stack's has {Skeleton.BoneCount}.", nameof(source));
+                $"the player poses another skeleton ({source.Skeleton.BoneCount} bones); a layer's player must pose this stack's own.", nameof(source));
         }
 
         if (layers.Any(l => ReferenceEquals(l.Source, source)))

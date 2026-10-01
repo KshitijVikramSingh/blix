@@ -26,17 +26,23 @@ public sealed class AnimationHost : IUpdateable
     {
         // In order, compacting in place: an animation that finishes is skipped over and the survivors
         // keep their order, with no list copy per frame.
+        //
+        // Only the animations present when the advance began. One added by a callback during it lands
+        // after them and starts on the next advance: it does not spend this delta, and a callback that
+        // keeps adding cannot make one advance run forever.
+        var present = animations.Count;
         var kept = 0;
-        for (var i = 0; i < animations.Count; i++)
+        for (var i = 0; i < present; i++)
         {
             var animation = animations[i];
             if (animation.Advance(delta)) animations[kept++] = animation;
         }
 
-        animations.RemoveRange(kept, animations.Count - kept);
+        // Close the gap the finished left, keeping anything added during the advance behind the survivors.
+        animations.RemoveRange(kept, present - kept);
     }
 
-    // As an IUpdateable, the frame's delta. Whether hosts are ticked through IUpdateable at all is the
-    // fixed-step decision (plan.md §J4).
+    // As an IUpdateable, the delta it is handed: a loop calls it from OnUpdate or OnFixedUpdate, and the
+    // host ticks neither.
     void IUpdateable.Update(Time time) => Advance(time.Delta);
 }

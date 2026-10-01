@@ -47,7 +47,7 @@ public sealed record HeadlessOptions(
         if (args.Flag("debug")) result = result with { Diagnostics = true };
         if (args.Double("step") is { } step)
         {
-            result = step > 0
+            result = step > 0.0 && double.IsFinite(step)
                 ? result with { Step = step }
                 : throw new AppArgsException($"--step expects seconds above zero, got {step}.");
         }

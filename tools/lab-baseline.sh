@@ -194,6 +194,13 @@ while IFS="$(printf '\t')" read -r name args why; do
     done < <(sed -n 's/^\(.*\.png\): \([0-9]*\)% of pixels lit$/\1 \2/p' "$RUN/$name.log")
 done < <(modes)
 
+# A filter that selects nothing would compare nothing, and "IDENTICAL — 0 artifact(s)" reads as a pass.
+# The pattern is anchored (^(...)$), so a bare prefix like `compose` matches no mode: say so.
+if [ -n "$ONLY" ] && [ "${#selected[@]}" -eq 0 ]; then
+    echo "REFUSING: no mode matches /^($ONLY)\$/ (the pattern is anchored; try '$ONLY.*')" >&2
+    exit 2
+fi
+
 if [ "$unlit" -gt 0 ]; then
     echo "REFUSING: $unlit capture(s) hold no scene. The read-back lost the picture; nothing here is a baseline." >&2
     exit 3
