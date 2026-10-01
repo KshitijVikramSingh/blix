@@ -33,6 +33,22 @@ PLAN="$(mktemp "${TMPDIR:-/tmp}/gltf-corpus-plan.XXXXXX")"
 CONF="$(mktemp "${TMPDIR:-/tmp}/gltf-corpus-conf.XXXXXX")"
 trap 'rm -f "$PLAN" "$CONF"' EXIT
 
+# A URL as ASCII: every byte outside printable ASCII percent-encoded (the UTF-8 bytes, as RFC 3986
+# says), everything else untouched. Byte-wise under LC_ALL=C, so it works in macOS's bash 3.2 too.
+ascii_url() {
+    local in="$1" outurl="" c i
+    local LC_ALL=C
+    for ((i = 0; i < ${#in}; i++)); do
+        c="${in:i:1}"
+        case "$c" in
+        [\ -~]) outurl="$outurl$c" ;;
+        # printf reads a high byte as a signed char; the mask makes it the byte.
+        *) outurl="$outurl$(printf '%%%02X' $(( $(printf '%d' "'$c") & 255 )))" ;;
+        esac
+    done
+    printf '%s' "$outurl"
+}
+
 # Records a download rather than performing one. Already-present files are dropped here, so
 # re-running is cheap and a partial run resumes.
 get() {
@@ -109,15 +125,32 @@ if [ "$planned" -gt 0 ]; then
     dest_for_curl="$DEST"
     if command -v cygpath >/dev/null 2>&1; then dest_for_curl="$(cygpath -m "$DEST")"; fi
 
+    # Names outside ASCII (Unicode❤♻Test) cost a Windows CI round: the native curl reads a -K file's
+    # paths in the ANSI code page, so the download landed under a mangled name and the checklist below
+    # found nothing. So curl only ever sees ASCII: the URL percent-encoded (RFC 3986, UTF-8 bytes) and
+    # every file written to a numbered name in a staging folder, then moved into place by this shell,
+    # which handles Unicode names on every platform.
+    staging="$DEST/.downloading"
+    rm -rf "$staging"
+    mkdir -p "$staging"
+    n=0
     while IFS="$(printf '\t')" read -r url out; do
         mkdir -p "$(dirname "$out")"
-        printf 'url = "%s"\noutput = "%s"\n' "$url" "$dest_for_curl${out#"$DEST"}" >> "$CONF"
+        n=$((n + 1))
+        printf 'url = "%s"\noutput = "%s"\n' "$(ascii_url "$url")" "$dest_for_curl/.downloading/$n" >> "$CONF"
     done < "$PLAN"
     # --parallel reuses connections and overlaps requests; -f so a 404 is a failure rather
     # than an HTML error page written to disk under the name of a glTF file.
     conf_for_curl="$CONF"
     if command -v cygpath >/dev/null 2>&1; then conf_for_curl="$(cygpath -m "$CONF")"; fi
     curl -sfL --parallel --parallel-max 8 --max-time 300 -K "$conf_for_curl" || true
+
+    n=0
+    while IFS="$(printf '\t')" read -r url out; do
+        n=$((n + 1))
+        if [ -s "$staging/$n" ]; then mv -f "$staging/$n" "$out"; fi
+    done < "$PLAN"
+    rm -rf "$staging"
 fi
 
 # A curl that returns non-zero does not say WHICH file, and --parallel returns one code for
