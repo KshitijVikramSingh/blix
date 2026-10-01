@@ -8,8 +8,8 @@ namespace Blix;
 // The method is named `FixedUpdate` (not `Update`) to dodge the same-signature collision
 // with IUpdateable — a single class can implement both interfaces with separate method
 // bodies, ticking variable-rate behaviour in `Update` and fixed-rate behaviour in
-// `FixedUpdate`. The engine's loop (Game base class) accumulates frame deltas into a
-// FixedStepClock and dispatches FixedUpdate at the fixed cadence.
+// `FixedUpdate`. Nothing calls it by itself: the host runs an IFixedGameLoop's steps, and
+// the loop's OnFixedUpdate ticks what it owns.
 public interface IFixedUpdateable
 {
     void FixedUpdate(Time time);

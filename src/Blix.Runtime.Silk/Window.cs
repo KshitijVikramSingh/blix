@@ -46,6 +46,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     private float lastWheel;
     // The frame's one time sample, advanced in OnUpdate and read by OnRender (FrameClock).
     private FrameClock clock = null!;
+    private readonly FixedStepClock fixedClock = new();
     private readonly WindowOptions options;
     private readonly int validationErrorsBefore;
     private int renderedFrames;
@@ -289,6 +290,9 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         inputState.BeginTick();
 
         gameLoop.OnUpdate(time);
+
+        // After the update, which turned this frame's input into intents and chose the time scale.
+        if (gameLoop is IFixedGameLoop fixedLoop) fixedClock.Run(fixedLoop, time.Delta);
     }
 
     private void OnRender(double deltaTime)
@@ -705,7 +709,7 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
         var size = window.FramebufferSize;
         var w = size.X > 0 ? size.X : window.Size.X;
         var h = size.Y > 0 ? size.Y : window.Size.Y;
-        return new RenderFrameContext(Width: w, Height: h);
+        return new RenderFrameContext(Width: w, Height: h, FixedAlpha: fixedClock.Alpha);
     }
 
     private void ApplyDefaultSurfaceSize()
@@ -719,6 +723,8 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     // IRenderHost
     public void SetTitle(string title) => window.Title = title;
     public void RequestClose() => window.Close();
+
+    public void ResetFixedClock(double total = 0.0) => fixedClock.Reset(total);
 
     public void SetCursorCaptured(bool captured)
     {

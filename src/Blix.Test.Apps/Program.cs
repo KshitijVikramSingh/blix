@@ -176,6 +176,7 @@ public static class Program
 
         // ── a loop with no window ───────────────────────────────────────────
         HeadlessRunsTheSameLoop(t);
+        FixedStepsAreTheHosts(t);
 
         t.PrintSummary();
         return t.Failed == 0 ? 0 : 1;
@@ -787,6 +788,69 @@ public static class Program
     /// <summary>
     /// The external starter is a real project, not a collection of plausible snippets.
     /// </summary>
+    private static void FixedStepsAreTheHosts(TestRunner t)
+    {
+        // Steps here are powers of two, so every count below is exact rather than at the mercy of rounding.
+        t.Expect("Game is a loop the host runs fixed steps for", typeof(IFixedGameLoop).IsAssignableFrom(typeof(Game)));
+
+        // A frame holds no step or several, so a press is an intent the update records and a step consumes.
+        var latched = new FixedLoop { FixedStep = 1.0 / 30.0 };
+        new HeadlessHost(latched, new HeadlessOptions(ExitAfterFrames: 6), input: (frame, input) =>
+        {
+            if (frame == 0) input.RecordKeyDown(Key.Space);
+        }).Run();
+        t.Expect("at 30 Hz under 60 Hz frames, every other frame holds a step",
+            latched.StepsPerFrame.SequenceEqual(new[] { 0, 1, 0, 1, 0, 1 }), string.Join(",", latched.StepsPerFrame));
+        t.Expect("in the order update, steps, render",
+            latched.Calls.Skip(2).Take(3).SequenceEqual(new[] { "update", "step", "render" }), string.Join(" ", latched.Calls.Take(6)));
+        t.Expect("a press latched in the update reaches exactly one step, waiting through a frame with none",
+            latched.Pressed.SequenceEqual(new[] { 0 }) && latched.ConsumedOn.SequenceEqual(new[] { 1 }),
+            $"pressed {string.Join(",", latched.Pressed)}, consumed {string.Join(",", latched.ConsumedOn)}");
+        t.Expect("a step's Total is simulation time, one step per step; its Delta is the step",
+            latched.Steps.Select((x, i) => Math.Abs(x.Total - ((i + 1) / 30.0)) < 1e-12 && x.Delta == 1.0 / 30.0).All(ok => ok),
+            string.Join(" ", latched.Steps.Select(x => $"{x.Total}/{x.Delta}")));
+        t.Expect("render is told how far time is toward the next step",
+            latched.Alphas.Select((a, i) => Math.Abs(a - (i % 2 == 0 ? 0.5 : 0.0)) < 1e-9).All(ok => ok),
+            string.Join(",", latched.Alphas));
+
+        // The cap is in seconds before the scale, never in steps: a fast-forward runs every step it asked for.
+        var fast = new FixedLoop { FixedStep = 1.0 / 32.0, FixedTimeScale = 6.0 };
+        new HeadlessHost(fast, new HeadlessOptions(ExitAfterFrames: 1, Step: 0.25)).Run();
+        t.Expect("a quarter-second frame at 32 Hz and 6x runs all 48 steps",
+            fast.StepsPerFrame.SequenceEqual(new[] { 48 }), string.Join(",", fast.StepsPerFrame));
+        var stalled = new FixedLoop { FixedStep = 1.0 / 32.0, FixedTimeScale = 6.0 };
+        new HeadlessHost(stalled, new HeadlessOptions(ExitAfterFrames: 1, Step: 2.0)).Run();
+        t.Expect("and a two-second stall contributes a quarter second, not sixteen seconds of steps",
+            stalled.StepsPerFrame.SequenceEqual(new[] { 48 }), string.Join(",", stalled.StepsPerFrame));
+        t.Expect("CONTROL: real time at the same rate runs a quarter as many",
+            Steps(new FixedLoop { FixedStep = 1.0 / 32.0 }, 0.25).SequenceEqual(new[] { 8 }));
+
+        // Zero is pause: nothing steps, and the alpha holds where the pause found it.
+        var paused = new FixedLoop { FixedStep = 1.0 / 32.0, AtUpdate = (frame, loop) => { if (frame >= 1) loop.FixedTimeScale = 0.0; } };
+        new HeadlessHost(paused, new HeadlessOptions(ExitAfterFrames: 8, Step: 1.0 / 64.0)).Run();
+        t.Expect("a time scale of zero runs no steps", paused.StepsPerFrame.All(n => n == 0), string.Join(",", paused.StepsPerFrame));
+        t.Expect("and holds the alpha it had", paused.Alphas.All(a => a == 0.5), string.Join(",", paused.Alphas));
+
+        // A reset clears the residual: the step it would have finished never runs, and time restarts where asked.
+        var reset = new FixedLoop { FixedStep = 1.0 / 32.0, AtUpdate = (frame, loop) => { if (frame == 3) loop.Host.ResetFixedClock(100.0); } };
+        new HeadlessHost(reset, new HeadlessOptions(ExitAfterFrames: 5, Step: 1.0 / 64.0)).Run();
+        t.Expect("a reset drops the half step left over, so the frame that would have finished it does not step",
+            reset.StepsPerFrame.SequenceEqual(new[] { 0, 1, 0, 0, 1 }), string.Join(",", reset.StepsPerFrame));
+        t.Expect("and simulation time continues from where it was set",
+            reset.Steps[^1].Total == 100.0 + (1.0 / 32.0), reset.Steps[^1].Total.ToString("R"));
+
+        t.ExpectThrows("a step of zero is refused, naming it",
+            () => new HeadlessHost(new FixedLoop { FixedStep = 0.0 }, new HeadlessOptions(ExitAfterFrames: 1)).Run(), mustMention: "FixedStep");
+        t.ExpectThrows("and a negative time scale",
+            () => new HeadlessHost(new FixedLoop { FixedTimeScale = -1.0 }, new HeadlessOptions(ExitAfterFrames: 1)).Run(), mustMention: "FixedTimeScale");
+
+        static List<int> Steps(FixedLoop loop, double frame)
+        {
+            new HeadlessHost(loop, new HeadlessOptions(ExitAfterFrames: 1, Step: frame)).Run();
+            return loop.StepsPerFrame;
+        }
+    }
+
     private static void TheExternalStarterBuildsFromCleanState(TestRunner t) =>
         InStagedExample(t, "K", "hello-blix", staged =>
         {
@@ -1195,6 +1259,58 @@ internal enum FixtureView
 {
     Lit,
     ShadowMap,
+}
+
+/// <summary>A loop on a fixed step that writes down each step, and which frame's press reached one.</summary>
+internal sealed class FixedLoop : IFixedGameLoop
+{
+    private bool jumpIntent;
+    private int frame;
+    private int stepsThisFrame;
+
+    public double FixedStep { get; set; } = 1.0 / 60.0;
+    public double FixedTimeScale { get; set; } = 1.0;
+    public Action<int, FixedLoop>? AtUpdate { get; init; }
+    public IRenderHost Host { get; private set; } = null!;
+    public List<string> Calls { get; } = new();
+    public List<Time> Steps { get; } = new();
+    public List<int> StepsPerFrame { get; } = new();
+    public List<double> Alphas { get; } = new();
+    public List<int> Pressed { get; } = new();
+    public List<int> ConsumedOn { get; } = new();
+
+    public void OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice) => Host = host;
+
+    public void OnUpdate(Time time)
+    {
+        Calls.Add("update");
+        if (Host.Input[Key.Space].Pressed)
+        {
+            Pressed.Add(frame);
+            jumpIntent = true;
+        }
+
+        AtUpdate?.Invoke(frame, this);
+    }
+
+    public void OnFixedUpdate(Time time)
+    {
+        Calls.Add("step");
+        Steps.Add(time);
+        stepsThisFrame++;
+        if (!jumpIntent) return;
+        jumpIntent = false;
+        ConsumedOn.Add(frame);
+    }
+
+    public void OnRender(Time time, RenderFrameContext frameContext, RenderCommandList commandList)
+    {
+        Calls.Add("render");
+        StepsPerFrame.Add(stepsThisFrame);
+        Alphas.Add(frameContext.FixedAlpha);
+        stepsThisFrame = 0;
+        frame++;
+    }
 }
 
 /// <summary>An ordinary loop that writes down what happened to it.</summary>

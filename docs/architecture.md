@@ -84,8 +84,8 @@ Several details stop this from being a simplistic layered pyramid:
 
 - `Blix.Core` is the host-contract assembly, not a dependency-free foundation;
   its contracts name graphics and audio handles from `Blix.Graphics` and
-  `Blix.Audio`. It also carries the loop contract (`IGameLoop`, `Game`, `Time`,
-  `FixedStepClock`), still in the `Blix` namespace, so a program can run a
+  `Blix.Audio`. It also carries the loop contract (`IGameLoop`, `IFixedGameLoop`,
+  `Game`, `Time`, `FixedStepClock`), still in the `Blix` namespace, so a program can run a
   loop without referencing `Blix` and, through it, `Blix.Render` and Vulkan.
 - Nothing above the host names the backend. Libraries and programs take
   `IGraphicsDevice`, which is the whole device (shader programs, pipelines,

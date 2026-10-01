@@ -287,6 +287,15 @@ Stages:
   `Total` is its own simulation clock; `ResetFixedClock(total)` clears the residual. No `FixedInput`: one
   would be explicit, never a phase-switching `Host.Input`. Presentation that reads simulation state
   belongs in OnRender; there is no late-update hook.
+- **J4-B done:** `IFixedGameLoop` (Blix.Core) with a default scale of 1; `FixedStepClock` rewritten as the
+  hosts' scheduler (`Run(loop, frameDelta)`, `Total`, `Alpha`, `Reset`), the step cap gone;
+  `RenderFrameContext.FixedAlpha`; `IRenderHost.ResetFixedClock`. `Game` keeps `FixedStep` and gains
+  `FixedTimeScale`, both protected and bridged. `IUpdateable`/`IFixedUpdateable` stay as they are: the host
+  ticks neither, and a loop calls them on what it owns. Test.Apps: a press latched in OnUpdate reaches
+  exactly one step across a stepless frame; the order is update, step, render; the step's Total is simulation
+  time; alpha; 32 Hz at 6× runs 48 steps in a quarter-second frame and in a two-second stall (CONTROL: 8
+  at 1×); pause runs none and holds alpha; a reset drops the residual; bad step or scale refused. Pong
+  reads held keys in its step, so the order does not change it.
 
 ---
 

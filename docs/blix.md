@@ -79,7 +79,7 @@ Nothing references `Blix` from below. No transitive dependency on `Blix.Runtime.
 
 Every public type built by `Blix.csproj` and `Blix.Core.csproj`, one line each.
 
-**Loop + time:** `IGameLoop`, `Game`, `Time`, `IUpdateable`, `IFixedUpdateable`, `FixedStepClock`. These are in the `Blix` namespace but built by `Blix.Core`, so a program can use them without referencing this library.
+**Loop + time:** `IGameLoop`, `IFixedGameLoop`, `Game`, `Time`, `IUpdateable`, `IFixedUpdateable`, `FixedStepClock`. These are in the `Blix` namespace but built by `Blix.Core`, so a program can use them without referencing this library.
 
 **Transforms + cameras:** `Transform3D`, `Transform2D`, `Camera3D`, `Camera2D`, `CameraController`
 
@@ -118,13 +118,13 @@ public interface IGameLoop
 
 Three deliberate separations:
 
-- **Time vs render dims.** `Time` is its own value type. `RenderFrameContext` carries only `(Width, Height)` of the default framebuffer. Splitting lets render-side and update-side state diverge cleanly (fixed-step physics, time scale, pause).
+- **Time vs render dims.** `Time` is its own value type. `RenderFrameContext` carries the default framebuffer's `(Width, Height)` and the frame's `FixedAlpha`. Splitting lets render-side and update-side state diverge cleanly (fixed-step physics, time scale, pause).
 - **Input vs loop.** Input is not on `IGameLoop` and is not delivered by callback. The host computes a frame-stable `InputState` once per update and a game reads `Host.Input` during `OnUpdate`: `Down` for a hold, `Pressed`/`Released` for the transitions, `MouseDelta` for motion. Deriving those from platform events is mechanism the engine owes; deciding that Space means jump is the game's.
 - **Diagnostics vs loop.** `IDebuggable` (in `Blix.Diagnostics`) is a separate opt-in surface.
 
 ### Game
 
-The minimum useful base. Captures `IRenderHost` and `IGraphicsDevice` once at load, exposes them as `Host` and `GraphicsDevice`. Also auto-captures `AudioDevice` from `Host as IAudioHost` and routes `OnFixedUpdate` through the engine's `FixedStepClock`.
+The minimum useful base. Captures `IRenderHost` and `IGraphicsDevice` once at load, exposes them as `Host` and `GraphicsDevice`. Also auto-captures `AudioDevice` from `Host as IAudioHost`. It is an `IFixedGameLoop`, so the host runs its `OnFixedUpdate` steps (see [Fixed steps](#fixed-steps)).
 
 ```csharp
 internal sealed class MyGame : Game, IDebuggable
@@ -156,7 +156,7 @@ Virtuals:
 - `OnResize(int, int)` — framebuffer resize hook.
 - `OnUnload()` — game-side unload hook.
 
-Override `protected virtual double FixedStep => 1.0 / 60.0` to change the fixed cadence.
+Override `protected virtual double FixedStep => 1.0 / 60.0` to change the fixed cadence, and set `FixedTimeScale` (1 real time, 0 paused) in `OnUpdate`; the host reads both after it.
 
 ### Time
 
@@ -176,7 +176,7 @@ A passed-by-value struct. `Total` is seconds since startup (monotonically increa
 
 ### IUpdateable + IFixedUpdateable
 
-Opt-in update contracts: a thing that only sits in a scene implements neither, so it pays no virtual call and claims no behaviour it lacks. Whether the host ticks these, and on which clock, is the fixed-step decision still open ([plan.md](../plan.md) §J4).
+Opt-in update contracts: a thing that only sits in a scene implements neither, so it pays no virtual call and claims no behaviour it lacks. The host ticks neither: a loop calls `Update` from `OnUpdate` and `FixedUpdate` from `OnFixedUpdate` on what it owns, so it decides what runs and in which order.
 
 ```csharp
 public interface IUpdateable    { void Update(Time time); }
@@ -185,23 +185,19 @@ public interface IFixedUpdateable { void FixedUpdate(Time time); }
 
 Variable-rate (`Update`) fires once per render frame at whatever the display does (typically 60–144Hz). Fixed-rate (`FixedUpdate`) fires at a fixed cadence (default 60Hz) — zero, one, or more times per frame depending on how much delta has accumulated. The two interfaces have different method names so a single class can implement both with independent method bodies.
 
-### FixedStepClock
+### Fixed steps
 
-`Game` owns one and drives it from `OnUpdate`:
+A loop that is an `IFixedGameLoop` (`FixedStep`, `FixedTimeScale`, `OnFixedUpdate`) has its simulation scheduled by the host, which owns a `FixedStepClock`. Both hosts run every frame in one order:
 
-```csharp
-void IGameLoop.OnUpdate(Time time)
-{
-    OnUpdate(time);
-    var steps = fixedClock.Accumulate(time);
-    for (var i = 0; i < steps; i++)
-        OnFixedUpdate(new Time(time.Total, FixedStep));
-}
-```
+1. input held still for the frame;
+2. `OnUpdate(time)`: read `Host.Input`, turn it into intents, choose `FixedTimeScale`;
+3. `OnFixedUpdate(step)` once per whole step of accumulated time: zero, one or several;
+4. `OnRender(time, frame, ...)`, where `frame.FixedAlpha` in [0, 1) is how far time is toward the next step.
 
-`FixedStepClock` caps `MaxStepsPerFrame` at 4 by default — if the renderer hitches (debugger pause, OS suspend) and seconds of delta accumulate, the catch-up bursts are bounded. Any leftover beyond the cap is dropped (slow-mo recovery) instead of running thousands of steps the moment the app resumes.
-
-Iterate each scene list twice per outer frame: once with `(obj as IUpdateable)?.Update(time)` (variable, in `OnUpdate`), once with `(obj as IFixedUpdateable)?.FixedUpdate(time)` (fixed, in `OnFixedUpdate`).
+- **Input is the frame's.** A step does not see a press of its own, because a frame can hold no step or several. Record the press as an intent in `OnUpdate` and consume it in a step: it reaches exactly one step, and waits through frames that have none.
+- **Simulation time is its own clock.** A step's `Time.Total` advances one step per step: it runs at the time scale and stands still while paused. `Host.ResetFixedClock(total)` sets it and clears the residual, for a restart, a load or a scrub.
+- **The cap is in seconds.** A frame contributes at most `FixedStepClock.MaxFrameDelta` (0.25 s) before the scale, so a stall drops time instead of replaying it, and a fast-forward still runs every step it asked for: 30 Hz at 6× is 45 steps in a long frame. There is no step cap, which would make the scale lie.
+- **Presentation that reads the simulation goes in `OnRender`.** `OnUpdate` runs before this frame's steps, so a camera placed there from simulation state lags a step. There is no late-update hook.
 
 ## Scene primitives
 
