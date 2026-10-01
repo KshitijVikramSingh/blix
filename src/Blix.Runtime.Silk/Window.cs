@@ -188,15 +188,31 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
 
     public void Run()
     {
+        // <b>Silk's Run() extension, minus its last line.</b> It ends with view.Reset(), which destroys the GLFW
+        // window, and this host's teardown ran only afterwards, from Dispose. Disposing the input context then
+        // un-registers GLFW callbacks on a window GLFW had already freed: each glfwSet*Callback(window, null)
+        // reads the "previous callback" out of freed memory, and Silk turns it into a delegate. Usually the old
+        // pointer was still there; when the block had been reused it was a small number (0x1, 0xb, 0xd,
+        // 0x80000001), and the process died in UMEntryThunk::Decode with exit 139 after "[teardown] input". So
+        // the loop is run here, and the window is torn down by TearDown, last, after everything that uses it.
         try
         {
-            window.Run();
+            window.Initialize();
+            window.Run(() =>
+            {
+                window.DoEvents();
+                if (!window.IsClosing) window.DoUpdate();
+                if (!window.IsClosing) window.DoRender();
+            });
+            window.DoEvents();
         }
         catch
         {
             loopFaulted = true;
             throw;
         }
+
+        TearDown();
     }
 
     // Set when the loop ended by an exception. Silk still counts itself inside its render loop then, and
@@ -761,8 +777,17 @@ public sealed class Window : IRenderHost, IAudioHost, IDebugHost, IDisposable
     public DebugContext? CurrentDebug => debugSystem?.Current;
     public DebugSystem? System => debugSystem;
 
-    public void Dispose()
+    // A host that never reached the end of Run (it was never run, or its loop threw) is torn down here; one that
+    // did was torn down by Run while its window still existed.
+    public void Dispose() => TearDown();
+
+    private bool tornDown;
+
+    private void TearDown()
     {
+        if (tornDown) return;
+        tornDown = true;
+
         // Wait for in-flight frames to finish before tearing down the debug
         // renderers — they own pipelines/buffers the last frame may still reference,
         // and destroying those in-use trips validation. (graphicsDevice.Dispose
