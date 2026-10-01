@@ -100,10 +100,12 @@ public static class MeshRecipe
     // TRIANGLE_STRIP / TRIANGLE_FAN and non-indexed primitives into triangle lists, and refuses points and lines.
     // Version 11 (format v15) writes an image row per image as used — role, convention and glTF sampler.
     // Version 12 reads sparse index accessors, identity inverse binds when a skin has none, and joints with
-    // no common root, and refuses an index past the vertices. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
+    // no common root (invalid glTF — read since v17 as declared leniency), and refuses an index past the vertices. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
     // same format bumps this value.
     // Version 16 (format v18) writes the scene level: scenes, visibility, instances, cameras, lights, variants.
-    public const uint MeshRecipeVersion = 16;
+    // Version 17 validates sources (one declared leniency), builds generated tangents over the normal
+    // texture's TEXCOORD set, refuses index counts glTF forbids, and accepts extra inverse binds.
+    public const uint MeshRecipeVersion = 17;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false,
@@ -114,7 +116,7 @@ public static class MeshRecipe
         ArgumentNullException.ThrowIfNull(gltfPath);
         ArgumentNullException.ThrowIfNull(outPath);
 
-        var model = OpenSource(gltfPath);
+        var model = OpenSource(gltfPath, log);
 
         // The scene graph glTF has in every file: every node kept, parents first. A skinned node
         // places its mesh through its skin; every other mesh node places its mesh by its own world.
@@ -222,6 +224,16 @@ public static class MeshRecipe
         return primitiveCount;
     }
 
+    // The channel's TEXCOORD set; a KHR_texture_transform texCoord override replaces it (the spec's rule).
+    private static int TexCoord(MaterialChannel? channel) =>
+        channel is not { } c ? 0
+        : c.TextureTransform?.TextureCoordinateOverride is { } over ? over
+        : c.TextureCoordinate;
+
+    // The set generated tangents are built over: the normal texture's (glTF 2.0 §3.7.2.1), 0 without one.
+    private static int NormalUvSet(MeshPrimitive prim) =>
+        prim.Material?.FindChannel("Normal") is { Texture: not null } normal ? TexCoord(normal) : 0;
+
     /// <summary>A static glTF mesh's primitives, in mesh space, as the complete vertex with LODs.</summary>
     /// <remarks>
     /// Splitting and LOD error are spatial, and a mesh-space metre is not a world one under a scaled
@@ -247,7 +259,7 @@ public static class MeshRecipe
                 meshName, prim, Matrix4x4.Identity, Matrix4x4.Identity, flipTextureV, includeTangents: true, includeColour: true);
             // The builder leaves the tangent zero where the source authored no TANGENT; the cook fills
             // it with the MikkTSpace frame glTF asks for.
-            if (prim.GetVertexAccessor("TANGENT") is null) meshData = TangentGeneration.Generate(meshData);
+            if (prim.GetVertexAccessor("TANGENT") is null) meshData = TangentGeneration.Generate(meshData, NormalUvSet(prim));
 
             // Spatial split of oversized primitives so per-prim distance LOD gets fine-grained. Seam
             // vertices are duplicated per chunk and LockBorder-locked, so chunks are crack-free across
@@ -292,7 +304,7 @@ public static class MeshRecipe
             var prim = mesh.Primitives[i];
             var skinned = GltfImporter.BuildMeshData($"{mesh.Name ?? "gltf_mesh"}.{i}", prim, remap);
             var complete = Complete(skinned, prim);
-            if (TangentGeneration.HasNoTangents(complete)) complete = TangentGeneration.Generate(complete);
+            if (TangentGeneration.HasNoTangents(complete)) complete = TangentGeneration.Generate(complete, NormalUvSet(prim));
             primitives.Add(new BlixMeshPrimitive(
                 Name: complete.Name,
                 Layout: complete.Layout,
@@ -750,13 +762,68 @@ public static class MeshRecipe
         "KHR_node_visibility", "EXT_mesh_gpu_instancing", "KHR_lights_punctual", "KHR_materials_variants",
     };
 
-    // Opens a source and refuses it, by name, when it requires an extension the reader does not read.
-    private static ModelRoot OpenSource(string gltfPath)
+    /// <summary>
+    /// The one place Blix reads invalid glTF on purpose: a skin whose joints share no common root.
+    /// </summary>
+    /// <remarks>
+    /// glTF 2.0 §5.27: "Each skin's joints MUST have a common parent node"; the Khronos validator reports
+    /// SKIN_NO_COMMON_ROOT as an error, and SharpGLTF's strict validation refuses it. It is still loaded,
+    /// as COMPATIBILITY POLICY and not conformance: every joint's world is defined by the node graph
+    /// whatever its root, so a palette is computable, and such files exist in the wild (the Asset
+    /// Generator's Animation_Skin_06 is one). Any other invalidity is refused.
+    /// </remarks>
+    public const string LenientSkinWithoutCommonRoot = "a skin's joints share no common root (glTF 2.0 §5.27 MUST; validator SKIN_NO_COMMON_ROOT)";
+
+    /// <summary>Valid glTF SharpGLTF 1.0.6's validator refuses: more inverse binds than joints.</summary>
+    /// <remarks>
+    /// glTF 2.0 §5.27: the accessor's element count "MUST be greater than or equal to the number of joints";
+    /// SharpGLTF demands equality ("InverseBindMatrices: 3 must be equal to 2"). The validator is wrong here,
+    /// not the file, so this is not leniency: the file is read as glTF says, the first n matrices for n joints.
+    /// </remarks>
+    public const string ValidatorRefusesSpareInverseBinds = "more inverse binds than joints (valid, glTF 2.0 §5.27 'at least'; SharpGLTF's validator demands equality)";
+
+    // Opens a source VALIDATED: SharpGLTF's strict validator checks the spec's MUSTs, and each one it checks
+    // is one Blix does not have to. A file it refuses is refused — unless it carries one of the two causes
+    // above (a declared leniency, or the validator's own over-strictness), in which case it is re-read
+    // unvalidated and the cook says which. Either way a file requiring an extension the reader does not read
+    // is refused by name.
+    private static ModelRoot OpenSource(string gltfPath, Action<string>? log = null)
     {
-        // SharpGLTF's strict validation is skipped: it rejects valid glTF (joints with no common root,
-        // which the Asset Generator's positive Animation_Skin_06 exists to exercise and the spec allows).
-        // What the cook needs checked it checks itself, by name: POSITION, index range, required extensions.
-        var model = ModelRoot.Load(gltfPath, new SharpGLTF.Schema2.ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip });
+        ModelRoot model;
+        try
+        {
+            model = ModelRoot.Load(gltfPath, new SharpGLTF.Schema2.ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Strict });
+        }
+        catch (SharpGLTF.Validation.ModelException invalid)
+        {
+            model = ModelRoot.Load(gltfPath, new SharpGLTF.Schema2.ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip });
+            RefuseUnreadExtensions(model, gltfPath);
+            // Re-read unvalidated ONLY when one of the two named causes is present; a file the validator
+            // refuses for anything else is refused. (The cause present may not be the validator's only
+            // complaint — what it would have said after the first error is not knowable from here.)
+            var causes = ValidatorFallbacks(model).ToArray();
+            if (causes.Length == 0)
+            {
+                throw new InvalidDataException($"'{gltfPath}' is not valid glTF: {invalid.Message.Split('\n')[0]}");
+            }
+
+            foreach (var cause in causes) log?.Invoke($"  unvalidated read: {cause}");
+            return model;
+        }
+
+        RefuseUnreadExtensions(model, gltfPath);
+        return model;
+    }
+
+    /// <summary>Which of the two declared reasons to read past the validator <paramref name="model"/> has.</summary>
+    public static IEnumerable<string> ValidatorFallbacks(ModelRoot model)
+    {
+        if (model.LogicalSkins.Any(skin => !HasCommonRoot(skin))) yield return LenientSkinWithoutCommonRoot;
+        if (model.LogicalSkins.Any(skin => skin.InverseBindMatrices.Count > skin.Joints.Count)) yield return ValidatorRefusesSpareInverseBinds;
+    }
+
+    private static void RefuseUnreadExtensions(ModelRoot model, string gltfPath)
+    {
         var unread = model.ExtensionsRequired.Where(e => !ReadExtensions.Contains(e)).ToArray();
         if (unread.Length > 0)
         {
@@ -764,8 +831,21 @@ public static class MeshRecipe
                 $"'{gltfPath}' requires {string.Join(", ", unread)}, which Blix does not read; glTF says a file whose "
                 + "required extensions a reader does not support must not be loaded.");
         }
+    }
 
-        return model;
+    /// <summary>Whether <paramref name="skin"/>'s joints have a common ancestor (a joint itself counts).</summary>
+    public static bool HasCommonRoot(Skin skin)
+    {
+        HashSet<int>? common = null;
+        foreach (var joint in skin.Joints)
+        {
+            var chain = new HashSet<int>();
+            for (var n = joint; n is not null; n = n.VisualParent) chain.Add(n.LogicalIndex);
+            if (common is null) common = chain;
+            else common.IntersectWith(chain);
+        }
+
+        return common is null || common.Count > 0;
     }
 
     // A glTF sampler as glTF's codes: what the file says (BlixMeshSampler); the spec's defaults when absent.
@@ -928,11 +1008,6 @@ public static class MeshRecipe
                 ? row
                 : BlixMesh.NoImage;
 
-        // The channel's TEXCOORD set; a KHR_texture_transform texCoord override replaces it (the spec's rule).
-        static int TexCoord(MaterialChannel? channel) =>
-            channel is not { } c ? 0
-            : c.TextureTransform?.TextureCoordinateOverride is { } over ? over
-            : c.TextureCoordinate;
 
         static BlixMeshUvTransform Uv(MaterialChannel? channel) =>
             channel?.TextureTransform is { } t ? new BlixMeshUvTransform(t.Offset, t.Rotation, t.Scale) : BlixMeshUvTransform.Identity;

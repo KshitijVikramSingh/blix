@@ -51,6 +51,18 @@ internal static class GltfShared
                 $"glTF primitive '{name}' indexes vertex {beyond} of {count}; glTF forbids an index past the vertices (and primitive restart).");
         }
 
+        // glTF 2.0 §3.7.2.1's counts, refused by name rather than repaired: a list's vertices MUST be
+        // divisible by three, a strip's or fan's MUST be at least three. Dropping the remainder would
+        // quietly delete geometry the file says is there — and with SharpGLTF's validator out of the way
+        // for a lenient file, nothing else would say so.
+        var isList = primitive.DrawPrimitiveType is not (PrimitiveType.TRIANGLE_STRIP or PrimitiveType.TRIANGLE_FAN);
+        if (isList ? raw.Length == 0 || raw.Length % 3 != 0 : raw.Length < 3)
+        {
+            throw new InvalidOperationException(
+                $"glTF primitive '{name}' has {raw.Length} vertex index(es) for {primitive.DrawPrimitiveType}; glTF requires "
+                + (isList ? "a non-zero multiple of three." : "at least three."));
+        }
+
         // glTF 2.0 §3.7.2.1: strip triangle i is (v_i, v_i+1+i%2, v_i+2-i%2) and fan triangle i is
         // (v_i+1, v_i+2, v_0), both keeping the first triangle's winding.
         switch (primitive.DrawPrimitiveType)
@@ -80,7 +92,7 @@ internal static class GltfShared
                 return list;
             }
             default:
-                return raw.Length % 3 == 0 ? raw : raw[..(raw.Length - raw.Length % 3)];
+                return raw;
         }
     }
 

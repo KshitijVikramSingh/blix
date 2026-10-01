@@ -158,6 +158,58 @@ print(f"  derived MultiUVTest_uv1.gltf ({n} material(s) repointed to texCoord 1)
 PY
 fi
 
+# Generated tangents use "the texture coordinates associated with the normal texture" (glTF 2.0
+# §3.7.2.1) — its texCoord, not set 0. No corpus file generates a frame over set 1, so this one does:
+# NormalTangentMirrorTest with its authored TANGENT dropped, a TEXCOORD_1 that is TEXCOORD_0 turned a
+# quarter (u1 = v0, v1 = 1 - u0), and the normal texture pointed at it. A frame built over the wrong
+# set is then 90 degrees out, which no tolerance hides. Written as a self-contained .gltf (the glb's
+# binary chunk becomes buffer 0, the new set buffer 1, both data URIs).
+NT="$DEST/sample-assets/NormalTangentMirrorTest/NormalTangentMirrorTest.glb"
+if [ -f "$NT" ] && [ ! -s "$DEST/sample-assets/NormalTangentMirrorTest/NormalTangentMirrorTest_normaluv1.gltf" ]; then
+    python3 - "$NT" <<'PY'
+import base64, json, struct, sys
+p = sys.argv[1]
+b = open(p, "rb").read()
+jlen = struct.unpack("<I", b[12:16])[0]
+d = json.loads(b[20:20 + jlen])
+bin_at = 20 + jlen
+blen = struct.unpack("<I", b[bin_at:bin_at + 4])[0]
+blob = b[bin_at + 8:bin_at + 8 + blen]
+d["buffers"][0] = {"byteLength": len(blob), "uri": "data:application/octet-stream;base64," + base64.b64encode(blob).decode()}
+uv1 = bytearray()
+turned = 0
+for mesh in d["meshes"]:
+    for prim in mesh["primitives"]:
+        a = prim["attributes"]
+        if "TANGENT" not in a or "TEXCOORD_0" not in a:
+            continue
+        del a["TANGENT"]
+        acc = d["accessors"][a["TEXCOORD_0"]]
+        if acc["componentType"] != 5126 or acc.get("sparse"):
+            sys.exit("TEXCOORD_0 is not plain float — upstream changed shape")
+        view = d["bufferViews"][acc["bufferView"]]
+        stride = view.get("byteStride", 8)
+        base = view.get("byteOffset", 0) + acc.get("byteOffset", 0)
+        start = len(uv1)
+        for k in range(acc["count"]):
+            u, v = struct.unpack_from("<2f", blob, base + k * stride)
+            uv1 += struct.pack("<2f", v, 1.0 - u)
+        d["bufferViews"].append({"buffer": 1, "byteOffset": start, "byteLength": len(uv1) - start})
+        d["accessors"].append({"bufferView": len(d["bufferViews"]) - 1, "componentType": 5126, "count": acc["count"], "type": "VEC2"})
+        a["TEXCOORD_1"] = len(d["accessors"]) - 1
+        turned += 1
+if turned == 0:
+    sys.exit("NormalTangentMirrorTest has no tangent-bearing primitive to rework — upstream changed shape")
+d["buffers"].append({"byteLength": len(uv1), "uri": "data:application/octet-stream;base64," + base64.b64encode(bytes(uv1)).decode()})
+for m in d["materials"]:
+    if "normalTexture" in m:
+        m["normalTexture"]["texCoord"] = 1
+out = p.replace("NormalTangentMirrorTest.glb", "NormalTangentMirrorTest_normaluv1.gltf")
+json.dump(d, open(out, "w"))
+print(f"  derived NormalTangentMirrorTest_normaluv1.gltf ({turned} primitive(s): no TANGENT, normal map over a quarter-turned TEXCOORD_1)")
+PY
+fi
+
 # RiggedSimple carries one skinned cylinder and nothing else, so no rig in the corpus has a static
 # part or an attachment whose material is anything but opaque. This adds quads that differ only in
 # alpha, so a reader that ignores alpha on them draws all of them solid:
@@ -370,6 +422,39 @@ d["buffers"] = [{"byteLength": len(blob), "uri": "data:application/octet-stream;
 out = p.replace("RiggedSimple.glb", "RiggedSimple_mirrored.gltf")
 json.dump(d, open(out, "w"), indent=1)
 print("  derived RiggedSimple_mirrored.gltf (the whole scene under a (-1, 1, 1) scale)")
+PY
+fi
+
+# glTF 2.0 §5.27: an inverseBindMatrices accessor MUST have AT LEAST one element per joint; the joints
+# consume the first n in order and the rest are legal and unread. No corpus file has spare ones, so
+# RiggedSimple gets a third, a 100 m translation: a reader that demands exactly n refuses the file, and
+# one that takes the wrong n draws the skin a hundred metres away.
+RI="$DEST/sample-assets/RiggedSimple/RiggedSimple.glb"
+if [ -f "$RI" ] && [ ! -s "$DEST/sample-assets/RiggedSimple/RiggedSimple_extraibm.gltf" ]; then
+    python3 - "$RI" <<'PY'
+import base64, json, struct, sys
+p = sys.argv[1]
+raw = open(p, "rb").read()
+json_len = struct.unpack("<I", raw[12:16])[0]
+d = json.loads(raw[20:20 + json_len])
+bin_at = 20 + json_len
+blob = raw[bin_at + 8:bin_at + 8 + struct.unpack("<I", raw[bin_at:bin_at + 4])[0]]
+skin = d["skins"][0]
+acc = d["accessors"][skin["inverseBindMatrices"]]
+view = d["bufferViews"][acc["bufferView"]]
+start = view.get("byteOffset", 0) + acc.get("byteOffset", 0)
+ibms = bytearray(blob[start:start + 64 * acc["count"]])
+ibms += struct.pack("<16f", 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 100, 0, 0, 1)
+d["buffers"] = [
+    {"byteLength": len(blob), "uri": "data:application/octet-stream;base64," + base64.b64encode(bytes(blob)).decode()},
+    {"byteLength": len(ibms), "uri": "data:application/octet-stream;base64," + base64.b64encode(bytes(ibms)).decode()},
+]
+d["bufferViews"].append({"buffer": 1, "byteOffset": 0, "byteLength": len(ibms)})
+d["accessors"].append({"bufferView": len(d["bufferViews"]) - 1, "componentType": 5126, "count": acc["count"] + 1, "type": "MAT4"})
+skin["inverseBindMatrices"] = len(d["accessors"]) - 1
+out = p.replace("RiggedSimple.glb", "RiggedSimple_extraibm.gltf")
+json.dump(d, open(out, "w"), indent=1)
+print(f"  derived RiggedSimple_extraibm.gltf ({acc['count'] + 1} inverse binds for {len(skin['joints'])} joints)")
 PY
 fi
 
