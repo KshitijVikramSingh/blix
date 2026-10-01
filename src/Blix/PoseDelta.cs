@@ -16,8 +16,7 @@ namespace Blix;
 //   target.scale       *= lerp(one, delta.scale, weight)
 //
 // The "weight" parameter scales the delta from identity (no effect, weight=0) to
-// full application (weight=1), letting AdditiveClipAnimation fade overlays in
-// and out.
+// full application (weight=1), so an additive layer fades in and out by its weight.
 //
 // Convention: bone transforms are in glTF local space (the bone's parent's
 // frame), so the rotation delta is also in that local frame. Composes correctly

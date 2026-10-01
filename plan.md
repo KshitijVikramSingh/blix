@@ -222,6 +222,54 @@ RENDERS right is the Compare* set's job, judged against each README.
 
 ---
 
+## J — time-driven things: the scene layer goes, animation layers arrive, the clock follows
+
+One branch, one PR. The pieces are one whole: what owns time, and how time-driven things compose.
+
+**Read by what each type is, not by how many use it.** The audit (2026-10-01): the GameObject family
+(`GameObject`, `AnimatedGameObject`, `SkinnedGameObject`, `PhysicsGameObject`, `Submesh`) was a scene
+vocabulary that `Model` replaced. `SkinnedGameObject` is actively wrong now: it composes a mesh-node
+transform glTF ignores for skins, and palettes skin 0 only. The `IAnimation` family has the better
+COMPOSITION shape: one contract, an ordered host, one-shots that leave. `ClipPlayer` has the better
+SOURCE shape: an owned clock (rate, reverse, pause, scrub), root motion across the seam, and the reset
+to rest that every hand-rolled consumer got wrong. They are layers of one design, not rivals.
+
+Decided with the user:
+- **Delta-driven, each unit owns its time.** `IAnimation.Sample(Time)` keyed off `Time.Total − StartTime`,
+  so nothing could pause, change rate, reverse or restart without being rebuilt. It becomes
+  `bool Advance(double delta)` — the shape `ClipPlayer.Advance` already proved, and what a fixed step
+  will drive.
+- **The pose layer stack is separate from the host.** Pose layers apply onto the previous layer's
+  result; tweens have no such order. The stack can sit inside a host as one `IAnimation`.
+- **A finished one-shot layer holds its last frame by default.** Removing it is a per-layer setting the
+  caller chooses (selection is the caller's).
+- **Weights only, as stage D decided.** The stack is a flat ordered list of (source, mode, weight,
+  mask), with no nodes, parameters, states, transitions or durations. It is not a blend tree. A
+  crossfade is still the caller moving a weight.
+
+Stages:
+- **J1 — the scene layer goes.** Delete the GameObject family and `IAnimated`, plus `ClipAnimation`,
+  `BlendedClipAnimation` and `AdditiveClipAnimation`, which become layer modes in J3. `docs/blix.md`'s
+  surface list and getting-started example are rewritten to what Blix is (`Model`, `ClipPlayer`,
+  `Transform3D`, `CameraController`); its glTF line still names types that moved to `Blix.Import`.
+- **J2 — `IAnimation` on its own clock.** `Advance(delta)`; `AnimationHost.Advance(delta)`; the tweens
+  (`FloatAnimation`, `Transform3DAnimation`, `CallbackAnimation`) keep their elapsed time over the curves,
+  which stay as they are. There are no tests today: pin the lifecycle (alive, removed, finite end value
+  written on the last tick, removal order) in `Blix.Test.Graphics`.
+- **J3 — the pose layer stack** (stage D, in reusable form). Ordered layers: a source (a `ClipPlayer`; an
+  interface waits for a second kind of source), a mode (override, blend, additive), a weight, an
+  optional `BoneMask`, and on-finish (hold, the default, or remove). Advancing it advances every
+  layer's player; evaluating starts from rest and applies each layer in order through `PoseBlend` /
+  `PoseDelta`, which already do the maths. Studio's `RigAnimation.Compose()` becomes a two-layer stack,
+  and the instrument is the lab baseline: IDENTICAL, mode by mode. Plus stage F's controls (a mask set
+  to all bones breaks the legs; set to none leaves the walk bit-for-bit unchanged).
+- **J4 — a deterministic clock in the windowed host** (fixed-step A). `--step` means in a window what it
+  means headless: every frame advances by exactly that much. Fixed-update dispatch (B) is discussed
+  first: who owns the accumulator, what input edges mean when a frame holds two steps, the order
+  within a frame, and RTSGame's tick, read rather than migrated.
+
+---
+
 ## F — a body in the character room
 
 The one stage not started. `src/Demos/Character/` holds a shared library — room,

@@ -16,7 +16,7 @@ namespace Blix;
 // (defaulting to Default = bit 0); each query takes an optional CollisionMask
 // (defaulting to All). A query matches a collider when `mask.Matches(entry.Layer)`.
 //
-// `T` is whatever tag a game uses to identify the owner — typically a GameObject
+// `T` is whatever tag a game uses to identify the owner — typically the game's own entity type
 // reference, but the world stays generic so it works for any tag.
 public sealed class CollisionWorld3D<T> where T : notnull
 {

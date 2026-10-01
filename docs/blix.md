@@ -6,87 +6,61 @@ This doc is the reference for the `Blix` namespace. For the layers below, see [`
 
 ## Overview
 
-The deliberate framing: this layer is small and explicit. It does **not** introduce an ECS, a constraint-solver physics system, a scripting boundary, an editor, or a scenes-as-assets format. It introduces the smallest set of types a frame of update + render needs — a loop contract, transforms, objects, cameras, lights, time, animations (typed), skeletal animation, kinematic physics + collision, audio, and a glTF importer — and lets game code keep its own lists.
+The deliberate framing: this layer is small and explicit. It does **not** introduce an ECS, a constraint-solver physics system, a scripting boundary, an editor, or a scenes-as-assets format. It introduces the smallest set of types a frame of update + render needs — a loop contract, transforms, cameras, time, cooked models resident on the device, skeletal animation, time-driven animation, kinematic physics + collision, and audio — and lets game code keep its own lists.
 
-Anything richer (a scene graph, parenting, render queues, animation graphs, multi-body solver, navmesh, editor) is a follow-on that lands when there's a real consumer.
+Anything richer (a general scene graph, render queues, animation graphs, multi-body solver, navmesh, editor) is a follow-on that lands when there's a real consumer. `Transform3D` already supports explicit parent/child pose composition without introducing an engine-owned scene, and a cooked model brings its own node hierarchy (`Model`).
 
 ## Getting started
 
 ```csharp
 using Blix;
 using Blix.Core;
-using Blix.Diagnostics;
 using Blix.Graphics;
 using Blix.Runtime.Silk;
 
-using var window = new Window(new MyGame());
+var options = WindowOptions.FromArgs(args, WindowOptions.Default with
+{
+    Title = "My Game",
+    Width = 960,
+    Height = 540,
+});
+
+using var window = new Window(new MyGame(), options);
 window.Run();
 
-internal sealed class MyGame : Game, IDebuggable
+internal sealed class MyGame : Game
 {
-    private readonly List<GameObject> objects = new();
-    private Camera3D camera = null!;
-
     protected override void OnLoad()
     {
-        Host.SetTitle("My Game");
-
-        var mesh = GraphicsDevice.CreateMesh(/* ... */);
-
-        // A GameObject just stores a backend-neutral MaterialHandle. Creating one
-        // is a renderer concern: CreateMaterial allocates a set of bindings against
-        // the program's SPIR-V-reflected descriptor set; you write it by name and
-        // take .Handle. (Full render setup lives in the demos.)
-        MaterialHandle material = GraphicsDevice.CreateMaterial(litShaderProgram, name: "hero.material")
-            .SetUniform(binding: 0, "uTint", Vector4.One)
-            .SetTexture(binding: 1, albedoTexture)
-            .Handle;
-        objects.Add(new GameObject("hero", mesh, material,
-            new Transform3D { Position = new Vector3(0, 0, -2) }));
-
-        camera = new Camera3D
-        {
-            Transform = new Transform3D { Position = new Vector3(0, 1, 3) },
-            VerticalFieldOfView = MathF.PI / 3.0f,
-            NearPlane = 0.1f,
-            FarPlane = 100.0f,
-        };
+        // Host and GraphicsDevice are now available.
     }
 
     public override void OnUpdate(Time time)
     {
-        foreach (var obj in objects)
-            (obj as IUpdateable)?.Update(time);
+        // Input is read, not delivered, and is fixed for this update.
+        if (Host.Input[Key.Escape].Pressed)
+            Host.RequestClose();
     }
 
     public override void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
-        var view = camera.GetView();
-        var projection = camera.GetProjection(frame.Width / (float)frame.Height);
-
-        // The device drives a declarative RenderGraph: passes declare their
-        // targets + Read edges, materials bind through IMaterialBindings, and per-draw
-        // data rides push constants / transient descriptor sets. See the demo programs
-        // (src/Demos/Blix.Demos.VulkanLit, src/Demos/Blix.Demos.VulkanSponza) for the full render
-        // setup; this doc focuses on the game-layer types above the graphics layers.
-        foreach (var obj in objects)
-        {
-            // record obj.Mesh + obj.Material (a MaterialHandle) into the frame's graph
-        }
+        commandList.Pass(
+            "clear",
+            new RenderPassDescription(
+                Target: RenderSurfaceHandle.Default,
+                ClearColors: new GraphicsColor?[] { new(0.03f, 0.06f, 0.12f, 1f) },
+                ClearDepth: false),
+            _ => { });
     }
 
-    public string DebugName => "MyGame";
-    public void Debug(DebugContext debug) { /* opt-in */ }
-    protected override void OnUpdate(Time time)
+    public override void OnUnload()
     {
-        // Input is read, not delivered. Fixed for the length of this call.
-        if (Host.Input[Key.Space].Pressed) Jump();
-        if (Host.Input[Key.W].Down) WalkForward();
+        // The GPU is idle here: free what OnLoad made. Under --validate a leftover fails the run.
     }
 }
 ```
 
-See `src/Demos/Blix.Demos.VulkanLit/Program.cs` for a full game-layer reference — it exercises the lit/skinned/PBR path (directional + spot + point shadows, IBL, bloom, skinned glTF). Vulkan Sponza is a heavy-scene demo where higher-end rendering is researched and measured; its current, evolving feature set belongs in [Renderer](renderer.md#vulkan-sponza-research-renderer), not in this game-facing overview. For the game layer driving an actual playable title — the fixed-step-ish update loop, `Transform3D`, `PhysicsHost3D` (gravity/jump), `CollisionWorld3D.Overlap`, skeletal animation (`SkinnedGameObject` path via clip → `Pose` → `BonePalette`), `AudioSource`, and `IDebuggable` diagnostics, all wired together — see `src/Demos/Blix.Demos.Runner/Program.cs` (a 3D endless runner).
+This is the same shaderless application boundary `src/Demos/Blix.Demos.Chassis/Program.cs` proves. For a model on screen, `examples/hello-blix-3d` stands a cooked character on Studio's lit stage and plays its clips; a game's own path is `ModelData.Load` → `device.CreateModel` → draw the `Model`'s parts, as Runner and VulkanLit do. `src/Demos/Blix.Demos.VulkanLit/Program.cs` is the lit/skinned/PBR reference (directional + spot + point shadows, IBL, bloom, a skinned model through `Model`). Vulkan Sponza is a heavy-scene demo where higher-end rendering is researched and measured; its feature set belongs in [Renderer](renderer.md#vulkan-sponza-research-renderer). For a playable title — `Transform3D`, `PhysicsHost3D` (gravity/jump), `CollisionWorld3D.Overlap`, a skinned character through `Model` + `ClipPlayer`, `AudioSource` and `IDebuggable` diagnostics — see `src/Demos/Blix.Demos.Runner/Program.cs` (a 3D endless runner).
 
 ## Project dependencies
 
@@ -94,34 +68,36 @@ See `src/Demos/Blix.Demos.VulkanLit/Program.cs` for a full game-layer reference 
 - `Blix.Core` — `IRenderHost`, `IAudioHost`, `InputState`, `Key`, `MouseButton`, `RenderFrameContext`, `IRuntimeDiagnosticsSink`
 - `Blix.Geometry` — `Bounds3`/`Bounds2`, `BoundingSphere`, `Ray`, `Plane`, `Triangle`, `Capsule`, `OrientedBounds3`, `TriangleMesh3D`, `Circle`, `Capsule2D`, `OrientedBounds2`, `LineMesh2D`, `Segment2D`, `Intersection`/`Intersection2D`, `CollisionHit`, `CollisionResponse`
 - `Blix.Graphics` — `IGraphicsDevice`, `RenderCommandList`, matrix helpers
-- `Blix.Render` — `Mesh` (composed into `GameObject` / `Submesh`; the material slot is a backend-neutral `MaterialHandle` from `Blix.Graphics`)
-- `Blix.Assets` — `IAssetImporter<T>`, `AssetImportContext`, `MeshData` (for the glTF importer)
+- `Blix.Render` — `Mesh`, the uploaded geometry a `Model`'s parts hold
+- `Blix.Assets` — `MeshData` and the cooked `.blixmesh` reader
 
-Plus one NuGet dependency: **SharpGLTF.Toolkit**, used only by `GltfImporter` for parsing `.glb` / `.gltf` files. The glTF types are translated into engine types (`MeshData`, `Skeleton`, `AnimationClip`) at the format boundary so a future FBX or proprietary importer hits the same surface.
+No glTF parser: the engine reads cooked models only (`ModelData.Load` takes a `.blixmesh`). Parsing glTF sources is `Blix.Import`'s, which the cook and the tools use and a game does not ship.
 
 Nothing references `Blix` from below. No transitive dependency on `Blix.Runtime.Silk` or `Blix.Diagnostics` — the layer is platform-free.
 
 ## Public API index
 
-Every public type in `Blix`, one-line each.
+Every public type built by `Blix.csproj` and `Blix.Core.csproj`, one line each.
 
 **Loop + time:** `IGameLoop`, `Game`, `Time`, `IUpdateable`, `IFixedUpdateable`, `FixedStepClock`. These are in the `Blix` namespace but built by `Blix.Core`, so a program can use them without referencing this library.
 
-**Scene primitives:** `GameObject`, `Submesh`, `Transform3D`, `Transform2D`
+**Transforms + cameras:** `Transform3D`, `Transform2D`, `Camera3D`, `Camera2D`, `CameraController`
 
-**Cameras + lights:** `Camera3D`, `Camera2D`, `DirectionalLight`, `PointLight`, `SpotLight`
+**Lights:** `DirectionalLight`, `PointLight`, `SpotLight` — runtime light descriptions; a cooked file's lights are facts on `ModelData.Light`.
 
-**Animation surface:** `IAnimated`, `IAnimation`, `ICurve<T>`, `IFiniteCurve<T>`, `AnimationHost`, `AnimatedGameObject`, `LinearCurve`, `LinearVector3Curve`, `SlerpQuaternionCurve`, `KeyframeVector3Curve`, `KeyframeQuaternionCurve`, `Keyframe<T>`, `LoopCurve<T>`, `ConstantCurve<T>`, `FloatAnimation`, `Transform3DAnimation`, `CallbackAnimation`, `Curves`
+**Cooked models, resident:** `ModelData`, `ModelNeeds`, `Model`, `ResidencyExtensions` (`device.CreateModel`), `BoneBuffers`, `JointHierarchy`, `PbrMaterial`, `PbrMaterialExtensions`, `AlphaMode`, `TextureData`, `MaterialTextureLoader`, `MaterialTextures`, `TextureRegistry`, `UnreadAttribute`
 
-**Skeletal animation:** `BoneTransform`, `Bone`, `Skeleton`, `Pose`, `BonePalette`, `AnimationClip`, `BoneTrack`, `ClipAnimation`, `BlendedClipAnimation`, `AdditiveClipAnimation`, `PoseBlend`, `PoseDelta`, `SkinnedGameObject`
+**Time-driven animation:** `IAnimation`, `AnimationHost`, `FloatAnimation`, `Transform3DAnimation`, `CallbackAnimation`, and the curves: `ICurve<T>`, `IFiniteCurve<T>`, `ConstantCurve<T>`, `LinearCurve`, `LinearVector3Curve`, `SlerpQuaternionCurve`, `LoopCurve<T>`, `Keyframe<T>`, `KeyframeVector3Curve`, `KeyframeQuaternionCurve`, `Interpolation`
 
-**glTF import:** `GltfImporter`, `GltfModel`, `GltfPrimitive`, `PbrMaterial`, `TextureData`
+**Skeletal animation:** `BoneTransform`, `Bone`, `Skeleton`, `Pose`, `BonePalette`, `BonePaletteSet`, `BoneMask`, `AnimationClip`, `BoneTrack`, `ClipPlayer`, `PoseBlend`, `PoseDelta`, `RootMotion`, `SkinningAnalysis`
 
-**Physics:** `PhysicsHost3D`, `PhysicsHost2D`, `PhysicsGameObject`
+**Physics:** `PhysicsHost3D`, `PhysicsHost2D`
 
 **Collision world:** `CollisionWorld3D<T>`, `CollisionWorld2D<T>`, `CollisionContact3D<T>`, `CollisionContact2D<T>`, `CollisionLayer`, `CollisionMask`
 
 **Audio:** `AudioListener`, `AudioSource`
+
+**Picking + views:** `ViewTable`, `ViewDeclaration`, `ViewId`, `ViewPicking`
 
 ## Loop + time
 
@@ -198,7 +174,7 @@ A passed-by-value struct. `Total` is seconds since startup (monotonically increa
 
 ### IUpdateable + IFixedUpdateable
 
-Universal opt-in update contracts. Plain `GameObject` is *not* `IUpdateable` — objects that just sit in the scene don't pay a virtual call or claim behaviour they don't have. Subtypes opt in.
+Opt-in update contracts: a thing that only sits in a scene implements neither, so it pays no virtual call and claims no behaviour it lacks. Whether the host ticks these, and on which clock, is the fixed-step decision still open ([plan.md](../plan.md) §J4).
 
 ```csharp
 public interface IUpdateable    { void Update(Time time); }
@@ -274,7 +250,7 @@ Mapping a rigged glTF (a tank with a separate turret/gun, a mech, a crane) onto 
 #### Deliberate limits
 
 - Class, not struct. Game code regularly hands the same transform to multiple consumers; reference semantics are the right default.
-- No parent/child container on `GameObject` — parenting is pose-level on `Transform3D`. Game code wires `Transform.Parent` and keeps its own object lists; there's no automatic scene-graph that owns children, draw order, or lifetimes.
+- No engine-owned object container — parenting is pose-level on `Transform3D`. Game code wires `Transform.Parent` and keeps its own object lists; there's no automatic scene graph that owns children, draw order, or lifetimes. (A cooked model's own node hierarchy is `Model.Nodes`.)
 - No dirty-flag caching for `ToMatrix()` / `WorldMatrix`. Matrix composition is a few small multiplies and hierarchies here are shallow; `WorldMatrix` re-walks the parent chain on each access (add caching when a deep rig needs it). Cycle-checking happens once, on `Parent` assignment.
 - Non-uniform parent scale combined with a child rotation can shear the child (the standard TRS-hierarchy limitation; content keeps non-uniform scale off shared parents, mirroring the rigid-bone skinning assumption — `TankArena` applies a single **uniform** model scale in the per-part instance matrix, not in the pose hierarchy).
 - No `Origin` / `Pivot`. Mesh-side authored offsets are normalised at import time (`ObjImporter.RecenterToOrigin`, default true); game code uses plain `Transform.Position`.
@@ -289,38 +265,6 @@ The 2D sibling. Same shape; scalar `Rotation` around Z; 2D `Position` and `Scale
 
 - No `LookAt`. Collapses to `Rotation = MathF.Atan2(target.Y - Position.Y, target.X - Position.X)` (modulo facing convention).
 - `ToMatrix()` returns `Matrix4x4`, not `Matrix3x2`, to share the same `uModel` pipeline meshes use.
-
-### GameObject
-
-A plain container — `string Name`, `Mesh Mesh`, `MaterialHandle Material`, `Transform3D Transform`. No tags, no visibility flag, no component list, no render-queue field. The `Material` slot is the backend-neutral `MaterialHandle` (from `Blix.Graphics`), not a name-keyed uniform/texture bag.
-
-```csharp
-var heroCube = new GameObject("hero_cube", cubeMesh, heroCubeMaterial,
-    new Transform3D { Position = new Vector3(-0.25f, -0.05f, -0.55f) });
-```
-
-Game code arranges `GameObject`s into whatever lists it needs:
-
-```csharp
-private readonly List<GameObject> opaqueObjects = new();
-private readonly List<GameObject> glassObjects = new();
-```
-
-The demo splits by render pass: opaque list feeds shadow + scene passes; glass list feeds the refractive pass that runs after the scene snapshot. Pass routing is deliberately not the engine's concern — a future render-queue convention can land when the demo isn't the only consumer.
-
-#### Deliberate limits
-
-- No container abstraction. The demo's `List<GameObject>`s are the right size for the actual problem.
-- No `Visible` flag. Add when something needs to hide without removing.
-- No render-queue tag. Pass routing is the caller's problem until a second consumer wants the same routing decisions.
-
-### Submesh
-
-```csharp
-public readonly record struct Submesh(Mesh Mesh, MaterialHandle Material);
-```
-
-The atomic draw unit for multi-part meshes (typically glTF characters split into body / hair / clothing). `SkinnedGameObject` carries a `Submesh[]`; the base `GameObject.Mesh` / `Material` reflect `Submeshes[0]` for compatibility with code that reads them generically.
 
 ## Cameras
 
@@ -353,7 +297,7 @@ var viewProjection = camera.GetViewProjection(aspectRatio);
 
 ### Why composition, not inline pose
 
-Every type with a pose composes a `Transform`. Camera3D, GameObject, PointLight, SpotLight — all of them read and write pose through `.Transform`. The win is that **animation targets the Transform**, not the owning type: `() => camera.Transform.Position` and `() => obj.Transform.Position` are the same animation target shape. No branching by target type when animations land.
+Every type with a pose composes a `Transform`: cameras, the physics hosts, the audio listener, and whatever a game holds. The win is that **animation targets the Transform**, not the owning type: `Transform3DAnimation` drives a camera's `Transform` and a prop's the same way, with no branching by target type.
 
 ### Deliberate limits
 
@@ -423,18 +367,16 @@ Cone-attenuated point source. Cosines of inner/outer cone angles are computed C#
 
 ## Animation
 
-An animation is a thing that mutates state as a function of time. The engine factors this into a small surface: an updateable, an animation host, individual animations, and (optionally) typed curves.
+An animation is a thing that mutates state as a function of time. The engine factors this into a small surface: an animation host, individual animations, and (optionally) typed curves. Skeletal clips have their own player (`ClipPlayer`, under *Skeletal animation*).
 
 ### Contracts
 
 ```csharp
-public interface IAnimated   { void AddAnimation(IAnimation animation); }
 public interface IAnimation  { bool Sample(Time time); }
 public interface ICurve<T>   { T Evaluate(double time); }
 public interface IFiniteCurve<T> : ICurve<T> { double Duration { get; } }
 ```
 
-- **`IAnimated`** is "I host animations." Does *not* extend `IUpdateable` — a host typically also is updateable, but the interfaces stay independent so a future host could be driven externally.
 - **`IAnimation.Sample`** returns `bool`: `true` while running, `false` to be removed. Infinite animations just return `true` forever. Finite animations check whether their curves are still running and return `false` once they've all finished; the host drops them in the same tick.
 - **`ICurve<T>`** is a pure `time → value` function. Deliberately no `Duration` on the base interface — infinite curves (`ConstantCurve`, `LoopCurve`) don't have one.
 - **`IFiniteCurve<T>`** extends with a `Duration` property. Animations test for this interface to know when to self-remove: `curve is IFiniteCurve<T> finite && local >= finite.Duration` means done. Past `Duration`, finite curves still evaluate (clamped at the end value); they just stop claiming to be alive.
@@ -494,24 +436,15 @@ Typed animations are the goal — concrete classes with named fields, refactorab
 
 Demo-specific animations stay in the demo. A spin animation like `EulerRotationAnimation` (closed-form, takes a `Vector3 RadiansPerSecond` and sets `Target.Rotation` from `Time.Total × per-axis rate`) is a demo-shaped pattern, not engine-shaped, so it doesn't get promoted until a second consumer needs it.
 
-### AnimationHost + AnimatedGameObject
+### AnimationHost
 
-The animation-list + iterate-and-remove machinery lives on a reusable `AnimationHost`. `AnimatedGameObject` is a thin delegate that composes one:
+The animation-list + iterate-and-remove machinery lives on a reusable `AnimationHost`: `AddAnimation`, and an `Update` that ticks every animation and drops the ones that report done, in place.
 
 ```csharp
-public sealed class AnimationHost : IUpdateable, IAnimated { /* ... */ }
-
-public sealed class AnimatedGameObject : GameObject, IUpdateable, IAnimated
-{
-    private readonly AnimationHost host = new();
-    public void AddAnimation(IAnimation a) => host.AddAnimation(a);
-    public void Update(Time time) => host.Update(time);
-}
+public sealed class AnimationHost : IUpdateable { /* ... */ }
 ```
 
-The structural commit: **animations attach to the thing being animated, not to a separate central system**. There's no `AnimationSystem` singleton or service. An `AnimatedGameObject` owns its animation list, ticks it as part of its own `Update`, and removes done animations in place. Game code's update loop just iterates objects and calls `Update`.
-
-`AnimationHost` was extracted from `AnimatedGameObject` when physics arrived as a second composable behaviour (`PhysicsHost3D` is the sibling). Hosts are the engine's chosen composition unit: small, reusable, single-purpose. When game code wants animations *and* physics on the same object, it subclasses `GameObject` and composes both hosts directly — the engine doesn't ship a combinatorial `AnimatedPhysicsGameObject`.
+The structural commit: **animations attach to whatever owns them, not to a central system**. There's no `AnimationSystem` singleton or service: a game composes a host where it has animations to run, and ticks it. `PhysicsHost3D` is the sibling pattern for motion integration; a type that wants both composes both hosts.
 
 ### Targeting
 
@@ -530,7 +463,7 @@ Animations reference their targets via **typed fields**, not property paths or r
 
 ## Skeletal animation
 
-Vertices moving *relative to each other* within a single mesh, driven by a hierarchy of bones. Composes with the value-animation surface above: a `SkinnedGameObject` carries an `AnimationHost`, ticks it on `Update`, and the attached `ClipAnimation` / `BlendedClipAnimation` / `AdditiveClipAnimation` write into the rig's `Pose`.
+Vertices moving *relative to each other* within a single mesh, driven by a hierarchy of bones. A `ClipPlayer` samples clips into a `Pose`; `PoseBlend`, `PoseDelta` and `BoneMask` compose poses; a `Model` turns the pose into each skin's palette.
 
 ### Data primitives
 
@@ -564,7 +497,7 @@ public sealed class BonePalette
 }
 ```
 
-`BoneTransform` is the struct form of `Transform3D` — same TRS semantics, value type so a `Pose`'s array of N bone locals doesn't allocate N heap objects. Uses `Translation` (not `Position`) to mark the bone-local domain; reading code disambiguates "this is a bone-local transform inside a skeletal pose" from "this is a GameObject's world position."
+`BoneTransform` is the struct form of `Transform3D` — same TRS semantics, value type so a `Pose`'s array of N bone locals doesn't allocate N heap objects. Uses `Translation` (not `Position`) to mark the bone-local domain; reading code disambiguates "this is a bone-local transform inside a skeletal pose" from "this is an object's world position."
 
 `Bone` carries everything bind-time-constant: name, hierarchy via `ParentIndex` (flat-array index, `-1` for root), and the `InverseBindPose` matrix the GPU consumes directly.
 
@@ -578,7 +511,7 @@ public sealed class BonePalette
 
 Skeletal math uses the same convention as the rest of the engine: **`System.Numerics` row-vector form** — translation in `M41/M42/M43`, a vertex flows left-to-right (`v_row * M`, and `M = A * B` applies `A` first). `GraphicsMatrices.CreateModel` (and therefore `BoneTransform.ToMatrix`) is `Scale * Rotation * Translation` in that form. There are **no transposes** in the skeletal path: `Matrix4x4.Decompose` reads `System.Numerics` matrices directly, so `BoneTransform.FromMatrix` decomposes the matrix as-is, and `Skeleton.ComputeBonePalette` composes `child = local * parentWorld` straight (the same walk `Transform3D.WorldMatrix` uses). See [`architecture.md` → Matrices](architecture.md#conventions) for the full convention and the upload→GLSL story; `Blix.Test.Graphics` Section AH pins it.
 
-A manually built inverse-bind matrix is just `GraphicsMatrices.CreateModel(bindPos, bindRot, bindScale)` inverted — no transpose. `GltfImporter` doesn't transpose either: SharpGLTF already hands back IBMs in this row-vector form.
+A manually built inverse-bind matrix is just `GraphicsMatrices.CreateModel(bindPos, bindRot, bindScale)` inverted — no transpose. The cook doesn't transpose either: SharpGLTF already hands back IBMs in this row-vector form, and the `.blixmesh` stores them as read.
 
 ### Clips
 
@@ -608,161 +541,63 @@ public sealed class AnimationClip
 
 For full-pose clips (every bone tracked), the same semantics works — every bone gets overwritten so prior values don't matter. For partial clips, the caller resets `outPose` to a base (typically the cached rest pose) before sampling.
 
-### ClipAnimation
+### ClipPlayer
 
-The `IAnimation` adapter for `AnimationClip`:
-
-```csharp
-public sealed class ClipAnimation : IAnimation
-{
-    public AnimationClip Clip { get; init; }
-    public Pose Target { get; init; }
-    public double StartTime { get; init; }
-    public bool Loop { get; init; } = true;
-}
-```
-
-In `Loop = true` mode (default) it wraps `elapsed % Duration` indefinitely; in `Loop = false` mode it returns false from `Sample` once elapsed exceeds Duration, and `AnimationHost` removes it — same lifecycle pattern as `Transform3DAnimation`.
-
-### Composition: blend + additive
+A clip, its own clock, and the reset every hand-rolled consumer got wrong:
 
 ```csharp
-public static class PoseBlend
-{
-    public static void Lerp(Pose poseA, Pose poseB, float weight, Pose outPose);
-    public static BoneTransform LerpBone(BoneTransform a, BoneTransform b, float weight);
-}
-
-public sealed class BlendedClipAnimation : IAnimation
-{
-    public AnimationClip ClipA, ClipB;
-    public Pose Target, RestPose;
-    public float Weight { get; set; }   // mutable; 0 = ClipA, 1 = ClipB
-    public bool Loop { get; init; } = true;
-}
-
-public static class PoseDelta
-{
-    // Layers a clip's pose deltas (relative to the rest pose) onto the target.
-    public static void LayerOnto(Pose target, Pose rest, Pose clip, float weight);
-}
-
-public sealed class AdditiveClipAnimation : IAnimation
-{
-    public AnimationClip Clip;
-    public Pose Target, RestPose;
-    public float Weight { get; set; }
-    public bool Loop { get; init; } = true;
-}
+var player = new ClipPlayer(model.Skeleton, model.Clip("Running_A"));
+player.Rate = speed / baseSpeed;   // negative plays backwards; 0 holds
+player.Advance(time.Delta);        // false once a one-shot has finished
+// player.Pose is the sampled pose; player.RootDelta the root's travel this advance
 ```
 
-**`PoseBlend.Lerp`** is the per-bone interpolation primitive: translation and scale lerp linearly; rotation slerps along the unit-quaternion arc.
+`Advance` starts every sample from the rest pose — `AnimationClip.Sample` writes only the channels a clip has tracks for, so without it untracked bones keep last frame's values. It also guards zero-duration "pose" clips, reports `Finished` in the direction of travel (a one-shot played backwards ends at 0), and measures `RootDelta` across the loop seam piece by piece rather than as one subtraction that jumps backwards every cycle. `ScrubTo` jumps without accruing travel. `Phase` is where the clip sits in its cycle, in [0, 1].
 
-**`BlendedClipAnimation`** owns two scratch poses internally (lazy-allocated, reused frame-to-frame). Each `Sample`: sample `ClipA` from rest into `scratchA`, sample `ClipB` from rest into `scratchB`, `PoseBlend.Lerp(scratchA, scratchB, Weight, Target)`. Each clip wraps independently against its own duration — a 1.2s Walk and a 0.8s Run blend correctly without phase-locking.
+Deliberately not here: the palette (whoever draws builds it, from whichever pose won), and any state machine, blend tree, event track or scheduler.
 
-**`AdditiveClipAnimation`** does per-bone delta math:
-- Translation: `target.translation += weight * (clip.translation - rest.translation)`
-- Rotation: `target.rotation *= slerp(identity, inverse(rest.rotation) * clip.rotation, weight)`
-- Scale: `target.scale *= lerp(1, clip.scale / rest.scale, weight)`
-
-Composes naturally with `AnimationHost` ordering: add the base animation (`ClipAnimation` / `BlendedClipAnimation`) **first**, the additive **second**. The host iterates in insertion order, so the additive reads the base's output and modifies it in place. Multiple additives stack.
-
-`Weight` is mutable, not curve-driven. Game code mutates `Weight` per frame for any crossfade shape (linear ramp, eased transition, UI-slider scrub, state-machine output). The engine deliberately doesn't ship a built-in `CrossfadeClipAnimation` with self-completing lifecycle — every game's crossfade timing/easing is its own decision.
-
-### SkinnedGameObject
+### Composition: blend, additive, masks
 
 ```csharp
-public sealed class SkinnedGameObject : GameObject, IUpdateable, IAnimated
-{
-    public Skeleton Skeleton { get; }
-    public Pose RestPose { get; }
-    public Pose Pose { get; }
-    public BonePalette Palette { get; }
-    public Submesh[] Submeshes { get; }
-    public Bounds3 AggregateBounds { get; }
-    public Matrix4x4 MeshNodeTransform { get; }
-    public void AddAnimation(IAnimation animation);
-    public void Update(Time time);   // CopyFrom(rest) → host.Update → ComputeBonePalette
-}
+PoseBlend.Lerp(a.Pose, b.Pose, weight, outPose);                // crossfade
+PoseBlend.Lerp(a.Pose, b.Pose, weight, mask, outPose);          // per bone: weight × mask[i]
+outPose.Locals[i] = PoseDelta.LayerOnto(basePose, rest, clipPose, weight);   // additive, per bone
+var upper = BoneMask.Subtree(skeleton, "spine", weight: 1f, falloff: 2);
 ```
 
-Parallel to `AnimatedGameObject` (carries an `AnimationHost`) and `PhysicsGameObject` (sibling kind of game object, no inheritance between them). Each frame's `Update` does the standard skeletal sequence:
+- **`PoseBlend.Lerp`** interpolates per bone: translation and scale linearly, rotation by slerp. The masked overload multiplies the weight by the bone's mask, so a mask of 0 leaves that bone exactly as pose A had it.
+- **`PoseDelta.LayerOnto`** applies a clip's offset from rest on top of a base: translation adds, rotation composes, scale multiplies, each scaled by the weight.
+- **`BoneMask`** names bones by a subtree root, not by indices (an asset's numbering must not leak into game code), with an optional falloff up the chain so a boundary does not kink. An unknown bone name throws, naming the bones that exist.
 
-1. `Pose.CopyFrom(RestPose)` — partial clips overlay onto a known base.
-2. `host.Update(time)` — every attached `ClipAnimation` / `BlendedClipAnimation` / `AdditiveClipAnimation` samples into `Pose`.
-3. `Skeleton.ComputeBonePalette(Pose, Palette)` — GPU-ready matrices.
+Weights only: a crossfade is the caller moving a weight. Studio's `RigAnimation` composes two players this way; a reusable layer stack is planned ([plan.md](../plan.md) §J3).
 
-Render code reads `Palette.Matrices` to bind the bone-palette uniform; everything else (transform, mesh, material) is the standard `GameObject` surface.
+### Skinned models
 
-`MeshNodeTransform` is the glTF mesh-node ancestor matrix the importer captured. Compose into the model matrix at draw time: `uModel = Transform.ToMatrix() * MeshNodeTransform`. Identity for hand-built skinned content.
-
-`AggregateBounds` is the union of every submesh's mesh-local AABB, computed once at construction. Useful for editor pick volumes / culling against the whole character regardless of which submesh's bounds individually contain a point. Rest-pose only — doesn't reflect current `Pose` deformation; accurate posed bounds would need per-frame recomputation from `Palette`, deferred until consumers demand it.
-
-### glTF import
+A skinned model is a `Model` whose parts a skin deforms (see *Cooked models*). The pose is of `Model.Skeleton`, the model's animated hierarchy: every skin's joints and every node a clip moves. Each skin gathers its own palette from that one pose:
 
 ```csharp
-public sealed class GltfImporter : IAssetImporter<GltfModel>
-{
-    public string Name => "rigged-model.gltf";
-}
-
-public sealed record GltfModel(
-    GltfPrimitive[] Primitives,
-    Skeleton Skeleton,
-    AnimationClip[] Animations,
-    Matrix4x4 SkeletonPlacement);
-
-public sealed record GltfPrimitive(MeshData Mesh, PbrMaterial? Material);
-
-public sealed record PbrMaterial(
-    string Name,
-    Vector4 BaseColorFactor,
-    TextureData? BaseColorTexture,
-    TextureData? NormalTexture,
-    TextureData? MetallicRoughnessTexture,
-    float MetallicFactor,
-    float RoughnessFactor);
-
-public sealed record TextureData(string Name, byte[] RgbaPixels, int Width, int Height);
+var palettes = model.CreatePaletteSets(instances: 1);
+var bones = model.CreateBoneBuffers(skinnedProgram, maxInstances: 1);
+model.PackPalettes(poses, placements, palettes);   // world-space: SkeletonPlacement × placement
+for (var s = 0; s < palettes.Length; s++) bones.Upload(s, palettes[s]);
+// draw each model.SkinnedParts entry with bones.For(part.SkinIndex)
 ```
 
-Registered via `assets.RegisterImporter(new GltfImporter())`, manifested via the dispatch key `"rigged-model.gltf"`.
+The shader side is `skinning.glsl` (set 3, binding 0, unsized): each skin's buffer is sized for its bones × bodies, so there is no bone cap beyond what the device binds. A crowd is N bodies in one set, read at `gl_InstanceIndex × boneCount` (Bulwark).
 
-```csharp
-var gltf = assets.Load<GltfModel>(AssetId.Parse("models/cesium_man"));
-var skeleton = gltf.Skeleton;
-var animations = gltf.Animations;
-foreach (var prim in gltf.Primitives)
-{
-    var mesh = graphicsDevice.CreateMesh(prim.Mesh);
-    var material = /* convert prim.Material to runtime Material */;
-}
-```
+### Cooked models
 
-Per-file invariants the importer enforces or normalises:
+The engine reads cooked models only. `ModelData.Load(path, needs, scene)` reads a `.blixmesh` — glTF's scene graph as the cook wrote it: nodes, meshes placed by them, skins as joint nodes, clips on nodes, materials and the scene level (scenes, visibility, instances, cameras, lights, material variants). `ModelNeeds` declares the vertex layout the pipelines read. `device.CreateModel(data, textureLoader, name)` makes it resident: one uploaded `Mesh` per primitive with its material and textures, and the skins and clips above.
 
-- **First skinned mesh wins as the primary skin.** Multi-mesh characters (body + hair + clothing) sharing one skin are all collected and concatenated into `Primitives[]` provided they share the primary node's `WorldMatrix`.
-- **Joints topo-sorted.** glTF's `Skin.Joints` is an ordered list of nodes, but the order isn't required to be hierarchy-ordered. The importer computes parent indices by walking each joint's `VisualParent` chain up to the next ancestor that's also a joint, then DFS-orders the joints so parents come first.
-- **Inverse-bind matrices kept in the engine's row-vector form** at the boundary — SharpGLTF already returns them that way, so no transpose is applied (see "Matrix convention (F-016)" above).
-- **`LINEAR` interpolation only.** glTF also defines `STEP` and `CUBICSPLINE`; the importer throws `NotSupportedException` on either.
-- **Channel filtering by skin.** Animations that don't touch the skin's joints produce empty `AnimationClip`s and are dropped.
-- **Morph-target weight channels skipped.** Lands alongside their first real use.
-
-Vertex stream decoding: `POSITION` is required; `NORMAL` defaults to `(0, 1, 0)` if absent; `TEXCOORD_0` defaults to `(0, 0)`; `JOINTS_0` and `WEIGHTS_0` are required (this is the *skinned* mesh importer); `TANGENT` is optional (missing = `(0,0,0,0)` sentinel that the shader falls back from). Indices wider than `ushort` throw.
-
-UV.y is flipped at import (`uv = (rawUv.X, 1 - rawUv.Y)`). glTF authors UVs with origin at the top of the image (Y-down per spec); the engine's pipeline flips PNG/JPEG textures at load so OBJ-style Y-up UVs render correctly. Flipping the glTF UV.y at import puts everything in the same convention.
+A tool opens glTF sources by cooking them first (`Blix.Recipes.CookCache.Resolve`); `Blix.Import` holds the source importers the cook uses.
 
 ### Deliberate limits (skeletal)
 
-- **64-bone uniform array cap.** Bigger characters split into multiple skinned submeshes, or upgrade the upload to a UBO / texture later.
-- **Rigid-bone normal assumption.** Skinning the normal with the full skin matrix is exact for rotation + uniform scale, approximate for non-uniform per-bone scale. Content avoiding non-uniform per-bone scale is the convention.
+- **Rigid-bone normal assumption.** Skinning the normal with the full skin matrix is exact for rotation + uniform scale, approximate for non-uniform per-bone scale.
 - **No CPU skinning fallback.** GPU only.
-- **`Weight` on blend/additive not clamped at setter.** `Sample` clamps to [0, 1]; out-of-range values silently behave like 0 or 1.
-- **No mask-driven partial blends.** All bones blend with the same Weight. Mask-driven would replace the scalar Weight with a per-bone weight array.
-- **No state-machine / animation-graph abstraction.** Game code owns the "what plays when" decision.
-- **Aggregate bounds are rest-pose-only.** Animated deformation isn't reflected.
-- **One skin per glTF file.** Multi-skin files pick only the primary skin's meshes; secondary skins are silently ignored.
-- **`Pose` is mutable shared state.** `ClipAnimation.Target` is a reference to a `Pose` that the host expects to be reset to `RestPose` before each tick. The convention is one `Pose` per `SkinnedGameObject`.
+- **No state machine or animation graph.** What plays when is game code's; the engine learns weights.
+- **A skin mirrored at some joints and not others** within one primitive draws with one front face (Studio judges it by one weighted bone).
+- **`Pose` is mutable shared state.** A pose is written by one player per frame; a consumer that blends reads players' poses into a pose of its own.
 
 ## Physics
 
@@ -785,9 +620,9 @@ public sealed class PhysicsHost3D : IFixedUpdateable
 }
 ```
 
-`PhysicsGameObject` is the convenience class — a `GameObject` that composes a `PhysicsHost3D` with `Target = this.Transform`, exposes `Physics` for tuning, and dispatches `FixedUpdate`. Sibling pattern to `AnimatedGameObject`; an object needing both behaviours defines its own subclass composing both hosts directly.
+A game composes a host per body and points it at that body's `Transform3D`; something wanting animation too composes an `AnimationHost` beside it.
 
-`PhysicsHost2D` mirrors `PhysicsHost3D` for 2D: `Transform2D` target, `Vector2` velocity, `Gravity` defaults `(0, 9.81f)` (Y-down to match screen-space ortho where origin is top-left). Used by 2D physics tests (`Blix.Test.Physics2D`); no in-engine consumer wires it for the demo because the demo is 3D.
+`PhysicsHost2D` mirrors `PhysicsHost3D` for 2D: `Transform2D` target, `Vector2` velocity, `Gravity` defaults `(0, 9.81f)` (Y-down to match screen-space ortho where origin is top-left). Nothing wires it yet: Pong, the 2D demo, keeps its own pose. `Blix.Test.Physics2D` covers the 2D collision it would pair with (`CollisionWorld2D`, `Intersection2D`).
 
 ### Engine vs game-code split
 
