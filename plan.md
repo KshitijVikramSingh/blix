@@ -117,8 +117,10 @@ refusals, then features:
    rigid part's back faces, lights a doubleSided back face with its frame reversed, and gives a mirrored
    part (negative determinant) clockwise front faces whether culled or not; TextureSettingsTest and
    NegativeScaleTest pass every row. (Skinned parts already culled; a mirrored skin is not handled.)
-3c. **Extension texture channels are not cooked.** Only the five core channels get image rows; sheen,
-   clearcoat, transmission, iridescence, anisotropy and specular textures are dropped (factors survive).
+3c. **Extension texture channels — done.** All 14 KHR_materials_* texture channels cook (colour ones as
+   sRGB, the clearcoat normal as a normal map); every textured channel kind in the corpus (16) reaches the
+   cooked file. Renderers decide which they draw — Studio draws none of the extensions. Found on the way:
+   same-named embedded images overwrote each other's cooked file; each extraction now takes a unique stem.
 4. **Refused valid files — done.** A sparse INDEX accessor (Accessor_Sparse_03), a skin with no inverse
    binds (identity, §5.27), and joints with no common root (Animation_Skin_06, which SharpGLTF's strict
    validator rejects — sources now load unvalidated, and the cook checks what it needs itself: POSITION,

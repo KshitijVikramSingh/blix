@@ -102,7 +102,7 @@ public static class MeshRecipe
     // Version 12 reads sparse index accessors, identity inverse binds when a skin has none, and joints with
     // no common root, and refuses an index past the vertices. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
     // same format bumps this value.
-    public const uint MeshRecipeVersion = 13;
+    public const uint MeshRecipeVersion = 14;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false,
@@ -494,6 +494,11 @@ public static class MeshRecipe
         var extractDir = Path.Combine(
             outDir, Path.GetFileNameWithoutExtension(outPath) + BlixMesh.ExtractedImageFolder);
 
+        // An image's name is not unique: two embedded images may share one (TextureTransformMultiTest has two
+        // "TestMap"s), or sanitise to one stem. Each extracted file takes a stem no other has taken, so two
+        // images can never overwrite each other's cooked file.
+        var usedStems = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         // One row per (variant, sampler): an image as used. Two samplers on one variant share its file.
         var resources = new Dictionary<int, (string Name, ulong Hash, string Resource)>();
         var rowOf = new Dictionary<(int Variant, BlixMeshSampler Sampler), int>();
@@ -549,6 +554,13 @@ public static class MeshRecipe
             // Embedded: invent a location and put the pixels there.
             Directory.CreateDirectory(extractDir);
             var stem = Sanitise(name);
+            if (!usedStems.Add(stem))
+            {
+                var k = 2;
+                while (!usedStems.Add($"{stem}_{k}")) k++;
+                stem = $"{stem}_{k}";
+            }
+
             var raw = Path.Combine(extractDir, stem + ExtensionFor(bytes.Span));
             File.WriteAllBytes(raw, bytes.ToArray());
 
@@ -575,8 +587,16 @@ public static class MeshRecipe
     }
 
     /// <summary>The channels whose images are recorded — the same five the loader pre-decodes.</summary>
+    // Every channel whose texture the cook writes: glTF's five core channels, then the KHR_materials_*
+    // ones (SharpGLTF's channel keys). The extension textures were dropped until they were listed here —
+    // their factors survived, their images did not.
     private static readonly string[] ImageChannels =
-        { "BaseColor", "Normal", "MetallicRoughness", "Occlusion", "Emissive" };
+    {
+        "BaseColor", "Normal", "MetallicRoughness", "Occlusion", "Emissive",
+        "ClearCoat", "ClearCoatRoughness", "ClearCoatNormal", "SheenColor", "SheenRoughness",
+        "SpecularColor", "SpecularFactor", "Transmission", "VolumeThickness", "Iridescence",
+        "IridescenceThickness", "Anisotropy", "DiffuseTransmissionFactor", "DiffuseTransmissionColor",
+    };
 
     private static TextureRole RoleForChannel(string channelName) => channelName switch
     {
@@ -584,6 +604,9 @@ public static class MeshRecipe
         "Normal" => TextureRole.Normal,
         "MetallicRoughness" => TextureRole.MetallicRoughness,
         "Emissive" => TextureRole.Emissive,
+        // Colour: sRGB, as glTF stores every *Color texture.
+        "SheenColor" or "SpecularColor" or "DiffuseTransmissionColor" => TextureRole.BaseColor,
+        "ClearCoatNormal" => TextureRole.Normal,
         // Occlusion is single-channel linear data. It is not MetallicRoughness, whose loader
         // rewrites grayscale input into the engine's ORM layout.
         _ => TextureRole.Linear,

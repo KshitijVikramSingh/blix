@@ -138,6 +138,59 @@ public static class Program
     private static SharpGLTF.Schema2.ModelRoot LoadSource(string file) =>
         SharpGLTF.Schema2.ModelRoot.Load(file, new SharpGLTF.Schema2.ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip });
 
+    // ── Every textured channel reaches the cooked file ─────────────────────────
+    // Enumerated by each material's ACTUAL channel keys (SharpGLTF's), not by a list of names this file
+    // shares with the cook — a misspelt key would otherwise drop a texture on both sides and pass.
+    private static void EveryTexturedChannelCooks(TestRunner t)
+    {
+        var root = FindFile("InterpolationTest.glb") is { } it ? Path.GetFullPath(Path.Combine(it, "..", "..", "..")) : null;
+        if (root is null) return;
+
+        var seen = new SortedSet<string>(StringComparer.Ordinal);
+        var dropped = new List<string>();
+        var clashes = new List<string>();
+        foreach (var file in Directory.EnumerateFiles(root, "*.gl*", SearchOption.AllDirectories)
+            .Where(f => (f.EndsWith(".glb", StringComparison.Ordinal) || f.EndsWith(".gltf", StringComparison.Ordinal))
+                && !ExpectedRefusals.ContainsKey(Path.GetFileName(f)))
+            .OrderBy(f => f, StringComparer.Ordinal))
+        {
+            var gltf = LoadSource(file);
+            var cooked = BlixMeshReader.Read(CookCache.Resolve(file));
+            // One cooked file is one source image: rows of two different pictures never share a resource.
+            foreach (var shared in cooked.ImageTable.GroupBy(r => r.Resource).Where(g => g.Select(r => r.ContentHash).Distinct().Count() > 1))
+                clashes.Add($"{Path.GetFileName(file)}: {shared.Key} holds {shared.Select(r => r.ContentHash).Distinct().Count()} different images");
+            for (var m = 0; m < gltf.LogicalMaterials.Count; m++)
+            {
+                var row = cooked.MaterialTable[m];
+                var x = row.Ext;
+                var cookedImage = new Dictionary<string, int>(StringComparer.Ordinal)
+                {
+                    ["BaseColor"] = row.BaseColorImage, ["Normal"] = row.NormalImage, ["MetallicRoughness"] = row.MetallicRoughnessImage,
+                    ["Occlusion"] = row.OcclusionImage, ["Emissive"] = row.EmissiveImage,
+                    ["ClearCoat"] = x.ClearcoatImage, ["ClearCoatRoughness"] = x.ClearcoatRoughnessImage, ["ClearCoatNormal"] = x.ClearcoatNormalImage,
+                    ["SheenColor"] = x.SheenColorImage, ["SheenRoughness"] = x.SheenRoughnessImage,
+                    ["SpecularColor"] = x.SpecularColorImage, ["SpecularFactor"] = x.SpecularImage,
+                    ["Transmission"] = x.TransmissionImage, ["VolumeThickness"] = x.ThicknessImage,
+                    ["Iridescence"] = x.IridescenceImage, ["IridescenceThickness"] = x.IridescenceThicknessImage,
+                    ["Anisotropy"] = x.AnisotropyImage,
+                    ["DiffuseTransmissionFactor"] = x.DiffuseTransmissionImage, ["DiffuseTransmissionColor"] = x.DiffuseTransmissionColorImage,
+                };
+                foreach (var channel in gltf.LogicalMaterials[m].Channels)
+                {
+                    if (channel.Texture is null) continue;
+                    seen.Add(channel.Key);
+                    if (!cookedImage.TryGetValue(channel.Key, out var image) || image < 0)
+                        dropped.Add($"{Path.GetFileName(file)} material {m}: {channel.Key}");
+                }
+            }
+        }
+
+        t.Expect($"every textured channel in the corpus cooks an image ({seen.Count} channel kinds: {string.Join(",", seen)})",
+            dropped.Count == 0, string.Join(" | ", dropped.Take(6)));
+        t.Expect("and no cooked file holds two different source images (same-named embedded images do not overwrite each other)",
+            clashes.Count == 0, string.Join(" | ", clashes.Take(4)));
+    }
+
     // ── KHR_texture_transform as glTF defines it ───────────────────────────────
     // Every core channel in the corpus that carries the extension cooks to exactly its offset, rotation
     // and scale, with a texCoord override replacing the channel's set; and the engine's UvTransform is the
@@ -1921,6 +1974,7 @@ public static class Program
         TriangleModesMatchSpec(t);
         SamplersMatchGltf(t);
         TextureTransformsMatchGltf(t);
+        EveryTexturedChannelCooks(t);
 
         // ── tools cook on open ───────────────────────────────────────────────
         // The engine reads cooked models; a tool opening a raw one cooks it into a cache first.
