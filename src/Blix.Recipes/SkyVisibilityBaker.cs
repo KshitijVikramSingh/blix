@@ -244,9 +244,8 @@ public static class SkyVisibilityBaker
             var file = BlixMeshReader.Read(path);
             var materials = file.MaterialTable;
             var albedoCache = new Dictionary<int, Vector3>();
-            // World geometry: each placed primitive, moved by the node that places it.
-            var world = file.WorldTransforms();
-            foreach (var (prim, node) in file.PlacedPrimitives())
+            // World geometry: each primitive the default scene shows, at each world it is drawn at.
+            foreach (var (prim, _, world) in file.DrawnPrimitives())
             {
                 // glTF alpha modes: 0 OPAQUE, 1 MASK, 2 BLEND. Anything not opaque is a surface the
                 // renderer lets light through, so the grid should too.
@@ -269,7 +268,7 @@ public static class SkyVisibilityBaker
                     positions[v] = Vector3.Transform(new Vector3(
                         BitConverter.ToSingle(prim.VertexBytes, o),
                         BitConverter.ToSingle(prim.VertexBytes, o + 4),
-                        BitConverter.ToSingle(prim.VertexBytes, o + 8)), world[node]);
+                        BitConverter.ToSingle(prim.VertexBytes, o + 8)), world);
                     min = Vector3.Min(min, positions[v]);
                     max = Vector3.Max(max, positions[v]);
                 }

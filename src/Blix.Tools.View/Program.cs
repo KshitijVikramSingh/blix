@@ -262,6 +262,16 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
 
     internal Model? Rig => rig;
 
+    /// <summary>Which of the file's cameras the main view looks through; -1 for Studio's orbit.</summary>
+    internal int FileCamera { get; set; } = -1;
+
+    // The orbit's view-projection, or the file camera's when one is chosen and some node carries it.
+    private Matrix4x4 MainViewProjection() =>
+        FileCamera >= 0 && (model ?? rig) is { } subject
+        && StudioFraming.ThroughCamera(subject, FileCamera, model is not null ? modelTransform : rigTransform, aspect) is { } through
+            ? through
+            : camera.ViewProjection(aspect);
+
     /// <summary>Where the rig was read from; null without one.</summary>
     internal string? RigPath => rig is null ? null : modelPath;
 
@@ -403,7 +413,8 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         // had opened — which reads as "the viewer is broken" rather than "that file is not a glTF".
         try
         {
-            loaded = renderer.LoadModel(modelPath);
+            var scene = args.Int("scene", -1);
+            loaded = renderer.LoadModel(modelPath, scene >= 0 ? scene : null);
         }
         catch (AssetImportException refused)
         {
@@ -638,7 +649,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
     {
         ReadInput();
         cameraPosition = camera.Position;
-        viewProjection = camera.ViewProjection(aspect);
+        viewProjection = MainViewProjection();
 
         // The viewport's own camera. Aspect comes from the PANEL, not the window — that is the
         // whole difference between a second view and a second copy of this one, and it is why
@@ -706,7 +717,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
     {
         frames++;
         if (frame.Height > 0) aspect = frame.Width / (float)frame.Height;
-        viewProjection = camera.ViewProjection(aspect);
+        viewProjection = MainViewProjection();
 
         // Before recording, because the palette buffer is read at Execute and written here — the
         // draw carries a descriptor set, not a copy of the matrices.

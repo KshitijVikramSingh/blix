@@ -37,7 +37,14 @@ public sealed class StudioRenderer : IDisposable
     /// uploaded with (<see cref="UploadPalettes"/>). Owned by the stage: <see cref="Unload"/> releases it,
     /// and so does disposing the stage. Call after <see cref="Load"/>.
     /// </remarks>
-    public Model LoadModel(string path) => assets.Add(StudioModel.Load(device, path, skinnedProgram));
+    /// <param name="scene">The glTF scene to place; null for the file's default.</param>
+    public Model LoadModel(string path, int? scene = null) => assets.Add(StudioModel.Load(device, path, skinnedProgram, scene));
+
+    /// <summary>Draws <paramref name="model"/> with a <c>KHR_materials_variants</c> entry's materials (-1: each part's own).</summary>
+    public void SetVariant(Model model, int variant) => assets.For(model).SetVariant(variant);
+
+    /// <summary>The variant <paramref name="model"/> is drawn with; -1 for each part's own material.</summary>
+    public int Variant(Model model) => assets.For(model).Variant;
 
     /// <summary>Releases a model this stage loaded: its buffers, bone buffers and textures.</summary>
     public void Unload(Model model) => assets.Remove(model);

@@ -99,6 +99,7 @@ public static class Program
             {
                 var mesh = Blix.Assets.BlixMeshReader.Read(path);
                 ReportCookedExtensions(mesh);
+                ReportSceneLevel(mesh);
             }
             catch (Exception ex)
             {
@@ -107,6 +108,51 @@ public static class Program
         }
 
         return 0;
+    }
+
+    // What the file states above the meshes: scenes, hidden and instanced nodes, cameras, lights, variants.
+    private static void ReportSceneLevel(Blix.Assets.BlixMeshFile mesh)
+    {
+        var scenes = mesh.SceneTable;
+        if (scenes.Count > 1 || mesh.CameraTable.Count > 0 || mesh.LightTable.Count > 0 || mesh.VariantTable.Count > 0
+            || mesh.Nodes.Any(n => !n.Visible || n.Instances is not null))
+        {
+            Console.WriteLine("  scene level:");
+        }
+        else
+        {
+            return;
+        }
+
+        if (scenes.Count > 1)
+        {
+            Console.WriteLine($"    scenes     {scenes.Count}, default {mesh.DefaultScene}: " +
+                string.Join(" · ", scenes.Select((sc, i) => $"{i} '{sc.Name}' ({sc.Roots.Count} root(s))")));
+        }
+
+        var hidden = mesh.Nodes.Where(n => !n.Visible).Select(n => n.Name).ToArray();
+        if (hidden.Length > 0) Console.WriteLine($"    hidden     {hidden.Length} node(s) (KHR_node_visibility; their children too)");
+        foreach (var n in mesh.Nodes.Where(n => n.Instances is not null))
+            Console.WriteLine($"    instanced  '{n.Name}' x {n.Instances!.Count} (EXT_mesh_gpu_instancing)");
+        for (var c = 0; c < mesh.CameraTable.Count; c++)
+        {
+            var cam = mesh.CameraTable[c];
+            var on = mesh.Nodes.FirstOrDefault(n => n.CameraIndex == c)?.Name ?? "(no node)";
+            Console.WriteLine(cam.Orthographic
+                ? $"    camera {c}   '{cam.Name}' orthographic {cam.XMag:0.###} x {cam.YMag:0.###}, on '{on}'"
+                : $"    camera {c}   '{cam.Name}' perspective yfov {cam.YFov:0.###}{(cam.AspectRatio > 0 ? $" aspect {cam.AspectRatio:0.###}" : "")}, on '{on}'");
+        }
+
+        for (var l = 0; l < mesh.LightTable.Count; l++)
+        {
+            var light = mesh.LightTable[l];
+            var kind = light.Type switch { Blix.Assets.BlixMesh.LightDirectional => "directional", Blix.Assets.BlixMesh.LightPoint => "point", _ => "spot" };
+            var on = mesh.Nodes.FirstOrDefault(n => n.LightIndex == l)?.Name ?? "(no node)";
+            Console.WriteLine($"    light {l,-3}  '{light.Name}' {kind} intensity {light.Intensity:0.###}" +
+                $"{(float.IsFinite(light.Range) ? $" range {light.Range:0.###}" : "")}, on '{on}'");
+        }
+
+        if (mesh.VariantTable.Count > 0) Console.WriteLine($"    variants   {string.Join(", ", mesh.VariantTable)} (KHR_materials_variants)");
     }
 
     /// <summary>The cooked mirror of <see cref="ReportMaterialExtensions"/>, off a .blixmesh.</summary>

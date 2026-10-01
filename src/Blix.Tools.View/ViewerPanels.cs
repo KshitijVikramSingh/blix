@@ -657,6 +657,11 @@ internal sealed class ViewerPanels
             DrawNodeList();
         }
 
+        if ((app.Model ?? app.Rig) is { } subject && HasSceneLevel(subject) && ImGui.CollapsingHeader("scene", ImGuiTreeNodeFlags.DefaultOpen))
+        {
+            DrawScenePanel(subject);
+        }
+
         if (ImGui.CollapsingHeader("materials", ImGuiTreeNodeFlags.DefaultOpen))
         {
             DrawMaterialPanel();
@@ -701,6 +706,39 @@ internal sealed class ViewerPanels
     /// MEANS — which view declaration to cast through, whether a node or a joint is selected —
     /// is this tool's business and nobody else's.
     /// </remarks>
+    private static bool HasSceneLevel(Model m) =>
+        m.Scenes.Count > 1 || m.Cameras.Count > 0 || m.Lights.Count > 0 || m.Variants.Count > 0
+        || m.Nodes.Any(n => !n.Shown || n.Instances is not null);
+
+    // What the file states above its meshes. The scene is chosen at load (--scene); a variant and a
+    // file camera are chosen here. Lights are listed only: nothing in Studio shades with them.
+    private void DrawScenePanel(Model m)
+    {
+        if (m.Scenes.Count > 1)
+            ImGui.TextDisabled($"scene {m.SceneIndex} of {m.Scenes.Count} (--scene to choose)");
+        var hidden = m.Nodes.Count(n => n.PrimitiveCount > 0 && !n.Shown);
+        if (hidden > 0) ImGui.TextDisabled($"{hidden} hidden mesh node(s) (KHR_node_visibility)");
+        var instances = m.Nodes.Where(n => n.Instances is not null).Sum(n => n.Instances!.Count);
+        if (instances > 0) ImGui.TextDisabled($"{instances} instance(s) (EXT_mesh_gpu_instancing)");
+
+        if (m.Variants.Count > 0)
+        {
+            var variant = app.Renderer.Variant(m) + 1;
+            var names = "<own materials>\0" + string.Concat(m.Variants.Select(v => v + "\0"));
+            if (ImGui.Combo("variant", ref variant, names)) app.Renderer.SetVariant(m, variant - 1);
+        }
+
+        if (m.Cameras.Count > 0)
+        {
+            var through = app.FileCamera + 1;
+            var names = "<orbit>\0" + string.Concat(m.Cameras.Select(c => c.Name + "\0"));
+            if (ImGui.Combo("view through", ref through, names)) app.FileCamera = through - 1;
+        }
+
+        foreach (var light in m.Lights)
+            ImGui.TextDisabled($"light '{light.Name}': {light.Type.ToString().ToLowerInvariant()}, {light.Intensity:0.##} (not shaded)");
+    }
+
     public void DrawViewportPanel()
     {
         viewport.Draw(

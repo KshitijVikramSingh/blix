@@ -53,8 +53,10 @@ public static class BlixMesh
     // only skin 0's joints. v15 makes an image row one image as used — role, normal convention and
     // glTF sampler — so an image used two ways is two rows. v16 adds each core channel's
     // KHR_texture_transform to the material; v17 each extension channel's TEXCOORD set and transform.
-    // Older layouts must be re-cooked.
-    public const uint Version17 = 17;
+    // v18 adds the scene level: each node's visibility, instance transforms, camera and light; the
+    // scenes with their roots and the default; the camera, light and variant tables; and each
+    // primitive's KHR_materials_variants mapping. Older layouts must be re-cooked.
+    public const uint Version18 = 18;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
     public const uint LayoutPosition3NormalTextureSkin4Tangent = 3; // 80-byte, rigged
@@ -87,6 +89,9 @@ public static class BlixMesh
     public const byte AlphaBlend = 2;
     public const byte IndexFormatU16 = 0;
     public const byte IndexFormatU32 = 1;
+    public const byte LightDirectional = 0;
+    public const byte LightPoint = 1;
+    public const byte LightSpot = 2;
 
     /// <summary>The layout a stored id names. The inverse of <see cref="LayoutIdForStride"/>.</summary>
     public static VertexLayout LayoutForId(uint id) => id switch
@@ -342,7 +347,40 @@ public sealed record BlixMeshSkin(BlixMeshBone[] Bones);
 /// <param name="Name">The authored name; empty when the source gave none.</param>
 /// <param name="MeshIndex">The mesh this node places, or -1.</param>
 /// <param name="SkinIndex">The skin that deforms that mesh, or -1; a skinned mesh is placed by its skin, not its node.</param>
-public sealed record BlixMeshNode(string Name, int ParentIndex, Matrix4x4 LocalTransform, int MeshIndex = -1, int SkinIndex = -1);
+/// <param name="Visible">
+/// Its own <c>KHR_node_visibility</c> flag (true when the file states none). A node is shown only when it
+/// and every ancestor are visible; that composition is the reader's.
+/// </param>
+/// <param name="Instances">
+/// <c>EXT_mesh_gpu_instancing</c>: one transform per instance, each applied before the node's world
+/// (row-vector <c>instance * world</c>). When present the mesh is drawn once per instance and never
+/// un-instanced. Null for an ordinary node.
+/// </param>
+/// <param name="CameraIndex">The camera this node carries, or -1; it looks down the node's -Z with +Y up.</param>
+/// <param name="LightIndex">The <c>KHR_lights_punctual</c> light this node carries, or -1; it points down -Z.</param>
+public sealed record BlixMeshNode(
+    string Name, int ParentIndex, Matrix4x4 LocalTransform, int MeshIndex = -1, int SkinIndex = -1,
+    bool Visible = true, IReadOnlyList<Matrix4x4>? Instances = null, int CameraIndex = -1, int LightIndex = -1);
+
+/// <summary>A glTF scene: the root nodes it places. A node belongs to a scene when its root is one of these.</summary>
+public sealed record BlixMeshScene(string Name, IReadOnlyList<int> Roots);
+
+/// <summary>A glTF camera, as authored. A perspective camera with no aspect ratio takes the viewport's.</summary>
+/// <param name="AspectRatio">The authored aspect ratio, or 0 when the file leaves it to the viewport.</param>
+/// <param name="ZFar">The far plane; <see cref="float.PositiveInfinity"/> for a perspective camera with none (infinite projection).</param>
+/// <param name="XMag">Orthographic half-width; 0 for a perspective camera.</param>
+/// <param name="YMag">Orthographic half-height; 0 for a perspective camera.</param>
+public sealed record BlixMeshCamera(
+    string Name, bool Orthographic, float YFov, float AspectRatio, float XMag, float YMag, float ZNear, float ZFar);
+
+/// <summary>A <c>KHR_lights_punctual</c> light, as authored: what it is, not how anything shades it.</summary>
+/// <param name="Type"><see cref="BlixMesh.LightDirectional"/>, <see cref="BlixMesh.LightPoint"/> or <see cref="BlixMesh.LightSpot"/>.</param>
+/// <param name="Intensity">Candela for point and spot, lux for directional.</param>
+/// <param name="Range">Where the light's influence ends; <see cref="float.PositiveInfinity"/> when the file gives none.</param>
+/// <param name="InnerConeAngle">Spot only: radians from the axis where falloff starts.</param>
+/// <param name="OuterConeAngle">Spot only: radians from the axis where it reaches zero.</param>
+public sealed record BlixMeshLight(
+    string Name, byte Type, Vector3 Color, float Intensity, float Range, float InnerConeAngle, float OuterConeAngle);
 
 /// <summary>A mesh: primitives in mesh space, stored once however many nodes place it.</summary>
 /// <param name="Name">The authored name; empty when the source gave none.</param>
@@ -370,7 +408,12 @@ public sealed record BlixMeshPrimitive(
     int VertexCount,
     byte[] VertexBytes,
     IndexFormat IndexFormat,
-    IReadOnlyList<BlixMeshLod> Lods);
+    IReadOnlyList<BlixMeshLod> Lods,
+    /// <summary>
+    /// <c>KHR_materials_variants</c>: per variant of the file, the material it gives this primitive, or
+    /// -1 to keep <see cref="MaterialIndex"/>. Null when the file has no variants.
+    /// </summary>
+    IReadOnlyList<int>? VariantMaterials = null);
 
 /// <param name="Cooked">
 /// The preamble, when this came off disk. Null when it was built in memory on the way to being
@@ -400,8 +443,25 @@ public sealed record BlixMeshFile(
     IReadOnlyList<BlixMeshSkin>? Skins = null,
     IReadOnlyList<BlixMeshClip>? Clips = null,
     CookedHeader? Cooked = null,
-    IReadOnlyList<BlixMeshIgnored>? Ignored = null)
+    IReadOnlyList<BlixMeshIgnored>? Ignored = null,
+    IReadOnlyList<BlixMeshScene>? Scenes = null,
+    int DefaultScene = -1,
+    IReadOnlyList<BlixMeshCamera>? Cameras = null,
+    IReadOnlyList<BlixMeshLight>? Lights = null,
+    IReadOnlyList<string>? Variants = null)
 {
+    /// <summary>Never null: a file with no scene list reads as none (every root node is then placed).</summary>
+    public IReadOnlyList<BlixMeshScene> SceneTable => Scenes ?? Array.Empty<BlixMeshScene>();
+
+    /// <summary>Never null: a file with no cameras reads as none.</summary>
+    public IReadOnlyList<BlixMeshCamera> CameraTable => Cameras ?? Array.Empty<BlixMeshCamera>();
+
+    /// <summary>Never null: a file with no punctual lights reads as none.</summary>
+    public IReadOnlyList<BlixMeshLight> LightTable => Lights ?? Array.Empty<BlixMeshLight>();
+
+    /// <summary>Never null: the <c>KHR_materials_variants</c> names, in the file's order.</summary>
+    public IReadOnlyList<string> VariantTable => Variants ?? Array.Empty<string>();
+
     /// <summary>Never null: a file whose cook read every attribute reads as none.</summary>
     public IReadOnlyList<BlixMeshIgnored> IgnoredTable => Ignored ?? Array.Empty<BlixMeshIgnored>();
 
@@ -435,6 +495,58 @@ public sealed record BlixMeshFile(
         {
             if (Nodes[i].MeshIndex < 0) continue;
             foreach (var p in Meshes[Nodes[i].MeshIndex].Primitives) yield return (p, i);
+        }
+    }
+
+    /// <summary>
+    /// The scene a reader places when asked for <paramref name="asked"/>: that one, else the file's default,
+    /// else scene 0; -1 when the file lists no scenes (every root is then placed).
+    /// </summary>
+    public int SceneFor(int? asked = null)
+    {
+        if (SceneTable.Count == 0) return -1;
+        var scene = asked ?? (DefaultScene >= 0 ? DefaultScene : 0);
+        if ((uint)scene >= (uint)SceneTable.Count)
+            throw new ArgumentOutOfRangeException(nameof(asked), $"scene {scene} was asked for, and the file has {SceneTable.Count}");
+        return scene;
+    }
+
+    /// <summary>
+    /// glTF's rule for what a scene draws, given each node's parent and own visibility: a node is placed when
+    /// its root is one of <paramref name="roots"/> (every root when null), and shown when it is placed and it
+    /// and every ancestor are visible (<c>KHR_node_visibility</c>). Parents must precede children.
+    /// </summary>
+    public static (bool[] Placed, bool[] Shown) Placement(IReadOnlyList<int> parents, IReadOnlyList<bool> visible, IReadOnlyCollection<int>? roots)
+    {
+        var placed = new bool[parents.Count];
+        var shown = new bool[parents.Count];
+        var rootSet = roots?.ToHashSet();
+        for (var i = 0; i < parents.Count; i++)
+        {
+            var parent = parents[i];
+            placed[i] = parent < 0 ? rootSet is null || rootSet.Contains(i) : placed[parent];
+            shown[i] = placed[i] && visible[i] && (parent < 0 || shown[parent]);
+        }
+
+        return (placed, shown);
+    }
+
+    /// <summary>
+    /// Every primitive the scene shows, with its node and each world it is drawn at — once per instance for
+    /// an instanced node (<c>instance * world</c>). Hidden nodes and nodes outside the scene give none.
+    /// </summary>
+    public IEnumerable<(BlixMeshPrimitive Primitive, int NodeIndex, Matrix4x4 World)> DrawnPrimitives(int? scene = null)
+    {
+        var chosen = SceneFor(scene);
+        var (_, shown) = Placement(
+            Nodes.Select(n => n.ParentIndex).ToArray(), Nodes.Select(n => n.Visible).ToArray(),
+            chosen < 0 ? null : SceneTable[chosen].Roots.ToArray());
+        var world = WorldTransforms();
+        for (var i = 0; i < Nodes.Count; i++)
+        {
+            if (Nodes[i].MeshIndex < 0 || !shown[i]) continue;
+            foreach (var at in Nodes[i].Instances?.Select(k => k * world[i]) ?? new[] { world[i] })
+            foreach (var p in Meshes[Nodes[i].MeshIndex].Primitives) yield return (p, i, at);
         }
     }
 
@@ -495,9 +607,22 @@ internal static class BlixMeshBinary
             }
         }
 
+        var variantCount = br.ReadInt32();
+        if (variantCount is < 0 or > 65_536)
+        {
+            throw new InvalidDataException($"'{path}' primitive '{name}' has invalid variant count {variantCount}.");
+        }
+
+        int[]? variants = null;
+        if (variantCount > 0)
+        {
+            variants = new int[variantCount];
+            for (var v = 0; v < variantCount; v++) variants[v] = br.ReadInt32();
+        }
+
         return new BlixMeshPrimitive(
             name, layout, materialIndex, bounds, vertexCount, vertexBytes,
-            isU32 ? IndexFormat.UInt32 : IndexFormat.UInt16, lods);
+            isU32 ? IndexFormat.UInt32 : IndexFormat.UInt16, lods, variants);
     }
 
     internal static Matrix4x4 ReadMatrix(BinaryReader br) => new(
@@ -584,7 +709,7 @@ public static class BlixMeshWriter
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(file);
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version17, stamp);
+        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version18, stamp);
         using var bw = new BinaryWriter(fs);
 
         bw.Write(file.Nodes.Count);
@@ -595,6 +720,12 @@ public static class BlixMeshWriter
             WriteMatrix(bw, node.LocalTransform);
             bw.Write(node.MeshIndex);
             bw.Write(node.SkinIndex);
+            bw.Write(node.Visible);
+            var instances = node.Instances ?? Array.Empty<Matrix4x4>();
+            bw.Write(node.Instances is null ? -1 : instances.Count);
+            foreach (var m in instances) WriteMatrix(bw, m);
+            bw.Write(node.CameraIndex);
+            bw.Write(node.LightIndex);
         }
 
         bw.Write(file.Meshes.Count);
@@ -712,6 +843,41 @@ public static class BlixMeshWriter
             WriteString(bw, i.Semantic);
             bw.Write(i.Primitives);
         }
+
+        var scenes = file.SceneTable;
+        bw.Write(scenes.Count);
+        foreach (var scene in scenes)
+        {
+            WriteString(bw, scene.Name);
+            bw.Write(scene.Roots.Count);
+            foreach (var r in scene.Roots) bw.Write(r);
+        }
+
+        bw.Write(file.DefaultScene);
+
+        var cameras = file.CameraTable;
+        bw.Write(cameras.Count);
+        foreach (var c in cameras)
+        {
+            WriteString(bw, c.Name);
+            bw.Write(c.Orthographic);
+            bw.Write(c.YFov); bw.Write(c.AspectRatio); bw.Write(c.XMag); bw.Write(c.YMag);
+            bw.Write(c.ZNear); bw.Write(c.ZFar);
+        }
+
+        var lights = file.LightTable;
+        bw.Write(lights.Count);
+        foreach (var l in lights)
+        {
+            WriteString(bw, l.Name);
+            bw.Write(l.Type);
+            bw.Write(l.Color.X); bw.Write(l.Color.Y); bw.Write(l.Color.Z);
+            bw.Write(l.Intensity); bw.Write(l.Range); bw.Write(l.InnerConeAngle); bw.Write(l.OuterConeAngle);
+        }
+
+        var variantNames = file.VariantTable;
+        bw.Write(variantNames.Count);
+        foreach (var v in variantNames) WriteString(bw, v);
     }
 
     private static void WriteClip(BinaryWriter bw, BlixMeshClip clip)
@@ -778,6 +944,10 @@ public static class BlixMeshWriter
                 bw.Write(MemoryMarshal.AsBytes(lod.Indices16.AsSpan()));
             }
         }
+
+        var variants = p.VariantMaterials ?? Array.Empty<int>();
+        bw.Write(variants.Count);
+        foreach (var v in variants) bw.Write(v);
     }
 
     private static void WriteMatrix(BinaryWriter bw, in Matrix4x4 m)
@@ -862,7 +1032,7 @@ public static class BlixMeshReader
         ArgumentNullException.ThrowIfNull(path);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version17, path, ".blixmesh");
+        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version18, path, ".blixmesh");
         return AssetImportException.Refusing(path, () => ReadBody(fs, path, header), ".blixmesh");
     }
 
@@ -887,7 +1057,21 @@ public static class BlixMeshReader
                     $"{path}: node {i} ('{name}') has parent {parent}; expected -1 or an index below {i}.");
             }
 
-            nodes[i] = new BlixMeshNode(name, parent, BlixMeshBinary.ReadMatrix(br), br.ReadInt32(), br.ReadInt32());
+            var local = BlixMeshBinary.ReadMatrix(br);
+            var mesh = br.ReadInt32();
+            var skin = br.ReadInt32();
+            var visible = br.ReadBoolean();
+            var instanceCount = br.ReadInt32();
+            if (instanceCount is < -1 or > 16_000_000)
+                throw new InvalidDataException($"{path}: node {i} ('{name}') has invalid instance count {instanceCount}.");
+            Matrix4x4[]? instances = null;
+            if (instanceCount >= 0)
+            {
+                instances = new Matrix4x4[instanceCount];
+                for (var k = 0; k < instanceCount; k++) instances[k] = BlixMeshBinary.ReadMatrix(br);
+            }
+
+            nodes[i] = new BlixMeshNode(name, parent, local, mesh, skin, visible, instances, br.ReadInt32(), br.ReadInt32());
         }
 
         var meshCount = br.ReadInt32();
@@ -1031,6 +1215,76 @@ public static class BlixMeshReader
         var ignored = new BlixMeshIgnored[ignoredCount];
         for (var i = 0; i < ignoredCount; i++) ignored[i] = new BlixMeshIgnored(BlixMeshBinary.ReadString(br), br.ReadInt32());
 
-        return new BlixMeshFile(nodes, meshes, materials, images, skins, clips, header, ignored);
+        var sceneCount = br.ReadInt32();
+        if (sceneCount is < 0 or > 1_000_000) throw new InvalidDataException($"'{path}' has invalid sceneCount {sceneCount}.");
+        var scenes = new BlixMeshScene[sceneCount];
+        for (var i = 0; i < sceneCount; i++)
+        {
+            var name = BlixMeshBinary.ReadString(br);
+            var roots = new int[br.ReadInt32()];
+            for (var r = 0; r < roots.Length; r++)
+            {
+                roots[r] = br.ReadInt32();
+                if ((uint)roots[r] >= (uint)nodes.Length || nodes[roots[r]].ParentIndex >= 0)
+                    throw new InvalidDataException($"{path}: scene {i} ('{name}') names node {roots[r]} as a root, and it is not a root node.");
+            }
+
+            scenes[i] = new BlixMeshScene(name, roots);
+        }
+
+        var defaultScene = br.ReadInt32();
+        if (defaultScene < -1 || defaultScene >= sceneCount)
+            throw new InvalidDataException($"{path}: default scene {defaultScene}, and there are {sceneCount}.");
+
+        var cameras = new BlixMeshCamera[br.ReadInt32()];
+        for (var i = 0; i < cameras.Length; i++)
+        {
+            cameras[i] = new BlixMeshCamera(
+                BlixMeshBinary.ReadString(br), br.ReadBoolean(),
+                br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
+        }
+
+        var lights = new BlixMeshLight[br.ReadInt32()];
+        for (var i = 0; i < lights.Length; i++)
+        {
+            var name = BlixMeshBinary.ReadString(br);
+            var type = br.ReadByte();
+            if (type > BlixMesh.LightSpot) throw new InvalidDataException($"{path}: light {i} ('{name}') has unknown type {type}.");
+            lights[i] = new BlixMeshLight(
+                name, type, new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle()),
+                br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
+        }
+
+        var variantNames = new string[br.ReadInt32()];
+        for (var i = 0; i < variantNames.Length; i++) variantNames[i] = BlixMeshBinary.ReadString(br);
+
+        // The scene level's cross-references, refused by name like the rest.
+        for (var i = 0; i < nodes.Length; i++)
+        {
+            var n = nodes[i];
+            if (n.CameraIndex < -1 || n.CameraIndex >= cameras.Length)
+                throw new InvalidDataException($"{path}: node {i} ('{n.Name}') carries camera {n.CameraIndex}, and there are {cameras.Length}.");
+            if (n.LightIndex < -1 || n.LightIndex >= lights.Length)
+                throw new InvalidDataException($"{path}: node {i} ('{n.Name}') carries light {n.LightIndex}, and there are {lights.Length}.");
+            if (n.Instances is not null && (n.MeshIndex < 0 || n.SkinIndex >= 0))
+                throw new InvalidDataException($"{path}: node {i} ('{n.Name}') is instanced, and only a node placing an unskinned mesh can be.");
+        }
+
+        foreach (var mesh in meshes)
+        foreach (var p in mesh.Primitives)
+        {
+            if (p.VariantMaterials is not { } map) continue;
+            if (map.Count != variantNames.Length)
+                throw new InvalidDataException($"{path}: primitive '{p.Name}' maps {map.Count} variant(s), and the file has {variantNames.Length}.");
+            foreach (var m in map)
+            {
+                if (m < -1 || m >= materials.Length)
+                    throw new InvalidDataException($"{path}: primitive '{p.Name}' maps a variant to material {m}, and there are {materials.Length}.");
+            }
+        }
+
+        return new BlixMeshFile(
+            nodes, meshes, materials, images, skins, clips, header, ignored,
+            scenes, defaultScene, cameras, lights, variantNames);
     }
 }

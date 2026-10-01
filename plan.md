@@ -132,7 +132,53 @@ refusals, then features:
    and with the transform bypassed its fail symbols do. Other renderers (Sponza, the demos) read the
    transforms off PbrMaterial when they want them.
 6. **Scene structure the reader ignores:** scene selection (MultipleScenes), cameras, KHR_node_visibility,
-   EXT_mesh_gpu_instancing, KHR_lights_punctual, KHR_materials_variants.
+   EXT_mesh_gpu_instancing, KHR_lights_punctual, KHR_materials_variants. Branch `gltf-scene` (on rig-alpha).
+   Two of these were silently wrong, not merely absent: both listed as *used*, not required, so they loaded
+   — SimpleInstancing drew one copy of its grid, NodeVisibilityTest drew its hidden nodes. MultipleScenes
+   drew both scenes on top of each other. DirectionalLight (lights *required*) was refused.
+
+   **One format version (v18) for all six**, so Sponza re-cooks once. Every one is a FACT the file states;
+   what a consumer does with it is the consumer's (conventions §10):
+   - *Scenes:* each scene's root nodes and the default (SharpGLTF reads an absent `scene` as 0, which the
+     spec leaves to the client — kept). `ModelData.Load(…, scene:)` picks one, default the file's; nodes
+     outside it are not placed. Node indices stay the file's, so skins and tracks need no remap.
+   - *Visibility:* each node's own `visible`; shown = its own AND every ancestor's (the spec's rule). Hides
+     meshes (and lights), never cameras. Static here: animating it needs `animation_pointer` (item 7).
+   - *Instancing:* each node's instance transforms, applied before its world (row-vector `instance * world`).
+     The non-instanced mesh is not drawn. A skinned instanced node is refused by name (the spec defines none).
+     Per instance mirroring: an instance's own negative scale flips its front face.
+   - *Cameras / lights:* the records and the node that carries each. Studio and `blix shot` can view through a
+     file's camera (`--camera`); nothing draws punctual lights yet — that is a lighting arc a consumer asks for.
+   - *Variants:* variant names and, per primitive, the material each variant maps it to. A resident `Model`
+     keeps every variant's material resolved, so switching is a lookup, not a reload.
+
+   **Done (format v18, recipe 16).** One rule for what a scene draws, on the cooked file
+   (`BlixMeshFile.Placement` / `DrawnPrimitives`), read by `ModelData` and the sky-visibility bake alike —
+   the bake had its own node walk and would have voxelised hidden, out-of-scene and un-instanced geometry.
+   `ModelData.Load(…, scene:)`, `IsPlaced`/`IsShown`/`DrawnWorlds`, `Cameras`/`Lights`/`Variants`,
+   `Primitive.MaterialFor(variant)`; `Model` uploads the placed scene only and carries each node's `Shown`,
+   `Instances`, camera and light, and every variant's material resolved (`Part.MaterialFor`). Studio draws
+   shown nodes, once per instance, in the chosen variant; `blix shot --scene/--variant/--camera`, the viewer's
+   *scene* panel (variant, view through a file camera), `blix inspect`'s *scene level*. Instruments:
+   Test.Recipes `SceneLevelMatchesGltf` (157 scenes, 6 hidden nodes, 125 instances from the raw accessors'
+   T·R·S, 6 cameras, 6 lights, 7 mapped primitives from the JSON), `SceneLevelReachesModelData`,
+   `FlattenKeepsFacesUnderMirrors` (a real control: with the fix off, 24/4228 mirrored triangles face right
+   and 12% of frames, against 4076/4228 and 71%≈76% unmirrored); nine lab modes (instancing, visibility,
+   scenes, scene0, camera-persp, camera-ortho, variant-beach, variant-street, lights). Corpus +3:
+   LightsPunctualLamp, DirectionalLight, MaterialsVariantsShoe.
+
+   **Found while looking at Sponza:** `ModelData.Flattened()` (Sponza's load path) bakes a node's world into
+   the vertices and, for a mirroring world, neither reversed the winding nor negated the tangent's `w`.
+   Sponza has no mirrored node (measured: 0 of 138 mesh nodes), so it never showed; any other flat consumer
+   would draw a mirrored part inside-out with its normal map's bitangent backwards.
+
+   **Sponza against 3b/3c, measured from its sources:** its culling already follows `doubleSided` per material
+   (single-sided → back-face culled, double-sided → unculled with `gl_FrontFacing` flipping N in the lit and
+   pre-pass shaders) — glTF's rule. Shadow casters are unculled on purpose (thin and two-sided casters). One
+   UV set read, no texture transform, one sampler (repeat, trilinear) — so 3c's per-channel sets, transforms
+   and samplers change nothing it draws today. 373 primitives carry an unread TEXCOORD_1 (lightmap UVs). Its
+   main file carries 24 KHR_lights_punctual lights (23 point, 1 sun, all authored at intensity 0) and six
+   cameras: the first real consumer for both, if Sponza wants its lamps or authored views.
 7. **Out of scope unless asked:** Draco, meshopt, KTX2/BasisU, WEB3D quantized (refused by name), morph
    targets and KHR_animation_pointer (recorded as unread), KHR_xmp (metadata).
 

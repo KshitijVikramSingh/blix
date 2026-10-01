@@ -102,7 +102,8 @@ public static class MeshRecipe
     // Version 12 reads sparse index accessors, identity inverse binds when a skin has none, and joints with
     // no common root, and refuses an index past the vertices. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
     // same format bumps this value.
-    public const uint MeshRecipeVersion = 15;
+    // Version 16 (format v18) writes the scene level: scenes, visibility, instances, cameras, lights, variants.
+    public const uint MeshRecipeVersion = 16;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false,
@@ -158,6 +159,7 @@ public static class MeshRecipe
 
         // Meshes, once per (glTF mesh, skin) pair: the vertices of a skinned placement address that
         // skin's bones, so the same glTF mesh placed skinned and unskinned is two meshes here.
+        var variants = MaterialVariants.Read(gltfPath);
         var meshes = new List<BlixMeshMesh>();
         var meshOf = new Dictionary<(int Mesh, int Skin), int>();
         var cookedNodes = nodes.ToArray();
@@ -172,8 +174,8 @@ public static class MeshRecipe
                 meshIndex = meshes.Count;
                 meshOf[key] = meshIndex;
                 var primitives = skinIndex < 0
-                    ? CookStaticMesh(model, node.Mesh, node, world, nodeOfLogical, flipTextureV, simplify, splitTriBudget, splitFoliage, splitMaxExtent)
-                    : CookSkinnedMesh(node.Mesh, remaps[skinIndex]);
+                    ? CookStaticMesh(model, node.Mesh, node, world, nodeOfLogical, flipTextureV, simplify, splitTriBudget, splitFoliage, splitMaxExtent, variants)
+                    : CookSkinnedMesh(node.Mesh, remaps[skinIndex], variants);
                 meshes.Add(new BlixMeshMesh(node.Mesh.Name ?? string.Empty, primitives, skinIndex));
                 primitiveCount += primitives.Count;
             }
@@ -207,7 +209,15 @@ public static class MeshRecipe
             outPath,
             new BlixMeshFile(
                 cookedNodes, meshes, CookMaterials(model, imageRows, patch, log), images, skins, clips,
-                Ignored: GltfImporter.UnreadAttributes(model).Select(i => new BlixMeshIgnored(i.Semantic, i.Primitives)).ToArray()),
+                Ignored: GltfImporter.UnreadAttributes(model).Select(i => new BlixMeshIgnored(i.Semantic, i.Primitives)).ToArray(),
+                Scenes: model.LogicalScenes
+                    .Select(sc => new BlixMeshScene(sc.Name ?? string.Empty, sc.VisualChildren.Select(r => nodeOfLogical[r.LogicalIndex]).ToArray()))
+                    .ToArray(),
+                // SharpGLTF reads an absent `scene` as scene 0; the spec leaves that choice to the client.
+                DefaultScene: model.DefaultScene?.LogicalIndex ?? -1,
+                Cameras: model.LogicalCameras.Select(CookCamera).ToArray(),
+                Lights: model.LogicalPunctualLights.Select(CookLight).ToArray(),
+                Variants: variants.Names),
             stamp);
         return primitiveCount;
     }
@@ -220,7 +230,7 @@ public static class MeshRecipe
     /// </remarks>
     private static List<BlixMeshPrimitive> CookStaticMesh(
         ModelRoot model, Mesh mesh, Node first, Matrix4x4[] world, int[] nodeOfLogical, bool flipTextureV,
-        SimplifyFn? simplify, int splitTriBudget, bool splitFoliage, float splitMaxExtent)
+        SimplifyFn? simplify, int splitTriBudget, bool splitFoliage, float splitMaxExtent, MaterialVariants variants)
     {
         var scale = model.LogicalNodes
             .Where(n => n.Mesh == mesh && n.Skin is null)
@@ -260,7 +270,8 @@ public static class MeshRecipe
                     IndexFormat: chunk.IndexFormat,
                     Lods: BuildLods(chunk, layout.Stride, simplify)
                         .Select(l => l with { Error = l.Error * scale })
-                        .ToArray()));
+                        .ToArray(),
+                    VariantMaterials: variants.For(prim)));
             }
         }
 
@@ -273,7 +284,7 @@ public static class MeshRecipe
     /// selection are the importer's. The second set and the colour are appended before tangents are
     /// generated, because generation re-welds and renumbers vertices.
     /// </remarks>
-    private static List<BlixMeshPrimitive> CookSkinnedMesh(Mesh mesh, int[] remap)
+    private static List<BlixMeshPrimitive> CookSkinnedMesh(Mesh mesh, int[] remap, MaterialVariants variants)
     {
         var primitives = new List<BlixMeshPrimitive>();
         for (var i = 0; i < mesh.Primitives.Count; i++)
@@ -290,7 +301,8 @@ public static class MeshRecipe
                 VertexCount: complete.VertexCount,
                 VertexBytes: complete.VertexBytes,
                 IndexFormat: complete.IndexFormat,
-                Lods: new[] { new BlixMeshLod(complete.Indices, complete.Indices32) }));
+                Lods: new[] { new BlixMeshLod(complete.Indices, complete.Indices32) },
+                VariantMaterials: variants.For(prim)));
         }
 
         return primitives;
@@ -358,9 +370,54 @@ public static class MeshRecipe
             .Select(n => new BlixMeshNode(
                 n.Name ?? $"node_{n.LogicalIndex}",
                 n.VisualParent is { } p ? map[p.LogicalIndex] : -1,
-                n.LocalMatrix))
+                n.LocalMatrix,
+                Visible: !n.TryGetVisibility(out var visible) || visible,
+                Instances: Instances(n),
+                CameraIndex: n.Camera?.LogicalIndex ?? -1,
+                LightIndex: n.PunctualLight?.LogicalIndex ?? -1))
             .ToList();
     }
+
+    // EXT_mesh_gpu_instancing: each instance's TRS, in the node's space. glTF defines none for a node
+    // without a mesh or with a skin, so the first is dropped as meaningless and the second refused.
+    private static Matrix4x4[]? Instances(Node node)
+    {
+        if (node.GetGpuInstancing() is not { Count: > 0 } instancing || node.Mesh is null) return null;
+        if (node.Skin is not null)
+        {
+            throw new InvalidDataException(
+                $"node '{node.Name}' is both skinned and instanced (EXT_mesh_gpu_instancing), which glTF does not define.");
+        }
+
+        var all = new Matrix4x4[instancing.Count];
+        for (var i = 0; i < all.Length; i++) all[i] = instancing.GetLocalMatrix(i);
+        return all;
+    }
+
+    private static BlixMeshCamera CookCamera(SharpGLTF.Schema2.Camera camera) => camera.Settings switch
+    {
+        SharpGLTF.Schema2.CameraOrthographic o => new BlixMeshCamera(
+            camera.Name ?? $"camera_{camera.LogicalIndex}", true, 0f, 0f, o.XMag, o.YMag, o.ZNear, o.ZFar),
+        SharpGLTF.Schema2.CameraPerspective p => new BlixMeshCamera(
+            camera.Name ?? $"camera_{camera.LogicalIndex}", false, p.VerticalFOV, p.AspectRatio ?? 0f, 0f, 0f, p.ZNear,
+            float.IsFinite(p.ZFar) && p.ZFar > 0f ? p.ZFar : float.PositiveInfinity),
+        _ => throw new InvalidDataException($"camera {camera.LogicalIndex} ('{camera.Name}') is neither perspective nor orthographic."),
+    };
+
+    private static BlixMeshLight CookLight(SharpGLTF.Schema2.PunctualLight light) => new(
+        light.Name ?? $"light_{light.LogicalIndex}",
+        light.LightType switch
+        {
+            SharpGLTF.Schema2.PunctualLightType.Directional => BlixMesh.LightDirectional,
+            SharpGLTF.Schema2.PunctualLightType.Point => BlixMesh.LightPoint,
+            _ => BlixMesh.LightSpot,
+        },
+        light.Color, light.Intensity,
+        // glTF: an absent range is infinite.
+        light.Range > 0f && float.IsFinite(light.Range) ? light.Range : float.PositiveInfinity,
+        light.LightType == SharpGLTF.Schema2.PunctualLightType.Spot ? light.InnerConeAngle : 0f,
+        light.LightType == SharpGLTF.Schema2.PunctualLightType.Spot ? light.OuterConeAngle : 0f);
+
 
     /// <summary>One animation, as keyframes.</summary>
     /// <remarks>
@@ -690,6 +747,7 @@ public static class MeshRecipe
         "KHR_materials_ior", "KHR_materials_specular", "KHR_materials_sheen", "KHR_materials_clearcoat",
         "KHR_materials_iridescence", "KHR_materials_anisotropy", "KHR_materials_dispersion",
         "KHR_materials_unlit", "KHR_materials_emissive_strength",
+        "KHR_node_visibility", "EXT_mesh_gpu_instancing", "KHR_lights_punctual", "KHR_materials_variants",
     };
 
     // Opens a source and refuses it, by name, when it requires an extension the reader does not read.
@@ -1289,7 +1347,7 @@ public static class MeshRecipe
         MaterialPatch? patch = null)
     {
         var header = CookedFile.TryReadHeader(outputPath);
-        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version17 }) return false;
+        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version18 }) return false;
         var stamp = header.Value.Stamp;
         if (!stamp.MatchesProducerAndSource(BlixMesh.ShippedRecipe, MeshRecipeVersion, sourcePath))
             return false;

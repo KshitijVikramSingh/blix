@@ -12,6 +12,14 @@ namespace Blix;
 /// Keep skinned meshes skinned, in the 80-byte layout skinned pipelines read. False reads them as static
 /// geometry at their bind pose, which is what a model view of a rigged file draws.
 /// </param>
+/// <summary>What a <c>KHR_lights_punctual</c> light is.</summary>
+public enum LightType
+{
+    Directional,
+    Point,
+    Spot,
+}
+
 public readonly record struct ModelNeeds(bool Tangents = false, bool Colour = false, bool Skinned = true);
 
 /// <summary>
@@ -32,11 +40,48 @@ public readonly record struct ModelNeeds(bool Tangents = false, bool Colour = fa
 /// </remarks>
 public sealed class ModelData
 {
-    /// <summary>A node of the scene graph. Mesh and skin are -1 where it has none.</summary>
-    public sealed record Node(string Name, int ParentIndex, Matrix4x4 Local, int MeshIndex, int SkinIndex);
+    /// <summary>A node of the scene graph. Mesh, skin, camera and light are -1 where it has none.</summary>
+    /// <param name="Visible">Its own <c>KHR_node_visibility</c> flag; whether it is shown also takes its ancestors' (<see cref="IsShown"/>).</param>
+    /// <param name="Instances">
+    /// <c>EXT_mesh_gpu_instancing</c>: the transform of each instance, applied before the node's world
+    /// (row-vector <c>instance * world</c>). Null for an ordinary node; an instanced mesh is never drawn
+    /// un-instanced.
+    /// </param>
+    public sealed record Node(
+        string Name, int ParentIndex, Matrix4x4 Local, int MeshIndex, int SkinIndex,
+        bool Visible = true, IReadOnlyList<Matrix4x4>? Instances = null, int CameraIndex = -1, int LightIndex = -1);
 
     /// <summary>One primitive of a mesh, in mesh space, with its material.</summary>
-    public sealed record Primitive(MeshData Mesh, PbrMaterial? Material, int MaterialIndex);
+    /// <param name="Variants">
+    /// <c>KHR_materials_variants</c>: per variant of the model, the material it gives this primitive, or null
+    /// to keep its own. Null when the model has no variants.
+    /// </param>
+    public sealed record Primitive(MeshData Mesh, PbrMaterial? Material, int MaterialIndex, IReadOnlyList<VariantMaterial?>? Variants = null)
+    {
+        /// <summary>The material <paramref name="variant"/> gives this primitive; its own for -1 or a variant that leaves it.</summary>
+        public VariantMaterial MaterialFor(int variant) =>
+            Variants is { } v && (uint)variant < (uint)v.Count && v[variant] is { } chosen ? chosen : new VariantMaterial(MaterialIndex, Material);
+    }
+
+    /// <summary>A material by its index in the file, resolved.</summary>
+    public sealed record VariantMaterial(int MaterialIndex, PbrMaterial? Material);
+
+    /// <summary>A glTF scene: the root nodes it places.</summary>
+    public sealed record Scene(string Name, IReadOnlyList<int> Roots);
+
+    /// <summary>A glTF camera, as authored; the node carrying it looks down its -Z with +Y up.</summary>
+    /// <param name="AspectRatio">The authored aspect, or 0 to take the viewport's.</param>
+    /// <param name="ZFar">The far plane; infinity for an infinite perspective projection.</param>
+    /// <param name="XMag">Orthographic half-width (0 for perspective).</param>
+    /// <param name="YMag">Orthographic half-height (0 for perspective).</param>
+    public sealed record Camera(
+        string Name, bool Orthographic, float YFov, float AspectRatio, float XMag, float YMag, float ZNear, float ZFar);
+
+    /// <summary>A <c>KHR_lights_punctual</c> light, as authored: what it is, not how it is shaded.</summary>
+    /// <param name="Intensity">Candela for point and spot, lux for directional.</param>
+    /// <param name="Range">Where its influence ends; infinity when the file gives none.</param>
+    public sealed record Light(
+        string Name, LightType Type, Vector3 Color, float Intensity, float Range, float InnerConeAngle, float OuterConeAngle);
 
     /// <summary>A mesh: primitives stored once, however many nodes place it.</summary>
     /// <param name="Skinned">Whether its vertices are skinned in this load (per <see cref="ModelNeeds.Skinned"/>).</param>
@@ -54,11 +99,23 @@ public sealed class ModelData
     public sealed record Attachment(int NodeIndex, int JointNode, int SkinIndex, int BoneIndex, Matrix4x4 Local);
 
     private Matrix4x4[]? world;
+    private readonly bool[] placed;
+    private readonly bool[] shown;
 
     private ModelData(
         IReadOnlyList<Node> nodes, IReadOnlyList<Mesh> meshes, IReadOnlyList<Skin> skins, IReadOnlyList<AnimationClip> clips,
-        IReadOnlyList<UnreadAttribute> ignored, string source, Skeleton? skeleton, IReadOnlyList<int> skeletonNodes, Matrix4x4 skeletonPlacement)
+        IReadOnlyList<UnreadAttribute> ignored, string source, Skeleton? skeleton, IReadOnlyList<int> skeletonNodes, Matrix4x4 skeletonPlacement,
+        IReadOnlyList<Scene> scenes, int defaultScene, int scene, IReadOnlyList<Camera> cameras, IReadOnlyList<Light> lights,
+        IReadOnlyList<string> variants)
     {
+        Scenes = scenes;
+        DefaultScene = defaultScene;
+        SceneIndex = scene;
+        Cameras = cameras;
+        Lights = lights;
+        Variants = variants;
+        (placed, shown) = BlixMeshFile.Placement(
+            nodes.Select(n => n.ParentIndex).ToArray(), nodes.Select(n => n.Visible).ToArray(), scene < 0 ? null : scenes[scene].Roots.ToArray());
         Skeleton = skeleton;
         SkeletonNodes = skeletonNodes;
         SkeletonPlacement = skeletonPlacement;
@@ -71,6 +128,44 @@ public sealed class ModelData
     }
 
     public IReadOnlyList<Node> Nodes { get; }
+
+    /// <summary>The file's scenes. Empty for a file with none, whose every root node is placed.</summary>
+    public IReadOnlyList<Scene> Scenes { get; }
+
+    /// <summary>The scene the file names as its default, or -1 when it has no scenes.</summary>
+    public int DefaultScene { get; }
+
+    /// <summary>The scene this load placed (-1: the file has none, so every root is placed).</summary>
+    public int SceneIndex { get; }
+
+    /// <summary>The file's cameras; a node carries one by <see cref="Node.CameraIndex"/>.</summary>
+    public IReadOnlyList<Camera> Cameras { get; }
+
+    /// <summary>The file's punctual lights; a node carries one by <see cref="Node.LightIndex"/>.</summary>
+    public IReadOnlyList<Light> Lights { get; }
+
+    /// <summary>The <c>KHR_materials_variants</c> names, in the file's order (<see cref="Primitive.MaterialFor"/>).</summary>
+    public IReadOnlyList<string> Variants { get; }
+
+    /// <summary>Whether node <paramref name="node"/> is in the scene this load placed.</summary>
+    /// <remarks>Every view here — flattened, attachments, skinned primitives, a resident model — takes only placed nodes.</remarks>
+    public bool IsPlaced(int node) => placed[node];
+
+    /// <summary>Whether node <paramref name="node"/> is placed and it and every ancestor are visible (<c>KHR_node_visibility</c>).</summary>
+    /// <remarks>A hidden node's meshes and lights are not drawn; its cameras still work.</remarks>
+    public bool IsShown(int node) => shown[node];
+
+    /// <summary>Every world node <paramref name="node"/>'s mesh is drawn at: its world, or one per instance.</summary>
+    public IEnumerable<Matrix4x4> DrawnWorlds(int node)
+    {
+        if (Nodes[node].Instances is not { } instances)
+        {
+            yield return World[node];
+            yield break;
+        }
+
+        foreach (var instance in instances) yield return instance * World[node];
+    }
 
     public IReadOnlyList<Mesh> Meshes { get; }
 
@@ -142,7 +237,7 @@ public sealed class ModelData
         for (var b = 0; b < SkeletonNodes.Count; b++) boneOfNode[SkeletonNodes[b]] = b;
         for (var n = 0; n < Nodes.Count; n++)
         {
-            if (Nodes[n].MeshIndex < 0 || Nodes[n].SkinIndex >= 0) continue;
+            if (Nodes[n].MeshIndex < 0 || Nodes[n].SkinIndex >= 0 || !placed[n]) continue;
             var local = Matrix4x4.Identity;
             var carrier = n;
             while (carrier >= 0 && !boneOfNode.ContainsKey(carrier))
@@ -169,7 +264,7 @@ public sealed class ModelData
     {
         for (var n = 0; n < Nodes.Count; n++)
         {
-            if (Nodes[n].SkinIndex != skin || Nodes[n].MeshIndex < 0) continue;
+            if (Nodes[n].SkinIndex != skin || Nodes[n].MeshIndex < 0 || !placed[n]) continue;
             foreach (var p in Meshes[Nodes[n].MeshIndex].Primitives) yield return p;
         }
     }
@@ -185,23 +280,35 @@ public sealed class ModelData
         return -1;
     }
 
-    /// <summary>Every primitive a node places, moved to that node's world: the scene as one flat list.</summary>
-    /// <remarks>A skinned mesh read skinned stays in mesh space here; only static vertices are moved.</remarks>
+    /// <summary>Every primitive a shown node places, moved to that node's world: the scene as one flat list.</summary>
+    /// <remarks>
+    /// <para>
+    /// A skinned mesh read skinned stays in mesh space here; only static vertices are moved. An instanced
+    /// node gives one primitive per instance (<see cref="DrawnWorlds"/>). Hidden nodes and nodes outside the
+    /// placed scene give none.
+    /// </para>
+    /// <para>
+    /// A mirroring world (negative determinant) reverses the winding, so the front face is still the one
+    /// glTF means, and negates the tangent's <c>w</c>, so the bitangent still follows the texture's v.
+    /// </para>
+    /// </remarks>
     public IEnumerable<(int NodeIndex, Primitive Primitive)> Flattened()
     {
         for (var n = 0; n < Nodes.Count; n++)
         {
-            if (Nodes[n].MeshIndex < 0) continue;
+            if (Nodes[n].MeshIndex < 0 || !shown[n]) continue;
             var mesh = Meshes[Nodes[n].MeshIndex];
+            foreach (var at in DrawnWorlds(n))
             foreach (var p in mesh.Primitives)
             {
-                yield return (n, mesh.Skinned || World[n].IsIdentity ? p : p with { Mesh = Moved(p.Mesh, World[n]) });
+                yield return (n, mesh.Skinned || at.IsIdentity ? p : p with { Mesh = Moved(p.Mesh, at) });
             }
         }
     }
 
     /// <summary>Reads a cooked model, its vertices in the layout <paramref name="needs"/> declares.</summary>
-    public static ModelData Load(string path, ModelNeeds needs = default)
+    /// <param name="scene">The scene to place; null for the file's default. Ignored by a file with no scenes.</param>
+    public static ModelData Load(string path, ModelNeeds needs = default, int? scene = null)
     {
         ArgumentNullException.ThrowIfNull(path);
         if (!path.EndsWith(".blixmesh", StringComparison.OrdinalIgnoreCase))
@@ -233,12 +340,22 @@ public sealed class ModelData
                     new MeshData(p.Name, bytes, lod0.Indices16 ?? Array.Empty<ushort>(), layout, bounds,
                         Indices32: lod0.Indices32, Lods: lods),
                     CookedMaterials.MaterialFromCooked(file.MaterialTable, p.MaterialIndex, materialCache, textureCache, path),
-                    p.MaterialIndex);
+                    p.MaterialIndex,
+                    p.VariantMaterials?.Select(v => v < 0 ? null : new VariantMaterial(
+                        v, CookedMaterials.MaterialFromCooked(file.MaterialTable, v, materialCache, textureCache, path))).ToArray());
             }).ToArray();
             return new Mesh(m.Name, primitives, m.SkinIndex, skinned);
         }).ToArray();
 
-        var nodes = file.Nodes.Select(n => new Node(n.Name, n.ParentIndex, n.LocalTransform, n.MeshIndex, n.SkinIndex)).ToArray();
+        var nodes = file.Nodes.Select(n => new Node(
+            n.Name, n.ParentIndex, n.LocalTransform, n.MeshIndex, n.SkinIndex, n.Visible, n.Instances, n.CameraIndex, n.LightIndex)).ToArray();
+        var scenes = file.SceneTable.Select(s => new Scene(s.Name, s.Roots)).ToArray();
+        if (scene is { } asked && file.SceneTable.Count > 0 && (uint)asked >= (uint)file.SceneTable.Count)
+        {
+            throw new AssetImportException(path, null, $"scene {asked} was asked for, and the file has {file.SceneTable.Count}");
+        }
+
+        var placedScene = file.SceneFor(scene);
         var worlds = ComposeWorld(nodes);
         var skins = file.SkinTable.Select(s =>
         {
@@ -282,8 +399,16 @@ public sealed class ModelData
                 Recipe: file.Cooked?.Stamp.Recipe));
         }
 
-        return new ModelData(nodes, meshes, skins, clips, ignored, path, skeleton, skeletonNodes, skeletonPlacement);
+        return new ModelData(
+            nodes, meshes, skins, clips, ignored, path, skeleton, skeletonNodes, skeletonPlacement,
+            scenes, file.DefaultScene, placedScene,
+            file.CameraTable.Select(c => new Camera(c.Name, c.Orthographic, c.YFov, c.AspectRatio, c.XMag, c.YMag, c.ZNear, c.ZFar)).ToArray(),
+            file.LightTable.Select(l => new Light(
+                l.Name, l.Type switch { BlixMesh.LightDirectional => LightType.Directional, BlixMesh.LightPoint => LightType.Point, _ => LightType.Spot },
+                l.Color, l.Intensity, l.Range, l.InnerConeAngle, l.OuterConeAngle)).ToArray(),
+            file.VariantTable);
     }
+
 
     // The animated hierarchy: every skin's joints and every tracked node. Skin 0's own skeleton when that
     // is all it is; otherwise one skeleton over the set in node order (the cook writes parents first).
@@ -347,6 +472,7 @@ public sealed class ModelData
     {
         var bytes = (byte[])mesh.VertexBytes.Clone();
         var normalMatrix = GraphicsMatrices.NormalMatrix(world);
+        var mirrors = world.GetDeterminant() < 0f;
         var stride = mesh.Layout.Stride;
         var tangentAt = mesh.Layout.Attributes.FirstOrDefault(a => a.Format == VertexAttributeFormat.Float4)?.Offset ?? -1;
         var min = new Vector3(float.MaxValue);
@@ -367,8 +493,30 @@ public sealed class ModelData
             var t = Vector3.TransformNormal(new Vector3(floats[t0], floats[t0 + 1], floats[t0 + 2]), world);
             if (t.LengthSquared() > 1e-12f) t = Vector3.Normalize(t);
             floats[t0] = t.X; floats[t0 + 1] = t.Y; floats[t0 + 2] = t.Z;
+            // cross(Mn, Mt) = det(M) * M^-T cross(n, t): a mirror turns the bitangent round, and w puts it back.
+            if (mirrors) floats[t0 + 3] = -floats[t0 + 3];
         }
 
-        return mesh with { VertexBytes = bytes, Bounds = mesh.VertexCount > 0 ? new Geometry.Bounds3(min, max) : mesh.Bounds };
+        var moved = mesh with { VertexBytes = bytes, Bounds = mesh.VertexCount > 0 ? new Geometry.Bounds3(min, max) : mesh.Bounds };
+        if (!mirrors) return moved;
+
+        // Mirrored positions turn every triangle's winding round; reversing each triangle turns it back.
+        return moved with
+        {
+            Indices = Reversed(mesh.Indices),
+            Indices32 = mesh.Indices32 is { } i32 ? Reversed(i32) : null,
+            Lods = mesh.Lods?.Select(l => l with
+            {
+                Indices16 = l.Indices16 is { } a ? Reversed(a) : null,
+                Indices32 = l.Indices32 is { } b ? Reversed(b) : null,
+            }).ToArray(),
+        };
+    }
+
+    private static T[] Reversed<T>(T[] triangles)
+    {
+        var result = (T[])triangles.Clone();
+        for (var i = 0; i + 2 < result.Length; i += 3) (result[i + 1], result[i + 2]) = (result[i + 2], result[i + 1]);
+        return result;
     }
 }
