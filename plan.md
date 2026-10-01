@@ -387,6 +387,12 @@ clean diff and acceptance story of its own.
     three labels were reworded to what their refusals say.
   - A renderer-support table measured apart from reader support: a `PbrMaterial` field existing is not the
     extension being drawn.
+    **Done:** `docs/renderer.md` "glTF materials: read versus drawn". Studio MEASURED by
+    `tools/studio-material-support.sh` (strip one extension, shoot both, byte-compare; CONTROL the materials painted red
+    must differ): it draws emissive_strength, texture transforms and a second UV set, and ignores the other eleven,
+    unlit included (an unlit material is lit). Sponza TRACED (packed in SponzaLoop.Scene and read by lit.frag):
+    emissive strength, transmission and sheen factors, diffuse transmission's factor, colour and colour texture.
+    The first name-grep of Sponza missed every `ext.*` read: the trace is the slot the shader reads, not the name.
 
 - **Later, as their own arcs:** morph targets (deformation + a `weights` clip channel), then
   `KHR_animation_pointer` (not forced into skeletal animation). A skin that mirrors only some joints of one

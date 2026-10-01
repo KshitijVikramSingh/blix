@@ -476,6 +476,46 @@ When a Sponza result is ready to promote, move the reusable mechanism or shader
 vocabulary into an engine project, give it another credible consumer, and leave
 Sponza with only the scene-specific composition and policy.
 
+## glTF materials: read versus drawn
+
+The reader stores every `KHR_materials_*` extension's values on `PbrMaterial`
+(`PbrMaterialExtensions`), and each renderer decides which it draws. A field
+existing is not the extension being drawn, so the two columns below are
+established separately, and say how.
+
+- **Studio is measured** by `tools/studio-material-support.sh`. For each
+  extension, a corpus asset is shot as authored and with the extension stripped,
+  and the renders are compared byte for byte (Studio's are deterministic). The
+  control is the same asset with the extension's materials painted red, which
+  must differ; otherwise the row is reported as unmeasured.
+- **Sponza is traced**, because its renderer draws only its own pack. A value
+  counts as drawn when `SponzaLoop.Scene` packs it and `lit.frag` reads that
+  slot. A name search alone missed half of these reads.
+
+| Extension | Read | Studio (measured) | Sponza (traced) |
+| --- | --- | --- | --- |
+| `KHR_materials_emissive_strength` | yes | **draws** | **draws** (`uEmissiveFactor.a`) |
+| `KHR_materials_transmission` | yes | ignores | **draws the factor**, as Fresnel glass through the blend pipeline; the texture is not read |
+| `KHR_materials_volume` | yes | ignores | ignores (stated above: a response needs a transmission pass) |
+| `KHR_materials_ior` | yes | ignores | ignores |
+| `KHR_materials_clearcoat` | yes | ignores | ignores |
+| `KHR_materials_sheen` | yes | ignores | **draws the colour and roughness factors**; the textures are not read |
+| `KHR_materials_specular` | yes | ignores | ignores |
+| `KHR_materials_iridescence` | yes | ignores | ignores |
+| `KHR_materials_anisotropy` | yes | ignores | ignores |
+| `KHR_materials_diffuse_transmission` | yes | ignores | **draws the factor, colour factor and colour texture**; the factor texture is not read |
+| `KHR_materials_dispersion` | yes | ignores | ignores |
+| `KHR_materials_unlit` | yes | **ignores: an unlit material is lit** | ignores |
+| `KHR_texture_transform` | yes | **draws**, every core channel, including the normal map's frame | ignores: the pack has none, and the loader does not read them |
+| A second UV set (`texCoord: 1`) | yes | **draws** | ignores: samples set 0 |
+
+Two of these will mislead a user, and are worth knowing before a bug report.
+Studio draws a `KHR_materials_unlit` material **lit**. And Studio draws
+transmissive glass as its alpha mode alone says, with no transmission at all:
+it is the inspection renderer, and its transmission column is empty. Either is a renderer's choice, as everything in
+this table is. What the table guarantees is that the choice is written down and
+re-measurable, not inferred from a `PbrMaterial` field.
+
 ## Technique ownership at a glance
 
 | Scope | Current examples |
