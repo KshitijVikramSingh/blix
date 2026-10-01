@@ -10,11 +10,9 @@ namespace Blix.Runtime.Silk;
 /// Answers "what is under the cursor" by drawing every selectable into the one pixel under it.
 /// </summary>
 /// <remarks>
-/// <b>What Unity, Unreal and Blender do, for the reason they do it.</b> Selectables used to be picked by
-/// ray-testing their bounds, and a box says where a thing might be, not where its surface is: in Sponza a
-/// click on a tree against the sky crossed 52 boxes, and the nearest was the air under a vaulted ceiling.
-/// This draws the geometry itself, with an ID per selectable written into an RGBA8 target, and reads
-/// back the pixel: the nearest surface there, exactly, with no box and no ray.
+/// <b>What Unity, Unreal and Blender do, for the reason they do it:</b> a box says where a thing might be,
+/// not where its surface is. This draws the geometry itself, with an ID per selectable written into an
+/// RGBA8 target, and reads back the pixel: the nearest surface there, exactly, with no box and no ray.
 /// <para>
 /// <b>One pixel, not a picture.</b> The target is 1x1, and each draw's matrix carries the pixel crop
 /// (<see cref="ViewPicking.PixelCrop"/>), so the rasteriser samples only the cursor's pixel centre and

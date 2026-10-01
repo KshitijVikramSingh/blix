@@ -9,10 +9,8 @@ namespace Blix.Diagnostics;
 // of signal that should be one glance away in the overlay's Stats tab.
 //
 // Registered by the host whenever diagnostics are live, ahead of the loop, so
-// every application gets it without asking. It used to be opt-in through a
-// RegisterDebug extension, which two of fifteen applications called; the
-// others either went without or copied the vendor and renderer into their
-// own values.
+// every application gets the device's vendor, renderer, version, errors and
+// arena use without asking, and none needs to copy them into its own values.
 public sealed class GraphicsDeviceContributor : IDebuggable
 {
     private readonly IGraphicsDevice device;

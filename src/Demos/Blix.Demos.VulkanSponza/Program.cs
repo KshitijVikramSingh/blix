@@ -799,15 +799,20 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private readonly List<byte[]> maskPushPool = new();
     private int maskPushCursor;
 
-    // Camera + input. Yaw 0 = looking down -Z; positive X is "right".
-    // Initial pose aims at the +X end-wall lavabo (wall fountain) so the
-    // sculpture is in the first frame, useful for normal-map debugging.
-    private Vector3 cameraPosition = new(-9f, 3f, 0f);
-    private Vector3 cameraForward = Vector3.UnitX;
-    private float camYaw = MathF.PI / 2f;
-    private float camPitch;
+    // The engine's camera controller: look, orbit, fly, zoom, and --cam. The initial pose aims at the +X
+    // end-wall lavabo (wall fountain) so the sculpture is in the first frame, useful for normal-map
+    // debugging. The three names below are what the renderer reads; they are the controller's now.
+    private readonly CameraController camera = SponzaCamera();
+    private Vector3 cameraPosition => camera.Position;
+    private Vector3 cameraForward => camera.Forward;
+    private float fovYRadians => camera.FieldOfView;
     private float aspect = 16f / 9f;
-    private float fovYRadians = MathF.PI / 3f;
+
+    private static CameraController SponzaCamera()
+    {
+        var lens = new Camera3D { VerticalFieldOfView = MathF.PI / 3f, NearPlane = CameraNearPlane, FarPlane = CameraFarPlane };
+        return new CameraController(lens) { Position = new Vector3(-9f, 3f, 0f), Yaw = 90f, MoveSpeed = 4.5f };
+    }
     private float renderHeightPx = 810f; // updated on resize; drives screen-space-error LOD
     // Screen-space-error LOD threshold: a level is used when its baked geometric error projects to
     // no more than this many pixels at the viewing distance. About 1 px targets imperceptibility;
@@ -828,7 +833,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private static float FoliageLodMargin = 1f;
     private Vector3 foliageCentre;
     private bool foliageValid;
-    private bool mouseLook;
     // What a pick can land on, rebuilt after consolidation. The loop answers the engine's selection
     // and inspection hooks by handing them to it (below); the engine does the picking.
     private readonly SceneSelection sceneSelection = new();
@@ -1007,7 +1011,6 @@ internal sealed class RenderSettings
     // presentation default; lighting-strength overrides remain separately visible scene choices.
     [Tune(0.05f, 16f)] public float Exposure = 2.0f;
     [Tune]             public TonemapMode Tonemap = TonemapMode.AgX;
-    [Tune(0.3f, 60f)]  public float MoveSpeed = 4.5f;
     // Two pixels is the current cost/quality knee: 1 -> 2 px removed 22% of submitted geometry for
     // 1.5 ms, while 2 -> 4 px saved another 17% for only 0.56 ms. Use the exact LOD census when
     // retuning rather than relying on noisy frame time alone.

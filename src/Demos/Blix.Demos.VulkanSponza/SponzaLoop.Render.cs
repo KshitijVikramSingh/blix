@@ -1420,8 +1420,8 @@ internal sealed partial class SponzaLoop
 
     // --- live GPU pass cost ----------------------------------------------
     // The mean of the last 60 frames per pass, taken from the host's cumulative totals: the same window
-    // the overlay's Perf tab shows. It was an exponential average of Sponza's own; lifetime means include
-    // loading and respond too slowly for live controls.
+    // the overlay's Perf tab shows. A window rather than a lifetime mean, which includes loading and
+    // responds too slowly for live controls.
     private GpuPassWindow gpuPasses = new(FrameTimings.None);
 
     /// <summary>What the probe field actually holds, against what the inputs say it should.</summary>

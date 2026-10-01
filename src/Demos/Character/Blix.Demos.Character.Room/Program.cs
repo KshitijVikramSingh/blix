@@ -222,7 +222,6 @@ internal sealed class RoomLoop : IGameLoop, IDebuggable, IUiSource, IDisposable
             // A metre grid, so every claim in the panel has something to be read against: a 0.2 m
             // riser and a 0.3 m one are hard to tell apart by eye and trivial against a ruler.
             // Grid, bounds and normals are layers: the Layers tab switches them, and G and N do too.
-            // They were checkboxes on this loop's panel with their own keys beside them.
             if (debug.Draw.Layer("grid", key: Key.G))
             {
                 debug.Draw.Grid("grid", new Vector3(0f, 0.01f, 0f), 28f, 28, new GraphicsColor(0.35f, 0.38f, 0.42f, 1f));

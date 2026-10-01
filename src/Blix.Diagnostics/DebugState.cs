@@ -24,12 +24,9 @@ public sealed class DebugState
 
     /// <summary>Whether the diagnostics panels are on screen. The host owns the key that flips it.</summary>
     /// <remarks>
-    /// <b>One flag, where there were two.</b> An <c>Enabled</c> sat beside this one and the overlay drew
-    /// only when both were true, while the backtick key flipped only this one. So a run without
-    /// <c>--debug</c> had a key that did nothing, and four applications wrote <c>Enabled</c> from their
-    /// own field every frame (one with its own Cmd+C) to get an overlay at all. Where it starts is the
-    /// application's to say, once, through its host options (<c>Diagnostics</c>, which <c>--debug</c>
-    /// also sets); after that it is the viewer's.
+    /// <b>Where it starts is the application's; after that it is the viewer's.</b> The application says
+    /// once, through its host options (<c>Diagnostics</c>, which <c>--debug</c> also sets), and the
+    /// host's backtick key flips it from then on. Nothing else writes it.
     /// <para>
     /// It does not gate the producers: <c>Debug()</c> runs either way, so a dump taken with the panels
     /// hidden still says what the frame was. A producer that would rather not build controls nobody can
@@ -83,26 +80,21 @@ public sealed class DebugState
 
     /// <summary>Whether a recorded primitive reaches the screen.</summary>
     /// <remarks>
-    /// <b>The Layers tab was a panel of switches connected to nothing.</b> It listed every path drawn
-    /// and wrote <see cref="LayersEnabled"/>, and the line pass never asked, so unticking a layer
-    /// changed nothing on screen; the only thing it gated was <c>IDebugGeometrySource</c>, which no
-    /// producer implements. Every application that wanted a gizmo it could hide grew its own toggle
-    /// instead. This is the question the line pass asks now, per command.
+    /// <b>The question the line pass asks, per command.</b> The master switch first, then the layer the
+    /// command's path falls under (<see cref="LayersEnabled"/>, set from the Layers tab or a layer's key).
+    /// A gizmo an application wants to be able to hide needs only a path.
     /// <para>
-    /// The selection highlight answers to the master switch only. It is the system's reply to a click,
-    /// and a layer unticked by accident should not make a pick look like it missed.
+    /// The selection highlight (<see cref="DebugDrawCommand.Feedback"/>) answers to the master switch
+    /// only. It is the system's reply to a click, and a layer unticked by accident should not make a
+    /// pick look like it missed.
     /// </para>
     /// </remarks>
     public bool ShouldDraw(DebugDrawCommand command)
     {
         ArgumentNullException.ThrowIfNull(command);
         if (!ShowDebugDraw) return false;
-        return IsSelectionFeedback(command.Path) || IsPathVisible(command.Path);
+        return command.Feedback || IsPathVisible(command.Path);
     }
-
-    private static bool IsSelectionFeedback(string path) =>
-        path == DebugSystem.SelectionScope
-        || path.StartsWith(DebugSystem.SelectionScope + "/", StringComparison.Ordinal);
 
     // Returns true if the command at `path` should be rendered. Walks
     // the path's prefix ladder (e.g. "a/b/c" -> "a/b" -> "a") and

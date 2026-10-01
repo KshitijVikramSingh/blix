@@ -41,34 +41,15 @@ internal sealed partial class SponzaLoop
         var input = host.Input;
         ReadInput(input);
 
-        // Translation: WASD + Space/Ctrl. Sprint via Shift, or Cmd/Super — the latter was the only
-        // one of the two the Key enum could name when this was written.
-        var move = Vector3.Zero;
-        if (input[Key.W].Down) move += cameraForward;
-        if (input[Key.S].Down) move -= cameraForward;
-        var right = Vector3.Normalize(Vector3.Cross(cameraForward, Vector3.UnitY));
-        if (input[Key.D].Down) move += right;
-        if (input[Key.A].Down) move -= right;
-        if (input[Key.Space].Down) move += Vector3.UnitY;
-        if (input[Key.LeftControl].Down) move -= Vector3.UnitY;
-        var sprint = input[Key.LeftShift].Down || input[Key.RightShift].Down
-                     || input[Key.LeftSuper].Down || input[Key.RightSuper].Down;
-        var speed = sprint ? render.MoveSpeed * 3f : render.MoveSpeed;
-        if (move != Vector3.Zero)
-        {
-            cameraPosition += Vector3.Normalize(move) * speed * dt;
-        }
-
-        // Rotation: arrow keys (keyboard look — WASD already handles movement).
-        // Left/Right yaw, Up/Down pitch; matches the mouse-look sign convention.
+        // The engine's layout: right-drag looks (the wheel sets the speed meanwhile), WASD with Space and
+        // Ctrl flies, Shift or Cmd sprints, left-drag orbits, the wheel zooms. Arrow keys stay Sponza's:
+        // keyboard look, for when a hand is on the keys.
+        camera.DriveDefault(host, dt);
         const float lookSpeed = 1.8f; // rad/s
-        var look = lookSpeed * dt;
-        if (input[Key.Left].Down)  camYaw -= look;
-        if (input[Key.Right].Down) camYaw += look;
-        if (input[Key.Up].Down)    camPitch += look;
-        if (input[Key.Down].Down)  camPitch -= look;
-        var pitchLimit = MathF.PI / 2f - 0.01f;
-        camPitch = Math.Clamp(camPitch, -pitchLimit, pitchLimit);
+        var turn = new Vector2(
+            (input[Key.Right].Down ? 1f : 0f) - (input[Key.Left].Down ? 1f : 0f),
+            (input[Key.Up].Down ? 1f : 0f) - (input[Key.Down].Down ? 1f : 0f));
+        if (turn != Vector2.Zero) camera.Turn(turn.X * lookSpeed * dt, turn.Y * lookSpeed * dt);
 
         UpdateCamera();
     }
@@ -97,29 +78,23 @@ internal sealed partial class SponzaLoop
         // foliage and the cascade transitions all are, and an exterior orbit sees none of them.
         var radius = MathF.Min(skyVolumeSpan.X, skyVolumeSpan.Z) * 0.20f;
         var eyeY = centre.Y * 0.55f + skyVolumeMin.Y * 0.45f;
-        cameraPosition = new Vector3(
+        var eye = new Vector3(
             centre.X + MathF.Cos(angle) * radius,
             eyeY,
             centre.Z + MathF.Sin(angle) * radius);
 
         // Face inward to keep the measured subject in view. The moving camera position still sweeps
         // each fitted light frustum through the scene and exercises cascade updates.
-        var toCentre = centre - cameraPosition;
-        camYaw = MathF.Atan2(toCentre.X, -toCentre.Z);
-        camPitch = MathF.Atan2(toCentre.Y, new Vector2(toCentre.X, toCentre.Z).Length());
+        camera.LookAt(eye, centre);
         UpdateCamera();
     }
 
     private void UpdateCamera()
     {
-        var cp = MathF.Cos(camPitch);
-        cameraForward = Vector3.Normalize(new Vector3(
-            cp * MathF.Sin(camYaw),
-            MathF.Sin(camPitch),
-            -cp * MathF.Cos(camYaw)));
-        var view = Matrix4x4.CreateLookAt(cameraPosition, cameraPosition + cameraForward, Vector3.UnitY);
-        // Sponza atrium spans tens of metres; far plane needs to be generous.
-        var proj = GraphicsMatrices.CreatePerspectiveVulkan(fovYRadians, aspect, CameraNearPlane, CameraFarPlane);
+        // The controller's camera, whose view equals CreateLookAt(position, position + forward) (Test.Graphics BO.6).
+        // Sponza atrium spans tens of metres; the far plane is generous (SponzaCamera).
+        var view = camera.Camera.GetView();
+        var proj = camera.Camera.GetProjection(aspect);
         // Kept apart as well as combined: GTAO reconstructs VIEW space from depth, which needs the
         // projection alone, and returns a bent normal in world space, which needs the view alone.
         cameraView = view;
@@ -151,29 +126,7 @@ internal sealed partial class SponzaLoop
     /// <summary>Read the devices once per tick, at a point this loop chose.</summary>
     private void ReadInput(IInputState input)
     {
+        // The mouse, the cursor capture and the wheel are the camera controller's (Drive, in OnUpdate).
         if (input[Key.Escape].Pressed) host.RequestClose();
-
-        // Cursor capture follows the button rather than a bool kept in step with it.
-        var look = input[MouseButton.Right].Down;
-        if (look != mouseLook)
-        {
-            mouseLook = look;
-            host.SetCursorCaptured(look);
-        }
-
-        if (mouseLook && input.MouseDelta != Vector2.Zero)
-        {
-            const float sensitivity = 0.0035f;
-            camYaw += input.MouseDelta.X * sensitivity;
-            camPitch -= input.MouseDelta.Y * sensitivity;
-            var limit = MathF.PI / 2f - 0.01f;
-            camPitch = Math.Clamp(camPitch, -limit, limit);
-            UpdateCamera();
-        }
-
-        if (input.MouseWheel.Y != 0f)
-        {
-            render.MoveSpeed = Math.Clamp(render.MoveSpeed * (input.MouseWheel.Y > 0 ? 1.25f : 0.8f), 0.3f, 60f);
-        }
     }
 }

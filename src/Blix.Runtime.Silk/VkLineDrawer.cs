@@ -7,12 +7,9 @@ using Blix.Core;
 
 namespace Blix.Runtime.Silk;
 
-// Vulkan-native debug-line renderer used by Window to translate
-// debug.Draw.* commands into a real Pass on the swapchain. Mirrors the
-// shape of Blix.Render.DebugDraw but bypasses the GL-only
-// CreateShaderProgram(ShaderSources) path — pre-compiled SPIR-V from the
-// library's Shaders/ output dir feeds straight into the Vulkan backend's
-// CreateShaderProgramFromSpv.
+// The debug-line renderer the window uses to turn debug.Draw.* commands into
+// a real pass on each declared view's target, from this library's compiled
+// debugline shaders.
 //
 // Lines render WITHOUT depth test or write so they're always visible —
 // the right default for debug overlays. If depth-tested debug becomes

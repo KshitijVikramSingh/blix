@@ -51,13 +51,11 @@ internal sealed partial class SponzaLoop
     // Controls are read-back: the returned value feeds this frame's render.
     public void Debug(DebugContext debug)
     {
-        // The keys this loop handles itself (Camera.cs), listed with the overlay hidden too.
-        debug.Keys.Describe("WASD", "move");
-        debug.Keys.Describe("Space / LeftControl", "up / down");
-        debug.Keys.Describe("Shift", "held, move three times faster");
+        // The camera's layout and its pasteable pose (--cam, so an observed frame can be replayed by the
+        // headless measurement and capture paths), then the keys this loop handles itself. Listed with
+        // the overlay hidden too, so F12 dumps carry them.
+        camera.DescribeDefaultKeys(debug);
         debug.Keys.Describe("Arrows", "look around");
-        debug.Keys.Describe("Right-drag", "look around");
-        debug.Keys.Describe("Wheel", "move speed");
         debug.Keys.Describe(Key.Escape, "quit");
 
         // Read-only values run even with the overlay hidden so F12 captures remain self-describing.
@@ -67,14 +65,6 @@ internal sealed partial class SponzaLoop
 
         // Live tuning, grouped by scope. Controls are read-back: the returned
         // value feeds this frame's render (Debug() runs before OnRender).
-        using (debug.Scope("Camera"))
-        {
-            // Keep the camera value pasteable as --cam so an observed frame can be replayed by the
-            // headless measurement and capture paths.
-            debug.Values.Value("--cam", string.Create(System.Globalization.CultureInfo.InvariantCulture,
-                $"{cameraPosition.X:0.##},{cameraPosition.Y:0.##},{cameraPosition.Z:0.##}," +
-                $"{camYaw * 180f / MathF.PI:0.##},{camPitch * 180f / MathF.PI:0.##}"));
-        }
 
         using (debug.Scope("Sun"))
         {
@@ -165,7 +155,7 @@ internal sealed partial class SponzaLoop
         // Outlines every opaque primitive NOT at full detail, tinted by how coarse it is, and flashes
         // white the moment one switches level. The question this answers is not "how much does LOD
         // save" — the A/B answers that — but "which piece of wall was it". A layer that starts
-        // hidden, switched in the Layers tab; it used to be a "Show LOD levels" toggle of its own.
+        // hidden, switched in the Layers tab.
         //
         // Level 0 is deliberately not drawn: at a sane budget most of the scene is at full detail,
         // and outlining all of it would bury the handful of primitives the question is about.
@@ -221,8 +211,8 @@ internal sealed partial class SponzaLoop
             debug.Values.Value("probe-refresh", $"{rays} rays every {period:0}f");
         }
 
-        // Per-pass GPU time, the CPU split and what was submitted are the Perf tab's now: Sponza read the
-        // host's timing record for them when the overlay did not.
+        // Per-pass GPU time, the CPU split and what was submitted are on the Perf tab, from the host's
+        // timing record; the values here are Sponza's own.
 
         debug.Values.Value("shadow-map", $"{ShadowMapSizes[0]}/{ShadowMapSizes[1]}/{ShadowMapSizes[2]}");
         debug.Values.Value("splits-m", $"{cascadeSplits[1]:0}/{cascadeSplits[2]:0}/{cascadeSplits[3]:0}");

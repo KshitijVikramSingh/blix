@@ -8,7 +8,7 @@ namespace Blix.Diagnostics;
 // small (default 120 frames = 2s @ 60fps), so a linear scan is fine and
 // avoids a parallel dictionary that would have to stay in sync.
 //
-// Not thread-safe. All Push / read calls run on the GL thread.
+// Not thread-safe: Push and every read happen on the thread running the host's frame loop.
 public sealed class DebugFrameHistory
 {
     private readonly DebugFrame?[] ring;

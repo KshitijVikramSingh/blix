@@ -5,8 +5,8 @@ namespace Blix.Graphics;
 /// <b>A window, exactly, rather than a smoothed guess.</b> <see cref="IFrameTiming.GpuPassTotals"/> only ever
 /// grows, so the time a pass took over any span is the later total less the earlier one. Keep the last N
 /// snapshots and each pass's mean is that difference over its resolutions: a figure that can be stated
-/// ("mean of the last 60 frames") and compared across runs. Sponza computed an exponential average instead,
-/// which has neither property; the overlay and Sponza now both read one of these.
+/// ("mean of the last 60 frames") and compared across runs, which a smoothed average cannot. The overlay's
+/// Perf tab reads one; so can an application that shows a pass's cost beside its own controls.
 /// <para>
 /// It is display, not measurement. These are attribution: on a tile-based GPU (Apple, through MoltenVK) a
 /// pass's timestamps bracket its encoding rather than its tiled execution, so the passes need not sum to the

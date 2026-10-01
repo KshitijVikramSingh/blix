@@ -687,7 +687,7 @@ public static class Program
         t.Expect("and its mean is per resolution", Math.Abs(window.MeanMs - 2.0) < 1e-12, window.MeanMs.ToString());
         t.Expect("an empty window has a mean of zero, not NaN", new GpuPassTotal(0, 0).MeanMs == 0.0);
         // A window over the totals is the later total less the earlier one, per pass: exact, and stated
-        // as "the last N frames". It replaced an exponential average of Sponza's own.
+        // as "the last N frames".
         var fake = new FakeTiming();
         var gpu = new GpuPassWindow(fake, frames: 3);
         t.Expect("an unsampled window has nothing to say", gpu.ByCost().Count == 0 && gpu.MeanMs("lit") == 0.0);

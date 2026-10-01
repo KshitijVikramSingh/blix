@@ -5534,6 +5534,99 @@ static ShaderInterface MinimalShader() => new(new[]
         referencing.Count == 0, string.Join("; ", referencing));
 }
 
+// ============================================================================
+// Section BO — CameraController: one camera, looked, orbited, flown and zoomed.
+// ============================================================================
+//
+// The controller has one convention (yaw 0 down -Z turning to +X, pitch where it looks, up positive), and
+// these pin it: every saved --cam viewpoint depends on it meaning what it means in Sponza.
+{
+    static bool Near(Vector3 a, Vector3 b, float e = 1e-4f) => Vector3.Distance(a, b) < e;
+    var c = new CameraController(new Camera3D());
+    t.Expect("BO.1 yaw 0, pitch 0 looks down -Z", Near(c.Forward, -Vector3.UnitZ), c.Forward.ToString());
+    c.Yaw = 90f;
+    t.Expect("BO.1 yaw 90 turns towards +X", Near(c.Forward, Vector3.UnitX), c.Forward.ToString());
+    c.Yaw = 0f; c.Pitch = 30f;
+    t.Expect("BO.1 positive pitch looks up", c.Forward.Y > 0.49f && c.Forward.Y < 0.51f, c.Forward.ToString());
+
+    // Sponza's own formula, which its saved viewpoints were taken with.
+    var rng = new Random(3);
+    var worst = 0f;
+    for (var i = 0; i < 100; i++)
+    {
+        var yawDeg = rng.NextSingle() * 360f - 180f;
+        var pitchDeg = rng.NextSingle() * 170f - 85f;
+        c.Yaw = yawDeg; c.Pitch = pitchDeg;
+        var y = yawDeg * MathF.PI / 180f; var p = pitchDeg * MathF.PI / 180f;
+        var sponza = new Vector3(MathF.Cos(p) * MathF.Sin(y), MathF.Sin(p), -MathF.Cos(p) * MathF.Cos(y));
+        worst = MathF.Max(worst, Vector3.Distance(c.Forward, sponza));
+    }
+    t.Expect("BO.2 forward is Sponza's (cos p sin y, sin p, -cos p cos y) at any pose", worst < 1e-4f, $"worst {worst:E2}");
+
+    // A saved viewpoint from the yellow-vault investigation, exactly as it was written down.
+    var saved = new CameraController(new Camera3D());
+    saved.ReadArgs(AppArgs.Parse(new[] { "--cam", "9.04,8.27,0.76,-331.14,-8.94" }));
+    t.Expect("BO.3 a saved --cam is read in degrees and wrapped", saved.Pose == "9.04,8.27,0.76,28.86,-8.94", saved.Pose);
+    var again = new CameraController(new Camera3D());
+    again.ReadArgs(AppArgs.Parse(new[] { "--cam", saved.Pose }));
+    t.Expect("BO.3 and the pose it reports reads back to the same camera", Near(again.Forward, saved.Forward) && again.Position == saved.Position);
+    t.ExpectThrows("BO.3 a --cam that is not five numbers is refused, naming it",
+        () => new CameraController(new Camera3D()).ReadArgs(AppArgs.Parse(new[] { "--cam", "1,2,3" })), mustMention: "--cam");
+
+    var o = new CameraController(new Camera3D());
+    o.LookAt(new Vector3(0, 2, 8), new Vector3(0, 1, 0));
+    t.Expect("BO.4 LookAt makes the target the pivot", Near(o.Pivot, new Vector3(0, 1, 0), 1e-3f), o.Pivot.ToString());
+    var pivot = o.Pivot;
+    o.Orbit(120f, 40f);
+    t.Expect("BO.4 orbiting keeps the pivot and the distance", Near(o.Pivot, pivot, 1e-3f) && Math.Abs(Vector3.Distance(o.Position, pivot) - o.Distance) < 1e-3f,
+        $"{o.Pivot} {o.Position}");
+    var eye = o.Position;
+    o.Look(30f, -10f);
+    t.Expect("BO.4 looking keeps the position and swings the pivot", o.Position == eye && !Near(o.Pivot, pivot, 1e-2f));
+    pivot = o.Pivot;
+    o.Zoom(2f);
+    t.Expect("BO.4 zooming closes on the pivot and keeps it", Near(o.Pivot, pivot, 1e-3f) && Vector3.Distance(o.Position, pivot) < Vector3.Distance(eye, pivot));
+    var before = o.Position;
+    o.Move(new Vector3(0, 0, 1), 1f);
+    t.Expect("BO.4 moving forward goes where the camera looks, at MoveSpeed", Near(o.Position - before, o.Forward * o.MoveSpeed, 1e-3f));
+
+    // The camera it drives agrees: the pivot projects to the middle of the picture.
+    var look = new CameraController(new Camera3D());
+    look.LookAt(new Vector3(3, 4, 5), new Vector3(-1, 0.5f, -2));
+    var clip = Vector4.Transform(new Vector4(look.Pivot, 1f), look.ViewProjection(16f / 9f));
+    t.Expect("BO.5 the pivot lands at the centre of the camera's picture",
+        MathF.Abs(clip.X / clip.W) < 1e-4f && MathF.Abs(clip.Y / clip.W) < 1e-4f && clip.W > 0f, $"{clip.X / clip.W}, {clip.Y / clip.W}");
+    t.Expect("BO.5 and a bad aspect cannot break the matrix", look.ViewProjection(0f) == look.ViewProjection(16f / 9f));
+
+    // The camera's view must equal Matrix4x4.CreateLookAt(position, position + forward, up), the view every
+    // captured Sponza frame and saved viewpoint was made with, or those frames move.
+    var same = 0f;
+    var poses = new Random(11);
+    var driven = new CameraController(new Camera3D());
+    for (var i = 0; i < 100; i++)
+    {
+        driven.Position = new Vector3(poses.NextSingle() * 20 - 10, poses.NextSingle() * 6, poses.NextSingle() * 10 - 5);
+        driven.Yaw = poses.NextSingle() * 360f - 180f;
+        driven.Pitch = poses.NextSingle() * 170f - 85f;
+        var lookAt = Matrix4x4.CreateLookAt(driven.Position, driven.Position + driven.Forward, Vector3.UnitY);
+        var mine = driven.Camera.GetView();
+        for (var r = 0; r < 4; r++)
+            for (var col = 0; col < 4; col++)
+                same = MathF.Max(same, MathF.Abs(lookAt[r, col] - mine[r, col]));
+    }
+    t.Expect("BO.6 the camera's view is Sponza's CreateLookAt view at any pose", same < 1e-4f, $"worst {same:E2}");
+
+    // One path from pose to picture: a write that goes round the controller is caught at the next
+    // operation, instead of half taking effect (the camera moved, yaw and pitch did not).
+    var owned = new CameraController(new Camera3D());
+    owned.LookAt(new Vector3(0, 2, 6), Vector3.Zero);
+    owned.Camera.Transform.Position += Vector3.UnitX;
+    t.ExpectThrows("BO.7 a camera moved outside its controller is refused at the next operation",
+        () => owned.Orbit(10f, 0f), mustMention: "outside its CameraController");
+    t.Expect("BO.7 and Forward comes from the pose, not from whatever was written to the camera",
+        Vector3.Distance(owned.Forward, Vector3.Normalize(new Vector3(0, -2, -6))) < 1e-4f, owned.Forward.ToString());
+}
+
 t.PrintSummary();
 return t.Failed;
 

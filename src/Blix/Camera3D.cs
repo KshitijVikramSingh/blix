@@ -41,12 +41,13 @@ public sealed class Camera3D
 
     // Build a world-space Ray from a screen-pixel position. Screen coordinates use
     // top-left origin (screen Y grows downward, the window-system convention),
-    // which matches Vulkan's Y-down NDC, so the screen→NDC map needs no Y flip.
+    // which matches Blix's Y-down NDC (GraphicsMatrices.CreatePerspectiveVulkan), so the screen→NDC
+    // map needs no Y flip.
     // The returned ray's origin sits on the near plane and the direction points
     // away from the camera through the screen pixel toward the far plane.
     //
     // The view-projection is computed from the camera's current Transform + the
-    // viewport's aspect ratio, then inverted. The two Vulkan NDC z values
+    // viewport's aspect ratio, then inverted. The two NDC z values
     // (0 = near, 1 = far) get unprojected through the inverse, homogeneous-
     // divided, and subtracted to form the ray direction.
     public Ray ScreenPointToRay(float screenX, float screenY, float viewportWidth, float viewportHeight)
@@ -60,7 +61,7 @@ public sealed class Camera3D
             throw new ArgumentOutOfRangeException(nameof(viewportHeight), "Viewport height must be positive.");
         }
 
-        // Screen -> Vulkan NDC. NDC y points down, same as screen y — no flip.
+        // Screen -> NDC. In Blix's clip space NDC y points down, same as screen y — no flip.
         var ndcX = 2.0f * screenX / viewportWidth - 1.0f;
         var ndcY = 2.0f * screenY / viewportHeight - 1.0f;
 
@@ -74,7 +75,7 @@ public sealed class Camera3D
 
         // Engine row-vector form: Vector4.Transform applies v_row * M, which is
         // exactly what we need for unprojecting NDC through inv(viewProj).
-        // Vulkan clip depth is [0, 1]: near = 0, far = 1.
+        // Blix's clip depth is [0, 1]: near = 0, far = 1.
         var nearH = Vector4.Transform(new Vector4(ndcX, ndcY, 0.0f, 1.0f), inv);
         var farH  = Vector4.Transform(new Vector4(ndcX, ndcY, 1.0f, 1.0f), inv);
 

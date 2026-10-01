@@ -56,13 +56,14 @@ public static class ViewPicking
         var localY = pointer.Y - rect.Y;
         if (localX < 0f || localY < 0f || localX >= rect.Width || localY >= rect.Height) return null;
 
-        // Screen -> Vulkan NDC. NDC y points down, same as screen y — no flip, matching Camera3D.
+        // Screen -> NDC in Blix's clip space (GraphicsMatrices.CreatePerspectiveVulkan): NDC y points
+        // down, same as screen y, so there is no flip, matching Camera3D.
         var ndcX = 2.0f * localX / rect.Width - 1.0f;
         var ndcY = 2.0f * localY / rect.Height - 1.0f;
 
         if (!Matrix4x4.Invert(view.ViewProjection, out var inverse)) return null;
 
-        // Vulkan depth range is [0, 1], so the near plane is z = 0 and the far plane z = 1.
+        // Blix's depth range is [0, 1], so the near plane is z = 0 and the far plane z = 1.
         var near = Unproject(inverse, ndcX, ndcY, 0.0f);
         var far = Unproject(inverse, ndcX, ndcY, 1.0f);
 

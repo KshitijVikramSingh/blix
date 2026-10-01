@@ -67,9 +67,9 @@ public sealed class DebugDrawChannel
     /// <remarks>
     /// <b>Each rectangle is the right one.</b> <see cref="RenderFrameContext"/> is PHYSICAL pixels — 2x
     /// logical on a Retina display — and a pointer arrives in logical ones, which the host passes to
-    /// <see cref="DebugSystem.BeginFrame"/>. This used to take the framebuffer for both, which was fine
-    /// for drawing and off by the backing scale for a click; it did not matter while every application
-    /// built its own pick ray, and would have the moment the engine picked through it.
+    /// <see cref="DebugSystem.BeginFrame"/>. The logical rectangle is what a pick maps a pointer
+    /// through; taking the framebuffer for both would put a Retina click at twice its distance from the
+    /// corner.
     /// </remarks>
     public ViewDeclaration Declare(string name, Matrix4x4 viewProjection) =>
         context.State.Views.Declare(
@@ -132,8 +132,7 @@ public sealed class DebugDrawChannel
     /// <para>
     /// <paramref name="visible"/> is where the layer starts, and it is only read the first time: after
     /// that the switch is the viewer's. A layer declared hidden is listed in the Layers tab from the
-    /// first frame, before it has drawn anything, which is what replaces the "Show …" toggle an
-    /// application used to add for each gizmo it did not want on by default.
+    /// first frame, before it has drawn anything, so a gizmo that starts off needs no toggle of its own.
     /// </para>
     /// </remarks>
     /// <param name="key">A key that switches the layer, as its box in the Layers tab would.</param>
@@ -149,6 +148,13 @@ public sealed class DebugDrawChannel
 
         return context.State.ShowDebugDraw && context.State.IsPathVisible(path);
     }
+
+    // Set by the debug system while it draws the selection highlight, and only then: what marks a command
+    // as the system's reply to a pick (DebugDrawCommand.Feedback) rather than a path an app could also write.
+    internal bool EmittingFeedback { get; set; }
+
+    private void Add(DebugDrawCommand command) =>
+        commands.Add(EmittingFeedback ? command with { Feedback = true } : command);
 
     private void PopView() => scopes.Pop();
 
@@ -169,42 +175,42 @@ public sealed class DebugDrawChannel
 
     public void Line(string name, Vector3 a, Vector3 b, GraphicsColor color)
     {
-        commands.Add(new DebugDrawLine(context.BuildPath(name), color, CurrentView, a, b));
+        Add(new DebugDrawLine(context.BuildPath(name), color, CurrentView, a, b));
     }
 
     public void Aabb(string name, Vector3 min, Vector3 max, GraphicsColor color)
     {
-        commands.Add(new DebugDrawAabb(context.BuildPath(name), color, CurrentView, min, max));
+        Add(new DebugDrawAabb(context.BuildPath(name), color, CurrentView, min, max));
     }
 
     public void Grid(string name, Vector3 center, float size, int divisions, GraphicsColor color)
     {
-        commands.Add(new DebugDrawGrid(context.BuildPath(name), color, CurrentView, center, size, divisions));
+        Add(new DebugDrawGrid(context.BuildPath(name), color, CurrentView, center, size, divisions));
     }
 
     public void Frustum(string name, Matrix4x4 viewProjection, GraphicsColor color)
     {
-        commands.Add(new DebugDrawFrustum(context.BuildPath(name), color, CurrentView, viewProjection));
+        Add(new DebugDrawFrustum(context.BuildPath(name), color, CurrentView, viewProjection));
     }
 
     public void Sphere(string name, Vector3 center, float radius, GraphicsColor color, int segments = 24)
     {
-        commands.Add(new DebugDrawSphere(context.BuildPath(name), color, CurrentView, center, radius, segments));
+        Add(new DebugDrawSphere(context.BuildPath(name), color, CurrentView, center, radius, segments));
     }
 
     public void Plane(string name, Vector3 center, Vector3 normal, float size, GraphicsColor color)
     {
-        commands.Add(new DebugDrawPlane(context.BuildPath(name), color, CurrentView, center, normal, size));
+        Add(new DebugDrawPlane(context.BuildPath(name), color, CurrentView, center, normal, size));
     }
 
     public void Ray(string name, Vector3 origin, Vector3 direction, float length, GraphicsColor color)
     {
-        commands.Add(new DebugDrawRay(context.BuildPath(name), color, CurrentView, origin, direction, length));
+        Add(new DebugDrawRay(context.BuildPath(name), color, CurrentView, origin, direction, length));
     }
 
     public void Capsule(string name, Vector3 a, Vector3 b, float radius, GraphicsColor color, int segments = 16)
     {
-        commands.Add(new DebugDrawCapsule(context.BuildPath(name), color, CurrentView, a, b, radius, segments));
+        Add(new DebugDrawCapsule(context.BuildPath(name), color, CurrentView, a, b, radius, segments));
     }
 
     // Obb takes a transform that maps the unit cube [-1, 1]^3 into world
@@ -213,7 +219,7 @@ public sealed class DebugDrawChannel
     // — keeping the matrix-vs-tuple decision at the producer site.
     public void Obb(string name, Matrix4x4 transform, GraphicsColor color)
     {
-        commands.Add(new DebugDrawObb(context.BuildPath(name), color, CurrentView, transform));
+        Add(new DebugDrawObb(context.BuildPath(name), color, CurrentView, transform));
     }
 
     /// <summary>
@@ -240,29 +246,29 @@ public sealed class DebugDrawChannel
         // sink that is already holding it.
         var points = new Vector3[remembered.Count];
         for (var i = 0; i < points.Length; i++) points[i] = remembered[i];
-        commands.Add(new DebugDrawPolyline(path, color, CurrentView, points));
+        Add(new DebugDrawPolyline(path, color, CurrentView, points));
     }
 
     /// <summary>Draws an explicit path through space, remembering nothing.</summary>
     public void Polyline(string name, IReadOnlyList<Vector3> points, GraphicsColor color)
     {
         ArgumentNullException.ThrowIfNull(points);
-        commands.Add(new DebugDrawPolyline(context.BuildPath(name), color, CurrentView, points));
+        Add(new DebugDrawPolyline(context.BuildPath(name), color, CurrentView, points));
     }
 
     public void Cross(string name, Vector3 center, float size, GraphicsColor color)
     {
-        commands.Add(new DebugDrawCross(context.BuildPath(name), color, CurrentView, center, size));
+        Add(new DebugDrawCross(context.BuildPath(name), color, CurrentView, center, size));
     }
 
     public void Cone(string name, Vector3 apex, Vector3 axis, float length, float halfAngleRad, GraphicsColor color, int segments = 16)
     {
-        commands.Add(new DebugDrawCone(context.BuildPath(name), color, CurrentView, apex, axis, length, halfAngleRad, segments));
+        Add(new DebugDrawCone(context.BuildPath(name), color, CurrentView, apex, axis, length, halfAngleRad, segments));
     }
 
     public void Arrow(string name, Vector3 from, Vector3 to, GraphicsColor color)
     {
-        commands.Add(new DebugDrawArrow(context.BuildPath(name), color, CurrentView, from, to));
+        Add(new DebugDrawArrow(context.BuildPath(name), color, CurrentView, from, to));
     }
 
     // The arrays are held by reference for the lifetime of any frame
@@ -271,13 +277,13 @@ public sealed class DebugDrawChannel
     {
         ArgumentNullException.ThrowIfNull(vertices);
         ArgumentNullException.ThrowIfNull(edges);
-        commands.Add(new DebugDrawMeshWireframe(context.BuildPath(name), color, CurrentView, vertices, edges));
+        Add(new DebugDrawMeshWireframe(context.BuildPath(name), color, CurrentView, vertices, edges));
     }
 
     public void Normals(string name, IReadOnlyList<Vector3> positions, IReadOnlyList<Vector3> normals, float length, GraphicsColor color)
     {
         ArgumentNullException.ThrowIfNull(positions);
         ArgumentNullException.ThrowIfNull(normals);
-        commands.Add(new DebugDrawNormals(context.BuildPath(name), color, CurrentView, positions, normals, length));
+        Add(new DebugDrawNormals(context.BuildPath(name), color, CurrentView, positions, normals, length));
     }
 }

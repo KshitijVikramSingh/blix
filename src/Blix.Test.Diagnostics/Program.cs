@@ -1276,18 +1276,21 @@ var t = new TestRunner();
 }
 
 // -- Layers reach the screen: ShouldDraw is what the line pass asks ---------
-// The Layers tab wrote LayersEnabled and nothing that drew read it, so every switch in it was
-// connected to nothing. These are the answers the line pass now takes per command.
+// Guards the Layers tab being wired to what draws: these are the answers the line pass takes, per
+// command, from the switches the tab sets.
 {
     var state = new DebugState();
     var box = new DebugDrawAabb("physics/aabb/box-3", new GraphicsColor(0, 1, 0, 1), default, -Vector3.One, Vector3.One);
-    var pick = new DebugDrawAabb(DebugSystem.SelectionScope + "/bounds", new GraphicsColor(1, 0, 1, 1), default, -Vector3.One, Vector3.One);
+    var pick = new DebugDrawAabb(DebugSystem.SelectionScope + "/bounds", new GraphicsColor(1, 0, 1, 1), default, -Vector3.One, Vector3.One) { Feedback = true };
+    // A path that only SAYS selection is not feedback: the exemption is the flag, which only the system sets.
+    var impostor = new DebugDrawAabb(DebugSystem.SelectionScope + "/mine", new GraphicsColor(1, 1, 0, 1), default, -Vector3.One, Vector3.One);
     t.ExpectTrue("A primitive under no switch is drawn", state.ShouldDraw(box));
     state.LayersEnabled["physics/aabb"] = false;
     t.ExpectTrue("Unticking its layer stops it being drawn", !state.ShouldDraw(box));
     t.ExpectTrue("But not the selection highlight, which answers a click", state.ShouldDraw(pick));
     state.LayersEnabled[DebugSystem.SelectionScope] = false;
     t.ExpectTrue("Even when its own layer is unticked", state.ShouldDraw(pick));
+    t.ExpectTrue("While a draw that only has the path answers to that layer like any other", !state.ShouldDraw(impostor));
     state.LayersEnabled.Clear();
     state.ShowDebugDraw = false;
     t.ExpectTrue("The master switch stops everything, the highlight included",
@@ -1296,7 +1299,7 @@ var t = new TestRunner();
 }
 
 // -- Draw.Layer: a layer declared once, hidden by default if asked -----------
-// What replaces the "Show …" toggle an application added for each gizmo it did not want on by default.
+// A gizmo that starts hidden needs no toggle of its own: the layer is listed, switched and remembered.
 {
     var sys = new DebugSystem(historyCapacity: 4);
     bool Declare(bool visible)
@@ -1502,7 +1505,7 @@ var t = new TestRunner();
     t.ExpectTrue("Select sets path", sys.SelectedPath == "scene/foo/sub-3");
     t.ExpectTrue("Its bounds are the source's",
         sys.SelectedBounds is { } b && b.Min == new Vector3(-1) && b.Max == new Vector3(1));
-    // The highlight used to be a copy taken at the click, and stayed where a moving thing had been.
+    // Guards a highlight left behind where a moving thing was: bounds are asked, not copied at the click.
     mover.Bounds = new Bounds3(new Vector3(4), new Vector3(5));
     t.ExpectTrue("And follow it when it moves", sys.SelectedBounds is { } moved && moved.Min == new Vector3(4));
 
@@ -1624,6 +1627,21 @@ var t = new TestRunner();
     t.ExpectTrue("Highlight includes both AABB and Cross marker",
         sys.LatestFrame!.DrawCommands.Any(c => c is DebugDrawAabb a && a.Path == "selection/scene/foo") &&
         sys.LatestFrame!.DrawCommands.Any(c => c is DebugDrawCross x && x.Path == "selection/scene/foo/marker"));
+}
+
+// -- The selection scope is reserved, and the highlight is flagged, not named -
+{
+    var sys = new DebugSystem(historyCapacity: 4);
+    t.ExpectThrows("A contributor cannot be named for the system's selection scope",
+        () => sys.Register(new TestDebuggable(DebugSystem.SelectionScope)), mustMention: "selection");
+    sys.Register(new TestSelectable("scene", new DebugSelectable("scene/foo", new Bounds3(Vector3.Zero, Vector3.One), TestGeometry.None)));
+    sys.Select("scene/foo");
+    sys.BeginFrame(new RenderFrameContext(Width: 1, Height: 1));
+    using (sys.Current!.Draw.In("main", Matrix4x4.Identity)) sys.Run();
+    sys.EndFrame();
+    var cmds = sys.LatestFrame!.DrawCommands;
+    t.ExpectTrue("The highlight the system draws is flagged as feedback, every piece of it",
+        cmds.Count > 0 && cmds.All(c => c.Feedback), string.Join(", ", cmds.Select(c => $"{c.Path}:{c.Feedback}")));
 }
 
 // -- Snapshot captures SelectedPath -----------------------------------------
@@ -1789,8 +1807,8 @@ var t = new TestRunner();
 }
 
 // -- Keys: bound on controls, driven by the engine ---------------------------
-// Five applications kept private lists of Pressed checks. A key bound to a control does what clicking it
-// would, through the same pending slot, so the panel and the key never disagree.
+// A key bound to a control does what clicking it would, through the same pending slot, so the panel and
+// the key never disagree.
 {
     var sys = new DebugSystem(historyCapacity: 4);
     sys.DeclareHostKey("F12", "dump this frame");
