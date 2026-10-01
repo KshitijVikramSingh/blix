@@ -204,7 +204,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private Matrix4x4 viewProjection = Matrix4x4.Identity;
 
     private readonly string? modelPath;
-    private StudioModel? model;
+    private Model? model;
     private Matrix4x4 modelTransform = Matrix4x4.Identity;
 
     private readonly string? rigPath;
@@ -216,7 +216,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private readonly List<Vector3> rootPath = new();
     private Vector3 rootTravel;
     private float rigDrawnHeight = 3f;
-    private StudioRig? rig;
+    private Rig? rig;
     // <b>The same RigAnimation the viewer uses.</b> This tool had its own ClipPlayers, its own
     // BonePaletteSets and its own instance packing, and that class's header claimed both lab
     // executables used it. They did not, and the cost arrived when skins became plural: per-skin
@@ -363,7 +363,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         this.maskFalloff = maskFalloff;
         this.viewport = viewport;
         this.sequence = sequence;
-        instanceCount = Math.Clamp(instances, 1, StudioRig.MaxInstances);
+        instanceCount = Math.Clamp(instances, 1, StudioRenderer.MaxInstances);
         this.lockstep = lockstep;
         this.xray = xray;
         this.advance = advance;
@@ -428,7 +428,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // had opened — which reads as "the viewer is broken" rather than "that file is not a glTF".
         try
         {
-            model = StudioModel.Load(device, modelPath);
+            model = renderer.LoadModel(modelPath);
         }
         catch (AssetImportException refused)
         {
@@ -438,10 +438,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         var extent = model.LongestExtent;
         var scale = extent > 0.001f ? 3f / extent : 1f;
         modelTransform = Matrix4x4.CreateScale(scale)
-                         * Matrix4x4.CreateTranslation(0f, -model.BoundsMin.Y * scale, 0f);
+                         * Matrix4x4.CreateTranslation(0f, -model.Bounds.Min.Y * scale, 0f);
         Console.WriteLine(
             $"model: {Path.GetFileName(modelPath)} — {model.Nodes.Count} node(s), {model.Parts.Count} part(s), " +
-            $"{model.TexturedPartCount} textured ({model.TextureCount} image(s))");
+            $"{StudioInspection.TexturedParts(model)} textured ({StudioInspection.Images(model).Count} image(s))");
     }
 
     // Sampled ONCE, at load, and never advanced. A capture that ran the clock would produce a
@@ -452,7 +452,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
         try
         {
-            rig = StudioRig.Load(device, rigPath, renderer.SkinnedProgram);
+            rig = renderer.LoadRig(rigPath);
         }
         catch (AssetImportException refused)
         {
@@ -524,9 +524,9 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         var extent = rig.LongestExtent;
         var scale = extent > 0.001f ? 3f / extent : 1f;
         var rigBase = Matrix4x4.CreateScale(scale)
-                      * Matrix4x4.CreateTranslation(0f, -rig.BoundsMin.Y * scale, 0f);
+                      * Matrix4x4.CreateTranslation(0f, -rig.RestBounds.Min.Y * scale, 0f);
         rigTransform = rigBase;
-        rigDrawnHeight = MathF.Max(0.5f, (rig.BoundsMax.Y - rig.BoundsMin.Y) * scale);
+        rigDrawnHeight = MathF.Max(0.5f, (rig.RestBounds.Max.Y - rig.RestBounds.Min.Y) * scale);
 
         // <b>17 ms, and deliberately not a sixtieth.</b> A step that divides the clip length puts
         // every wrap exactly on a seam, where the piecewise travel walk has nothing to do — the line
@@ -621,7 +621,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             }
         }
 
-        StudioRig.ComputeBoneWorlds(rig.Skeleton, player.Pose, boneWorlds);
+        rig.Skeleton.ComputeBoneWorlds(player.Pose, boneWorlds);
 
         Console.WriteLine(
             $"rig: {Path.GetFileName(rigPath)} — {rig.Skeleton.BoneCount} bone(s), {rig.Clips.Count} clip(s), " +
@@ -690,7 +690,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
         if (rig is not null && animation is not null)
         {
-            for (var s = 0; s < animation!.SkinCount; s++) rig.UploadPalettes(animation.PalettesFor(s), s);
+            for (var s = 0; s < animation!.SkinCount; s++) renderer.UploadPalettes(rig, animation.PalettesFor(s), s);
         }
 
         // The panel camera looks from the opposite side, so a --viewport capture and a plain one of
@@ -776,7 +776,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // No travel folded in here: Pack moves each body by its own.
         animation.Pack(rigTransform, rowSpacing);
 
-        StudioRig.ComputeBoneWorlds(rig.Skeleton, animation.Driven.Posed, boneWorlds);
+        rig.Skeleton.ComputeBoneWorlds(animation.Driven.Posed, boneWorlds);
     }
 
     private void CaptureSequenceFrame()
@@ -864,7 +864,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             for (var i = 0; i < animation!.Placements.Count; i++)
             {
                 using var instanceScope = debug.Scope($"i{i}");
-                StudioRig.ComputeBoneWorlds(rig.Skeleton, animation[i].Posed, worlds);
+                rig.Skeleton.ComputeBoneWorlds(animation[i].Posed, worlds);
                 SkeletonGizmo.Draw(
                     debug,
                     rig.Skeleton,
@@ -913,7 +913,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         var size = MathF.Max(0.08f, model.LongestExtent * modelTransform.M11 * 0.1f);
         foreach (var node in model.Nodes)
         {
-            var world = node.WorldTransform * modelTransform;
+            var world = node.World * modelTransform;
             var origin = new Vector3(world.M41, world.M42, world.M43);
             // Mesh-bearing nodes only. The tank has 96 nodes and 11 meshes — the other 85 are
             // track links and wheel pivots, and a triad on each is noise rather than information.
@@ -930,15 +930,15 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                 new GraphicsColor(0.4f, 0.55f, 0.95f, 1f));
         }
 
-        var lo = Vector3.Transform(model.BoundsMin, modelTransform);
-        var hi = Vector3.Transform(model.BoundsMax, modelTransform);
+        var lo = Vector3.Transform(model.Bounds.Min, modelTransform);
+        var hi = Vector3.Transform(model.Bounds.Max, modelTransform);
         debug.Draw.Aabb("bounds", Vector3.Min(lo, hi), Vector3.Max(lo, hi),
             new GraphicsColor(0.9f, 0.85f, 0.4f, 1f));
     }
 
     // Instance i's clip: i steps along the rig's own list from whichever clip the subject is on.
     // In order rather than random, so two runs of the same arguments produce the same picture.
-    private static int ClipIndexFor(StudioRig rig, AnimationClip? subject, int instance)
+    private static int ClipIndexFor(Rig rig, AnimationClip? subject, int instance)
     {
         var start = 0;
         for (var i = 0; i < rig.Clips.Count; i++)
@@ -954,10 +954,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     // Rebuilt per call rather than cached, because Debug() runs a handful of times in a bounded run
     // and a 41-matrix walk is not worth a field. Cache it the day a capture has hundreds of bones.
 
-    private static Matrix4x4[] RestWorlds(StudioRig rig, ClipPlayer player)
+    private static Matrix4x4[] RestWorlds(Rig rig, ClipPlayer player)
     {
         var worlds = new Matrix4x4[rig.Skeleton.BoneCount];
-        StudioRig.ComputeBoneWorlds(rig.Skeleton, player.RestPose, worlds);
+        rig.Skeleton.ComputeBoneWorlds(player.RestPose, worlds);
         return worlds;
     }
 
@@ -1014,6 +1014,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         }
 
         var rgba = new byte[width * height * 4];
+        var lit = 0;
         for (var i = 0; i < width * height; i++)
         {
             var src = i * 8;
@@ -1040,9 +1041,15 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             rgba[dst + 1] = ToSrgbByte(g);
             rgba[dst + 2] = ToSrgbByte(b);
             rgba[dst + 3] = 255;
+            if (rgba[dst] >= 8 || rgba[dst + 1] >= 8 || rgba[dst + 2] >= 8) lit++;
         }
 
         PngWriter.WriteRgba8(path, rgba, width, height);
+
+        // How much of the picture is not black, so a reader can tell a capture of the scene from a
+        // capture of the debug lines alone. The stage's sky and ground fill every frame, so a
+        // stage capture far under full is a read-back that lost the scene, however stable its hash.
+        Console.WriteLine($"{Path.GetFileName(path)}: {lit * 100L / Math.Max(1, width * height)}% of pixels lit");
         return true;
     }
 
@@ -1056,8 +1063,6 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     public void Dispose()
     {
-        rig?.Dispose();
-        model?.Dispose();
         renderer.Dispose();
     }
 }

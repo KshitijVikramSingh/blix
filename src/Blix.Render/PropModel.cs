@@ -538,7 +538,7 @@ public sealed class PropModel : IDisposable
         var (indices, count) = mesh.Indices32 is { } wide
             ? (device.CreateIndexBuffer(wide, name: $"{mesh.Name}.ib"), wide.Length)
             : (device.CreateIndexBuffer(mesh.Indices, name: $"{mesh.Name}.ib"), mesh.Indices.Length);
-        return new Mesh(mesh.Name, vertices, indices, count, mesh.Bounds);
+        return new Mesh(mesh.Name, vertices, indices, count, mesh.Bounds, mesh.Layout);
     }
 
     private sealed class Part

@@ -15,7 +15,7 @@ namespace Blix.Tools.Studio;
 /// </remarks>
 public sealed class RigInstances : ITunable
 {
-    private readonly StudioRig rig;
+    private readonly Rig rig;
     private readonly RigAnimation[] bodies;
     private readonly BonePaletteSet[] palettesBySkin;
     private readonly List<Matrix4x4> placements = new();
@@ -23,16 +23,16 @@ public sealed class RigInstances : ITunable
     private readonly Matrix4x4[] scratchWorlds;
     private BonePaletteSet? poseCheck;
 
-    public RigInstances(StudioRig rig, int count)
+    public RigInstances(Rig rig, int count)
     {
         ArgumentNullException.ThrowIfNull(rig);
         this.rig = rig;
 
-        Count = Math.Clamp(count, 1, StudioRig.MaxInstances);
+        Count = Math.Clamp(count, 1, StudioRenderer.MaxInstances);
         bodies = new RigAnimation[Count];
         for (var i = 0; i < Count; i++) bodies[i] = new RigAnimation(rig);
 
-        palettesBySkin = rig.CreatePaletteSets(StudioRig.MaxInstances);
+        palettesBySkin = rig.CreatePaletteSets(StudioRenderer.MaxInstances);
         scratchWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
     }
 
@@ -95,7 +95,7 @@ public sealed class RigInstances : ITunable
     /// </remarks>
     public IReadOnlyList<Matrix4x4> BoneWorldsFor(int body)
     {
-        StudioRig.ComputeBoneWorlds(rig.Skeleton, bodies[body].Posed, scratchWorlds);
+        rig.Skeleton.ComputeBoneWorlds(bodies[body].Posed, scratchWorlds);
         return scratchWorlds;
     }
 
@@ -173,7 +173,7 @@ public sealed class RigInstances : ITunable
 
     private int CountDistinctPoses()
     {
-        poseCheck ??= new BonePaletteSet(rig.Skeleton.BoneCount, StudioRig.MaxInstances);
+        poseCheck ??= new BonePaletteSet(rig.Skeleton.BoneCount, StudioRenderer.MaxInstances);
         poseCheck.Reset();
         foreach (var body in bodies) poseCheck.Add(rig.Skeleton, body.Posed, Matrix4x4.Identity);
 

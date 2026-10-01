@@ -42,6 +42,6 @@ public static class GraphicsDeviceMeshExtensions
         // data.IndexCount, not data.Indices.Length: the same 32-bit case that broke the buffer
         // above would report zero indices here, and a zero-index draw renders nothing at all
         // rather than failing.
-        return new Mesh(meshName, vertexBuffer, indexBuffer, data.IndexCount, data.Bounds);
+        return new Mesh(meshName, vertexBuffer, indexBuffer, data.IndexCount, data.Bounds, data.Layout);
     }
 }

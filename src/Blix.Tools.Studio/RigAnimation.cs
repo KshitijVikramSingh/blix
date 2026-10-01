@@ -34,13 +34,13 @@ public enum PoseMode
 /// </remarks>
 public sealed class RigAnimation : ITunable
 {
-    private readonly StudioRig rig;
+    private readonly Rig rig;
     private readonly Matrix4x4[] boneWorlds;
     private readonly Matrix4x4[] restWorlds;
     private readonly Matrix4x4[] scratchWorlds;
     private ClipPlayer? secondary;
 
-    public RigAnimation(StudioRig rig)
+    public RigAnimation(Rig rig)
     {
         ArgumentNullException.ThrowIfNull(rig);
         this.rig = rig;
@@ -51,7 +51,7 @@ public sealed class RigAnimation : ITunable
         boneWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
         restWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
         scratchWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
-        StudioRig.ComputeBoneWorlds(rig.Skeleton, Subject.RestPose, restWorlds);
+        rig.Skeleton.ComputeBoneWorlds(Subject.RestPose, restWorlds);
     }
 
     /// <summary>The body the panel's transport, bone list and root-motion readout describe.</summary>
@@ -235,7 +235,7 @@ public sealed class RigAnimation : ITunable
         // animated AND applying the delta moves a travelling clip twice.
         if (DriveRoot) RootMotion.Strip(rig.Skeleton, Posed, Subject.RestPose);
 
-        StudioRig.ComputeBoneWorlds(rig.Skeleton, Posed, boneWorlds);
+        rig.Skeleton.ComputeBoneWorlds(Posed, boneWorlds);
     }
 
     /// <summary>A quaternion's turn magnitude in degrees.</summary>

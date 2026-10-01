@@ -19,13 +19,14 @@ layout(set = 0, binding = 0) uniform ShadowFrame {
     mat4 uLightViewProjection;
 };
 
-// 1024 = StudioRig.MaxBones (128) x StudioRig.MaxInstances (8). The literal is here because the
-// build's SPIR-V target does not pass -D, so this cannot be a define — which means the number
-// lives in two files. Blix.Test.Studio reads the reflected block size and fails if it stops
-// matching the C# constants; StudioRig owns the corresponding asset limit at load.
-layout(std430, set = 3, binding = 0) readonly buffer Bones {
-    mat4 m[1024];
-} bones;
+// The palettes: the engine's bone block at set 3 (skinning.glsl), sized here. Reflection reads an
+// unsized array as a zero-byte buffer, and the bone buffer is allocated at the reflected size, so the
+// capacity is a literal: 1024 = StudioRig.MaxBones (128) x StudioRig.MaxInstances (8). Blix.Test.Studio
+// reads the reflected block size and fails if it stops matching the C# constants; StudioRig rejects an
+// asset whose skin cannot fit before allocating its GPU resources. A short write is legal, so a small
+// rig uploads only its live palettes and the tail is never read.
+#define BLIX_BONE_CAPACITY 1024
+#include "skinning.glsl"
 
 // <b>Sixteen bytes, and no model matrix.</b> The unskinned caster pushes a mat4 because it has
 // to place its object; this one does not, because each instance's placement is already baked
@@ -49,10 +50,7 @@ void main()
 {
     int base = gl_InstanceIndex * int(uSkin.x);
 
-    mat4 skin = bones.m[base + int(aBoneIndices.x)] * aBoneWeights.x
-              + bones.m[base + int(aBoneIndices.y)] * aBoneWeights.y
-              + bones.m[base + int(aBoneIndices.z)] * aBoneWeights.z
-              + bones.m[base + int(aBoneIndices.w)] * aBoneWeights.w;
+    mat4 skin = blix_skin(aBoneIndices, aBoneWeights, base);
 
     vUv = aTexCoord;
 

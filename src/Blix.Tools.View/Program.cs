@@ -102,7 +102,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
     /// </remarks>
     public StudioTints Tints { get; } = new();
     private readonly string? modelPath;
-    private StudioModel? model;
+    private Model? model;
     private Matrix4x4 modelTransform = Matrix4x4.Identity;
 
     // What is selected and what a click selects. Its own class because picking has two genuinely
@@ -127,7 +127,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
     private readonly string? secondClip;
     private readonly int requestedInstances;
     private readonly PoseMode startMode;
-    private StudioRig? rig;
+    private Rig? rig;
     private RigInstances? session;
 
     private Matrix4x4 rigBase = Matrix4x4.Identity;
@@ -252,11 +252,17 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
     internal StudioRenderer Renderer => renderer;
 
 
-    internal StudioModel? Model => model;
+    internal Model? Model => model;
+
+    /// <summary>Where the model was read from; null without one.</summary>
+    internal string? ModelPath => model is null ? null : modelPath;
 
     internal Matrix4x4 ModelTransform => modelTransform;
 
-    internal StudioRig? Rig => rig;
+    internal Rig? Rig => rig;
+
+    /// <summary>Where the rig was read from; null without one.</summary>
+    internal string? RigPath => rig is null ? null : rigPath;
 
     internal RigInstances? Session => session;
 
@@ -396,7 +402,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         // had opened — which reads as "the viewer is broken" rather than "that file is not a glTF".
         try
         {
-            model = StudioModel.Load(device, modelPath);
+            model = renderer.LoadModel(modelPath);
         }
         catch (AssetImportException refused)
         {
@@ -412,18 +418,18 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         var extent = model.LongestExtent;
         var scale = extent > 0.001f ? 3f / extent : 1f;
         modelTransform = Matrix4x4.CreateScale(scale)
-                         * Matrix4x4.CreateTranslation(0f, -model.BoundsMin.Y * scale, 0f);
+                         * Matrix4x4.CreateTranslation(0f, -model.Bounds.Min.Y * scale, 0f);
 
-        foreach (var image in model.Images)
+        foreach (var image in StudioInspection.Images(model))
         {
             uiImages.Add((image.Name, host.RegisterUiTexture(image.Texture), image.Width, image.Height));
         }
 
         Console.WriteLine(
             $"model: {Path.GetFileName(modelPath)} — {model.Nodes.Count} node(s), {model.Parts.Count} part(s), " +
-            $"{model.TexturedPartCount} textured ({model.TextureCount} image(s)), " +
-            $"bounds {model.BoundsMin.X:0.00},{model.BoundsMin.Y:0.00},{model.BoundsMin.Z:0.00} .. " +
-            $"{model.BoundsMax.X:0.00},{model.BoundsMax.Y:0.00},{model.BoundsMax.Z:0.00}, " +
+            $"{StudioInspection.TexturedParts(model)} textured ({StudioInspection.Images(model).Count} image(s)), " +
+            $"bounds {model.Bounds.Min.X:0.00},{model.Bounds.Min.Y:0.00},{model.Bounds.Min.Z:0.00} .. " +
+            $"{model.Bounds.Max.X:0.00},{model.Bounds.Max.Y:0.00},{model.Bounds.Max.Z:0.00}, " +
             $"scaled x{scale:0.000}");
     }
 
@@ -442,7 +448,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
 
         try
         {
-            rig = StudioRig.Load(device, rigPath, renderer.SkinnedProgram);
+            rig = renderer.LoadRig(rigPath);
         }
         catch (AssetImportException refused)
         {
@@ -585,10 +591,10 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         var extent = rig.LongestExtent;
         rigScale = extent > 0.001f ? 3f / extent : 1f;
         rigBase = Matrix4x4.CreateScale(rigScale)
-                  * Matrix4x4.CreateTranslation(0f, -rig.BoundsMin.Y * rigScale, 0f);
+                  * Matrix4x4.CreateTranslation(0f, -rig.RestBounds.Min.Y * rigScale, 0f);
         rigTransform = rigBase;
 
-        foreach (var image in rig.Images)
+        foreach (var image in StudioInspection.Images(rig))
         {
             uiImages.Add((image.Name, host!.RegisterUiTexture(image.Texture), image.Width, image.Height));
         }
@@ -596,10 +602,10 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         Console.WriteLine(
             $"rig: {Path.GetFileName(rigPath)} — {rig.Skeleton.BoneCount} bone(s), {rig.Clips.Count} clip(s), " +
             $"{rig.Parts.Count} primitive(s), {rig.VertexCount} vertices, " +
-            $"bounds {rig.BoundsMin.Y:0.00}..{rig.BoundsMax.Y:0.00} tall, scaled x{rigScale:0.000}");
+            $"bounds {rig.RestBounds.Min.Y:0.00}..{rig.RestBounds.Max.Y:0.00} tall, scaled x{rigScale:0.000}");
     }
 
-    private static int NamedClip(StudioRig rig, string name)
+    private static int NamedClip(Rig rig, string name)
     {
         for (var i = 0; i < rig.Clips.Count; i++)
         {
@@ -615,7 +621,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         return 0;
     }
 
-    private static int PreferredClip(StudioRig rig, string[] names, int fallback)
+    private static int PreferredClip(Rig rig, string[] names, int fallback)
     {
         foreach (var wanted in names)
         {
@@ -709,7 +715,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
         // tank.glb's tracks reading whatever the buffer happened to hold.
         if (rig is not null && session is not null)
         {
-            for (var s = 0; s < session.SkinCount; s++) rig.UploadPalettes(session.PalettesFor(s), s);
+            for (var s = 0; s < session.SkinCount; s++) renderer.UploadPalettes(rig, session.PalettesFor(s), s);
         }
 
         // What this tool puts on the stage. Rebuilt per frame rather than cached, because the
@@ -981,7 +987,7 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
             for (var i = 0; i < model.Nodes.Count; i++)
             {
                 var node = model.Nodes[i];
-                var world = node.WorldTransform * modelTransform;
+                var world = node.World * modelTransform;
                 var origin = new Vector3(world.M41, world.M42, world.M43);
 
                 // A transform-only node is usually an armature or a rig pivot — terser, because a
@@ -1003,18 +1009,18 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
 
         if (!panels.ShowBounds) return;
 
-        var min = Vector3.Transform(model.BoundsMin, modelTransform);
-        var max = Vector3.Transform(model.BoundsMax, modelTransform);
+        var min = Vector3.Transform(model.Bounds.Min, modelTransform);
+        var max = Vector3.Transform(model.Bounds.Max, modelTransform);
         debug.Draw.Aabb("bounds", Vector3.Min(min, max), Vector3.Max(min, max),
             new GraphicsColor(0.9f, 0.85f, 0.4f, 0.9f));
 
         if (selection.Node >= 0 && selection.Node < model.Nodes.Count)
         {
             var node = model.Nodes[selection.Node];
-            if (node.PrimitiveCount > 0)
+            if (node.Bounds is { } nodeBounds)
             {
-                var lo = Vector3.Transform(node.BoundsMin, modelTransform);
-                var hi = Vector3.Transform(node.BoundsMax, modelTransform);
+                var lo = Vector3.Transform(nodeBounds.Min, modelTransform);
+                var hi = Vector3.Transform(nodeBounds.Max, modelTransform);
                 debug.Draw.Aabb("selected", Vector3.Min(lo, hi), Vector3.Max(lo, hi),
                     new GraphicsColor(1f, 1f, 1f, 1f));
             }
@@ -1131,8 +1137,6 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
     // Bulwark both take this route; this one had to crash first to join them.
     public void Dispose()
     {
-        rig?.Dispose();
-        model?.Dispose();
         renderer.Dispose();
     }
 }

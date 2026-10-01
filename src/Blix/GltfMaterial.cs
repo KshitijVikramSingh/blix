@@ -25,20 +25,25 @@ public sealed record GltfMaterial(
 
     /// <summary>Which TEXCOORD set <see cref="BaseColorTexture"/> samples. Almost always 0.</summary>
     /// <remarks>
-    /// glTF lets every texture on a material choose its coordinate set
-    /// independently, so this is a property of the CHANNEL rather than of the mesh or the material.
-    /// Only base colour is recorded because only base colour is sampled by anything here; the rest
-    /// of the channels keep their sets when something reads them.
+    /// glTF lets every texture on a material choose its coordinate set independently, so each core
+    /// channel records its own: a property of the CHANNEL rather than of the mesh or the material.
     /// </remarks>
     int BaseColorTexCoord,
-    // Tangent-space normal map. Null when the material has none -- the lit
-    // shader's NormalScale uniform doubles as "use this map at all" gate.
+    // Tangent-space normal map. Null when the material has none.
     GltfTexture? NormalTexture,
+    /// <summary>Which TEXCOORD set <see cref="NormalTexture"/> samples.</summary>
+    int NormalTexCoord,
+    /// <summary>
+    /// <c>normalTexture.scale</c>: the multiplier on the sampled normal's X and Y. 1 when unauthored.
+    /// </summary>
+    float NormalScale,
     // glTF packs metallic + roughness into one texture: G channel = roughness,
     // B channel = metallic. The PBR fragment shader samples this and multiplies
     // by the factors below. Materials without an explicit MR texture use a
     // default (R=0, G=128, B=0) so factors alone drive the BRDF.
     GltfTexture? MetallicRoughnessTexture,
+    /// <summary>Which TEXCOORD set <see cref="MetallicRoughnessTexture"/> samples.</summary>
+    int MetallicRoughnessTexCoord,
     float MetallicFactor,
     float RoughnessFactor,
     // Ambient-occlusion: glTF-spec R channel of the occlusion-roughness-metallic
@@ -47,6 +52,8 @@ public sealed record GltfMaterial(
     // point at the same GltfTexture and shaders should sample once. Strength is
     // the multiplier on `(1.0 - sample)` before applying.
     GltfTexture? OcclusionTexture,
+    /// <summary>Which TEXCOORD set <see cref="OcclusionTexture"/> samples.</summary>
+    int OcclusionTexCoord,
     float OcclusionStrength,
     // Emissive: additive radiance from the surface, in linear HDR. EmissiveTexture
     // is sRGB-encoded per spec (loader decodes); EmissiveFactor is linear-space.
@@ -54,6 +61,8 @@ public sealed record GltfMaterial(
     // EmissiveFactor that lets authors push emission >1.0 for visible-bloom
     // emissives. 1.0 is the spec default (no extension or factor=1).
     GltfTexture? EmissiveTexture,
+    /// <summary>Which TEXCOORD set <see cref="EmissiveTexture"/> samples.</summary>
+    int EmissiveTexCoord,
     Vector3 EmissiveFactor,
     float EmissiveStrength,
     // Alpha handling: OPAQUE (no test), MASK (binary discard at AlphaCutoff),

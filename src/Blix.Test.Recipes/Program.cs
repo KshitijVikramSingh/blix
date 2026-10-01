@@ -18,6 +18,95 @@ namespace Blix.Test.Recipes;
 //   fail, because a self-test that only ever prints is a self-test that only ever passes.
 public static class Program
 {
+    private static void AuthoredMaterialReachesBothPaths(TestRunner t)
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "blix-authored-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            // One indexed triangle: POSITION, NORMAL, TEXCOORD_0, TEXCOORD_1, three vertices each.
+            var floats = new float[]
+            {
+                0, 0, 0, 1, 0, 0, 0, 1, 0,          // POSITION
+                0, 0, 1, 0, 0, 1, 0, 0, 1,          // NORMAL
+                0, 0, 1, 0, 0, 1,                   // TEXCOORD_0
+                0, 0, 1, 0, 0, 1,                   // TEXCOORD_1
+            };
+            var bytes = new byte[floats.Length * 4 + 12];
+            Buffer.BlockCopy(floats, 0, bytes, 0, floats.Length * 4);
+            Buffer.BlockCopy(new uint[] { 0, 1, 2 }, 0, bytes, floats.Length * 4, 12);
+            File.WriteAllBytes(Path.Combine(temp, "tri.bin"), bytes);
+            // One image per channel: a cooked image carries one channel's role (sRGB or linear).
+            foreach (var channel in new[] { "base", "normal", "mr", "occlusion", "emissive" })
+            {
+                Blix.Graphics.Images.PngWriter.WriteRgba8(
+                    Path.Combine(temp, channel + ".png"), Enumerable.Repeat((byte)128, 4 * 4 * 4).ToArray(), 4, 4);
+            }
+
+            var gltf = Path.Combine(temp, "authored.gltf");
+            File.WriteAllText(gltf, """
+                {
+                  "asset": { "version": "2.0" },
+                  "scene": 0, "scenes": [ { "nodes": [ 0 ] } ],
+                  "nodes": [ { "mesh": 0 } ],
+                  "meshes": [ { "primitives": [ { "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2, "TEXCOORD_1": 3 }, "indices": 4, "material": 0 } ] } ],
+                  "buffers": [ { "uri": "tri.bin", "byteLength": 132 } ],
+                  "bufferViews": [
+                    { "buffer": 0, "byteOffset": 0, "byteLength": 36 },
+                    { "buffer": 0, "byteOffset": 36, "byteLength": 36 },
+                    { "buffer": 0, "byteOffset": 72, "byteLength": 24 },
+                    { "buffer": 0, "byteOffset": 96, "byteLength": 24 },
+                    { "buffer": 0, "byteOffset": 120, "byteLength": 12 }
+                  ],
+                  "accessors": [
+                    { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [ 0, 0, 0 ], "max": [ 1, 1, 0 ] },
+                    { "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3" },
+                    { "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2" },
+                    { "bufferView": 3, "componentType": 5126, "count": 3, "type": "VEC2" },
+                    { "bufferView": 4, "componentType": 5125, "count": 3, "type": "SCALAR" }
+                  ],
+                  "images": [ { "uri": "base.png" }, { "uri": "normal.png" }, { "uri": "mr.png" }, { "uri": "occlusion.png" }, { "uri": "emissive.png" } ],
+                  "textures": [ { "source": 0 }, { "source": 1 }, { "source": 2 }, { "source": 3 }, { "source": 4 } ],
+                  "materials": [ {
+                    "name": "authored",
+                    "pbrMetallicRoughness": {
+                      "baseColorTexture": { "index": 0, "texCoord": 1 },
+                      "metallicRoughnessTexture": { "index": 2, "texCoord": 0 }
+                    },
+                    "normalTexture": { "index": 1, "texCoord": 1, "scale": 0.5 },
+                    "occlusionTexture": { "index": 3, "texCoord": 1, "strength": 0.25 },
+                    "emissiveTexture": { "index": 4, "texCoord": 0 },
+                    "emissiveFactor": [ 1, 1, 1 ]
+                  } ]
+                }
+                """);
+
+            var fromSource = new Blix.GltfStaticImporter()
+                .Import(new AssetImportContext(AssetId.Parse("t/authored-src"), gltf)).Primitives[0].Material;
+            var cooked = Path.ChangeExtension(gltf, ".blixmesh");
+            MeshRecipe.CookToBlixMesh(gltf, cooked);
+            var fromCooked = new Blix.GltfStaticImporter()
+                .Import(new AssetImportContext(AssetId.Parse("t/authored-cooked"), cooked)).Primitives[0].Material;
+
+            foreach (var (path, m) in new[] { ("source", fromSource), ("cooked", fromCooked) })
+            {
+                t.Expect($"K-F.2 the {path} path reads the authored texture-coordinate sets",
+                    m is { BaseColorTexCoord: 1, NormalTexCoord: 1, MetallicRoughnessTexCoord: 0,
+                        OcclusionTexCoord: 1, EmissiveTexCoord: 0 },
+                    m is null ? "no material" :
+                        $"base {m.BaseColorTexCoord}, normal {m.NormalTexCoord}, mr {m.MetallicRoughnessTexCoord}, " +
+                        $"occlusion {m.OcclusionTexCoord}, emissive {m.EmissiveTexCoord}");
+                t.Expect($"K-F.2 the {path} path reads the authored normal scale and occlusion strength",
+                    m is { NormalScale: 0.5f, OcclusionStrength: 0.25f },
+                    m is null ? "no material" : $"scale {m.NormalScale}, strength {m.OcclusionStrength}");
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
+        }
+    }
+
     public static int Main()
     {
         var t = new TestRunner();
@@ -196,6 +285,118 @@ public static class Program
             t.ExpectThrows<InvalidDataException>(
                 "one logical image cannot claim incompatible material roles",
                 () => MeshRecipe.ReferencedImages(conflict));
+
+            // ── a patch states a normal map's convention, and the cook flips the image once ──
+            // Nothing in a file says a normal map is DirectX-convention (green down); Sponza ships 24
+            // of 30 that way inside glTF, which specifies green up. The patch declares it per
+            // material, and the cooked map comes out in glTF's convention.
+            var named = Path.Combine(referenceTemp, "named.gltf");
+            File.WriteAllText(named, """
+                {
+                  "asset": { "version": "2.0" },
+                  "images": [ { "uri": "shared.png" }, { "uri": "normal.png" } ],
+                  "textures": [ { "source": 0 }, { "source": 1 } ],
+                  "materials": [ {
+                    "name": "stone",
+                    "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } },
+                    "normalTexture": { "index": 1 }
+                  } ]
+                }
+                """);
+            var directXPatch = Path.Combine(referenceTemp, "directx.blixpatch");
+            File.WriteAllText(directXPatch, "material stone{1} normal=directx\n");
+            var flipped = MeshRecipe.ReferencedImages(named, MaterialPatch.Load(directXPatch));
+            t.ExpectTrue("a normal map its patch declares directx is referenced for a green flip",
+                flipped.Contains(new MeshRecipe.ReferencedImage("normal.png", TextureRole.Normal, FlipGreen: true)));
+            t.ExpectTrue("and the material's other images are not",
+                flipped.Contains(new MeshRecipe.ReferencedImage("shared.png", TextureRole.BaseColor)));
+            t.ExpectTrue("while without a patch the map is read as glTF's convention",
+                MeshRecipe.ReferencedImages(named).Contains(new MeshRecipe.ReferencedImage("normal.png", TextureRole.Normal)));
+
+            var openGlPatch = Path.Combine(referenceTemp, "opengl.blixpatch");
+            File.WriteAllText(openGlPatch, "material stone{1} normal=directx\nmaterial stone normal=opengl\n");
+            t.ExpectTrue("the last rule to state a material's convention wins",
+                MeshRecipe.ReferencedImages(named, MaterialPatch.Load(openGlPatch))
+                    .Contains(new MeshRecipe.ReferencedImage("normal.png", TextureRole.Normal)));
+
+            var badValue = Path.Combine(referenceTemp, "bad.blixpatch");
+            File.WriteAllText(badValue, "material stone normal=upside\n");
+            t.ExpectThrows<InvalidDataException>("a convention other than directx or opengl is refused",
+                () => MeshRecipe.ReferencedImages(named, MaterialPatch.Load(badValue)));
+
+            var sharedNormal = Path.Combine(referenceTemp, "shared-normal.gltf");
+            File.WriteAllText(sharedNormal, """
+                {
+                  "asset": { "version": "2.0" },
+                  "images": [ { "uri": "normal.png" } ],
+                  "textures": [ { "source": 0 } ],
+                  "materials": [
+                    { "name": "stone", "normalTexture": { "index": 0 } },
+                    { "name": "plaster", "normalTexture": { "index": 0 } }
+                  ]
+                }
+                """);
+            t.ExpectThrows<InvalidDataException>(
+                "one normal image declared directx by one material and not by another is refused",
+                () => MeshRecipe.ReferencedImages(sharedNormal, MaterialPatch.Load(directXPatch)));
+
+            var asCooked = Path.Combine(referenceTemp, "normal-as-is.blixtex");
+            var greenFlipped = Path.Combine(referenceTemp, "normal-flipped.blixtex");
+            var formatBefore = Environment.GetEnvironmentVariable("BLIX_COOK_FORMAT");
+            try
+            {
+                Environment.SetEnvironmentVariable("BLIX_COOK_FORMAT", "rgba8");
+                var normalPng = Path.Combine(referenceTemp, "normal.png");
+                TextureRecipe.CookOne(normalPng, asCooked, out _, out _, TextureRole.Normal);
+                TextureRecipe.CookOne(normalPng, greenFlipped, out _, out _, TextureRole.Normal, flipGreen: true);
+                var plain = Blix.Graphics.Images.BlixTexReader.Read(asCooked).MipBytes[0];
+                var inverted = Blix.Graphics.Images.BlixTexReader.Read(greenFlipped).MipBytes[0];
+                t.Expect("the flipped cook inverts green and only green",
+                    inverted[0] == plain[0] && inverted[1] == 255 - plain[1] && inverted[2] == plain[2],
+                    $"as cooked {plain[0]},{plain[1]},{plain[2]}; flipped {inverted[0]},{inverted[1]},{inverted[2]}");
+                t.ExpectTrue("a flipped texture is current only for a flipped cook",
+                    TextureRecipe.IsCurrent(normalPng, greenFlipped, TextureRole.Normal, flipGreen: true)
+                    && !TextureRecipe.IsCurrent(normalPng, greenFlipped, TextureRole.Normal));
+                t.ExpectThrows<InvalidDataException>("a green flip on anything but a normal map is refused",
+                    () => TextureRecipe.CookOne(normalPng, greenFlipped, out _, out _, TextureRole.BaseColor, flipGreen: true));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("BLIX_COOK_FORMAT", formatBefore);
+            }
+
+            // ── the convention measure is held to a map whose convention is known by construction ──
+            // A height field's gradient, written as an OpenGL (green up) normal map, must read opengl;
+            // the same map with green inverted must read directx; a flat map must read unclear rather
+            // than pick a side.
+            const int side = 128;
+            var known = new byte[side * side * 4];
+            for (var row = 0; row < side; row++)
+            for (var col = 0; col < side; col++)
+            {
+                // h = sin(u) * cos(v) bumps; slopes per pixel, with v measured UP the image.
+                var u = col * 0.2; var v = (side - row) * 0.15;
+                var dhdu = Math.Cos(u) * Math.Cos(v) * 0.2 * 3;
+                var dhdv = -Math.Sin(u) * Math.Sin(v) * 0.15 * 3;
+                var nx = -dhdu; var ny = -dhdv; var nz = 1.0;
+                var len = Math.Sqrt((nx * nx) + (ny * ny) + (nz * nz));
+                var at = ((row * side) + col) * 4;
+                known[at] = (byte)Math.Round(((nx / len) * 0.5 + 0.5) * 255);
+                known[at + 1] = (byte)Math.Round(((ny / len) * 0.5 + 0.5) * 255);
+                known[at + 2] = (byte)Math.Round(((nz / len) * 0.5 + 0.5) * 255);
+                known[at + 3] = 255;
+            }
+            var asMade = NormalMapConvention.Measure(known, side, side);
+            var greenDown = (byte[])known.Clone();
+            for (var i = 1; i < greenDown.Length; i += 4) greenDown[i] = (byte)(255 - greenDown[i]);
+            var greenDownReading = NormalMapConvention.Measure(greenDown, side, side);
+            var flat = Enumerable.Range(0, side * side).SelectMany(_ => new byte[] { 128, 128, 255, 255 }).ToArray();
+            t.Expect("a height field's gradient written green up measures opengl",
+                asMade.Verdict() == "opengl", $"opengl {asMade.OpenGlCurl:0.0000}, directx {asMade.DirectXCurl:0.0000}");
+            t.Expect("and the same map with green inverted measures directx",
+                greenDownReading.Verdict() == "directx", $"opengl {greenDownReading.OpenGlCurl:0.0000}, directx {greenDownReading.DirectXCurl:0.0000}");
+            t.Expect("while a flat map measures unclear rather than picking a side",
+                NormalMapConvention.Measure(flat, side, side).Verdict() == "unclear", "flat map took a side");
 
             var packaged = Path.Combine(referenceTemp, "out");
             t.Expect("cook asset refuses one destination with incompatible roles",
@@ -509,6 +710,11 @@ public static class Program
                     Same("MetallicFactor", a.MetallicFactor == b.MetallicFactor, a.MetallicFactor, b.MetallicFactor);
                     Same("RoughnessFactor", a.RoughnessFactor == b.RoughnessFactor, a.RoughnessFactor, b.RoughnessFactor);
                     Same("OcclusionStrength", a.OcclusionStrength == b.OcclusionStrength, a.OcclusionStrength, b.OcclusionStrength);
+                    Same("NormalScale", a.NormalScale == b.NormalScale, a.NormalScale, b.NormalScale);
+                    Same("NormalTexCoord", a.NormalTexCoord == b.NormalTexCoord, a.NormalTexCoord, b.NormalTexCoord);
+                    Same("MetallicRoughnessTexCoord", a.MetallicRoughnessTexCoord == b.MetallicRoughnessTexCoord, a.MetallicRoughnessTexCoord, b.MetallicRoughnessTexCoord);
+                    Same("OcclusionTexCoord", a.OcclusionTexCoord == b.OcclusionTexCoord, a.OcclusionTexCoord, b.OcclusionTexCoord);
+                    Same("EmissiveTexCoord", a.EmissiveTexCoord == b.EmissiveTexCoord, a.EmissiveTexCoord, b.EmissiveTexCoord);
                     Same("EmissiveFactor", a.EmissiveFactor == b.EmissiveFactor, a.EmissiveFactor, b.EmissiveFactor);
                     Same("EmissiveStrength", a.EmissiveStrength == b.EmissiveStrength, a.EmissiveStrength, b.EmissiveStrength);
                     Same("AlphaMode", a.AlphaMode == b.AlphaMode, a.AlphaMode, b.AlphaMode);
@@ -542,6 +748,14 @@ public static class Program
                 try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
             }
         }
+
+        // ── K-F.2: what a material authors reaches both load paths ────────────
+        // K-F compares the cooked path with the source path, which cannot see a value both read the
+        // same wrong way — and both did: occlusion strength was looked up by glTF's word "strength"
+        // where SharpGLTF names it "OcclusionStrength", so every material read 1. This authors each
+        // value, with the channels on DIFFERENT texture-coordinate sets so a swap between two of
+        // them fails too, and holds both paths to the file.
+        AuthoredMaterialReachesBothPaths(t);
 
         // ── and the debt is gone, which is the flag's whole point ───────────
         // SourceRequired was set on every .blixmesh from K-A onward. K-F narrowed it to image bytes;
@@ -1101,11 +1315,11 @@ public static class Program
         {
             var table = new[]
             {
-                new BlixMeshMaterial("glass", System.Numerics.Vector4.One, 0, 0f, 1f, 1f,
+                new BlixMeshMaterial("glass", System.Numerics.Vector4.One, 0, 0, 1f, 0, 0, 0, 0f, 1f, 1f,
                     System.Numerics.Vector3.Zero, 1f, BlixMesh.AlphaOpaque, 0.5f, false, 0f),
-                new BlixMeshMaterial("stone_wall_01", System.Numerics.Vector4.One, 0, 0.35f, 1f, 1f,
+                new BlixMeshMaterial("stone_wall_01", System.Numerics.Vector4.One, 0, 0, 1f, 0, 0, 0, 0.35f, 1f, 1f,
                     System.Numerics.Vector3.Zero, 1f, BlixMesh.AlphaOpaque, 0.5f, false, 0f),
-                new BlixMeshMaterial("stone_trims_01", System.Numerics.Vector4.One, 0, 0.35f, 1f, 1f,
+                new BlixMeshMaterial("stone_trims_01", System.Numerics.Vector4.One, 0, 0, 1f, 0, 0, 0, 0.35f, 1f, 1f,
                     System.Numerics.Vector3.Zero, 1f, BlixMesh.AlphaOpaque, 0.5f, false, 0f),
             };
 

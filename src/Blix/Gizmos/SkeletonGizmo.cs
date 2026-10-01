@@ -86,7 +86,7 @@ public static class SkeletonGizmo
     /// Draws the skeleton implied by <paramref name="boneWorlds"/>, placed by <paramref name="modelTransform"/>.
     /// </summary>
     /// <param name="boneWorlds">
-    /// Object-space bone transforms from <see cref="StudioRig.ComputeBoneWorlds"/> — NOT palette matrices.
+    /// Object-space bone transforms from <see cref="Skeleton.ComputeBoneWorlds"/> — NOT palette matrices.
     /// A palette matrix's translation is a displacement from rest, so a skeleton drawn from one collapses
     /// into a knot at the origin: correct arithmetic, wrong question.
     /// </param>
@@ -95,8 +95,8 @@ public static class SkeletonGizmo
     /// what turns "this looks a bit off" into "this bone is 30 degrees out and the rest are fine".
     /// </param>
     /// <param name="include">
-    /// Optional per-bone filter. <c>StudioRig.DeformHierarchy</c> is the one to pass, NOT
-    /// <c>StudioRig.WeightedBones</c>: a joint no vertex weights can still carry a chain that several do,
+    /// Optional per-bone filter. <see cref="Rig.DeformHierarchy"/> is the one to pass, NOT
+    /// <see cref="Rig.WeightedBones"/>: a joint no vertex weights can still carry a chain that several do,
     /// and filtering on the literal census leaves those chains as floating segments. A rig's IK handles
     /// and roll controls skin nothing and hang off the root, so drawing all of them turns a skeleton
     /// into a starburst at the character's feet. Null draws everything, which is the honest default

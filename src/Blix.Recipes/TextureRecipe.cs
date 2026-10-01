@@ -34,14 +34,16 @@ public static class TextureRecipe
         bool NativeBc7,
         int NativeQuality,
         string Backend,
-        string Quality)
+        string Quality,
+        bool FlipGreen = false)
     {
         public string StampPrefix =>
-            $"role={Role} format={Format} flags={Flags} encoder={Backend} quality={Quality}";
+            $"role={Role} format={Format} flags={Flags} encoder={Backend} quality={Quality}"
+            + (FlipGreen ? " green=flipped" : string.Empty);
     }
 
-    /// <summary>Whether a texture artifact matches today's recipe, source, role and encoder.</summary>
-    public static bool IsCurrent(string source, string destination, TextureRole? role = null)
+    /// <summary>Whether a texture artifact matches today's recipe, source, role, encoder and green flip.</summary>
+    public static bool IsCurrent(string source, string destination, TextureRole? role = null, bool flipGreen = false)
     {
         var header = CookedFile.TryReadHeader(destination);
         if (header is not { Magic: BlixTex.Magic, FormatVersion: BlixTex.Version3 }) return false;
@@ -49,7 +51,7 @@ public static class TextureRecipe
                 BlixTex.ShippedRecipe, BlixTex.ShippedRecipeVersion, source))
             return false;
 
-        var prefix = ResolveEncoding(source, role).StampPrefix + " mips=";
+        var prefix = ResolveEncoding(source, role, flipGreen).StampPrefix + " mips=";
         var parameters = header.Value.Stamp.Parameters;
         if (!parameters.StartsWith(prefix, StringComparison.Ordinal)) return false;
         return int.TryParse(parameters.AsSpan(prefix.Length), out var mipCount) && mipCount > 0;
@@ -67,11 +69,22 @@ public static class TextureRecipe
     /// does.
     /// </para>
     /// </remarks>
+    /// <param name="flipGreen">
+    /// Invert the green channel before mipping: a DirectX-convention normal map (green down) made
+    /// into the OpenGL convention glTF specifies (green up). Only a normal map may ask; the caller
+    /// states it, from the project's material patch, because nothing in a file says which it is.
+    /// </param>
     public static void CookOne(
-        string source, string destination, out long sourceLen, out long destLen, TextureRole? role = null)
+        string source, string destination, out long sourceLen, out long destLen, TextureRole? role = null,
+        bool flipGreen = false)
     {
         var verbose = Environment.GetEnvironmentVariable("BLIX_COOK_VERBOSE") != null;
-        var plan = ResolveEncoding(source, role);
+        var plan = ResolveEncoding(source, role, flipGreen);
+        if (flipGreen && plan.Role != TextureRole.Normal)
+        {
+            throw new InvalidDataException(
+                $"{Path.GetFileName(source)}: a green flip is a normal-map convention, and this cooks as {plan.Role}.");
+        }
         var name = Path.GetFileName(source);
         sourceLen = new FileInfo(source).Length;
         using var probe = File.OpenRead(source);
@@ -90,6 +103,10 @@ public static class TextureRecipe
                 ? ImageLoader.LoadMetallicRoughness(stream)
                 : ImageLoader.LoadRgba32(stream);
             if (verbose) Console.WriteLine($"\r    decoded {name} {image.Width}x{image.Height} in {decodeSw.ElapsedMilliseconds} ms");
+            if (plan.FlipGreen)
+            {
+                for (var i = 1; i < image.Pixels.Length; i += 4) image.Pixels[i] = (byte)(255 - image.Pixels[i]);
+            }
 
             var mipSw = Stopwatch.StartNew();
             var mipsRgba = GenerateMipsBoxFilter(image.Pixels, image.Width, image.Height, minDim: 4);
@@ -163,7 +180,10 @@ public static class TextureRecipe
             ? Math.Clamp(q, 0, 2)
             : 1;
 
-    private static EncodingPlan ResolveEncoding(string source, TextureRole? role)
+    private static EncodingPlan ResolveEncoding(string source, TextureRole? role, bool flipGreen = false) =>
+        ResolveEncodingCore(source, role) with { FlipGreen = flipGreen };
+
+    private static EncodingPlan ResolveEncodingCore(string source, TextureRole? role)
     {
         var resolvedRole = role ?? ClassifyRole(source);
         var (bcFormat, flags) = PickFormat(resolvedRole);

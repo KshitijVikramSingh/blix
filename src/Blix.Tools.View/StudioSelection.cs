@@ -38,12 +38,12 @@ internal sealed class StudioSelection
     public bool PickThrough(
         in ViewDeclaration view,
         Vector2 pointer,
-        StudioRig? rig,
+        Rig? rig,
         Matrix4x4 rigPlacement,
         IReadOnlyList<Matrix4x4> boneWorlds,
         IReadOnlyList<bool>? boneFilter,
         float gizmoScale,
-        StudioModel? model,
+        Model? model,
         Matrix4x4 modelTransform)
     {
         if (ViewPicking.RayThrough(view, pointer) is not { } ray) return false;
@@ -64,17 +64,17 @@ internal sealed class StudioSelection
     /// so what gets picked is exactly what is outlined. Triangle-accurate picking is a different
     /// question and no consumer has asked it.
     /// </remarks>
-    private static int PickNode(Ray ray, StudioModel model, Matrix4x4 modelTransform)
+    private static int PickNode(Ray ray, Model model, Matrix4x4 modelTransform)
     {
         var best = -1;
         var nearest = float.MaxValue;
         for (var i = 0; i < model.Nodes.Count; i++)
         {
             var node = model.Nodes[i];
-            if (node.PrimitiveCount == 0) continue;
+            if (node.Bounds is not { } nodeBounds) continue;
 
-            var lo = Vector3.Transform(node.BoundsMin, modelTransform);
-            var hi = Vector3.Transform(node.BoundsMax, modelTransform);
+            var lo = Vector3.Transform(nodeBounds.Min, modelTransform);
+            var hi = Vector3.Transform(nodeBounds.Max, modelTransform);
             var bounds = new Bounds3(Vector3.Min(lo, hi), Vector3.Max(lo, hi));
 
             if (Intersection.Raycast(ray, bounds) is not { } hit) continue;
@@ -96,7 +96,7 @@ internal sealed class StudioSelection
     /// </remarks>
     private static int PickBone(
         Ray ray,
-        StudioRig rig,
+        Rig rig,
         Matrix4x4 placement,
         IReadOnlyList<Matrix4x4> boneWorlds,
         IReadOnlyList<bool>? filter,

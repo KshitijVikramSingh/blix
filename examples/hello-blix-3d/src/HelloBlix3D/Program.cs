@@ -63,7 +63,7 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
     // Studio frames its subjects; --cam, or F12's dump of it, puts it back anywhere.
     private readonly CameraController camera = StudioFraming.Around(StudioFraming.SubjectCentre, -16.6f, 12f, 5.18f);
     private readonly Playback playback = new();
-    private StudioRig rig = null!;
+    private Rig rig = null!;
     private RigInstances body = null!;
     private ObjectTunables tunables = null!;
     private Matrix4x4 placement;
@@ -93,12 +93,12 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
         camera.ReadArgs(args);
 
         stage.Load(GraphicsDevice);
-        rig = StudioRig.Load(GraphicsDevice, Character, stage.SkinnedProgram);
+        rig = stage.LoadRig(Character);
         body = new RigInstances(rig, 1);
 
         // Two metres tall, standing on the ground, whatever size it was authored at.
         var scale = 2f / rig.LongestExtent;
-        placement = Matrix4x4.CreateScale(scale) * Matrix4x4.CreateTranslation(0f, -rig.BoundsMin.Y * scale, 0f);
+        placement = Matrix4x4.CreateScale(scale) * Matrix4x4.CreateTranslation(0f, -rig.RestBounds.Min.Y * scale, 0f);
     }
 
     public override void OnUpdate(Time time)
@@ -116,7 +116,7 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
         if (frame.Height > 0) aspect = frame.Width / (float)frame.Height;
 
         body.Pack(placement, spacing: 0f);
-        rig.UploadPalettes(body.PalettesFor(0), 0);
+        stage.UploadPalettes(rig, body.PalettesFor(0));
         var character = new RigView(rig) { BoneWorlds = body.Driven.BoneWorlds, Placements = body.Placements };
         stage.Render(commands, camera.ViewProjection(aspect), camera.Position, new IStudioView[] { character });
     }
@@ -132,7 +132,6 @@ internal sealed class Stage(AppArgs args) : Game, IDebuggable
 
     public override void OnUnload()
     {
-        rig.Dispose();
         stage.Dispose();
     }
 }

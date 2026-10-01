@@ -148,32 +148,10 @@ public sealed class MaterialPatch
         ArgumentNullException.ThrowIfNull(materials);
         var result = (BlixMeshMaterial[])materials.Clone();
 
+        var names = materials.Select(m => m.Name).ToArray();
         foreach (var rule in Rules)
         {
-            var pattern = GlobToRegex(rule.Selector);
-            var hits = new List<int>();
-            for (var i = 0; i < result.Length; i++)
-                if (pattern.IsMatch(result[i].Name)) hits.Add(i);
-
-            if (hits.Count == 0)
-            {
-                // Named, with near misses, because "your rule matched nothing" is only actionable if
-                // it also says what was there. This is the whole difference from a silent heuristic.
-                var near = materials
-                    .Select(m => m.Name)
-                    .OrderBy(n => Distance(n, rule.Selector))
-                    .Take(5);
-                throw new InvalidDataException(
-                    $"{Path}:{rule.Line}: '{rule.Selector}' matched no material. " +
-                    $"Closest names present: {string.Join(", ", near)}.");
-            }
-            if (rule.ExpectedCount is { } want && hits.Count != want)
-            {
-                throw new InvalidDataException(
-                    $"{Path}:{rule.Line}: '{rule.Selector}' expected {want} material(s) and matched " +
-                    $"{hits.Count}: {string.Join(", ", hits.Select(h => result[h].Name))}.");
-            }
-
+            var hits = Match(rule, names);
             foreach (var i in hits)
                 foreach (var (key, value) in rule.Assignments)
                     result[i] = ApplyOne(result[i], key, value, rule, Path);
@@ -184,6 +162,72 @@ public sealed class MaterialPatch
         }
         return result;
     }
+
+    /// <summary>
+    /// Which of <paramref name="materialNames"/> the patch declares to carry a DirectX-convention
+    /// normal map (<c>normal=directx</c>), by index; the last rule to state a material's convention wins.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="Apply"/> because the convention is not a material property: it is how
+    /// the material's normal IMAGE is to be read, and the image is cooked before, and apart from, the
+    /// material table. Rules match with the same refusals as <see cref="Apply"/>.
+    /// </remarks>
+    public IReadOnlySet<int> DirectXNormalMaterials(IReadOnlyList<string> materialNames)
+    {
+        ArgumentNullException.ThrowIfNull(materialNames);
+        var directX = new HashSet<int>();
+        foreach (var rule in Rules)
+        {
+            var hits = Match(rule, materialNames);
+            foreach (var (key, value) in rule.Assignments)
+            {
+                if (key != "normal") continue;
+                var isDirectX = NormalConvention(value, rule, Path);
+                foreach (var i in hits)
+                {
+                    if (isDirectX) directX.Add(i);
+                    else directX.Remove(i);
+                }
+            }
+        }
+
+        return directX;
+    }
+
+    // Every rule matches through here, so Apply and DirectXNormalMaterials refuse the same way.
+    private List<int> Match(Rule rule, IReadOnlyList<string> names)
+    {
+        var pattern = GlobToRegex(rule.Selector);
+        var hits = new List<int>();
+        for (var i = 0; i < names.Count; i++)
+            if (pattern.IsMatch(names[i])) hits.Add(i);
+
+        if (hits.Count == 0)
+        {
+            // Named, with near misses, because "your rule matched nothing" is only actionable if
+            // it also says what was there. This is the whole difference from a silent heuristic.
+            var near = names.OrderBy(n => Distance(n, rule.Selector)).Take(5);
+            throw new InvalidDataException(
+                $"{Path}:{rule.Line}: '{rule.Selector}' matched no material. " +
+                $"Closest names present: {string.Join(", ", near)}.");
+        }
+        if (rule.ExpectedCount is { } want && hits.Count != want)
+        {
+            throw new InvalidDataException(
+                $"{Path}:{rule.Line}: '{rule.Selector}' expected {want} material(s) and matched " +
+                $"{hits.Count}: {string.Join(", ", hits.Select(h => names[h]))}.");
+        }
+
+        return hits;
+    }
+
+    private static bool NormalConvention(string value, Rule rule, string path) => value switch
+    {
+        "directx" => true,
+        "opengl" => false,
+        _ => throw new InvalidDataException(
+            $"{path}:{rule.Line}: normal takes 'directx' or 'opengl', not '{value}'."),
+    };
 
     private static BlixMeshMaterial ApplyOne(
         BlixMeshMaterial m, string key, string value, Rule rule, string path)
@@ -236,6 +280,14 @@ public sealed class MaterialPatch
             case "clearcoat":          return m with { Extensions = x with { ClearcoatFactor = F(value) } };
             case "clearcoatRoughness": return m with { Extensions = x with { ClearcoatRoughnessFactor = F(value) } };
             case "unlit":          return m with { Extensions = x with { Unlit = B(value) } };
+
+            // The normal map's green convention. Not a material property: the cook reads it through
+            // DirectXNormalMaterials and flips the IMAGE once, so the table is unchanged here and the
+            // cooked map is glTF's convention. `opengl` is the spec's default, stated to record that
+            // the map was checked.
+            case "normal":
+                NormalConvention(value, rule, path);
+                return m;
             default:
                 throw new InvalidDataException(
                     $"{path}:{rule.Line}: unknown material key '{key}'.");

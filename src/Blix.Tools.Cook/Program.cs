@@ -50,9 +50,56 @@ public static class Program
             "status" => Status(args),
             "batch" => Batch(args),
             "outputs" => Outputs(args),
+            "normals" => SurveyNormals(args),
             "help" => Help(args),
             _ => UnknownVerb(verb),
         };
+    }
+
+    /// <summary>Measures each material's normal-map convention, beside what a patch declares.</summary>
+    /// <remarks>
+    /// <c>blix cook normals &lt;gltf&gt; [--patch &lt;file&gt;]</c>. A report: it proposes <c>normal=</c>
+    /// rules and says where a patch disagrees with the pixels, and decides nothing. Exits 1 when a
+    /// clear measurement contradicts the patch, so a pack's patch can be held to its maps.
+    /// </remarks>
+    static int SurveyNormals(AppArgs args)
+    {
+        // Read before the positionals: an option's value counts as positional until it is read.
+        var patchPath = args.String("patch");
+        if (args.Positionals is not [var source])
+        {
+            Console.Error.WriteLine("Usage: blix cook normals <gltf-or-glb> [--patch <file>]");
+            return 2;
+        }
+
+        Blix.Recipes.MaterialPatch? patch = null;
+        try
+        {
+            if (patchPath is not null) patch = Blix.Recipes.MaterialPatch.Load(patchPath);
+            var rows = Blix.Recipes.NormalMapConvention.Survey(source, patch);
+            var disagreements = 0;
+            Console.WriteLine($"  {"material",-32} {"normal map",-40} {"opengl",8} {"directx",8}  measured  declared");
+            foreach (var row in rows)
+            {
+                var verdict = row.Reading.Verdict();
+                var disagrees = verdict != "unclear" && verdict != row.Declared;
+                if (disagrees) disagreements++;
+                Console.WriteLine(
+                    $"  {row.Material,-32} {row.Image,-40} {row.Reading.OpenGlCurl,8:0.0000} {row.Reading.DirectXCurl,8:0.0000}"
+                    + $"  {verdict,-8}  {row.Declared}{(disagrees ? "   <- DISAGREES" : string.Empty)}");
+            }
+
+            Console.WriteLine(
+                $"  {rows.Count} normal map(s): {rows.Count(r => r.Reading.Verdict() == "directx")} directx, "
+                + $"{rows.Count(r => r.Reading.Verdict() == "opengl")} opengl, "
+                + $"{rows.Count(r => r.Reading.Verdict() == "unclear")} unclear; {disagreements} disagree with the patch");
+            return disagreements == 0 ? 0 : 1;
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or ArgumentException)
+        {
+            Console.Error.WriteLine($"  cannot survey: {ex.Message}");
+            return 1;
+        }
     }
 
     // blix cook sky <dir-of-blixmesh> [--occupancy N] [--probes N] [--rays N] [--albedo N]
@@ -171,7 +218,7 @@ public static class Program
         IReadOnlyList<Blix.Recipes.MeshRecipe.ReferencedImage> references;
         try
         {
-            references = Blix.Recipes.MeshRecipe.ReferencedImages(source);
+            references = Blix.Recipes.MeshRecipe.ReferencedImages(source, mesh.Patch);
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or ArgumentException)
         {
@@ -186,12 +233,12 @@ public static class Program
         var invalid = false;
         foreach (var group in byUri)
         {
-            var roles = group.Select(reference => reference.Role).Distinct().ToArray();
+            var roles = group.Select(reference => (reference.Role, reference.FlipGreen)).Distinct().ToArray();
             if (roles.Length > 1)
             {
                 Console.Error.WriteLine(
                     $"  ambiguous: {group.Key} is used as {string.Join(" and ", roles)}; one "
-                    + ".blixtex cannot preserve both material-channel roles");
+                    + ".blixtex cannot preserve both material-channel roles or conventions");
                 invalid = true;
             }
 
@@ -234,7 +281,7 @@ public static class Program
                 var to = Path.Combine(outputRoot, Path.ChangeExtension(reference.Uri, ".blixtex"));
                 Directory.CreateDirectory(Path.GetDirectoryName(to)!);
                 Blix.Recipes.TextureRecipe.CookOne(
-                    from, to, out var inLen, out var outLen, reference.Role);
+                    from, to, out var inLen, out var outLen, reference.Role, reference.FlipGreen);
                 Interlocked.Add(ref sourceBytes, inLen);
                 Interlocked.Add(ref cookedBytes, outLen);
             });
@@ -402,6 +449,8 @@ public static class Program
     Console.WriteLine("                             cook a .gltf/.glb (or a tree of them) to .blixmesh");
     Console.WriteLine("    asset <gltf-or-glb> --out <dir> [mesh flags]");
     Console.WriteLine("                             cook one model and its referenced images into an output tree");
+    Console.WriteLine("    normals <gltf-or-glb> [--patch <file>]");
+    Console.WriteLine("                             measure each normal map's green convention against the patch");
     Console.WriteLine("    sky <dir-or-blixmesh> [--out <file>] [--occupancy N] [--probes N]");
     Console.WriteLine("                            [--rays N] [--albedo N]");
     Console.WriteLine("                             bake scene sky visibility from cooked meshes");
