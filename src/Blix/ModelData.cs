@@ -42,19 +42,26 @@ public sealed class ModelData
     /// <param name="Skinned">Whether its vertices are skinned in this load (per <see cref="ModelNeeds.Skinned"/>).</param>
     public sealed record Mesh(string Name, IReadOnlyList<Primitive> Primitives, int SkinIndex, bool Skinned);
 
-    /// <summary>A skin: its skeleton, bones in parent-first order, and each bone's joint node.</summary>
-    public sealed record Skin(Skeleton Skeleton, IReadOnlyList<int> JointNodes);
+    /// <summary>A skin: its skeleton, bones in parent-first order, each bone's joint node, and where it hangs.</summary>
+    /// <param name="Placement">What goes after every bone world of its own skeleton (<see cref="JointHierarchy.Placement"/>).</param>
+    /// <param name="Bones">Each of its joints as a bone of the model's animated <see cref="ModelData.Skeleton"/>.</param>
+    public sealed record Skin(Skeleton Skeleton, IReadOnlyList<int> JointNodes, Matrix4x4 Placement, IReadOnlyList<int> Bones);
 
-    /// <summary>A static mesh a joint carries: its node, the joint, and its transform relative to that joint.</summary>
-    /// <param name="BoneIndex">The joint's bone in <paramref name="SkinIndex"/>'s skeleton.</param>
+    /// <summary>A rigid mesh an animated node carries: its node, that node, and its transform relative to it.</summary>
+    /// <param name="JointNode">The nearest animated node at or above it — a joint, or any node a clip moves.</param>
+    /// <param name="SkinIndex">The first skin with <paramref name="JointNode"/> as a joint, or -1.</param>
+    /// <param name="BoneIndex">That node's bone in the model's animated <see cref="ModelData.Skeleton"/>.</param>
     public sealed record Attachment(int NodeIndex, int JointNode, int SkinIndex, int BoneIndex, Matrix4x4 Local);
 
     private Matrix4x4[]? world;
 
     private ModelData(
         IReadOnlyList<Node> nodes, IReadOnlyList<Mesh> meshes, IReadOnlyList<Skin> skins, IReadOnlyList<AnimationClip> clips,
-        IReadOnlyList<UnreadAttribute> ignored, string source)
+        IReadOnlyList<UnreadAttribute> ignored, string source, Skeleton? skeleton, IReadOnlyList<int> skeletonNodes, Matrix4x4 skeletonPlacement)
     {
+        Skeleton = skeleton;
+        SkeletonNodes = skeletonNodes;
+        SkeletonPlacement = skeletonPlacement;
         Ignored = ignored;
         Nodes = nodes;
         Meshes = meshes;
@@ -69,8 +76,36 @@ public sealed class ModelData
 
     public IReadOnlyList<Skin> Skins { get; }
 
-    /// <summary>Clips on skin 0's bones; tracks on nodes that are not its joints are not carried.</summary>
+    /// <summary>
+    /// The model's animated hierarchy: every skin's joints and every node a clip moves, as one skeleton.
+    /// Null for a model with neither.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// glTF animates nodes, and every skin reads its joints' worlds from the one scene graph; this is the
+    /// part of the graph that moves. One pose of it drives every skin (each gathering its joints through
+    /// <see cref="Skin.Bones"/>) and every rigid part an animated node carries (<see cref="Attachments"/>).
+    /// Static nodes in between are the bones' offsets (<see cref="JointHierarchy"/>).
+    /// </para>
+    /// <para>
+    /// When it is exactly skin 0's joints — one skin, no other node animated, which is most rigs — it IS
+    /// skin 0's skeleton, same object and same bone order, so code that pairs <c>Skins[0].Skeleton</c>
+    /// with <see cref="Clips"/> keeps working. Otherwise its bones are in node order.
+    /// </para>
+    /// </remarks>
+    public Skeleton? Skeleton { get; }
+
+    /// <summary>The node each <see cref="Skeleton"/> bone is.</summary>
+    public IReadOnlyList<int> SkeletonNodes { get; }
+
+    /// <summary>Where the animated hierarchy hangs: goes after every bone world (<see cref="JointHierarchy.Placement"/>).</summary>
+    public Matrix4x4 SkeletonPlacement { get; }
+
+    /// <summary>Clips as bone tracks against <see cref="Skeleton"/>: every animated node, joint or not.</summary>
     public IReadOnlyList<AnimationClip> Clips { get; }
+
+    /// <summary>Whether a clip moves anything.</summary>
+    public bool IsAnimated => Clips.Count > 0;
 
     /// <summary>The source's vertex attributes its cook did not carry.</summary>
     public IReadOnlyList<UnreadAttribute> Ignored { get; }
@@ -82,51 +117,48 @@ public sealed class ModelData
     public bool IsRigged => Skins.Count > 0;
 
     /// <summary>Every node's world transform (row-vector: <c>local * parentWorld</c>).</summary>
-    public IReadOnlyList<Matrix4x4> World => world ??= ComposeWorld();
+    public IReadOnlyList<Matrix4x4> World => world ??= ComposeWorld(Nodes);
 
     /// <summary>
-    /// Where <paramref name="skin"/>'s geometry sits: the world of the node that places its mesh. The
-    /// cook refused a skin placed at two different worlds, so the first such node speaks for all.
+    /// Where <paramref name="skin"/>'s skeleton hangs in the scene: the world of the node its first root
+    /// joint hangs from, or identity for a scene root (<see cref="JointHierarchy"/>).
     /// </summary>
-    public Matrix4x4 Placement(int skin)
-    {
-        for (var n = 0; n < Nodes.Count; n++)
-        {
-            if (Nodes[n].SkinIndex == skin && Nodes[n].MeshIndex >= 0) return World[n];
-        }
-
-        return Matrix4x4.Identity;
-    }
-
-    /// <summary>Unskinned mesh nodes under a joint, each claimed by the first skin whose joints include it.</summary>
     /// <remarks>
-    /// The transform is composed from the node up to the joint (row-vector: child local, then parent).
-    /// A mesh node that reaches the root without meeting a joint only shares the file, and is not one.
+    /// Not the mesh node's world: glTF places a skinned vertex by its joints alone and ignores that
+    /// transform. The two agree in most exports; tank.glb is one where they do not.
+    /// </remarks>
+    public Matrix4x4 Placement(int skin) => Skins[skin].Placement;
+
+    /// <summary>Unskinned mesh nodes at or under an animated node: the rigid parts the pose moves.</summary>
+    /// <remarks>
+    /// The transform is composed from the node up to the animated node (row-vector: child local, then
+    /// parent); identity when the mesh node is itself animated. A mesh node that reaches the root without
+    /// meeting one is a static part.
     /// </remarks>
     public IReadOnlyList<Attachment> Attachments()
     {
         var found = new List<Attachment>();
-        var claimed = new HashSet<int>();
-        for (var s = 0; s < Skins.Count; s++)
+        var boneOfNode = new Dictionary<int, int>();
+        for (var b = 0; b < SkeletonNodes.Count; b++) boneOfNode[SkeletonNodes[b]] = b;
+        for (var n = 0; n < Nodes.Count; n++)
         {
-            var boneOfJoint = new Dictionary<int, int>();
-            for (var b = 0; b < Skins[s].JointNodes.Count; b++) boneOfJoint[Skins[s].JointNodes[b]] = b;
-
-            for (var n = 0; n < Nodes.Count; n++)
+            if (Nodes[n].MeshIndex < 0 || Nodes[n].SkinIndex >= 0) continue;
+            var local = Matrix4x4.Identity;
+            var carrier = n;
+            while (carrier >= 0 && !boneOfNode.ContainsKey(carrier))
             {
-                if (Nodes[n].MeshIndex < 0 || Nodes[n].SkinIndex >= 0 || claimed.Contains(n)) continue;
-                var local = Nodes[n].Local;
-                var ancestor = Nodes[n].ParentIndex;
-                while (ancestor >= 0 && !boneOfJoint.ContainsKey(ancestor))
-                {
-                    local *= Nodes[ancestor].Local;
-                    ancestor = Nodes[ancestor].ParentIndex;
-                }
-
-                if (ancestor < 0) continue;
-                claimed.Add(n);
-                found.Add(new Attachment(n, ancestor, s, boneOfJoint[ancestor], local));
+                local *= Nodes[carrier].Local;
+                carrier = Nodes[carrier].ParentIndex;
             }
+
+            if (carrier < 0) continue;
+            var skin = -1;
+            for (var s = 0; s < Skins.Count && skin < 0; s++)
+            {
+                if (Skins[s].JointNodes.Contains(carrier)) skin = s;
+            }
+
+            found.Add(new Attachment(n, carrier, skin, boneOfNode[carrier], local));
         }
 
         return found;
@@ -206,15 +238,21 @@ public sealed class ModelData
             return new Mesh(m.Name, primitives, m.SkinIndex, skinned);
         }).ToArray();
 
-        var skins = file.SkinTable.Select(s => new Skin(
-            new Skeleton(s.Bones.Select(b => new Bone(b.Name, b.ParentIndex, b.InverseBindPose)).ToArray()),
-            s.Bones.Select(b => b.NodeIndex).ToArray())).ToArray();
-
-        var boneOfNode = new Dictionary<int, int>();
-        if (skins.Length > 0)
+        var nodes = file.Nodes.Select(n => new Node(n.Name, n.ParentIndex, n.LocalTransform, n.MeshIndex, n.SkinIndex)).ToArray();
+        var worlds = ComposeWorld(nodes);
+        var skins = file.SkinTable.Select(s =>
         {
-            for (var b = 0; b < skins[0].JointNodes.Count; b++) boneOfNode[skins[0].JointNodes[b]] = b;
-        }
+            var joints = s.Bones.Select(b => b.NodeIndex).ToArray();
+            var hierarchy = JointHierarchy.Resolve(
+                s.Bones.Select(b => new Bone(b.Name, b.ParentIndex, b.InverseBindPose)).ToArray(), joints,
+                n => nodes[n].ParentIndex, n => nodes[n].Local, n => worlds[n]);
+            return new Skin(new Skeleton(hierarchy.Bones.ToArray()), joints, hierarchy.Placement, Array.Empty<int>());
+        }).ToArray();
+
+        var (skeleton, skeletonNodes, skeletonPlacement) = AnimatedHierarchy(file, nodes, worlds, skins);
+        var boneOfNode = new Dictionary<int, int>();
+        for (var b = 0; b < skeletonNodes.Length; b++) boneOfNode[skeletonNodes[b]] = b;
+        skins = skins.Select(k => k with { Bones = k.JointNodes.Select(n => boneOfNode[n]).ToArray() }).ToArray();
 
         var clips = file.ClipTable
             .Select(c => new AnimationClip(c.Name, c.Tracks
@@ -223,16 +261,18 @@ public sealed class ModelData
                 {
                     BoneIndex = boneOfNode[t.NodeIndex],
                     Translation = t.Translation.Length == 0 ? null
-                        : new KeyframeVector3Curve(t.Translation.Select(k => new Keyframe<Vector3>(k.Time, k.Value)).ToArray()),
+                        : new KeyframeVector3Curve(t.Translation.Select(k => new Keyframe<Vector3>(k.Time, k.Value, k.InTangent, k.OutTangent)).ToArray(),
+                            Mode(t.TranslationInterpolation)),
                     Rotation = t.Rotation.Length == 0 ? null
-                        : new KeyframeQuaternionCurve(t.Rotation.Select(k => new Keyframe<Quaternion>(k.Time, k.Value)).ToArray()),
+                        : new KeyframeQuaternionCurve(t.Rotation.Select(k => new Keyframe<Quaternion>(k.Time, k.Value, k.InTangent, k.OutTangent)).ToArray(),
+                            Mode(t.RotationInterpolation)),
                     Scale = t.Scale.Length == 0 ? null
-                        : new KeyframeVector3Curve(t.Scale.Select(k => new Keyframe<Vector3>(k.Time, k.Value)).ToArray()),
+                        : new KeyframeVector3Curve(t.Scale.Select(k => new Keyframe<Vector3>(k.Time, k.Value, k.InTangent, k.OutTangent)).ToArray(),
+                            Mode(t.ScaleInterpolation)),
                 }).ToArray()))
             .Where(c => c.Tracks.Length > 0)
             .ToArray();
 
-        var nodes = file.Nodes.Select(n => new Node(n.Name, n.ParentIndex, n.LocalTransform, n.MeshIndex, n.SkinIndex)).ToArray();
         var ignored = file.IgnoredTable.Select(i => new UnreadAttribute(i.Semantic, i.Primitives)).ToArray();
         if (AssetLoadLog.Enabled)
         {
@@ -242,15 +282,60 @@ public sealed class ModelData
                 Recipe: file.Cooked?.Stamp.Recipe));
         }
 
-        return new ModelData(nodes, meshes, skins, clips, ignored, path);
+        return new ModelData(nodes, meshes, skins, clips, ignored, path, skeleton, skeletonNodes, skeletonPlacement);
     }
 
-    private Matrix4x4[] ComposeWorld()
+    // The animated hierarchy: every skin's joints and every tracked node. Skin 0's own skeleton when that
+    // is all it is; otherwise one skeleton over the set in node order (the cook writes parents first).
+    private static (Skeleton? Skeleton, int[] Nodes, Matrix4x4 Placement) AnimatedHierarchy(
+        BlixMeshFile file, IReadOnlyList<Node> nodes, Matrix4x4[] worlds, IReadOnlyList<Skin> skins)
     {
-        var result = new Matrix4x4[Nodes.Count];
-        for (var i = 0; i < Nodes.Count; i++)
+        var members = skins.SelectMany(k => k.JointNodes)
+            .Concat(file.ClipTable.SelectMany(c => c.Tracks).Select(t => t.NodeIndex))
+            .ToHashSet();
+        if (members.Count == 0) return (null, Array.Empty<int>(), Matrix4x4.Identity);
+        if (skins.Count > 0 && members.SetEquals(skins[0].JointNodes))
         {
-            result[i] = Nodes[i].ParentIndex < 0 ? Nodes[i].Local : Nodes[i].Local * result[Nodes[i].ParentIndex];
+            return (skins[0].Skeleton, skins[0].JointNodes.ToArray(), skins[0].Placement);
+        }
+
+        var order = members.OrderBy(n => n).ToArray();
+        var index = new Dictionary<int, int>();
+        for (var i = 0; i < order.Length; i++) index[order[i]] = i;
+        var inverseBind = new Dictionary<int, Matrix4x4>();
+        if (skins.Count > 0)
+        {
+            for (var b = 0; b < skins[0].JointNodes.Count; b++) inverseBind[skins[0].JointNodes[b]] = skins[0].Skeleton.Bones[b].InverseBindPose;
+        }
+
+        var bones = new Bone[order.Length];
+        for (var i = 0; i < order.Length; i++)
+        {
+            var parent = nodes[order[i]].ParentIndex;
+            while (parent >= 0 && !index.ContainsKey(parent)) parent = nodes[parent].ParentIndex;
+            // Inverse binds belong to skins, and each skin applies its own; skin 0's are kept on its joints
+            // so a consumer computing a palette from this skeleton for skin 0 still gets skin 0's.
+            bones[i] = new Bone(nodes[order[i]].Name, parent < 0 ? -1 : index[parent],
+                inverseBind.TryGetValue(order[i], out var ibm) ? ibm : Matrix4x4.Identity);
+        }
+
+        var resolved = JointHierarchy.Resolve(bones, order, n => nodes[n].ParentIndex, n => nodes[n].Local, n => worlds[n]);
+        return (new Skeleton(resolved.Bones.ToArray()), order, resolved.Placement);
+    }
+
+    private static Interpolation Mode(BlixMeshInterpolation mode) => mode switch
+    {
+        BlixMeshInterpolation.Step => Interpolation.Step,
+        BlixMeshInterpolation.CubicSpline => Interpolation.CubicSpline,
+        _ => Interpolation.Linear,
+    };
+
+    private static Matrix4x4[] ComposeWorld(IReadOnlyList<Node> nodes)
+    {
+        var result = new Matrix4x4[nodes.Count];
+        for (var i = 0; i < nodes.Count; i++)
+        {
+            result[i] = nodes[i].ParentIndex < 0 ? nodes[i].Local : nodes[i].Local * result[nodes[i].ParentIndex];
         }
 
         return result;

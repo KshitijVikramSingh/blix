@@ -161,7 +161,7 @@ public sealed class RigAnimation : ITunable
         if (Mode != PoseMode.Single) Secondary.Advance(delta);
         Compose();
 
-        RootTravel += Vector3.TransformNormal(Subject.RootDelta.Translation, rig.MeshNodeTransform);
+        RootTravel += Vector3.TransformNormal(Subject.RootDelta.Translation, rig.SkeletonPlacement);
         RootTurn = Quaternion.Normalize(RootTurn * Subject.RootDelta.Rotation);
         RootTurnPathDegrees += DegreesOf(Subject.RootDelta.Rotation);
 

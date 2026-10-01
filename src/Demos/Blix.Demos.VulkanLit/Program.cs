@@ -111,7 +111,7 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
     private Pose cesiumRestPose = null!;
     private BonePalette cesiumPalette = null!;
     private AnimationClip cesiumAnimation = null!;
-    private Matrix4x4 cesiumMeshNodeTransform;
+    private Matrix4x4 cesiumSkeletonPlacement;
     private Matrix4x4 cesiumUserTransform;
     private byte[] cesiumPalettePayload = null!;
     private double cesiumAnimTime;
@@ -333,7 +333,7 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         cesiumPose = cesiumSkeleton.CreateRestPose();
         cesiumPalette = new BonePalette(cesiumSkeleton.BoneCount);
         cesiumAnimation = cesiumModel.Clips[0];
-        cesiumMeshNodeTransform = cesiumModel.Placement(0);
+        cesiumSkeletonPlacement = cesiumModel.Placement(0);
         cesiumPalettePayload = new byte[cesiumSkeleton.BoneCount * 64];
 
         // First primitive only — CesiumMan is a single-primitive mesh.
@@ -692,7 +692,7 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
 
         // Cesium user transform: stand the figure next to the cube on the
         // ground. CesiumMan is roughly 1.5 units tall in mesh-local space;
-        // MeshNodeTransform handles the Z-up → Y-up axis correction the
+        // SkeletonPlacement handles the Z-up → Y-up axis correction the
         // asset's parent node applies.
         cesiumUserTransform =
             Matrix4x4.CreateTranslation(1.7f, -0.6f, -0.6f);
@@ -789,7 +789,7 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
         // Compose the demo's user transform with the asset's mesh-node
         // axis correction (Z-up → Y-up for CesiumMan). The bone palette
         // is mesh-local; uModel takes mesh-local → world.
-        cesiumWorldModel = cesiumMeshNodeTransform * cesiumUserTransform;
+        cesiumWorldModel = cesiumSkeletonPlacement * cesiumUserTransform;
 
         // Pack the palette into the SSBO payload bytes (16 floats × N bones)
         // and upload to the slot matching this frame.

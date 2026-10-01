@@ -81,27 +81,9 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                 "load it as a static model instead (GltfStaticImporter)");
         }
 
-        // Nodes driven by one skin share one palette and model matrix, so their world matrices must
-        // agree. Different skins retain independent placement transforms.
-        //
-        // Each skin's mesh-node transform is its group's. It is NOT baked into vertices: per the
-        // glTF skinning spec the inverse binds map MESH-LOCAL vertices into joint space, so baking
-        // it would put the skinning maths in the wrong frame. The renderer composes it at draw time
-        //    uModel = userTransform * MeshNodeTransform
-        // F-016: engine row-vector form matches SharpGLTF, so no transpose.
-        foreach (var group in nodesBySkin.Values)
-        {
-            var head = group[0];
-            foreach (var node in group)
-            {
-                if (node.WorldMatrix == head.WorldMatrix) continue;
-                throw new InvalidOperationException(
-                    $"glTF '{context.SourcePath}' has multiple skinned-mesh nodes sharing ONE skin " +
-                    $"but with different world matrices. Mesh '{node.Mesh!.Name}' transform diverges " +
-                    $"from '{head.Mesh!.Name}'. Per-submesh mesh-node transforms aren't supported; " +
-                    $"meshes at different places need different skins, which this importer does read.");
-            }
-        }
+        // A skinned mesh's own node transform is ignored, per glTF: its vertices are placed by the skin's
+        // joints alone, so one skin may be placed by any number of mesh nodes, wherever they sit. Where the
+        // skeleton hangs is the skin's (JointHierarchy.Placement), not any mesh node's.
 
         // Decode every primitive across every skinned-mesh node. Each gets its
         // own MeshData (skinned vertex stream) and the material it references.
@@ -126,7 +108,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             // only within the skin that supplied it.
             var (skinBones, skinRemap) = BuildSkeletonAndOrdering(owner);
             var skinRemaps = skinRemap;
-            bindings.Add(new GltfSkinBinding(new Skeleton(skinBones), group[0].WorldMatrix));
+            bindings.Add(new GltfSkinBinding(new Skeleton(skinBones), PlacementOf(owner, skinBones, skinRemap)));
             remapsBySkin.Add(skinRemaps);
 
             foreach (var node in group)
@@ -254,7 +236,7 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         }
 
         return new GltfModel(
-            primitives, bindings[0].Skeleton, animations.ToArray(), bindings[0].MeshNodeTransform,
+            primitives, bindings[0].Skeleton, animations.ToArray(), bindings[0].SkeletonPlacement,
             attachments.ToArray(), staticParts.ToArray(), ignored, bindings.ToArray());
     }
 
@@ -383,6 +365,9 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
         var joints = skin.Joints;
         var ibmList = skin.InverseBindMatrices;
         var n = joints.Count;
+        // No inverseBindMatrices accessor means each is the identity (glTF 2.0 §5.27): the joints were
+        // bound where they stand.
+        if (ibmList.Count == 0) ibmList = Enumerable.Repeat(Matrix4x4.Identity, n).ToArray();
         if (ibmList.Count != n)
         {
             throw new InvalidOperationException(
@@ -442,7 +427,30 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
             // engine convention). Pass through without transpose.
             bones[newIdx] = new Bone(joint.Name ?? $"bone_{newIdx}", parentNew, ibm);
         }
-        return (bones, oldToNew);
+
+        // Rest and offset from the scene graph, as the cooked reader derives them: one rule, in the engine.
+        var jointNodes = new int[n];
+        for (var newIdx = 0; newIdx < n; newIdx++) jointNodes[newIdx] = joints[orderNewToOld[newIdx]].LogicalIndex;
+        var hierarchy = Resolve(skin, bones, jointNodes);
+        return (hierarchy.Bones.ToArray(), oldToNew);
+    }
+
+    private static JointHierarchy Resolve(Skin skin, Bone[] bones, int[] jointNodes)
+    {
+        var nodes = skin.LogicalParent.LogicalNodes;
+        return JointHierarchy.Resolve(
+            bones, jointNodes,
+            n => nodes[n].VisualParent?.LogicalIndex ?? -1,
+            n => nodes[n].LocalMatrix,
+            n => nodes[n].WorldMatrix);
+    }
+
+    // Where a skin's skeleton hangs: the same answer the cooked reader gives.
+    private static System.Numerics.Matrix4x4 PlacementOf(Skin skin, Bone[] bones, int[] oldToNew)
+    {
+        var jointNodes = new int[bones.Length];
+        for (var old = 0; old < oldToNew.Length; old++) jointNodes[oldToNew[old]] = skin.Joints[old].LogicalIndex;
+        return Resolve(skin, bones, jointNodes).Placement;
     }
 
     // Pack the mesh primitive's vertex streams into the engine's skinned vertex
@@ -612,41 +620,12 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
                 new GraphicsVector4(t.X, t.Y, t.Z, t.W));
         }
 
-        // Indices: glTF supports unsigned byte / short / int. We pick UInt16
-        // when the vertex count fits, UInt32 otherwise. Mesh primitives
-        // without an index buffer (rare for skinned content) get a
-        // sequential index list synthesised.
-        var rawIndices = primitive.GetIndices();
+        // Indices as a triangle list whatever the primitive's mode (GltfShared.TriangleIndices), in the
+        // narrowest width the vertex count allows.
+        var triangles = GltfShared.TriangleIndices(name, primitive);
         var needsUInt32 = vertexCount > ushort.MaxValue;
-        ushort[] indices16;
-        uint[]? indices32;
-        if (rawIndices is null || rawIndices.Count == 0)
-        {
-            if (needsUInt32)
-            {
-                indices16 = Array.Empty<ushort>();
-                indices32 = new uint[vertexCount];
-                for (var i = 0; i < vertexCount; i++) indices32[i] = (uint)i;
-            }
-            else
-            {
-                indices32 = null;
-                indices16 = new ushort[vertexCount];
-                for (var i = 0; i < vertexCount; i++) indices16[i] = (ushort)i;
-            }
-        }
-        else if (needsUInt32)
-        {
-            indices16 = Array.Empty<ushort>();
-            indices32 = new uint[rawIndices.Count];
-            for (var i = 0; i < rawIndices.Count; i++) indices32[i] = rawIndices[i];
-        }
-        else
-        {
-            indices32 = null;
-            indices16 = new ushort[rawIndices.Count];
-            for (var i = 0; i < rawIndices.Count; i++) indices16[i] = (ushort)rawIndices[i];
-        }
+        var indices32 = needsUInt32 ? triangles : null;
+        var indices16 = needsUInt32 ? Array.Empty<ushort>() : triangles.Select(i => (ushort)i).ToArray();
 
         var bytes = VertexPosition3NormalTextureSkin4Tangent.Pack(vertices);
         return new MeshData(
@@ -713,34 +692,35 @@ public sealed class GltfImporter : IAssetImporter<GltfModel>
 
     private static KeyframeVector3Curve BuildVector3Curve(IAnimationSampler<Vector3> sampler, string? animName, string channelName)
     {
-        if (sampler.InterpolationMode != AnimationInterpolationMode.LINEAR)
-        {
-            throw new NotSupportedException(
-                $"glTF animation '{animName}' channel '{channelName}' uses interpolation mode " +
-                $"{sampler.InterpolationMode}; only LINEAR is supported.");
-        }
-        var keys = new List<Keyframe<Vector3>>();
-        foreach (var (time, value) in sampler.GetLinearKeys())
-        {
-            keys.Add(new Keyframe<Vector3>(time, value));
-        }
-        return new KeyframeVector3Curve(keys.ToArray());
+        var (keys, mode) = SampleKeys(sampler);
+        return new KeyframeVector3Curve(keys, mode);
     }
 
     private static KeyframeQuaternionCurve BuildQuaternionCurve(IAnimationSampler<Quaternion> sampler, string? animName, string channelName)
     {
-        if (sampler.InterpolationMode != AnimationInterpolationMode.LINEAR)
+        var (keys, mode) = SampleKeys(sampler);
+        return new KeyframeQuaternionCurve(keys, mode);
+    }
+
+    /// <summary>A glTF sampler's keys and interpolation, as the curves read them: LINEAR, STEP or CUBICSPLINE.</summary>
+    /// <remarks>
+    /// CUBICSPLINE keys carry glTF's in/out tangents (a_k, b_k), per unit of time. The one reading of a
+    /// sampler, shared by the source importer and the cook.
+    /// </remarks>
+    public static (Keyframe<T>[] Keys, Interpolation Mode) SampleKeys<T>(IAnimationSampler<T> sampler)
+    {
+        ArgumentNullException.ThrowIfNull(sampler);
+        switch (sampler.InterpolationMode)
         {
-            throw new NotSupportedException(
-                $"glTF animation '{animName}' channel '{channelName}' uses interpolation mode " +
-                $"{sampler.InterpolationMode}; only LINEAR is supported.");
+            case AnimationInterpolationMode.CUBICSPLINE:
+                return (sampler.GetCubicKeys()
+                    .Select(k => new Keyframe<T>(k.Key, k.Value.Value, k.Value.TangentIn, k.Value.TangentOut)).ToArray(),
+                    Interpolation.CubicSpline);
+            case AnimationInterpolationMode.STEP:
+                return (sampler.GetLinearKeys().Select(k => new Keyframe<T>(k.Key, k.Value)).ToArray(), Interpolation.Step);
+            default:
+                return (sampler.GetLinearKeys().Select(k => new Keyframe<T>(k.Key, k.Value)).ToArray(), Interpolation.Linear);
         }
-        var keys = new List<Keyframe<Quaternion>>();
-        foreach (var (time, value) in sampler.GetLinearKeys())
-        {
-            keys.Add(new Keyframe<Quaternion>(time, value));
-        }
-        return new KeyframeQuaternionCurve(keys.ToArray());
     }
 
     private sealed class TrackBuilder

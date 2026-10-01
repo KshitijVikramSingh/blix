@@ -21,8 +21,13 @@ public static class Program
         // are not converted into a clean asset report.
         try
         {
-            if (args.String("model") is { } model) return InspectModel(model);
-            if (args.String("rig") is { } rig) return InspectRig(rig, args.Flag("verbose"));
+            if (args.String("rig") is not null)
+            {
+                Console.Error.WriteLine("check: --rig is gone: --model checks any model, and runs the rig checks on one with a skin.");
+                return 2;
+            }
+
+            if (args.String("model") is { } model) return InspectModel(model, args.Flag("verbose"));
             if (args.String("cooked") is { } cooked) return JudgeCooked(cooked);
         }
         catch (AssetImportException refused)
@@ -33,12 +38,12 @@ public static class Program
 
         if (args.Flag("help") | args.Flag("h"))
         {
-            Console.WriteLine("Usage: blix check --model <gltf-or-glb> | --rig <rigged.glb> [--verbose] | --cooked <directory>");
-            Console.WriteLine("  --model     import a static or rigged model; report shape and reject unusable clip lengths");
+            Console.WriteLine("Usage: blix check --model <gltf-or-glb> [--verbose] | --cooked <directory>");
+            Console.WriteLine("  --model     import a model; report shape and reject unusable clip lengths, and on one");
+            Console.WriteLine("              with a skin check the rig: hierarchy, rest palette, track coverage,");
+            Console.WriteLine("              finiteness across every clip; report root-motion observations");
             Console.WriteLine("  --cooked    load supported meshes under a DIRECTORY and fail if geometry or images");
             Console.WriteLine("              resolve to source, fallback, or missing data");
-            Console.WriteLine("  --rig       check a RIG: hierarchy, rest palette, track coverage,");
-            Console.WriteLine("              finiteness across every clip; report root-motion observations");
             Console.WriteLine("  Exits non-zero when something is wrong. For a plain listing of an");
             Console.WriteLine("  asset's hierarchy and pivots, use: blix inspect <path>");
             return 0;
@@ -46,7 +51,7 @@ public static class Program
 
         // Shader and binding conformance has no asset subject and belongs to Blix.Test.Studio.
         Console.Error.WriteLine(
-            "check needs something to check: --model <path.glb>, --rig <rigged.glb>, or --cooked <directory>.");
+            "check needs something to check: --model <path.glb> or --cooked <directory>.");
         Console.Error.WriteLine(
             "  (the studio's own binding model is checked by `blix test`, not here)");
         return 2;
@@ -183,7 +188,7 @@ public static class Program
         }
     }
 
-    private static int InspectModel(string path)
+    private static int InspectModel(string path, bool verbose)
     {
         if (!File.Exists(path))
         {
@@ -230,30 +235,23 @@ public static class Program
             problems++;
         }
 
-        if (problems == 0) return 0;
-        Console.Error.WriteLine($"{problems} problem(s).");
-        return 1;
+        if (problems > 0) Console.Error.WriteLine($"{problems} problem(s).");
+        // A skin is a fact of the file, so its checks run whenever there is one.
+        var rigVerdict = rigged ? InspectRig(path, verbose) : 0;
+        return problems > 0 ? 1 : rigVerdict;
     }
 
     // Rig checks separate hierarchy, rest-pose, and sampled animation faults before a graphics
     // device is involved. Consumer budgets and naming conventions are deliberately outside it.
     private static int InspectRig(string path, bool verbose)
     {
-        if (!File.Exists(path))
-        {
-            Console.Error.WriteLine($"No rig at {path}.");
-            return 2;
-        }
-
         var problems = 0;
         var imported = ModelData.Load(Blix.Recipes.CookCache.Resolve(path), new ModelNeeds(Colour: true, Skinned: true));
-        if (!imported.IsRigged)
-        {
-            Console.Error.WriteLine($"{Path.GetFileName(path)}: no node has a skin, so there is no rig here — probe it as a model.");
-            return 1;
-        }
 
-        var skeleton = imported.Skins[0].Skeleton;
+        // Two skeletons, two questions: skin 0's own (its inverse binds, the joints its vertices weight) and
+        // the animated hierarchy clips pose (every skin's joints and every animated node).
+        var skinSkeleton = imported.Skins[0].Skeleton;
+        var skeleton = imported.Skeleton ?? skinSkeleton;
 
         // Attachments and static parts as the rig reads them: an unskinned mesh node under a joint,
         // and every other unskinned mesh node.
@@ -321,54 +319,75 @@ public static class Program
 
         Console.WriteLine($"  hierarchy: {roots} root(s), order valid");
 
-        // ── Rest pose ───────────────────────────────────────────────────────
-        // BindWorld × InverseBindPose = I by construction, so every rest palette matrix is the
-        // identity — and a rig whose inverse-bind matrices do not invert its bind pose fails here
-        // rather than as a mesh that explodes the moment it is skinned. This is the single most
-        // valuable check in the file: it is exact, it needs no clip, and it catches a bad export.
-        var rest = skeleton.CreateRestPose();
-        var palette = new BonePalette(skeleton.BoneCount);
-        var worlds = new Matrix4x4[skeleton.BoneCount];
-        skeleton.ComputeBonePalette(rest, palette, worlds);
-        var worstRest = 0f;
-        for (var i = 0; i < skeleton.BoneCount; i++)
+        // ── Bind pose ───────────────────────────────────────────────────────
+        // The bind pose rebuilt from the inverse binds, fed back through them, is the identity by
+        // construction — so a rig whose inverse-bind matrices do not invert a consistent bind pose
+        // fails here rather than as a mesh that explodes the moment it is skinned. Measured on the
+        // skeleton WITHOUT its authored rest: glTF's rest is the joint nodes' own transforms and need
+        // not be the bind pose, so a rest palette far from identity is legitimate (reported below).
+        var bindOnly = new Skeleton(skinSkeleton.Bones.Select(b => b with { Rest = null, Offset = null }).ToArray());
+        var palette = new BonePalette(skinSkeleton.BoneCount);
+        var worlds = new Matrix4x4[skinSkeleton.BoneCount];
+        bindOnly.ComputeBonePalette(bindOnly.CreateRestPose(), palette, worlds);
+        var worstBind = 0f;
+        for (var i = 0; i < skinSkeleton.BoneCount; i++)
         {
             var m = palette.Matrices[i];
             if (!IsFinite(m))
             {
-                Console.Error.WriteLine($"  rest palette for bone {i} '{skeleton.Bones[i].Name}' is not finite.");
+                Console.Error.WriteLine($"  bind palette for bone {i} '{skinSkeleton.Bones[i].Name}' is not finite.");
                 problems++;
                 continue;
             }
 
-            worstRest = MathF.Max(worstRest, DistanceFromIdentity(m));
+            worstBind = MathF.Max(worstBind, DistanceFromIdentity(m));
         }
 
         // A millimetre of float drift over a long bone chain is normal; a centimetre is a rig whose
         // bind matrices were baked at a different scale from its joints.
-        var restOk = worstRest < 0.01f;
+        var bindOk = worstBind < 0.01f;
         Console.WriteLine(
-            $"  rest palette: worst deviation from identity {worstRest:0.00000}" + (restOk ? "" : "  ← TOO LARGE"));
-        if (!restOk) problems++;
+            $"  bind palette: worst deviation from identity {worstBind:0.00000}" + (bindOk ? "" : "  ← TOO LARGE"));
+        if (!bindOk) problems++;
+
+        // glTF's rest — the joint nodes' transforms — against that bind pose. A fact, not a verdict.
+        var skinRest = skinSkeleton.CreateRestPose();
+        skinSkeleton.ComputeBonePalette(skinRest, palette, worlds);
+        var worstRest = 0f;
+        for (var i = 0; i < skinSkeleton.BoneCount; i++)
+        {
+            if (!IsFinite(palette.Matrices[i]))
+            {
+                Console.Error.WriteLine($"  rest palette for bone {i} '{skinSkeleton.Bones[i].Name}' is not finite.");
+                problems++;
+                continue;
+            }
+
+            worstRest = MathF.Max(worstRest, DistanceFromIdentity(palette.Matrices[i]));
+        }
+
+        Console.WriteLine(worstRest < 0.01f
+            ? "  rest pose: the bind pose"
+            : $"  rest pose: {worstRest:0.00000} from the bind pose (glTF allows it; the rest is the joint nodes')");
 
         // ── World-space joint positions and deformation reach ──────────────
         // Weighted bones deform vertices; promoted ancestors are required to draw those chains
         // without gaps. Control bones may appear in neither set.
-        var weighted = SkinningAnalysis.FindWeightedBones(skeleton, imported.SkinnedPrimitives().Select(p => p.Mesh));
-        var deform = SkinningAnalysis.IncludeAncestors(skeleton, weighted);
+        var weighted = SkinningAnalysis.FindWeightedBones(skinSkeleton, imported.SkinnedPrimitives().Select(p => p.Mesh));
+        var deform = SkinningAnalysis.IncludeAncestors(skinSkeleton, weighted);
         var weightedCount = weighted.Count(b => b);
         var deformCount = deform.Count(b => b);
         Console.WriteLine(
-            $"  weighted bones: {weightedCount}/{skeleton.BoneCount}" +
-            (weightedCount == skeleton.BoneCount
+            $"  weighted bones: {weightedCount}/{skinSkeleton.BoneCount}" +
+            (weightedCount == skinSkeleton.BoneCount
                 ? " (every bone skins something)"
-                : $" — {skeleton.BoneCount - weightedCount} bone(s) no vertex weights") +
+                : $" — {skinSkeleton.BoneCount - weightedCount} bone(s) no vertex weights") +
             (deformCount == weightedCount
                 ? string.Empty
                 : $"; {deformCount} to draw the chains unbroken"));
         var min = new Vector3(float.MaxValue);
         var max = new Vector3(float.MinValue);
-        for (var i = 0; i < skeleton.BoneCount; i++)
+        for (var i = 0; i < skinSkeleton.BoneCount; i++)
         {
             var at = new Vector3(worlds[i].M41, worlds[i].M42, worlds[i].M43);
             min = Vector3.Min(min, at);
@@ -379,11 +398,11 @@ public static class Program
             $"  rest joints: {min.X:0.000},{min.Y:0.000},{min.Z:0.000} .. {max.X:0.000},{max.Y:0.000},{max.Z:0.000}");
         if (verbose)
         {
-            for (var i = 0; i < skeleton.BoneCount; i++)
+            for (var i = 0; i < skinSkeleton.BoneCount; i++)
             {
                 var at = new Vector3(worlds[i].M41, worlds[i].M42, worlds[i].M43);
                 Console.WriteLine(
-                    $"    {i,3} {skeleton.Bones[i].Name,-24} parent {skeleton.Bones[i].ParentIndex,3}  " +
+                    $"    {i,3} {skinSkeleton.Bones[i].Name,-24} parent {skinSkeleton.Bones[i].ParentIndex,3}  " +
                     $"{at.X,8:0.000} {at.Y,8:0.000} {at.Z,8:0.000}  " +
                     $"{(weighted[i] ? "weighted" : deform[i] ? "carrier " : "control ")}");
             }
@@ -393,6 +412,7 @@ public static class Program
         var poses = 0;
         var travelling = 0;
         var pose = skeleton.CreateRestPose();
+        var rest = skeleton.CreateRestPose();
         var rootBone = RootMotion.DefaultRootBone(skeleton);
         Console.WriteLine($"  root bone: {rootBone} '{skeleton.Bones[rootBone].Name}'");
 

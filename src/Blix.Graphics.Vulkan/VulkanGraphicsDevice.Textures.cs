@@ -1183,10 +1183,11 @@ public sealed partial class VulkanGraphicsDevice
             SType = StructureType.SamplerCreateInfo,
             MinFilter = MapFilter(desc.MinFilter),
             MagFilter = MapFilter(desc.MagFilter),
-            // Mip filter follows MinFilter — bilinear within a mip pairs
-            // with linear between mips for trilinear; nearest pairs with
-            // nearest. When mipmaps are disabled the field is ignored.
-            MipmapMode = desc.MinFilter == TextureFilter.Linear
+            // Mip filter as declared, else following MinFilter — bilinear within a mip pairs with
+            // linear between mips for trilinear; nearest pairs with nearest. None pins the base
+            // level (MaxLod 0 below).
+            MipmapMode = (desc.MipFilter ?? (desc.MinFilter == TextureFilter.Linear ? TextureMipFilter.Linear : TextureMipFilter.Nearest))
+                == TextureMipFilter.Linear
                 ? SamplerMipmapMode.Linear
                 : SamplerMipmapMode.Nearest,
             AddressModeU = MapWrap(desc.WrapU),
@@ -1204,7 +1205,7 @@ public sealed partial class VulkanGraphicsDevice
             // Unclamped — let the texture's own mip count limit sampling.
             // For non-mipped textures the view only exposes mip 0 so this
             // is a no-op.
-            MaxLod = float.MaxValue,
+            MaxLod = desc.MipFilter == TextureMipFilter.None ? 0f : float.MaxValue,
             BorderColor = BorderColor.IntOpaqueBlack,
             UnnormalizedCoordinates = false,
         };
@@ -1225,6 +1226,7 @@ public sealed partial class VulkanGraphicsDevice
     {
         TextureWrap.Repeat => SamplerAddressMode.Repeat,
         TextureWrap.ClampToEdge => SamplerAddressMode.ClampToEdge,
+        TextureWrap.MirroredRepeat => SamplerAddressMode.MirroredRepeat,
         _ => throw new ArgumentOutOfRangeException(nameof(w), w, null),
     };
 

@@ -18,14 +18,11 @@ public sealed record GltfModel(
     /// </remarks>
     Skeleton Skeleton,
     AnimationClip[] Animations,
-    // Row-vector model matrix (F-016) produced by walking the skin node's ancestor chain in
-    // the source glTF. Most authored characters apply their axis-orientation
-    // correction (Z-up → Y-up, etc.) at a parent node rather than per-vertex;
-    // composing this matrix into uModel (`uModel = userTransform * MeshNodeTransform`)
-    // is what makes the imported mesh come out oriented as the asset author
-    // intended. Identity is a valid value for assets whose skin node sits at the
-    // scene root with no ancestor transform.
-    System.Numerics.Matrix4x4 MeshNodeTransform,
+    // Row-vector (F-016): where skin 0's skeleton hangs — the world of the node its root joint
+    // hangs from (JointHierarchy). Most authored characters apply their axis correction
+    // (Z-up → Y-up) at that parent; it goes after every bone world. Identity for a skeleton
+    // whose roots are scene roots.
+    System.Numerics.Matrix4x4 SkeletonPlacement,
 
     // Static meshes parented to joints — equipment, capes, anything the asset hangs off the
     // skeleton without skinning it. Empty for most rigs and not empty for any character that holds
@@ -43,10 +40,10 @@ public sealed record GltfModel(
 
     /// <summary>
     /// Every skin the file declares, in the order the importer met them. Null for a single-skin
-    /// import, where <see cref="Skeleton"/> and <see cref="MeshNodeTransform"/> already say it all.
+    /// import, where <see cref="Skeleton"/> and <see cref="SkeletonPlacement"/> already say it all.
     /// </summary>
     /// <remarks>
-    /// The singular <see cref="Skeleton"/> and <see cref="MeshNodeTransform"/> members are
+    /// The singular <see cref="Skeleton"/> and <see cref="SkeletonPlacement"/> members are
     /// compatibility shorthands for skin 0. Multi-skin consumers should use this collection and
     /// each primitive's <c>SkinIndex</c>.
     /// </remarks>
@@ -64,5 +61,5 @@ public sealed record GltfModel(
     /// Every skin, never null. A consumer writes one loop and never branches on how many there are.
     /// </summary>
     public GltfSkinBinding[] SkinsOrEmpty =>
-        Skins ?? [new GltfSkinBinding(Skeleton, MeshNodeTransform)];
+        Skins ?? [new GltfSkinBinding(Skeleton, SkeletonPlacement)];
 }

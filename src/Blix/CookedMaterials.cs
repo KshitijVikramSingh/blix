@@ -76,6 +76,7 @@ internal static class CookedMaterials
                 textureCache[row] = new TextureData(entry.Name, BlixTexReader.ReadHandle(path))
                 {
                     ResourceId = path,
+                    Sampler = entry.Sampler.ToSamplerDescription(),
                 };
                 cooked++;
                 if (AssetLoadLog.Enabled)
@@ -94,7 +95,7 @@ internal static class CookedMaterials
                 var d = metallicRoughnessRows.Contains(row)
                     ? ImageLoader.LoadMetallicRoughness(stream)
                     : ImageLoader.LoadRgba32(stream);
-                textureCache[row] = TextureData.Rgba8Single(entry.Name, d.Pixels, d.Width, d.Height, path);
+                textureCache[row] = TextureData.Rgba8Single(entry.Name, d.Pixels, d.Width, d.Height, path, entry.Sampler.ToSamplerDescription());
             }
 
             decodedCount++;
@@ -160,13 +161,17 @@ internal static class CookedMaterials
             m.TransmissionFactor,
             // Resolve cooked extension image rows through the same texture cache as core material
             // channels so source and cooked material shapes agree.
-            CookedExtensions(m.Ext, Texture));
+            CookedExtensions(m.Ext, Texture),
+            m.UvTransforms is { } uv ? new PbrUvTransforms(Uv(uv.BaseColor), Uv(uv.Normal), Uv(uv.MetallicRoughness), Uv(uv.Occlusion), Uv(uv.Emissive)) : null,
+            m.ExtensionUv?.Select(e => new PbrTextureUv(e.TexCoord, Uv(e.Transform))).ToArray());
 
         materialCache[index] = result;
         return result;
 
         TextureData? Texture(int image) =>
             image >= 0 && textureCache.TryGetValue(image, out var t) ? t : null;
+
+        static UvTransform Uv(BlixMeshUvTransform t) => new(t.Offset, t.Rotation, t.Scale);
     }
 
 
@@ -222,4 +227,5 @@ internal static class CookedMaterials
             return 0L;
         }
     }
+
 }

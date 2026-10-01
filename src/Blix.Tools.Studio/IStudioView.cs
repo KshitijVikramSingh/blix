@@ -53,9 +53,37 @@ public readonly record struct StudioDraw(
     PipelineHandle BlendPipeline = default,
 
     /// <summary>Its skinned twin.</summary>
-    PipelineHandle SkinnedBlendPipeline = default)
+    PipelineHandle SkinnedBlendPipeline = default,
+
+    /// <summary>The standard pipeline WITH back-face culling, for a single-sided material (glTF's default).</summary>
+    /// <remarks>Zero in the caster pass, which culls nothing; a view falls back to <see cref="Pipeline"/>.</remarks>
+    PipelineHandle CulledPipeline = default,
+
+    /// <summary>
+    /// The culled pipeline with clockwise front faces, for a part whose world transform mirrors (a negative
+    /// determinant): mirroring reverses winding, so the face to cull reverses with it.
+    /// </summary>
+    PipelineHandle MirroredCulledPipeline = default,
+
+    /// <summary>
+    /// <see cref="Pipeline"/> with clockwise front faces, for a doubleSided part that mirrors: nothing is
+    /// culled, but which side is the front still decides how it is lit (gl_FrontFacing).
+    /// </summary>
+    PipelineHandle MirroredPipeline = default,
+
+    /// <summary><see cref="BlendPipeline"/> with clockwise front faces, for a blended part that mirrors.</summary>
+    PipelineHandle MirroredBlendPipeline = default,
+
+    /// <summary>The skinned pipelines with clockwise front faces, for a skin whose palette mirrors.</summary>
+    PipelineHandle MirroredSkinnedPipeline = default,
+
+    /// <summary>Its unculled twin, for a doubleSided part of a mirrored skin.</summary>
+    PipelineHandle MirroredSkinnedDoubleSidedPipeline = default,
+
+    /// <summary>Its blended twin.</summary>
+    PipelineHandle MirroredSkinnedBlendPipeline = default)
 {
-    /// <summary>The stage's per-asset state, for a stage view (RigView, ModelView) to find its asset's.</summary>
+    /// <summary>The stage's per-asset state, for a stage view (ModelView) to find its asset's.</summary>
     internal StudioAssets? Assets { get; init; }
 
     /// <summary>The pass's textures plus this draw's albedo, with white in every other material channel.</summary>
@@ -81,6 +109,16 @@ public readonly record struct StudioDraw(
     {
         if (Pass == StudioPass.Shadow) return new[] { new ShaderTextureBinding("uAlbedo", albedo) };
         return Append(Textures, albedo, normal, metallicRoughness, occlusion, emissive);
+    }
+
+    /// <summary>The pass's uniforms plus this surface's UV transforms; the caster pass reads none of them.</summary>
+    internal ShaderUniform[] WithUv(in StudioSurface surface)
+    {
+        if (Pass == StudioPass.Shadow) return Uniforms;
+        var all = new ShaderUniform[Uniforms.Length + 1];
+        Uniforms.CopyTo(all, 0);
+        all[^1] = new ShaderUniform("uUvRows", new Matrix4x4ArrayUniform(surface.UvRows));
+        return all;
     }
 
     internal ShaderTextureBinding[] WithSurface(in StudioSurface surface) => WithMaterial(

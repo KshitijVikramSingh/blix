@@ -53,21 +53,28 @@ cat <<'MODES'
 plain	--frames 10	The empty stage. Everything else is drawn on top of this, so it fails first when the stage changes.
 static	--model $CRATE	One static model, one material. The smallest thing that can go wrong.
 tank	--model $TANK	THREE skins and two static mesh nodes. Neither was read before the inlet arc: the importer took one skin and dropped anything not under a joint.
-clip	--rig $ROGUE --clip Walking_A --time 0.35 --xray	A named pose at a named instant — the smallest reproducible rig picture.
-attach	--rig $ROGUE --clip Walking_A --time 0.35 --attach 1H_Crossbow --xray	An attachment following a joint, which is a different thing from a static part.
-mask	--rig $ROGUE --clip Walking_A --mask-root spine --mask-falloff 2 --skeleton-only --xray --zoom 2	A layer mask as a picture of the mask, not of what it was used for.
-advance	--rig $ROGUE --clip Dodge_Forward --advance 2.0 --drive-root	Root motion integrated over five loop cycles, single body. The travel number in the log is the assertion.
-inst3	--rig $ROGUE --instances 3 --xray	Three bodies, three poses, one draw.
-lockstep	--rig $ROGUE --instances 3 --lockstep --xray	The negative control for inst3: one clip at one instant must yield ONE distinct pose. Without it "they differ" proves nothing.
-viewport	--rig $ROGUE --instances 3 --viewport --xray	Two cameras, two files. Writes viewport.scene.png too — if the pair shows one camera, something upstream is sharing view state.
-inst3-travel	--rig $ROGUE --clip Dodge_Forward --advance 2.0 --drive-root --instances 3 --xray	MULTI-BODY ROOT MOTION. The hole the old set had: root motion applied to one body and fanned to all three was invisible to every single-body mode.
-inst3-travel-lockstep	--rig $ROGUE --clip Dodge_Forward --advance 2.0 --drive-root --instances 3 --lockstep --xray	Its negative control: driven from one clip at one phase, the three must stay one distinct pose while still travelling.
-inst5-travel	--rig $ROGUE --clip Dodge_Forward --advance 2.0 --drive-root --instances 5 --xray	Five, because an index fault that reads body 0 or body N-1 can pass at three.
+clip	--model $ROGUE --clip Walking_A --time 0.35 --xray	A named pose at a named instant — the smallest reproducible rig picture.
+attach	--model $ROGUE --clip Walking_A --time 0.35 --attach 1H_Crossbow --xray	An attachment following a joint, which is a different thing from a static part.
+mask	--model $ROGUE --clip Walking_A --mask-root spine --mask-falloff 2 --skeleton-only --xray --zoom 2	A layer mask as a picture of the mask, not of what it was used for.
+advance	--model $ROGUE --clip Dodge_Forward --advance 2.0 --drive-root	Root motion integrated over five loop cycles, single body. The travel number in the log is the assertion.
+inst3	--model $ROGUE --instances 3 --xray	Three bodies, three poses, one draw.
+lockstep	--model $ROGUE --instances 3 --lockstep --xray	The negative control for inst3: one clip at one instant must yield ONE distinct pose. Without it "they differ" proves nothing.
+viewport	--model $ROGUE --instances 3 --viewport --xray	Two cameras, two files. Writes viewport.scene.png too — if the pair shows one camera, something upstream is sharing view state.
+inst3-travel	--model $ROGUE --clip Dodge_Forward --advance 2.0 --drive-root --instances 3 --xray	MULTI-BODY ROOT MOTION. The hole the old set had: root motion applied to one body and fanned to all three was invisible to every single-body mode.
+inst3-travel-lockstep	--model $ROGUE --clip Dodge_Forward --advance 2.0 --drive-root --instances 3 --lockstep --xray	Its negative control: driven from one clip at one phase, the three must stay one distinct pose while still travelling.
+inst5-travel	--model $ROGUE --clip Dodge_Forward --advance 2.0 --drive-root --instances 5 --xray	Five, because an index fault that reads body 0 or body N-1 can pass at three.
 selftest	judge:0 --stage-selftest --frames 6	Rung four: a tool declares a pass of its own and the stage must record it. A hook nothing calls is a hook that rots.
 vertexcolor	corpus: --model $CORPUS/sample-assets/BoxVertexColors/BoxVertexColors.glb	COLOR_0 as a base-colour multiplier. Rendered WHITE until I-A, and no asset in this tree could have shown it: all 33 nature-kit primitives use COLOR_0 as greyscale baked AO.
 blend	corpus: --model $CORPUS/sample-assets/AlphaBlendModeTest/AlphaBlendModeTest.glb	OPAQUE/MASK/BLEND side by side with real alpha. Rendered fully opaque before I-B.
 alphamask	corpus: --model $CORPUS/generator/Material_AlphaMask/Material_AlphaMask_05.gltf	The cutoff whose baseColorFactor.a of 0.7 makes its EFFECTIVE cutoff 0.571 — it looked identical to _01 while baseAlpha was hardcoded to 1.
 doublesided	corpus: --model $CORPUS/generator/Material_DoubleSided/Material_DoubleSided_00.gltf	doubleSided, which is pipeline state in Vulkan and so cannot ride a push constant.
+rigcutout	corpus: --model $CORPUS/sample-assets/RiggedSimple/RiggedSimple_cutout.gltf --attach attach_kept --attach attach_dropped	A rig's static parts and attachments honour alpha: each MASK pair keeps one quad and drops one, BLEND is translucent, and neither dropped nor blended casts. All five drew solid, and cast, before.
+bones300	corpus: --model $CORPUS/sample-assets/RiggedSimple/RiggedSimple_bones300.gltf --instances 2	A skin past the old 128-bone cap, weighted by joints 300 and 301: must match RiggedSimple --instances 2 pixel for pixel, the second body bent. Byte-truncated indices lose the bend (42k pixels).
+nodeanim	corpus: --model $CORPUS/sample-assets/BoxAnimated/BoxAnimated.glb --clip anim --time 0.3	Node animation with no skin: the inner box is lifted out of the outer one at 0.3 s. Drawn frozen before the animated hierarchy (clips reached only skin 0's joints).
+samplers	corpus: --model $CORPUS/sample-assets/TextureSettingsTest/TextureSettingsTest.glb --zoom 1.6	glTF samplers: repeat and mirror show checkmarks, clamp shows solid green (README). Mirror was impossible before v15 (no mirrored wrap). The single-sided row's red X is the static pipeline not culling, plan.md §I.
+uvtransform	corpus: --model $CORPUS/sample-assets/TextureTransformMultiTest/TextureTransformMultiTest.glb --zoom 1.3	KHR_texture_transform on every core channel and TEXCOORD_1: checkmarks; the transform bypassed shows the asset's fail symbol. Clearcoat rows are dark: Studio does not draw clearcoat (plan.md §I 3c).
+negscale	corpus: --model $CORPUS/sample-assets/NegativeScaleTest/NegativeScaleTest.glb	Mirrored nodes: single-sided culling follows the reversed winding (every row a checkmark), and the -1.0 column's doubleSided spheres light like the 1.0 column's (README). Needs the front face to follow the determinant even unculled.
+mirrorskin	corpus: --model $CORPUS/sample-assets/RiggedSimple/RiggedSimple_mirrored.gltf	A skin under a (-1,1,1) node: front faces follow the palette's mirror, so it draws as the unmirrored rig (0 pixels differ); with the flag ignored it draws inside-out.
 uv1	corpus: --model $CORPUS/sample-assets/MultiUVTest/MultiUVTest_uv1.gltf	A texture naming texCoord 1. The locally derived asset — upstream ships the second UV set but no material that names it, so the stock file cannot tell the two readers apart.
 interleaved	corpus: --model $CORPUS/cesium/BoxInterleaved/BoxInterleaved.gltf	Interleaved attributes. A vertex buffer is walked at the PIPELINE's stride, so a mismatch reads as garbage geometry rather than a missing attribute.
 nonormals	corpus: --model $CORPUS/cesium/BoxNoNormals/BoxNoNormals.gltf	No NORMAL attribute at all. Blix's behaviour here is recorded rather than asserted — this mode exists so a change to it is noticed.

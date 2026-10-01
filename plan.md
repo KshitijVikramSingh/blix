@@ -63,6 +63,85 @@ buffer views and sparse data stay behind in the cook.
 
 ---
 
+## H — glTF animation as glTF defines it: nodes, not skin 0's joints
+
+glTF animates NODES. Blix read clips only on skin 0's joints, as bone indices; everything else was
+dropped or refused. A survey of the corpus (94 files added for this arc) found each case live:
+rigid node animation with no skin (AnimatedTriangle, BoxAnimated, CesiumMilkTruck, InterpolationTest),
+tracks on non-joint nodes above joints (BrainStem), skins with different joint lists under one clip set
+(RecursiveSkeletons: 84 skins, refused), and STEP / CUBICSPLINE sampling (refused outright: the cooked
+format stores only time/value keys). Morph weights and KHR_animation_pointer stay out of scope, recorded
+as unread.
+
+1. **Sampling.** `.blixmesh` v14 records each channel's interpolation and CUBICSPLINE's in/out tangents;
+   the curves evaluate STEP and CUBICSPLINE by the spec's formulas. The cook writes tracks for every
+   animated node, not only skin 0's joints.
+2. **One animated hierarchy per model.** Its bones are every skin's joints plus every animated node
+   (static in-between nodes stay offsets). Clips are bone indices against it; one pose drives every skin,
+   each gathering its joints' worlds with its own inverse binds. For a one-skin file with no other
+   animated node it is exactly skin 0's skeleton, so existing consumers see no change.
+3. **Rigid parts follow the pose.** A part under an animated node is placed by that node's posed world;
+   attachments are the special case where the node is a joint. A model with clips is posed whether or
+   not it has a skin.
+4. **Proof.** A conformance check samples every clip in the corpus at several times and holds skinned
+   vertices and rigid part worlds to the spec: node locals from rest TRS plus spec-sampled channels,
+   composed up the tree in the test. (Not SharpGLTF's evaluator: its cubic rotation disagrees with the
+   spec, checked by hand.)
+
+**Done** (branch `rig-alpha`): stage 1 (762e00a) — sampling, v14, every animated node cooked, 94 corpus
+files. Stages 2-4 — the animated hierarchy (`ModelData.Skeleton`, `Skin.Bones`, palettes gathered),
+rigid parts under any animated node, posing without a skin in the tools, and the conformance check over
+22 animated files (RecursiveSkeletons' 84 skins, BrainStem, InterpolationTest, BoxAnimated, the milk truck).
+Out of scope: morph weights, `KHR_animation_pointer`.
+
+---
+
+## I — glTF spec support: the audit, and what it found
+
+The corpus is 150 files (after §H's additions). `Blix.Test.Recipes` now cooks and loads every one and
+samples every clip: 137 load, 13 are refused for a listed reason (`ExpectedRefusals`), and the list can
+only shrink on purpose. Loading is not reading: a grep of what the reader touches (with a known-positive
+control) found the second half. In a proposed order — correctness of what already loads first, then the
+refusals, then features:
+
+1. **Primitive modes — done.** Strips, fans and non-indexed primitives unroll to triangle lists in the
+   cook (recipe 10), checked triangle-for-triangle against the spec's unrolling; points and lines are
+   refused by name (decided: pipelines for them wait for a consumer).
+2. **Samplers — done.** Each cooked image row carries its glTF sampler (format v15); the engine maps
+   wrap (incl. MIRRORED_REPEAT) and min/mag/mip filters; TextureSettingsTest's six sampler tests pass.
+3. **One image, two roles — done.** An image used two ways cooks once per role and convention
+   (`ImageVariants`); TextureEncodingTest and TextureLinearInterpolationTest load. Files whose REQUIRED
+   extensions Blix does not read are now refused (glTF's rule): SheenChair and TextureTransformMultiTest
+   wait for item 5.
+3b. **Single-sided culling, double-sided back faces, mirrored nodes — done.** Studio culls a single-sided
+   rigid part's back faces, lights a doubleSided back face with its frame reversed, and gives a mirrored
+   part (negative determinant) clockwise front faces whether culled or not; TextureSettingsTest and
+   NegativeScaleTest pass every row. A mirrored skin (its palette's determinant negative) takes clockwise
+   skinned pipelines the same way (RiggedSimple_mirrored: identical to the unmirrored rig).
+3c. **Extension texture channels — done.** All 14 KHR_materials_* texture channels cook (colour ones as
+   sRGB, the clearcoat normal as a normal map); every textured channel kind in the corpus (16) reaches the
+   cooked file. Renderers decide which they draw — Studio draws none of the extensions. Found on the way:
+   same-named embedded images overwrote each other's cooked file; each extraction now takes a unique stem.
+4. **Refused valid files — done.** A sparse INDEX accessor (Accessor_Sparse_03), a skin with no inverse
+   binds (identity, §5.27), and joints with no common root (Animation_Skin_06, which SharpGLTF's strict
+   validator rejects — sources now load unvalidated, and the cook checks what it needs itself: POSITION,
+   index range, required extensions).
+5. **KHR_texture_transform — done.** Each core channel's offset/rotation/scale cooks into the material
+   (format v16) and a texCoord override replaces the channel's set; Studio applies them per draw
+   (`uUvRows`, set 1). TextureTransformMultiTest and SheenChair load; the multi-test's checkmarks show,
+   and with the transform bypassed its fail symbols do. Other renderers (Sponza, the demos) read the
+   transforms off PbrMaterial when they want them.
+6. **Scene structure the reader ignores:** scene selection (MultipleScenes), cameras, KHR_node_visibility,
+   EXT_mesh_gpu_instancing, KHR_lights_punctual, KHR_materials_variants.
+7. **Out of scope unless asked:** Draco, meshopt, KTX2/BasisU, WEB3D quantized (refused by name), morph
+   targets and KHR_animation_pointer (recorded as unread), KHR_xmp (metadata).
+
+Material extensions are already broadly read (transmission, diffuse transmission, sheen, volume,
+specular, IOR, clearcoat, iridescence, anisotropy, dispersion, unlit, emissive strength); whether each
+RENDERS right is the Compare* set's job, judged against each README.
+
+---
+
 ## F — a body in the character room
 
 The one stage not started. `src/Demos/Character/` holds a shared library — room,

@@ -58,6 +58,13 @@ layout(set = 1, binding = 8) uniform sampler2D uMetallicRoughness;  // linear, G
 layout(set = 1, binding = 9) uniform sampler2D uOcclusion;          // linear, R = occlusion
 layout(set = 1, binding = 10) uniform sampler2D uEmissive;          // sRGB
 
+// Each core channel's KHR_texture_transform, as two rows (u' = a.xyz . (u, v, 1), v' = b.xyz . (u, v, 1)):
+// channel c's rows are r = 2c and 2c + 1, held at uUvRows[r / 4][r % 4]. Base colour, normal,
+// metallic-roughness, occlusion, emissive. Per draw (set 1 is per-draw); identity where untransformed.
+layout(set = 1, binding = 11) uniform UvTransforms {
+    mat4 uUvRows[3];
+};
+
 layout(push_constant) uniform Push {
     mat4 uModel;
     vec4 uBaseColour;
@@ -85,10 +92,15 @@ layout(location = 0) out vec4 outColour;
 // normal, and the bitangent cross(N, T) * w. MikkTSpace's frame reproduced exactly is what a baked map
 // expects, seams and mirrored UVs included. The cook wrote the tangent against TEXCOORD_0, so a normal
 // map naming set 1 is read in set 0's frame.
+//
+// On a back face (a doubleSided material seen from behind) the whole frame is reversed, as glTF says and
+// the Khronos sample viewer does: N arrives here already flipped, and T and B flip with it.
 mat3 surfaceFrame(vec3 N)
 {
-    vec3 T = normalize(vTangent.xyz - N * dot(N, vTangent.xyz));
-    return mat3(T, cross(N, T) * vTangent.w, N);
+    float side = gl_FrontFacing ? 1.0 : -1.0;
+    vec3 t = vTangent.xyz * side;
+    vec3 T = normalize(t - N * dot(N, t));
+    return mat3(T, cross(N, T) * vTangent.w * side, N);
 }
 
 vec2 channelUv(int bit)
@@ -96,10 +108,21 @@ vec2 channelUv(int bit)
     return (int(uExtra.z + 0.5) & bit) != 0 ? vUv1 : vUv;
 }
 
+vec2 uvOf(int channel, vec2 uv)
+{
+    int r = channel * 2;
+    vec4 a = uUvRows[r / 4][r % 4];
+    vec4 b = uUvRows[(r + 1) / 4][(r + 1) % 4];
+    vec3 p = vec3(uv, 1.0);
+    return vec2(dot(a.xyz, p), dot(b.xyz, p));
+}
+
 void main()
 {
-    vec3 N = normalize(vNormal);
-    vec2 uvNormal = channelUv(1);
+    // glTF: a doubleSided material's back face is lit with its normal reversed. A single-sided one never
+    // reaches here from behind (its back faces are culled), so this only ever applies where it should.
+    vec3 N = normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0);
+    vec2 uvNormal = uvOf(1, channelUv(1));
 
     // The shadow's normal offset uses the geometric normal: it is about where the surface is, and a
     // normal map only says how it scatters light.
@@ -126,13 +149,13 @@ void main()
         vWorld, geometric, max(dot(geometric, L), 0.0), 1.5, gl_FragCoord.xy,
         cascade);
 
-    vec4 metallicRoughness = texture(uMetallicRoughness, channelUv(2));
+    vec4 metallicRoughness = texture(uMetallicRoughness, uvOf(2, channelUv(2)));
     float metallic = clamp(uMaterial.x * metallicRoughness.b, 0.0, 1.0);
     float roughness = clamp(uMaterial.y * metallicRoughness.g, 0.04, 1.0);
     // A zero cutoff lets OPAQUE and MASK share this pipeline. Alpha is texture × baseColorFactor.a ×
     // vertex alpha, per glTF. `discard` prevents early-Z for the whole shader; Studio accepts that
     // cost for its small subjects rather than multiplying pipeline variants. Revisit for large views.
-    vec2 uvAlbedo = uExtra.x > 0.5 ? vUv1 : vUv;
+    vec2 uvAlbedo = uvOf(0, uExtra.x > 0.5 ? vUv1 : vUv);
     if (uMaterial.w > 0.0 && texture(uAlbedo, uvAlbedo).a * uBaseColour.a * vColour.a < uMaterial.w) discard;
 
     vec3 albedo = uBaseColour.rgb * texture(uAlbedo, uvAlbedo).rgb * vColour.rgb;
@@ -155,10 +178,10 @@ void main()
     }
 
     // glTF occlusion darkens indirect light only; the sun is already shadowed.
-    ambient *= 1.0 + uEmission.a * (texture(uOcclusion, channelUv(4)).r - 1.0);
+    ambient *= 1.0 + uEmission.a * (texture(uOcclusion, uvOf(3, channelUv(4))).r - 1.0);
 
     // Output the same composed alpha used by MASK; opaque pipelines ignore this channel.
-    vec3 lit = direct + ambient + uEmission.rgb * texture(uEmissive, channelUv(8)).rgb;
+    vec3 lit = direct + ambient + uEmission.rgb * texture(uEmissive, uvOf(4, channelUv(8))).rgb;
 
     // Cascade diagnostics replace shading with a flat band; shadow remains as brightness.
     if (uCascadeTexels.w > 0.5) lit = blix_cascade_tint(cascade) * mix(0.35, 1.0, shadow);

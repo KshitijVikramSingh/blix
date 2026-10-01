@@ -39,16 +39,18 @@ public static class Program
     {
         var output = args.String("out", "capture.png");
         var modelPath = args.String("model");
-        var rigPath = args.String("rig");
+        if (args.String("rig") is not null)
+        {
+            Console.Error.WriteLine("shot: --rig is gone: --model opens any file, and one with a skin is posed (--clip, --instances).");
+            return 2;
+        }
+
         // A subject that is not there is refused, not skipped: an empty stage is lit sky and ground, so it
         // passes every lit floor, and a mistyped path used to capture it and exit 0.
-        foreach (var (flag, subject) in new[] { ("--model", modelPath), ("--rig", rigPath) })
+        if (modelPath is not null && !File.Exists(modelPath))
         {
-            if (subject is not null && !File.Exists(subject))
-            {
-                Console.Error.WriteLine($"shot: {flag} {subject}: no such file.");
-                return 2;
-            }
+            Console.Error.WriteLine($"shot: --model {modelPath}: no such file.");
+            return 2;
         }
 
         // <b>A pose, named by a clip and a time, is a reproducible picture.</b> That pairing is what
@@ -168,7 +170,7 @@ public static class Program
         }
 
         var loop = new CaptureLoop(
-            output, options.ExitAfterFrames, modelPath, rigPath, clipName, clipTime, xray, advance,
+            output, options.ExitAfterFrames, modelPath, clipName, clipTime, xray, advance,
             driveRoot, instances, lockstep, viewport, sequence, maskRoot, maskFalloff, skeletonOnly,
             zoom, stageSelfTest, args, tints);
         using (var window = new Window(loop, options))
@@ -217,7 +219,6 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
     private Model? model;
     private Matrix4x4 modelTransform = Matrix4x4.Identity;
 
-    private readonly string? rigPath;
     private readonly string? clipName;
     private readonly double clipTime;
     private readonly bool xray;
@@ -346,7 +347,6 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         string outputPath,
         int captureOnFrame,
         string? modelPath = null,
-        string? rigPath = null,
         string? clipName = null,
         double clipTime = 0.0,
         bool xray = false,
@@ -379,7 +379,6 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         this.advance = advance;
         this.driveRoot = driveRoot;
         this.modelPath = modelPath;
-        this.rigPath = rigPath;
         this.clipName = clipName;
         this.clipTime = clipTime;
         this.outputPath = outputPath;
@@ -429,22 +428,32 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
             ? $"environment: procedural probe from the stage sun, {renderer.BakeMilliseconds:0.0} ms"
             : "environment: OFF — flat ambient stands in for the probe");
 
-        LoadRig();
-
-        if (modelPath is null || !File.Exists(modelPath)) return;
+        if (modelPath is null) return;
+        Model loaded;
         // <b>The same catch the judge has, for the same reason.</b> AssetImportException is the
         // engine refusing a file by name; anything else escaping here is a fault in this tool.
         // Without it a bad asset took the whole process down with a stack trace AFTER the window
         // had opened — which reads as "the viewer is broken" rather than "that file is not a glTF".
         try
         {
-            model = renderer.LoadModel(modelPath);
+            loaded = renderer.LoadModel(modelPath);
         }
         catch (AssetImportException refused)
         {
             Console.Error.WriteLine($"blix cannot read this: {refused.Message}");
             Environment.Exit(1);
+            return;
         }
+
+        // A model with a skin or a clip is posed and framed by its body; one with neither is framed as a prop.
+        if (loaded.IsSkinned || loaded.IsAnimated)
+        {
+            rig = loaded;
+            PoseRig();
+            return;
+        }
+
+        model = loaded;
         var extent = model.LongestExtent;
         var scale = extent > 0.001f ? 3f / extent : 1f;
         modelTransform = Matrix4x4.CreateScale(scale)
@@ -456,20 +465,9 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
 
     // Sampled ONCE, at load, and never advanced. A capture that ran the clock would produce a
     // different picture per run — which is precisely what a capture exists not to do.
-    private void LoadRig()
+    private void PoseRig()
     {
-        if (rigPath is null || !File.Exists(rigPath)) return;
-
-        try
-        {
-            rig = renderer.LoadRig(rigPath);
-        }
-        catch (AssetImportException refused)
-        {
-            Console.Error.WriteLine($"blix cannot read this: {refused.Message}");
-            Environment.Exit(1);
-        }
-
+        var rig = this.rig!;
         animation = new RigInstances(rig, instanceCount)
         {
             Lockstep = lockstep,
@@ -526,7 +524,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         if (clipName is not null && player.Clip is null)
         {
             Console.Error.WriteLine(
-                $"No clip named '{clipName}' in {Path.GetFileName(rigPath)}; capturing the rest pose.");
+                $"No clip named '{clipName}' in {Path.GetFileName(modelPath)}; capturing the rest pose.");
         }
 
         player.ScrubTo(clipTime);
@@ -634,7 +632,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         rig.Skeleton.ComputeBoneWorlds(player.Pose, boneWorlds);
 
         Console.WriteLine(
-            $"rig: {Path.GetFileName(rigPath)} — {rig.Skeleton.BoneCount} bone(s), {rig.Clips.Count} clip(s), " +
+            $"rig: {Path.GetFileName(modelPath)} — {rig.Skeleton.BoneCount} bone(s), {rig.Clips.Count} clip(s), " +
             $"clip '{player.Clip?.Name ?? "(rest)"}' at {player.Time:0.000}s of {player.Duration:0.00}s");
         if (steps > 0)
         {
@@ -652,7 +650,10 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // Pulled in when there is a subject, so it fills the frame rather than sitting in it. A rig
         // is framed higher and closer still: a character's interesting half is above its waist.
         var subject = model is not null || rig is not null;
-        var eye = rig is not null
+        // The character camera is for a body a skin deforms; a posed model with no skin (node animation
+        // only) is a prop that moves, and gets the prop's camera.
+        var character = rig is { IsSkinned: true };
+        var eye = character
             ? new Vector3(2.6f, 2.0f, 3.4f)
             : subject ? new Vector3(3.4f, 2.4f, 4.2f) : new Vector3(6.4f, 4.8f, 7.6f);
 
@@ -663,7 +664,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
         // The rig's OWN half-height, not a constant that happened to suit one asset. A hardcoded
         // 1.4 m aims over the head of anything shorter, and --zoom then magnifies empty air: the
         // first mask capture centred on the sky with the skeleton falling off the bottom edge.
-        var target = rig is not null
+        var target = character
             ? new Vector3(0f, rigDrawnHeight * 0.5f, 0f)
             : subject ? new Vector3(0f, 0.7f, 0f) : new Vector3(0f, 1f, 0f);
 
@@ -710,12 +711,12 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                         * GraphicsMatrices.CreatePerspectiveVulkan(MathF.PI / 3.2f, aspect, 0.1f, 120f);
 
         var views = new List<IStudioView>();
-        if (model is not null) views.Add(new ModelView(model, modelTransform) { Tints = tints });
+        if (model is not null) views.Add(new ModelView(model) { Placement = modelTransform, Tints = tints });
         if (!skeletonOnly && rig is not null)
         {
             // Same wiring as the viewer, because a capture that could not show an attachment would
             // make the one instrument that produces evidence blind to the thing being added.
-            var rigView = new RigView(rig, animation?.Count ?? 0)
+            var rigView = new ModelView(rig, animation?.Count ?? 0)
             {
                 Tints = tints,
                 BoneWorlds = boneWorlds,
@@ -727,7 +728,8 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                 InstanceBoneWorlds = animation is null ? null : animation.BoneWorldsFor,
                 Placements = animation?.Placements,
             };
-            foreach (var name in visibleAttachments) rigView.VisibleAttachments.Add(name);
+            // --attach filters; without it every attachment the file carries is drawn.
+            if (visibleAttachments.Count > 0) rigView.VisibleAttachments = new HashSet<string>(visibleAttachments, StringComparer.Ordinal);
             views.Add(rigView);
         }
 
@@ -879,7 +881,7 @@ internal sealed class CaptureLoop : IGameLoop, IDebuggable, IDisposable
                     debug,
                     rig.Skeleton,
                     worlds,
-                    rig.MeshNodeTransform * animation.Placements[i],
+                    rig.SkeletonPlacement * animation.Placements[i],
                     SkeletonGizmo.Options.Default,
                     selectedBone: -1,
                     restWorlds: null,

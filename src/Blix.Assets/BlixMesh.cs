@@ -33,14 +33,28 @@ public static class BlixMesh
     /// stamps its own, which is what makes "who made this file" answerable.
     /// </summary>
     public const string ShippedRecipe = "gmsh";
+
+    /// <summary>The KHR_materials_* texture channels, in the order a material's <c>ExtensionUv</c> lists them.</summary>
+    /// <remarks>SharpGLTF's channel keys; the engine's <c>PbrExtensionTexture</c> follows this order.</remarks>
+    public static readonly IReadOnlyList<string> ExtensionChannels = new[]
+    {
+        "ClearCoat", "ClearCoatRoughness", "ClearCoatNormal", "SheenColor", "SheenRoughness",
+        "SpecularColor", "SpecularFactor", "Transmission", "VolumeThickness", "Iridescence",
+        "IridescenceThickness", "Anisotropy", "DiffuseTransmissionFactor", "DiffuseTransmissionColor",
+    };
     // Version 13 is the only accepted layout. It includes per-primitive layouts and LOD errors,
     // common provenance, material and image tables (each core channel with its TEXCOORD set, and
     // the normal scale), rig data, attachments/static parts, authored nodes, and the current
     // KHR_materials_* parameter block. v12 mirrors glTF's structure: a node table in every file,
     // meshes stored once and placed by nodes, vertices in mesh space as the complete static (6) or
     // skinned (7) vertex, skins as joint nodes, clips targeting nodes, and the source attributes the
-    // cook did not carry (v13). Older layouts must be re-cooked.
-    public const uint Version13 = 13;
+    // cook did not carry (v13). v14 gives each track channel its glTF interpolation (LINEAR, STEP or
+    // CUBICSPLINE, with the spline's in/out tangents), and tracks every animated node rather than
+    // only skin 0's joints. v15 makes an image row one image as used — role, normal convention and
+    // glTF sampler — so an image used two ways is two rows. v16 adds each core channel's
+    // KHR_texture_transform to the material; v17 each extension channel's TEXCOORD set and transform.
+    // Older layouts must be re-cooked.
+    public const uint Version17 = 17;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
     public const uint LayoutPosition3NormalTextureSkin4Tangent = 3; // 80-byte, rigged
@@ -125,7 +139,44 @@ public sealed record BlixMeshLod(ushort[]? Indices16, uint[]? Indices32, float E
 /// <param name="Resource">
 /// Relative to the cooked mesh, with forward slashes, so it means the same thing on every machine.
 /// </param>
-public sealed record BlixMeshImage(string Name, ulong ContentHash, string Resource);
+/// <param name="Sampler">How the materials using this row sample it: glTF's sampler, as glTF's codes.</param>
+/// <remarks>
+/// A row is one image AS USED: one role (colour or data), one normal convention, one sampler. The same
+/// source image used two ways is two rows — two cooked files when the role or convention differs, one
+/// file and two samplers when only the sampler does.
+/// </remarks>
+public sealed record BlixMeshImage(string Name, ulong ContentHash, string Resource, BlixMeshSampler Sampler = default);
+
+/// <summary>A <c>KHR_texture_transform</c>: a channel's UVs scaled, rotated, then offset (uv' = T R S uv).</summary>
+/// <remarks>Its <c>texCoord</c> override is folded into the channel's TEXCOORD index at the cook.</remarks>
+public readonly record struct BlixMeshUvTransform(Vector2 Offset, float Rotation, Vector2 Scale)
+{
+    public static BlixMeshUvTransform Identity { get; } = new(Vector2.Zero, 0f, Vector2.One);
+}
+
+/// <summary>Which TEXCOORD set a channel samples, and its <c>KHR_texture_transform</c>.</summary>
+public readonly record struct BlixMeshChannelUv(int TexCoord, BlixMeshUvTransform Transform)
+{
+    public static BlixMeshChannelUv Default { get; } = new(0, BlixMeshUvTransform.Identity);
+}
+
+/// <summary>The five core channels' UV transforms.</summary>
+public sealed record BlixMeshUvTransforms(
+    BlixMeshUvTransform BaseColor, BlixMeshUvTransform Normal, BlixMeshUvTransform MetallicRoughness,
+    BlixMeshUvTransform Occlusion, BlixMeshUvTransform Emissive)
+{
+    public static BlixMeshUvTransforms Identity { get; } = new(
+        BlixMeshUvTransform.Identity, BlixMeshUvTransform.Identity, BlixMeshUvTransform.Identity,
+        BlixMeshUvTransform.Identity, BlixMeshUvTransform.Identity);
+
+    public IEnumerable<BlixMeshUvTransform> All => new[] { BaseColor, Normal, MetallicRoughness, Occlusion, Emissive };
+}
+
+/// <summary>A glTF sampler, kept as glTF's own codes: what the file says, for the reader to map.</summary>
+/// <param name="WrapS">10497 REPEAT, 33071 CLAMP_TO_EDGE, 33648 MIRRORED_REPEAT. 0 reads as REPEAT, the spec's default.</param>
+/// <param name="MinFilter">9728/9729 NEAREST/LINEAR, 9984-9987 the four mipmap modes; 0 when unspecified.</param>
+/// <param name="MagFilter">9728 NEAREST, 9729 LINEAR; 0 when unspecified.</param>
+public readonly record struct BlixMeshSampler(int WrapS, int WrapT, int MinFilter, int MagFilter);
 
 /// <summary>
 /// A cooked material whose image fields index this file's image table. -1 means the channel has no
@@ -156,7 +207,16 @@ public sealed record BlixMeshMaterial(
     int EmissiveImage = BlixMesh.NoImage,
 
     /// <summary>Every <c>KHR_materials_*</c> property, as cooked. Null for in-memory callers that omit the block.</summary>
-    BlixMaterialExtensions? Extensions = null)
+    BlixMaterialExtensions? Extensions = null,
+
+    /// <summary>Each core channel's <c>KHR_texture_transform</c>; null reads as identity on every channel.</summary>
+    BlixMeshUvTransforms? UvTransforms = null,
+
+    /// <summary>
+    /// The 14 extension channels' TEXCOORD set and transform, in <see cref="BlixMesh.ExtensionChannels"/> order;
+    /// null when every one is set 0, untransformed.
+    /// </summary>
+    IReadOnlyList<BlixMeshChannelUv>? ExtensionUv = null)
 {
     /// <summary>The extensions, never null — an absent block reads as every spec default.</summary>
     public BlixMaterialExtensions Ext => Extensions ?? BlixMaterialExtensions.None;
@@ -229,11 +289,20 @@ public sealed record BlixMaterialExtensions(
 /// <param name="NodeIndex">The joint: a row of the file's node table.</param>
 public sealed record BlixMeshBone(string Name, int ParentIndex, Matrix4x4 InverseBindPose, int NodeIndex);
 
-/// <summary>A translation or scale key.</summary>
-public readonly record struct BlixMeshVectorKey(float Time, Vector3 Value);
+/// <summary>How a channel reads between keys: glTF's sampler interpolation.</summary>
+public enum BlixMeshInterpolation : byte
+{
+    Linear = 0,
+    Step = 1,
+    CubicSpline = 2,
+}
 
-/// <summary>A rotation key.</summary>
-public readonly record struct BlixMeshQuaternionKey(float Time, Quaternion Value);
+/// <summary>A translation or scale key. The tangents are read, and stored, only in a CUBICSPLINE channel.</summary>
+public readonly record struct BlixMeshVectorKey(float Time, Vector3 Value, Vector3 InTangent = default, Vector3 OutTangent = default);
+
+/// <summary>A rotation key. The tangents are read, and stored, only in a CUBICSPLINE channel.</summary>
+public readonly record struct BlixMeshQuaternionKey(
+    float Time, Quaternion Value, Quaternion InTangent = default, Quaternion OutTangent = default);
 
 /// <summary>One node's animation across a clip. An empty channel array means that channel is absent.</summary>
 /// <remarks>
@@ -241,12 +310,15 @@ public readonly record struct BlixMeshQuaternionKey(float Time, Quaternion Value
 /// not give it at all; a channel with zero keys has no meaning either way, so one representation
 /// covers both and the reader needs no presence flag per channel.
 /// </remarks>
-/// <param name="NodeIndex">The node animated, as glTF's channels target nodes; a rig maps it to its bone.</param>
+/// <param name="NodeIndex">The node animated, as glTF's channels target nodes: a joint or any other node.</param>
 public sealed record BlixMeshTrack(
     int NodeIndex,
     BlixMeshVectorKey[] Translation,
     BlixMeshQuaternionKey[] Rotation,
-    BlixMeshVectorKey[] Scale);
+    BlixMeshVectorKey[] Scale,
+    BlixMeshInterpolation TranslationInterpolation = BlixMeshInterpolation.Linear,
+    BlixMeshInterpolation RotationInterpolation = BlixMeshInterpolation.Linear,
+    BlixMeshInterpolation ScaleInterpolation = BlixMeshInterpolation.Linear);
 
 /// <summary>A named animation. Duration is derived from the keys, never stored.</summary>
 /// <remarks>
@@ -434,32 +506,71 @@ internal static class BlixMeshBinary
         br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle(),
         br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
 
-    internal static BlixMeshVectorKey[] ReadVectorKeys(BinaryReader br)
+    internal static IReadOnlyList<BlixMeshChannelUv>? ReadExtensionUv(BinaryReader br)
     {
+        var n = br.ReadInt32();
+        if (n == 0) return null;
+        var all = new BlixMeshChannelUv[n];
+        for (var i = 0; i < n; i++)
+        {
+            all[i] = new BlixMeshChannelUv(br.ReadInt32(), new BlixMeshUvTransform(
+                new Vector2(br.ReadSingle(), br.ReadSingle()), br.ReadSingle(), new Vector2(br.ReadSingle(), br.ReadSingle())));
+        }
+
+        return all;
+    }
+
+    internal static BlixMeshUvTransforms ReadUvTransforms(BinaryReader br)
+    {
+        BlixMeshUvTransform One() => new(new Vector2(br.ReadSingle(), br.ReadSingle()), br.ReadSingle(), new Vector2(br.ReadSingle(), br.ReadSingle()));
+        return new BlixMeshUvTransforms(One(), One(), One(), One(), One());
+    }
+
+    internal static (BlixMeshVectorKey[] Keys, BlixMeshInterpolation Interpolation) ReadVectorKeys(BinaryReader br)
+    {
+        var interpolation = ReadInterpolation(br);
         var n = br.ReadInt32();
         var keys = new BlixMeshVectorKey[n];
         for (var i = 0; i < n; i++)
         {
-            keys[i] = new BlixMeshVectorKey(
-                br.ReadSingle(), new Vector3(br.ReadSingle(), br.ReadSingle(), br.ReadSingle()));
+            var time = br.ReadSingle();
+            var value = ReadVector3(br);
+            keys[i] = interpolation == BlixMeshInterpolation.CubicSpline
+                ? new BlixMeshVectorKey(time, value, ReadVector3(br), ReadVector3(br))
+                : new BlixMeshVectorKey(time, value);
         }
 
-        return keys;
+        return (keys, interpolation);
     }
 
-    internal static BlixMeshQuaternionKey[] ReadQuaternionKeys(BinaryReader br)
+    internal static (BlixMeshQuaternionKey[] Keys, BlixMeshInterpolation Interpolation) ReadQuaternionKeys(BinaryReader br)
     {
+        var interpolation = ReadInterpolation(br);
         var n = br.ReadInt32();
         var keys = new BlixMeshQuaternionKey[n];
         for (var i = 0; i < n; i++)
         {
-            keys[i] = new BlixMeshQuaternionKey(
-                br.ReadSingle(),
-                new Quaternion(br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle()));
+            var time = br.ReadSingle();
+            var value = ReadQuaternion(br);
+            keys[i] = interpolation == BlixMeshInterpolation.CubicSpline
+                ? new BlixMeshQuaternionKey(time, value, ReadQuaternion(br), ReadQuaternion(br))
+                : new BlixMeshQuaternionKey(time, value);
         }
 
-        return keys;
+        return (keys, interpolation);
     }
+
+    private static BlixMeshInterpolation ReadInterpolation(BinaryReader br)
+    {
+        var raw = br.ReadByte();
+        return raw <= (byte)BlixMeshInterpolation.CubicSpline
+            ? (BlixMeshInterpolation)raw
+            : throw new InvalidDataException($"a track channel names interpolation {raw}; 0-2 are defined.");
+    }
+
+    private static Vector3 ReadVector3(BinaryReader br) => new(br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
+
+    private static Quaternion ReadQuaternion(BinaryReader br) => new(br.ReadSingle(), br.ReadSingle(), br.ReadSingle(), br.ReadSingle());
 }
 
 public static class BlixMeshWriter
@@ -473,7 +584,7 @@ public static class BlixMeshWriter
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(file);
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version13, stamp);
+        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version17, stamp);
         using var bw = new BinaryWriter(fs);
 
         bw.Write(file.Nodes.Count);
@@ -543,6 +654,20 @@ public static class BlixMeshWriter
             bw.Write(x.IridescenceImage); bw.Write(x.IridescenceThicknessImage);
             bw.Write(x.AnisotropyStrength); bw.Write(x.AnisotropyRotation); bw.Write(x.AnisotropyImage);
             bw.Write(x.Dispersion); bw.Write(x.Unlit);
+
+            foreach (var t in (m.UvTransforms ?? BlixMeshUvTransforms.Identity).All)
+            {
+                bw.Write(t.Offset.X); bw.Write(t.Offset.Y); bw.Write(t.Rotation); bw.Write(t.Scale.X); bw.Write(t.Scale.Y);
+            }
+
+            var extensionUv = m.ExtensionUv ?? Array.Empty<BlixMeshChannelUv>();
+            bw.Write(extensionUv.Count);
+            foreach (var u in extensionUv)
+            {
+                bw.Write(u.TexCoord);
+                bw.Write(u.Transform.Offset.X); bw.Write(u.Transform.Offset.Y); bw.Write(u.Transform.Rotation);
+                bw.Write(u.Transform.Scale.X); bw.Write(u.Transform.Scale.Y);
+            }
         }
 
         var images = file.ImageTable;
@@ -556,6 +681,8 @@ public static class BlixMeshWriter
             var resourceBytes = System.Text.Encoding.UTF8.GetBytes(img.Resource);
             bw.Write(resourceBytes.Length);
             bw.Write(resourceBytes);
+            bw.Write(img.Sampler.WrapS); bw.Write(img.Sampler.WrapT);
+            bw.Write(img.Sampler.MinFilter); bw.Write(img.Sampler.MagFilter);
         }
 
         var skins = file.SkinTable;
@@ -597,9 +724,9 @@ public static class BlixMeshWriter
             foreach (var track in clip.Tracks)
             {
                 bw.Write(track.NodeIndex);
-                WriteVectorKeys(bw, track.Translation);
-                WriteQuaternionKeys(bw, track.Rotation);
-                WriteVectorKeys(bw, track.Scale);
+                WriteVectorKeys(bw, track.Translation, track.TranslationInterpolation);
+                WriteQuaternionKeys(bw, track.Rotation, track.RotationInterpolation);
+                WriteVectorKeys(bw, track.Scale, track.ScaleInterpolation);
             }
         }
 
@@ -661,23 +788,31 @@ public static class BlixMeshWriter
         bw.Write(m.M41); bw.Write(m.M42); bw.Write(m.M43); bw.Write(m.M44);
     }
 
-    private static void WriteVectorKeys(BinaryWriter bw, BlixMeshVectorKey[] keys)
+    private static void WriteVectorKeys(BinaryWriter bw, BlixMeshVectorKey[] keys, BlixMeshInterpolation interpolation)
     {
+        bw.Write((byte)interpolation);
         bw.Write(keys.Length);
         foreach (var k in keys)
         {
             bw.Write(k.Time);
             bw.Write(k.Value.X); bw.Write(k.Value.Y); bw.Write(k.Value.Z);
+            if (interpolation != BlixMeshInterpolation.CubicSpline) continue;
+            bw.Write(k.InTangent.X); bw.Write(k.InTangent.Y); bw.Write(k.InTangent.Z);
+            bw.Write(k.OutTangent.X); bw.Write(k.OutTangent.Y); bw.Write(k.OutTangent.Z);
         }
     }
 
-    private static void WriteQuaternionKeys(BinaryWriter bw, BlixMeshQuaternionKey[] keys)
+    private static void WriteQuaternionKeys(BinaryWriter bw, BlixMeshQuaternionKey[] keys, BlixMeshInterpolation interpolation)
     {
+        bw.Write((byte)interpolation);
         bw.Write(keys.Length);
         foreach (var k in keys)
         {
             bw.Write(k.Time);
             bw.Write(k.Value.X); bw.Write(k.Value.Y); bw.Write(k.Value.Z); bw.Write(k.Value.W);
+            if (interpolation != BlixMeshInterpolation.CubicSpline) continue;
+            bw.Write(k.InTangent.X); bw.Write(k.InTangent.Y); bw.Write(k.InTangent.Z); bw.Write(k.InTangent.W);
+            bw.Write(k.OutTangent.X); bw.Write(k.OutTangent.Y); bw.Write(k.OutTangent.Z); bw.Write(k.OutTangent.W);
         }
     }
 }
@@ -727,7 +862,7 @@ public static class BlixMeshReader
         ArgumentNullException.ThrowIfNull(path);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version13, path, ".blixmesh");
+        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version17, path, ".blixmesh");
         return AssetImportException.Refusing(path, () => ReadBody(fs, path, header), ".blixmesh");
     }
 
@@ -802,7 +937,9 @@ public static class BlixMeshReader
                 MetallicRoughnessImage: br.ReadInt32(),
                 OcclusionImage: br.ReadInt32(),
                 EmissiveImage: br.ReadInt32(),
-                Extensions: ReadExtensions(br));
+                Extensions: ReadExtensions(br),
+                UvTransforms: BlixMeshBinary.ReadUvTransforms(br),
+                ExtensionUv: BlixMeshBinary.ReadExtensionUv(br));
         }
 
         var imageCount = br.ReadInt32();
@@ -814,7 +951,8 @@ public static class BlixMeshReader
             var hash = br.ReadUInt64();
             var resourceLen = br.ReadInt32();
             var resource = System.Text.Encoding.UTF8.GetString(br.ReadBytes(resourceLen));
-            images[i] = new BlixMeshImage(name, hash, resource);
+            var sampler = new BlixMeshSampler(br.ReadInt32(), br.ReadInt32(), br.ReadInt32(), br.ReadInt32());
+            images[i] = new BlixMeshImage(name, hash, resource, sampler);
         }
 
         var skinCount = br.ReadInt32();
@@ -859,8 +997,11 @@ public static class BlixMeshReader
             var tracks = new BlixMeshTrack[trackCount];
             for (var t = 0; t < trackCount; t++)
             {
-                tracks[t] = new BlixMeshTrack(
-                    br.ReadInt32(), BlixMeshBinary.ReadVectorKeys(br), BlixMeshBinary.ReadQuaternionKeys(br), BlixMeshBinary.ReadVectorKeys(br));
+                var node = br.ReadInt32();
+                var (translation, translationMode) = BlixMeshBinary.ReadVectorKeys(br);
+                var (rotation, rotationMode) = BlixMeshBinary.ReadQuaternionKeys(br);
+                var (scale, scaleMode) = BlixMeshBinary.ReadVectorKeys(br);
+                tracks[t] = new BlixMeshTrack(node, translation, rotation, scale, translationMode, rotationMode, scaleMode);
             }
 
             clips[i] = new BlixMeshClip(name, tracks);

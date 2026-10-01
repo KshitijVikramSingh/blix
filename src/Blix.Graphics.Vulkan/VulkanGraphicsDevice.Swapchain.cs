@@ -1221,7 +1221,8 @@ public sealed partial class VulkanGraphicsDevice
         if (d.Uniforms.Count > 0) WriteUniformsAcrossSets(prog, frameSlot, d.Uniforms);
 
         Vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, pipe.Pipeline);
-        BindTransientDescriptorSets(cmd, prog, pipe.Layout, frameSlot, d.Textures);
+        BindTransientDescriptorSets(cmd, prog, pipe.Layout, frameSlot, d.Textures,
+            materialSet: d.PerDrawMaterial is { } covered ? materialTable[covered.Id].SetIndex : -1);
 
         // Modulo lets the static (FramesInFlight=1) and replicated cases
         // share one bind path — static always picks Sets[0].
@@ -1645,15 +1646,19 @@ public sealed partial class VulkanGraphicsDevice
         PipelineLayout pipeLayout,
         int frameSlot,
         IReadOnlyList<ShaderTextureBinding> textures,
-        PipelineBindPoint bindPoint = PipelineBindPoint.Graphics)
+        PipelineBindPoint bindPoint = PipelineBindPoint.Graphics,
+        int materialSet = -1)
     {
+        // materialSet is the set a per-draw material binds for this draw. The program's own copy of it
+        // would be written, bound, and then replaced by the material's — and for a runtime-sized block
+        // the program has no buffer to write at all — so it is skipped here.
         // Hoist scratch above the loop (CA2014). Size = the widest set's
         // potential write count.
         var maxWritesPerSet = 0;
         for (var setIdx = 0; setIdx < prog.Sets.Length; setIdx++)
         {
             if (prog.Sets[setIdx] is not { } sr2) continue;
-            if (setIdx == MaterialOwnedSet) continue;
+            if (setIdx == MaterialOwnedSet || setIdx == materialSet) continue;
             if (sr2.Slots.Count == 0) continue;
             var w = sr2.Slots.Count + textures.Count;
             if (w > maxWritesPerSet) maxWritesPerSet = w;
@@ -1669,7 +1674,7 @@ public sealed partial class VulkanGraphicsDevice
         for (var setIdx = 0; setIdx < prog.Sets.Length; setIdx++)
         {
             if (prog.Sets[setIdx] is not { } sr) continue;
-            if (setIdx == MaterialOwnedSet) continue;
+            if (setIdx == MaterialOwnedSet || setIdx == materialSet) continue;
             if (sr.Slots.Count == 0) continue;
 
             var ds = AllocateTransientSet(frameSlot, sr.Layout);
@@ -1721,6 +1726,13 @@ public sealed partial class VulkanGraphicsDevice
                     dynamicOffsetScratch[dynamicCount++] = live.Offset;
                     writeIdx++;
                     continue;
+                }
+
+                if (block.TotalSize == 0)
+                {
+                    throw new InvalidOperationException(
+                        $"'{prog.Name}' set {sr.Set} binding {slot.Binding} is runtime-sized, so only a material can back it; " +
+                        "this draw binds that set from the program. Pass the material made for it (perDrawMaterial).");
                 }
 
                 if (!sr.BuffersPerBinding.TryGetValue(slot.Binding, out var buffers)) continue;

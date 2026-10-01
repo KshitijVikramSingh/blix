@@ -226,7 +226,7 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
     private AnimationClip enemyWalk = null!;
     private AnimationClip enemyDeath = null!;
     private float enemyDeathHold = 0.8f;   // corpse lingers playing the Death clip, then is removed
-    private Matrix4x4 enemyMeshNodeTransform = Matrix4x4.Identity;
+    private Matrix4x4 enemySkeletonPlacement = Matrix4x4.Identity;
     private IMaterialBindings enemyBones = null!;   // set 3 palette SSBO, frames-in-flight; shared by both skinned pipelines
     private const int EnemyBones = 15;             // the robot skeleton; the loader asserts it (matches the shaders' BONE_COUNT)
     private const float SkinnedEnemyScale = 1.15f;   // visual dial
@@ -1065,7 +1065,7 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
             enemyPose = enemySkeleton.CreateRestPose();
             enemyBonePalette = new BonePalette(EnemyBones);
             enemyPalettePayload = new byte[MaxAlive * EnemyBones * 64];   // one world-space palette per instance
-            enemyMeshNodeTransform = model.Placement(0);
+            enemySkeletonPlacement = model.Placement(0);
             enemyWalk = FindEnemyClip(model, "Walk") ?? FindEnemyClip(model, "Run") ?? model.Clips[0];
             enemyDeath = FindEnemyClip(model, "Death") ?? enemyWalk;
             enemyDeathHold = (float)(enemyDeath.Duration > 0 ? enemyDeath.Duration : 0.8);
@@ -1163,7 +1163,7 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
         var user = Matrix4x4.CreateScale(SkinnedEnemyScale)
                  * Matrix4x4.CreateRotationY(yaw)
                  * Matrix4x4.CreateTranslation(pos.X, 0f, pos.Z);
-        return enemyMeshNodeTransform * user;
+        return enemySkeletonPlacement * user;
     }
 
     private void PrintStatus(float dt)

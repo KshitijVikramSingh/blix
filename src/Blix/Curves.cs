@@ -86,7 +86,34 @@ public sealed class SlerpQuaternionCurve : IFiniteCurve<Quaternion>
 
 // One (Time, Value) sample in a keyframe-based curve. Lightweight value type so an
 // array of 50+ keyframes packs contiguously with zero heap allocations per entry.
-public readonly record struct Keyframe<T>(double Time, T Value);
+// InTangent and OutTangent are read only by a CubicSpline curve: glTF's a_k and b_k, per
+// unit of time, which the spline scales by the interval.
+public readonly record struct Keyframe<T>(double Time, T Value, T InTangent = default!, T OutTangent = default!);
+
+// How a keyframe curve reads between two keys: glTF's three sampler interpolations.
+public enum Interpolation
+{
+    // A straight line (a great-circle arc for rotation).
+    Linear,
+
+    // The earlier key's value, held until the next key.
+    Step,
+
+    // The Hermite spline through each key's value with its in/out tangents.
+    CubicSpline,
+}
+
+// The glTF CUBICSPLINE basis between keys k0 and k1 at local t in [0, 1], interval dt:
+// (2t^3 - 3t^2 + 1) v0 + dt (t^3 - 2t^2 + t) b0 + (-2t^3 + 3t^2) v1 + dt (t^3 - t^2) a1.
+internal static class Hermite
+{
+    public static (float V0, float B0, float V1, float A1) Weights(float t, float dt)
+    {
+        var t2 = t * t;
+        var t3 = t2 * t;
+        return (2f * t3 - 3f * t2 + 1f, dt * (t3 - 2f * t2 + t), -2f * t3 + 3f * t2, dt * (t3 - t2));
+    }
+}
 
 // Generalised N-keyframe curve for Vector3 values, linearly interpolated between
 // adjacent keyframes. Sibling to LinearVector3Curve in the same way KeyframeQuaternion
@@ -101,9 +128,12 @@ public sealed class KeyframeVector3Curve : IFiniteCurve<Vector3>
     public Keyframe<Vector3>[] Keyframes { get; }
     public double Duration { get; }
 
-    public KeyframeVector3Curve(Keyframe<Vector3>[] keyframes)
+    public Interpolation Interpolation { get; }
+
+    public KeyframeVector3Curve(Keyframe<Vector3>[] keyframes, Interpolation interpolation = Interpolation.Linear)
     {
         ArgumentNullException.ThrowIfNull(keyframes);
+        Interpolation = interpolation;
         if (keyframes.Length == 0)
         {
             throw new ArgumentException("KeyframeVector3Curve requires at least one keyframe.", nameof(keyframes));
@@ -136,7 +166,16 @@ public sealed class KeyframeVector3Curve : IFiniteCurve<Vector3>
             if (time >= k0.Time && time <= k1.Time)
             {
                 var t = (float)((time - k0.Time) / (k1.Time - k0.Time));
-                return Vector3.Lerp(k0.Value, k1.Value, t);
+                switch (Interpolation)
+                {
+                    case Interpolation.Step:
+                        return time < k1.Time ? k0.Value : k1.Value;
+                    case Interpolation.CubicSpline:
+                        var (v0, b0, v1, a1) = Hermite.Weights(t, (float)(k1.Time - k0.Time));
+                        return k0.Value * v0 + k0.OutTangent * b0 + k1.Value * v1 + k1.InTangent * a1;
+                    default:
+                        return Vector3.Lerp(k0.Value, k1.Value, t);
+                }
             }
         }
         return Keyframes[^1].Value;   // unreachable given the bounds checks above
@@ -151,9 +190,12 @@ public sealed class KeyframeQuaternionCurve : IFiniteCurve<Quaternion>
     public Keyframe<Quaternion>[] Keyframes { get; }
     public double Duration { get; }
 
-    public KeyframeQuaternionCurve(Keyframe<Quaternion>[] keyframes)
+    public Interpolation Interpolation { get; }
+
+    public KeyframeQuaternionCurve(Keyframe<Quaternion>[] keyframes, Interpolation interpolation = Interpolation.Linear)
     {
         ArgumentNullException.ThrowIfNull(keyframes);
+        Interpolation = interpolation;
         if (keyframes.Length == 0)
         {
             throw new ArgumentException("KeyframeQuaternionCurve requires at least one keyframe.", nameof(keyframes));
@@ -167,7 +209,10 @@ public sealed class KeyframeQuaternionCurve : IFiniteCurve<Quaternion>
                     nameof(keyframes));
             }
         }
-        Keyframes = keyframes;
+        // glTF rotations are unit quaternions, and an exporter that writes 0.707 for 1/sqrt(2) is not
+        // writing one: held at a key, it scales the joint by |q|^2. The values are normalised here, once;
+        // a spline's tangents are not values and are left as authored.
+        Keyframes = keyframes.Select(k => k with { Value = Quaternion.Normalize(k.Value) }).ToArray();
         Duration = keyframes[^1].Time;
     }
 
@@ -183,7 +228,22 @@ public sealed class KeyframeQuaternionCurve : IFiniteCurve<Quaternion>
             if (time >= k0.Time && time <= k1.Time)
             {
                 var t = (float)((time - k0.Time) / (k1.Time - k0.Time));
-                return Quaternion.Slerp(k0.Value, k1.Value, t);
+                switch (Interpolation)
+                {
+                    case Interpolation.Step:
+                        return time < k1.Time ? k0.Value : k1.Value;
+                    case Interpolation.CubicSpline:
+                        // Per component, then normalised: the spec's rule for a rotation spline.
+                        var (v0, b0, v1, a1) = Hermite.Weights(t, (float)(k1.Time - k0.Time));
+                        var q = new Quaternion(
+                            k0.Value.X * v0 + k0.OutTangent.X * b0 + k1.Value.X * v1 + k1.InTangent.X * a1,
+                            k0.Value.Y * v0 + k0.OutTangent.Y * b0 + k1.Value.Y * v1 + k1.InTangent.Y * a1,
+                            k0.Value.Z * v0 + k0.OutTangent.Z * b0 + k1.Value.Z * v1 + k1.InTangent.Z * a1,
+                            k0.Value.W * v0 + k0.OutTangent.W * b0 + k1.Value.W * v1 + k1.InTangent.W * a1);
+                        return Quaternion.Normalize(q);
+                    default:
+                        return Quaternion.Slerp(k0.Value, k1.Value, t);
+                }
             }
         }
         return Keyframes[^1].Value;

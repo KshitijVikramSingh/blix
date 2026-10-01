@@ -23,7 +23,7 @@ are also discoverable by their assembly name and by an unambiguous suffix:
 
 ```sh
 ./blix view --model path/to/model.glb
-./blix shot --rig path/to/character.glb --clip Walking_A --out walk.png
+./blix shot --model path/to/character.glb --clip Walking_A --out walk.png
 ./blix run Blix.Demos.Pong
 ./blix run Blix.Demos.Runner --frames 120
 ```
@@ -237,7 +237,7 @@ a graphics device unless their specific work says otherwise.
 ./blix inspect path/to/asset.glb
 ./blix inspect path/to/asset.blixmesh
 ./blix check --model path/to/model.glb
-./blix check --rig path/to/character.glb --verbose
+./blix check --model path/to/character.glb --verbose
 ./blix check --cooked path/to/cooked-tree
 ./blix cook list
 ./blix cook status path/to/project-or-tree
@@ -252,25 +252,25 @@ discovery, diagnosis, and one-off execution surface.
 
 ```sh
 ./blix view --model path/to/model.glb
-./blix view --rig path/to/character.glb --clip Walking_A
-./blix view --rig path/to/character.glb --clip Walking_A --blend Running_A
-./blix view --rig path/to/character.glb --clip Walking_A --instances 3
+./blix view --model path/to/character.glb --clip Walking_A
+./blix view --model path/to/character.glb --clip Walking_A --blend Running_A
+./blix view --model path/to/character.glb --clip Walking_A --instances 3
 ```
 
-`--model` preserves the authored node hierarchy so pivots, bounds, transforms,
-materials, and selection remain inspectable. `--rig` preserves skeletons and
-clips. The rig path supports single, blended, additive, and masked composition,
-root-motion inspection, independent multi-instance clocks, skeleton gizmos,
-material auditioning, and a second-camera viewport. The caller chooses model or
-rig semantics explicitly; the viewer does not guess.
+`--model` opens any model with its authored node hierarchy, so pivots, bounds,
+transforms, materials, and selection remain inspectable. A model with a skin is
+also posed: single, blended, additive, and masked composition, root-motion
+inspection, independent multi-instance clocks, skeleton gizmos, material
+auditioning, and a second-camera viewport. Whether it has a skin is the file's
+fact, so there is no second flag to say so.
 
 ### Shot
 
 ```sh
 ./blix shot --model path/to/model.glb --out model.png
-./blix shot --rig path/to/character.glb --clip Walking_A --time 0.35 --xray --out walk.png
-./blix shot --rig path/to/character.glb --clip Walking_A --frames-out 24 --out walk.png
-./blix shot --rig path/to/character.glb --instances 3 --lockstep --out control.png
+./blix shot --model path/to/character.glb --clip Walking_A --time 0.35 --xray --out walk.png
+./blix shot --model path/to/character.glb --clip Walking_A --frames-out 24 --out walk.png
+./blix shot --model path/to/character.glb --instances 3 --lockstep --out control.png
 ```
 
 `shot` captures the HDR scene target and applies the CPU twin of the Studio

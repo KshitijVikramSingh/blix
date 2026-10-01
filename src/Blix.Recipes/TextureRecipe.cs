@@ -324,8 +324,10 @@ public static class TextureRecipe
             {
                 for (var x = 0; x < nw; x++)
                 {
-                    var sx = x * 2;
-                    var sy = y * 2;
+                    // Both taps clamped: a level held at minDim (6 -> 4, not 3) samples past the halfway
+                    // row, and a 1000x100 image reached row 6 of a 6-row source that way.
+                    var sx = Math.Min(x * 2, w - 1);
+                    var sy = Math.Min(y * 2, h - 1);
                     var sx1 = Math.Min(sx + 1, w - 1);
                     var sy1 = Math.Min(sy + 1, h - 1);
                     // Weight RGB by alpha so transparent padding does not tint cutout edges. Alpha

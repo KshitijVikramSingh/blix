@@ -37,37 +37,26 @@ public static class AssetCook
         var sourceDir = Path.GetDirectoryName(Path.GetFullPath(source)) ?? ".";
         var outputRoot = Path.GetFullPath(outDir);
 
+        // One cooked file per image AS USED: an image read in two roles or two conventions is two
+        // references with two cooked names (MeshRecipe.ImageVariants), so nothing here is ambiguous.
         var references = MeshRecipe.ReferencedImages(source, patch);
-        var byUri = references
-            .GroupBy(reference => reference.Uri, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        log?.Invoke($"  {byUri.Length} referenced image(s)");
+        log?.Invoke($"  {references.Count} referenced image(s)");
 
         var problems = new List<string>();
-        foreach (var group in byUri)
+        foreach (var reference in references)
         {
-            var roles = group.Select(reference => (reference.Role, reference.FlipGreen)).Distinct().ToArray();
-            if (roles.Length > 1)
-            {
-                problems.Add(
-                    $"ambiguous: {group.Key} is used as {string.Join(" and ", roles)}; one "
-                    + ".blixtex cannot preserve both material-channel roles or conventions");
-            }
-
-            var sourcePath = Path.GetFullPath(Path.Combine(sourceDir, group.Key));
-            var outputPath = Path.GetFullPath(Path.Combine(outputRoot, Path.ChangeExtension(group.Key, ".blixtex")));
+            var sourcePath = Path.GetFullPath(Path.Combine(sourceDir, reference.Uri));
+            var outputPath = Path.GetFullPath(Path.Combine(outputRoot, reference.CookedUri));
             if (!IsWithin(sourceDir, sourcePath) || !IsWithin(outputRoot, outputPath))
-                problems.Add($"outside tree: {group.Key} does not remain inside both source and output roots");
+                problems.Add($"outside tree: {reference.Uri} does not remain inside both source and output roots");
             else if (!File.Exists(sourcePath))
-                problems.Add($"missing: {group.Key}");
+                problems.Add($"missing: {reference.Uri}");
         }
 
-        foreach (var collision in byUri.GroupBy(
-                     group => Path.ChangeExtension(group.Key, ".blixtex"),
-                     StringComparer.OrdinalIgnoreCase).Where(group => group.Count() > 1))
+        foreach (var collision in references.GroupBy(r => r.CookedUri, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
         {
             problems.Add(
-                $"output collision: {string.Join(", ", collision.Select(group => group.Key))} "
+                $"output collision: {string.Join(", ", collision.Select(r => $"{r.Uri} as {r.Role}"))} "
                 + $"all map to {collision.Key}");
         }
 
@@ -76,11 +65,10 @@ public static class AssetCook
         Directory.CreateDirectory(outputRoot);
         long sourceBytes = 0, cookedBytes = 0;
         var sw = Stopwatch.StartNew();
-        Parallel.ForEach(byUri, group =>
+        Parallel.ForEach(references, reference =>
         {
-            var reference = group.Single();
             var from = Path.Combine(sourceDir, reference.Uri);
-            var to = Path.Combine(outputRoot, Path.ChangeExtension(reference.Uri, ".blixtex"));
+            var to = Path.Combine(outputRoot, reference.CookedUri);
             Directory.CreateDirectory(Path.GetDirectoryName(to)!);
             TextureRecipe.CookOne(from, to, out var inLen, out var outLen, reference.Role, reference.FlipGreen);
             Interlocked.Add(ref sourceBytes, inLen);
@@ -100,7 +88,7 @@ public static class AssetCook
             patch: patch,
             log: log);
 
-        return new Result(meshOut, count, byUri.Length, sourceBytes, cookedBytes, textureTime);
+        return new Result(meshOut, count, references.Count, sourceBytes, cookedBytes, textureTime);
     }
 
     private static bool IsWithin(string root, string path)

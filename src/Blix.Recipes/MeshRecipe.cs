@@ -22,7 +22,15 @@ public static class MeshRecipe
     /// <param name="FlipGreen">
     /// A normal map the project's patch declares DirectX-convention, to be cooked into glTF's.
     /// </param>
-    public readonly record struct ReferencedImage(string Uri, TextureRole Role, bool FlipGreen = false);
+    /// <param name="Cooked">
+    /// Where this use cooks to, relative like <paramref name="Uri"/>: the image's own name, or with a role
+    /// suffix when the same image is also used another way (one cooked file per role and convention).
+    /// </param>
+    public readonly record struct ReferencedImage(string Uri, TextureRole Role, bool FlipGreen = false, string? Cooked = null)
+    {
+        /// <summary>The cooked file's relative path.</summary>
+        public string CookedUri => Cooked ?? Path.ChangeExtension(Uri, ".blixtex");
+    }
 
     // Cook a .gltf/.glb to its .blixmesh sibling. CPU-only -- no GraphicsDevice
     // required; safe to invoke from the offline cook tool. Walks the same
@@ -86,10 +94,15 @@ public static class MeshRecipe
     /// the same source and settings. Recorded in every file it writes, so a re-cook can be told
     /// from a rewrite.
     /// </summary>
-    // Version 8 writes glTF's scene graph (format v12): meshes once, in mesh space, placed by nodes,
-    // as the complete static or skinned vertex, with MikkTSpace tangents wherever none were authored. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
+    // Version 9 writes glTF's scene graph (format v14): meshes once, in mesh space, placed by nodes,
+    // as the complete static or skinned vertex, with MikkTSpace tangents wherever none were authored,
+    // and a track for every animated node with its channels' interpolation. Version 10 unrolls
+    // TRIANGLE_STRIP / TRIANGLE_FAN and non-indexed primitives into triangle lists, and refuses points and lines.
+    // Version 11 (format v15) writes an image row per image as used — role, convention and glTF sampler.
+    // Version 12 reads sparse index accessors, identity inverse binds when a skin has none, and joints with
+    // no common root, and refuses an index past the vertices. Format compatibility is versioned separately by BlixMesh; changing recipe output with the
     // same format bumps this value.
-    public const uint MeshRecipeVersion = 8;
+    public const uint MeshRecipeVersion = 15;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false,
@@ -100,7 +113,7 @@ public static class MeshRecipe
         ArgumentNullException.ThrowIfNull(gltfPath);
         ArgumentNullException.ThrowIfNull(outPath);
 
-        var model = ModelRoot.Load(gltfPath);
+        var model = OpenSource(gltfPath);
 
         // The scene graph glTF has in every file: every node kept, parents first. A skinned node
         // places its mesh through its skin; every other mesh node places its mesh by its own world.
@@ -127,18 +140,8 @@ public static class MeshRecipe
 
         // Nodes driven by one skin share one palette and one placement, so their world matrices must
         // agree; different skins keep independent placements.
-        foreach (var skin in skinOrder)
-        {
-            var group = model.LogicalNodes.Where(n => n.Mesh is not null && n.Skin == skin).ToArray();
-            foreach (var node in group.Skip(1))
-            {
-                if (node.WorldMatrix == group[0].WorldMatrix) continue;
-                throw new InvalidDataException(
-                    $"glTF '{gltfPath}' has multiple skinned-mesh nodes sharing ONE skin but with different "
-                    + $"world matrices. Mesh '{node.Mesh!.Name}' transform diverges from '{group[0].Mesh!.Name}'. "
-                    + "Meshes at different places need different skins.");
-            }
-        }
+        // One skin may be placed by any number of mesh nodes, wherever they sit: glTF ignores a skinned
+        // mesh node's transform, and the skeleton's placement is read from its joints at load.
 
         var skins = new List<BlixMeshSkin>();
         var remaps = new List<int[]>();
@@ -179,31 +182,12 @@ public static class MeshRecipe
             cookedNodes[at] = cookedNodes[at] with { MeshIndex = meshIndex, SkinIndex = skinIndex };
         }
 
-        // Clip tracks address bones against one skeleton, so one clip set is valid only when every
-        // skin resolves each joint to the same parent-first index.
-        var clips = new List<BlixMeshClip>();
-        if (skinOrder.Count > 0 && model.LogicalAnimations.Count > 0)
-        {
-            for (var s = 1; s < skinOrder.Count; s++)
-            {
-                var agree = skinOrder[s].JointsCount == skinOrder[0].JointsCount
-                    && Enumerable.Range(0, skinOrder[s].JointsCount).All(j =>
-                        ReferenceEquals(skinOrder[s].GetJoint(j).Joint, skinOrder[0].GetJoint(j).Joint)
-                        && remaps[s][j] == remaps[0][j]);
-                if (agree) continue;
-                throw new InvalidDataException(
-                    $"'{gltfPath}': this file's {skinOrder.Count} skins order their joints differently, so one set of "
-                    + "animation clips cannot drive them all — clip tracks are bone indices against a "
-                    + "single skeleton. Reading the skins is supported; per-skin clips are not yet.");
-            }
-
-            var nodeOfBone = skins[0].Bones.Select(b => b.NodeIndex).ToArray();
-            foreach (var anim in model.LogicalAnimations)
-            {
-                var clip = GltfImporter.BuildAnimationClip(anim, skinOrder[0], remaps[0]);
-                if (clip.Tracks.Length > 0) clips.Add(CookClip(clip, nodeOfBone));
-            }
-        }
+        // Clips as glTF has them: channels on NODES — joints, and any other node. Which bones a load
+        // makes of them is the reader's; the cook records every animated node, skinned file or not.
+        var clips = model.LogicalAnimations
+            .Select(anim => CookClip(anim, nodeOfLogical))
+            .Where(c => c.Tracks.Length > 0)
+            .ToList();
 
         var (images, imageRows) = CookImages(model, gltfPath, outPath, patch);
 
@@ -386,23 +370,60 @@ public static class MeshRecipe
     /// arrays back is lossless; writing a serialised "curve" would be inventing a representation
     /// for something that is already one.
     /// </remarks>
-    private static BlixMeshClip CookClip(AnimationClip clip, int[] nodeOfBone) => new(
-        clip.Name,
-        clip.Tracks.Select(t => new BlixMeshTrack(
-            nodeOfBone[t.BoneIndex],
-            VectorKeys(t.Translation),
-            QuaternionKeys(t.Rotation),
-            VectorKeys(t.Scale))).ToArray());
+    // One track per animated node, each channel with its interpolation. Morph-weight channels are
+    // not read (the unread-attribute table says so), and a channel with no target node is skipped.
+    private static BlixMeshClip CookClip(SharpGLTF.Schema2.Animation anim, int[] nodeOfLogical)
+    {
+        var tracks = new SortedDictionary<int, BlixMeshTrack>();
+        foreach (var channel in anim.Channels)
+        {
+            if (channel.TargetNode is null) continue;
+            var node = nodeOfLogical[channel.TargetNode.LogicalIndex];
+            var track = tracks.TryGetValue(node, out var t) ? t
+                : new BlixMeshTrack(node, Array.Empty<BlixMeshVectorKey>(), Array.Empty<BlixMeshQuaternionKey>(), Array.Empty<BlixMeshVectorKey>());
+            switch (channel.TargetNodePath)
+            {
+                case SharpGLTF.Schema2.PropertyPath.translation:
+                {
+                    var (keys, mode) = GltfImporter.SampleKeys(channel.GetTranslationSampler());
+                    track = track with { Translation = VectorKeys(keys), TranslationInterpolation = Mode(mode) };
+                    break;
+                }
+                case SharpGLTF.Schema2.PropertyPath.rotation:
+                {
+                    var (keys, mode) = GltfImporter.SampleKeys(channel.GetRotationSampler());
+                    track = track with
+                    {
+                        Rotation = keys.Select(k => new BlixMeshQuaternionKey((float)k.Time, k.Value, k.InTangent, k.OutTangent)).ToArray(),
+                        RotationInterpolation = Mode(mode),
+                    };
+                    break;
+                }
+                case SharpGLTF.Schema2.PropertyPath.scale:
+                {
+                    var (keys, mode) = GltfImporter.SampleKeys(channel.GetScaleSampler());
+                    track = track with { Scale = VectorKeys(keys), ScaleInterpolation = Mode(mode) };
+                    break;
+                }
+                default:
+                    continue;
+            }
 
-    private static BlixMeshVectorKey[] VectorKeys(IFiniteCurve<Vector3>? curve) =>
-        curve is KeyframeVector3Curve k
-            ? k.Keyframes.Select(x => new BlixMeshVectorKey((float)x.Time, x.Value)).ToArray()
-            : Array.Empty<BlixMeshVectorKey>();
+            tracks[node] = track;
+        }
 
-    private static BlixMeshQuaternionKey[] QuaternionKeys(IFiniteCurve<Quaternion>? curve) =>
-        curve is KeyframeQuaternionCurve k
-            ? k.Keyframes.Select(x => new BlixMeshQuaternionKey((float)x.Time, x.Value)).ToArray()
-            : Array.Empty<BlixMeshQuaternionKey>();
+        return new BlixMeshClip(anim.Name ?? "anim", tracks.Values.ToArray());
+
+        static BlixMeshVectorKey[] VectorKeys(Keyframe<Vector3>[] keys) =>
+            keys.Select(k => new BlixMeshVectorKey((float)k.Time, k.Value, k.InTangent, k.OutTangent)).ToArray();
+
+        static BlixMeshInterpolation Mode(Interpolation mode) => mode switch
+        {
+            Interpolation.Step => BlixMeshInterpolation.Step,
+            Interpolation.CubicSpline => BlixMeshInterpolation.CubicSpline,
+            _ => BlixMeshInterpolation.Linear,
+        };
+    }
 
     /// <summary>
     /// The external images this asset's materials actually reference, with material-channel roles.
@@ -420,26 +441,18 @@ public static class MeshRecipe
     {
         ArgumentNullException.ThrowIfNull(gltfPath);
 
-        var model = ModelRoot.Load(gltfPath);
-        var rolesByImage = ResolveImageRoles(model);
-        var greenDown = DirectXNormalImages(model, patch);
+        var model = OpenSource(gltfPath);
+        var (variants, _) = ImageVariants(model, patch);
         var gltfDir = Path.GetDirectoryName(Path.GetFullPath(gltfPath)) ?? ".";
         var references = new List<ReferencedImage>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var material in model.LogicalMaterials)
+        foreach (var variant in variants)
         {
-            foreach (var channelName in ImageChannels)
-            {
-                var image = material.FindChannel(channelName)?.Texture?.PrimaryImage;
-                if (image?.Content.SourcePath is not { } uri) continue;
-                if (uri.StartsWith("data:", StringComparison.Ordinal)) continue;
-
-                var relative = RelativeImagePath(gltfDir, uri);
-                var role = rolesByImage[image.LogicalIndex];
-                var flip = greenDown.Contains(image.LogicalIndex);
-                if (seen.Add($"{relative}\0{role}\0{flip}")) references.Add(new ReferencedImage(relative, role, flip));
-            }
+            var image = model.LogicalImages[variant.Image];
+            if (image.Content.SourcePath is not { } uri || uri.StartsWith("data:", StringComparison.Ordinal)) continue;
+            var relative = RelativeImagePath(gltfDir, uri);
+            // Stated only when it differs from the image's own name: the first variant keeps that.
+            references.Add(new ReferencedImage(relative, variant.Role, variant.FlipGreen,
+                variant.Suffix.Length == 0 ? null : CookedName(relative, variant.Suffix)));
         }
 
         return references;
@@ -470,45 +483,59 @@ public static class MeshRecipe
     /// before any format decision is made.
     /// </para>
     /// </remarks>
-    private static (IReadOnlyList<BlixMeshImage> Images, Dictionary<int, int> Rows) CookImages(
+    private static (IReadOnlyList<BlixMeshImage> Images, Dictionary<(int Material, string Channel), int> Rows) CookImages(
         ModelRoot model, string gltfPath, string outPath, MaterialPatch? patch)
     {
         var images = new List<BlixMeshImage>();
-        var rows = new Dictionary<int, int>();
-        var rolesByImage = ResolveImageRoles(model);
-        var greenDown = DirectXNormalImages(model, patch);
+        var rows = new Dictionary<(int, string), int>();
+        var (variants, ofChannel) = ImageVariants(model, patch);
         var sourceDir = Path.GetDirectoryName(Path.GetFullPath(gltfPath)) ?? ".";
         var outDir = Path.GetDirectoryName(Path.GetFullPath(outPath)) ?? ".";
         var extractDir = Path.Combine(
             outDir, Path.GetFileNameWithoutExtension(outPath) + BlixMesh.ExtractedImageFolder);
 
+        // An image's name is not unique: two embedded images may share one (TextureTransformMultiTest has two
+        // "TestMap"s), or sanitise to one stem. Each extracted file takes a stem no other has taken, so two
+        // images can never overwrite each other's cooked file.
+        var usedStems = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // One row per (variant, sampler): an image as used. Two samplers on one variant share its file.
+        var resources = new Dictionary<int, (string Name, ulong Hash, string Resource)>();
+        var rowOf = new Dictionary<(int Variant, BlixMeshSampler Sampler), int>();
         foreach (var material in model.LogicalMaterials)
         {
             foreach (var channelName in ImageChannels)
             {
-                var image = material.FindChannel(channelName)?.Texture?.PrimaryImage;
-                if (image is null || rows.ContainsKey(image.LogicalIndex)) continue;
+                if (!ofChannel.TryGetValue((material.LogicalIndex, channelName), out var v)) continue;
+                var texture = material.FindChannel(channelName)!.Value.Texture!;
+                var sampler = SamplerOf(texture.Sampler);
+                if (!rowOf.TryGetValue((v, sampler), out var row))
+                {
+                    if (!resources.TryGetValue(v, out var resource))
+                    {
+                        var variant = variants[v];
+                        var image = model.LogicalImages[variant.Image];
+                        var bytes = image.Content.Content;
+                        var name = (image.Name
+                            ?? (image.Content.SourcePath is { } uri ? Path.GetFileNameWithoutExtension(uri) : null)
+                            ?? $"image_{image.LogicalIndex}") + variant.Suffix;
+                        resource = (name, ContentHash(bytes.Span),
+                            Shippable(Resource(image, bytes, name, variant.Role, variant.FlipGreen, variant.Suffix), gltfPath));
+                        resources[v] = resource;
+                    }
 
-                // The material channel is authoritative texture-role metadata, especially for
-                // embedded images whose generated names carry no reliable role.
-                var role = rolesByImage[image.LogicalIndex];
+                    row = images.Count;
+                    rowOf[(v, sampler)] = row;
+                    images.Add(new BlixMeshImage(resource.Name, resource.Hash, resource.Resource, sampler));
+                }
 
-                var bytes = image.Content.Content;
-                var hash = ContentHash(bytes.Span);
-                var name = image.Name
-                    ?? (image.Content.SourcePath is { } uri ? Path.GetFileNameWithoutExtension(uri) : null)
-                    ?? $"image_{image.LogicalIndex}";
-
-                rows[image.LogicalIndex] = images.Count;
-                images.Add(new BlixMeshImage(
-                    name, hash,
-                    Shippable(Resource(image, bytes, name, role, greenDown.Contains(image.LogicalIndex)), gltfPath)));
+                rows[(material.LogicalIndex, channelName)] = row;
             }
         }
 
         return (images, rows);
 
-        string Resource(SharpGLTF.Schema2.Image image, ReadOnlyMemory<byte> bytes, string name, TextureRole role, bool flipGreen)
+        string Resource(SharpGLTF.Schema2.Image image, ReadOnlyMemory<byte> bytes, string name, TextureRole role, bool flipGreen, string suffix)
         {
             // External: the file is already on disk beside the glTF. Prefer the cooked artifact
             // when one is there — the asset driver cooks textures BEFORE the mesh precisely so that
@@ -517,7 +544,7 @@ public static class MeshRecipe
             if (image.Content.SourcePath is { } uri && !uri.StartsWith("data:", StringComparison.Ordinal))
             {
                 var relative = RelativeImagePath(sourceDir, uri);
-                var cooked = Path.ChangeExtension(relative, ".blixtex");
+                var cooked = CookedName(relative, suffix);
 
                 // Check the output directory because Resource is relative to the cooked mesh. For
                 // an out-of-place cook, source and destination trees are intentionally different.
@@ -527,6 +554,13 @@ public static class MeshRecipe
             // Embedded: invent a location and put the pixels there.
             Directory.CreateDirectory(extractDir);
             var stem = Sanitise(name);
+            if (!usedStems.Add(stem))
+            {
+                var k = 2;
+                while (!usedStems.Add($"{stem}_{k}")) k++;
+                stem = $"{stem}_{k}";
+            }
+
             var raw = Path.Combine(extractDir, stem + ExtensionFor(bytes.Span));
             File.WriteAllBytes(raw, bytes.ToArray());
 
@@ -553,8 +587,11 @@ public static class MeshRecipe
     }
 
     /// <summary>The channels whose images are recorded — the same five the loader pre-decodes.</summary>
+    // Every channel whose texture the cook writes: glTF's five core channels, then the KHR_materials_*
+    // ones (SharpGLTF's channel keys). The extension textures were dropped until they were listed here —
+    // their factors survived, their images did not.
     private static readonly string[] ImageChannels =
-        { "BaseColor", "Normal", "MetallicRoughness", "Occlusion", "Emissive" };
+        new[] { "BaseColor", "Normal", "MetallicRoughness", "Occlusion", "Emissive" }.Concat(BlixMesh.ExtensionChannels).ToArray();
 
     private static TextureRole RoleForChannel(string channelName) => channelName switch
     {
@@ -562,46 +599,13 @@ public static class MeshRecipe
         "Normal" => TextureRole.Normal,
         "MetallicRoughness" => TextureRole.MetallicRoughness,
         "Emissive" => TextureRole.Emissive,
+        // Colour: sRGB, as glTF stores every *Color texture.
+        "SheenColor" or "SpecularColor" or "DiffuseTransmissionColor" => TextureRole.BaseColor,
+        "ClearCoatNormal" => TextureRole.Normal,
         // Occlusion is single-channel linear data. It is not MetallicRoughness, whose loader
         // rewrites grayscale input into the engine's ORM layout.
         _ => TextureRole.Linear,
     };
-
-    /// <summary>
-    /// The normal images the patch declares DirectX-convention, by logical index; refuses an image
-    /// that one material declares DirectX and another does not.
-    /// </summary>
-    /// <remarks>One cooked image has one convention, for the same reason it has one role.</remarks>
-    private static HashSet<int> DirectXNormalImages(ModelRoot model, MaterialPatch? patch)
-    {
-        var greenDown = new HashSet<int>();
-        if (patch is null) return greenDown;
-
-        var names = model.LogicalMaterials.Select((m, i) => m.Name ?? $"material_{i}").ToArray();
-        var directX = patch.DirectXNormalMaterials(names);
-        var said = new Dictionary<int, (bool DirectX, string Material)>();
-        for (var i = 0; i < names.Length; i++)
-        {
-            var image = model.LogicalMaterials[i].FindChannel("Normal")?.Texture?.PrimaryImage;
-            if (image is null) continue;
-
-            var isDirectX = directX.Contains(i);
-            if (said.TryGetValue(image.LogicalIndex, out var earlier) && earlier.DirectX != isDirectX)
-            {
-                var imageName = image.Name ?? image.Content.SourcePath ?? $"image {image.LogicalIndex}";
-                throw new InvalidDataException(
-                    $"'{imageName}' is the normal map of '{earlier.Material}' ({Convention(earlier.DirectX)}) "
-                    + $"and of '{names[i]}' ({Convention(isDirectX)}); one cooked image has one convention.");
-            }
-
-            said[image.LogicalIndex] = (isDirectX, names[i]);
-            if (isDirectX) greenDown.Add(image.LogicalIndex);
-        }
-
-        return greenDown;
-
-        static string Convention(bool directX) => directX ? "directx" : "opengl";
-    }
 
     /// <summary>
     /// The one pair of roles an image may hold at once: occlusion (R) packed with metallic-roughness
@@ -613,10 +617,28 @@ public static class MeshRecipe
             ? TextureRole.MetallicRoughness
             : null;
 
-    /// <summary>One cooked image has one role, save ORM packing; refuse a material graph that says otherwise.</summary>
-    private static Dictionary<int, TextureRole> ResolveImageRoles(ModelRoot model)
+    /// <summary>One source image as the cook writes it: one role, one normal convention, one cooked name.</summary>
+    /// <param name="Suffix">Empty for the image's first variant; <c>.&lt;role&gt;</c> (and <c>.dx</c>) for the others.</param>
+    private readonly record struct ImageVariant(int Image, TextureRole Role, bool FlipGreen, string Suffix);
+
+    /// <summary>
+    /// Every (image, role, convention) the materials use, and the variant each material channel reads.
+    /// </summary>
+    /// <remarks>
+    /// glTF lets one image be read by several textures in several ways: as colour by one material and as
+    /// data by another (TextureEncodingTest does exactly this), or as a normal map in two conventions. A
+    /// cooked image has one encoding, so each use is its own variant, cooked to its own file — the first
+    /// under the image's own name, the rest with a role suffix. The one exception is glTF's ORM packing:
+    /// occlusion (R) beside metallic-roughness (G, B) is one variant, since the metallic-roughness
+    /// encoding passes RGB through. The single rule ReferencedImages, CookImages and the materials share.
+    /// </remarks>
+    private static (List<ImageVariant> Variants, Dictionary<(int Material, string Channel), int> OfChannel) ImageVariants(
+        ModelRoot model, MaterialPatch? patch)
     {
-        var roles = new Dictionary<int, TextureRole>();
+        var names = model.LogicalMaterials.Select((m, i) => m.Name ?? $"material_{i}").ToArray();
+        var directX = patch?.DirectXNormalMaterials(names) ?? new HashSet<int>();
+        var variants = new List<ImageVariant>();
+        var ofChannel = new Dictionary<(int, string), int>();
         foreach (var material in model.LogicalMaterials)
         {
             foreach (var channelName in ImageChannels)
@@ -625,27 +647,77 @@ public static class MeshRecipe
                 if (image is null) continue;
 
                 var role = RoleForChannel(channelName);
-                if (roles.TryGetValue(image.LogicalIndex, out var existing) && existing != role
-                    && Packed(existing, role) is { } packed)
+                var flip = channelName == "Normal" && directX.Contains(material.LogicalIndex);
+                var found = -1;
+                for (var v = 0; v < variants.Count && found < 0; v++)
                 {
-                    roles[image.LogicalIndex] = packed;
-                    continue;
+                    var x = variants[v];
+                    if (x.Image != image.LogicalIndex || x.FlipGreen != flip) continue;
+                    if (x.Role == role) found = v;
+                    else if (Packed(x.Role, role) is { } packed)
+                    {
+                        variants[v] = x with { Role = packed };
+                        found = v;
+                    }
                 }
 
-                if (roles.TryGetValue(image.LogicalIndex, out existing) && existing != role)
+                if (found < 0)
                 {
-                    var name = image.Name ?? image.Content.SourcePath ?? $"image {image.LogicalIndex}";
-                    throw new InvalidDataException(
-                        $"'{name}' is used as both {existing} and {role}; one cooked image cannot "
-                        + "preserve both material-channel roles");
+                    var first = variants.All(x => x.Image != image.LogicalIndex);
+                    found = variants.Count;
+                    variants.Add(new ImageVariant(image.LogicalIndex, role, flip,
+                        first ? string.Empty : $".{role.ToString().ToLowerInvariant()}{(flip ? ".dx" : string.Empty)}"));
                 }
 
-                roles[image.LogicalIndex] = role;
+                ofChannel[(material.LogicalIndex, channelName)] = found;
             }
         }
 
-        return roles;
+        return (variants, ofChannel);
     }
+
+    /// <summary>The extensions this reader reads. A file that REQUIRES any other is refused.</summary>
+    /// <remarks>
+    /// glTF: a client that does not support an extension in extensionsRequired must not load the asset,
+    /// because the file cannot be drawn correctly without it. One merely USED may be ignored, and is.
+    /// KHR_mesh_quantization is accessor encoding the parser decodes; the rest are material terms the
+    /// cook carries.
+    /// </remarks>
+    public static readonly IReadOnlySet<string> ReadExtensions = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "KHR_mesh_quantization", "KHR_texture_transform",
+        "KHR_materials_transmission", "KHR_materials_diffuse_transmission", "KHR_materials_volume",
+        "KHR_materials_ior", "KHR_materials_specular", "KHR_materials_sheen", "KHR_materials_clearcoat",
+        "KHR_materials_iridescence", "KHR_materials_anisotropy", "KHR_materials_dispersion",
+        "KHR_materials_unlit", "KHR_materials_emissive_strength",
+    };
+
+    // Opens a source and refuses it, by name, when it requires an extension the reader does not read.
+    private static ModelRoot OpenSource(string gltfPath)
+    {
+        // SharpGLTF's strict validation is skipped: it rejects valid glTF (joints with no common root,
+        // which the Asset Generator's positive Animation_Skin_06 exists to exercise and the spec allows).
+        // What the cook needs checked it checks itself, by name: POSITION, index range, required extensions.
+        var model = ModelRoot.Load(gltfPath, new SharpGLTF.Schema2.ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip });
+        var unread = model.ExtensionsRequired.Where(e => !ReadExtensions.Contains(e)).ToArray();
+        if (unread.Length > 0)
+        {
+            throw new InvalidDataException(
+                $"'{gltfPath}' requires {string.Join(", ", unread)}, which Blix does not read; glTF says a file whose "
+                + "required extensions a reader does not support must not be loaded.");
+        }
+
+        return model;
+    }
+
+    // A glTF sampler as glTF's codes: what the file says (BlixMeshSampler); the spec's defaults when absent.
+    private static BlixMeshSampler SamplerOf(SharpGLTF.Schema2.TextureSampler? sampler) => sampler is null
+        ? default
+        : new BlixMeshSampler((int)sampler.WrapS, (int)sampler.WrapT, (int)sampler.MinFilter, (int)sampler.MagFilter);
+
+    // A variant's cooked name: the image's own, with the variant's suffix before .blixtex.
+    private static string CookedName(string relative, string suffix) =>
+        Path.ChangeExtension(relative, null) + suffix + ".blixtex";
 
     /// <summary>
     /// An image reference as a path RELATIVE to the asset, whatever form the parser handed back.
@@ -729,7 +801,7 @@ public static class MeshRecipe
     /// </para>
     /// </remarks>
     private static IReadOnlyList<BlixMeshMaterial> CookMaterials(
-        ModelRoot model, IReadOnlyDictionary<int, int> imageRows,
+        ModelRoot model, IReadOnlyDictionary<(int Material, string Channel), int> imageRows,
         MaterialPatch? patch = null, Action<string>? log = null)
     {
         var cooked = new BlixMeshMaterial[model.LogicalMaterials.Count];
@@ -778,7 +850,9 @@ public static class MeshRecipe
                 NormalImage: ImageIndex(normal),
                 MetallicRoughnessImage: ImageIndex(mr),
                 OcclusionImage: ImageIndex(occlusion),
-                EmissiveImage: ImageIndex(emissive));
+                EmissiveImage: ImageIndex(emissive),
+                UvTransforms: UvTransforms(baseColor, normal, mr, occlusion, emissive),
+                ExtensionUv: ExtensionUv(m));
         }
 
         // Applied here, once, on the cooked table — so a patched property is indistinguishable at
@@ -790,16 +864,38 @@ public static class MeshRecipe
         ReportDefaultTransmissionColour(final, log);
         return final;
 
-        // Store rows in this cooked file's image table, not source glTF image indices.
-        int ImageIndex(MaterialChannel? channel)
-        {
-            var logical = channel?.Texture?.PrimaryImage?.LogicalIndex;
-            return logical is not null && imageRows.TryGetValue(logical.Value, out var row)
+        // Rows of this cooked file's image table, one per channel as used, not source image indices.
+        int ImageIndex(MaterialChannel? channel) =>
+            channel is { } c && c.Texture is not null && imageRows.TryGetValue((c.LogicalParent.LogicalIndex, c.Key), out var row)
                 ? row
                 : BlixMesh.NoImage;
+
+        // The channel's TEXCOORD set; a KHR_texture_transform texCoord override replaces it (the spec's rule).
+        static int TexCoord(MaterialChannel? channel) =>
+            channel is not { } c ? 0
+            : c.TextureTransform?.TextureCoordinateOverride is { } over ? over
+            : c.TextureCoordinate;
+
+        static BlixMeshUvTransform Uv(MaterialChannel? channel) =>
+            channel?.TextureTransform is { } t ? new BlixMeshUvTransform(t.Offset, t.Rotation, t.Scale) : BlixMeshUvTransform.Identity;
+
+        // The extension channels' set and transform, in BlixMesh.ExtensionChannels order; null when all default.
+        static IReadOnlyList<BlixMeshChannelUv>? ExtensionUv(Material material)
+        {
+            var all = BlixMesh.ExtensionChannels
+                .Select(key => material.FindChannel(key) is { } c && c.Texture is not null
+                    ? new BlixMeshChannelUv(TexCoord(c), Uv(c))
+                    : BlixMeshChannelUv.Default)
+                .ToArray();
+            return all.All(u => u == BlixMeshChannelUv.Default) ? null : all;
         }
 
-        static int TexCoord(MaterialChannel? channel) => channel.HasValue ? channel.Value.TextureCoordinate : 0;
+        // Null when every channel is identity, so a material without the extension cooks as it always has.
+        static BlixMeshUvTransforms? UvTransforms(params MaterialChannel?[] channels)
+        {
+            var all = new BlixMeshUvTransforms(Uv(channels[0]), Uv(channels[1]), Uv(channels[2]), Uv(channels[3]), Uv(channels[4]));
+            return all.All.All(t => t == BlixMeshUvTransform.Identity) ? null : all;
+        }
 
         float Parameter(MaterialChannel? channel, string name, float fallback)
         {
@@ -1193,7 +1289,7 @@ public static class MeshRecipe
         MaterialPatch? patch = null)
     {
         var header = CookedFile.TryReadHeader(outputPath);
-        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version13 }) return false;
+        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version17 }) return false;
         var stamp = header.Value.Stamp;
         if (!stamp.MatchesProducerAndSource(BlixMesh.ShippedRecipe, MeshRecipeVersion, sourcePath))
             return false;

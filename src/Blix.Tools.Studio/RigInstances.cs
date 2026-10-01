@@ -90,7 +90,7 @@ public sealed class RigInstances : ITunable
     /// <summary>Bone worlds for one body, into a shared scratch. Valid until the next call.</summary>
     /// <remarks>
     /// A scratch rather than an array per body: a reader consumes it before asking for the next, and
-    /// collecting these into an array gives N references to one buffer. See <c>RigView</c>, which
+    /// collecting these into an array gives N references to one buffer. See <c>ModelView</c>, which
     /// takes this as a delegate for exactly that reason.
     /// </remarks>
     public IReadOnlyList<Matrix4x4> BoneWorldsFor(int body)

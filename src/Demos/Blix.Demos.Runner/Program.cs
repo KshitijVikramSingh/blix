@@ -136,7 +136,7 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
     private ClipPlayer charPlayer = null!;
     private BonePalette charPalette = null!;
     private byte[] charPalettePayload = Array.Empty<byte>();
-    private Matrix4x4 charMeshNodeTransform = Matrix4x4.Identity;
+    private Matrix4x4 charSkeletonPlacement = Matrix4x4.Identity;
     private AnimationClip charRun = null!;
     private AnimationClip charJump = null!;
     private readonly byte[] skinnedPush = new byte[128];  // uModel + uViewProjection
@@ -307,7 +307,7 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
         charPlayer = new ClipPlayer(charSkeleton);
         charPalette = new BonePalette(charSkeleton.BoneCount);
         charPalettePayload = new byte[charSkeleton.BoneCount * 64];
-        charMeshNodeTransform = model.Placement(0);
+        charSkeletonPlacement = model.Placement(0);
         charRun = FindClip(model, "Running_A") ?? model.Clips[0];
         charJump = FindClip(model, "Jump_Idle") ?? FindClip(model, "Jump_Full_Short") ?? charRun;
 
@@ -362,7 +362,7 @@ internal sealed class RunnerLoop : IGameLoop, IDebuggable
         var user = Matrix4x4.CreateScale(CharScale)
                  * Matrix4x4.CreateRotationY(CharFacing)
                  * Matrix4x4.CreateTranslation(player.Position.X, player.Position.Y, 0f);
-        var model = charMeshNodeTransform * user;
+        var model = charSkeletonPlacement * user;
         MemoryMarshal.Write(skinnedPush.AsSpan(0, 64), in model);
         MemoryMarshal.Write(skinnedPush.AsSpan(64, 64), in viewProj);
     }

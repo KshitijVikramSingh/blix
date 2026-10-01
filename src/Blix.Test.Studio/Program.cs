@@ -22,9 +22,10 @@ using Blix.Verify;
 //
 // ── What it is FOR ──────────────────────────────────────────────────────────
 //   Every number below exists in two places: once in a GLSL file and once in a C#
-//   constant the renderer packs to. `mat4 m[128]` and StudioRig.MaxBones are the
-//   same fact written twice, and two copies of a fact drift. The reflected block is
-//   the authority; this is what notices when C# stops agreeing with it.
+//   constant the renderer packs to, and two copies of a fact drift. The reflected block
+//   is the authority; this is what notices when C# stops agreeing with it. The palette
+//   is the exception that proves it: its length is no longer written in the shader at
+//   all, so what is checked is that both skinned stages leave it to the model.
 //
 //   A push size that disagrees is not a subtle bug — the device refuses the draw —
 //   but a PALETTE size that disagrees is: the lit pass looks perfect while the
@@ -104,7 +105,6 @@ public static class Program
         }
 
         CheckPalette(t, shaderDirectory);
-        CheckRigCapacity(t);
 
         // Links the studio's own code, not only its build output: the stage's look is described
         // without a device anywhere in sight, which is the point of it being declared state rather
@@ -183,12 +183,13 @@ public static class Program
     }
 
     /// <summary>
-    /// The palette's size, from the shader rather than from a C# constant.
+    /// The palette is runtime-sized in both skinned stages, at the block the bone buffers bind.
     /// </summary>
     /// <remarks>
-    /// <c>StudioRig.MaxBones</c> and the <c>mat4 m[128]</c> in studio_skinned.vert are the same
-    /// number written in two files, which is exactly the drift this exists for. The reflected block
-    /// is the authority.
+    /// Each model's bone buffers are sized for its own skin (<c>Model.CreateBoneBuffers</c>), so the shader
+    /// must not fix a length: a literal is a bone cap, and it was one (128). The lit and caster stages
+    /// share ONE palette material, so they must also agree on where it is — a caster reading another
+    /// binding is a shadow posed by a different body, with the lit pass looking perfect.
     /// </remarks>
     private static void CheckPalette(TestRunner t, string shaderDirectory)
     {
@@ -214,16 +215,13 @@ public static class Program
             return;
         }
 
-        var declared = block.TotalSize / 64;
-        var expected = StudioRig.MaxBones * StudioRig.MaxInstances;
-        t.Expect("the palette holds as many matrices as C# thinks",
-            declared == expected,
-            $"the shader holds {declared}, StudioRig.MaxBones x MaxInstances says {expected} — the " +
-            "shader indexes gl_InstanceIndex x stride into this array, and a short one reads past its end");
+        t.Expect("the palette is runtime-sized, so a model's bone buffers give it its length",
+            block.TotalSize == 0,
+            $"the shader fixes it at {block.TotalSize / 64} matrices — a literal length is a bone cap");
+        t.Expect("at the set and binding the bone buffers bind",
+            boneSlot.Set == DescriptorSets.Draw && boneSlot.Binding == 0,
+            $"set {boneSlot.Set} binding {boneSlot.Binding}");
 
-        // <b>Both skinned stages, not just the lit one.</b> They share ONE palette material, so a
-        // caster whose array is a different size is a shadow reading a different body's pose — and
-        // the lit pass would look perfect while it happened.
         var casterSlot = caster.Slots.FirstOrDefault(s => s.Type == ShaderResourceType.StorageBuffer);
         if (casterSlot?.BlockLayout is not { } casterBlock)
         {
@@ -231,49 +229,10 @@ public static class Program
             return;
         }
 
-        t.Expect("the caster reads the same palette, same set, same size",
-            casterBlock.TotalSize == block.TotalSize && casterSlot.Set == boneSlot.Set,
-            $"caster is set {casterSlot.Set} x {casterBlock.TotalSize}B against the lit pass's " +
-            $"set {boneSlot.Set} x {block.TotalSize}B — they share one material and must agree");
-    }
-
-    /// <summary>Studio, rather than the engine's asset checker, owns its fixed GPU palette budget.</summary>
-    private static void CheckRigCapacity(TestRunner t)
-    {
-        t.Expect("Studio's palette capacity is its per-rig bone and instance budget",
-            StudioRig.PaletteMatrixCapacity == StudioRig.MaxBones * StudioRig.MaxInstances,
-            $"{StudioRig.PaletteMatrixCapacity} matrices vs " +
-            $"{StudioRig.MaxBones} bones x {StudioRig.MaxInstances} instances");
-
-        StudioRig.ValidatePaletteCapacity(
-            "within.glb",
-            new[] { SkinWith(StudioRig.MaxBones) });
-        t.Pass("a rig exactly at Studio's bone limit is accepted");
-
-        t.ExpectThrows<AssetImportException>(
-            "Studio refuses an oversized rig before GPU allocation",
-            () => StudioRig.ValidatePaletteCapacity(
-                "oversized.glb",
-                new[] { SkinWith(StudioRig.MaxBones + 1) }),
-            $"at most {StudioRig.MaxBones} bones");
-
-        t.ExpectThrows<AssetImportException>(
-            "Studio checks every skin rather than only the primary one",
-            () => StudioRig.ValidatePaletteCapacity(
-                "multi-skin.glb",
-                new[] { SkinWith(1), SkinWith(StudioRig.MaxBones + 1) }),
-            "skin 1");
-    }
-
-    private static Skeleton SkinWith(int boneCount)
-    {
-        var bones = new Bone[boneCount];
-        for (var i = 0; i < bones.Length; i++)
-        {
-            bones[i] = new Bone($"bone{i}", i - 1, Matrix4x4.Identity);
-        }
-
-        return new Skeleton(bones);
+        t.Expect("the caster reads the same palette: same set, same binding, runtime-sized too",
+            casterBlock.TotalSize == 0 && casterSlot.Set == boneSlot.Set && casterSlot.Binding == boneSlot.Binding,
+            $"caster is set {casterSlot.Set} binding {casterSlot.Binding} x {casterBlock.TotalSize}B against the lit pass's " +
+            $"set {boneSlot.Set} binding {boneSlot.Binding} — they share one material and must agree");
     }
 
     /// <summary>

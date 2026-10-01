@@ -1,3 +1,4 @@
+using System.Numerics;
 using Blix.Assets;
 using Blix.Graphics;
 
@@ -39,6 +40,50 @@ public static class SkinningAnalysis
         }
 
         return weighted;
+    }
+
+    /// <summary>
+    /// Where <paramref name="mesh"/>'s vertices land under <paramref name="palette"/> (a skin's palette at
+    /// rest), widened into <paramref name="min"/> and <paramref name="max"/>.
+    /// </summary>
+    /// <remarks>
+    /// The skin sum itself — <c>sum(w * v * palette)</c> at the rest palette — rather than the mesh-space
+    /// vertices under one transform: a file's rest pose need not be its bind pose, and only the skin
+    /// knows where the rest pose puts them. A vertex with no weight is left out: glTF gives it no place.
+    /// </remarks>
+    public static void AccumulateRestBounds(
+        IReadOnlyList<Matrix4x4> palette, MeshData mesh, ref Vector3 min, ref Vector3 max)
+    {
+        ArgumentNullException.ThrowIfNull(palette);
+        ArgumentNullException.ThrowIfNull(mesh);
+        var indexAttribute = Attribute(mesh.Layout, location: 3);
+        var weightAttribute = Attribute(mesh.Layout, location: 4);
+
+        var stride = mesh.Layout.Stride;
+        for (var vertex = 0; vertex < mesh.VertexCount; vertex++)
+        {
+            var at = vertex * stride;
+            var p = new Vector3(
+                BitConverter.ToSingle(mesh.VertexBytes, at),
+                BitConverter.ToSingle(mesh.VertexBytes, at + 4),
+                BitConverter.ToSingle(mesh.VertexBytes, at + 8));
+            var skinned = Vector3.Zero;
+            var total = 0f;
+            for (var influence = 0; indexAttribute >= 0 && weightAttribute >= 0 && influence < 4; influence++)
+            {
+                var weight = BitConverter.ToSingle(mesh.VertexBytes, at + weightAttribute + (influence * 4));
+                if (weight <= 0f) continue;
+                var bone = (int)BitConverter.ToSingle(mesh.VertexBytes, at + indexAttribute + (influence * 4));
+                if ((uint)bone >= (uint)palette.Count) continue;
+                skinned += Vector3.Transform(p, palette[bone]) * weight;
+                total += weight;
+            }
+
+            if (total <= 0f) continue;
+            var world = skinned / total;
+            min = Vector3.Min(min, world);
+            max = Vector3.Max(max, world);
+        }
     }
 
     /// <summary>Adds every ancestor needed to draw weighted bone chains continuously.</summary>

@@ -3703,39 +3703,37 @@ static ShaderInterface MinimalShader() => new(new[]
                 named is "tip" or "btip");
         }
 
-        // ── BB.3 each skin keeps its own frame ──────────────────────────────
+        // ── BB.3 a skinned mesh node's transform does not place its skin ────
         //
-        // tank.glb is why: its two track meshes sit ±3.97 along Z from the hull, and each skin's
-        // inverse binds encode that same offset (0.0397 in the other space, the pair differing by
-        // exactly the 0.01 scale on the node). One shared mesh-node transform lands a track a fifth
-        // of the tank away — wrong in a way that reads as a physics bug rather than an import one.
+        // glTF places a skinned vertex by its joints' world transforms alone and ignores the transform
+        // of the node that places the mesh. This used to assert the opposite — that displacing one
+        // skin's mesh node moved that skin — because the skeleton's rest was rebuilt from inverse binds
+        // and needed the mesh node to land tank.glb's tracks. Read as glTF defines it (JointHierarchy),
+        // the tracks land exactly with one shared placement; Blix.Test.Recipes holds every tank vertex
+        // to glTF's own sum.
         //
-        // Built by editing the JSON because SceneBuilder normalises a skinned mesh node to identity:
-        // the world transform passed to AddSkinnedMesh does not survive into the node, so the
-        // condition cannot be expressed through that API at all. The first draft of this test tried
-        // and asserted <0,0,0> against <0,0,0>, which is a test that could only pass once it was
-        // weakened — so the fixture moves the node directly instead.
+        // Built by editing the JSON because SceneBuilder normalises a skinned mesh node to identity: the
+        // world transform passed to AddSkinnedMesh does not survive into the node.
         var framePath = Path.Combine(temp, "two-frames.gltf");
         {
             var doc = System.Text.Json.Nodes.JsonNode.Parse(
                 File.ReadAllText(Path.Combine(temp, "two-orders.gltf")))!;
             var nodes = doc["nodes"]!.AsArray();
             var skinned = nodes.Where(n => n!["mesh"] is not null && n["skin"] is not null).ToList();
-            // Move the SECOND skinned mesh node. The first stays put, so any difference measured
-            // below is this displacement and not a shared drift.
             skinned[1]!["translation"] = new System.Text.Json.Nodes.JsonArray(0, 0, 4.0);
             File.WriteAllText(framePath, doc.ToJsonString());
         }
 
+        var unmoved = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("bb/unmoved"), Path.Combine(temp, "two-orders.gltf")));
         var m3 = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("bb/frames"), framePath));
         t.Expect("BB.3 the displaced file still yields two skins",
             m3.SkinsOrEmpty.Length == 2, $"{m3.SkinsOrEmpty.Length}");
-        if (m3.SkinsOrEmpty.Length == 2)
+        if (m3.SkinsOrEmpty.Length == 2 && unmoved.SkinsOrEmpty.Length == 2)
         {
-            var a = m3.SkinsOrEmpty[0].MeshNodeTransform.Translation;
-            var b = m3.SkinsOrEmpty[1].MeshNodeTransform.Translation;
-            t.ExpectTrue($"BB.3 each skin carries its OWN frame ({a} vs {b})",
-                (a - b).Length() > 3.5f);
+            var before = unmoved.SkinsOrEmpty[1].SkeletonPlacement.Translation;
+            var after = m3.SkinsOrEmpty[1].SkeletonPlacement.Translation;
+            t.ExpectTrue($"BB.3 moving a skinned mesh node does not move its skin ({before} vs {after})",
+                (before - after).Length() < 1e-5f);
         }
 
         // ── BB.3b clips against disagreeing skins are REFUSED, not guessed ──
@@ -3762,7 +3760,7 @@ static ShaderInterface MinimalShader() => new(new[]
         // ── BB.4 CONTROL: one skin is untouched ─────────────────────────────
         //
         // The whole change is additive or it is not. Six of the seven rigged assets in this tree have
-        // one skin, and every consumer of them reads Skeleton and MeshNodeTransform directly.
+        // one skin, and every consumer of them reads Skeleton and SkeletonPlacement directly.
         var one = new SharpGLTF.Scenes.SceneBuilder();
         one.AddSkinnedMesh(Weighted("solo", 0), Matrix4x4.Identity, tipA, rootA, midA);
         var onePath = Path.Combine(temp, "one-skin.glb");
@@ -5851,7 +5849,7 @@ sealed class RecordingDevice : IGraphicsDevice
     public ShaderProgramHandle CreateShaderProgramFromSpv(byte[] vertexSpv, byte[] fragmentSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
     public ShaderProgramHandle CreateComputeShaderProgramFromSpv(byte[] computeSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
     public PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null) => throw No();
-    public IMaterialBindings CreateMaterial(ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null) => throw No();
+    public IMaterialBindings CreateMaterial(ShaderProgramHandle program, int setIndex = DescriptorSets.Material, int framesInFlight = 1, string? name = null, IReadOnlyDictionary<int, int>? blockSizes = null) => throw No();
     public void DestroyMaterial(MaterialHandle handle) => throw No();
     public TextureHandle CreateTextureCube(int faceSize, TextureFormat format, int mipCount, ReadOnlySpan<byte> data, SamplerDescription sampler, string name) => throw No();
     public TextureHandle CreateStorageTexture2D(int width, int height, TextureFormat format, SamplerDescription sampler, string? name = null) => throw No();

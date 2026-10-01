@@ -710,7 +710,7 @@ public sealed record GltfModel(
     GltfPrimitive[] Primitives,
     Skeleton Skeleton,
     AnimationClip[] Animations,
-    Matrix4x4 MeshNodeTransform);
+    Matrix4x4 SkeletonPlacement);
 
 public sealed record GltfPrimitive(MeshData Mesh, PbrMaterial? Material);
 

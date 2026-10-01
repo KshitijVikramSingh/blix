@@ -509,7 +509,7 @@ internal sealed class ViewerPanels
 
         var local = app.Session.Driven.Posed.Locals[app.Selection.Bone];
         var rest = app.Session.Driven.Subject.RestPose.Locals[app.Selection.Bone];
-        var world = app.Session.Driven.BoneWorlds[app.Selection.Bone] * app.Rig.MeshNodeTransform * app.SubjectPlacementOf;
+        var world = app.Session.Driven.BoneWorlds[app.Selection.Bone] * app.Rig.SkeletonPlacement * app.SubjectPlacementOf;
 
         ImGui.TextDisabled($"bone {app.Selection.Bone} · parent {app.Rig.Skeleton.Bones[app.Selection.Bone].ParentIndex}");
         ImGui.Text($"local T {local.Translation.X:0.000}, {local.Translation.Y:0.000}, {local.Translation.Z:0.000}");
@@ -588,7 +588,7 @@ internal sealed class ViewerPanels
         // depth-tested, one layer up.
         if (app.RigPath is not null) ImGui.TextDisabled(Path.GetFileName(app.RigPath));
         else if (app.ModelPath is not null) ImGui.TextDisabled(Path.GetFileName(app.ModelPath));
-        else ImGui.TextDisabled("nothing loaded — pass --model <path.glb> or --rig <rigged.glb>");
+        else ImGui.TextDisabled("nothing loaded — pass --model <path.glb>");
 
         if (ImGui.CollapsingHeader("image", ImGuiTreeNodeFlags.DefaultOpen))
         {

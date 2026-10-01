@@ -43,6 +43,14 @@ public sealed class TextureData
     /// </remarks>
     public string ResourceId { get; init; } = string.Empty;
     public TextureFormat Format { get; }
+
+    /// <summary>How the asset says to sample it (glTF's sampler); null for the loader's default.</summary>
+    /// <remarks>
+    /// One image sampled two ways is two TextureData with one ResourceId and two samplers, and two
+    /// GPU textures: a texture handle carries its sampler.
+    /// </remarks>
+    public SamplerDescription? Sampler { get; init; }
+
     public int Width { get; }
     public int Height { get; }
     public int MipCount { get; }
@@ -79,8 +87,9 @@ public sealed class TextureData
 
     // Factory for the source-decoded, single-mip Rgba8 shape. Cooked-load
     // callers use a constructor that exposes the artifact's full mip chain.
-    public static TextureData Rgba8Single(string name, byte[] pixels, int width, int height, string resourceId = "")
-        => new(name, TextureFormat.Rgba8, width, height, new[] { pixels }) { ResourceId = resourceId };
+    public static TextureData Rgba8Single(
+        string name, byte[] pixels, int width, int height, string resourceId = "", SamplerDescription? sampler = null)
+        => new(name, TextureFormat.Rgba8, width, height, new[] { pixels }) { ResourceId = resourceId, Sampler = sampler };
 
     // Drops this instance's eager CPU-byte references. The caller is responsible
     // for retaining any bytes still needed by deferred upload work.

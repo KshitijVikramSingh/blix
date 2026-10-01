@@ -498,16 +498,17 @@ Examples:
 
 ```sh
 ./blix inspect path/to/asset.glb
-./blix check --rig path/to/character.glb
+./blix check --model path/to/character.glb
 ./blix cook list
-./blix view --rig path/to/character.glb --clip Walking_A
-./blix shot --rig path/to/character.glb --clip Walking_A --out walk.png
+./blix view --model path/to/character.glb --clip Walking_A
+./blix shot --model path/to/character.glb --clip Walking_A --out walk.png
 ```
 
 Not every asset needs every step. In particular, `inspect` should not fail a
 file merely because it contains something Blix does not consume; that belongs
-to `check`. `view` should not silently choose between model and rig semantics;
-the caller states `--model` or `--rig`.
+to `check`. `view`, `shot` and `check` take one `--model`: a file with a skin is
+posed (and checked as a rig), one without is shown at its nodes. Whether a file
+has a skin is a fact of the file, so no tool asks the caller to restate it.
 
 ### Reporting and enforcing exits
 
@@ -527,10 +528,10 @@ These commands deliberately do not assign the same meaning to exit zero:
   source, fallback, or missing data. It exercises geometry and the image loads
   triggered by it. It does not compare source timestamps, so an accepted stale
   artifact can pass; pair it with `cook status` when freshness is policy.
-- `blix check --model` routes static and rigged glTF through their matching
-  importers and rejects non-finite clip durations. `blix check --rig` performs
-  deeper engine-level hierarchy, rest-palette, and clip-sampling checks, then
-  reports weighted-bone, track-coverage, and root-motion facts. Root-motion seam
+- `blix check --model` reports a model's shape and rejects non-finite clip
+  durations; on a model with a skin it also performs engine-level hierarchy,
+  rest-palette, and clip-sampling checks, then reports weighted-bone,
+  track-coverage, and root-motion facts. Root-motion seam
   observations are advisory because glTF does not declare whether a clip is
   intended to loop.
 - Studio owns its reference renderer's fixed bone and instance budget. Rig load
