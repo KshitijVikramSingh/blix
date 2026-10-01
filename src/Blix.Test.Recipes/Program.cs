@@ -556,6 +556,58 @@ public static class Program
         }
     }
 
+    // KHR_mesh_quantization was accepted with nothing exercising it. NormalTangentTest_quantized (derived by the
+    // fetch script) is NormalTangentTest re-encoded as an optimiser writes it: POSITION as unsigned shorts with the
+    // dequantisation on the node, NORMAL as normalized bytes, TEXCOORD_0 as normalized unsigned shorts. Placed in
+    // the world, every vertex must be the float file's to within one quantisation step. CONTROL: the quantized
+    // file's own (node-local) positions are nowhere near the floats, so it is the node transform that agrees.
+    private static void QuantizedAttributesReadAsTheirFloats(TestRunner t)
+    {
+        if (FindFile("NormalTangentTest_quantized.gltf") is not { } quantized || FindFile("NormalTangentTest.glb") is not { } plain) return;
+        var q = Blix.ModelData.Load(CookCache.Resolve(quantized));
+        var f = Blix.ModelData.Load(CookCache.Resolve(plain));
+        var qm = q.Flattened().Single().Primitive.Mesh;
+        var fm = f.Flattened().Single().Primitive.Mesh;
+        var local = q.Meshes.Single().Primitives.Single().Mesh;
+        t.Expect("a quantized file cooks to the float file's vertex and index counts",
+            qm.VertexCount == fm.VertexCount && qm.IndexCount == fm.IndexCount, $"{qm.VertexCount}/{qm.IndexCount} vs {fm.VertexCount}/{fm.IndexCount}");
+        if (qm.VertexCount != fm.VertexCount) return;
+
+        int At(Blix.Assets.MeshData m, int location) => m.Layout.Attributes.First(a => a.Location == location).Offset;
+        System.Numerics.Vector3 V3(Blix.Assets.MeshData m, int v, int at)
+        {
+            var o = (v * m.Layout.Stride) + at;
+            return new(BitConverter.ToSingle(m.VertexBytes, o), BitConverter.ToSingle(m.VertexBytes, o + 4), BitConverter.ToSingle(m.VertexBytes, o + 8));
+        }
+
+        System.Numerics.Vector2 V2(Blix.Assets.MeshData m, int v, int at)
+        {
+            var o = (v * m.Layout.Stride) + at;
+            return new(BitConverter.ToSingle(m.VertexBytes, o), BitConverter.ToSingle(m.VertexBytes, o + 4));
+        }
+
+        var extent = fm.Bounds.Max - fm.Bounds.Min;
+        var step = MathF.Max(extent.X, MathF.Max(extent.Y, extent.Z)) / 65535f;
+        float worstPosition = 0f, worstNormal = 0f, worstUv = 0f, worstRaw = 0f;
+        for (var v = 0; v < fm.VertexCount; v++)
+        {
+            var fp = V3(fm, v, At(fm, 0));
+            worstPosition = MathF.Max(worstPosition, (V3(qm, v, At(qm, 0)) - fp).Length());
+            worstRaw = MathF.Max(worstRaw, (V3(local, v, At(local, 0)) - fp).Length());
+            worstNormal = MathF.Max(worstNormal, (V3(qm, v, At(qm, 1)) - V3(fm, v, At(fm, 1))).Length());
+            worstUv = MathF.Max(worstUv, (V2(qm, v, At(qm, 2)) - V2(fm, v, At(fm, 2))).Length());
+        }
+
+        t.Expect($"its positions, placed by the node's dequantisation, are the floats' within a step (worst {worstPosition:G3}, step {step:G3})",
+            worstPosition <= step, "");
+        t.Expect($"its normalized-byte normals are the floats' within a byte's precision (worst {worstNormal:G3})",
+            worstNormal <= 0.015f, "");
+        t.Expect($"its normalized-short UVs are the floats' within a short's precision (worst {worstUv:G3})",
+            worstUv <= 2f / 65535f, "");
+        t.Expect($"CONTROL: its node-local positions are the raw integers, nowhere near the floats (worst {worstRaw:G3})",
+            worstRaw > 100f, "");
+    }
+
     // ── A golden that shares nothing with the reader ─────────────────────────────
     // SamplingMatchesGltf and AnimationMatchesGltf evaluate keys independently, but both take the keys
     // through GltfImporter.SampleKeys — so a mis-read of a CUBICSPLINE triple (in, value, out) would sit
@@ -2703,6 +2755,7 @@ public static class Program
         ValidatorRejectionsAreAccounted(t);
         IndexCountsAreRefusedNotRepaired(t);
         GeneratedTangentsFollowTheNormalTexture(t);
+        QuantizedAttributesReadAsTheirFloats(t);
         InterpolationGolden(t);
         SceneLevelMatchesGltf(t);
         SceneLevelReachesModelData(t);

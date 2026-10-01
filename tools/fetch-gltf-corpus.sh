@@ -491,6 +491,76 @@ print(f"  derived RiggedSimple_extraibm.gltf ({acc['count'] + 1} inverse binds f
 PY
 fi
 
+# KHR_mesh_quantization is accepted (MeshRecipe.ReadExtensions) and no corpus file uses it, so the claim
+# had no instrument. NormalTangentTest re-encoded the way an optimiser writes it: POSITION as unsigned
+# shorts with the dequantisation (per-axis scale, then offset) on the mesh's node, NORMAL as normalized
+# bytes, TEXCOORD_0 as normalized unsigned shorts, each padded to a 4-byte stride. The extension is
+# REQUIRED, as it must be: a reader that ignores it would draw the raw integers. The scale is uniform,
+# because the node transform also reaches the normals.
+NQ="$DEST/sample-assets/NormalTangentTest/NormalTangentTest.glb"
+if [ -f "$NQ" ] && [ ! -s "$DEST/sample-assets/NormalTangentTest/NormalTangentTest_quantized.gltf" ]; then
+    python3 - "$NQ" <<'PY'
+import base64, json, struct, sys
+p = sys.argv[1]
+b = open(p, "rb").read()
+jlen = struct.unpack("<I", b[12:16])[0]
+d = json.loads(b[20:20 + jlen])
+bin_at = 20 + jlen
+blen = struct.unpack("<I", b[bin_at:bin_at + 4])[0]
+blob = b[bin_at + 8:bin_at + 8 + blen]
+d["buffers"][0] = {"byteLength": len(blob), "uri": "data:application/octet-stream;base64," + base64.b64encode(blob).decode()}
+if len(d["meshes"]) != 1 or len(d["meshes"][0]["primitives"]) != 1:
+    sys.exit("NormalTangentTest is not one mesh of one primitive — upstream changed shape")
+users = [n for n in d["nodes"] if n.get("mesh") == 0]
+if len(users) != 1 or any(k in users[0] for k in ("matrix", "translation", "rotation", "scale")):
+    sys.exit("NormalTangentTest's mesh node is not a single untransformed node — upstream changed shape")
+prim = d["meshes"][0]["primitives"][0]
+def floats(key, width):
+    acc = d["accessors"][prim["attributes"][key]]
+    if acc["componentType"] != 5126 or acc.get("sparse"):
+        sys.exit(f"{key} is not plain float — upstream changed shape")
+    view = d["bufferViews"][acc["bufferView"]]
+    stride = view.get("byteStride", 4 * width)
+    base = view.get("byteOffset", 0) + acc.get("byteOffset", 0)
+    return [struct.unpack_from(f"<{width}f", blob, base + k * stride) for k in range(acc["count"])]
+pos, nrm, uv = floats("POSITION", 3), floats("NORMAL", 3), floats("TEXCOORD_0", 2)
+if min(min(t) for t in uv) < 0 or max(max(t) for t in uv) > 1:
+    sys.exit("TEXCOORD_0 leaves [0, 1]; normalized shorts cannot hold it — upstream changed shape")
+lo = [min(v[i] for v in pos) for i in range(3)]
+hi = [max(v[i] for v in pos) for i in range(3)]
+# ONE scale for all three axes: the node transform reaches the normals too (through its inverse transpose),
+# so a per-axis scale would bend every normal; a uniform one leaves their directions alone.
+step = max(hi[i] - lo[i] for i in range(3)) / 65535.0
+scale = [step, step, step]
+out = bytearray()
+def view_of(data, stride):
+    while len(out) % 4: out.append(0)
+    start = len(out)
+    out.extend(data)
+    d["bufferViews"].append({"buffer": 1, "byteOffset": start, "byteLength": len(data), "byteStride": stride, "target": 34962})
+    return len(d["bufferViews"]) - 1
+qp = [tuple(max(0, min(65535, round((v[i] - lo[i]) / scale[i]))) for i in range(3)) for v in pos]
+data = b"".join(struct.pack("<3H2x", *q) for q in qp)
+d["accessors"].append({"bufferView": view_of(data, 8), "componentType": 5123, "count": len(qp), "type": "VEC3",
+                       "min": [min(q[i] for q in qp) for i in range(3)], "max": [max(q[i] for q in qp) for i in range(3)]})
+prim["attributes"]["POSITION"] = len(d["accessors"]) - 1
+data = b"".join(struct.pack("<3bx", *(max(-127, min(127, round(c * 127))) for c in v)) for v in nrm)
+d["accessors"].append({"bufferView": view_of(data, 4), "componentType": 5120, "normalized": True, "count": len(nrm), "type": "VEC3"})
+prim["attributes"]["NORMAL"] = len(d["accessors"]) - 1
+data = b"".join(struct.pack("<2H", *(max(0, min(65535, round(c * 65535))) for c in v)) for v in uv)
+d["accessors"].append({"bufferView": view_of(data, 4), "componentType": 5123, "normalized": True, "count": len(uv), "type": "VEC2"})
+prim["attributes"]["TEXCOORD_0"] = len(d["accessors"]) - 1
+users[0]["translation"] = lo
+users[0]["scale"] = scale
+d["buffers"].append({"byteLength": len(out), "uri": "data:application/octet-stream;base64," + base64.b64encode(bytes(out)).decode()})
+for key in ("extensionsUsed", "extensionsRequired"):
+    d[key] = sorted(set(d.get(key, [])) | {"KHR_mesh_quantization"})
+dst = p.replace("NormalTangentTest.glb", "NormalTangentTest_quantized.gltf")
+json.dump(d, open(dst, "w"))
+print(f"  derived NormalTangentTest_quantized.gltf ({len(qp)} vertices: POSITION u16 + node dequantisation, NORMAL i8n, TEXCOORD_0 u16n)")
+PY
+fi
+
 echo
 echo "corpus at $DEST — $((planned - failed)) fetched, $failed missing, $(find "$DEST" -type f | wc -l | tr -d ' ') file(s) total"
 [ "$failed" -eq 0 ]
