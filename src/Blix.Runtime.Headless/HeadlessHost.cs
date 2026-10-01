@@ -16,7 +16,8 @@ namespace Blix.Runtime.Headless;
 /// </para>
 /// <para>
 /// <b>The same order, and the same arguments.</b> Each frame is what a window's is:
-/// input held still for the tick, <see cref="IGameLoop.OnUpdate"/>, the loop's diagnostics,
+/// input held still for the tick, <see cref="IGameLoop.OnUpdate"/>, the fixed steps of an
+/// <see cref="IFixedGameLoop"/>, the loop's diagnostics,
 /// <see cref="IGameLoop.OnRender"/>, then the dump and the frame bound. What differs is only what a
 /// headless run cannot have. There is no device, so <see cref="IGameLoop.OnLoad"/> is handed a
 /// <see cref="NoGraphicsDevice"/>. Nothing executes the recorded commands, so the render pass
@@ -38,6 +39,7 @@ public sealed class HeadlessHost : IRenderHost, IDebugHost
     private readonly DebugSystem? debugSystem;
     private readonly DiagnosticsFrameRecorder? frameRecorder;
     private readonly JsonDumpSink? jsonDumpSink;
+    private readonly FixedStepClock fixedClock = new();
     private bool closeRequested;
 
     /// <param name="gameLoop">The loop to run.</param>
@@ -109,16 +111,18 @@ public sealed class HeadlessHost : IRenderHost, IDebugHost
         gameLoop.OnLoad(this, device);
         debugSystem?.Register((IDebugContributor)gameLoop);
 
-        var frame = new RenderFrameContext(options.Width, options.Height);
-        var total = 0.0;
+        var clock = new FrameClock(options.Step);
+        var fixedLoop = gameLoop as IFixedGameLoop;
         while (!closeRequested)
         {
-            total += options.Step;
-            var time = new Time(total, options.Step);
+            var time = clock.Advance(0.0);
 
             input?.Invoke(Frames, inputState);
             inputState.BeginTick();
             gameLoop.OnUpdate(time);
+            if (fixedLoop is not null) fixedClock.Run(fixedLoop, time.Delta);
+
+            var frame = new RenderFrameContext(options.Width, options.Height, fixedClock.Alpha);
 
             if (debugSystem is not null)
             {
@@ -154,6 +158,9 @@ public sealed class HeadlessHost : IRenderHost, IDebugHost
 
     /// <inheritdoc />
     public void RequestClose() => closeRequested = true;
+
+    /// <inheritdoc />
+    public void ResetFixedClock(double total = 0.0) => fixedClock.Reset(total);
 
     /// <inheritdoc />
     /// <remarks>Nothing to title.</remarks>

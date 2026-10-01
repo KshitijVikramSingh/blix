@@ -401,8 +401,9 @@ if (args.Flag("headless"))
 Each frame runs in a window's order: input held still for the tick,
 `OnUpdate`, the loop's diagnostics, `OnRender`, then the dump and the frame
 bound. `HeadlessOptions.FromArgs` reads `--frames`, `--dump-frame`, `--width`,
-`--height` and `--debug` as a window does, plus `--step`, the seconds per frame;
-time is always that fixed step. A window's own `--title` is left unread.
+`--height`, `--debug` and `--step` (the seconds every frame advances by) as a
+window does; headless, time is always that step (default 1/60 s), because there
+is no display to measure it by. A window's own `--title` is left unread.
 
 What a headless run cannot have is stated rather than faked:
 

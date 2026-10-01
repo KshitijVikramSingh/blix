@@ -474,5 +474,18 @@ var t = new TestRunner();
         "priming must not be sticky");
 }
 
+
+// --step means in a window what it means headless (FrameClock): seconds every frame advances by.
+{
+    var stepped = Blix.Runtime.Silk.WindowOptions.FromArgs(AppArgs.Parse(new[] { "--step", "0.02" }));
+    t.Expect("--step sets a window's frame step", stepped.Step == 0.02, $"{stepped.Step}");
+    t.Expect("and without it a window takes the display's measured time",
+        Blix.Runtime.Silk.WindowOptions.FromArgs(AppArgs.Parse(Array.Empty<string>())).Step is null);
+    t.ExpectThrows("a step of zero is refused by name",
+        () => Blix.Runtime.Silk.WindowOptions.FromArgs(AppArgs.Parse(new[] { "--step", "0" })), mustMention: "--step");
+    t.ExpectThrows("and so is an infinite one",
+        () => Blix.Runtime.Silk.WindowOptions.FromArgs(AppArgs.Parse(new[] { "--step", "Infinity" })), mustMention: "--step");
+}
+
 t.PrintSummary();
 return t.Failed;

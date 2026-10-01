@@ -2,8 +2,8 @@ using System.Numerics;
 
 namespace Blix;
 
-// Per-bone pose interpolation helpers. The math BlendedClipAnimation (and any
-// future blend/crossfade/additive primitive) builds on.
+// Per-bone pose interpolation helpers: the math any blend, crossfade or masked layer
+// builds on.
 //
 // Translation and scale use linear lerp; rotation uses spherical-linear (slerp)
 // on the unit-quaternion arc, the same justification SlerpQuaternionCurve gave

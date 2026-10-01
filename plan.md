@@ -222,6 +222,93 @@ RENDERS right is the Compare* set's job, judged against each README.
 
 ---
 
+## J — time-driven things: the scene layer goes, animation layers arrive, the clock follows
+
+One branch, one PR. The pieces are one whole: what owns time, and how time-driven things compose.
+
+**Read by what each type is, not by how many use it.** The audit (2026-10-01): the GameObject family
+(`GameObject`, `AnimatedGameObject`, `SkinnedGameObject`, `PhysicsGameObject`, `Submesh`) was a scene
+vocabulary that `Model` replaced. `SkinnedGameObject` is actively wrong now: it composes a mesh-node
+transform glTF ignores for skins, and palettes skin 0 only. The `IAnimation` family has the better
+COMPOSITION shape: one contract, an ordered host, one-shots that leave. `ClipPlayer` has the better
+SOURCE shape: an owned clock (rate, reverse, pause, scrub), root motion across the seam, and the reset
+to rest that every hand-rolled consumer got wrong. They are layers of one design, not rivals.
+
+Decided with the user:
+- **Delta-driven, each unit owns its time.** `IAnimation.Sample(Time)` keyed off `Time.Total − StartTime`,
+  so nothing could pause, change rate, reverse or restart without being rebuilt. It becomes
+  `bool Advance(double delta)` — the shape `ClipPlayer.Advance` already proved, and what a fixed step
+  will drive.
+- **The pose layer stack is separate from the host.** Pose layers apply onto the previous layer's
+  result; tweens have no such order. The stack can sit inside a host as one `IAnimation`.
+- **A finished one-shot layer holds its last frame by default.** Removing it is a per-layer setting the
+  caller chooses (selection is the caller's).
+- **Weights only, as stage D decided.** The stack is a flat ordered list of (source, mode, weight,
+  mask), with no nodes, parameters, states, transitions or durations. It is not a blend tree. A
+  crossfade is still the caller moving a weight.
+
+Stages:
+- **J1 — the scene layer goes.** Delete the GameObject family and `IAnimated`, plus `ClipAnimation`,
+  `BlendedClipAnimation` and `AdditiveClipAnimation`, which become layer modes in J3. `docs/blix.md`'s
+  surface list and getting-started example are rewritten to what Blix is (`Model`, `ClipPlayer`,
+  `Transform3D`, `CameraController`); its glTF line still names types that moved to `Blix.Import`.
+- **J2 — `IAnimation` on its own clock.** `Advance(delta)`; `AnimationHost.Advance(delta)`; the tweens
+  (`FloatAnimation`, `Transform3DAnimation`, `CallbackAnimation`) keep their elapsed time over the curves,
+  which stay as they are. There are no tests today: pin the lifecycle (alive, removed, finite end value
+  written on the last tick, removal order) in `Blix.Test.Graphics`.
+- **J3 — the pose layer stack** (stage D, in reusable form). Ordered layers: a source (a `ClipPlayer`; an
+  interface waits for a second kind of source), a mode (override, blend, additive), a weight, an
+  optional `BoneMask`, and on-finish (hold, the default, or remove). Advancing it advances every
+  layer's player; evaluating starts from rest and applies each layer in order through `PoseBlend` /
+  `PoseDelta`, which already do the maths. Studio's `RigAnimation.Compose()` becomes a two-layer stack,
+  and the instrument is the lab baseline: IDENTICAL, mode by mode. Plus stage F's controls (a mask set
+  to all bones breaks the legs; set to none leaves the walk bit-for-bit unchanged).
+- **J1–J3 done** (`b0f83de`, `394cfcd`, and J3): the scene layer deleted; `IAnimation.Advance(delta)` with
+  Test.Graphics BR; `PoseStack` with Test.Graphics BS (each mode bit-for-bit its engine call, both mask
+  controls, hold/remove). `blix shot` gained `--blend` / `--additive` / `--mask` / `--weight` (the viewer's
+  flags) and the lab three `compose-*` modes, recorded on the old composition and IDENTICAL on the stack;
+  CONTROL, the additive weight nudged 1% changes compose-additive alone. `lab-baseline.sh` takes a mode
+  regex, so a change to a few modes is proven without opening a window for all of them.
+- **J4-A — a deterministic clock in the windowed host** (fixed-step A). `--step` means in a window what it
+  means headless: every frame advances by exactly that much. It promises deterministic APPLICATION time,
+  not execution: wall-clock budgets (a `Drain(ms)`) stay out of scope. One `FrameClock` (Blix.Core) is
+  both hosts' sample, taken once per frame; render reads the sample its update saw, and the callback's own
+  delta is kept for the FPS readout and ImGui only. `SetVSync` now reaches the device (it set Silk's GL flag,
+  a no-op on Vulkan).
+- **J4-A done:** Test.Apps (clock: stepped, measured, negative/NaN clamped, 0/∞ refused) and Test.Input
+  (`--step` parse). Proof: Runner `--step 0.0166 --dump-frame 100`, three runs IDENTICAL (23 m, speed
+  14.467719, 10 coins); CONTROL, measured runs differ (26 m vs 29 m). A focused window takes stray
+  keystrokes: two runs that differed only in lane and coins were contaminated by input, not time.
+- **J4-B — fixed-update dispatch, owned by the host** (decided 2026-10-01). An optional `IFixedGameLoop`
+  (FixedStep, FixedTimeScale, OnFixedUpdate(Time)); `Game` implements it and loses `FixedStepClock`.
+  Order per frame: flip input → OnUpdate (input becomes intents; the scale is chosen) → accumulate
+  `min(delta, 0.25) × scale` and run OnFixedUpdate per whole step → OnRender with
+  `RenderFrameContext.FixedAlpha`. No step cap (30 Hz at 6× is 45 steps); scale 0 is pause; the fixed
+  `Total` is its own simulation clock; `ResetFixedClock(total)` clears the residual. No `FixedInput`: one
+  would be explicit, never a phase-switching `Host.Input`. Presentation that reads simulation state
+  belongs in OnRender; there is no late-update hook.
+- **J4-B done:** `IFixedGameLoop` (Blix.Core) with a default scale of 1; `FixedStepClock` rewritten as the
+  hosts' scheduler (`Run(loop, frameDelta)`, `Total`, `Alpha`, `Reset`), the step cap gone;
+  `RenderFrameContext.FixedAlpha`; `IRenderHost.ResetFixedClock`. `Game` keeps `FixedStep` and gains
+  `FixedTimeScale`, both protected and bridged. `IUpdateable`/`IFixedUpdateable` stay as they are: the host
+  ticks neither, and a loop calls them on what it owns. Test.Apps: a press latched in OnUpdate reaches
+  exactly one step across a stepless frame; the order is update, step, render; the step's Total is simulation
+  time; alpha; 32 Hz at 6× runs 48 steps in a quarter-second frame and in a two-second stall (CONTROL: 8
+  at 1×); pause runs none and holds alpha; a reset drops the residual; bad step or scale refused. Pong
+  reads held keys in its step, so the order does not change it.
+- **Review fixes (before merge):** `FixedStepClock` counts its steps up front and refuses a frame that asks
+  for more than it can count. A finite `delta × scale` can overflow to ∞, and past 2^52 steps subtracting a
+  step changes nothing: either way the old loop hung. A reset from inside a step ends that frame's steps.
+  `PoseStack.Add` requires the player's `Skeleton` INSTANCE; a matching bone count is shape, not meaning.
+  `AnimationHost.Advance` runs only the animations present when it began, so one added by a callback starts
+  on the next advance. `Elapsed`'s doc no longer promises a scrub that writes the target. Headless `--step`
+  refuses ∞ while parsing, as the window does.
+- **Open, deliberately not here:** `BoneMask.Subtree(skeleton, …)` forgets which skeleton resolved it, and
+  later checks compare bone counts only. `All(count)`/`None(count)` are rightly skeleton-agnostic, so the
+  fix is a mask that knows its skeleton when it has one, not a blanket rule.
+
+---
+
 ## F — a body in the character room
 
 The one stage not started. `src/Demos/Character/` holds a shared library — room,

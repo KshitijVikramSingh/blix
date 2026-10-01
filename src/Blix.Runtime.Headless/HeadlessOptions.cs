@@ -31,8 +31,9 @@ public sealed record HeadlessOptions(
     /// Reads the arguments every Blix loop shares, leaving the rest to the application.
     /// </summary>
     /// <remarks>
-    /// <c>--step</c> is the one flag a window has no use for: its time comes from the display, and a
-    /// headless run's comes from here. A value that cannot mean what it says is an error.
+    /// <c>--step</c> means what it means in a window (<c>WindowOptions.Step</c>): every frame advances by
+    /// exactly that much. Here it is always set, because a headless run has no display to measure time by.
+    /// A value that cannot mean what it says is an error.
     /// </remarks>
     public static HeadlessOptions FromArgs(AppArgs args, HeadlessOptions? defaults = null)
     {
@@ -46,7 +47,7 @@ public sealed record HeadlessOptions(
         if (args.Flag("debug")) result = result with { Diagnostics = true };
         if (args.Double("step") is { } step)
         {
-            result = step > 0
+            result = step > 0.0 && double.IsFinite(step)
                 ? result with { Step = step }
                 : throw new AppArgsException($"--step expects seconds above zero, got {step}.");
         }

@@ -77,6 +77,16 @@ public sealed record WindowOptions(string Title, int Width, int Height)
     /// </remarks>
     public bool Validate { get; init; }
 
+    /// <summary>
+    /// Seconds every frame advances by (<c>--step</c>), or null for the display's measured frame time.
+    /// </summary>
+    /// <remarks>
+    /// The same flag as a headless run's, meaning the same thing (<see cref="FrameClock"/>): a bounded
+    /// windowed run with a step tells its loop the same times every run. It does not change how fast frames
+    /// arrive, which is still the display's, and it does not govern work budgeted by a stopwatch.
+    /// </remarks>
+    public double? Step { get; init; }
+
     public static WindowOptions FromArgs(AppArgs args, WindowOptions? defaults = null)
     {
         ArgumentNullException.ThrowIfNull(args);
@@ -89,6 +99,12 @@ public sealed record WindowOptions(string Title, int Width, int Height)
         if (args.String("title") is { } title) result = result with { Title = title };
         if (args.Flag("debug")) result = result with { Diagnostics = true };
         if (args.Flag("validate")) result = result with { Validate = true };
+        if (args.Double("step") is { } step)
+        {
+            result = step > 0.0 && double.IsFinite(step)
+                ? result with { Step = step }
+                : throw new AppArgsException($"--step expects seconds above zero, got {step}.");
+        }
 
         return result;
     }

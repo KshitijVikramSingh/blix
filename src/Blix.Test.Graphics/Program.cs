@@ -5786,6 +5786,206 @@ static ShaderInterface MinimalShader() => new(new[]
         () => fixedBlock.WithArrayLength(0, 0, 4), mustMention: "does not end in an unsized array");
 }
 
+// ============================================================================
+// Section BR — IAnimation on its own clock, and the host that runs them.
+// ============================================================================
+//
+// An animation advances by the delta it is handed and keeps its own elapsed time: nothing reads an
+// absolute total, so pausing is not advancing, rate is a scaled delta, and restarting is setting
+// Elapsed. The host runs them in the order added and drops the finished in the same tick.
+{
+    var value = -1f;
+    var fade = new FloatAnimation { Curve = new LinearCurve { From = 0f, To = 1f, Duration = 1.0 }, Setter = v => value = v };
+    var midway = fade.Advance(0.5);
+    t.Expect("BR.1 a finite tween writes its curve at its own elapsed time and stays alive before its end",
+        midway && MathF.Abs(value - 0.5f) < 1e-6f, $"alive {midway}, value {value}");
+    var ended = fade.Advance(0.75);
+    t.Expect("BR.1 and on the tick that passes its end it writes the end value and reports done",
+        !ended && value == 1f, $"alive {ended}, value {value}");
+    fade.Elapsed = 0.0;
+    var again = fade.Advance(0.25);
+    t.Expect("BR.1 setting Elapsed restarts it", again && MathF.Abs(value - 0.25f) < 1e-6f, $"{value}");
+
+    var delayed = -1f;
+    var late = new FloatAnimation { Curve = new LinearCurve { From = 2f, To = 4f, Duration = 1.0 }, Setter = v => delayed = v, Delay = 0.5 };
+    late.Advance(0.25);
+    var held = delayed;
+    late.Advance(0.75);
+    t.Expect("BR.2 a Delay holds the curve's start value until it has passed, then runs from there",
+        held == 2f && MathF.Abs(delayed - 3f) < 1e-6f, $"held {held}, then {delayed}");
+
+    var target = new Transform3D();
+    var none = new Transform3DAnimation { Target = target };
+    var forever = new Transform3DAnimation
+    {
+        Target = target,
+        Position = new LinearVector3Curve { From = Vector3.Zero, To = Vector3.UnitX, Duration = 0.5 },
+        Rotation = new ConstantCurve<Quaternion>(Quaternion.Identity),
+    };
+    t.Expect("BR.3 a transform tween with no channels is done at once; one with an infinite channel never is",
+        !none.Advance(0.1) && forever.Advance(10.0) && target.Position == Vector3.UnitX, target.Position.ToString());
+
+    // The host: in order, the finished dropped in the same tick, the survivors' order kept.
+    var calls = new List<string>();
+    var host = new AnimationHost();
+    var ticksLeft = new Dictionary<string, int> { ["a"] = 3, ["b"] = 1, ["c"] = 2 };
+    foreach (var name in new[] { "a", "b", "c" })
+    {
+        host.AddAnimation(new CallbackAnimation(delta =>
+        {
+            calls.Add($"{name}:{delta}");
+            return --ticksLeft[name] > 0;
+        }));
+    }
+
+    host.Advance(0.5);
+    var afterOne = host.Count;
+    host.Advance(0.25);
+    var afterTwo = host.Count;
+    host.Advance(0.25);
+    t.Expect("BR.4 the host advances in the order added, hands every animation its delta, and drops each on the tick it ends",
+        string.Join(" ", calls) == "a:0.5 b:0.5 c:0.5 a:0.25 c:0.25 a:0.25" && afterOne == 2 && afterTwo == 1 && host.Count == 0,
+        $"{string.Join(" ", calls)} | counts {afterOne}, {afterTwo}, {host.Count}");
+
+    // Re-entrant adds: one added during an advance starts on the next, behind the survivors. A callback that
+    // adds another every time it runs then adds one per advance, rather than running forever inside one.
+    var order = new List<string>();
+    var reentrant = new AnimationHost();
+    var adds = 0;
+    CallbackAnimation Adder() => new(delta =>
+    {
+        order.Add($"adder{adds}");
+        adds++;
+        reentrant.AddAnimation(Adder());
+        return false;
+    });
+    reentrant.AddAnimation(new CallbackAnimation(_ => { order.Add("keeper"); return true; }));
+    reentrant.AddAnimation(Adder());
+    reentrant.Advance(0.1);
+    var firstTick = string.Join(" ", order);
+    var countAfterFirst = reentrant.Count;
+    reentrant.Advance(0.1);
+    t.Expect("BR.5 an animation added during an advance does not spend that delta, and starts on the next behind the survivors",
+        firstTick == "keeper adder0" && countAfterFirst == 2 && string.Join(" ", order) == "keeper adder0 keeper adder1" && reentrant.Count == 2,
+        $"{string.Join(" ", order)} | counts {countAfterFirst}, {reentrant.Count}");
+}
+
+// ============================================================================
+// Section BS — PoseStack: ordered layers of (source, mode, weight, mask) over rest.
+// ============================================================================
+//
+// Each mode must be exactly the engine call it stands for — the stack owns the order and the rest pose,
+// PoseBlend and PoseDelta own the maths — so a consumer moving onto it changes no bit. Plus stage F's two
+// mask failures: a layer that changes everything, and one that changes nothing.
+{
+    var skeleton = new Skeleton(new[]
+    {
+        new Bone("hips", -1, Matrix4x4.Identity),
+        new Bone("spine", 0, Matrix4x4.Identity),
+        new Bone("leg", 0, Matrix4x4.Identity),
+    });
+
+    static BoneTrack Spin(int bone, float radians) => new()
+    {
+        BoneIndex = bone,
+        Rotation = new KeyframeQuaternionCurve(new[]
+        {
+            new Keyframe<Quaternion>(0.0, Quaternion.Identity),
+            new Keyframe<Quaternion>(1.0, Quaternion.CreateFromAxisAngle(Vector3.UnitY, radians)),
+        }),
+        Translation = new KeyframeVector3Curve(new[]
+        {
+            new Keyframe<Vector3>(0.0, Vector3.Zero),
+            new Keyframe<Vector3>(1.0, new Vector3(radians, 0f, 0f)),
+        }),
+    };
+
+    var walk = new AnimationClip("walk", new[] { Spin(0, 0.4f), Spin(1, 0.2f), Spin(2, 1.1f) });
+    var swing = new AnimationClip("swing", new[] { Spin(0, -0.3f), Spin(1, 1.4f), Spin(2, -0.9f) });
+    ClipPlayer At(AnimationClip clip, double time)
+    {
+        var player = new ClipPlayer(skeleton, clip);
+        player.ScrubTo(time);
+        return player;
+    }
+
+    static bool Same(Pose a, Pose b) => Enumerable.Range(0, a.BoneCount).All(i => a.Locals[i] == b.Locals[i]);
+
+    var a = At(walk, 0.3);
+    var b = At(swing, 0.6);
+    var stack = new PoseStack(skeleton);
+    stack.Add(a);
+    stack.Evaluate();
+    t.Expect("BS.1 one layer at full weight is its player's pose, exactly", Same(stack.Pose, a.Pose));
+
+    var overlay = stack.Add(b, PoseLayerMode.Blend, 0.35f);
+    stack.Evaluate();
+    var lerped = skeleton.CreateRestPose();
+    PoseBlend.Lerp(a.Pose, b.Pose, 0.35f, lerped);
+    t.Expect("BS.2 a blend layer is PoseBlend.Lerp of what is below it toward its own, bit for bit", Same(stack.Pose, lerped));
+
+    var upper = BoneMask.Subtree(skeleton, "spine");
+    overlay.Mask = upper;
+    stack.Evaluate();
+    var masked = skeleton.CreateRestPose();
+    PoseBlend.Lerp(a.Pose, b.Pose, 0.35f, upper, masked);
+    t.Expect("BS.3 with a mask, it is the masked Lerp, bit for bit, and the leg it does not reach is the base's",
+        Same(stack.Pose, masked) && stack.Pose.Locals[2] == a.Pose.Locals[2]);
+
+    overlay.Mask = BoneMask.None(skeleton.BoneCount);
+    overlay.Weight = 1f;
+    stack.Evaluate();
+    var none = Same(stack.Pose, a.Pose);
+    overlay.Mask = BoneMask.All(skeleton.BoneCount);
+    stack.Evaluate();
+    var all = Same(stack.Pose, b.Pose);
+    t.Expect("BS.3 CONTROLS a mask over no bone leaves the base bit for bit; over every bone at full weight it is the layer",
+        none && all, $"none {none}, all {all}");
+
+    overlay.Mask = null;
+    overlay.Mode = PoseLayerMode.Additive;
+    overlay.Weight = 0.6f;
+    stack.Evaluate();
+    var layered = skeleton.CreateRestPose();
+    var rest = skeleton.CreateRestPose();
+    for (var i = 0; i < layered.BoneCount; i++) layered.Locals[i] = PoseDelta.LayerOnto(a.Pose.Locals[i], rest.Locals[i], b.Pose.Locals[i], 0.6f);
+    t.Expect("BS.4 an additive layer is PoseDelta.LayerOnto over the same rest, bit for bit", Same(stack.Pose, layered));
+
+    // A finished one-shot holds its last frame by default, and leaves only when told to.
+    var holdStack = new PoseStack(skeleton);
+    var oneShot = new ClipPlayer(skeleton, swing) { Loop = false };
+    holdStack.Add(oneShot);
+    holdStack.Advance(2.0);
+    // The clip's last frame, sampled directly (a looping player scrubbed to the end would wrap to 0).
+    var end = skeleton.CreateRestPose();
+    swing.Sample(swing.Duration, end);
+    var held = holdStack.Layers.Count == 1 && oneShot.Finished && Same(holdStack.Pose, end);
+    var leaving = new PoseStack(skeleton);
+    var base_ = new ClipPlayer(skeleton, walk);
+    var gone = new ClipPlayer(skeleton, swing) { Loop = false };
+    leaving.Add(base_);
+    leaving.Add(gone).OnFinish = PoseLayerFinish.Remove;
+    leaving.Advance(0.5);
+    var stillThere = leaving.Layers.Count == 2;
+    leaving.Advance(1.0);
+    t.Expect("BS.5 a finished one-shot layer holds its last frame by default, and with Remove leaves on the advance it finished",
+        held && stillThere && leaving.Layers.Count == 1 && ReferenceEquals(leaving.Layers[0].Source, base_),
+        $"held {held}, two before {stillThere}, after {leaving.Layers.Count}");
+
+    t.ExpectThrows("BS.6 a player is one layer's: adding it twice would advance it twice",
+        () => stack.Add(a), mustMention: "already a layer's source");
+
+    // Same bone count, another rig: locals go by index, so a count match is shape, not meaning.
+    var lookalike = new Skeleton(new[]
+    {
+        new Bone("root", -1, Matrix4x4.Identity),
+        new Bone("tail", 0, Matrix4x4.Identity),
+        new Bone("wing", 0, Matrix4x4.Identity),
+    });
+    t.ExpectThrows("BS.6 a player posing another skeleton is refused, even one with as many bones",
+        () => stack.Add(new ClipPlayer(lookalike, walk)), mustMention: "another skeleton");
+}
+
 t.PrintSummary();
 return t.Failed;
 

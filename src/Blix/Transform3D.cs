@@ -12,7 +12,7 @@ public sealed class Transform3D
     public Vector3 Scale { get; set; } = Vector3.One;
 
     // Local-forward convention matches Camera3D: identity rotation looks down -Z. A
-    // GameObject with default rotation faces the same direction as a default camera.
+    // transform with default rotation faces the same direction as a default camera.
     public Vector3 Forward => Vector3.Transform(-Vector3.UnitZ, Rotation);
 
     public Vector3 Right => Vector3.Transform(Vector3.UnitX, Rotation);

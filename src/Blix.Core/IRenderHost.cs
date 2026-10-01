@@ -23,6 +23,14 @@ public interface IRenderHost
     // sides — pass `LogicalSize` here, not the framebuffer dimensions.
     (int Width, int Height) LogicalSize { get; }
 
+    /// <summary>Clears the fixed-step residual and sets simulation time, for a loop run on a fixed step.</summary>
+    /// <remarks>
+    /// A restart, a load or a scrub puts simulation time somewhere new; the residual left from before it
+    /// would otherwise run a step the new state never asked for. Called from inside a step, it also ends
+    /// that frame's steps. Does nothing that matters for a loop that is not an <see cref="IFixedGameLoop"/>.
+    /// </remarks>
+    void ResetFixedClock(double total = 0.0);
+
     // Toggle vertical sync. Off lets the GPU run uncapped (useful for
     // profiling — the displayed FPS reflects real frame cost, not what
     // the refresh rate clamps it to). On is the user-facing default.

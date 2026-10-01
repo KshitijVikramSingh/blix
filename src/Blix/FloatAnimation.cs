@@ -1,6 +1,6 @@
 namespace Blix;
 
-// Curve-driven float animation: evaluates a curve at `time.Total - StartTime` and
+// Curve-driven float animation: evaluates a curve at its own elapsed time (less any Delay) and
 // writes the result through a setter closure. Intended for things like material
 // uniforms, FoV, light intensity — anywhere a single scalar varies over time.
 //
@@ -14,13 +14,17 @@ public sealed class FloatAnimation : IAnimation
 
     public Action<float> Setter { get; init; } = null!;
 
-    // The time at which Evaluate(0) should be the result. Defaults to 0 — set this in
-    // OnLoad to the current Time.Total if the animation should start "now."
-    public double StartTime { get; init; }
+    // Seconds before the curve starts; until then it holds its value at time 0.
+    public double Delay { get; init; }
 
-    public bool Sample(Time time)
+    // Seconds advanced so far. Setting it moves the clock only: the target is written at the next Advance
+    // (Advance(0) writes it now).
+    public double Elapsed { get; set; }
+
+    public bool Advance(double delta)
     {
-        var local = time.Total - StartTime;
+        Elapsed += delta;
+        var local = Math.Max(0.0, Elapsed - Delay);
         // Always pin the curve's current value first — for finite curves, this means
         // the final clamped value is written on the last tick before removal.
         Setter(Curve.Evaluate(local));

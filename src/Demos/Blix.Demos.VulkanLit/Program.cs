@@ -743,14 +743,14 @@ internal sealed class LitLoop : IGameLoop, IDebuggable, IDisposable
                   * Matrix4x4.CreateTranslation(0, 0.2f, 0);
 
         // --- Animate skinned model -------------------------------------
-        // Standard reset-sample-palette sequence (matches SkinnedGameObject.Update):
+        // The reset-sample sequence (ClipPlayer's, written out here):
         //   1. Pose ← RestPose so partial clips overlay onto a known base.
         //      Skipping this means non-animated channels keep last frame's
         //      sampled values — contortion comes from a clip's track shape
         //      being interpreted as "this is the WHOLE local transform"
         //      when it's actually "delta on top of rest".
         //   2. Sample the clip at looped time into the working pose.
-        //   3. Push pose through skeleton to get the GPU bone palette.
+        //   3. Model.PackPalettes turns the pose into each skin's palette (below).
         if (!animPaused) cesiumAnimTime += time.Delta;
         var loopedTime = cesiumAnimation.Duration > 0
             ? cesiumAnimTime % cesiumAnimation.Duration

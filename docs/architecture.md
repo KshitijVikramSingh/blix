@@ -84,8 +84,8 @@ Several details stop this from being a simplistic layered pyramid:
 
 - `Blix.Core` is the host-contract assembly, not a dependency-free foundation;
   its contracts name graphics and audio handles from `Blix.Graphics` and
-  `Blix.Audio`. It also carries the loop contract (`IGameLoop`, `Game`, `Time`,
-  `FixedStepClock`), still in the `Blix` namespace, so a program can run a
+  `Blix.Audio`. It also carries the loop contract (`IGameLoop`, `IFixedGameLoop`,
+  `Game`, `Time`, `FixedStepClock`), still in the `Blix` namespace, so a program can run a
   loop without referencing `Blix` and, through it, `Blix.Render` and Vulkan.
 - Nothing above the host names the backend. Libraries and programs take
   `IGraphicsDevice`, which is the whole device (shader programs, pipelines,
@@ -152,7 +152,7 @@ the getting-started renderer and its current graph is not an engine promise.
 
 ## The Vulkan binding model
 
-The renderer's defining choice is that the binding model is *derived*, not declared by hand. At build time the compiled SPIR-V is reflected (via spirv-cross sidecars) into a `ShaderInterface`: descriptor sets + std140 UBO layouts + push-constant ranges, keyed by the set/binding/member names in the shader. `CreateMaterial(program, setIndex, …)` then allocates an `IMaterialBindings` against one reflected set — `SetUniform("uTint", …)` / `SetTexture(binding, …)` write into it by name, and `.Handle` is the backend-neutral `MaterialHandle` a `GameObject` stores. Sets are organised by lifetime (frame-global, per-material, per-draw), and per-draw data rides push constants or a transient descriptor pool refilled each frame. There is no parallel hand-maintained binding table to drift out of sync with the shader source.
+The renderer's defining choice is that the binding model is *derived*, not declared by hand. At build time the compiled SPIR-V is reflected (via spirv-cross sidecars) into a `ShaderInterface`: descriptor sets + std140 UBO layouts + push-constant ranges, keyed by the set/binding/member names in the shader. `CreateMaterial(program, setIndex, …)` then allocates an `IMaterialBindings` against one reflected set — `SetUniform("uTint", …)` / `SetTexture(binding, …)` write into it by name, and `.Handle` is the backend-neutral `MaterialHandle` a draw binds. Sets are organised by lifetime (frame-global, per-material, per-draw), and per-draw data rides push constants or a transient descriptor pool refilled each frame. There is no parallel hand-maintained binding table to drift out of sync with the shader source.
 
 The Vulkan path is the sole renderer. Reflected descriptors, push constants,
 transient per-draw data, the declarative render graph, glTF/skinning, PBR/IBL,

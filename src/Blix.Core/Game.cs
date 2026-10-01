@@ -8,17 +8,12 @@ namespace Blix;
 // load so subclasses don't have to thread them through their own fields, and exposes
 // them as protected properties.
 //
-// Also owns the fixed-step clock: each variable-rate OnUpdate accumulates frame Δt
-// and dispatches OnFixedUpdate one or more times at the FixedStep cadence. Subclasses
-// override OnFixedUpdate to tick whatever they own that's IFixedUpdateable (physics
-// is the canonical case).
-public abstract class Game : IGameLoop
+// It is an IFixedGameLoop, so the host runs its fixed steps: OnUpdate, then OnFixedUpdate
+// once per whole FixedStep of simulation time, then OnRender (see IFixedGameLoop for the
+// order and what input means in it). Subclasses override OnFixedUpdate to tick whatever
+// they own that's IFixedUpdateable (physics is the canonical case).
+public abstract class Game : IFixedGameLoop
 {
-    // Lazy so the subclass's FixedStep override is in effect by the time it's read —
-    // virtual-call-in-constructor would otherwise see only the base value because the
-    // subclass's fields and v-table aren't fully wired during base construction.
-    private FixedStepClock? fixedClock;
-
     protected IRenderHost Host { get; private set; } = null!;
 
     protected IGraphicsDevice GraphicsDevice { get; private set; } = null!;
@@ -29,12 +24,17 @@ public abstract class Game : IGameLoop
     // null-check before use.
     protected IAudioDevice? AudioDevice { get; private set; }
 
-    // Fixed-update cadence. 60Hz by convention — matches most physics defaults and
-    // avoids the awkward fractional accumulator residues that, say, 30Hz produces
-    // against a 60Hz render. Override in the subclass constructor's `: base(...)` if
-    // a different step is needed; the override needs to land before the base
-    // constructor's clock is constructed, so this is a virtual property read once.
+    // Fixed-update cadence. 60Hz by convention — matches most physics defaults. The host
+    // reads it every frame, after OnUpdate, so an override is in effect from the first frame.
     protected virtual double FixedStep => 1.0 / 60.0;
+
+    // Simulation seconds per second of frame time, chosen in OnUpdate: 1 is real time, 0 pauses,
+    // above 1 fast-forwards (every step still runs; nothing is skipped).
+    protected double FixedTimeScale { get; set; } = 1.0;
+
+    double IFixedGameLoop.FixedStep => FixedStep;
+
+    double IFixedGameLoop.FixedTimeScale => FixedTimeScale;
 
     void IGameLoop.OnLoad(IRenderHost host, IGraphicsDevice graphicsDevice)
     {
@@ -42,24 +42,6 @@ public abstract class Game : IGameLoop
         GraphicsDevice = graphicsDevice;
         AudioDevice = (host as IAudioHost)?.AudioDevice;
         OnLoad();
-    }
-
-    void IGameLoop.OnUpdate(Time time)
-    {
-        // Variable-rate first: animations, input, anything time-sensitive that should
-        // sample at the display refresh.
-        OnUpdate(time);
-
-        // Then fixed-rate: physics integration, collision resolution, anything that
-        // wants stable Δt. The clock returns 0..MaxStepsPerFrame for this frame.
-        fixedClock ??= new FixedStepClock(FixedStep);
-        var steps = fixedClock.Accumulate(time);
-        for (var i = 0; i < steps; i++)
-        {
-            // Δ is the fixed step; Total stays as-is (no in-loop interpolation yet —
-            // physics doesn't read Total for integration).
-            OnFixedUpdate(new Time(time.Total, FixedStep));
-        }
     }
 
     protected virtual void OnLoad() { }

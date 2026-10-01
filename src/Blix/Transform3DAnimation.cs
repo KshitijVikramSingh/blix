@@ -9,7 +9,7 @@ namespace Blix;
 // Lifecycle: the animation stays alive as long as ANY non-null channel is still
 // running. A channel that holds a finite curve drops out once local time exceeds its
 // duration; an infinite-curve channel keeps the animation alive forever. When all
-// non-null channels have finished (or all three channels are null), Sample returns
+// non-null channels have finished (or all three channels are null), Advance returns
 // false and the host removes the animation.
 //
 // The final tick still writes the clamped end value of finite channels, so the
@@ -24,11 +24,17 @@ public sealed class Transform3DAnimation : IAnimation
 
     public ICurve<Vector3>? Scale { get; init; }
 
-    public double StartTime { get; init; }
+    // Seconds before the curves start; until then each channel holds its value at time 0.
+    public double Delay { get; init; }
 
-    public bool Sample(Time time)
+    // Seconds advanced so far. Setting it moves the clock only: the target is written at the next Advance
+    // (Advance(0) writes it now).
+    public double Elapsed { get; set; }
+
+    public bool Advance(double delta)
     {
-        var local = time.Total - StartTime;
+        Elapsed += delta;
+        var local = Math.Max(0.0, Elapsed - Delay);
 
         // `alive` starts false and any non-null still-running channel flips it true.
         // If all three curves are null, the animation has nothing to do and removes
