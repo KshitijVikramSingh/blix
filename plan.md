@@ -113,8 +113,10 @@ refusals, then features:
    (`ImageVariants`); TextureEncodingTest and TextureLinearInterpolationTest load. Files whose REQUIRED
    extensions Blix does not read are now refused (glTF's rule): SheenChair and TextureTransformMultiTest
    wait for item 5.
-3b. **Single-sided static materials are not culled.** Studio's static pipeline never culls, so
-   TextureSettingsTest's single-sided row shows its red X. Found by the sampler capture.
+3b. **Single-sided culling, double-sided back faces, mirrored nodes — done.** Studio culls a single-sided
+   rigid part's back faces, lights a doubleSided back face with its frame reversed, and gives a mirrored
+   part (negative determinant) clockwise front faces whether culled or not; TextureSettingsTest and
+   NegativeScaleTest pass every row. (Skinned parts already culled; a mirrored skin is not handled.)
 3c. **Extension texture channels are not cooked.** Only the five core channels get image rows; sheen,
    clearcoat, transmission, iridescence, anisotropy and specular textures are dropped (factors survive).
 4. **Refused valid files — done.** A sparse INDEX accessor (Accessor_Sparse_03), a skin with no inverse

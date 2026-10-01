@@ -224,7 +224,7 @@ public sealed class ModelView : IStudioView
             draw.Scope.DrawIndexed(
                 vertexBuffer: part.Vertices,
                 indexBuffer: part.Indices,
-                pipeline: blended && draw.BlendPipeline.Id != 0 ? draw.BlendPipeline : draw.Pipeline,
+                pipeline: RigidPipeline(draw, blended, part.DoubleSided, part.WorldTransform * Placement),
                 indexCount: part.IndexCount,
                 uniforms: draw.WithUv(part.Surface),
                 textures: draw.WithSurface(part.Surface),
@@ -291,12 +291,25 @@ public sealed class ModelView : IStudioView
             draw.Scope.DrawIndexed(
                 vertexBuffer: attachment.Vertices,
                 indexBuffer: attachment.Indices,
-                pipeline: blended && draw.BlendPipeline.Id != 0 ? draw.BlendPipeline : draw.Pipeline,
+                pipeline: RigidPipeline(draw, blended, attachment.DoubleSided, model),
                 indexCount: attachment.IndexCount,
                 uniforms: draw.WithUv(attachment.Surface),
                 textures: draw.WithSurface(attachment.Surface),
                 pushConstants: attachPush);
         }
+    }
+
+    // A rigid part's pipeline: BLEND blends (unculled); a doubleSided material is unculled; otherwise back
+    // faces are culled. Whenever the part's world mirrors (negative determinant) the front face is clockwise,
+    // culled or not: mirroring reverses winding, and the lit shader reads the front face to light a back face.
+    private static PipelineHandle RigidPipeline(in StudioDraw draw, bool blended, bool doubleSided, Matrix4x4 world)
+    {
+        var mirrored = world.GetDeterminant() < 0f;
+        static PipelineHandle Pick(PipelineHandle mirroredOne, PipelineHandle plain, bool mirrored) =>
+            mirrored && mirroredOne.Id != 0 ? mirroredOne : plain;
+        if (blended && draw.BlendPipeline.Id != 0) return Pick(draw.MirroredBlendPipeline, draw.BlendPipeline, mirrored);
+        if (doubleSided || draw.CulledPipeline.Id == 0) return Pick(draw.MirroredPipeline, draw.Pipeline, mirrored);
+        return Pick(draw.MirroredCulledPipeline, draw.CulledPipeline, mirrored);
     }
 
     // Separate from the skinned buffers above: a skinned caster pushes sixteen bytes and a static

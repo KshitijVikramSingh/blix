@@ -92,10 +92,15 @@ layout(location = 0) out vec4 outColour;
 // normal, and the bitangent cross(N, T) * w. MikkTSpace's frame reproduced exactly is what a baked map
 // expects, seams and mirrored UVs included. The cook wrote the tangent against TEXCOORD_0, so a normal
 // map naming set 1 is read in set 0's frame.
+//
+// On a back face (a doubleSided material seen from behind) the whole frame is reversed, as glTF says and
+// the Khronos sample viewer does: N arrives here already flipped, and T and B flip with it.
 mat3 surfaceFrame(vec3 N)
 {
-    vec3 T = normalize(vTangent.xyz - N * dot(N, vTangent.xyz));
-    return mat3(T, cross(N, T) * vTangent.w, N);
+    float side = gl_FrontFacing ? 1.0 : -1.0;
+    vec3 t = vTangent.xyz * side;
+    vec3 T = normalize(t - N * dot(N, t));
+    return mat3(T, cross(N, T) * vTangent.w * side, N);
 }
 
 vec2 channelUv(int bit)
@@ -114,7 +119,9 @@ vec2 uvOf(int channel, vec2 uv)
 
 void main()
 {
-    vec3 N = normalize(vNormal);
+    // glTF: a doubleSided material's back face is lit with its normal reversed. A single-sided one never
+    // reaches here from behind (its back faces are culled), so this only ever applies where it should.
+    vec3 N = normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0);
     vec2 uvNormal = uvOf(1, channelUv(1));
 
     // The shadow's normal offset uses the geometric normal: it is about where the surface is, and a

@@ -53,7 +53,26 @@ public readonly record struct StudioDraw(
     PipelineHandle BlendPipeline = default,
 
     /// <summary>Its skinned twin.</summary>
-    PipelineHandle SkinnedBlendPipeline = default)
+    PipelineHandle SkinnedBlendPipeline = default,
+
+    /// <summary>The standard pipeline WITH back-face culling, for a single-sided material (glTF's default).</summary>
+    /// <remarks>Zero in the caster pass, which culls nothing; a view falls back to <see cref="Pipeline"/>.</remarks>
+    PipelineHandle CulledPipeline = default,
+
+    /// <summary>
+    /// The culled pipeline with clockwise front faces, for a part whose world transform mirrors (a negative
+    /// determinant): mirroring reverses winding, so the face to cull reverses with it.
+    /// </summary>
+    PipelineHandle MirroredCulledPipeline = default,
+
+    /// <summary>
+    /// <see cref="Pipeline"/> with clockwise front faces, for a doubleSided part that mirrors: nothing is
+    /// culled, but which side is the front still decides how it is lit (gl_FrontFacing).
+    /// </summary>
+    PipelineHandle MirroredPipeline = default,
+
+    /// <summary><see cref="BlendPipeline"/> with clockwise front faces, for a blended part that mirrors.</summary>
+    PipelineHandle MirroredBlendPipeline = default)
 {
     /// <summary>The stage's per-asset state, for a stage view (ModelView) to find its asset's.</summary>
     internal StudioAssets? Assets { get; init; }

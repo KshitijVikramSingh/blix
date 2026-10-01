@@ -79,6 +79,8 @@ internal sealed class StudioModel : IDisposable
         float BaseAlpha = 1f,
         AlphaMode AlphaMode = AlphaMode.Opaque,
         float AlphaCutoff = 0.5f,
+        /// <summary>The material's <c>doubleSided</c>: drawn unculled when set, back faces culled otherwise.</summary>
+        bool DoubleSided = false,
         /// <summary>The material's own name, which application-owned tint policy keys on.</summary>
         string MaterialName = "");
 
@@ -100,6 +102,8 @@ internal sealed class StudioModel : IDisposable
         float BaseAlpha = 1f,
         AlphaMode AlphaMode = AlphaMode.Opaque,
         float AlphaCutoff = 0.5f,
+        /// <summary>The material's <c>doubleSided</c>: drawn unculled when set, back faces culled otherwise.</summary>
+        bool DoubleSided = false,
         /// <summary>The material's own name, which application-owned tint policy keys on.</summary>
         string MaterialName = "");
 
@@ -178,6 +182,7 @@ internal sealed class StudioModel : IDisposable
                 BaseAlpha: m?.BaseColorFactor.W ?? 1f,
                 AlphaMode: m?.AlphaMode ?? AlphaMode.Opaque,
                 AlphaCutoff: m?.AlphaCutoff ?? 0.5f,
+                DoubleSided: m?.DoubleSided ?? false,
                 MaterialName: m?.Name ?? string.Empty));
         }
 
@@ -192,6 +197,7 @@ internal sealed class StudioModel : IDisposable
                 BaseAlpha: m?.BaseColorFactor.W ?? 1f,
                 AlphaMode: m?.AlphaMode ?? AlphaMode.Opaque,
                 AlphaCutoff: m?.AlphaCutoff ?? 0.5f,
+                DoubleSided: m?.DoubleSided ?? false,
                 MaterialName: m?.Name ?? string.Empty));
         }
 

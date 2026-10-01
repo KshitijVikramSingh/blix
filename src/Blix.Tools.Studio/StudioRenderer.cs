@@ -97,6 +97,17 @@ public sealed class StudioRenderer : IDisposable
     private ShaderProgramHandle skinnedShadowProgram;
 
     private PipelineHandle litPipeline;
+    // Single-sided materials cull their back faces, as glTF's default says; mirrored parts flip the front face.
+    private PipelineHandle litCulledPipeline;
+    private PipelineHandle litMirroredCulledPipeline;
+    private PipelineHandle viewportLitCulledPipeline;
+    private PipelineHandle viewportLitMirroredCulledPipeline;
+    // A mirrored part's front face is clockwise whether or not anything is culled, because the lit shader
+    // reads gl_FrontFacing to reverse a doubleSided back face's normal.
+    private PipelineHandle litMirroredPipeline;
+    private PipelineHandle blendMirroredPipeline;
+    private PipelineHandle viewportLitMirroredPipeline;
+    private PipelineHandle viewportBlendMirroredPipeline;
     private PipelineHandle shadowPipeline;
     private PipelineHandle presentPipeline;
     private PipelineHandle skyPipeline;
@@ -403,6 +414,22 @@ public sealed class StudioRenderer : IDisposable
             RasterizerState.NoCulling,
             new[] { BlendState.Disabled },
             RenderTarget: graph.GetPassSurface(litPass)), "lab.lit");
+        litCulledPipeline = device.CreatePipeline(new PipelineDescription(
+            litProgram, VertexPosition3NormalTangentTexture2Color.Layout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled },
+            RenderTarget: graph.GetPassSurface(litPass)), "lab.lit.culled");
+        litMirroredCulledPipeline = device.CreatePipeline(new PipelineDescription(
+            litProgram, VertexPosition3NormalTangentTexture2Color.Layout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite, new RasterizerState(CullMode.Back, FrontFace.Clockwise), new[] { BlendState.Disabled },
+            RenderTarget: graph.GetPassSurface(litPass)), "lab.lit.culled.mirrored");
+        litMirroredPipeline = device.CreatePipeline(new PipelineDescription(
+            litProgram, VertexPosition3NormalTangentTexture2Color.Layout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite, new RasterizerState(CullMode.None, FrontFace.Clockwise), new[] { BlendState.Disabled },
+            RenderTarget: graph.GetPassSurface(litPass)), "lab.lit.mirrored");
+        blendMirroredPipeline = device.CreatePipeline(new PipelineDescription(
+            litProgram, VertexPosition3NormalTangentTexture2Color.Layout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualNoWrite, new RasterizerState(CullMode.None, FrontFace.Clockwise), new[] { BlendState.AlphaBlend },
+            RenderTarget: graph.GetPassSurface(litPass)), "lab.lit.blend.mirrored");
 
         // Depth-tested at the far plane and never written: drawn first, it fills what the pre-pass
         // left at 1.0 and nothing else, and it cannot occlude anything drawn after it.
@@ -457,6 +484,22 @@ public sealed class StudioRenderer : IDisposable
             litProgram, VertexPosition3NormalTangentTexture2Color.Layout, PrimitiveTopology.Triangles,
             DepthState.LessEqualWrite, RasterizerState.NoCulling, new[] { BlendState.Disabled },
             RenderTarget: viewportSurface), "lab.viewport.lit");
+        viewportLitCulledPipeline = device.CreatePipeline(new PipelineDescription(
+            litProgram, VertexPosition3NormalTangentTexture2Color.Layout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite, RasterizerState.BackFaceCulling, new[] { BlendState.Disabled },
+            RenderTarget: viewportSurface), "lab.viewport.lit.culled");
+        viewportLitMirroredCulledPipeline = device.CreatePipeline(new PipelineDescription(
+            litProgram, VertexPosition3NormalTangentTexture2Color.Layout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite, new RasterizerState(CullMode.Back, FrontFace.Clockwise), new[] { BlendState.Disabled },
+            RenderTarget: viewportSurface), "lab.viewport.lit.culled.mirrored");
+        viewportLitMirroredPipeline = device.CreatePipeline(new PipelineDescription(
+            litProgram, VertexPosition3NormalTangentTexture2Color.Layout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualWrite, new RasterizerState(CullMode.None, FrontFace.Clockwise), new[] { BlendState.Disabled },
+            RenderTarget: viewportSurface), "lab.viewport.lit.mirrored");
+        viewportBlendMirroredPipeline = device.CreatePipeline(new PipelineDescription(
+            litProgram, VertexPosition3NormalTangentTexture2Color.Layout, PrimitiveTopology.Triangles,
+            DepthState.LessEqualNoWrite, new RasterizerState(CullMode.None, FrontFace.Clockwise), new[] { BlendState.AlphaBlend },
+            RenderTarget: viewportSurface), "lab.viewport.lit.blend.mirrored");
         viewportSkyPipeline = device.CreatePipeline(new PipelineDescription(
             skyProgram, FullscreenPass.Layout, PrimitiveTopology.Triangles,
             new DepthState(Enabled: true, WriteEnabled: false, DepthCompare.LessEqual),
@@ -681,7 +724,9 @@ public sealed class StudioRenderer : IDisposable
             var draw = new StudioDraw(
                 scope, StudioPass.Lit, uniforms, textures, litPipeline, skinnedPipeline, whiteTexture,
                 SkinnedDoubleSidedPipeline: skinnedDoubleSidedPipeline,
-                BlendPipeline: blendPipeline, SkinnedBlendPipeline: skinnedBlendPipeline) { Assets = assets };
+                BlendPipeline: blendPipeline, SkinnedBlendPipeline: skinnedBlendPipeline,
+                CulledPipeline: litCulledPipeline, MirroredCulledPipeline: litMirroredCulledPipeline,
+                MirroredPipeline: litMirroredPipeline, MirroredBlendPipeline: blendMirroredPipeline) { Assets = assets };
             foreach (var view in views) view.Draw(draw);
         });
 
@@ -720,7 +765,9 @@ public sealed class StudioRenderer : IDisposable
                 var draw = new StudioDraw(
                     scope, StudioPass.Lit, uniforms, textures, viewportLitPipeline, viewportSkinnedPipeline, whiteTexture,
                     SkinnedDoubleSidedPipeline: viewportSkinnedDoubleSidedPipeline,
-                    BlendPipeline: viewportBlendPipeline, SkinnedBlendPipeline: viewportSkinnedBlendPipeline) { Assets = assets };
+                    BlendPipeline: viewportBlendPipeline, SkinnedBlendPipeline: viewportSkinnedBlendPipeline,
+                    CulledPipeline: viewportLitCulledPipeline, MirroredCulledPipeline: viewportLitMirroredCulledPipeline,
+                    MirroredPipeline: viewportLitMirroredPipeline, MirroredBlendPipeline: viewportBlendMirroredPipeline) { Assets = assets };
                 foreach (var view in views) view.Draw(draw);
             });
         }
@@ -971,6 +1018,10 @@ public sealed class StudioRenderer : IDisposable
         if (device is null) return;
 
         device.DestroyPipeline(litPipeline);
+        device.DestroyPipeline(litCulledPipeline);
+        device.DestroyPipeline(litMirroredCulledPipeline);
+        device.DestroyPipeline(litMirroredPipeline);
+        device.DestroyPipeline(blendMirroredPipeline);
         device.DestroyPipeline(shadowPipeline);
         device.DestroyPipeline(presentPipeline);
         device.DestroyPipeline(skinnedPipeline);
@@ -979,6 +1030,10 @@ public sealed class StudioRenderer : IDisposable
         device.DestroyPipeline(skinnedBlendPipeline);
         device.DestroyPipeline(skinnedShadowPipeline);
         device.DestroyPipeline(viewportLitPipeline);
+        device.DestroyPipeline(viewportLitCulledPipeline);
+        device.DestroyPipeline(viewportLitMirroredCulledPipeline);
+        device.DestroyPipeline(viewportLitMirroredPipeline);
+        device.DestroyPipeline(viewportBlendMirroredPipeline);
         device.DestroyPipeline(viewportSkinnedPipeline);
         device.DestroyPipeline(viewportBlendPipeline);
         device.DestroyPipeline(viewportSkinnedBlendPipeline);
