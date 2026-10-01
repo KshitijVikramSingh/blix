@@ -30,9 +30,9 @@ namespace Blix;
 /// </remarks>
 public sealed class TextureRegistry
 {
-    private readonly Dictionary<(string Id, TextureFormat Format), TextureHandle> byIdentity = new();
+    private readonly Dictionary<(string Id, TextureFormat Format, SamplerDescription? Sampler), TextureHandle> byIdentity = new();
     private readonly Dictionary<(TextureData Texture, TextureFormat Format), TextureHandle> byObject = new();
-    private readonly Dictionary<(string Id, TextureFormat Format), long> bytes = new();
+    private readonly Dictionary<(string Id, TextureFormat Format, SamplerDescription? Sampler), long> bytes = new();
 
     /// <summary>Distinct textures resident on the GPU through this registry.</summary>
     public int ResidentCount => byIdentity.Count + byObject.Count;
@@ -85,7 +85,9 @@ public sealed class TextureRegistry
             return fresh;
         }
 
-        var key = (texture.ResourceId, format);
+        // The sampler is part of the key: a GPU texture carries its sampler, so one image sampled two
+        // ways is two textures.
+        var key = (texture.ResourceId, format, texture.Sampler);
         if (byIdentity.TryGetValue(key, out var resident))
         {
             SharedUploads++;

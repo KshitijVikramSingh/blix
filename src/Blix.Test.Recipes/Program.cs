@@ -4,6 +4,7 @@ using System.Diagnostics;
 using Blix.Cooked;
 using Blix.Recipes;
 using Blix.Verify;
+using Blix;
 
 namespace Blix.Test.Recipes;
 
@@ -132,6 +133,61 @@ public static class Program
             new Skeleton(Array.Empty<Bone>()), Array.Empty<AnimationClip>(), System.Numerics.Matrix4x4.Identity);
     }
 
+    // ── Samplers as glTF defines them ──────────────────────────────────────────
+    // Every textured core channel of every corpus file: the cooked row it reads carries exactly that
+    // texture's glTF sampler, and the engine maps glTF's codes to its own as the spec defines them.
+    private static void SamplersMatchGltf(TestRunner t)
+    {
+        var root = FindFile("InterpolationTest.glb") is { } it ? Path.GetFullPath(Path.Combine(it, "..", "..", "..")) : null;
+        if (root is null) return;
+
+        var checkedChannels = 0;
+        var nonDefault = 0;
+        var wrong = new List<string>();
+        foreach (var file in Directory.EnumerateFiles(root, "*.gl*", SearchOption.AllDirectories)
+            .Where(f => (f.EndsWith(".glb", StringComparison.Ordinal) || f.EndsWith(".gltf", StringComparison.Ordinal))
+                && !ExpectedRefusals.ContainsKey(Path.GetFileName(f)))
+            .OrderBy(f => f, StringComparer.Ordinal))
+        {
+            var gltf = SharpGLTF.Schema2.ModelRoot.Load(file);
+            var cooked = BlixMeshReader.Read(CookCache.Resolve(file));
+            for (var m = 0; m < gltf.LogicalMaterials.Count; m++)
+            {
+                var material = gltf.LogicalMaterials[m];
+                var row = cooked.MaterialTable[m];
+                foreach (var (channel, image) in new[]
+                {
+                    ("BaseColor", row.BaseColorImage), ("Normal", row.NormalImage), ("MetallicRoughness", row.MetallicRoughnessImage),
+                    ("Occlusion", row.OcclusionImage), ("Emissive", row.EmissiveImage),
+                })
+                {
+                    var texture = material.FindChannel(channel)?.Texture;
+                    if (texture is null || image < 0) continue;
+                    checkedChannels++;
+                    var s = texture.Sampler;
+                    var want = s is null ? default : new BlixMeshSampler((int)s.WrapS, (int)s.WrapT, (int)s.MinFilter, (int)s.MagFilter);
+                    if (want != default) nonDefault++;
+                    if (cooked.ImageTable[image].Sampler != want)
+                        wrong.Add($"{Path.GetFileName(file)} material {m} {channel}: cooked {cooked.ImageTable[image].Sampler}, glTF {want}");
+                }
+            }
+        }
+
+        t.Expect($"every textured channel's cooked row carries its glTF sampler ({checkedChannels} channels, {nonDefault} not the default)",
+            wrong.Count == 0 && nonDefault > 0, string.Join(" | ", wrong.Take(5)));
+
+        // The engine's reading of glTF's codes.
+        var mirrored = new BlixMeshSampler(33648, 33071, 9984, 9728).ToSamplerDescription();
+        t.Expect("MIRRORED_REPEAT x CLAMP_TO_EDGE, NEAREST_MIPMAP_NEAREST, NEAREST read as glTF says",
+            mirrored is { WrapU: Blix.Graphics.TextureWrap.MirroredRepeat, WrapV: Blix.Graphics.TextureWrap.ClampToEdge, MinFilter: Blix.Graphics.TextureFilter.Nearest,
+                MipFilter: Blix.Graphics.TextureMipFilter.Nearest, MagFilter: Blix.Graphics.TextureFilter.Nearest }, $"{mirrored}");
+        var noMips = new BlixMeshSampler(10497, 10497, 9729, 9729).ToSamplerDescription();
+        t.Expect("a LINEAR min filter names no mipmap mode, so it samples the base level only",
+            noMips is { MinFilter: Blix.Graphics.TextureFilter.Linear, MipFilter: Blix.Graphics.TextureMipFilter.None }, $"{noMips}");
+        t.Expect("and a sampler that says nothing keeps the loader's default",
+            default(BlixMeshSampler).ToSamplerDescription() is null && new BlixMeshSampler(10497, 10497, 0, 0).ToSamplerDescription() is null, "");
+    }
+
     // ── Primitive modes as glTF defines them ───────────────────────────────────
     // Every triangle-mode primitive in the corpus (TRIANGLES, TRIANGLE_STRIP, TRIANGLE_FAN, indexed or not)
     // unrolled here from the raw accessors by glTF 2.0 §3.7.2.1 — strip i = (v_i, v_{i+1+i%2}, v_{i+2-i%2}),
@@ -234,9 +290,8 @@ public static class Program
         ["Accessor_Sparse_03.gltf"] = "a sparse accessor with no base buffer view",
         ["Animation_Skin_03.gltf"] = "a skin with no inverse binds (identity, per the spec)",
         ["Animation_Skin_06.gltf"] = "a skeleton root the importer rejects",
-        ["TextureEncodingTest.glb"] = "one image used as colour and as data",
-        ["TextureLinearInterpolationTest.glb"] = "one image used as colour and as data",
-        ["TextureTransformMultiTest.glb"] = "KHR_texture_transform (required)",
+        ["TextureTransformMultiTest.glb"] = "requires KHR_texture_transform, which Blix does not read yet",
+        ["SheenChair.glb"] = "requires KHR_texture_transform, which Blix does not read yet",
     };
 
     private static void EveryCorpusFileLoads(TestRunner t)
@@ -1220,9 +1275,14 @@ public static class Program
                   } ]
                 }
                 """);
-            t.ExpectThrows<InvalidDataException>(
-                "one logical image cannot claim incompatible material roles",
-                () => MeshRecipe.ReferencedImages(conflict));
+            // glTF allows one image to be read two ways; a cooked image has one encoding, so each use is
+            // its own cooked file: the first under the image's name, the next with a role suffix.
+            var twoRoles = MeshRecipe.ReferencedImages(conflict);
+            t.Expect("one image used in two roles is referenced once per role, each with its own cooked file",
+                twoRoles.Count == 2
+                && twoRoles.Any(r => r.Role == TextureRole.BaseColor && r.CookedUri == "shared.blixtex")
+                && twoRoles.Any(r => r.Role == TextureRole.Normal && r.CookedUri == "shared.normal.blixtex"),
+                string.Join(", ", twoRoles.Select(r => $"{r.Role}->{r.CookedUri}")));
 
             // ── a patch states a normal map's convention, and the cook flips the image once ──
             // Nothing in a file says a normal map is DirectX-convention (green down); Sponza ships 24
@@ -1271,9 +1331,11 @@ public static class Program
                   ]
                 }
                 """);
-            t.ExpectThrows<InvalidDataException>(
-                "one normal image declared directx by one material and not by another is refused",
-                () => MeshRecipe.ReferencedImages(sharedNormal, directXPatch));
+            var twoConventions = MeshRecipe.ReferencedImages(sharedNormal, directXPatch);
+            t.Expect("one normal image declared directx by one material and not by another cooks once per convention",
+                twoConventions.Count == 2 && twoConventions.Count(r => r.FlipGreen) == 1
+                && twoConventions.Select(r => r.CookedUri).Distinct().Count() == 2,
+                string.Join(", ", twoConventions.Select(r => $"flip={r.FlipGreen}->{r.CookedUri}")));
 
             var asCooked = Path.Combine(referenceTemp, "normal-as-is.blixtex");
             var greenFlipped = Path.Combine(referenceTemp, "normal-flipped.blixtex");
@@ -1334,11 +1396,16 @@ public static class Program
                 NormalMapConvention.Measure(flat, side, side).Verdict() == "unclear", "flat map took a side");
 
             var packaged = Path.Combine(referenceTemp, "out");
-            t.Expect("cook asset refuses one destination with incompatible roles",
-                Blix.Tools.Cook.Program.Main(new[] { "asset", conflict, "--out", packaged }) == 1,
-                "driver accepted the ambiguous image");
-            t.ExpectTrue("and refuses it before writing a texture",
-                !File.Exists(Path.Combine(packaged, "shared.blixtex")));
+            t.Expect("cook asset cooks an image used in two roles into two files",
+                Blix.Tools.Cook.Program.Main(new[] { "asset", conflict, "--out", packaged }) == 0
+                && File.Exists(Path.Combine(packaged, "shared.blixtex")) && File.Exists(Path.Combine(packaged, "shared.normal.blixtex")),
+                "a cooked file is missing");
+            if (File.Exists(Path.Combine(packaged, "shared.normal.blixtex")))
+            {
+                var colour = Blix.Graphics.Images.BlixTexReader.ReadHandle(Path.Combine(packaged, "shared.blixtex")).Format;
+                var normal = Blix.Graphics.Images.BlixTexReader.ReadHandle(Path.Combine(packaged, "shared.normal.blixtex")).Format;
+                t.Expect("each in its own role's encoding", colour != normal, $"both {colour}");
+            }
         }
         finally
         {
@@ -1777,6 +1844,7 @@ public static class Program
         AnimationMatchesGltf(t);
         EveryCorpusFileLoads(t);
         TriangleModesMatchSpec(t);
+        SamplersMatchGltf(t);
 
         // ── tools cook on open ───────────────────────────────────────────────
         // The engine reads cooked models; a tool opening a raw one cooks it into a cache first.

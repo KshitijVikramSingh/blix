@@ -41,8 +41,9 @@ public static class BlixMesh
     // skinned (7) vertex, skins as joint nodes, clips targeting nodes, and the source attributes the
     // cook did not carry (v13). v14 gives each track channel its glTF interpolation (LINEAR, STEP or
     // CUBICSPLINE, with the spline's in/out tangents), and tracks every animated node rather than
-    // only skin 0's joints. Older layouts must be re-cooked.
-    public const uint Version14 = 14;
+    // only skin 0's joints. v15 makes an image row one image as used — role, normal convention and
+    // glTF sampler — so an image used two ways is two rows. Older layouts must be re-cooked.
+    public const uint Version15 = 15;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
     public const uint LayoutPosition3NormalTextureSkin4Tangent = 3; // 80-byte, rigged
@@ -127,7 +128,19 @@ public sealed record BlixMeshLod(ushort[]? Indices16, uint[]? Indices32, float E
 /// <param name="Resource">
 /// Relative to the cooked mesh, with forward slashes, so it means the same thing on every machine.
 /// </param>
-public sealed record BlixMeshImage(string Name, ulong ContentHash, string Resource);
+/// <param name="Sampler">How the materials using this row sample it: glTF's sampler, as glTF's codes.</param>
+/// <remarks>
+/// A row is one image AS USED: one role (colour or data), one normal convention, one sampler. The same
+/// source image used two ways is two rows — two cooked files when the role or convention differs, one
+/// file and two samplers when only the sampler does.
+/// </remarks>
+public sealed record BlixMeshImage(string Name, ulong ContentHash, string Resource, BlixMeshSampler Sampler = default);
+
+/// <summary>A glTF sampler, kept as glTF's own codes: what the file says, for the reader to map.</summary>
+/// <param name="WrapS">10497 REPEAT, 33071 CLAMP_TO_EDGE, 33648 MIRRORED_REPEAT. 0 reads as REPEAT, the spec's default.</param>
+/// <param name="MinFilter">9728/9729 NEAREST/LINEAR, 9984-9987 the four mipmap modes; 0 when unspecified.</param>
+/// <param name="MagFilter">9728 NEAREST, 9729 LINEAR; 0 when unspecified.</param>
+public readonly record struct BlixMeshSampler(int WrapS, int WrapT, int MinFilter, int MagFilter);
 
 /// <summary>
 /// A cooked material whose image fields index this file's image table. -1 means the channel has no
@@ -506,7 +519,7 @@ public static class BlixMeshWriter
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(file);
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version14, stamp);
+        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version15, stamp);
         using var bw = new BinaryWriter(fs);
 
         bw.Write(file.Nodes.Count);
@@ -589,6 +602,8 @@ public static class BlixMeshWriter
             var resourceBytes = System.Text.Encoding.UTF8.GetBytes(img.Resource);
             bw.Write(resourceBytes.Length);
             bw.Write(resourceBytes);
+            bw.Write(img.Sampler.WrapS); bw.Write(img.Sampler.WrapT);
+            bw.Write(img.Sampler.MinFilter); bw.Write(img.Sampler.MagFilter);
         }
 
         var skins = file.SkinTable;
@@ -768,7 +783,7 @@ public static class BlixMeshReader
         ArgumentNullException.ThrowIfNull(path);
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version14, path, ".blixmesh");
+        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version15, path, ".blixmesh");
         return AssetImportException.Refusing(path, () => ReadBody(fs, path, header), ".blixmesh");
     }
 
@@ -855,7 +870,8 @@ public static class BlixMeshReader
             var hash = br.ReadUInt64();
             var resourceLen = br.ReadInt32();
             var resource = System.Text.Encoding.UTF8.GetString(br.ReadBytes(resourceLen));
-            images[i] = new BlixMeshImage(name, hash, resource);
+            var sampler = new BlixMeshSampler(br.ReadInt32(), br.ReadInt32(), br.ReadInt32(), br.ReadInt32());
+            images[i] = new BlixMeshImage(name, hash, resource, sampler);
         }
 
         var skinCount = br.ReadInt32();

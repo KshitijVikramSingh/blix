@@ -146,7 +146,7 @@ public sealed class MaterialTextureLoader : IDisposable
             // drains. One file open per texture (not per mip) — see
             // CreateBufferedMipReader — which matters on a high-open-latency volume.
             handle = device.AllocateTexture2DMips(
-                new TextureDescription(tex.Width, tex.Height, tex.Format, SamplerDescription.LinearRepeat),
+                new TextureDescription(tex.Width, tex.Height, tex.Format, tex.Sampler ?? SamplerDescription.LinearRepeat),
                 tex.MipCount, label);
             uploader.EnqueueInto(
                 handle, tex.Format, tex.Width, tex.Height, tex.MipCount,
@@ -158,9 +158,9 @@ public sealed class MaterialTextureLoader : IDisposable
             // or an eager .blixtex read.
             handle = tex.MipCount > 1
                 ? device.CreateTexture2DMipped(
-                    new TextureDescription(tex.Width, tex.Height, tex.Format, SamplerDescription.LinearRepeat), mips, label)
+                    new TextureDescription(tex.Width, tex.Height, tex.Format, tex.Sampler ?? SamplerDescription.LinearRepeat), mips, label)
                 : device.CreateTexture2D(
-                    new TextureDescription(tex.Width, tex.Height, uploadFormat, SamplerDescription.LinearRepeat), mips[0], label);
+                    new TextureDescription(tex.Width, tex.Height, uploadFormat, tex.Sampler ?? SamplerDescription.LinearRepeat), mips[0], label);
         }
         else
         {

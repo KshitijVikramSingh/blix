@@ -120,7 +120,11 @@ public sealed record SamplerDescription(
     // Wrap mode for the third (W) axis. Only consumed by 3D textures via
     // CreateTexture3D; ignored by 2D/Cube paths. Defaults to ClampToEdge so
     // existing 2D-only call sites stay unaffected.
-    TextureWrap WrapW = TextureWrap.ClampToEdge)
+    TextureWrap WrapW = TextureWrap.ClampToEdge,
+    // How minification moves between mip levels. Null follows MinFilter (linear between levels for a
+    // linear MinFilter, nearest for nearest); None samples the base level only, which is what glTF's
+    // non-mipmapped NEAREST / LINEAR min filters mean.
+    TextureMipFilter? MipFilter = null)
 {
     public static SamplerDescription PixelatedRepeat { get; } = new(
         TextureFilter.Nearest,
@@ -178,5 +182,14 @@ public enum TextureFilter
 public enum TextureWrap
 {
     Repeat = 0,
-    ClampToEdge
+    ClampToEdge,
+    MirroredRepeat,
+}
+
+public enum TextureMipFilter
+{
+    Nearest = 0,
+    Linear,
+    // The base level only.
+    None,
 }

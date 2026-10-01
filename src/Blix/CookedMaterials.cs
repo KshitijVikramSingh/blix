@@ -76,6 +76,7 @@ internal static class CookedMaterials
                 textureCache[row] = new TextureData(entry.Name, BlixTexReader.ReadHandle(path))
                 {
                     ResourceId = path,
+                    Sampler = entry.Sampler.ToSamplerDescription(),
                 };
                 cooked++;
                 if (AssetLoadLog.Enabled)
@@ -94,7 +95,7 @@ internal static class CookedMaterials
                 var d = metallicRoughnessRows.Contains(row)
                     ? ImageLoader.LoadMetallicRoughness(stream)
                     : ImageLoader.LoadRgba32(stream);
-                textureCache[row] = TextureData.Rgba8Single(entry.Name, d.Pixels, d.Width, d.Height, path);
+                textureCache[row] = TextureData.Rgba8Single(entry.Name, d.Pixels, d.Width, d.Height, path, entry.Sampler.ToSamplerDescription());
             }
 
             decodedCount++;
@@ -222,4 +223,5 @@ internal static class CookedMaterials
             return 0L;
         }
     }
+
 }

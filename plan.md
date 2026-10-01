@@ -107,9 +107,16 @@ refusals, then features:
 1. **Primitive modes — done.** Strips, fans and non-indexed primitives unroll to triangle lists in the
    cook (recipe 10), checked triangle-for-triangle against the spec's unrolling; points and lines are
    refused by name (decided: pipelines for them wait for a consumer).
-2. **Samplers.** Wrap and filter modes are not read: every texture gets one sampler (TextureSettingsTest).
-3. **One image, two roles.** An image used as colour (sRGB) and as data (linear) is refused
-   (TextureEncodingTest, TextureLinearInterpolationTest); the spec allows it, so it cooks twice.
+2. **Samplers — done.** Each cooked image row carries its glTF sampler (format v15); the engine maps
+   wrap (incl. MIRRORED_REPEAT) and min/mag/mip filters; TextureSettingsTest's six sampler tests pass.
+3. **One image, two roles — done.** An image used two ways cooks once per role and convention
+   (`ImageVariants`); TextureEncodingTest and TextureLinearInterpolationTest load. Files whose REQUIRED
+   extensions Blix does not read are now refused (glTF's rule): SheenChair and TextureTransformMultiTest
+   wait for item 5.
+3b. **Single-sided static materials are not culled.** Studio's static pipeline never culls, so
+   TextureSettingsTest's single-sided row shows its red X. Found by the sampler capture.
+3c. **Extension texture channels are not cooked.** Only the five core channels get image rows; sheen,
+   clearcoat, transmission, iridescence, anisotropy and specular textures are dropped (factors survive).
 4. **Refused valid files.** A sparse accessor with no base buffer view (zeros, per the spec); a skin with
    no inverse binds (identity); Animation_Skin_06's root.
 5. **KHR_texture_transform** (required by TextureTransformMultiTest, used by two more).
