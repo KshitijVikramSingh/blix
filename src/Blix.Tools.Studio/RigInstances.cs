@@ -21,7 +21,7 @@ public sealed class RigInstances : ITunable
     private readonly List<Matrix4x4> placements = new();
     private readonly List<Pose> posed = new();
     private readonly Matrix4x4[] scratchWorlds;
-    private BonePaletteSet? poseCheck;
+    private Matrix4x4[] poseWorlds = [];
 
     public RigInstances(Model rig, int count)
     {
@@ -171,14 +171,19 @@ public sealed class RigInstances : ITunable
 
     public void OnChanged(TunableChange change) => Driven.OnChanged(change);
 
+    // Distinct bone worlds: the question is whether the bodies are posed differently, which is a fact about the
+    // hierarchy and no skin's. It used to fingerprint a palette built from skin 0's inverse binds; the binds are
+    // invertible, so the verdict is the same, and the answer no longer depends on a skin it never asked about.
     private int CountDistinctPoses()
     {
-        poseCheck ??= new BonePaletteSet(rig.Skeleton.BoneCount, StudioRenderer.MaxInstances);
-        poseCheck.Reset();
-        foreach (var body in bodies) poseCheck.Add(rig.Skeleton, body.Posed, Matrix4x4.Identity);
-
+        if (poseWorlds.Length != rig.Skeleton.BoneCount) poseWorlds = new Matrix4x4[rig.Skeleton.BoneCount];
         var seen = new HashSet<ulong>();
-        for (var i = 0; i < poseCheck.Count; i++) seen.Add(poseCheck.Fingerprint(i));
+        foreach (var body in bodies)
+        {
+            rig.Skeleton.ComputeBoneWorlds(body.Posed, poseWorlds);
+            seen.Add(BonePaletteSet.Fingerprint(poseWorlds));
+        }
+
         return seen.Count;
     }
 }

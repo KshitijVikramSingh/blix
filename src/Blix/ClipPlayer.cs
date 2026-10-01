@@ -3,11 +3,11 @@ namespace Blix;
 // A clip, a clock, and the reset that every consumer was performing by hand.
 //
 // ── The decision being named ────────────────────────────────────────────────
-// Three places in this tree write the same three lines independently:
+// Three places in this tree wrote the same lines independently, before it existed:
 //
 //     pose.CopyFrom(restPose);                 // Runner, Bulwark, external RTSGame consumer
 //     clip.Sample(time % clip.Duration, pose);
-//     skeleton.ComputeBonePalette(pose, palette);
+//     ... then a palette from the pose          // today: a skin's binding over the bone worlds
 //
 // The reset is not tidiness. `AnimationClip.Sample` writes only the channels a clip has
 // tracks for, so without it every untracked bone keeps the PREVIOUS frame's value — which
@@ -20,7 +20,7 @@ namespace Blix;
 // 0, so this is a live case rather than a defensive one).
 //
 // ── What is deliberately NOT here ───────────────────────────────────────────
-// The palette. `Skeleton.ComputeBonePalette` is already a named engine call, and a player
+// The palette. A skin's `SkinBinding.ComputePalette` is already a named engine call, and a player
 // that owned the palette would make blending awkward for no gain — two players feeding
 // `PoseBlend.Lerp` into a third pose is the obvious shape, and it is obvious precisely
 // because the palette is built once, by whoever draws, from whichever pose won.
@@ -35,7 +35,7 @@ public sealed class ClipPlayer
     /// <summary>The base every sample starts from. Never mutated by this type.</summary>
     public Pose RestPose { get; }
 
-    /// <summary>The working pose, rewritten by every sample. Feed it to ComputeBonePalette.</summary>
+    /// <summary>The working pose, rewritten by every sample. A skin's binding turns it into a palette (<see cref="SkinBinding.ComputePalette(Pose, BonePalette, BoneWorlds)"/>).</summary>
     public Pose Pose { get; }
 
     /// <summary>The clip being played. Null holds the rest pose.</summary>

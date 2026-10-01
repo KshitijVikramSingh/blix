@@ -36,7 +36,7 @@ public static class Program
     {
         // The same cooked character the stage draws: the stage cooks on open, and so does this.
         var character = ModelData.Load(Blix.Recipes.CookCache.Resolve(Stage.Character), new ModelNeeds(Skinned: true));
-        var bones = character.IsRigged ? character.Skins[0].Skeleton.BoneCount : 0;
+        var bones = character.Skeleton?.BoneCount ?? 0;
         var clips = character.Clips.Select(clip => clip.Name).ToHashSet();
         var correct = bones > 0 && clips.Contains(Playback.Opening);
         Console.WriteLine(correct

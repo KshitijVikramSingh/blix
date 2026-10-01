@@ -57,14 +57,14 @@ internal sealed class StudioModel : IDisposable
 
     /// <summary>A static mesh carried by a joint — a knife in a hand, a cape on a chest.</summary>
     /// <remarks>
-    /// Attachments use the standard lit pipeline and a model matrix composed from their joint world
+    /// Attachments use the standard lit pipeline and a model matrix composed from their carrying bone's world
     /// transform; they do not consume the skinned palette as vertex data. Their alpha is the
     /// material's, as a skinned part's is: MASK discards, BLEND draws in the blended group.
     /// </remarks>
     public readonly record struct Attachment(
         string Name,
-        string JointName,
-        int JointIndex,
+        string BoneName,
+        int BoneIndex,
         Matrix4x4 LocalTransform,
         VertexBufferHandle Vertices,
         IndexBufferHandle Indices,
@@ -107,8 +107,8 @@ internal sealed class StudioModel : IDisposable
         /// <summary>The material's own name, which application-owned tint policy keys on.</summary>
         string MaterialName = "");
 
-    /// <summary>One skin: its own skeleton (bone count, inverse binds) and its palette binding.</summary>
-    public sealed record SkinSlot(Skeleton Skeleton, MaterialHandle BoneMaterial);
+    /// <summary>One skin: its binding into the model's shared skeleton (its joints and their inverse binds), and its palette's material.</summary>
+    public sealed record SkinSlot(SkinBinding Skin, MaterialHandle BoneMaterial);
 
     private Model model = null!;
     private BoneBuffers? bones;
@@ -117,10 +117,11 @@ internal sealed class StudioModel : IDisposable
     private readonly List<Attachment> attachments = new();
     private readonly List<StaticPart> staticParts = new();
     private readonly List<SkinSlot> skins = new();
-    // Per skin: whether its last uploaded palette mirrors (a negative determinant), judged on a bone that
-    // weights vertices — the skin's equivalent of a rigid part's world, for choosing its front face.
+    // Per skin: whether its last uploaded palette mirrors (a negative determinant), judged on a joint THIS skin
+    // weights vertices with — the skin's equivalent of a rigid part's world, for choosing its front face. An index
+    // into the skin's palette, not the hierarchy.
     private bool[] mirrored = Array.Empty<bool>();
-    private int[] probeBone = Array.Empty<int>();
+    private int[] probeJoint = Array.Empty<int>();
     private int variant = -1;
 
     /// <summary>Whether <paramref name="skin"/> was last uploaded mirrored, so its front faces are clockwise.</summary>
@@ -168,18 +169,19 @@ internal sealed class StudioModel : IDisposable
 
         studio.bones = model.CreateBoneBuffers(skinnedProgram, MaxInstances);
         studio.mirrored = new bool[model.Skins.Count];
-        studio.probeBone = model.Skins.Select(skin =>
+        // This skin's own weighted joints, from its own vertices. Model.WeightedBones is every skin's, gathered into
+        // hierarchy bones: a bone two skins share reads as weighted when only one of them weights it, and the other
+        // skin would then judge its mirror on a joint none of its vertices follow.
+        studio.probeJoint = model.Skins.Select((skin, s) =>
         {
-            for (var j = 0; j < skin.Bones.Count; j++)
-            {
-                if ((uint)skin.Bones[j] < (uint)model.WeightedBones.Count && model.WeightedBones[skin.Bones[j]]) return j;
-            }
-
-            return 0;
+            var meshes = data.SkinnedPrimitives(s).Select(p => p.Mesh).Where(m => m.Layout.Stride >= 80);
+            var weighted = SkinningAnalysis.FindWeightedJoints(skin, meshes);
+            var first = Array.IndexOf(weighted, true);
+            return first < 0 ? 0 : first;
         }).ToArray();
         for (var s = 0; s < model.Skins.Count; s++)
         {
-            studio.skins.Add(new SkinSlot(model.Skins[s].Skeleton, studio.bones.For(s).Handle));
+            studio.skins.Add(new SkinSlot(model.Skins[s], studio.bones.For(s).Handle));
         }
 
         return studio;
@@ -259,7 +261,7 @@ internal sealed class StudioModel : IDisposable
             foreach (var local in node.Instances?.Select(i => i * a.Local) ?? new[] { a.Local })
             {
                 attachments.Add(new Attachment(
-                    node.Instances is null ? a.Name : $"{a.Name}#{instance++}", a.JointName, a.JointIndex, local,
+                    node.Instances is null ? a.Name : $"{a.Name}#{instance++}", a.BoneName, a.BoneIndex, local,
                     a.Part.Mesh.VertexBuffer, a.Part.Mesh.IndexBuffer, a.Part.Mesh.IndexCount,
                     BaseColourOf(m), m?.MetallicFactor ?? 0f, m?.RoughnessFactor ?? StudioInspection.FallbackRoughness,
                     StudioSurface.Of(m, tex),
@@ -280,7 +282,7 @@ internal sealed class StudioModel : IDisposable
             .Upload(skinIndex, palettes);
         if (palettes.Count > 0 && (uint)skinIndex < (uint)mirrored.Length)
         {
-            mirrored[skinIndex] = palettes.Matrices[probeBone[skinIndex]].GetDeterminant() < 0f;
+            mirrored[skinIndex] = palettes.Matrices[probeJoint[skinIndex]].GetDeterminant() < 0f;
         }
     }
 

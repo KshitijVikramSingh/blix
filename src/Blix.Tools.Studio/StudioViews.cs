@@ -146,9 +146,10 @@ public sealed class ModelView : IStudioView
         var studio = Studio(draw);
         foreach (var part in studio.SkinnedParts)
         {
-            // The part's OWN skin's bone count: each skin's palettes are packed at its own stride, and
-            // skins of one file need not have the same number of bones.
-            var stride = (float)studio.Skins[part.SkinIndex].Skeleton.BoneCount;
+            // The part's OWN skin's joint count: each skin's palettes are packed at its own stride, and
+            // skins of one file need not have the same number of joints. Not the skeleton's bone count: the
+            // skeleton is the model's whole animated hierarchy, shared by every skin.
+            var stride = (float)studio.Skins[part.SkinIndex].Skin.JointCount;
             var blended = StudioAlpha.IsBlended(part.AlphaMode);
             if (blended != blendedGroup) continue;
             if (casterOnly && blended) continue;
@@ -273,7 +274,7 @@ public sealed class ModelView : IStudioView
         foreach (var attachment in Studio(draw).Attachments)
         {
             if (visible is not null && !visible.Contains(attachment.Name)) continue;
-            if ((uint)attachment.JointIndex >= (uint)worlds.Count) continue;
+            if ((uint)attachment.BoneIndex >= (uint)worlds.Count) continue;
             var blended = StudioAlpha.IsBlended(attachment.AlphaMode);
             if (blended != blendedGroup) continue;
             if (casterOnly && blended) continue;
@@ -283,7 +284,7 @@ public sealed class ModelView : IStudioView
             // rig with no rotation and nowhere near it on one with any.
             // Bone worlds are in the hierarchy's space, which hangs at SkeletonPlacement: the same
             // composition a skinned palette gets, so a part and the skin it rides stay together.
-            var model = attachment.LocalTransform * worlds[attachment.JointIndex] * Model.SkeletonPlacement * placement;
+            var model = attachment.LocalTransform * worlds[attachment.BoneIndex] * Model.SkeletonPlacement * placement;
 
             var cutoff = StudioAlpha.CutoffFor(attachment.AlphaMode, attachment.AlphaCutoff);
             StudioPush.Matrix(model, attachPush);

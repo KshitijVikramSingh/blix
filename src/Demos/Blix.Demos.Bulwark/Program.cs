@@ -222,16 +222,16 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
     private PipelineHandle skinnedPipeline;         // scene (lit, instanced)
     private PipelineHandle skinnedShadowPipeline;   // shadow caster (depth-only, instanced)
     // The engine's resident Model: its skinned parts, palette packing for N bodies, and one set-3 bone
-    // buffer per skin sized for MaxAlive bodies of its bones. Both pipelines, the shadow caster, the
+    // buffer per skin sized for MaxAlive bodies of its joints. Both pipelines, the shadow caster, the
     // crowd's poses and placements stay here, which is where this game differs from every other
-    // skinned consumer. The shaders read the bone count from the push, so any skeleton works.
+    // skinned consumer. The shaders read the stride (the skin's joint count) from the push, so any skin works.
     private Model enemyModel = null!;
     private MaterialTextureLoader enemyTextures = null!;
     private BonePaletteSet[] enemyPalettes = Array.Empty<BonePaletteSet>();   // per skin, MaxAlive world-space palettes
     private BoneBuffers enemyBones = null!;   // set 3, frames-in-flight; shared by both skinned pipelines
     private readonly Pose[] crowdPoses = new Pose[MaxAlive];
     private readonly Matrix4x4[] crowdPlacements = new Matrix4x4[MaxAlive];
-    // The world and shadow pushes with the skin's bone count after them (offsets 160 and 64), per skin.
+    // The world and shadow pushes with the skin's joint count after them (offsets 160 and 64), per skin.
     private byte[][] skinnedWorldPush = Array.Empty<byte[]>();
     private byte[][] skinnedShadowPush = Array.Empty<byte[]>();
     private Skeleton enemySkeleton = null!;
@@ -505,13 +505,13 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
         if (skinnedLoaded && enemies.Count > 0)
         {
             WriteCrowdPalette();
-            // The skinned pushes: the shared world/shadow push, then the skin's bone count.
+            // The skinned pushes: the shared world/shadow push, then the skin's joint count (the palette stride).
             for (var s = 0; s < enemyPalettes.Length; s++)
             {
                 worldPush.CopyTo(skinnedWorldPush[s], 0);
-                BitConverter.TryWriteBytes(skinnedWorldPush[s].AsSpan(160, 4), enemyPalettes[s].BoneCount);
+                BitConverter.TryWriteBytes(skinnedWorldPush[s].AsSpan(160, 4), enemyPalettes[s].JointCount);
                 shadowPush.CopyTo(skinnedShadowPush[s], 0);
-                BitConverter.TryWriteBytes(skinnedShadowPush[s].AsSpan(64, 4), enemyPalettes[s].BoneCount);
+                BitConverter.TryWriteBytes(skinnedShadowPush[s].AsSpan(64, 4), enemyPalettes[s].JointCount);
             }
         }
 

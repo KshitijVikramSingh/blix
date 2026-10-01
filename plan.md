@@ -338,6 +338,25 @@ clean diff and acceptance story of its own.
   - The cooked format is already binding-shaped (no version bump expected). RTSGame breaks on purpose:
     "skeleton + pose → palette" must say which binding.
   - Instruments: `SkinsMatchGltf`, lab rig modes and the demos gate, all bit-identical.
+  - **Done (branch `skin-binding`, PR #54).** As decided, plus what review and measurement added:
+    - **`BoneWorlds`**: a skeleton's bone worlds, written only by `Compute(pose)` from that skeleton. The
+      binding's palette takes it and refuses another rig's worlds by INSTANCE. A raw `Matrix4x4[]` erased
+      ownership again one step after K1 fixed it for masks, and the old doc claimed a check the code did not make.
+      The limit is one level down: a `Pose` has no skeleton (as with `PoseBlend`).
+    - **Joints, not bones, on every palette type**: `BonePalette`, `BonePaletteSet` and `BoneBuffers` say
+      `JointCount`. The old `BoneCount` on the stride is the name that wrote the bug below.
+    - **Found by reading, not by any instrument**: Studio's stride came from `SkinSlot.Skeleton.BoneCount`,
+      which compiled and became the hierarchy's count. It is equal on every lab rig; on BrainStem (18 joints,
+      19 bones) bodies 1 and up shatter. Lab mode `brainstem-inst3` now guards it (control: the old stride's
+      render differs from the baseline).
+    - **A singular placement (fixed in #54, found in review):** `JointHierarchy.Resolve` inverted the first root's
+      parent world unchecked. glTF allows a zero-scaled parent, so refusing it was wrong. The inverse is NaN, and
+      `IsIdentity` read a NaN offset as identity (NaN compares false), so a second root under ANOTHER parent was
+      placed silently under the first root's: 8 units off in the AQ.19 fixture (control: the original code fails it).
+      Now a singular placement factors nothing out (identity; each root offset by its own parent, exact), and NaN
+      is never identity.
+    - `DemoRigsSkinTheSameThroughModel` resolves skin 0's joint tree independently and asserts the joint-order
+      convention (control: disabling it fails cesium_man). The Check tool's output on BrainStem matches main's.
 - **K3 — conformance cleanup.**
   - A `KHR_mesh_quantization` fixture (accepted today, exercised by nothing).
   - The normal map under `KHR_texture_transform`: a derived regression asset (rotation and non-uniform scale),
@@ -349,6 +368,7 @@ clean diff and acceptance story of its own.
     are refused under that rule; no repo asset has targets.
   - A renderer-support table measured apart from reader support: a `PbrMaterial` field existing is not the
     extension being drawn.
+
 - **Later, as their own arcs:** morph targets (deformation + a `weights` clip channel), then
   `KHR_animation_pointer` (not forced into skeletal animation). A skin that mirrors only some joints of one
   primitive stays an explicit rendering limitation: no asset, no consumer, no single front face.

@@ -117,7 +117,7 @@ candidates were inspected on shipped code and decided against:
 | Ground-plane picking | none | Keep local and annotated, exactly as Tank Arena did with nav. |
 
 Skinned-mesh instancing is the one engine gap the game did close. A crowd draws
-from a `[MaxAlive x BoneCount]` world-baked palette read at `gl_InstanceIndex *
+from a `[MaxAlive x JointCount]` world-baked palette read at `gl_InstanceIndex *
 BONE_COUNT`, in both the scene pass and an instanced skinned shadow caster. It
 stays local to the demo until a second consumer asks for it.
 

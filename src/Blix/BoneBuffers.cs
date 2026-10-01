@@ -14,16 +14,16 @@ public sealed class BoneBuffers : IDisposable
 {
     private readonly IGraphicsDevice device;
     private readonly IMaterialBindings[] bindings;
-    private readonly int[] boneCounts;
+    private readonly SkinBinding[] skins;
     private readonly byte[] payload;
 
-    internal BoneBuffers(IGraphicsDevice device, IMaterialBindings[] bindings, int[] boneCounts, int maxInstances)
+    internal BoneBuffers(IGraphicsDevice device, IMaterialBindings[] bindings, SkinBinding[] skins, int maxInstances)
     {
         this.device = device;
         this.bindings = bindings;
-        this.boneCounts = boneCounts;
+        this.skins = skins;
         MaxInstances = maxInstances;
-        payload = new byte[(boneCounts.Length == 0 ? 0 : boneCounts.Max()) * maxInstances * 64];
+        payload = new byte[(skins.Length == 0 ? 0 : skins.Max(s => s.JointCount)) * maxInstances * 64];
     }
 
     /// <summary>How many bodies each skin's buffer holds.</summary>
@@ -41,11 +41,13 @@ public sealed class BoneBuffers : IDisposable
             throw new ArgumentOutOfRangeException(nameof(skin), skin, $"this rig has {bindings.Length} skin(s).");
         }
 
-        if (palettes.BoneCount != boneCounts[skin])
+        // By identity, not by stride: a set packed for another skin of the same joint count has the right size and
+        // the wrong joints, and the shader would read its slices as this skin's without failing.
+        if (!ReferenceEquals(palettes.Skin, skins[skin]))
         {
             throw new ArgumentException(
-                $"Palette set is packed at a stride of {palettes.BoneCount}; skin {skin} has {boneCounts[skin]} bones. " +
-                "The shader multiplies by the stride, so a mismatch renders other instances' poses rather than failing.",
+                $"the palette set was packed for another skin ({palettes.JointCount} joints) than skin {skin} of this model; " +
+                "a buffer's joint indices mean its own skin's joints only.",
                 nameof(palettes));
         }
 

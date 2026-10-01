@@ -150,11 +150,11 @@ public static class MeshRecipe
         var remaps = new List<int[]>();
         foreach (var skin in skinOrder)
         {
-            var (bones, oldToNew) = GltfImporter.BuildSkeletonAndOrdering(skin);
+            var (bones, inverseBinds, oldToNew, _) = GltfImporter.BuildSkeletonAndOrdering(skin);
             var jointOfBone = new int[bones.Length];
             for (var old = 0; old < oldToNew.Length; old++) jointOfBone[oldToNew[old]] = nodeOfLogical[skin.Joints[old].LogicalIndex];
             skins.Add(new BlixMeshSkin(bones
-                .Select((b, k) => new BlixMeshBone(b.Name, b.ParentIndex, b.InverseBindPose, jointOfBone[k]))
+                .Select((b, k) => new BlixMeshBone(b.Name, b.ParentIndex, inverseBinds[k], jointOfBone[k]))
                 .ToArray()));
             remaps.Add(oldToNew);
         }

@@ -45,9 +45,9 @@ behaviour here, that test should fail first.
   invisible on a full clip and is a character whose legs lag its arms on a
   partial one. `ClipPlayer` owns the reset, the loop wrap and the zero-duration
   guard so it is made once rather than remembered three times.
-- **A palette matrix is not a joint position.** `ComputeBonePalette` produces
-  `InverseBindPose × world` — a *rest vertex's* displacement, exactly zero at
-  rest. Where a joint **is** comes from the hierarchy walk's `world` term alone.
+- **A palette matrix is not a joint position.** `SkinBinding.ComputePalette`
+  produces `inverseBind × world` — a *rest vertex's* displacement, exactly zero at
+  bind. Where a joint **is** comes from the hierarchy walk's `world` term alone.
   Drawing a skeleton from palette translations is correct arithmetic answering
   the wrong question, and it looks like a knot at the origin.
 - **Root motion is a delta, taken across the loop.** `RootMotion` reports the
@@ -60,7 +60,7 @@ behaviour here, that test should fail first.
   applies the travel twice: double speed, and a snap back once per loop.
   `RootMotion.Strip` reverts every parentless bone to rest, and the pairing is
   the whole division — the clip says how far, the game says where.
-- **N posed bodies share ONE palette buffer, sliced at `i * BoneCount`.** A
+- **N posed bodies share ONE palette buffer, sliced at `i * JointCount`** (the skin's joints, not the skeleton's bones). A
   descriptor set's buffer is not copied at record time, so two draws in a frame
   sharing one palette binding both read the second pose. `BonePaletteSet` owns
   the stride — the sentence a C# packing loop and a GLSL `gl_InstanceIndex *

@@ -2570,14 +2570,23 @@ static ShaderInterface MinimalShader() => new(new[]
 // makes both failures observable in one setup: bone 1 is what the reset protects, and
 // bone 0 is what travels.
 {
-    // Bind pose: root at the origin, child one unit up. InverseBindPose is the inverse
-    // of the bone's object-space bind transform, which is what Skeleton documents.
+    // Root at the origin, child one unit up, at rest and at bind. The rest is the skeleton's; the binds
+    // (each the inverse of the bone's object-space bind transform) are the skin's.
     var bones = new[]
     {
-        new Bone("root", -1, Matrix4x4.Identity),
-        new Bone("child", 0, Matrix4x4.CreateTranslation(0, -1, 0)),
+        new Bone("root", -1, BoneTransform.Identity),
+        new Bone("child", 0, BoneTransform.Identity with { Translation = new Vector3(0f, 1f, 0f) }),
     };
     var skeleton = new Skeleton(bones);
+    var skin = SkinBinding.Direct(skeleton, new[] { Matrix4x4.Identity, Matrix4x4.CreateTranslation(0, -1, 0) });
+
+    // A body's palette into a set: its bone worlds, then the set's skin's binding over them.
+    static int AddPose(BonePaletteSet set, Pose pose, Matrix4x4 post)
+    {
+        var worlds = new BoneWorlds(set.Skin.Skeleton);
+        worlds.Compute(pose);
+        return set.Add(worlds, post);
+    }
 
     // The root walks 2 m along +X over 1 s and does NOT return — real root motion.
     var travel = new AnimationClip("walk", new[]
@@ -2737,14 +2746,14 @@ static ShaderInterface MinimalShader() => new(new[]
 
     // ── A palette matrix is not a joint position ─────────────────────────────
     // The distinction that cost the lab its first skeleton overlay, pinned here because
-    // it is a fact about ComputeBonePalette rather than about the lab. At rest every
+    // it is a fact about the palette rather than about the lab. At rest every
     // palette matrix is the identity by construction (BindWorld × InverseBindPose = I),
     // so a skeleton drawn from palette translations collapses onto the origin — correct
     // arithmetic, wrong question. Where the joint IS comes from the hierarchy walk's
     // `world` term alone, which is the three-line recurrence below.
     var rest = skeleton.CreateRestPose();
     var palette = new BonePalette(skeleton.BoneCount);
-    skeleton.ComputeBonePalette(rest, palette);
+    skin.ComputePalette(rest, palette);
     t.ExpectClose("AQ.12 a rest palette matrix carries no translation", palette.Matrices[1].M42, 0f);
 
     var worlds = new Matrix4x4[skeleton.BoneCount];
@@ -2801,9 +2810,9 @@ static ShaderInterface MinimalShader() => new(new[]
     // they disagree the bodies do not vanish, they render as other bodies' poses, smeared.
     // Bulwark and the external RTSGame consumer each carry their own copy of it; this names it once.
     {
-        var set = new BonePaletteSet(skeleton.BoneCount, capacity: 3);
-        t.ExpectTrue("AQ.15 the buffer is capacity x bone count",
-            set.Matrices.Length == 3 * skeleton.BoneCount);
+        var set = new BonePaletteSet(skin, capacity: 3);
+        t.ExpectTrue("AQ.15 the buffer is capacity x the skin's joint count",
+            set.Matrices.Length == 3 * skin.JointCount);
         t.ExpectTrue("AQ.15 and starts with nothing live", set.Count == 0 && set.LiveMatrixCount == 0);
 
         // Three DIFFERENT poses, so a set that wrote them all to one slot would be caught.
@@ -2814,41 +2823,114 @@ static ShaderInterface MinimalShader() => new(new[]
         b.Locals[0] = b.Locals[0] with { Translation = new Vector3(2f, 0f, 0f) };
         c.Locals[0] = c.Locals[0] with { Translation = new Vector3(3f, 0f, 0f) };
 
-        t.ExpectTrue("AQ.15 Add returns the instance index", set.Add(skeleton, a, Matrix4x4.Identity) == 0);
-        t.ExpectTrue("AQ.15 counting up", set.Add(skeleton, b, Matrix4x4.Identity) == 1);
-        t.ExpectTrue("AQ.15 and again", set.Add(skeleton, c, Matrix4x4.Identity) == 2);
+        t.ExpectTrue("AQ.15 Add returns the instance index", AddPose(set, a, Matrix4x4.Identity) == 0);
+        t.ExpectTrue("AQ.15 counting up", AddPose(set, b, Matrix4x4.Identity) == 1);
+        t.ExpectTrue("AQ.15 and again", AddPose(set, c, Matrix4x4.Identity) == 2);
         t.ExpectTrue("AQ.15 three live instances is three strides of matrices",
-            set.LiveMatrixCount == 3 * skeleton.BoneCount);
+            set.LiveMatrixCount == 3 * skin.JointCount);
 
         // The root bone of each instance sits at i * BoneCount and holds THAT instance's pose.
         // This is the assertion a shader's `base = gl_InstanceIndex * stride` has to match.
         t.ExpectClose("AQ.15 instance 0 at offset 0", set.Matrices[0].M41, 1f);
-        t.ExpectClose("AQ.15 instance 1 one stride along", set.Matrices[skeleton.BoneCount].M41, 2f);
-        t.ExpectClose("AQ.15 instance 2 two strides along", set.Matrices[2 * skeleton.BoneCount].M41, 3f);
+        t.ExpectClose("AQ.15 instance 1 one stride along", set.Matrices[skin.JointCount].M41, 2f);
+        t.ExpectClose("AQ.15 instance 2 two strides along", set.Matrices[2 * skin.JointCount].M41, 3f);
         t.ExpectClose("AQ.15 and Slice agrees with the arithmetic", set.Slice(1)[0].M41, 2f);
 
         // `post` is where a caller bakes a world placement in (Bulwark's shape) or passes identity
         // and places the body some other way (the external RTSGame consumer's). The set takes no view; it just composes.
         set.Reset();
         t.ExpectTrue("AQ.16 Reset makes the slots free again", set.Count == 0);
-        set.Add(skeleton, a, Matrix4x4.CreateTranslation(10f, 0f, 0f));
+        AddPose(set, a, Matrix4x4.CreateTranslation(10f, 0f, 0f));
         t.ExpectClose("AQ.16 post-multiply bakes a placement into the palette", set.Matrices[0].M41, 11f);
 
         // Full is an exception, not a silent drop. A crowd that quietly stops growing at capacity
         // shows up as "the last few enemies are invisible", which looks like anything but this.
-        set.Add(skeleton, b, Matrix4x4.Identity);
-        set.Add(skeleton, c, Matrix4x4.Identity);
+        AddPose(set, b, Matrix4x4.Identity);
+        AddPose(set, c, Matrix4x4.Identity);
         var overflowed = false;
-        try { set.Add(skeleton, a, Matrix4x4.Identity); }
+        try { AddPose(set, a, Matrix4x4.Identity); }
         catch (InvalidOperationException) { overflowed = true; }
         t.ExpectTrue("AQ.16 a fourth instance in a set of three throws", overflowed);
 
         // A stride mismatch is the failure this type exists to make impossible, so it is loud.
-        var wrongSized = new Skeleton(new[] { new Bone("only", -1, Matrix4x4.Identity) });
-        var rejected = false;
-        try { set.Add(wrongSized, wrongSized.CreateRestPose(), Matrix4x4.Identity); }
-        catch (ArgumentException) { rejected = true; }
-        t.ExpectTrue("AQ.16 and a skeleton of the wrong bone count is refused", rejected);
+        // A set is one skin's: the stride is that skin's joint count, and no body of another skin can be added,
+        // because Add takes no skin. Two same-sized skins cannot share a buffer by accident.
+        t.Expect("AQ.16 a set is made for one skin, and its stride is that skin's joint count",
+            ReferenceEquals(set.Skin, skin) && set.JointCount == skin.JointCount);
+
+        // The worlds must be the skin's own skeleton's. A same-sized rig's are refused by identity: a count
+        // check would pass them, and its bone 1 is not this one's.
+        set.Reset();
+        var sameSized = new Skeleton(bones);
+        var foreignWorlds = new BoneWorlds(sameSized);
+        foreignWorlds.Compute(sameSized.CreateRestPose());
+        t.ExpectThrows("AQ.16 bone worlds of another skeleton are refused, even one with as many bones",
+            () => set.Add(foreignWorlds, Matrix4x4.Identity), mustMention: "another skeleton");
+        var ownWorlds = new BoneWorlds(skeleton);
+        ownWorlds.Compute(skeleton.CreateRestPose());
+        t.Expect("AQ.16 CONTROL: the skin's own skeleton's worlds are taken", set.Add(ownWorlds, Matrix4x4.Identity) == 0);
+
+        // Index-for-index facts refuse a count that does not match, rather than padding or cutting it.
+        t.ExpectThrows("AQ.16 IncludeAncestors refuses flags that are not one per node",
+            () => SkinningAnalysis.IncludeAncestors(new[] { -1, 0, 1 }, new[] { true, false }), mustMention: "index for index");
+        t.Expect("AQ.16 CONTROL: one flag per node promotes the ancestors of a weighted one",
+            SkinningAnalysis.IncludeAncestors(new[] { -1, 0, 1 }, new[] { false, false, true }).SequenceEqual(new[] { true, true, true }));
+
+        // A diagnostic primitive names the fact it could not derive.
+        var singular = SkinBinding.Direct(skeleton, new[] { Matrix4x4.Identity, default(Matrix4x4) });
+        t.ExpectThrows("AQ.16 JointBindWorlds refuses a singular inverse bind, naming the joint",
+            () => singular.JointBindWorlds(), mustMention: "joint 1 ('child')");
+        t.Expect("AQ.16 CONTROL: invertible binds give their bind worlds",
+            skin.JointBindWorlds()[1].M42 == 1f);
+
+        // JointHierarchy's placement is a factoring: any invertible one gives the same worlds. A singular one (a
+        // zero-scaled parent, which glTF allows) has no inverse. The case it broke is a second root under ANOTHER
+        // parent: its offset against the singular placement was NaN, read as identity, and the root was placed
+        // under the first root's parent instead. Two roots: A under `firstParent`, B under an ordinary parent.
+        static (JointHierarchy Hierarchy, Matrix4x4[] Scene) Hang(Matrix4x4 firstParent)
+        {
+            var locals = new[]
+            {
+                firstParent, Matrix4x4.CreateTranslation(0f, 1f, 0f), Matrix4x4.CreateTranslation(0f, 1f, 0f),
+                Matrix4x4.CreateTranslation(-3f, 0f, 0f), Matrix4x4.CreateTranslation(0f, 2f, 0f),
+            };
+            var parentOf = new[] { -1, 0, 1, -1, 3 };
+            var scene = new Matrix4x4[locals.Length];
+            for (var n = 0; n < locals.Length; n++) scene[n] = parentOf[n] < 0 ? locals[n] : locals[n] * scene[parentOf[n]];
+            var resolved = JointHierarchy.Resolve(new[] { "rootA", "tipA", "rootB" }, new[] { -1, 0, -1 }, new[] { 1, 2, 4 },
+                n => parentOf[n], n => locals[n], n => scene[n]);
+            return (resolved, scene);
+        }
+
+        static float WorstAgainstScene(JointHierarchy h, Matrix4x4[] scene)
+        {
+            var jointNodes = new[] { 1, 2, 4 };
+            var bones = new Skeleton(h.Bones.ToArray());
+            var worlds = new BoneWorlds(bones);
+            worlds.Compute(bones.CreateRestPose());
+            var worst = 0f;
+            for (var b = 0; b < jointNodes.Length; b++)
+            {
+                var d = worlds[b] * h.Placement - scene[jointNodes[b]];
+                foreach (var v in new[] { d.M11, d.M12, d.M13, d.M14, d.M21, d.M22, d.M23, d.M24, d.M31, d.M32, d.M33, d.M34, d.M41, d.M42, d.M43, d.M44 })
+                {
+                    worst = float.IsFinite(v) ? MathF.Max(worst, MathF.Abs(v)) : float.PositiveInfinity;
+                }
+            }
+
+            return worst;
+        }
+
+        var (ordinary, ordinaryScene) = Hang(Matrix4x4.CreateScale(2f) * Matrix4x4.CreateTranslation(5f, 0f, 0f));
+        t.Expect("AQ.19 CONTROL: an ordinary first parent is the placement, and both roots' worlds are the scene's",
+            ordinary.Placement == ordinaryScene[0] && WorstAgainstScene(ordinary, ordinaryScene) < 1e-5f,
+            $"worst {WorstAgainstScene(ordinary, ordinaryScene)}");
+        var (hidden, hiddenScene) = Hang(Matrix4x4.CreateScale(0f) * Matrix4x4.CreateTranslation(5f, 0f, 0f));
+        t.Expect("AQ.19 a zero-scaled first parent factors nothing out: identity placement, each root offset by its own parent",
+            hidden.Placement == Matrix4x4.Identity && hidden.Bones[0].Offset == hiddenScene[0] && hidden.Bones[2].Offset == hiddenScene[3],
+            $"placement {hidden.Placement}, offsets {hidden.Bones[0].Offset} / {hidden.Bones[2].Offset}");
+        t.Expect("AQ.19 and the root under the other parent is where the scene puts it, not under the zero-scaled one",
+            WorstAgainstScene(hidden, hiddenScene) < 1e-5f, $"worst {WorstAgainstScene(hidden, hiddenScene)}");
     }
 
     // ── Instancing is not phase-locked, clip-locked or state-locked ──────────
@@ -2861,10 +2943,11 @@ static ShaderInterface MinimalShader() => new(new[]
         // A skeleton whose root is animated by two clips that disagree at every instant.
         var bones2 = new[]
         {
-            new Bone("root", -1, Matrix4x4.Identity),
-            new Bone("child", 0, Matrix4x4.CreateTranslation(0, -1, 0)),
+            new Bone("root", -1, BoneTransform.Identity),
+            new Bone("child", 0, BoneTransform.Identity with { Translation = new Vector3(0f, 1f, 0f) }),
         };
         var rig = new Skeleton(bones2);
+        var rigSkin = SkinBinding.Direct(rig, new[] { Matrix4x4.Identity, Matrix4x4.CreateTranslation(0, -1, 0) });
 
         AnimationClip Line(string name, float to) => new(name, new[]
         {
@@ -2881,7 +2964,7 @@ static ShaderInterface MinimalShader() => new(new[]
 
         var slow = Line("slow", 1f);
         var fast = Line("fast", 5f);
-        var set = new BonePaletteSet(rig.BoneCount, capacity: 3);
+        var set = new BonePaletteSet(rigSkin, capacity: 3);
 
         // Positive: three players, different clips, different phases, different rates.
         var players = new[]
@@ -2893,7 +2976,7 @@ static ShaderInterface MinimalShader() => new(new[]
         players[0].ScrubTo(0.1);
         players[1].ScrubTo(0.4);
         players[2].ScrubTo(0.8);
-        foreach (var p in players) set.Add(rig, p.Pose, Matrix4x4.Identity);
+        foreach (var p in players) AddPose(set, p.Pose, Matrix4x4.Identity);
 
         var prints = new[] { set.Fingerprint(0), set.Fingerprint(1), set.Fingerprint(2) };
         t.ExpectTrue("AQ.17 three independently posed bodies give three fingerprints",
@@ -2906,7 +2989,7 @@ static ShaderInterface MinimalShader() => new(new[]
         set.Reset();
         var one = new ClipPlayer(rig, slow);
         one.ScrubTo(0.37);
-        for (var i = 0; i < 3; i++) set.Add(rig, one.Pose, Matrix4x4.Identity);
+        for (var i = 0; i < 3; i++) AddPose(set, one.Pose, Matrix4x4.Identity);
         t.ExpectTrue("AQ.17 and one pose in every slot comes back identical",
             set.Fingerprint(0) == set.Fingerprint(1) && set.Fingerprint(1) == set.Fingerprint(2));
 
@@ -3147,14 +3230,14 @@ static ShaderInterface MinimalShader() => new(new[]
     // Parents precede children, which Skeleton's own constructor requires and BoneMask relies on.
     var bones = new[]
     {
-        new Bone("root", -1, Matrix4x4.Identity),
-        new Bone("pelvis", 0, Matrix4x4.Identity),
-        new Bone("spine", 1, Matrix4x4.Identity),
-        new Bone("chest", 2, Matrix4x4.Identity),
-        new Bone("armL", 3, Matrix4x4.Identity),
-        new Bone("armR", 3, Matrix4x4.Identity),
-        new Bone("legL", 1, Matrix4x4.Identity),
-        new Bone("legR", 1, Matrix4x4.Identity),
+        new Bone("root", -1, BoneTransform.Identity),
+        new Bone("pelvis", 0, BoneTransform.Identity),
+        new Bone("spine", 1, BoneTransform.Identity),
+        new Bone("chest", 2, BoneTransform.Identity),
+        new Bone("armL", 3, BoneTransform.Identity),
+        new Bone("armR", 3, BoneTransform.Identity),
+        new Bone("legL", 1, BoneTransform.Identity),
+        new Bone("legR", 1, BoneTransform.Identity),
     };
     var skeleton = new Skeleton(bones);
     var mask = BoneMask.Subtree(skeleton, "spine");
@@ -3407,12 +3490,13 @@ static ShaderInterface MinimalShader() => new(new[]
         // <b>The palette is not the joints' transforms.</b> Matrices[i] is InverseBindPose · world —
         // a map from a REST vertex to its posed position, which is what a skinned shader wants and
         // the wrong thing entirely for a knife that has no rest vertices in this skin's space.
-        // ComputeBonePalette built the worlds as an intermediate and threw them away one line later.
+        // The palette built the worlds as an intermediate and threw them away one line later.
         var skel = model.Skeleton;
+        var skinOf = model.SkinsOrEmpty[0].Binding;
         var rest = skel.CreateRestPose();
-        var palette = new BonePalette(skel.BoneCount);
-        var worlds = new Matrix4x4[skel.BoneCount];
-        skel.ComputeBonePalette(rest, palette, worlds);
+        var palette = new BonePalette(skinOf.JointCount);
+        var worlds = new BoneWorlds(skel);
+        skinOf.ComputePalette(rest, palette, worlds);
 
         // At rest, InverseBindPose · world is the identity for every bone — the invariant
         // CreateRestPose already documents, read from the other end. If the worlds were wrong this
@@ -3420,7 +3504,7 @@ static ShaderInterface MinimalShader() => new(new[]
         var worstRest = 0f;
         for (var i = 0; i < skel.BoneCount; i++)
         {
-            var shouldBeIdentity = skel.Bones[i].InverseBindPose * worlds[i];
+            var shouldBeIdentity = skinOf.InverseBinds[i] * worlds[i];
             worstRest = MathF.Max(worstRest, Deviation(shouldBeIdentity));
         }
 
@@ -3435,7 +3519,7 @@ static ShaderInterface MinimalShader() => new(new[]
         {
             Translation = posed.Locals[skel.BoneCount - 1].Translation + new Vector3(0f, 1.5f, 0f),
         };
-        skel.ComputeBonePalette(posed, palette, worlds);
+        skinOf.ComputePalette(posed, palette, worlds);
         t.ExpectTrue("AY.6 and a joint world is not its palette matrix",
             Deviation(palette.Matrices[skel.BoneCount - 1] * Matrix4x4.Identity)
                 != Deviation(worlds[skel.BoneCount - 1]));
@@ -3457,8 +3541,8 @@ static ShaderInterface MinimalShader() => new(new[]
 
         // The array is the scratch, so a caller that wants the worlds pays no allocation — and one
         // that does not still gets a palette.
-        var noWorlds = new BonePalette(skel.BoneCount);
-        skel.ComputeBonePalette(posed, noWorlds);
+        var noWorlds = new BonePalette(skinOf.JointCount);
+        skinOf.ComputePalette(posed, noWorlds);
         var same = true;
         for (var i = 0; i < skel.BoneCount; i++)
         {
@@ -3467,8 +3551,8 @@ static ShaderInterface MinimalShader() => new(new[]
 
         t.ExpectTrue("AY.6 asking for the worlds does not change the palette", same);
 
-        t.ExpectThrows<ArgumentException>("AY.6 a wrongly-sized world array is refused, not silently partial",
-            () => skel.ComputeBonePalette(posed, palette, new Matrix4x4[skel.BoneCount + 1]));
+        t.ExpectThrows("AY.6 worlds of another skeleton are refused, not silently written",
+            () => skinOf.ComputePalette(posed, palette, new BoneWorlds(new Skeleton(skel.Bones))), mustMention: "another skeleton");
     }
     finally
     {
@@ -5880,9 +5964,9 @@ static ShaderInterface MinimalShader() => new(new[]
 {
     var skeleton = new Skeleton(new[]
     {
-        new Bone("hips", -1, Matrix4x4.Identity),
-        new Bone("spine", 0, Matrix4x4.Identity),
-        new Bone("leg", 0, Matrix4x4.Identity),
+        new Bone("hips", -1, BoneTransform.Identity),
+        new Bone("spine", 0, BoneTransform.Identity),
+        new Bone("leg", 0, BoneTransform.Identity),
     });
 
     static BoneTrack Spin(int bone, float radians) => new()
@@ -5978,9 +6062,9 @@ static ShaderInterface MinimalShader() => new(new[]
     // Same bone count, another rig: locals go by index, so a count match is shape, not meaning.
     var lookalike = new Skeleton(new[]
     {
-        new Bone("root", -1, Matrix4x4.Identity),
-        new Bone("tail", 0, Matrix4x4.Identity),
-        new Bone("wing", 0, Matrix4x4.Identity),
+        new Bone("root", -1, BoneTransform.Identity),
+        new Bone("tail", 0, BoneTransform.Identity),
+        new Bone("wing", 0, BoneTransform.Identity),
     });
     t.ExpectThrows("BS.6 a player posing another skeleton is refused, even one with as many bones",
         () => stack.Add(new ClipPlayer(lookalike, walk)), mustMention: "another skeleton");
