@@ -5984,6 +5984,26 @@ static ShaderInterface MinimalShader() => new(new[]
     });
     t.ExpectThrows("BS.6 a player posing another skeleton is refused, even one with as many bones",
         () => stack.Add(new ClipPlayer(lookalike, walk)), mustMention: "another skeleton");
+
+    // A mask remembers the skeleton that resolved it; uniform masks name none and fit any rig of their size.
+    var spine = BoneMask.Subtree(skeleton, "spine");
+    t.Expect("BS.7 a subtree remembers the skeleton that resolved it, its complement keeps it, and All/None name none",
+        ReferenceEquals(spine.Skeleton, skeleton) && ReferenceEquals(spine.Inverted().Skeleton, skeleton)
+        && BoneMask.All(3).Skeleton is null && BoneMask.None(3).Skeleton is null);
+    var foreign = BoneMask.Subtree(lookalike, "tail");
+    var masking = new PoseStack(skeleton);
+    t.ExpectThrows("BS.7 a subtree of a same-sized rig is refused when a layer is added",
+        () => masking.Add(new ClipPlayer(skeleton, walk), mask: foreign), mustMention: "another skeleton");
+    var maskable = masking.Add(new ClipPlayer(skeleton, walk), mask: spine);
+    t.ExpectThrows("BS.7 and when it is set on a layer afterwards, which used to be checked by nobody",
+        () => maskable.Mask = foreign, mustMention: "another skeleton");
+    t.ExpectThrows("BS.7 a mask of the wrong size is refused by the setter too",
+        () => maskable.Mask = BoneMask.None(2), mustMention: "covers 2 bones");
+    maskable.Mask = BoneMask.All(skeleton.BoneCount, 0.5f);
+    var uniformFits = maskable.Mask is { Skeleton: null };
+    maskable.Mask = spine.Inverted();
+    t.Expect("BS.7 CONTROL: a uniform mask fits any rig of its size, and this rig's own subtree still sets",
+        uniformFits && ReferenceEquals(maskable.Mask?.Skeleton, skeleton));
 }
 
 t.PrintSummary();

@@ -27,6 +27,8 @@ public enum PoseLayerFinish
 /// </remarks>
 public sealed class PoseLayer
 {
+    private BoneMask? mask;
+
     internal PoseLayer(ClipPlayer source, PoseLayerMode mode, float weight, BoneMask? mask)
     {
         Source = source;
@@ -44,7 +46,20 @@ public sealed class PoseLayer
     public float Weight { get; set; }
 
     /// <summary>A per-bone weight multiplied into <see cref="Weight"/>; null reaches every bone.</summary>
-    public BoneMask? Mask { get; set; }
+    /// <remarks>
+    /// Checked on every set, not only when the layer is added: the stack requires its layers' players to pose
+    /// its own skeleton, so <see cref="Source"/>'s skeleton is the one the mask must mean.
+    /// </remarks>
+    /// <exception cref="ArgumentException">The mask is for another skeleton (<see cref="BoneMask.ValidateFor"/>).</exception>
+    public BoneMask? Mask
+    {
+        get => mask;
+        set
+        {
+            value?.ValidateFor(Source.Skeleton, nameof(Mask));
+            mask = value;
+        }
+    }
 
     /// <summary>Hold the last frame (the default) or leave the stack once a one-shot clip finishes.</summary>
     public PoseLayerFinish OnFinish { get; set; } = PoseLayerFinish.Hold;
@@ -114,12 +129,7 @@ public sealed class PoseStack : IAnimation
                 "the player is already a layer's source; two layers sharing one would advance it twice per advance.", nameof(source));
         }
 
-        if (mask is not null && mask.BoneCount != Skeleton.BoneCount)
-        {
-            throw new ArgumentException(
-                $"the mask covers {mask.BoneCount} bones and this stack's skeleton has {Skeleton.BoneCount}.", nameof(mask));
-        }
-
+        mask?.ValidateFor(Skeleton, nameof(mask));
         var layer = new PoseLayer(source, mode, weight, mask);
         layers.Add(layer);
         return layer;

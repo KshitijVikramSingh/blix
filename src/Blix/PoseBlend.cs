@@ -70,6 +70,9 @@ public static class PoseBlend
                 $"Pose bone counts differ: {poseA.BoneCount}, {poseB.BoneCount}, {outPose.BoneCount}.");
         }
 
+        // A count is all a pose can be held to: it is indexed locals and does not know its skeleton, so two
+        // same-sized poses from unrelated rigs still blend here. Where the skeleton is known (PoseStack, a
+        // gizmo) the mask is held to it by BoneMask.ValidateFor.
         if (mask.BoneCount != poseA.BoneCount)
         {
             throw new ArgumentException(

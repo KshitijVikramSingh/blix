@@ -305,7 +305,53 @@ Stages:
   refuses ∞ while parsing, as the window does.
 - **Open, deliberately not here:** `BoneMask.Subtree(skeleton, …)` forgets which skeleton resolved it, and
   later checks compare bone counts only. `All(count)`/`None(count)` are rightly skeleton-agnostic, so the
-  fix is a mask that knows its skeleton when it has one, not a blanket rule.
+  fix is a mask that knows its skeleton when it has one, not a blanket rule. (Done in §K1.)
+
+---
+
+## K — which skeleton is this about?
+
+The last sediment of the old rig model: indices that mean a bone only in one hierarchy, carried by types
+that do not say which. One theme, three PRs, because K2 deliberately breaks a lot of source and deserves a
+clean diff and acceptance story of its own.
+
+- **K1 — mask provenance (branch `mask-provenance`).** `BoneMask.Skeleton` is the skeleton that resolved it:
+  `Subtree` sets it, `Inverted` keeps it, `All(count)`/`None(count)` name none. One rule,
+  `BoneMask.ValidateFor(skeleton)`: a mask that names a skeleton is valid for that instance only, one that
+  names none for any skeleton of its size. Applied wherever the skeleton is known: `PoseStack.Add`, the
+  `PoseLayer.Mask` setter (unchecked before; it validates against `Source.Skeleton`, which `Add` already
+  holds to the stack's), and `SkeletonGizmo.Draw`. `PoseBlend` keeps its count check, the strongest claim a
+  pose (indexed locals, no skeleton) supports: same-sized poses from unrelated rigs still blend there, a
+  documented limit, not a reason to give `Pose` an identity. Test.Graphics BS.7; lab `compose-.*` IDENTICAL.
+- **K2 — `Skeleton` becomes the pose hierarchy; `SkinBinding` holds the skin.** Decided with the user:
+  - `Bone(Name, ParentIndex, Rest, Offset)`: `Rest` required, no `InverseBindPose`. `CreateRestPose` is the
+    bones' authored rest, with no reconstruction from inverse binds (hand-built rigs state their rest).
+  - `SkinBinding(Skeleton, Bones[] skin joint → hierarchy bone, InverseBinds[])`. It keeps the `Skeleton` it
+    indexes: `Bones` without it is indices into some hierarchy somewhere. The palette is a binding operation
+    (`Skeleton.ComputeBonePalette` and `BonePaletteSet.Add(skeleton, pose)` go; `AddGathered` becomes
+    binding-shaped and checks the worlds against `Binding.Skeleton`). The check tool's fact is
+    `JointBindWorlds` (inverse of each inverse bind), matrices, never a `Pose`.
+  - `ModelData`: one `Skeleton` (the animated hierarchy); `Skin(Binding, JointNodes, Placement)`.
+    `AnimatedHierarchy` stops copying skin 0's inverse binds onto nodes. Bone order is kept as a
+    compatibility convention: skin 0's joint order when the animated set is exactly its joints, else node order.
+  - Studio's `CountDistinctPoses` fingerprints bone worlds, not a palette computed from skin 0's binds.
+  - The cooked format is already binding-shaped (no version bump expected). RTSGame breaks on purpose:
+    "skeleton + pose → palette" must say which binding.
+  - Instruments: `SkinsMatchGltf`, lab rig modes and the demos gate, all bit-identical.
+- **K3 — conformance cleanup.**
+  - A `KHR_mesh_quantization` fixture (accepted today, exercised by nothing).
+  - The normal map under `KHR_texture_transform`: a derived regression asset (rotation and non-uniform scale),
+    and the fix in the normal-map shading path from the channel's full 2×2 linear part and handedness, not
+    baked into the mesh (variants can give one mesh several transforms).
+  - Morph targets refused by name when they can take effect: nonzero default weights (mesh or node), or a
+    `weights` animation channel. All-zero weights with nothing animating them render as the base geometry,
+    which is correct, and load with the targets recorded as unread. Measured: all four corpus morph files
+    are refused under that rule; no repo asset has targets.
+  - A renderer-support table measured apart from reader support: a `PbrMaterial` field existing is not the
+    extension being drawn.
+- **Later, as their own arcs:** morph targets (deformation + a `weights` clip channel), then
+  `KHR_animation_pointer` (not forced into skeletal animation). A skin that mirrors only some joints of one
+  primitive stays an explicit rendering limitation: no asset, no consumer, no single front face.
 
 ---
 

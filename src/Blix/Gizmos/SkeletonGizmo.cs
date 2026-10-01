@@ -116,6 +116,7 @@ public static class SkeletonGizmo
         ArgumentNullException.ThrowIfNull(debug);
         ArgumentNullException.ThrowIfNull(skeleton);
         ArgumentNullException.ThrowIfNull(boneWorlds);
+        mask?.ValidateFor(skeleton, nameof(mask));
 
         using var scope = debug.Scope("skeleton");
 
@@ -155,7 +156,7 @@ public static class SkeletonGizmo
 
             // A bone's colour says one of two things: which one is selected, or how much of the layer
             // reaches it. Selection wins, because it is the thing you are pointing at.
-            var painted = mask is not null && i < mask.BoneCount;
+            var painted = mask is not null;
             var boneColour = selected ? SelectedColour : painted ? MaskColour(mask![i]) : BoneColour;
             var jointColour = selected ? SelectedColour : painted ? MaskColour(mask![i]) : JointColour;
 
