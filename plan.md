@@ -357,8 +357,11 @@ clean diff and acceptance story of its own.
       is never identity.
     - `DemoRigsSkinTheSameThroughModel` resolves skin 0's joint tree independently and asserts the joint-order
       convention (control: disabling it fails cesium_man). The Check tool's output on BrainStem matches main's.
-- **K3 — conformance cleanup.**
-  - A `KHR_mesh_quantization` fixture (accepted today, exercised by nothing).
+- **K3 — conformance cleanup (branch `conformance`).**
+  - A `KHR_mesh_quantization` fixture (accepted today, exercised by nothing). **Done:** the fetch script derives
+    `NormalTangentTest_quantized.gltf` (u16 positions with the dequantisation on the node at a UNIFORM scale,
+    because the node transform reaches normals; i8n normals; u16n UVs; extension required). Placed in the world,
+    every vertex matches the float file within one step; CONTROL, node-local positions are the raw integers.
   - The normal map under `KHR_texture_transform`: a derived regression asset (rotation and non-uniform scale),
     and the fix in the normal-map shading path from the channel's full 2×2 linear part and handedness, not
     baked into the mesh (variants can give one mesh several transforms).
@@ -366,6 +369,11 @@ clean diff and acceptance story of its own.
     `weights` animation channel. All-zero weights with nothing animating them render as the base geometry,
     which is correct, and load with the targets recorded as unread. Measured: all four corpus morph files
     are refused under that rule; no repo asset has targets.
+    **Done:** `MeshRecipe.RefuseEffectiveMorphTargets` on both load paths, naming the mesh and why; recipe 18
+    (no output changes, but a cached cook of a now-refused file must not keep loading; lab IDENTICAL after the
+    re-cook). `SimpleMorph_static` (derived: weights zeroed, animation dropped) loads with its targets unread.
+    The corpus check now holds each listed refusal to its STATED reason (control: a mislabelled one fails);
+    three labels were reworded to what their refusals say.
   - A renderer-support table measured apart from reader support: a `PbrMaterial` field existing is not the
     extension being drawn.
 

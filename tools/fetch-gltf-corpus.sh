@@ -561,6 +561,30 @@ print(f"  derived NormalTangentTest_quantized.gltf ({len(qp)} vertices: POSITION
 PY
 fi
 
+# Morph targets are refused only where they take effect: a nonzero default weight (mesh or node) or a
+# weights animation. With every weight zero and nothing driving them the base mesh IS the render, so such
+# a file loads, its targets recorded as unread. Every corpus morph file moves its targets, so this is the
+# one that must load: SimpleMorph with its weights zeroed and its animation dropped.
+SM="$DEST/sample-assets/SimpleMorph/SimpleMorph.gltf"
+if [ -f "$SM" ] && [ ! -s "$DEST/sample-assets/SimpleMorph/SimpleMorph_static.gltf" ]; then
+    python3 - "$SM" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+if not any("targets" in prim for m in d["meshes"] for prim in m["primitives"]):
+    sys.exit("SimpleMorph has no morph targets — upstream changed shape")
+for m in d["meshes"]:
+    if "weights" in m:
+        m["weights"] = [0.0] * len(m["weights"])
+for n in d["nodes"]:
+    if "weights" in n:
+        n["weights"] = [0.0] * len(n["weights"])
+d.pop("animations", None)
+json.dump(d, open(p.replace("SimpleMorph.gltf", "SimpleMorph_static.gltf"), "w"))
+print("  derived SimpleMorph_static.gltf (morph targets kept, every weight zero, no animation)")
+PY
+fi
+
 echo
 echo "corpus at $DEST — $((planned - failed)) fetched, $failed missing, $(find "$DEST" -type f | wc -l | tr -d ' ') file(s) total"
 [ "$failed" -eq 0 ]

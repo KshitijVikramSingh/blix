@@ -1180,15 +1180,19 @@ public static class Program
         ["CesiumMan.gltf"] = "KHR_draco_mesh_compression",
         ["BoxWeb3dQuantizedAttributes.gltf"] = "WEB3D_quantized_attributes",
         // Invalid glTF, which must be refused.
-        ["Mesh_NoPosition_00.gltf"] = "no POSITION",
-        ["Mesh_PrimitiveRestart_00.gltf"] = "primitive restart",
+        ["Mesh_NoPosition_00.gltf"] = "missing required POSITION",
+        ["Mesh_PrimitiveRestart_00.gltf"] = "restart value",
         // Points and lines: Blix draws triangles, and refuses them by name rather than mis-reading them.
-        ["MeshPrimitiveModes.gltf"] = "POINTS and LINES primitives",
+        ["MeshPrimitiveModes.gltf"] = "is POINTS",
         ["Mesh_PrimitiveMode_00.gltf"] = "POINTS", ["Mesh_PrimitiveMode_07.gltf"] = "POINTS",
         ["Mesh_PrimitiveMode_01.gltf"] = "LINES", ["Mesh_PrimitiveMode_08.gltf"] = "LINES",
         ["Mesh_PrimitiveMode_02.gltf"] = "LINE_LOOP", ["Mesh_PrimitiveMode_09.gltf"] = "LINE_LOOP",
         ["Mesh_PrimitiveMode_03.gltf"] = "LINE_STRIP", ["Mesh_PrimitiveMode_10.gltf"] = "LINE_STRIP",
         // Valid glTF that Blix does not read yet — the spec gaps (plan.md, the spec audit).
+        // Morph targets that take effect: Blix does not deform by them, and the base mesh would be another shape.
+        // (SimpleMorph_static, whose weights are all zero and undriven, loads: its base IS the render.)
+        ["AnimatedMorphCube.glb"] = "morph targets", ["MorphStressTest.glb"] = "morph targets",
+        ["MorphPrimitivesTest.glb"] = "morph targets", ["SimpleMorph.gltf"] = "morph targets",
     };
 
     private static void EveryCorpusFileLoads(TestRunner t)
@@ -1226,7 +1230,11 @@ public static class Program
             }
             catch (AssetImportException refused)
             {
-                if (!expected) wrong.Add($"{name} refused: {refused.Message.Split('\n')[0]}");
+                // Refused for the LISTED reason, as the claim below says: a file refused for another one passes
+                // a refused-or-not check while its listed gap could have quietly closed.
+                var message = refused.Message.Split('\n')[0];
+                if (!expected) wrong.Add($"{name} refused: {message}");
+                else if (!refused.ToString().Contains(why!, StringComparison.OrdinalIgnoreCase)) wrong.Add($"{name} refused, but not for '{why}': {message}");
             }
             catch (Exception crash) when (crash is not OutOfMemoryException)
             {
@@ -1534,8 +1542,10 @@ public static class Program
             try { cooked = CookCache.Resolve(file); }
             catch (AssetImportException refused)
             {
-                // A refused cook is a finding, not a skip: it is how a texture crash hid InterpolationTest.
-                t.Fail($"{Path.GetFileName(file)}: an animated file cooks", refused.Message);
+                // A refused cook is a finding, not a skip: it is how a texture crash hid InterpolationTest. The one
+                // exemption is a refusal LISTED as deliberate (a morph-weight animation, say), which
+                // EveryCorpusFileLoads holds to its stated reason.
+                if (!ExpectedRefusals.ContainsKey(Path.GetFileName(file))) t.Fail($"{Path.GetFileName(file)}: an animated file cooks", refused.Message);
                 continue;
             }
             var tracks = BlixMeshReader.Read(cooked).ClipTable.SelectMany(c => c.Tracks).ToArray();
@@ -1798,11 +1808,11 @@ public static class Program
             () => Blix.ModelData.Load("some/asset.glb"));
 
         var rogue = FindFile("Rogue.glb");
-        var morph = FindFile("AnimatedMorphCube.glb");
+        var morph = FindFile("SimpleMorph_static.gltf");
         var multiUv = FindFile("MultiUVTest.gltf");
         if (rogue is null || morph is null || multiUv is null)
         {
-            Console.WriteLine("  --   ModelData checks skipped: Rogue.glb, AnimatedMorphCube.glb or MultiUVTest.gltf not found");
+            Console.WriteLine("  --   ModelData checks skipped: Rogue.glb, SimpleMorph_static.gltf or MultiUVTest.gltf not found");
             return;
         }
 
@@ -1825,11 +1835,12 @@ public static class Program
         Directory.CreateDirectory(temp);
         try
         {
-            var cube = Path.Combine(temp, "AnimatedMorphCube.glb");
+            // Morph targets whose weights are all zero and undriven: the base mesh is the render, so it cooks.
+            var cube = Path.Combine(temp, "SimpleMorph_static.gltf");
             File.Copy(morph, cube);
             MeshRecipe.CookToBlixMesh(cube, Path.ChangeExtension(cube, ".blixmesh"));
             var morphs = Blix.ModelData.Load(Path.ChangeExtension(cube, ".blixmesh")).Ignored;
-            t.Expect("a cooked file records the source attributes its cook did not carry (morph targets)",
+            t.Expect("a cooked file records the source attributes its cook did not carry (morph targets that take no effect)",
                 morphs.Any(i => i.Semantic == Blix.UnreadAttribute.MorphTargets), string.Join(",", morphs.Select(i => i.Semantic)));
 
             var uv = Path.Combine(temp, "MultiUVTest.gltf");

@@ -105,7 +105,9 @@ public static class MeshRecipe
     // Version 16 (format v18) writes the scene level: scenes, visibility, instances, cameras, lights, variants.
     // Version 17 validates sources (one declared leniency), builds generated tangents over the normal
     // texture's TEXCOORD set, refuses index counts glTF forbids, and accepts extra inverse binds.
-    public const uint MeshRecipeVersion = 17;
+    // Version 18 refuses morph targets that take effect (a nonzero default weight, or a weights animation): no
+    // file that cooks changes, but a cached cook of one that is now refused must not keep loading.
+    public const uint MeshRecipeVersion = 18;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false,
@@ -798,6 +800,7 @@ public static class MeshRecipe
         {
             model = ModelRoot.Load(gltfPath, new SharpGLTF.Schema2.ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip });
             RefuseUnreadExtensions(model, gltfPath);
+            RefuseEffectiveMorphTargets(model, gltfPath);
             // Re-read unvalidated ONLY when one of the two named causes is present; a file the validator
             // refuses for anything else is refused. (The cause present may not be the validator's only
             // complaint — what it would have said after the first error is not knowable from here.)
@@ -812,6 +815,7 @@ public static class MeshRecipe
         }
 
         RefuseUnreadExtensions(model, gltfPath);
+        RefuseEffectiveMorphTargets(model, gltfPath);
         return model;
     }
 
@@ -831,6 +835,40 @@ public static class MeshRecipe
                 $"'{gltfPath}' requires {string.Join(", ", unread)}, which Blix does not read; glTF says a file whose "
                 + "required extensions a reader does not support must not be loaded.");
         }
+    }
+
+    // Morph targets are core glTF, and Blix does not deform by them. A mesh renders as base + sum(w_i * target_i),
+    // so where every weight is zero and nothing drives one, the base mesh IS the render and the file loads, its
+    // targets recorded as unread. Where a weight can be nonzero (a mesh's or a node's default weights, or an
+    // animation of a node's weights) drawing the base would be a different shape than the file says: refused,
+    // naming the mesh, rather than loaded as something it is not.
+    private static void RefuseEffectiveMorphTargets(ModelRoot model, string gltfPath)
+    {
+        static bool Morphs(SharpGLTF.Schema2.Mesh? mesh) => mesh is not null && mesh.Primitives.Any(p => p.MorphTargetsCount > 0);
+        static bool AnyNonZero(IReadOnlyList<float>? weights) => weights is not null && weights.Any(w => w != 0f);
+
+        foreach (var mesh in model.LogicalMeshes.Where(Morphs))
+        {
+            if (AnyNonZero(mesh.MorphWeights)) RefuseMorph(mesh, "its default weights are not all zero");
+        }
+
+        foreach (var node in model.LogicalNodes.Where(n => Morphs(n.Mesh)))
+        {
+            if (AnyNonZero(node.MorphWeights)) RefuseMorph(node.Mesh!, $"node {node.LogicalIndex} ('{node.Name}') sets weights that are not all zero");
+        }
+
+        foreach (var anim in model.LogicalAnimations)
+        foreach (var channel in anim.Channels)
+        {
+            if (channel.TargetNodePath == SharpGLTF.Schema2.PropertyPath.weights && Morphs(channel.TargetNode?.Mesh))
+            {
+                RefuseMorph(channel.TargetNode!.Mesh!, $"animation '{anim.Name}' drives node {channel.TargetNode.LogicalIndex}'s weights");
+            }
+        }
+
+        void RefuseMorph(SharpGLTF.Schema2.Mesh mesh, string why) => throw new InvalidDataException(
+            $"'{gltfPath}' morph targets of mesh {mesh.LogicalIndex} ('{mesh.Name}') take effect ({why}), and Blix does not deform "
+            + "by morph targets; drawing the base mesh would be a different shape than the file describes.");
     }
 
     /// <summary>Whether <paramref name="skin"/>'s joints have a common ancestor (a joint itself counts).</summary>
