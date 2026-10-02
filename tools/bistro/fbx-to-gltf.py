@@ -8,8 +8,8 @@
 # (README.txt), because glTF has a place for each channel and the importer puts them in the wrong one:
 #
 #   BaseColor  RGB colour, A opacity       -> baseColor; alpha mode MASK where any texel is cut, else OPAQUE
-#   Specular   R occlusion, G roughness,   -> metallicRoughness (G, B) and occlusion (R): glTF's own packing,
-#              B metalness                    so the one image is referenced twice and nothing is repacked
+#   Specular   R occlusion, G roughness,   -> metallicRoughness (G, B), and occlusion (R) only where R carries
+#              B metalness                    anything: glTF's own packing, one image referenced twice
 #   Normal     DirectX                     -> normalTexture, as authored (the convention is the cook's)
 #   Emissive   RGB                         -> emissive, as the importer wires it
 #
@@ -17,6 +17,11 @@
 # Bistro states double-sidedness in the material NAME (".DoubleSided", changelog v3a: the foliage); and a
 # specular tint taken from the FBX's legacy specular colour, which exports as KHR_materials_specular on a
 # file that authors none. Both are put back to what the file says.
+#
+# <b>Occlusion from the data, not the README.</b> Every Specular map in the pack has R = 0 (they are 16x16
+# constants), which Falcor, the renderer the pack was made for, never reads as occlusion. glTF reads an
+# occlusion of 0 as "receives no indirect light", so wiring it by the README blacked out everything the sun
+# missed. An image whose R never rises above zero is not authored occlusion, and is not exported as one.
 #
 # The importer wires Specular into Principled's "Specular IOR Level" and links every BaseColor alpha, so
 # without this every material exports alpha-BLENDED with no roughness or metalness.
@@ -38,6 +43,15 @@ def gltf_output_group():
         g.interface.new_socket("Occlusion", in_out="INPUT", socket_type="NodeSocketFloat")
     return g
 
+occlusion_cache = {}
+def has_occlusion(image):
+    # Any texel of R above zero: the channel says something. Decoded once per image.
+    if image.name not in occlusion_cache:
+        px = np.empty(len(image.pixels), dtype=np.float32)
+        image.pixels.foreach_get(px)
+        occlusion_cache[image.name] = bool((px[0::image.channels] > 0.5 / 255).any())
+    return occlusion_cache[image.name]
+
 alpha_cache = {}
 def has_cutout(image):
     # Any texel meaningfully below opaque. Decoded once per image.
@@ -47,7 +61,7 @@ def has_cutout(image):
         alpha_cache[image.name] = bool((px[3::4] < 0.99).any()) if image.channels == 4 else False
     return alpha_cache[image.name]
 
-counts = {"orm": 0, "mask": 0, "opaque": 0, "no-principled": 0}
+counts = {"orm": 0, "occlusion": 0, "mask": 0, "opaque": 0, "no-principled": 0}
 for m in bpy.data.materials:
     nt = m.node_tree
     if nt is None:
@@ -74,9 +88,11 @@ for m in bpy.data.materials:
         links.new(image_node.outputs["Color"], sep.inputs["Color"])
         links.new(sep.outputs["Green"], bsdf.inputs["Roughness"])
         links.new(sep.outputs["Blue"], bsdf.inputs["Metallic"])
-        group = nt.nodes.new("ShaderNodeGroup")
-        group.node_tree = gltf_output_group()
-        links.new(sep.outputs["Red"], group.inputs["Occlusion"])
+        if has_occlusion(image_node.image):
+            group = nt.nodes.new("ShaderNodeGroup")
+            group.node_tree = gltf_output_group()
+            links.new(sep.outputs["Red"], group.inputs["Occlusion"])
+            counts["occlusion"] += 1
         counts["orm"] += 1
 
     # Alpha: read from the BaseColor texture itself (the importer loads it a second time for alpha).

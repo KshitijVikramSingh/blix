@@ -165,11 +165,11 @@ internal sealed partial class SponzaLoop
         sunYaw = MathF.Atan2(sunDirection.X, -sunDirection.Z);
 
 
-        if (!TryLocateSponza(out var assetsRoot, out var gltfPath))
+        if (!TryLocateScene(out var assetsRoot, out var packsToParse))
         {
             // A run that asked for the loaded scene and never loaded one has not passed.
             if (framesAfterLoad is not null || shotPath is not null)
-                BlixApps.ReportFailure("the Sponza pack set is missing, so the loaded scene never rendered");
+                BlixApps.ReportFailure($"the {scene.Name} pack set is missing, so the loaded scene never rendered");
             return;
         }
         LoadIbl(assetsRoot);
@@ -701,26 +701,15 @@ internal sealed partial class SponzaLoop
         skyBindings = skySamples.Select(n => passBindings.Single(b => b.Name == n)).ToArray();
         skyFroxelGridBinding = Array.FindIndex(skyBindings, b => b.Name == "uFroxelGrid");
 
-        // --- Load Sponza geometry ---------------------------------------
-        // Static-mesh importer (Sponza has no skinning): each glTF primitive
+        // --- Load the scene's geometry ------------------------------------
+        // Static meshes (neither scene skins): each cooked primitive
         // becomes one mesh with a baked-in node transform; its material is
         // resolved + cached by GetMaterial. Parsing is pure CPU (~7s — the bulk
         // of the load), so the AsyncLoadQueue runs it off-thread; the GPU work
         // (StageDrawable + ConsolidateBuffers) drains on the main thread via
         // TryFinishLoad. Until then sceneLoaded is false and OnRender shows a
-        // responsive clear (loading screen). Candles excluded (no light source).
-        var packsToParse = new List<(string Name, string Path, string AssetId)>
-        {
-            ("main", gltfPath, "models/sponza_main"),
-        };
-        // --no-foliage excludes cutout geometry from every pass. A uniform A/B cannot price discard,
-        // overdraw, pre-pass work, and all shadow cascades together; the pack-level arm can.
-        AddOptionalPackPath(packsToParse, assetsRoot, "curtains", "addons/curtains");
-        if (!noFoliage)
-        {
-            AddOptionalPackPath(packsToParse, assetsRoot, "ivy",   "addons/ivy");
-            AddOptionalPackPath(packsToParse, assetsRoot, "trees", "addons/trees");
-        }
+        // responsive clear (loading screen). The packs are the scene profile's (TryLocateScene);
+        // Sponza's candles are not among them (no light source).
         meshLoad.Start(() =>
         {
             var prims = new List<ModelData.Primitive>();
@@ -735,55 +724,57 @@ internal sealed partial class SponzaLoop
         UpdateCamera();
     }
 
-    // Resolve the Sponza glTF under BLIX_SPONZA_ASSETS, the cooked pack set the two
-    // tools/ scripts prepare. There is no bin-local fallback: it was fed from a directory
-    // belonging to a deleted demo, and a default nothing can populate only ever reports the
-    // wrong missing path. Closes the window cleanly when the packs aren't present and returns
-    // false so OnLoad bails. The glTF filename varies across Khronos revisions, so glob.
-    private bool TryLocateSponza(out string assetsRoot, out string gltfPath)
+    // Resolve the scene's cooked tree from its profile's variable (BLIX_SPONZA_ASSETS, BLIX_BISTRO_ASSETS):
+    // the tree a setup script prepares. There is no bin-local fallback — a default nothing can populate only
+    // ever reports the wrong missing path. Closes the window cleanly when a required pack is missing and
+    // returns false so OnLoad bails.
+    private bool TryLocateScene(out string assetsRoot, out List<(string Name, string Path)> packs)
     {
-        gltfPath = "";
-        assetsRoot = Environment.GetEnvironmentVariable("BLIX_SPONZA_ASSETS") ?? "";
+        packs = new List<(string Name, string Path)>();
+        assetsRoot = Environment.GetEnvironmentVariable(scene.AssetsVariable) ?? "";
         if (assetsRoot.Length == 0)
         {
-            Console.WriteLine("[VulkanSponza] BLIX_SPONZA_ASSETS is not set. It names the cooked pack set;");
-            Console.WriteLine("[VulkanSponza] tools/setup-sponza-modern.sh prepares one from your local Khronos packs.");
+            Console.WriteLine($"[VulkanSponza] {scene.AssetsVariable} is not set. It names {scene.Name}'s cooked tree;");
+            Console.WriteLine($"[VulkanSponza] {scene.SetupHint}.");
             host.RequestClose();
             return false;
         }
-        var mainPackDir = Path.Combine(assetsRoot, "main_sponza");
-        if (!Directory.Exists(mainPackDir))
+
+        foreach (var pack in scene.Packs)
         {
-            Console.WriteLine($"[VulkanSponza] Main Sponza assets not found at {mainPackDir}.");
-            Console.WriteLine("[VulkanSponza] Point BLIX_SPONZA_ASSETS at a cooked pack set, or run");
-            Console.WriteLine("[VulkanSponza] tools/setup-sponza-modern.sh to prepare one there from your local Khronos packs.");
+            // --no-foliage excludes cutout geometry from every pass. A uniform A/B cannot price discard,
+            // overdraw, pre-pass work, and all shadow cascades together; the pack-level arm can.
+            if (pack.Foliage && noFoliage) continue;
+            var packDir = Path.Combine(assetsRoot, pack.Directory);
+            var found = Directory.Exists(packDir) ? FirstAsset(packDir) : null;
+            if (found is not null)
+            {
+                packs.Add((pack.Directory, found));
+                continue;
+            }
+
+            if (!pack.Required) continue;
+            Console.WriteLine($"[VulkanSponza] No cooked .blixmesh in {packDir}.");
+            Console.WriteLine($"[VulkanSponza] Point {scene.AssetsVariable} at a cooked tree; {scene.SetupHint}.");
             host.RequestClose();
             return false;
         }
-        var found = FirstAsset(mainPackDir);
-        if (found is null)
-        {
-            Console.WriteLine($"[VulkanSponza] No .blixmesh in {mainPackDir}. Cook it: tools/cook-sponza-modern.sh.");
-            host.RequestClose();
-            return false;
-        }
-        gltfPath = found;
+
         return true;
     }
 
-    // IBL prefers a cooked .blixprobe, then any probe in the texture directory, and finally the
-    // procedural sky. DefaultProbeCandidates defines the named order. Detected probe suns align
+    // IBL prefers a cooked .blixprobe, then any probe in the scene's probe directory, and finally the
+    // procedural sky. The scene profile's ProbeCandidates define the named order. Detected probe suns align
     // direct light automatically unless --sun-authored opts out.
     private void LoadIbl(string assetsRoot)
     {
-        // --probe places an explicit asset ahead of the default preference list without requiring a
-        // rebuild. Pizzo Pernice is the standard first choice; its detected sun direction and
-        // irradiance independently round-trip to the source HDR within the recorded tolerance.
+        // --probe places an explicit asset ahead of the scene's preference list without requiring a
+        // rebuild.
         string[] probeCandidates = probeName is { Length: > 0 }
             ? new[] { probeName.EndsWith(".blixprobe", StringComparison.Ordinal) ? probeName : probeName + ".blixprobe" }
-                .Concat(DefaultProbeCandidates).ToArray()
-            : DefaultProbeCandidates;
-        var probeDir = Path.Combine(assetsRoot, "textures");
+                .Concat(scene.ProbeCandidates).ToArray()
+            : scene.ProbeCandidates;
+        var probeDir = Path.Combine(assetsRoot, scene.ProbeDirectory);
         var probePath = probeCandidates
             .Select(p => Path.Combine(probeDir, p))
             .FirstOrDefault(File.Exists)
@@ -855,15 +846,6 @@ internal sealed partial class SponzaLoop
             Console.WriteLine($"[VulkanSponza] probe load failed ({ex.Message}); using procedural IBL.");
             BakeProceduralIbl();
         }
-    }
-
-    private static void AddOptionalPackPath(
-        List<(string Name, string Path, string AssetId)> packs, string assetsRoot, string packDirName, string assetId)
-    {
-        var packDir = Path.Combine(assetsRoot, packDirName);
-        if (!Directory.Exists(packDir)) return;
-        var asset = FirstAsset(packDir);
-        if (asset is not null) packs.Add((packDirName, asset, assetId));
     }
 
     /// <summary>Returns the pack's cooked mesh, or null when the pack has not been cooked.</summary>
@@ -1033,6 +1015,13 @@ internal sealed partial class SponzaLoop
         BitConverter.TryWriteBytes(open.AsSpan(0, 2), (Half)(4f * MathF.PI * 0.282095f));
         skyVisibilityTexture = Own(device.CreateTexture3D(
             1, 1, 1, TextureFormat.Rgba16F, SamplerDescription.LinearClamp, open, "sponza.skyvis.open"));
+        // All three bands are bound whether or not a volume shipped (passBindings, the froxel and incident
+        // passes), and a handle of 0 is no texture at all. An open sky is L0 alone: the higher bands are zero.
+        var zero = Own(device.CreateTexture3D(
+            1, 1, 1, TextureFormat.Rgba16F, SamplerDescription.LinearClamp, new byte[4 * 2], "sponza.skyvis.zero"));
+        skyVisibilityTextures[0] = skyVisibilityTexture;
+        skyVisibilityTextures[1] = zero;
+        skyVisibilityTextures[2] = zero;
         skyVolumeLoaded = false;
         Console.WriteLine("[VulkanSponza] sky visibility: none found — every surface sees a full sky.");
     }

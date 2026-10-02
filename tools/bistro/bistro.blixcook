@@ -11,3 +11,10 @@ asset exterior/BistroExterior.gltf -> exterior
   # Normal-map convention: README.txt states "Normal (DirectX)" for the whole pack, and glTF specifies
   # OpenGL. The count is every material in the exterior; the cook flips each map once.
   material *{132}           normal=directx
+
+
+asset interior/BistroInterior.gltf -> interior
+  split 4096
+
+  # The same README convention: every normal map DirectX. The count is every material in the interior.
+  material *{71}            normal=directx

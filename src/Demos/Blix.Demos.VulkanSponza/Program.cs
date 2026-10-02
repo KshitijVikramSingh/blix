@@ -53,7 +53,8 @@ public static class Program
         // question no amount of per-pass timing can answer on a tile-based GPU, where the
         // timestamps bracket encoder submission rather than execution.
         // Opens with the overlay showing, as a research renderer is mostly read through it. ` hides it.
-        var defaults = new WindowOptions("Blix — Vulkan Sponza", 1440, 810) { Diagnostics = true };
+        var scene = SceneProfile.Named(args.String("scene"));
+        var defaults = new WindowOptions($"Blix — {scene.Title}", 1440, 810) { Diagnostics = true };
         if (args.Values("win", 2) is [var w, var h])
         {
             var width = int.Parse(w, CultureInfo.InvariantCulture);
@@ -66,7 +67,7 @@ public static class Program
             defaults = defaults with { Width = width, Height = height };
         }
 
-        var loop = new SponzaLoop(args);
+        var loop = new SponzaLoop(args, scene);
         using var window = new Window(loop, WindowOptions.FromArgs(args, defaults));
         window.Run();
         return 0;
@@ -80,7 +81,19 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // Read during OnLoad, because most of what it sets needs the device.
     private readonly AppArgs args;
 
-    public SponzaLoop(AppArgs args) => this.args = args;
+    public SponzaLoop(AppArgs args, SceneProfile scene)
+    {
+        this.args = args;
+        this.scene = scene;
+        camera = SceneCamera(scene);
+        cascadeSplits = (float[])scene.CascadeSplits.Clone();
+        // Before ObjectTunables reads the flags, so --tune and the overlay start from the scene's values.
+        shadows.SunDistance = scene.SunDistance;
+        fog.Far = scene.FogFar;
+    }
+
+    /// <summary>Which scene this run draws (<c>--scene</c>), and the constants sized to it.</summary>
+    private readonly SceneProfile scene;
 
     // The engine picks and highlights; these say what there is to pick. See SceneSelection.
     public void CollectSelectables(List<DebugSelectable> destination) => sceneSelection.CollectSelectables(destination);
@@ -138,7 +151,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // The resolve rides the pass store rather than requiring another geometry pass.
     // Shared by projection, Hi-Z linearisation, and GTAO's background test.
     private const float CameraNearPlane = 0.1f;
-    private const float CameraFarPlane = 200f;
+    // The scene's (SceneProfile.FarPlane): a 30 m atrium and a 180 m street want different reaches.
+    private float CameraFarPlane => scene.FarPlane;
     private Matrix4x4 cameraView;
     private Matrix4x4 cameraProjection;
     private GraphResourceHandle depthResolveHandle;   // 1x resolve of the MSAA depth
@@ -448,9 +462,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private float bounceDiv = 1f;
     /// <summary>--sun-overhead: straight down, so the courtyard is lit while base lighting is worked on.</summary>
     private bool sunOverhead;
-    private static readonly string[] DefaultProbeCandidates =
-        { "pizzo_pernice_puresky_4k.blixprobe", "kloppenheim_05_4k.blixprobe",
-          "autumn_field_4k.blixprobe", "rogland_overcast_4k.blixprobe", "sky_hdr.blixprobe" };
     private string abMode = "";
     private bool abFlat;
     private const int AbPeriodFrames = 120;
@@ -532,9 +543,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     /// resolves more finely than the two-texel surface filter, leaving room for future retuning.
     /// </remarks>
     private static int[] ShadowMapSizes = { 2048, 2048, 1024 };
-    // Camera-depth slices fit each cascade; shader selection is by fitted-volume containment.
-    // The 14 m near split keeps its resolution transition out of common mid-range subjects.
-    private readonly float[] cascadeSplits = { 0.1f, 14f, 30f, 60f };
+    // Camera-depth slices fit each cascade; shader selection is by fitted-volume containment. The
+    // scene's own (SceneProfile.CascadeSplits), copied because the overlay edits them live.
+    private readonly float[] cascadeSplits;
     // Per-cascade frustum culling of shadow casters (overlay toggle + margin).
     private bool cullEnabled = true;
     private float cullMargin = 0.5f;
@@ -799,19 +810,21 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private readonly List<byte[]> maskPushPool = new();
     private int maskPushCursor;
 
-    // The engine's camera controller: look, orbit, fly, zoom, and --cam. The initial pose aims at the +X
-    // end-wall lavabo (wall fountain) so the sculpture is in the first frame, useful for normal-map
-    // debugging. The three names below are what the renderer reads; they are the controller's now.
-    private readonly CameraController camera = SponzaCamera();
+    // The engine's camera controller: look, orbit, fly, zoom, and --cam, starting where the scene's profile
+    // says. The three names below are what the renderer reads; they are the controller's now.
+    private readonly CameraController camera;
     private Vector3 cameraPosition => camera.Position;
     private Vector3 cameraForward => camera.Forward;
     private float fovYRadians => camera.FieldOfView;
     private float aspect = 16f / 9f;
 
-    private static CameraController SponzaCamera()
+    private static CameraController SceneCamera(SceneProfile scene)
     {
-        var lens = new Camera3D { VerticalFieldOfView = MathF.PI / 3f, NearPlane = CameraNearPlane, FarPlane = CameraFarPlane };
-        return new CameraController(lens) { Position = new Vector3(-9f, 3f, 0f), Yaw = 90f, MoveSpeed = 4.5f };
+        var lens = new Camera3D { VerticalFieldOfView = MathF.PI / 3f, NearPlane = CameraNearPlane, FarPlane = scene.FarPlane };
+        return new CameraController(lens)
+        {
+            Position = scene.StartPosition, Yaw = scene.StartYaw, Pitch = scene.StartPitch, MoveSpeed = scene.MoveSpeed,
+        };
     }
     private float renderHeightPx = 810f; // updated on resize; drives screen-space-error LOD
     // Screen-space-error LOD threshold: a level is used when its baked geometric error projects to

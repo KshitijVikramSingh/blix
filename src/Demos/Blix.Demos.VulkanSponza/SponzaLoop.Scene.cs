@@ -16,7 +16,7 @@ internal sealed partial class SponzaLoop
     // Background, parallel: each cooked pack is read to CPU geometry/material data, flattened into
     // world space, with tangents for the lit TBN. Returns primitives in pack order (main first).
     private static List<(string Name, ModelData.Primitive[] Primitives)> ParsePacksParallel(
-        List<(string Name, string Path, string AssetId)> packs)
+        List<(string Name, string Path)> packs)
     {
         var parsed = new (string Name, ModelData.Primitive[] Primitives)?[packs.Count];
         System.Threading.Tasks.Parallel.For(0, packs.Count, i =>
@@ -35,6 +35,23 @@ internal sealed partial class SponzaLoop
         return parsed.Where(r => r.HasValue).Select(r => r!.Value).ToList();
     }
 
+    private void FitSceneVolumeToDrawables()
+    {
+        var all = opaqueDrawables.Concat(blendDrawables).ToList();
+        if (all.Count == 0) return;
+        var min = all[0].Bounds.Min;
+        var max = all[0].Bounds.Max;
+        foreach (var d in all)
+        {
+            min = Vector3.Min(min, d.Bounds.Min);
+            max = Vector3.Max(max, d.Bounds.Max);
+        }
+
+        skyVolumeMin = min;
+        skyVolumeSpan = max - min;
+        Console.WriteLine($"[VulkanSponza] scene volume (no .blixsky): {min} .. {max}");
+    }
+
     private void TryFinishLoad()
     {
         if (sceneLoaded) return;
@@ -51,6 +68,10 @@ internal sealed partial class SponzaLoop
 
         // Everything staged → build the shared buffers + finish.
         ConsolidateBuffers();
+        // With no baked sky volume, the scene's extent is still the truth caster culling sweeps to and the
+        // orbit frames: everything that can cast or receive is a drawable, so their union is that volume.
+        // Without this both read a zero box, and offscreen casters lost their shadows.
+        if (!skyVolumeLoaded) FitSceneVolumeToDrawables();
         RegisterSelectables();
         Console.WriteLine($"[VulkanSponza] total draws: {opaqueDrawables.Count} opaque/mask, {blendDrawables.Count} blend.");
         LogPrimitiveSizeHistogram();
