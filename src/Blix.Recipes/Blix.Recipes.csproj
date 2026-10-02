@@ -19,18 +19,25 @@
        The test that it is honest: this project uses only PUBLIC engine API. No
        InternalsVisibleTo, because an internals grant would let Blix's recipes do
        what a project's recipe cannot, which is the same blessing wearing a
-       different hat. Lifting the mesh cook out needed exactly two engine members
-       made public — BuildStaticMeshData and ComputeNormalMatrix. -->
+       different hat.
+
+       A grant runs the other way, once: this project's own tests see its
+       internals (the glTF readers in GltfVertices, GltfSkin, GltfUnread),
+       because those are the cook's, and are tested as the cook's. That gives
+       a test what a recipe author does not need, not a recipe what the engine
+       withholds. -->
 
   <ItemGroup>
     <ProjectReference Include="..\Blix\Blix.csproj" />
-    <!-- The cook reads glTF sources through Blix.Import; the engine does not. -->
-    <ProjectReference Include="..\Blix.Import\Blix.Import.csproj" />
     <ProjectReference Include="..\Blix.Assets\Blix.Assets.csproj" />
     <ProjectReference Include="..\Blix.Cooked\Blix.Cooked.csproj" />
     <ProjectReference Include="..\Blix.Geometry\Blix.Geometry.csproj" />
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
     <ProjectReference Include="..\Blix.Graphics.Images\Blix.Graphics.Images.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Blix.Test.Recipes" />
   </ItemGroup>
 
   <ItemGroup>

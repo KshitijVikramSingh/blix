@@ -114,7 +114,7 @@ public sealed record PbrMaterial(
     /// <remarks>
     /// Empty when the caller cannot say which file it came from — never shared, for the same reason
     /// an unnamed texture is not: an identity nobody can reproduce is not an identity. One spelling,
-    /// written by the source importer and the cooked reader alike.
+    /// written by the cooked reader for every material it loads.
     /// </remarks>
     public static string IdentityOf(string containerPath, int index) =>
         containerPath.Length == 0 ? string.Empty : $"{Path.GetFullPath(containerPath)}#material{index}";

@@ -4,7 +4,6 @@
     <ProjectReference Include="..\Blix.Recipes\Blix.Recipes.csproj" />
     <ProjectReference Include="..\\Blix.Verify\\Blix.Verify.csproj" />
     <ProjectReference Include="..\Blix\Blix.csproj" />
-    <ProjectReference Include="..\Blix.Import\Blix.Import.csproj" />
     <ProjectReference Include="..\Blix.Graphics\Blix.Graphics.csproj" />
     <ProjectReference Include="..\Blix.Graphics.Vulkan\Blix.Graphics.Vulkan.csproj" />
     <ProjectReference Include="..\Blix.Diagnostics\Blix.Diagnostics.csproj" />
@@ -30,5 +29,12 @@
     <Nullable>enable</Nullable>
     <UseAppHost>false</UseAppHost>
   </PropertyGroup>
+
+  <!-- The suite's own glTF library, declared because this project uses it, not reached through the cook
+       (Blix.Recipes): Toolkit, because the fixtures are AUTHORED here (MeshBuilder, MaterialBuilder,
+       SceneBuilder), and Toolkit carries the parser. The runtime references none (Section BT). -->
+  <ItemGroup>
+    <PackageReference Include="SharpGLTF.Toolkit" Version="1.0.6" />
+  </ItemGroup>
 
 </Project>

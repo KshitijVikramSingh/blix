@@ -7,9 +7,8 @@ namespace Blix;
 
 /// <summary>A cooked mesh's materials and images, read from its own tables: no source involved.</summary>
 /// <remarks>
-/// The engine's half of what the glTF importers used to share: a cooked file's image table resolved
-/// to textures, and its material rows to <see cref="PbrMaterial"/>s. Parsing a source's materials is
-/// the cook's, in Blix.Import.
+/// A cooked file's image table resolved to textures, and its material rows to
+/// <see cref="PbrMaterial"/>s. Parsing a source's materials is the cook's (Blix.Recipes).
 /// </remarks>
 internal static class CookedMaterials
 {
@@ -17,8 +16,7 @@ internal static class CookedMaterials
     /// Loads every image a cooked mesh names, from the cooked mesh's own table — no glTF involved.
     /// </summary>
     /// <remarks>
-    /// Counterpart to the source importer's pre-decode for source-free cooked loads. Image discovery
-    /// and resource location both come from the cooked image table.
+    /// Image discovery and resource location both come from the cooked image table.
     /// <para>
     /// The cache is keyed by image-table row, matching what a cooked material channel stores.
     /// <see cref="MaterialFromCooked"/> looks its textures up by that same number, so the two agree

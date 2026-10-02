@@ -60,9 +60,8 @@ public static class BlixMesh
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
     public const uint LayoutPosition3NormalTextureSkin4Tangent = 3; // 80-byte, rigged
-    // The two colour-carrying static layouts. They reach this format through a RIG's attachments
-    // and static parts, which are built by the static mesh path with includeColour — so a format
-    // that knew only the skinned layout could store a rig's skeleton and not its cape.
+    // The two colour-carrying static layouts. The cook writes the complete vertices (6 and 7); these
+    // remain layouts the format can store, and the shapes a load narrows to.
     public const uint LayoutPosition3NormalTextureColor = 4;      // 36-byte
     public const uint LayoutPosition3NormalTexture2Color = 5;     // 44-byte, two UV sets
     public const uint LayoutPosition3NormalTangentTexture2Color = 6; // 60-byte, the complete static vertex
@@ -1023,17 +1022,20 @@ public static class BlixMeshReader
 
     /// <summary>Reads a cooked mesh, refusing anything that is not one by name.</summary>
     /// <remarks>
-    /// Everything past the preamble is wrapped, so a truncated or corrupt body arrives as the
-    /// engine declining a file rather than as whatever <see cref="BinaryReader"/> happened to throw
-    /// — the same sentence a bad glTF gets, so a tool catches one type and survives both.
+    /// Everything is wrapped, the open included, so a missing, truncated or corrupt file arrives as the
+    /// engine declining it rather than as whatever <see cref="FileStream"/> or <see cref="BinaryReader"/>
+    /// happened to throw — the same sentence a bad glTF gets, so a tool catches one type and survives both.
     /// </remarks>
     public static BlixMeshFile Read(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
 
-        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version18, path, ".blixmesh");
-        return AssetImportException.Refusing(path, () => ReadBody(fs, path, header), ".blixmesh");
+        return AssetImportException.Refusing(path, () =>
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version18, path, ".blixmesh");
+            return ReadBody(fs, path, header);
+        }, ".blixmesh");
     }
 
     private static BlixMeshFile ReadBody(Stream fs, string path, CookedHeader header)

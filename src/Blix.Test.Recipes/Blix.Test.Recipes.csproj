@@ -8,7 +8,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Blix.Import\Blix.Import.csproj" />
     <ProjectReference Include="..\Blix.Verify\Blix.Verify.csproj" />
     <ProjectReference Include="..\Blix.Cooked\Blix.Cooked.csproj" />
     <ProjectReference Include="..\Blix.Recipes\Blix.Recipes.csproj" />
@@ -20,6 +19,13 @@
          tool rather than moving the check into Blix.Cooked keeps it where the knowledge
          is — the batch line's shape is the build rule's, not a recipe's. -->
     <ProjectReference Include="..\Blix.Tools.Cook\Blix.Tools.Cook.csproj" />
+  </ItemGroup>
+
+  <!-- The suite's own glTF parser: its reference side reads the authored file directly, independent of
+       whatever the cook (Blix.Recipes) exposes. The same parser, declared here because this project uses it;
+       the runtime references none. -->
+  <ItemGroup>
+    <PackageReference Include="SharpGLTF.Core" Version="1.0.6" />
   </ItemGroup>
 
 </Project>

@@ -1036,7 +1036,7 @@ internal sealed class BulwarkLoop : IGameLoop, IDisposable
         }
     }
 
-    // ── Skinned enemy (M4 Gate A) — full GltfImporter (Skeleton + clips + JOINTS/
+    // ── Skinned enemy (M4 Gate A) — a cooked rig (Skeleton + clips + JOINTS/
     // WEIGHTS); one animated enemy, shadow-aware via the shared cube.frag. ──
     private void LoadSkinnedEnemy(string shaderDir)
     {

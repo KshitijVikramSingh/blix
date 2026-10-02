@@ -1,4 +1,3 @@
-using Blix.Import;
 using Blix.Verify;
 using System.Numerics;
 using Blix;
@@ -2067,15 +2066,14 @@ static ShaderInterface MinimalShader() => new(new[]
 }
 
 // ============================================================================
-// Section AI — GltfStaticImporter.ImportNodes (articulated hierarchy import).
+// Section AI — the cooked scene graph keeps an articulated hierarchy.
 // ============================================================================
 //
-// ImportNodes preserves the node hierarchy (name + parent + LOCAL transform) with
-// each mesh in local space — unlike Import, which world-bakes everything into one
-// flat blob. That's what lets an articulated model (hull -> turret -> barrel) map
-// onto a Transform3D rig. Build a tiny 2-node glTF (turret a child of hull, lifted
-// +1 Y) and assert the round-trip keeps the names, parent link, local-space mesh,
-// and unbaked local transform.
+// The cook keeps the node hierarchy (name + parent + LOCAL transform) with each mesh in mesh space — not
+// world-baked into one flat blob. That's what lets an articulated model (hull -> turret -> barrel) map
+// onto a Transform3D rig (TankArena reads its tank this way). Build a tiny 2-node glTF (turret a child of
+// hull, lifted +1 Y), cook it, and assert the cooked graph keeps the names, the parent link, the mesh in
+// its own space and the unbaked local transform.
 {
     var tri = new SharpGLTF.Geometry.MeshBuilder<SharpGLTF.Geometry.VertexTypes.VertexPositionNormal>("tri");
     var prim = tri.UsePrimitive(SharpGLTF.Materials.MaterialBuilder.CreateDefault());
@@ -2092,19 +2090,22 @@ static ShaderInterface MinimalShader() => new(new[]
     sceneBuilder.AddRigidMesh(tri, hull);
     sceneBuilder.AddRigidMesh(tri, turret);
 
-    var tmp = Path.Combine(Path.GetTempPath(), "blix_importnodes_test.glb");
+    var dir = Path.Combine(Path.GetTempPath(), $"blix-ai-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(dir);
+    var tmp = Path.Combine(dir, "articulated.glb");
     sceneBuilder.ToGltf2().SaveGLB(tmp);
+    var cooked = Blix.Recipes.CookCache.Resolve(tmp);
 
-    var nm = new GltfStaticImporter().ImportNodes(new AssetImportContext(AssetId.Parse("tmp/test"), tmp));
-    var hullNode = nm.Find("hull");
-    var turretNode = nm.Find("turret");
-    t.ExpectTrue("AI.1 hull node imported", hullNode is not null);
-    t.ExpectTrue("AI.1 turret node imported", turretNode is not null);
-    t.ExpectClose("AI.2 node carries its local-space mesh (3 verts)", hullNode!.Primitives[0].Mesh.VertexCount, 3);
-    t.ExpectTrue("AI.3 turret's parent is hull",
-        turretNode!.ParentIndex >= 0 && nm.Nodes[turretNode.ParentIndex].Name == "hull");
-    t.ExpectClose("AI.4 turret local transform kept (+1 Y, not world-baked)", turretNode.LocalTransform.M42, 1f);
-    File.Delete(tmp);
+    var nm = ModelData.Load(cooked, new ModelNeeds(Skinned: false));
+    var hullNode = nm.FindNode("hull");
+    var turretNode = nm.FindNode("turret");
+    t.ExpectTrue("AI.1 hull node cooked", hullNode >= 0);
+    t.ExpectTrue("AI.1 turret node cooked", turretNode >= 0);
+    t.ExpectClose("AI.2 node carries its mesh in mesh space (3 verts)",
+        nm.Meshes[nm.Nodes[hullNode].MeshIndex].Primitives[0].Mesh.VertexCount, 3);
+    t.ExpectTrue("AI.3 turret's parent is hull", nm.Nodes[turretNode].ParentIndex == hullNode);
+    t.ExpectClose("AI.4 turret local transform kept (+1 Y, not world-baked)", nm.Nodes[turretNode].Local.M42, 1f);
+    Directory.Delete(dir, recursive: true);
 }
 
 // ============================================================================
@@ -3339,8 +3340,8 @@ static ShaderInterface MinimalShader() => new(new[]
 // Section AY — a mesh parented to a joint is not thrown away.
 // ============================================================================
 //
-// <b>The rigged importer took nodes carrying both a mesh and a skin and dropped the rest in
-// silence.</b> Rogue.glb is twelve mesh-bearing nodes, six skinned and six not — a knife, two
+// <b>The old rigged importer took nodes carrying both a mesh and a skin and dropped the rest in
+// silence.</b> The cook is now the one reader, and these are held to what it writes. Rogue.glb is twelve mesh-bearing nodes, six skinned and six not — a knife, two
 // crossbows, a throwable and a cape, each parented to a joint — so half of the tree's reference rig
 // arrived as nothing, with no warning and no count, across several arcs of looking straight at it.
 // A character with empty hands looks exactly like a character.
@@ -3387,30 +3388,31 @@ static ShaderInterface MinimalShader() => new(new[]
         var withGear = Path.Combine(temp, "rig-with-gear.glb");
         scene.ToGltf2().SaveGLB(withGear);
 
-        var model = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("ay/gear"), withGear));
-        var found = model.AttachmentsOrEmpty;
+        ModelData Cooked(string glb) => ModelData.Load(Blix.Recipes.CookCache.Resolve(glb), new ModelNeeds(Skinned: true));
+        var model = Cooked(withGear);
+        var found = model.Attachments();
 
-        t.Expect("AY.1 a mesh parented to a joint survives import", found.Length == 1, $"found {found.Length}");
-        if (found.Length == 1)
+        t.Expect("AY.1 a mesh parented to a joint survives the cook", found.Count == 1, $"found {found.Count}");
+        if (found.Count == 1)
         {
             var a = found[0];
-            t.Expect("AY.1 named by its node", a.Name == "held", $"got '{a.Name}'");
-            t.Expect("AY.2 carrying the joint it hangs from", a.JointName == "tip", $"got '{a.JointName}'");
+            t.Expect("AY.1 named by its node", model.Nodes[a.NodeIndex].Name == "held", $"got '{model.Nodes[a.NodeIndex].Name}'");
+            t.Expect("AY.2 carried by the joint it hangs from", model.Nodes[a.CarrierNode].Name == "tip", $"got '{model.Nodes[a.CarrierNode].Name}'");
 
             // <b>The check the Rogue could not make.</b> `tip` is joint 0 in the skin's own list and
-            // bone 2 in the skeleton. A recorded raw index would name `root` here and every count
-            // would still be right.
+            // bone 2 in the cooked, parent-first skeleton. A recorded raw index would name `root` here
+            // and every count would still be right.
+            var skeletonOf = model.Skeleton!;
             t.Expect("AY.2 and the REMAPPED bone index, not the skin's",
-                a.JointIndex >= 0 && a.JointIndex < model.Skeleton.BoneCount
-                && model.Skeleton.Bones[a.JointIndex].Name == "tip",
-                $"bone[{a.JointIndex}] is '{(a.JointIndex >= 0 && a.JointIndex < model.Skeleton.BoneCount ? model.Skeleton.Bones[a.JointIndex].Name : "out of range")}'");
-            t.ExpectTrue("AY.2 which is a different number from the skin's", a.JointIndex != 0);
+                a.BoneIndex >= 0 && a.BoneIndex < skeletonOf.BoneCount && skeletonOf.Bones[a.BoneIndex].Name == "tip",
+                $"bone[{a.BoneIndex}] is '{(a.BoneIndex >= 0 && a.BoneIndex < skeletonOf.BoneCount ? skeletonOf.Bones[a.BoneIndex].Name : "out of range")}'");
+            t.ExpectTrue("AY.2 which is a different number from the skin's", a.BoneIndex != 0);
 
-            t.Expect("AY.3 with its geometry", a.Primitives.Length == 1 && a.Primitives[0].Mesh.VertexCount == 3);
+            var carried = model.Meshes[model.Nodes[a.NodeIndex].MeshIndex].Primitives;
+            t.Expect("AY.3 with its geometry", carried.Count == 1 && carried[0].Mesh.VertexCount == 3);
 
-            // Unbaked: the static builder bakes a world matrix into positions, which is wrong for
-            // something carried by a hand. Identity goes in; the placement rides on LocalTransform.
-            var verts = a.Primitives[0].Mesh;
+            // Unbaked: in mesh space, not baked to the joint's world position. The placement rides on Local.
+            var verts = carried[0].Mesh;
             t.ExpectTrue("AY.3 in its own space, not baked to the joint's world position",
                 verts.Bounds.Min.Y > -0.001f && verts.Bounds.Max.Y < 0.001f);
         }
@@ -3424,9 +3426,9 @@ static ShaderInterface MinimalShader() => new(new[]
         var withScenery = Path.Combine(temp, "rig-with-scenery.glb");
         loose.ToGltf2().SaveGLB(withScenery);
 
-        var sceneryModel = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("ay/scenery"), withScenery));
+        var sceneryModel = Cooked(withScenery);
         t.Expect("AY.4 a static mesh NOT under a joint is not an attachment",
-            sceneryModel.AttachmentsOrEmpty.Length == 0, $"found {sceneryModel.AttachmentsOrEmpty.Length}");
+            sceneryModel.Attachments().Count == 0, $"found {sceneryModel.Attachments().Count}");
 
         // And a rig with nothing attached reports nothing, with its body untouched — because the
         // collection walks every mesh node and a bug there would show up as either.
@@ -3435,11 +3437,13 @@ static ShaderInterface MinimalShader() => new(new[]
         var bareGlb = Path.Combine(temp, "rig-bare.glb");
         bare.ToGltf2().SaveGLB(bareGlb);
 
-        var bareModel = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("ay/bare"), bareGlb));
-        t.Expect("AY.5 a rig with nothing attached reports none", bareModel.AttachmentsOrEmpty.Length == 0);
+        var bareModel = Cooked(bareGlb);
+        t.Expect("AY.5 a rig with nothing attached reports none", bareModel.Attachments().Count == 0);
+        var bareSkinned = bareModel.SkinnedPrimitives(0).ToArray();
+        var scenerySkinned = sceneryModel.SkinnedPrimitives(0).ToArray();
         t.Expect("AY.5 and its skinned primitives are unchanged",
-            bareModel.Primitives.Length == sceneryModel.Primitives.Length
-            && bareModel.Primitives[0].Mesh.VertexCount == sceneryModel.Primitives[0].Mesh.VertexCount);
+            bareSkinned.Length == scenerySkinned.Length && bareSkinned.Length > 0
+            && bareSkinned[0].Mesh.VertexCount == scenerySkinned[0].Mesh.VertexCount);
 
         // ── AY.7 what the import leaves behind, said out loud ───────────────
         // <b>A bare `continue` used to sit where this reporting is.</b> A mesh weighted to a second
@@ -3462,37 +3466,43 @@ static ShaderInterface MinimalShader() => new(new[]
         var twoSkinPath = Path.Combine(temp, "two-skins.glb");
         twoSkins.ToGltf2().SaveGLB(twoSkinPath);
 
-        var twoSkinModel = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("ay/two"), twoSkinPath));
-        // Nothing is left behind any more. Both of this file's refusals — a mesh on a second skin,
-        // a static mesh under no joint — were this importer's rules rather than the format's, and
-        // both are gone. The fixture's loose_prop is now a static part instead of a casualty.
-        t.Expect("AY.7 both skins are present",
-            twoSkinModel.SkinsOrEmpty.Length == 2, $"{twoSkinModel.SkinsOrEmpty.Length}");
+        var twoSkinModel = Cooked(twoSkinPath);
+        // Nothing is left behind: a mesh on a second skin and a static mesh under no joint both arrive.
+        t.Expect("AY.7 both skins are present", twoSkinModel.Skins.Count == 2, $"{twoSkinModel.Skins.Count}");
         t.ExpectTrue("AY.7 and primitives from both of them arrive",
-            twoSkinModel.Primitives.Any(p => p.SkinIndex == 0)
-            && twoSkinModel.Primitives.Any(p => p.SkinIndex == 1));
+            twoSkinModel.SkinnedPrimitives(0).Any() && twoSkinModel.SkinnedPrimitives(1).Any());
 
-        var looseParts = twoSkinModel.StaticPartsOrEmpty;
+        // A static part is a mesh node that is neither skinned nor carried by an animated node.
+        static string[] StaticParts(ModelData m)
+        {
+            var carried = m.Attachments().Select(x => x.NodeIndex).ToHashSet();
+            return Enumerable.Range(0, m.Nodes.Count)
+                .Where(n => m.Nodes[n].MeshIndex >= 0 && m.Nodes[n].SkinIndex < 0 && !carried.Contains(n))
+                .Select(n => m.Nodes[n].Name).ToArray();
+        }
+
+        var looseParts = StaticParts(twoSkinModel);
         t.ExpectTrue($"AY.7 a static mesh under no joint is READ, not dropped (got {looseParts.Length})",
-            looseParts.Any(x => x.Name == "loose_prop"));
+            looseParts.Contains("loose_prop"));
+        var looseNode = twoSkinModel.FindNode("loose_prop");
         t.ExpectTrue("AY.7 and it carries its geometry",
-            looseParts.All(x => x.Primitives.Length > 0 && x.Primitives.All(p => p.Mesh.VertexCount > 0)));
+            looseNode >= 0 && twoSkinModel.Meshes[twoSkinModel.Nodes[looseNode].MeshIndex].Primitives.All(p => p.Mesh.VertexCount > 0));
 
         // <b>The control that stops static parts swallowing everything.</b> Equipment hangs off a
         // joint and must stay an ATTACHMENT — if it fell through to here it would stop following the
         // hand that holds it, which is a silent downgrade rather than a visible loss.
         t.Expect("AY.7 CONTROL an attachment is NOT also a static part",
-            model.StaticPartsOrEmpty.Length == 0, $"got {model.StaticPartsOrEmpty.Length}");
+            StaticParts(model).Length == 0, $"got {string.Join(",", StaticParts(model))}");
         t.Expect("AY.7 CONTROL a rig with nothing loose has no static parts",
-            bareModel.StaticPartsOrEmpty.Length == 0, $"got {bareModel.StaticPartsOrEmpty.Length}");
+            StaticParts(bareModel).Length == 0, $"got {string.Join(",", StaticParts(bareModel))}");
 
         // ── AY.6 the joint world transforms, which were computed and dropped ─
         // <b>The palette is not the joints' transforms.</b> Matrices[i] is InverseBindPose · world —
         // a map from a REST vertex to its posed position, which is what a skinned shader wants and
         // the wrong thing entirely for a knife that has no rest vertices in this skin's space.
         // The palette built the worlds as an intermediate and threw them away one line later.
-        var skel = model.Skeleton;
-        var skinOf = model.SkinsOrEmpty[0].Binding;
+        var skel = model.Skeleton!;
+        var skinOf = model.Skins[0].Binding;
         var rest = skel.CreateRestPose();
         var palette = new BonePalette(skinOf.JointCount);
         var worlds = new BoneWorlds(skel);
@@ -3610,10 +3620,11 @@ static ShaderInterface MinimalShader() => new(new[]
         var path = Path.Combine(temp, "eight-influences.glb");
         scene.ToGltf2().SaveGLB(path);
 
-        var model = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("bc/eight"), path));
-        var mesh = model.Primitives[0].Mesh;
+        ModelData Cooked(string glb) => ModelData.Load(Blix.Recipes.CookCache.Resolve(glb), new ModelNeeds(Skinned: true));
+        var model = Cooked(path);
+        var mesh = model.SkinnedPrimitives(0).First().Mesh;
 
-        // The skinned vertex is pos(3) normal(3) uv(2) joints(4) weights(4) tangent(4) floats.
+        // The cooked 80-byte skinned vertex is pos(3) normal(3) uv(2) joints(4) weights(4) tangent(4) floats.
         static (float[] Joints, float[] Weights) InfluencesOf(MeshData m, int vertex)
         {
             var f = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(
@@ -3664,8 +3675,8 @@ static ShaderInterface MinimalShader() => new(new[]
         var fourPath = Path.Combine(temp, "four-influences.glb");
         fourScene.ToGltf2().SaveGLB(fourPath);
 
-        var fourModel = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("bc/four"), fourPath));
-        var (fidx, fwts) = InfluencesOf(fourModel.Primitives[0].Mesh, 0);
+        var fourModel = Cooked(fourPath);
+        var (fidx, fwts) = InfluencesOf(fourModel.SkinnedPrimitives(0).First().Mesh, 0);
 
         // <b>Compared against what is IN THE FILE, not against what was handed to the builder.</b>
         // SharpGLTF sorts influences by weight as it writes, so (0.1, 0.6, 0.2, 0.1) arrives on disk
@@ -3685,7 +3696,7 @@ static ShaderInterface MinimalShader() => new(new[]
         // attributes ignored was an older collector describing its shared allow-list rather than
         // what this import actually consumed.
         t.ExpectTrue("BC.4 complete additional influence sets are not falsely reported as ignored",
-            model.IgnoredOrEmpty.All(i => i.Semantic is not ("JOINTS_1" or "WEIGHTS_1")));
+            model.Ignored.All(i => i.Semantic is not ("JOINTS_1" or "WEIGHTS_1")));
     }
     finally
     {
@@ -3705,7 +3716,7 @@ static ShaderInterface MinimalShader() => new(new[]
 // The format was never the obstacle. A glTF skin is self-contained — its own joint list, its own
 // inverse bind matrices — and every skinned node names the skin it uses. N skins are N skeletons
 // and there is nothing to reconcile between them. What was missing was a place to put them:
-// GltfModel had one Skeleton and GltfPrimitive had no way to say which skin it belonged to.
+// the old source importer's model had one Skeleton and no way for a primitive to say which skin it belonged to.
 //
 // The fault worth testing is not "are both meshes present" — it is that EACH SKIN ORDERS ITS OWN
 // JOINTS. Reusing the first skin's remap gives indices that are in range and name the wrong bones,
@@ -3756,12 +3767,12 @@ static ShaderInterface MinimalShader() => new(new[]
         // Also as text, so BB.3 below can move a node the builder will not let it move.
         built.SaveGLTF(Path.Combine(temp, "two-orders.gltf"));
 
-        var m2 = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("bb/two"), path));
+        ModelData Cooked(string file) => ModelData.Load(Blix.Recipes.CookCache.Resolve(file), new ModelNeeds(Skinned: true));
+        var m2 = Cooked(path);
 
-        t.Expect("BB.1 both skins are read", m2.SkinsOrEmpty.Length == 2, $"{m2.SkinsOrEmpty.Length}");
-        t.Expect("BB.1 and every primitive says which skin drives it",
-            m2.Primitives.Select(p => p.SkinIndex).Distinct().OrderBy(x => x).SequenceEqual(new[] { 0, 1 }),
-            string.Join(",", m2.Primitives.Select(p => p.SkinIndex)));
+        t.Expect("BB.1 both skins are read", m2.Skins.Count == 2, $"{m2.Skins.Count}");
+        t.ExpectTrue("BB.1 and every skinned primitive says which skin drives it",
+            m2.SkinnedPrimitives(0).Any() && m2.SkinnedPrimitives(1).Any());
 
         // Bone indices live at float slot 8 of the skinned vertex (pos 3, normal 3, uv 2).
         static int FirstBoneIndex(MeshData mesh)
@@ -3773,17 +3784,18 @@ static ShaderInterface MinimalShader() => new(new[]
 
         // ── BB.2 THE ONE THAT MATTERS ───────────────────────────────────────
         //
-        // Each skeleton is sorted topologically, so 'tip'/'btip' is bone 2 in BOTH regardless of the
-        // order its skin declared them. Sharing skin A's remap sends skin B's raw index 2 to bone 1.
-        for (var i = 0; i < m2.Primitives.Length; i++)
+        // A vertex names a joint of ITS skin, and each skin's binding takes that joint to a bone of the one
+        // hierarchy. Each skin orders its own joints, so reusing skin A's order sends skin B's 'btip' to
+        // another bone: in range, plausible, wrong.
+        for (var s = 0; s < m2.Skins.Count; s++)
+        foreach (var prim in m2.SkinnedPrimitives(s))
         {
-            var prim = m2.Primitives[i];
-            var skel = m2.SkinsOrEmpty[prim.SkinIndex].Skeleton;
-            var bone = FirstBoneIndex(prim.Mesh);
-            var named = (uint)bone < (uint)skel.BoneCount ? skel.Bones[bone].Name : "(out of range)";
+            var binding = m2.Skins[s].Binding;
+            var joint = FirstBoneIndex(prim.Mesh);
+            var named = (uint)joint < (uint)binding.JointCount ? binding.Skeleton.Bones[binding.Bones[joint]].Name : "(out of range)";
             t.ExpectTrue(
-                $"BB.2 skin {prim.SkinIndex}'s vertices name its own leaf joint, not another skin's bone "
-                + $"(bone {bone} = '{named}')",
+                $"BB.2 skin {s}'s vertices name its own leaf joint, not another skin's bone "
+                + $"(joint {joint} = '{named}')",
                 named is "tip" or "btip");
         }
 
@@ -3808,28 +3820,24 @@ static ShaderInterface MinimalShader() => new(new[]
             File.WriteAllText(framePath, doc.ToJsonString());
         }
 
-        var unmoved = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("bb/unmoved"), Path.Combine(temp, "two-orders.gltf")));
-        var m3 = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("bb/frames"), framePath));
-        t.Expect("BB.3 the displaced file still yields two skins",
-            m3.SkinsOrEmpty.Length == 2, $"{m3.SkinsOrEmpty.Length}");
-        if (m3.SkinsOrEmpty.Length == 2 && unmoved.SkinsOrEmpty.Length == 2)
+        var unmoved = Cooked(Path.Combine(temp, "two-orders.gltf"));
+        var m3 = Cooked(framePath);
+        t.Expect("BB.3 the displaced file still yields two skins", m3.Skins.Count == 2, $"{m3.Skins.Count}");
+        if (m3.Skins.Count == 2 && unmoved.Skins.Count == 2)
         {
-            var before = unmoved.SkinsOrEmpty[1].SkeletonPlacement.Translation;
-            var after = m3.SkinsOrEmpty[1].SkeletonPlacement.Translation;
+            var before = unmoved.Skins[1].Placement.Translation;
+            var after = m3.Skins[1].Placement.Translation;
             t.ExpectTrue($"BB.3 moving a skinned mesh node does not move its skin ({before} vs {after})",
                 (before - after).Length() < 1e-5f);
         }
 
-        // ── BB.3b clips against disagreeing skins are REFUSED, not guessed ──
+        // ── BB.3b clips drive NODES, whatever order each skin declares ──────
         //
-        // glTF animation channels target NODES and say nothing about skins; our AnimationClip stores
-        // bone INDICES against one skeleton. Those two facts only reconcile while every skin orders
-        // its joints the same way. The BB.2 fixture is exactly a file where they do not — skin A
-        // declares (tip, root, mid) and skin B declares (broot, bmid, btip) — so one set of clips
-        // built against the first would drive the second's bones wrongly and silently.
-        //
-        // Refused rather than approximated. The two-orders fixture has no animations, so the refusal
-        // is exercised on one that does.
+        // glTF animation channels target NODES and say nothing about skins. The old source importer stored
+        // a clip as bone indices against ONE skin's skeleton, so it had to refuse a file whose skins order
+        // their joints differently (skin A declares (tip, root, mid), skin B (broot, bmid, btip)). The cook
+        // has no such limit: one animated hierarchy over every skin's joints, a track per animated NODE, and
+        // each skin bound into it. So the file is read, and the clip drives the bone of the node it names.
         var animated = new SharpGLTF.Scenes.SceneBuilder();
         animated.AddSkinnedMesh(Weighted("x", 0), Matrix4x4.Identity, tipA, rootA, midA);
         animated.AddSkinnedMesh(Weighted("y", 2), Matrix4x4.Identity, rootB, midB, tipB);
@@ -3837,9 +3845,11 @@ static ShaderInterface MinimalShader() => new(new[]
         var animatedPath = Path.Combine(temp, "two-orders-animated.glb");
         animated.ToGltf2().SaveGLB(animatedPath);
 
-        t.ExpectThrows<AssetImportException>(
-            "BB.3b skins that order joints differently refuse one clip set rather than mis-drive it",
-            () => new GltfImporter().Import(new AssetImportContext(AssetId.Parse("bb/anim"), animatedPath)));
+        var animatedModel = Cooked(animatedPath);
+        var track = animatedModel.Clips.SelectMany(c => c.Tracks).Single();
+        t.Expect("BB.3b skins that order joints differently are read, and the clip drives the node it names ('root')",
+            animatedModel.Skins.Count == 2 && animatedModel.Skeleton!.Bones[track.BoneIndex].Name == "root",
+            $"track on bone {track.BoneIndex} '{animatedModel.Skeleton?.Bones[track.BoneIndex].Name}'");
 
         // ── BB.4 CONTROL: one skin is untouched ─────────────────────────────
         //
@@ -3850,14 +3860,12 @@ static ShaderInterface MinimalShader() => new(new[]
         var onePath = Path.Combine(temp, "one-skin.glb");
         one.ToGltf2().SaveGLB(onePath);
 
-        var m1 = new GltfImporter().Import(new AssetImportContext(AssetId.Parse("bb/one"), onePath));
-        t.Expect("BB.4 CONTROL a single-skin file reports exactly one skin",
-            m1.SkinsOrEmpty.Length == 1, $"{m1.SkinsOrEmpty.Length}");
-        t.ExpectTrue("BB.4 CONTROL its primitives all sit on skin 0",
-            m1.Primitives.All(p => p.SkinIndex == 0));
-        t.ExpectTrue("BB.4 CONTROL and the singular Skeleton still means skin 0",
-            ReferenceEquals(m1.SkinsOrEmpty[0].Skeleton, m1.Skeleton)
-            || m1.SkinsOrEmpty[0].Skeleton.BoneCount == m1.Skeleton.BoneCount);
+        var m1 = Cooked(onePath);
+        t.Expect("BB.4 CONTROL a single-skin file reports exactly one skin", m1.Skins.Count == 1, $"{m1.Skins.Count}");
+        t.ExpectTrue("BB.4 CONTROL its skinned primitives all sit on skin 0",
+            m1.SkinnedPrimitives(0).Count() == m1.Meshes.Where(m => m.Skinned).Sum(m => m.Primitives.Count));
+        t.ExpectTrue("BB.4 CONTROL and its skeleton is skin 0's joints, in skin 0's order",
+            m1.Skins[0].Binding.Bones.Select((b, j) => b == j).All(x => x) && m1.Skins[0].Binding.JointCount == m1.Skeleton!.BoneCount);
     }
     finally
     {
@@ -3924,66 +3932,55 @@ static ShaderInterface MinimalShader() => new(new[]
         attrs["_CUSTOM_THING"] = attrs["TEXCOORD_0"]!.DeepClone();
         File.WriteAllText(extra, json.ToJsonString());
 
-        var plainWithoutTangents = new GltfStaticImporter().ImportNodes(
-            new AssetImportContext(AssetId.Parse("ba/plain-default"), plain));
-        var plainModel = new GltfStaticImporter().ImportNodes(
-            new AssetImportContext(AssetId.Parse("ba/plain"), plain, includeTangents: true));
-        var extraModel = new GltfStaticImporter().ImportNodes(
-            new AssetImportContext(AssetId.Parse("ba/extra"), extra, includeTangents: true));
-        var colouredModel = new GltfStaticImporter().ImportNodes(
-            new AssetImportContext(AssetId.Parse("ba/extra-colour"), extra, includeColour: true));
-        var flatExtraModel = new GltfStaticImporter().Import(
-            new AssetImportContext(AssetId.Parse("ba/extra-flat"), extra, includeTangents: true));
+        // What the cook did not carry is a fact of the FILE, recorded in it: the cook writes the complete
+        // vertex (tangents, both UV sets, colour), so a narrower load is a choice of layout, not a loss.
+        ModelData Cooked(string file, ModelNeeds needs) => ModelData.Load(Blix.Recipes.CookCache.Resolve(file), needs);
+        var plainModel = Cooked(plain, new ModelNeeds(Tangents: true, Skinned: false));
+        var plainNarrow = Cooked(plain, new ModelNeeds(Skinned: false));
+        var extraModel = Cooked(extra, new ModelNeeds(Tangents: true, Skinned: false));
+        var extraNarrow = Cooked(extra, new ModelNeeds(Skinned: false));
 
-        // ── BA.1 THE CONTROL FIRST ──────────────────────────────────────────
-        //
-        // A file with nothing unread must report nothing. Without this, a sweep that returned every
-        // attribute it saw — including POSITION and NORMAL — would pass every other check here and
-        // make the report worthless by crying constantly.
+        // ── BA.1 the control first ──────────────────────────────────────────
         t.Expect("BA.1 CONTROL a file with no unread attributes reports none",
-            plainModel.IgnoredOrEmpty.Length == 0,
-            $"got {string.Join(", ", plainModel.IgnoredOrEmpty.Select(i => i.Semantic))}");
-        t.ExpectTrue("BA.1 and the same file reports TANGENT when the selected layout omits it",
-            plainWithoutTangents.IgnoredOrEmpty.Any(i => i.Semantic == "TANGENT"));
+            plainModel.Ignored.Count == 0,
+            $"got {string.Join(", ", plainModel.Ignored.Select(i => i.Semantic))}");
+        t.ExpectTrue("BA.1 and a narrower load reports nothing more: unread is the file's, not the layout's",
+            plainNarrow.Ignored.Count == 0
+            && extraNarrow.Ignored.Select(i => i.Semantic).SequenceEqual(extraModel.Ignored.Select(i => i.Semantic)));
 
         // ── BA.2 what it does catch ─────────────────────────────────────────
-        var names = extraModel.IgnoredOrEmpty.Select(i => i.Semantic).ToArray();
-        t.ExpectTrue($"BA.2 a second UV set is reported (got {names.Length}: {string.Join(", ", names)})",
-            names.Contains("TEXCOORD_1"));
+        var names = extraModel.Ignored.Select(i => i.Semantic).ToArray();
 
         // The subtractive sweep's whole reason for being: nobody wrote "_CUSTOM_THING" into a list.
-        t.ExpectTrue("BA.2 and so is an attribute nobody anticipated, which a fixed list would miss",
+        t.ExpectTrue($"BA.2 an attribute nobody anticipated is reported, which a fixed list would miss (got {string.Join(", ", names)})",
             names.Contains("_CUSTOM_THING"));
-        t.ExpectTrue("BA.2 the flat static importer reports the same unread second UV set",
-            flatExtraModel.IgnoredOrEmpty.Any(i => i.Semantic == "TEXCOORD_1"));
+        t.ExpectTrue("BA.2 the second UV set the cook carries into the complete vertex is not reported",
+            !names.Contains("TEXCOORD_1"));
 
         t.Expect("BA.2 the semantics Blix DOES read are not reported as ignored",
             !names.Contains("POSITION") && !names.Contains("NORMAL") && !names.Contains("TEXCOORD_0"),
             string.Join(", ", names));
 
-        var uv1 = extraModel.IgnoredOrEmpty.First(i => i.Semantic == "TEXCOORD_1");
-        t.Expect("BA.2 counted per primitive", uv1.Primitives == 1, $"{uv1.Primitives}");
-        t.ExpectTrue("BA.2 the coloured layout consumes TEXCOORD_1 instead of merely allow-listing it",
-            colouredModel.IgnoredOrEmpty.All(i => i.Semantic != "TEXCOORD_1"));
+        var custom = extraModel.Ignored.First(i => i.Semantic == "_CUSTOM_THING");
+        t.Expect("BA.2 counted per primitive", custom.Primitives == 1, $"{custom.Primitives}");
 
-        // ── BA.3 explanations name the relevant import capability ───────────
-        // A semantic alone is not enough to say what happened: an additional influence pair is
-        // consumed by the rigged path but irrelevant to a static layout. The explanation points at
-        // that distinction without claiming the mode-aware collector dropped data it actually read.
-        t.ExpectTrue("BA.3 a second UV set explains itself as a missing capability",
-            uv1.Explanation.Contains("UV", StringComparison.Ordinal));
+        // ── BA.3 explanations say what the cook did and did not carry ──────
+        // A semantic alone is not enough to say what happened: an influence pair is read on a skinned mesh
+        // and meaningless on a mesh no skin drives. The explanation names both, against the complete vertex.
+        t.ExpectTrue("BA.3 a third UV set explains itself against the two the cooked vertex carries",
+            new UnreadAttribute("TEXCOORD_2", 1).Explanation.Contains("two the cooked vertex carries", StringComparison.Ordinal));
 
         var joints1 = new UnreadAttribute("JOINTS_1", 3);
-        t.ExpectTrue($"BA.3 JOINTS_1 distinguishes static omission from rigged consumption ({joints1.Explanation})",
-            joints1.Explanation.Contains("static", StringComparison.Ordinal)
-            && joints1.Explanation.Contains("rigged", StringComparison.Ordinal));
+        t.ExpectTrue($"BA.3 JOINTS_1 names both reasons an influence pair goes unread ({joints1.Explanation})",
+            joints1.Explanation.Contains("no skin drives", StringComparison.Ordinal)
+            && joints1.Explanation.Contains("complete and contiguous", StringComparison.Ordinal));
 
         t.ExpectTrue("BA.3 and an underscore attribute is named as application-specific",
             new UnreadAttribute("_BATCHID", 1).Explanation.Contains("application-specific", StringComparison.Ordinal));
 
-        // ── BA.4 likely importer-mode mistakes come first ───────────────────
-        // A skin channel on a static import is the strongest signal that the caller chose the wrong
-        // importer, so it leads ordinary omitted capabilities and application metadata.
+        // ── BA.4 the likeliest authoring mistake comes first ────────────────
+        // A skin channel on a mesh no skin drives says the mesh lost its skin on export: it leads ordinary
+        // omitted capabilities and application metadata.
         // Each alias borrows an accessor of a type its semantic actually allows: TEXCOORD_1 a VEC2,
         // COLOR_1 a VEC3, JOINTS_1 the VEC4 tangent. Declared in an order that puts JOINTS_1 in the
         // middle, so passing cannot be an accident of insertion order.
@@ -3995,10 +3992,9 @@ static ShaderInterface MinimalShader() => new(new[]
         mixedAttrs["COLOR_1"] = mixedAttrs["NORMAL"]!.DeepClone();
         File.WriteAllText(mixedPath, mixedJson.ToJsonString());
 
-        var mixedModel = new GltfStaticImporter().ImportNodes(
-            new AssetImportContext(AssetId.Parse("ba/mixed"), mixedPath, includeTangents: true));
-        var first = mixedModel.IgnoredOrEmpty.FirstOrDefault()?.Semantic;
-        t.Expect("BA.4 the skin channel that suggests the wrong importer is listed first",
+        var mixedModel = Cooked(mixedPath, new ModelNeeds(Tangents: true, Skinned: false));
+        var first = mixedModel.Ignored.FirstOrDefault()?.Semantic;
+        t.Expect("BA.4 a skin channel on a mesh no skin drives is listed first",
             first == "JOINTS_1", $"got '{first}'");
     }
     finally
@@ -4064,15 +4060,11 @@ static ShaderInterface MinimalShader() => new(new[]
         var coloured = BuildGltf(Path.Combine(temp, "coloured.glb"), withColour: true);
         var plain = BuildGltf(Path.Combine(temp, "plain.glb"), withColour: false);
 
+        // The cook writes the complete vertex once; a load asks for the layout its pipeline declares.
         static MeshData First(string path, bool includeColour, bool includeTangents = false)
         {
-            var m = new GltfStaticImporter().ImportNodes(
-                new AssetImportContext(AssetId.Parse("az"), path, includeTangents: includeTangents, includeColour: includeColour));
-            foreach (var n in m.Nodes)
-            {
-                if (n.Primitives.Length > 0) return n.Primitives[0].Mesh;
-            }
-            throw new InvalidOperationException("no primitive");
+            var m = ModelData.Load(Blix.Recipes.CookCache.Resolve(path), new ModelNeeds(includeTangents, includeColour, Skinned: false));
+            return m.Meshes.First(x => x.Primitives.Count > 0).Primitives[0].Mesh;
         }
 
         // Colour lives in the last four bytes of the vertex, as UByte4Norm — after TWO UV sets since
@@ -4176,15 +4168,9 @@ static ShaderInterface MinimalShader() => new(new[]
             Math.Abs(combinedColours[0] - 64) <= 2 && Math.Abs(combinedColours[1] - 128) <= 2
             && Math.Abs(combinedColours[2] - 191) <= 2, string.Join(",", combinedColours));
 
-        // CONTROL for AZ.5: each flag ALONE is accepted, so the refusal above is about the
-        // combination and not about tangents having quietly stopped working.
-        var tangentsOnly = new GltfStaticImporter().ImportNodes(new AssetImportContext(
-            AssetId.Parse("az"), coloured, includeTangents: true));
-        var tangentStride = 0;
-        foreach (var n in tangentsOnly.Nodes)
-        {
-            if (n.Primitives.Length > 0) { tangentStride = n.Primitives[0].Mesh.Layout.Stride; break; }
-        }
+        // CONTROL for AZ.5: each flag ALONE gives its own layout, so the combined one above is the
+        // combination and not tangents having quietly stopped working.
+        var tangentStride = First(coloured, includeColour: false, includeTangents: true).Layout.Stride;
         t.Expect("AZ.5 CONTROL tangents alone still import",
             tangentStride == 48, $"stride {tangentStride}");
     }
@@ -4205,9 +4191,10 @@ static ShaderInterface MinimalShader() => new(new[]
 // moment the event occurred. It also sat in Blix.Diagnostics, a tier above two of the three cooked
 // readers, so half the loaders could not have referenced it anyway.
 //
-// These check the channel and the emitters, with the control that matters most: the same asset,
-// loaded with and without a cooked sibling, must report differently. A reporter that always says
-// "Cooked" is worse than no reporter, because it is believed.
+// These check the channel and the emitters, with the control that matters most: a source load and a
+// cooked load must report differently. A reporter that always says "Cooked" is worse than no reporter,
+// because it is believed. glTF reaches the runtime cooked only (the cook is its one reader), so the
+// source half is a format the runtime still reads from source: an OBJ through WavefrontParts.
 {
     var temp = Path.Combine(Path.GetTempPath(), $"blix-ax-{Guid.NewGuid():N}");
     Directory.CreateDirectory(temp);
@@ -4227,17 +4214,20 @@ static ShaderInterface MinimalShader() => new(new[]
 
         // <b>Silent unless asked.</b> A game's load path pays nothing for an instrument nobody
         // turned on, which is the same rule DebugState.Enabled follows one layer up.
+        var cookedPath = Blix.Recipes.CookCache.Resolve(glb);
         AssetLoadLog.Enabled = false;
         AssetLoadLog.Drain();
-        new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("ax/off"), glb));
+        Blix.ModelData.Load(cookedPath);
         t.Expect("AX.1 a load reports nothing while the log is off", AssetLoadLog.Peek().Length == 0,
             $"got {AssetLoadLog.Peek().Length}");
 
-        // ── uncooked ────────────────────────────────────────────────────────
+        // ── uncooked: a format the runtime still reads from source ──────────
+        var obj = Path.Combine(temp, "reported.obj");
+        File.WriteAllText(obj, "v 0 0 0\nv 1 0 0\nv 0 0 1\nvn 0 1 0\nf 1//1 2//1 3//1\n");
         AssetLoadLog.Start();
-        new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("ax/src"), glb));
+        WavefrontParts.Import(obj);
         var uncooked = AssetLoadLog.Drain();
-        var meshReport = uncooked.SingleOrDefault(r => r.SourcePath == glb);
+        var meshReport = uncooked.SingleOrDefault(r => r.SourcePath == obj);
 
         t.ExpectTrue("AX.2 an uncooked load is reported at all", meshReport is not null);
         t.Expect("AX.2 and reports Source", meshReport!.Mode == AssetLoadMode.Source, $"got {meshReport.Mode}");
@@ -4246,16 +4236,14 @@ static ShaderInterface MinimalShader() => new(new[]
         t.ExpectTrue("AX.2 carrying a cost, not just a branch", meshReport.LoadMs > 0 && meshReport.Bytes > 0);
 
         // ── cooked ──────────────────────────────────────────────────────────
-        // The engine's reader reports a cooked load; the cook's importer only ever reads the source.
-        var cookedPath = Path.ChangeExtension(glb, ".blixmesh");
-        Blix.Recipes.MeshRecipe.CookToBlixMesh(glb, cookedPath);
+        // The engine's reader reports a cooked load: the glTF, as the cook wrote it.
         AssetLoadLog.Start();
         Blix.ModelData.Load(cookedPath);
         var afterCook = AssetLoadLog.Drain();
         var cookedReport = afterCook.SingleOrDefault(r => r.SourcePath == cookedPath);
 
         t.ExpectTrue("AX.3 a cooked load is reported", cookedReport is not null);
-        t.Expect("AX.3 and reports Cooked — the same asset, a different answer",
+        t.Expect("AX.3 and reports Cooked: a source load and a cooked load answer differently",
             cookedReport!.Mode == AssetLoadMode.Cooked, $"got {cookedReport.Mode}");
         t.ExpectTrue("AX.3 naming the artifact it used",
             cookedReport.CookedPath?.EndsWith(".blixmesh", StringComparison.Ordinal) == true);
@@ -4267,7 +4255,7 @@ static ShaderInterface MinimalShader() => new(new[]
         t.Expect("AX.4 Drain clears what it returned", AssetLoadLog.Peek().Length == 0);
 
         AssetLoadLog.Start();
-        new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("ax/again"), glb));
+        Blix.ModelData.Load(cookedPath);
         var firstPeek = AssetLoadLog.Peek().Length;
         var secondPeek = AssetLoadLog.Peek().Length;
         t.Expect("AX.4 Peek does not clear", firstPeek > 0 && secondPeek == firstPeek,
@@ -4440,30 +4428,25 @@ static ShaderInterface MinimalShader() => new(new[]
         scene.AddRigidMesh(mesh, new SharpGLTF.Scenes.NodeBuilder("only"));
         scene.ToGltf2().SaveGLB(glbPath);
 
-        // Uncooked first, so the check cannot pass by the cooked path never being taken.
-        var beforeCook = new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("aw/glb"), glbPath));
-        t.Expect("AW.9 a .glb imports statically before it is cooked", beforeCook.Primitives.Length == 1);
-
+        // The cook is the one way a .glb reaches the runtime, and CookCache is its front door: a source with no
+        // current sibling cooks into the cache; once a current sibling exists, the sibling is used as it is.
+        // Uncooked first, so the check cannot pass by the sibling path never being taken.
+        static int Vertices(string cooked) => ModelData.Load(cooked, new ModelNeeds(Skinned: false)).Flattened().Sum(x => x.Primitive.Mesh.VertexCount);
         var cookedGlb = Path.ChangeExtension(glbPath, ".blixmesh");
-        Blix.Recipes.MeshRecipe.CookToBlixMesh(glbPath, cookedGlb);
+        var beforeCook = Blix.Recipes.CookCache.Resolve(glbPath);
+        t.Expect("AW.9 a .glb with no sibling resolves through the cook, into the cache",
+            beforeCook != cookedGlb && File.Exists(beforeCook), beforeCook);
+
+        // Cooked as a project ships it: CookCache takes a sibling only when it is current for the shipped recipe
+        // and settings (MeshRecipe.IsShippedCurrent), not merely present.
+        Blix.Recipes.MeshRecipe.CookShipped(glbPath, cookedGlb);
         t.ExpectTrue("AW.9 and the cook writes a sibling", File.Exists(cookedGlb));
 
-        // Caught rather than allowed to escape: the failure mode being guarded against is a refusal,
-        // and an uncaught one would take the whole suite down with it — losing every check after
-        // this point, which is how one bug hides the next.
-        try
-        {
-            var afterCook = new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("aw/glb2"), glbPath));
-            t.Expect("AW.9 and it still imports once a cooked sibling exists", afterCook.Primitives.Length == 1);
-            t.Expect("AW.9 with the same geometry as before it was cooked",
-                afterCook.Primitives[0].Mesh.VertexCount == beforeCook.Primitives[0].Mesh.VertexCount,
-                $"{beforeCook.Primitives[0].Mesh.VertexCount} -> {afterCook.Primitives[0].Mesh.VertexCount}");
-        }
-        catch (AssetImportException refused)
-        {
-            t.Fail("AW.9 and it still imports once a cooked sibling exists", refused.Message);
-            t.Fail("AW.9 with the same geometry as before it was cooked", "the import was refused");
-        }
+        var afterCook = Blix.Recipes.CookCache.Resolve(glbPath);
+        t.Expect("AW.9 and a current sibling is then used as it is", afterCook == cookedGlb, afterCook);
+        t.Expect("AW.9 with the same geometry either way",
+            Vertices(afterCook) == Vertices(beforeCook) && Vertices(afterCook) > 0,
+            $"{Vertices(beforeCook)} -> {Vertices(afterCook)}");
 
         // ── The three recipes, as declared ───────────────────────────────────
         // <b>These check the DECLARATIONS, not the cooking.</b> A recipe whose id does not match
@@ -4521,12 +4504,12 @@ static ShaderInterface MinimalShader() => new(new[]
     }
 }
 
-// Section AV — the importer refuses by NAME, not by whatever the parser threw.
+// Section AV — the cook refuses by NAME, not by whatever the parser threw.
 // ============================================================================
 //
 // <b>This is what lets a tool tell a bad asset from a bug in itself.</b> Every refusal comes out
-// as AssetImportException carrying the path; anything else escaping an importer is a fault in
-// Blix. A tool can then catch exactly one type and let the rest crash, which is the only way a
+// as AssetImportException carrying the path; anything else escaping the cook's front door (CookCache, the
+// one way a tool turns a source into what the engine reads) is a fault in Blix. A tool can then catch exactly one type and let the rest crash, which is the only way a
 // judge both survives bad input AND does not swallow its own faults.
 //
 // Before this, `blix check --rig not-a-glb` exited 134 through the parser's own exception — a
@@ -4544,7 +4527,7 @@ static ShaderInterface MinimalShader() => new(new[]
         var keptInner = false;
         try
         {
-            new GltfImporter().Import(new AssetImportContext(AssetId.Parse("av.bad"), notGltf));
+            Blix.Recipes.CookCache.Resolve(notGltf);
         }
         catch (AssetImportException bad)
         {
@@ -4567,7 +4550,7 @@ static ShaderInterface MinimalShader() => new(new[]
         var single = true;
         try
         {
-            new GltfImporter().Import(new AssetImportContext(AssetId.Parse("av.bad2"), notGltf));
+            Blix.Recipes.CookCache.Resolve(notGltf);
         }
         catch (AssetImportException bad)
         {
@@ -4583,8 +4566,7 @@ static ShaderInterface MinimalShader() => new(new[]
         var missingRefused = false;
         try
         {
-            new GltfImporter().Import(
-                new AssetImportContext(AssetId.Parse("av.gone"), Path.Combine(temp, "gone.glb")));
+            Blix.Recipes.CookCache.Resolve(Path.Combine(temp, "gone.glb"));
         }
         catch (AssetImportException)
         {
@@ -4595,6 +4577,35 @@ static ShaderInterface MinimalShader() => new(new[]
         }
 
         t.ExpectTrue("AV.3 a missing file is refused the same way", missingRefused);
+
+        // And the cooked side, through the engine's reader: a missing .blixmesh resolves to itself, so
+        // the refusal has to come from the open. A corrupt one is the control that the reader's own
+        // checks still answer in the same type.
+        static string RefusedAs(Action read)
+        {
+            try { read(); return "loaded"; }
+            catch (AssetImportException) { return nameof(AssetImportException); }
+            catch (Exception e) { return e.GetType().Name; }
+        }
+
+        var goneCooked = RefusedAs(() => ModelData.Load(Blix.Recipes.CookCache.Resolve(Path.Combine(temp, "gone.blixmesh"))));
+        t.Expect("AV.3b a missing cooked file is refused the same way", goneCooked == nameof(AssetImportException), goneCooked);
+        var corrupt = Path.Combine(temp, "corrupt.blixmesh");
+        File.WriteAllBytes(corrupt, new byte[] { 1, 2, 3 });
+        var corruptCooked = RefusedAs(() => ModelData.Load(corrupt));
+        t.Expect("AV.3c a corrupt cooked file is refused the same way", corruptCooked == nameof(AssetImportException), corruptCooked);
+
+        // Every cooked reader opens inside its refusal, not only the mesh's.
+        foreach (var (name, read) in new (string, Action)[]
+        {
+            (".blixtex", () => Blix.Graphics.Images.BlixTexReader.ReadHandle(Path.Combine(temp, "gone.blixtex"))),
+            (".blixfont", () => Blix.Assets.BlixFontReader.Read(Path.Combine(temp, "gone.blixfont"))),
+            (".blixprobe", () => Blix.Graphics.Images.BlixProbeReader.Read(Path.Combine(temp, "gone.blixprobe"))),
+        })
+        {
+            var answer = RefusedAs(read);
+            t.Expect($"AV.3d a missing {name} is refused the same way", answer == nameof(AssetImportException), answer);
+        }
     }
     finally
     {
@@ -5794,29 +5805,28 @@ static ShaderInterface MinimalShader() => new(new[]
     });
     t.Expect("BP.2b VertexSemantics names each of Blix's seven layouts' attributes where the layout declares them", tableAgrees);
 
-    // A parent translated by +10 on X with a child translated by +1: the child's world is +11, child first.
-    static PbrMaterial Plain(string id, string name) => new(
-        id, name, Vector4.One, null, 0, null, 0, 1f, null, 0, 0f, 0.7f, null, 0, 1f, null, 0, Vector3.Zero, 1f,
-        AlphaMode.Opaque, 0.5f, false);
-    var red = Plain("t#material0", "red");
-    var blue = Plain("t#material1", "blue");
-    var nodes = new GltfNodeModel(new[]
-    {
-        new GltfNode("root", -1, Matrix4x4.CreateTranslation(10f, 0f, 0f), new[] { new GltfPrimitive(a, red) }),
-        new GltfNode("child", 0, Matrix4x4.CreateTranslation(1f, 0f, 0f),
-            new[] { new GltfPrimitive(a, blue), new GltfPrimitive(b, red) }),
-    });
-    var world = nodes.WorldTransforms();
+    // A parent translated by +10 on X with a child translated by +1: the cooked scene graph composes the child's
+    // world (ModelData.World, local x every ancestor's) to +11. Read from a cooked file, not recomputed here.
+    var triangle = new SharpGLTF.Geometry.MeshBuilder<SharpGLTF.Geometry.VertexTypes.VertexPositionNormal>("tri");
+    triangle.UsePrimitive(SharpGLTF.Materials.MaterialBuilder.CreateDefault()).AddTriangle(
+        new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 0, 0, 1, 0),
+        new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(1, 0, 0, 0, 1, 0),
+        new SharpGLTF.Geometry.VertexTypes.VertexPositionNormal(0, 0, 1, 0, 1, 0));
+    var rootNode = new SharpGLTF.Scenes.NodeBuilder("root") { LocalMatrix = Matrix4x4.CreateTranslation(10f, 0f, 0f) };
+    var childNode = rootNode.CreateNode("child");
+    childNode.LocalMatrix = Matrix4x4.CreateTranslation(1f, 0f, 0f);
+    var worldScene = new SharpGLTF.Scenes.SceneBuilder();
+    worldScene.AddRigidMesh(triangle, rootNode);
+    worldScene.AddRigidMesh(triangle, childNode);
+    var worldDir = Path.Combine(Path.GetTempPath(), $"blix-bp-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(worldDir);
+    var worldGlb = Path.Combine(worldDir, "worlds.glb");
+    worldScene.ToGltf2().SaveGLB(worldGlb);
+    var cookedWorlds = ModelData.Load(Blix.Recipes.CookCache.Resolve(worldGlb), new ModelNeeds(Skinned: false));
+    var childWorld = cookedWorlds.World[cookedWorlds.FindNode("child")];
     t.Expect("BP.3 a node's world is its local composed with every ancestor's",
-        world[1].Translation == new Vector3(11f, 0f, 0f), world[1].Translation.ToString());
-    var byMaterial = nodes.Merged();
-    t.Expect("BP.3 Merged gives one mesh per material, in the order they are first met",
-        byMaterial.Count == 2 && byMaterial[0].Material == red && byMaterial[1].Material == blue
-        && byMaterial[0].Mesh.VertexCount == 8 && byMaterial[1].Mesh.VertexCount == 4,
-        string.Join(", ", byMaterial.Select(m => $"{m.Material?.Name}:{m.Mesh.VertexCount}")));
-    t.Expect("BP.3 each primitive lands at its node's world transform",
-        byMaterial[1].Mesh.Bounds.Min.X == 11f && byMaterial[0].Mesh.Bounds.Max.X == 12f,
-        $"{byMaterial[0].Mesh.Bounds} / {byMaterial[1].Mesh.Bounds}");
+        childWorld.Translation == new Vector3(11f, 0f, 0f), childWorld.Translation.ToString());
+    Directory.Delete(worldDir, recursive: true);
 }
 
 // ============================================================================
@@ -6090,6 +6100,57 @@ static ShaderInterface MinimalShader() => new(new[]
         uniformFits && ReferenceEquals(maskable.Mask?.Skeleton, skeleton));
 }
 
+// ============================================================================
+// Section BT — no glTF parser in the runtime: the cook is the one reader.
+// ============================================================================
+//
+// Over EVERY project in the repository, not a chosen set of roots: a runtime assembly that is a consumer of
+// the engine (a host, an audio backend, an overlay) is not reachable from the engine's own graph, so walking
+// down from Blix would stay green while one of them took a parser. Each project's ProjectReference closure is
+// followed, and any that reaches a SharpGLTF PackageReference must be the cook, a tool or a test.
+{
+    var repo = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+    var projects = new[] { "src", "examples", "tools" }
+        .Select(d => Path.Combine(repo, d))
+        .Where(Directory.Exists)
+        .SelectMany(d => Directory.EnumerateFiles(d, "*.csproj", SearchOption.AllDirectories))
+        .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")
+                 && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
+        .ToDictionary(f => Path.GetFullPath(f), f =>
+        {
+            var x = System.Xml.Linq.XDocument.Load(f);
+            var dir = Path.GetDirectoryName(f)!;
+            return (
+                Refs: x.Descendants("ProjectReference").Select(r => Path.GetFullPath(Path.Combine(dir, ((string)r.Attribute("Include")!).Replace('\\', Path.DirectorySeparatorChar)))).ToArray(),
+                Parser: x.Descendants("PackageReference").Any(r => ((string?)r.Attribute("Include"))?.StartsWith("SharpGLTF", StringComparison.Ordinal) == true));
+        });
+
+    bool ReachesParser(string project, HashSet<string> seen) =>
+        seen.Add(project) && projects.TryGetValue(project, out var p) && (p.Parser || p.Refs.Any(r => ReachesParser(r, seen)));
+
+    static bool MayKnowParser(string name) =>
+        name == "Blix.Recipes" || name.StartsWith("Blix.Tools.", StringComparison.Ordinal) || name.StartsWith("Blix.Test.", StringComparison.Ordinal);
+
+    var named = projects.Keys.ToDictionary(k => Path.GetFileNameWithoutExtension(k), k => k);
+    // Not vacuous: the scan sees the runtime assemblies outside the engine's own graph.
+    var expected = new[] { "Blix", "Blix.Runtime.Silk", "Blix.Runtime.Headless", "Blix.Audio.OpenAL", "Blix.Diagnostics.Overlay" };
+    t.Expect("BT.1 the scan sees every project, runtime hosts included",
+        expected.All(named.ContainsKey) && projects.Count > 40,
+        $"{projects.Count} project(s); missing {string.Join(", ", expected.Where(e => !named.ContainsKey(e)))}");
+
+    var offenders = projects.Keys
+        .Where(k => ReachesParser(k, new HashSet<string>()))
+        .Select(k => Path.GetFileNameWithoutExtension(k))
+        .Where(n => !MayKnowParser(n))
+        .OrderBy(n => n, StringComparer.Ordinal)
+        .ToArray();
+    t.Expect("BT.2 only the cook, tools and tests reach a glTF parser", offenders.Length == 0, string.Join(", ", offenders));
+
+    // CONTROLS: the walk finds a direct reference, and one a project reaches only through another.
+    t.ExpectTrue("BT.3 CONTROL: the cook reaches one directly", ReachesParser(named["Blix.Recipes"], new HashSet<string>()));
+    t.ExpectTrue("BT.3 CONTROL: a tool reaches one through the cook", ReachesParser(named["Blix.Tools.Shot"], new HashSet<string>())
+        && !projects[named["Blix.Tools.Shot"]].Parser);
+}
 t.PrintSummary();
 return t.Failed;
 

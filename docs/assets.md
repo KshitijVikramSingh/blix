@@ -312,28 +312,28 @@ already names their assets clearly.
 
 ### Importer boundaries
 
-Runtime importer entry points prefer a compatible cooked sibling where one is
-defined. Recipe entry points such as `GltfImporter.ImportSource`,
-`WavefrontParts.ImportSource`, and `FontImporter.ImportSource` deliberately
-bypass siblings so a recipe cannot consume its own earlier output.
+glTF has no importer. The cook (`MeshRecipe`) is the one reader of a glTF
+source, and a tool that wants to open one cooks it first
+(`CookCache.Resolve`), so every reader in the tree sees the same file. What the
+cook writes:
 
-The two glTF importers share image discovery, material extraction, texture
-identity, and source-versus-`.blixtex` selection, but keep different geometry
-contracts:
+- A static primitive is the complete 60-byte vertex, in mesh space: position,
+  normal, tangent, two UV sets and `COLOR_0`. A missing tangent is generated
+  (MikkTSpace, over the normal texture's UV set), a missing second set mirrors
+  the first, and a missing colour is white. A load narrows that to the layout
+  its pipeline declares (`ModelNeeds`).
+- A skinned primitive is the complete 92-byte skinned vertex. It keeps the
+  strongest four influences across the contiguous `JOINTS_n`/`WEIGHTS_n`
+  pairs and renormalizes their weights. Each skin keeps its own binding, and
+  clips drive nodes, so skins that order their joints differently share one
+  clip set.
+- Mesh indices use 16 or 32 bits as required. Morph targets that take effect
+  are refused.
 
-- `GltfStaticImporter` bakes node world transforms into flat geometry. It can
-  also reconstruct a node hierarchy from a cooked mesh by unbaking each
-  primitive with its recorded node transform.
-- `GltfImporter` preserves one binding per skin, joint attachments, and static
-  parts that share the rigged file. Multiple skins are supported; a shared
-  animation-clip set requires them to resolve joints to the same parent-first
-  ordering.
-- A rigged vertex retains the strongest four influences across the contiguous
-  `JOINTS_n`/`WEIGHTS_n` pairs and renormalizes those weights. Mesh indices use
-  16 or 32 bits as required.
-- Static tangent and colour modes are distinct vertex layouts. Colour mode also
-  carries `TEXCOORD_1`; requesting tangents and colour together is refused
-  because no current layout represents both.
+OBJ and fonts keep importers. Their runtime entry points prefer a compatible
+cooked sibling. Their recipe entry points (`WavefrontParts.ImportSource`,
+`FontImporter.ImportSource`) deliberately bypass siblings, so a recipe cannot
+consume its own earlier output.
 
 `ObjImporter` returns one flattened mesh and falls back to source when a cooked
 artifact contains several material parts. `WavefrontParts` is the separate
@@ -341,12 +341,12 @@ material-preserving OBJ shape. Both validate the vertex-affecting `recenter`
 setting before accepting a sibling. `FontImporter` similarly prefers
 `.blixfont` and otherwise rasterizes the declared TTF sizes.
 
-`UnreadAttribute` is a per-import-layout diagnostic. Static imports account for the
-selected tangent or colour/second-UV layout, and rigged imports account for
-contiguous complete influence pairs as well as coloured static parts in the
-same file. The sweep remains subtractive, so unknown application semantics are
+`UnreadAttribute` is a fact of the cooked file: what the source's primitives
+carry that the cooked vertex does not. For a skinned primitive, the contiguous
+complete influence pairs count as read. The list does not depend on the layout
+a load asks for. The sweep is subtractive, so unknown application semantics are
 reported without being predeclared. Influence entries discarded by the
-strongest-four reduction are a fidelity limit, not an ignored attribute.
+strongest-four reduction are a fidelity limit, not an unread attribute.
 
 ### Loads are observable
 

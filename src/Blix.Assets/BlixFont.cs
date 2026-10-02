@@ -87,9 +87,13 @@ public static class BlixFontReader
     {
         ArgumentNullException.ThrowIfNull(path);
 
-        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        CookPreamble.Read(fs, path).Require(BlixFont.Magic, BlixFont.Version1, path, ".blixfont");
-        return AssetImportException.Refusing(path, () => ReadBody(fs), ".blixfont");
+        // The open included, so a missing file is refused like a corrupt one.
+        return AssetImportException.Refusing(path, () =>
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            CookPreamble.Read(fs, path).Require(BlixFont.Magic, BlixFont.Version1, path, ".blixfont");
+            return ReadBody(fs);
+        }, ".blixfont");
     }
 
     private static FontData ReadBody(Stream fs)

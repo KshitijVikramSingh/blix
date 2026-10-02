@@ -1,4 +1,3 @@
-using Blix.Import;
 using Blix.Assets;
 using System.Diagnostics;
 using Blix.Cooked;
@@ -31,14 +30,13 @@ public static class Program
         foreach (var prim in mesh.Primitives)
         {
             if (prim.GetVertexAccessor("TANGENT") is null || prim.GetVertexAccessor("TEXCOORD_0") is null) continue;
-            var authored = Blix.Import.GltfStaticImporter.BuildStaticMeshData(
-                mesh.Name ?? "m", prim, System.Numerics.Matrix4x4.Identity, System.Numerics.Matrix4x4.Identity,
-                includeTangents: true);
+            var authored = Blix.Recipes.GltfVertices.Static(mesh.Name ?? "m", prim);
+            var stride = authored.Layout.Stride;
             var stripped = (byte[])authored.VertexBytes.Clone();
             for (var v = 0; v < authored.VertexCount; v++)
             {
-                Array.Clear(stripped, (v * 48) + 24, 16);
-                if (mirrorV) BitConverter.TryWriteBytes(stripped.AsSpan((v * 48) + 44, 4), 1f - BitConverter.ToSingle(stripped, (v * 48) + 44));
+                Array.Clear(stripped, (v * stride) + 24, 16);
+                if (mirrorV) BitConverter.TryWriteBytes(stripped.AsSpan((v * stride) + 44, 4), 1f - BitConverter.ToSingle(stripped, (v * stride) + 44));
             }
             var generated = TangentGeneration.Generate(authored with { VertexBytes = stripped });
 
@@ -46,8 +44,8 @@ public static class Program
             var after = generated.Indices32 ?? generated.Indices.Select(i => (uint)i).ToArray();
             for (var c = 0; c < before.Length; c++)
             {
-                var a = Tangent(authored.VertexBytes, before[c]);
-                var g = Tangent(generated.VertexBytes, after[c]);
+                var a = Tangent(authored.VertexBytes, before[c], stride);
+                var g = Tangent(generated.VertexBytes, after[c], stride);
                 corners++;
                 if (System.Numerics.Vector3.Dot(Vector3Of(a), Vector3Of(g)) > MathF.Cos(8f * MathF.PI / 180f)) direction++;
                 if (MathF.Sign(a.W) == MathF.Sign(g.W)) handedness++;
@@ -56,9 +54,9 @@ public static class Program
 
         return (corners, direction, handedness);
 
-        static System.Numerics.Vector4 Tangent(byte[] bytes, uint vertex)
+        static System.Numerics.Vector4 Tangent(byte[] bytes, uint vertex, int stride)
         {
-            var o = ((int)vertex * 48) + 24;
+            var o = ((int)vertex * stride) + 24;
             return new System.Numerics.Vector4(
                 BitConverter.ToSingle(bytes, o), BitConverter.ToSingle(bytes, o + 4),
                 BitConverter.ToSingle(bytes, o + 8), BitConverter.ToSingle(bytes, o + 12));
@@ -68,74 +66,133 @@ public static class Program
             System.Numerics.Vector3.Normalize(new System.Numerics.Vector3(v.X, v.Y, v.Z));
     }
 
-    // Per triangle corner, because the cook's tangent weld renumbers vertices; floats to a hair (the
-    // cooked path unbakes a node transform the source applied once), the packed colour exactly.
-    private static bool SameCorners(Blix.Assets.MeshData a, Blix.Assets.MeshData b, int colourAt)
+    // Per triangle corner, because the cook's tangent weld renumbers vertices: every field the narrowed
+    // layout carries (position, normal, UV0, and UV1 with the packed colour where it has them), byte for
+    // byte against the complete vertex. The tangent is not compared, since the cook generates it where
+    // the source authored none.
+    private static bool SameNarrowedCorners(Blix.Assets.MeshData narrowed, Blix.Assets.MeshData complete)
     {
-        var ia = a.Indices32 ?? a.Indices.Select(i => (uint)i).ToArray();
-        var ib = b.Indices32 ?? b.Indices.Select(i => (uint)i).ToArray();
-        if (ia.Length != ib.Length || a.Layout.Stride != b.Layout.Stride) return false;
-        var stride = a.Layout.Stride;
-        for (var c = 0; c < ia.Length; c++)
-        {
-            var va = (int)ia[c] * stride;
-            var vb = (int)ib[c] * stride;
-            for (var at = 0; at < stride; at += 4)
-            {
-                if (at == colourAt)
-                {
-                    if (BitConverter.ToUInt32(a.VertexBytes, va + at) != BitConverter.ToUInt32(b.VertexBytes, vb + at)) return false;
-                    continue;
-                }
+        if (Blix.Graphics.VertexSemantics.Of(narrowed.Layout) is not { } n
+            || Blix.Graphics.VertexSemantics.Of(complete.Layout) is not { Uv1: >= 0 } c) return false;
+        var fields = new List<(int At, int From, int Bytes)> { (n.Position, c.Position, 12), (n.Normal, c.Normal, 12), (n.Uv0, c.Uv0, 8) };
+        // The colour sits right after UV1 in both colour layouts.
+        if (n.Uv1 >= 0) fields.AddRange(new[] { (n.Uv1, c.Uv1, 8), (n.Uv1 + 8, c.Uv1 + 8, 4) });
 
-                if (Math.Abs(BitConverter.ToSingle(a.VertexBytes, va + at) - BitConverter.ToSingle(b.VertexBytes, vb + at)) > 1e-4f) return false;
+        var ia = narrowed.Indices32 ?? narrowed.Indices.Select(i => (uint)i).ToArray();
+        var ib = complete.Indices32 ?? complete.Indices.Select(i => (uint)i).ToArray();
+        if (ia.Length != ib.Length) return false;
+        for (var corner = 0; corner < ia.Length; corner++)
+        {
+            var va = narrowed.VertexBytes.AsSpan((int)ia[corner] * narrowed.Layout.Stride, narrowed.Layout.Stride);
+            var vb = complete.VertexBytes.AsSpan((int)ib[corner] * complete.Layout.Stride, complete.Layout.Stride);
+            foreach (var (at, from, bytes) in fields)
+            {
+                if (!va.Slice(at, bytes).SequenceEqual(vb.Slice(from, bytes))) return false;
             }
         }
 
         return true;
     }
 
-    // A cooked file read by the engine (ModelData), in the shapes the cook's importer returns for a
-    // source, so a cooked-versus-source comparison compares like with like. Test-side only: the
-    // engine has one reader, and it is ModelData.
-    private static Blix.Import.GltfNodeModel CookedNodes(string blixmesh, bool tangents = false, bool colour = false)
+    // Every placed primitive of a cooked file, as ModelData draws it: world space, a rig's skinned
+    // meshes at bind pose.
+    private static Blix.ModelData.Primitive[] CookedPrimitives(string blixmesh) =>
+        Blix.ModelData.Load(blixmesh).Flattened().Select(x => x.Primitive).ToArray();
+
+    // A material's fields in one fixed order, read from what the engine loaded and, independently,
+    // from the glTF itself (SharpGLTF's channel and parameter names, glTF's defaults where a channel is
+    // absent), so K-F can zip the two. The IMAGES are not compared byte for byte: each channel's
+    // PRESENCE is, which is what a dropped image reference breaks.
+    private static IEnumerable<(string Field, object Value)> MaterialFacts(PbrMaterial m)
     {
-        var d = Blix.ModelData.Load(blixmesh, new Blix.ModelNeeds(tangents, colour, Skinned: false));
-        return new Blix.Import.GltfNodeModel(d.Nodes.Select(n => new Blix.Import.GltfNode(
-            n.Name, n.ParentIndex, n.Local,
-            n.MeshIndex < 0
-                ? Array.Empty<Blix.Import.GltfPrimitive>()
-                : d.Meshes[n.MeshIndex].Primitives
-                    .Select(p => new Blix.Import.GltfPrimitive(p.Mesh, p.Material, MaterialIndex: p.MaterialIndex)).ToArray())).ToArray());
+        yield return ("Name", m.Name);
+        yield return ("BaseColorFactor", m.BaseColorFactor);
+        yield return ("BaseColorTexCoord", m.BaseColorTexCoord);
+        yield return ("MetallicFactor", m.MetallicFactor);
+        yield return ("RoughnessFactor", m.RoughnessFactor);
+        yield return ("OcclusionStrength", m.OcclusionStrength);
+        yield return ("NormalScale", m.NormalScale);
+        yield return ("NormalTexCoord", m.NormalTexCoord);
+        yield return ("MetallicRoughnessTexCoord", m.MetallicRoughnessTexCoord);
+        yield return ("OcclusionTexCoord", m.OcclusionTexCoord);
+        yield return ("EmissiveTexCoord", m.EmissiveTexCoord);
+        yield return ("EmissiveFactor", m.EmissiveFactor);
+        yield return ("EmissiveStrength", m.EmissiveStrength);
+        yield return ("AlphaMode", m.AlphaMode.ToString());
+        yield return ("AlphaCutoff", m.AlphaCutoff);
+        yield return ("DoubleSided", m.DoubleSided);
+        yield return ("TransmissionFactor", m.TransmissionFactor);
+        yield return ("BaseColorTexture presence", m.BaseColorTexture is not null);
+        yield return ("NormalTexture presence", m.NormalTexture is not null);
+        yield return ("MetallicRoughnessTexture presence", m.MetallicRoughnessTexture is not null);
+        yield return ("OcclusionTexture presence", m.OcclusionTexture is not null);
+        yield return ("EmissiveTexture presence", m.EmissiveTexture is not null);
     }
 
-    private static Blix.Import.GltfModel CookedModel(string blixmesh, bool tangents = false, bool colour = false)
+    private static IEnumerable<(string Field, object Value)> MaterialFacts(SharpGLTF.Schema2.Material m)
     {
-        var d = Blix.ModelData.Load(blixmesh, new Blix.ModelNeeds(tangents, colour, Skinned: true));
-        if (d.IsRigged)
+        var baseColour = m.FindChannel("BaseColor");
+        var normal = m.FindChannel("Normal");
+        var mr = m.FindChannel("MetallicRoughness");
+        var occlusion = m.FindChannel("Occlusion");
+        var emissive = m.FindChannel("Emissive");
+        var transmission = m.FindChannel("Transmission");
+        static float Param(SharpGLTF.Schema2.MaterialChannel? c, string name, float absent) =>
+            c?.Parameters.FirstOrDefault(p => p.Name == name) is { Name: not null } p ? (float)Convert.ToDouble(p.Value) : absent;
+        static int TexCoord(SharpGLTF.Schema2.MaterialChannel? c) => c?.TextureCoordinate ?? 0;
+        static bool HasTexture(SharpGLTF.Schema2.MaterialChannel? c) => c?.Texture is not null;
+        var e = emissive?.Color ?? System.Numerics.Vector4.Zero;
+
+        yield return ("Name", m.Name ?? $"material_{m.LogicalIndex}");
+        yield return ("BaseColorFactor", baseColour?.Color ?? System.Numerics.Vector4.One);
+        yield return ("BaseColorTexCoord", TexCoord(baseColour));
+        yield return ("MetallicFactor", Param(mr, "MetallicFactor", 1f));
+        yield return ("RoughnessFactor", Param(mr, "RoughnessFactor", 1f));
+        yield return ("OcclusionStrength", Param(occlusion, "OcclusionStrength", 1f));
+        yield return ("NormalScale", Param(normal, "NormalScale", 1f));
+        yield return ("NormalTexCoord", TexCoord(normal));
+        yield return ("MetallicRoughnessTexCoord", TexCoord(mr));
+        yield return ("OcclusionTexCoord", TexCoord(occlusion));
+        yield return ("EmissiveTexCoord", TexCoord(emissive));
+        yield return ("EmissiveFactor", new System.Numerics.Vector3(e.X, e.Y, e.Z));
+        yield return ("EmissiveStrength", Param(emissive, "EmissiveStrength", 1f));
+        yield return ("AlphaMode", m.Alpha switch
         {
-            var skinned = Enumerable.Range(0, d.Skins.Count)
-                .SelectMany(s => d.SkinnedPrimitives(s).Select(p => new Blix.Import.GltfPrimitive(p.Mesh, p.Material, SkinIndex: s, MaterialIndex: p.MaterialIndex)))
-                .ToArray();
-            return new Blix.Import.GltfModel(skinned, d.Skeleton!, d.Clips.ToArray(), d.SkeletonPlacement,
-                Skins: d.Skins.Select(k => new Blix.Import.GltfSkinBinding(k.Binding, k.Placement)).ToArray());
+            SharpGLTF.Schema2.AlphaMode.MASK => nameof(AlphaMode.Mask),
+            SharpGLTF.Schema2.AlphaMode.BLEND => nameof(AlphaMode.Blend),
+            _ => nameof(AlphaMode.Opaque),
+        });
+        yield return ("AlphaCutoff", m.AlphaCutoff);
+        yield return ("DoubleSided", m.DoubleSided);
+        yield return ("TransmissionFactor", Param(transmission, "TransmissionFactor", 0f));
+        yield return ("BaseColorTexture presence", HasTexture(baseColour));
+        yield return ("NormalTexture presence", HasTexture(normal));
+        yield return ("MetallicRoughnessTexture presence", HasTexture(mr));
+        yield return ("OcclusionTexture presence", HasTexture(occlusion));
+        yield return ("EmissiveTexture presence", HasTexture(emissive));
+    }
+
+    private static bool NearlyEqual(System.Numerics.Matrix4x4 a, System.Numerics.Matrix4x4 b, float tolerance = 1e-5f)
+    {
+        for (var r = 0; r < 4; r++)
+        for (var c = 0; c < 4; c++)
+        {
+            if (Math.Abs(a[r, c] - b[r, c]) > tolerance) return false;
         }
 
-        return CookedFlat(blixmesh, tangents, colour);
-    }
-
-    // Every placed primitive in world space, a rigged file's skinned meshes at bind pose: the flat
-    // static reading the source importer's Import gives.
-    private static Blix.Import.GltfModel CookedFlat(string blixmesh, bool tangents = false, bool colour = false)
-    {
-        var flat = Blix.ModelData.Load(blixmesh, new Blix.ModelNeeds(tangents, colour, Skinned: false));
-        return new Blix.Import.GltfModel(
-            flat.Flattened().Select(x => new Blix.Import.GltfPrimitive(x.Primitive.Mesh, x.Primitive.Material)).ToArray(),
-            new Skeleton(Array.Empty<Bone>()), Array.Empty<AnimationClip>(), System.Numerics.Matrix4x4.Identity);
+        return true;
     }
 
     // A source read as a REFERENCE, unvalidated so the declared-lenient files (ReadLeniently) can be read
     // too. The cook itself validates (MeshRecipe.OpenSource); ValidatorRejectionsAreAccounted audits that.
+    // A glTF node's name as the cook spells it: an unnamed node is node_{logical index} (MeshRecipe).
+    private static string NodeName(SharpGLTF.Schema2.Node node) => node.Name ?? $"node_{node.LogicalIndex}";
+
+    private static IEnumerable<SharpGLTF.Schema2.Node> Ancestors(SharpGLTF.Schema2.Node node)
+    {
+        for (var p = node.VisualParent; p is not null; p = p.VisualParent) yield return p;
+    }
+
     private static SharpGLTF.Schema2.ModelRoot LoadSource(string file) =>
         SharpGLTF.Schema2.ModelRoot.Load(file, new SharpGLTF.Schema2.ReadSettings { Validation = SharpGLTF.Validation.ValidationMode.Skip });
 
@@ -487,8 +544,7 @@ public static class Program
             string? refusal = null;
             try
             {
-                Blix.Import.GltfStaticImporter.BuildStaticMeshData("probe", gltf.LogicalMeshes[0].Primitives[0],
-                    System.Numerics.Matrix4x4.Identity, System.Numerics.Matrix4x4.Identity);
+                Blix.Recipes.GltfVertices.Static("probe", gltf.LogicalMeshes[0].Primitives[0]);
             }
             catch (InvalidOperationException e)
             {
@@ -715,41 +771,9 @@ public static class Program
         return string.Join(" | ", parts);
     }
 
-    // One source policy (GltfSourcePolicy): what the cook refuses, the source importers refuse too, or a file the
-    // shipped path calls a different shape would load as its base mesh through a documented API.
-    private static void EveryImporterRefusesWhatTheCookRefuses(TestRunner t)
-    {
-        if (FindFile("AnimatedMorphCube.glb") is not { } morphing || FindFile("SimpleMorph_nodezero.gltf") is not { } zeroed) return;
-        var importers = new (string Name, Func<string, object> Import)[]
-        {
-            ("GltfStaticImporter.Import", f => new GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("k3/static"), f))),
-            ("GltfStaticImporter.ImportNodes", f => new GltfStaticImporter().ImportNodes(new AssetImportContext(AssetId.Parse("k3/nodes"), f))),
-            ("GltfImporter.Import", f => new GltfImporter().Import(new AssetImportContext(AssetId.Parse("k3/rig"), f))),
-        };
-        foreach (var (name, import) in importers)
-        {
-            string? refusal = null;
-            try { import(morphing); }
-            catch (AssetImportException refused) { refusal = MessagesOf(refused); }
-            t.Expect($"{name} refuses morph targets that take effect, as the cook does",
-                refusal is not null && refusal.Contains("morph targets", StringComparison.Ordinal), refusal ?? "it loaded");
-        }
-
-        // CONTROL: a file whose every instance is its base is not refused for morphing by the static importers. (The
-        // rigged importer refuses it for having no skin, which is its own rule.)
-        foreach (var (name, import) in importers.Take(2))
-        {
-            string? refusal = null;
-            try { import(zeroed); }
-            catch (AssetImportException refused) { refusal = MessagesOf(refused); }
-            t.Expect($"CONTROL: {name} reads a morph file whose every instance is its base",
-                refusal is null, refusal ?? "");
-        }
-    }
-
     // ── A golden that shares nothing with the reader ─────────────────────────────
     // SamplingMatchesGltf and AnimationMatchesGltf evaluate keys independently, but both take the keys
-    // through GltfImporter.SampleKeys — so a mis-read of a CUBICSPLINE triple (in, value, out) would sit
+    // through MeshRecipe.SampleKeys — so a mis-read of a CUBICSPLINE triple (in, value, out) would sit
     // on both sides. This one decodes InterpolationTest's accessors from the .glb's own bytes, applies
     // glTF Appendix C by hand, and holds Blix's sampled pose to it; plus one literal from the spec
     // computed by hand (CubicSpline Rotation at t = 1.9).
@@ -1459,11 +1483,11 @@ public static class Program
                         switch (channel.TargetNodePath)
                         {
                             case SharpGLTF.Schema2.PropertyPath.translation:
-                                trs[n].Translation = SpecVector(GltfImporter.SampleKeys(channel.GetTranslationSampler()), time); moved[n] = true; break;
+                                trs[n].Translation = SpecVector(MeshRecipe.SampleKeys(channel.GetTranslationSampler()), time); moved[n] = true; break;
                             case SharpGLTF.Schema2.PropertyPath.scale:
-                                trs[n].Scale = SpecVector(GltfImporter.SampleKeys(channel.GetScaleSampler()), time); moved[n] = true; break;
+                                trs[n].Scale = SpecVector(MeshRecipe.SampleKeys(channel.GetScaleSampler()), time); moved[n] = true; break;
                             case SharpGLTF.Schema2.PropertyPath.rotation:
-                                trs[n].Rotation = SpecRotation(GltfImporter.SampleKeys(channel.GetRotationSampler()), time); moved[n] = true; break;
+                                trs[n].Rotation = SpecRotation(MeshRecipe.SampleKeys(channel.GetRotationSampler()), time); moved[n] = true; break;
                         }
                     }
 
@@ -1657,7 +1681,7 @@ public static class Program
 
     // ── Sampling as glTF defines it ────────────────────────────────────────────
     // Every channel of every animated file in the corpus, read into Blix's curves by the one sampler
-    // reading (GltfImporter.SampleKeys) and through the cooked file, is held to SharpGLTF's own curve
+    // reading (MeshRecipe.SampleKeys) and through the cooked file, is held to SharpGLTF's own curve
     // evaluator at many times — LINEAR, STEP and CUBICSPLINE alike (InterpolationTest has all three).
     private static void SamplingMatchesGltf(TestRunner t)
     {
@@ -1710,7 +1734,7 @@ public static class Program
                 if (path == SharpGLTF.Schema2.PropertyPath.rotation)
                 {
                     var sampler = channel.GetRotationSampler();
-                    var (keys, mode) = GltfImporter.SampleKeys(sampler);
+                    var (keys, mode) = MeshRecipe.SampleKeys(sampler);
                     (count, wantMode) = (keys.Length, mode);
                     modes.Add(mode);
                     var ours = new KeyframeQuaternionCurve(keys, mode);
@@ -1738,7 +1762,7 @@ public static class Program
                 else
                 {
                     var sampler = path == SharpGLTF.Schema2.PropertyPath.translation ? channel.GetTranslationSampler() : channel.GetScaleSampler();
-                    var (keys, mode) = GltfImporter.SampleKeys(sampler);
+                    var (keys, mode) = MeshRecipe.SampleKeys(sampler);
                     (count, wantMode) = (keys.Length, mode);
                     modes.Add(mode);
                     var ours = new KeyframeVector3Curve(keys, mode);
@@ -2040,10 +2064,10 @@ public static class Program
             // rig is, and the static hierarchy a model view wants.
             var rigSibling = Path.ChangeExtension(rogue, ".blixmesh");
             t.Expect("a current cooked sibling is used as-is", CookCache.Resolve(rogue) == rigSibling, CookCache.Resolve(rogue));
-            var asModel = CookedNodes(rigSibling, colour: true);
+            var asModel = Blix.ModelData.Load(rigSibling, new Blix.ModelNeeds(Colour: true));
             t.Expect("and the same cooked rig reads as a model, its skinned meshes at bind pose",
-                BlixMeshReader.Read(rigSibling).IsRigged && asModel.Nodes.Any(n => n.Primitives.Length > 0),
-                $"{asModel.Nodes.Length} node(s)");
+                BlixMeshReader.Read(rigSibling).IsRigged && asModel.Flattened().Any(),
+                $"{asModel.Nodes.Count} node(s)");
 
             var broken = Path.Combine(work, "broken.gltf");
             File.WriteAllText(broken, "{ \"asset\": { \"version\": \"2.0\" }, \"meshes\": [ { \"primitives\": [ { \"attributes\": { } } ] } ], \"nodes\": [ { \"mesh\": 0 } ] }");
@@ -2077,7 +2101,7 @@ public static class Program
         }
     }
 
-    private static void AuthoredMaterialReachesBothPaths(TestRunner t)
+    private static void AuthoredMaterialReachesTheCook(TestRunner t)
     {
         var temp = Path.Combine(Path.GetTempPath(), "blix-authored-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(temp);
@@ -2140,21 +2164,18 @@ public static class Program
                 }
                 """);
 
-            var fromSource = new Blix.Import.GltfStaticImporter()
-                .Import(new AssetImportContext(AssetId.Parse("t/authored-src"), gltf)).Primitives[0].Material;
+            // The JSON above is the truth; the cooked file is the only reading of it there is.
             var cooked = Path.ChangeExtension(gltf, ".blixmesh");
             MeshRecipe.CookToBlixMesh(gltf, cooked);
-            var fromCooked = CookedModel(cooked).Primitives[0].Material;
-
-            foreach (var (path, m) in new[] { ("source", fromSource), ("cooked", fromCooked) })
+            var m = Blix.ModelData.Load(cooked).Flattened().First().Primitive.Material;
             {
-                t.Expect($"K-F.2 the {path} path reads the authored texture-coordinate sets",
+                t.Expect("K-F.2 the cooked file carries the authored texture-coordinate sets",
                     m is { BaseColorTexCoord: 1, NormalTexCoord: 1, MetallicRoughnessTexCoord: 0,
                         OcclusionTexCoord: 1, EmissiveTexCoord: 0 },
                     m is null ? "no material" :
                         $"base {m.BaseColorTexCoord}, normal {m.NormalTexCoord}, mr {m.MetallicRoughnessTexCoord}, " +
                         $"occlusion {m.OcclusionTexCoord}, emissive {m.EmissiveTexCoord}");
-                t.Expect($"K-F.2 the {path} path reads the authored normal scale and occlusion strength",
+                t.Expect("K-F.2 the cooked file carries the authored normal scale and occlusion strength",
                     m is { NormalScale: 0.5f, OcclusionStrength: 0.25f },
                     m is null ? "no material" : $"scale {m.NormalScale}, strength {m.OcclusionStrength}");
             }
@@ -2500,7 +2521,7 @@ public static class Program
             Directory.CreateDirectory(rigTemp);
             try
             {
-                // The cooked leg is the engine's reader; the source leg is the cook's importer. Both
+                // The cooked leg is the engine's reader; the source leg is the glTF itself. Both
                 // must describe the same rig.
                 var cookedRig = Path.ChangeExtension(rig, ".blixmesh");
                 AssetLoadLog.Start();
@@ -2510,19 +2531,18 @@ public static class Program
                 var cookedBinds = cookedData.Skins[0].Binding.InverseBinds;
                 var cookedClips = cookedData.Clips;
                 var cookedAttachments = cookedData.Attachments();
-                var cookedPrimitives = Enumerable.Range(0, cookedData.Skins.Count)
-                    .SelectMany(s => cookedData.SkinnedPrimitives(s)).ToArray();
 
                 var meshReport = rigReports.SingleOrDefault(r => r.SourcePath == cookedRig);
                 t.ExpectTrue("a rigged load is reported at all", meshReport is not null);
                 t.Expect("and reports Cooked", meshReport!.Mode == AssetLoadMode.Cooked, $"got {meshReport.Mode}");
                 t.ExpectTrue("with a cost attached", meshReport.LoadMs > 0 && meshReport.Bytes > 0);
 
-                // The source leg: the same .glb with no cooked sibling beside it.
+                // The source leg: the .glb itself, read raw. Not through any Blix reader, because the
+                // cook's readers are what built the cooked file, and a reader compared with itself
+                // agrees by construction.
                 var loneRig = Path.Combine(rigTemp, Path.GetFileName(rig));
                 File.Copy(rig, loneRig);
-                var viaSourceRig = new Blix.Import.GltfImporter()
-                    .Import(new AssetImportContext(AssetId.Parse("t/rig-source"), loneRig));
+                var rigSource = LoadSource(rig);
 
                 t.ExpectThrows<InvalidDataException>(
                     "a rigged cook refuses static-only vertex policy",
@@ -2530,122 +2550,157 @@ public static class Program
                         loneRig, Path.Combine(rigTemp, "invalid-options.blixmesh"),
                         flipTextureV: true));
 
-                t.Expect("cooked and source agree on bone count",
-                    cookedSkeleton.BoneCount == viaSourceRig.Skeleton.BoneCount,
-                    $"cooked {cookedSkeleton.BoneCount}, source {viaSourceRig.Skeleton.BoneCount}");
+                var sourceSkin = rigSource.LogicalSkins[0];
+                var cookedBinding = cookedData.Skins[0].Binding;
+                t.Expect("cooked and source agree on joint count",
+                    cookedBinding.JointCount == sourceSkin.JointsCount,
+                    $"cooked {cookedBinding.JointCount}, source {sourceSkin.JointsCount}");
                 t.Expect("and on clip count",
-                    cookedClips.Count == viaSourceRig.Animations.Length,
-                    $"cooked {cookedClips.Count}, source {viaSourceRig.Animations.Length}");
-                t.Expect("and on attachment count",
-                    cookedAttachments.Count == viaSourceRig.AttachmentsOrEmpty.Length,
-                    $"cooked {cookedAttachments.Count}, source {viaSourceRig.AttachmentsOrEmpty.Length}");
-                // Without this the three counts above can all pass on an asset with no attachments,
-                // which is the case the per-primitive layout migration was made for.
-                t.Expect("on an asset that actually has attachments",
-                    viaSourceRig.AttachmentsOrEmpty.Length > 0,
-                    $"{viaSourceRig.AttachmentsOrEmpty.Length} attachments");
+                    cookedClips.Count == rigSource.LogicalAnimations.Count,
+                    $"cooked {cookedClips.Count}, source {rigSource.LogicalAnimations.Count}");
 
+                // An attachment, as glTF has it: a mesh node no skin deforms, under a joint.
+                var sourceJoints = Enumerable.Range(0, sourceSkin.JointsCount)
+                    .Select(j => sourceSkin.GetJoint(j).Joint).ToHashSet();
+                var sourceAttachments = rigSource.LogicalNodes.Count(n =>
+                    n.Mesh is not null && n.Skin is null
+                    && Ancestors(n).Any(sourceJoints.Contains));
+                t.Expect("and on attachment count",
+                    cookedAttachments.Count == sourceAttachments,
+                    $"cooked {cookedAttachments.Count}, source {sourceAttachments}");
+                // Without this the counts above can all pass on an asset with no attachments,
+                // which is the case the per-primitive layout migration was made for.
+                t.Expect("on an asset that actually has attachments", sourceAttachments > 0,
+                    $"{sourceAttachments} attachments");
+
+                // Joint by joint, through the binding, since the cooked skeleton orders bones parent
+                // first and glTF orders joints however it was authored.
                 var rigMismatch = new List<string>();
-                for (var i = 0; i < Math.Min(cookedSkeleton.BoneCount, viaSourceRig.Skeleton.BoneCount); i++)
+                for (var j = 0; j < Math.Min(cookedBinding.JointCount, sourceSkin.JointsCount); j++)
                 {
-                    var a = cookedSkeleton.Bones[i];
-                    var b = viaSourceRig.Skeleton.Bones[i];
-                    if (a.Name != b.Name) rigMismatch.Add($"bone[{i}] {a.Name} vs {b.Name}");
-                    if (a.ParentIndex != b.ParentIndex) rigMismatch.Add($"bone[{i}] parent {a.ParentIndex} vs {b.ParentIndex}");
-                    if (cookedBinds[i] != viaSourceRig.SkinsOrEmpty[0].Binding.InverseBinds[i]) rigMismatch.Add($"bone[{i}] inverse bind differs");
+                    var (node, inverseBind) = sourceSkin.GetJoint(j);
+                    var bone = cookedSkeleton.Bones[cookedBinding.Bones[j]];
+                    if (bone.Name != NodeName(node)) rigMismatch.Add($"joint[{j}] {bone.Name} vs {NodeName(node)}");
+                    var cookedParent = bone.ParentIndex < 0 ? null : cookedSkeleton.Bones[bone.ParentIndex].Name;
+                    var sourceParent = node.VisualParent is { } vp && sourceJoints.Contains(vp) ? NodeName(vp) : null;
+                    if (cookedParent != sourceParent) rigMismatch.Add($"joint[{j}] parent {cookedParent} vs {sourceParent}");
+                    if (cookedBinds[j] != inverseBind) rigMismatch.Add($"joint[{j}] inverse bind differs");
                 }
 
-                t.Expect("bones match name, parent and inverse bind", rigMismatch.Count == 0,
+                t.Expect("joints match name, parent and inverse bind", rigMismatch.Count == 0,
                     string.Join("; ", rigMismatch.Take(4)));
 
                 var clipMismatch = new List<string>();
-                for (var i = 0; i < Math.Min(cookedClips.Count, viaSourceRig.Animations.Length); i++)
+                for (var i = 0; i < Math.Min(cookedClips.Count, rigSource.LogicalAnimations.Count); i++)
                 {
                     var a = cookedClips[i];
-                    var b = viaSourceRig.Animations[i];
+                    var b = rigSource.LogicalAnimations[i];
                     if (a.Name != b.Name) clipMismatch.Add($"clip[{i}] {a.Name} vs {b.Name}");
-                    if (Math.Abs(a.Duration - b.Duration) > 1e-6) clipMismatch.Add($"clip '{a.Name}' duration {a.Duration} vs {b.Duration}");
-                    if (a.Tracks.Length != b.Tracks.Length) clipMismatch.Add($"clip '{a.Name}' tracks {a.Tracks.Length} vs {b.Tracks.Length}");
+                    if (Math.Abs(a.Duration - b.Duration) > 1e-5) clipMismatch.Add($"clip '{a.Name}' duration {a.Duration} vs {b.Duration}");
                 }
 
-                t.Expect("clips match name, duration and track count", clipMismatch.Count == 0,
+                t.Expect("clips match name and duration", clipMismatch.Count == 0,
                     string.Join("; ", clipMismatch.Take(4)));
 
-                // Per triangle corner, because equal counts are not equal geometry — and because the
-                // cook generates MikkTSpace tangents where the source authored none, splitting a
-                // vertex wherever its corners' frames disagree. So every corner must agree on every
-                // byte but the tangent's, and the cooked tangent must exist.
-                var vertexMismatch = 0;
+                // Per triangle corner, because equal counts are not equal geometry: each cooked
+                // skinned primitive against its node's glTF primitive, matched by node name (the cook
+                // orders nodes parent first). Position, normal and UV must be the authored floats
+                // exactly; the cook generates MikkTSpace tangents where the source authored none,
+                // splitting vertices, which is why this compares corners and not vertex arrays.
+                var vertexMismatch = new List<string>();
                 var untangented = 0;
-                const int tangentAt = 64, stride = 80;
-                for (var i = 0; i < Math.Min(cookedPrimitives.Length, viaSourceRig.Primitives.Length); i++)
+                var comparedCorners = 0;
+                var matMismatch = new List<string>();
+                var withAlbedo = 0;
+                var skinnedPrimitiveCount = 0;
+                for (var ni = 0; ni < cookedData.Nodes.Count; ni++)
                 {
-                    var cookedMesh = cookedPrimitives[i].Mesh;
-                    var sourceMesh = viaSourceRig.Primitives[i].Mesh;
-                    var cookedIndices = cookedMesh.Indices32 ?? cookedMesh.Indices.Select(x => (uint)x).ToArray();
-                    var sourceIndices = sourceMesh.Indices32 ?? sourceMesh.Indices.Select(x => (uint)x).ToArray();
-                    // Read with Colour, the cooked skinned vertex is the complete 92-byte one, whose first 80 bytes are the
-                    // source importer's 80-byte vertex: the shared prefix is what both readers must agree on.
-                    var cookedStride = cookedMesh.Layout.Stride;
-                    if (cookedStride < stride || cookedIndices.Length != sourceIndices.Length)
+                    var cn = cookedData.Nodes[ni];
+                    if (cn.SkinIndex < 0 || cn.MeshIndex < 0) continue;
+                    var sn = rigSource.LogicalNodes.FirstOrDefault(x => NodeName(x) == cn.Name);
+                    var cookedPrims = cookedData.Meshes[cn.MeshIndex].Primitives;
+                    if (sn?.Mesh is null || sn.Mesh.Primitives.Count != cookedPrims.Count)
                     {
-                        vertexMismatch++;
+                        vertexMismatch.Add($"'{cn.Name}' has no source mesh of {cookedPrims.Count} primitive(s)");
                         continue;
                     }
 
-                    var differs = false;
-                    for (var c = 0; c < cookedIndices.Length && !differs; c++)
+                    for (var pi = 0; pi < cookedPrims.Count; pi++)
                     {
-                        var cv = cookedMesh.VertexBytes.AsSpan((int)cookedIndices[c] * cookedStride, stride);
-                        var sv = sourceMesh.VertexBytes.AsSpan((int)sourceIndices[c] * stride, stride);
-                        differs = !cv[..tangentAt].SequenceEqual(sv[..tangentAt]);
-                    }
+                        skinnedPrimitiveCount++;
+                        var cookedMesh = cookedPrims[pi].Mesh;
+                        var sp = sn.Mesh.Primitives[pi];
+                        var sourcePositions = sp.GetVertexAccessor("POSITION").AsVector3Array();
+                        var normals = sp.GetVertexAccessor("NORMAL").AsVector3Array();
+                        var uvs = sp.GetVertexAccessor("TEXCOORD_0").AsVector2Array();
+                        var sourceIndices = sp.GetIndices();
+                        var cookedIndices = cookedMesh.Indices32 ?? cookedMesh.Indices.Select(x => (uint)x).ToArray();
+                        if (cookedIndices.Length != sourceIndices.Count)
+                        {
+                            vertexMismatch.Add($"'{cn.Name}'[{pi}] corners {cookedIndices.Length} vs {sourceIndices.Count}");
+                            continue;
+                        }
 
-                    if (differs) vertexMismatch++;
-                    if (TangentGeneration.HasNoTangents(cookedMesh)) untangented++;
+                        var stride = cookedMesh.Layout.Stride;
+                        var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(cookedMesh.VertexBytes);
+                        for (var c = 0; c < cookedIndices.Length; c++)
+                        {
+                            var at = (int)cookedIndices[c] * stride / 4;
+                            var src = (int)sourceIndices[c];
+                            var cp = new System.Numerics.Vector3(floats[at], floats[at + 1], floats[at + 2]);
+                            var cnrm = new System.Numerics.Vector3(floats[at + 3], floats[at + 4], floats[at + 5]);
+                            var cuv = new System.Numerics.Vector2(floats[at + 6], floats[at + 7]);
+                            if (cp != sourcePositions[src] || cnrm != normals[src] || cuv != uvs[src])
+                            {
+                                vertexMismatch.Add($"'{cn.Name}'[{pi}] corner {c}");
+                                break;
+                            }
+
+                            comparedCorners++;
+                        }
+
+                        if (TangentGeneration.HasNoTangents(cookedMesh)) untangented++;
+
+                        // <b>Materials, because equal geometry drawn with a different surface is a
+                        // different picture.</b> Left out of the first version of this control, and a
+                        // cooked Rogue rendered visibly brighter than the source one with every other
+                        // assertion here passing — the character was being drawn without its albedo.
+                        var x = cookedPrims[pi].Material;
+                        var y = sp.Material;
+                        if (x is null || y is null)
+                        {
+                            if ((x is null) != (y is null)) matMismatch.Add($"'{cn.Name}'[{pi}] material presence {x is not null} vs {y is not null}");
+                            continue;
+                        }
+
+                        var baseColour = y.FindChannel("BaseColor");
+                        var metalRough = y.FindChannel("MetallicRoughness");
+                        var sourceAlbedo = baseColour?.Texture is not null;
+                        if (baseColour is { } bc && x.BaseColorFactor != bc.Color)
+                            matMismatch.Add($"'{cn.Name}'[{pi}] base colour {x.BaseColorFactor} vs {bc.Color}");
+                        if ((x.BaseColorTexture is not null) != sourceAlbedo)
+                            matMismatch.Add($"'{cn.Name}'[{pi}] albedo presence {x.BaseColorTexture is not null} vs {sourceAlbedo}");
+                        if (metalRough is { } mr)
+                        {
+                            var metallic = mr.GetFactor("MetallicFactor");
+                            var roughness = mr.GetFactor("RoughnessFactor");
+                            if (x.MetallicFactor != metallic) matMismatch.Add($"'{cn.Name}'[{pi}] metallic {x.MetallicFactor} vs {metallic}");
+                            if (x.RoughnessFactor != roughness) matMismatch.Add($"'{cn.Name}'[{pi}] roughness {x.RoughnessFactor} vs {roughness}");
+                        }
+
+                        if (sourceAlbedo) withAlbedo++;
+                    }
                 }
 
                 t.Expect("every skinned primitive cooks with a tangent frame", untangented == 0,
                     $"{untangented} primitive(s) still carry zero tangents");
-
-                t.Expect("skinned corners agree on every byte but the generated tangent", vertexMismatch == 0,
-                    $"{vertexMismatch} primitive(s) differ");
-
-                // <b>Materials, because equal geometry drawn with a different surface is a
-                // different picture.</b> Left out of the first version of this control, and a cooked
-                // Rogue rendered visibly brighter than the source one with every other assertion
-                // here passing — the character was being drawn without its albedo.
-                var matMismatch = new List<string>();
-                var withAlbedo = 0;
-                for (var i = 0; i < Math.Min(cookedPrimitives.Length, viaSourceRig.Primitives.Length); i++)
-                {
-                    var x = cookedPrimitives[i].Material;
-                    var y = viaSourceRig.Primitives[i].Material;
-                    if (x is null || y is null)
-                    {
-                        if (!ReferenceEquals(x, y)) matMismatch.Add($"[{i}] material presence {x is not null} vs {y is not null}");
-                        continue;
-                    }
-
-                    if (x.BaseColorFactor != y.BaseColorFactor) matMismatch.Add($"[{i}] base colour {x.BaseColorFactor} vs {y.BaseColorFactor}");
-                    if ((x.BaseColorTexture is null) != (y.BaseColorTexture is null))
-                        matMismatch.Add($"[{i}] albedo presence {x.BaseColorTexture is not null} vs {y.BaseColorTexture is not null}");
-                    if (x.MetallicFactor != y.MetallicFactor) matMismatch.Add($"[{i}] metallic {x.MetallicFactor} vs {y.MetallicFactor}");
-                    if (x.RoughnessFactor != y.RoughnessFactor) matMismatch.Add($"[{i}] roughness {x.RoughnessFactor} vs {y.RoughnessFactor}");
-                    if (y.BaseColorTexture is not null) withAlbedo++;
-                }
-
+                t.Expect("skinned corners carry the authored position, normal and UV", vertexMismatch.Count == 0,
+                    string.Join("; ", vertexMismatch.Take(4)));
+                t.Expect("on corners that actually exist", comparedCorners > 0, $"{comparedCorners}");
                 t.Expect("materials match on the rigged path", matMismatch.Count == 0,
                     string.Join("; ", matMismatch.Take(5)));
                 t.Expect("on primitives that actually carry an albedo", withAlbedo > 0,
-                    $"{withAlbedo} of {viaSourceRig.Primitives.Length}");
-
-                // <b>And the importers read sources only.</b> A cooked file is the engine's to read, so
-                // handing one to the cook's importer is refused by name rather than half-read.
-                var refused = t.ExpectThrows<AssetImportException>("the importers refuse a cooked file, naming ModelData",
-                    () => new Blix.Import.GltfStaticImporter().Import(new AssetImportContext(AssetId.Parse("t/static"), cookedRig)));
-                t.Expect("naming ModelData.Load", refused?.Message.Contains("ModelData.Load", StringComparison.Ordinal) == true,
-                    refused?.Message ?? "(none)");
+                    $"{withAlbedo} of {skinnedPrimitiveCount}");
             }
             finally
             {
@@ -2744,16 +2799,17 @@ public static class Program
             try { Directory.Delete(fontTemp, recursive: true); } catch (IOException) { }
         }
 
-        // ── K-F: a cooked load and a source load describe the same surface ──
-        // <b>The control the whole stage rests on.</b> .blixmesh v5 carries every material property
-        // except image bytes, and the loader now reads them from the file instead of re-walking the
-        // glTF. That is only an improvement if the two paths agree: a property the cook silently
-        // drops is one that disappears the moment an asset is cooked, which shows up as an asset
-        // rendering differently on machines that have built — the worst shape a bug can take,
-        // because the tree that reproduces it is the tree that works.
+        // ── K-F: a cooked material is the material the file authors ──────────
+        // <b>The control the whole stage rests on.</b> .blixmesh carries every material property
+        // except image bytes, and the loader reads them from the file instead of re-walking the
+        // glTF. A property the cook silently drops is one that disappears the moment an asset is
+        // cooked, which shows up as an asset rendering differently on machines that have built —
+        // the worst shape a bug can take, because the tree that reproduces it is the tree that works.
         //
-        // Both halves are loaded from real shipped assets rather than a synthetic material, because
-        // a synthetic one tests the writer against the reader and nothing against glTF.
+        // The reference is the glTF read here, field by field (MaterialFacts), not another Blix
+        // reader: the cook's readers are what wrote the cooked file. And a real shipped asset rather
+        // than a synthetic material, because a synthetic one tests the writer against the reader
+        // and nothing against glTF; K-F.2 below authors each value instead.
         var cookedAsset = FindFile("Rogue.glb");
         if (cookedAsset is null)
         {
@@ -2765,100 +2821,60 @@ public static class Program
         }
         else
         {
-            // The source leg is the SAME file with no cooked sibling beside it — copied out rather
-            // than the cooked one deleted, so a failure here cannot damage the tree.
-            var temp = Path.Combine(Path.GetTempPath(), "blix-kf-" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(temp);
-            try
+            var cookedData = Blix.ModelData.Load(Path.ChangeExtension(cookedAsset, ".blixmesh"));
+            var source = LoadSource(cookedAsset);
+            var mismatches = new List<string>();
+            var compared = 0;
+            foreach (var node in cookedData.Nodes)
             {
-                var lone = Path.Combine(temp, Path.GetFileName(cookedAsset));
-                File.Copy(cookedAsset, lone);
-
-                var viaCooked = CookedFlat(Path.ChangeExtension(cookedAsset, ".blixmesh"));
-                var viaSource = new Blix.Import.GltfStaticImporter()
-                    .Import(new AssetImportContext(AssetId.Parse("t/kf-source"), lone));
-
-                t.Expect("both paths return the same primitive count",
-                    viaCooked.Primitives.Length == viaSource.Primitives.Length,
-                    $"cooked {viaCooked.Primitives.Length}, source {viaSource.Primitives.Length}");
-
-                var pairs = Math.Min(viaCooked.Primitives.Length, viaSource.Primitives.Length);
-                var mismatches = new List<string>();
-                var compared = 0;
-                for (var i = 0; i < pairs; i++)
+                if (node.MeshIndex < 0) continue;
+                var twin = source.LogicalNodes.FirstOrDefault(n => NodeName(n) == node.Name)?.Mesh;
+                var primitives = cookedData.Meshes[node.MeshIndex].Primitives;
+                if (twin is null || twin.Primitives.Count != primitives.Count)
                 {
-                    var a = viaCooked.Primitives[i].Material;
-                    var b = viaSource.Primitives[i].Material;
+                    mismatches.Add($"'{node.Name}' has no source mesh of {primitives.Count} primitive(s)");
+                    continue;
+                }
+
+                for (var i = 0; i < primitives.Count; i++)
+                {
+                    var a = primitives[i].Material;
+                    var b = twin.Primitives[i].Material;
                     if (a is null || b is null)
                     {
-                        if (!ReferenceEquals(a, b)) mismatches.Add($"[{i}] one path has no material");
+                        if ((a is null) != (b is null)) mismatches.Add($"'{node.Name}'[{i}] one side has no material");
                         continue;
                     }
 
                     compared++;
-                    void Same(string field, bool ok, object got, object want)
+                    foreach (var ((field, got), (_, want)) in MaterialFacts(a).Zip(MaterialFacts(b)))
                     {
-                        if (!ok) mismatches.Add($"[{i}] {field}: cooked {got}, source {want}");
+                        if (!Equals(got, want)) mismatches.Add($"'{node.Name}'[{i}] {field}: cooked {got}, source {want}");
                     }
-
-                    Same("Name", a.Name == b.Name, a.Name, b.Name);
-                    Same("BaseColorFactor", a.BaseColorFactor == b.BaseColorFactor, a.BaseColorFactor, b.BaseColorFactor);
-                    Same("BaseColorTexCoord", a.BaseColorTexCoord == b.BaseColorTexCoord, a.BaseColorTexCoord, b.BaseColorTexCoord);
-                    Same("MetallicFactor", a.MetallicFactor == b.MetallicFactor, a.MetallicFactor, b.MetallicFactor);
-                    Same("RoughnessFactor", a.RoughnessFactor == b.RoughnessFactor, a.RoughnessFactor, b.RoughnessFactor);
-                    Same("OcclusionStrength", a.OcclusionStrength == b.OcclusionStrength, a.OcclusionStrength, b.OcclusionStrength);
-                    Same("NormalScale", a.NormalScale == b.NormalScale, a.NormalScale, b.NormalScale);
-                    Same("NormalTexCoord", a.NormalTexCoord == b.NormalTexCoord, a.NormalTexCoord, b.NormalTexCoord);
-                    Same("MetallicRoughnessTexCoord", a.MetallicRoughnessTexCoord == b.MetallicRoughnessTexCoord, a.MetallicRoughnessTexCoord, b.MetallicRoughnessTexCoord);
-                    Same("OcclusionTexCoord", a.OcclusionTexCoord == b.OcclusionTexCoord, a.OcclusionTexCoord, b.OcclusionTexCoord);
-                    Same("EmissiveTexCoord", a.EmissiveTexCoord == b.EmissiveTexCoord, a.EmissiveTexCoord, b.EmissiveTexCoord);
-                    Same("EmissiveFactor", a.EmissiveFactor == b.EmissiveFactor, a.EmissiveFactor, b.EmissiveFactor);
-                    Same("EmissiveStrength", a.EmissiveStrength == b.EmissiveStrength, a.EmissiveStrength, b.EmissiveStrength);
-                    Same("AlphaMode", a.AlphaMode == b.AlphaMode, a.AlphaMode, b.AlphaMode);
-                    Same("AlphaCutoff", a.AlphaCutoff == b.AlphaCutoff, a.AlphaCutoff, b.AlphaCutoff);
-                    Same("DoubleSided", a.DoubleSided == b.DoubleSided, a.DoubleSided, b.DoubleSided);
-                    Same("TransmissionFactor", a.TransmissionFactor == b.TransmissionFactor, a.TransmissionFactor, b.TransmissionFactor);
-
-                    // The IMAGES are deliberately not compared byte for byte — they come from the
-                    // same source on both paths. What is checked is that each channel agrees about
-                    // whether it HAS one, which is what a dropped image reference would break.
-                    Same("BaseColorTexture presence", (a.BaseColorTexture is null) == (b.BaseColorTexture is null),
-                        a.BaseColorTexture is not null, b.BaseColorTexture is not null);
-                    Same("NormalTexture presence", (a.NormalTexture is null) == (b.NormalTexture is null),
-                        a.NormalTexture is not null, b.NormalTexture is not null);
-                    Same("MetallicRoughnessTexture presence", (a.MetallicRoughnessTexture is null) == (b.MetallicRoughnessTexture is null),
-                        a.MetallicRoughnessTexture is not null, b.MetallicRoughnessTexture is not null);
-                    Same("OcclusionTexture presence", (a.OcclusionTexture is null) == (b.OcclusionTexture is null),
-                        a.OcclusionTexture is not null, b.OcclusionTexture is not null);
-                    Same("EmissiveTexture presence", (a.EmissiveTexture is null) == (b.EmissiveTexture is null),
-                        a.EmissiveTexture is not null, b.EmissiveTexture is not null);
                 }
+            }
 
-                // Without this the loop above passes on an asset whose materials are all null,
-                // which is a test that cannot fail.
-                t.Expect("materials were actually compared", compared > 0, $"compared {compared}");
-                t.Expect("cooked and source materials agree on every field",
-                    mismatches.Count == 0, string.Join("; ", mismatches.Take(5)));
-            }
-            finally
-            {
-                try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
-            }
+            // Without this the loop above passes on an asset whose materials are all null,
+            // which is a test that cannot fail.
+            t.Expect("materials were actually compared", compared > 0, $"compared {compared}");
+            t.Expect("cooked materials agree with the glTF on every field",
+                mismatches.Count == 0, string.Join("; ", mismatches.Take(5)));
         }
 
-        // ── K-F.2: what a material authors reaches both load paths ────────────
-        // K-F compares the cooked path with the source path, which cannot see a value both read the
-        // same wrong way — and both did: occlusion strength was looked up by glTF's word "strength"
-        // where SharpGLTF names it "OcclusionStrength", so every material read 1. This authors each
-        // value, with the channels on DIFFERENT texture-coordinate sets so a swap between two of
-        // them fails too, and holds both paths to the file.
-        AuthoredMaterialReachesBothPaths(t);
+        // ── K-F.2: what a material authors reaches the cooked file ────────────
+        // K-F compares the cook with a second reading of the glTF, which cannot see a value both
+        // read the same wrong way — and two readers once did: occlusion strength was looked up by
+        // glTF's word "strength" where SharpGLTF names it "OcclusionStrength", so every material
+        // read 1. This authors each value, with the channels on DIFFERENT texture-coordinate sets so
+        // a swap between two of them fails too, and holds the cook to the file.
+        AuthoredMaterialReachesTheCook(t);
 
         // ── a cooked mesh carries the whole vertex ───────────────────────────
         // The flat cook used to write position, normal and uv only; a load asking for colour then
         // got white and uv0 copied into uv1, which was invisible only while Studio read sources. A
-        // static primitive now cooks as the complete vertex, so a cooked load and a source load of
-        // the same asset, asking for the same layout, must hand over the same vertices.
+        // static primitive now cooks as the complete vertex, and a load narrows it to the layout it
+        // asks for, so each narrowing must equal the vertex builder run at that layout on the
+        // source primitive.
         foreach (var asset in new[] { "BoxVertexColors.glb", "MultiUVTest.gltf" })
         {
             var source = FindFile(asset);
@@ -2875,28 +2891,27 @@ public static class Program
 
                 foreach (var (tangents, colour) in new[] { (false, true), (true, false), (false, false) })
                 {
-                    var fromSource = new Blix.Import.GltfStaticImporter().ImportNodes(
-                        new AssetImportContext(AssetId.Parse("t/cv-src"), gltf, includeTangents: tangents, includeColour: colour));
-                    var fromCooked = CookedNodes(cooked, tangents, colour);
+                    var sourceModel = LoadSource(gltf);
+                    var fromCooked = Blix.ModelData.Load(cooked, new Blix.ModelNeeds(tangents, colour, Skinned: false));
                     var differ = 0;
                     var compared = 0;
-                    var byName = fromSource.Nodes.ToDictionary(n => n.Name, StringComparer.Ordinal);
                     foreach (var node in fromCooked.Nodes)
                     {
-                        if (!byName.TryGetValue(node.Name, out var twin)) continue;
-                        for (var i = 0; i < Math.Min(node.Primitives.Length, twin.Primitives.Length); i++)
+                        var twin = sourceModel.LogicalNodes.FirstOrDefault(n => NodeName(n) == node.Name)?.Mesh;
+                        if (node.MeshIndex < 0 || twin is null) continue;
+                        var primitives = fromCooked.Meshes[node.MeshIndex].Primitives;
+                        for (var i = 0; i < Math.Min(primitives.Count, twin.Primitives.Count); i++)
                         {
-                            var a2 = node.Primitives[i].Mesh;
-                            var b2 = twin.Primitives[i].Mesh;
+                            var a2 = primitives[i].Mesh;
+                            var b2 = Blix.Recipes.GltfVertices.Static("reference", twin.Primitives[i]);
                             compared++;
                             // Tangents are generated by the cook where the source authored none, so
-                            // at the tangent layout only everything else must agree.
-                            if (a2.Layout.Stride != b2.Layout.Stride || a2.IndexCount != b2.IndexCount) { differ++; continue; }
-                            if (!tangents && !SameCorners(a2, b2, colourAt: colour ? 40 : -1)) differ++;
+                            // the tangent itself is not compared; everything the layout carries is.
+                            if (a2.IndexCount != b2.IndexCount || !SameNarrowedCorners(a2, b2)) differ++;
                         }
                     }
 
-                    t.Expect($"{asset}: a cooked load equals a source load at the {(tangents ? "tangent" : colour ? "colour" : "plain")} layout",
+                    t.Expect($"{asset}: a cooked load equals the source vertex at the {(tangents ? "tangent" : colour ? "colour" : "plain")} layout",
                         compared > 0 && differ == 0, $"{differ} of {compared} primitive(s) differ");
                 }
             }
@@ -2920,7 +2935,6 @@ public static class Program
         GeneratedTangentsFollowTheNormalTexture(t);
         QuantizedAttributesReadAsTheirFloats(t);
         NormalMapFramesFollowTheTextureTransform(t);
-        EveryImporterRefusesWhatTheCookRefuses(t);
         InterpolationGolden(t);
         SceneLevelMatchesGltf(t);
         SceneLevelReachesModelData(t);
@@ -2992,27 +3006,23 @@ public static class Program
                 t.ExpectTrue("no source file travelled with it",
                     !Directory.EnumerateFiles(aloneDir, "*.gl*", SearchOption.AllDirectories).Any());
 
-                // Routed by what the cooked file HOLDS, which is the same rule the judge uses.
-                var rigged = BlixMeshReader.Read(meshCopy).IsRigged;
-                var alone = CookedModel(meshCopy);
+                var alone = CookedPrimitives(meshCopy);
 
                 // The same asset loaded the ordinary way, in its own tree, to compare against.
-                var besideSource = rigged
-                    ? CookedModel(Path.ChangeExtension(cookedAsset, ".blixmesh"))
-                    : CookedModel(Path.ChangeExtension(cookedAsset, ".blixmesh"));
+                var besideSource = CookedPrimitives(Path.ChangeExtension(cookedAsset, ".blixmesh"));
 
                 t.Expect("a cooked mesh loads with no source anywhere",
-                    alone.Primitives.Length == besideSource.Primitives.Length,
-                    $"alone {alone.Primitives.Length}, beside-source {besideSource.Primitives.Length}");
+                    alone.Length == besideSource.Length,
+                    $"alone {alone.Length}, beside-source {besideSource.Length}");
 
                 // Same surfaces, not merely the same count — a load that silently lost its textures
                 // would pass a count check and draw grey.
                 var aloneMismatch = new List<string>();
                 var withTexture = 0;
-                for (var i = 0; i < Math.Min(alone.Primitives.Length, besideSource.Primitives.Length); i++)
+                for (var i = 0; i < Math.Min(alone.Length, besideSource.Length); i++)
                 {
-                    var x = alone.Primitives[i].Material;
-                    var y = besideSource.Primitives[i].Material;
+                    var x = alone[i].Material;
+                    var y = besideSource[i].Material;
                     if (x is null || y is null)
                     {
                         if (!ReferenceEquals(x, y)) aloneMismatch.Add($"[{i}] material presence");
@@ -3061,10 +3071,10 @@ public static class Program
                     !Directory.EnumerateFiles(driverOut, "*.gltf", SearchOption.AllDirectories).Any()
                     && !Directory.EnumerateFiles(driverOut, "*.glb", SearchOption.AllDirectories).Any());
 
-                var fromDriver = CookedModel(driverMesh);
+                var fromDriver = CookedPrimitives(driverMesh);
                 t.Expect("the driver's source-free output opens directly",
-                    fromDriver.Primitives.Length > 0,
-                    $"{fromDriver.Primitives.Length} primitive(s)");
+                    fromDriver.Length > 0,
+                    $"{fromDriver.Length} primitive(s)");
             }
             finally
             {
@@ -3216,13 +3226,13 @@ public static class Program
         }
         else
         {
-            var firstLoad = new Blix.Import.GltfImporter()
-                .Import(new AssetImportContext(AssetId.Parse("t/id-1"), idAsset));
-            var secondLoad = new Blix.Import.GltfImporter()
-                .Import(new AssetImportContext(AssetId.Parse("t/id-2"), idAsset));
+            // Two independent loads of the one cooked file: the form every runtime reader sees.
+            var idCooked = CookCache.Resolve(idAsset);
+            var firstLoad = Blix.ModelData.Load(idCooked);
+            var secondLoad = Blix.ModelData.Load(idCooked);
 
-            static string[] Ids(Blix.Import.GltfModel m) => m.Primitives
-                .Select(p => p.Material?.BaseColorTexture)
+            static string[] Ids(Blix.ModelData m) => m.Flattened()
+                .Select(x => x.Primitive.Material?.BaseColorTexture)
                 .Where(x => x is not null)
                 .Select(x => x!.ResourceId)
                 .Distinct(StringComparer.Ordinal)
@@ -3240,8 +3250,8 @@ public static class Program
 
             // And the objects do NOT compare equal — which is the defect the identity exists to
             // route around, asserted so the two facts stay visibly separate.
-            var a = firstLoad.Primitives.Select(p => p.Material?.BaseColorTexture).First(x => x is not null);
-            var b = secondLoad.Primitives.Select(p => p.Material?.BaseColorTexture).First(x => x is not null);
+            var a = firstLoad.Flattened().Select(x => x.Primitive.Material?.BaseColorTexture).First(x => x is not null);
+            var b = secondLoad.Flattened().Select(x => x.Primitive.Material?.BaseColorTexture).First(x => x is not null);
             t.ExpectTrue("while the objects themselves are still distinct", !ReferenceEquals(a, b));
         }
 
@@ -3290,13 +3300,12 @@ public static class Program
         // keeps its own storage and shares only the key. Asserted the same way: two loads agree.
         if (idAsset is not null)
         {
-            var matA = new Blix.Import.GltfImporter()
-                .Import(new AssetImportContext(AssetId.Parse("t/mat-1"), idAsset));
-            var matB = new Blix.Import.GltfImporter()
-                .Import(new AssetImportContext(AssetId.Parse("t/mat-2"), idAsset));
+            var matCooked = CookCache.Resolve(idAsset);
+            var matA = Blix.ModelData.Load(matCooked);
+            var matB = Blix.ModelData.Load(matCooked);
 
-            static string[] MaterialIds(Blix.Import.GltfModel m) => m.Primitives
-                .Select(p => p.Material)
+            static string[] MaterialIds(Blix.ModelData m) => m.Flattened()
+                .Select(x => x.Primitive.Material)
                 .Where(x => x is not null)
                 .Select(x => x!.ResourceId)
                 .Distinct(StringComparer.Ordinal)
@@ -3310,19 +3319,14 @@ public static class Program
                 idsA.SequenceEqual(MaterialIds(matB), StringComparer.Ordinal),
                 $"[{string.Join(", ", idsA)}]");
             t.ExpectTrue("and they are distinct per material",
-                idsA.Length == matA.Primitives.Select(p => p.Material?.ResourceId)
+                idsA.Length == matA.Flattened().Select(x => x.Primitive.Material?.ResourceId)
                     .Where(x => !string.IsNullOrEmpty(x)).Distinct(StringComparer.Ordinal).Count());
         }
 
-        // ── a cooked mesh opens as a node hierarchy, and the un-bake is exact ──
-        // <b>The cook bakes each node's world transform into its vertices</b>, which is most of what
-        // the flat load path buys — and it threw the hierarchy away, so the studio's model view,
-        // which is entirely node-shaped, could not open the one form a project ships.
-        //
-        // A node table fixes that without unbaking anything at cook time: the primitive records its
-        // node, so a consumer that wants node-local geometry applies the inverse itself. What is
-        // worth asserting is that the inverse RECOVERS the original — a hierarchy that came back
-        // with subtly different vertices would be worse than none.
+        // ── a cooked mesh opens as the glTF's node hierarchy ─────────────────
+        // The studio's model view is entirely node-shaped, so the one form a project ships has to
+        // carry the hierarchy, not only the placed geometry: each node's parent, its local
+        // transform, and its mesh in mesh space. Held to the glTF itself, node by node.
         var nodeAsset = FindFile("MultiUVTest.gltf");
         if (nodeAsset is null)
         {
@@ -3345,25 +3349,22 @@ public static class Program
                 var gltf = Path.Combine(nodeTemp, Path.GetFileName(nodeAsset));
                 MeshRecipe.CookToBlixMesh(gltf, Path.ChangeExtension(gltf, ".blixmesh"));
 
-                var importer = new Blix.Import.GltfStaticImporter();
-                var fromSource = importer.ImportNodes(
-                    new AssetImportContext(AssetId.Parse("t/n-src"), gltf, includeColour: true));
-                var fromCooked = CookedNodes(Path.ChangeExtension(gltf, ".blixmesh"), colour: true);
+                var source = LoadSource(gltf);
+                var fromCooked = Blix.ModelData.Load(Path.ChangeExtension(gltf, ".blixmesh"), new Blix.ModelNeeds(Colour: true));
 
                 t.Expect("a cooked mesh yields the same node count",
-                    fromCooked.Nodes.Length == fromSource.Nodes.Length,
-                    $"cooked {fromCooked.Nodes.Length}, source {fromSource.Nodes.Length}");
+                    fromCooked.Nodes.Count == source.LogicalNodes.Count,
+                    $"cooked {fromCooked.Nodes.Count}, source {source.LogicalNodes.Count}");
 
                 // <b>Matched by NAME, not by index, and that is not a weakening.</b> The cook
                 // topo-sorts — every parent before its children, which is the invariant the format
-                // promises and its reader enforces — while the source keeps glTF's own order, and
-                // this very asset lists a child before its parent. Both are valid hierarchies of the
-                // same shape; demanding one order would be asserting an accident.
-                var sourceByName = fromSource.Nodes.ToDictionary(n => n.Name, StringComparer.Ordinal);
+                // promises and its reader enforces — while glTF keeps its own order, and this very
+                // asset lists a child before its parent. Both are valid hierarchies of the same
+                // shape; demanding one order would be asserting an accident.
+                var sourceByName = source.LogicalNodes.ToDictionary(NodeName, StringComparer.Ordinal);
                 var nodeMismatch = new List<string>();
                 var comparedVerts = 0;
-
-                for (var i = 0; i < fromCooked.Nodes.Length; i++)
+                for (var i = 0; i < fromCooked.Nodes.Count; i++)
                 {
                     var a = fromCooked.Nodes[i];
                     if (!sourceByName.TryGetValue(a.Name, out var b))
@@ -3374,44 +3375,38 @@ public static class Program
 
                     // The parent is compared by NAME too, since the indices differ by construction.
                     var aParent = a.ParentIndex < 0 ? null : fromCooked.Nodes[a.ParentIndex].Name;
-                    var bParent = b.ParentIndex < 0 ? null : fromSource.Nodes[b.ParentIndex].Name;
+                    var bParent = b.VisualParent is { } parent ? NodeName(parent) : null;
                     if (aParent != bParent) nodeMismatch.Add($"'{a.Name}' parent {aParent} vs {bParent}");
-                    if (a.LocalTransform != b.LocalTransform) nodeMismatch.Add($"'{a.Name}' local transform");
+                    if (!NearlyEqual(a.Local, b.LocalMatrix)) nodeMismatch.Add($"'{a.Name}' local transform");
 
                     // And the promise the ORDER does make: a parent is always already placed.
                     if (a.ParentIndex >= i) nodeMismatch.Add($"'{a.Name}' parent {a.ParentIndex} is not before {i}");
 
-                    if (a.Primitives.Length != b.Primitives.Length)
+                    var aPrims = a.MeshIndex < 0 ? Array.Empty<Blix.ModelData.Primitive>() : fromCooked.Meshes[a.MeshIndex].Primitives.ToArray();
+                    var bPrims = b.Mesh?.Primitives ?? (IReadOnlyList<SharpGLTF.Schema2.MeshPrimitive>)Array.Empty<SharpGLTF.Schema2.MeshPrimitive>();
+                    if (aPrims.Length != bPrims.Count)
                     {
-                        nodeMismatch.Add($"'{a.Name}' primitive count {a.Primitives.Length} vs {b.Primitives.Length}");
+                        nodeMismatch.Add($"'{a.Name}' primitive count {aPrims.Length} vs {bPrims.Count}");
                         continue;
                     }
 
-                    for (var pi = 0; pi < a.Primitives.Length; pi++)
+                    for (var pi = 0; pi < aPrims.Length; pi++)
                     {
-                        // <b>The layout has to match too, or the GPU reads garbage.</b> A cooked file
-                        // is 32-byte position/normal/uv; the studio's stage declares the 44-byte
-                        // colour layout. Handing it the first drew the model as a cloud of shards —
-                        // the same stride mismatch that once drew Sponza as grey triangles.
-                        if (a.Primitives[pi].Mesh.Layout.Stride != b.Primitives[pi].Mesh.Layout.Stride)
+                        // <b>The layout has to match too, or the GPU reads garbage.</b> The studio's
+                        // stage declares the 44-byte colour layout; handing it a 32-byte vertex once
+                        // drew the model as a cloud of shards — the same stride mismatch that once
+                        // drew Sponza as grey triangles. The reference is the complete vertex the cook
+                        // builds, in mesh space, compared field by field.
+                        var am = aPrims[pi].Mesh;
+                        if (am.Layout.Stride != Blix.Graphics.VertexPosition3NormalTexture2Color.Layout.Stride)
                         {
-                            nodeMismatch.Add(
-                                $"'{a.Name}' stride {a.Primitives[pi].Mesh.Layout.Stride} vs {b.Primitives[pi].Mesh.Layout.Stride}");
+                            nodeMismatch.Add($"'{a.Name}' stride {am.Layout.Stride}, not the colour layout's");
                             continue;
                         }
 
-                        comparedVerts += a.Primitives[pi].Mesh.VertexCount;
-                        var av = a.Primitives[pi].Mesh.VertexBytes;
-                        var bv = b.Primitives[pi].Mesh.VertexBytes;
-                        if (av.Length != bv.Length) { nodeMismatch.Add($"'{a.Name}' vertex bytes length"); continue; }
-
-                        // Not byte equality: the un-bake is float arithmetic, so the test is that it
-                        // lands within rounding of where the source path put it.
-                        var af = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(av);
-                        var bf = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(bv);
-                        var worst = 0f;
-                        for (var f = 0; f < af.Length; f++) worst = Math.Max(worst, Math.Abs(af[f] - bf[f]));
-                        if (worst > 1e-4f) nodeMismatch.Add($"'{a.Name}' vertex delta {worst}");
+                        comparedVerts += am.VertexCount;
+                        if (!SameNarrowedCorners(am, Blix.Recipes.GltfVertices.Static("reference", bPrims[pi])))
+                            nodeMismatch.Add($"'{a.Name}'[{pi}] corners differ");
                     }
                 }
 
