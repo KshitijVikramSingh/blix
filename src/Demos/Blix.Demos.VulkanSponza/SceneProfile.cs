@@ -95,7 +95,31 @@ internal sealed record SceneProfile(
         StartPitch: -3.3f,
         MoveSpeed: 8f);
 
-    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro };
+    /// <summary>The generated city (<c>blix city</c>, tools/city/setup.sh): the scale scene, any size from a seed.</summary>
+    /// <remarks>
+    /// No probe or sky volume ships with it, so it lights with the procedural sky and the open-sky fallback:
+    /// it is for measuring how the frame grows with the world, not for how it looks. The start pose stands
+    /// in the street at x = -7 (the street east of the fourth block column at the default sizes), looking
+    /// down it.
+    /// </remarks>
+    public static readonly SceneProfile City = new(
+        Name: "city",
+        Title: "Vulkan City",
+        AssetsVariable: "BLIX_CITY_ASSETS",
+        SetupHint: "tools/city/setup.sh generates and cooks one",
+        Packs: new ScenePack[] { new("city", Required: true) },
+        ProbeDirectory: "textures",
+        ProbeCandidates: Array.Empty<string>(),
+        FarPlane: 2000f,
+        CascadeSplits: new[] { 0.1f, 30f, 120f, 400f },
+        SunDistance: 120f,
+        FogFar: 150f,
+        StartPosition: new Vector3(-7f, 1.8f, 30f),
+        StartYaw: 0f,
+        StartPitch: 0f,
+        MoveSpeed: 15f);
+
+    public static readonly IReadOnlyList<SceneProfile> All = new[] { Sponza, Bistro, City };
 
     /// <summary>The profile <c>--scene</c> names, Sponza when it names none.</summary>
     public static SceneProfile Named(string? name)
