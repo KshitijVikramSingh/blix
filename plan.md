@@ -26,14 +26,18 @@ instance dirties the probes near it, which retrace first, and that runtime trace
 exactly where the world has changed.
 
 **Stages, in order.**
-0. *The instruments.* `./blix run` sometimes drops an app's flags (`--viz`, `--cam`, `--frames`, `--win`
-   seen unread with their argv intact; `AppArgs` reads the same tokens correctly in isolation), and a
-   comparison that can lose a flag proves nothing. Plus a parametric, seeded scale scene (instances,
-   lights, extent), because Bistro alone cannot say "huge".
+0. *Open from the instruments stage:* `./blix run` was seen dropping an app's flags (`--viz`, `--cam`,
+   `--frames`, `--win`) with argv intact, and did not reproduce in six attempts (isolated, traced, beside a
+   second instance). The unread warning now says which failure it was when it fires (nothing asked for the
+   flag, or asked and not taken); the next occurrence is diagnosable. The scale scene is `blix city`
+   (`tools/city/setup.sh`, `--scene city`): one seed is one city at any size.
 1. *Cooked clusters and per-mesh BVH*: the format and the cook (meshoptimizer's meshlets; the cook already
    simplifies).
 2. *GPU-driven culling, LOD and a visibility buffer* over those clusters, measured on Bistro and the
-   generator. Bindless materials as its prerequisite.
+   generator. Bindless materials as its prerequisite. The wall it removes, measured on the city (seed 1):
+   the host bakes every placement into one vertex buffer, so 8x8 blocks are 3.2M vertices (0.6 GB peak),
+   16x16 are 12.4M (1.8 GB), and 32x32 dies in `MeshBundler.Pack` building a ~2.4 GB array — memory grows
+   with placements, not with the 30 unique primitives the city is made of.
 3. *The ray-query interface*: software backend first, hardware when a device can prove it.
 4. *Runtime GI*: camera-relative clipmap probes traced through 3, relocated out of walls, rays amortised
    over frames, dirty-region updates, capsule occluders.
