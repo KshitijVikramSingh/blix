@@ -1,0 +1,13 @@
+# Bistro's cook configuration: what this scene decides about Amazon Lumberyard Bistro (ORCA, CC-BY 4.0) that
+# its glTF does not say. The glTF is made from the ORCA FBX by tools/bistro/fbx-to-gltf.py (Blender, headless),
+# which fixes only what the FBX importer mis-wires; every scene decision is here. tools/bistro/setup.sh copies
+# this file beside the converted sources, because an entry's path is relative to the file that names it.
+#
+# split 4096 for the reason Sponza's entries give: distance LOD is only as fine as the thing it selects over.
+
+asset exterior/BistroExterior.gltf -> exterior
+  split 4096
+
+  # Normal-map convention: README.txt states "Normal (DirectX)" for the whole pack, and glTF specifies
+  # OpenGL. The count is every material in the exterior; the cook flips each map once.
+  material *{132}           normal=directx

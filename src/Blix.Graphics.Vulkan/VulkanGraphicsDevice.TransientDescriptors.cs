@@ -13,22 +13,29 @@ namespace Blix.Graphics.Vulkan;
 // path; this pool handles everything else.
 public sealed partial class VulkanGraphicsDevice
 {
-    // Exhaustion surfaces as vkAllocateDescriptorSets failure; bump rather
-    // than complicate with growable chained pools. One transient set is
-    // allocated per non-material set per draw, so set count scales with
-    // (draws × sets-per-program). VulkanSponza's cascaded-shadow scene is the
-    // current high-water mark: ~455 lit draws × 2 sets (per-frame + per-pass)
-    // plus ~1190 shadow-cascade draws × 1 set ≈ 2100 sets/frame. 4096 leaves
-    // ~2× headroom for more lights / cascades. PerType stays comfortably above
-    // the matching per-type descriptor counts (~3900 combined-image-samplers).
+    // <b>Chained, because a constant is a cliff.</b> One transient set is allocated per non-material set per
+    // draw, so the count scales with (draws × sets-per-program), and the pool used to be one fixed size,
+    // bumped whenever a scene outgrew it: Sponza's cascaded-shadow frame (~2100 sets) set the last bump.
+    // Bistro's exterior is 7403 primitives across the pre-pass, three cascades and the lit pass — some
+    // 40k sets — and exhausted it on the first frame. So each frame slot holds a chain: when its current
+    // pool is exhausted the next one is used (created the first time it is needed), and the frame's reset
+    // resets the whole chain. A frame keeps the pools its heaviest frame needed; nothing is freed until
+    // the device goes.
     private const uint TransientPoolMaxSets = 4096;
     private const uint TransientPoolPerType = 8192;
 
-    private DescriptorPool[] transientPools = Array.Empty<DescriptorPool>();
+    private List<DescriptorPool>[] transientPools = Array.Empty<List<DescriptorPool>>();
+    private int[] transientPoolAt = Array.Empty<int>();
 
-    private unsafe void CreateTransientDescriptorPools()
+    private void CreateTransientDescriptorPools()
     {
-        transientPools = new DescriptorPool[MaxFramesInFlightConst];
+        transientPools = new List<DescriptorPool>[MaxFramesInFlightConst];
+        transientPoolAt = new int[MaxFramesInFlightConst];
+        for (var i = 0; i < transientPools.Length; i++) transientPools[i] = new List<DescriptorPool> { CreateTransientPool(i, 0) };
+    }
+
+    private unsafe DescriptorPool CreateTransientPool(int frameSlot, int link)
+    {
         var poolSizes = stackalloc DescriptorPoolSize[7];
         poolSizes[0] = new DescriptorPoolSize { Type = DescriptorType.UniformBuffer, DescriptorCount = TransientPoolPerType };
         poolSizes[1] = new DescriptorPoolSize { Type = DescriptorType.StorageBuffer, DescriptorCount = TransientPoolPerType };
@@ -51,50 +58,59 @@ public sealed partial class VulkanGraphicsDevice
             PPoolSizes = poolSizes,
             MaxSets = TransientPoolMaxSets,
         };
-        for (var i = 0; i < transientPools.Length; i++)
-        {
-            DescriptorPool pool;
-            ThrowIfNotSuccess(
-                Vk.CreateDescriptorPool(Device, in poolCi, null, &pool),
-                $"vkCreateDescriptorPool(transient[{i}])");
-            transientPools[i] = pool;
-        }
+        DescriptorPool pool;
+        ThrowIfNotSuccess(
+            Vk.CreateDescriptorPool(Device, in poolCi, null, &pool),
+            $"vkCreateDescriptorPool(transient[{frameSlot}].{link})");
+        return pool;
     }
 
     private unsafe void ResetTransientDescriptorPool(int frameSlot)
     {
         if (transientPools.Length == 0) return;
-        ThrowIfNotSuccess(
-            Vk.ResetDescriptorPool(Device, transientPools[frameSlot], 0),
-            $"vkResetDescriptorPool(transient[{frameSlot}])");
+        foreach (var pool in transientPools[frameSlot])
+        {
+            ThrowIfNotSuccess(Vk.ResetDescriptorPool(Device, pool, 0), $"vkResetDescriptorPool(transient[{frameSlot}])");
+        }
+
+        transientPoolAt[frameSlot] = 0;
     }
 
     private unsafe DescriptorSet AllocateTransientSet(int frameSlot, DescriptorSetLayout layout)
     {
-        var alloc = new DescriptorSetAllocateInfo
+        var chain = transientPools[frameSlot];
+        while (true)
         {
-            SType = StructureType.DescriptorSetAllocateInfo,
-            DescriptorPool = transientPools[frameSlot],
-            DescriptorSetCount = 1,
-            PSetLayouts = &layout,
-        };
-        DescriptorSet ds;
-        ThrowIfNotSuccess(
-            Vk.AllocateDescriptorSets(Device, in alloc, &ds),
-            "vkAllocateDescriptorSets(transient)");
-        return ds;
+            var alloc = new DescriptorSetAllocateInfo
+            {
+                SType = StructureType.DescriptorSetAllocateInfo,
+                DescriptorPool = chain[transientPoolAt[frameSlot]],
+                DescriptorSetCount = 1,
+                PSetLayouts = &layout,
+            };
+            DescriptorSet ds;
+            var result = Vk.AllocateDescriptorSets(Device, in alloc, &ds);
+            if (result is not (Result.ErrorOutOfPoolMemory or Result.ErrorFragmentedPool))
+            {
+                ThrowIfNotSuccess(result, "vkAllocateDescriptorSets(transient)");
+                return ds;
+            }
+
+            // This pool is spent for the frame: move along the chain, growing it the first time.
+            var next = ++transientPoolAt[frameSlot];
+            if (next == chain.Count) chain.Add(CreateTransientPool(frameSlot, next));
+        }
     }
 
     private unsafe void DestroyTransientDescriptorPools()
     {
-        for (var i = 0; i < transientPools.Length; i++)
+        foreach (var chain in transientPools)
+        foreach (var pool in chain)
         {
-            if (transientPools[i].Handle != 0)
-            {
-                Vk.DestroyDescriptorPool(Device, transientPools[i], null);
-                transientPools[i] = default;
-            }
+            if (pool.Handle != 0) Vk.DestroyDescriptorPool(Device, pool, null);
         }
-        transientPools = Array.Empty<DescriptorPool>();
+
+        transientPools = Array.Empty<List<DescriptorPool>>();
+        transientPoolAt = Array.Empty<int>();
     }
 }

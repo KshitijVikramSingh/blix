@@ -737,7 +737,9 @@ internal sealed class ViewerLoop : IGameLoop, IDebuggable, IUiSource, IDisposabl
             // <b>The worlds come from the session, not from here.</b> They are already computed once
             // per pose for the skeleton gizmo; an attachment is the second reader of the same
             // number and recomputing them would be a second hierarchy walk for one knife.
-            var rigView = new ModelView(rig, session?.PalettesFor(0).Count ?? 0)
+            // The instance count is the session's, not a skin's: a file animated by its nodes alone (Bistro's
+            // camera path and wind) is posed with no skin, and has no palette set 0 to count.
+            var rigView = new ModelView(rig, session?.Placements.Count ?? 0)
             {
                 BoneWorlds = session?.Driven.BoneWorlds,
                 Placement = rigTransform,
