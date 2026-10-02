@@ -1,21 +1,27 @@
 using System.Numerics;
-using Blix;
+using Blix.Assets;
 using SharpGLTF.Schema2;
 
 namespace Blix.Recipes;
 
-/// <summary>A glTF skin's joints as the cook records them: parent-first bones, and the order that came from.</summary>
-internal static class GltfSkeleton
+/// <summary>A glTF skin as the cook writes it: its joints parent-first, each with its inverse bind and its node.</summary>
+/// <remarks>
+/// Only the order and the file's own facts. Rest, offset and placement are runtime facts derived from the cooked
+/// node graph when a model is read (<see cref="Blix.JointHierarchy"/>, in <c>ModelData</c>), so the cook does not
+/// derive them.
+/// </remarks>
+internal static class GltfSkin
 {
     /// <summary>
-    /// A skin's joints in parent-first order: as bones (rest and offset from the scene graph), their inverse
-    /// binds index for index, the source-joint-to-bone remap, and where the joints hang.
+    /// <paramref name="skin"/>'s joints in parent-first order, and the source-joint-to-bone remap the skinned
+    /// vertices are written through.
     /// </summary>
+    /// <param name="nodeOfLogical">Each glTF logical node's index in the cooked node table.</param>
     /// <remarks>
     /// Inverse binds pass through untransposed: SharpGLTF returns System.Numerics row-vector matrices, which
     /// is exactly the engine's convention (F-016).
     /// </remarks>
-    public static (Bone[] Bones, Matrix4x4[] InverseBinds, int[] OldToNew, Matrix4x4 Placement) Build(Skin skin)
+    public static (BlixMeshSkin Skin, int[] OldToNew) Cook(Skin skin, int[] nodeOfLogical)
     {
         var joints = skin.Joints;
         var ibmList = skin.InverseBindMatrices;
@@ -66,26 +72,17 @@ internal static class GltfSkeleton
             oldToNew[orderNewToOld[newIdx]] = newIdx;
         }
 
-        var names = new string[n];
-        var parents = new int[n];
-        var inverseBinds = new Matrix4x4[n];
-        var jointNodes = new int[n];
+        var bones = new BlixMeshBone[n];
         for (var newIdx = 0; newIdx < n; newIdx++)
         {
             var oldIdx = orderNewToOld[newIdx];
-            names[newIdx] = joints[oldIdx].Name ?? $"bone_{newIdx}";
-            parents[newIdx] = parentOld[oldIdx] >= 0 ? oldToNew[parentOld[oldIdx]] : -1;
-            inverseBinds[newIdx] = ibmList[oldIdx];
-            jointNodes[newIdx] = joints[oldIdx].LogicalIndex;
+            bones[newIdx] = new BlixMeshBone(
+                joints[oldIdx].Name ?? $"bone_{newIdx}",
+                parentOld[oldIdx] >= 0 ? oldToNew[parentOld[oldIdx]] : -1,
+                ibmList[oldIdx],
+                nodeOfLogical[joints[oldIdx].LogicalIndex]);
         }
 
-        // Rest, offset and placement from the scene graph, as the cooked reader derives them: one rule, in the engine.
-        var nodes = skin.LogicalParent.LogicalNodes;
-        var hierarchy = JointHierarchy.Resolve(
-            names, parents, jointNodes,
-            j => nodes[j].VisualParent?.LogicalIndex ?? -1,
-            j => nodes[j].LocalMatrix,
-            j => nodes[j].WorldMatrix);
-        return (hierarchy.Bones.ToArray(), inverseBinds, oldToNew, hierarchy.Placement);
+        return (new BlixMeshSkin(bones), oldToNew);
     }
 }

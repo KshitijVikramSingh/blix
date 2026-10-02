@@ -153,9 +153,13 @@ public static class BlixProbeReader
     {
         ArgumentNullException.ThrowIfNull(path);
 
-        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        CookPreamble.Read(fs, path).Require(BlixProbe.Magic, BlixProbe.Version4, path, ".blixprobe");
-        return AssetImportException.Refusing(path, () => ReadBody(fs, path), ".blixprobe");
+        // The open included, so a missing file is refused like a corrupt one.
+        return AssetImportException.Refusing(path, () =>
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            CookPreamble.Read(fs, path).Require(BlixProbe.Magic, BlixProbe.Version4, path, ".blixprobe");
+            return ReadBody(fs, path);
+        }, ".blixprobe");
     }
 
     private static BlixProbeData ReadBody(Stream fs, string path)

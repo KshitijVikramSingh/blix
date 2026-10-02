@@ -30,4 +30,11 @@
     <UseAppHost>false</UseAppHost>
   </PropertyGroup>
 
+  <!-- The suite's own glTF parser: its reference side reads the authored file directly, independent of
+       whatever the cook (Blix.Recipes) exposes. The same parser, declared here because this project uses it;
+       the runtime references none. -->
+  <ItemGroup>
+    <PackageReference Include="SharpGLTF.Core" Version="1.0.6" />
+  </ItemGroup>
+
 </Project>

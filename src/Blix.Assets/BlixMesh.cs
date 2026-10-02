@@ -1022,17 +1022,20 @@ public static class BlixMeshReader
 
     /// <summary>Reads a cooked mesh, refusing anything that is not one by name.</summary>
     /// <remarks>
-    /// Everything past the preamble is wrapped, so a truncated or corrupt body arrives as the
-    /// engine declining a file rather than as whatever <see cref="BinaryReader"/> happened to throw
-    /// — the same sentence a bad glTF gets, so a tool catches one type and survives both.
+    /// Everything is wrapped, the open included, so a missing, truncated or corrupt file arrives as the
+    /// engine declining it rather than as whatever <see cref="FileStream"/> or <see cref="BinaryReader"/>
+    /// happened to throw — the same sentence a bad glTF gets, so a tool catches one type and survives both.
     /// </remarks>
     public static BlixMeshFile Read(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
 
-        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version18, path, ".blixmesh");
-        return AssetImportException.Refusing(path, () => ReadBody(fs, path, header), ".blixmesh");
+        return AssetImportException.Refusing(path, () =>
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version18, path, ".blixmesh");
+            return ReadBody(fs, path, header);
+        }, ".blixmesh");
     }
 
     private static BlixMeshFile ReadBody(Stream fs, string path, CookedHeader header)

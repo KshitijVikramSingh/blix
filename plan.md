@@ -8,11 +8,15 @@ its history in git.
 
 ## Open decisions, and the arcs after them
 
-**OBJ, now that glTF has no importer.** `ObjImporter` has no consumer outside the tests, and
-`WavefrontParts` has one, the Check tool. No recipe cooks an OBJ, so both read the source every time,
-and their cooked-sibling path, with the `recenter` validation in front of it, is reachable only by a file
-no recipe in the tree writes. The open decision: give OBJ a recipe and route it through the cook as glTF
-now is, or retire both readers.
+**Every format through the cook, as glTF now is (decided; one format at a time).** The engine reads no
+raw asset: each format gets a standard cook pipeline, and its source reader becomes the cook's. Ergonomics
+of cooking may get better later; the split (a runtime source path beside the cooked one) does not come
+back. Still read raw today: OBJ (`ObjImporter`, which nothing outside the tests uses, and `WavefrontParts`,
+which the Check tool uses; no recipe cooks an OBJ), fonts (`FontImporter` rasterizes the TTF when no
+`.blixfont` exists), materials (`MaterialImporter`), audio (`WavImporter`), images (`TextureImporter`, and
+`CookedMaterials` decoding a source image when a cooked mesh's `.blixtex` is missing). These source readers
+still throw `FileNotFoundException`, unlike the cooked readers' `AssetImportException`; each format's arc
+closes that gap for it.
 
 **Later, as their own arcs, when something asks:** morph deformation (targets plus a `weights` clip
 channel; today refused where they take effect, `MeshRecipe.OpenSource`), then `KHR_animation_pointer` (not

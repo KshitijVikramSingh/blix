@@ -4577,6 +4577,35 @@ static ShaderInterface MinimalShader() => new(new[]
         }
 
         t.ExpectTrue("AV.3 a missing file is refused the same way", missingRefused);
+
+        // And the cooked side, through the engine's reader: a missing .blixmesh resolves to itself, so
+        // the refusal has to come from the open. A corrupt one is the control that the reader's own
+        // checks still answer in the same type.
+        static string RefusedAs(Action read)
+        {
+            try { read(); return "loaded"; }
+            catch (AssetImportException) { return nameof(AssetImportException); }
+            catch (Exception e) { return e.GetType().Name; }
+        }
+
+        var goneCooked = RefusedAs(() => ModelData.Load(Blix.Recipes.CookCache.Resolve(Path.Combine(temp, "gone.blixmesh"))));
+        t.Expect("AV.3b a missing cooked file is refused the same way", goneCooked == nameof(AssetImportException), goneCooked);
+        var corrupt = Path.Combine(temp, "corrupt.blixmesh");
+        File.WriteAllBytes(corrupt, new byte[] { 1, 2, 3 });
+        var corruptCooked = RefusedAs(() => ModelData.Load(corrupt));
+        t.Expect("AV.3c a corrupt cooked file is refused the same way", corruptCooked == nameof(AssetImportException), corruptCooked);
+
+        // Every cooked reader opens inside its refusal, not only the mesh's.
+        foreach (var (name, read) in new (string, Action)[]
+        {
+            (".blixtex", () => Blix.Graphics.Images.BlixTexReader.ReadHandle(Path.Combine(temp, "gone.blixtex"))),
+            (".blixfont", () => Blix.Assets.BlixFontReader.Read(Path.Combine(temp, "gone.blixfont"))),
+            (".blixprobe", () => Blix.Graphics.Images.BlixProbeReader.Read(Path.Combine(temp, "gone.blixprobe"))),
+        })
+        {
+            var answer = RefusedAs(read);
+            t.Expect($"AV.3d a missing {name} is refused the same way", answer == nameof(AssetImportException), answer);
+        }
     }
     finally
     {
@@ -6070,6 +6099,37 @@ static ShaderInterface MinimalShader() => new(new[]
     t.Expect("BS.7 CONTROL: a uniform mask fits any rig of its size, and this rig's own subtree still sets",
         uniformFits && ReferenceEquals(maskable.Mask?.Skeleton, skeleton));
 }
+
+// ============================================================================
+// Section BT — no glTF parser in the runtime: the cook is the one reader.
+// ============================================================================
+//
+// Walked through every Blix assembly a runtime assembly references, because a direct-reference check misses
+// SharpGLTF arriving one assembly down. The cook reaching it is the control: the walk can find it.
+{
+    static HashSet<string> Closure(string root)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var queue = new Queue<string>(new[] { root });
+        while (queue.TryDequeue(out var name))
+        {
+            if (!seen.Add(name) || !name.StartsWith("Blix", StringComparison.Ordinal)) continue;
+            foreach (var r in System.Reflection.Assembly.Load(name).GetReferencedAssemblies()) queue.Enqueue(r.Name!);
+        }
+
+        return seen;
+    }
+
+    foreach (var runtime in new[] { "Blix", "Blix.Assets", "Blix.Cooked", "Blix.Graphics", "Blix.Graphics.Images",
+                 "Blix.Graphics.Vulkan", "Blix.Render", "Blix.Geometry", "Blix.Core", "Blix.Audio" })
+    {
+        var parsers = Closure(runtime).Where(n => n.StartsWith("SharpGLTF", StringComparison.Ordinal)).ToArray();
+        t.Expect($"BT.1 {runtime} reaches no glTF parser", parsers.Length == 0, string.Join(", ", parsers));
+    }
+
+    t.ExpectTrue("BT.2 CONTROL: the cook reaches one", Closure("Blix.Recipes").Contains("SharpGLTF.Core"));
+}
+
 
 t.PrintSummary();
 return t.Failed;

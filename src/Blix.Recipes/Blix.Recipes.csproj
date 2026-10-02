@@ -22,7 +22,7 @@
        different hat.
 
        A grant runs the other way, once: this project's own tests see its
-       internals (the glTF readers in GltfVertices, GltfSkeleton, GltfUnread),
+       internals (the glTF readers in GltfVertices, GltfSkin, GltfUnread),
        because those are the cook's, and are tested as the cook's. That gives
        a test what a recipe author does not need, not a recipe what the engine
        withholds. -->

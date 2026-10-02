@@ -132,11 +132,11 @@ public static class BlixTexReader
     public static BlixTexLazyHandle ReadHandle(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
-        using var stream = File.OpenRead(path);
-        var header = CookPreamble.Read(stream, path).Require(BlixTex.Magic, BlixTex.Version3, path, ".blixtex");
-
+        // The open included, so a missing file is refused like a corrupt one.
         return AssetImportException.Refusing(path, () =>
         {
+            using var stream = File.OpenRead(path);
+            var header = CookPreamble.Read(stream, path).Require(BlixTex.Magic, BlixTex.Version3, path, ".blixtex");
             var headerBuf = new byte[BlixTex.HeaderSize];
             stream.ReadExactly(headerBuf, 0, BlixTex.HeaderSize);
             var kind = BitConverter.ToUInt32(headerBuf, 0);
