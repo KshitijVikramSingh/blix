@@ -6104,33 +6104,53 @@ static ShaderInterface MinimalShader() => new(new[]
 // Section BT — no glTF parser in the runtime: the cook is the one reader.
 // ============================================================================
 //
-// Walked through every Blix assembly a runtime assembly references, because a direct-reference check misses
-// SharpGLTF arriving one assembly down. The cook reaching it is the control: the walk can find it.
+// Over EVERY project in the repository, not a chosen set of roots: a runtime assembly that is a consumer of
+// the engine (a host, an audio backend, an overlay) is not reachable from the engine's own graph, so walking
+// down from Blix would stay green while one of them took a parser. Each project's ProjectReference closure is
+// followed, and any that reaches a SharpGLTF PackageReference must be the cook, a tool or a test.
 {
-    static HashSet<string> Closure(string root)
-    {
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        var queue = new Queue<string>(new[] { root });
-        while (queue.TryDequeue(out var name))
+    var repo = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
+    var projects = new[] { "src", "examples", "tools" }
+        .Select(d => Path.Combine(repo, d))
+        .Where(Directory.Exists)
+        .SelectMany(d => Directory.EnumerateFiles(d, "*.csproj", SearchOption.AllDirectories))
+        .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")
+                 && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
+        .ToDictionary(f => Path.GetFullPath(f), f =>
         {
-            if (!seen.Add(name) || !name.StartsWith("Blix", StringComparison.Ordinal)) continue;
-            foreach (var r in System.Reflection.Assembly.Load(name).GetReferencedAssemblies()) queue.Enqueue(r.Name!);
-        }
+            var x = System.Xml.Linq.XDocument.Load(f);
+            var dir = Path.GetDirectoryName(f)!;
+            return (
+                Refs: x.Descendants("ProjectReference").Select(r => Path.GetFullPath(Path.Combine(dir, ((string)r.Attribute("Include")!).Replace('\\', Path.DirectorySeparatorChar)))).ToArray(),
+                Parser: x.Descendants("PackageReference").Any(r => ((string?)r.Attribute("Include"))?.StartsWith("SharpGLTF", StringComparison.Ordinal) == true));
+        });
 
-        return seen;
-    }
+    bool ReachesParser(string project, HashSet<string> seen) =>
+        seen.Add(project) && projects.TryGetValue(project, out var p) && (p.Parser || p.Refs.Any(r => ReachesParser(r, seen)));
 
-    foreach (var runtime in new[] { "Blix", "Blix.Assets", "Blix.Cooked", "Blix.Graphics", "Blix.Graphics.Images",
-                 "Blix.Graphics.Vulkan", "Blix.Render", "Blix.Geometry", "Blix.Core", "Blix.Audio" })
-    {
-        var parsers = Closure(runtime).Where(n => n.StartsWith("SharpGLTF", StringComparison.Ordinal)).ToArray();
-        t.Expect($"BT.1 {runtime} reaches no glTF parser", parsers.Length == 0, string.Join(", ", parsers));
-    }
+    static bool MayKnowParser(string name) =>
+        name == "Blix.Recipes" || name.StartsWith("Blix.Tools.", StringComparison.Ordinal) || name.StartsWith("Blix.Test.", StringComparison.Ordinal);
 
-    t.ExpectTrue("BT.2 CONTROL: the cook reaches one", Closure("Blix.Recipes").Contains("SharpGLTF.Core"));
+    var named = projects.Keys.ToDictionary(k => Path.GetFileNameWithoutExtension(k), k => k);
+    // Not vacuous: the scan sees the runtime assemblies outside the engine's own graph.
+    var expected = new[] { "Blix", "Blix.Runtime.Silk", "Blix.Runtime.Headless", "Blix.Audio.OpenAL", "Blix.Diagnostics.Overlay" };
+    t.Expect("BT.1 the scan sees every project, runtime hosts included",
+        expected.All(named.ContainsKey) && projects.Count > 40,
+        $"{projects.Count} project(s); missing {string.Join(", ", expected.Where(e => !named.ContainsKey(e)))}");
+
+    var offenders = projects.Keys
+        .Where(k => ReachesParser(k, new HashSet<string>()))
+        .Select(k => Path.GetFileNameWithoutExtension(k))
+        .Where(n => !MayKnowParser(n))
+        .OrderBy(n => n, StringComparer.Ordinal)
+        .ToArray();
+    t.Expect("BT.2 only the cook, tools and tests reach a glTF parser", offenders.Length == 0, string.Join(", ", offenders));
+
+    // CONTROLS: the walk finds a direct reference, and one a project reaches only through another.
+    t.ExpectTrue("BT.3 CONTROL: the cook reaches one directly", ReachesParser(named["Blix.Recipes"], new HashSet<string>()));
+    t.ExpectTrue("BT.3 CONTROL: a tool reaches one through the cook", ReachesParser(named["Blix.Tools.Shot"], new HashSet<string>())
+        && !projects[named["Blix.Tools.Shot"]].Parser);
 }
-
-
 t.PrintSummary();
 return t.Failed;
 

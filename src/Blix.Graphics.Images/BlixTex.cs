@@ -129,6 +129,9 @@ public sealed record BlixTexLazyHandle(
 public static class BlixTexReader
 {
     // Parses only the preamble, format header, and mip table. Individual mip bytes remain on disk.
+    // The refusal covers what this does: opening and recognising the file, so a missing or malformed
+    // .blixtex is an AssetImportException. Mip reads after it are ordinary IO on a file already
+    // recognised; one deleted or truncated in between throws as IO does.
     public static BlixTexLazyHandle ReadHandle(string path)
     {
         ArgumentNullException.ThrowIfNull(path);

@@ -30,11 +30,11 @@
     <UseAppHost>false</UseAppHost>
   </PropertyGroup>
 
-  <!-- The suite's own glTF parser: its reference side reads the authored file directly, independent of
-       whatever the cook (Blix.Recipes) exposes. The same parser, declared here because this project uses it;
-       the runtime references none. -->
+  <!-- The suite's own glTF library, declared because this project uses it, not reached through the cook
+       (Blix.Recipes): Toolkit, because the fixtures are AUTHORED here (MeshBuilder, MaterialBuilder,
+       SceneBuilder), and Toolkit carries the parser. The runtime references none (Section BT). -->
   <ItemGroup>
-    <PackageReference Include="SharpGLTF.Core" Version="1.0.6" />
+    <PackageReference Include="SharpGLTF.Toolkit" Version="1.0.6" />
   </ItemGroup>
 
 </Project>
