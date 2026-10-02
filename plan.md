@@ -6,6 +6,45 @@ its history in git.
 
 ---
 
+## The arc now: geometry and lighting for huge, dynamic worlds
+
+**Why.** Sponza and Bistro (`--scene`, `tools/bistro/`) both sit in one frame-rate range, and on Bistro the
+sun-bounce injection alone is 18 ms isolated against 7.5 ms for all of shading. Its knobs only trade
+quality for a fraction of the cost: copying skipped tiles costs nothing, 8x fewer probes is only ~3x
+cheaper. The approach is the limit: a regular probe grid sized to the scene's bounds (cost and resolution
+follow world size), rays that march a voxel grid rather than geometry, transport re-solved every frame for
+a static answer, and four unrelated structures (cascades, Hi-Z, SH volume, occupancy) for one scene.
+
+**The constraints, decided.** Design for dynamic geometry; assume huge worlds; ray tracing behind one
+interface whose backends are software (compute traversal; this Mac's MoltenVK exposes no ray query) and
+hardware (`VK_KHR_ray_query`) where a device has it.
+
+**How moving things take part.** Receiving: the GI lives in space (probes), so anything samples it where it
+stands. Occluding: characters through capsule or sphere proxies, not skinned triangles in a BVH. Large
+dynamic geometry: per-mesh cooked BVHs placed as instances in a runtime top-level structure; a changed
+instance dirties the probes near it, which retrace first, and that runtime trace overrides the static bake
+exactly where the world has changed.
+
+**Stages, in order.**
+0. *The instruments.* `./blix run` sometimes drops an app's flags (`--viz`, `--cam`, `--frames`, `--win`
+   seen unread with their argv intact; `AppArgs` reads the same tokens correctly in isolation), and a
+   comparison that can lose a flag proves nothing. Plus a parametric, seeded scale scene (instances,
+   lights, extent), because Bistro alone cannot say "huge".
+1. *Cooked clusters and per-mesh BVH*: the format and the cook (meshoptimizer's meshlets; the cook already
+   simplifies).
+2. *GPU-driven culling, LOD and a visibility buffer* over those clusters, measured on Bistro and the
+   generator. Bindless materials as its prerequisite.
+3. *The ray-query interface*: software backend first, hardware when a device can prove it.
+4. *Runtime GI*: camera-relative clipmap probes traced through 3, relocated out of walls, rays amortised
+   over frames, dirty-region updates, capsule occluders.
+5. *PRT baked by the cook*: per-region probe transfer, relit by the sun at runtime: the static base and
+   warm start of 4.
+
+Huge also means camera-relative rendering and streaming by region (cluster geometry and BLAS per region,
+the top level over what is loaded); both land where the stage that needs them does.
+
+---
+
 ## Open decisions, and the arcs after them
 
 **Every format through the cook, as glTF now is (decided; one format at a time).** The engine reads no
