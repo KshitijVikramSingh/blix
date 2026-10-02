@@ -85,6 +85,10 @@ public static class BlixApps
         if (parsed.Unread is { Count: > 0 } unread)
         {
             Console.Error.WriteLine($"blix: warning: nothing read {string.Join(' ', unread)}");
+            if (parsed.UnreadExplained is { Count: > 0 } why)
+            {
+                Console.Error.WriteLine($"blix:   {string.Join("; ", why)}");
+            }
         }
 
         if (failures.Count > 0)

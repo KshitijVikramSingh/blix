@@ -619,6 +619,17 @@ public static class Program
         var unread = AppArgs.Parse(new[] { "--years", "3", "--year", "4" });
         unread.Int("years");
         t.Expect("what nothing read is what is left", unread.Unread is ["--year", "4"]);
+        // A dropped flag does not reproduce on demand, so the warning has to say which failure it was
+        // when it fires: no reader asked (control flow), or one asked and still did not take it.
+        t.Expect("an unread option nothing asked for says so",
+            unread.UnreadExplained is ["--year (nothing asked for it)"], string.Join("; ", unread.UnreadExplained));
+        var looked = AppArgs.Parse(new[] { "--cam", "1,2,3,4,5" });
+        _ = looked.Int("frames");
+        t.Expect("and asking for another name does not count as asking for it",
+            looked.UnreadExplained is ["--cam (nothing asked for it)"], string.Join("; ", looked.UnreadExplained));
+        _ = looked.String("cam");
+        t.Expect("while asking for it reads it, leaving nothing to explain",
+            looked.UnreadExplained.Count == 0 && looked.Unread.Count == 0, string.Join("; ", looked.Unread));
 
         t.ExpectThrows("a value that is not a number is refused, naming the flag",
             () => AppArgs.Parse(new[] { "--frames", "abc" }).Int("frames"),

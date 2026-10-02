@@ -40,6 +40,7 @@ public sealed class AppArgs
 {
     private readonly Token[] tokens;
     private readonly int positionalFrom;
+    private readonly HashSet<string> asked = new(StringComparer.Ordinal);
 
     private AppArgs(Token[] tokens, int positionalFrom)
     {
@@ -255,10 +256,29 @@ public sealed class AppArgs
     /// <summary>The tokens nothing has read, in the order they were given.</summary>
     public IReadOnlyList<string> Unread => tokens.Where(t => !t.Read).Select(t => t.Text).ToArray();
 
+    /// <summary>
+    /// Why each unread option went unread: nobody asked for its name, or somebody did and its tokens
+    /// were still not taken.
+    /// </summary>
+    /// <remarks>
+    /// The two are different failures. The first is the program's control flow, a reader that never ran
+    /// (a typo, a branch not taken, a run that ended before the code that reads it). The second would be
+    /// this class mis-reading what it was handed, and has never been seen. Saying which, every time a
+    /// warning fires, is what makes a dropped flag diagnosable after the fact, because it does not
+    /// reproduce on demand.
+    /// </remarks>
+    public IReadOnlyList<string> UnreadExplained => tokens
+        .Where(t => !t.Read && t.Name is not null)
+        .Select(t => asked.Contains(t.Name!)
+            ? $"{t.Text} (asked for, yet not taken)"
+            : $"{t.Text} (nothing asked for it)")
+        .ToArray();
+
     private IEnumerable<int> Occurrences(string name)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         var key = Key(name);
+        asked.Add(key);
         for (var i = 0; i < Math.Min(tokens.Length, positionalFrom); i++)
         {
             if (tokens[i].Name == key) yield return i;
