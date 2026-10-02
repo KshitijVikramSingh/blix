@@ -24,6 +24,34 @@ forced into skeletal animation).
 
 ---
 
+## Structure: three findings, open
+
+**1. The getting-started game renders through a tool, and cooks at launch.** `hello-blix-3d` draws with
+`Blix.Tools.Studio.StudioRenderer`, which `renderer.md` calls an optional reference for model and rig inspection
+while saying there is no engine renderer. Studio is the de facto default: hello-3d, View, Shot and Studio all
+stand on it. Through it the game's runtime reaches `Blix.Recipes` (SharpGLTF, BCnEncoder, the meshopt, MikkTSpace
+and BC7 natives), ships a raw `Rogue.glb`, and cooks it on launch, so "the engine reads no raw asset" holds for
+the engine and not for the first program a newcomer runs. Section BT does not see it: the example references the
+engine as `$(BlixSourceRoot)/…`, the scan resolves no such path, and its closure comes back empty. The open
+decision: promote a renderer out of the tools (four consumers is the evidence; it reverses "no engine renderer"),
+or have the example own its pipeline and cook at build time as the demos do. BT's MSBuild-property blind spot is
+a fix either way.
+
+**2. Reading cooked formats is spread over four assemblies, and cook work sits in the runtime.** `Blix.Cooked`
+holds the preamble, stamp and refusal type; `Blix.Assets` the `.blixmesh` and `.blixfont` readers beside the
+source importers (StbTrueType, WAV, OBJ, materials) and `AssetDatabase`; `Blix.Graphics.Images` the `.blixtex`
+and `.blixprobe` readers beside Stb image decode, environment conversion and probe baking; `Blix` the model
+reader (`ModelData`, `CookedMaterials`, `CookedVertices`, `CookedSamplers`). The format arc above ends naturally
+in one runtime layer of cooked readers, with every decoder and baker behind the cook, and BT's rule extended from
+SharpGLTF to StbImage, StbTrueType and the rest.
+
+**3. `Blix` is one flat namespace of about sixty files.** Animation is about twenty-two of them and the largest
+coherent subsystem; beside it are the kinematic physics hosts and collision worlds, cameras and controllers,
+lights, transforms, the model reader and residency, and audio sources. Not a case for more assemblies, which would
+be predicting; an animation namespace would help finding things.
+
+---
+
 ## F — a body in the character room
 
 The one stage not started. `src/Demos/Character/` holds a shared library — room,
