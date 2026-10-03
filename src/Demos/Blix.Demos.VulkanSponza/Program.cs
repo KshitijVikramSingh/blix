@@ -838,6 +838,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // levels it reads are uploaded once; per-placement LOD state lives in cullState across frames. set 3
     // is then these buffers by name (sceneBuffers) rather than the sceneInstances material.
     private bool gpuCull = true;
+    private bool litFlat;
+    private PipelineHandle flatSolidPipeline;
     private PassHandle cullPassHandle;
     private PipelineHandle cullPipeline;
     // Two-phase occlusion (scene_occlusion.comp): the early depth's own pyramid, the pass that tests against

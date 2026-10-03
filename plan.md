@@ -41,11 +41,16 @@ exactly where the world has changed.
    0.06-0.09 ms at every size, against 0.9 ms at 8x8 and 44 ms at 64x64 on the CPU path, for the same
    picture. Two-phase occlusion culling over placements follows it (`scene_occlusion.comp`; `--no-occlusion`
    is the A/B, `--occlusion-cut` makes every frame a camera cut): city 64x64 29.0 -> 5.4 ms, Bistro flat
-   (not triangle-bound), Sponza ~1% dearer, every view and orbit the same picture. Next is cluster grain:
-   the census (`WriteClusterCensus`) says it keeps 9.4% where placement occlusion keeps 13.5% (city),
-   36.2% against 41.9% (Bistro), and that cluster frustum and normal-cone tests alone are worth 2-12%.
-   It needs a new way to draw: this GPU has neither drawIndirectCount nor mesh shaders. The cull keeps its
-   counts on the GPU, so caster and triangle counts read back only under `--cpu-cull`.
+   (not triangle-bound), Sponza ~1% dearer, every view and orbit the same picture. Cluster grain is
+   measured and NOT built: the census (`WriteClusterCensus`) says it keeps 9.4% where placement occlusion
+   keeps 13.5% (city), 75.4% against 91.5% (Sponza), 36.2% against 41.9% (Bistro); frustum and normal-cone
+   tests alone are worth 2-12%. Priced at what triangles cost each scene, that is ~1 ms of the city's 5.4
+   and ~0.8 ms of Sponza's ~25 (warm), nothing on Bistro, for a new draw path (no drawIndirectCount, no
+   mesh shaders: meshlet vertex lists, GPU index compaction, vertex pulling in four vertex shaders). The
+   visibility buffer is not the lever either: `--lit-flat` (flat.frag in the lit pass, all else equal)
+   leaves Sponza's full-LOD cost where it was (8.7-9.6 ms against 7.4-8.0 with materials), so that cost
+   is geometric, not shading on small triangles. The cull keeps its counts on the GPU, so caster and
+   triangle counts read back only under `--cpu-cull`.
 3. *The ray-query interface*: software backend first, hardware when a device can prove it.
 4. *Runtime GI*: camera-relative clipmap probes traced through 3, relocated out of walls, rays amortised
    over frames, dirty-region updates, capsule occluders.
@@ -63,6 +68,12 @@ copied to a buffer without transfer-source usage, in the shot's readback). Not t
 And the froxel fog animates on wall-clock time (`uFogParams.w = time.Total`), so two arms with different
 frame rates reach a `--shot-frames` frame with different fog: 0.2 mean against a 0.04 floor at city 64x64,
 gone with `--no-fog`. Compare arms that differ in speed with the fog off.
+The first ~250 frames after load run slow and then settle: Bistro 25-34 ms, then 15-18 ms, with or
+without the sky bounce (cause unproven; the GPU clock ramping under sustained load is the suspect). A
+120-frame shot measures the cold regime, which is how an `--ab lod` on Bistro read 4.9 ms and then sign-
+flipped. Time at `--shot-frames=1500` (each arm keeps its last 600 frames) and compare the quartiles.
+The scene host also ignores its `[Tune]` fields on the command line (`--lod-error-pixels` is reported
+unread): three field names collide across its settings objects, so applying them is a naming decision.
 The Bistro orbit at `--shot-frames=120` has two outcomes in either arm (3,931 pixels apart, max 74), so a
 Bistro orbit A/B needs several runs per arm before a difference is one.
 

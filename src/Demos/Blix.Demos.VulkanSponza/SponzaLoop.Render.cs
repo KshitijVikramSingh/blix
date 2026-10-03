@@ -964,6 +964,7 @@ internal sealed partial class SponzaLoop
                     if (pipeline == opaqueSolidPipeline) pipeline = opaqueSolidPipelineWrites;
                     else if (pipeline == opaqueDoubleSidedPipeline) pipeline = opaqueDoubleSidedPipelineWrites;
                 }
+                if (litFlat) pipeline = g.Pipeline == opaqueDoubleSidedPipeline ? flatPipeline : flatSolidPipeline;
                 DrawSceneGroup(scope, occlusionNow ? SceneListCameraFinal : SceneListCamera, g, pipeline, perFrame, passBindings, g.Material);
             }
             // The probe view, before the sky so the sky can still fill where nothing was drawn, and

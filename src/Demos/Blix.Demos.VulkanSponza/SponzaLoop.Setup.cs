@@ -140,6 +140,9 @@ internal sealed partial class SponzaLoop
         // --cpu-cull: build the indirect records and visible lists on the CPU, the way 1a did, for an A/B
         // against the GPU cull (scene_cull.comp) that is otherwise the default.
         gpuCull = !args.Flag("cpu-cull");
+        // --lit-flat: the lit pass shades opaque geometry with flat.frag, everything else unchanged (same lit.vert,
+        // culling, pre-pass and LOD). What a cost does under it is the part that is not material shading.
+        litFlat = args.Flag("lit-flat");
         // --no-occlusion: the GPU cull without its two-phase occlusion test (scene_occlusion.comp), for the A/B.
         occlusionCull = gpuCull && !args.Flag("no-occlusion");
         // --occlusion-cut: every frame is a camera cut. The early list draws nothing, so the late list carries
@@ -584,6 +587,10 @@ internal sealed partial class SponzaLoop
         flatPipeline = Pipeline(flatProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
             new[] { BlendState.Disabled }, litPassHandle, "flat");
+        // --lit-flat's single-sided twin: the flat fragment over exactly the raster work the lit pipeline does.
+        flatSolidPipeline = Pipeline(flatProgram, VertexPosition3NormalTangentTexture.Layout,
+            DepthState.LessEqualNoWrite, RasterizerState.BackFaceCulling,
+            new[] { BlendState.Disabled }, litPassHandle, "flat.solid");
 
         var prepassOpaqueFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "depth_prepass.frag.spv"));
         prepassOpaqueProgram = Own(device.CreateShaderProgramFromSpv(litVertSpv, prepassOpaqueFragSpv, litInterface, "depth_prepass"));
