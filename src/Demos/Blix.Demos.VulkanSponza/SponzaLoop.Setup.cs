@@ -137,6 +137,9 @@ internal sealed partial class SponzaLoop
         // --flatten: bake every placement into its own primitive, placed once at identity: the pre-
         // instancing shape through the same draw path, so an A/B isolates instancing alone.
         flatten = args.Flag("flatten");
+        // --cpu-cull: build the indirect records and visible lists on the CPU, the way 1a did, for an A/B
+        // against the GPU cull (scene_cull.comp) that is otherwise the default.
+        gpuCull = !args.Flag("cpu-cull");
         if (args.Flag("probe-reference")) probeReference = true;
         if (args.Flag("no-sky-bounce")) noSkyBounce = true;
         if (args.Int("fog-slices") is { } fs) froxelGridZ = Math.Clamp(fs, 8, 128);
@@ -272,6 +275,12 @@ internal sealed partial class SponzaLoop
                 ? $"[VulkanSponza] tune {kv[0]} = {tv}"
                 : $"[VulkanSponza] tune {kv[0]}: no such shader uniform — ignored.");
         }
+
+        // The scene cull: every pass's indirect records and visible list, written before the first pass
+        // that draws from them (the cascades), so it is declared ahead of all of them. Its dispatches
+        // are fenced on both sides because they bind GPU buffers; the graph tracks images only.
+        cullInterface = Reflect("scene_cull.comp");
+        cullPassHandle = graph.ComputePass("scene-cull").Shader(cullInterface).Handle;
 
         // One graphics pass per cascade, each writing its own depth target.
         // Both shadow programs are render-pass-compatible with these passes.
@@ -638,6 +647,10 @@ internal sealed partial class SponzaLoop
             var usageProgram = Own(device.CreateComputeShaderProgramFromSpv(usageSpv, usageInterface, "probe_usage"));
             probeUsagePipeline = Own(device.CreateComputePipeline(usageProgram, "probe_usage"));
         }
+
+        var cullSpv = File.ReadAllBytes(Path.Combine(shaderDir, "scene_cull.comp.spv"));
+        var cullProgram = Own(device.CreateComputeShaderProgramFromSpv(cullSpv, cullInterface, "scene_cull"));
+        cullPipeline = Own(device.CreateComputePipeline(cullProgram, "scene_cull"));
 
         // --- Froxel fog compute program + grid ---------------------------
         var froxelSpv = File.ReadAllBytes(Path.Combine(shaderDir, "froxel.comp.spv"));

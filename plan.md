@@ -36,8 +36,12 @@ exactly where the world has changed.
 2. *GPU-driven culling, LOD and a visibility buffer* over those clusters, measured on Bistro and the
    generator. Bindless materials as its prerequisite. Where it starts, measured on the city (seed 1): the
    host keeps each unique primitive once (82,576 vertices at every size) and draws its placements
-   instanced, so memory is flat to 64x64 blocks (123,422 placements, ~0.45 GB), but the CPU still culls
-   and picks LOD per placement for five passes: 4.5 ms at 8x8, 13.6 ms at 32x32, 31 ms at 64x64.
+   instanced, so memory is flat to 64x64 blocks (123,422 placements, ~0.45 GB), and culling and LOD per
+   placement run on the GPU (`scene_cull.comp`; `--cpu-cull` is the A/B): building a frame costs the CPU
+   0.06-0.09 ms at every size, against 0.9 ms at 8x8 and 44 ms at 64x64 on the CPU path, for the same
+   picture. What is left is per-PLACEMENT: at 64x64 the camera submits 15.6M triangles and the frame is
+   31 ms of GPU, which is what cluster culling and occlusion are for. The cull keeps its counts on the GPU,
+   so caster and triangle counts read back only under `--cpu-cull`.
 3. *The ray-query interface*: software backend first, hardware when a device can prove it.
 4. *Runtime GI*: camera-relative clipmap probes traced through 3, relocated out of walls, rays amortised
    over frames, dirty-region updates, capsule occluders.
@@ -52,6 +56,9 @@ between them.
 
 Known instrument gap: a Sponza `--shot` raises 9 validation errors on `main` as well (a storage image
 copied to a buffer without transfer-source usage, in the shot's readback). Not this arc's, and not fixed.
+And the froxel fog animates on wall-clock time (`uFogParams.w = time.Total`), so two arms with different
+frame rates reach a `--shot-frames` frame with different fog: 0.2 mean against a 0.04 floor at city 64x64,
+gone with `--no-fog`. Compare arms that differ in speed with the fog off.
 
 Huge also means camera-relative rendering and streaming by region (cluster geometry and BLAS per region,
 the top level over what is loaded); both land where the stage that needs them does.

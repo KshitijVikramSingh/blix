@@ -988,6 +988,24 @@ static ShaderInterface MinimalShader() => new(new[]
     var threw = false;
     try { graph.Dispatch(comp, dispatch); } catch { threw = true; }
     t.ExpectTrue("L.14 Dispatch on a compute-pass handle accepted", !threw);
+    threw = false;
+    try { graph.Dispatch(comp, dispatch); } catch { threw = true; }
+    t.ExpectTrue("L.14 a second Dispatch into the same pass in a frame is accepted (it appends)", !threw);
+}
+
+{
+    // L.15 — A compute pass carries several dispatches, in the order given: what lets one pass reset,
+    // count and scatter (the scene cull). The graph hands its recorded list to this overload.
+    var list = new RenderCommandList();
+    DispatchCommand D(int x) => new(default, x, 1, 1, Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>());
+    list.ComputePass("cull", new[] { D(1), D(2), D(3) });
+    var pass = list.Passes.Single();
+    t.ExpectTrue("L.15 one compute pass holds every dispatch, in order",
+        pass.Description.Compute
+        && pass.Commands.OfType<DispatchCommand>().Select(d => d.GroupsX).SequenceEqual(new[] { 1, 2, 3 }));
+    var refused = false;
+    try { list.ComputePass("empty", Array.Empty<DispatchCommand>()); } catch (ArgumentException) { refused = true; }
+    t.ExpectTrue("L.15 a compute pass with no dispatches is refused", refused);
 }
 
 // ============================================================================

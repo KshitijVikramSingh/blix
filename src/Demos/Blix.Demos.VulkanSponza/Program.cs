@@ -110,7 +110,13 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         {
             using (debug.Scope("LOD"))
             {
-                margins[at] = debug.Controls.Float("margin (×px)", margins[at], 0f, 8f);
+                var edited = debug.Controls.Float("margin (×px)", margins[at], 0f, 8f);
+                if (edited != margins[at])
+                {
+                    margins[at] = edited;
+                    var global = ReferenceEquals(margins, blendLodMargins) ? opaquePlacements.Count + at : at;
+                    pendingMarginEdit = (global + 1, edited);
+                }
             }
         }
     }
@@ -238,6 +244,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private TextureHandle probeUsageTexture;
     private PassHandle probeUsagePassHandle;
     private ShaderInterface usageInterface = null!;
+    private ShaderInterface cullInterface = null!;
     private PipelineHandle probeUsagePipeline;
     // Usage marking reads prior-frame depth before the current pre-pass. A current-frame dependency
     // made the isolated injection cheaper but the whole frame slower by breaking tile pass merging.
@@ -820,6 +827,19 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // How many indirect commands each drawable owns per pass: one per LOD level the deepest chain has, so
     // a drawable's placements at different levels draw from one indirect run.
     private int lodSlots = 1;
+    // GPU culling (the default; --cpu-cull is the A/B): scene_cull.comp builds every pass's indirect records
+    // and visible list on the GPU, and the draws read them from sceneArgs. The placements, drawables and
+    // levels it reads are uploaded once; per-placement LOD state lives in cullState across frames. set 3
+    // is then these buffers by name (sceneBuffers) rather than the sceneInstances material.
+    private bool gpuCull = true;
+    private PassHandle cullPassHandle;
+    private PipelineHandle cullPipeline;
+    private GpuBufferHandle cullPlacements, cullDrawables, cullLods, cullState, cullCursor, sceneArgs, sceneVisible, sceneTransformBuffer;
+    private ShaderBufferBinding[] cullBuffers = System.Array.Empty<ShaderBufferBinding>();
+    private ShaderBufferBinding[] sceneBuffers = System.Array.Empty<ShaderBufferBinding>();
+    // A Selection-panel margin edit not yet sent: (global placement index + 1, value), carried by the
+    // next frame's classify dispatches into the one thread that owns the row.
+    private (int Placement, float Margin) pendingMarginEdit;
     // --flatten: the old shape through the new path. Every placement baked into its own primitive and
     // placed once at identity, so a same-binary A/B isolates instancing from everything else.
     private bool flatten;

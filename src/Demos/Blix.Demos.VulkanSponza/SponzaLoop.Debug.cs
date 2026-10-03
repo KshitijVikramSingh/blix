@@ -222,10 +222,15 @@ internal sealed partial class SponzaLoop
             $"{cascadeTexelWorld[0]:0.000}/{cascadeTexelWorld[1]:0.000}/{cascadeTexelWorld[2]:0.000}");
         // Per-cascade caster counts after frustum cull (one frame stale — set
         // during the previous OnRender's graph.Execute).
-        debug.Values.Value("cascade-casters", $"{cascadeDrawCounts[0]}/{cascadeDrawCounts[1]}/{cascadeDrawCounts[2]} of {opaquePlacements.Count}");
+        // Under GPU culling both counts stay on the GPU: --cpu-cull reports them.
+        debug.Values.Value("cascade-casters", gpuCull
+            ? "on the GPU (--cpu-cull counts)"
+            : $"{cascadeDrawCounts[0]}/{cascadeDrawCounts[1]}/{cascadeDrawCounts[2]} of {opaquePlacements.Count}");
         // Shadow-map cache hits: R = re-rendered this frame, · = served cached.
-        debug.Values.Value("cascade-tris", string.Create(Inv,
-            $"{cascadeTriangles[0]:N0}/{cascadeTriangles[1]:N0}/{cascadeTriangles[2]:N0} vs camera {cameraTriangles:N0}"));
+        debug.Values.Value("cascade-tris", gpuCull
+            ? "on the GPU (--cpu-cull counts)"
+            : string.Create(Inv,
+                $"{cascadeTriangles[0]:N0}/{cascadeTriangles[1]:N0}/{cascadeTriangles[2]:N0} vs camera {cameraTriangles:N0}"));
         debug.Values.Value("cascade-cache", $"{(cascadeRendered[0] ? 'R' : '·')}{(cascadeRendered[1] ? 'R' : '·')}{(cascadeRendered[2] ? 'R' : '·')}");
         debug.Values.Value("blend-draws", blendDrawables.Count);
         debug.Values.Value("cam-pos", cameraPosition);

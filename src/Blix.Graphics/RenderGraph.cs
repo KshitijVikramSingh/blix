@@ -46,7 +46,8 @@ public sealed partial class RenderGraph : IDisposable
     // Per-frame compute dispatches keyed by ComputePass handle. Executed in
     // PassOrder (declaration order) alongside graphics passes, so a compute
     // pass declared before a graphics pass that samples its output runs first.
-    private readonly Dictionary<int, Blix.Graphics.DispatchCommand> recordedDispatches = new();
+    // A pass's dispatches run in the order they were recorded.
+    private readonly Dictionary<int, List<Blix.Graphics.DispatchCommand>> recordedDispatches = new();
 
     public RenderGraph(IGraphicsDevice device)
     {
@@ -281,10 +282,12 @@ public sealed partial class RenderGraph : IDisposable
         recordedScopes[handle.Id] = (scope, clearColor);
     }
 
-    // Record a compute pass's dispatch for this frame. The pipeline must be a
+    // Record a dispatch into a compute pass for this frame. The pipeline must be a
     // compute pipeline whose program matches the ComputePass's declared Shader
     // interface. Emitted at Execute time as a RenderCommandList.ComputePass in
-    // declaration order.
+    // declaration order. Dispatches recorded into one pass in a frame run in the
+    // order recorded, each fenced against the last where they bind GPU buffers,
+    // which is what lets one pass reset, count and then scatter.
     public void Dispatch(PassHandle handle, Blix.Graphics.DispatchCommand dispatch)
     {
         ArgumentNullException.ThrowIfNull(dispatch);
@@ -298,7 +301,12 @@ public sealed partial class RenderGraph : IDisposable
             throw new InvalidOperationException(
                 $"RenderGraph.Dispatch targets pass {handle.Id}, which is not a ComputePass. Declare it with graph.ComputePass(...).");
         }
-        recordedDispatches[handle.Id] = dispatch;
+        if (!recordedDispatches.TryGetValue(handle.Id, out var list))
+        {
+            list = new List<Blix.Graphics.DispatchCommand>();
+            recordedDispatches[handle.Id] = list;
+        }
+        list.Add(dispatch);
     }
 
     public void Execute(Blix.Graphics.RenderCommandList commandList)
@@ -313,14 +321,14 @@ public sealed partial class RenderGraph : IDisposable
 
         foreach (var passId in PassOrder)
         {
-            // Compute pass: emit its recorded dispatch (if any) in order. The
+            // Compute pass: emit its recorded dispatches (if any) in order. The
             // Vulkan backend records it outside a render pass with the storage
             // barriers; a graphics pass declared after it samples the result.
             if (ComputePasses.TryGetValue(passId, out var cpass))
             {
-                if (recordedDispatches.TryGetValue(passId, out var dispatch))
+                if (recordedDispatches.TryGetValue(passId, out var dispatches))
                 {
-                    commandList.ComputePass(cpass.Name, dispatch);
+                    commandList.ComputePass(cpass.Name, dispatches);
                 }
                 continue;
             }

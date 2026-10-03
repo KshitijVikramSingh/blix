@@ -124,6 +124,7 @@ internal sealed partial class SponzaLoop
         // Without this both read a zero box, and offscreen casters lost their shadows.
         if (!skyVolumeLoaded) FitSceneVolumeToDrawables();
         RegisterSelectables();
+        BuildCullBuffers();
         Console.WriteLine(
             $"[VulkanSponza] total: {opaqueDrawables.Count} opaque/mask + {blendDrawables.Count} blend unique primitives, "
             + $"placed {opaquePlacements.Count} + {blendPlacements.Count} times{(flatten ? " (--flatten: every placement baked)" : "")}.");
@@ -364,6 +365,14 @@ internal sealed partial class SponzaLoop
         // each frame (camera opaque + one per shadow cascade + blend). indirectScratch is sized for the
         // largest list (opaque) and reused for the smaller fills.
         lodSlots = Math.Max(1, opaqueDrawables.Concat(blendDrawables).Select(d => d.LodIndexCounts.Length).DefaultIfEmpty(1).Max());
+        staging.Clear();
+        Console.WriteLine(
+            $"[VulkanSponza] bundled geometry: 1 VB ({bundle.VertexCount} verts) holding {opaqueDrawables.Count} + {blendDrawables.Count} "
+            + $"unique primitives, placed {opaquePlacements.Count} + {blendPlacements.Count} times; {opaqueGroups.Count} opaque indirect groups "
+            + $"x {lodSlots} LOD slots; {sceneTransforms.Count} transforms ({sceneTransforms.Count * 64 / 1024.0:0.0} KB).");
+        // The GPU cull's buffers wait for the LOD margins (RegisterSelectables); see BuildCullBuffers.
+        if (gpuCull) return;
+
         opaqueIndirect = Own(device.CreateIndirectBuffer(opaqueDrawables.Count * lodSlots, "sponza.opaque.indirect"));
         for (var c = 0; c < CascadeCount; c++)
             cascadeIndirect[c] = Own(device.CreateIndirectBuffer(opaqueDrawables.Count * lodSlots, $"sponza.cascade{c}.indirect"));
@@ -383,13 +392,82 @@ internal sealed partial class SponzaLoop
         // Static: written into every frame slot once, never again.
         var transformBytes = MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(sceneTransforms));
         for (var slot = 0; slot < instances.FramesInFlight; slot++) instances.WriteBuffer(slot, 0, transformBytes);
-
-        staging.Clear();
-        Console.WriteLine(
-            $"[VulkanSponza] bundled geometry: 1 VB ({bundle.VertexCount} verts) holding {opaqueDrawables.Count} + {blendDrawables.Count} "
-            + $"unique primitives, placed {opaquePlacements.Count} + {blendPlacements.Count} times; {opaqueGroups.Count} opaque indirect groups "
-            + $"x {lodSlots} LOD slots; {sceneTransforms.Count} transforms ({sceneTransforms.Count * 64 / 1024.0:0.0} KB).");
     }
+
+    // What scene_cull.comp reads, uploaded once, and what it writes, zeroed: every placement (bounds,
+    // drawable, transform row, LOD margin), every drawable and its levels, opaque bucket first, then
+    // blend; per-(pass, placement) LOD state laid out like the visible list; and the indirect records,
+    // one region per pass in the order of SceneListRecordBase.
+    private void BuildCullBuffers()
+    {
+        if (!gpuCull) return;
+        var placementCount = opaquePlacements.Count + blendPlacements.Count;
+        var drawableCount = opaqueDrawables.Count + blendDrawables.Count;
+
+        var placements = new CullPlacement[Math.Max(1, placementCount)];
+        void Placements(List<Placement> list, float[] margins, int offset)
+        {
+            for (var i = 0; i < list.Count; i++)
+            {
+                var p = list[i];
+                placements[offset + i] = new CullPlacement(
+                    new Vector4(p.Bounds.Min, 0f), new Vector4(p.Bounds.Max, 0f),
+                    (uint)p.Drawable, (uint)p.Transform, margins[i], 0);
+            }
+        }
+        Placements(opaquePlacements, opaqueLodMargins, 0);
+        Placements(blendPlacements, blendLodMargins, opaquePlacements.Count);
+
+        var drawables = new CullDrawable[Math.Max(1, drawableCount)];
+        var lods = new CullLod[Math.Max(1, drawableCount * lodSlots)];
+        var at = 0;
+        foreach (var d in opaqueDrawables.Concat(blendDrawables))
+        {
+            drawables[at] = new CullDrawable((uint)d.LodIndexCounts.Length, d.BaseVertex, (uint)d.PlacementStart, 0);
+            for (var l = 0; l < d.LodIndexCounts.Length; l++)
+            {
+                lods[at * lodSlots + l] = new CullLod(d.LodErrors[l], (uint)d.LodIndexCounts[l], (uint)d.LodFirstIndex[l], 0);
+            }
+            at++;
+        }
+
+        var visibleCapacity = Math.Max(1, opaquePlacements.Count * (1 + CascadeCount) + blendPlacements.Count);
+        var records = Math.Max(1, SceneListRecordBase(SceneListBlend) + blendDrawables.Count * lodSlots);
+        cullPlacements = Own(device.CreateGpuBuffer(placements.Length * CullPlacement.Size,
+            MemoryMarshal.AsBytes(placements.AsSpan()), "sponza.cull.placements"));
+        cullDrawables = Own(device.CreateGpuBuffer(drawables.Length * 16, MemoryMarshal.AsBytes(drawables.AsSpan()), "sponza.cull.drawables"));
+        cullLods = Own(device.CreateGpuBuffer(lods.Length * 16, MemoryMarshal.AsBytes(lods.AsSpan()), "sponza.cull.lods"));
+        cullState = Own(device.CreateGpuBuffer(visibleCapacity * 4, name: "sponza.cull.state"));
+        cullCursor = Own(device.CreateGpuBuffer(records * 4, name: "sponza.cull.cursor"));
+        sceneArgs = Own(device.CreateGpuBuffer(records * IndirectDraw.RecordStride, name: "sponza.scene.args"));
+        sceneVisible = Own(device.CreateGpuBuffer(visibleCapacity * 4, name: "sponza.scene.visible"));
+        sceneTransformBuffer = Own(device.CreateGpuBuffer(Math.Max(1, sceneTransforms.Count) * 64,
+            MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(sceneTransforms)), "sponza.scene.transforms"));
+        cullBuffers = new ShaderBufferBinding[]
+        {
+            new("CullPlacements", cullPlacements), new("CullDrawables", cullDrawables), new("CullLods", cullLods),
+            new("CullState", cullState), new("CullCursor", cullCursor), new("SceneArgs", sceneArgs),
+            new("SceneVisible", sceneVisible),
+        };
+        sceneBuffers = new ShaderBufferBinding[] { new("SceneTransforms", sceneTransformBuffer), new("SceneVisible", sceneVisible) };
+        Console.WriteLine(
+            $"[VulkanSponza] GPU cull: {placementCount} placements, {drawableCount} drawables x {lodSlots} levels, "
+            + $"{records} indirect records, {visibleCapacity} visible slots "
+            + $"({(placements.Length * CullPlacement.Size + (drawables.Length + lods.Length) * 16 + visibleCapacity * 8 + records * 24 + sceneTransforms.Count * 64) / 1048576.0:0.0} MB).");
+    }
+
+    // scene_cull.comp's records, std430.
+    [StructLayout(LayoutKind.Sequential)]
+    private readonly record struct CullPlacement(Vector4 BoundsMin, Vector4 BoundsMax, uint Drawable, uint Transform, float Margin, uint Pad)
+    {
+        public const int Size = 48;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private readonly record struct CullDrawable(uint LodCount, int BaseVertex, uint PlacementStart, uint Pad);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private readonly record struct CullLod(float Error, uint IndexCount, uint FirstIndex, uint Pad);
 
     // Whether a world's linear part scales every axis alike (a rotation times a uniform scale).
     private static bool UniformScale(in Matrix4x4 m)

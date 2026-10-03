@@ -40,7 +40,7 @@ internal sealed partial class SponzaLoop
         fillIndirectTriangles = 0;
         // --ab lod reaches every camera and cascade fill through this shared selector. A zero budget
         // is PickLod's normal full-detail path.
-        var errorPixels = abMode == "lod" ? LodArmPixels : render.LodErrorPixels;
+        var errorPixels = LodErrorPixelsNow;
         Span<int> counts = stackalloc int[lodSlots];
         Span<int> fill = stackalloc int[lodSlots];
         var cursor = visibleBase;
@@ -118,22 +118,136 @@ internal sealed partial class SponzaLoop
     // current frame slot. Once per frame, after every fill and before the graph executes.
     private void UploadVisible()
     {
+        // The frame's dispatches are recorded: an edit one of them carried has been sent.
+        if (marginEditSent) { pendingMarginEdit = default; marginEditSent = false; }
         if (sceneInstances is not { } instances || visibleWritten == 0) return;
         instances.WriteBuffer(device.CurrentFrameSlot, 1,
             MemoryMarshal.AsBytes(visibleScratch.AsSpan(0, visibleWritten)));
         visibleWritten = 0;
     }
 
-    // Where each pass's run of visible placements starts in visibleScratch.
-    private int CameraVisibleBase => 0;
-    private int CascadeVisibleBase(int cascade) => opaquePlacements.Count * (1 + cascade);
-    private int BlendVisibleBase => opaquePlacements.Count * (1 + CascadeCount);
-
     // A group's commands: its drawables' lodSlots each.
     private int GroupByteOffset(OpaqueGroup g) => g.Start * lodSlots * IndirectDraw.RecordStride;
     private int GroupDrawCount(OpaqueGroup g) => g.Count * lodSlots;
 
+    // --ab lod reaches every camera and cascade selection through this. A zero budget is full detail.
+    private float LodErrorPixelsNow => abMode == "lod" ? LodArmPixels : render.LodErrorPixels;
+
+    // The lists a frame culls, each its own indirect records and run of the visible list: the camera's
+    // over the opaque placements (shared by the depth pre-pass and the lit pass), one per cascade over
+    // the same placements, and the camera's over the blend ones.
+    private const int SceneListCamera = 0;
+    private static int SceneListCascade(int cascade) => 1 + cascade;
+    private const int SceneListBlend = 1 + CascadeCount;
+    private int SceneListRecordBase(int list) => opaqueDrawables.Count * lodSlots * list;
+    private int SceneListVisibleBase(int list) => opaquePlacements.Count * list;
+
+    private IndirectBufferHandle SceneListIndirect(int list) =>
+        list == SceneListCamera ? opaqueIndirect : list == SceneListBlend ? blendIndirect : cascadeIndirect[list - 1];
+
+    private int[] SceneListLodState(int list) =>
+        list == SceneListCamera ? opaqueLodState : list == SceneListBlend ? blendLodState : cascadeLodState[list - 1];
+
+    // Cull one list and choose its levels: on the CPU into its indirect buffer (FillIndirect, returning the
+    // visible count), or on the GPU as scene_cull.comp's three dispatches into the scene-cull pass
+    // (returning -1: the count stays on the GPU). Either way the draws then read it via DrawSceneGroup.
+    // cullViewProj and receiversViewProj are row-vector view-projections (clip = world · M), as the
+    // camera and cascade matrices are kept.
+    private int CullList(
+        int list, Matrix4x4? cullViewProj, float margin, float worldErrorBudget = 0f,
+        Matrix4x4? receiversViewProj = null, Vector3 shadowSweepDir = default)
+    {
+        var blend = list == SceneListBlend;
+        var drawables = blend ? blendDrawables : opaqueDrawables;
+        var placements = blend ? blendPlacements : opaquePlacements;
+        if (drawables.Count == 0) return 0;
+        if (!gpuCull)
+        {
+            return FillIndirect(drawables, placements, blend ? blendLodMargins : opaqueLodMargins,
+                SceneListLodState(list), SceneListIndirect(list), SceneListVisibleBase(list),
+                cullViewProj is { } c ? Frustum.FromViewProjection(Matrix4x4.Transpose(c)) : null, margin, worldErrorBudget,
+                receiversViewProj is { } r ? Frustum.FromViewProjection(Matrix4x4.Transpose(r)) : null, shadowSweepDir);
+        }
+
+        var firstPlacement = blend ? opaquePlacements.Count : 0;
+        var records = drawables.Count * lodSlots;
+        // The edit belongs to this list's bucket only when its row is in this list's range.
+        var edit = pendingMarginEdit.Placement - 1;
+        var editsHere = edit >= firstPlacement && edit < firstPlacement + placements.Count;
+        if (editsHere) marginEditSent = true;
+        DispatchCommand Phase(int mode, int items)
+        {
+            var groups = (items + CullGroupSize - 1) / CullGroupSize;
+            if (groups > 65535)
+            {
+                throw new InvalidOperationException(
+                    $"scene cull: {items} items is {groups} workgroups, past the 65535 one dispatch dimension holds.");
+            }
+            var uniforms = new ShaderUniform[]
+            {
+                new("uCull", new Matrix4x4Uniform(cullViewProj ?? Matrix4x4.Identity)),
+                new("uReceivers", new Matrix4x4Uniform(receiversViewProj ?? Matrix4x4.Identity)),
+                new("uSweep", new Vector4Uniform(new Vector4(shadowSweepDir, shadowSweepDir == Vector3.Zero ? 0f : 1f))),
+                new("uVolumeMin", new Vector4Uniform(new Vector4(skyVolumeMin, 0f))),
+                new("uVolumeMax", new Vector4Uniform(new Vector4(skyVolumeMin + skyVolumeSpan, 0f))),
+                new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, LodErrorScale))),
+                new("uLod", new Vector4Uniform(new Vector4(LodErrorPixelsNow, worldErrorBudget, LodHysteresis, margin))),
+                new("uRange", new Vector4Uniform(new Vector4(
+                    firstPlacement, placements.Count, blend ? opaqueDrawables.Count : 0, SceneListVisibleBase(list)))),
+                new("uArgs", new Vector4Uniform(new Vector4(SceneListRecordBase(list), records, lodSlots, mode))),
+                new("uFlags", new Vector4Uniform(new Vector4(
+                    cullViewProj is null ? 0f : 1f, receiversViewProj is null ? 0f : 1f,
+                    editsHere ? pendingMarginEdit.Placement : 0f, editsHere ? pendingMarginEdit.Margin : 0f))),
+            };
+            return new DispatchCommand(cullPipeline, Math.Max(1, groups), 1, 1, uniforms,
+                Array.Empty<ShaderTextureBinding>(), Buffers: cullBuffers);
+        }
+
+        graph.Dispatch(cullPassHandle, Phase(0, records));
+        graph.Dispatch(cullPassHandle, Phase(1, placements.Count));
+        graph.Dispatch(cullPassHandle, Phase(2, placements.Count));
+        return -1;
+    }
+
+    private const int CullGroupSize = 64;
+    // Whether a classify dispatch this frame carried pendingMarginEdit; cleared with it at frame end.
+    private bool marginEditSent;
+
+    // One group's indirect draw from a culled list: the GPU's records and set-3 buffers, or the CPU's.
+    private void DrawSceneGroup(
+        RenderPassBuilder scope, int list, OpaqueGroup g, PipelineHandle pipeline,
+        IReadOnlyList<ShaderUniform> uniforms, IReadOnlyList<ShaderTextureBinding> textures,
+        MaterialHandle? material, byte[]? pushConstants = null)
+    {
+        var ib = g.IsU32 ? sharedIbU32 : sharedIbU16;
+        if (gpuCull)
+        {
+            scope.DrawIndexedIndirect(sharedVb, ib, pipeline, sceneArgs,
+                (SceneListRecordBase(list) + g.Start * lodSlots) * IndirectDraw.RecordStride, GroupDrawCount(g),
+                uniforms, textures, material, pushConstants, sceneBuffers);
+            return;
+        }
+        scope.DrawIndexedIndirect(sharedVb, ib, pipeline, SceneListIndirect(list), GroupByteOffset(g), GroupDrawCount(g),
+            uniforms, textures, material, pushConstants, perDrawMaterial: sceneInstances!.Handle);
+    }
+
     public void OnRender(Time time, RenderFrameContext frame, RenderCommandList commandList)
+    {
+        // The CPU this loop spends building a frame: culling, recording, and the graph's translation of
+        // it, which is the cost GPU culling exists to take off the CPU. Post-load frames only, outside
+        // an --ab run, alongside the frame periods (WriteFrameStats).
+        var start = System.Diagnostics.Stopwatch.GetTimestamp();
+        var counted = fullyLoaded && abMode.Length == 0;
+        RenderFrame(time, frame, commandList);
+        if (!counted) return;
+        recordMs[recordCount % recordMs.Length] = System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+        recordCount++;
+    }
+
+    private readonly double[] recordMs = new double[600];
+    private int recordCount;
+
+    private void RenderFrame(Time time, RenderFrameContext frame, RenderCommandList commandList)
     {
         // Match-swapchain graph targets are reallocated rather than resized in place. Their public
         // handles stay stable, but their contents do not. GTAO reads ambientDenoisedHandle as the
@@ -304,27 +418,18 @@ internal sealed partial class SponzaLoop
         // discard against the not-yet-uploaded albedo).
         if (!fullyLoaded || AbFlatPhase)
         {
-            FillIndirect(opaqueDrawables, opaquePlacements, opaqueLodMargins, opaqueLodState, opaqueIndirect,
-                CameraVisibleBase, cull: null, margin: 0f);
+            CullList(SceneListCamera, cullViewProj: null, margin: 0f);
             graph.Pass(depthPrepassHandle, scope =>
             {
                 foreach (var g in opaqueGroups)
-                    scope.DrawIndexedIndirect(
-                        vertexBuffer: sharedVb, indexBuffer: g.IsU32 ? sharedIbU32 : sharedIbU16,
-                        pipeline: prepassOpaquePipeline, indirectBuffer: opaqueIndirect,
-                        indirectByteOffset: GroupByteOffset(g), drawCount: GroupDrawCount(g),
-                        uniforms: perFrame, textures: Array.Empty<ShaderTextureBinding>(),
-                        material: null, perDrawMaterial: sceneInstances!.Handle);
+                    DrawSceneGroup(scope, SceneListCamera, g, prepassOpaquePipeline,
+                        perFrame, Array.Empty<ShaderTextureBinding>(), material: null);
             });
             graph.Pass(litPassHandle, scope =>
             {
                 foreach (var g in opaqueGroups)
-                    scope.DrawIndexedIndirect(
-                        vertexBuffer: sharedVb, indexBuffer: g.IsU32 ? sharedIbU32 : sharedIbU16,
-                        pipeline: flatPipeline, indirectBuffer: opaqueIndirect,
-                        indirectByteOffset: GroupByteOffset(g), drawCount: GroupDrawCount(g),
-                        uniforms: perFrame, textures: Array.Empty<ShaderTextureBinding>(),
-                        material: null, perDrawMaterial: sceneInstances!.Handle);
+                    DrawSceneGroup(scope, SceneListCamera, g, flatPipeline,
+                        perFrame, Array.Empty<ShaderTextureBinding>(), material: null);
             }, clearColor: new GraphicsColor(0.05f, 0.07f, 0.10f, 1f));
             UploadVisible();
             graph.Execute(commandList);
@@ -384,51 +489,40 @@ internal sealed partial class SponzaLoop
             // (clip = M·world); our cascade VP is the System.Numerics
             // row-vector form (clip = Vector4.Transform(world, M)), so transpose
             // to hand it the clip-coordinate generators as rows.
-            var cascadeFrustum = Frustum.FromViewProjection(Matrix4x4.Transpose(vp));
-            // Fill this cascade's indirect buffer (per-cascade frustum cull → 0
-            // instanceCount; same SSE LOD as the lit/pre-pass so shadow depth
-            // matches the shaded silhouette). Then one indirect draw per group.
+            // Cull this cascade's list (per-cascade frustum cull → 0 instanceCount; same SSE LOD
+            // as the lit/pre-pass so shadow depth matches the shaded silhouette). Then one
+            // indirect draw per group.
             cascadeTriangles[ci] = 0;
-            cascadeDrawCounts[ci] = FillIndirect(
-                opaqueDrawables, opaquePlacements, opaqueLodMargins, cascadeLodState[ci], cascadeIndirect[ci],
-                CascadeVisibleBase(ci), cull ? cascadeFrustum : null, margin,
+            cascadeDrawCounts[ci] = CullList(
+                SceneListCascade(ci), cull ? vp : null, margin,
                 // Shadow LOD is bounded by this cascade's world texel, not camera pixels. The full-
                 // detail A/B arm explicitly overrides it so “no LOD” means every pass.
                 abMode == "lod" && LodArmPixels <= 0f ? 0f : cascadeTexelWorld[ci] * shadowLodTexels,
                 // Receiver culling tests the scene-bounded sun sweep against the camera frustum.
-                shadowCasterCull && !(abMode == "castercull" && AbOffPhase) ? cameraFrustumThisFrame : null,
+                shadowCasterCull && !(abMode == "castercull" && AbOffPhase) ? viewProj : null,
                 Vector3.Normalize(sunDirection));
-            cascadeTriangles[ci] = fillIndirectTriangles;
+            cascadeTriangles[ci] = gpuCull ? -1 : fillIndirectTriangles;
             // Opaque casters all push the same bytes (this cascade's VP); mask casters push
             // per-material alpha params, so one mask push per group (constant within a material).
             // Where each placement stands is set 3's.
             var cascadeOpaquePush = ShadowOpaquePushBytes(vp);
-            var cascadeBuf = cascadeIndirect[ci];
+            var cascadeList = SceneListCascade(ci);
             graph.Pass(cascadePassHandles[ci], scope =>
             {
                 foreach (var g in opaqueGroups)
                 {
-                    var ib = g.IsU32 ? sharedIbU32 : sharedIbU16;
-                    var byteOffset = GroupByteOffset(g);
                     if (g.IsMask)
                     {
                         var rep = opaqueDrawables[g.Start];
-                        scope.DrawIndexedIndirect(
-                            vertexBuffer: sharedVb, indexBuffer: ib, pipeline: shadowMaskPipeline,
-                            indirectBuffer: cascadeBuf, indirectByteOffset: byteOffset, drawCount: GroupDrawCount(g),
-                            uniforms: Array.Empty<ShaderUniform>(), textures: rep.ShadowAlbedoBinding,
-                            material: null,
-                            pushConstants: RentMaskPush(vp, rep.AlphaCutoff, rep.BaseColorAlpha),
-                            perDrawMaterial: sceneInstances!.Handle);
+                        DrawSceneGroup(scope, cascadeList, g, shadowMaskPipeline,
+                            Array.Empty<ShaderUniform>(), rep.ShadowAlbedoBinding, material: null,
+                            pushConstants: RentMaskPush(vp, rep.AlphaCutoff, rep.BaseColorAlpha));
                     }
                     else
                     {
-                        scope.DrawIndexedIndirect(
-                            vertexBuffer: sharedVb, indexBuffer: ib, pipeline: shadowOpaquePipeline,
-                            indirectBuffer: cascadeBuf, indirectByteOffset: byteOffset, drawCount: GroupDrawCount(g),
-                            uniforms: Array.Empty<ShaderUniform>(), textures: Array.Empty<ShaderTextureBinding>(),
-                            material: null, pushConstants: cascadeOpaquePush,
-                            perDrawMaterial: sceneInstances!.Handle);
+                        DrawSceneGroup(scope, cascadeList, g, shadowOpaquePipeline,
+                            Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), material: null,
+                            pushConstants: cascadeOpaquePush);
                     }
                 }
             });
@@ -492,29 +586,25 @@ internal sealed partial class SponzaLoop
         // instanceCount without compacting groups, saving vertex/binning work while preserving
         // indirect offsets. Recorded off-screen geometry was 55% at the default view and 96% on
         // the orbit after cook-time spatial splitting made bounds selective.
-        var cameraFrustum = cullEnabled && !(abMode == "cull" && AbOffPhase)
-            ? cameraFrustumThisFrame
-            : (Frustum?)null;
+        Matrix4x4? cameraCull = cullEnabled && !(abMode == "cull" && AbOffPhase) ? viewProj : null;
         //
         // The margin is insurance, not tuning. A chunk whose bounds sit exactly on a frustum plane
         // can fall either way on floating-point noise, and at the screen edge that reads as geometry
         // blinking in and out as you turn. Half a metre of slack costs a fraction of a percent of
         // the rejections and removes the whole class.
-        FillIndirect(opaqueDrawables, opaquePlacements, opaqueLodMargins, opaqueLodState, opaqueIndirect,
-            CameraVisibleBase, cameraFrustum, margin: CameraCullMargin);
-        cameraTriangles = fillIndirectTriangles;
+        CullList(SceneListCamera, cameraCull, margin: CameraCullMargin);
+        cameraTriangles = gpuCull ? -1 : fillIndirectTriangles;
         // Accumulate exactly one contiguous orbit so triangle means cover the full closed path and
         // do not depend on streaming duration or which arc happened to be sampled.
         if (!orbit || triangleFrames < OrbitFrames)
         {
             for (var c = 0; c < CascadeCount; c++) cascadeTriangleSum[c] += cascadeTriangles[c];
-            cameraTriangleSum += fillIndirectTriangles;
+            cameraTriangleSum += cameraTriangles;
             triangleFrames++;
         }
         if (blendDrawables.Count > 0)
         {
-            FillIndirect(blendDrawables, blendPlacements, blendLodMargins, blendLodState, blendIndirect,
-                BlendVisibleBase, cameraFrustum, margin: CameraCullMargin);
+            CullList(SceneListBlend, cameraCull, margin: CameraCullMargin);
         }
 
         // Depth pre-pass: same non-blend set as the lit pass (no cull, so the
@@ -529,17 +619,8 @@ internal sealed partial class SponzaLoop
             if (skipPrepass) return;
             foreach (var g in opaqueGroups)
             {
-                scope.DrawIndexedIndirect(
-                    vertexBuffer: sharedVb,
-                    indexBuffer: g.IsU32 ? sharedIbU32 : sharedIbU16,
-                    pipeline: g.IsMask ? prepassMaskPipeline : prepassOpaquePipeline,
-                    indirectBuffer: opaqueIndirect,
-                    indirectByteOffset: GroupByteOffset(g),
-                    drawCount: GroupDrawCount(g),
-                    uniforms: perFrame,
-                    textures: Array.Empty<ShaderTextureBinding>(),
-                    material: g.IsMask ? g.Material : null,
-                    perDrawMaterial: sceneInstances!.Handle);
+                DrawSceneGroup(scope, SceneListCamera, g, g.IsMask ? prepassMaskPipeline : prepassOpaquePipeline,
+                    perFrame, Array.Empty<ShaderTextureBinding>(), material: g.IsMask ? g.Material : null);
             }
         });
 
@@ -816,17 +897,7 @@ internal sealed partial class SponzaLoop
                     if (pipeline == opaqueSolidPipeline) pipeline = opaqueSolidPipelineWrites;
                     else if (pipeline == opaqueDoubleSidedPipeline) pipeline = opaqueDoubleSidedPipelineWrites;
                 }
-                scope.DrawIndexedIndirect(
-                    vertexBuffer: sharedVb,
-                    indexBuffer: g.IsU32 ? sharedIbU32 : sharedIbU16,
-                    pipeline: pipeline,
-                    indirectBuffer: opaqueIndirect,
-                    indirectByteOffset: GroupByteOffset(g),
-                    drawCount: GroupDrawCount(g),
-                    uniforms: perFrame,
-                    textures: passBindings,
-                    material: g.Material,
-                    perDrawMaterial: sceneInstances!.Handle);
+                DrawSceneGroup(scope, SceneListCamera, g, pipeline, perFrame, passBindings, g.Material);
             }
             // The probe view, before the sky so the sky can still fill where nothing was drawn, and
             // before blend so glass composites over it like any other geometry.
@@ -878,17 +949,7 @@ internal sealed partial class SponzaLoop
             // draw per (pipeline, material) group, same as opaque.
             foreach (var g in blendGroups)
             {
-                scope.DrawIndexedIndirect(
-                    vertexBuffer: sharedVb,
-                    indexBuffer: g.IsU32 ? sharedIbU32 : sharedIbU16,
-                    pipeline: g.Pipeline,
-                    indirectBuffer: blendIndirect,
-                    indirectByteOffset: GroupByteOffset(g),
-                    drawCount: GroupDrawCount(g),
-                    uniforms: perFrame,
-                    textures: passBindings,
-                    material: g.Material,
-                    perDrawMaterial: sceneInstances!.Handle);
+                DrawSceneGroup(scope, SceneListBlend, g, g.Pipeline, perFrame, passBindings, g.Material);
             }
         }, clearColor: new GraphicsColor(0.05f, 0.07f, 0.10f, 1f));
 
@@ -1272,6 +1333,7 @@ internal sealed partial class SponzaLoop
         };
         Report($"ON  : with {term}", framePeriodsMs, framePeriodCount);
         Report($"OFF : without {term}", flatPeriodsMs, flatPeriodCount);
+        Report($"CPU : building the frame ({(gpuCull ? "GPU" : "CPU")} cull)", recordMs, recordCount);
 
         var lit = Median(framePeriodsMs, framePeriodCount);
         var flat = Median(flatPeriodsMs, flatPeriodCount);
@@ -1699,7 +1761,11 @@ internal sealed partial class SponzaLoop
             + "and use paired A/B runs (--no-ao and friends) for absolute cost.");
         // Report triangle means over the measurement window rather than the camera's final pose.
         var tf = Math.Max(1, triangleFrames);
-        Console.WriteLine(string.Create(Inv,
+        if (gpuCull)
+        {
+            Console.WriteLine("[VulkanSponza] triangles submitted: counted on the GPU, not read back (--cpu-cull counts them).");
+        }
+        else Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] triangles submitted (mean of {tf} frames): cascades "
             + $"{cascadeTriangleSum[0] / tf:N0}/{cascadeTriangleSum[1] / tf:N0}/{cascadeTriangleSum[2] / tf:N0}, "
             + $"camera {cameraTriangleSum / tf:N0}"));

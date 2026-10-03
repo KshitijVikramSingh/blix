@@ -16,6 +16,7 @@ internal sealed partial class SponzaLoop
     private readonly List<IndexBufferHandle> ownedIndexBuffers = new();
     private readonly List<IndirectBufferHandle> ownedIndirect = new();
     private readonly List<MaterialHandle> ownedMaterials = new();
+    private readonly List<GpuBufferHandle> ownedGpuBuffers = new();
 
     private ShaderProgramHandle Own(ShaderProgramHandle h) { ownedPrograms.Add(h); return h; }
     private PipelineHandle Own(PipelineHandle h) { ownedPipelines.Add(h); return h; }
@@ -24,6 +25,7 @@ internal sealed partial class SponzaLoop
     private IndexBufferHandle Own(IndexBufferHandle h) { ownedIndexBuffers.Add(h); return h; }
     private IndirectBufferHandle Own(IndirectBufferHandle h) { ownedIndirect.Add(h); return h; }
     private MaterialHandle Own(MaterialHandle h) { ownedMaterials.Add(h); return h; }
+    private GpuBufferHandle Own(GpuBufferHandle h) { ownedGpuBuffers.Add(h); return h; }
 
     private void ReleaseDeviceResources()
     {
@@ -32,6 +34,7 @@ internal sealed partial class SponzaLoop
         foreach (var p in ownedPipelines) device.DestroyPipeline(p);
         foreach (var p in ownedPrograms) device.DestroyShaderProgram(p);
         foreach (var b in ownedIndirect) device.DestroyIndirectBuffer(b);
+        foreach (var b in ownedGpuBuffers) device.DestroyGpuBuffer(b);
         foreach (var b in ownedVertexBuffers) device.DestroyVertexBuffer(b);
         foreach (var b in ownedIndexBuffers) device.DestroyIndexBuffer(b);
 
