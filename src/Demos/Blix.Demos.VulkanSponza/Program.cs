@@ -683,7 +683,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         string Name,
         // This primitive's placements: a contiguous run of its bucket's placement list.
         int PlacementStart = 0,
-        int PlacementCount = 0)
+        int PlacementCount = 0,
+        // Each level's clusters, mesh space, FirstIndex relative to that level's LodFirstIndex. Empty for
+        // a level the cook did not cluster.
+        IReadOnlyList<MeshCluster>[]? LodClusters = null,
+        // Both faces are drawn, so a cluster's normal cone says nothing about whether it can be seen.
+        bool DoubleSided = false)
     {
         // Screen-space-error LOD: pick the COARSEST level whose stored world
         // error projects to ≤ errorPixels at the nearest point of the bounds,

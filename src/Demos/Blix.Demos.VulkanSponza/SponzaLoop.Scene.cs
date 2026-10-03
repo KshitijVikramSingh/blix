@@ -330,7 +330,9 @@ internal sealed partial class SponzaLoop
             bucket.Add(new Drawable(
                 bm.IndicesAreU32, bm.BaseVertex, bm.LodFirstIndex, bm.LodIndexCounts, bm.LodErrors,
                 s.Material, s.Pipeline, bm.Bounds, s.Albedo, s.AlphaCutoff, s.BaseColorAlpha,
-                s.ShadowAlbedoBinding, s.Name, start, s.Worlds.Length));
+                s.ShadowAlbedoBinding, s.Name, start, s.Worlds.Length,
+                s.Lods.Select(l => l.Clusters ?? (IReadOnlyList<MeshCluster>)Array.Empty<MeshCluster>()).ToArray(),
+                s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline));
         }
 
         // lit.vert carries normals by the model's linear part, exact for rotation and uniform scale. Said

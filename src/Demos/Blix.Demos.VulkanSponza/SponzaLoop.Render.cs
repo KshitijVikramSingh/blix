@@ -985,6 +985,7 @@ internal sealed partial class SponzaLoop
             LeakCensus();
             WritePassBreakdown();
             WriteLodCensus();
+            WriteClusterCensus();
             WriteProbeCensus();
             if (probeReference) WriteProbeReference(probeCount: 12, paths: 4096, bounces: refBounces);
             WriteFrameStats();
@@ -1155,26 +1156,46 @@ internal sealed partial class SponzaLoop
     /// </remarks>
     private void OcclusionCensus()
     {
-        // A level whose texels are coarse enough that a handful covers a typical object.
-        const int Level = 3;
-        var pixels = device.ReadTexture(
-            graph.GetColorTexture(hiZHandles[Level]), out var w, out var h, out var format);
-        if (format != TextureFormat.Rgba16F) return;
-
-        var farthest = new float[w * h];
-        for (var i = 0; i < w * h; i++) farthest[i] = (float)BitConverter.ToHalf(pixels, i * 8 + 2);
-
+        if (ReadHiZ() is not { } hiZ) return;
         var occluded = 0;
         long occludedTris = 0, totalTris = 0;
         var offscreen = 0;
 
         foreach (var p in opaquePlacements)
         {
-            var b = p.Bounds;
             var tris = opaqueDrawables[p.Drawable].LodIndexCounts[0] / 3;
             totalTris += tris;
+            switch (hiZ.Test(p.Bounds))
+            {
+                case HiZVerdict.OffScreen: offscreen++; break;
+                case HiZVerdict.Hidden: occluded++; occludedTris += tris; break;
+            }
+        }
 
-            // Project the eight corners; track the screen rect and the NEAREST view depth.
+        var shown = opaquePlacements.Count - offscreen;
+        Console.WriteLine(
+            $"[VulkanSponza] occlusion census (Hi-Z level {HiZCensusLevel}, {hiZ.Width}x{hiZ.Height}): " +
+            $"{occluded}/{shown} on-screen placements fully hidden, " +
+            $"{occludedTris / 1000.0:0.0}k of {totalTris / 1000.0:0.0}k triangles " +
+            $"({(totalTris > 0 ? 100.0 * occludedTris / totalTris : 0):0.0}%), {offscreen} off-screen");
+    }
+
+    // A level whose texels are coarse enough that a handful covers a typical object.
+    private const int HiZCensusLevel = 3;
+
+    private enum HiZVerdict { OffScreen, Hidden, Visible }
+
+    // This frame's Hi-Z level, read back: the farthest depth in each texel, and the camera it was drawn with.
+    private sealed record HiZSnapshot(float[] Farthest, int Width, int Height, Matrix4x4 View, Matrix4x4 ViewProj, float Near)
+    {
+        /// <summary>Whether everything these bounds could draw is behind the depth already recorded where they land.</summary>
+        /// <remarks>
+        /// Project the eight corners; take the screen rectangle and the NEAREST view depth. If the farthest
+        /// depth recorded anywhere in that rectangle is still nearer than the bounds' closest point, nothing
+        /// inside them would survive the depth test. Bounds reaching the near plane are never hidden.
+        /// </remarks>
+        public HiZVerdict Test(in Bounds3 b)
+        {
             float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
             var nearest = float.MaxValue;
             var anyInFront = false;
@@ -1184,48 +1205,43 @@ internal sealed partial class SponzaLoop
                     (c & 1) == 0 ? b.Min.X : b.Max.X,
                     (c & 2) == 0 ? b.Min.Y : b.Max.Y,
                     (c & 4) == 0 ? b.Min.Z : b.Max.Z);
-                var view = Vector3.Transform(corner, cameraView);
-                var depth = -view.Z;
-                if (depth <= CameraNearPlane) { anyInFront = true; continue; }
+                var depth = -Vector3.Transform(corner, View).Z;
+                if (depth <= Near) { anyInFront = true; continue; }
                 nearest = MathF.Min(nearest, depth);
                 anyInFront = true;
 
-                var clip = Vector4.Transform(new Vector4(corner, 1f), viewProj);
+                var clip = Vector4.Transform(new Vector4(corner, 1f), ViewProj);
                 var ndcX = clip.X / clip.W;
                 var ndcY = clip.Y / clip.W;
                 minX = MathF.Min(minX, ndcX); maxX = MathF.Max(maxX, ndcX);
                 minY = MathF.Min(minY, ndcY); maxY = MathF.Max(maxY, ndcY);
             }
 
-            if (!anyInFront || nearest == float.MaxValue) { offscreen++; continue; }
-            // Entirely outside the frustum sideways — the frustum cull's job, not this census's.
-            if (maxX < -1f || minX > 1f || maxY < -1f || minY > 1f) { offscreen++; continue; }
+            if (!anyInFront || nearest == float.MaxValue) return HiZVerdict.OffScreen;
+            // Entirely outside the frustum sideways: the frustum cull's job, not this test's.
+            if (maxX < -1f || minX > 1f || maxY < -1f || minY > 1f) return HiZVerdict.OffScreen;
 
-            var x0 = Math.Clamp((int)MathF.Floor((minX * 0.5f + 0.5f) * w), 0, w - 1);
-            var x1 = Math.Clamp((int)MathF.Ceiling((maxX * 0.5f + 0.5f) * w), 0, w - 1);
-            var y0 = Math.Clamp((int)MathF.Floor((minY * 0.5f + 0.5f) * h), 0, h - 1);
-            var y1 = Math.Clamp((int)MathF.Ceiling((maxY * 0.5f + 0.5f) * h), 0, h - 1);
+            var x0 = Math.Clamp((int)MathF.Floor((minX * 0.5f + 0.5f) * Width), 0, Width - 1);
+            var x1 = Math.Clamp((int)MathF.Ceiling((maxX * 0.5f + 0.5f) * Width), 0, Width - 1);
+            var y0 = Math.Clamp((int)MathF.Floor((minY * 0.5f + 0.5f) * Height), 0, Height - 1);
+            var y1 = Math.Clamp((int)MathF.Ceiling((maxY * 0.5f + 0.5f) * Height), 0, Height - 1);
 
-            // Farthest recorded depth anywhere the object covers. If even that is nearer than the
-            // object's closest point, nothing the object could draw would survive the depth test.
             var deepest = 0f;
             for (var y = y0; y <= y1; y++)
             for (var x = x0; x <= x1; x++)
-                deepest = MathF.Max(deepest, farthest[y * w + x]);
-
-            if (nearest > deepest)
-            {
-                occluded++;
-                occludedTris += tris;
-            }
+                deepest = MathF.Max(deepest, Farthest[y * Width + x]);
+            return nearest > deepest ? HiZVerdict.Hidden : HiZVerdict.Visible;
         }
+    }
 
-        var shown = opaquePlacements.Count - offscreen;
-        Console.WriteLine(
-            $"[VulkanSponza] occlusion census (Hi-Z level {Level}, {w}x{h}): " +
-            $"{occluded}/{shown} on-screen placements fully hidden, " +
-            $"{occludedTris / 1000.0:0.0}k of {totalTris / 1000.0:0.0}k triangles " +
-            $"({(totalTris > 0 ? 100.0 * occludedTris / totalTris : 0):0.0}%), {offscreen} off-screen");
+    private HiZSnapshot? ReadHiZ()
+    {
+        var pixels = device.ReadTexture(
+            graph.GetColorTexture(hiZHandles[HiZCensusLevel]), out var w, out var h, out var format);
+        if (format != TextureFormat.Rgba16F) return null;
+        var farthest = new float[w * h];
+        for (var i = 0; i < w * h; i++) farthest[i] = (float)BitConverter.ToHalf(pixels, i * 8 + 2);
+        return new HiZSnapshot(farthest, w, h, cameraView, viewProj, CameraNearPlane);
     }
 
     /// <summary>Checks each pyramid level really is the min/max of the one above it.</summary>
@@ -1723,6 +1739,83 @@ internal sealed partial class SponzaLoop
                 $"{saturated * 100.0 / opaquePlacements.Count,14:0.0}%   " +
                 $"{hist[0]}/{hist[1]}/{hist[2]}/{hist[3]}"));
         }
+    }
+
+    /// <summary>What culling clusters rather than placements would take off the camera's triangles, here.</summary>
+    /// <remarks>
+    /// Exact counts at this camera, every opaque placement at the level the global budget settles at
+    /// (no hysteresis, as the LOD census). Three filters, each on top of the last: the placement's
+    /// bounds against the frustum (what is submitted now), each cluster's world bounds against it,
+    /// and each cluster's normal cone against the camera (meshoptimizer's test: the cluster is
+    /// back-facing when dot(normalize(apex - eye), axis) >= cutoff). The cone is only asked of
+    /// single-sided geometry placed by a rotation and positive uniform scale; anything else keeps the
+    /// cluster, and is counted as ineligible so the share the test can never reach is visible.
+    /// </remarks>
+    private void WriteClusterCensus()
+    {
+        if (opaquePlacements.Count == 0) return;
+        var frustum = Frustum.FromViewProjection(Matrix4x4.Transpose(viewProj));
+        var hiZ = ReadHiZ();
+        long placementTris = 0, clusterFrustumTris = 0, coneTris = 0, ineligibleTris = 0;
+        long clustersInFrustum = 0, clustersAfterCone = 0, unclustered = 0;
+        // Occlusion against this frame's Hi-Z, on top of the frustum: whole placements, then each
+        // remaining cluster (after the cone).
+        long placementHiddenTris = 0, clusterHiddenTris = 0, clustersVisible = 0;
+        for (var i = 0; i < opaquePlacements.Count; i++)
+        {
+            var p = opaquePlacements[i];
+            if (!frustum.Intersects(p.Bounds, CameraCullMargin)) continue;
+            var d = opaqueDrawables[p.Drawable];
+            var level = d.PickLod(p.Bounds, cameraPosition, LodErrorScale, render.LodErrorPixels * opaqueLodMargins[i], 0);
+            placementTris += d.LodIndexCounts[level] / 3;
+            var placementHidden = hiZ?.Test(p.Bounds) == HiZVerdict.Hidden;
+            if (placementHidden) placementHiddenTris += d.LodIndexCounts[level] / 3;
+            var clusters = d.LodClusters is { } lc && level < lc.Length ? lc[level] : Array.Empty<MeshCluster>();
+            if (clusters.Count == 0)
+            {
+                unclustered += d.LodIndexCounts[level] / 3;
+                clusterFrustumTris += d.LodIndexCounts[level] / 3;
+                coneTris += d.LodIndexCounts[level] / 3;
+                if (placementHidden) clusterHiddenTris += d.LodIndexCounts[level] / 3;
+                continue;
+            }
+
+            var world = sceneTransforms[p.Transform];
+            var coneEligible = !d.DoubleSided && UniformScale(world) && world.GetDeterminant() > 0f;
+            foreach (var c in clusters)
+            {
+                var tris = c.IndexCount / 3;
+                var clusterBounds = WorldBounds(new Bounds3(c.Min, c.Max), world);
+                if (!frustum.Intersects(clusterBounds, 0f)) continue;
+                clustersInFrustum++;
+                clusterFrustumTris += tris;
+                if (!coneEligible) { ineligibleTris += tris; }
+                else if (c.ConeCutoff < 1f)
+                {
+                    var apex = Vector3.Transform(c.ConeApex, world);
+                    var axis = Vector3.Normalize(Vector3.TransformNormal(c.ConeAxis, world));
+                    if (Vector3.Dot(Vector3.Normalize(apex - cameraPosition), axis) >= c.ConeCutoff) continue;
+                }
+                clustersAfterCone++;
+                coneTris += tris;
+                if (placementHidden || hiZ?.Test(clusterBounds) == HiZVerdict.Hidden) clusterHiddenTris += tris;
+                else clustersVisible++;
+            }
+        }
+
+        double Share(long n) => placementTris > 0 ? n * 100.0 / placementTris : 0;
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] cluster census at this camera (opaque, {render.LodErrorPixels:0.##} px): "
+            + $"placement culling submits {placementTris:N0} triangles; "
+            + $"cluster frustum keeps {clusterFrustumTris:N0} ({Share(clusterFrustumTris):0.0}%, {clustersInFrustum:N0} clusters); "
+            + $"+ normal cone keeps {coneTris:N0} ({Share(coneTris):0.0}%, {clustersAfterCone:N0} clusters). "
+            + $"Cone-ineligible (double-sided or non-uniform): {Share(ineligibleTris):0.0}%; unclustered: {Share(unclustered):0.0}%."));
+        if (hiZ is null) return;
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] occlusion on top (this frame's Hi-Z level {HiZCensusLevel}, {hiZ.Width}x{hiZ.Height}, conservative): "
+            + $"placement occlusion keeps {placementTris - placementHiddenTris:N0} ({Share(placementTris - placementHiddenTris):0.0}%); "
+            + $"frustum + cone + cluster occlusion keeps {coneTris - clusterHiddenTris:N0} "
+            + $"({Share(coneTris - clusterHiddenTris):0.0}%, {clustersVisible:N0} clusters)."));
     }
 
     /// <summary>Prints resolved GPU milliseconds per pass, heaviest first.</summary>
