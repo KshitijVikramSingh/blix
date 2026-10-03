@@ -29,6 +29,17 @@ public interface IGraphicsDevice : IDisposable
     /// <summary>The optional features this device enabled (see <see cref="GraphicsFeatures"/>).</summary>
     GraphicsFeatures Features { get; }
 
+    /// <summary>A device-local buffer of <paramref name="sizeBytes"/>: <paramref name="initial"/> at its start, zeros after.</summary>
+    /// <remarks>
+    /// Storage a compute pass reads and writes (atomics included), a draw reads, and an indirect draw can take its
+    /// arguments from; bound by block name with <see cref="ShaderBufferBinding"/>. The initial contents are uploaded
+    /// once, now. After that only the GPU writes it: a dispatch that binds one is ordered after every earlier read of
+    /// it, and every later read after the dispatch's writes.
+    /// </remarks>
+    GpuBufferHandle CreateGpuBuffer(int sizeBytes, ReadOnlySpan<byte> initial = default, string? name = null);
+
+    void DestroyGpuBuffer(GpuBufferHandle handle);
+
     GraphicsDeviceDiagnostics DiagnosticsSnapshot { get; }
 
     void SetDefaultRenderSurfaceSize(int width, int height);

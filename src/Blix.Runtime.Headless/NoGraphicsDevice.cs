@@ -66,6 +66,10 @@ public sealed class NoGraphicsDevice : IGraphicsDevice
 
     public void DestroyIndirectBuffer(IndirectBufferHandle handle) => throw Refuse();
 
+    public GpuBufferHandle CreateGpuBuffer(int sizeBytes, ReadOnlySpan<byte> initial = default, string? name = null) => throw Refuse();
+
+    public void DestroyGpuBuffer(GpuBufferHandle handle) => throw Refuse();
+
     public ShaderProgramHandle CreateShaderProgramFromSpv(
         byte[] vertexSpv, byte[] fragmentSpv, ShaderInterface shaderInterface, string? name = null) => throw Refuse();
 

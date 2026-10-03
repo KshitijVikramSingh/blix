@@ -1037,6 +1037,7 @@ public sealed partial class VulkanGraphicsDevice
         foreach (var e in indexBufferTable.Values) DestroyVkBufferEntry(e);
         indexBufferTable.Clear();
         DestroyIndirectBuffers();
+        DestroyAllGpuBuffers();
         DestroyTransientDescriptorPools();
     }
 }

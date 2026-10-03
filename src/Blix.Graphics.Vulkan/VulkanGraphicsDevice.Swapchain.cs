@@ -1315,7 +1315,7 @@ public sealed partial class VulkanGraphicsDevice
         // The per-draw material's set is the material's, so no transient set is allocated there: the
         // same rule as the direct draw (TranslateDrawIndexed).
         BindTransientDescriptorSets(cmd, prog, pipe.Layout, frameSlot, d.Textures,
-            materialSet: d.PerDrawMaterial is { } covered ? materialTable[covered.Id].SetIndex : -1);
+            materialSet: d.PerDrawMaterial is { } covered ? materialTable[covered.Id].SetIndex : -1, gpuBuffers: d.Buffers);
 
         if (d.Material is { } matHandle)
         {
@@ -1345,7 +1345,9 @@ public sealed partial class VulkanGraphicsDevice
         Vk.CmdBindVertexBuffers(cmd, 0, 1, &buffer, &offset);
         Vk.CmdBindIndexBuffer(cmd, ib.Buffer, 0, ib.IndexType);
 
-        var indirect = GetIndirectBuffer(d.IndirectBuffer);
+        // The records: a GPU buffer a compute pass wrote this frame (its dispatch fenced the write), or the
+        // CPU-written ring slot.
+        var indirect = d.ArgumentBuffer is { } gpuArguments ? GetGpuBuffer(gpuArguments) : GetIndirectBuffer(d.IndirectBuffer);
         // Cast to uint below, where a negative count becomes four billion. Refused here, by name.
         if (d.DrawCount < 0)
         {
@@ -1425,14 +1427,18 @@ public sealed partial class VulkanGraphicsDevice
                     PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderWriteBit);
             }
 
+            var bindsGpuBuffers = d.Buffers is { Count: > 0 };
+            if (bindsGpuBuffers) FenceGpuBuffers(cmd, beforeDispatch: true);
+
             if (d.Uniforms.Count > 0) WriteUniformsAcrossSets(prog, frameSlot, d.Uniforms);
             Vk.CmdBindPipeline(cmd, PipelineBindPoint.Compute, pipe.Pipeline);
-            BindTransientDescriptorSets(cmd, prog, pipe.Layout, frameSlot, d.Textures, PipelineBindPoint.Compute);
+            BindTransientDescriptorSets(cmd, prog, pipe.Layout, frameSlot, d.Textures, PipelineBindPoint.Compute, gpuBuffers: d.Buffers);
             if (d.PushConstants is { } pc)
             {
                 PushConstantsToCommandBuffer(cmd, pipe.Layout, prog.Interface.PushConstants, pc);
             }
             Vk.CmdDispatch(cmd, (uint)d.GroupsX, (uint)d.GroupsY, (uint)d.GroupsZ);
+            if (bindsGpuBuffers) FenceGpuBuffers(cmd, beforeDispatch: false);
 
             for (var i = 0; i < d.Textures.Count; i++)
             {
@@ -1442,6 +1448,34 @@ public sealed partial class VulkanGraphicsDevice
                     ImageLayout.General, ImageLayout.ShaderReadOnlyOptimal,
                     PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderWriteBit,
                     PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderReadBit);
+            }
+        }
+    }
+
+    private static GpuBufferHandle? GpuBufferNamed(IReadOnlyList<ShaderBufferBinding>? buffers, string? name)
+    {
+        if (buffers is null || name is null) return null;
+        foreach (var b in buffers)
+        {
+            if (string.Equals(b.Name, name, StringComparison.Ordinal)) return b.Buffer;
+        }
+
+        return null;
+    }
+
+    // Every GPU buffer a command binds names a storage block the program declares: a misspelt name would
+    // otherwise bind nothing and leave the block to whatever the program's own copy holds.
+    private static void RequireNamedBuffers(VkShaderProgramEntry prog, IReadOnlyList<ShaderBufferBinding>? buffers)
+    {
+        if (buffers is null) return;
+        foreach (var b in buffers)
+        {
+            var found = prog.Interface.Slots.Any(s =>
+                s.Type == ShaderResourceType.StorageBuffer && string.Equals(s.Name, b.Name, StringComparison.Ordinal));
+            if (!found)
+            {
+                throw new InvalidOperationException(
+                    $"A GPU buffer is bound to storage block '{b.Name}', which program '{prog.Name}' does not declare.");
             }
         }
     }
@@ -1659,7 +1693,8 @@ public sealed partial class VulkanGraphicsDevice
         int frameSlot,
         IReadOnlyList<ShaderTextureBinding> textures,
         PipelineBindPoint bindPoint = PipelineBindPoint.Graphics,
-        int materialSet = -1)
+        int materialSet = -1,
+        IReadOnlyList<ShaderBufferBinding>? gpuBuffers = null)
     {
         // materialSet is the set a per-draw material binds for this draw. The program's own copy of it
         // would be written, bound, and then replaced by the material's — and for a runtime-sized block
@@ -1682,6 +1717,7 @@ public sealed partial class VulkanGraphicsDevice
         var imgInfos = stackalloc DescriptorImageInfo[maxWritesPerSet];
 
         RequireNamedTextures(prog, textures);
+        RequireNamedBuffers(prog, gpuBuffers);
 
         for (var setIdx = 0; setIdx < prog.Sets.Length; setIdx++)
         {
@@ -1701,6 +1737,26 @@ public sealed partial class VulkanGraphicsDevice
             foreach (var slot in sr.Slots.OrderBy(x => x.Binding))
             {
                 if (slot.BlockLayout is not { } block) continue;
+
+                // A storage block a GPU buffer backs, by the block's name: the whole buffer, whatever the block
+                // declares, which is what lets a runtime-sized one be written by one pass and read by another.
+                if (slot.Type == ShaderResourceType.StorageBuffer && GpuBufferNamed(gpuBuffers, slot.Name) is { } gpu)
+                {
+                    var entry = GetGpuBuffer(gpu);
+                    bufInfos[writeIdx] = new DescriptorBufferInfo { Buffer = entry.Buffer, Offset = 0, Range = entry.Size };
+                    writes[writeIdx] = new WriteDescriptorSet
+                    {
+                        SType = StructureType.WriteDescriptorSet,
+                        DstSet = ds,
+                        DstBinding = (uint)slot.Binding,
+                        DstArrayElement = 0,
+                        DescriptorType = DescriptorType.StorageBuffer,
+                        DescriptorCount = 1,
+                        PBufferInfo = &bufInfos[writeIdx],
+                    };
+                    writeIdx++;
+                    continue;
+                }
 
                 if (IsDynamicUniformSlot(setIdx, slot))
                 {

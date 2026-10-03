@@ -243,9 +243,11 @@ public static class ShaderReflection
             var totalSize = b.GetProperty("block_size").GetInt32();
             var typeRef = b.GetProperty("type").GetString()!;
             var members = ParseMembers(types, typeRef, where);
+            // The block's name, which is what a ShaderBufferBinding names it by.
+            var name = b.TryGetProperty("name", out var n) ? n.GetString() : null;
             outSlots.Add(new DescriptorSetSlot(
                 set, binding, type, stage,
-                BlockLayout: new UniformBlockLayout(totalSize, members)));
+                BlockLayout: new UniformBlockLayout(totalSize, members), Name: name));
         }
     }
 

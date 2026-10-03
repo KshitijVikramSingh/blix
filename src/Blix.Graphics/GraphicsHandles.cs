@@ -19,6 +19,11 @@ public readonly record struct TransientVertexSlice(
 // IGraphicsDevice.CreateIndirectBuffer.
 public readonly record struct IndirectBufferHandle(int Id);
 
+// A device-local GPU buffer (IGraphicsDevice.CreateGpuBuffer): storage a compute pass reads and writes,
+// a draw reads, and an indirect draw can take its arguments from. One copy, not a per-frame ring, so
+// the GPU, not the CPU, is what writes it each frame.
+public readonly record struct GpuBufferHandle(int Id);
+
 public readonly record struct ShaderProgramHandle(int Id);
 
 public readonly record struct PipelineHandle(int Id);

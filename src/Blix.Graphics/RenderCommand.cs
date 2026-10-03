@@ -65,9 +65,15 @@ public sealed record DispatchCommand(
     int GroupsZ,
     IReadOnlyList<ShaderUniform> Uniforms,
     IReadOnlyList<ShaderTextureBinding> Textures,
-    byte[]? PushConstants = null) : RenderCommand
+    byte[]? PushConstants = null,
+    // GPU buffers bound to the program's storage blocks by name. A dispatch that binds any is fenced on both
+    // sides: after every earlier read of a GPU buffer, before every later one.
+    IReadOnlyList<ShaderBufferBinding>? Buffers = null) : RenderCommand
 {
     private readonly byte[]? pushConstants = PushConstants is null ? null : PushConstants.AsSpan().ToArray();
+
+    /// <summary>The GPU buffers this dispatch binds, copied at record time.</summary>
+    public IReadOnlyList<ShaderBufferBinding>? Buffers { get; init; } = Buffers?.ToArray();
 
     private readonly IReadOnlyList<ShaderUniform> uniforms = Uniforms;
     private readonly ulong[]? uniformFingerprint = RenderCommandDiagnostics.Fingerprint(Uniforms);
@@ -175,8 +181,16 @@ public sealed record DrawIndexedIndirectCommand(
     IReadOnlyList<ShaderTextureBinding> Textures,
     MaterialHandle? Material = null,
     byte[]? PushConstants = null,
-    MaterialHandle? PerDrawMaterial = null) : RenderCommand
+    MaterialHandle? PerDrawMaterial = null,
+    // GPU buffers bound to the program's storage blocks by name, as on DispatchCommand.
+    IReadOnlyList<ShaderBufferBinding>? Buffers = null,
+    // When set, the indirect records are read from this GPU buffer (written on the GPU this frame) instead of
+    // IndirectBuffer's CPU-written ring; IndirectBuffer is then unused.
+    GpuBufferHandle? ArgumentBuffer = null) : RenderCommand
 {
+    /// <summary>The GPU buffers this draw binds, copied at record time.</summary>
+    public IReadOnlyList<ShaderBufferBinding>? Buffers { get; init; } = Buffers?.ToArray();
+
     private readonly byte[]? pushConstants = PushConstants is null ? null : PushConstants.AsSpan().ToArray();
 
     private readonly IReadOnlyList<ShaderUniform> uniforms = Uniforms;

@@ -72,6 +72,8 @@ public sealed record MaterialEntry(MaterialHandle Handle, string Name);
 /// <summary>An indirect draw buffer (every ring slot of it) the device holds.</summary>
 public sealed record IndirectBufferEntry(IndirectBufferHandle Handle, string Name);
 
+public sealed record GpuBufferEntry(GpuBufferHandle Handle, string Name, long SizeBytes);
+
 public sealed class ResourceRegistrySnapshot
 {
     private readonly Dictionary<int, VertexBufferEntry> vertexBuffers;
@@ -89,10 +91,12 @@ public sealed class ResourceRegistrySnapshot
         IReadOnlyList<PipelineEntry> pipelineEntries,
         IReadOnlyList<RenderSurfaceEntry> renderSurfaceEntries,
         IReadOnlyList<MaterialEntry>? materialEntries = null,
-        IReadOnlyList<IndirectBufferEntry>? indirectBufferEntries = null)
+        IReadOnlyList<IndirectBufferEntry>? indirectBufferEntries = null,
+        IReadOnlyList<GpuBufferEntry>? gpuBufferEntries = null)
     {
         Materials = materialEntries ?? Array.Empty<MaterialEntry>();
         IndirectBuffers = indirectBufferEntries ?? Array.Empty<IndirectBufferEntry>();
+        GpuBuffers = gpuBufferEntries ?? Array.Empty<GpuBufferEntry>();
         VertexBuffers = vertexBufferEntries;
         IndexBuffers = indexBufferEntries;
         Textures = textureEntries;
@@ -113,6 +117,9 @@ public sealed class ResourceRegistrySnapshot
 
     /// <summary>Every indirect buffer the device holds; empty from a backend that does not say.</summary>
     public IReadOnlyList<IndirectBufferEntry> IndirectBuffers { get; }
+
+    /// <summary>Every GPU buffer the device holds; empty from a backend that does not say.</summary>
+    public IReadOnlyList<GpuBufferEntry> GpuBuffers { get; }
 
     public IReadOnlyList<VertexBufferEntry> VertexBuffers { get; }
     public IReadOnlyList<IndexBufferEntry> IndexBuffers { get; }

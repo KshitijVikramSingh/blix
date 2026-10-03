@@ -107,11 +107,32 @@ public sealed class RenderPassBuilder
         IReadOnlyList<ShaderTextureBinding> textures,
         MaterialHandle? material = null,
         byte[]? pushConstants = null,
-        MaterialHandle? perDrawMaterial = null)
+        MaterialHandle? perDrawMaterial = null,
+        IReadOnlyList<ShaderBufferBinding>? buffers = null)
     {
         commands.Add(new DrawIndexedIndirectCommand(
             vertexBuffer, indexBuffer, pipeline, indirectBuffer, indirectByteOffset, drawCount,
-            uniforms, textures, material, pushConstants, perDrawMaterial));
+            uniforms, textures, material, pushConstants, perDrawMaterial, buffers));
+    }
+
+    // GPU-driven indirect multi-draw: the records come from a GPU buffer a compute pass wrote this frame,
+    // not from a CPU-written indirect ring. Everything else binds as above.
+    public void DrawIndexedIndirect(
+        VertexBufferHandle vertexBuffer,
+        IndexBufferHandle indexBuffer,
+        PipelineHandle pipeline,
+        GpuBufferHandle arguments,
+        int argumentByteOffset,
+        int drawCount,
+        IReadOnlyList<ShaderUniform> uniforms,
+        IReadOnlyList<ShaderTextureBinding> textures,
+        MaterialHandle? material = null,
+        byte[]? pushConstants = null,
+        IReadOnlyList<ShaderBufferBinding>? buffers = null)
+    {
+        commands.Add(new DrawIndexedIndirectCommand(
+            vertexBuffer, indexBuffer, pipeline, default, argumentByteOffset, drawCount,
+            uniforms, textures, material, pushConstants, Buffers: buffers, ArgumentBuffer: arguments));
     }
 
     // Sub-range draw: starts at indexOffset into the index buffer. Lets multiple

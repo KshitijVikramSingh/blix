@@ -154,7 +154,8 @@ public sealed partial class VulkanGraphicsDevice : IGraphicsDevice, IRenderGraph
         return new ResourceRegistrySnapshot(
             vertexBuffers, indexBuffers, textures, shaderPrograms, pipelines, renderSurfaces,
             materialTable.Select(kv => new MaterialEntry(new MaterialHandle(kv.Key), kv.Value.Name)).ToArray(),
-            indirectBufferTable.Select(kv => new IndirectBufferEntry(new IndirectBufferHandle(kv.Key), kv.Value.Name)).ToArray());
+            indirectBufferTable.Select(kv => new IndirectBufferEntry(new IndirectBufferHandle(kv.Key), kv.Value.Name)).ToArray(),
+            gpuBufferTable.Select(kv => new GpuBufferEntry(new GpuBufferHandle(kv.Key), kv.Value.Name, (long)kv.Value.Size)).ToArray());
     }
 
     // Execute the per-frame command list: walks each pass, builds a

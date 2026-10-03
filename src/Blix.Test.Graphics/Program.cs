@@ -6163,6 +6163,47 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectTrue("BT.3 CONTROL: a tool reaches one through the cook", ReachesParser(named["Blix.Tools.Shot"], new HashSet<string>())
         && !projects[named["Blix.Tools.Shot"]].Parser);
 }
+
+// ============================================================================
+// Section BU — GPU buffers: bound by block name, carried by the commands that bind them.
+// ============================================================================
+//
+// The GPU side (a compute pass writing indirect records and instance lists that draws then read, fenced on
+// both sides) is proven where the scene host uses it, under validation. Here: what it rests on, deviceless.
+{
+    // Binding by name rests on reflection keeping a storage block's name, a runtime-sized one included.
+    var reflected = ShaderReflection.Parse(
+        "{\"entryPoints\":[{\"name\":\"main\",\"mode\":\"comp\"}]," +
+        "\"types\":{\"_9\":{\"name\":\"SceneVisible\",\"members\":[{\"name\":\"visible\",\"type\":\"uint\"," +
+        "\"array\":[0],\"array_size_is_literal\":[true],\"offset\":0,\"array_stride\":4}]}}," +
+        "\"ssbos\":[{\"type\":\"_9\",\"name\":\"SceneVisible\",\"block_size\":0,\"set\":3,\"binding\":1}]}",
+        "bu1.comp");
+    t.Expect("BU.1 reflection keeps a storage block's name",
+        reflected.Slots.Any(s => s.Type == ShaderResourceType.StorageBuffer && s.Name == "SceneVisible" && s.Set == 3 && s.Binding == 1),
+        string.Join(", ", reflected.Slots.Select(s => $"{s.Type} {s.Name}@{s.Set}.{s.Binding}")));
+
+    // A dispatch and an indirect draw carry the GPU buffers they bind, copied when recorded (a recorded
+    // command is read at Execute, long after the caller has moved on: the push-constant rule, AP).
+    var bindings = new List<ShaderBufferBinding> { new("SceneVisible", new GpuBufferHandle(5)) };
+    var dispatch = new DispatchCommand(new PipelineHandle(1), 4, 1, 1,
+        Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), Buffers: bindings);
+    bindings[0] = new("Other", new GpuBufferHandle(6));
+    t.ExpectTrue("BU.2 a dispatch carries the GPU buffers it was recorded with",
+        dispatch.Buffers is [{ Name: "SceneVisible", Buffer.Id: 5 }]);
+    t.ExpectTrue("BU.2 and binds none unless given some",
+        new DispatchCommand(new PipelineHandle(1), 1, 1, 1, Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>()).Buffers is null);
+
+    var list = new RenderCommandList();
+    list.Pass("gpu-driven", new RenderPassDescription(RenderSurfaceHandle.Default, Array.Empty<GraphicsColor?>(), ClearDepth: false),
+        pass => pass.DrawIndexedIndirect(
+            new VertexBufferHandle(1), new IndexBufferHandle(1), new PipelineHandle(1), new GpuBufferHandle(7), 40, 3,
+            Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(),
+            buffers: new[] { new ShaderBufferBinding("SceneVisible", new GpuBufferHandle(5)) }));
+    var recorded = list.Passes.Single().Commands.OfType<DrawIndexedIndirectCommand>().Single();
+    t.ExpectTrue("BU.3 an indirect draw can read its records from a GPU buffer",
+        recorded.ArgumentBuffer == new GpuBufferHandle(7) && recorded.IndirectByteOffset == 40 && recorded.DrawCount == 3);
+    t.ExpectTrue("BU.3 and binds the GPU buffers it names", recorded.Buffers is [{ Name: "SceneVisible", Buffer.Id: 5 }]);
+}
 t.PrintSummary();
 return t.Failed;
 
@@ -6325,6 +6366,8 @@ sealed class RecordingDevice : IGraphicsDevice
     public IndirectBufferHandle CreateIndirectBuffer(int maxDrawCommands, string? name = null) => throw No();
     public void WriteIndirectCommands(IndirectBufferHandle handle, ReadOnlySpan<byte> commands) => throw No();
     public void DestroyIndirectBuffer(IndirectBufferHandle handle) => throw No();
+    public GpuBufferHandle CreateGpuBuffer(int sizeBytes, ReadOnlySpan<byte> initial = default, string? name = null) => throw No();
+    public void DestroyGpuBuffer(GpuBufferHandle handle) => throw No();
     public ShaderProgramHandle CreateShaderProgramFromSpv(byte[] vertexSpv, byte[] fragmentSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
     public ShaderProgramHandle CreateComputeShaderProgramFromSpv(byte[] computeSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
     public PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null) => throw No();
