@@ -1,0 +1,128 @@
+#version 450
+
+// The camera's late list: two-phase occlusion culling over the opaque placements.
+//
+// The early list (scene_cull.comp, uOcclusion.x = 1) drew only what this test found visible last frame,
+// and its depth was reduced into a pyramid of FARTHEST linear depths (uOccZ0..5, hiz_build.frag). This
+// pass then tests every placement in the frustum against that pyramid. Whatever is not hidden is visible
+// this frame, which is remembered for the next one (WasVisible on the early slot), and whatever of that
+// the early list did not draw goes into the late list, drawn into the same depth before anything reads
+// it. Nothing is dropped that this frame's drawn geometry does not cover, so the picture is the one
+// frustum culling alone gives.
+//
+// It also writes the final list, early and late together, which is what the lit pass draws: one indirect
+// draw per group rather than two, because a record costs this driver something even with no instances.
+// The final list's records follow the late list's (uArgs.x + uArgs.y), its visible slots start at
+// uOcclusion.w. Five dispatches, uArgs.w says which:
+//
+//   0  reset     the late list's records, then the final list's (scene_cull.glsl)
+//   3  occlude   one thread per opaque placement, as above
+//   2  scatter   the late list's placements into its run, then the final list's (scene_cull.glsl)
+
+layout(local_size_x = 64) in;
+
+#include "scene_cull.glsl"
+
+// The early depth's pyramid, level 0 at half the framebuffer; .g is the farthest depth under a texel.
+layout(set = 0, binding = 8) uniform sampler2D uOccZ0;
+layout(set = 0, binding = 9) uniform sampler2D uOccZ1;
+layout(set = 0, binding = 10) uniform sampler2D uOccZ2;
+layout(set = 0, binding = 11) uniform sampler2D uOccZ3;
+layout(set = 0, binding = 12) uniform sampler2D uOccZ4;
+layout(set = 0, binding = 13) uniform sampler2D uOccZ5;
+
+const int Levels = 6;
+// The widest footprint read at the chosen level, per axis; anything wider is called visible.
+const int MaxSpan = 16;
+
+ivec2 levelSize(int level) {
+    switch (level) {
+        case 0: return textureSize(uOccZ0, 0);
+        case 1: return textureSize(uOccZ1, 0);
+        case 2: return textureSize(uOccZ2, 0);
+        case 3: return textureSize(uOccZ3, 0);
+        case 4: return textureSize(uOccZ4, 0);
+        default: return textureSize(uOccZ5, 0);
+    }
+}
+
+float farthest(int level, ivec2 texel) {
+    switch (level) {
+        case 0: return texelFetch(uOccZ0, texel, 0).g;
+        case 1: return texelFetch(uOccZ1, texel, 0).g;
+        case 2: return texelFetch(uOccZ2, texel, 0).g;
+        case 3: return texelFetch(uOccZ3, texel, 0).g;
+        case 4: return texelFetch(uOccZ4, texel, 0).g;
+        default: return texelFetch(uOccZ5, texel, 0).g;
+    }
+}
+
+// Whether everything inside these bounds is behind the depth already drawn where they land (the census's
+// HiZSnapshot.Test, on the GPU). Bounds reaching the near plane are never hidden.
+bool hidden(vec3 bmin, vec3 bmax) {
+    vec2 lo = vec2(1e30), hi = vec2(-1e30);
+    float nearest = 1e30;
+    for (int c = 0; c < 8; ++c) {
+        vec3 corner = vec3((c & 1) == 0 ? bmin.x : bmax.x, (c & 2) == 0 ? bmin.y : bmax.y, (c & 4) == 0 ? bmin.z : bmax.z);
+        float depth = -(u.uView * vec4(corner, 1.0)).z;
+        if (depth <= u.uOcclusion.y) return false;
+        nearest = min(nearest, depth);
+        vec4 clip = u.uCull * vec4(corner, 1.0);
+        vec2 ndc = clip.xy / clip.w;
+        lo = min(lo, ndc);
+        hi = max(hi, ndc);
+    }
+    // Off screen sideways is the frustum's call, already made; clamping keeps the footprint on screen.
+    lo = clamp(lo * 0.5 + 0.5, 0.0, 1.0);
+    hi = clamp(hi * 0.5 + 0.5, 0.0, 1.0);
+
+    // The level where the footprint is a few texels wide, then one texel of slack on every side: the
+    // pyramid reduced the depth resolve's first sample and a jittered projection, both sub-pixel.
+    vec2 size0 = vec2(levelSize(0));
+    vec2 extent = (hi - lo) * size0;
+    int level = clamp(int(ceil(log2(max(max(extent.x, extent.y), 1.0) / 4.0))), 0, Levels - 1);
+    ivec2 size = levelSize(level);
+    ivec2 t0 = clamp(ivec2(floor(lo * vec2(size))) - 1, ivec2(0), size - 1);
+    ivec2 t1 = clamp(ivec2(floor(hi * vec2(size))) + 1, ivec2(0), size - 1);
+    if (t1.x - t0.x >= MaxSpan || t1.y - t0.y >= MaxSpan) return false;
+
+    float deepest = 0.0;
+    for (int y = t0.y; y <= t1.y; ++y)
+        for (int x = t0.x; x <= t1.x; ++x)
+            deepest = max(deepest, farthest(level, ivec2(x, y)));
+    // The pyramid is half floats: a stored depth can sit up to 2^-11 nearer than the surface it rounds.
+    return nearest > deepest * (1.0 + 1.0 / 1024.0);
+}
+
+void occlude(uint i) {
+    uint g = uint(u.uRange.x) + i;
+    Placement p = placements[g];
+    uint early = uint(u.uRange.w) + i;
+    uint late = uint(u.uOcclusion.z) + i;
+    uint s = state[early];
+    uint lod = s & 0xFFu;
+    bool drawnEarly = (s & Culled) == 0u;
+
+    bool vis = u.uFlags.x <= 0.0 || intersects(u.uCull, p.boundsMin.xyz, p.boundsMax.xyz, u.uLod.w);
+    if (vis) vis = !hidden(p.boundsMin.xyz, p.boundsMax.xyz);
+    state[early] = (s & ~WasVisible) | (vis ? WasVisible : 0u);
+
+    bool drawLate = vis && !drawnEarly;
+    state[late] = lod | (drawLate ? 0u : Culled);
+    bool drawn = drawnEarly || drawLate;
+    state[uint(u.uOcclusion.w) + i] = lod | (drawn ? 0u : Culled);
+    uint record = p.drawable * uint(u.uArgs.z) + lod;
+    if (drawLate) atomicAdd(args[(uint(u.uArgs.x) + record) * 5u + 1u], 1u);
+    if (drawn) atomicAdd(args[(uint(u.uArgs.x) + uint(u.uArgs.y) + record) * 5u + 1u], 1u);
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint mode = uint(u.uArgs.w);
+    if (mode == 0u) {
+        if (i < uint(u.uArgs.y)) reset(i);
+    } else if (i < uint(u.uRange.y)) {
+        if (mode == 3u) occlude(i);
+        else scatter(i);
+    }
+}

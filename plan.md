@@ -39,9 +39,13 @@ exactly where the world has changed.
    instanced, so memory is flat to 64x64 blocks (123,422 placements, ~0.45 GB), and culling and LOD per
    placement run on the GPU (`scene_cull.comp`; `--cpu-cull` is the A/B): building a frame costs the CPU
    0.06-0.09 ms at every size, against 0.9 ms at 8x8 and 44 ms at 64x64 on the CPU path, for the same
-   picture. What is left is per-PLACEMENT: at 64x64 the camera submits 15.6M triangles and the frame is
-   31 ms of GPU, which is what cluster culling and occlusion are for. The cull keeps its counts on the GPU,
-   so caster and triangle counts read back only under `--cpu-cull`.
+   picture. Two-phase occlusion culling over placements follows it (`scene_occlusion.comp`; `--no-occlusion`
+   is the A/B, `--occlusion-cut` makes every frame a camera cut): city 64x64 29.0 -> 5.4 ms, Bistro flat
+   (not triangle-bound), Sponza ~1% dearer, every view and orbit the same picture. Next is cluster grain:
+   the census (`WriteClusterCensus`) says it keeps 9.4% where placement occlusion keeps 13.5% (city),
+   36.2% against 41.9% (Bistro), and that cluster frustum and normal-cone tests alone are worth 2-12%.
+   It needs a new way to draw: this GPU has neither drawIndirectCount nor mesh shaders. The cull keeps its
+   counts on the GPU, so caster and triangle counts read back only under `--cpu-cull`.
 3. *The ray-query interface*: software backend first, hardware when a device can prove it.
 4. *Runtime GI*: camera-relative clipmap probes traced through 3, relocated out of walls, rays amortised
    over frames, dirty-region updates, capsule occluders.
@@ -59,6 +63,8 @@ copied to a buffer without transfer-source usage, in the shot's readback). Not t
 And the froxel fog animates on wall-clock time (`uFogParams.w = time.Total`), so two arms with different
 frame rates reach a `--shot-frames` frame with different fog: 0.2 mean against a 0.04 floor at city 64x64,
 gone with `--no-fog`. Compare arms that differ in speed with the fog off.
+The Bistro orbit at `--shot-frames=120` has two outcomes in either arm (3,931 pixels apart, max 74), so a
+Bistro orbit A/B needs several runs per arm before a difference is one.
 
 Huge also means camera-relative rendering and streaming by region (cluster geometry and BLAS per region,
 the top level over what is loaded); both land where the stage that needs them does.

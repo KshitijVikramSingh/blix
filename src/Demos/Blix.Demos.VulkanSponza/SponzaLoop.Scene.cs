@@ -384,7 +384,7 @@ internal sealed partial class SponzaLoop
 
         // Set 3, sized to this scene: the transform table, and room for every pass to see every placement
         // (camera and each cascade over the opaque placements, the camera again over the blend ones).
-        var visibleCapacity = opaquePlacements.Count * (1 + CascadeCount) + blendPlacements.Count;
+        var visibleCapacity = SceneListVisibleBase(SceneListBlend) + blendPlacements.Count;
         visibleScratch = new uint[Math.Max(1, visibleCapacity)];
         var instances = device.CreateMaterial(
             litProgram, setIndex: 3, framesInFlight: device.MaxFramesInFlightCount, name: "sponza.instances",
@@ -433,7 +433,7 @@ internal sealed partial class SponzaLoop
             at++;
         }
 
-        var visibleCapacity = Math.Max(1, opaquePlacements.Count * (1 + CascadeCount) + blendPlacements.Count);
+        var visibleCapacity = Math.Max(1, SceneListVisibleBase(SceneListBlend) + blendPlacements.Count);
         var records = Math.Max(1, SceneListRecordBase(SceneListBlend) + blendDrawables.Count * lodSlots);
         cullPlacements = Own(device.CreateGpuBuffer(placements.Length * CullPlacement.Size,
             MemoryMarshal.AsBytes(placements.AsSpan()), "sponza.cull.placements"));

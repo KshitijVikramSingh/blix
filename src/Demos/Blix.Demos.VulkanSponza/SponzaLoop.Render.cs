@@ -135,27 +135,39 @@ internal sealed partial class SponzaLoop
 
     // The lists a frame culls, each its own indirect records and run of the visible list: the camera's
     // over the opaque placements (shared by the depth pre-pass and the lit pass), one per cascade over
-    // the same placements, and the camera's over the blend ones.
+    // the same placements, the camera's late list (what occlusion finds the early one missed) and its final one
+    // (early and late together, which the lit pass draws; both GPU only),
+    // and the camera's over the blend ones. Every list before the blend one spans the opaque bucket.
     private const int SceneListCamera = 0;
     private static int SceneListCascade(int cascade) => 1 + cascade;
-    private const int SceneListBlend = 1 + CascadeCount;
+    private const int SceneListCameraLate = 1 + CascadeCount;
+    // Early and late together: what the lit pass draws when occlusion is on.
+    private const int SceneListCameraFinal = 2 + CascadeCount;
+    private const int SceneListBlend = 3 + CascadeCount;
     private int SceneListRecordBase(int list) => opaqueDrawables.Count * lodSlots * list;
     private int SceneListVisibleBase(int list) => opaquePlacements.Count * list;
 
+    // The CPU path's buffers and state per list; it has no late list.
     private IndirectBufferHandle SceneListIndirect(int list) =>
-        list == SceneListCamera ? opaqueIndirect : list == SceneListBlend ? blendIndirect : cascadeIndirect[list - 1];
+        list == SceneListCamera ? opaqueIndirect : list == SceneListBlend ? blendIndirect
+        : list < SceneListCameraLate ? cascadeIndirect[list - 1]
+        : throw new InvalidOperationException("the CPU cull has no late list");
 
     private int[] SceneListLodState(int list) =>
-        list == SceneListCamera ? opaqueLodState : list == SceneListBlend ? blendLodState : cascadeLodState[list - 1];
+        list == SceneListCamera ? opaqueLodState : list == SceneListBlend ? blendLodState
+        : list < SceneListCameraLate ? cascadeLodState[list - 1]
+        : throw new InvalidOperationException("the CPU cull has no late list");
 
     // Cull one list and choose its levels: on the CPU into its indirect buffer (FillIndirect, returning the
     // visible count), or on the GPU as scene_cull.comp's three dispatches into the scene-cull pass
     // (returning -1: the count stays on the GPU). Either way the draws then read it via DrawSceneGroup.
     // cullViewProj and receiversViewProj are row-vector view-projections (clip = world · M), as the
     // camera and cascade matrices are kept.
+    // occlusionEarly: this is the camera's early list, so it draws only what the occlusion test found
+    // visible last frame (the late list, RecordOcclusion, catches the rest).
     private int CullList(
         int list, Matrix4x4? cullViewProj, float margin, float worldErrorBudget = 0f,
-        Matrix4x4? receiversViewProj = null, Vector3 shadowSweepDir = default)
+        Matrix4x4? receiversViewProj = null, Vector3 shadowSweepDir = default, bool occlusionEarly = false)
     {
         var blend = list == SceneListBlend;
         var drawables = blend ? blendDrawables : opaqueDrawables;
@@ -175,8 +187,26 @@ internal sealed partial class SponzaLoop
         var edit = pendingMarginEdit.Placement - 1;
         var editsHere = edit >= firstPlacement && edit < firstPlacement + placements.Count;
         if (editsHere) marginEditSent = true;
-        DispatchCommand Phase(int mode, int items)
-        {
+        DispatchCommand Phase(int mode, int items) => CullPhase(cullPipeline, mode, items,
+            cullViewProj, margin, worldErrorBudget, receiversViewProj, shadowSweepDir,
+            firstPlacement, placements.Count, blend ? opaqueDrawables.Count : 0, SceneListVisibleBase(list),
+            SceneListRecordBase(list), records,
+            editsHere ? pendingMarginEdit : default,
+            new Vector4(occlusionEarly ? (occlusionCut ? 2f : 1f) : 0f, CameraNearPlane, 0f, 0f), null);
+
+        graph.Dispatch(cullPassHandle, Phase(0, records));
+        graph.Dispatch(cullPassHandle, Phase(1, placements.Count));
+        graph.Dispatch(cullPassHandle, Phase(2, placements.Count));
+        return -1;
+    }
+
+    // One dispatch of either cull shader; every uniform the shared Cull block (scene_cull.glsl) declares.
+    private DispatchCommand CullPhase(
+        PipelineHandle pipeline, int mode, int items,
+        Matrix4x4? cullViewProj, float margin, float worldErrorBudget, Matrix4x4? receiversViewProj, Vector3 shadowSweepDir,
+        int firstPlacement, int placementCount, int firstDrawable, int visibleBase, int recordBase, int records,
+        (int Placement, float Margin) edit, Vector4 occlusion, IReadOnlyList<ShaderTextureBinding>? textures)
+    {
             var groups = (items + CullGroupSize - 1) / CullGroupSize;
             if (groups > 65535)
             {
@@ -185,28 +215,91 @@ internal sealed partial class SponzaLoop
             }
             var uniforms = new ShaderUniform[]
             {
-                new("uCull", new Matrix4x4Uniform(cullViewProj ?? Matrix4x4.Identity)),
+                new("uCull", new Matrix4x4Uniform(cullViewProj ?? viewProj)),
                 new("uReceivers", new Matrix4x4Uniform(receiversViewProj ?? Matrix4x4.Identity)),
                 new("uSweep", new Vector4Uniform(new Vector4(shadowSweepDir, shadowSweepDir == Vector3.Zero ? 0f : 1f))),
                 new("uVolumeMin", new Vector4Uniform(new Vector4(skyVolumeMin, 0f))),
                 new("uVolumeMax", new Vector4Uniform(new Vector4(skyVolumeMin + skyVolumeSpan, 0f))),
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, LodErrorScale))),
                 new("uLod", new Vector4Uniform(new Vector4(LodErrorPixelsNow, worldErrorBudget, LodHysteresis, margin))),
-                new("uRange", new Vector4Uniform(new Vector4(
-                    firstPlacement, placements.Count, blend ? opaqueDrawables.Count : 0, SceneListVisibleBase(list)))),
-                new("uArgs", new Vector4Uniform(new Vector4(SceneListRecordBase(list), records, lodSlots, mode))),
+                new("uRange", new Vector4Uniform(new Vector4(firstPlacement, placementCount, firstDrawable, visibleBase))),
+                new("uArgs", new Vector4Uniform(new Vector4(recordBase, records, lodSlots, mode))),
                 new("uFlags", new Vector4Uniform(new Vector4(
-                    cullViewProj is null ? 0f : 1f, receiversViewProj is null ? 0f : 1f,
-                    editsHere ? pendingMarginEdit.Placement : 0f, editsHere ? pendingMarginEdit.Margin : 0f))),
+                    cullViewProj is null ? 0f : 1f, receiversViewProj is null ? 0f : 1f, edit.Placement, edit.Margin))),
+                new("uView", new Matrix4x4Uniform(cameraView)),
+                new("uOcclusion", new Vector4Uniform(occlusion)),
             };
-            return new DispatchCommand(cullPipeline, Math.Max(1, groups), 1, 1, uniforms,
-                Array.Empty<ShaderTextureBinding>(), Buffers: cullBuffers);
-        }
+            return new DispatchCommand(pipeline, Math.Max(1, groups), 1, 1, uniforms,
+                textures ?? Array.Empty<ShaderTextureBinding>(), Buffers: cullBuffers);
+    }
 
-        graph.Dispatch(cullPassHandle, Phase(0, records));
-        graph.Dispatch(cullPassHandle, Phase(1, placements.Count));
-        graph.Dispatch(cullPassHandle, Phase(2, placements.Count));
-        return -1;
+    // The late half of two-phase occlusion: reduce the early pre-pass's depth into its own pyramid, test
+    // every opaque placement against it (scene_occlusion.comp), and draw what is visible but was not drawn
+    // into the same depth and normals. The lit pass then draws the final list, early and late together.
+    private void RecordOcclusion(Matrix4x4? cameraCull, IReadOnlyList<ShaderUniform> perFrame, int frameWidth, int frameHeight)
+    {
+        RecordPyramid(occZPassHandles, occZPipelines, occZHandles, frameWidth, frameHeight, skip: false);
+
+        var records = opaqueDrawables.Count * lodSlots;
+        var pyramid = new ShaderTextureBinding[HiZLevels];
+        for (var level = 0; level < HiZLevels; level++)
+        {
+            pyramid[level] = new ShaderTextureBinding($"uOccZ{level}", graph.GetColorTexture(occZHandles[level]));
+        }
+        DispatchCommand Phase(int mode, int items, int list, int visibleList) => CullPhase(occlusionPipeline, mode, items,
+            cameraCull, CameraCullMargin, 0f, null, Vector3.Zero,
+            0, opaquePlacements.Count, 0, SceneListVisibleBase(visibleList), SceneListRecordBase(list), records,
+            default, new Vector4(0f, CameraNearPlane,
+                SceneListVisibleBase(SceneListCameraLate), SceneListVisibleBase(SceneListCameraFinal)), pyramid);
+        // occlude reads the early slots (uRange.w) and writes the late and final ones (uOcclusion.zw), counting
+        // into the late records (uArgs.x) and the final ones after them; reset and scatter run per list.
+        graph.Dispatch(occlusionPassHandle, Phase(0, records, SceneListCameraLate, SceneListCameraLate));
+        graph.Dispatch(occlusionPassHandle, Phase(0, records, SceneListCameraFinal, SceneListCameraFinal));
+        graph.Dispatch(occlusionPassHandle, Phase(3, opaquePlacements.Count, SceneListCameraLate, SceneListCamera));
+        graph.Dispatch(occlusionPassHandle, Phase(2, opaquePlacements.Count, SceneListCameraLate, SceneListCameraLate));
+        graph.Dispatch(occlusionPassHandle, Phase(2, opaquePlacements.Count, SceneListCameraFinal, SceneListCameraFinal));
+
+        graph.Pass(latePrepassHandle, scope =>
+        {
+            foreach (var g in opaqueGroups)
+            {
+                DrawSceneGroup(scope, SceneListCameraLate, g, g.IsMask ? prepassMaskPipeline : prepassOpaquePipeline,
+                    perFrame, Array.Empty<ShaderTextureBinding>(), material: g.IsMask ? g.Material : null);
+            }
+        });
+    }
+
+    // A Hi-Z pyramid (hiz_build.frag): level 0 reduces the resolved scene depth, each level after its parent.
+    private void RecordPyramid(
+        PassHandle[] passes, PipelineHandle[] pipelines, GraphResourceHandle[] targets, int frameWidth, int frameHeight, bool skip)
+    {
+        Matrix4x4.Invert(cameraProjection, out var hiZInvProjection);
+        for (var level = 0; level < HiZLevels; level++)
+        {
+            var srcW = level == 0 ? frameWidth : Math.Max(1, frameWidth >> level);
+            var srcH = level == 0 ? frameHeight : Math.Max(1, frameHeight >> level);
+            var dstW = Math.Max(1, frameWidth >> (level + 1));
+            var dstH = Math.Max(1, frameHeight >> (level + 1));
+            var source = level == 0
+                ? graph.GetDepthTexture(SampleableSceneDepth)
+                : graph.GetColorTexture(targets[level - 1]);
+            var uniforms = new ShaderUniform[]
+            {
+                new("uInvProjection", new Matrix4x4Uniform(hiZInvProjection)),
+                new("uSizes", new Vector4Uniform(new Vector4(srcW, srcH, dstW, dstH))),
+                new("uMode",  new Vector4Uniform(new Vector4(level == 0 ? 1f : 0f, 0f, 0f, 0f))),
+            };
+            var pipeline = pipelines[level];
+            graph.Pass(passes[level], scope =>
+            {
+                if (skip) return;
+                fullscreen.Draw(
+                    scope, pipeline,
+                    new[] { new ShaderTextureBinding("uSource", source) },
+                    pushConstants: null,
+                    uniforms: uniforms);
+            });
+        }
     }
 
     private const int CullGroupSize = 64;
@@ -592,7 +685,10 @@ internal sealed partial class SponzaLoop
         // can fall either way on floating-point noise, and at the screen edge that reads as geometry
         // blinking in and out as you turn. Half a metre of slack costs a fraction of a percent of
         // the rejections and removes the whole class.
-        CullList(SceneListCamera, cameraCull, margin: CameraCullMargin);
+        // Occlusion needs the pre-pass's depth; without one the early list is the whole frustum's.
+        var skipPrepass = noPrepass || (abMode == "prepass" && AbOffPhase);
+        var occlusionNow = occlusionCull && !skipPrepass;
+        CullList(SceneListCamera, cameraCull, margin: CameraCullMargin, occlusionEarly: occlusionNow);
         cameraTriangles = gpuCull ? -1 : fillIndirectTriangles;
         // Accumulate exactly one contiguous orbit so triangle means cover the full closed path and
         // do not depend on streaming duration or which arc happened to be sampled.
@@ -613,7 +709,6 @@ internal sealed partial class SponzaLoop
         // discard + the mask pipeline; opaque needs only set 0 + model push.
         // --ab prepass off-phase: record the pass (it still clears depth) but draw nothing into it,
         // so the lit pass below establishes depth itself through the writing pipelines.
-        var skipPrepass = noPrepass || (abMode == "prepass" && AbOffPhase);
         graph.Pass(depthPrepassHandle, scope =>
         {
             if (skipPrepass) return;
@@ -623,6 +718,7 @@ internal sealed partial class SponzaLoop
                     perFrame, Array.Empty<ShaderTextureBinding>(), material: g.IsMask ? g.Material : null);
             }
         });
+        if (occlusionNow) RecordOcclusion(cameraCull, perFrame, frame.Width, frame.Height);
 
         // Flip before dispatching: the pass writes one texture while every reader — the lit pass,
         // and the pass's own multi-bounce feedback — takes the other, which is what keeps the
@@ -708,36 +804,7 @@ internal sealed partial class SponzaLoop
         }
 
         // Hi-Z pyramid: level 0 reduces the resolved depth, each level after reduces its parent.
-        {
-            Matrix4x4.Invert(cameraProjection, out var hiZInvProjection);
-            for (var level = 0; level < HiZLevels; level++)
-            {
-                var srcW = level == 0 ? frame.Width : Math.Max(1, frame.Width >> level);
-                var srcH = level == 0 ? frame.Height : Math.Max(1, frame.Height >> level);
-                var dstW = Math.Max(1, frame.Width >> (level + 1));
-                var dstH = Math.Max(1, frame.Height >> (level + 1));
-                var source = level == 0
-                    ? graph.GetDepthTexture(SampleableSceneDepth)
-                    : graph.GetColorTexture(hiZHandles[level - 1]);
-                var uniforms = new ShaderUniform[]
-                {
-                    new("uInvProjection", new Matrix4x4Uniform(hiZInvProjection)),
-                    new("uSizes", new Vector4Uniform(new Vector4(srcW, srcH, dstW, dstH))),
-                    new("uMode",  new Vector4Uniform(new Vector4(level == 0 ? 1f : 0f, 0f, 0f, 0f))),
-                };
-                var levelIndex = level;
-                var skipHiZ = abMode == "hiz" && AbOffPhase;
-                graph.Pass(hiZPassHandles[level], scope =>
-                {
-                    if (skipHiZ) return;
-                    fullscreen.Draw(
-                        scope, hiZPipelines[levelIndex],
-                        new[] { new ShaderTextureBinding("uSource", source) },
-                        pushConstants: null,
-                        uniforms: uniforms);
-                });
-            }
-        }
+        RecordPyramid(hiZPassHandles, hiZPipelines, hiZHandles, frame.Width, frame.Height, skip: abMode == "hiz" && AbOffPhase);
 
         // Ambient visibility. Reads the 1x depth the pre-pass just resolved, writes bent normal +
         // visibility for the lit pass. When disabled the pass still runs and clears to white-ish —
@@ -897,7 +964,7 @@ internal sealed partial class SponzaLoop
                     if (pipeline == opaqueSolidPipeline) pipeline = opaqueSolidPipelineWrites;
                     else if (pipeline == opaqueDoubleSidedPipeline) pipeline = opaqueDoubleSidedPipelineWrites;
                 }
-                DrawSceneGroup(scope, SceneListCamera, g, pipeline, perFrame, passBindings, g.Material);
+                DrawSceneGroup(scope, occlusionNow ? SceneListCameraFinal : SceneListCamera, g, pipeline, perFrame, passBindings, g.Material);
             }
             // The probe view, before the sky so the sky can still fill where nothing was drawn, and
             // before blend so glass composites over it like any other geometry.

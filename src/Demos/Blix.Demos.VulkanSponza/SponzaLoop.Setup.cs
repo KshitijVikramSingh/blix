@@ -140,6 +140,11 @@ internal sealed partial class SponzaLoop
         // --cpu-cull: build the indirect records and visible lists on the CPU, the way 1a did, for an A/B
         // against the GPU cull (scene_cull.comp) that is otherwise the default.
         gpuCull = !args.Flag("cpu-cull");
+        // --no-occlusion: the GPU cull without its two-phase occlusion test (scene_occlusion.comp), for the A/B.
+        occlusionCull = gpuCull && !args.Flag("no-occlusion");
+        // --occlusion-cut: every frame is a camera cut. The early list draws nothing, so the late list carries
+        // the whole frame: the case history cannot help, and the proof that the late list is complete.
+        occlusionCut = args.Flag("occlusion-cut");
         if (args.Flag("probe-reference")) probeReference = true;
         if (args.Flag("no-sky-bounce")) noSkyBounce = true;
         if (args.Int("fog-slices") is { } fs) froxelGridZ = Math.Clamp(fs, 8, 128);
@@ -357,6 +362,33 @@ internal sealed partial class SponzaLoop
         // Rides the pass's depth store when there is something to resolve.
         if (MsaaSamples > 1) prepassBuilder = prepassBuilder.ResolveDepth(depthResolveHandle);
         depthPrepassHandle = prepassBuilder.Handle;
+
+        // Two-phase occlusion culling (scene_occlusion.comp). The pre-pass above is its early half: what was
+        // visible last frame. Its depth is reduced into a pyramid of its own, every placement is tested
+        // against it, and what is visible but was not drawn is drawn by the late pre-pass into the same
+        // depth and normals, before the main pyramid and everything after read them. A separate pyramid
+        // rather than the main one so that GTAO and the rest see the whole frame's depth.
+        occlusionInterface = Reflect("scene_occlusion.comp");
+        for (var level = 0; level < HiZLevels; level++)
+        {
+            occZHandles[level] = graph.ColorTarget(
+                $"occ-z{level}", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(0.5f / (1 << level)));
+        }
+        for (var level = 0; level < HiZLevels; level++)
+        {
+            var builder = graph.GraphicsPass($"occ-z{level}").Target(occZHandles[level], LoadOp.Clear, StoreOp.Store);
+            builder = level == 0 ? builder.Read(SampleableSceneDepth) : builder.Read(occZHandles[level - 1]);
+            occZPassHandles[level] = builder.Shader(hiZInterface).Handle;
+        }
+        var occlusionPass = graph.ComputePass("occlusion-cull").Shader(occlusionInterface);
+        for (var level = 0; level < HiZLevels; level++) occlusionPass = occlusionPass.Read(occZHandles[level]);
+        occlusionPassHandle = occlusionPass.Handle;
+        var lateBuilder = graph.GraphicsPass("depth-prepass-late")
+            .Target(prepassNormalHandle, LoadOp.Load, StoreOp.Store)
+            .Depth(depthHandle, LoadOp.Load, StoreOp.Store)
+            .Shader(litInterface);
+        if (MsaaSamples > 1) lateBuilder = lateBuilder.ResolveColor(prepassNormalResolveHandle).ResolveDepth(depthResolveHandle);
+        latePrepassHandle = lateBuilder.Handle;
 
         // The Hi-Z pyramid, immediately after the pre-pass that resolves the depth it reduces.
         // Level 0 is half the framebuffer — the same grid GTAO already works on, so its consumers
@@ -591,6 +623,9 @@ internal sealed partial class SponzaLoop
             hiZPipelines[level] = Pipeline(hiZProgram, VertexPosition3NormalTexture.Layout,
                 DepthState.Disabled, RasterizerState.NoCulling,
                 new[] { BlendState.Disabled }, hiZPassHandles[level], $"hiz{level}");
+            occZPipelines[level] = Pipeline(hiZProgram, VertexPosition3NormalTexture.Layout,
+                DepthState.Disabled, RasterizerState.NoCulling,
+                new[] { BlendState.Disabled }, occZPassHandles[level], $"occz{level}");
         }
 
         // One program, two pipelines — each bound to its own pass surface, because a pipeline is
@@ -651,6 +686,9 @@ internal sealed partial class SponzaLoop
         var cullSpv = File.ReadAllBytes(Path.Combine(shaderDir, "scene_cull.comp.spv"));
         var cullProgram = Own(device.CreateComputeShaderProgramFromSpv(cullSpv, cullInterface, "scene_cull"));
         cullPipeline = Own(device.CreateComputePipeline(cullProgram, "scene_cull"));
+        var occlusionSpv = File.ReadAllBytes(Path.Combine(shaderDir, "scene_occlusion.comp.spv"));
+        var occlusionProgram = Own(device.CreateComputeShaderProgramFromSpv(occlusionSpv, occlusionInterface, "scene_occlusion"));
+        occlusionPipeline = Own(device.CreateComputePipeline(occlusionProgram, "scene_occlusion"));
 
         // --- Froxel fog compute program + grid ---------------------------
         var froxelSpv = File.ReadAllBytes(Path.Combine(shaderDir, "froxel.comp.spv"));

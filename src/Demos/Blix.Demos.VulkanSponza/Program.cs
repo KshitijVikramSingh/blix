@@ -245,6 +245,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private PassHandle probeUsagePassHandle;
     private ShaderInterface usageInterface = null!;
     private ShaderInterface cullInterface = null!;
+    private ShaderInterface occlusionInterface = null!;
     private PipelineHandle probeUsagePipeline;
     // Usage marking reads prior-frame depth before the current pre-pass. A current-frame dependency
     // made the isolated injection cheaper but the whole frame slower by breaking tile pass merging.
@@ -839,6 +840,16 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private bool gpuCull = true;
     private PassHandle cullPassHandle;
     private PipelineHandle cullPipeline;
+    // Two-phase occlusion (scene_occlusion.comp): the early depth's own pyramid, the pass that tests against
+    // it, and the late pre-pass that draws what it finds. Off under --no-occlusion and --cpu-cull.
+    private bool occlusionCull = true;
+    private bool occlusionCut;
+    private readonly GraphResourceHandle[] occZHandles = new GraphResourceHandle[HiZLevels];
+    private readonly PassHandle[] occZPassHandles = new PassHandle[HiZLevels];
+    private readonly PipelineHandle[] occZPipelines = new PipelineHandle[HiZLevels];
+    private PassHandle occlusionPassHandle;
+    private PipelineHandle occlusionPipeline;
+    private PassHandle latePrepassHandle;
     private GpuBufferHandle cullPlacements, cullDrawables, cullLods, cullState, cullCursor, sceneArgs, sceneVisible, sceneTransformBuffer;
     private ShaderBufferBinding[] cullBuffers = System.Array.Empty<ShaderBufferBinding>();
     private ShaderBufferBinding[] sceneBuffers = System.Array.Empty<ShaderBufferBinding>();
