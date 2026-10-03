@@ -53,7 +53,8 @@ public static class MeshDataExtensions
     //
     // Bounds are recomputed from the transformed positions. Every other byte of the vertex is kept.
     // The LOD chain is carried (winding reversed with it): a transform changes where the geometry is,
-    // not how it is indexed.
+    // not how it is indexed. Each level's clusters keep their index runs and are moved with the geometry
+    // (MovedCluster): bounds and cone are in the vertices' space, so they cannot stay behind.
     public static MeshData Transformed(this MeshData data, Matrix4x4 transform, string? name = null)
     {
         ArgumentNullException.ThrowIfNull(data);
@@ -98,17 +99,53 @@ public static class MeshDataExtensions
             max = Vector3.Zero;
         }
 
-        var moved = data with { Name = name ?? data.Name, VertexBytes = bytes, Bounds = new Bounds3(min, max) };
+        var lods = data.Lods?.Select(l => l with
+        {
+            Indices16 = mirrors && l.Indices16 is { } a ? Reversed(a) : l.Indices16,
+            Indices32 = mirrors && l.Indices32 is { } b ? Reversed(b) : l.Indices32,
+            Clusters = l.Clusters?.Select(c => MovedCluster(c, transform, normalMatrix)).ToArray(),
+        }).ToArray();
+        var moved = data with { Name = name ?? data.Name, VertexBytes = bytes, Bounds = new Bounds3(min, max), Lods = lods };
         if (!mirrors) return moved;
         return moved with
         {
             Indices = Reversed(data.Indices),
             Indices32 = data.Indices32 is { } i32 ? Reversed(i32) : null,
-            Lods = data.Lods?.Select(l => l with
-            {
-                Indices16 = l.Indices16 is { } a ? Reversed(a) : null,
-                Indices32 = l.Indices32 is { } b ? Reversed(b) : null,
-            }).ToArray(),
+        };
+    }
+
+    // A cluster carried with its vertices. The sphere's centre moves and its radius takes the largest axis
+    // scale; the box is its eight corners' box; the cone's apex moves and its axis goes through the normal
+    // matrix. A cone is only exact under rotation and uniform scale, so under anything else its cutoff
+    // becomes 1, which never culls: conservative, never wrong.
+    private static MeshCluster MovedCluster(MeshCluster c, in Matrix4x4 transform, in Matrix4x4 normalMatrix)
+    {
+        var sx = new Vector3(transform.M11, transform.M12, transform.M13).Length();
+        var sy = new Vector3(transform.M21, transform.M22, transform.M23).Length();
+        var sz = new Vector3(transform.M31, transform.M32, transform.M33).Length();
+        var largest = MathF.Max(sx, MathF.Max(sy, sz));
+        var uniform = MathF.Min(sx, MathF.Min(sy, sz)) > 0f && largest / MathF.Min(sx, MathF.Min(sy, sz)) < 1.001f;
+        var min = new Vector3(float.MaxValue);
+        var max = new Vector3(float.MinValue);
+        for (var k = 0; k < 8; k++)
+        {
+            var corner = Vector3.Transform(new Vector3(
+                (k & 1) == 0 ? c.Min.X : c.Max.X, (k & 2) == 0 ? c.Min.Y : c.Max.Y, (k & 4) == 0 ? c.Min.Z : c.Max.Z), transform);
+            min = Vector3.Min(min, corner);
+            max = Vector3.Max(max, corner);
+        }
+
+        var axis = Vector3.TransformNormal(c.ConeAxis, normalMatrix);
+        axis = axis.LengthSquared() > 1e-12f ? Vector3.Normalize(axis) : c.ConeAxis;
+        return c with
+        {
+            Center = Vector3.Transform(c.Center, transform),
+            Radius = c.Radius * largest,
+            Min = min,
+            Max = max,
+            ConeApex = Vector3.Transform(c.ConeApex, transform),
+            ConeAxis = axis,
+            ConeCutoff = uniform ? c.ConeCutoff : 1f,
         };
     }
 

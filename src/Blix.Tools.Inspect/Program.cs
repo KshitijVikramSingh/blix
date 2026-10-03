@@ -100,6 +100,7 @@ public static class Program
                 var mesh = Blix.Assets.BlixMeshReader.Read(path);
                 ReportCookedExtensions(mesh);
                 ReportSceneLevel(mesh);
+                ReportClusters(mesh);
             }
             catch (Exception ex)
             {
@@ -108,6 +109,25 @@ public static class Program
         }
 
         return 0;
+    }
+
+    // The cook's clusters (format v19), per LOD level across every primitive: how many, how full, and how many
+    // carry a normal cone that can cull at all.
+    private static void ReportClusters(Blix.Assets.BlixMeshFile mesh)
+    {
+        var levels = mesh.Meshes.SelectMany(m => m.Primitives).SelectMany(p => p.Lods.Select((lod, level) => (lod, level))).ToList();
+        if (levels.Count == 0) return;
+        Console.WriteLine("  clusters (per LOD level, every primitive):");
+        foreach (var group in levels.GroupBy(x => x.level).OrderBy(g => g.Key))
+        {
+            var clusters = group.SelectMany(x => x.lod.Clusters ?? Array.Empty<Blix.Assets.MeshCluster>()).ToList();
+            var triangles = group.Sum(x => (long)x.lod.IndexCount / 3);
+            var cones = clusters.Count(c => c.ConeCutoff < 1f);
+            Console.WriteLine(
+                $"    LOD{group.Key}: {clusters.Count:N0} clusters over {triangles:N0} triangles "
+                + $"({(clusters.Count > 0 ? (double)triangles / clusters.Count : 0):0.0} per cluster), "
+                + $"{cones:N0} with a cone that can cull ({(clusters.Count > 0 ? 100.0 * cones / clusters.Count : 0):0}%)");
+        }
     }
 
     // What the file states above the meshes: scenes, hidden and instanced nodes, cameras, lights, variants.

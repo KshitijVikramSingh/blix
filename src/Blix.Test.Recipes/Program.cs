@@ -66,10 +66,11 @@ public static class Program
             System.Numerics.Vector3.Normalize(new System.Numerics.Vector3(v.X, v.Y, v.Z));
     }
 
-    // Per triangle corner, because the cook's tangent weld renumbers vertices: every field the narrowed
-    // layout carries (position, normal, UV0, and UV1 with the packed colour where it has them), byte for
-    // byte against the complete vertex. The tangent is not compared, since the cook generates it where
-    // the source authored none.
+    // As triangles, because the cook renumbers vertices (the tangent weld) and reorders triangles (clusters,
+    // MeshClusters): every field the narrowed layout carries (position, normal, UV0, and UV1 with the packed
+    // colour where it has them), byte for byte against the complete vertex, compared as the SET of triangles
+    // each list draws, windings included (TriangleSet). The tangent is not compared, since the cook generates
+    // it where the source authored none.
     private static bool SameNarrowedCorners(Blix.Assets.MeshData narrowed, Blix.Assets.MeshData complete)
     {
         if (Blix.Graphics.VertexSemantics.Of(narrowed.Layout) is not { } n
@@ -78,20 +79,35 @@ public static class Program
         // The colour sits right after UV1 in both colour layouts.
         if (n.Uv1 >= 0) fields.AddRange(new[] { (n.Uv1, c.Uv1, 8), (n.Uv1 + 8, c.Uv1 + 8, 4) });
 
-        var ia = narrowed.Indices32 ?? narrowed.Indices.Select(i => (uint)i).ToArray();
-        var ib = complete.Indices32 ?? complete.Indices.Select(i => (uint)i).ToArray();
-        if (ia.Length != ib.Length) return false;
-        for (var corner = 0; corner < ia.Length; corner++)
+        string Corner(Blix.Assets.MeshData m, uint vertex, bool narrowedSide)
         {
-            var va = narrowed.VertexBytes.AsSpan((int)ia[corner] * narrowed.Layout.Stride, narrowed.Layout.Stride);
-            var vb = complete.VertexBytes.AsSpan((int)ib[corner] * complete.Layout.Stride, complete.Layout.Stride);
-            foreach (var (at, from, bytes) in fields)
-            {
-                if (!va.Slice(at, bytes).SequenceEqual(vb.Slice(from, bytes))) return false;
-            }
+            var at = (int)vertex * m.Layout.Stride;
+            return string.Concat(fields.Select(f => Convert.ToHexString(m.VertexBytes, at + (narrowedSide ? f.At : f.From), f.Bytes)));
         }
 
-        return true;
+        var ia = narrowed.Indices32 ?? narrowed.Indices.Select(i => (uint)i).ToArray();
+        var ib = complete.Indices32 ?? complete.Indices.Select(i => (uint)i).ToArray();
+        return ia.Length == ib.Length
+            && TriangleSet(ia, v => Corner(narrowed, v, true)).SequenceEqual(TriangleSet(ib, v => Corner(complete, v, false)));
+    }
+
+    // A triangle list as the sorted set of its triangles, each keyed by its corners' data starting at the
+    // smallest corner and keeping the cyclic order: the same triangles in any order and from any first
+    // corner compare equal, and a triangle wound the other way does not.
+    private static string[] TriangleSet(IReadOnlyList<uint> indices, Func<uint, string> corner)
+    {
+        var triangles = new string[indices.Count / 3];
+        for (var t = 0; t < triangles.Length; t++)
+        {
+            var k = new[] { corner(indices[t * 3]), corner(indices[t * 3 + 1]), corner(indices[t * 3 + 2]) };
+            var start = string.CompareOrdinal(k[0], k[1]) <= 0
+                ? (string.CompareOrdinal(k[0], k[2]) <= 0 ? 0 : 2)
+                : (string.CompareOrdinal(k[1], k[2]) <= 0 ? 1 : 2);
+            triangles[t] = $"{k[start]}|{k[(start + 1) % 3]}|{k[(start + 2) % 3]}";
+        }
+
+        Array.Sort(triangles, StringComparer.Ordinal);
+        return triangles;
     }
 
     // Every placed primitive of a cooked file, as ModelData draws it: world space, a rig's skinned
@@ -769,6 +785,133 @@ public static class Program
         var parts = new List<string>();
         for (Exception? at = e; at is not null; at = at.InnerException) parts.Add(at.Message);
         return string.Join(" | ", parts);
+    }
+
+    // ── Clusters: the runs tile every level, and their bounds and cones are true ─────────────────
+    // Stage 1b of the geometry arc: the cook splits every LOD level into clusters (MeshClusters) and reorders
+    // its index list so each is one run. What every later stage relies on is pinned here, on every level of
+    // every primitive of three subjects: a static mesh with a real LOD chain through the shipped cook
+    // (DamagedHelmet), a skinned one (the Rogue), and a mirrored node baked through ModelData.Flattened
+    // (NegativeScaleTest), which is MeshData.Transformed carrying clusters into world space.
+    //
+    // That the triangles are the source's own, each with its winding, is the complete-vertex and node-hierarchy
+    // checks above, which compare triangle SETS; the first check here holds that comparison to telling a
+    // winding apart.
+    private static void ClustersTileAndBound(TestRunner t)
+    {
+        var square = TriangleSet(new uint[] { 0, 1, 2 }, v => v.ToString());
+        t.Expect("1b the triangle-set comparison ignores order and starting corner",
+            square.SequenceEqual(TriangleSet(new uint[] { 1, 2, 0 }, v => v.ToString())));
+        t.Expect("1b and tells a winding apart",
+            !square.SequenceEqual(TriangleSet(new uint[] { 0, 2, 1 }, v => v.ToString())));
+
+        var subjects = new List<(string Name, Blix.ModelData Model, bool Flatten)>();
+        var temp = Path.Combine(Path.GetTempPath(), "blix-clusters-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            if (FindFile("DamagedHelmet.glb") is { } helmet)
+            {
+                var cooked = Path.Combine(temp, "helmet.blixmesh");
+                MeshRecipe.CookShipped(helmet, cooked);
+                subjects.Add(("DamagedHelmet (shipped, with LODs)", Blix.ModelData.Load(cooked), false));
+            }
+
+            if (FindFile("Rogue.glb") is { } rogue)
+            {
+                subjects.Add(("Rogue (skinned)", Blix.ModelData.Load(CookCache.Resolve(rogue), new Blix.ModelNeeds(Skinned: true)), false));
+            }
+
+            if (FindFile("NegativeScaleTest.glb") is { } mirrored)
+            {
+                subjects.Add(("NegativeScaleTest (flattened, mirrored)", Blix.ModelData.Load(CookCache.Resolve(mirrored)), true));
+            }
+
+            if (subjects.Count == 0)
+            {
+                Console.WriteLine("  --   cluster checks skipped: no subject found");
+                return;
+            }
+
+            foreach (var (name, model, flatten) in subjects)
+            {
+                var meshes = flatten
+                    ? model.Flattened().Select(x => x.Primitive.Mesh).ToList()
+                    : model.Meshes.SelectMany(m => m.Primitives).Select(p => p.Mesh).ToList();
+                int levels = 0, clusters = 0, tiling = 0, sizes = 0, bounds = 0, coneWrong = 0, coneTested = 0, coneClaims = 0;
+                foreach (var mesh in meshes)
+                foreach (var lod in mesh.Lods ?? Array.Empty<Blix.Assets.MeshLod>())
+                {
+                    levels++;
+                    var indices = lod.Indices32 ?? lod.Indices16!.Select(i => (uint)i).ToArray();
+                    var runs = lod.Clusters ?? Array.Empty<Blix.Assets.MeshCluster>();
+                    clusters += runs.Count;
+                    var expected = 0;
+                    var stride = mesh.Layout.Stride;
+                    System.Numerics.Vector3 P(uint v) => new(
+                        BitConverter.ToSingle(mesh.VertexBytes, (int)v * stride),
+                        BitConverter.ToSingle(mesh.VertexBytes, (int)v * stride + 4),
+                        BitConverter.ToSingle(mesh.VertexBytes, (int)v * stride + 8));
+                    foreach (var c in runs)
+                    {
+                        if (c.FirstIndex != expected) tiling++;
+                        expected = c.FirstIndex + c.IndexCount;
+                        var run = indices.AsSpan(c.FirstIndex, c.IndexCount).ToArray();
+                        if (run.Length / 3 > MeshClusters.MaxTriangles || run.Distinct().Count() > MeshClusters.MaxVertices) sizes++;
+
+                        // Every corner inside the sphere and the box, to float rounding.
+                        var slack = 1e-4f * MathF.Max(1f, c.Radius);
+                        if (run.Any(v =>
+                            (P(v) - c.Center).Length() > c.Radius + slack
+                            || System.Numerics.Vector3.Min(P(v), c.Min - new System.Numerics.Vector3(slack)) != c.Min - new System.Numerics.Vector3(slack)
+                            || System.Numerics.Vector3.Max(P(v), c.Max + new System.Numerics.Vector3(slack)) != c.Max + new System.Numerics.Vector3(slack)))
+                        {
+                            bounds++;
+                        }
+
+                        // The cone, as its contract: from any point it calls back-facing, every triangle faces
+                        // away. Probed from 26 points around the cluster at twice and ten times its radius.
+                        if (c.ConeCutoff >= 1f) continue;
+                        coneTested++;
+                        for (var d = 0; d < 26; d++)
+                        foreach (var reach in new[] { 2f, 10f })
+                        {
+                            var dir = System.Numerics.Vector3.Normalize(new System.Numerics.Vector3(
+                                (d % 3) - 1, (d / 3 % 3) - 1, (d / 9 % 3) - 1 + (d == 13 ? 1 : 0)));
+                            var eye = c.Center + dir * MathF.Max(c.Radius, 1e-3f) * reach;
+                            if (System.Numerics.Vector3.Dot(System.Numerics.Vector3.Normalize(c.ConeApex - eye), c.ConeAxis) < c.ConeCutoff) continue;
+                            coneClaims++;
+                            for (var k = 0; k + 2 < run.Length; k += 3)
+                            {
+                                var (a, b, e) = (P(run[k]), P(run[k + 1]), P(run[k + 2]));
+                                var n = System.Numerics.Vector3.Cross(b - a, e - a);
+                                if (n.LengthSquared() < 1e-20f) continue; // degenerate: faces nowhere
+                                if (System.Numerics.Vector3.Dot(n, a - eye) < -1e-6f * n.Length() * (a - eye).Length())
+                                {
+                                    coneWrong++;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (expected != indices.Length) tiling++;
+                }
+
+                t.Expect($"1b {name}: every level is clustered", levels > 0 && clusters >= levels, $"{clusters} clusters over {levels} levels");
+                t.Expect($"1b {name}: the runs tile every level exactly", tiling == 0, $"{tiling} level(s) not tiled");
+                t.Expect($"1b {name}: every cluster within {MeshClusters.MaxVertices} vertices and {MeshClusters.MaxTriangles} triangles", sizes == 0, $"{sizes} over");
+                t.Expect($"1b {name}: every corner inside its cluster's sphere and box", bounds == 0, $"{bounds} cluster(s) leak");
+                t.Expect($"1b {name}: no viewpoint the cone calls back-facing sees a triangle's front", coneWrong == 0,
+                    $"{coneWrong} wrong of {coneClaims} back-facing claims over {coneTested} cones");
+                // CONTROL: the cone check above cannot pass by never being asked.
+                t.Expect($"1b {name}: CONTROL the cone test made claims to check", flatten || coneClaims > 0, $"{coneClaims} claims");
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
+        }
     }
 
     // ── A golden that shares nothing with the reader ─────────────────────────────
@@ -2641,23 +2784,27 @@ public static class Program
                             continue;
                         }
 
+                        // As triangle sets: the cook reorders triangles into clusters (MeshClusters), so the
+                        // contract is the same triangles with the same windings, not the same order.
                         var stride = cookedMesh.Layout.Stride;
-                        var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(cookedMesh.VertexBytes);
-                        for (var c = 0; c < cookedIndices.Length; c++)
+                        var bytes = cookedMesh.VertexBytes;
+                        string CookedCorner(uint v)
                         {
-                            var at = (int)cookedIndices[c] * stride / 4;
-                            var src = (int)sourceIndices[c];
-                            var cp = new System.Numerics.Vector3(floats[at], floats[at + 1], floats[at + 2]);
-                            var cnrm = new System.Numerics.Vector3(floats[at + 3], floats[at + 4], floats[at + 5]);
-                            var cuv = new System.Numerics.Vector2(floats[at + 6], floats[at + 7]);
-                            if (cp != sourcePositions[src] || cnrm != normals[src] || cuv != uvs[src])
-                            {
-                                vertexMismatch.Add($"'{cn.Name}'[{pi}] corner {c}");
-                                break;
-                            }
-
-                            comparedCorners++;
+                            var at = (int)v * stride;
+                            float F(int k) => BitConverter.ToSingle(bytes, at + k * 4);
+                            return $"{F(0):R},{F(1):R},{F(2):R};{F(3):R},{F(4):R},{F(5):R};{F(6):R},{F(7):R}";
                         }
+                        string SourceCorner(uint v)
+                        {
+                            var (p, nn, uv) = (sourcePositions[(int)v], normals[(int)v], uvs[(int)v]);
+                            return $"{p.X:R},{p.Y:R},{p.Z:R};{nn.X:R},{nn.Y:R},{nn.Z:R};{uv.X:R},{uv.Y:R}";
+                        }
+
+                        var cookedSet = TriangleSet(cookedIndices, CookedCorner);
+                        var sourceSet = TriangleSet(sourceIndices.ToArray(), SourceCorner);
+                        var firstDiff = Enumerable.Range(0, cookedSet.Length).FirstOrDefault(t => cookedSet[t] != sourceSet[t], -1);
+                        if (firstDiff >= 0) vertexMismatch.Add($"'{cn.Name}'[{pi}] triangle set differs at sorted triangle {firstDiff}");
+                        else comparedCorners += cookedIndices.Length;
 
                         if (TangentGeneration.HasNoTangents(cookedMesh)) untangented++;
 
@@ -2694,7 +2841,7 @@ public static class Program
 
                 t.Expect("every skinned primitive cooks with a tangent frame", untangented == 0,
                     $"{untangented} primitive(s) still carry zero tangents");
-                t.Expect("skinned corners carry the authored position, normal and UV", vertexMismatch.Count == 0,
+                t.Expect("skinned triangles carry the authored position, normal and UV, windings included", vertexMismatch.Count == 0,
                     string.Join("; ", vertexMismatch.Take(4)));
                 t.Expect("on corners that actually exist", comparedCorners > 0, $"{comparedCorners}");
                 t.Expect("materials match on the rigged path", matMismatch.Count == 0,
@@ -2935,6 +3082,7 @@ public static class Program
         GeneratedTangentsFollowTheNormalTexture(t);
         QuantizedAttributesReadAsTheirFloats(t);
         NormalMapFramesFollowTheTextureTransform(t);
+        ClustersTileAndBound(t);
         InterpolationGolden(t);
         SceneLevelMatchesGltf(t);
         SceneLevelReachesModelData(t);

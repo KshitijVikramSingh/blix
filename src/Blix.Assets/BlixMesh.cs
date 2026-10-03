@@ -55,8 +55,10 @@ public static class BlixMesh
     // KHR_texture_transform to the material; v17 each extension channel's TEXCOORD set and transform.
     // v18 adds the scene level: each node's visibility, instance transforms, camera and light; the
     // scenes with their roots and the default; the camera, light and variant tables; and each
-    // primitive's KHR_materials_variants mapping. Older layouts must be re-cooked.
-    public const uint Version18 = 18;
+    // primitive's KHR_materials_variants mapping. v19 gives every LOD level its cluster table (MeshCluster): the
+    // level's index list reordered so each cluster is one run, each with its bounds and normal cone. Older
+    // layouts must be re-cooked.
+    public const uint Version19 = 19;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
     public const uint LayoutPosition3NormalTextureSkin4Tangent = 3; // 80-byte, rigged
@@ -123,7 +125,7 @@ public static class BlixMesh
 // plus the world-space geometric error decimating to this level introduced
 // (0 for LOD0, the original surface). Lods[0] is full detail; higher indices
 // are progressively decimated with monotonically increasing error.
-public sealed record BlixMeshLod(ushort[]? Indices16, uint[]? Indices32, float Error = 0f)
+public sealed record BlixMeshLod(ushort[]? Indices16, uint[]? Indices32, float Error = 0f, IReadOnlyList<MeshCluster>? Clusters = null)
 {
     public int IndexCount => Indices32?.Length ?? Indices16!.Length;
 }
@@ -566,6 +568,44 @@ public sealed record BlixMeshFile(
 
 internal static class BlixMeshBinary
 {
+    // One level's cluster table (v19): a count, then per cluster its index run, sphere, box and cone. Refused
+    // by name when the runs do not tile the level exactly, which is the property every reader relies on.
+    internal static MeshCluster[] ReadClusters(BinaryReader br, int indexCount, string path, string primitive)
+    {
+        var count = br.ReadInt32();
+        if (count < 0 || count > indexCount / 3)
+        {
+            throw new InvalidDataException($"'{path}' primitive '{primitive}' has invalid cluster count {count} for {indexCount} indices.");
+        }
+
+        var clusters = new MeshCluster[count];
+        var expected = 0;
+        for (var c = 0; c < count; c++)
+        {
+            var first = br.ReadInt32();
+            var n = br.ReadInt32();
+            if (first != expected || n <= 0 || n % 3 != 0 || first + n > indexCount)
+            {
+                throw new InvalidDataException(
+                    $"'{path}' primitive '{primitive}' cluster {c} covers indices {first}..{first + n} where {expected} was next of {indexCount}.");
+            }
+
+            expected = first + n;
+            clusters[c] = new MeshCluster(first, n,
+                ReadVector(br), br.ReadSingle(), ReadVector(br), ReadVector(br),
+                ReadVector(br), ReadVector(br), br.ReadSingle());
+        }
+
+        if (count > 0 && expected != indexCount)
+        {
+            throw new InvalidDataException($"'{path}' primitive '{primitive}' clusters cover {expected} of {indexCount} indices.");
+        }
+
+        return clusters;
+
+        static System.Numerics.Vector3 ReadVector(BinaryReader r) => new(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+    }
+
     internal static string ReadString(BinaryReader br) =>
         System.Text.Encoding.UTF8.GetString(br.ReadBytes(br.ReadInt32()));
 
@@ -604,6 +644,8 @@ internal static class BlixMeshBinary
                 br.ReadBytes(indexCount * 2).AsSpan().CopyTo(MemoryMarshal.AsBytes(indices16.AsSpan()));
                 lods[l] = new BlixMeshLod(indices16, null, error);
             }
+
+            lods[l] = lods[l] with { Clusters = BlixMeshBinary.ReadClusters(br, indexCount, path, name) };
         }
 
         var variantCount = br.ReadInt32();
@@ -699,6 +741,42 @@ internal static class BlixMeshBinary
 
 public static class BlixMeshWriter
 {
+    // One level's cluster table (v19). A level with no clusters writes a count of 0.
+    private static void WriteClusters(BinaryWriter bw, IReadOnlyList<MeshCluster>? clusters, int indexCount, string primitive)
+    {
+        clusters ??= Array.Empty<MeshCluster>();
+        bw.Write(clusters.Count);
+        var expected = 0;
+        foreach (var c in clusters)
+        {
+            if (c.FirstIndex != expected || c.IndexCount <= 0 || c.IndexCount % 3 != 0)
+            {
+                throw new ArgumentException($"Primitive '{primitive}' clusters do not tile its LOD from index {expected}.");
+            }
+
+            expected += c.IndexCount;
+            bw.Write(c.FirstIndex);
+            bw.Write(c.IndexCount);
+            Write(bw, c.Center);
+            bw.Write(c.Radius);
+            Write(bw, c.Min);
+            Write(bw, c.Max);
+            Write(bw, c.ConeApex);
+            Write(bw, c.ConeAxis);
+            bw.Write(c.ConeCutoff);
+        }
+
+        if (clusters.Count > 0 && expected != indexCount)
+        {
+            throw new ArgumentException($"Primitive '{primitive}' clusters cover {expected} of its LOD's {indexCount} indices.");
+        }
+
+        static void Write(BinaryWriter w, System.Numerics.Vector3 v)
+        {
+            w.Write(v.X); w.Write(v.Y); w.Write(v.Z);
+        }
+    }
+
     /// <param name="stamp">
     /// Who cooked this, from what, and with which settings. Required so this writer cannot produce
     /// an unstamped artifact.
@@ -708,7 +786,7 @@ public static class BlixMeshWriter
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(file);
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version18, stamp);
+        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version19, stamp);
         using var bw = new BinaryWriter(fs);
 
         bw.Write(file.Nodes.Count);
@@ -942,6 +1020,8 @@ public static class BlixMeshWriter
                 bw.Write(lod.Error);
                 bw.Write(MemoryMarshal.AsBytes(lod.Indices16.AsSpan()));
             }
+
+            WriteClusters(bw, lod.Clusters, lod.IndexCount, p.Name);
         }
 
         var variants = p.VariantMaterials ?? Array.Empty<int>();
@@ -1033,7 +1113,7 @@ public static class BlixMeshReader
         return AssetImportException.Refusing(path, () =>
         {
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version18, path, ".blixmesh");
+            var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version19, path, ".blixmesh");
             return ReadBody(fs, path, header);
         }, ".blixmesh");
     }

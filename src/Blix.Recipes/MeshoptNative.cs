@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Runtime.InteropServices;
 
 namespace Blix.Recipes;
@@ -143,6 +144,106 @@ public static unsafe class MeshoptNative
         {
             return meshopt_simplifyScale(
                 pos, (nuint)vertexCount, (nuint)(positionStrideFloats * sizeof(float)));
+        }
+    }
+
+    // ── Clusters (meshoptimizer's meshlets) ──────────────────────────────────────────────────────
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Meshlet
+    {
+        public uint VertexOffset;
+        public uint TriangleOffset;
+        public uint VertexCount;
+        public uint TriangleCount;
+    }
+
+    /// <summary>meshopt_Bounds: a cluster's bounding sphere and normal cone (cutoff = cos of half the cone's angle).</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ClusterBounds
+    {
+        public Vector3 Center;
+        public float Radius;
+        public Vector3 ConeApex;
+        public Vector3 ConeAxis;
+        public float ConeCutoff;
+        public sbyte ConeAxisX, ConeAxisY, ConeAxisZ, ConeCutoffS8;
+    }
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    private static extern nuint meshopt_buildMeshletsBound(nuint indexCount, nuint maxVertices, nuint maxTriangles);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    private static extern nuint meshopt_buildMeshlets(
+        Meshlet* meshlets, uint* meshletVertices, byte* meshletTriangles, uint* indices, nuint indexCount,
+        float* vertexPositions, nuint vertexCount, nuint vertexPositionsStride,
+        nuint maxVertices, nuint maxTriangles, float coneWeight);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void meshopt_optimizeMeshlet(uint* meshletVertices, byte* meshletTriangles, nuint triangleCount, nuint vertexCount);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    private static extern ClusterBounds meshopt_computeClusterBounds(
+        uint* indices, nuint indexCount, float* vertexPositions, nuint vertexCount, nuint vertexPositionsStride);
+
+    /// <summary>
+    /// Splits a triangle list into clusters and returns the same triangles reordered so each cluster is one
+    /// run, with the runs' (first index, index count). Windings are kept: a cluster's local triangle indices
+    /// map back through its vertex list in the order meshoptimizer wrote them.
+    /// </summary>
+    /// <param name="positions">Tightly packed xyz, one per vertex.</param>
+    public static (uint[] Indices, (int First, int Count)[] Runs) BuildClusters(
+        uint[] indices, float[] positions, int vertexCount, int maxVertices, int maxTriangles, float coneWeight)
+    {
+        var bound = (int)meshopt_buildMeshletsBound((nuint)indices.Length, (nuint)maxVertices, (nuint)maxTriangles);
+        var meshlets = new Meshlet[bound];
+        var meshletVertices = new uint[indices.Length];
+        var meshletTriangles = new byte[indices.Length];
+        nuint count;
+        fixed (Meshlet* m = meshlets)
+        fixed (uint* mv = meshletVertices)
+        fixed (byte* mt = meshletTriangles)
+        fixed (uint* idx = indices)
+        fixed (float* pos = positions)
+        {
+            count = meshopt_buildMeshlets(
+                m, mv, mt, idx, (nuint)indices.Length, pos, (nuint)vertexCount, sizeof(float) * 3,
+                (nuint)maxVertices, (nuint)maxTriangles, coneWeight);
+            // Locality inside each cluster: the order the rasteriser (and later a ray traversal) reads it in.
+            for (nuint i = 0; i < count; i++)
+            {
+                meshopt_optimizeMeshlet(mv + m[i].VertexOffset, mt + m[i].TriangleOffset, m[i].TriangleCount, m[i].VertexCount);
+            }
+        }
+
+        var reordered = new uint[indices.Length];
+        var runs = new (int First, int Count)[(int)count];
+        var at = 0;
+        for (var i = 0; i < (int)count; i++)
+        {
+            var meshlet = meshlets[i];
+            runs[i] = (at, (int)meshlet.TriangleCount * 3);
+            for (var t = 0; t < meshlet.TriangleCount * 3; t++)
+            {
+                reordered[at++] = meshletVertices[meshlet.VertexOffset + meshletTriangles[meshlet.TriangleOffset + t]];
+            }
+        }
+
+        if (at != indices.Length)
+        {
+            throw new InvalidOperationException($"meshoptimizer clustered {at / 3} of {indices.Length / 3} triangles.");
+        }
+
+        return (reordered, runs);
+    }
+
+    /// <summary>One run's bounding sphere and normal cone.</summary>
+    public static ClusterBounds Bounds(ReadOnlySpan<uint> run, float[] positions, int vertexCount)
+    {
+        fixed (uint* idx = run)
+        fixed (float* pos = positions)
+        {
+            return meshopt_computeClusterBounds(idx, (nuint)run.Length, pos, (nuint)vertexCount, sizeof(float) * 3);
         }
     }
 }

@@ -341,7 +341,7 @@ public sealed class ModelData
             {
                 var (bytes, bounds) = CookedVertices.Repack(p, layout, transform: null, path);
                 if (ReferenceEquals(bytes, p.VertexBytes)) bytes = (byte[])bytes.Clone();
-                var lods = p.Lods.Select(l => new MeshLod(l.Indices16, l.Indices32, l.Error)).ToArray();
+                var lods = p.Lods.Select(l => new MeshLod(l.Indices16, l.Indices32, l.Error, l.Clusters)).ToArray();
                 var lod0 = p.Lods[0];
                 return new Primitive(
                     new MeshData(p.Name, bytes, lod0.Indices16 ?? Array.Empty<ushort>(), layout, bounds,

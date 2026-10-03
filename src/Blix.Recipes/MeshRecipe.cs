@@ -106,7 +106,9 @@ public static class MeshRecipe
     // Version 18 refuses morph targets that take effect: an instantiated node whose effective weights (its own,
     // else its mesh's) are not all zero, or a weights animation of such a node (RefuseEffectiveMorphTargets). No file that
     // cooks changes, but a cached cook of one that is now refused must not keep loading.
-    public const uint MeshRecipeVersion = 18;
+    // Version 19 (format v19) clusters every LOD level (MeshClusters): each level's index list reordered so a
+    // cluster is one run, with its bounds and normal cone.
+    public const uint MeshRecipeVersion = 19;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false,
@@ -276,7 +278,7 @@ public static class MeshRecipe
                     VertexCount: chunk.VertexCount,
                     VertexBytes: chunk.VertexBytes,
                     IndexFormat: chunk.IndexFormat,
-                    Lods: BuildLods(chunk, layout.Stride, simplify)
+                    Lods: MeshClusters.Clustered(BuildLods(chunk, layout.Stride, simplify), chunk)
                         .Select(l => l with { Error = l.Error * scale })
                         .ToArray(),
                     VariantMaterials: variants.For(prim)));
@@ -309,7 +311,7 @@ public static class MeshRecipe
                 VertexCount: complete.VertexCount,
                 VertexBytes: complete.VertexBytes,
                 IndexFormat: complete.IndexFormat,
-                Lods: new[] { new BlixMeshLod(complete.Indices, complete.Indices32) },
+                Lods: MeshClusters.Clustered(new[] { new BlixMeshLod(complete.Indices, complete.Indices32) }, complete),
                 VariantMaterials: variants.For(prim)));
         }
 
@@ -1481,7 +1483,7 @@ public static class MeshRecipe
         MaterialPatch? patch = null)
     {
         var header = CookedFile.TryReadHeader(outputPath);
-        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version18 }) return false;
+        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version19 }) return false;
         var stamp = header.Value.Stamp;
         if (!stamp.MatchesProducerAndSource(BlixMesh.ShippedRecipe, MeshRecipeVersion, sourcePath))
             return false;
