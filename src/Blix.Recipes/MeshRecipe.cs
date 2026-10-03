@@ -108,7 +108,9 @@ public static class MeshRecipe
     // cooks changes, but a cached cook of one that is now refused must not keep loading.
     // Version 19 (format v19) clusters every LOD level (MeshClusters): each level's index list reordered so a
     // cluster is one run, with its bounds and normal cone.
-    public const uint MeshRecipeVersion = 19;
+    // Version 20 weighs LOD collapses against the UV again (SimplifierInputs): since the complete vertex, the
+    // simplifier had been reading the tangent's x and y where it meant the texture coordinates.
+    public const uint MeshRecipeVersion = 20;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false,
@@ -278,7 +280,7 @@ public static class MeshRecipe
                     VertexCount: chunk.VertexCount,
                     VertexBytes: chunk.VertexBytes,
                     IndexFormat: chunk.IndexFormat,
-                    Lods: MeshClusters.Clustered(BuildLods(chunk, layout.Stride, simplify), chunk)
+                    Lods: MeshClusters.Clustered(BuildLods(chunk, simplify), chunk)
                         .Select(l => l with { Error = l.Error * scale })
                         .ToArray(),
                     VariantMaterials: variants.For(prim)));
@@ -1145,7 +1147,38 @@ public static class MeshRecipe
     // LOD0 (full) + decimated levels via the injected simplifier. All levels
     // share the primitive's index format (decimated indices reference the same
     // vertex buffer, so a u16 primitive stays u16).
-    private static IReadOnlyList<BlixMeshLod> BuildLods(MeshData meshData, int stride, SimplifyFn? simplify)
+    /// <summary>What the simplifier weighs a collapse against: positions, and per vertex normal (3) + UV0 (2).</summary>
+    /// <remarks>
+    /// Which bytes those are comes from <see cref="VertexSemantics"/>, the one table of Blix's layouts. This used
+    /// to infer the UV from the stride (48 bytes meant the tangent layout, anything else the 32-byte one), which
+    /// was right until static meshes cooked as the 60-byte complete vertex: from then on it read float 6, the
+    /// tangent's x and y, so every LOD protected the tangent and let the texture coordinates slide.
+    /// </remarks>
+    internal static (float[] Positions, float[] Attributes) SimplifierInputs(MeshData meshData)
+    {
+        var semantics = VertexSemantics.Of(meshData.Layout) ?? throw new ArgumentException(
+            $"Mesh '{meshData.Name}' has a {meshData.Layout.Stride}-byte vertex that is not one of Blix's layouts.", nameof(meshData));
+        var stride = meshData.Layout.Stride;
+        var positions = new float[meshData.VertexCount * 3];
+        var attributes = new float[meshData.VertexCount * AttributeFloats];
+        for (var v = 0; v < meshData.VertexCount; v++)
+        {
+            var o = v * stride;
+            positions[v * 3 + 0] = BitConverter.ToSingle(meshData.VertexBytes, o + semantics.Position);
+            positions[v * 3 + 1] = BitConverter.ToSingle(meshData.VertexBytes, o + semantics.Position + 4);
+            positions[v * 3 + 2] = BitConverter.ToSingle(meshData.VertexBytes, o + semantics.Position + 8);
+            var a = v * AttributeFloats;
+            attributes[a + 0] = BitConverter.ToSingle(meshData.VertexBytes, o + semantics.Normal);
+            attributes[a + 1] = BitConverter.ToSingle(meshData.VertexBytes, o + semantics.Normal + 4);
+            attributes[a + 2] = BitConverter.ToSingle(meshData.VertexBytes, o + semantics.Normal + 8);
+            attributes[a + 3] = BitConverter.ToSingle(meshData.VertexBytes, o + semantics.Uv0);
+            attributes[a + 4] = BitConverter.ToSingle(meshData.VertexBytes, o + semantics.Uv0 + 4);
+        }
+
+        return (positions, attributes);
+    }
+
+    private static IReadOnlyList<BlixMeshLod> BuildLods(MeshData meshData, SimplifyFn? simplify)
     {
         // LOD0 is the original surface: zero geometric error.
         var lods = new List<BlixMeshLod> { new(meshData.Indices, meshData.Indices32, Error: 0f) };
@@ -1154,27 +1187,7 @@ public static class MeshRecipe
         var baseIndices = meshData.Indices32 ?? Array.ConvertAll(meshData.Indices, idx => (uint)idx);
         if (baseIndices.Length < MinLodIndices) return lods;
 
-        var positions = new float[meshData.VertexCount * 3];
-        // Normal (3) + UV (2), interleaved, in the order the weights below expect. Both layouts
-        // this cook writes put the normal immediately after the position; only the UV moves, and
-        // the stride is what says which layout this is — 48 bytes with a tangent between them,
-        // 32 without. Reading the UV from the wrong offset would feed the simplifier the tangent's
-        // xy and quietly protect the wrong thing.
-        var uvFloatOffset = stride == 48 ? 10 : 6;
-        var attributes = new float[meshData.VertexCount * AttributeFloats];
-        for (var v = 0; v < meshData.VertexCount; v++)
-        {
-            var o = v * stride;
-            positions[v * 3 + 0] = BitConverter.ToSingle(meshData.VertexBytes, o);
-            positions[v * 3 + 1] = BitConverter.ToSingle(meshData.VertexBytes, o + 4);
-            positions[v * 3 + 2] = BitConverter.ToSingle(meshData.VertexBytes, o + 8);
-            var a = v * AttributeFloats;
-            attributes[a + 0] = BitConverter.ToSingle(meshData.VertexBytes, o + 12);
-            attributes[a + 1] = BitConverter.ToSingle(meshData.VertexBytes, o + 16);
-            attributes[a + 2] = BitConverter.ToSingle(meshData.VertexBytes, o + 20);
-            attributes[a + 3] = BitConverter.ToSingle(meshData.VertexBytes, o + uvFloatOffset * 4);
-            attributes[a + 4] = BitConverter.ToSingle(meshData.VertexBytes, o + uvFloatOffset * 4 + 4);
-        }
+        var (positions, attributes) = SimplifierInputs(meshData);
 
         var prevCount = baseIndices.Length;
         foreach (var ratio in LodRatios)

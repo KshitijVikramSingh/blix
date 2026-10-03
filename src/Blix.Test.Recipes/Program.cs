@@ -787,6 +787,37 @@ public static class Program
         return string.Join(" | ", parts);
     }
 
+    // ── The simplifier weighs a collapse against the UV, read where the layout keeps it ──────────
+    // Since static meshes cooked as the 60-byte complete vertex, the LOD simplifier inferred the UV's offset
+    // from the stride and read the tangent's x and y instead. A vertex whose tangent and UV hold different
+    // values tells the two apart; the 32-byte layout is the control that the old inference got right.
+    private static void SimplifierWeighsTheUv(TestRunner t)
+    {
+        var complete = new Blix.Graphics.VertexPosition3NormalTangentTexture2Color(
+            new Blix.Graphics.GraphicsVector3(1, 2, 3), new Blix.Graphics.GraphicsVector3(0, 1, 0),
+            new Blix.Graphics.GraphicsVector4(7, 8, 9, 1), new Blix.Graphics.GraphicsVector2(0.25f, 0.75f),
+            new Blix.Graphics.GraphicsVector2(0.5f, 0.5f), 0xFFFFFFFF);
+        var mesh = new Blix.Assets.MeshData("probe",
+            Blix.Graphics.VertexPosition3NormalTangentTexture2Color.Pack(new[] { complete, complete, complete }),
+            new ushort[] { 0, 1, 2 }, Blix.Graphics.VertexPosition3NormalTangentTexture2Color.Layout,
+            new Blix.Geometry.Bounds3(System.Numerics.Vector3.Zero, System.Numerics.Vector3.One));
+        var (positions, attributes) = MeshRecipe.SimplifierInputs(mesh);
+        t.Expect("the simplifier reads the complete vertex's UV, not its tangent",
+            attributes[3] == 0.25f && attributes[4] == 0.75f, $"read ({attributes[3]}, {attributes[4]})");
+        t.Expect("and its position and normal", positions[0] == 1f && positions[2] == 3f && attributes[1] == 1f,
+            $"position ({positions[0]}, {positions[1]}, {positions[2]}), normal y {attributes[1]}");
+
+        var plain = new Blix.Assets.MeshData("plain",
+            Blix.Graphics.VertexPosition3NormalTexture.Pack(Enumerable.Repeat(new Blix.Graphics.VertexPosition3NormalTexture(
+                new Blix.Graphics.GraphicsVector3(1, 2, 3), new Blix.Graphics.GraphicsVector3(0, 1, 0),
+                new Blix.Graphics.GraphicsVector2(0.25f, 0.75f)), 3).ToArray()),
+            new ushort[] { 0, 1, 2 }, Blix.Graphics.VertexPosition3NormalTexture.Layout,
+            new Blix.Geometry.Bounds3(System.Numerics.Vector3.Zero, System.Numerics.Vector3.One));
+        var (_, plainAttributes) = MeshRecipe.SimplifierInputs(plain);
+        t.Expect("CONTROL and the 32-byte layout's", plainAttributes[3] == 0.25f && plainAttributes[4] == 0.75f,
+            $"read ({plainAttributes[3]}, {plainAttributes[4]})");
+    }
+
     // ── Clusters: the runs tile every level, and their bounds and cones are true ─────────────────
     // Stage 1b of the geometry arc: the cook splits every LOD level into clusters (MeshClusters) and reorders
     // its index list so each is one run. What every later stage relies on is pinned here, on every level of
@@ -3083,6 +3114,7 @@ public static class Program
         QuantizedAttributesReadAsTheirFloats(t);
         NormalMapFramesFollowTheTextureTransform(t);
         ClustersTileAndBound(t);
+        SimplifierWeighsTheUv(t);
         InterpolationGolden(t);
         SceneLevelMatchesGltf(t);
         SceneLevelReachesModelData(t);
