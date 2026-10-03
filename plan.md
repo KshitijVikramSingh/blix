@@ -8,12 +8,14 @@ its history in git.
 
 ## The arc now: geometry and lighting for huge, dynamic worlds
 
-**Why.** Sponza and Bistro (`--scene`, `tools/bistro/`) both sit in one frame-rate range, and on Bistro the
-sun-bounce injection alone is 18 ms isolated against 7.5 ms for all of shading. Its knobs only trade
-quality for a fraction of the cost: copying skipped tiles costs nothing, 8x fewer probes is only ~3x
-cheaper. The approach is the limit: a regular probe grid sized to the scene's bounds (cost and resolution
-follow world size), rays that march a voxel grid rather than geometry, transport re-solved every frame for
-a static answer, and four unrelated structures (cascades, Hi-Z, SH volume, occupancy) for one scene.
+**Why.** Not speed, as first thought: timed warm on the orbit (`--ab <term>`, 1500 frames), Bistro's frame
+is ~17 ms and Sponza's ~19, all lighting together is 8.3 and 9.5 ms of it, and the terms the arc began
+with are small (sun-bounce injection 0.35 / 3.0 ms, probe terms 0.4 / 0.4, GTAO ~0 / 0.7, shadows ~0 /
+1.0); most of it is the lit pass's material shading. The 18 ms that started this was the cold regime.
+The approach is the limit for what the constraints below ask: a regular probe grid sized to the scene's
+bounds (cost and resolution follow world size), rays that march a cook-baked voxel grid rather than
+geometry (so nothing that moves occludes or bounces light), and four unrelated structures (cascades, Hi-Z,
+SH volume, occupancy) for one scene.
 
 **The constraints, decided.** Design for dynamic geometry; assume huge worlds; ray tracing behind one
 interface whose backends are software (compute traversal; this Mac's MoltenVK exposes no ray query) and
@@ -51,7 +53,15 @@ exactly where the world has changed.
    leaves Sponza's full-LOD cost where it was (8.7-9.6 ms against 7.4-8.0 with materials), so that cost
    is geometric, not shading on small triangles. The cull keeps its counts on the GPU, so caster and
    triangle counts read back only under `--cpu-cull`.
-3. *The ray-query interface*: software backend first, hardware when a device can prove it.
+3. *The ray-query interface*: software backend first, hardware when a device can prove it. 3a is the CPU
+   half (`Blix.Geometry`: `BvhBuilder`, `TriangleBvh`, `RayQueryScene`, Test.Graphics BV): binned-SAH
+   hierarchies in 32-byte GPU-ready nodes, the watertight triangle test, Ize's widened box exits, hits
+   in `rayQuery`'s terms (facing is the mesh's own). Built at load (`--ray-scene`), Release: Sponza
+   12.8M triangles in 2.2 s and 353 MB of nodes, Bistro 2.8M in 0.87 s, the city's 123k placements in
+   0.29 s; 0.07-0.37M CPU rays/s per core. Next (3b): the same structures on the GPU, a traversal in
+   `Blix.Shaders`, tested ray for ray against this oracle (which needs a GPU buffer read back), and the
+   level of detail GI traces (full detail is 353 MB on Sponza). The cook takes the hierarchies once the
+   layout stops moving.
 4. *Runtime GI*: camera-relative clipmap probes traced through 3, relocated out of walls, rays amortised
    over frames, dirty-region updates, capsule occluders.
 5. *PRT baked by the cook*: per-region probe transfer, relit by the sun at runtime: the static base and
@@ -72,6 +82,8 @@ The first ~250 frames after load run slow and then settle: Bistro 25-34 ms, then
 without the sky bounce (cause unproven; the GPU clock ramping under sustained load is the suspect). A
 120-frame shot measures the cold regime, which is how an `--ab lod` on Bistro read 4.9 ms and then sign-
 flipped. Time at `--shot-frames=1500` (each arm keeps its last 600 frames) and compare the quartiles.
+`BLIX_CONFIG=Release ./blix run` ran a binary older than the Release build beside it, without saying so
+(found by a node count that did not move); measure Release by exec'ing the apphost.
 The scene host also ignores its `[Tune]` fields on the command line (`--lod-error-pixels` is reported
 unread): three field names collide across its settings objects, so applying them is a naming decision.
 The Bistro orbit at `--shot-frames=120` has two outcomes in either arm (3,931 pixels apart, max 74), so a

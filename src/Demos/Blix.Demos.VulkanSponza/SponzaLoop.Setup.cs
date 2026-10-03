@@ -143,6 +143,8 @@ internal sealed partial class SponzaLoop
         // --lit-flat: the lit pass shades opaque geometry with flat.frag, everything else unchanged (same lit.vert,
         // culling, pre-pass and LOD). What a cost does under it is the part that is not material shading.
         litFlat = args.Flag("lit-flat");
+        // --ray-scene: build CPU ray-query hierarchies over the scene at load and time camera rays (SponzaLoop.RayScene).
+        rayScene = args.Flag("ray-scene");
         // --no-occlusion: the GPU cull without its two-phase occlusion test (scene_occlusion.comp), for the A/B.
         occlusionCull = gpuCull && !args.Flag("no-occlusion");
         // --occlusion-cut: every frame is a camera cut. The early list draws nothing, so the late list carries

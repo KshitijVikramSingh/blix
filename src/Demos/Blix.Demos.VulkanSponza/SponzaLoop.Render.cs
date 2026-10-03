@@ -1054,6 +1054,7 @@ internal sealed partial class SponzaLoop
             WritePassBreakdown();
             WriteLodCensus();
             WriteClusterCensus();
+            WriteRayBenchmark();
             WriteProbeCensus();
             if (probeReference) WriteProbeReference(probeCount: 12, paths: 4096, bounces: refBounces);
             WriteFrameStats();

@@ -6222,6 +6222,237 @@ static ShaderInterface MinimalShader() => new(new[]
         recorded.ArgumentBuffer == new GpuBufferHandle(7) && recorded.IndirectByteOffset == 40 && recorded.DrawCount == 3);
     t.ExpectTrue("BU.3 and binds the GPU buffers it names", recorded.Buffers is [{ Name: "SceneVisible", Buffer.Id: 5 }]);
 }
+
+// ============================================================================
+// Section BV — ray queries on the CPU: the hierarchies and the traversal the GPU will mirror.
+// ============================================================================
+//
+// The oracle is exhaustive: every triangle (every placement's, carried the same way) through the same
+// watertight test, nearest first. So a BVH answer that differs is the hierarchy's fault, not the arithmetic's:
+// the same test on the same floats gives the same distance, bit for bit.
+{
+    var rng = new Random(20261004);
+    Vector3 RandomIn(float r) => new((float)(rng.NextDouble() * 2 - 1) * r, (float)(rng.NextDouble() * 2 - 1) * r, (float)(rng.NextDouble() * 2 - 1) * r);
+    Vector3 RandomDir() { Vector3 v; do v = RandomIn(1f); while (v.LengthSquared() is < 1e-4f or > 1f); return Vector3.Normalize(v); }
+
+    // Three meshes: a soup with slivers and a degenerate triangle, a closed sphere, and a flat grid whose
+    // triangles share every edge.
+    (Vector3[] P, uint[] I) Soup(int n)
+    {
+        var p = new List<Vector3>();
+        for (var i = 0; i < n; i++)
+        {
+            var c = RandomIn(10f);
+            p.Add(c + RandomIn(0.8f)); p.Add(c + RandomIn(0.8f)); p.Add(c + RandomIn(0.05f) * (i % 7 == 0 ? 0f : 1f));
+        }
+        p.Add(Vector3.One); p.Add(Vector3.One); p.Add(Vector3.One);   // zero-area
+        return (p.ToArray(), Enumerable.Range(0, p.Count).Select(i => (uint)i).ToArray());
+    }
+    (Vector3[] P, uint[] I) Sphere(int rings, int segments)
+    {
+        var p = new List<Vector3>();
+        for (var r = 0; r <= rings; r++)
+        for (var g = 0; g <= segments; g++)
+        {
+            var th = MathF.PI * r / rings;
+            var ph = 2 * MathF.PI * g / segments;
+            p.Add(new Vector3(MathF.Sin(th) * MathF.Cos(ph), MathF.Cos(th), MathF.Sin(th) * MathF.Sin(ph)) * 3f);
+        }
+        var idx = new List<uint>();
+        for (var r = 0; r < rings; r++)
+        for (var g = 0; g < segments; g++)
+        {
+            uint a = (uint)(r * (segments + 1) + g), b = a + 1, c = a + (uint)segments + 1, d = c + 1;
+            idx.AddRange(new[] { a, c, b, b, c, d });
+        }
+        return (p.ToArray(), idx.ToArray());
+    }
+    (Vector3[] P, uint[] I) Grid(int n)
+    {
+        var p = new List<Vector3>();
+        for (var z = 0; z <= n; z++) for (var x = 0; x <= n; x++) p.Add(new Vector3(x * 0.37f, 0f, z * 0.37f));
+        var idx = new List<uint>();
+        for (var z = 0; z < n; z++)
+        for (var x = 0; x < n; x++)
+        {
+            uint a = (uint)(z * (n + 1) + x), b = a + 1, c = a + (uint)n + 1, d = c + 1;
+            idx.AddRange(new[] { a, c, b, b, c, d });
+        }
+        return (p.ToArray(), idx.ToArray());
+    }
+
+    (float T, int Tri)? Exhaustive(TriangleBvh mesh, in ShearedRay r, float tMin, float tMax)
+    {
+        (float, int)? best = null;
+        var t = tMax;
+        for (var i = 0; i < mesh.TriangleCount; i++)
+        {
+            if (mesh.Hit(r, i, tMin, t, out var th, out _, out _)) { t = th; best = (th, i); }
+        }
+        return best;
+    }
+
+    var meshes = new (string Name, TriangleBvh Bvh)[]
+    {
+        ("soup", TriangleBvh.Build(Soup(3000).P, Soup(3000).I)),
+        ("sphere", TriangleBvh.Build(Sphere(40, 64).P, Sphere(40, 64).I)),
+        ("grid", TriangleBvh.Build(Grid(48).P, Grid(48).I)),
+    };
+    // Soup() draws from the generator twice above; rebuild it once so the mesh and its positions are one draw.
+    var soup = Soup(3000);
+    meshes[0] = ("soup", TriangleBvh.Build(soup.P, soup.I));
+
+    foreach (var (name, bvh) in meshes)
+    {
+        // Build invariants: every triangle in exactly one leaf, leaves within the cap, every box holding what is under it.
+        var seen = new int[bvh.TriangleCount];
+        var leavesOk = true;
+        var boxesOk = true;
+        var maxDepth = 0;
+        var walk = new Stack<(int Node, int Depth)>();
+        walk.Push((0, 1));
+        while (walk.Count > 0)
+        {
+            var (ni, depth) = walk.Pop();
+            maxDepth = Math.Max(maxDepth, depth);
+            var node = bvh.Nodes[ni];
+            bool Holds(Bounds3 b) => Vector3.Min(b.Min, node.Min) == node.Min && Vector3.Max(b.Max, node.Max) == node.Max;
+            if (node.IsLeaf)
+            {
+                leavesOk &= node.Count <= TriangleBvh.MaxLeafSize;
+                for (var k = 0; k < node.Count; k++)
+                {
+                    var tri = bvh.Order[node.Index + k];
+                    seen[tri]++;
+                    var a = bvh.Positions[bvh.Indices[tri * 3]]; var b = bvh.Positions[bvh.Indices[tri * 3 + 1]]; var c = bvh.Positions[bvh.Indices[tri * 3 + 2]];
+                    boxesOk &= Holds(new Bounds3(Vector3.Min(a, Vector3.Min(b, c)), Vector3.Max(a, Vector3.Max(b, c))));
+                }
+                continue;
+            }
+            boxesOk &= Holds(bvh.Nodes[node.Index].Bounds) && Holds(bvh.Nodes[node.Index + 1].Bounds);
+            walk.Push(((int)node.Index, depth + 1));
+            walk.Push(((int)node.Index + 1, depth + 1));
+        }
+        t.Expect($"BV.1 {name}: every triangle is in exactly one leaf", seen.All(c => c == 1), $"counts {string.Join(",", seen.Distinct())}");
+        t.ExpectTrue($"BV.1 {name}: leaves hold at most {TriangleBvh.MaxLeafSize}, boxes hold their contents", leavesOk && boxesOk);
+        t.Expect($"BV.1 {name}: depth fits the 64-entry traversal stack", maxDepth < 64, $"depth {maxDepth}");
+        t.Expect($"BV.1 {name}: SAH cost far below testing every triangle",
+            BvhBuilder.SahCost(bvh.Nodes) < bvh.TriangleCount * 0.1f, $"cost {BvhBuilder.SahCost(bvh.Nodes):0.0} for {bvh.TriangleCount} triangles");
+
+        // Closest and Any against the exhaustive oracle: random rays, and rays aimed at random triangles' interiors.
+        int hits = 0, mismatches = 0, anyMismatches = 0;
+        for (var k = 0; k < 4000; k++)
+        {
+            Vector3 o, d;
+            if (k % 2 == 0) { o = RandomIn(14f); d = RandomDir(); }
+            else
+            {
+                var tri = rng.Next(bvh.TriangleCount);
+                var a = bvh.Positions[bvh.Indices[tri * 3]]; var b = bvh.Positions[bvh.Indices[tri * 3 + 1]]; var c = bvh.Positions[bvh.Indices[tri * 3 + 2]];
+                var u = (float)rng.NextDouble(); var v = (float)rng.NextDouble() * (1 - u);
+                o = RandomIn(14f);
+                d = Vector3.Normalize(a + (b - a) * u + (c - a) * v - o);
+            }
+            var r = new ShearedRay(o, d);
+            var tMax = k % 5 == 0 ? 6f : float.PositiveInfinity;
+            var want = Exhaustive(bvh, r, 0f, tMax);
+            var got = bvh.Closest(r, 0f, tMax, out var tGot, out var triGot, out _, out _);
+            if (got) hits++;
+            if (got != want.HasValue || (got && tGot != want!.Value.T)) mismatches++;
+            if (bvh.Any(r, 0f, tMax) != want.HasValue) anyMismatches++;
+        }
+        t.Expect($"BV.2 {name}: Closest gives the oracle's distance on all 4000 rays", mismatches == 0, $"{mismatches} disagree, {hits} hit");
+        t.Expect($"BV.2 {name}: Any agrees with the oracle on all 4000 rays", anyMismatches == 0, $"{anyMismatches} disagree");
+        t.Expect($"BV.2 {name}: the rays exercise both answers", hits > 400 && hits < 3900, $"{hits} hit");
+    }
+
+    // Watertight: from inside the closed sphere, rays through every vertex and every edge's midpoint (exactly the
+    // points two or more triangles share) must all hit. From above the grid, likewise through its shared corners.
+    {
+        var sphere = meshes[1].Bvh;
+        var misses = 0;
+        var oracleMisses = 0;
+        var aimed = 0;
+        var inside = new Vector3(0.013f, -0.021f, 0.017f);
+        foreach (var target in sphere.Positions.Concat(
+            Enumerable.Range(0, sphere.TriangleCount).SelectMany(tri => new[] { (0, 1), (1, 2), (2, 0) }
+                .Select(e => (sphere.Positions[sphere.Indices[tri * 3 + e.Item1]] + sphere.Positions[sphere.Indices[tri * 3 + e.Item2]]) * 0.5f))))
+        {
+            aimed++;
+            var r = new ShearedRay(inside, target - inside);
+            if (!sphere.Closest(r, 0f, float.PositiveInfinity, out _, out _, out _, out _)) misses++;
+            if (Exhaustive(sphere, r, 0f, float.PositiveInfinity) is null) oracleMisses++;
+        }
+        t.Expect("BV.3 watertight: rays through the sphere's shared vertices and edges all hit", misses == 0,
+            $"{misses} of {aimed} missed; the exhaustive oracle misses {oracleMisses}");
+
+        var grid = meshes[2].Bvh;
+        var gridMisses = 0;
+        var gridOracleMisses = 0;
+        var eye = new Vector3(8.81f, 5f, 8.83f);
+        foreach (var target in grid.Positions.Where(q => q.X > 0 && q.X < 17.7f && q.Z > 0 && q.Z < 17.7f))
+        {
+            var r = new ShearedRay(eye, target - eye);
+            if (!grid.Any(r, 0f, float.PositiveInfinity)) gridMisses++;
+            if (Exhaustive(grid, r, 0f, float.PositiveInfinity) is null) gridOracleMisses++;
+        }
+        t.Expect("BV.3 watertight: rays through the grid's interior corners all hit", gridMisses == 0,
+            $"{gridMisses} missed; the exhaustive oracle misses {gridOracleMisses}");
+    }
+
+    // Placements: rotated, non-uniformly scaled, mirrored and translated copies, through the top level, against the
+    // exhaustive answer over every placement with the ray carried into it the same way.
+    {
+        var sphere = meshes[1].Bvh;
+        var gridMesh = meshes[2].Bvh;
+        var placements = new List<RayQueryScene.Instance>();
+        for (var i = 0; i < 60; i++)
+        {
+            var world = Matrix4x4.CreateScale(0.5f + (float)rng.NextDouble(), 0.5f + (float)rng.NextDouble(), 0.5f + (float)rng.NextDouble())
+                * Matrix4x4.CreateFromAxisAngle(RandomDir(), (float)rng.NextDouble() * 6f)
+                * (i % 9 == 0 ? Matrix4x4.CreateScale(-1f, 1f, 1f) : Matrix4x4.Identity)
+                * Matrix4x4.CreateTranslation(RandomIn(25f));
+            placements.Add(new RayQueryScene.Instance(i % 3 == 0 ? gridMesh : sphere, world));
+        }
+        var scene = RayQueryScene.Build(placements);
+        int mismatches = 0, hits = 0, pointErrors = 0;
+        for (var k = 0; k < 3000; k++)
+        {
+            var ray = new Ray(RandomIn(35f), RandomDir());
+            (float T, int Inst)? want = null;
+            var tBest = float.PositiveInfinity;
+            for (var i = 0; i < placements.Count; i++)
+            {
+                Matrix4x4.Invert(placements[i].World, out var inv);
+                var local = new ShearedRay(Vector3.Transform(ray.Origin, inv), Vector3.TransformNormal(ray.Direction, inv));
+                if (Exhaustive(placements[i].Mesh, local, 0f, tBest) is { } h) { tBest = h.T; want = (h.T, i); }
+            }
+            var got = scene.Closest(ray);
+            if (got.HasValue != want.HasValue || (got is { } g && g.T != want!.Value.T)) { mismatches++; continue; }
+            if (got is not { } hit) continue;
+            hits++;
+            // The barycentrics name the same point the distance does, once carried back to the world.
+            var m = placements[hit.Instance].Mesh;
+            var p0 = m.Positions[m.Indices[hit.Triangle * 3]]; var p1 = m.Positions[m.Indices[hit.Triangle * 3 + 1]]; var p2 = m.Positions[m.Indices[hit.Triangle * 3 + 2]];
+            var onMesh = p0 * (1 - hit.Barycentrics.X - hit.Barycentrics.Y) + p1 * hit.Barycentrics.X + p2 * hit.Barycentrics.Y;
+            if (Vector3.Distance(Vector3.Transform(onMesh, placements[hit.Instance].World), ray.PointAt(hit.T)) > 1e-3f) pointErrors++;
+        }
+        t.Expect("BV.4 placements: the top level gives the oracle's nearest hit on all 3000 rays", mismatches == 0, $"{mismatches} disagree, {hits} hit");
+        t.Expect("BV.4 placements: a hit's barycentrics and distance name the same world point", pointErrors == 0, $"{pointErrors} of {hits} off by more than 1 mm");
+        t.Expect("BV.4 placements: the rays exercise both answers", hits > 300 && hits < 2700, $"{hits} hit");
+        t.ExpectTrue("BV.4 an empty scene answers no hit", RayQueryScene.Build(Array.Empty<RayQueryScene.Instance>()).Closest(new Ray(Vector3.Zero, Vector3.UnitX)) is null);
+    }
+
+    // Front face is the counter-clockwise side, and a mirroring placement turns it inside out.
+    {
+        var tri = TriangleBvh.Build(new[] { Vector3.Zero, Vector3.UnitX, Vector3.UnitY }, new uint[] { 0, 1, 2 });
+        var fromFront = new Ray(new Vector3(0.2f, 0.2f, 1f), -Vector3.UnitZ);
+        var plain = RayQueryScene.Build(new[] { new RayQueryScene.Instance(tri, Matrix4x4.Identity) }).Closest(fromFront);
+        var mirrored = RayQueryScene.Build(new[] { new RayQueryScene.Instance(tri, Matrix4x4.CreateScale(1f, 1f, -1f)) }).Closest(fromFront);
+        t.ExpectTrue("BV.5 a ray meeting the counter-clockwise side reports the front face", plain is { FrontFace: true });
+        t.ExpectTrue("BV.5 facing is the mesh's own: mirrored through its plane, the ray meets its authored back", mirrored is { FrontFace: false });
+    }
+}
 t.PrintSummary();
 return t.Failed;
 

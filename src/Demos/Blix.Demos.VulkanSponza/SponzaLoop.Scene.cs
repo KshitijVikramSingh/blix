@@ -312,6 +312,8 @@ internal sealed partial class SponzaLoop
         // blend buckets (bundle order == ordered order). Each drawable's placements follow as one
         // contiguous run of its bucket's placement list, and every placement takes a row of the
         // transform table.
+        var rayMeshes = rayScene ? BuildRayMeshes(ordered) : null;
+        var rayInstances = new List<RayQueryScene.Instance>();
         var nonUniform = 0;
         for (var i = 0; i < ordered.Count; i++)
         {
@@ -324,6 +326,7 @@ internal sealed partial class SponzaLoop
             {
                 placements.Add(new Placement(bucket.Count, sceneTransforms.Count, WorldBounds(bm.Bounds, world)));
                 sceneTransforms.Add(world);
+                if (rayMeshes is not null) rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
                 if (!UniformScale(world)) nonUniform++;
             }
 
@@ -334,6 +337,8 @@ internal sealed partial class SponzaLoop
                 s.Lods.Select(l => l.Clusters ?? (IReadOnlyList<MeshCluster>)Array.Empty<MeshCluster>()).ToArray(),
                 s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline));
         }
+
+        if (rayMeshes is not null) BuildRayScene(rayMeshes, rayInstances);
 
         // lit.vert carries normals by the model's linear part, exact for rotation and uniform scale. Said
         // when it is not, rather than shaded wrong in silence.
