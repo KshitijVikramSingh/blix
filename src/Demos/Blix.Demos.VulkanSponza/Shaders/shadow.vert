@@ -1,13 +1,15 @@
 #version 450
 
-// Depth-only OPAQUE shadow caster. Push-only — no descriptor sets — so opaque
-// casters (the bulk of the scene) allocate zero per-draw transient descriptor
-// sets. MASK foliage uses shadow_mask.{vert,frag} instead for alpha cutout.
+// Depth-only OPAQUE shadow caster. No textures, so opaque casters (the bulk of the
+// scene) allocate zero per-draw transient descriptor sets; the only set is 3, the
+// scene's placements (instances.glsl), a material bound as it is and never allocated
+// per draw. MASK foliage uses shadow_mask.{vert,frag} instead for alpha cutout.
 //
-// Push layout (128 bytes, Vertex): mat4 uModel (0), mat4 uCascadeViewProj (64).
+// Push layout (64 bytes, Vertex): mat4 uCascadeViewProj (0).
+
+#include "instances.glsl"
 
 layout(push_constant) uniform PushConstants {
-    mat4 uModel;
     mat4 uCascadeViewProj;
 } pc;
 
@@ -16,5 +18,5 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) in vec3 inPosition;
 
 void main() {
-    gl_Position = pc.uCascadeViewProj * pc.uModel * vec4(inPosition, 1.0);
+    gl_Position = pc.uCascadeViewProj * instanceWorld() * vec4(inPosition, 1.0);
 }

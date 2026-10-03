@@ -8,7 +8,6 @@
 layout(set = 0, binding = 0) uniform sampler2D uAlbedo;
 
 layout(push_constant) uniform PushConstants {
-    mat4 uModel;
     mat4 uCascadeViewProj;
     vec4 uAlphaParams;   // x = alphaCutoff, y = baseColorAlpha
 } pc;

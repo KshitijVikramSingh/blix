@@ -13,19 +13,20 @@ namespace Blix.Demos.VulkanSponza;
 
 internal sealed partial class SponzaLoop
 {
-    // Background, parallel: each cooked pack is read to CPU geometry/material data, flattened into
-    // world space, with tangents for the lit TBN. Returns primitives in pack order (main first).
-    private static List<(string Name, ModelData.Primitive[] Primitives)> ParsePacksParallel(
-        List<(string Name, string Path)> packs)
+    // Background, parallel: each cooked pack is read to CPU geometry/material data, with tangents for the
+    // lit TBN: each unique primitive once, in mesh space, with every world the scene places it at (or,
+    // under --flatten, every placement baked into its own primitive). Returns pack order (main first).
+    private static List<(string Name, PlacedPrimitive[] Primitives)> ParsePacksParallel(
+        List<(string Name, string Path)> packs, bool flatten)
     {
-        var parsed = new (string Name, ModelData.Primitive[] Primitives)?[packs.Count];
+        var parsed = new (string Name, PlacedPrimitive[] Primitives)?[packs.Count];
         System.Threading.Tasks.Parallel.For(0, packs.Count, i =>
         {
             var p = packs[i];
             try
             {
                 var model = ModelData.Load(p.Path, new ModelNeeds(Tangents: true, Skinned: false));
-                parsed[i] = (p.Name, model.Flattened().Select(x => x.Primitive).ToArray());
+                parsed[i] = (p.Name, flatten ? Flattened(model) : Placed(model));
             }
             catch (Exception ex)
             {
@@ -35,16 +36,66 @@ internal sealed partial class SponzaLoop
         return parsed.Where(r => r.HasValue).Select(r => r!.Value).ToList();
     }
 
+    // The old shape: every placement baked into world-space vertices, each placed once at identity.
+    private static PlacedPrimitive[] Flattened(ModelData model) => model.Flattened()
+        .Select(x => new PlacedPrimitive(x.Primitive, new[] { Matrix4x4.Identity }))
+        .ToArray();
+
+    // Each mesh's primitives once, with every world a shown node draws the mesh at (DrawnWorlds: the
+    // node's world, or each of its instances'), in the order the file first places the mesh. A skinned
+    // mesh is drawn at its bind pose, unmoved, as Flattened draws it.
+    private static PlacedPrimitive[] Placed(ModelData model)
+    {
+        var worlds = new Dictionary<int, List<Matrix4x4>>();
+        var order = new List<int>();
+        for (var n = 0; n < model.Nodes.Count; n++)
+        {
+            var mesh = model.Nodes[n].MeshIndex;
+            if (mesh < 0 || !model.IsShown(n)) continue;
+            if (!worlds.TryGetValue(mesh, out var list))
+            {
+                worlds[mesh] = list = new List<Matrix4x4>();
+                order.Add(mesh);
+            }
+
+            if (model.Meshes[mesh].Skinned) list.Add(Matrix4x4.Identity);
+            else list.AddRange(model.DrawnWorlds(n));
+        }
+
+        return order
+            .SelectMany(mesh => model.Meshes[mesh].Primitives.Select(p => new PlacedPrimitive(p, worlds[mesh].ToArray())))
+            .ToArray();
+    }
+
+    // A mesh-space box carried to world space: the AABB of its eight transformed corners.
+    private static Bounds3 WorldBounds(in Bounds3 mesh, in Matrix4x4 world)
+    {
+        if (world.IsIdentity) return mesh;
+        var min = new Vector3(float.PositiveInfinity);
+        var max = new Vector3(float.NegativeInfinity);
+        for (var c = 0; c < 8; c++)
+        {
+            var corner = Vector3.Transform(new Vector3(
+                (c & 1) == 0 ? mesh.Min.X : mesh.Max.X,
+                (c & 2) == 0 ? mesh.Min.Y : mesh.Max.Y,
+                (c & 4) == 0 ? mesh.Min.Z : mesh.Max.Z), world);
+            min = Vector3.Min(min, corner);
+            max = Vector3.Max(max, corner);
+        }
+
+        return new Bounds3(min, max);
+    }
+
     private void FitSceneVolumeToDrawables()
     {
-        var all = opaqueDrawables.Concat(blendDrawables).ToList();
+        var all = opaquePlacements.Concat(blendPlacements).ToList();
         if (all.Count == 0) return;
         var min = all[0].Bounds.Min;
         var max = all[0].Bounds.Max;
-        foreach (var d in all)
+        foreach (var p in all)
         {
-            min = Vector3.Min(min, d.Bounds.Min);
-            max = Vector3.Max(max, d.Bounds.Max);
+            min = Vector3.Min(min, p.Bounds.Min);
+            max = Vector3.Max(max, p.Bounds.Max);
         }
 
         skyVolumeMin = min;
@@ -73,44 +124,47 @@ internal sealed partial class SponzaLoop
         // Without this both read a zero box, and offscreen casters lost their shadows.
         if (!skyVolumeLoaded) FitSceneVolumeToDrawables();
         RegisterSelectables();
-        Console.WriteLine($"[VulkanSponza] total draws: {opaqueDrawables.Count} opaque/mask, {blendDrawables.Count} blend.");
+        Console.WriteLine(
+            $"[VulkanSponza] total: {opaqueDrawables.Count} opaque/mask + {blendDrawables.Count} blend unique primitives, "
+            + $"placed {opaquePlacements.Count} + {blendPlacements.Count} times{(flatten ? " (--flatten: every placement baked)" : "")}.");
         LogPrimitiveSizeHistogram();
         UpdateCamera();
         sceneLoaded = true;
     }
 
-    // Build the pickable-primitive set (one entry per drawable, opaque + blend)
-    // and register it with the debug system, so click-to-pick + the Selection
-    // panel work. Paths are session-stable (bucket + index); nothing persists.
+    // Build the pickable set (one entry per placement, opaque + blend) and register it with the debug
+    // system, so click-to-pick + the Selection panel work. Paths are session-stable (bucket + placement
+    // index); nothing persists. Per-placement LOD state is sized here too.
     private void RegisterSelectables()
     {
         var items = new List<(string Path, string Name, Bounds3 Bounds, DebugPickGeometry Geometry, int LodLevels, float MaxError)>(
-            opaqueDrawables.Count + blendDrawables.Count);
-        void Add(string bucket, List<Drawable> list)
+            opaquePlacements.Count + blendPlacements.Count);
+        void Add(string bucket, List<Drawable> drawables, List<Placement> placements)
         {
-            for (var i = 0; i < list.Count; i++)
+            for (var i = 0; i < placements.Count; i++)
             {
-                var d = list[i];
+                var p = placements[i];
+                var d = drawables[p.Drawable];
                 var maxErr = d.LodErrors.Length > 0 ? d.LodErrors[^1] : 0f;
-                // The full-detail range out of the shared buffers, already in world space: what the pick
-                // pass draws to know whether this primitive is under the cursor.
+                // The full-detail range out of the shared buffers, at this placement's world: what the
+                // pick pass draws to know whether this placement is under the cursor.
                 var geometry = new DebugPickGeometry(
                     sharedVb, sharedLayout, SharedIb(d), d.LodFirstIndex[0], d.LodIndexCounts[0], d.BaseVertex,
-                    System.Numerics.Matrix4x4.Identity);
-                items.Add(($"scene/{bucket}/{i}", d.Name, d.Bounds, geometry, d.LodIndexCounts.Length, maxErr));
+                    sceneTransforms[p.Transform]);
+                items.Add(($"scene/{bucket}/{i}", d.Name, p.Bounds, geometry, d.LodIndexCounts.Length, maxErr));
             }
         }
-        Add("opaque", opaqueDrawables);
-        Add("blend", blendDrawables);
+        Add("opaque", opaqueDrawables, opaquePlacements);
+        Add("blend", blendDrawables, blendPlacements);
         sceneSelection.Rebuild(items);
 
-        // Per-drawable LOD margins, default 1.0 (= use the global budget as-is).
-        opaqueLodMargins = new float[opaqueDrawables.Count];
-        blendLodMargins = new float[blendDrawables.Count];
-        opaqueLodState = new int[opaqueDrawables.Count];
+        // Per-placement LOD margins, default 1.0 (= use the global budget as-is).
+        opaqueLodMargins = new float[opaquePlacements.Count];
+        blendLodMargins = new float[blendPlacements.Count];
+        opaqueLodState = new int[opaquePlacements.Count];
         cascadeLodState = new int[CascadeCount][];
-        for (var c = 0; c < CascadeCount; c++) cascadeLodState[c] = new int[opaqueDrawables.Count];
-        blendLodState = new int[blendDrawables.Count];
+        for (var c = 0; c < CascadeCount; c++) cascadeLodState[c] = new int[opaquePlacements.Count];
+        blendLodState = new int[blendPlacements.Count];
         System.Array.Fill(opaqueLodMargins, 1f);
         System.Array.Fill(blendLodMargins, 1f);
 
@@ -118,31 +172,31 @@ internal sealed partial class SponzaLoop
         // tolerates coarser geometry, and the ivy/tree packs account for a measured 9.85 ms. Select
         // by alpha-cutoff semantics rather than asset naming.
         var foliage = 0;
-        for (var i = 0; i < opaqueDrawables.Count; i++)
+        for (var i = 0; i < opaquePlacements.Count; i++)
         {
-            if (opaqueDrawables[i].AlphaCutoff <= 0f) continue;
+            if (opaqueDrawables[opaquePlacements[i].Drawable].AlphaCutoff <= 0f) continue;
             opaqueLodMargins[i] = FoliageLodMargin;
             foliage++;
         }
-        for (var i = 0; i < blendDrawables.Count; i++)
+        for (var i = 0; i < blendPlacements.Count; i++)
         {
-            if (blendDrawables[i].AlphaCutoff <= 0f) continue;
+            if (blendDrawables[blendPlacements[i].Drawable].AlphaCutoff <= 0f) continue;
             blendLodMargins[i] = FoliageLodMargin;
         }
         // Derive the measurement orbit from cutout geometry so foliage-focused runs keep their
         // intended subject in view as scene bounds or authored placement change.
         var sum = Vector3.Zero;
         var n = 0;
-        foreach (var d in opaqueDrawables)
+        foreach (var p in opaquePlacements)
         {
-            if (d.AlphaCutoff <= 0f) continue;
-            sum += (d.Bounds.Min + d.Bounds.Max) * 0.5f;
+            if (opaqueDrawables[p.Drawable].AlphaCutoff <= 0f) continue;
+            sum += (p.Bounds.Min + p.Bounds.Max) * 0.5f;
             n++;
         }
         foliageCentre = n > 0 ? sum / n : Vector3.Zero;
         foliageValid = n > 0;
         Console.WriteLine(
-            $"[VulkanSponza]   {foliage:N0} cutout drawables start at {FoliageLodMargin:0.#}x the LOD budget"
+            $"[VulkanSponza]   {foliage:N0} cutout placements start at {FoliageLodMargin:0.#}x the LOD budget"
             + (foliageValid ? $", centred at {foliageCentre}." : "."));
     }
 
@@ -162,9 +216,9 @@ internal sealed partial class SponzaLoop
         var tris = new long[edges.Length];
         long totalTris = 0;
         var fattest = new List<int>();
-        foreach (var d in opaqueDrawables)
+        foreach (var p in opaquePlacements)
         {
-            var t = d.LodIndexCounts[0] / 3;
+            var t = opaqueDrawables[p.Drawable].LodIndexCounts[0] / 3;
             totalTris += t;
             fattest.Add(t);
             for (var i = 0; i < edges.Length; i++)
@@ -174,7 +228,7 @@ internal sealed partial class SponzaLoop
         }
         fattest.Sort((a, b) => b.CompareTo(a));
         var top = string.Join("/", fattest.Take(5).Select(t => $"{t / 1000.0:0.0}k"));
-        Console.WriteLine($"[VulkanSponza] opaque LOD0 tris: {totalTris / 1_000_000.0:0.00}M across {opaqueDrawables.Count} prims; top5={top}");
+        Console.WriteLine($"[VulkanSponza] opaque LOD0 tris: {totalTris / 1_000_000.0:0.00}M across {opaquePlacements.Count} placed prims; top5={top}");
         for (var i = 0; i < edges.Length; i++)
         {
             var pct = totalTris > 0 ? 100.0 * tris[i] / totalTris : 0;
@@ -189,8 +243,9 @@ internal sealed partial class SponzaLoop
     // Materials are cached by PbrMaterial so primitives sharing a material reuse
     // one handle + descriptor set. Called incrementally (time-sliced) during the
     // streaming load — the material's texture read+upload is the bulk of the cost.
-    private void StageDrawable(ModelData.Primitive prim)
+    private void StageDrawable(PlacedPrimitive placed)
     {
+        var prim = placed.Primitive;
         {
             var pm = prim.Material;
             var mesh = prim.Mesh;
@@ -219,7 +274,7 @@ internal sealed partial class SponzaLoop
                 mesh.VertexBytes, mesh.VertexCount, lods, material, pipeline, mesh.Bounds,
                 albedo, alphaCutoff, baseColorAlpha,
                 new[] { new ShaderTextureBinding("uAlbedo", albedo) }, isBlend,
-                string.IsNullOrEmpty(mesh.Name) ? "primitive" : mesh.Name));
+                string.IsNullOrEmpty(mesh.Name) ? "primitive" : mesh.Name, placed.Worlds));
         }
     }
 
@@ -252,16 +307,36 @@ internal sealed partial class SponzaLoop
         sharedIbU16 = bundle.Indices16;
         sharedIbU32 = bundle.Indices32;
 
-        // Attach material/pipeline/etc. to each bundled geometry sub-range; split
-        // back into the opaque + blend buckets (bundle order == ordered order).
+        // Attach material/pipeline/etc. to each bundled geometry sub-range; split back into the opaque +
+        // blend buckets (bundle order == ordered order). Each drawable's placements follow as one
+        // contiguous run of its bucket's placement list, and every placement takes a row of the
+        // transform table.
+        var nonUniform = 0;
         for (var i = 0; i < ordered.Count; i++)
         {
             var s = ordered[i];
             var bm = bundle.Meshes[i];
-            (s.IsBlend ? blendDrawables : opaqueDrawables).Add(new Drawable(
+            var bucket = s.IsBlend ? blendDrawables : opaqueDrawables;
+            var placements = s.IsBlend ? blendPlacements : opaquePlacements;
+            var start = placements.Count;
+            foreach (var world in s.Worlds)
+            {
+                placements.Add(new Placement(bucket.Count, sceneTransforms.Count, WorldBounds(bm.Bounds, world)));
+                sceneTransforms.Add(world);
+                if (!UniformScale(world)) nonUniform++;
+            }
+
+            bucket.Add(new Drawable(
                 bm.IndicesAreU32, bm.BaseVertex, bm.LodFirstIndex, bm.LodIndexCounts, bm.LodErrors,
                 s.Material, s.Pipeline, bm.Bounds, s.Albedo, s.AlphaCutoff, s.BaseColorAlpha,
-                s.ShadowAlbedoBinding, s.Name));
+                s.ShadowAlbedoBinding, s.Name, start, s.Worlds.Length));
+        }
+
+        // lit.vert carries normals by the model's linear part, exact for rotation and uniform scale. Said
+        // when it is not, rather than shaded wrong in silence.
+        if (nonUniform > 0)
+        {
+            Console.WriteLine($"[VulkanSponza] {nonUniform} placement(s) scale non-uniformly; their normals are approximate.");
         }
 
         // Contiguous (pipeline, material, width) groups over the sorted lists. A
@@ -285,17 +360,46 @@ internal sealed partial class SponzaLoop
         BuildGroups(opaqueDrawables, opaqueGroups);
         BuildGroups(blendDrawables, blendGroups);
 
-        // One indirect command per drawable, refilled each frame (camera opaque +
-        // one per shadow cascade + blend). indirectScratch is sized for the
+        // lodSlots indirect commands per drawable per pass, one per LOD level (see FillIndirect), refilled
+        // each frame (camera opaque + one per shadow cascade + blend). indirectScratch is sized for the
         // largest list (opaque) and reused for the smaller fills.
-        opaqueIndirect = Own(device.CreateIndirectBuffer(opaqueDrawables.Count, "sponza.opaque.indirect"));
+        lodSlots = Math.Max(1, opaqueDrawables.Concat(blendDrawables).Select(d => d.LodIndexCounts.Length).DefaultIfEmpty(1).Max());
+        opaqueIndirect = Own(device.CreateIndirectBuffer(opaqueDrawables.Count * lodSlots, "sponza.opaque.indirect"));
         for (var c = 0; c < CascadeCount; c++)
-            cascadeIndirect[c] = Own(device.CreateIndirectBuffer(opaqueDrawables.Count, $"sponza.cascade{c}.indirect"));
+            cascadeIndirect[c] = Own(device.CreateIndirectBuffer(opaqueDrawables.Count * lodSlots, $"sponza.cascade{c}.indirect"));
         if (blendDrawables.Count > 0)
-            blendIndirect = Own(device.CreateIndirectBuffer(blendDrawables.Count, "sponza.blend.indirect"));
-        indirectScratch = new byte[Math.Max(opaqueDrawables.Count, blendDrawables.Count) * IndirectDraw.RecordStride];
+            blendIndirect = Own(device.CreateIndirectBuffer(blendDrawables.Count * lodSlots, "sponza.blend.indirect"));
+        indirectScratch = new byte[Math.Max(opaqueDrawables.Count, blendDrawables.Count) * lodSlots * IndirectDraw.RecordStride];
+
+        // Set 3, sized to this scene: the transform table, and room for every pass to see every placement
+        // (camera and each cascade over the opaque placements, the camera again over the blend ones).
+        var visibleCapacity = opaquePlacements.Count * (1 + CascadeCount) + blendPlacements.Count;
+        visibleScratch = new uint[Math.Max(1, visibleCapacity)];
+        var instances = device.CreateMaterial(
+            litProgram, setIndex: 3, framesInFlight: device.MaxFramesInFlightCount, name: "sponza.instances",
+            arrayLengths: new Dictionary<int, int> { [0] = Math.Max(1, sceneTransforms.Count), [1] = visibleScratch.Length });
+        Own(instances.Handle);
+        sceneInstances = instances;
+        // Static: written into every frame slot once, never again.
+        var transformBytes = MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(sceneTransforms));
+        for (var slot = 0; slot < instances.FramesInFlight; slot++) instances.WriteBuffer(slot, 0, transformBytes);
+
         staging.Clear();
-        Console.WriteLine($"[VulkanSponza] bundled geometry: 1 VB ({bundle.VertexCount} verts); {opaqueDrawables.Count} opaque + {blendDrawables.Count} blend draws; {opaqueGroups.Count} opaque indirect groups.");
+        Console.WriteLine(
+            $"[VulkanSponza] bundled geometry: 1 VB ({bundle.VertexCount} verts) holding {opaqueDrawables.Count} + {blendDrawables.Count} "
+            + $"unique primitives, placed {opaquePlacements.Count} + {blendPlacements.Count} times; {opaqueGroups.Count} opaque indirect groups "
+            + $"x {lodSlots} LOD slots; {sceneTransforms.Count} transforms ({sceneTransforms.Count * 64 / 1024.0:0.0} KB).");
+    }
+
+    // Whether a world's linear part scales every axis alike (a rotation times a uniform scale).
+    private static bool UniformScale(in Matrix4x4 m)
+    {
+        var x = new Vector3(m.M11, m.M12, m.M13).Length();
+        var y = new Vector3(m.M21, m.M22, m.M23).Length();
+        var z = new Vector3(m.M31, m.M32, m.M33).Length();
+        var lo = MathF.Min(x, MathF.Min(y, z));
+        var hi = MathF.Max(x, MathF.Max(y, z));
+        return lo > 0f && hi / lo < 1.001f;
     }
 
     private MaterialHandle GetMaterial(PbrMaterial? gm, out TextureHandle albedo, out float alphaCutoff, out float baseColorAlpha)

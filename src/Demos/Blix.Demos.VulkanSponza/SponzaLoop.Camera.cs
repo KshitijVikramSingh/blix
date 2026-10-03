@@ -41,6 +41,16 @@ internal sealed partial class SponzaLoop
         var input = host.Input;
         ReadInput(input);
 
+        // <b>A shot is a measurement, so nothing at the keyboard moves it.</b> The shot window takes focus
+        // when it opens; a key or a drag meant for another window then flew the camera, and two "identical"
+        // runs captured two places (Bistro's noise floor read 91% of pixels changed). The pose is the
+        // profile's start or --cam, and --orbit still drives its own path.
+        if (shotPath is not null)
+        {
+            UpdateCamera();
+            return;
+        }
+
         // The engine's layout: right-drag looks (the wheel sets the speed meanwhile), WASD with Space and
         // Ctrl flies, Shift or Cmd sprints, left-drag orbits, the wheel zooms. Arrow keys stay Sponza's:
         // keyboard look, for when a hand is on the keys.

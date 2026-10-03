@@ -4,15 +4,12 @@
 // VertexPosition3NormalTangentTexture layout (48-byte stride): position,
 // normal, tangent (vec4 xyz + w handedness), uv. Forwards a real world-space
 // tangent frame to the fragment shader for normal mapping. Per-frame UBO in
-// set 0; per-draw model matrix rides a push constant.
+// set 0; the placement's world matrix comes from set 3 (instances.glsl).
 
 // Declare only the matrix this stage reads. The shared block's remaining layout is owned and
 // validated by the fragment-stage interface rather than duplicated here.
 #include "frame.glsl"
-
-layout(push_constant) uniform PushConstants {
-    mat4 uModel;
-} pc;
+#include "instances.glsl"
 
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
@@ -31,9 +28,12 @@ layout(location = 4) out float vTangentSign;
 invariant gl_Position;
 
 void main() {
-    vec4 world = pc.uModel * vec4(inPosition, 1.0);
+    mat4 model = instanceWorld();
+    vec4 world = model * vec4(inPosition, 1.0);
     gl_Position = frame.uViewProjection * world;
-    mat3 m = mat3(pc.uModel);
+    // The model's linear part carries normals and tangents, which is exact for rotation and uniform
+    // scale (the fragment stage normalises). The host counts placements with non-uniform scale at load.
+    mat3 m = mat3(model);
     vNormalWorld = m * inNormal;
     vTangentWorld = m * inTangent.xyz;
     vTangentSign = inTangent.w;

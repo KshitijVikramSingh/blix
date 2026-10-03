@@ -34,15 +34,18 @@ exactly where the world has changed.
 1. *Cooked clusters and per-mesh BVH*: the format and the cook (meshoptimizer's meshlets; the cook already
    simplifies).
 2. *GPU-driven culling, LOD and a visibility buffer* over those clusters, measured on Bistro and the
-   generator. Bindless materials as its prerequisite. The wall it removes, measured on the city (seed 1):
-   the host bakes every placement into one vertex buffer, so 8x8 blocks are 3.2M vertices (0.6 GB peak),
-   16x16 are 12.4M (1.8 GB), and 32x32 dies in `MeshBundler.Pack` building a ~2.4 GB array — memory grows
-   with placements, not with the 30 unique primitives the city is made of.
+   generator. Bindless materials as its prerequisite. Where it starts, measured on the city (seed 1): the
+   host keeps each unique primitive once (82,576 vertices at every size) and draws its placements
+   instanced, so memory is flat to 64x64 blocks (123,422 placements, ~0.45 GB), but the CPU still culls
+   and picks LOD per placement for five passes: 4.5 ms at 8x8, 13.6 ms at 32x32, 31 ms at 64x64.
 3. *The ray-query interface*: software backend first, hardware when a device can prove it.
 4. *Runtime GI*: camera-relative clipmap probes traced through 3, relocated out of walls, rays amortised
    over frames, dirty-region updates, capsule occluders.
 5. *PRT baked by the cook*: per-region probe transfer, relit by the sun at runtime: the static base and
    warm start of 4.
+
+Known instrument gap: a Sponza `--shot` raises 9 validation errors on `main` as well (a storage image
+copied to a buffer without transfer-source usage, in the shot's readback). Not this arc's, and not fixed.
 
 Huge also means camera-relative rendering and streaming by region (cluster geometry and BLAS per region,
 the top level over what is loaded); both land where the stage that needs them does.

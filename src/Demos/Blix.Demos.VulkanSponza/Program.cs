@@ -411,7 +411,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // Demo-owned capture records the final image and selected intermediate targets; Blix.Tools.Shot
     // covers Studio rather than this renderer.
     private string? shotPath;
-    private int shotFrame = 240;        // long enough for the streamed textures to land
+    private int shotFrame = 240;
+    private bool shotResized;
+    private (int Width, int Height)? shotSizeAtLoad;        // long enough for the streamed textures to land
     // --frames-after-load N: close N frames after texture streaming finishes. A host --frames count
     // cannot bound this, because loading takes a varying ~1000 frames and the lit path only runs after it.
     private int? framesAfterLoad;
@@ -586,6 +588,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private readonly bool[] cascadeDue = new bool[CascadeCount];
     // Triangles each fill submitted, so a pass's cost can be split between geometry and fill.
     private long fillIndirectTriangles;
+    // FillIndirect's per-drawable level choices (-1 = culled), and how far into visibleScratch this
+    // frame's fills reached (what UploadVisible sends).
+    private int[] levelScratch = System.Array.Empty<int>();
+    private int visibleWritten;
     private readonly long[] cascadeTriangles = new long[CascadeCount];
     private long cameraTriangles;
     private readonly long[] cascadeTriangleSum = new long[CascadeCount];
@@ -654,10 +660,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         float[] LodErrors,
         MaterialHandle Material,
         PipelineHandle Pipeline,
-        // World-space AABB (the static importer bakes node transforms into the
-        // vertices, so object bounds == world bounds) — used for per-cascade
-        // shadow frustum culling AND distance-based LOD selection.
-        Bounds3 Bounds,
+        // The primitive's own bounds, in mesh space. Where it stands is its placements' (each a
+        // world matrix and the world AABB culling and LOD read); see Placement.
+        Bounds3 MeshBounds,
         // Shadow-caster cutout inputs: the albedo handle the shadow.frag
         // samples for MASK foliage, the alpha cutoff (0 for OPAQUE), and
         // baseColorFactor.a (glTF effective-alpha multiplier).
@@ -668,10 +673,14 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         // allocate a binding array each (×3 cascades × every frame).
         ShaderTextureBinding[] ShadowAlbedoBinding,
         // Source primitive name — selection/inspection identity (debug only).
-        string Name)
+        string Name,
+        // This primitive's placements: a contiguous run of its bucket's placement list.
+        int PlacementStart = 0,
+        int PlacementCount = 0)
     {
         // Screen-space-error LOD: pick the COARSEST level whose stored world
-        // error projects to ≤ errorPixels at the nearest point of the bounds.
+        // error projects to ≤ errorPixels at the nearest point of the bounds,
+        // which are one placement's (the same primitive stands at many distances).
         //   errorScale = viewportH / (2·tan(fovY/2))  → pixels-per-world at unit
         //   distance; pixels-per-world at distance d = errorScale / d.
         // errorPixels ≤ 0 forces full detail. Distance is to the NEAREST point
@@ -679,10 +688,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         // detailed where it matters instead of coarsening on a far centre.
         // Identical across lit, depth-pre-pass, and shadow passes so depth stays
         // invariant. 1-LOD drawables (uncooked) always pick 0.
-        public int PickLod(Vector3 cameraPos, float errorScale, float errorPixels, int currentLevel)
+        public int PickLod(in Bounds3 bounds, Vector3 cameraPos, float errorScale, float errorPixels, int currentLevel)
         {
             if (LodIndexCounts.Length <= 1 || errorPixels <= 0f) return 0;
-            var nearest = Vector3.Clamp(cameraPos, Bounds.Min, Bounds.Max);
+            var nearest = Vector3.Clamp(cameraPos, bounds.Min, bounds.Max);
             var d = MathF.Max((cameraPos - nearest).Length(), 0.01f);
             var pixelsPerWorld = errorScale / d;
             var wanted = 0;
@@ -754,7 +763,20 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         float BaseColorAlpha,
         ShaderTextureBinding[] ShadowAlbedoBinding,
         bool IsBlend,
-        string Name);
+        string Name,
+        // Where the primitive stands: one world matrix per placement.
+        Matrix4x4[] Worlds);
+
+    /// <summary>One placement of a unique primitive: which drawable, its row in the transform table, and its world AABB.</summary>
+    /// <remarks>
+    /// The unit of culling and LOD selection, which is why per-element state (LOD margins and levels) is
+    /// indexed by placement. A primitive the file places once is one drawable with one placement; one it
+    /// places a thousand times is still one drawable, and its geometry is uploaded once.
+    /// </remarks>
+    private readonly record struct Placement(int Drawable, int Transform, Bounds3 Bounds);
+
+    /// <summary>A unique cooked primitive, in mesh space, with every world it is placed at.</summary>
+    private sealed record PlacedPrimitive(ModelData.Primitive Primitive, Matrix4x4[] Worlds);
 
     // Shared geometry buffers (one VB + one IB per index width), built from the
     // staging list by ConsolidateBuffers (via MeshBundler). Every draw is a
@@ -787,17 +809,29 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // moves at speed through translucent surfaces).
     private readonly List<Drawable> opaqueDrawables = new();
     private readonly List<Drawable> blendDrawables = new();
+    // Their placements, contiguous per drawable in drawable order (Drawable.PlacementStart/Count).
+    private readonly List<Placement> opaquePlacements = new();
+    private readonly List<Placement> blendPlacements = new();
+    // Every placement's world matrix, both buckets: set 3 binding 0 (instances.glsl), written once.
+    private readonly List<Matrix4x4> sceneTransforms = new();
+    // Set 3: the transform table and this frame's visible placement indices (every pass's list end to end).
+    private IMaterialBindings? sceneInstances;
+    private uint[] visibleScratch = System.Array.Empty<uint>();
+    // How many indirect commands each drawable owns per pass: one per LOD level the deepest chain has, so
+    // a drawable's placements at different levels draw from one indirect run.
+    private int lodSlots = 1;
+    // --flatten: the old shape through the new path. Every placement baked into its own primitive and
+    // placed once at identity, so a same-binary A/B isolates instancing from everything else.
+    private bool flatten;
     private bool sceneLoaded;
     // Background pack parse + budgeted main-thread drain (engine primitive):
     // started in OnLoad, drained by TryFinishLoad in OnUpdate. Produces the flat
     // primitive list off-thread; staging runs on the render thread.
-    private readonly Blix.Render.AsyncLoadQueue<ModelData.Primitive> meshLoad = new();
+    private readonly Blix.Render.AsyncLoadQueue<PlacedPrimitive> meshLoad = new();
 
     // Per-frame-reused, content-constant buffers built once at load (avoids
-    // re-allocating them every frame). identityPush: the per-draw model push
-    // (always identity — transforms are baked into the vertices). passBindings:
-    // the lit pass's set-1 IBL + shadow-cascade textures (all stable handles).
-    private byte[] identityPush = null!;
+    // re-allocating them every frame). passBindings: the lit pass's set-1 IBL +
+    // shadow-cascade textures (all stable handles).
     private ShaderTextureBinding[] passBindings = null!;
     // The skybox's own list: it samples six of the lit pass's textures, and a name a program does
     // not declare is an error, not a skip.
@@ -849,12 +883,12 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // What a pick can land on, rebuilt after consolidation. The loop answers the engine's selection
     // and inspection hooks by handing them to it (below); the engine does the picking.
     private readonly SceneSelection sceneSelection = new();
-    // Per-drawable LOD error-margin multipliers (×global px budget), keyed by
-    // drawable index — parallel to opaque/blend drawables, default 1.0. Live,
+    // Per-placement LOD error-margin multipliers (×global px budget), keyed by
+    // placement index — parallel to opaque/blend placements, default 1.0. Live,
     // ephemeral; edited via the Selection panel, consumed by PickLod.
     private float[] opaqueLodMargins = System.Array.Empty<float>();
     private float[] blendLodMargins = System.Array.Empty<float>();
-    // Persistent per-primitive camera LOD state supplies hysteresis and keeps depth, lit, and blend
+    // Persistent per-placement camera LOD state supplies hysteresis and keeps depth, lit, and blend
     // passes on the same level decision within a frame.
     private int[] opaqueLodState = System.Array.Empty<int>();
     private int[] blendLodState = System.Array.Empty<int>();

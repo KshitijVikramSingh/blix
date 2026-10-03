@@ -161,12 +161,12 @@ internal sealed partial class SponzaLoop
         // and outlining all of it would bury the handful of primitives the question is about.
         if (debug.Draw.Layer("lod", visible: false))
         {
-            for (var i = 0; i < lodLevels.Length && i < opaqueDrawables.Count; i++)
+            for (var i = 0; i < lodLevels.Length && i < opaquePlacements.Count; i++)
             {
                 var level = lodLevels[i];
                 var justPopped = lodPopAge[i] < PopHoldSeconds;
                 if (level == 0 && !justPopped) continue;
-                var bounds = opaqueDrawables[i].Bounds;
+                var bounds = opaquePlacements[i].Bounds;
                 debug.Draw.Aabb($"lod/{i}", bounds.Min, bounds.Max,
                     justPopped ? PopColor : LodTints[Math.Min(level, LodTints.Length - 1)]);
             }
@@ -222,7 +222,7 @@ internal sealed partial class SponzaLoop
             $"{cascadeTexelWorld[0]:0.000}/{cascadeTexelWorld[1]:0.000}/{cascadeTexelWorld[2]:0.000}");
         // Per-cascade caster counts after frustum cull (one frame stale — set
         // during the previous OnRender's graph.Execute).
-        debug.Values.Value("cascade-casters", $"{cascadeDrawCounts[0]}/{cascadeDrawCounts[1]}/{cascadeDrawCounts[2]} of {opaqueDrawables.Count}");
+        debug.Values.Value("cascade-casters", $"{cascadeDrawCounts[0]}/{cascadeDrawCounts[1]}/{cascadeDrawCounts[2]} of {opaquePlacements.Count}");
         // Shadow-map cache hits: R = re-rendered this frame, · = served cached.
         debug.Values.Value("cascade-tris", string.Create(Inv,
             $"{cascadeTriangles[0]:N0}/{cascadeTriangles[1]:N0}/{cascadeTriangles[2]:N0} vs camera {cameraTriangles:N0}"));
@@ -234,10 +234,10 @@ internal sealed partial class SponzaLoop
         //
         // Retain each drawable's rendered level and transition age as well as the aggregate
         // histogram so the gizmo pass can identify where and when a visible switch occurred.
-        if (lodLevels.Length != opaqueDrawables.Count)
+        if (lodLevels.Length != opaquePlacements.Count)
         {
-            lodLevels = new int[opaqueDrawables.Count];
-            lodPopAge = new float[opaqueDrawables.Count];
+            lodLevels = new int[opaquePlacements.Count];
+            lodPopAge = new float[opaquePlacements.Count];
             Array.Fill(lodPopAge, float.MaxValue);
         }
         var maxLevels = 0;
@@ -246,9 +246,9 @@ internal sealed partial class SponzaLoop
         long submitted = 0;
         long full = 0;
         var dt = (float)(lastFramePeriodMs * 0.001);
-        for (var i = 0; i < opaqueDrawables.Count; i++)
+        for (var i = 0; i < opaquePlacements.Count; i++)
         {
-            var d = opaqueDrawables[i];
+            var d = opaqueDrawables[opaquePlacements[i].Drawable];
             maxLevels = Math.Max(maxLevels, d.LodIndexCounts.Length);
             // Read the renderer's persistent selection. Hysteresis makes a second evaluation here
             // history-dependent and potentially different from the level actually submitted.

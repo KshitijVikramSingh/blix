@@ -123,6 +123,9 @@ internal sealed partial class SponzaLoop
         if (args.Flag("gpu-isolate")) host.Timing.IsolatePasses = true;
         if (args.Flag("no-caster-cull")) shadowCasterCull = false;
         if (args.Flag("no-foliage")) noFoliage = true;
+        // --flatten: bake every placement into its own primitive, placed once at identity: the pre-
+        // instancing shape through the same draw path, so an A/B isolates instancing alone.
+        flatten = args.Flag("flatten");
         if (args.Flag("probe-reference")) probeReference = true;
         if (args.Flag("no-sky-bounce")) noSkyBounce = true;
         if (args.Int("fog-slices") is { } fs) froxelGridZ = Math.Clamp(fs, 8, 128);
@@ -655,7 +658,6 @@ internal sealed partial class SponzaLoop
 
         // Build the per-frame-constant buffers after graph compilation and texture creation. Reuse
         // them every frame in OnRender.
-        identityPush = ModelPushBytes(Matrix4x4.Identity);
         passBindings = new[]
         {
             new ShaderTextureBinding("uIrradiance",     irradianceCubeTexture),
@@ -712,11 +714,13 @@ internal sealed partial class SponzaLoop
         // Sponza's candles are not among them (no light source).
         meshLoad.Start(() =>
         {
-            var prims = new List<ModelData.Primitive>();
-            foreach (var (name, primitives) in ParsePacksParallel(packsToParse))
+            var prims = new List<PlacedPrimitive>();
+            foreach (var (name, primitives) in ParsePacksParallel(packsToParse, flatten))
             {
                 prims.AddRange(primitives);
-                Console.WriteLine($"[VulkanSponza] {name} pack: {primitives.Length} primitives.");
+                Console.WriteLine(
+                    $"[VulkanSponza] {name} pack: {primitives.Length} unique primitives, "
+                    + $"{primitives.Sum(p => p.Worlds.Length)} placements.");
             }
             return prims;
         });
