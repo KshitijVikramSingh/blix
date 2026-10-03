@@ -19,6 +19,9 @@ namespace Blix.Runtime.Headless;
 /// </remarks>
 public sealed class NoGraphicsDevice : IGraphicsDevice
 {
+    /// <summary>Nothing is drawn, so no feature is enabled.</summary>
+    public GraphicsFeatures Features => GraphicsFeatures.None;
+
     /// <inheritdoc />
     public GraphicsDeviceInfo Info { get; } = new("Blix", "headless (no device)", "0", "none");
 

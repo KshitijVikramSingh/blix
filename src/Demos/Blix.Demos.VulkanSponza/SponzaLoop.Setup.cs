@@ -32,6 +32,17 @@ internal sealed partial class SponzaLoop
     {
         this.host = host;
         device = graphicsDevice;
+        // The scene is drawn as instanced multi-draw indirect, each record's firstInstance where its run of
+        // placements starts (FillIndirect). Both are optional device features, and validation cannot see an
+        // indirect buffer's contents, so their absence is refused here by name rather than drawn wrong.
+        const GraphicsFeatures needed = GraphicsFeatures.MultiDrawIndirect | GraphicsFeatures.DrawIndirectFirstInstance;
+        if ((device.Features & needed) != needed)
+        {
+            BlixApps.ReportFailure(
+                $"this renderer draws with {needed}, and the device enabled only {device.Features}");
+            host.RequestClose();
+            return;
+        }
         gpuPasses = new GpuPassWindow(host.Timing);
         textureLoader = new MaterialTextureLoader(device);
         aspect = host.LogicalSize.Width / (float)host.LogicalSize.Height;

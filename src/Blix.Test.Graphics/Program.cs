@@ -6296,6 +6296,8 @@ static class SheenTwin
 // tolerating it. A no-op stub would let that change pass.
 sealed class RecordingDevice : IGraphicsDevice
 {
+    public GraphicsFeatures Features => GraphicsFeatures.None;
+
     /// <summary>16, 32, or 0 when no index buffer was created.</summary>
     public int LastIndexWidth { get; private set; }
 

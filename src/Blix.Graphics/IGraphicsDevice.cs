@@ -26,6 +26,9 @@ public interface IGraphicsDevice : IDisposable
 {
     GraphicsDeviceInfo Info { get; }
 
+    /// <summary>The optional features this device enabled (see <see cref="GraphicsFeatures"/>).</summary>
+    GraphicsFeatures Features { get; }
+
     GraphicsDeviceDiagnostics DiagnosticsSnapshot { get; }
 
     void SetDefaultRenderSurfaceSize(int width, int height);

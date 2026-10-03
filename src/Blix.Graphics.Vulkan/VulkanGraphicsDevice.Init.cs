@@ -39,6 +39,9 @@ public sealed partial class VulkanGraphicsDevice
     /// <summary>Whether a fragment shader may write storage images — see where it is enabled.</summary>
     public bool FragmentStoresSupported { get; private set; }
 
+    /// <inheritdoc />
+    public GraphicsFeatures Features { get; private set; }
+
     internal KhrSurface KhrSurface { get; private set; } = null!;
     internal SurfaceKHR Surface { get; private set; }
 
@@ -392,10 +395,21 @@ public sealed partial class VulkanGraphicsDevice
         // geometrically identical, and what distinguishes them is that nothing renders against one
         // of them. A fragment marking what it read is the only place that truth exists.
         FragmentStoresSupported = supportedFeatures.FragmentStoresAndAtomics;
+
+        // drawIndirectFirstInstance: an indirect record's firstInstance may be non-zero. Without it every
+        // indirect sub-draw starts at instance 0, so per-instance data cannot be reached through an offset —
+        // which is how an instanced indirect draw finds its run of placements (gl_InstanceIndex includes
+        // firstInstance). Validation cannot read an indirect buffer, so a missing feature is silent: the
+        // application checks Features instead.
+        var firstInstance = supportedFeatures.DrawIndirectFirstInstance;
+        Features = (MultiDrawIndirectSupported ? GraphicsFeatures.MultiDrawIndirect : GraphicsFeatures.None)
+            | (firstInstance ? GraphicsFeatures.DrawIndirectFirstInstance : GraphicsFeatures.None)
+            | (FragmentStoresSupported ? GraphicsFeatures.FragmentStoresAndAtomics : GraphicsFeatures.None);
         var features = new PhysicalDeviceFeatures
         {
             SamplerAnisotropy = AnisotropySupported,
             MultiDrawIndirect = MultiDrawIndirectSupported,
+            DrawIndirectFirstInstance = firstInstance,
             FragmentStoresAndAtomics = FragmentStoresSupported,
         };
         var ci = new DeviceCreateInfo
