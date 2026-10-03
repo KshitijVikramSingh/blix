@@ -2554,6 +2554,18 @@ static ShaderInterface MinimalShader() => new(new[]
     scratch[0] = 7;
     t.ExpectTrue("AP.4 compute dispatch owns its payload too", dispatch.PushConstants![0] == 99);
     t.ExpectTrue("AP.4 indirect draw owns its payload too", indirect.PushConstants![0] == 99);
+
+    // AP.5: an indirect draw carries a per-draw material (set 3, the per-instance storage buffer an
+    // instanced indirect draw reads through gl_InstanceIndex), as the direct draws do, and every caller
+    // that names none still records none.
+    t.ExpectTrue("AP.5 an indirect draw records no per-draw material unless given one", indirect.PerDrawMaterial is null);
+    var list = new RenderCommandList();
+    list.Pass("instanced", new RenderPassDescription(RenderSurfaceHandle.Default, Array.Empty<GraphicsColor?>(), ClearDepth: false),
+        pass => pass.DrawIndexedIndirect(
+            new VertexBufferHandle(1), new IndexBufferHandle(1), new PipelineHandle(1), new IndirectBufferHandle(1), 0, 4,
+            Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), perDrawMaterial: new MaterialHandle(9)));
+    t.ExpectTrue("AP.5 and a pass forwards one it is given",
+        list.Passes.Single().Commands.OfType<DrawIndexedIndirectCommand>().SingleOrDefault()?.PerDrawMaterial == new MaterialHandle(9));
 }
 
 // ============================================================================

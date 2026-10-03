@@ -1312,7 +1312,10 @@ public sealed partial class VulkanGraphicsDevice
         if (d.Uniforms.Count > 0) WriteUniformsAcrossSets(prog, frameSlot, d.Uniforms);
 
         Vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, pipe.Pipeline);
-        BindTransientDescriptorSets(cmd, prog, pipe.Layout, frameSlot, d.Textures);
+        // The per-draw material's set is the material's, so no transient set is allocated there: the
+        // same rule as the direct draw (TranslateDrawIndexed).
+        BindTransientDescriptorSets(cmd, prog, pipe.Layout, frameSlot, d.Textures,
+            materialSet: d.PerDrawMaterial is { } covered ? materialTable[covered.Id].SetIndex : -1);
 
         if (d.Material is { } matHandle)
         {
@@ -1321,6 +1324,15 @@ public sealed partial class VulkanGraphicsDevice
             Vk.CmdBindDescriptorSets(
                 cmd, PipelineBindPoint.Graphics, pipe.Layout,
                 firstSet: (uint)mat.SetIndex, descriptorSetCount: 1, &matSet,
+                dynamicOffsetCount: 0, pDynamicOffsets: null);
+        }
+        if (d.PerDrawMaterial is { } perDrawHandle)
+        {
+            var perDraw = materialTable[perDrawHandle.Id];
+            var perDrawSet = perDraw.Sets[frameSlot % perDraw.FramesInFlight];
+            Vk.CmdBindDescriptorSets(
+                cmd, PipelineBindPoint.Graphics, pipe.Layout,
+                firstSet: (uint)perDraw.SetIndex, descriptorSetCount: 1, &perDrawSet,
                 dynamicOffsetCount: 0, pDynamicOffsets: null);
         }
         if (d.PushConstants is { } pcBytes)

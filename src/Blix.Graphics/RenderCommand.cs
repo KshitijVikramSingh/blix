@@ -117,7 +117,10 @@ public sealed record DispatchCommand(
 // material, push constants), then issues one vkCmdDrawIndexedIndirect that reads
 // DrawCount VkDrawIndexedIndirectCommand structs from IndirectBuffer starting at
 // IndirectByteOffset. All sub-draws share the bound state — group objects by
-// (pipeline, material) and emit one of these per group.
+// (pipeline, material) and emit one of these per group. PerDrawMaterial binds a
+// second material at its own set index (set 3 by convention), exactly as it does on
+// DrawIndexedCommand: the per-instance storage buffer an instanced indirect draw reads
+// through gl_InstanceIndex, whose firstInstance each sub-draw sets.
 // <b>Recorded commands own their push payload.</b> A pass body RECORDS; the GPU work
 // happens later, at Execute. A byte[] handed over here is therefore read long after the
 // caller has moved on — and a caller that reuses one scratch array across draws gives
@@ -171,7 +174,8 @@ public sealed record DrawIndexedIndirectCommand(
     IReadOnlyList<ShaderUniform> Uniforms,
     IReadOnlyList<ShaderTextureBinding> Textures,
     MaterialHandle? Material = null,
-    byte[]? PushConstants = null) : RenderCommand
+    byte[]? PushConstants = null,
+    MaterialHandle? PerDrawMaterial = null) : RenderCommand
 {
     private readonly byte[]? pushConstants = PushConstants is null ? null : PushConstants.AsSpan().ToArray();
 

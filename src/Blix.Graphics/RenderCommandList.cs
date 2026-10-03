@@ -93,7 +93,8 @@ public sealed class RenderPassBuilder
 
     // Per-material indirect multi-draw: one call issuing drawCount sub-draws from
     // an indirect buffer, all sharing the bound state (pipeline + shared VB/IB +
-    // set0 uniforms/textures + set2 material + push). Vulkan-only. See
+    // set0 uniforms/textures + set2 material + push, and perDrawMaterial at its own
+    // set, typically 3, for per-instance data). Vulkan-only. See
     // DrawIndexedIndirectCommand.
     public void DrawIndexedIndirect(
         VertexBufferHandle vertexBuffer,
@@ -105,11 +106,12 @@ public sealed class RenderPassBuilder
         IReadOnlyList<ShaderUniform> uniforms,
         IReadOnlyList<ShaderTextureBinding> textures,
         MaterialHandle? material = null,
-        byte[]? pushConstants = null)
+        byte[]? pushConstants = null,
+        MaterialHandle? perDrawMaterial = null)
     {
         commands.Add(new DrawIndexedIndirectCommand(
             vertexBuffer, indexBuffer, pipeline, indirectBuffer, indirectByteOffset, drawCount,
-            uniforms, textures, material, pushConstants));
+            uniforms, textures, material, pushConstants, perDrawMaterial));
     }
 
     // Sub-range draw: starts at indexOffset into the index buffer. Lets multiple
