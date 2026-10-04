@@ -275,7 +275,7 @@ internal sealed partial class SponzaLoop
                 mesh.VertexBytes, mesh.VertexCount, lods, material, pipeline, mesh.Bounds,
                 albedo, alphaCutoff, baseColorAlpha,
                 new[] { new ShaderTextureBinding("uAlbedo", albedo) }, isBlend,
-                string.IsNullOrEmpty(mesh.Name) ? "primitive" : mesh.Name, placed.Worlds));
+                string.IsNullOrEmpty(mesh.Name) ? "primitive" : mesh.Name, placed.Worlds, pm?.BaseColorFactor ?? Vector4.One));
         }
     }
 
@@ -326,7 +326,11 @@ internal sealed partial class SponzaLoop
             {
                 placements.Add(new Placement(bucket.Count, sceneTransforms.Count, WorldBounds(bm.Bounds, world)));
                 sceneTransforms.Add(world);
-                if (rayMeshes is not null) rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
+                if (rayMeshes is not null)
+                {
+                    rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
+                    rayPlacementMaterials.Add(new RayMaterial(s.Albedo, s.BaseColor, s.AlphaCutoff));
+                }
                 if (!UniformScale(world)) nonUniform++;
             }
 

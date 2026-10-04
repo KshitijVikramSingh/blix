@@ -310,6 +310,8 @@ internal sealed partial class SponzaLoop
         // are fenced on both sides because they bind GPU buffers; the graph tracks images only.
         cullInterface = Reflect("scene_cull.comp");
         cullPassHandle = graph.ComputePass("scene-cull").Shader(cullInterface).Handle;
+        raySurfaceBakeInterface = Reflect("ray_surface_bake.comp");
+        raySurfaceBakePassHandle = graph.ComputePass("ray-surface-bake").Shader(raySurfaceBakeInterface).Handle;
         rayCheckInterface = Reflect("ray_check.comp");
         rayCheckPassHandle = graph.ComputePass("ray-check").Shader(rayCheckInterface).Handle;
 
@@ -723,6 +725,9 @@ internal sealed partial class SponzaLoop
         var rayViewSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_view.comp.spv"));
         rayViewPipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(rayViewSpv, rayViewInterface, "ray_view")), "ray_view"));
+        var bakeSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_surface_bake.comp.spv"));
+        raySurfaceBakePipeline = Own(device.CreateComputePipeline(
+            Own(device.CreateComputeShaderProgramFromSpv(bakeSpv, raySurfaceBakeInterface, "ray_surface_bake")), "ray_surface_bake"));
         var rayCheckSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_check.comp.spv"));
         rayCheckPipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(rayCheckSpv, rayCheckInterface, "ray_check")), "ray_check"));

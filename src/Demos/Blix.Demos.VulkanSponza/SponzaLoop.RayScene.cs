@@ -13,6 +13,18 @@ internal sealed partial class SponzaLoop
 {
     private bool rayScene;
     private RayQueryScene? rayQueries;
+    // Per ray-scene placement (the transform table's order): the material a surface bake reads.
+    private readonly record struct RayMaterial(TextureHandle Albedo, Vector4 BaseColor, float AlphaCutoff);
+    private readonly List<RayMaterial> rayPlacementMaterials = new();
+    private RayQueryGpuData? rayGpuData;
+    private GpuBufferHandle raySurfaces;
+    // One bake dispatch per material: its albedo, factor and cutoff, and its run of triangle rows in BakeRows.
+    private readonly List<(RayMaterial Material, int First, int Count)> raySurfaceBakes = new();
+    private ShaderBufferBinding[] raySurfaceBakeBuffers = Array.Empty<ShaderBufferBinding>();
+    private ShaderInterface raySurfaceBakeInterface = null!;
+    private PassHandle raySurfaceBakePassHandle;
+    private PipelineHandle raySurfaceBakePipeline;
+    private bool raySurfacesBaked;
     // --ray-region-triangles N: the most triangles a region holds before it is split (RayQueryScene).
     private int rayRegionTriangles = RayQueryScene.DefaultRegionTriangles;
     // --ray-lod-error M: trace each mesh at its coarsest cooked level whose geometric error, carried into the world
@@ -22,17 +34,21 @@ internal sealed partial class SponzaLoop
     private RayMesh[] BuildRayMeshes(List<DrawableStaging> ordered)
     {
         var stride = sharedLayout.Stride;
-        var position = Blix.Graphics.VertexSemantics.Of(sharedLayout)?.Position ?? 0;
+        var semantics = Blix.Graphics.VertexSemantics.Of(sharedLayout);
+        var position = semantics?.Position ?? 0;
+        var uv = semantics?.Uv0 ?? -1;
         var meshes = new RayMesh[ordered.Count];
         Parallel.For(0, ordered.Count, i =>
         {
             var s = ordered[i];
             var positions = new Vector3[s.VertexCount];
+            var uvs = uv >= 0 ? new Vector2[s.VertexCount] : null;
             for (var v = 0; v < s.VertexCount; v++)
             {
                 var at = v * stride + position;
                 positions[v] = new Vector3(
                     BitConverter.ToSingle(s.VertexBytes, at), BitConverter.ToSingle(s.VertexBytes, at + 4), BitConverter.ToSingle(s.VertexBytes, at + 8));
+                if (uvs is not null) uvs[v] = new Vector2(BitConverter.ToSingle(s.VertexBytes, v * stride + uv), BitConverter.ToSingle(s.VertexBytes, v * stride + uv + 4));
             }
             var scale = s.Worlds.Select(w => MathF.Max(new Vector3(w.M11, w.M12, w.M13).Length(),
                 MathF.Max(new Vector3(w.M21, w.M22, w.M23).Length(), new Vector3(w.M31, w.M32, w.M33).Length()))).DefaultIfEmpty(1f).Max();
@@ -43,7 +59,7 @@ internal sealed partial class SponzaLoop
                 else break;
             }
             var lod = s.Lods[level];
-            meshes[i] = new RayMesh(positions, lod.Indices32 ?? Array.ConvertAll(lod.Indices16!, x => (uint)x));
+            meshes[i] = new RayMesh(positions, lod.Indices32 ?? Array.ConvertAll(lod.Indices16!, x => (uint)x), uvs);
         });
         return meshes;
     }
@@ -83,6 +99,7 @@ internal sealed partial class SponzaLoop
     private void BuildRayCheck()
     {
         var data = RayQueryGpuData.Pack(rayQueries!);
+        rayGpuData = data;
         var blocks = data.Blocks();
         var buffers = new List<ShaderBufferBinding>();
         for (var b = 0; b < blocks.Length; b++)
@@ -90,6 +107,31 @@ internal sealed partial class SponzaLoop
             buffers.Add(new ShaderBufferBinding(RayQueryGpuData.BlockNames[b],
                 Own(device.CreateGpuBuffer(Math.Max(16, blocks[b].Length), blocks[b], $"sponza.{RayQueryGpuData.BlockNames[b]}"))));
         }
+        raySurfaces = buffers[^1].Buffer;
+
+        // The surface bake's inputs: every triangle row grouped by its placement's material, one run per material.
+        var byMaterial = new Dictionary<RayMaterial, List<uint>>();
+        for (var row = 0; row < data.RowPlacements.Length; row++)
+        {
+            var material = rayPlacementMaterials[(int)data.RowPlacements[row]];
+            if (!byMaterial.TryGetValue(material, out var rows)) byMaterial[material] = rows = new List<uint>();
+            rows.Add((uint)row);
+        }
+        var bakeRows = new List<uint>(data.RowPlacements.Length);
+        foreach (var (material, rows) in byMaterial)
+        {
+            raySurfaceBakes.Add((material, bakeRows.Count, rows.Count));
+            bakeRows.AddRange(rows);
+        }
+        var uvBytes = MemoryMarshal.AsBytes(data.Uvs.AsSpan()).ToArray();
+        var bakeRowBytes = MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(bakeRows)).ToArray();
+        raySurfaceBakeBuffers = new[]
+        {
+            new ShaderBufferBinding("BlixRayTriangles", buffers[3].Buffer),
+            new ShaderBufferBinding("BlixRayUvs", Own(device.CreateGpuBuffer(Math.Max(16, uvBytes.Length), uvBytes, "sponza.ray.uvs"))),
+            new ShaderBufferBinding("BakeRows", Own(device.CreateGpuBuffer(Math.Max(16, bakeRowBytes.Length), bakeRowBytes, "sponza.ray.bake-rows"))),
+            new ShaderBufferBinding("BlixRaySurfaces", raySurfaces),
+        };
 
         var rng = new Random(20261004);
         var bounds = rayQueries!.Nodes[0].Bounds;
@@ -176,6 +218,26 @@ internal sealed partial class SponzaLoop
             $"[VulkanSponza] ray check: scene packed for the GPU, {data.SizeInBytes / 1048576.0:0.0} MB ({data.Nodes.Length:N0} mesh nodes, {data.Triangles.Length / 4:N0} triangles, {data.Positions.Length:N0} vertices, {data.Instances.Length:N0} placements); {RayCheckCount:N0} {rayBench ?? "check"} rays."));
     }
 
+    // Once, on the first frame every texture is resident: one dispatch per material into the surfaces block, declared
+    // ahead of every pass that traces.
+    private void RecordRaySurfaceBake()
+    {
+        if (raySurfacesBaked || raySurfaceBakes.Count == 0 || !fullyLoaded) return;
+        foreach (var (material, first, count) in raySurfaceBakes)
+        {
+            graph.Dispatch(raySurfaceBakePassHandle, new DispatchCommand(raySurfaceBakePipeline, (count + 63) / 64, 1, 1,
+                new ShaderUniform[]
+                {
+                    new("uBaseColor", new Vector4Uniform(material.BaseColor)),
+                    new("uParams", new Vector4Uniform(new Vector4(first, count, material.AlphaCutoff, 0f))),
+                },
+                new[] { new ShaderTextureBinding("uAlbedo", material.Albedo) },
+                Buffers: raySurfaceBakeBuffers));
+        }
+        raySurfacesBaked = true;
+        Console.WriteLine(string.Create(Inv, $"[VulkanSponza] ray surfaces: baked {rayGpuData!.RowPlacements.Length:N0} triangles' albedo and coverage in {raySurfaceBakes.Count} material dispatches."));
+    }
+
     private void RecordRayCheck()
     {
         if (rayCheckBuffers.Length == 0 || !fullyLoaded) return;
@@ -194,6 +256,15 @@ internal sealed partial class SponzaLoop
     private void WriteRayCheck()
     {
         if (rayCheckBuffers.Length == 0 || rayQueries is null) return;
+        // The baked coverage, back to the CPU hierarchies, so the oracle meets the same partly covered triangles.
+        if (rayGpuData is { } gpuData)
+        {
+            var surfaceWords = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(raySurfaces, 0, gpuData.RowPlacements.Length * 4).AsSpan()).ToArray();
+            gpuData.ApplyCoverage(surfaceWords);
+            var partly = surfaceWords.Count(w => (w >> 24) is > 0 and < 255);
+            var none = surfaceWords.Count(w => w >> 24 == 0);
+            Console.WriteLine(string.Create(Inv, $"[VulkanSponza] ray surfaces: {partly:N0} triangles partly covered, {none:N0} not at all, of {surfaceWords.Length:N0}."));
+        }
         var bytes = device.ReadGpuBuffer(rayCheckHits, 0, RayCheckCount * 48 + 80);
         var words = MemoryMarshal.Cast<byte, uint>(bytes.AsSpan()).ToArray();
         int hits = 0, hitMismatch = 0, anyMismatch = 0, sameTriangle = 0, otherTriangle = 0, otherTriangleSameT = 0, faceMismatch = 0;
@@ -206,8 +277,8 @@ internal sealed partial class SponzaLoop
             var o = i * 12;
             var gpuHit = (words[o + 3] & 1u) != 0;
             var gpuAny = (words[o + 3] & 4u) != 0;
-            var cpu = rayQueries.Closest(rayCheckRays[i], 0f, rayCheckTMax[i]);
-            if (rayBench is null && gpuAny != cpu.HasValue) anyMismatch++;
+            var cpu = rayQueries.Closest(rayCheckRays[i], 0f, rayCheckTMax[i], (uint)i);
+            if (rayBench is null && gpuAny != rayQueries.Any(rayCheckRays[i], 0f, rayCheckTMax[i], (uint)i)) anyMismatch++;
             if (gpuHit != cpu.HasValue) { hitMismatch++; continue; }
             if (cpu is not { } c) continue;
             hits++;
@@ -298,7 +369,7 @@ internal sealed partial class SponzaLoop
         foreach (var (label, i) in new[] { ("worst same-triangle", worst), ("a different triangle at another distance", worstOther) })
         {
             if (i < 0) continue;
-            var c = rayQueries.Closest(rayCheckRays[i], 0f, rayCheckTMax[i])!.Value;
+            var c = rayQueries.Closest(rayCheckRays[i], 0f, rayCheckTMax[i], (uint)i)!.Value;
             var o = i * 12;
             var inst = rayQueries.Instances[c.Instance];
             var m = inst.Mesh;
@@ -415,7 +486,9 @@ internal sealed partial class SponzaLoop
                 var packedNormal = words[i * 4 + 3];
                 float Snorm(int shift) => Math.Clamp((sbyte)((packedNormal >> shift) & 0xFF) / 127f, -1f, 1f);
                 var n = new Vector3(Snorm(0), Snorm(8), Snorm(16));
-                var l = 0.12f + 0.6f * Math.Clamp(Vector3.Dot(n, light) * 0.5f + 0.5f, 0f, 1f);
+                // Lit by a fixed direction, times how bright the baked albedo is: the surfaces a ray now meets.
+                var albedo = (packedNormal >> 24) / 255f;
+                var l = (0.25f + 0.75f * Math.Clamp(Vector3.Dot(n, light) * 0.5f + 0.5f, 0f, 1f)) * MathF.Pow(albedo, 1f / 2.2f);
                 var v = (byte)Math.Clamp(l * 255f, 0f, 255f);
                 shaded[o] = v; shaded[o + 1] = v; shaded[o + 2] = v;
             }

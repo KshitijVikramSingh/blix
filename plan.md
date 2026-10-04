@@ -80,12 +80,19 @@ exactly where the world has changed.
    raster depth: within 1% on 94-96% of pixels, the rest alpha-tested foliage (5.4% Sponza, 0.65% Bistro:
    rays have no alpha test yet), depth edges and LOD; with the raster at full detail too, Sponza leaves
    48 pixels unexplained in 518,400. Hits now carry a world-space geometric normal (checked against the
-   CPU's). Next: stage 4 on this interface, starting with what the probes' rays need that a camera ray
-   does not: alpha-tested occluders and a material at the hit. Far-from-origin rounding (the city at
+   CPU's). Far-from-origin rounding (the city at
    2 km moves an entry point 0.1 mm) is the huge-worlds origin question, not a traversal one. The cook
    takes the hierarchies once the layout stops moving.
 4. *Runtime GI*: camera-relative clipmap probes traced through 3, relocated out of walls, rays amortised
-   over frames, dirty-region updates, capsule occluders.
+   over frames, dirty-region updates, capsule occluders. In steps: 4a surfaces at hits (done: below);
+   4b the sky/bounce injection traces rays into the atlas the lit pass already reads, A/B against the
+   occupancy march on the same grid; 4c a camera-relative clipmap in place of the bounds-sized grid; 4d
+   relocation, dirty regions, capsules. 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
+   material, 16 area-stratified samples per triangle at a footprint-matched mip) gives every triangle a
+   word in `BlixRaySurfaces`: albedo (sRGB) and coverage. Traversal meets a partly covered triangle by an
+   integer hash of the ray's seed, the entry and its leaf position (`RayTests.Covered`), so the CPU oracle
+   flips the same coins and stays bit-exact; hits carry linear albedo. Sponza: 1.35M of 12.8M triangles
+   partly covered; the traced view's disagreement at foliage halves (5.45% -> 2.76%).
 5. *PRT baked by the cook*: per-region probe transfer, relit by the sun at runtime: the static base and
    warm start of 4.
 

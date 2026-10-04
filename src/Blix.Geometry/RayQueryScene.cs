@@ -5,16 +5,20 @@ namespace Blix.Geometry;
 /// <summary>A mesh as ray queries take it: positions and a triangle list, in the mesh's own space.</summary>
 public sealed class RayMesh
 {
-    public RayMesh(Vector3[] positions, uint[] indices)
+    public RayMesh(Vector3[] positions, uint[] indices, Vector2[]? uvs = null)
     {
         ArgumentNullException.ThrowIfNull(positions);
         ArgumentNullException.ThrowIfNull(indices);
         if (indices.Length % 3 != 0) throw new ArgumentException($"{indices.Length} indices are not whole triangles.", nameof(indices));
+        if (uvs is not null && uvs.Length != positions.Length) throw new ArgumentException($"{uvs.Length} UVs for {positions.Length} positions.", nameof(uvs));
         Positions = positions;
         Indices = indices;
+        Uvs = uvs;
     }
 
     public Vector3[] Positions { get; }
+    /// <summary>One per position, when the mesh has texture coordinates: what a bake of its material's texture reads.</summary>
+    public Vector2[]? Uvs { get; }
     public uint[] Indices { get; }
     public int TriangleCount => Indices.Length / 3;
 
@@ -63,7 +67,7 @@ public sealed class RayQueryScene
     public readonly record struct Instance(RayMesh Mesh, Matrix4x4 World, bool Dynamic = false);
 
     /// <summary>What the top level holds: a region (world space, with owners) or one instanced placement.</summary>
-    internal sealed record Entry(TriangleBvh Bvh, Matrix4x4 WorldToLocal, int Placement, int[]? OwnerPlacement, int[]? OwnerTriangle)
+    internal sealed record Entry(TriangleBvh Bvh, Matrix4x4 WorldToLocal, int Placement, int[]? OwnerPlacement, int[]? OwnerTriangle, Vector2[]? Uvs)
     {
         public bool IsRegion => OwnerPlacement is not null;
     }
@@ -171,6 +175,7 @@ public sealed class RayQueryScene
         {
             var cell = regions[r];
             var positions = new List<Vector3>();
+            var uvs = new List<Vector2>();
             var indices = new uint[cell.Length * 3];
             var ownerPlacement = new int[cell.Length];
             var ownerTriangle = new int[cell.Length];
@@ -194,6 +199,7 @@ public sealed class RayQueryScene
                     {
                         at = (uint)positions.Count;
                         positions.Add(worldPositions[i][vertex]);
+                        uvs.Add(mesh.Uvs is { } meshUvs ? meshUvs[vertex] : Vector2.Zero);
                         remap[key] = at;
                     }
                     indices[n * 3 + c] = at;
@@ -201,7 +207,7 @@ public sealed class RayQueryScene
                 ownerPlacement[n] = i;
                 ownerTriangle[n] = mirrored ? tri | MirroredOwner : tri;
             }
-            regionEntries[r] = new Entry(TriangleBvh.Build(positions.ToArray(), indices), Matrix4x4.Identity, -1, ownerPlacement, ownerTriangle);
+            regionEntries[r] = new Entry(TriangleBvh.Build(positions.ToArray(), indices), Matrix4x4.Identity, -1, ownerPlacement, ownerTriangle, uvs.ToArray());
         });
 
         var meshBvhs = new Dictionary<RayMesh, TriangleBvh>(ReferenceEqualityComparer.Instance);
@@ -218,7 +224,7 @@ public sealed class RayQueryScene
             {
                 throw new ArgumentException($"placement {i}'s world matrix has no inverse.", nameof(placements));
             }
-            entries.Add(new Entry(meshBvhs[all[i].Mesh], inverse, i, null, null));
+            entries.Add(new Entry(meshBvhs[all[i].Mesh], inverse, i, null, null, all[i].Mesh.Uvs));
         }
 
         var boxes = entries.Select(e => e.IsRegion ? e.Bvh.Bounds : WorldBounds(e.Bvh.Bounds, all[e.Placement].World)).ToArray();
@@ -227,7 +233,8 @@ public sealed class RayQueryScene
     }
 
     /// <summary>The nearest hit along the ray in (tMin, tMax), if any.</summary>
-    public RayHit? Closest(in Ray ray, float tMin = 0f, float tMax = float.PositiveInfinity)
+    /// <param name="seed">The ray's own seed for partly covered triangles (<see cref="TriangleBvh.Coverage"/>); ray_query.glsl takes the same.</param>
+    public RayHit? Closest(in Ray ray, float tMin = 0f, float tMax = float.PositiveInfinity, uint seed = 0)
     {
         if (entries.Length == 0) return null;
         var world = new ShearedRay(ray.Origin, ray.Direction);
@@ -262,7 +269,7 @@ public sealed class RayQueryScene
             for (var k = 0; k < node.Count; k++)
             {
                 var e = Order[node.Index + k];
-                if (!entries[e].Bvh.Closest(Local(ray, e), tMin, t, out var th, out var tri, out var bc, out var front)) continue;
+                if (!entries[e].Bvh.Closest(Local(ray, e), tMin, t, new RayCoverageKey(seed, (uint)e), out var th, out var tri, out var bc, out var front)) continue;
                 t = th;
                 bestEntry = e;
                 bestTriangle = tri;
@@ -283,7 +290,7 @@ public sealed class RayQueryScene
     }
 
     /// <summary>Whether anything is hit along the ray in (tMin, tMax).</summary>
-    public bool Any(in Ray ray, float tMin = 0f, float tMax = float.PositiveInfinity)
+    public bool Any(in Ray ray, float tMin = 0f, float tMax = float.PositiveInfinity, uint seed = 0)
     {
         if (entries.Length == 0) return false;
         var world = new ShearedRay(ray.Origin, ray.Direction);
@@ -303,7 +310,7 @@ public sealed class RayQueryScene
             for (var k = 0; k < node.Count; k++)
             {
                 var e = Order[node.Index + k];
-                if (entries[e].Bvh.Any(Local(ray, e), tMin, tMax)) return true;
+                if (entries[e].Bvh.Any(Local(ray, e), tMin, tMax, new RayCoverageKey(seed, (uint)e))) return true;
             }
         }
         return false;

@@ -685,6 +685,7 @@ internal sealed partial class SponzaLoop
         // can fall either way on floating-point noise, and at the screen edge that reads as geometry
         // blinking in and out as you turn. Half a metre of slack costs a fraction of a percent of
         // the rejections and removes the whole class.
+        RecordRaySurfaceBake();
         RecordRayCheck();
 
         // Occlusion needs the pre-pass's depth; without one the early list is the whole frustum's.

@@ -27,14 +27,16 @@ void main() {
     vec4 o = rays[i * 2u];
     vec4 d = rays[i * 2u + 1u];
     BlixRayHit hit;
-    bool found = blix_traceClosest(o.xyz, d.xyz, o.w, d.w, hit);
+    // Each ray its own seed: its index, as the host's CPU check passes it.
+    bool found = blix_traceClosest(o.xyz, d.xyz, o.w, d.w, i, hit);
     // What the closest-hit trace did, before the any-hit trace adds to it: nodes, placements, triangles.
     uvec3 work = blix_rayStats;
-    bool any = u.uCount.y > 0.5 ? found : blix_traceAny(o.xyz, d.xyz, o.w, d.w);
+    bool any = u.uCount.y > 0.5 ? found : blix_traceAny(o.xyz, d.xyz, o.w, d.w, i);
     uint flags = (found ? 1u : 0u) | (hit.frontFace ? 2u : 0u) | (any ? 4u : 0u) | (min(work.y, 0xFFFFFFu) << 8);
     hits[i * 3u] = uvec4(floatBitsToUint(hit.t), floatBitsToUint(hit.barycentrics.x), floatBitsToUint(hit.barycentrics.y), flags);
     hits[i * 3u + 1u] = uvec4(hit.instance, hit.triangle, work.x, work.z);
-    hits[i * 3u + 2u] = uvec4(floatBitsToUint(hit.normal.x), floatBitsToUint(hit.normal.y), floatBitsToUint(hit.normal.z), 0u);
+    hits[i * 3u + 2u] = uvec4(floatBitsToUint(hit.normal.x), floatBitsToUint(hit.normal.y), floatBitsToUint(hit.normal.z),
+                              packUnorm4x8(vec4(hit.albedo, 0.0)));
 
     // The probe: this ray against one named triangle directly, no traversal, so a disagreement can be placed in
     // the triangle test or in the hierarchy. Written after every ray's answer: hit flag, t, and the barycentrics.

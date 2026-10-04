@@ -6560,6 +6560,82 @@ static ShaderInterface MinimalShader() => new(new[]
         t.Expect("BV.6 every mesh's vertices are packed once, a shared mesh's included, plus one for the empty mesh",
             packed.Positions.Length == distinctVertices + 1 && scene.RegionCount >= 2, $"{packed.Positions.Length} packed, {distinctVertices} distinct, {scene.RegionCount} regions");
     }
+
+    // Partly covered triangles (an alpha-tested material's): met by chance, the same chance on both sides.
+    {
+        t.ExpectTrue("BV.7 coverage 255 is always met and 0 never",
+            Enumerable.Range(0, 1000).All(k => RayTests.Covered(255, (uint)k, 3, 7) && !RayTests.Covered(0, (uint)k, 3, 7)));
+        var met = Enumerable.Range(0, 20000).Count(k => RayTests.Covered(64, (uint)k, 5, 11));
+        t.Expect("BV.7 a quarter-covered triangle is met by about a quarter of rays", Math.Abs(met / 20000.0 - 64 / 256.0) < 0.015, $"{met} of 20000");
+        t.ExpectTrue("BV.7 the same ray, entry and triangle always get the same answer",
+            Enumerable.Range(0, 1000).All(k => RayTests.Covered(100, (uint)k, 2, 9) == RayTests.Covered(100, (uint)k, 2, 9)));
+
+        // Random coverage through the packer onto both sides, then the packed walk, coin flips and all, against the scene.
+        var placements = Mixed(40);
+        var scene = RayQueryScene.Build(placements, regionTriangles: 12000);
+        var packed = RayQueryGpuData.Pack(scene);
+        var surfaces = new uint[packed.RowPlacements.Length];
+        for (var r = 0; r < surfaces.Length; r++) surfaces[r] = (uint)(r % 3 == 0 ? 255 : rng.Next(256)) << 24 | 0xFFFFFFu;
+        packed.ApplyCoverage(surfaces);
+
+        (float T, int Inst, int Tri)? Walk(Ray ray, uint seed)
+        {
+            var world = new ShearedRay(ray.Origin, ray.Direction);
+            var t = float.PositiveInfinity;
+            var bestEntry = -1;
+            var bestRow = 0u;
+            var top = new Stack<uint>();
+            top.Push(0);
+            while (top.Count > 0)
+            {
+                var node = packed.TopNodes[top.Pop()];
+                if (!RayTests.Box(world, node, 0f, t, out _)) continue;
+                if (!node.IsLeaf) { top.Push(node.Index + 1); top.Push(node.Index); continue; }
+                var inst = packed.Instances[node.Index];
+                var local = new ShearedRay(Vector3.Transform(ray.Origin, inst.WorldToLocal), Vector3.TransformNormal(ray.Direction, inst.WorldToLocal));
+                var stack = new Stack<uint>();
+                stack.Push(inst.Root);
+                while (stack.Count > 0)
+                {
+                    var n = packed.Nodes[stack.Pop()];
+                    if (!RayTests.Box(local, n, 0f, t, out _)) continue;
+                    if (!n.IsLeaf) { stack.Push(n.Index + 1); stack.Push(n.Index); continue; }
+                    for (var k = 0u; k < n.Count; k++)
+                    {
+                        var row = n.Index + k;
+                        var at = (int)row * 4;
+                        var p0 = packed.Positions[packed.Triangles[at]]; var p1 = packed.Positions[packed.Triangles[at + 1]]; var p2 = packed.Positions[packed.Triangles[at + 2]];
+                        if (RayTests.Triangle(local, new Vector3(p0.X, p0.Y, p0.Z), new Vector3(p1.X, p1.Y, p1.Z), new Vector3(p2.X, p2.Y, p2.Z), 0f, t, out var th, out _, out _)
+                            && RayTests.Covered((byte)(surfaces[row] >> 24), seed, node.Index, row - inst.TriangleBase))
+                        {
+                            t = th;
+                            bestEntry = (int)node.Index;
+                            bestRow = packed.Triangles[at + 3];
+                        }
+                    }
+                }
+            }
+            if (bestEntry < 0) return null;
+            var e = packed.Instances[bestEntry];
+            return e.Placement != RayQueryGpuData.RegionPlacement
+                ? (t, (int)e.Placement, (int)bestRow)
+                : (t, (int)packed.Owners[bestRow * 2], (int)(packed.Owners[bestRow * 2 + 1] & 0x7FFFFFFFu));
+        }
+
+        int mismatches = 0, hits = 0, coinChanged = 0;
+        for (var k = 0; k < 3000; k++)
+        {
+            var ray = new Ray(RandomIn(35f), RandomDir());
+            var want = scene.Closest(ray, seed: (uint)k);
+            var got = Walk(ray, (uint)k);
+            if (want.HasValue != got.HasValue || (want is { } w && (w.T != got!.Value.T || w.Instance != got.Value.Inst || w.Triangle != got.Value.Tri))) mismatches++;
+            if (want.HasValue) hits++;
+            if (want?.T != scene.Closest(ray, seed: (uint)k + 7919u)?.T) coinChanged++;
+        }
+        t.Expect("BV.7 with coverage, the packed walk gives RayQueryScene's answer to the bit on all 3000 rays, seed for seed", mismatches == 0,
+            $"{mismatches} disagree, {hits} hit");
+        t.Expect("BV.7 and the seed matters: another seed changes the answer on some rays", coinChanged > 30, $"{coinChanged} changed");
+    }
 }
 t.PrintSummary();
 return t.Failed;

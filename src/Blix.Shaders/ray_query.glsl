@@ -2,8 +2,8 @@
 //
 // blix_traceClosest and blix_traceAny answer what VK_KHR_ray_query commits (distance, placement, triangle,
 // barycentrics of v1 and v2, facing in the mesh's own space), so a hardware backend can stand behind the
-// same two functions. The data is RayQueryScene's, packed by RayQueryGpuData into six storage blocks the
-// host binds by name; this file declares them at BLIX_RAY_SET, bindings BLIX_RAY_BINDING to +5:
+// same two functions. The data is RayQueryScene's, packed by RayQueryGpuData into seven storage blocks the
+// host binds by name; this file declares them at BLIX_RAY_SET, bindings BLIX_RAY_BINDING to +6:
 //
 //   BlixRayTopNodes   the hierarchy over entries; a leaf's index is the entry itself
 //   BlixRayInstances  per entry (a region in world space, or one instanced placement): world-to-mesh matrix
@@ -16,6 +16,12 @@
 //   BlixRayPositions  every hierarchy's vertex positions, end to end
 //   BlixRayOwners     per region triangle: its placement, and its index in that placement's mesh with the high
 //                     bit set when the merge swapped v1 and v2 to undo a mirror
+//   BlixRaySurfaces   per triangle row: its albedo (sRGB, low three bytes) and how much of it is there (top byte,
+//                     255 solid), baked from its material; a partly covered triangle is met by chance
+//
+// A trace takes a seed: the caller's name for the ray, which with the entry and the triangle decides whether a
+// partly covered triangle is met (RayTests.Covered, the same integer hash). Over many rays a leaf card is met in
+// proportion to how much of it the material's alpha keeps.
 //
 // The tests are the CPU's (RayTests): the watertight triangle test without a double fallback, and the slab
 // test with Ize's widened exit. Each traversal keeps a stack of BLIX_RAY_STACK entries per level, the depth the
@@ -43,7 +49,7 @@ uvec3 blix_rayStats = uvec3(0u);
 #endif
 
 struct BlixBvhNode { vec3 lo; uint index; vec3 hi; uint count; };
-struct BlixRayInstance { mat4 worldToLocal; uvec4 info; };   // info.x = root node, info.y = placement (0xFFFFFFFF: a region)
+struct BlixRayInstance { mat4 worldToLocal; uvec4 info; };   // info.x root node, y placement (0xFFFFFFFF: a region), z first triangle row
 
 layout(std430, set = BLIX_RAY_SET, binding = BLIX_RAY_BINDING + 0) readonly buffer BlixRayTopNodes { BlixBvhNode blix_topNodes[]; };
 layout(std430, set = BLIX_RAY_SET, binding = BLIX_RAY_BINDING + 1) readonly buffer BlixRayInstances { BlixRayInstance blix_instances[]; };
@@ -51,6 +57,21 @@ layout(std430, set = BLIX_RAY_SET, binding = BLIX_RAY_BINDING + 2) readonly buff
 layout(std430, set = BLIX_RAY_SET, binding = BLIX_RAY_BINDING + 3) readonly buffer BlixRayTriangles { uvec4 blix_triangles[]; };
 layout(std430, set = BLIX_RAY_SET, binding = BLIX_RAY_BINDING + 4) readonly buffer BlixRayPositions { vec4 blix_positions[]; };
 layout(std430, set = BLIX_RAY_SET, binding = BLIX_RAY_BINDING + 5) readonly buffer BlixRayOwners { uvec2 blix_owners[]; };
+layout(std430, set = BLIX_RAY_SET, binding = BLIX_RAY_BINDING + 6) readonly buffer BlixRaySurfaces { uint blix_surfaces[]; };
+
+// RayTests.Pcg and RayTests.Covered.
+uint blix_pcg(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+bool blix_covered(uint row, uint seed, uint entry, uint leafPosition) {
+    uint coverage = blix_surfaces[row] >> 24u;
+    if (coverage == 255u) return true;
+    if (coverage == 0u) return false;
+    return (blix_pcg(seed + blix_pcg(entry * 0x9E3779B9u + leafPosition)) >> 24u) < coverage;
+}
 
 struct BlixRayHit {
     float t;
@@ -61,6 +82,8 @@ struct BlixRayHit {
     // World-space geometric normal of the triangle hit, unit length, on its authored front (the side frontFace
     // names): what shading a hit needs and rayQuery leaves to the caller.
     vec3 normal;
+    // Linear albedo baked for the triangle hit (its material's texture over the triangle, times its factor).
+    vec3 albedo;
 };
 
 // RayTests.BoxExitWidening: 1 + 2 * gamma(3), gamma(n) = n * 2^-24 / (1 - n * 2^-24).
@@ -126,7 +149,8 @@ bool blix_rayTriangle(BlixShearedRay r, vec3 v0, vec3 v1, vec3 v2, float tMin, f
 }
 
 // One mesh's hierarchy from its root, nearest first, shrinking tMax as hits are found (TriangleBvh.Closest).
-bool blix_traceMesh(BlixShearedRay r, uint root, float tMin, inout float tMax, out uint triangle, out vec2 barycentrics, out bool frontFace, out uint row) {
+bool blix_traceMesh(BlixShearedRay r, uint root, float tMin, inout float tMax, uint seed, uint entryIndex, uint triangleBase,
+                    out uint triangle, out vec2 barycentrics, out bool frontFace, out uint row) {
     triangle = 0xFFFFFFFFu;
     row = 0u;
     barycentrics = vec2(0.0);
@@ -145,7 +169,8 @@ bool blix_traceMesh(BlixShearedRay r, uint root, float tMin, inout float tMax, o
                 uvec4 tri = blix_triangles[node.index + k];
                 float th; vec2 bc; bool front;
                 if (blix_rayTriangle(r, blix_positions[tri.x].xyz, blix_positions[tri.y].xyz, blix_positions[tri.z].xyz,
-                                     tMin, tMax, th, bc, front)) {
+                                     tMin, tMax, th, bc, front)
+                    && blix_covered(node.index + k, seed, entryIndex, node.index + k - triangleBase)) {
                     tMax = th;
                     triangle = tri.w;
                     barycentrics = bc;
@@ -171,7 +196,7 @@ bool blix_traceMesh(BlixShearedRay r, uint root, float tMin, inout float tMax, o
     return triangle != 0xFFFFFFFFu;
 }
 
-bool blix_anyInMesh(BlixShearedRay r, uint root, float tMin, float tMax) {
+bool blix_anyInMesh(BlixShearedRay r, uint root, float tMin, float tMax, uint seed, uint entryIndex, uint triangleBase) {
     uint stack[BLIX_RAY_STACK];
     int top = 0;
     stack[top++] = root;
@@ -188,7 +213,8 @@ bool blix_anyInMesh(BlixShearedRay r, uint root, float tMin, float tMax) {
             uvec4 tri = blix_triangles[node.index + k];
             float th; vec2 bc; bool front;
             if (blix_rayTriangle(r, blix_positions[tri.x].xyz, blix_positions[tri.y].xyz, blix_positions[tri.z].xyz,
-                                 tMin, tMax, th, bc, front)) return true;
+                                 tMin, tMax, th, bc, front)
+                && blix_covered(node.index + k, seed, entryIndex, node.index + k - triangleBase)) return true;
         }
     }
     return false;
@@ -205,13 +231,14 @@ BlixShearedRay blix_toInstance(vec3 origin, vec3 direction, uint instance) {
 }
 
 // The nearest hit in (tMin, tMax) over every placement (RayQueryScene.Closest).
-bool blix_traceClosest(vec3 origin, vec3 direction, float tMin, float tMax, out BlixRayHit hit) {
+bool blix_traceClosest(vec3 origin, vec3 direction, float tMin, float tMax, uint seed, out BlixRayHit hit) {
     hit.t = tMax;
     hit.instance = 0xFFFFFFFFu;
     hit.triangle = 0xFFFFFFFFu;
     hit.barycentrics = vec2(0.0);
     hit.frontFace = false;
     hit.normal = vec3(0.0);
+    hit.albedo = vec3(0.0);
     uint hitRow = 0u;
     BlixShearedRay world = blix_shear(origin, direction);
     uint stack[BLIX_RAY_STACK];
@@ -241,7 +268,8 @@ bool blix_traceClosest(vec3 origin, vec3 direction, float tMin, float tMax, out 
         BLIX_RAY_COUNT(1);
         uint triangle; vec2 bc; bool front; uint row;
         float t = hit.t;
-        if (blix_traceMesh(blix_toInstance(origin, direction, instance), blix_instances[instance].info.x, tMin, t, triangle, bc, front, row)) {
+        if (blix_traceMesh(blix_toInstance(origin, direction, instance), blix_instances[instance].info.x, tMin, t, seed, instance,
+                           blix_instances[instance].info.z, triangle, bc, front, row)) {
             hit.t = t;
             hit.instance = instance;   // the entry, until resolved below
             hit.triangle = triangle;
@@ -258,6 +286,9 @@ bool blix_traceClosest(vec3 origin, vec3 direction, float tMin, float tMax, out 
     vec3 p0 = blix_positions[tri.x].xyz;
     vec3 n = cross(blix_positions[tri.y].xyz - p0, blix_positions[tri.z].xyz - p0);
     hit.normal = normalize(transpose(mat3(blix_instances[hit.instance].worldToLocal)) * n);
+    // sRGB-encoded albedo bytes back to linear (the bake stores them encoded for precision in the darks).
+    vec3 srgb = unpackUnorm4x8(blix_surfaces[hitRow]).rgb;
+    hit.albedo = mix(srgb / 12.92, pow((srgb + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), srgb));
     // Resolve the entry to the placement: an instance is one; a region's owner row names it (RayQueryScene.Closest).
     uint placement = blix_instances[hit.instance].info.y;
     if (placement != 0xFFFFFFFFu) {
@@ -272,7 +303,7 @@ bool blix_traceClosest(vec3 origin, vec3 direction, float tMin, float tMax, out 
 }
 
 // Whether anything is hit in (tMin, tMax) (RayQueryScene.Any).
-bool blix_traceAny(vec3 origin, vec3 direction, float tMin, float tMax) {
+bool blix_traceAny(vec3 origin, vec3 direction, float tMin, float tMax, uint seed) {
     BlixShearedRay world = blix_shear(origin, direction);
     uint stack[BLIX_RAY_STACK];
     int top = 0;
@@ -287,7 +318,8 @@ bool blix_traceAny(vec3 origin, vec3 direction, float tMin, float tMax) {
             continue;
         }
         uint instance = node.index;
-        if (blix_anyInMesh(blix_toInstance(origin, direction, instance), blix_instances[instance].info.x, tMin, tMax)) return true;
+        if (blix_anyInMesh(blix_toInstance(origin, direction, instance), blix_instances[instance].info.x, tMin, tMax, seed, instance,
+                           blix_instances[instance].info.z)) return true;
     }
     return false;
 }

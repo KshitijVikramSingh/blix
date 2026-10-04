@@ -778,7 +778,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         bool IsBlend,
         string Name,
         // Where the primitive stands: one world matrix per placement.
-        Matrix4x4[] Worlds);
+        Matrix4x4[] Worlds,
+        // The material's base colour factor (linear rgb, alpha): what a ray's surface bake multiplies the texture by.
+        Vector4 BaseColor);
 
     /// <summary>One placement of a unique primitive: which drawable, its row in the transform table, and its world AABB.</summary>
     /// <remarks>

@@ -38,9 +38,36 @@ public readonly struct ShearedRay
     }
 }
 
+/// <summary>What makes a ray's chance of meeting a partly covered triangle its own: a seed the caller gives the ray, and the top-level entry.</summary>
+public readonly record struct RayCoverageKey(uint Seed, uint Entry);
+
 /// <summary>The ray tests a traversal is built from, written once for the CPU and mirrored by the GPU's.</summary>
 public static class RayTests
 {
+    /// <summary>Whether a ray meets a triangle with this much coverage: always at 255, never at 0, else by an integer hash.</summary>
+    /// <remarks>
+    /// The hash (PCG's output function, twice) of the seed, the entry and the triangle's leaf position, its top byte
+    /// against the coverage byte: integer arithmetic only, so ray_query.glsl gets the same answer bit for bit. Over many
+    /// rays a triangle is met in proportion to how much of it the material's alpha keeps.
+    /// </remarks>
+    public static bool Covered(byte coverage, uint seed, uint entry, uint leafPosition)
+    {
+        if (coverage == 255) return true;
+        if (coverage == 0) return false;
+        return (Pcg(seed + Pcg(entry * 0x9E3779B9u + leafPosition)) >> 24) < coverage;
+    }
+
+    /// <summary>PCG's output permutation as a hash (Jarzynski and Olano, "Hash Functions for GPU Rendering", 2020).</summary>
+    public static uint Pcg(uint v)
+    {
+        unchecked
+        {
+            var state = v * 747796405u + 2891336453u;
+            var word = ((state >> (int)((state >> 28) + 4u)) ^ state) * 277803737u;
+            return (word >> 22) ^ word;
+        }
+    }
+
     /// <summary>The watertight ray-triangle test (Woop, Benthin and Wald, 2013).</summary>
     /// <remarks>
     /// The triangle is sheared into the ray's frame and tested by three edge functions, each computed from the
@@ -130,6 +157,13 @@ public sealed class TriangleBvh
 
     public int TriangleCount => Indices.Length / 3;
 
+    /// <summary>Per triangle in leaf order (<see cref="Order"/>'s positions), how much of it is there: 255 solid, 0 none.</summary>
+    /// <remarks>
+    /// Null is solid throughout. Set from a bake of the material's alpha (ray_query.glsl's surfaces block holds the
+    /// same bytes): a ray meets a partly covered triangle with that probability, by <see cref="RayTests.Covered"/>.
+    /// </remarks>
+    public byte[]? Coverage { get; set; }
+
     public Bounds3 Bounds => Nodes[0].Bounds;
 
     public static TriangleBvh Build(Vector3[] positions, uint[] indices)
@@ -151,7 +185,11 @@ public sealed class TriangleBvh
     }
 
     /// <summary>The nearest hit in (tMin, tMax), front to back: the nearer child first, and nothing past the best so far.</summary>
-    public bool Closest(in ShearedRay ray, float tMin, float tMax, out float t, out int triangle, out Vector2 barycentrics, out bool frontFace)
+    public bool Closest(in ShearedRay ray, float tMin, float tMax, out float t, out int triangle, out Vector2 barycentrics, out bool frontFace) =>
+        Closest(ray, tMin, tMax, default, out t, out triangle, out barycentrics, out frontFace);
+
+    /// <summary>As above, with partly covered triangles met by chance: <paramref name="key"/> names the ray and the placement.</summary>
+    public bool Closest(in ShearedRay ray, float tMin, float tMax, RayCoverageKey key, out float t, out int triangle, out Vector2 barycentrics, out bool frontFace)
     {
         t = tMax;
         triangle = -1;
@@ -170,7 +208,7 @@ public sealed class TriangleBvh
                 for (var k = 0; k < node.Count; k++)
                 {
                     var tri = Order[node.Index + k];
-                    if (Hit(ray, tri, tMin, t, out var th, out var bc, out var front))
+                    if (Hit(ray, tri, tMin, t, out var th, out var bc, out var front) && Covered(key, node.Index + (uint)k))
                     {
                         t = th;
                         triangle = tri;
@@ -197,7 +235,9 @@ public sealed class TriangleBvh
     }
 
     /// <summary>Whether anything is hit in (tMin, tMax): stops at the first triangle found.</summary>
-    public bool Any(in ShearedRay ray, float tMin, float tMax)
+    public bool Any(in ShearedRay ray, float tMin, float tMax) => Any(ray, tMin, tMax, default);
+
+    public bool Any(in ShearedRay ray, float tMin, float tMax, RayCoverageKey key)
     {
         if (TriangleCount == 0) return false;
         Span<uint> stack = stackalloc uint[64];
@@ -215,11 +255,14 @@ public sealed class TriangleBvh
             }
             for (var k = 0; k < node.Count; k++)
             {
-                if (Hit(ray, Order[node.Index + k], tMin, tMax, out _, out _, out _)) return true;
+                if (Hit(ray, Order[node.Index + k], tMin, tMax, out _, out _, out _) && Covered(key, node.Index + (uint)k)) return true;
             }
         }
         return false;
     }
+
+    private bool Covered(RayCoverageKey key, uint leafPosition) =>
+        Coverage is not { } coverage || RayTests.Covered(coverage[leafPosition], key.Seed, key.Entry, leafPosition);
 
     /// <summary>One triangle by index, through the same test the traversal uses.</summary>
     public bool Hit(in ShearedRay ray, int triangle, float tMin, float tMax, out float t, out Vector2 barycentrics, out bool frontFace) =>

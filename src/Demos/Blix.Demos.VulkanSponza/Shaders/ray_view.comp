@@ -38,7 +38,7 @@ void main() {
     vec4 far = u.uInvViewProj * vec4(ndc, 1.0, 1.0);
     vec3 direction = normalize(far.xyz / far.w - u.uCamera.xyz);
     BlixRayHit hit;
-    bool found = blix_traceClosest(u.uCamera.xyz, direction, 0.0, Infinity, hit);
+    bool found = blix_traceClosest(u.uCamera.xyz, direction, 0.0, Infinity, cell.y * uint(u.uSize.x) + cell.x, hit);
     float traced = found ? hit.t * dot(direction, u.uForward.xyz) : Infinity;
 
     float raw = texelFetch(uSceneDepth, texel, 0).r;
@@ -46,6 +46,8 @@ void main() {
     float raster = raw >= 1.0 ? Infinity : -(view.z / view.w);
 
     uint index = cell.y * uint(u.uSize.x) + cell.x;
+    // The normal in the low three bytes, and how bright the albedo is (luminance, 0-255) in the top one.
+    float luminance = dot(hit.albedo, vec3(0.2126, 0.7152, 0.0722));
     pixels[index] = uvec4(floatBitsToUint(traced), floatBitsToUint(raster), found ? hit.instance : 0xFFFFFFFFu,
-                          found ? packSnorm4x8(vec4(hit.normal, 0.0)) : 0u);
+                          found ? (packSnorm4x8(vec4(hit.normal, 0.0)) & 0x00FFFFFFu) | (uint(clamp(luminance, 0.0, 1.0) * 255.0 + 0.5) << 24) : 0u);
 }
