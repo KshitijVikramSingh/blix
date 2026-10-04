@@ -155,6 +155,7 @@ internal sealed partial class SponzaLoop
         }
         rayScene |= rayCheck;
         if (args.Int("ray-region-triangles") is { } regionTriangles) rayRegionTriangles = Math.Max(1, regionTriangles);
+        if (args.Float("ray-lod-error") is { } lodError) rayLodError = Math.Max(0f, lodError);
         if (args.Values("ray-probe", 3) is [var probeRay, var probeInstance, var probeTriangle])
         {
             rayCheckProbe = (int.Parse(probeRay, CultureInfo.InvariantCulture), int.Parse(probeInstance, CultureInfo.InvariantCulture),

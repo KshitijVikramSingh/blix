@@ -15,6 +15,9 @@ internal sealed partial class SponzaLoop
     private RayQueryScene? rayQueries;
     // --ray-region-triangles N: the most triangles a region holds before it is split (RayQueryScene).
     private int rayRegionTriangles = RayQueryScene.DefaultRegionTriangles;
+    // --ray-lod-error M: trace each mesh at its coarsest cooked level whose geometric error, carried into the world
+    // by the largest scale any of its placements gives it, stays within M metres. 0 traces full detail.
+    private float rayLodError;
 
     private RayMesh[] BuildRayMeshes(List<DrawableStaging> ordered)
     {
@@ -31,8 +34,16 @@ internal sealed partial class SponzaLoop
                 positions[v] = new Vector3(
                     BitConverter.ToSingle(s.VertexBytes, at), BitConverter.ToSingle(s.VertexBytes, at + 4), BitConverter.ToSingle(s.VertexBytes, at + 8));
             }
-            var lod0 = s.Lods[0];
-            meshes[i] = new RayMesh(positions, lod0.Indices32 ?? Array.ConvertAll(lod0.Indices16!, x => (uint)x));
+            var scale = s.Worlds.Select(w => MathF.Max(new Vector3(w.M11, w.M12, w.M13).Length(),
+                MathF.Max(new Vector3(w.M21, w.M22, w.M23).Length(), new Vector3(w.M31, w.M32, w.M33).Length()))).DefaultIfEmpty(1f).Max();
+            var level = 0;
+            for (var l = 1; l < s.Lods.Count && rayLodError > 0f; l++)
+            {
+                if (s.Lods[l].Error * scale <= rayLodError) level = l;
+                else break;
+            }
+            var lod = s.Lods[level];
+            meshes[i] = new RayMesh(positions, lod.Indices32 ?? Array.ConvertAll(lod.Indices16!, x => (uint)x));
         });
         return meshes;
     }

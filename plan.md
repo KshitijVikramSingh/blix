@@ -70,8 +70,13 @@ exactly where the world has changed.
    each, owners per triangle): camera rays enter 2.3 cells on Bistro where they entered 12.1 placements,
    8.8 on Sponza where 18.2, nodes per ray 118 -> 79 and 157 -> 110; still bit-exact; Release build 1.7 s
    and 4.3 s. A coarser cell budget no longer changes Sponza's nodes per ray (105-118 from 65k to 4M), so
-   the cost left is the full-detail triangles themselves. Next: the level of detail GI traces (full
-   detail packs to 684 MB on Sponza), then a primary-ray view held against the raster. Far-from-origin rounding (the city at
+   the cost left is the traversal itself. `--ray-lod-error M` traces each mesh's coarsest cooked level
+   within M metres: memory, not speed. Sponza packs to 781 / 475 / 234 MB at 0 / 2 cm / 20 cm and Bistro
+   to 197 / 67 / 58 MB, while nodes per probe ray stay 42-46 and 24-27 (depth is the log of the triangle
+   count) and the GPU stays bit-exact. The city does the same ~40 nodes per ray 3-4x faster from 1.3 MB of
+   nodes, so traversal is bound by memory traffic: the structural lever is compressed wide nodes (eight
+   quantised children in ~80 bytes), worth building once a consumer's ray budget says it is needed. Next:
+   a primary-ray view held against the raster, then stage 4 on top. Far-from-origin rounding (the city at
    2 km moves an entry point 0.1 mm) is the huge-worlds origin question, not a traversal one. The cook
    takes the hierarchies once the layout stops moving.
 4. *Runtime GI*: camera-relative clipmap probes traced through 3, relocated out of walls, rays amortised
