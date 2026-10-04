@@ -772,12 +772,14 @@ internal sealed partial class SponzaLoop
                 new("uTransport", new Vector4Uniform(new Vector4(
                     injectFeedback, transportOcclusion, 0f, 0f))),
             };
+            // Traced (--gi-trace, or the on-phase of --ab trace): the same probes and atlas, rays through the ray scene.
+            var traced = InjectTracedNow;
             graph.Dispatch(injectPassHandle, new DispatchCommand(
-                injectPipeline,
+                traced ? injectTracedPipeline : injectPipeline,
                 // One workgroup per probe: its 64 threads are the rays shared across all 36
                 // interior texels of that probe's tile.
                 bounceX * bounceY * bounceZ, 1, 1,
-                injectUniforms, BounceBindings()));
+                injectUniforms, BounceBindings(), Buffers: traced ? rayBlockBuffers : null));
         }
 
         // Which probes this camera needs, sampled from the previous frame's resolved depth because
@@ -1414,6 +1416,7 @@ internal sealed partial class SponzaLoop
             "normal" => "normal mapping",
             "indirect"=> "the probe-volume terms (bounce + baked sky visibility)",
             "inject"  => "the bounce injection dispatch",
+            "trace"   => "probe rays traced through the ray scene rather than marched through the occupancy grid",
             "cull"    => "camera frustum culling",
             "castercull" => "shadow caster culling against the camera",
             "sleep"   => "probes sleeping when nothing samples them",

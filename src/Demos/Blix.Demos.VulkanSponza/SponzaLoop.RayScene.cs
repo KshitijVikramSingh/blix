@@ -12,6 +12,12 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private bool rayScene;
+    // --gi-trace: the probe injection traces its rays through the ray scene (sky_inject_traced.comp) instead of
+    // marching the baked occupancy grid. --ab trace alternates the two in one process.
+    private bool giTrace;
+    private PipelineHandle injectTracedPipeline;
+    private bool InjectTracedNow => injectTracedPipeline.Id != 0 && rayBlockBuffers.Length > 0 && raySurfacesBaked
+        && (abMode == "trace" ? !AbOffPhase : giTrace);
     private RayQueryScene? rayQueries;
     // Per ray-scene placement (the transform table's order): the material a surface bake reads.
     private readonly record struct RayMaterial(TextureHandle Albedo, Vector4 BaseColor, float AlphaCutoff);
@@ -71,6 +77,7 @@ internal sealed partial class SponzaLoop
         var nodes = rayQueries.MeshNodeCount;
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] ray scene: {instances.Count:N0} placements of {meshes.Length:N0} meshes as {rayQueries.RegionCount:N0} regions (at most {rayRegionTriangles:N0} triangles) and {rayQueries.InstanceEntryCount:N0} instances, {rayQueries.StoredTriangleCount:N0} triangles stored, built in {clock.Elapsed.TotalMilliseconds:0} ms on {Environment.ProcessorCount} threads; {nodes:N0} nodes ({nodes * BvhNode.SizeInBytes / 1048576.0:0.0} MB), top level {rayQueries.Nodes.Length:N0}."));
+        if ((rayCheck || giTrace) && instances.Count > 0) BuildRayGpu();
         if (rayCheck && instances.Count > 0) BuildRayCheck();
     }
 
@@ -96,7 +103,11 @@ internal sealed partial class SponzaLoop
     // The top-level entry the probe's placement is: it must be an instance, since a region's triangles are renumbered.
     private int rayProbeEntry = -1;
 
-    private void BuildRayCheck()
+    // The ray scene on the GPU, for whatever traces it (the check, the view, the traced injection): the packed
+    // blocks, and the surface bake's inputs.
+    private ShaderBufferBinding[] rayBlockBuffers = Array.Empty<ShaderBufferBinding>();
+
+    private void BuildRayGpu()
     {
         var data = RayQueryGpuData.Pack(rayQueries!);
         rayGpuData = data;
@@ -132,7 +143,15 @@ internal sealed partial class SponzaLoop
             new ShaderBufferBinding("BakeRows", Own(device.CreateGpuBuffer(Math.Max(16, bakeRowBytes.Length), bakeRowBytes, "sponza.ray.bake-rows"))),
             new ShaderBufferBinding("BlixRaySurfaces", raySurfaces),
         };
+        rayBlockBuffers = buffers.ToArray();
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] ray scene on the GPU: {data.SizeInBytes / 1048576.0:0.0} MB ({data.Nodes.Length:N0} mesh nodes, {data.Triangles.Length / 4:N0} triangles, {data.Positions.Length:N0} vertices, {data.Instances.Length:N0} entries)."));
+    }
 
+    private void BuildRayCheck()
+    {
+        var data = rayGpuData!;
+        var buffers = rayBlockBuffers.ToList();
         var rng = new Random(20261004);
         var bounds = rayQueries!.Nodes[0].Bounds;
         Vector3 InBox() => bounds.Min + (bounds.Max - bounds.Min) * new Vector3((float)rng.NextDouble(), (float)rng.NextDouble(), (float)rng.NextDouble());
@@ -215,7 +234,7 @@ internal sealed partial class SponzaLoop
             }
         }
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] ray check: scene packed for the GPU, {data.SizeInBytes / 1048576.0:0.0} MB ({data.Nodes.Length:N0} mesh nodes, {data.Triangles.Length / 4:N0} triangles, {data.Positions.Length:N0} vertices, {data.Instances.Length:N0} placements); {RayCheckCount:N0} {rayBench ?? "check"} rays."));
+            $"[VulkanSponza] ray check: {RayCheckCount:N0} {rayBench ?? "check"} rays."));
     }
 
     // Once, on the first frame every texture is resident: one dispatch per material into the surfaces block, declared
@@ -399,7 +418,7 @@ internal sealed partial class SponzaLoop
 
     private void RecordRayView(int frameWidth, int frameHeight)
     {
-        if (!rayView || rayCheckBuffers.Length == 0 || !fullyLoaded) return;
+        if (!rayView || rayBlockBuffers.Length == 0 || !fullyLoaded) return;
         var size = (frameWidth / 2, frameHeight / 2);
         if (rayViewSize != size)
         {
@@ -409,7 +428,7 @@ internal sealed partial class SponzaLoop
         }
         Matrix4x4.Invert(viewProjJittered, out var invViewProj);
         Matrix4x4.Invert(cameraProjection, out var invProjection);
-        var buffers = rayCheckBuffers.Take(RayQueryGpuData.BlockNames.Length).Append(new ShaderBufferBinding("RayViewOut", rayViewOut)).ToArray();
+        var buffers = rayBlockBuffers.Append(new ShaderBufferBinding("RayViewOut", rayViewOut)).ToArray();
         graph.Dispatch(rayViewPassHandle, new DispatchCommand(rayViewPipeline, (size.Item1 + 7) / 8, (size.Item2 + 7) / 8, 1,
             new ShaderUniform[]
             {

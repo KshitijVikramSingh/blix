@@ -156,7 +156,8 @@ internal sealed partial class SponzaLoop
         // --ray-view: trace the camera's view and hold it against the raster at the shot (it brings the ray check with it).
         rayView = args.Flag("ray-view");
         rayCheck |= rayView;
-        rayScene |= rayCheck;
+        giTrace = args.Flag("gi-trace");
+        rayScene |= rayCheck || giTrace || abMode == "trace";
         if (args.Int("ray-region-triangles") is { } regionTriangles) rayRegionTriangles = Math.Max(1, regionTriangles);
         if (args.Float("ray-lod-error") is { } lodError) rayLodError = Math.Max(0f, lodError);
         if (args.Values("ray-probe", 3) is [var probeRay, var probeInstance, var probeTriangle])
@@ -711,6 +712,13 @@ internal sealed partial class SponzaLoop
             var injectSpv = File.ReadAllBytes(Path.Combine(shaderDir, "sky_inject.comp.spv"));
             injectProgram = Own(device.CreateComputeShaderProgramFromSpv(injectSpv, injectInterface, "sky_inject"));
             injectPipeline = Own(device.CreateComputePipeline(injectProgram, "sky_inject"));
+            if (rayScene)
+            {
+                var tracedInterface = Reflect("sky_inject_traced.comp");
+                var tracedSpv = File.ReadAllBytes(Path.Combine(shaderDir, "sky_inject_traced.comp.spv"));
+                injectTracedPipeline = Own(device.CreateComputePipeline(
+                    Own(device.CreateComputeShaderProgramFromSpv(tracedSpv, tracedInterface, "sky_inject_traced")), "sky_inject_traced"));
+            }
             // Rebuilt each frame around the write/read pair; see BounceBindings.
             injectBindings = BounceBindings();
 

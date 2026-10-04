@@ -92,7 +92,13 @@ exactly where the world has changed.
    word in `BlixRaySurfaces`: albedo (sRGB) and coverage. Traversal meets a partly covered triangle by an
    integer hash of the ray's seed, the entry and its leaf position (`RayTests.Covered`), so the CPU oracle
    flips the same coins and stays bit-exact; hits carry linear albedo. Sponza: 1.35M of 12.8M triangles
-   partly covered; the traced view's disagreement at foliage halves (5.45% -> 2.76%).
+   partly covered; the traced view's disagreement at foliage halves (5.45% -> 2.76%). 4b: `--gi-trace`
+   swaps the injection's march for traced rays into the same atlas (`sky_inject_traced.comp`; the body is
+   `sky_inject.glsl`, two programs so default runs build no ray scene; `--ab trace` alternates). Warm A/B
+   on the orbit: Bistro 20.2 against 21.9 ms, Sponza 27.5 against 28.6: faster than the march. Pictures
+   within 1.6/255 on average, traced a little brighter (Sponza's curtains and upper walls). Open: which
+   is right (`--probe-reference` is the arbiter), coloured transmission through leaves (the march had
+   it), and the probes' own placement still reads the occupancy grid (buried test).
 5. *PRT baked by the cook*: per-region probe transfer, relit by the sun at runtime: the static base and
    warm start of 4.
 
