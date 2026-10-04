@@ -58,10 +58,17 @@ exactly where the world has changed.
    hierarchies in 32-byte GPU-ready nodes, the watertight triangle test, Ize's widened box exits, hits
    in `rayQuery`'s terms (facing is the mesh's own). Built at load (`--ray-scene`), Release: Sponza
    12.8M triangles in 2.2 s and 353 MB of nodes, Bistro 2.8M in 0.87 s, the city's 123k placements in
-   0.29 s; 0.07-0.37M CPU rays/s per core. Next (3b): the same structures on the GPU, a traversal in
-   `Blix.Shaders`, tested ray for ray against this oracle (which needs a GPU buffer read back), and the
-   level of detail GI traces (full detail is 353 MB on Sponza). The cook takes the hierarchies once the
-   layout stops moving.
+   0.29 s; 0.07-0.37M CPU rays/s per core. 3b-i put them on the GPU (`RayQueryGpuData` packs five
+   blocks, `Blix.Shaders/ray_query.glsl` traverses them, `ReadGpuBuffer` reads answers back): with
+   MoltenVK's fast math off (`MVK_CONFIG_FAST_MATH_ENABLED=0`) the GPU equals the CPU oracle bit for bit
+   on 65,536 rays per scene (`--ray-check`). With it on (the default) 1-3 grazing edge hits per ~50k
+   disagree: division is not correctly rounded there; fused multiply-adds are forbidden by `precise`, which
+   is what keeps the edges watertight. `--ray-probe` runs one ray against one triangle on both. Next:
+   speed. Incoherent closest+any over the whole scene is 25M rays/s on the city, 15M on Sponza, 10M on
+   Bistro, too slow for a GI ray budget; then the level of detail GI traces (full detail packs to 684 MB
+   on Sponza), then a primary-ray view held against the raster. Far-from-origin rounding (the city at
+   2 km moves an entry point 0.1 mm) is the huge-worlds origin question, not a traversal one. The cook
+   takes the hierarchies once the layout stops moving.
 4. *Runtime GI*: camera-relative clipmap probes traced through 3, relocated out of walls, rays amortised
    over frames, dirty-region updates, capsule occluders.
 5. *PRT baked by the cook*: per-region probe transfer, relit by the sun at runtime: the static base and

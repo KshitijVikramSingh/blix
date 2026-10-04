@@ -76,6 +76,40 @@ public sealed partial class VulkanGraphicsDevice
         DestroyVkBufferEntry(entry);
     }
 
+    public unsafe byte[] ReadGpuBuffer(GpuBufferHandle handle, int offset, int length)
+    {
+        ThrowIfDisposed();
+        var entry = GetGpuBuffer(handle);
+        if (offset < 0 || length <= 0 || (ulong)offset + (ulong)length > entry.Size)
+        {
+            throw new ArgumentOutOfRangeException(nameof(length),
+                $"{length} bytes from {offset} is outside GPU buffer '{entry.Name}' ({entry.Size} bytes).");
+        }
+
+        var staging = CreateHostVisibleBuffer(new byte[length], BufferUsageFlags.TransferDstBit, $"{entry.Name}.readback");
+        var cmd = BeginSingleTimeCommands();
+        // Everything submitted before this, compute and draws alike, made visible to the copy: a pipeline barrier's
+        // first scope is every earlier command on the queue, not only this command buffer's.
+        var written = new MemoryBarrier
+        {
+            SType = StructureType.MemoryBarrier,
+            SrcAccessMask = AccessFlags.ShaderWriteBit | AccessFlags.TransferWriteBit,
+            DstAccessMask = AccessFlags.TransferReadBit,
+        };
+        Vk.CmdPipelineBarrier(cmd, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.TransferBit, 0, 1, &written, 0, null, 0, null);
+        var region = new BufferCopy { SrcOffset = (ulong)offset, DstOffset = 0, Size = (ulong)length };
+        Vk.CmdCopyBuffer(cmd, entry.Buffer, staging.Buffer, 1, &region);
+        EndSingleTimeCommands(cmd);
+
+        var bytes = new byte[length];
+        void* mapped;
+        ThrowIfNotSuccess(Vk.MapMemory(Device, staging.Memory, 0, staging.Size, 0, &mapped), "vkMapMemory(gpu-buffer readback)");
+        new ReadOnlySpan<byte>(mapped, length).CopyTo(bytes);
+        Vk.UnmapMemory(Device, staging.Memory);
+        DestroyVkBufferEntry(staging);
+        return bytes;
+    }
+
     internal VkBufferEntry GetGpuBuffer(GpuBufferHandle handle) =>
         gpuBufferTable.TryGetValue(handle.Id, out var entry)
             ? entry

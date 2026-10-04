@@ -145,6 +145,14 @@ internal sealed partial class SponzaLoop
         litFlat = args.Flag("lit-flat");
         // --ray-scene: build CPU ray-query hierarchies over the scene at load and time camera rays (SponzaLoop.RayScene).
         rayScene = args.Flag("ray-scene");
+        // --ray-check: also trace a fixed batch of rays on the GPU every frame and hold them against the CPU at the shot.
+        rayCheck = args.Flag("ray-check");
+        rayScene |= rayCheck;
+        if (args.Values("ray-probe", 3) is [var probeRay, var probeInstance, var probeTriangle])
+        {
+            rayCheckProbe = (int.Parse(probeRay, CultureInfo.InvariantCulture), int.Parse(probeInstance, CultureInfo.InvariantCulture),
+                int.Parse(probeTriangle, CultureInfo.InvariantCulture));
+        }
         // --no-occlusion: the GPU cull without its two-phase occlusion test (scene_occlusion.comp), for the A/B.
         occlusionCull = gpuCull && !args.Flag("no-occlusion");
         // --occlusion-cut: every frame is a camera cut. The early list draws nothing, so the late list carries
@@ -291,6 +299,8 @@ internal sealed partial class SponzaLoop
         // are fenced on both sides because they bind GPU buffers; the graph tracks images only.
         cullInterface = Reflect("scene_cull.comp");
         cullPassHandle = graph.ComputePass("scene-cull").Shader(cullInterface).Handle;
+        rayCheckInterface = Reflect("ray_check.comp");
+        rayCheckPassHandle = graph.ComputePass("ray-check").Shader(rayCheckInterface).Handle;
 
         // One graphics pass per cascade, each writing its own depth target.
         // Both shadow programs are render-pass-compatible with these passes.
@@ -695,6 +705,9 @@ internal sealed partial class SponzaLoop
         var cullSpv = File.ReadAllBytes(Path.Combine(shaderDir, "scene_cull.comp.spv"));
         var cullProgram = Own(device.CreateComputeShaderProgramFromSpv(cullSpv, cullInterface, "scene_cull"));
         cullPipeline = Own(device.CreateComputePipeline(cullProgram, "scene_cull"));
+        var rayCheckSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_check.comp.spv"));
+        rayCheckPipeline = Own(device.CreateComputePipeline(
+            Own(device.CreateComputeShaderProgramFromSpv(rayCheckSpv, rayCheckInterface, "ray_check")), "ray_check"));
         var occlusionSpv = File.ReadAllBytes(Path.Combine(shaderDir, "scene_occlusion.comp.spv"));
         var occlusionProgram = Own(device.CreateComputeShaderProgramFromSpv(occlusionSpv, occlusionInterface, "scene_occlusion"));
         occlusionPipeline = Own(device.CreateComputePipeline(occlusionProgram, "scene_occlusion"));

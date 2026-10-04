@@ -1,0 +1,78 @@
+#version 450
+
+// --ray-check: a fixed batch of rays traced through ray_query.glsl, closest hit and any hit, every frame, so the
+// host can read the answers back and hold them against the CPU's (SponzaLoop.RayScene). Each ray is two vec4s:
+// origin and tMin, direction and tMax. Each answer is two uvec4s: the closest hit's distance and barycentrics as
+// float bits with flags (bit 0 hit, bit 1 front face, bit 2 the any-hit answer), then its placement and triangle.
+
+layout(local_size_x = 64) in;
+
+#define BLIX_RAY_SET 0
+#define BLIX_RAY_BINDING 2
+#include "ray_query.glsl"
+
+layout(set = 0, binding = 0) uniform RayCheck {
+    vec4 uCount;   // x rays
+    vec4 uProbe;   // x ray + 1 (0 = none), y placement, z triangle: the bare triangle test, written after the answers
+} u;
+
+layout(std430, set = 0, binding = 1) readonly buffer RayCheckRays { vec4 rays[]; };
+layout(std430, set = 0, binding = 7) buffer RayCheckHits { uvec4 hits[]; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(u.uCount.x)) return;
+    vec4 o = rays[i * 2u];
+    vec4 d = rays[i * 2u + 1u];
+    BlixRayHit hit;
+    bool found = blix_traceClosest(o.xyz, d.xyz, o.w, d.w, hit);
+    bool any = blix_traceAny(o.xyz, d.xyz, o.w, d.w);
+    uint flags = (found ? 1u : 0u) | (hit.frontFace ? 2u : 0u) | (any ? 4u : 0u);
+    hits[i * 2u] = uvec4(floatBitsToUint(hit.t), floatBitsToUint(hit.barycentrics.x), floatBitsToUint(hit.barycentrics.y), flags);
+    hits[i * 2u + 1u] = uvec4(hit.instance, hit.triangle, 0u, 0u);
+
+    // The probe: this ray against one named triangle directly, no traversal, so a disagreement can be placed in
+    // the triangle test or in the hierarchy. Written after every ray's answer: hit flag, t, and the barycentrics.
+    if (uint(u.uProbe.x) == i + 1u) {
+        uint instance = uint(u.uProbe.y);
+        uint want = uint(u.uProbe.z);
+        BlixShearedRay r = blix_toInstance(o.xyz, d.xyz, instance);
+        // Find the packed triangle whose mesh index is the one named, scanning this placement's mesh leaves.
+        uint found = 0u;
+        float th = 0.0; vec2 bc = vec2(0.0); bool front = false;
+        uint root = blix_instances[instance].info.x;
+        uint stack[BLIX_RAY_STACK];
+        int top = 0;
+        stack[top++] = root;
+        bool hitIt = false;
+        while (top > 0) {
+            BlixBvhNode node = blix_nodes[stack[--top]];
+            if (node.count == 0u) { stack[top++] = node.index; stack[top++] = node.index + 1u; continue; }
+            for (uint k = 0u; k < node.count; ++k) {
+                uvec4 tri = blix_triangles[node.index + k];
+                if (tri.w != want) continue;
+                found = 1u;
+                hitIt = blix_rayTriangle(r, blix_positions[tri.x].xyz, blix_positions[tri.y].xyz, blix_positions[tri.z].xyz,
+                                         o.w, d.w, th, bc, front);
+                // The test's insides, as blix_rayTriangle computes them.
+                vec3 a = blix_positions[tri.x].xyz - r.origin;
+                vec3 b = blix_positions[tri.y].xyz - r.origin;
+                vec3 c = blix_positions[tri.z].xyz - r.origin;
+                float az = a[r.k.z], bz = b[r.k.z], cz = c[r.k.z];
+                float ax = a[r.k.x] - r.s.x * az, ay = a[r.k.y] - r.s.y * az;
+                float bx = b[r.k.x] - r.s.x * bz, by = b[r.k.y] - r.s.y * bz;
+                float cx = c[r.k.x] - r.s.x * cz, cy = c[r.k.y] - r.s.y * cz;
+                precise float pu = cx * by - cy * bx;
+                precise float pv = ax * cy - ay * cx;
+                precise float pw = bx * ay - by * ax;
+                uint n2 = uint(u.uCount.x) * 2u;
+                hits[n2 + 1u] = uvec4(floatBitsToUint(pu), floatBitsToUint(pv), floatBitsToUint(pw), uint(r.k.x | (r.k.y << 4) | (r.k.z << 8)));
+                hits[n2 + 2u] = uvec4(floatBitsToUint(r.s.x), floatBitsToUint(r.s.y), floatBitsToUint(r.s.z), 0u);
+                hits[n2 + 3u] = uvec4(floatBitsToUint(r.origin.x), floatBitsToUint(r.origin.y), floatBitsToUint(r.origin.z), 0u);
+                hits[n2 + 4u] = uvec4(floatBitsToUint(r.direction.x), floatBitsToUint(r.direction.y), floatBitsToUint(r.direction.z), 0u);
+            }
+        }
+        uint n = uint(u.uCount.x);
+        hits[n * 2u] = uvec4(found | (hitIt ? 2u : 0u), floatBitsToUint(th), floatBitsToUint(bc.x), floatBitsToUint(bc.y));
+    }
+}

@@ -40,6 +40,13 @@ public interface IGraphicsDevice : IDisposable
 
     void DestroyGpuBuffer(GpuBufferHandle handle);
 
+    /// <summary><paramref name="length"/> bytes of a GPU buffer from <paramref name="offset"/>, once everything already submitted has finished.</summary>
+    /// <remarks>
+    /// For checks, instruments and tools: it waits for the device, like <see cref="ReadTexture"/>, so not for a frame
+    /// loop. What a dispatch wrote is read after it, whichever frame recorded it, provided that frame was submitted.
+    /// </remarks>
+    byte[] ReadGpuBuffer(GpuBufferHandle handle, int offset, int length);
+
     GraphicsDeviceDiagnostics DiagnosticsSnapshot { get; }
 
     void SetDefaultRenderSurfaceSize(int width, int height);

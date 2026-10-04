@@ -6452,6 +6452,74 @@ static ShaderInterface MinimalShader() => new(new[]
         t.ExpectTrue("BV.5 a ray meeting the counter-clockwise side reports the front face", plain is { FrontFace: true });
         t.ExpectTrue("BV.5 facing is the mesh's own: mirrored through its plane, the ray meets its authored back", mirrored is { FrontFace: false });
     }
+
+    // The packed form ray_query.glsl reads, walked on the CPU the way the shader walks it: rebased node, triangle and
+    // vertex indices, top leaves naming placements directly, a shared mesh packed once, an empty mesh a dead leaf.
+    // It must give RayQueryScene's answer, so a packing fault is found here, without a device.
+    {
+        var sphere = meshes[1].Bvh;
+        var gridMesh = meshes[2].Bvh;
+        var empty = TriangleBvh.Build(Array.Empty<Vector3>(), Array.Empty<uint>());
+        var placements = new List<RayQueryScene.Instance>();
+        for (var i = 0; i < 40; i++)
+        {
+            var world = Matrix4x4.CreateScale(0.5f + (float)rng.NextDouble()) * Matrix4x4.CreateFromAxisAngle(RandomDir(), (float)rng.NextDouble() * 6f)
+                * Matrix4x4.CreateTranslation(RandomIn(25f));
+            placements.Add(new RayQueryScene.Instance(i % 10 == 3 ? empty : i % 3 == 0 ? gridMesh : sphere, world));
+        }
+        var scene = RayQueryScene.Build(placements);
+        var packed = RayQueryGpuData.Pack(scene);
+
+        (float T, int Inst, int Tri)? Walk(Ray ray)
+        {
+            var world = new ShearedRay(ray.Origin, ray.Direction);
+            (float, int, int)? best = null;
+            var t = float.PositiveInfinity;
+            var top = new Stack<uint>();
+            top.Push(0);
+            while (top.Count > 0)
+            {
+                var node = packed.TopNodes[top.Pop()];
+                if (!RayTests.Box(world, node, 0f, t, out _)) continue;
+                if (!node.IsLeaf) { top.Push(node.Index + 1); top.Push(node.Index); continue; }
+                var inst = packed.Instances[node.Index];
+                var local = new ShearedRay(Vector3.Transform(ray.Origin, inst.WorldToLocal), Vector3.TransformNormal(ray.Direction, inst.WorldToLocal));
+                var stack = new Stack<uint>();
+                stack.Push(inst.Root);
+                while (stack.Count > 0)
+                {
+                    var n = packed.Nodes[stack.Pop()];
+                    if (!RayTests.Box(local, n, 0f, t, out _)) continue;
+                    if (!n.IsLeaf) { stack.Push(n.Index + 1); stack.Push(n.Index); continue; }
+                    for (var k = 0u; k < n.Count; k++)
+                    {
+                        var at = (int)(n.Index + k) * 4;
+                        var p0 = packed.Positions[packed.Triangles[at]]; var p1 = packed.Positions[packed.Triangles[at + 1]]; var p2 = packed.Positions[packed.Triangles[at + 2]];
+                        if (RayTests.Triangle(local, new Vector3(p0.X, p0.Y, p0.Z), new Vector3(p1.X, p1.Y, p1.Z), new Vector3(p2.X, p2.Y, p2.Z), 0f, t, out var th, out _, out _))
+                        {
+                            t = th;
+                            best = (th, (int)node.Index, (int)packed.Triangles[at + 3]);
+                        }
+                    }
+                }
+            }
+            return best;
+        }
+
+        int mismatches = 0, hits = 0;
+        for (var k = 0; k < 3000; k++)
+        {
+            var ray = new Ray(RandomIn(35f), RandomDir());
+            var want = scene.Closest(ray);
+            var got = Walk(ray);
+            if (want.HasValue != got.HasValue || (want is { } w && (w.T != got!.Value.T || w.Instance != got.Value.Inst || w.Triangle != got.Value.Tri))) mismatches++;
+            if (want.HasValue) hits++;
+        }
+        t.Expect("BV.6 the packed form, walked as the shader walks it, gives RayQueryScene's answer on all 3000 rays", mismatches == 0, $"{mismatches} disagree, {hits} hit");
+        t.Expect("BV.6 a mesh placed many times is packed once",
+            packed.Nodes.Length == sphere.Nodes.Length + gridMesh.Nodes.Length + 1 && packed.Positions.Length == sphere.Positions.Length + gridMesh.Positions.Length + 1,
+            $"{packed.Nodes.Length} nodes, {packed.Positions.Length} vertices");
+    }
 }
 t.PrintSummary();
 return t.Failed;
@@ -6617,6 +6685,7 @@ sealed class RecordingDevice : IGraphicsDevice
     public void DestroyIndirectBuffer(IndirectBufferHandle handle) => throw No();
     public GpuBufferHandle CreateGpuBuffer(int sizeBytes, ReadOnlySpan<byte> initial = default, string? name = null) => throw No();
     public void DestroyGpuBuffer(GpuBufferHandle handle) => throw No();
+    public byte[] ReadGpuBuffer(GpuBufferHandle handle, int offset, int length) => throw No();
     public ShaderProgramHandle CreateShaderProgramFromSpv(byte[] vertexSpv, byte[] fragmentSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
     public ShaderProgramHandle CreateComputeShaderProgramFromSpv(byte[] computeSpv, ShaderInterface shaderInterface, string? name = null) => throw No();
     public PipelineHandle CreateComputePipeline(ShaderProgramHandle program, string? name = null) => throw No();
