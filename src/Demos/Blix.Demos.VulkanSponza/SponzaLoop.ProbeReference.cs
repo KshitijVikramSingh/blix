@@ -1,4 +1,5 @@
 using System.Numerics;
+using Blix.Geometry;
 using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
@@ -262,5 +263,103 @@ internal sealed partial class SponzaLoop
         Console.WriteLine(string.Create(Inv,
             $"    TOTAL  reference {refSum / Math.Max(1, compared):0.0000}   measured {gotSum / Math.Max(1, compared):0.0000}   "
             + $"the field is {(refSum > 1e-9 ? gotSum / refSum : 0):0.00}x the reference"));
+    }
+    // The same reference on the scene's triangles (RayQueryScene) rather than the occupancy grid, with the GPU's
+    // baked per-triangle albedo and coverage read back: the arbiter between the march and the traced injection,
+    // which the grid reference cannot be, since it shares the march's geometry. Sun only, the same probes, the same
+    // estimator; a leaf is met by its coverage, by chance, as the runtime meets it.
+    internal void WriteProbeReferenceTriangles(int probeCount, int paths, int bounces)
+    {
+        if (rayQueries is null || rayGpuData is null || !bounceReady)
+        {
+            Console.WriteLine("[VulkanSponza] triangle probe reference: needs the ray scene on the GPU (--gi-trace or --ray-check) and a bounce field.");
+            return;
+        }
+        var surfaces = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(
+            device.ReadGpuBuffer(raySurfaces, 0, rayGpuData.RowPlacements.Length * 4).AsSpan()).ToArray();
+        rayGpuData.ApplyCoverage(surfaces);
+        var irr = device.ReadTexture(bounceTextures[BounceRead], out var w, out var h, out _);
+        var toSun = -Vector3.Normalize(sunDirection);
+        var sunIrr = EffectiveSunIrradiance;
+        var scene = rayQueries;
+        var data = rayGpuData;
+
+        Vector3 Albedo(int placement, int triangle)
+        {
+            var word = surfaces[data.RowOf(placement, triangle)];
+            static float Linear(uint b) { var c = b / 255f; return c <= 0.04045f ? c / 12.92f : MathF.Pow((c + 0.055f) / 1.055f, 2.4f); }
+            return new Vector3(Linear(word & 0xFF), Linear((word >> 8) & 0xFF), Linear((word >> 16) & 0xFF));
+        }
+
+        Vector3 Normal(RayHit hit)
+        {
+            var inst = scene.Instances[hit.Instance];
+            var m = inst.Mesh;
+            var a = Vector3.Transform(m.Positions[m.Indices[hit.Triangle * 3]], inst.World);
+            var b = Vector3.Transform(m.Positions[m.Indices[hit.Triangle * 3 + 1]], inst.World);
+            var c = Vector3.Transform(m.Positions[m.Indices[hit.Triangle * 3 + 2]], inst.World);
+            var n = Vector3.Cross(b - a, c - a);
+            return n.LengthSquared() > 0f ? Vector3.Normalize(n) : Vector3.UnitY;
+        }
+
+        Vector3 Trace(Vector3 origin, Vector3 dir, int depth, Random rng)
+        {
+            var hit = scene.Closest(new Ray(origin, dir), 0f, float.PositiveInfinity, (uint)rng.Next());
+            if (hit is not { } h) return Vector3.Zero;
+            var n = Normal(h);
+            if (Vector3.Dot(n, dir) > 0f) n = -n;
+            var p = origin + dir * h.T + n * 0.01f;
+            var albedo = Albedo(h.Instance, h.Triangle);
+            var ndotl = MathF.Max(Vector3.Dot(n, toSun), 0f);
+            var direct = ndotl > 0f && !scene.Any(new Ray(p, toSun), 0f, float.PositiveInfinity, (uint)rng.Next())
+                ? sunIrr * ndotl : Vector3.Zero;
+            var outgoing = albedo * direct / MathF.PI;
+            if (depth > 0) outgoing += albedo * Trace(p, CosineHemisphereCpu(n, rng), depth - 1, rng);
+            return outgoing;
+        }
+
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] triangle probe reference — CPU path trace on the ray scene, sun only, {paths} paths x {bounces} bounces:"));
+        Console.WriteLine("    probe (x,y,z)        world            reference    measured     ratio");
+        var results = new (int X, int Y, int Z, Vector3 Origin, double Reference, double Measured)[probeCount];
+        Parallel.For(0, probeCount, s =>
+        {
+            var px = (s * 7 + 3) % bounceX;
+            var py = (s * 5 + 2) % bounceY;
+            var pz = (s * 11 + 5) % bounceZ;
+            var origin = skyVolumeMin + (new Vector3(px, py, pz) + new Vector3(0.5f)) * skyVolumeSpan / new Vector3(bounceX, bounceY, bounceZ);
+            var rng = new Random(12345 + s);
+            var acc = Vector3.Zero;
+            for (var k = 0; k < paths; k++)
+            {
+                var nrm = UniformSphereCpu(rng);
+                acc += Trace(origin, CosineHemisphereCpu(nrm, rng), bounces, rng);
+            }
+            var reference = acc * (MathF.PI / paths);
+            const int tile = 8;
+            double got = 0;
+            var n2 = 0;
+            for (var ty = 1; ty < tile - 1; ty++)
+            for (var tx = 1; tx < tile - 1; tx++)
+            {
+                var ix = px * tile + tx;
+                var iy = (py + pz * bounceY) * tile + ty;
+                if (ix >= w || iy >= h) continue;
+                var o = (iy * w + ix) * 8;
+                got += 0.2126 * (float)BitConverter.ToHalf(irr, o) + 0.7152 * (float)BitConverter.ToHalf(irr, o + 2)
+                     + 0.0722 * (float)BitConverter.ToHalf(irr, o + 4);
+                n2++;
+            }
+            results[s] = (px, py, pz, origin, 0.2126 * reference.X + 0.7152 * reference.Y + 0.0722 * reference.Z, n2 > 0 ? got / n2 : 0);
+        });
+        foreach (var r in results)
+        {
+            Console.WriteLine(string.Create(Inv,
+                $"    ({r.X,3},{r.Y,3},{r.Z,3})   ({r.Origin.X,6:0.0},{r.Origin.Y,5:0.0},{r.Origin.Z,6:0.0})   {r.Reference,9:0.0000}   {r.Measured,9:0.0000}   {(r.Reference > 1e-9 ? r.Measured / r.Reference : 0),6:0.00}x"));
+        }
+        var refMean = results.Average(r => r.Reference);
+        var gotMean = results.Average(r => r.Measured);
+        Console.WriteLine(string.Create(Inv,
+            $"    TOTAL  triangle reference {refMean:0.0000}   measured {gotMean:0.0000}   the field is {(refMean > 1e-9 ? gotMean / refMean : 0):0.00}x the triangle reference"));
     }
 }

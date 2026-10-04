@@ -618,6 +618,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     /// <summary>--no-foliage: skip the ivy and tree packs, to price alpha-cutout overdraw.</summary>
     private bool noFoliage;
     private int refBounces = 3;
+    // --ref-probes N: how many probes the references path-trace (12 by default, spread through the volume).
+    private int referenceProbes = 12;
     private Matrix4x4 prevAmbientViewProj = Matrix4x4.Identity;
     private bool ambientHistoryValid;
     // Two shadow caster pipelines: opaque casters use a push-only program (no

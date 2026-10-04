@@ -80,6 +80,7 @@ internal sealed partial class SponzaLoop
         // Zero isolates sky-fed transport from the direct-sun source for probe censuses.
         if (args.Float("sun-strength") is { } ss) sunStrength = MathF.Max(0f, ss);
         if (args.Int("ref-bounces") is { } rb) refBounces = Math.Clamp(rb, 1, 8);
+        if (args.Int("ref-probes") is { } rp) referenceProbes = Math.Clamp(rp, 1, 1024);
         if (args.String("shadow-maps") is { } shadowMaps)
         {
             var sm = shadowMaps.Split(',');
@@ -157,7 +158,8 @@ internal sealed partial class SponzaLoop
         rayView = args.Flag("ray-view");
         rayCheck |= rayView;
         giTrace = args.Flag("gi-trace");
-        rayScene |= rayCheck || giTrace || abMode == "trace";
+        // The triangle probe reference (--probe-reference) traces the ray scene too.
+        rayScene |= rayCheck || giTrace || abMode == "trace" || args.Flag("probe-reference");
         if (args.Int("ray-region-triangles") is { } regionTriangles) rayRegionTriangles = Math.Max(1, regionTriangles);
         if (args.Float("ray-lod-error") is { } lodError) rayLodError = Math.Max(0f, lodError);
         if (args.Values("ray-probe", 3) is [var probeRay, var probeInstance, var probeTriangle])

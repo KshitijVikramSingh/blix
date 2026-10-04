@@ -1064,7 +1064,11 @@ internal sealed partial class SponzaLoop
             WriteRayCheck();
             WriteRayView(Path.ChangeExtension(path, null));
             WriteProbeCensus();
-            if (probeReference) WriteProbeReference(probeCount: 12, paths: 4096, bounces: refBounces);
+            if (probeReference)
+            {
+                WriteProbeReference(probeCount: referenceProbes, paths: 4096, bounces: refBounces);
+                WriteProbeReferenceTriangles(probeCount: referenceProbes, paths: 4096, bounces: refBounces);
+            }
             WriteFrameStats();
             host.RequestClose();
         }

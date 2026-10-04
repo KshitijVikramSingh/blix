@@ -64,6 +64,11 @@ public sealed class RayQueryGpuData
     /// <summary>One per triangle row: the placement it came from, which names its material for a bake.</summary>
     public uint[] RowPlacements { get; }
 
+    /// <summary>The row holding a placement's triangle (its index in that placement's mesh): where its surface word is.</summary>
+    public int RowOf(int placement, int triangle) => rowsByPlacement[placement][triangle];
+
+    private int[][] rowsByPlacement = Array.Empty<int[]>();
+
     private readonly (TriangleBvh Bvh, uint TriangleBase)[] distinct;
 
     /// <summary>Hand baked surface words (one per triangle row) back to the CPU hierarchies as coverage, so the oracle meets the same triangles.</summary>
@@ -167,8 +172,40 @@ public sealed class RayQueryGpuData
             instances[e] = new GpuInstance(entry.WorldToLocal, root, entry.IsRegion ? RegionPlacement : (uint)entry.Placement, triangleBases[mesh], 0);
         }
 
+        // Placement and triangle back to row: a region's rows name their owners; an instance's mesh rows are shared by
+        // every placement of it, in its hierarchy's leaf order.
+        var rowsByPlacement = new int[scene.Instances.Count][];
+        for (var p = 0; p < rowsByPlacement.Length; p++) rowsByPlacement[p] = Array.Empty<int>();
+        var shared = new Dictionary<TriangleBvh, int[]>(ReferenceEqualityComparer.Instance);
+        for (var e = 0; e < scene.Entries.Count; e++)
+        {
+            var entry = scene.Entries[e];
+            var bvh = entry.Bvh;
+            var triangleBase = (int)triangleBases[bvh];
+            if (entry.IsRegion)
+            {
+                for (var pos = 0; pos < bvh.TriangleCount; pos++)
+                {
+                    var placement = entry.OwnerPlacement![bvh.Order[pos]];
+                    var triangle = entry.OwnerTriangle![bvh.Order[pos]] & ~RayQueryScene.MirroredOwner;
+                    if (rowsByPlacement[placement].Length == 0) rowsByPlacement[placement] = new int[scene.Instances[placement].Mesh.TriangleCount];
+                    rowsByPlacement[placement][triangle] = triangleBase + pos;
+                }
+            }
+            else
+            {
+                if (!shared.TryGetValue(bvh, out var rows))
+                {
+                    rows = new int[bvh.TriangleCount];
+                    for (var pos = 0; pos < bvh.TriangleCount; pos++) rows[bvh.Order[pos]] = triangleBase + pos;
+                    shared[bvh] = rows;
+                }
+                rowsByPlacement[entry.Placement] = rows;
+            }
+        }
+
         var top = scene.Nodes.Select(n => n.IsLeaf ? n with { Index = (uint)scene.Order[n.Index] } : n).ToArray();
         return new RayQueryGpuData(top, instances, nodes.ToArray(), triangles.ToArray(), positions.ToArray(), owners.ToArray(),
-            uvs.ToArray(), rowPlacements.ToArray(), triangleBases.Select(kv => (kv.Key, kv.Value)).ToArray());
+            uvs.ToArray(), rowPlacements.ToArray(), triangleBases.Select(kv => (kv.Key, kv.Value)).ToArray()) { rowsByPlacement = rowsByPlacement };
     }
 }

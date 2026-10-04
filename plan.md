@@ -96,9 +96,15 @@ exactly where the world has changed.
    swaps the injection's march for traced rays into the same atlas (`sky_inject_traced.comp`; the body is
    `sky_inject.glsl`, two programs so default runs build no ray scene; `--ab trace` alternates). Warm A/B
    on the orbit: Bistro 20.2 against 21.9 ms, Sponza 27.5 against 28.6: faster than the march. Pictures
-   within 1.6/255 on average, traced a little brighter (Sponza's curtains and upper walls). Open: which
-   is right (`--probe-reference` is the arbiter), coloured transmission through leaves (the march had
-   it), and the probes' own placement still reads the occupancy grid (buried test).
+   within 1.6/255 on average, traced a little brighter (Sponza's curtains and upper walls). The traced
+   field is the right one: `--probe-reference` now also path-traces the triangles (baked albedo and
+   coverage; the old reference traced the occupancy grid, the march's own geometry). Sun-only field
+   against it, 48 probes: Sponza march median ratio 0.73 and mean error 0.0300, traced 0.98 and 0.0027
+   (11x smaller); Bistro 0.0116 against 0.0052. The grid under-lights Sponza's arcades by about a
+   quarter, and the grid reference shares the bias (18% under the triangles). Open: coloured
+   transmission through leaves (the march had it), the probes' own placement still reads the occupancy
+   grid (buried test), and the sky term has no reference yet (traced runs 7-16% brighter with the sun
+   off).
 5. *PRT baked by the cook*: per-region probe transfer, relit by the sun at runtime: the static base and
    warm start of 4.
 
