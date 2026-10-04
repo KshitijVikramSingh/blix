@@ -75,8 +75,13 @@ exactly where the world has changed.
    to 197 / 67 / 58 MB, while nodes per probe ray stay 42-46 and 24-27 (depth is the log of the triangle
    count) and the GPU stays bit-exact. The city does the same ~40 nodes per ray 3-4x faster from 1.3 MB of
    nodes, so traversal is bound by memory traffic: the structural lever is compressed wide nodes (eight
-   quantised children in ~80 bytes), worth building once a consumer's ray budget says it is needed. Next:
-   a primary-ray view held against the raster, then stage 4 on top. Far-from-origin rounding (the city at
+   quantised children in ~80 bytes), worth building once a consumer's ray budget says it is needed. 3c:
+   `--ray-view` traces the camera's view (half resolution, through each pixel's depth sample) beside the
+   raster depth: within 1% on 94-96% of pixels, the rest alpha-tested foliage (5.4% Sponza, 0.65% Bistro:
+   rays have no alpha test yet), depth edges and LOD; with the raster at full detail too, Sponza leaves
+   48 pixels unexplained in 518,400. Hits now carry a world-space geometric normal (checked against the
+   CPU's). Next: stage 4 on this interface, starting with what the probes' rays need that a camera ray
+   does not: alpha-tested occluders and a material at the hit. Far-from-origin rounding (the city at
    2 km moves an entry point 0.1 mm) is the huge-worlds origin question, not a traversal one. The cook
    takes the hierarchies once the layout stops moving.
 4. *Runtime GI*: camera-relative clipmap probes traced through 3, relocated out of walls, rays amortised

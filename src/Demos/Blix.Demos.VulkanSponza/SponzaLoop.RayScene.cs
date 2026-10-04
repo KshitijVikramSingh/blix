@@ -160,7 +160,7 @@ internal sealed partial class SponzaLoop
             packed[i * 2 + 1] = new Vector4(direction, tMax);
         }
         var raysBuffer = Own(device.CreateGpuBuffer(packed.Length * 16, MemoryMarshal.AsBytes(packed.AsSpan()), "sponza.ray-check.rays"));
-        rayCheckHits = Own(device.CreateGpuBuffer(RayCheckCount * 32 + 80, name: "sponza.ray-check.hits"));
+        rayCheckHits = Own(device.CreateGpuBuffer(RayCheckCount * 48 + 80, name: "sponza.ray-check.hits"));
         buffers.Add(new ShaderBufferBinding("RayCheckRays", raysBuffer));
         buffers.Add(new ShaderBufferBinding("RayCheckHits", rayCheckHits));
         rayCheckBuffers = buffers.ToArray();
@@ -194,16 +194,16 @@ internal sealed partial class SponzaLoop
     private void WriteRayCheck()
     {
         if (rayCheckBuffers.Length == 0 || rayQueries is null) return;
-        var bytes = device.ReadGpuBuffer(rayCheckHits, 0, RayCheckCount * 32 + 80);
+        var bytes = device.ReadGpuBuffer(rayCheckHits, 0, RayCheckCount * 48 + 80);
         var words = MemoryMarshal.Cast<byte, uint>(bytes.AsSpan()).ToArray();
         int hits = 0, hitMismatch = 0, anyMismatch = 0, sameTriangle = 0, otherTriangle = 0, otherTriangleSameT = 0, faceMismatch = 0;
-        double maxRelT = 0, maxBary = 0;
+        double maxRelT = 0, maxBary = 0, maxNormal = 0;
         var relBuckets = new int[4];   // same triangle, relative distance error above 1e-6, 1e-5, 1e-4, 1e-3
         var worst = -1;
         var worstOther = -1;
         for (var i = 0; i < RayCheckCount; i++)
         {
-            var o = i * 8;
+            var o = i * 12;
             var gpuHit = (words[o + 3] & 1u) != 0;
             var gpuAny = (words[o + 3] & 4u) != 0;
             var cpu = rayQueries.Closest(rayCheckRays[i], 0f, rayCheckTMax[i]);
@@ -224,6 +224,15 @@ internal sealed partial class SponzaLoop
                 var b = new Vector2(BitConverter.UInt32BitsToSingle(words[o + 1]), BitConverter.UInt32BitsToSingle(words[o + 2]));
                 maxBary = Math.Max(maxBary, Vector2.Distance(b, c.Barycentrics));
                 if (((words[o + 3] & 2u) != 0) != c.FrontFace) faceMismatch++;
+                // The normal against the CPU's: the mesh triangle carried into the world, authored front, unit.
+                var mesh = rayQueries.Instances[c.Instance].Mesh;
+                var world = rayQueries.Instances[c.Instance].World;
+                var q0 = Vector3.Transform(mesh.Positions[mesh.Indices[c.Triangle * 3]], world);
+                var q1 = Vector3.Transform(mesh.Positions[mesh.Indices[c.Triangle * 3 + 1]], world);
+                var q2 = Vector3.Transform(mesh.Positions[mesh.Indices[c.Triangle * 3 + 2]], world);
+                var cpuNormal = Vector3.Normalize(Vector3.Cross(q1 - q0, q2 - q0) * (world.GetDeterminant() < 0f ? -1f : 1f));
+                var gpuNormal = new Vector3(BitConverter.UInt32BitsToSingle(words[o + 8]), BitConverter.UInt32BitsToSingle(words[o + 9]), BitConverter.UInt32BitsToSingle(words[o + 10]));
+                if (float.IsFinite(cpuNormal.X)) maxNormal = Math.Max(maxNormal, Vector3.Distance(cpuNormal, gpuNormal));
             }
             else
             {
@@ -235,7 +244,7 @@ internal sealed partial class SponzaLoop
             }
         }
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] ray check, GPU against CPU over {RayCheckCount:N0} rays ({hits:N0} hit): hit/miss differ on {hitMismatch}, any-hit on {anyMismatch}; same placement and triangle on {sameTriangle:N0}, another on {otherTriangle} ({otherTriangleSameT} of them at the same distance); distance within {maxRelT:0.0e0} relative, barycentrics within {maxBary:0.0e0}, facing differs on {faceMismatch}."));
+            $"[VulkanSponza] ray check, GPU against CPU over {RayCheckCount:N0} rays ({hits:N0} hit): hit/miss differ on {hitMismatch}, any-hit on {anyMismatch}; same placement and triangle on {sameTriangle:N0}, another on {otherTriangle} ({otherTriangleSameT} of them at the same distance); distance within {maxRelT:0.0e0} relative, barycentrics within {maxBary:0.0e0}, facing differs on {faceMismatch}, normals within {maxNormal:0.0e0}."));
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] ray check: same-triangle distance error, relative to the coordinates' scale, above 1e-6 / 1e-5 / 1e-4 / 1e-3 on {relBuckets[0]} / {relBuckets[1]} / {relBuckets[2]} / {relBuckets[3]} rays."));
         // What a closest-hit trace did per ray: nodes popped (both levels), placements entered, triangles tested.
@@ -244,9 +253,9 @@ internal sealed partial class SponzaLoop
         var tested = new long[RayCheckCount];
         for (var i = 0; i < RayCheckCount; i++)
         {
-            nodes[i] = words[i * 8 + 6];
-            entered[i] = words[i * 8 + 3] >> 8;
-            tested[i] = words[i * 8 + 7];
+            nodes[i] = words[i * 12 + 6];
+            entered[i] = words[i * 12 + 3] >> 8;
+            tested[i] = words[i * 12 + 7];
         }
         string Spread(long[] v)
         {
@@ -264,7 +273,7 @@ internal sealed partial class SponzaLoop
 
         if (rayCheckProbe is { } probe && rayProbeEntry >= 0)
         {
-            var w = RayCheckCount * 8;
+            var w = RayCheckCount * 12;
             var inst = rayQueries.Instances[probe.Instance];
             Matrix4x4.Invert(inst.World, out var inv);
             var ray = rayCheckRays[probe.Ray];
@@ -290,7 +299,7 @@ internal sealed partial class SponzaLoop
         {
             if (i < 0) continue;
             var c = rayQueries.Closest(rayCheckRays[i], 0f, rayCheckTMax[i])!.Value;
-            var o = i * 8;
+            var o = i * 12;
             var inst = rayQueries.Instances[c.Instance];
             var m = inst.Mesh;
             var p0 = m.Positions[m.Indices[c.Triangle * 3]]; var p1 = m.Positions[m.Indices[c.Triangle * 3 + 1]]; var p2 = m.Positions[m.Indices[c.Triangle * 3 + 2]];
@@ -298,6 +307,128 @@ internal sealed partial class SponzaLoop
             Console.WriteLine(string.Create(Inv,
                 $"[VulkanSponza] ray check, {label} (ray {i}): CPU t {c.T:0.######} placement {c.Instance} triangle {c.Triangle} bary {c.Barycentrics}; GPU t {BitConverter.UInt32BitsToSingle(words[o]):0.######} placement {(int)words[o + 4]} triangle {(int)words[o + 5]} bary ({BitConverter.UInt32BitsToSingle(words[o + 1]):0.####}, {BitConverter.UInt32BitsToSingle(words[o + 2]):0.####}); triangle area {area:0.######} m², placement scale det {inst.World.GetDeterminant():0.###}, direction {rayCheckRays[i].Direction}."));
         }
+    }
+
+    // --ray-view. The camera's view traced through the same scene (ray_view.comp), half resolution, beside the
+    // raster's depth at each pixel's depth sample; read back at the shot.
+    private bool rayView;
+    private ShaderInterface rayViewInterface = null!;
+    private PassHandle rayViewPassHandle;
+    private PipelineHandle rayViewPipeline;
+    private GpuBufferHandle rayViewOut;
+    private (int Width, int Height) rayViewSize;
+
+    // Where in its pixel the depth resolve's sample sits: sample 0 of the standard pattern under MSAA.
+    private Vector2 DepthSamplePoint => MsaaSamples switch
+    {
+        4 => new Vector2(0.375f, 0.125f),
+        2 => new Vector2(0.75f, 0.75f),
+        _ => new Vector2(0.5f, 0.5f),
+    };
+
+    private void RecordRayView(int frameWidth, int frameHeight)
+    {
+        if (!rayView || rayCheckBuffers.Length == 0 || !fullyLoaded) return;
+        var size = (frameWidth / 2, frameHeight / 2);
+        if (rayViewSize != size)
+        {
+            // The view is recorded at the window's size; a shot refuses a resize, so this sizes once in practice.
+            rayViewOut = Own(device.CreateGpuBuffer(size.Item1 * size.Item2 * 16, name: "sponza.ray-view"));
+            rayViewSize = size;
+        }
+        Matrix4x4.Invert(viewProjJittered, out var invViewProj);
+        Matrix4x4.Invert(cameraProjection, out var invProjection);
+        var buffers = rayCheckBuffers.Take(RayQueryGpuData.BlockNames.Length).Append(new ShaderBufferBinding("RayViewOut", rayViewOut)).ToArray();
+        graph.Dispatch(rayViewPassHandle, new DispatchCommand(rayViewPipeline, (size.Item1 + 7) / 8, (size.Item2 + 7) / 8, 1,
+            new ShaderUniform[]
+            {
+                new("uInvViewProj", new Matrix4x4Uniform(invViewProj)),
+                new("uInvProjection", new Matrix4x4Uniform(invProjection)),
+                new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
+                new("uForward", new Vector4Uniform(new Vector4(Vector3.Normalize(cameraForward), 0f))),
+                new("uSize", new Vector4Uniform(new Vector4(size.Item1, size.Item2, frameWidth, frameHeight))),
+                new("uSample", new Vector4Uniform(new Vector4(DepthSamplePoint, 0f, 0f))),
+            },
+            new[] { new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)) },
+            Buffers: buffers));
+    }
+
+    // Every pixel classified, and both pictures written: the traced view shaded by its normals, and where the two
+    // depths disagree, coloured by why.
+    private void WriteRayView(string basePath)
+    {
+        if (!rayView || rayViewSize.Width == 0 || rayQueries is null) return;
+        var (w, h) = rayViewSize;
+        var words = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(rayViewOut, 0, w * h * 16).AsSpan()).ToArray();
+        float Traced(int i) => BitConverter.UInt32BitsToSingle(words[i * 4]);
+        float Raster(int i) => BitConverter.UInt32BitsToSingle(words[i * 4 + 1]);
+
+        // What each placement is in the raster: alpha-tested (the pre-pass discards its transparent texels; a ray has no
+        // alpha test yet) or glass (not in the depth at all). The ray scene's placements are the transform table's rows.
+        var masked = new bool[sceneTransforms.Count];
+        var glass = new bool[sceneTransforms.Count];
+        foreach (var p in opaquePlacements) masked[p.Transform] = opaqueDrawables[p.Drawable].AlphaCutoff > 0f;
+        foreach (var p in blendPlacements) glass[p.Transform] = true;
+
+        int agree = 0, bothSky = 0, foliage = 0, glassCount = 0, edge = 0, other = 0, nearAgree = 0;
+        var diff = new byte[w * h * 4];
+        var shaded = new byte[w * h * 4];
+        var light = Vector3.Normalize(new Vector3(0.35f, 0.85f, 0.4f));
+        for (var y = 0; y < h; y++)
+        for (var x = 0; x < w; x++)
+        {
+            var i = y * w + x;
+            var traced = Traced(i);
+            var raster = Raster(i);
+            var placement = words[i * 4 + 2];
+            var o = i * 4;
+            (byte R, byte G, byte B) colour;
+            if (float.IsInfinity(traced) && float.IsInfinity(raster)) { bothSky++; colour = (40, 40, 40); }
+            else if (!float.IsInfinity(traced) && !float.IsInfinity(raster) && MathF.Abs(traced - raster) <= 0.01f * raster)
+            {
+                agree++;
+                if (MathF.Abs(traced - raster) <= 0.001f * raster) nearAgree++;
+                colour = (0, 110, 0);
+            }
+            else if (placement != 0xFFFFFFFFu && placement < glass.Length && glass[placement]) { glassCount++; colour = (0, 200, 220); }
+            else if (placement != 0xFFFFFFFFu && placement < masked.Length && masked[placement]) { foliage++; colour = (60, 90, 255); }
+            else
+            {
+                // An edge: the raster's depth jumps by more than 5% to a neighbour, so a sub-pixel offset picks a different surface.
+                var jump = false;
+                for (var dy = -1; dy <= 1 && !jump; dy++)
+                for (var dx = -1; dx <= 1 && !jump; dx++)
+                {
+                    var nx = x + dx; var ny = y + dy;
+                    if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                    var r = Raster(ny * w + nx);
+                    jump = float.IsInfinity(r) != float.IsInfinity(raster) || MathF.Abs(r - raster) > 0.05f * MathF.Min(r, raster);
+                }
+                if (jump) { edge++; colour = (230, 200, 0); }
+                else { other++; colour = (255, 0, 0); }
+            }
+            diff[o] = colour.R; diff[o + 1] = colour.G; diff[o + 2] = colour.B; diff[o + 3] = 255;
+
+            if (float.IsInfinity(traced)) { shaded[o] = 70; shaded[o + 1] = 90; shaded[o + 2] = 120; }
+            else
+            {
+                var packedNormal = words[i * 4 + 3];
+                float Snorm(int shift) => Math.Clamp((sbyte)((packedNormal >> shift) & 0xFF) / 127f, -1f, 1f);
+                var n = new Vector3(Snorm(0), Snorm(8), Snorm(16));
+                var l = 0.12f + 0.6f * Math.Clamp(Vector3.Dot(n, light) * 0.5f + 0.5f, 0f, 1f);
+                var v = (byte)Math.Clamp(l * 255f, 0f, 255f);
+                shaded[o] = v; shaded[o + 1] = v; shaded[o + 2] = v;
+            }
+            shaded[o + 3] = 255;
+        }
+
+        var total = w * h;
+        double Share(int n) => 100.0 * n / total;
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] ray view against the raster, {w}x{h} at each pixel's depth sample: depths agree within 1% on {Share(agree):0.00}% ({Share(nearAgree):0.00}% within 0.1%), both sky {Share(bothSky):0.00}%; disagree at alpha-tested foliage {Share(foliage):0.00}%, glass {Share(glassCount):0.00}%, depth edges {Share(edge):0.00}%, elsewhere {Share(other):0.000}% ({other} pixels)."));
+        Blix.Graphics.Images.PngWriter.WriteRgba8(basePath + ".traced.png", shaded, w, h);
+        Blix.Graphics.Images.PngWriter.WriteRgba8(basePath + ".traced-vs-raster.png", diff, w, h);
+        Console.WriteLine($"[VulkanSponza]   {basePath}.traced.png, {basePath}.traced-vs-raster.png (green agree, blue alpha-tested, cyan glass, yellow depth edge, red elsewhere)");
     }
 
     // Camera rays through a grid over the view, traced on every core, at the end of a shot: what a CPU ray costs here.

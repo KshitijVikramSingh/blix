@@ -153,6 +153,9 @@ internal sealed partial class SponzaLoop
             rayBench = bench;
             rayCheck = true;
         }
+        // --ray-view: trace the camera's view and hold it against the raster at the shot (it brings the ray check with it).
+        rayView = args.Flag("ray-view");
+        rayCheck |= rayView;
         rayScene |= rayCheck;
         if (args.Int("ray-region-triangles") is { } regionTriangles) rayRegionTriangles = Math.Max(1, regionTriangles);
         if (args.Float("ray-lod-error") is { } lodError) rayLodError = Math.Max(0f, lodError);
@@ -412,6 +415,10 @@ internal sealed partial class SponzaLoop
             .Shader(litInterface);
         if (MsaaSamples > 1) lateBuilder = lateBuilder.ResolveColor(prepassNormalResolveHandle).ResolveDepth(depthResolveHandle);
         latePrepassHandle = lateBuilder.Handle;
+
+        // --ray-view: the traced camera view beside the raster depth, after every pre-pass has drawn into it.
+        rayViewInterface = Reflect("ray_view.comp");
+        rayViewPassHandle = graph.ComputePass("ray-view").Shader(rayViewInterface).Read(SampleableSceneDepth).Handle;
 
         // The Hi-Z pyramid, immediately after the pre-pass that resolves the depth it reduces.
         // Level 0 is half the framebuffer — the same grid GTAO already works on, so its consumers
@@ -713,6 +720,9 @@ internal sealed partial class SponzaLoop
         var cullSpv = File.ReadAllBytes(Path.Combine(shaderDir, "scene_cull.comp.spv"));
         var cullProgram = Own(device.CreateComputeShaderProgramFromSpv(cullSpv, cullInterface, "scene_cull"));
         cullPipeline = Own(device.CreateComputePipeline(cullProgram, "scene_cull"));
+        var rayViewSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_view.comp.spv"));
+        rayViewPipeline = Own(device.CreateComputePipeline(
+            Own(device.CreateComputeShaderProgramFromSpv(rayViewSpv, rayViewInterface, "ray_view")), "ray_view"));
         var rayCheckSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_check.comp.spv"));
         rayCheckPipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(rayCheckSpv, rayCheckInterface, "ray_check")), "ray_check"));

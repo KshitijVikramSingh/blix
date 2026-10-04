@@ -58,6 +58,9 @@ struct BlixRayHit {
     uint triangle;
     vec2 barycentrics;
     bool frontFace;
+    // World-space geometric normal of the triangle hit, unit length, on its authored front (the side frontFace
+    // names): what shading a hit needs and rayQuery leaves to the caller.
+    vec3 normal;
 };
 
 // RayTests.BoxExitWidening: 1 + 2 * gamma(3), gamma(n) = n * 2^-24 / (1 - n * 2^-24).
@@ -123,8 +126,9 @@ bool blix_rayTriangle(BlixShearedRay r, vec3 v0, vec3 v1, vec3 v2, float tMin, f
 }
 
 // One mesh's hierarchy from its root, nearest first, shrinking tMax as hits are found (TriangleBvh.Closest).
-bool blix_traceMesh(BlixShearedRay r, uint root, float tMin, inout float tMax, out uint triangle, out vec2 barycentrics, out bool frontFace) {
+bool blix_traceMesh(BlixShearedRay r, uint root, float tMin, inout float tMax, out uint triangle, out vec2 barycentrics, out bool frontFace, out uint row) {
     triangle = 0xFFFFFFFFu;
+    row = 0u;
     barycentrics = vec2(0.0);
     frontFace = false;
     float entry;
@@ -146,6 +150,7 @@ bool blix_traceMesh(BlixShearedRay r, uint root, float tMin, inout float tMax, o
                     triangle = tri.w;
                     barycentrics = bc;
                     frontFace = front;
+                    row = node.index + k;
                 }
             }
             continue;
@@ -206,6 +211,8 @@ bool blix_traceClosest(vec3 origin, vec3 direction, float tMin, float tMax, out 
     hit.triangle = 0xFFFFFFFFu;
     hit.barycentrics = vec2(0.0);
     hit.frontFace = false;
+    hit.normal = vec3(0.0);
+    uint hitRow = 0u;
     BlixShearedRay world = blix_shear(origin, direction);
     uint stack[BLIX_RAY_STACK];
     int top = 0;
@@ -232,17 +239,25 @@ bool blix_traceClosest(vec3 origin, vec3 direction, float tMin, float tMax, out 
         }
         uint instance = node.index;
         BLIX_RAY_COUNT(1);
-        uint triangle; vec2 bc; bool front;
+        uint triangle; vec2 bc; bool front; uint row;
         float t = hit.t;
-        if (blix_traceMesh(blix_toInstance(origin, direction, instance), blix_instances[instance].info.x, tMin, t, triangle, bc, front)) {
+        if (blix_traceMesh(blix_toInstance(origin, direction, instance), blix_instances[instance].info.x, tMin, t, triangle, bc, front, row)) {
             hit.t = t;
             hit.instance = instance;   // the entry, until resolved below
             hit.triangle = triangle;
             hit.barycentrics = bc;
             hit.frontFace = front;
+            hitRow = row;
         }
     }
     if (hit.instance == 0xFFFFFFFFu) return false;
+    // The normal, from the triangle as stored: a region's is in the world already (re-wound if its placement
+    // mirrored); an instance's is carried out of mesh space by the inverse transpose of its world matrix, which for
+    // the world-to-mesh matrix stored here is its transpose.
+    uvec4 tri = blix_triangles[hitRow];
+    vec3 p0 = blix_positions[tri.x].xyz;
+    vec3 n = cross(blix_positions[tri.y].xyz - p0, blix_positions[tri.z].xyz - p0);
+    hit.normal = normalize(transpose(mat3(blix_instances[hit.instance].worldToLocal)) * n);
     // Resolve the entry to the placement: an instance is one; a region's owner row names it (RayQueryScene.Closest).
     uint placement = blix_instances[hit.instance].info.y;
     if (placement != 0xFFFFFFFFu) {

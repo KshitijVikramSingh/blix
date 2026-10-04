@@ -2,8 +2,9 @@
 
 // --ray-check: a fixed batch of rays traced through ray_query.glsl, closest hit and any hit, every frame, so the
 // host can read the answers back and hold them against the CPU's (SponzaLoop.RayScene). Each ray is two vec4s:
-// origin and tMin, direction and tMax. Each answer is two uvec4s: the closest hit's distance and barycentrics as
-// float bits with flags (bit 0 hit, bit 1 front face, bit 2 the any-hit answer), then its placement and triangle.
+// origin and tMin, direction and tMax. Each answer is three uvec4s: the closest hit's distance and barycentrics as
+// float bits with flags (bit 0 hit, bit 1 front face, bit 2 the any-hit answer, from bit 8 placements entered), then
+// its placement, triangle, nodes popped and triangles tested, then its world-space normal as float bits.
 
 layout(local_size_x = 64) in;
 
@@ -31,8 +32,9 @@ void main() {
     uvec3 work = blix_rayStats;
     bool any = u.uCount.y > 0.5 ? found : blix_traceAny(o.xyz, d.xyz, o.w, d.w);
     uint flags = (found ? 1u : 0u) | (hit.frontFace ? 2u : 0u) | (any ? 4u : 0u) | (min(work.y, 0xFFFFFFu) << 8);
-    hits[i * 2u] = uvec4(floatBitsToUint(hit.t), floatBitsToUint(hit.barycentrics.x), floatBitsToUint(hit.barycentrics.y), flags);
-    hits[i * 2u + 1u] = uvec4(hit.instance, hit.triangle, work.x, work.z);
+    hits[i * 3u] = uvec4(floatBitsToUint(hit.t), floatBitsToUint(hit.barycentrics.x), floatBitsToUint(hit.barycentrics.y), flags);
+    hits[i * 3u + 1u] = uvec4(hit.instance, hit.triangle, work.x, work.z);
+    hits[i * 3u + 2u] = uvec4(floatBitsToUint(hit.normal.x), floatBitsToUint(hit.normal.y), floatBitsToUint(hit.normal.z), 0u);
 
     // The probe: this ray against one named triangle directly, no traversal, so a disagreement can be placed in
     // the triangle test or in the hierarchy. Written after every ray's answer: hit flag, t, and the barycentrics.
@@ -68,7 +70,7 @@ void main() {
                 precise float pu = cx * by - cy * bx;
                 precise float pv = ax * cy - ay * cx;
                 precise float pw = bx * ay - by * ax;
-                uint n2 = uint(u.uCount.x) * 2u;
+                uint n2 = uint(u.uCount.x) * 3u;
                 hits[n2 + 1u] = uvec4(floatBitsToUint(pu), floatBitsToUint(pv), floatBitsToUint(pw), uint(r.k.x | (r.k.y << 4) | (r.k.z << 8)));
                 hits[n2 + 2u] = uvec4(floatBitsToUint(r.s.x), floatBitsToUint(r.s.y), floatBitsToUint(r.s.z), 0u);
                 hits[n2 + 3u] = uvec4(floatBitsToUint(r.origin.x), floatBitsToUint(r.origin.y), floatBitsToUint(r.origin.z), 0u);
@@ -76,6 +78,6 @@ void main() {
             }
         }
         uint n = uint(u.uCount.x);
-        hits[n * 2u] = uvec4(found | (hitIt ? 2u : 0u), floatBitsToUint(th), floatBitsToUint(bc.x), floatBitsToUint(bc.y));
+        hits[n * 3u] = uvec4(found | (hitIt ? 2u : 0u), floatBitsToUint(th), floatBitsToUint(bc.x), floatBitsToUint(bc.y));
     }
 }

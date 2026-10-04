@@ -721,6 +721,7 @@ internal sealed partial class SponzaLoop
             }
         });
         if (occlusionNow) RecordOcclusion(cameraCull, perFrame, frame.Width, frame.Height);
+        RecordRayView(frame.Width, frame.Height);
 
         // Flip before dispatching: the pass writes one texture while every reader — the lit pass,
         // and the pass's own multi-bounce feedback — takes the other, which is what keeps the
@@ -1058,6 +1059,7 @@ internal sealed partial class SponzaLoop
             WriteClusterCensus();
             WriteRayBenchmark();
             WriteRayCheck();
+            WriteRayView(Path.ChangeExtension(path, null));
             WriteProbeCensus();
             if (probeReference) WriteProbeReference(probeCount: 12, paths: 4096, bounces: refBounces);
             WriteFrameStats();
