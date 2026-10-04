@@ -2,16 +2,20 @@
 //
 // blix_traceClosest and blix_traceAny answer what VK_KHR_ray_query commits (distance, placement, triangle,
 // barycentrics of v1 and v2, facing in the mesh's own space), so a hardware backend can stand behind the
-// same two functions. The data is RayQueryScene's, packed by RayQueryGpuData into five storage blocks the
-// host binds by name; this file declares them at BLIX_RAY_SET, bindings BLIX_RAY_BINDING to +4:
+// same two functions. The data is RayQueryScene's, packed by RayQueryGpuData into six storage blocks the
+// host binds by name; this file declares them at BLIX_RAY_SET, bindings BLIX_RAY_BINDING to +5:
 //
-//   BlixRayTopNodes   the hierarchy over placements; a leaf's index is the placement itself
-//   BlixRayInstances  per placement: world-to-mesh matrix (column form: local = m * world), its mesh's root node
-//   BlixRayNodes      every mesh's hierarchy, end to end; an interior index names the left child of an
+//   BlixRayTopNodes   the hierarchy over entries; a leaf's index is the entry itself
+//   BlixRayInstances  per entry (a region in world space, or one instanced placement): world-to-mesh matrix
+//                     (column form: local = m * world; identity for a region), its root node, its placement
+//                     (0xFFFFFFFF for a region)
+//   BlixRayNodes      every distinct hierarchy, end to end; an interior index names the left child of an
 //                     adjacent pair, a leaf's the first of its triangles in BlixRayTriangles
-//   BlixRayTriangles  in leaf order: the three vertex indices into BlixRayPositions, and the triangle's index
-//                     in its mesh's index list
-//   BlixRayPositions  every mesh's vertex positions, end to end
+//   BlixRayTriangles  in leaf order: the three vertex indices into BlixRayPositions, then the triangle's index
+//                     in its mesh (an instance) or its row in BlixRayOwners (a region)
+//   BlixRayPositions  every hierarchy's vertex positions, end to end
+//   BlixRayOwners     per region triangle: its placement, and its index in that placement's mesh with the high
+//                     bit set when the merge swapped v1 and v2 to undo a mirror
 //
 // The tests are the CPU's (RayTests): the watertight triangle test without a double fallback, and the slab
 // test with Ize's widened exit. Each traversal keeps a stack of BLIX_RAY_STACK entries per level, the depth the
@@ -29,14 +33,24 @@
 #define BLIX_RAY_STACK 64
 #endif
 
+// BLIX_RAY_STATS: count what each trace does (nodes popped, placements entered, triangles tested) into
+// blix_rayStats, private to the invocation, for an instrument to write out. Off, it costs nothing.
+#ifdef BLIX_RAY_STATS
+uvec3 blix_rayStats = uvec3(0u);
+#define BLIX_RAY_COUNT(i) blix_rayStats[i]++
+#else
+#define BLIX_RAY_COUNT(i)
+#endif
+
 struct BlixBvhNode { vec3 lo; uint index; vec3 hi; uint count; };
-struct BlixRayInstance { mat4 worldToLocal; uvec4 info; };   // info.x = root node in BlixRayNodes
+struct BlixRayInstance { mat4 worldToLocal; uvec4 info; };   // info.x = root node, info.y = placement (0xFFFFFFFF: a region)
 
 layout(std430, set = BLIX_RAY_SET, binding = BLIX_RAY_BINDING + 0) readonly buffer BlixRayTopNodes { BlixBvhNode blix_topNodes[]; };
 layout(std430, set = BLIX_RAY_SET, binding = BLIX_RAY_BINDING + 1) readonly buffer BlixRayInstances { BlixRayInstance blix_instances[]; };
 layout(std430, set = BLIX_RAY_SET, binding = BLIX_RAY_BINDING + 2) readonly buffer BlixRayNodes { BlixBvhNode blix_nodes[]; };
 layout(std430, set = BLIX_RAY_SET, binding = BLIX_RAY_BINDING + 3) readonly buffer BlixRayTriangles { uvec4 blix_triangles[]; };
 layout(std430, set = BLIX_RAY_SET, binding = BLIX_RAY_BINDING + 4) readonly buffer BlixRayPositions { vec4 blix_positions[]; };
+layout(std430, set = BLIX_RAY_SET, binding = BLIX_RAY_BINDING + 5) readonly buffer BlixRayOwners { uvec2 blix_owners[]; };
 
 struct BlixRayHit {
     float t;
@@ -120,8 +134,10 @@ bool blix_traceMesh(BlixShearedRay r, uint root, float tMin, inout float tMax, o
     stack[top++] = root;
     while (top > 0) {
         BlixBvhNode node = blix_nodes[stack[--top]];
+        BLIX_RAY_COUNT(0);
         if (node.count > 0u) {
             for (uint k = 0u; k < node.count; ++k) {
+                BLIX_RAY_COUNT(2);
                 uvec4 tri = blix_triangles[node.index + k];
                 float th; vec2 bc; bool front;
                 if (blix_rayTriangle(r, blix_positions[tri.x].xyz, blix_positions[tri.y].xyz, blix_positions[tri.z].xyz,
@@ -196,6 +212,7 @@ bool blix_traceClosest(vec3 origin, vec3 direction, float tMin, float tMax, out 
     stack[top++] = 0u;
     while (top > 0) {
         BlixBvhNode node = blix_topNodes[stack[--top]];
+        BLIX_RAY_COUNT(0);
         float entry;
         if (!blix_rayBox(world, node, tMin, hit.t, entry)) continue;
         if (node.count == 0u) {
@@ -214,17 +231,29 @@ bool blix_traceClosest(vec3 origin, vec3 direction, float tMin, float tMax, out 
             continue;
         }
         uint instance = node.index;
+        BLIX_RAY_COUNT(1);
         uint triangle; vec2 bc; bool front;
         float t = hit.t;
         if (blix_traceMesh(blix_toInstance(origin, direction, instance), blix_instances[instance].info.x, tMin, t, triangle, bc, front)) {
             hit.t = t;
-            hit.instance = instance;
+            hit.instance = instance;   // the entry, until resolved below
             hit.triangle = triangle;
             hit.barycentrics = bc;
             hit.frontFace = front;
         }
     }
-    return hit.instance != 0xFFFFFFFFu;
+    if (hit.instance == 0xFFFFFFFFu) return false;
+    // Resolve the entry to the placement: an instance is one; a region's owner row names it (RayQueryScene.Closest).
+    uint placement = blix_instances[hit.instance].info.y;
+    if (placement != 0xFFFFFFFFu) {
+        hit.instance = placement;
+    } else {
+        uvec2 owner = blix_owners[hit.triangle];
+        hit.instance = owner.x;
+        hit.triangle = owner.y & 0x7FFFFFFFu;
+        if ((owner.y & 0x80000000u) != 0u) hit.barycentrics = hit.barycentrics.yx;
+    }
+    return true;
 }
 
 // Whether anything is hit in (tMin, tMax) (RayQueryScene.Any).

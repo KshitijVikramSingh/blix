@@ -9,15 +9,16 @@ layout(local_size_x = 64) in;
 
 #define BLIX_RAY_SET 0
 #define BLIX_RAY_BINDING 2
+#define BLIX_RAY_STATS
 #include "ray_query.glsl"
 
 layout(set = 0, binding = 0) uniform RayCheck {
-    vec4 uCount;   // x rays
-    vec4 uProbe;   // x ray + 1 (0 = none), y placement, z triangle: the bare triangle test, written after the answers
+    vec4 uCount;   // x rays, y 1 = closest hit only (--ray-bench), 0 = closest and any (--ray-check)
+    vec4 uProbe;   // x ray + 1 (0 = none), y entry (an instanced placement's), z triangle: the bare triangle test, written after the answers
 } u;
 
 layout(std430, set = 0, binding = 1) readonly buffer RayCheckRays { vec4 rays[]; };
-layout(std430, set = 0, binding = 7) buffer RayCheckHits { uvec4 hits[]; };
+layout(std430, set = 0, binding = 9) buffer RayCheckHits { uvec4 hits[]; };
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
@@ -26,10 +27,12 @@ void main() {
     vec4 d = rays[i * 2u + 1u];
     BlixRayHit hit;
     bool found = blix_traceClosest(o.xyz, d.xyz, o.w, d.w, hit);
-    bool any = blix_traceAny(o.xyz, d.xyz, o.w, d.w);
-    uint flags = (found ? 1u : 0u) | (hit.frontFace ? 2u : 0u) | (any ? 4u : 0u);
+    // What the closest-hit trace did, before the any-hit trace adds to it: nodes, placements, triangles.
+    uvec3 work = blix_rayStats;
+    bool any = u.uCount.y > 0.5 ? found : blix_traceAny(o.xyz, d.xyz, o.w, d.w);
+    uint flags = (found ? 1u : 0u) | (hit.frontFace ? 2u : 0u) | (any ? 4u : 0u) | (min(work.y, 0xFFFFFFu) << 8);
     hits[i * 2u] = uvec4(floatBitsToUint(hit.t), floatBitsToUint(hit.barycentrics.x), floatBitsToUint(hit.barycentrics.y), flags);
-    hits[i * 2u + 1u] = uvec4(hit.instance, hit.triangle, 0u, 0u);
+    hits[i * 2u + 1u] = uvec4(hit.instance, hit.triangle, work.x, work.z);
 
     // The probe: this ray against one named triangle directly, no traversal, so a disagreement can be placed in
     // the triangle test or in the hierarchy. Written after every ray's answer: hit flag, t, and the barycentrics.

@@ -63,10 +63,15 @@ exactly where the world has changed.
    MoltenVK's fast math off (`MVK_CONFIG_FAST_MATH_ENABLED=0`) the GPU equals the CPU oracle bit for bit
    on 65,536 rays per scene (`--ray-check`). With it on (the default) 1-3 grazing edge hits per ~50k
    disagree: division is not correctly rounded there; fused multiply-adds are forbidden by `precise`, which
-   is what keeps the edges watertight. `--ray-probe` runs one ray against one triangle on both. Next:
-   speed. Incoherent closest+any over the whole scene is 25M rays/s on the city, 15M on Sponza, 10M on
-   Bistro, too slow for a GI ray budget; then the level of detail GI traces (full detail packs to 684 MB
-   on Sponza), then a primary-ray view held against the raster. Far-from-origin rounding (the city at
+   is what keeps the edges watertight. `--ray-probe` runs one ray against one triangle on both. 3b-ii:
+   `--ray-bench <mixed|probe|camera>` counts each ray's work (nodes, placements entered, triangles; exact,
+   unlike GPU timings here, which moved up to 50% between batches of unchanged code). Placements of meshes
+   used once now merge into regions, cells of triangles in world space (`RayQueryScene`, 262k triangles
+   each, owners per triangle): camera rays enter 2.3 cells on Bistro where they entered 12.1 placements,
+   8.8 on Sponza where 18.2, nodes per ray 118 -> 79 and 157 -> 110; still bit-exact; Release build 1.7 s
+   and 4.3 s. A coarser cell budget no longer changes Sponza's nodes per ray (105-118 from 65k to 4M), so
+   the cost left is the full-detail triangles themselves. Next: the level of detail GI traces (full
+   detail packs to 684 MB on Sponza), then a primary-ray view held against the raster. Far-from-origin rounding (the city at
    2 km moves an entry point 0.1 mm) is the huge-worlds origin question, not a traversal one. The cook
    takes the hierarchies once the layout stops moving.
 4. *Runtime GI*: camera-relative clipmap probes traced through 3, relocated out of walls, rays amortised

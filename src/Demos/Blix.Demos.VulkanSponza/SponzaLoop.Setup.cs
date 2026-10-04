@@ -147,7 +147,14 @@ internal sealed partial class SponzaLoop
         rayScene = args.Flag("ray-scene");
         // --ray-check: also trace a fixed batch of rays on the GPU every frame and hold them against the CPU at the shot.
         rayCheck = args.Flag("ray-check");
+        if (args.String("ray-bench") is { } bench)
+        {
+            if (bench is not ("mixed" or "probe" or "camera")) throw new AppArgsException($"--ray-bench takes mixed, probe or camera, not '{bench}'.");
+            rayBench = bench;
+            rayCheck = true;
+        }
         rayScene |= rayCheck;
+        if (args.Int("ray-region-triangles") is { } regionTriangles) rayRegionTriangles = Math.Max(1, regionTriangles);
         if (args.Values("ray-probe", 3) is [var probeRay, var probeInstance, var probeTriangle])
         {
             rayCheckProbe = (int.Parse(probeRay, CultureInfo.InvariantCulture), int.Parse(probeInstance, CultureInfo.InvariantCulture),

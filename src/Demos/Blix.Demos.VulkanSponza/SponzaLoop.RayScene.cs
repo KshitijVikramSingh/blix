@@ -6,20 +6,21 @@ using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
 
-// --ray-scene: the scene under CPU ray-query hierarchies (Blix.Geometry), built at load. One TriangleBvh per
-// unique primitive over its full-detail triangles, one RayQueryScene over every placement. Stage 3's first
-// measure: whether a load-time build fits these scenes, and what a CPU ray costs in them.
+// --ray-scene: the scene under CPU ray-query hierarchies (Blix.Geometry), built at load over every primitive's
+// full-detail triangles: regions over the placements of meshes used once, an instance per placement of a mesh
+// used more. Stage 3's measure of whether a load-time build fits these scenes, and what a CPU ray costs in them.
 internal sealed partial class SponzaLoop
 {
     private bool rayScene;
     private RayQueryScene? rayQueries;
+    // --ray-region-triangles N: the most triangles a region holds before it is split (RayQueryScene).
+    private int rayRegionTriangles = RayQueryScene.DefaultRegionTriangles;
 
-    private TriangleBvh[] BuildRayMeshes(List<DrawableStaging> ordered)
+    private RayMesh[] BuildRayMeshes(List<DrawableStaging> ordered)
     {
-        var clock = Stopwatch.StartNew();
         var stride = sharedLayout.Stride;
         var position = Blix.Graphics.VertexSemantics.Of(sharedLayout)?.Position ?? 0;
-        var meshes = new TriangleBvh[ordered.Count];
+        var meshes = new RayMesh[ordered.Count];
         Parallel.For(0, ordered.Count, i =>
         {
             var s = ordered[i];
@@ -31,23 +32,18 @@ internal sealed partial class SponzaLoop
                     BitConverter.ToSingle(s.VertexBytes, at), BitConverter.ToSingle(s.VertexBytes, at + 4), BitConverter.ToSingle(s.VertexBytes, at + 8));
             }
             var lod0 = s.Lods[0];
-            var indices = lod0.Indices32 ?? Array.ConvertAll(lod0.Indices16!, x => (uint)x);
-            meshes[i] = TriangleBvh.Build(positions, indices);
+            meshes[i] = new RayMesh(positions, lod0.Indices32 ?? Array.ConvertAll(lod0.Indices16!, x => (uint)x));
         });
-        var triangles = meshes.Sum(m => (long)m.TriangleCount);
-        var nodes = meshes.Sum(m => (long)m.Nodes.Length);
-        var sah = meshes.Where(m => m.TriangleCount > 0).Select(m => BvhBuilder.SahCost(m.Nodes) / m.TriangleCount).DefaultIfEmpty(0f).Average();
-        Console.WriteLine(string.Create(Inv, 
-            $"[VulkanSponza] ray scene: {meshes.Length} mesh hierarchies over {triangles:N0} triangles in {clock.Elapsed.TotalMilliseconds:0} ms ({Environment.ProcessorCount} threads); {nodes:N0} nodes ({nodes * BvhNode.SizeInBytes / 1048576.0:0.0} MB) + order {triangles * 4 / 1048576.0:0.0} MB; mean SAH cost {sah:0.000} of testing every triangle."));
         return meshes;
     }
 
-    private void BuildRayScene(TriangleBvh[] meshes, List<RayQueryScene.Instance> instances)
+    private void BuildRayScene(RayMesh[] meshes, List<RayQueryScene.Instance> instances)
     {
         var clock = Stopwatch.StartNew();
-        rayQueries = RayQueryScene.Build(instances);
+        rayQueries = RayQueryScene.Build(instances, rayRegionTriangles);
+        var nodes = rayQueries.MeshNodeCount;
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] ray scene: top level over {instances.Count:N0} placements in {clock.Elapsed.TotalMilliseconds:0} ms, {rayQueries.Nodes.Length:N0} nodes."));
+            $"[VulkanSponza] ray scene: {instances.Count:N0} placements of {meshes.Length:N0} meshes as {rayQueries.RegionCount:N0} regions (at most {rayRegionTriangles:N0} triangles) and {rayQueries.InstanceEntryCount:N0} instances, {rayQueries.StoredTriangleCount:N0} triangles stored, built in {clock.Elapsed.TotalMilliseconds:0} ms on {Environment.ProcessorCount} threads; {nodes:N0} nodes ({nodes * BvhNode.SizeInBytes / 1048576.0:0.0} MB), top level {rayQueries.Nodes.Length:N0}."));
         if (rayCheck && instances.Count > 0) BuildRayCheck();
     }
 
@@ -64,8 +60,14 @@ internal sealed partial class SponzaLoop
     private Ray[] rayCheckRays = Array.Empty<Ray>();
     private float[] rayCheckTMax = Array.Empty<float>();
     private const int RayCheckCount = 65536;
+    // --ray-bench <mixed|probe|camera>: closest hit only, on a batch shaped like one use (null: --ray-check's mix
+    // with any-hit too). probe: 2,048 points on a grid through the scene, 32 directions each, as GI probes cast;
+    // camera: the start view's primary rays.
+    private string? rayBench;
     // --ray-probe <ray> <placement> <triangle>: also run that ray against that triangle alone on the GPU.
     private (int Ray, int Instance, int Triangle)? rayCheckProbe;
+    // The top-level entry the probe's placement is: it must be an instance, since a region's triangles are renumbered.
+    private int rayProbeEntry = -1;
 
     private void BuildRayCheck()
     {
@@ -92,10 +94,34 @@ internal sealed partial class SponzaLoop
         rayCheckTMax = new float[RayCheckCount];
         var packed = new Vector4[RayCheckCount * 2];
         var instances = rayQueries.Instances;
+        Matrix4x4.Invert(viewProj, out var invViewProj);
         for (var i = 0; i < RayCheckCount; i++)
         {
             var origin = InBox();
             var direction = Direction();
+            if (rayBench is "probe" or "camera")
+            {
+                if (rayBench == "probe")
+                {
+                    // 16 x 8 x 16 grid points, cell centres, each casting 32 random directions.
+                    var cell = i / 32;
+                    var g = new Vector3(cell % 16, (cell / 16) % 8, cell / 128);
+                    origin = bounds.Min + (bounds.Max - bounds.Min) * (g + new Vector3(0.5f)) / new Vector3(16f, 8f, 16f);
+                }
+                else
+                {
+                    // 256 x 256 over the view.
+                    var ndc = new Vector2((i % 256 + 0.5f) / 256f * 2f - 1f, (i / 256 + 0.5f) / 256f * 2f - 1f);
+                    var far = Vector4.Transform(new Vector4(ndc, 1f, 1f), invViewProj);
+                    origin = cameraPosition;
+                    direction = Vector3.Normalize(new Vector3(far.X, far.Y, far.Z) / far.W - cameraPosition);
+                }
+                rayCheckRays[i] = new Ray(origin, direction);
+                rayCheckTMax[i] = float.PositiveInfinity;
+                packed[i * 2] = new Vector4(origin, 0f);
+                packed[i * 2 + 1] = new Vector4(direction, float.PositiveInfinity);
+                continue;
+            }
             if (i % 2 == 1)
             {
                 var inst = instances[rng.Next(instances.Count)];
@@ -127,8 +153,16 @@ internal sealed partial class SponzaLoop
         buffers.Add(new ShaderBufferBinding("RayCheckRays", raysBuffer));
         buffers.Add(new ShaderBufferBinding("RayCheckHits", rayCheckHits));
         rayCheckBuffers = buffers.ToArray();
+        if (rayCheckProbe is { } probe)
+        {
+            rayProbeEntry = Array.FindIndex(data.Instances, x => x.Placement == (uint)probe.Instance);
+            if (rayProbeEntry < 0)
+            {
+                Console.WriteLine($"[VulkanSponza] ray probe: placement {probe.Instance} is merged into a region; the probe takes instanced placements only.");
+            }
+        }
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] ray check: scene packed for the GPU, {data.SizeInBytes / 1048576.0:0.0} MB ({data.Nodes.Length:N0} mesh nodes, {data.Triangles.Length / 4:N0} triangles, {data.Positions.Length:N0} vertices, {data.Instances.Length:N0} placements); {RayCheckCount:N0} rays."));
+            $"[VulkanSponza] ray check: scene packed for the GPU, {data.SizeInBytes / 1048576.0:0.0} MB ({data.Nodes.Length:N0} mesh nodes, {data.Triangles.Length / 4:N0} triangles, {data.Positions.Length:N0} vertices, {data.Instances.Length:N0} placements); {RayCheckCount:N0} {rayBench ?? "check"} rays."));
     }
 
     private void RecordRayCheck()
@@ -137,8 +171,8 @@ internal sealed partial class SponzaLoop
         graph.Dispatch(rayCheckPassHandle, new DispatchCommand(rayCheckPipeline, (RayCheckCount + 63) / 64, 1, 1,
             new ShaderUniform[]
             {
-                new("uCount", new Vector4Uniform(new Vector4(RayCheckCount, 0f, 0f, 0f))),
-                new("uProbe", new Vector4Uniform(rayCheckProbe is { } p ? new Vector4(p.Ray + 1, p.Instance, p.Triangle, 0f) : Vector4.Zero)),
+                new("uCount", new Vector4Uniform(new Vector4(RayCheckCount, rayBench is null ? 0f : 1f, 0f, 0f))),
+                new("uProbe", new Vector4Uniform(rayCheckProbe is { } p && rayProbeEntry >= 0 ? new Vector4(p.Ray + 1, rayProbeEntry, p.Triangle, 0f) : Vector4.Zero)),
             },
             Array.Empty<ShaderTextureBinding>(), Buffers: rayCheckBuffers));
     }
@@ -162,7 +196,7 @@ internal sealed partial class SponzaLoop
             var gpuHit = (words[o + 3] & 1u) != 0;
             var gpuAny = (words[o + 3] & 4u) != 0;
             var cpu = rayQueries.Closest(rayCheckRays[i], 0f, rayCheckTMax[i]);
-            if (gpuAny != cpu.HasValue) anyMismatch++;
+            if (rayBench is null && gpuAny != cpu.HasValue) anyMismatch++;
             if (gpuHit != cpu.HasValue) { hitMismatch++; continue; }
             if (cpu is not { } c) continue;
             hits++;
@@ -193,7 +227,31 @@ internal sealed partial class SponzaLoop
             $"[VulkanSponza] ray check, GPU against CPU over {RayCheckCount:N0} rays ({hits:N0} hit): hit/miss differ on {hitMismatch}, any-hit on {anyMismatch}; same placement and triangle on {sameTriangle:N0}, another on {otherTriangle} ({otherTriangleSameT} of them at the same distance); distance within {maxRelT:0.0e0} relative, barycentrics within {maxBary:0.0e0}, facing differs on {faceMismatch}."));
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] ray check: same-triangle distance error, relative to the coordinates' scale, above 1e-6 / 1e-5 / 1e-4 / 1e-3 on {relBuckets[0]} / {relBuckets[1]} / {relBuckets[2]} / {relBuckets[3]} rays."));
-        if (rayCheckProbe is { } probe)
+        // What a closest-hit trace did per ray: nodes popped (both levels), placements entered, triangles tested.
+        var nodes = new long[RayCheckCount];
+        var entered = new long[RayCheckCount];
+        var tested = new long[RayCheckCount];
+        for (var i = 0; i < RayCheckCount; i++)
+        {
+            nodes[i] = words[i * 8 + 6];
+            entered[i] = words[i * 8 + 3] >> 8;
+            tested[i] = words[i * 8 + 7];
+        }
+        string Spread(long[] v)
+        {
+            var sorted = v.OrderBy(x => x).ToArray();
+            return string.Create(Inv, $"mean {v.Average():0.0}, median {sorted[sorted.Length / 2]}, p95 {sorted[(int)(sorted.Length * 0.95)]}, max {sorted[^1]}");
+        }
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] ray work per {rayBench ?? "check"} ray, closest hit: nodes {Spread(nodes)}; placements entered {Spread(entered)}; triangles tested {Spread(tested)}; {100.0 * hits / RayCheckCount:0.0}% hit."));
+        if (host.Timing.GpuPassTotals.TryGetValue("ray-check", out var pass) && pass.Samples > 0)
+        {
+            var traced = rayBench is null ? 2 * RayCheckCount : RayCheckCount;
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] ray {(rayBench is null ? "check" : "bench")}: {pass.MeanMs:0.000} ms per dispatch over {pass.Samples} frames, {traced / pass.MeanMs / 1000.0:0.0} M rays/s{(rayBench is null ? " (closest and any)" : " (closest)")}."));
+        }
+
+        if (rayCheckProbe is { } probe && rayProbeEntry >= 0)
         {
             var w = RayCheckCount * 8;
             var inst = rayQueries.Instances[probe.Instance];

@@ -6400,81 +6400,113 @@ static ShaderInterface MinimalShader() => new(new[]
             $"{gridMisses} missed; the exhaustive oracle misses {gridOracleMisses}");
     }
 
-    // Placements: rotated, non-uniformly scaled, mirrored and translated copies, through the top level, against the
-    // exhaustive answer over every placement with the ray carried into it the same way.
+    // Placements through the top level: rotated, non-uniformly scaled, mirrored and translated copies of shared meshes
+    // (instances), and unique meshes placed once (merged into regions; a small budget makes several, and some of
+    // those placements mirror). Against an exhaustive oracle over every placement in its own space. A region traces in
+    // world space, so distances agree to rounding there rather than to the bit.
+    RayMesh AsMesh(TriangleBvh b) => new(b.Positions, b.Indices);
+    var sphereMesh = AsMesh(meshes[1].Bvh);
+    var gridMesh = AsMesh(meshes[2].Bvh);
+    List<RayQueryScene.Instance> Mixed(int count)
     {
-        var sphere = meshes[1].Bvh;
-        var gridMesh = meshes[2].Bvh;
-        var placements = new List<RayQueryScene.Instance>();
-        for (var i = 0; i < 60; i++)
+        var list = new List<RayQueryScene.Instance>();
+        for (var i = 0; i < count; i++)
         {
             var world = Matrix4x4.CreateScale(0.5f + (float)rng.NextDouble(), 0.5f + (float)rng.NextDouble(), 0.5f + (float)rng.NextDouble())
                 * Matrix4x4.CreateFromAxisAngle(RandomDir(), (float)rng.NextDouble() * 6f)
                 * (i % 9 == 0 ? Matrix4x4.CreateScale(-1f, 1f, 1f) : Matrix4x4.Identity)
                 * Matrix4x4.CreateTranslation(RandomIn(25f));
-            placements.Add(new RayQueryScene.Instance(i % 3 == 0 ? gridMesh : sphere, world));
+            // Used once (merged into a region): mostly a sphere copied into arrays of its own, sometimes a sliver soup.
+            var mesh = i % 4 == 1
+                ? (i % 8 == 5 ? new RayMesh(Soup(60).P, Soup(60).I) : new RayMesh((Vector3[])sphereMesh.Positions.Clone(), (uint[])sphereMesh.Indices.Clone()))
+                : i % 3 == 0 ? gridMesh : sphereMesh;
+            list.Add(new RayQueryScene.Instance(mesh, world));
         }
-        var scene = RayQueryScene.Build(placements);
-        int mismatches = 0, hits = 0, pointErrors = 0;
+        return list;
+    }
+    {
+        var placements = Mixed(60);
+        var scene = RayQueryScene.Build(placements, regionTriangles: 12000);
+        int mismatches = 0, hits = 0, pointErrors = 0, regionHits = 0;
+        double worst = 0;
         for (var k = 0; k < 3000; k++)
         {
             var ray = new Ray(RandomIn(35f), RandomDir());
-            (float T, int Inst)? want = null;
+            (float T, int Inst, int Tri)? want = null;
             var tBest = float.PositiveInfinity;
             for (var i = 0; i < placements.Count; i++)
             {
                 Matrix4x4.Invert(placements[i].World, out var inv);
                 var local = new ShearedRay(Vector3.Transform(ray.Origin, inv), Vector3.TransformNormal(ray.Direction, inv));
-                if (Exhaustive(placements[i].Mesh, local, 0f, tBest) is { } h) { tBest = h.T; want = (h.T, i); }
+                for (var tri = 0; tri < placements[i].Mesh.TriangleCount; tri++)
+                {
+                    if (placements[i].Mesh.Hit(local, tri, 0f, tBest, out var th, out _, out _)) { tBest = th; want = (th, i, tri); }
+                }
             }
             var got = scene.Closest(ray);
-            if (got.HasValue != want.HasValue || (got is { } g && g.T != want!.Value.T)) { mismatches++; continue; }
+            if (got.HasValue != want.HasValue) { mismatches++; continue; }
             if (got is not { } hit) continue;
             hits++;
-            // The barycentrics name the same point the distance does, once carried back to the world.
+            var rel = Math.Abs(hit.T - want!.Value.T) / Math.Max(1f, hit.T);
+            worst = Math.Max(worst, rel);
+            if ((hit.Instance != want.Value.Inst || hit.Triangle != want.Value.Tri) && rel > 1e-5) mismatches++;
+            if (placements[hit.Instance].Mesh.TriangleCount > 0 && ReferenceEquals(placements[hit.Instance].Mesh, sphereMesh) is false
+                && ReferenceEquals(placements[hit.Instance].Mesh, gridMesh) is false) regionHits++;
+            // The barycentrics and the distance name the same world point, once carried back.
             var m = placements[hit.Instance].Mesh;
             var p0 = m.Positions[m.Indices[hit.Triangle * 3]]; var p1 = m.Positions[m.Indices[hit.Triangle * 3 + 1]]; var p2 = m.Positions[m.Indices[hit.Triangle * 3 + 2]];
             var onMesh = p0 * (1 - hit.Barycentrics.X - hit.Barycentrics.Y) + p1 * hit.Barycentrics.X + p2 * hit.Barycentrics.Y;
             if (Vector3.Distance(Vector3.Transform(onMesh, placements[hit.Instance].World), ray.PointAt(hit.T)) > 1e-3f) pointErrors++;
         }
-        t.Expect("BV.4 placements: the top level gives the oracle's nearest hit on all 3000 rays", mismatches == 0, $"{mismatches} disagree, {hits} hit");
-        t.Expect("BV.4 placements: a hit's barycentrics and distance name the same world point", pointErrors == 0, $"{pointErrors} of {hits} off by more than 1 mm");
-        t.Expect("BV.4 placements: the rays exercise both answers", hits > 300 && hits < 2700, $"{hits} hit");
+        t.Expect("BV.4 the top level gives the oracle's nearest hit (placement and triangle) on all 3000 rays", mismatches == 0,
+            $"{mismatches} disagree, {hits} hit, worst distance {worst:0.0e0} relative");
+        t.Expect("BV.4 a hit's barycentrics and distance name the same world point", pointErrors == 0, $"{pointErrors} of {hits} off by more than 1 mm");
+        t.Expect("BV.4 meshes used once became several regions, shared ones instances", scene.RegionCount >= 3 && scene.InstanceEntryCount == 45,
+            $"{scene.RegionCount} regions, {scene.InstanceEntryCount} instances");
+        t.Expect("BV.4 the rays exercise both answers, and regions", hits > 300 && hits < 2700 && regionHits > 50, $"{hits} hit, {regionHits} in regions");
         t.ExpectTrue("BV.4 an empty scene answers no hit", RayQueryScene.Build(Array.Empty<RayQueryScene.Instance>()).Closest(new Ray(Vector3.Zero, Vector3.UnitX)) is null);
     }
 
-    // Front face is the counter-clockwise side, and a mirroring placement turns it inside out.
+    // Facing is the mesh's own, whether the placement stays an instance or is merged into a region: mirrored through
+    // its plane, the ray from the front meets the authored back.
     {
-        var tri = TriangleBvh.Build(new[] { Vector3.Zero, Vector3.UnitX, Vector3.UnitY }, new uint[] { 0, 1, 2 });
+        var tri = new RayMesh(new[] { Vector3.Zero, Vector3.UnitX, Vector3.UnitY }, new uint[] { 0, 1, 2 });
         var fromFront = new Ray(new Vector3(0.2f, 0.2f, 1f), -Vector3.UnitZ);
+        var mirror = Matrix4x4.CreateScale(1f, 1f, -1f);
+        var far = Matrix4x4.CreateTranslation(0f, 0f, -50f);
         var plain = RayQueryScene.Build(new[] { new RayQueryScene.Instance(tri, Matrix4x4.Identity) }).Closest(fromFront);
-        var mirrored = RayQueryScene.Build(new[] { new RayQueryScene.Instance(tri, Matrix4x4.CreateScale(1f, 1f, -1f)) }).Closest(fromFront);
+        var mirroredRegion = RayQueryScene.Build(new[] { new RayQueryScene.Instance(tri, mirror) });
+        var mirroredInstance = RayQueryScene.Build(new[] { new RayQueryScene.Instance(tri, mirror), new RayQueryScene.Instance(tri, far) });
         t.ExpectTrue("BV.5 a ray meeting the counter-clockwise side reports the front face", plain is { FrontFace: true });
-        t.ExpectTrue("BV.5 facing is the mesh's own: mirrored through its plane, the ray meets its authored back", mirrored is { FrontFace: false });
+        t.Expect("BV.5 mirrored and merged into a region, the ray meets its authored back, barycentrics in its own vertices",
+            mirroredRegion.RegionCount == 1 && mirroredRegion.Closest(fromFront) is { FrontFace: false } h
+            && Vector2.Distance(h.Barycentrics, new Vector2(0.2f, 0.2f)) < 1e-5f, $"{mirroredRegion.Closest(fromFront)}");
+        t.Expect("BV.5 mirrored and instanced, the same", mirroredInstance.InstanceEntryCount == 2 && mirroredInstance.Closest(fromFront) is { FrontFace: false },
+            $"{mirroredInstance.Closest(fromFront)}");
+        var skewed = new RayMesh(new[] { Vector3.Zero, new Vector3(2f, 0f, 0f), new Vector3(0f, 1f, 0f) }, new uint[] { 0, 1, 2 });
+        var skewHit = RayQueryScene.Build(new[] { new RayQueryScene.Instance(skewed, mirror) }).Closest(new Ray(new Vector3(0.5f, 0.25f, 1f), -Vector3.UnitZ));
+        t.Expect("BV.5 a merged mirrored hit's barycentrics are its own v1 and v2, swapped back", skewHit is { } sk
+            && Vector2.Distance(sk.Barycentrics, new Vector2(0.25f, 0.25f)) < 1e-5f, $"{skewHit}");
     }
 
-    // The packed form ray_query.glsl reads, walked on the CPU the way the shader walks it: rebased node, triangle and
-    // vertex indices, top leaves naming placements directly, a shared mesh packed once, an empty mesh a dead leaf.
-    // It must give RayQueryScene's answer, so a packing fault is found here, without a device.
+    // The packed form ray_query.glsl reads, walked on the CPU the way the shader walks it: top leaves naming entries,
+    // rebased node, triangle and vertex indices, owners resolving a region's hit, a shared mesh packed once, an empty
+    // mesh a dead leaf. It must give RayQueryScene's answer to the bit, so a packing fault is found here, without a device.
     {
-        var sphere = meshes[1].Bvh;
-        var gridMesh = meshes[2].Bvh;
-        var empty = TriangleBvh.Build(Array.Empty<Vector3>(), Array.Empty<uint>());
-        var placements = new List<RayQueryScene.Instance>();
-        for (var i = 0; i < 40; i++)
-        {
-            var world = Matrix4x4.CreateScale(0.5f + (float)rng.NextDouble()) * Matrix4x4.CreateFromAxisAngle(RandomDir(), (float)rng.NextDouble() * 6f)
-                * Matrix4x4.CreateTranslation(RandomIn(25f));
-            placements.Add(new RayQueryScene.Instance(i % 10 == 3 ? empty : i % 3 == 0 ? gridMesh : sphere, world));
-        }
-        var scene = RayQueryScene.Build(placements);
+        var empty = new RayMesh(Array.Empty<Vector3>(), Array.Empty<uint>());
+        var placements = Mixed(40);
+        placements.Add(new RayQueryScene.Instance(empty, Matrix4x4.Identity));
+        placements.Add(new RayQueryScene.Instance(empty, Matrix4x4.CreateTranslation(3f, 0f, 0f)));
+        var scene = RayQueryScene.Build(placements, regionTriangles: 12000);
         var packed = RayQueryGpuData.Pack(scene);
 
-        (float T, int Inst, int Tri)? Walk(Ray ray)
+        (float T, int Inst, int Tri, Vector2 Bary)? Walk(Ray ray)
         {
             var world = new ShearedRay(ray.Origin, ray.Direction);
-            (float, int, int)? best = null;
             var t = float.PositiveInfinity;
+            var bestEntry = -1;
+            var bestRow = 0u;
+            Vector2 bestBary = default;
             var top = new Stack<uint>();
             top.Push(0);
             while (top.Count > 0)
@@ -6495,15 +6527,21 @@ static ShaderInterface MinimalShader() => new(new[]
                     {
                         var at = (int)(n.Index + k) * 4;
                         var p0 = packed.Positions[packed.Triangles[at]]; var p1 = packed.Positions[packed.Triangles[at + 1]]; var p2 = packed.Positions[packed.Triangles[at + 2]];
-                        if (RayTests.Triangle(local, new Vector3(p0.X, p0.Y, p0.Z), new Vector3(p1.X, p1.Y, p1.Z), new Vector3(p2.X, p2.Y, p2.Z), 0f, t, out var th, out _, out _))
+                        if (RayTests.Triangle(local, new Vector3(p0.X, p0.Y, p0.Z), new Vector3(p1.X, p1.Y, p1.Z), new Vector3(p2.X, p2.Y, p2.Z), 0f, t, out var th, out var bc, out _))
                         {
                             t = th;
-                            best = (th, (int)node.Index, (int)packed.Triangles[at + 3]);
+                            bestEntry = (int)node.Index;
+                            bestRow = packed.Triangles[at + 3];
+                            bestBary = bc;
                         }
                     }
                 }
             }
-            return best;
+            if (bestEntry < 0) return null;
+            var e = packed.Instances[bestEntry];
+            if (e.Placement != RayQueryGpuData.RegionPlacement) return (t, (int)e.Placement, (int)bestRow, bestBary);
+            var owner = packed.Owners[bestRow * 2 + 1];
+            return (t, (int)packed.Owners[bestRow * 2], (int)(owner & 0x7FFFFFFFu), (owner & 0x80000000u) != 0 ? new Vector2(bestBary.Y, bestBary.X) : bestBary);
         }
 
         int mismatches = 0, hits = 0;
@@ -6512,13 +6550,15 @@ static ShaderInterface MinimalShader() => new(new[]
             var ray = new Ray(RandomIn(35f), RandomDir());
             var want = scene.Closest(ray);
             var got = Walk(ray);
-            if (want.HasValue != got.HasValue || (want is { } w && (w.T != got!.Value.T || w.Instance != got.Value.Inst || w.Triangle != got.Value.Tri))) mismatches++;
+            if (want.HasValue != got.HasValue
+                || (want is { } w && (w.T != got!.Value.T || w.Instance != got.Value.Inst || w.Triangle != got.Value.Tri || w.Barycentrics != got.Value.Bary))) mismatches++;
             if (want.HasValue) hits++;
         }
-        t.Expect("BV.6 the packed form, walked as the shader walks it, gives RayQueryScene's answer on all 3000 rays", mismatches == 0, $"{mismatches} disagree, {hits} hit");
-        t.Expect("BV.6 a mesh placed many times is packed once",
-            packed.Nodes.Length == sphere.Nodes.Length + gridMesh.Nodes.Length + 1 && packed.Positions.Length == sphere.Positions.Length + gridMesh.Positions.Length + 1,
-            $"{packed.Nodes.Length} nodes, {packed.Positions.Length} vertices");
+        t.Expect("BV.6 the packed form, walked as the shader walks it, gives RayQueryScene's answer to the bit on all 3000 rays", mismatches == 0, $"{mismatches} disagree, {hits} hit");
+        var distinctVertices = scene.Instances.Where(p => p.Mesh.TriangleCount > 0).Select(p => p.Mesh).Distinct(ReferenceEqualityComparer.Instance)
+            .Cast<RayMesh>().Sum(m => m.Positions.Length);
+        t.Expect("BV.6 every mesh's vertices are packed once, a shared mesh's included, plus one for the empty mesh",
+            packed.Positions.Length == distinctVertices + 1 && scene.RegionCount >= 2, $"{packed.Positions.Length} packed, {distinctVertices} distinct, {scene.RegionCount} regions");
     }
 }
 t.PrintSummary();
