@@ -66,6 +66,7 @@
     <GlslShader Include="Shaders\ray_surface_bake.comp" />
     <GlslShader Include="Shaders\clipmap_inject.comp" />
     <GlslShader Include="Shaders\screen_probe.comp" />
+    <GlslShader Include="Shaders\screen_probe_filter.comp" />
     <GlslShader Include="Shaders\incident_clipmap.frag" />
     <GlslShader Include="Shaders\present.vert" />
     <GlslShader Include="Shaders\incident.frag" />

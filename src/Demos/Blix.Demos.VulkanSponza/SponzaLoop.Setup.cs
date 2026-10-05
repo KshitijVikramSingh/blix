@@ -168,6 +168,13 @@ internal sealed partial class SponzaLoop
         if (args.Float("clipmap-unknown-sky") is { } unknownSky) clipmapUnknownSky = Math.Clamp(unknownSky, 0f, 1f);
         // --gi-screen-probes: the per-tile gather over the clipmap (SponzaLoop.ScreenProbes); it needs the clipmap.
         screenProbesEnabled = args.Flag("gi-screen-probes");
+        // --no-taa: no TAA and so no sub-pixel jitter: the control for --stability, whose variation otherwise
+        // counts every edge the jitter moves.
+        if (args.Flag("no-taa")) render.Taa = 0f;
+        // --stability K: per-pixel temporal variation over the K still frames before the shot (SponzaLoop.Stability).
+        if (args.Int("stability") is { } stability) stabilityFrames = Math.Max(2, stability);
+        if (args.Int("clipmap-freeze") is { } freeze) clipmapFreeze = Math.Max(1, freeze);
+        if (args.Int("screen-probe-filter") is { } spFilter) screenProbeFilterRadius = Math.Clamp(spFilter, 0, 4);
         if (args.Int("screen-probe-ablate") is { } ablate) screenProbeAblate = ablate;
         if (args.Int("orbit-frames") is { } orbitFrames) OrbitFrames = Math.Max(2, orbitFrames);
         if (screenProbesEnabled && !clipmapEnabled) throw new AppArgsException("--gi-screen-probes needs --gi-clipmap: its rays read the clipmap where they hit.");
@@ -492,6 +499,8 @@ internal sealed partial class SponzaLoop
             .Read(SampleablePrepassNormal);
         for (var c = 0; c < CascadeCount; c++) screenProbeBuilder = screenProbeBuilder.Read(cascadeHandles[c]);
         screenProbePassHandle = screenProbeBuilder.Shader(screenProbeInterface).Handle;
+        screenProbeFilterInterface = Reflect("screen_probe_filter.comp");
+        screenProbeFilterPassHandle = graph.ComputePass("screen-probe-filter").Shader(screenProbeFilterInterface).Handle;
 
         incidentPassHandle = graph.GraphicsPass("incident-light")
             .Target(incidentHandle, LoadOp.Clear, StoreOp.Store)
@@ -773,6 +782,9 @@ internal sealed partial class SponzaLoop
         var screenProbeSpv = File.ReadAllBytes(Path.Combine(shaderDir, "screen_probe.comp.spv"));
         screenProbePipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(screenProbeSpv, screenProbeInterface, "screen_probe")), "screen_probe"));
+        var screenProbeFilterSpv = File.ReadAllBytes(Path.Combine(shaderDir, "screen_probe_filter.comp.spv"));
+        screenProbeFilterPipeline = Own(device.CreateComputePipeline(
+            Own(device.CreateComputeShaderProgramFromSpv(screenProbeFilterSpv, screenProbeFilterInterface, "screen_probe_filter")), "screen_probe_filter"));
         var bakeSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_surface_bake.comp.spv"));
         raySurfaceBakePipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(bakeSpv, raySurfaceBakeInterface, "ray_surface_bake")), "ray_surface_bake"));

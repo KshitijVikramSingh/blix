@@ -28,6 +28,9 @@ internal sealed partial class SponzaLoop
     private PassHandle clipmapPassHandle;
     private PipelineHandle clipmapPipeline;
     private int clipmapFrame;
+    // --clipmap-freeze N: stop solving after N frames, the clipmap then held as it is: a control for what its own
+    // re-solving moves (every 512 probes a frame re-blended at 25%).
+    private int clipmapFreeze = int.MaxValue;
     private ShaderInterface incidentClipmapInterface = null!;
     private PipelineHandle incidentClipmapPipeline;
 
@@ -94,6 +97,7 @@ internal sealed partial class SponzaLoop
     private void RecordClipmap()
     {
         if (clipmap is null || rayBlockBuffers.Length == 0 || !raySurfacesBaked) return;
+        if (clipmapFrame >= clipmapFreeze) return;
         clipmap.Follow(cameraPosition);
         var origins = new Vector4[4];
         for (var l = 0; l < ClipmapLevels; l++) origins[l] = new Vector4(clipmap.Origins[l].X, clipmap.Origins[l].Y, clipmap.Origins[l].Z, 0f);

@@ -1048,6 +1048,7 @@ internal sealed partial class SponzaLoop
         // Capture only a completed lit arm after at least one prior fully loaded frame has populated
         // readback targets. Deadlines use post-load frames and require a useful timing sample set.
         var measuredFrames = postLoadFrames;
+        SampleStability();
         if (shotPath is { } path && !shotWritten && fullyLoaded && !AbOffPhase
             && framePeriodCount >= 60 && measuredFrames >= shotFrame)
         {
@@ -1066,6 +1067,7 @@ internal sealed partial class SponzaLoop
             // output can be inspected without the 3x3 bilateral neighbourhood.
             WriteAmbientRaw(Path.ChangeExtension(path, null) + ".raw.png");
             WriteSceneShot(Path.ChangeExtension(path, null) + ".scene.png");
+            WriteStability(Path.ChangeExtension(path, null));
             LeakCensus();
             WritePassBreakdown();
             WriteLodCensus();

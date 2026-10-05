@@ -9,8 +9,12 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private bool screenProbesEnabled;
-    // --screen-probe-history N: frames a probe's radiance averages over at most.
-    private float screenProbeHistory = 64f;
+    // --screen-probe-history N: frames a probe's radiance averages over at most. 256: at 64 a probe's average kept
+    // wandering by its last few rays, and --stability (TAA off, still camera) measured the incident light varying
+    // 2.02% (median pixel) with the clipmap frozen, against 0.51% at 256. The price is lag: a change in the light
+    // takes ~4 s to settle in (adaptive history, short when the estimate disagrees with its past, is the fix when
+    // something in a scene changes its lighting).
+    private float screenProbeHistory = 256f;
     // --screen-probe-ablate N: drop parts of the trace to attribute its cost (screen_probe.comp, uParams.w).
     private int screenProbeAblate;
     private ShaderInterface screenProbeInterface = null!;
@@ -22,6 +26,13 @@ internal sealed partial class SponzaLoop
     private GpuBufferHandle screenProbeDummy;
     private GpuBufferHandle screenProbeTileDummy;
     private GpuBufferHandle screenProbeStats;
+    // The spatially filtered probes the incident pass reads (screen_probe_filter.comp); the next frame accumulates
+    // from the unfiltered ones. --screen-probe-filter R: radius in tiles, 0 a copy.
+    private ShaderInterface screenProbeFilterInterface = null!;
+    private PassHandle screenProbeFilterPassHandle;
+    private PipelineHandle screenProbeFilterPipeline;
+    private GpuBufferHandle screenProbeFiltered;
+    private int screenProbeFilterRadius = 1;
     private (int X, int Y) screenProbeTiles;
     private int screenProbeCurrent;
     private int screenProbeFrame;
@@ -50,6 +61,7 @@ internal sealed partial class SponzaLoop
                 screenProbeTileBuffers[i] = Own(device.CreateGpuBuffer(tiles.Item1 * tiles.Item2 * ScreenProbeTileBytes, name: $"sponza.screen-probe-tiles.{i}"));
             }
             screenProbeTiles = tiles;
+            screenProbeFiltered = Own(device.CreateGpuBuffer(tiles.Item1 * tiles.Item2 * ScreenProbeBytes, name: "sponza.screen-probes.filtered"));
             if (screenProbeStats.Equals(default(GpuBufferHandle))) screenProbeStats = Own(device.CreateGpuBuffer(32, name: "sponza.screen-probe-stats"));
             screenProbeHistoryValid = false;
         }
@@ -103,6 +115,19 @@ internal sealed partial class SponzaLoop
                 .Append(new ShaderBufferBinding("ScreenProbeTilesCurrent", currentTiles))
                 .Append(new ShaderBufferBinding("ScreenProbesCurrent", current))
                 .Append(new ShaderBufferBinding("ScreenProbeStats", screenProbeStats)).ToArray()));
+        graph.Dispatch(screenProbeFilterPassHandle, new DispatchCommand(screenProbeFilterPipeline, (count + 63) / 64, 1, 1,
+            new ShaderUniform[]
+            {
+                new("uTarget", new Vector4Uniform(new Vector4(frameWidth, frameHeight, tiles.Item1, tiles.Item2))),
+                new("uParams", new Vector4Uniform(new Vector4(screenProbeFilterRadius, 0f, 0f, 0f))),
+            },
+            Array.Empty<ShaderTextureBinding>(),
+            Buffers: new[]
+            {
+                new ShaderBufferBinding("ScreenProbeTiles", currentTiles),
+                new ShaderBufferBinding("ScreenProbes", current),
+                new ShaderBufferBinding("ScreenProbesFiltered", screenProbeFiltered),
+            }));
         screenProbePrevViewProj = viewProj;
         screenProbeHistoryValid = true;
         screenProbeFrame++;
@@ -114,7 +139,7 @@ internal sealed partial class SponzaLoop
         if (ScreenProbesActive && screenProbeTiles.X > 0)
         {
             return (new Vector4(1f, screenProbeTiles.X, screenProbeTiles.Y, 0f), new Vector4(frameWidth, frameHeight, 0f, 0f),
-                screenProbeTileBuffers[screenProbeCurrent], screenProbeBuffers[screenProbeCurrent]);
+                screenProbeTileBuffers[screenProbeCurrent], screenProbeFiltered);
         }
         if (screenProbeDummy.Equals(default(GpuBufferHandle)))
         {

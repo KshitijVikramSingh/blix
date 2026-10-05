@@ -158,7 +158,17 @@ exactly where the world has changed.
    frame (whole workgroups skip; a checkerboard would idle lanes in busy SIMD groups): 15.0 -> 8.6-10.1
    ms. At 1500 frames: Sponza 8.9 ms, as shaded median 1.00, |err| 0.0060 (0.97, 0.0058 before the
    cuts); Bistro 4.9 ms (from 18.9), 0.96, 0.031. Open: the half that does not trace still costs ~4
-   ms on Sponza (history search: up to 9 candidates, a depth fetch for visibility each). Found on the way and fixed: the
+   ms on Sponza (history search: up to 9 candidates, a depth fetch for visibility each).
+   NOT SETTLING (the user, twice): `--stability K` reads the incident light and the final HDR every
+   frame for K still frames; with `--no-taa` (jitter otherwise counts every edge) the default field
+   varies 0.08% (median pixel), the clipmap 0.01% (p99 6.8%: its own re-solving, 0.00% frozen),
+   screen probes 2.04% with 51% of pixels over 2%. Not the clipmap (frozen: still 2.02%); the probes'
+   own running average at a 64-frame cap (256: 0.51%), and only 1.4x from a spatial filter alone.
+   Now: history 256 + a 3x3 same-surface filter (`screen_probe_filter.comp`, 0.17 ms, read-only:
+   accumulation continues unfiltered): Sponza 0.37%, 1.8% of pixels over 2% (clipmap 8.8%, default
+   2.3%); Bistro 0.15%, 0.2% (clipmap 2.9%). Accuracy unchanged (Sponza 1.01, 0.0058; Bistro 0.95,
+   0.030). Price: ~4 s for a lighting change to settle in; adaptive history is the fix when a scene
+   changes its light. MoltenVK 1.4.1 here has no VK_EXT_mesh_shader (descriptor indexing: yes). Found on the way and fixed: the
    probe cook integrated diffuse irradiance with 64 samples a texel, which a bright aureole turned into
    +-25% texel noise (straight up, every floor's lookup, read 1.47x high); 4096 now (probe recipe 2). 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
    material, 16 area-stratified samples per triangle at a footprint-matched mip) gives every triangle a

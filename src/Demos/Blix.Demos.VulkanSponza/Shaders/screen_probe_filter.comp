@@ -1,0 +1,65 @@
+#version 450
+
+// Screen probes, filtered in space (screen_probe.glsl): each probe's radiance averaged with its neighbours' on the
+// same surface, for the incident pass to read. A probe's own average keeps wandering by its last few rays (8 a
+// traced frame, folded in at 1/64): measured by --stability with TAA's jitter off, it left the incident light
+// varying 2.0% (median pixel) frame to frame where the clipmap alone holds to 0.01%. Neighbours' estimates are
+// independent, so averaging them divides that noise without waiting for more frames.
+//
+// What is written here is for reading only: the next frame's accumulation continues from the UNFILTERED probes, so
+// the blur never compounds across frames.
+//
+// A neighbour counts by: a spatial falloff (uParams.x tiles out), its normal against this one's (^8, as the
+// incident pass weighs), how far it lies off this probe's plane (2% of the depth), and how settled it is (its
+// accumulated frames, full from 8). A tile header names each tile's probes; this probe's own header is copied.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform ScreenProbeFilter {
+    vec4 uTarget;   // zw tiles across and down
+    vec4 uParams;   // x radius in tiles (0: a copy)
+} u;
+
+#include "screen_probe.glsl"
+layout(std430, set = 0, binding = 1) readonly buffer ScreenProbeTiles { ScreenProbeTile tileHeaders[]; };
+layout(std430, set = 0, binding = 2) readonly buffer ScreenProbes { ScreenProbe probes[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer ScreenProbesFiltered { ScreenProbe filtered[]; };
+
+void main() {
+    int index = int(gl_GlobalInvocationID.x);
+    ivec2 tiles = ivec2(u.uTarget.zw);
+    if (index >= tiles.x * tiles.y) return;
+    ScreenProbe self = probes[index];
+    ScreenProbe outProbe = self;
+    if (self.position.w <= 0.0) { filtered[index] = outProbe; return; }
+
+    ivec2 tile = ivec2(index % tiles.x, index / tiles.x);
+    int radius = int(u.uParams.x + 0.5);
+    vec3 n = self.normal.xyz;
+    float depth = self.position.w;
+    vec3 sum[9];
+    for (int i = 0; i < 9; ++i) sum[i] = vec3(0.0);
+    float weight = 0.0;
+    for (int dy = -radius; dy <= radius; ++dy)
+    for (int dx = -radius; dx <= radius; ++dx) {
+        ivec2 t = tile + ivec2(dx, dy);
+        if (any(lessThan(t, ivec2(0))) || any(greaterThanEqual(t, tiles))) continue;
+        ScreenProbeTile header = tileHeaders[t.y * tiles.x + t.x];
+        for (uint j = 0u; j < min(header.y, uint(SCREEN_PROBE_MAX_PER_TILE)); ++j) {
+            int k = int(header.x + j);
+            float settled = min(probes[k].normal.w / 8.0, 1.0);
+            if (settled <= 0.0) continue;
+            float facing = max(dot(probes[k].normal.xyz, n), 0.0);
+            float plane = abs(dot(n, probes[k].position.xyz - self.position.xyz));
+            float falloff = exp(-float(dx * dx + dy * dy) / max(float(radius * radius), 1.0));
+            float w = falloff * pow(facing, 8.0) * exp(-plane / (0.02 * depth)) * settled;
+            if (w <= 1e-5) continue;
+            for (int i = 0; i < 9; ++i) sum[i] += w * probes[k].radiance[i].rgb;
+            weight += w;
+        }
+    }
+    if (weight > 1e-5) {
+        for (int i = 0; i < 9; ++i) outProbe.radiance[i] = vec4(sum[i] / weight, 0.0);
+    }
+    filtered[index] = outProbe;
+}
