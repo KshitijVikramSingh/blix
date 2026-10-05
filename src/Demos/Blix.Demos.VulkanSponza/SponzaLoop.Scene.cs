@@ -312,7 +312,8 @@ internal sealed partial class SponzaLoop
         // blend buckets (bundle order == ordered order). Each drawable's placements follow as one
         // contiguous run of its bucket's placement list, and every placement takes a row of the
         // transform table.
-        var rayMeshes = rayScene ? BuildRayMeshes(ordered) : null;
+        // Traced GI needs the ray scene only where there is a probe field to inject into.
+        var rayMeshes = rayScene || (giTrace && bounceReady) ? BuildRayMeshes(ordered) : null;
         var rayInstances = new List<RayQueryScene.Instance>();
         var nonUniform = 0;
         for (var i = 0; i < ordered.Count; i++)

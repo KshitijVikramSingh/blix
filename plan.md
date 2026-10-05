@@ -101,7 +101,9 @@ exactly where the world has changed.
    coverage; the old reference traced the occupancy grid, the march's own geometry). Sun-only field
    against it, 48 probes: Sponza march median ratio 0.73 and mean error 0.0300, traced 0.98 and 0.0027
    (11x smaller); Bistro 0.0116 against 0.0052. The grid under-lights Sponza's arcades by about a
-   quarter, and the grid reference shares the bias (18% under the triangles). Open: coloured
+   quarter, and the grid reference shares the bias (18% under the triangles). Traced is now the
+   default (`--gi-march` for the A/B), tracing at 2 cm (`--ray-lod-error`; same error against the
+   full-detail reference, Sponza 506 MB on the GPU), built only where there is a probe field. Open: coloured
    transmission through leaves (the march had it), the probes' own placement still reads the occupancy
    grid (buried test), and the sky term has no reference yet (traced runs 7-16% brighter with the sun
    off).

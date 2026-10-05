@@ -12,8 +12,8 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private bool rayScene;
-    // --gi-trace: the probe injection traces its rays through the ray scene (sky_inject_traced.comp) instead of
-    // marching the baked occupancy grid. --ab trace alternates the two in one process.
+    // The probe injection traces its rays through the ray scene (sky_inject_traced.comp) unless --gi-march asks for
+    // the baked occupancy grid's march. --ab trace alternates the two in one process.
     private bool giTrace;
     private PipelineHandle injectTracedPipeline;
     private bool InjectTracedNow => injectTracedPipeline.Id != 0 && rayBlockBuffers.Length > 0 && raySurfacesBaked
@@ -34,8 +34,10 @@ internal sealed partial class SponzaLoop
     // --ray-region-triangles N: the most triangles a region holds before it is split (RayQueryScene).
     private int rayRegionTriangles = RayQueryScene.DefaultRegionTriangles;
     // --ray-lod-error M: trace each mesh at its coarsest cooked level whose geometric error, carried into the world
-    // by the largest scale any of its placements gives it, stays within M metres. 0 traces full detail.
-    private float rayLodError;
+    // by the largest scale any of its placements gives it, stays within M metres. 0 traces full detail. 2 cm by
+    // default: the traced probe field's error against the full-detail reference is unchanged there (Sponza 0.0027,
+    // Bistro 0.0050) for 506 MB on the GPU rather than 781 (Sponza).
+    private float rayLodError = 0.02f;
 
     private RayMesh[] BuildRayMeshes(List<DrawableStaging> ordered)
     {

@@ -157,9 +157,13 @@ internal sealed partial class SponzaLoop
         // --ray-view: trace the camera's view and hold it against the raster at the shot (it brings the ray check with it).
         rayView = args.Flag("ray-view");
         rayCheck |= rayView;
-        giTrace = args.Flag("gi-trace");
-        // The triangle probe reference (--probe-reference) traces the ray scene too.
-        rayScene |= rayCheck || giTrace || abMode == "trace" || args.Flag("probe-reference");
+        // The probe injection traces the scene's triangles by default: against a path-traced reference on the
+        // triangles its field's per-probe error is 11x smaller than the occupancy march's on Sponza (which it
+        // under-lit by about a quarter) and 2x on Bistro, and it is cheaper. --gi-march keeps the march for the A/B.
+        giTrace = !args.Flag("gi-march");
+        // The triangle probe reference (--probe-reference) traces the ray scene too. GI's own need for it waits
+        // for the scene to say whether it has a probe field at all (ConsolidateBuffers).
+        rayScene |= rayCheck || abMode == "trace" || args.Flag("probe-reference");
         if (args.Int("ray-region-triangles") is { } regionTriangles) rayRegionTriangles = Math.Max(1, regionTriangles);
         if (args.Float("ray-lod-error") is { } lodError) rayLodError = Math.Max(0f, lodError);
         if (args.Values("ray-probe", 3) is [var probeRay, var probeInstance, var probeTriangle])
@@ -714,7 +718,7 @@ internal sealed partial class SponzaLoop
             var injectSpv = File.ReadAllBytes(Path.Combine(shaderDir, "sky_inject.comp.spv"));
             injectProgram = Own(device.CreateComputeShaderProgramFromSpv(injectSpv, injectInterface, "sky_inject"));
             injectPipeline = Own(device.CreateComputePipeline(injectProgram, "sky_inject"));
-            if (rayScene)
+            if (rayScene || giTrace)
             {
                 var tracedInterface = Reflect("sky_inject_traced.comp");
                 var tracedSpv = File.ReadAllBytes(Path.Combine(shaderDir, "sky_inject_traced.comp.spv"));
