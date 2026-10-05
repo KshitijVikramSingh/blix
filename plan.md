@@ -117,9 +117,22 @@ exactly where the world has changed.
    sky bounce + direct sky) at 1500 frames after load: Bistro bounds median 0.94, |err| 0.105 -> clipmap
    1.00, |err| 0.063; Sponza 1.52 (p90 5.45) -> 1.33 (p90 4.19), |err| 0.0130 -> 0.0127, but the mean
    rose (0.0332 -> 0.0350 against 0.0256). Sun off, Sponza's sky part is still 1.5x by mean (clipmap
-   0.0141, bounds 0.0145, reference 0.0093; median 1.61 against 3.03). Next: find what still over-lights
-   Sponza's surfaces in both terms (the p90 says leaks: courtyard probes read through arcade walls?)
-   before the clipmap can be the default. Found on the way and fixed: the
+   0.0141, bounds 0.0145, reference 0.0093; median 1.61 against 3.03). What still over-lights Sponza,
+   found with a CPU twin of the clipmap's sampling (`SponzaLoop.ClipmapTwin.cs`; matches the GPU field,
+   Bistro median 1.00, p10-p90 0.99-1.01) inside the surface reference: NOT leaks (17% of each answer
+   comes from probes the surface cannot see, but visible probes alone read 1.31 against 1.29), NOT the
+   sky cube (the prefiltered mips integrate to the cooked irradiance within 0.93-1.04, sun-facing
+   included), NOT probe density (spacing 0.25/0.5/1 m: median 1.27/1.29/1.37). As shaded (field x
+   GTAO) Sponza is median 1.15 with the excess in a quarter of the pixels (2.5x, left arcade and
+   curtains), and there the truth at the strongest probe, 0.5 m out, is 2.66x the truth at the
+   surface; the probes' own values are only 1.11x (1.19x there). So the field lacks light variation
+   below a probe cell (concavities darker than the air beside them), GTAO (0.8 m, screen space) covers
+   0.77 of what needs ~0.4, and it grows with distance as cells reach 2-4 m (the user's "far end lights
+   flat"; Bistro's p90 rises 1.21/1.84/2.14 over levels 0/2/3). A multiplied traced AO ranged to the
+   spacing is the wrong model (worst group 2.52 -> 1.80 at best, over-darkens elsewhere, worse in
+   Bistro): occluded near directions carry nearby bounce, not black. Next: decide the near-field
+   remedy (per-pixel short traced gather, hits shaded from the field, misses read the probes; or
+   screen-space gather) before the clipmap can be the default. Found on the way and fixed: the
    probe cook integrated diffuse irradiance with 64 samples a texel, which a bright aureole turned into
    +-25% texel noise (straight up, every floor's lookup, read 1.47x high); 4096 now (probe recipe 2). 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
    material, 16 area-stratified samples per triangle at a footprint-matched mip) gives every triangle a
