@@ -2072,8 +2072,12 @@ internal sealed partial class SponzaLoop
             new("uInvViewProjJittered", new Matrix4x4Uniform(invJittered)),
             new("uPrevViewProj",        new Matrix4x4Uniform(taaHistoryValid ? prevTaaViewProj : viewProj)),
             new("uParams",              new Vector4Uniform(new Vector4(
-                render.Taa, taaHistoryValid ? 1f : 0f, render.ShowTaaRejection ? 1f : 0f, 0f))),
+                render.Taa, taaHistoryValid ? 1f : 0f, render.ShowTaaRejection ? 1f : 0f, taaCountRejection ? 1f : 0f))),
+            new("uViewProj",            new Matrix4x4Uniform(viewProj)),
+            new("uMode",                new Vector4Uniform(new Vector4(
+                taaMotionReprojection ? 1f : 0f, taaVarianceClip ? 1f : 0f, taaGamma, taaLinearBlend ? 1f : 0f))),
         };
+        if (taaStats.Equals(default(GpuBufferHandle))) taaStats = Own(device.CreateGpuBuffer(8, name: "sponza.taa.stats"));
         var bindings = new[]
         {
             new ShaderTextureBinding("uCurrent", graph.GetColorTexture(hdrHandle)),
@@ -2081,7 +2085,8 @@ internal sealed partial class SponzaLoop
             new ShaderTextureBinding("uDepth", graph.GetDepthTexture(SampleableSceneDepth)),
         };
         graph.Pass(taaPassHandles[taaWrite], scope => fullscreen.Draw(
-            scope, taaPipelines[taaWrite], bindings, pushConstants: null, uniforms: uniforms));
+            scope, taaPipelines[taaWrite], bindings, pushConstants: null, uniforms: uniforms,
+            buffers: new[] { new ShaderBufferBinding("TaaStats", taaStats) }));
         // The UNJITTERED matrix, because the resolved image this frame writes is what the next frame
         // reprojects into — and that image is aligned to the un-jittered grid by construction.
         prevTaaViewProj = viewProj;

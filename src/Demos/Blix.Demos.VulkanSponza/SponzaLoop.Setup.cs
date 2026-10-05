@@ -173,6 +173,25 @@ internal sealed partial class SponzaLoop
         if (args.Flag("no-taa")) render.Taa = 0f;
         // --taa X: the history weight (the overlay's "Taa"), for measuring what it leaves of the jitter.
         if (args.Float("taa") is { } taa) render.Taa = Math.Clamp(taa, 0f, 0.97f);
+        // --taa-show-rejection: the resolve outputs 1 where it clamped history, 0 where it kept it; with --stability
+        // the presented image's mean is then the rejection rate.
+        if (args.Flag("taa-show-rejection")) render.ShowTaaRejection = true;
+        if (args.String("taa-reproject") is { } reproject) taaMotionReprojection = reproject switch
+        {
+            "motion" => true, "old" => false,
+            _ => throw new AppArgsException($"--taa-reproject takes motion or old, not '{reproject}'."),
+        };
+        if (args.String("taa-clip") is { } clip) taaVarianceClip = clip switch
+        {
+            "variance" => true, "box" => false,
+            _ => throw new AppArgsException($"--taa-clip takes variance or box, not '{clip}'."),
+        };
+        if (args.Float("taa-gamma") is { } gamma) taaGamma = Math.Max(0.1f, gamma);
+        taaCountRejection = args.Flag("taa-count-rejection");
+        taaLinearBlend = args.Flag("taa-linear");
+        // --taa-history11: the resolved history back in R11G11B10F (the control for history that stops converging
+        // once a frame's step falls below half the format's rounding step); Rgba16F is the default.
+        if (args.Flag("taa-history11")) taaHistory16 = false;
         // --stability K: per-pixel temporal variation over the K still frames before the shot (SponzaLoop.Stability).
         if (args.Int("stability") is { } stability) stabilityFrames = Math.Max(2, stability);
         noIncidentGradient = args.Flag("no-incident-gradient");
@@ -261,7 +280,7 @@ internal sealed partial class SponzaLoop
         hdrHandle = graph.ColorTarget("hdr", TextureFormat.R11G11B10F, fullSize);
         // TAA ping-pongs because each resolve samples prior output while writing the next image.
         for (var i = 0; i < 2; i++)
-            taaHandles[i] = graph.ColorTarget($"taa{i}", TextureFormat.R11G11B10F, fullSize);
+            taaHandles[i] = graph.ColorTarget($"taa{i}", taaHistory16 ? TextureFormat.Rgba16F : TextureFormat.R11G11B10F, fullSize);
         // MSAA colour + depth the lit pass renders into; resolves to hdr.
         hdrMsaaHandle = graph.ColorTarget("hdr-msaa", TextureFormat.R11G11B10F, fullSize, samples: MsaaSamples);
         depthHandle = graph.DepthTarget("scene-depth", fullSize, samples: MsaaSamples);

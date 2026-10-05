@@ -135,6 +135,23 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private int taaWriteNext;
     private Matrix4x4 prevTaaViewProj = Matrix4x4.Identity;
     private bool taaHistoryValid;
+    // taa.frag's modes (each a flag, so each change is measured alone): --taa-reproject motion|old, --taa-clip
+    // variance|box, --taa-gamma G; --taa-count-rejection counts clipped history into taaStats (refused, total).
+    // Measured on Sponza, still camera, 32 frames (presented median variation / median error against the jittered
+    // frames' supersample): the old resolve 3.16% / 4.20%, its error barely under one raw jittered frame (4.95%).
+    // Motion reprojection (history stops being resampled at the jitter offset): 1.89% / 2.31%. Heavier history then
+    // got steadier but WRONGER (0.9: 1.12% / 4.68%, 4.51% of it bias): R11G11B10F history rounds to ~1.6% steps, and
+    // once a frame's 10% step is below half of one, history stops converging. Rgba16F: 0.9 gives 0.83% / 0.94%.
+    // Variance clipping measured worse than the min/max box here (5 taps: 0.7 2.25% / 2.53%).
+    private bool taaMotionReprojection = true;
+    private bool taaVarianceClip;
+    private float taaGamma = 1f;
+    private bool taaCountRejection;
+    // --taa-linear: blend in linear space rather than luminance-tonemapped (the control for that blend's bias).
+    private bool taaLinearBlend;
+    // --taa-history11: the old R11G11B10F history (see above).
+    private bool taaHistory16 = true;
+    private GpuBufferHandle taaStats;
     private Matrix4x4 viewProjJittered = Matrix4x4.Identity;
     private GraphResourceHandle hdrMsaaHandle;   // MSAA colour the lit pass renders into
     private GraphResourceHandle depthHandle;     // MSAA depth (matches hdrMsaa)
@@ -1117,7 +1134,7 @@ internal sealed class RenderSettings
     [Tune(0f, 8f)]     public float LodErrorPixels = 2.0f;
     // History weight for the full-screen resolve; zero is the current-frame reference. History is
     // rejected off-screen and neighbourhood-clamped so the present frame remains authoritative.
-    [Tune(0f, 0.97f)]  public float Taa = 0.7f;
+    [Tune(0f, 0.97f)]  public float Taa = 0.9f;
     // Bright where history was refused or clamped back. A still camera should show nearly nothing.
     [Tune]             public bool ShowTaaRejection = false;
 }

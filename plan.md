@@ -183,8 +183,17 @@ exactly where the world has changed.
    map 2 mips down for it and clamps the factor to [0.5, 1.5] (`--incident-normal-bias`,
    `--incident-gradient-clamp`): bias 0/1/2/3 move 13.0/5.3/1.7/0.56% of pixels at 6.69/4.78/3.67/3.44%
    presented (none 3.40%). `--stability` reads the TAA-resolved image too; the ~3% floor in EVERY arm
-   (default 3.16%) is the TAA itself: history 0.7 (0.9: 2.36%, less than the longer average predicts,
-   so its clamp discards too). NEXT: TAA quality, then the normal-map bias can come down. Found on the way and fixed: the
+   (default 3.16%) was the TAA itself. TAA, measured with `--stability` (presented variation, and error
+   against the K jittered frames' average = the supersample; `--taa-count-rejection`): the old resolve
+   was 3.16% / 4.20%, its error barely under ONE raw jittered frame (4.95%), and only 4.4% of pixels
+   clipped, so the clamp was not it. (1) It reprojected the jittered point, resampling history at the
+   jitter offset every frame: motion reprojection 1.89% / 2.31%. (2) Heavier history got steadier but
+   wronger (0.9: 1.12% / 4.68%, 4.51% of it BIAS): R11G11B10F history rounds to ~1.6% steps and stops
+   converging once a frame's step is below half one; Rgba16F at 0.9: 0.83% / 0.94% (Bistro 1.43% /
+   2.40% -> 0.34% / 0.49%). Variance clipping (5 taps) measured worse than the min/max box; linear vs
+   tonemapped blend made no real difference. Defaults now: motion, Rgba16F, 0.9 (`--taa-reproject
+   old`, `--taa-history11`, `--taa X`). Normal-map bias back to 1 (screen probes 1.24% presented).
+   Not measured: ghosting under motion (heavier history; the min/max box is what limits it). Found on the way and fixed: the
    probe cook integrated diffuse irradiance with 64 samples a texel, which a bright aureole turned into
    +-25% texel noise (straight up, every floor's lookup, read 1.47x high); 4096 now (probe recipe 2). 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
    material, 16 area-stratified samples per triangle at a footprint-matched mip) gives every triangle a

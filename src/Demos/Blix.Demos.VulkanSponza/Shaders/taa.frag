@@ -27,9 +27,21 @@ layout(set = 0, binding = 0) uniform Taa {
     // aligned to the un-jittered pixel grid; reprojecting into the jittered one would chase the
     // offset that exists to be averaged away.
     mat4 uPrevViewProj;
-    // x = history weight, y = 1 when history is valid at all, z = show rejection, w unused.
+    // x = history weight, y = 1 when history is valid at all, z = show rejection, w = 1: count rejections into
+    // TaaStats (measurement only; the image is untouched).
     vec4 uParams;
+    // This frame's UNJITTERED view-projection: where the surface point sits on the un-jittered grid now, so history
+    // moves by the surface's motion and never by the jitter.
+    mat4 uViewProj;
+    // x reprojection: 0 the jittered point's own position (history resampled at the jitter offset every frame),
+    //   1 the surface's motion applied to this pixel's centre (a still camera reads its own pixel);
+    // y history bound: 0 per-channel min/max of the 5-tap cross, 1 variance clip toward the mean in YCoCg;
+    // z the clip's gamma (box = mean +- gamma * sigma); w 1: blend in linear space (the control for the tonemapped
+    // blend's bias, which averages high-contrast detail away from its linear mean).
+    vec4 uMode;
 } t;
+
+layout(std430, set = 0, binding = 4) buffer TaaStats { uint refusedCount; uint totalCount; };
 
 layout(set = 0, binding = 1) uniform sampler2D uCurrent;
 layout(set = 0, binding = 2) uniform sampler2D uHistory;
@@ -40,6 +52,18 @@ layout(set = 0, binding = 3) uniform sampler2D uDepth;
 // here; it is inverted exactly after the blend, so the result is still linear HDR.
 vec3 toneIn(vec3 c)  { return c / (1.0 + dot(c, vec3(0.2126, 0.7152, 0.0722))); }
 vec3 toneOut(vec3 c) { return c / max(1.0 - dot(c, vec3(0.2126, 0.7152, 0.0722)), 1e-4); }
+
+vec3 toYCoCg(vec3 c) { return vec3(dot(c, vec3(0.25, 0.5, 0.25)), dot(c, vec3(0.5, 0.0, -0.5)), dot(c, vec3(-0.25, 0.5, -0.25))); }
+vec3 fromYCoCg(vec3 c) { return vec3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z); }
+
+// Clip a point toward a box's centre (Salvi; Karis's "clip, not clamp"): the history keeps its hue, moving along
+// the line to the neighbourhood's mean until it is inside, where a per-channel clamp would bend it.
+vec3 clipToBox(vec3 history, vec3 centre, vec3 extent) {
+    vec3 offset = history - centre;
+    vec3 units = abs(offset / max(extent, vec3(1e-5)));
+    float largest = max(units.x, max(units.y, units.z));
+    return largest > 1.0 ? centre + offset / largest : history;
+}
 
 void main() {
     vec3 current = texture(uCurrent, vUv).rgb;
@@ -58,6 +82,11 @@ void main() {
     vec3 n3 = texture(uCurrent, vUv + vec2(0.0, -texel.y)).rgb;
     lo = min(lo, min(min(n0, n1), min(n2, n3)));
     hi = max(hi, max(max(n0, n1), max(n2, n3)));
+    // The same five taps' mean and spread in YCoCg (tonemapped, so a highlight cannot widen the box alone).
+    vec3 y0 = toYCoCg(toneIn(current)), y1 = toYCoCg(toneIn(n0)), y2 = toYCoCg(toneIn(n1)), y3 = toYCoCg(toneIn(n2)), y4 = toYCoCg(toneIn(n3));
+    vec3 mean = (y0 + y1 + y2 + y3 + y4) / 5.0;
+    vec3 meanSq = (y0 * y0 + y1 * y1 + y2 * y2 + y3 * y3 + y4 * y4) / 5.0;
+    vec3 sigma = sqrt(max(meanSq - mean * mean, vec3(0.0)));
 
     float refused = 1.0;
     vec3 resolved = current;
@@ -65,16 +94,31 @@ void main() {
         vec4 world = t.uInvViewProjJittered * vec4(vUv * 2.0 - 1.0, depth, 1.0);
         vec3 worldPos = world.xyz / world.w;
         vec4 clipPrev = t.uPrevViewProj * vec4(worldPos, 1.0);
-        if (clipPrev.w > 1e-4) {
+        vec4 clipNow = t.uViewProj * vec4(worldPos, 1.0);
+        if (clipPrev.w > 1e-4 && clipNow.w > 1e-4) {
             vec2 uvPrev = (clipPrev.xy / clipPrev.w) * 0.5 + 0.5;
+            // The surface's motion on the un-jittered grid, applied to this pixel's centre.
+            if (t.uMode.x > 0.5) uvPrev = vUv + (uvPrev - ((clipNow.xy / clipNow.w) * 0.5 + 0.5));
             if (all(greaterThanEqual(uvPrev, vec2(0.0))) && all(lessThanEqual(uvPrev, vec2(1.0)))) {
                 vec3 history = texture(uHistory, uvPrev).rgb;
                 // Clamped to the neighbourhood, not rejected on a threshold: a disocclusion shows up
                 // as history outside what any nearby pixel of this frame contains, and pulling it to
                 // the edge of that range keeps the stability while dropping the stale colour.
-                vec3 bounded = clamp(history, lo, hi);
-                refused = any(greaterThan(abs(bounded - history), vec3(1e-4))) ? 1.0 : 0.0;
-                resolved = toneOut(mix(toneIn(current), toneIn(bounded), clamp(t.uParams.x, 0.0, 1.0)));
+                vec3 bounded;
+                if (t.uMode.y > 0.5) {
+                    vec3 h = toYCoCg(toneIn(history));
+                    bounded = toneOut(fromYCoCg(clipToBox(h, mean, t.uMode.z * sigma)));
+                } else {
+                    bounded = clamp(history, lo, hi);
+                }
+                refused = any(greaterThan(abs(bounded - history), vec3(1e-4 * max(1.0, dot(history, vec3(0.3333)))))) ? 1.0 : 0.0;
+                resolved = t.uMode.w > 0.5
+                    ? mix(current, bounded, clamp(t.uParams.x, 0.0, 1.0))
+                    : toneOut(mix(toneIn(current), toneIn(bounded), clamp(t.uParams.x, 0.0, 1.0)));
+                if (t.uParams.w > 0.5) {
+                    atomicAdd(totalCount, 1u);
+                    if (refused > 0.5) atomicAdd(refusedCount, 1u);
+                }
             }
         }
     }

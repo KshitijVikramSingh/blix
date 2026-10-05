@@ -41,8 +41,9 @@ internal sealed partial class SponzaLoop
     // correction's factor stays in [1 - C, 1 + C] (it was [0, 3]). Sponza, still camera: pixels the gradient moves
     // (TAA off) against the presented image's median variation (TAA on): bias 0 (clamp 0-3) 13.0% / 6.69%, 1 5.3% /
     // 4.78%, 2 1.7% / 3.67%, 3 0.56% / 3.44%, none 0 / 3.40%. The detail IS the shimmer: what a normal map adds below
-    // a few pixels, TAA's jitter samples differently every frame. 2 until the TAA resolves its jitter better.
-    private float incidentNormalBias = 2f;
+    // a few pixels, TAA's jitter samples differently every frame. Under the reworked TAA (motion reprojection,
+    // Rgba16F history, 0.9) the same sweep reads bias 0/1/2 at 1.83/1.24/0.97% (default look 0.83%): 1.
+    private float incidentNormalBias = 1f;
     private float incidentGradientClamp = 0.5f;
     private (int X, int Y) screenProbeTiles;
     private int screenProbeCurrent;

@@ -26,7 +26,8 @@ internal sealed partial class SponzaLoop
         if (postLoadFrames < shotFrame - stabilityFrames || postLoadFrames >= shotFrame) return;
         var incident = device.ReadTexture(graph.GetColorTexture(incidentHandle), out var iw, out var ih, out _);
         var scene = device.ReadTexture(graph.GetColorTexture(hdrHandle), out var sw, out var sh, out _);
-        var resolved = render.Taa > 0f ? device.ReadTexture(graph.GetColorTexture(taaHandles[taaWrite]), out _, out _, out _) : null;
+        var resolvedFormat = TextureFormat.R11G11B10F;
+        var resolved = render.Taa > 0f ? device.ReadTexture(graph.GetColorTexture(taaHandles[taaWrite]), out _, out _, out resolvedFormat) : null;
         var gw = sw / StabilityStride;
         var gh = sh / StabilityStride;
         stabilityGrid = (gw, gh);
@@ -46,8 +47,16 @@ internal sealed partial class SponzaLoop
             sce[y * gw + x] = Lum(UnpackFloat(packed & 0x7FF, 6), UnpackFloat((packed >> 11) & 0x7FF, 6), UnpackFloat((packed >> 22) & 0x3FF, 5));
             if (resolved is not null)
             {
-                var rp = BitConverter.ToUInt32(resolved, (py * sw + px) * 4);
-                res[y * gw + x] = Lum(UnpackFloat(rp & 0x7FF, 6), UnpackFloat((rp >> 11) & 0x7FF, 6), UnpackFloat((rp >> 22) & 0x3FF, 5));
+                if (resolvedFormat == TextureFormat.Rgba16F)
+                {
+                    var o16 = (py * sw + px) * 8;
+                    res[y * gw + x] = Lum((float)BitConverter.ToHalf(resolved, o16), (float)BitConverter.ToHalf(resolved, o16 + 2), (float)BitConverter.ToHalf(resolved, o16 + 4));
+                }
+                else
+                {
+                    var rp = BitConverter.ToUInt32(resolved, (py * sw + px) * 4);
+                    res[y * gw + x] = Lum(UnpackFloat(rp & 0x7FF, 6), UnpackFloat((rp >> 11) & 0x7FF, 6), UnpackFloat((rp >> 22) & 0x3FF, 5));
+                }
             }
         }
         stabilityIncident.Add(inc);
@@ -59,6 +68,48 @@ internal sealed partial class SponzaLoop
     private void WriteStability(string basePath)
     {
         if (stabilityIncident.Count < 2) return;
+        // Accuracy of what is presented: against the K jittered frames' average, which is the view supersampled
+        // (each frame's jitter samples a different point of the pixel). A resolve can be steady by blurring; this
+        // says how far each presented frame is from the image it should converge to. Errors over the mean
+        // (relative), median pixel, averaged over the frames.
+        if (taaCountRejection && !taaStats.Equals(default(GpuBufferHandle)))
+        {
+            var counts = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(taaStats, 0, 8).AsSpan()).ToArray();
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] TAA rejection over the run: history clipped at {100.0 * counts[0] / Math.Max(1u, counts[1]):0.0}% of {counts[1]:N0} resolved pixels"));
+        }
+        if (stabilityResolved.Count == stabilityScene.Count && stabilityScene.Count >= 2)
+        {
+            var (gw, gh) = stabilityGrid;
+            var reference = new double[gw * gh];
+            foreach (var f in stabilityScene) for (var i = 0; i < reference.Length; i++) reference[i] += f[i];
+            for (var i = 0; i < reference.Length; i++) reference[i] /= stabilityScene.Count;
+            double MedianError(List<float[]> frames)
+            {
+                var errors = new List<double>();
+                for (var i = 0; i < reference.Length; i++)
+                {
+                    if (reference[i] < 1e-5) continue;
+                    double e = 0;
+                    foreach (var f in frames) e += Math.Abs(f[i] - reference[i]);
+                    errors.Add(e / frames.Count / reference[i]);
+                }
+                errors.Sort();
+                return errors.Count == 0 ? double.NaN : errors[errors.Count / 2];
+            }
+            // Bias alone: the presented frames' own average against the supersample (scatter averages away).
+            var biasErrors = new List<double>();
+            for (var i = 0; i < reference.Length; i++)
+            {
+                if (reference[i] < 1e-5) continue;
+                double mean = 0;
+                foreach (var f in stabilityResolved) mean += f[i];
+                biasErrors.Add(Math.Abs(mean / stabilityResolved.Count - reference[i]) / reference[i]);
+            }
+            biasErrors.Sort();
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] stability accuracy against the {stabilityScene.Count}-frame supersample: presented median error {100 * MedianError(stabilityResolved):0.00}%, of which bias (its own average's error) {100 * biasErrors[biasErrors.Count / 2]:0.00}%; one jittered frame (no TAA) {100 * MedianError(stabilityScene):0.00}%"));
+        }
         foreach (var (name, frames, map) in new[] { ("incident light", stabilityIncident, true), ("lit image before TAA", stabilityScene, false), ("presented image (TAA-resolved)", stabilityResolved, false) })
         {
             if (frames.Count < 2) continue;
