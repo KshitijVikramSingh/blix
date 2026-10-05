@@ -512,9 +512,11 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // than to the search radius.
     private float aoScale = 0.5f;
 
-    // The incident-light field's resolution, as a fraction of the framebuffer: the scene's choice
-    // (SceneProfile.IncidentScale), then --incident-full or --incident-scale.
-    private float incidentScale = 0.5f;
+    // The incident-light field's resolution, as a fraction of the framebuffer. Full by default: at half the
+    // bounce visibly loses detail on close, folded surfaces (seen headed on Sponza, 2026-10-05), for a cost
+    // within run-to-run noise (31.2 / 32.7 ms full against 31.1 / 32.3 half on the orbit). --incident-scale
+    // for anything less.
+    private float incidentScale = 1f;
     // Standard path: reconstruct sky visibility and bounce into the half-resolution incident field.
     // This measured -14.64 ms on the orbit and -29.99 ms with occupancy marching. --no-incident
     // preserves the inline reference path for comparison.

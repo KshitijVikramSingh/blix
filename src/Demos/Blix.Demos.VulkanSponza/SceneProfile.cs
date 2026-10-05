@@ -36,9 +36,7 @@ internal sealed record SceneProfile(
     Vector3 StartPosition,
     float StartYaw,
     float StartPitch,
-    float MoveSpeed,
-    // The incident-light field's resolution, as a fraction of the framebuffer (--incident-scale overrides).
-    float IncidentScale = 0.5f)
+    float MoveSpeed)
 {
     /// <summary>Intel Sponza (Khronos New Sponza): the atrium, ~30 m, and the packs it was built around.</summary>
     public static readonly SceneProfile Sponza = new(
@@ -71,10 +69,7 @@ internal sealed record SceneProfile(
         StartPosition: new Vector3(-9f, 3f, 0f),
         StartYaw: 90f,
         StartPitch: 0f,
-        MoveSpeed: 4.5f,
-        // Full resolution: at half, the bounce visibly loses detail on Sponza's close, folded surfaces (seen
-        // headed, 2026-10-05). The other scenes keep half until someone looks.
-        IncidentScale: 1f);
+        MoveSpeed: 4.5f);
 
     /// <summary>Amazon Lumberyard Bistro, exterior (ORCA, CC-BY 4.0): a street ~170 m by 180 m, 2.8M triangles.</summary>
     /// <remarks>

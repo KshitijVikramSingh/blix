@@ -63,7 +63,6 @@ internal sealed partial class SponzaLoop
         // The incident-light field ships on; --no-incident selects the inline reference path.
         if (args.Flag("no-incident")) incidentField = false;
         if (args.Flag("incident")) incidentField = true;
-        incidentScale = scene.IncidentScale;
         if (args.Flag("incident-full")) { incidentField = true; incidentScale = 1f; }
         // The resolution knob itself, because "half" is a guess and the error it costs is a
         // function of how far the coarse texel centre sits from the fine pixel it answers for.
