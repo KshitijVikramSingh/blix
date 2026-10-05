@@ -6637,6 +6637,124 @@ static ShaderInterface MinimalShader() => new(new[]
         t.Expect("BV.7 and the seed matters: another seed changes the answer on some rays", coinChanged > 30, $"{coinChanged} changed");
     }
 }
+
+// ============================================================================
+// Section BW — a camera-relative probe clipmap: where its probes are, and where each lives in the atlas.
+// ============================================================================
+//
+// ProbeClipmap is the contract probe_clipmap.glsl mirrors; the GPU's copy is held against it on a device.
+{
+    var rng = new Random(20261005);
+    var clip = new ProbeClipmap(levelCount: 4, dims: new Int3(32, 16, 32), baseSpacing: 0.5f);
+    Vector3 Camera(float r) => new((float)(rng.NextDouble() * 2 - 1) * r, (float)(rng.NextDouble() * 2 - 1) * r, (float)(rng.NextDouble() * 2 - 1) * r);
+    IEnumerable<Int3> Block(int level)
+    {
+        var o = clip.Origins[level];
+        for (var z = 0; z < clip.Dims.Z; z++) for (var y = 0; y < clip.Dims.Y; y++) for (var x = 0; x < clip.Dims.X; x++) yield return o + new Int3(x, y, z);
+    }
+
+    var bijective = true;
+    var inverse = true;
+    for (var k = 0; k < 12; k++)
+    {
+        clip.Follow(Camera(k % 2 == 0 ? 5000f : 3f));   // far from the origin and near it, both signs
+        for (var l = 0; l < clip.LevelCount; l++)
+        {
+            var slots = new HashSet<int>();
+            foreach (var cell in Block(l))
+            {
+                var slot = clip.Slot(cell);
+                bijective &= slots.Add(clip.SlotIndex(slot)) && slot.X >= 0 && slot.Y >= 0 && slot.Z >= 0;
+                inverse &= clip.CellInSlot(l, slot) == cell;
+            }
+            bijective &= slots.Count == clip.ProbesPerLevel;
+        }
+    }
+    t.ExpectTrue("BW.1 a level's block fills its slots one to one, wherever it is, negative cells included", bijective);
+    t.ExpectTrue("BW.1 and the slot gives back the cell it holds", inverse);
+
+    // Scrolling: a step of a few cells keeps every remaining cell's slot; the slab that entered takes exactly the
+    // slots the slab that left gave up.
+    var scrollKeeps = true;
+    var slabsSwap = true;
+    for (var k = 0; k < 20; k++)
+    {
+        var start = Camera(200f);
+        clip.Follow(start);
+        var before = Enumerable.Range(0, clip.LevelCount).Select(l => Block(l).ToHashSet()).ToArray();
+        var moved = clip.Follow(start + new Vector3(1.3f, -0.7f, 2.9f) * (k + 1) * 0.3f);
+        for (var l = 0; l < clip.LevelCount; l++)
+        {
+            var after = Block(l).ToHashSet();
+            var left = before[l].Except(after).Select(c => clip.SlotIndex(clip.Slot(c))).ToHashSet();
+            var entered = after.Except(before[l]).Select(c => clip.SlotIndex(clip.Slot(c))).ToHashSet();
+            slabsSwap &= left.SetEquals(entered);
+            foreach (var c in before[l].Intersect(after)) scrollKeeps &= clip.CellInSlot(l, clip.Slot(c)) == c;
+            if (moved[l] == new Int3(0, 0, 0)) slabsSwap &= left.Count == 0;
+        }
+    }
+    t.ExpectTrue("BW.2 scrolling keeps every remaining probe in its slot", scrollKeeps);
+    t.ExpectTrue("BW.2 the slab that entered takes exactly the slots the slab that left gave up", slabsSwap);
+
+    var tiles = new HashSet<(int, int)>();
+    var inAtlas = true;
+    for (var l = 0; l < clip.LevelCount; l++)
+    foreach (var cell in Block(l))
+    {
+        var (tx, ty) = clip.TileOrigin(l, clip.Slot(cell));
+        tiles.Add((tx, ty));
+        inAtlas &= tx >= 0 && ty >= 0 && tx + ProbeClipmap.TileTexels <= clip.AtlasWidth && ty + ProbeClipmap.TileTexels <= clip.AtlasHeight;
+    }
+    t.Expect("BW.3 every probe of every level has its own tile, inside the atlas", tiles.Count == clip.LevelCount * clip.ProbesPerLevel && inAtlas,
+        $"{tiles.Count} tiles for {clip.LevelCount * clip.ProbesPerLevel} probes, atlas {clip.AtlasWidth}x{clip.AtlasHeight}");
+
+    // Locating: the level answering for a point holds all eight probes around it, no finer level could, and the blend
+    // toward the next level rises steadily to 1 at the edge.
+    var camera = Camera(50f);
+    clip.Follow(camera);
+    var holdsNeighbours = true;
+    var finest = true;
+    var outside = 0;
+    for (var k = 0; k < 4000; k++)
+    {
+        var p = camera + Camera(70f);
+        var (level, _) = clip.Locate(p);
+        if (level < 0)
+        {
+            outside++;
+            for (var l = 0; l < clip.LevelCount; l++) finest &= clip.InsideDistance(l, p) < 0f;
+            continue;
+        }
+        var s = clip.Spacing(level);
+        var g = p / s - new Vector3(0.5f);
+        var base0 = new Int3((int)MathF.Floor(g.X), (int)MathF.Floor(g.Y), (int)MathF.Floor(g.Z));
+        for (var c = 0; c < 8; c++) holdsNeighbours &= clip.InBlock(level, base0 + new Int3(c & 1, (c >> 1) & 1, (c >> 2) & 1));
+        for (var l = 0; l < level; l++) finest &= clip.InsideDistance(l, p) < 0f;
+    }
+    t.ExpectTrue("BW.4 a point's level holds all eight probes around it", holdsNeighbours);
+    t.Expect("BW.4 and is the finest that does; beyond the coarsest there is none", finest && outside > 0, $"{outside} of 4000 beyond the coarsest");
+    var previous = -1f;
+    var rising = true;
+    var reachesOne = false;
+    for (var step = 0; step <= 200; step++)
+    {
+        // Out from the camera along +x until level 0 can no longer answer.
+        var p = camera + new Vector3(step * 0.05f, 0f, 0f);
+        var (level, blend) = clip.Locate(p);
+        if (level != 0) break;
+        rising &= blend >= previous - 1e-6f;
+        previous = blend;
+        reachesOne |= blend > 0.95f;
+    }
+    t.ExpectTrue("BW.4 the blend toward the next level rises steadily and reaches 1 at the edge", rising && reachesOne && previous > 0.95f);
+
+    clip.Follow(new Vector3(10.2f, 3.1f, -7.6f));
+    var still = clip.Follow(new Vector3(10.24f, 3.12f, -7.71f));
+    t.ExpectTrue("BW.5 a camera moving within a cell moves no level", still.All(m => m == new Int3(0, 0, 0)));
+
+    t.ExpectTrue("BW.6 cells at the bound still find their slots", NoThrow(() => clip.Slot(new Int3(ProbeClipmap.MaxCell - 1, -(ProbeClipmap.MaxCell - 1), 0))));
+    t.ExpectTrue("BW.6 and past it are refused", ThrowsArgument(() => clip.Slot(new Int3(ProbeClipmap.MaxCell, 0, 0))));
+}
 t.PrintSummary();
 return t.Failed;
 

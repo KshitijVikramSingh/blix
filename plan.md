@@ -87,7 +87,16 @@ exactly where the world has changed.
    over frames, dirty-region updates, capsule occluders. In steps: 4a surfaces at hits (done: below);
    4b the sky/bounce injection traces rays into the atlas the lit pass already reads, A/B against the
    occupancy march on the same grid; 4c a camera-relative clipmap in place of the bounds-sized grid; 4d
-   relocation, dirty regions, capsules. 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
+   relocation, dirty regions, capsules. 4c holds what the lit pass already consumes, both traced: bounce
+   (irradiance atlas) and directional sky visibility (the cosine-weighted share of a probe's rays that
+   escape, in the depth atlas's fourth channel), so nothing baked is needed (no occupancy, sky SH or
+   albedo grid). 4 levels of 32x16x32, spacing doubling, camera-centred and snapped, slots addressed
+   toroidally with each slot remembering its world cell (a reused slot restarts its history); lookup at
+   the finest level holding the point, blended at borders, Chebyshev only; buried = mostly back-face
+   hits. Steps: 4c-i addressing (`probe_clipmap.glsl` and its C# twin, deviceless tests); 4c-ii the traced
+   injection (budget, new slabs first, staleness, buried); 4c-iii the incident pass and fog read it under
+   `--gi-clipmap`, A/B against today's field (pictures, the triangle reference at the same points); 4c-iv
+   the city lit with no bake, and the clipmap the default if it holds. 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
    material, 16 area-stratified samples per triangle at a footprint-matched mip) gives every triangle a
    word in `BlixRaySurfaces`: albedo (sRGB) and coverage. Traversal meets a partly covered triangle by an
    integer hash of the ray's seed, the entry and its leaf position (`RayTests.Covered`), so the CPU oracle
