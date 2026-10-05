@@ -1073,6 +1073,7 @@ internal sealed partial class SponzaLoop
                 WriteProbeReference(probeCount: referenceProbes, paths: 4096, bounces: refBounces);
                 WriteProbeReferenceTriangles(probeCount: referenceProbes, paths: 4096, bounces: refBounces);
                 WriteSkyVisibilityReference(samples: 200, rays: 2048);
+                WriteSkyConsistency();
                 WriteSurfaceReference(grid: 24, paths: 1024, bounces: refBounces);
             }
             WriteFrameStats();

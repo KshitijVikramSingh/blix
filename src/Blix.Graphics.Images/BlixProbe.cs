@@ -49,7 +49,8 @@ public static class BlixProbe
     public const string ShippedRecipe = "gpro";
 
     /// <summary>The probe cook's own version — see BlixMesh.MeshRecipeVersion for why.</summary>
-    public const uint ShippedRecipeVersion = 1;
+    /// <remarks>2: the diffuse irradiance integrates 4096 samples a texel, not 64 (PbrIblBaker).</remarks>
+    public const uint ShippedRecipeVersion = 2;
 
     [Flags]
     public enum Flags : uint

@@ -932,7 +932,10 @@ internal sealed partial class SponzaLoop
         }
         try
         {
-            var baked = EnvironmentBaker.UploadCookedProbe(device, BlixProbeReader.Read(probePath), "sponza.ibl");
+            var probeData = BlixProbeReader.Read(probePath);
+            // Kept on the CPU for the sky references (SponzaLoop.ProbeReference), which need the sky's radiance.
+            iblProbeCpu = probeData;
+            var baked = EnvironmentBaker.UploadCookedProbe(device, probeData, "sponza.ibl");
             envCubeTexture = baked.Probe.PrefilteredSpecular;
             skyCubeTexture = baked.Probe.EnvCubemap;
             // Null when the probe is older than v4. Falling back to the specular cube would render

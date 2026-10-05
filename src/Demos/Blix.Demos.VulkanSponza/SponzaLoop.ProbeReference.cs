@@ -17,6 +17,157 @@ namespace Blix.Demos.VulkanSponza;
 // difference between a census with the sun on and one with --sun-strength 0.
 internal sealed partial class SponzaLoop
 {
+    // The cooked sky probe, CPU-side: its environment radiance is what a sky-lit reference path escapes into.
+    private Blix.Graphics.Images.BlixProbeData? iblProbeCpu;
+
+    // A cube's texel for a direction, in Vulkan's face convention (+X, -X, +Y, -Y, +Z, -Z; spec "cube map face
+    // selection"), nearest. Returns linear RGB.
+    private static Vector3 CubeTexel(Half[] cube, int faceSize, Vector3 d)
+    {
+        var a = Vector3.Abs(d);
+        int face; float sc, tc, ma;
+        if (a.X >= a.Y && a.X >= a.Z) { ma = a.X; face = d.X >= 0 ? 0 : 1; sc = d.X >= 0 ? -d.Z : d.Z; tc = -d.Y; }
+        else if (a.Y >= a.Z) { ma = a.Y; face = d.Y >= 0 ? 2 : 3; sc = d.X; tc = d.Y >= 0 ? d.Z : -d.Z; }
+        else { ma = a.Z; face = d.Z >= 0 ? 4 : 5; sc = d.Z >= 0 ? d.X : -d.X; tc = -d.Y; }
+        var s = 0.5f * (sc / ma + 1f);
+        var t = 0.5f * (tc / ma + 1f);
+        var x = Math.Clamp((int)(s * faceSize), 0, faceSize - 1);
+        var y = Math.Clamp((int)(t * faceSize), 0, faceSize - 1);
+        var o = ((face * faceSize + y) * faceSize + x) * 4;
+        return new Vector3((float)cube[o], (float)cube[o + 1], (float)cube[o + 2]);
+    }
+
+    // The sky as the lighting integrals see it: the environment with the sun's disc replaced by the mean of the
+    // annulus around it, as the cook does (PbrIblBaker.WithoutSun: radius 0.03 rad, annulus out to twice that). The
+    // visible environment keeps the disc, stored as +Inf where it overflows a half, which no integral can use.
+    private Vector3? skyAnnulusMean;
+    private const float SunDiscRadius = 0.03f;
+
+    private Vector3 SkyRadiance(Vector3 d)
+    {
+        if (iblProbeCpu is not { } probe) return Vector3.Zero;
+        var value = CubeTexel(probe.EnvCube, probe.EnvFaceSize, d);
+        if (probe.SunDirection is not { } sun) return float.IsFinite(value.X + value.Y + value.Z) ? value : Vector3.Zero;
+        var toSun = -Vector3.Normalize(sun);
+        if (skyAnnulusMean is null)
+        {
+            var rng = new Random(99);
+            var sum = Vector3.Zero;
+            var n = 0;
+            var cosOuter = MathF.Cos(SunDiscRadius * 2f);
+            var cosInner = MathF.Cos(SunDiscRadius);
+            while (n < 4000)
+            {
+                var c = cosOuter + (float)rng.NextDouble() * (cosInner - cosOuter);
+                var phi = (float)rng.NextDouble() * 2f * MathF.PI;
+                var up = MathF.Abs(toSun.Y) < 0.9f ? Vector3.UnitY : Vector3.UnitX;
+                var t = Vector3.Normalize(Vector3.Cross(up, toSun));
+                var b = Vector3.Cross(toSun, t);
+                var r = MathF.Sqrt(1f - c * c);
+                var v = CubeTexel(probe.EnvCube, probe.EnvFaceSize, toSun * c + t * (r * MathF.Cos(phi)) + b * (r * MathF.Sin(phi)));
+                if (!float.IsFinite(v.X + v.Y + v.Z)) continue;
+                sum += v;
+                n++;
+            }
+            skyAnnulusMean = sum / n;
+        }
+        return Vector3.Dot(d, toSun) >= MathF.Cos(SunDiscRadius) || !float.IsFinite(value.X + value.Y + value.Z)
+            ? skyAnnulusMean.Value : value;
+    }
+
+    // The CPU sky against itself: irradiance integrated from the environment's radiance, for a handful of normals,
+    // against the cooked irradiance cube in the same directions. A left-in sun disc or a wrong face convention shows
+    // as a ratio far from one; a reference built on this sky is only as good as this check.
+    private void WriteSkyConsistency()
+    {
+        if (iblProbeCpu is not { } probe) return;
+        var rng = new Random(4242);
+        var ratios = new List<double>();
+        foreach (var n in new[] { Vector3.UnitY, -Vector3.UnitY, Vector3.UnitX, -Vector3.UnitX, Vector3.UnitZ, -Vector3.UnitZ,
+                                  Vector3.Normalize(new Vector3(1f, 1f, 1f)), Vector3.Normalize(new Vector3(-1f, 0.3f, 0.5f)) })
+        {
+            var acc = Vector3.Zero;
+            const int samples = 20000;
+            for (var k = 0; k < samples; k++) acc += SkyRadiance(CosineHemisphereCpu(n, rng));
+            var integrated = acc * (MathF.PI / samples);
+            var stored = CubeTexel(probe.IrradianceCube, probe.IrradianceFaceSize, n);
+            double Lum(Vector3 v) => 0.2126 * v.X + 0.7152 * v.Y + 0.0722 * v.Z;
+            ratios.Add(Lum(integrated) / Math.Max(1e-9, Lum(stored)));
+        }
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] CPU sky check: irradiance integrated from the environment over the cooked irradiance cube, 8 normals: {string.Join(" ", ratios.Select(r => r.ToString("0.00", Inv)))}"));
+        foreach (var (name, dir) in new[] { ("+Y", Vector3.UnitY), ("-Y", -Vector3.UnitY), ("+X", Vector3.UnitX), ("+Z", Vector3.UnitZ) })
+        {
+            Console.WriteLine(string.Create(Inv,
+                $"    {name}: environment {CubeTexel(probe.EnvCube, probe.EnvFaceSize, dir)}, irradiance {CubeTexel(probe.IrradianceCube, probe.IrradianceFaceSize, dir)}"));
+        }
+        // How wide the anomaly at straight up is: the stored irradiance across the +Y face's centre, texel by texel.
+        {
+            var f = probe.IrradianceFaceSize;
+            var cells = new List<string>();
+            for (var dx = -3; dx <= 3; dx++)
+            {
+                var x = f / 2 + dx;
+                var o = ((2 * f + f / 2) * f + x) * 4;   // face +Y, middle row
+                cells.Add(string.Create(Inv, $"{(float)probe.IrradianceCube[o + 1]:0.000}"));
+            }
+            Console.WriteLine(string.Create(Inv, $"    irradiance cube +Y face (size {f}), middle row around the centre, green: {string.Join(" ", cells)}"));
+        }
+        // Tilted from straight up toward +X and toward -Z: does the disagreement grow toward the pole?
+        {
+            var rngTilt = new Random(31);
+            var line = new List<string>();
+            foreach (var deg in new[] { 0, 10, 20, 40, 60, 80 })
+            foreach (var azimuth in new[] { Vector3.UnitX, -Vector3.UnitZ })
+            {
+                var a = deg * MathF.PI / 180f;
+                var n = Vector3.Normalize(Vector3.UnitY * MathF.Cos(a) + azimuth * MathF.Sin(a));
+                var acc = Vector3.Zero;
+                for (var k = 0; k < 20000; k++) acc += SkyRadiance(CosineHemisphereCpu(n, rngTilt));
+                var integrated = acc * (MathF.PI / 20000);
+                var stored = CubeTexel(probe.IrradianceCube, probe.IrradianceFaceSize, n);
+                double Lum(Vector3 v) => 0.2126 * v.X + 0.7152 * v.Y + 0.0722 * v.Z;
+                line.Add(string.Create(Inv, $"{deg}deg{(azimuth.X > 0 ? "+X" : "-Z")} {Lum(integrated) / Lum(stored):0.00}"));
+            }
+            Console.WriteLine("    tilt from +Y: " + string.Join(", ", line));
+        }
+        // Where the environment is not finite, and how much of the +Y integral lands there or in the disc.
+        {
+            var faceTexels = probe.EnvFaceSize * probe.EnvFaceSize * 6;
+            var infinite = 0;
+            var maxAngle = 0.0;
+            var toSun = probe.SunDirection is { } sdir ? -Vector3.Normalize(sdir) : Vector3.UnitY;
+            for (var face = 0; face < 6; face++)
+            for (var y = 0; y < probe.EnvFaceSize; y++)
+            for (var x = 0; x < probe.EnvFaceSize; x++)
+            {
+                var o = ((face * probe.EnvFaceSize + y) * probe.EnvFaceSize + x) * 4;
+                if (float.IsFinite((float)probe.EnvCube[o] + (float)probe.EnvCube[o + 1] + (float)probe.EnvCube[o + 2])) continue;
+                infinite++;
+                var sc = (x + 0.5f) / probe.EnvFaceSize * 2f - 1f;
+                var tc = (y + 0.5f) / probe.EnvFaceSize * 2f - 1f;
+                var dir = face switch
+                {
+                    0 => new Vector3(1f, -tc, -sc), 1 => new Vector3(-1f, -tc, sc),
+                    2 => new Vector3(sc, 1f, tc), 3 => new Vector3(sc, -1f, -tc),
+                    4 => new Vector3(sc, -tc, 1f), _ => new Vector3(-sc, -tc, -1f),
+                };
+                maxAngle = Math.Max(maxAngle, Math.Acos(Math.Clamp(Vector3.Dot(Vector3.Normalize(dir), toSun), -1f, 1f)));
+            }
+            var rng2 = new Random(7);
+            int inDisc = 0, total = 20000;
+            var discEnergy = Vector3.Zero;
+            for (var k = 0; k < total; k++)
+            {
+                var d = CosineHemisphereCpu(Vector3.UnitY, rng2);
+                if (Vector3.Dot(d, toSun) >= MathF.Cos(SunDiscRadius)) { inDisc++; }
+            }
+            Console.WriteLine(string.Create(Inv,
+                $"    environment: {infinite} non-finite texels of {faceTexels} (face size {probe.EnvFaceSize}), the farthest {maxAngle * 180 / Math.PI:0.00} deg from the sun; +Y samples in the disc: {inDisc} of {total}; annulus mean {skyAnnulusMean}"));
+        }
+        if (probe.SunDirection is { } sd) Console.WriteLine(string.Create(Inv, $"    recorded sun direction {sd}, irradiance {probe.SunIrradiance}; environment toward it {CubeTexel(probe.EnvCube, probe.EnvFaceSize, -Vector3.Normalize(sd))} / {CubeTexel(probe.EnvCube, probe.EnvFaceSize, Vector3.Normalize(sd))}"));
+    }
+
     private byte[]? occupancyCpu;
     private byte[]? albedoCpu;
     private int occCpuX, occCpuY, occCpuZ, albCpuX, albCpuY, albCpuZ;
@@ -503,7 +654,20 @@ internal sealed partial class SponzaLoop
             return new Ray(cameraPosition, Vector3.Normalize(new Vector3(far.X, far.Y, far.Z) / far.W - cameraPosition));
         }
 
-        var results = new (bool Use, double Bounce, double BounceRef, double Sky, double SkyRef)[grid * grid];
+        // Sky-carried bounce: the sky the only light, escaped rays bringing the environment's radiance, the shading
+        // point's own escapes excluded (that is the direct sky the lit pass adds through sky visibility).
+        var probe = iblProbeCpu;
+        Vector3 SkyTrace(Vector3 origin, Vector3 dir, int depth, Random rng)
+        {
+            var hit = scene.Closest(new Ray(origin, dir), 0f, float.PositiveInfinity, (uint)rng.Next());
+            if (hit is not { } h) return probe is null ? Vector3.Zero : SkyRadiance(dir);
+            if (depth < 0) return Vector3.Zero;
+            var n = Normal(h);
+            if (Vector3.Dot(n, dir) > 0f) n = -n;
+            var p = origin + dir * h.T + n * 0.01f;
+            return Albedo(h.Instance, h.Triangle) * SkyTrace(p, CosineHemisphereCpu(n, rng), depth - 1, rng);
+        }
+        var results = new (bool Use, double Bounce, double BounceRef, double Sky, double SkyRef, double SkyBounceRef)[grid * grid];
         Parallel.For(0, grid * grid, k =>
         {
             var gx = k % grid; var gy = k / grid;
@@ -520,12 +684,22 @@ internal sealed partial class SponzaLoop
             var x = ray.PointAt(hit.T) + n * 0.01f;
             var rng = new Random(777 + k);
             var acc = Vector3.Zero;
+            var skyAcc = Vector3.Zero;
             var open = 0;
             for (var j = 0; j < paths; j++)
             {
                 var d = CosineHemisphereCpu(n, rng);
                 acc += Trace(x, d, bounces, rng);
                 if (!scene.Any(new Ray(x, d), 0f, float.PositiveInfinity, (uint)rng.Next())) open++;
+                // From the shading point, only a ray that meets a surface carries bounced sky.
+                var first = scene.Closest(new Ray(x, d), 0f, float.PositiveInfinity, (uint)rng.Next());
+                if (first is { } f)
+                {
+                    var fn = Normal(f);
+                    if (Vector3.Dot(fn, d) > 0f) fn = -fn;
+                    var fp = x + d * f.T + fn * 0.01f;
+                    skyAcc += Albedo(f.Instance, f.Triangle) * SkyTrace(fp, CosineHemisphereCpu(fn, rng), bounces - 1, rng);
+                }
             }
             var reference = acc * (MathF.PI / paths);
             var ix = Math.Clamp((int)px, 0, iw - 1);
@@ -534,14 +708,14 @@ internal sealed partial class SponzaLoop
             var got = new Vector3((float)BitConverter.ToHalf(incident, o), (float)BitConverter.ToHalf(incident, o + 2), (float)BitConverter.ToHalf(incident, o + 4));
             var sky = (float)BitConverter.ToHalf(incident, o + 6);
             double Lum(Vector3 v) => 0.2126 * v.X + 0.7152 * v.Y + 0.0722 * v.Z;
-            results[k] = (true, Lum(got), Lum(reference), sky, open / (double)paths);
+            results[k] = (true, Lum(got), Lum(reference), sky, open / (double)paths, Lum(skyAcc * (MathF.PI / paths)));
         });
         var used = results.Where(r => r.Use).ToArray();
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] surface reference ({used.Length} of {grid * grid} pixels off depth edges, {paths} paths x {bounces} bounces, sun only for bounce):"));
         foreach (var r in used)
         {
-            Console.WriteLine(string.Create(Inv, $"    surface  bounce {r.Bounce:0.00000} ref {r.BounceRef:0.00000}  sky {r.Sky:0.0000} ref {r.SkyRef:0.0000}"));
+            Console.WriteLine(string.Create(Inv, $"    surface  bounce {r.Bounce:0.00000} ref {r.BounceRef:0.00000}  sky {r.Sky:0.0000} ref {r.SkyRef:0.0000}  skybounce ref {r.SkyBounceRef:0.00000}"));
         }
         var skyRatios = used.Where(r => r.SkyRef > 0.02).Select(r => r.Sky / r.SkyRef).OrderBy(v => v).ToArray();
         if (skyRatios.Length > 0)

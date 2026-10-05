@@ -208,12 +208,15 @@ public static class PbrIblBaker
     // surface facing N. Lit shader uses this directly (no additional PI
     // scaling) for the diffuse IBL term.
     //
-    // sampleCount is the Hammersley-stratified sample count per output texel.
-    // 32 gives recognisable directional bias; 64-128 is smoother but slower.
+    // sampleCount is the Hammersley-stratified sample count per output texel. 4096: at 64, a sky with a
+    // bright aureole around its (removed) sun put each texel's estimate wherever its few samples happened to
+    // land, so neighbouring texels of pizzo_pernice's +Y face read 0.64 to 1.02, and straight up (every floor's
+    // lookup) came out 1.47x the irradiance integrated from the same sky by direction. A probe cook takes
+    // seconds more.
     public static Half[] BakeDiffuseIrradiance(
         HdrImageData equirect,
         int faceSize,
-        int sampleCount = 64,
+        int sampleCount = 4096,
         // Firefly clamp magnitude. Polyhaven HDRIs' single-pixel suns
         // otherwise produce speckle alias on normal-mapped surfaces; ~50
         // is empirically safe (preserves visible sun in the sky AND clean

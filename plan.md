@@ -103,9 +103,17 @@ exactly where the world has changed.
    what is shaded at camera-visible points (so it sees leaks). At Sponza's surfaces the clipmap's sky
    visibility is unbiased (median 0.99, error 0.008) where the bake is low (0.64, 0.014); sun-only bounce
    is over at the p90 in both (bounds 2.8x, clipmap 3.1x: leaks). Open, and why the clipmap is not the
-   default: its sky-carried bounce (sun off) is 6.6x the bounds field's (0.0238 against 0.0036), which is
-   what makes it 40% brighter, and nothing judges that term yet (the CPU has no sky radiance). Suspect to
-   check first: a hit where no clipmap probe answers takes the sky as open. 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
+   default: its 40% brighter picture was start-up glare (an unanswered hit took the sky as open; fixed:
+   closed, and early solves averaged), settled it agrees with the bounds field. The surface reference now
+   judges sky-carried bounce too, with the sky's radiance on the CPU (`SkyRadiance`: the cooked
+   environment with the sun disc replaced as the cook does, checked against the cooked irradiance to
+   0.97-1.03 for every normal). Both fields carry about 1.5x too much (bounds median 1.52, clipmap 1.45):
+   the shared model, sky irradiance times the share of sky visible, credits a courtyard surface with the
+   sky's average brightness when it sees the dim zenith. Next: measure the same bias in the lit pass's
+   direct sky, then hold sky radiance in the probes (escaped rays carry the environment's radiance,
+   DDGI-style) instead of a visibility fraction, if the numbers say so. Found on the way and fixed: the
+   probe cook integrated diffuse irradiance with 64 samples a texel, which a bright aureole turned into
+   +-25% texel noise (straight up, every floor's lookup, read 1.47x high); 4096 now (probe recipe 2). 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
    material, 16 area-stratified samples per triangle at a footprint-matched mip) gives every triangle a
    word in `BlixRaySurfaces`: albedo (sRGB) and coverage. Traversal meets a partly covered triangle by an
    integer hash of the ray's seed, the entry and its leaf position (`RayTests.Covered`), so the CPU oracle
