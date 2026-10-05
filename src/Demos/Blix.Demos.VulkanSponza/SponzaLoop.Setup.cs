@@ -166,6 +166,10 @@ internal sealed partial class SponzaLoop
         if (args.Float("clipmap-spacing") is { } clipSpacing) clipmapSpacing = Math.Max(0.05f, clipSpacing);
         if (args.Int("clipmap-budget") is { } clipBudget) clipmapBudget = Math.Clamp(clipBudget, 1, 65535);
         if (args.Float("clipmap-unknown-sky") is { } unknownSky) clipmapUnknownSky = Math.Clamp(unknownSky, 0f, 1f);
+        // --gi-screen-probes: the per-tile gather over the clipmap (SponzaLoop.ScreenProbes); it needs the clipmap.
+        screenProbesEnabled = args.Flag("gi-screen-probes");
+        if (screenProbesEnabled && !clipmapEnabled) throw new AppArgsException("--gi-screen-probes needs --gi-clipmap: its rays read the clipmap where they hit.");
+        if (args.Float("screen-probe-history") is { } spHistory) screenProbeHistory = Math.Max(1f, spHistory);
         // The triangle probe reference (--probe-reference) traces the ray scene too. GI's own need for it waits
         // for the scene to say whether it has a probe field at all (ConsolidateBuffers).
         rayScene |= rayCheck || abMode == "trace" || args.Flag("probe-reference") || clipmapEnabled;
@@ -478,6 +482,15 @@ internal sealed partial class SponzaLoop
         // Between the depth it unprojects and the lit pass that reads it. It also reads the bounce
         // atlas the injection dispatch writes. That atlas is device-owned rather than a graph
         // resource, so declaration order carries this dependency without a graph edge.
+        // Screen probes read this frame's depth and normals and write buffers the incident pass reads; declared
+        // between them, and fenced like every pass that binds GPU buffers.
+        screenProbeInterface = Reflect("screen_probe.comp");
+        screenProbePassHandle = graph.ComputePass("screen-probes")
+            .Read(SampleableSceneDepth)
+            .Read(SampleablePrepassNormal)
+            .Shader(screenProbeInterface)
+            .Handle;
+
         incidentPassHandle = graph.GraphicsPass("incident-light")
             .Target(incidentHandle, LoadOp.Clear, StoreOp.Store)
             .Read(SampleableSceneDepth)
@@ -755,6 +768,9 @@ internal sealed partial class SponzaLoop
         var clipmapSpv = File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_inject.comp.spv"));
         clipmapPipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(clipmapSpv, clipmapInterface, "clipmap_inject")), "clipmap_inject"));
+        var screenProbeSpv = File.ReadAllBytes(Path.Combine(shaderDir, "screen_probe.comp.spv"));
+        screenProbePipeline = Own(device.CreateComputePipeline(
+            Own(device.CreateComputeShaderProgramFromSpv(screenProbeSpv, screenProbeInterface, "screen_probe")), "screen_probe"));
         var bakeSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_surface_bake.comp.spv"));
         raySurfaceBakePipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(bakeSpv, raySurfaceBakeInterface, "ray_surface_bake")), "ray_surface_bake"));

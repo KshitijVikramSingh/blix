@@ -139,10 +139,18 @@ exactly where the world has changed.
    hits, the sky where it escapes) are unbiased: Sponza mean 0.0283 against 0.0272, median 0.99; worst
    group median 1.19 (was 2.50); Bistro median 1.00. But noisy at 48 rays (p10 0.35, p90 2.27, mean
    |error| 0.0111 against field x GTAO's 0.0095), so it needs accumulation. Cost: the GPU traces ~20 M
-   closest rays/s here, so a ray per pixel at 1080p is ~100 ms. Next: the GPU gather as screen probes
-   (a probe on the surface per 16x16 tile, full-length rays, field at hits, the cascades for the sun at
-   hits, radiance kept octahedrally and accumulated over frames, each pixel integrating it for its own
-   normal), ~8k probes x 8 rays a frame ~ 3 ms. Found on the way and fixed: the
+   closest rays/s here, so a ray per pixel at 1080p is ~100 ms. Screen probes (`--gi-screen-probes`,
+   with the clipmap; `screen_probe.glsl` holds the rules): a probe per 16x16 tile on the surface, 8
+   full-length rays a frame (sun by shadow ray, clipmap irradiance at hits, sky at escapes), RADIANCE
+   in L2 SH (world probes keep irradiance; one-way), tile headers over a probe pool (one probe a tile
+   today), history only on the same surface (placement identity in the pre-pass normal's alpha,
+   normal, plane, within one tile's footprint, still visible: disocclusion), and pixels blend toward
+   the clipmap by how settled their probes are (foliage never settles under TAA jitter). Sponza as
+   shaded median 0.97, |err| 0.0058 (field x GTAO was 1.14, 0.0095; p90 1.54 from 3.18); Bistro 0.95,
+   0.031 (0.92, 0.049). Default look bit-identical. Open: COST 19-23 ms (8160 probes x 8 rays + shadow
+   rays + clipmap samples at hits; estimate was 3 ms); history under motion (orbit keeps 64.5%; fresh
+   for identity 12% (cook splits a wall into many placements: material identity wanted), normal 9.5%,
+   no candidate 10%), so moving views mostly show the clipmap. Found on the way and fixed: the
    probe cook integrated diffuse irradiance with 64 samples a texel, which a bright aureole turned into
    +-25% texel noise (straight up, every floor's lookup, read 1.47x high); 4096 now (probe recipe 2). 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
    material, 16 area-stratified samples per triangle at a footprint-matched mip) gives every triangle a

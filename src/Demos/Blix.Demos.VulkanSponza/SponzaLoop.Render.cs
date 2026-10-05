@@ -917,7 +917,11 @@ internal sealed partial class SponzaLoop
                     bounceReady && skyVisibilityEnabled && !skipSkySample ? 1f : 0f,
                     tunePanel.Value("uProbeTetrahedral"), 0f, 0f))),
             };
-            if (ClipmapActive) RecordIncidentClipmap(incidentInvProj, incidentInvView, incW, incH);
+            if (ClipmapActive)
+            {
+                RecordScreenProbes(frame.Width, frame.Height);
+                RecordIncidentClipmap(incidentInvProj, incidentInvView, incW, incH, frame.Width, frame.Height);
+            }
             else graph.Pass(incidentPassHandle, scope => fullscreen.Draw(
                 scope, incidentPipeline,
                 new[]
@@ -1069,6 +1073,7 @@ internal sealed partial class SponzaLoop
             WriteRayBenchmark();
             WriteRayCheck();
             WriteClipmapCheck();
+            WriteScreenProbeCheck();
             WriteRayView(Path.ChangeExtension(path, null));
             WriteProbeCensus();
             if (probeReference)

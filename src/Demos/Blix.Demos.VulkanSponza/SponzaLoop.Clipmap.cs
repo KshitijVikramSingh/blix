@@ -35,9 +35,10 @@ internal sealed partial class SponzaLoop
     private bool ClipmapActive => clipmap is not null && clipmapFrame > 0;
 
     // The incident field from the clipmap (incident_clipmap.frag): the same target, the same two quantities.
-    private void RecordIncidentClipmap(Matrix4x4 invProjection, Matrix4x4 invView, int width, int height)
+    private void RecordIncidentClipmap(Matrix4x4 invProjection, Matrix4x4 invView, int width, int height, int frameWidth, int frameHeight)
     {
         var origins = clipmap!.Origins;
+        var screen = ScreenProbeIncidentInputs(frameWidth, frameHeight);
         graph.Pass(incidentPassHandle, scope => fullscreen.Draw(
             scope, incidentClipmapPipeline,
             new[]
@@ -60,8 +61,10 @@ internal sealed partial class SponzaLoop
                 new("uOrigin1", new Vector4Uniform(new Vector4(origins[1].X, origins[1].Y, origins[1].Z, 0f))),
                 new("uOrigin2", new Vector4Uniform(new Vector4(origins[2].X, origins[2].Y, origins[2].Z, 0f))),
                 new("uOrigin3", new Vector4Uniform(new Vector4(origins[3].X, origins[3].Y, origins[3].Z, 0f))),
+                new("uScreen", new Vector4Uniform(screen.Screen)),
+                new("uFrameSize", new Vector4Uniform(screen.FrameSize)),
             },
-            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState) }));
+            buffers: new[] { new ShaderBufferBinding("ClipmapState", clipmapState), new ShaderBufferBinding("ScreenProbeTiles", screen.Tiles), new ShaderBufferBinding("ScreenProbes", screen.Probes) }));
     }
 
     private const int ClipmapLevels = 4;

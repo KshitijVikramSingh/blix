@@ -25,11 +25,15 @@ layout(location = 1) in vec2 vUv;
 // subset of what the vertex stage produces, so this costs nothing new.
 layout(location = 2) in vec3 vWorldPos;
 
+layout(location = 5) flat in uint vPlacement;
+
+// rgb the geometric normal; a the placement's identity, (index mod 2048) + 1, exact in Rgba16F: what screen probes
+// compare before reusing a past probe (0 never written by a surface).
 layout(location = 0) out vec4 outNormal;
 
 void main() {
     vec3 n = normalize(vNormalWorld);
-    outNormal = vec4(gl_FrontFacing ? n : -n, 1.0);
+    outNormal = vec4(gl_FrontFacing ? n : -n, float(vPlacement % 2048u) + 1.0);
 
     float a = texture(uAlbedo, vUv).a * mat.uBaseColorFactor.w;
     if (a < mat.uMaterialParams.x) discard;

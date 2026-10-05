@@ -23,6 +23,8 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
     vec4 uOrigin1;
     vec4 uOrigin2;
     vec4 uOrigin3;
+    vec4 uScreen;        // screen probes: x 1 when they answer, yz tiles across and down; w unused
+    vec4 uFrameSize;     // xy the frame's pixels (the probes' tiles are in them)
 } g;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -31,6 +33,49 @@ layout(set = 0, binding = 3) uniform sampler2D uClipmapIrradiance;
 layout(set = 0, binding = 4) uniform sampler2D uClipmapDepth;
 layout(std430, set = 0, binding = 5) readonly buffer ClipmapState { uvec4 states[]; };
 layout(set = 0, binding = 6) uniform samplerCube uIrradiance;
+#include "screen_probe.glsl"
+layout(std430, set = 0, binding = 7) readonly buffer ScreenProbeTiles { ScreenProbeTile tileHeaders[]; };
+layout(std430, set = 0, binding = 8) readonly buffer ScreenProbes { ScreenProbe probes[]; };
+
+// With screen probes: the probes of the four tiles around the pixel (as each tile's header names them), each
+// weighted by its tile's bilinear share, how near its normal is to the pixel's, and how near the pixel lies to its
+// plane (a probe on another surface tells nothing). Their radiance becomes irradiance here, for this pixel's normal.
+// False where none of the four fits, and the clipmap's answer stands. confidence is how much of the fitting probes'
+// weight is accumulated history (a probe counts fully from 8 frames): foliage and depth edges, where TAA's jitter
+// puts each frame's probe on another surface, never accumulate, and there the clipmap's steady answer stays.
+bool screenProbesAt(vec3 worldPos, vec3 n, float viewDepth, out vec3 irradiance, out float confidence) {
+    ivec2 tiles = ivec2(g.uScreen.yz);
+    vec2 t = vUv * g.uFrameSize.xy / float(SCREEN_PROBE_TILE) - 0.5;
+    ivec2 base = ivec2(floor(t));
+    vec2 f = t - vec2(base);
+    vec3 sum = vec3(0.0);
+    float weight = 0.0, fitting = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        ivec2 o = ivec2(i & 1, i >> 1);
+        ivec2 tile = base + o;
+        if (any(lessThan(tile, ivec2(0))) || any(greaterThanEqual(tile, tiles))) continue;
+        ScreenProbeTile header = tileHeaders[tile.y * tiles.x + tile.x];
+        float share = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
+        for (uint j = 0u; j < min(header.y, uint(SCREEN_PROBE_MAX_PER_TILE)); ++j) {
+            int index = int(header.x + j);
+            vec3 pn = probes[index].normal.xyz;
+            float facing = max(dot(pn, n), 0.0);
+            float planeDistance = abs(dot(pn, worldPos - probes[index].position.xyz));
+            float w = share * pow(facing, 8.0) * exp(-planeDistance / (0.01 * viewDepth));
+            fitting += w;
+            // A probe counts by what it has accumulated: one that just started (8 rays) yields to settled ones.
+            w *= min(probes[index].normal.w / 8.0, 1.0);
+            if (w <= 1e-5) continue;
+            vec4 radiance[9];
+            for (int k = 0; k < 9; ++k) radiance[k] = probes[index].radiance[k];
+            sum += w * screenProbeIrradiance(radiance, n);
+            weight += w;
+        }
+    }
+    irradiance = weight > 1e-6 ? sum / weight : vec3(0.0);
+    confidence = fitting > 1e-4 ? clamp(weight / fitting, 0.0, 1.0) : 0.0;
+    return weight > 1e-6;
+}
 
 #define BLIX_CLIPMAP_IRRADIANCE(t) texelFetch(uClipmapIrradiance, t, 0)
 #define BLIX_CLIPMAP_DEPTH(t) texelFetch(uClipmapDepth, t, 0)
@@ -45,6 +90,7 @@ void main() {
     }
     vec4 view = g.uInvProjection * vec4(vUv * 2.0 - 1.0, raw, 1.0);
     vec3 worldPos = (g.uInvView * vec4(view.xyz / view.w, 1.0)).xyz;
+    float viewDepth = abs(view.z / view.w);
     vec4 nSample = texture(uPrepassNormal, vUv);
     vec3 N = dot(nSample.xyz, nSample.xyz) > 1e-6
         ? normalize(nSample.xyz)
@@ -61,4 +107,9 @@ void main() {
     bool found;
     vec4 field = blix_clipmapSample(c, worldPos, N, found);
     outIncident = found ? field : vec4(texture(uIrradiance, N).rgb, 1.0);
+    vec3 gathered;
+    float confidence;
+    if (g.uScreen.x > 0.5 && screenProbesAt(worldPos, N, viewDepth, gathered, confidence)) {
+        outIncident.rgb = mix(outIncident.rgb, gathered, confidence);
+    }
 }
