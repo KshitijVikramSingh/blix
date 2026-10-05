@@ -130,9 +130,19 @@ exactly where the world has changed.
    0.77 of what needs ~0.4, and it grows with distance as cells reach 2-4 m (the user's "far end lights
    flat"; Bistro's p90 rises 1.21/1.84/2.14 over levels 0/2/3). A multiplied traced AO ranged to the
    spacing is the wrong model (worst group 2.52 -> 1.80 at best, over-darkens elsewhere, worse in
-   Bistro): occluded near directions carry nearby bounce, not black. Next: decide the near-field
-   remedy (per-pixel short traced gather, hits shaded from the field, misses read the probes; or
-   screen-space gather) before the clipmap can be the default. Found on the way and fixed: the
+   Bistro): occluded near directions carry nearby bounce, not black. The CPU gather prototype (inside
+   the surface reference; each ray also traced to the truth): SHORT rays (R = 1-2 spacings, misses
+   read the field's irradiance at the ray's end facing along it) make it WORSE (worst group 2.53 ->
+   3.20): even with the TRUE irradiance there, that proxy is 1.9x the light actually arriving along the
+   ray (0.0171 against 0.0090); the field's own error adds 11%. Irradiance is not radiance where light
+   comes through openings beyond R. FULL-LENGTH rays (field irradiance only at the surface a ray finally
+   hits, the sky where it escapes) are unbiased: Sponza mean 0.0283 against 0.0272, median 0.99; worst
+   group median 1.19 (was 2.50); Bistro median 1.00. But noisy at 48 rays (p10 0.35, p90 2.27, mean
+   |error| 0.0111 against field x GTAO's 0.0095), so it needs accumulation. Cost: the GPU traces ~20 M
+   closest rays/s here, so a ray per pixel at 1080p is ~100 ms. Next: the GPU gather as screen probes
+   (a probe on the surface per 16x16 tile, full-length rays, field at hits, the cascades for the sun at
+   hits, radiance kept octahedrally and accumulated over frames, each pixel integrating it for its own
+   normal), ~8k probes x 8 rays a frame ~ 3 ms. Found on the way and fixed: the
    probe cook integrated diffuse irradiance with 64 samples a texel, which a bright aureole turned into
    +-25% texel noise (straight up, every floor's lookup, read 1.47x high); 4096 now (probe recipe 2). 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
    material, 16 area-stratified samples per triangle at a footprint-matched mip) gives every triangle a

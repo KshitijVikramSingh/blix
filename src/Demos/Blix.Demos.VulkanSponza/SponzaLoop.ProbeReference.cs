@@ -630,7 +630,7 @@ internal sealed partial class SponzaLoop
     // The clipmap's answers taken apart (SponzaLoop.ClipmapTwin): does the CPU twin reproduce the GPU's field, how
     // much of each answer came from probes the surface cannot see, and how far from the reference the field would
     // be had only the visible probes answered.
-    private static void WriteLeakAttribution((double Field, double Ref, double Twin, double LeakShare, double Visible, double Level, double Distance, double Gtao, double ProbeValue, double ProbeRef, double ProbeDistance, double Ao05, double Ao1, double Ao2)[] rows)
+    private static void WriteLeakAttribution((double Field, double Ref, double Twin, double LeakShare, double Visible, double Level, double Distance, double Gtao, double ProbeValue, double ProbeRef, double ProbeDistance, double Ao05, double Ao1, double Ao2, double G1, double G2, double G2k8, double G2k16)[] rows)
     {
         static string Q(IEnumerable<double> values)
         {
@@ -674,11 +674,18 @@ internal sealed partial class SponzaLoop
                 $"      {name,-12} {group.Length,4} pixels: probe stored / truth at probe {Q(group.Select(r => r.ProbeValue / r.ProbeRef))}; truth at probe / truth at surface {Q(group.Select(r => r.ProbeRef / r.Ref))}; probe {Q(group.Select(r => r.ProbeDistance))} m away"));
         }
         // Would a traced near-field visibility, ranged to the probe spacing, stand in for GTAO? The field times each.
-        foreach (var (name, ao) in new (string, Func<(double Field, double Ref, double Twin, double LeakShare, double Visible, double Level, double Distance, double Gtao, double ProbeValue, double ProbeRef, double ProbeDistance, double Ao05, double Ao1, double Ao2), double>)[]
+        foreach (var (name, ao) in new (string, Func<(double Field, double Ref, double Twin, double LeakShare, double Visible, double Level, double Distance, double Gtao, double ProbeValue, double ProbeRef, double ProbeDistance, double Ao05, double Ao1, double Ao2, double G1, double G2, double G2k8, double G2k16), double>)[]
             { ("GTAO", r => r.Gtao), ("traced 0.5 spacing", r => r.Ao05), ("traced 1 spacing", r => r.Ao1), ("traced 2 spacings", r => r.Ao2) })
         {
             Console.WriteLine(string.Create(Inv,
                 $"    field x {name,-19} mean {read.Average(r => r.Field * ao(r)):0.00000} against {read.Average(r => r.Ref):0.00000}, ratio {Q(read.Select(r => r.Field * ao(r) / r.Ref))}, mean |error| {read.Average(r => Math.Abs(r.Field * ao(r) - r.Ref)):0.00000}; worst group (field >= 2x) {Q(read.Where(r => r.Twin / r.Ref >= 2).Select(r => r.Field * ao(r) / r.Ref))}"));
+        }
+        // The gather prototype in place of field x occlusion: what it alone delivers (no GTAO on top).
+        foreach (var (name, pick) in new (string, Func<(double Field, double Ref, double Twin, double LeakShare, double Visible, double Level, double Distance, double Gtao, double ProbeValue, double ProbeRef, double ProbeDistance, double Ao05, double Ao1, double Ao2, double G1, double G2, double G2k8, double G2k16), double>)[]
+            { ("gather R=1 sp, 256", r => r.G1), ("gather R=2 sp, 256", r => r.G2), ("gather R=2 sp, 16", r => r.G2k16), ("gather R=2 sp, 8", r => r.G2k8) })
+        {
+            Console.WriteLine(string.Create(Inv,
+                $"    {name,-21} mean {read.Average(r => pick(r)):0.00000} against {read.Average(r => r.Ref):0.00000}, ratio {Q(read.Select(r => pick(r) / r.Ref))}, mean |error| {read.Average(r => Math.Abs(pick(r) - r.Ref)):0.00000}; worst group (field >= 2x) {Q(read.Where(r => r.Twin / r.Ref >= 2).Select(r => pick(r) / r.Ref))}"));
         }
         // By the level that answered (share-weighted, rounded), and by camera distance: does the field go flat, and
         // bright, where the coarse levels answer?
@@ -784,11 +791,86 @@ internal sealed partial class SponzaLoop
             }
             return sum * (MathF.PI / count);
         }
+        // The per-pixel gather prototype: K cosine rays out to range R. A hit brings what that surface sends back
+        // (albedo/pi times its direct sun and the field's irradiance there); a ray that meets nothing within R
+        // brings the field's irradiance at its far end facing back along it, over pi: the probes' word for the
+        // radiance arriving from that direction. Probes then carry the far field, the rays the near.
+        var clipmapForGather = ClipmapActive ? ReadClipmap() : null;
+        Vector3 FieldAt(Vector3 at, Vector3 facing)
+        {
+            var shares = ClipmapShares(clipmapForGather!, at, facing);
+            if (shares.Count == 0) return probe is null ? Vector3.Zero : CubeTexel(probe.IrradianceCube, probe.IrradianceFaceSize, facing);
+            var sum = Vector3.Zero;
+            foreach (var sh in shares) sum += sh.Share * sh.Irradiance;
+            return sum;
+        }
+        Vector3 Gather(Vector3 x, Vector3 n, float range, int count, Random rng)
+        {
+            var sum = Vector3.Zero;
+            for (var j = 0; j < count; j++)
+            {
+                var d = CosineHemisphereCpu(n, rng);
+                var h = scene.Closest(new Ray(x, d), 0f, range, (uint)rng.Next());
+                if (h is { } hit)
+                {
+                    var hn = Normal(hit);
+                    if (Vector3.Dot(hn, d) > 0f) hn = -hn;
+                    var hp = x + d * hit.T + hn * 0.01f;
+                    var ndotl = MathF.Max(Vector3.Dot(hn, toSun), 0f);
+                    var sun = ndotl > 0f && !scene.Any(new Ray(hp, toSun), 0f, float.PositiveInfinity, (uint)rng.Next()) ? sunIrr * ndotl : Vector3.Zero;
+                    sum += Albedo(hit.Instance, hit.Triangle) * (sun + FieldAt(hp, hn)) / MathF.PI;
+                }
+                else
+                {
+                    sum += FieldAt(x + d * range, d) / MathF.PI;
+                }
+            }
+            return sum * (MathF.PI / count);
+        }
+        // The gather split by ray: each ray's field-based radiance beside the traced truth for the same ray (a hit:
+        // that surface's albedo/pi times its sun and its true indirect; a miss: the ray continued past R, its
+        // escape bringing the sky, its hit the same as a near hit). Sums are cosine-weighted, pi/count each.
+        (Vector3 HitField, Vector3 HitTrue, Vector3 MissField, Vector3 MissTrue, Vector3 MissProxyTrue, Vector3 MissFull, int Hits) GatherSplit(Vector3 x, Vector3 n, float range, int count, int truthPaths, Random rng)
+        {
+            Vector3 hf = Vector3.Zero, ht = Vector3.Zero, mf = Vector3.Zero, mt = Vector3.Zero, mp = Vector3.Zero, mfull = Vector3.Zero; var hits = 0;
+            Vector3 Leaving(RayHit hit, Vector3 origin, Vector3 d, bool truth, out Vector3 field)
+            {
+                var hn = Normal(hit);
+                if (Vector3.Dot(hn, d) > 0f) hn = -hn;
+                var hp = origin + d * hit.T + hn * 0.01f;
+                var ndotl = MathF.Max(Vector3.Dot(hn, toSun), 0f);
+                var sun = ndotl > 0f && !scene.Any(new Ray(hp, toSun), 0f, float.PositiveInfinity, (uint)rng.Next()) ? sunIrr * ndotl : Vector3.Zero;
+                var albedo = Albedo(hit.Instance, hit.Triangle);
+                field = albedo * (sun + FieldAt(hp, hn)) / MathF.PI;
+                return albedo * (sun + TotalReference(hp, hn, truthPaths, rng)) / MathF.PI;
+            }
+            for (var j = 0; j < count; j++)
+            {
+                var d = CosineHemisphereCpu(n, rng);
+                var h = scene.Closest(new Ray(x, d), 0f, float.PositiveInfinity, (uint)rng.Next());
+                if (h is { } hit && hit.T <= range)
+                {
+                    hits++;
+                    ht += Leaving(hit, x, d, true, out var f);
+                    hf += f;
+                }
+                else
+                {
+                    mf += FieldAt(x + d * range, d) / MathF.PI;
+                    // The same proxy (irradiance at the ray's end, facing along it) with the TRUE irradiance there.
+                    mp += TotalReference(x + d * range, d, truthPaths, rng) / MathF.PI;
+                    if (h is { } far) { mt += Leaving(far, x, d, true, out var farField); mfull += farField; }
+                    else { var skyL = SkyRadiance(d); mt += skyL; mfull += skyL; }
+                }
+            }
+            var k = MathF.PI / count;
+            return (hf * k, ht * k, mf * k, mt * k, mp * k, mfull * k, hits);
+        }
         var results = new (bool Use, double Bounce, double BounceRef, double Sky, double SkyRef, double SkyBounceRef,
-            double DirectRef, double DirectModel, double DirectModelTrueV, double Twin, double LeakShare, double Visible, double Level, double Distance, double Gtao, float Px, float Py, double ProbeValue, double ProbeRef, double ProbeDistance, double Ao05, double Ao1, double Ao2)[grid * grid];
+            double DirectRef, double DirectModel, double DirectModelTrueV, double Twin, double LeakShare, double Visible, double Level, double Distance, double Gtao, float Px, float Py, double ProbeValue, double ProbeRef, double ProbeDistance, double Ao05, double Ao1, double Ao2, double G1, double G2, double G2k8, double G2k16, double HitField, double HitTrue, double MissField, double MissTrue, double HitShare, double MissProxy, double MissFull)[grid * grid];
         // With the clipmap: which probes answered each pixel, and which of them the surface cannot see (a segment
         // from the surface to the probe meets geometry). Those shares are light from the far side of a wall.
-        var clipmapRead = ClipmapActive ? ReadClipmap() : null;
+        var clipmapRead = clipmapForGather;
         // GTAO's visibility, which the lit pass multiplies the field by (ambientVis.a): the shaded indirect is field
         // times this, so that product is what the reference judges.
         var gtao = device.ReadTexture(graph.GetColorTexture(ambientDenoisedHandle), out var gw, out var gh, out var gf);
@@ -855,6 +937,8 @@ internal sealed partial class SponzaLoop
             double twin = double.NaN, leak = double.NaN, visible = double.NaN, level = double.NaN;
             double probeValue = double.NaN, probeRef = double.NaN, probeDistance = double.NaN;
             double ao05 = double.NaN, ao1 = double.NaN, ao2 = double.NaN;
+            double g1 = double.NaN, g2 = double.NaN, g2k8 = double.NaN, g2k16 = double.NaN;
+            double hitField = double.NaN, hitTrue = double.NaN, missField = double.NaN, missTrue = double.NaN, hitShare = double.NaN, missProxy = double.NaN, missFull = double.NaN;
             if (clipmapRead is not null)
             {
                 var shares = ClipmapShares(clipmapRead, ray.PointAt(hit.T), n);
@@ -887,6 +971,13 @@ internal sealed partial class SponzaLoop
                         if (t > 2f * spacing) f2++;
                     }
                     ao05 = f05 / (double)aoRays; ao1 = f1 / (double)aoRays; ao2 = f2 / (double)aoRays;
+                    g1 = Lum(Gather(x, n, spacing, 256, new Random(5 + k)));
+                    g2 = Lum(Gather(x, n, 2f * spacing, 256, new Random(6 + k)));
+                    g2k8 = Lum(Gather(x, n, 2f * spacing, 8, new Random(7 + k)));
+                    g2k16 = Lum(Gather(x, n, 2f * spacing, 16, new Random(8 + k)));
+                    var split = GatherSplit(x, n, 2f * spacing, 48, 32, new Random(9 + k));
+                    hitField = Lum(split.HitField); hitTrue = Lum(split.HitTrue); missField = Lum(split.MissField); missTrue = Lum(split.MissTrue);
+                    hitShare = split.Hits / 48.0; missProxy = Lum(split.MissProxyTrue); missFull = Lum(split.MissFull);
                     // The strongest visible probe judged at its own position, for this pixel's normal.
                     if (strongest is { } top)
                     {
@@ -901,7 +992,7 @@ internal sealed partial class SponzaLoop
                 }
             }
             results[k] = (true, Lum(got), Lum(reference), sky, open / (double)paths, Lum(skyAcc * (MathF.PI / paths)),
-                Lum(directAcc * (MathF.PI / paths)), Lum(cooked) * sky, Lum(cooked) * open / paths, twin, leak, visible, level, hit.T, GtaoAt(px, py), px / iw, py / ih, probeValue, probeRef, probeDistance, ao05, ao1, ao2);
+                Lum(directAcc * (MathF.PI / paths)), Lum(cooked) * sky, Lum(cooked) * open / paths, twin, leak, visible, level, hit.T, GtaoAt(px, py), px / iw, py / ih, probeValue, probeRef, probeDistance, ao05, ao1, ao2, g1, g2, g2k8, g2k16, hitField, hitTrue, missField, missTrue, hitShare, missProxy, missFull);
         });
         var used = results.Where(r => r.Use).ToArray();
         Console.WriteLine(string.Create(Inv,
@@ -933,6 +1024,23 @@ internal sealed partial class SponzaLoop
             Console.WriteLine(string.Create(Inv,
                 $"    total indirect ({(ClipmapActive ? "clipmap field alone" : "field + cube x visibility")}): mean {totals.Average(t => t.Field):0.00000} against {totals.Average(t => t.Ref):0.00000}, ratio median {totalRatios[totalRatios.Length / 2]:0.00} (p10 {totalRatios[totalRatios.Length / 10]:0.00}, p90 {totalRatios[totalRatios.Length * 9 / 10]:0.00}) over {totalRatios.Length}, mean |error| {totals.Average(t => Math.Abs(t.Field - t.Ref)):0.00000}"));
         }
-        if (clipmapRead is not null) WriteLeakAttribution(used.Select(r => (r.Bounce, Ref: r.BounceRef + r.SkyBounceRef + r.DirectRef, r.Twin, r.LeakShare, r.Visible, r.Level, r.Distance, r.Gtao, r.ProbeValue, r.ProbeRef, r.ProbeDistance, r.Ao05, r.Ao1, r.Ao2)).ToArray());
+        if (clipmapRead is not null)
+        {
+            var floorRef = 0.02 * used.Average(r => r.BounceRef + r.SkyBounceRef + r.DirectRef);
+            static string Q2(IEnumerable<double> values)
+            {
+                var v = values.OrderBy(x => x).ToArray();
+                return string.Create(Inv, $"median {v[v.Length / 2]:0.00} (p10 {v[v.Length / 10]:0.00}, p90 {v[v.Length * 9 / 10]:0.00})");
+            }
+            foreach (var (name, pick) in new (string, Func<double, bool>)[] { ("all", q => true), ("ratio < 1.3", q => q < 1.3), ("ratio >= 2", q => q >= 2) })
+            {
+                var g = used.Where(r => !double.IsNaN(r.HitTrue) && r.BounceRef + r.SkyBounceRef + r.DirectRef > floorRef
+                    && pick(r.Twin / (r.BounceRef + r.SkyBounceRef + r.DirectRef))).ToArray();
+                if (g.Length == 0) continue;
+                Console.WriteLine(string.Create(Inv,
+                    $"    gather split, {name,-12} {g.Length,4} px: rays hitting within R {g.Average(r => r.HitShare):0.00}; near hits field {g.Average(r => r.HitField):0.00000} true {g.Average(r => r.HitTrue):0.00000}; misses field {g.Average(r => r.MissField):0.00000} true-irradiance proxy {g.Average(r => r.MissProxy):0.00000} full-length (field at the far hit) {g.Average(r => r.MissFull):0.00000} true {g.Average(r => r.MissTrue):0.00000}; full-length gather total {Q2(g.Select(r => (r.HitField + r.MissFull) / (r.BounceRef + r.SkyBounceRef + r.DirectRef)))}, mean |error| {g.Average(r => Math.Abs(r.HitField + r.MissFull - (r.BounceRef + r.SkyBounceRef + r.DirectRef))):0.00000}; sum true {g.Average(r => r.HitTrue + r.MissTrue):0.00000} against reference {g.Average(r => r.BounceRef + r.SkyBounceRef + r.DirectRef):0.00000}"));
+            }
+        }
+        if (clipmapRead is not null) WriteLeakAttribution(used.Select(r => (r.Bounce, Ref: r.BounceRef + r.SkyBounceRef + r.DirectRef, r.Twin, r.LeakShare, r.Visible, r.Level, r.Distance, r.Gtao, r.ProbeValue, r.ProbeRef, r.ProbeDistance, r.Ao05, r.Ao1, r.Ao2, r.G1, r.G2, r.G2k8, r.G2k16)).ToArray());
     }
 }
