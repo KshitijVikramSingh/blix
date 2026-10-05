@@ -165,6 +165,7 @@ internal sealed partial class SponzaLoop
         clipmapEnabled = args.Flag("gi-clipmap");
         if (args.Float("clipmap-spacing") is { } clipSpacing) clipmapSpacing = Math.Max(0.05f, clipSpacing);
         if (args.Int("clipmap-budget") is { } clipBudget) clipmapBudget = Math.Clamp(clipBudget, 1, 65535);
+        if (args.Float("clipmap-unknown-sky") is { } unknownSky) clipmapUnknownSky = Math.Clamp(unknownSky, 0f, 1f);
         // The triangle probe reference (--probe-reference) traces the ray scene too. GI's own need for it waits
         // for the scene to say whether it has a probe field at all (ConsolidateBuffers).
         rayScene |= rayCheck || abMode == "trace" || args.Flag("probe-reference") || clipmapEnabled;

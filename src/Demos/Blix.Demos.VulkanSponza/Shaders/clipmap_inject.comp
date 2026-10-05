@@ -35,13 +35,15 @@ layout(set = 0, binding = 0) uniform ClipmapInject {
     vec4 uSunDirection;    // xyz the direction the sun travels
     vec4 uSunIrradiance;   // rgb measured irradiance, w 1 when the sky irradiance cube is valid
     vec4 uFrame;           // x frame counter, y bounce strength, z sky strength, w depth lobe exponent
+    vec4 uFallback;        // x the sky visibility taken at a hit no probe answers for
 } u;
 
 layout(set = 0, binding = 1, rgba16f) uniform image2D uClipmapIrradiance;
 layout(set = 0, binding = 2, rgba16f) uniform image2D uClipmapDepth;
 layout(set = 0, binding = 3) uniform samplerCube uIrradiance;
 layout(std430, set = 0, binding = 4) buffer ClipmapState { uvec4 states[]; };
-// counts[0..3] per level, then each level's queue of global slots (level * probes-per-level slots each).
+// counts[0..3] per level, [4] hits this frame, [5] of them no probe answered for, [6..7] unused, then each level's
+// queue of global slots (level * probes-per-level slots each).
 layout(std430, set = 0, binding = 5) buffer ClipmapQueue { uint queue[]; };
 
 #define BLIX_RAY_SET 0
@@ -100,7 +102,7 @@ void main() {
     int mode = int(u.uParams.z + 0.5);
 
     if (mode == 0) {
-        if (gl_GlobalInvocationID.x < 4u) queue[gl_GlobalInvocationID.x] = 0u;
+        if (gl_GlobalInvocationID.x < 8u) queue[gl_GlobalInvocationID.x] = 0u;
         return;
     }
 
@@ -118,7 +120,7 @@ void main() {
         }
         if ((state.w & BLIX_CLIPMAP_SOLVED) == 0u) {
             uint k = atomicAdd(queue[level], 1u);
-            queue[4u + uint(level * perLevel) + k] = uint(g);
+            queue[8u + uint(level * perLevel) + k] = uint(g);
         }
         return;
     }
@@ -130,7 +132,7 @@ void main() {
         int chosen = -1;
         for (int l = 0; l < BLIX_CLIPMAP_LEVELS && chosen < 0; ++l) {
             int count = int(queue[l]);
-            if (k < count) chosen = int(queue[4 + l * perLevel + k]);
+            if (k < count) chosen = int(queue[8 + l * perLevel + k]);
             else k -= count;
         }
         if (chosen < 0) {
@@ -172,7 +174,9 @@ void main() {
         // coarsest level it knows nothing, and the sky is taken as open there.
         bool known;
         vec4 field = blix_clipmapSample(c, hitPos, n, known);
-        float skyVisibility = known ? field.a : 1.0;
+        atomicAdd(queue[4], 1u);
+        if (!known) atomicAdd(queue[5], 1u);
+        float skyVisibility = known ? field.a : u.uFallback.x;
         vec3 sky = u.uSunIrradiance.w > 0.5 ? texture(uIrradiance, n).rgb * skyVisibility * u.uFrame.z : vec3(0.0);
         vec3 bounce = known ? field.rgb * u.uFrame.y : vec3(0.0);
         radiance = hit.albedo * (u.uSunIrradiance.rgb * sun + sky + bounce) / PI;
@@ -208,9 +212,13 @@ void main() {
 
     uint previousFlags = states[g].w;
     bool solvedBefore = (previousFlags & BLIX_CLIPMAP_SOLVED) != 0u;
+    // How many times this slot has been solved for its cell (bits 8-15). The first solves average evenly (1/n), so
+    // an early answer (made while its neighbours were unsolved, and so wrong) does not keep a quarter of its weight
+    // for hundreds of frames; past that, the steady blend.
+    uint solves = solvedBefore ? (previousFlags >> 8) & 0xFFu : 0u;
     // A quarter of the rays meeting back faces: the probe sits inside something.
     bool buried = float(sBackfaces) > 0.25 * float(RAYS);
-    float converge = solvedBefore ? u.uParams.y : 1.0;
+    float converge = max(u.uParams.y, 1.0 / float(solves + 1u));
     ivec2 tile = blix_clipmapTileOrigin(c, level, slot);
     ivec2 texel = ivec2(int(lane) % 8, int(lane) / 8);
     ivec2 src = blix_octBorderSource(texel, 8);
@@ -221,5 +229,5 @@ void main() {
     imageStore(uClipmapIrradiance, tile + texel, vec4(mix(old.rgb, value.rgb, converge), 1.0));
     imageStore(uClipmapDepth, tile + texel, vec4(mix(oldDepth.rg, sMoments[interior], converge), 0.0, mix(oldDepth.a, value.a, converge)));
     barrier();
-    if (lane == 0u) states[g] = uvec4(uvec3(cell), BLIX_CLIPMAP_SOLVED | (buried ? BLIX_CLIPMAP_BURIED : 0u));
+    if (lane == 0u) states[g] = uvec4(uvec3(cell), BLIX_CLIPMAP_SOLVED | (buried ? BLIX_CLIPMAP_BURIED : 0u) | (min(solves + 1u, 255u) << 8));
 }

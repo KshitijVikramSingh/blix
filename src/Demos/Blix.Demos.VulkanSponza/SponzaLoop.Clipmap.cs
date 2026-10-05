@@ -15,6 +15,10 @@ internal sealed partial class SponzaLoop
     // --clipmap-spacing M: level 0's probe spacing; --clipmap-budget N: probes solved a frame (64 rays each).
     private float clipmapSpacing = 0.5f;
     private int clipmapBudget = 512;
+    // --clipmap-unknown-sky V: the sky visibility a probe ray takes at a hit no clipmap probe answers for. Closed (0):
+    // in steady state 1 hit in 31,359 is unanswered, but at start-up nearly all are, and taking them as open sky lit
+    // Sponza's field with glare it took 4,000 frames to lose (sky-carried bounce 0.0244 at frame 600, 0.0033 settled).
+    private float clipmapUnknownSky = 0f;
     private ProbeClipmap? clipmap;
     private TextureHandle clipmapIrradiance;
     private TextureHandle clipmapDepth;
@@ -78,7 +82,7 @@ internal sealed partial class SponzaLoop
         var initial = new uint[slots * 4];
         for (var i = 0; i < slots; i++) { initial[i * 4] = 0x80000000u; initial[i * 4 + 1] = 0x80000000u; initial[i * 4 + 2] = 0x80000000u; }
         clipmapState = Own(device.CreateGpuBuffer(slots * 16, MemoryMarshal.AsBytes(initial.AsSpan()), "sponza.clipmap.state"));
-        clipmapQueue = Own(device.CreateGpuBuffer((4 + slots) * 4, name: "sponza.clipmap.queue"));
+        clipmapQueue = Own(device.CreateGpuBuffer((8 + slots) * 4, name: "sponza.clipmap.queue"));
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] probe clipmap: {ClipmapLevels} levels of {ClipmapDims.X}x{ClipmapDims.Y}x{ClipmapDims.Z} probes, spacing {clipmapSpacing:0.##} m doubling (level {ClipmapLevels - 1} spans {clipmap.Spacing(ClipmapLevels - 1) * ClipmapDims.X:0} m), atlases {clipmap.AtlasWidth}x{clipmap.AtlasHeight}, {clipmapBudget} probes a frame."));
     }
@@ -110,6 +114,7 @@ internal sealed partial class SponzaLoop
             new("uSunDirection", new Vector4Uniform(new Vector4(sunDirection, 0f))),
             new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 1f))),
             new("uFrame", new Vector4Uniform(new Vector4(clipmapFrame, 1f, 1f, ClipmapDepthLobe))),
+            new("uFallback", new Vector4Uniform(new Vector4(clipmapUnknownSky, 0f, 0f, 0f))),
         }, textures, Buffers: buffers);
         graph.Dispatch(clipmapPassHandle, Phase(0, 1));
         graph.Dispatch(clipmapPassHandle, Phase(1, (slots + 63) / 64));
@@ -138,6 +143,9 @@ internal sealed partial class SponzaLoop
             if ((words[g * 4 + 3] & 1u) != 0) solved[level]++;
             if ((words[g * 4 + 3] & 2u) != 0) buried[level]++;
         }
+        var counters = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapQueue, 0, 32).AsSpan()).ToArray();
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] probe clipmap, last frame: {counters[4]:N0} ray hits, {counters[5]:N0} ({100.0 * counters[5] / Math.Max(1u, counters[4]):0.0}%) where no probe answered (sky taken as {clipmapUnknownSky:0.##})."));
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] probe clipmap after {clipmapFrame} frames: slots whose cell differs from ProbeClipmap's {mismatched} of {slots}; solved per level {string.Join(" / ", solved)} of {clipmap.ProbesPerLevel}, buried {string.Join(" / ", buried)}."));
     }
