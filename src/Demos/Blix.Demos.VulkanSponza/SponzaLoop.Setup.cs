@@ -175,7 +175,9 @@ internal sealed partial class SponzaLoop
         if (args.Float("taa") is { } taa) render.Taa = Math.Clamp(taa, 0f, 0.97f);
         // --stability K: per-pixel temporal variation over the K still frames before the shot (SponzaLoop.Stability).
         if (args.Int("stability") is { } stability) stabilityFrames = Math.Max(2, stability);
-        if (args.Flag("incident-gradient")) noIncidentGradient = false;
+        noIncidentGradient = args.Flag("no-incident-gradient");
+        if (args.Float("incident-normal-bias") is { } nb) incidentNormalBias = Math.Clamp(nb, 0f, 12f);
+        if (args.Float("incident-gradient-clamp") is { } gc) incidentGradientClamp = Math.Clamp(gc, 0f, 4f);
         if (args.Int("clipmap-freeze") is { } freeze) clipmapFreeze = Math.Max(1, freeze);
         if (args.Int("screen-probe-filter") is { } spFilter) screenProbeFilterRadius = Math.Clamp(spFilter, 0, 4);
         if (args.Int("screen-probe-ablate") is { } ablate) screenProbeAblate = ablate;

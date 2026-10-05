@@ -33,11 +33,17 @@ internal sealed partial class SponzaLoop
     private PipelineHandle screenProbeFilterPipeline;
     private GpuBufferHandle screenProbeFiltered;
     private int screenProbeFilterRadius = 1;
-    // --incident-gradient: carry the light to the normal-mapped normal by the screen probes' SH gradient. Off by
-    // default: the user saw it shimmer, and --stability measured the TAA-resolved image (still camera) at a median
-    // 5.70% per-pixel variation with it against 3.40% without (default look 3.16%). The SH's directional bands are
-    // its noisiest part, and dividing by luminance amplifies them in the dark. A steadier source is wanted.
-    private bool noIncidentGradient = true;
+    // --no-incident-gradient: the incident pass writes no gradient, and the lit pass shades indirect light at the
+    // geometric normal (the control for what the normal map adds). The gradient comes from the clipmap's own
+    // directional irradiance (incident_clipmap.frag), not the screen probes' SH, which shimmered.
+    private bool noIncidentGradient;
+    // --incident-normal-bias B: mips down the normal map is read for the gradient; --incident-gradient-clamp C: the
+    // correction's factor stays in [1 - C, 1 + C] (it was [0, 3]). Sponza, still camera: pixels the gradient moves
+    // (TAA off) against the presented image's median variation (TAA on): bias 0 (clamp 0-3) 13.0% / 6.69%, 1 5.3% /
+    // 4.78%, 2 1.7% / 3.67%, 3 0.56% / 3.44%, none 0 / 3.40%. The detail IS the shimmer: what a normal map adds below
+    // a few pixels, TAA's jitter samples differently every frame. 2 until the TAA resolves its jitter better.
+    private float incidentNormalBias = 2f;
+    private float incidentGradientClamp = 0.5f;
     private (int X, int Y) screenProbeTiles;
     private int screenProbeCurrent;
     private int screenProbeFrame;
@@ -151,7 +157,7 @@ internal sealed partial class SponzaLoop
             screenProbeDummy = Own(device.CreateGpuBuffer(ScreenProbeBytes, name: "sponza.screen-probes.none"));
             screenProbeTileDummy = Own(device.CreateGpuBuffer(ScreenProbeTileBytes, name: "sponza.screen-probe-tiles.none"));
         }
-        return (Vector4.Zero, new Vector4(frameWidth, frameHeight, 0f, 0f), screenProbeTileDummy, screenProbeDummy);
+        return (new Vector4(0f, 0f, 0f, noIncidentGradient ? 1f : 0f), new Vector4(frameWidth, frameHeight, 0f, 0f), screenProbeTileDummy, screenProbeDummy);
     }
 
     // At the shot: how many frames each placed probe has accumulated (a probe that keeps losing its past shows only

@@ -59,21 +59,4 @@ vec3 screenProbeIrradiance(vec4 radiance[9], vec3 n) {
     return max(e, vec3(0.0));
 }
 
-// How that irradiance changes with the normal: the gradient of its LUMINANCE, as a function of the normal's
-// components, at n (the analytic derivative of the same band-scaled polynomial). The incident pass carries it so
-// the lit pass can turn irradiance evaluated at the geometric normal into irradiance at the normal-mapped one: a
-// normal map's folds and relief are where indirect light gets its detail.
-vec3 screenProbeIrradianceGradient(vec4 radiance[9], vec3 n) {
-    const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
-    float c[9];
-    for (int i = 0; i < 9; ++i) c[i] = dot(radiance[i].rgb, luma);
-    const float a1k = 1.0233267;      // 2pi/3 * 0.488603
-    const float a2 = 0.785398163;     // pi/4
-    const float k2 = 1.092548;        // the xy, yz, xz basis constant, and twice 0.546274
-    return vec3(
-        a1k * c[3] + a2 * (k2 * (c[4] * n.y + c[7] * n.z) + k2 * c[8] * n.x),
-        a1k * c[1] + a2 * (k2 * (c[4] * n.x + c[5] * n.z) - k2 * c[8] * n.y),
-        a1k * c[2] + a2 * (k2 * (c[5] * n.y + c[7] * n.x) + 1.892352 * c[6] * n.z));
-}
-
 #endif

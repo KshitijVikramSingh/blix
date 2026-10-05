@@ -175,14 +175,16 @@ exactly where the world has changed.
    the inline path at the geometric normal moves 15% of Sponza's pixels). The incident pass now writes
    a second target, the light's luminance gradient with the normal (exact from screen probes' SH; the
    clipmap contributes none), resolved alongside, and the lit pass carries the light to the normal-
-   mapped normal to first order (moves 8.4% of pixels). OFF by default (`--incident-gradient`): the
-   user saw it shimmer; `--stability` now also reads the TAA-resolved image, and with the camera still
-   it measured median per-pixel variation default 3.16%, clipmap 3.30%, screen probes 3.40%, with the
-   SH gradient 5.70% (its directional bands are the noisiest part). Open: a steady source of normal-map
-   detail for the field (the clipmap's directional irradiance is deterministic: sample it at tilted
-   normals in the incident pass?). And the 3% floor in EVERY arm is the TAA: history 0.7 (0.9: 2.36%,
-   less than the longer average predicts, so its history clamp discards too) leaves the jitter
-   visible; the user's "jitters with foliage, alpha, taa, fog, history, everything". Found on the way and fixed: the
+   mapped normal to first order. The gradient now comes from the CLIPMAP (irradiance at the geometric
+   normal and two ~20-degree tilts, same probes and weights: deterministic; the screen probes' SH
+   gradient shimmered, 3.40% -> 5.70% presented). With TAA off it adds nothing to the variation (0.89%
+   either way); with TAA on, applied at the full normal map it doubled the shimmer (6.69%): the detail
+   below a pixel is what the jitter samples differently each frame. So the lit pass reads the normal
+   map 2 mips down for it and clamps the factor to [0.5, 1.5] (`--incident-normal-bias`,
+   `--incident-gradient-clamp`): bias 0/1/2/3 move 13.0/5.3/1.7/0.56% of pixels at 6.69/4.78/3.67/3.44%
+   presented (none 3.40%). `--stability` reads the TAA-resolved image too; the ~3% floor in EVERY arm
+   (default 3.16%) is the TAA itself: history 0.7 (0.9: 2.36%, less than the longer average predicts,
+   so its clamp discards too). NEXT: TAA quality, then the normal-map bias can come down. Found on the way and fixed: the
    probe cook integrated diffuse irradiance with 64 samples a texel, which a bright aureole turned into
    +-25% texel noise (straight up, every floor's lookup, read 1.47x high); 4096 now (probe recipe 2). 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
    material, 16 area-stratified samples per triangle at a footprint-matched mip) gives every triangle a

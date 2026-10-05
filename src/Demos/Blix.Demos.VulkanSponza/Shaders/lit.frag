@@ -569,7 +569,16 @@ void main() {
             if (frame.uIncident.w > 0.5) {
                 vec3 gradient = texture(sampler2D(uIncidentGradient, uLinearClamp), gl_FragCoord.xy / frame.uFog.xy).xyz;
                 float lum = dot(incident, vec3(0.2126, 0.7152, 0.0722));
-                if (lum > 1e-6) incident *= clamp(1.0 + dot(gradient, N - vizGeometricN) / lum, 0.0, 3.0);
+                if (lum > 1e-6) {
+                    // The normal map read blurred (uIncidentGradient.x mips down), through the same frame: indirect
+                    // diffuse follows a surface's folds and relief, and the weave below a pixel that TAA's jitter
+                    // samples differently each frame stays with the direct light.
+                    vec2 nxyLow = (texture(uNormalMap, uv, frame.uIncidentGradient.x).xy * 2.0 - 1.0)
+                                * normalScale * (1.0 - frame.uAbFlags.w);
+                    vec3 nLow = normalize(mat3(T, B, vizGeometricN) * vec3(nxyLow, sqrt(max(0.0, 1.0 - dot(nxyLow, nxyLow)))));
+                    float range = frame.uIncidentGradient.y;
+                    incident *= clamp(1.0 + dot(gradient, nLow - vizGeometricN) / lum, 1.0 - range, 1.0 + range);
+                }
             }
             // The field carries no per-pixel confidence: each full-resolution texel has already
             // mixed four coarse samples. Channel 16 and the leak census therefore report full

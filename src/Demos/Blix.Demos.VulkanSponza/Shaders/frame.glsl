@@ -126,4 +126,10 @@ layout(set = 0, binding = 0) uniform Frame {
     // xy = the incident field's size in pixels, z = 1 when the lit pass should read it instead of
     // reconstructing the probe volumes itself, w unused.
     vec4  uIncident;
+    // How the lit pass carries the incident field's light to its normal-mapped normal (incident_clipmap.frag's
+    // gradient): x the mip bias the normal map is read at for it (indirect diffuse answers to folds and relief, not
+    // to a weave finer than a pixel, which under TAA's jitter shimmered), y how far the correction may scale the
+    // light either way (factor in [1 - y, 1 + y]). LAST in the block on purpose: skybox.vert hardcodes the offsets
+    // of members before it.
+    vec4  uIncidentGradient;
 } frame;
