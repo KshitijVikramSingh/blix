@@ -4,7 +4,9 @@
 // than from the baked bounds-sized volumes. Its own program because it declares the clipmap's state buffer, which
 // only exists when the clipmap does.
 //
-// Past the clipmap's coarsest level nothing answers: no bounce, and the sky taken as open.
+// rgb is ALL the indirect diffuse light arriving (the clipmap's probes carry the sky they see, not a visibility
+// fraction of it), so the lit pass adds no sky irradiance of its own when this field is active (frame.uIncident.w).
+// Past the clipmap's coarsest level nothing answers: the cooked sky irradiance, as if the sky were open.
 
 #include "fullscreen.glsl"
 
@@ -28,6 +30,7 @@ layout(set = 0, binding = 2) uniform sampler2D uPrepassNormal;
 layout(set = 0, binding = 3) uniform sampler2D uClipmapIrradiance;
 layout(set = 0, binding = 4) uniform sampler2D uClipmapDepth;
 layout(std430, set = 0, binding = 5) readonly buffer ClipmapState { uvec4 states[]; };
+layout(set = 0, binding = 6) uniform samplerCube uIrradiance;
 
 #define BLIX_CLIPMAP_IRRADIANCE(t) texelFetch(uClipmapIrradiance, t, 0)
 #define BLIX_CLIPMAP_DEPTH(t) texelFetch(uClipmapDepth, t, 0)
@@ -57,5 +60,5 @@ void main() {
     c.origin[3] = ivec3(g.uOrigin3.xyz);
     bool found;
     vec4 field = blix_clipmapSample(c, worldPos, N, found);
-    outIncident = found ? field : vec4(0.0, 0.0, 0.0, 1.0);
+    outIncident = found ? field : vec4(texture(uIrradiance, N).rgb, 1.0);
 }

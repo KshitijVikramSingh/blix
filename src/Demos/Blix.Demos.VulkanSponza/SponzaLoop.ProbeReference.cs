@@ -667,7 +667,8 @@ internal sealed partial class SponzaLoop
             var p = origin + dir * h.T + n * 0.01f;
             return Albedo(h.Instance, h.Triangle) * SkyTrace(p, CosineHemisphereCpu(n, rng), depth - 1, rng);
         }
-        var results = new (bool Use, double Bounce, double BounceRef, double Sky, double SkyRef, double SkyBounceRef)[grid * grid];
+        var results = new (bool Use, double Bounce, double BounceRef, double Sky, double SkyRef, double SkyBounceRef,
+            double DirectRef, double DirectModel, double DirectModelTrueV)[grid * grid];
         Parallel.For(0, grid * grid, k =>
         {
             var gx = k % grid; var gy = k / grid;
@@ -685,12 +686,18 @@ internal sealed partial class SponzaLoop
             var rng = new Random(777 + k);
             var acc = Vector3.Zero;
             var skyAcc = Vector3.Zero;
+            var directAcc = Vector3.Zero;
             var open = 0;
             for (var j = 0; j < paths; j++)
             {
                 var d = CosineHemisphereCpu(n, rng);
                 acc += Trace(x, d, bounces, rng);
-                if (!scene.Any(new Ray(x, d), 0f, float.PositiveInfinity, (uint)rng.Next())) open++;
+                if (!scene.Any(new Ray(x, d), 0f, float.PositiveInfinity, (uint)rng.Next()))
+                {
+                    open++;
+                    // Direct sky: what an escaping direction brings, cosine-sampled so the cosine cancels.
+                    directAcc += SkyRadiance(d);
+                }
                 // From the shading point, only a ray that meets a surface carries bounced sky.
                 var first = scene.Closest(new Ray(x, d), 0f, float.PositiveInfinity, (uint)rng.Next());
                 if (first is { } f)
@@ -708,14 +715,23 @@ internal sealed partial class SponzaLoop
             var got = new Vector3((float)BitConverter.ToHalf(incident, o), (float)BitConverter.ToHalf(incident, o + 2), (float)BitConverter.ToHalf(incident, o + 4));
             var sky = (float)BitConverter.ToHalf(incident, o + 6);
             double Lum(Vector3 v) => 0.2126 * v.X + 0.7152 * v.Y + 0.0722 * v.Z;
-            results[k] = (true, Lum(got), Lum(reference), sky, open / (double)paths, Lum(skyAcc * (MathF.PI / paths)));
+            // The lit pass's direct sky: the cooked irradiance at the normal times the field's sky visibility; and the same
+            // with the true visibility, so the model's own bias is told apart from the field's visibility error.
+            var cooked = probe is null ? Vector3.Zero : CubeTexel(probe.IrradianceCube, probe.IrradianceFaceSize, n);
+            results[k] = (true, Lum(got), Lum(reference), sky, open / (double)paths, Lum(skyAcc * (MathF.PI / paths)),
+                Lum(directAcc * (MathF.PI / paths)), Lum(cooked) * sky, Lum(cooked) * open / paths);
         });
         var used = results.Where(r => r.Use).ToArray();
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] surface reference ({used.Length} of {grid * grid} pixels off depth edges, {paths} paths x {bounces} bounces, sun only for bounce):"));
         foreach (var r in used)
         {
-            Console.WriteLine(string.Create(Inv, $"    surface  bounce {r.Bounce:0.00000} ref {r.BounceRef:0.00000}  sky {r.Sky:0.0000} ref {r.SkyRef:0.0000}  skybounce ref {r.SkyBounceRef:0.00000}"));
+            // All the indirect diffuse light: what the field delivers (the clipmap's incident field is all of it; the
+            // bounds field's is bounce, plus the lit pass's cube irradiance times visibility) against the three
+            // references summed (sun bounce at this run's sun, sky bounce, direct sky).
+            var fieldTotal = ClipmapActive ? r.Bounce : r.Bounce + r.DirectModel;
+            var refTotal = r.BounceRef + r.SkyBounceRef + r.DirectRef;
+            Console.WriteLine(string.Create(Inv, $"    surface  bounce {r.Bounce:0.00000} ref {r.BounceRef:0.00000}  sky {r.Sky:0.0000} ref {r.SkyRef:0.0000}  skybounce ref {r.SkyBounceRef:0.00000}  direct {r.DirectModel:0.00000} truev {r.DirectModelTrueV:0.00000} ref {r.DirectRef:0.00000}  total {fieldTotal:0.00000} ref {refTotal:0.00000}"));
         }
         var skyRatios = used.Where(r => r.SkyRef > 0.02).Select(r => r.Sky / r.SkyRef).OrderBy(v => v).ToArray();
         if (skyRatios.Length > 0)
@@ -725,5 +741,15 @@ internal sealed partial class SponzaLoop
         }
         Console.WriteLine(string.Create(Inv,
             $"    bounce (this run, with the sun as set): mean {used.Average(r => r.Bounce):0.00000}; sun-only reference mean {used.Average(r => r.BounceRef):0.00000}"));
+        // The whole indirect diffuse: what the incident field and the lit pass's sky term together deliver, against the
+        // three references summed. Ratios over the pixels with enough reference light to be read (2% of the mean up).
+        var totals = used.Select(r => (Field: ClipmapActive ? r.Bounce : r.Bounce + r.DirectModel, Ref: r.BounceRef + r.SkyBounceRef + r.DirectRef)).ToArray();
+        var floor = 0.02 * totals.Average(t => t.Ref);
+        var totalRatios = totals.Where(t => t.Ref > floor).Select(t => t.Field / t.Ref).OrderBy(v => v).ToArray();
+        if (totalRatios.Length > 0)
+        {
+            Console.WriteLine(string.Create(Inv,
+                $"    total indirect ({(ClipmapActive ? "clipmap field alone" : "field + cube x visibility")}): mean {totals.Average(t => t.Field):0.00000} against {totals.Average(t => t.Ref):0.00000}, ratio median {totalRatios[totalRatios.Length / 2]:0.00} (p10 {totalRatios[totalRatios.Length / 10]:0.00}, p90 {totalRatios[totalRatios.Length * 9 / 10]:0.00}) over {totalRatios.Length}, mean |error| {totals.Average(t => Math.Abs(t.Field - t.Ref)):0.00000}"));
+        }
     }
 }

@@ -10,9 +10,15 @@
 //              re-pointed and marked unsolved; every unsolved slot joins its level's queue
 //   2  update  one workgroup per probe, a fixed budget a frame: queued probes first, finest level first, the rest
 //              round-robin. 64 rays along a Fibonacci spiral, rotated afresh each update:
-//                hit     sun (a shadow ray), sky (the irradiance cube times the clipmap's own sky visibility there)
-//                        and bounce (the clipmap's own irradiance there), re-radiated in the baked albedo
-//                escape  counts toward sky visibility
+//                hit     sun (a shadow ray) and the clipmap's own irradiance there (which already holds the sky
+//                        that reaches that surface, directly and bounced), re-radiated in the baked albedo
+//                escape  the sky's radiance in that direction (the disc-free prefiltered sky, blurred to a ray's
+//                        share of the sphere), and it counts toward sky visibility
+//              So a probe's irradiance is ALL the indirect light arriving there, direct sky included: the sky a
+//              surface actually sees, not the sky's average times the share it sees. That product was measured
+//              against a path-traced reference at Sponza's and Bistro's surfaces (SponzaLoop.ProbeReference): 35%
+//              high in Sponza's courtyard, which sees the dim zenith, and off by half either way in Bistro's
+//              street, even with the true visibility.
 //              then each tile texel reconstructs irradiance, depth moments and sky visibility, blended in place with
 //              what the probe held; a probe whose rays mostly meet back faces is buried and shades nothing.
 //
@@ -35,12 +41,13 @@ layout(set = 0, binding = 0) uniform ClipmapInject {
     vec4 uSunDirection;    // xyz the direction the sun travels
     vec4 uSunIrradiance;   // rgb measured irradiance, w 1 when the sky irradiance cube is valid
     vec4 uFrame;           // x frame counter, y bounce strength, z sky strength, w depth lobe exponent
-    vec4 uFallback;        // x the sky visibility taken at a hit no probe answers for
+    vec4 uFallback;        // x the sky visibility taken at a hit no probe answers for, y the sky's mip for a ray
 } u;
 
 layout(set = 0, binding = 1, rgba16f) uniform image2D uClipmapIrradiance;
 layout(set = 0, binding = 2, rgba16f) uniform image2D uClipmapDepth;
-layout(set = 0, binding = 3) uniform samplerCube uIrradiance;
+layout(set = 0, binding = 3) uniform samplerCube uIrradiance;   // unused here since radiance replaced it; kept bound by the host
+layout(set = 0, binding = 6) uniform samplerCube uSkyRadiance;
 layout(std430, set = 0, binding = 4) buffer ClipmapState { uvec4 states[]; };
 // counts[0..3] per level, [4] hits this frame, [5] of them no probe answered for, [6..7] unused, then each level's
 // queue of global slots (level * probes-per-level slots each).
@@ -172,14 +179,17 @@ void main() {
             ? ndotl : 0.0;
         // What the clipmap knows at the hit, from earlier solves: bounce in rgb, sky visibility in a. Beyond its
         // coarsest level it knows nothing, and the sky is taken as open there.
+        // What the clipmap knows arrives at the hit, from earlier solves: all the indirect light, sky included. Where
+        // no probe answers (start-up, or past the coarsest level) it adds nothing, so a wrong start is dark.
         bool known;
         vec4 field = blix_clipmapSample(c, hitPos, n, known);
         atomicAdd(queue[4], 1u);
         if (!known) atomicAdd(queue[5], 1u);
-        float skyVisibility = known ? field.a : u.uFallback.x;
-        vec3 sky = u.uSunIrradiance.w > 0.5 ? texture(uIrradiance, n).rgb * skyVisibility * u.uFrame.z : vec3(0.0);
-        vec3 bounce = known ? field.rgb * u.uFrame.y : vec3(0.0);
-        radiance = hit.albedo * (u.uSunIrradiance.rgb * sun + sky + bounce) / PI;
+        vec3 indirect = known ? field.rgb * u.uFrame.y : vec3(0.0);
+        radiance = hit.albedo * (u.uSunIrradiance.rgb * sun + indirect) / PI;
+    } else {
+        // The sky this direction sees, as the lighting integrals see it (no disc: the sun is the shadow rays' job).
+        radiance = textureLod(uSkyRadiance, dir, u.uFallback.y).rgb * u.uFrame.z;
     }
     sRadiance[lane] = radiance;
     sDirection[lane] = dir;

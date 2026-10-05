@@ -46,6 +46,7 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
                 new ShaderTextureBinding("uClipmapIrradiance", clipmapIrradiance),
                 new ShaderTextureBinding("uClipmapDepth", clipmapDepth),
+                new ShaderTextureBinding("uIrradiance", irradianceCubeTexture),
             },
             pushConstants: null,
             uniforms: new ShaderUniform[]
@@ -99,6 +100,7 @@ internal sealed partial class SponzaLoop
             new ShaderTextureBinding("uClipmapIrradiance", clipmapIrradiance),
             new ShaderTextureBinding("uClipmapDepth", clipmapDepth),
             new ShaderTextureBinding("uIrradiance", irradianceCubeTexture),
+            new ShaderTextureBinding("uSkyRadiance", envCubeTexture),
         };
         var buffers = rayBlockBuffers
             .Append(new ShaderBufferBinding("ClipmapState", clipmapState))
@@ -114,7 +116,8 @@ internal sealed partial class SponzaLoop
             new("uSunDirection", new Vector4Uniform(new Vector4(sunDirection, 0f))),
             new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 1f))),
             new("uFrame", new Vector4Uniform(new Vector4(clipmapFrame, 1f, 1f, ClipmapDepthLobe))),
-            new("uFallback", new Vector4Uniform(new Vector4(clipmapUnknownSky, 0f, 0f, 0f))),
+            // y: the prefiltered sky's mip a probe ray reads, about a ray's 1/64 of the sphere (a ~15 degree cone).
+            new("uFallback", new Vector4Uniform(new Vector4(clipmapUnknownSky, MathF.Min(1.5f, Math.Max(0, iblPrefilterMips - 1)), 0f, 0f))),
         }, textures, Buffers: buffers);
         graph.Dispatch(clipmapPassHandle, Phase(0, 1));
         graph.Dispatch(clipmapPassHandle, Phase(1, (slots + 63) / 64));

@@ -109,9 +109,17 @@ exactly where the world has changed.
    environment with the sun disc replaced as the cook does, checked against the cooked irradiance to
    0.97-1.03 for every normal). Both fields carry about 1.5x too much (bounds median 1.52, clipmap 1.45):
    the shared model, sky irradiance times the share of sky visible, credits a courtyard surface with the
-   sky's average brightness when it sees the dim zenith. Next: measure the same bias in the lit pass's
-   direct sky, then hold sky radiance in the probes (escaped rays carry the environment's radiance,
-   DDGI-style) instead of a visibility fraction, if the numbers say so. Found on the way and fixed: the
+   sky's average brightness when it sees the dim zenith. The lit pass's direct sky has the same bias even
+   with the TRUE visibility (Sponza median 1.35, Bistro 0.80 with p90 2.07), so under `--gi-clipmap` the
+   probes now hold sky radiance (escaped rays read the disc-free prefiltered sky; a hit takes the field's
+   whole irradiance, no separate sky term) and the lit pass takes ALL indirect diffuse from the field
+   (`uIncident.w`; sky visibility kept for specular only). Judged on total indirect diffuse (sun bounce +
+   sky bounce + direct sky) at 1500 frames after load: Bistro bounds median 0.94, |err| 0.105 -> clipmap
+   1.00, |err| 0.063; Sponza 1.52 (p90 5.45) -> 1.33 (p90 4.19), |err| 0.0130 -> 0.0127, but the mean
+   rose (0.0332 -> 0.0350 against 0.0256). Sun off, Sponza's sky part is still 1.5x by mean (clipmap
+   0.0141, bounds 0.0145, reference 0.0093; median 1.61 against 3.03). Next: find what still over-lights
+   Sponza's surfaces in both terms (the p90 says leaks: courtyard probes read through arcade walls?)
+   before the clipmap can be the default. Found on the way and fixed: the
    probe cook integrated diffuse irradiance with 64 samples a texel, which a bright aureole turned into
    +-25% texel noise (straight up, every floor's lookup, read 1.47x high); 4096 now (probe recipe 2). 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
    material, 16 area-stratified samples per triangle at a footprint-matched mip) gives every triangle a

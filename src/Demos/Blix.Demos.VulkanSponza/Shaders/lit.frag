@@ -109,7 +109,7 @@ layout(set = 1, binding = 10) uniform textureCube uEnvCube;
 layout(set = 1, binding = 16) uniform texture3D uOccupancy;
 
 // The half-resolution incident-light field: rgb = bounced radiance, a = baked sky visibility.
-// Read instead of recomputing when uIncident.w says the pass ran. See incident.frag.
+// Read instead of recomputing when uIncident.z says the pass ran (w: it is the clipmap's, which carries the sky too). See incident.frag.
 layout(set = 1, binding = 17) uniform texture2D uIncidentField;
 // The pre-pass normal, bound here ONLY so viz channel 22 can show what the incident field reads.
 // Nothing in the lit path samples it: lit.frag has its own, better normal.
@@ -518,7 +518,9 @@ void main() {
         vizSh = vec4(skyVisibility);
     }
 
-    vec3 diffuseIBL = irradiance * albedo * skyVisibility;
+    // With the probe clipmap's field (frame.uIncident.w) the sky's diffuse light arrives through the incident field,
+    // as the sky the surface actually sees; adding the cube's irradiance times visibility here would count it twice.
+    vec3 diffuseIBL = frame.uIncident.w > 0.5 ? vec3(0.0) : irradiance * albedo * skyVisibility;
 
     // Specular: prefiltered env at LOD = roughness × (mipCount - 1), times
     // the BRDF LUT integration (split-sum approximation of the specular term).

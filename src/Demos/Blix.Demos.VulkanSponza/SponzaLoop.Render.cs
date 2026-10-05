@@ -479,7 +479,10 @@ internal sealed partial class SponzaLoop
             new("uIncident",         new Vector4Uniform(new Vector4(
                 Math.Max(1, (int)(frame.Width * incidentScale)),
                 Math.Max(1, (int)(frame.Height * incidentScale)),
-                incidentField && !(abMode == "incident" && AbOffPhase) ? 1f : 0f, 0f))),
+                incidentField && !(abMode == "incident" && AbOffPhase) ? 1f : 0f,
+                // w: the incident field carries the sky's diffuse light itself (the probe clipmap), so the lit pass
+                // adds none of its own.
+                ClipmapActive && incidentField && !(abMode == "incident" && AbOffPhase) ? 1f : 0f))),
             // One component per --ab shading mode, live only during that mode's off-phase.
             new("uAbFlags",          new Vector4Uniform(new Vector4(
                 AbOffPhase && abMode == "textures" ? 1f : 0f,
