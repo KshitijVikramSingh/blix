@@ -86,11 +86,13 @@ public sealed class RenderPassBuilder
         IReadOnlyList<ShaderTextureBinding> textures,
         // Bind the vertex buffer at this byte offset (transient-arena slice origin).
         // 0 = whole buffer. See DrawIndexedCommand.VertexBufferByteOffset.
-        ulong vertexBufferByteOffset = 0)
+        ulong vertexBufferByteOffset = 0,
+        // GPU buffers bound to storage blocks by name (DrawIndexedCommand.Buffers).
+        IReadOnlyList<ShaderBufferBinding>? buffers = null)
     {
         var command = new DrawIndexedCommand(
             vertexBuffer, indexBuffer, pipeline, indexCount, uniforms, textures,
-            VertexBufferByteOffset: vertexBufferByteOffset);
+            VertexBufferByteOffset: vertexBufferByteOffset, Buffers: buffers);
         commands.Add(command);
         recorder?.OnDraw(in command);
     }
@@ -213,12 +215,13 @@ public sealed class RenderPassBuilder
         int vertexOffset = 0,
         // Bind the vertex buffer at this byte offset (transient-arena slice origin).
         // 0 = whole buffer. See DrawIndexedCommand.VertexBufferByteOffset.
-        ulong vertexBufferByteOffset = 0)
+        ulong vertexBufferByteOffset = 0,
+        IReadOnlyList<ShaderBufferBinding>? buffers = null)
     {
         var command = new DrawIndexedCommand(
             vertexBuffer, indexBuffer, pipeline, indexCount, uniforms, textures,
             IndexOffset: indexOffset, Material: null, PushConstants: pushConstants,
-            VertexOffset: vertexOffset, VertexBufferByteOffset: vertexBufferByteOffset);
+            VertexOffset: vertexOffset, VertexBufferByteOffset: vertexBufferByteOffset, Buffers: buffers);
         commands.Add(command);
         recorder?.OnDraw(in command);
     }

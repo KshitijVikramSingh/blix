@@ -161,9 +161,13 @@ internal sealed partial class SponzaLoop
         // triangles its field's per-probe error is 11x smaller than the occupancy march's on Sponza (which it
         // under-lit by about a quarter) and 2x on Bistro, and it is cheaper. --gi-march keeps the march for the A/B.
         giTrace = !args.Flag("gi-march");
+        // --gi-clipmap: solve the camera-relative probe clipmap as well (stage 4c, SponzaLoop.Clipmap).
+        clipmapEnabled = args.Flag("gi-clipmap");
+        if (args.Float("clipmap-spacing") is { } clipSpacing) clipmapSpacing = Math.Max(0.05f, clipSpacing);
+        if (args.Int("clipmap-budget") is { } clipBudget) clipmapBudget = Math.Clamp(clipBudget, 1, 65535);
         // The triangle probe reference (--probe-reference) traces the ray scene too. GI's own need for it waits
         // for the scene to say whether it has a probe field at all (ConsolidateBuffers).
-        rayScene |= rayCheck || abMode == "trace" || args.Flag("probe-reference");
+        rayScene |= rayCheck || abMode == "trace" || args.Flag("probe-reference") || clipmapEnabled;
         if (args.Int("ray-region-triangles") is { } regionTriangles) rayRegionTriangles = Math.Max(1, regionTriangles);
         if (args.Float("ray-lod-error") is { } lodError) rayLodError = Math.Max(0f, lodError);
         if (args.Values("ray-probe", 3) is [var probeRay, var probeInstance, var probeTriangle])
@@ -276,6 +280,7 @@ internal sealed partial class SponzaLoop
         var gtaoDenoiseInterface = Reflect("present.vert", "gtao_denoise.frag");
         var hiZInterface = Reflect("present.vert", "hiz_build.frag");
         var incidentInterface = Reflect("present.vert", "incident.frag");
+        incidentClipmapInterface = Reflect("present.vert", "incident_clipmap.frag");
         var incidentResolveInterface = Reflect("present.vert", "incident_resolve.frag");
         var shadowOpaqueInterface = Reflect("shadow.vert", "shadow.frag");
         var shadowMaskInterface = Reflect("shadow_mask.vert", "shadow_mask.frag");
@@ -319,6 +324,8 @@ internal sealed partial class SponzaLoop
         cullPassHandle = graph.ComputePass("scene-cull").Shader(cullInterface).Handle;
         raySurfaceBakeInterface = Reflect("ray_surface_bake.comp");
         raySurfaceBakePassHandle = graph.ComputePass("ray-surface-bake").Shader(raySurfaceBakeInterface).Handle;
+        clipmapInterface = Reflect("clipmap_inject.comp");
+        clipmapPassHandle = graph.ComputePass("probe-clipmap").Shader(clipmapInterface).Handle;
         rayCheckInterface = Reflect("ray_check.comp");
         rayCheckPassHandle = graph.ComputePass("ray-check").Shader(rayCheckInterface).Handle;
 
@@ -474,7 +481,7 @@ internal sealed partial class SponzaLoop
             .Target(incidentHandle, LoadOp.Clear, StoreOp.Store)
             .Read(SampleableSceneDepth)
             .Read(SampleablePrepassNormal)
-            .Shader(incidentInterface)
+            .Shader(incidentInterface, incidentClipmapInterface)
             .Handle;
 
         incidentResolvePassHandle = graph.GraphicsPass("incident-resolve")
@@ -696,6 +703,11 @@ internal sealed partial class SponzaLoop
         incidentPipeline = Pipeline(incidentProgram, VertexPosition3NormalTexture.Layout,
             DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled }, incidentPassHandle, "incident");
+        var incidentClipmapSpv = File.ReadAllBytes(Path.Combine(shaderDir, "incident_clipmap.frag.spv"));
+        incidentClipmapPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
+                presentVertSpv, incidentClipmapSpv, incidentClipmapInterface, "incident_clipmap")),
+            VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
+            new[] { BlendState.Disabled }, incidentPassHandle, "incident_clipmap");
 
         var incidentResolveSpv = File.ReadAllBytes(Path.Combine(shaderDir, "incident_resolve.frag.spv"));
         var incidentResolveProgram = Own(device.CreateShaderProgramFromSpv(
@@ -739,6 +751,9 @@ internal sealed partial class SponzaLoop
         var rayViewSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_view.comp.spv"));
         rayViewPipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(rayViewSpv, rayViewInterface, "ray_view")), "ray_view"));
+        var clipmapSpv = File.ReadAllBytes(Path.Combine(shaderDir, "clipmap_inject.comp.spv"));
+        clipmapPipeline = Own(device.CreateComputePipeline(
+            Own(device.CreateComputeShaderProgramFromSpv(clipmapSpv, clipmapInterface, "clipmap_inject")), "clipmap_inject"));
         var bakeSpv = File.ReadAllBytes(Path.Combine(shaderDir, "ray_surface_bake.comp.spv"));
         raySurfaceBakePipeline = Own(device.CreateComputePipeline(
             Own(device.CreateComputeShaderProgramFromSpv(bakeSpv, raySurfaceBakeInterface, "ray_surface_bake")), "ray_surface_bake"));

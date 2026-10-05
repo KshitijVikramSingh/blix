@@ -464,12 +464,13 @@ internal sealed partial class SponzaLoop
             new("uFog",              new Vector4Uniform(
                 new Vector4(frame.Width, frame.Height, fog.Far, fog.Enabled ? 1f : 0f))),
             new("uVizChannel",       new FloatUniform(vizChannel)),
+            // w: sky visibility is available, baked or (through the incident field) from the clipmap.
             new("uSkyMin",           new Vector4Uniform(new Vector4(
-                skyVolumeMin, skyVolumeLoaded && skyVisibilityEnabled && !skipSkySample ? 1f : 0f))),
+                skyVolumeMin, (skyVolumeLoaded || (ClipmapActive && incidentField)) && skyVisibilityEnabled && !skipSkySample ? 1f : 0f))),
             // w: how far along the normal the probe lookup is pushed. About one cell, so a surface
             // asks the cell in FRONT of it rather than the one it is embedded in.
             new("uSkyScale",         new Vector4Uniform(new Vector4(skyVolumeInvSpan, 0.6f))),
-            new("uBounceStrength",   new FloatUniform(bounceReady && skyVisibilityEnabled && !skipSkySample ? 1f : 0f)),
+            new("uBounceStrength",   new FloatUniform((bounceReady || ClipmapActive) && skyVisibilityEnabled && !skipSkySample ? 1f : 0f)),
             // w gates the leak metric's march: 0 means no occupancy grid shipped and channel 21
             // has nothing to be the truth about.
             new("uOccupancyDims",    new Vector4Uniform(new Vector4(occX, occY, occZ, occX > 0 ? 1f : 0f))),
@@ -686,6 +687,7 @@ internal sealed partial class SponzaLoop
         // blinking in and out as you turn. Half a metre of slack costs a fraction of a percent of
         // the rejections and removes the whole class.
         RecordRaySurfaceBake();
+        RecordClipmap();
         RecordRayCheck();
 
         // Occlusion needs the pre-pass's depth; without one the early list is the whole frustum's.
@@ -912,7 +914,8 @@ internal sealed partial class SponzaLoop
                     bounceReady && skyVisibilityEnabled && !skipSkySample ? 1f : 0f,
                     tunePanel.Value("uProbeTetrahedral"), 0f, 0f))),
             };
-            graph.Pass(incidentPassHandle, scope => fullscreen.Draw(
+            if (ClipmapActive) RecordIncidentClipmap(incidentInvProj, incidentInvView, incW, incH);
+            else graph.Pass(incidentPassHandle, scope => fullscreen.Draw(
                 scope, incidentPipeline,
                 new[]
                 {
@@ -1062,12 +1065,15 @@ internal sealed partial class SponzaLoop
             WriteClusterCensus();
             WriteRayBenchmark();
             WriteRayCheck();
+            WriteClipmapCheck();
             WriteRayView(Path.ChangeExtension(path, null));
             WriteProbeCensus();
             if (probeReference)
             {
                 WriteProbeReference(probeCount: referenceProbes, paths: 4096, bounces: refBounces);
                 WriteProbeReferenceTriangles(probeCount: referenceProbes, paths: 4096, bounces: refBounces);
+                WriteSkyVisibilityReference(samples: 200, rays: 2048);
+                WriteSurfaceReference(grid: 24, paths: 1024, bounces: refBounces);
             }
             WriteFrameStats();
             host.RequestClose();

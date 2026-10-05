@@ -1222,7 +1222,7 @@ public sealed partial class VulkanGraphicsDevice
 
         Vk.CmdBindPipeline(cmd, PipelineBindPoint.Graphics, pipe.Pipeline);
         BindTransientDescriptorSets(cmd, prog, pipe.Layout, frameSlot, d.Textures,
-            materialSet: d.PerDrawMaterial is { } covered ? materialTable[covered.Id].SetIndex : -1);
+            materialSet: d.PerDrawMaterial is { } covered ? materialTable[covered.Id].SetIndex : -1, gpuBuffers: d.Buffers);
 
         // Modulo lets the static (FramesInFlight=1) and replicated cases
         // share one bind path — static always picks Sets[0].

@@ -6221,6 +6221,16 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectTrue("BU.3 an indirect draw can read its records from a GPU buffer",
         recorded.ArgumentBuffer == new GpuBufferHandle(7) && recorded.IndirectByteOffset == 40 && recorded.DrawCount == 3);
     t.ExpectTrue("BU.3 and binds the GPU buffers it names", recorded.Buffers is [{ Name: "SceneVisible", Buffer.Id: 5 }]);
+
+    // A plain draw can read a GPU buffer too (a fragment shader reading a clipmap's per-slot state), copied at record time.
+    var drawList = new RenderCommandList();
+    var named = new List<ShaderBufferBinding> { new("ClipmapState", new GpuBufferHandle(9)) };
+    drawList.Pass("reads-a-buffer", new RenderPassDescription(RenderSurfaceHandle.Default, Array.Empty<GraphicsColor?>(), ClearDepth: false),
+        pass => pass.DrawIndexed(new VertexBufferHandle(1), new IndexBufferHandle(1), new PipelineHandle(1), 3,
+            Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>(), buffers: named));
+    named.Clear();
+    var drawn = drawList.Passes.Single().Commands.OfType<DrawIndexedCommand>().Single();
+    t.ExpectTrue("BU.4 a plain draw binds the GPU buffers it was recorded with, copied then", drawn.Buffers is [{ Name: "ClipmapState", Buffer.Id: 9 }]);
 }
 
 // ============================================================================

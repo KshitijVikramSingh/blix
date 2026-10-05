@@ -79,7 +79,8 @@ internal sealed partial class SponzaLoop
         var nodes = rayQueries.MeshNodeCount;
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] ray scene: {instances.Count:N0} placements of {meshes.Length:N0} meshes as {rayQueries.RegionCount:N0} regions (at most {rayRegionTriangles:N0} triangles) and {rayQueries.InstanceEntryCount:N0} instances, {rayQueries.StoredTriangleCount:N0} triangles stored, built in {clock.Elapsed.TotalMilliseconds:0} ms on {Environment.ProcessorCount} threads; {nodes:N0} nodes ({nodes * BvhNode.SizeInBytes / 1048576.0:0.0} MB), top level {rayQueries.Nodes.Length:N0}."));
-        if ((rayCheck || giTrace || probeReference) && instances.Count > 0) BuildRayGpu();
+        if ((rayCheck || giTrace || probeReference || clipmapEnabled) && instances.Count > 0) BuildRayGpu();
+        if (clipmapEnabled && instances.Count > 0) CreateClipmap();
         if (rayCheck && instances.Count > 0) BuildRayCheck();
     }
 

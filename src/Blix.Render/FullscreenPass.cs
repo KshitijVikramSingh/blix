@@ -67,19 +67,21 @@ public sealed class FullscreenPass : IDisposable
         PipelineHandle pipeline,
         IReadOnlyList<ShaderTextureBinding> textures,
         byte[]? pushConstants = null,
-        IReadOnlyList<ShaderUniform>? uniforms = null)
+        IReadOnlyList<ShaderUniform>? uniforms = null,
+        // GPU buffers the pass's program reads, bound by block name.
+        IReadOnlyList<ShaderBufferBinding>? buffers = null)
     {
         ArgumentNullException.ThrowIfNull(pass);
         var binds = uniforms ?? Array.Empty<ShaderUniform>();
         if (pushConstants is null)
         {
             pass.DrawIndexed(
-                vertexBuffer, indexBuffer, pipeline, indexCount: 3, binds, textures);
+                vertexBuffer, indexBuffer, pipeline, indexCount: 3, binds, textures, buffers: buffers);
         }
         else
         {
             pass.DrawIndexed(
-                vertexBuffer, indexBuffer, pipeline, indexCount: 3, binds, textures, pushConstants);
+                vertexBuffer, indexBuffer, pipeline, indexCount: 3, binds, textures, pushConstants, buffers: buffers);
         }
     }
 

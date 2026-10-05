@@ -1,0 +1,225 @@
+#version 450
+
+// The camera-relative probe clipmap's injection: every probe's light, traced through the ray scene, with nothing
+// baked (no occupancy, no sky-visibility volume, no albedo grid). Blix.Geometry's ProbeClipmap places the probes and
+// Blix.Shaders' probe_clipmap.glsl addresses them; this keeps them solved. Three dispatches a frame, uParams.z says
+// which:
+//
+//   0  reset   the per-level queue counters
+//   1  scan    one thread per slot: the cell it should hold now; a slot holding another (the block scrolled) is
+//              re-pointed and marked unsolved; every unsolved slot joins its level's queue
+//   2  update  one workgroup per probe, a fixed budget a frame: queued probes first, finest level first, the rest
+//              round-robin. 64 rays along a Fibonacci spiral, rotated afresh each update:
+//                hit     sun (a shadow ray), sky (the irradiance cube times the clipmap's own sky visibility there)
+//                        and bounce (the clipmap's own irradiance there), re-radiated in the baked albedo
+//                escape  counts toward sky visibility
+//              then each tile texel reconstructs irradiance, depth moments and sky visibility, blended in place with
+//              what the probe held; a probe whose rays mostly meet back faces is buried and shades nothing.
+//
+// The atlases are updated in place and read back by the next update (and by feedback within this one: a neighbour
+// read mid-write is either its old or its new answer, both valid), which is why storage images keep their contents
+// between dispatches (VulkanGraphicsDevice's storage barrier).
+
+layout(local_size_x = 64) in;
+
+#define RAYS 64
+#define PI 3.14159265359
+
+layout(set = 0, binding = 0) uniform ClipmapInject {
+    vec4 uDims;            // xyz probes per level, w base spacing (m)
+    vec4 uParams;          // x blend band (probes), y temporal convergence, z mode, w update budget (probes a frame)
+    vec4 uOrigin0;         // each level's lowest cell (xyz), levels 0-3
+    vec4 uOrigin1;
+    vec4 uOrigin2;
+    vec4 uOrigin3;
+    vec4 uSunDirection;    // xyz the direction the sun travels
+    vec4 uSunIrradiance;   // rgb measured irradiance, w 1 when the sky irradiance cube is valid
+    vec4 uFrame;           // x frame counter, y bounce strength, z sky strength, w depth lobe exponent
+} u;
+
+layout(set = 0, binding = 1, rgba16f) uniform image2D uClipmapIrradiance;
+layout(set = 0, binding = 2, rgba16f) uniform image2D uClipmapDepth;
+layout(set = 0, binding = 3) uniform samplerCube uIrradiance;
+layout(std430, set = 0, binding = 4) buffer ClipmapState { uvec4 states[]; };
+// counts[0..3] per level, then each level's queue of global slots (level * probes-per-level slots each).
+layout(std430, set = 0, binding = 5) buffer ClipmapQueue { uint queue[]; };
+
+#define BLIX_RAY_SET 0
+#define BLIX_RAY_BINDING 13
+#include "ray_query.glsl"
+
+#define BLIX_CLIPMAP_IRRADIANCE(t) imageLoad(uClipmapIrradiance, t)
+#define BLIX_CLIPMAP_DEPTH(t) imageLoad(uClipmapDepth, t)
+#define BLIX_CLIPMAP_STATE(s) states[s]
+#include "probe_clipmap.glsl"
+
+shared vec3 sRadiance[RAYS];
+shared vec3 sDirection[RAYS];
+shared float sDistance[RAYS];
+shared float sEscaped[RAYS];
+shared uint sBackfaces;
+shared vec4 sTexel[36];      // irradiance rgb, sky visibility a
+shared vec2 sMoments[36];
+shared int sProbe;
+
+BlixClipmap clipmap() {
+    BlixClipmap c;
+    c.dims = ivec3(u.uDims.xyz);
+    c.baseSpacing = u.uDims.w;
+    c.blendProbes = u.uParams.x;
+    c.origin[0] = ivec3(u.uOrigin0.xyz);
+    c.origin[1] = ivec3(u.uOrigin1.xyz);
+    c.origin[2] = ivec3(u.uOrigin2.xyz);
+    c.origin[3] = ivec3(u.uOrigin3.xyz);
+    return c;
+}
+
+vec3 fibonacci(int i, int count) {
+    float y = 1.0 - 2.0 * (float(i) + 0.5) / float(count);
+    float r = sqrt(max(0.0, 1.0 - y * y));
+    float theta = 2.39996323 * float(i);
+    return vec3(cos(theta) * r, y, sin(theta) * r);
+}
+
+// A rotation from a seed: the spiral turned afresh on every update so successive solves see different directions.
+mat3 rotation(uint seed) {
+    float a = float(blix_pcg(seed) & 0xFFFFu) / 65536.0 * 2.0 * PI;
+    float b = float(blix_pcg(seed ^ 0x9E3779B9u) & 0xFFFFu) / 65536.0 * 2.0 - 1.0;
+    float c = float(blix_pcg(seed ^ 0x85EBCA6Bu) & 0xFFFFu) / 65536.0 * 2.0 * PI;
+    vec3 axis = vec3(sqrt(1.0 - b * b) * cos(c), b, sqrt(1.0 - b * b) * sin(c));
+    float s = sin(a), k = cos(a);
+    vec3 t = (1.0 - k) * axis;
+    return mat3(t.x * axis.x + k,          t.x * axis.y + s * axis.z, t.x * axis.z - s * axis.y,
+                t.y * axis.x - s * axis.z, t.y * axis.y + k,          t.y * axis.z + s * axis.x,
+                t.z * axis.x + s * axis.y, t.z * axis.y - s * axis.x, t.z * axis.z + k);
+}
+
+void main() {
+    BlixClipmap c = clipmap();
+    int perLevel = c.dims.x * c.dims.y * c.dims.z;
+    int mode = int(u.uParams.z + 0.5);
+
+    if (mode == 0) {
+        if (gl_GlobalInvocationID.x < 4u) queue[gl_GlobalInvocationID.x] = 0u;
+        return;
+    }
+
+    if (mode == 1) {
+        int g = int(gl_GlobalInvocationID.x);
+        if (g >= perLevel * BLIX_CLIPMAP_LEVELS) return;
+        int level = g / perLevel;
+        int index = g % perLevel;
+        ivec3 slot = ivec3(index % c.dims.x, (index / c.dims.x) % c.dims.y, index / (c.dims.x * c.dims.y));
+        ivec3 expected = blix_clipmapCellInSlot(c, level, slot);
+        uvec4 state = states[g];
+        if (ivec3(state.xyz) != expected) {
+            state = uvec4(uvec3(expected), 0u);
+            states[g] = state;
+        }
+        if ((state.w & BLIX_CLIPMAP_SOLVED) == 0u) {
+            uint k = atomicAdd(queue[level], 1u);
+            queue[4u + uint(level * perLevel) + k] = uint(g);
+        }
+        return;
+    }
+
+    // mode 2: which probe this workgroup solves.
+    uint lane = gl_LocalInvocationIndex;
+    if (lane == 0u) {
+        int k = int(gl_WorkGroupID.x);
+        int chosen = -1;
+        for (int l = 0; l < BLIX_CLIPMAP_LEVELS && chosen < 0; ++l) {
+            int count = int(queue[l]);
+            if (k < count) chosen = int(queue[4 + l * perLevel + k]);
+            else k -= count;
+        }
+        if (chosen < 0) {
+            // The budget the queues left over sweeps every probe in turn.
+            uint total = uint(perLevel * BLIX_CLIPMAP_LEVELS);
+            chosen = int((uint(u.uFrame.x) * uint(u.uParams.w) + gl_WorkGroupID.x) % total);
+        }
+        sProbe = chosen;
+        sBackfaces = 0u;
+    }
+    barrier();
+    int g = sProbe;
+    int level = g / perLevel;
+    int index = g % perLevel;
+    ivec3 slot = ivec3(index % c.dims.x, (index / c.dims.x) % c.dims.y, index / (c.dims.x * c.dims.y));
+    ivec3 cell = blix_clipmapCellInSlot(c, level, slot);
+    vec3 origin = blix_clipmapProbePosition(c, level, cell);
+    float spacing = blix_clipmapSpacing(c, level);
+    // As far as a ray can usefully report a distance: well past the level's block.
+    float farDistance = spacing * float(max(c.dims.x, max(c.dims.y, c.dims.z))) * 2.0;
+
+    uint seed = blix_pcg(uint(u.uFrame.x) * 2654435761u + uint(g));
+    vec3 dir = rotation(seed) * fibonacci(int(lane), RAYS);
+    vec3 toSun = -normalize(u.uSunDirection.xyz);
+    BlixRayHit hit;
+    vec3 radiance = vec3(0.0);
+    float distance = farDistance;
+    float escaped = 1.0;
+    if (blix_traceClosest(origin, dir, 0.0, uintBitsToFloat(0x7F800000u), seed ^ lane, hit)) {
+        escaped = 0.0;
+        distance = min(hit.t, farDistance);
+        if (!hit.frontFace) atomicAdd(sBackfaces, 1u);
+        vec3 n = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
+        vec3 hitPos = origin + dir * hit.t;
+        float ndotl = max(dot(n, toSun), 0.0);
+        float sun = ndotl > 0.0 && !blix_traceAny(hitPos + n * 0.01, toSun, 0.0, uintBitsToFloat(0x7F800000u), blix_pcg(seed ^ lane ^ 0x5bd1e995u))
+            ? ndotl : 0.0;
+        // What the clipmap knows at the hit, from earlier solves: bounce in rgb, sky visibility in a. Beyond its
+        // coarsest level it knows nothing, and the sky is taken as open there.
+        bool known;
+        vec4 field = blix_clipmapSample(c, hitPos, n, known);
+        float skyVisibility = known ? field.a : 1.0;
+        vec3 sky = u.uSunIrradiance.w > 0.5 ? texture(uIrradiance, n).rgb * skyVisibility * u.uFrame.z : vec3(0.0);
+        vec3 bounce = known ? field.rgb * u.uFrame.y : vec3(0.0);
+        radiance = hit.albedo * (u.uSunIrradiance.rgb * sun + sky + bounce) / PI;
+    }
+    sRadiance[lane] = radiance;
+    sDirection[lane] = dir;
+    sDistance[lane] = distance;
+    sEscaped[lane] = escaped;
+    barrier();
+
+    if (lane < 36u) {
+        ivec2 t = ivec2(int(lane) % 6, int(lane) / 6);
+        vec3 texelDir = blix_octDecode(((vec2(t) + 0.5) / 6.0) * 2.0 - 1.0);
+        vec3 irr = vec3(0.0);
+        float cosSum = 0.0, skySum = 0.0;
+        float dSum = 0.0, d2Sum = 0.0, dWeight = 0.0;
+        for (int i = 0; i < RAYS; ++i) {
+            float k = max(dot(texelDir, sDirection[i]), 0.0);
+            if (k <= 0.0) continue;
+            irr += sRadiance[i] * k;
+            skySum += sEscaped[i] * k;
+            cosSum += k;
+            float w = pow(k, u.uFrame.w);
+            dSum += sDistance[i] * w;
+            d2Sum += sDistance[i] * sDistance[i] * w;
+            dWeight += w;
+        }
+        sTexel[lane] = cosSum > 0.0 ? vec4(irr * (PI / cosSum), skySum / cosSum) : vec4(0.0, 0.0, 0.0, 1.0);
+        float mean = dWeight > 0.0 ? dSum / dWeight : farDistance;
+        sMoments[lane] = vec2(mean, dWeight > 0.0 ? max(d2Sum / dWeight - mean * mean, 0.0) : 0.0);
+    }
+    barrier();
+
+    uint previousFlags = states[g].w;
+    bool solvedBefore = (previousFlags & BLIX_CLIPMAP_SOLVED) != 0u;
+    // A quarter of the rays meeting back faces: the probe sits inside something.
+    bool buried = float(sBackfaces) > 0.25 * float(RAYS);
+    float converge = solvedBefore ? u.uParams.y : 1.0;
+    ivec2 tile = blix_clipmapTileOrigin(c, level, slot);
+    ivec2 texel = ivec2(int(lane) % 8, int(lane) / 8);
+    ivec2 src = blix_octBorderSource(texel, 8);
+    int interior = (src.y - 1) * 6 + (src.x - 1);
+    vec4 value = sTexel[interior];
+    vec4 old = imageLoad(uClipmapIrradiance, tile + texel);
+    vec4 oldDepth = imageLoad(uClipmapDepth, tile + texel);
+    imageStore(uClipmapIrradiance, tile + texel, vec4(mix(old.rgb, value.rgb, converge), 1.0));
+    imageStore(uClipmapDepth, tile + texel, vec4(mix(oldDepth.rg, sMoments[interior], converge), 0.0, mix(oldDepth.a, value.a, converge)));
+    barrier();
+    if (lane == 0u) states[g] = uvec4(uvec3(cell), BLIX_CLIPMAP_SOLVED | (buried ? BLIX_CLIPMAP_BURIED : 0u));
+}

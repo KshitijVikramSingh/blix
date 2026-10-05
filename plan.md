@@ -96,7 +96,16 @@ exactly where the world has changed.
    hits. Steps: 4c-i addressing (`probe_clipmap.glsl` and its C# twin, deviceless tests); 4c-ii the traced
    injection (budget, new slabs first, staleness, buried); 4c-iii the incident pass and fog read it under
    `--gi-clipmap`, A/B against today's field (pictures, the triangle reference at the same points); 4c-iv
-   the city lit with no bake, and the clipmap the default if it holds. 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
+   the city lit with no bake, and the clipmap the default if it holds. 4c-i and 4c-ii are in: the GPU's
+   slots equal `ProbeClipmap` on all 65,536, all four levels solve within 300 frames (512 probes a frame,
+   ~2.9 ms), the incident field can read it (`incident_clipmap.frag`). Two new arbiters (`--probe-
+   reference`): sky visibility against triangles at baked probes, and the SURFACE reference, which judges
+   what is shaded at camera-visible points (so it sees leaks). At Sponza's surfaces the clipmap's sky
+   visibility is unbiased (median 0.99, error 0.008) where the bake is low (0.64, 0.014); sun-only bounce
+   is over at the p90 in both (bounds 2.8x, clipmap 3.1x: leaks). Open, and why the clipmap is not the
+   default: its sky-carried bounce (sun off) is 6.6x the bounds field's (0.0238 against 0.0036), which is
+   what makes it 40% brighter, and nothing judges that term yet (the CPU has no sky radiance). Suspect to
+   check first: a hit where no clipmap probe answers takes the sky as open. 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
    material, 16 area-stratified samples per triangle at a footprint-matched mip) gives every triangle a
    word in `BlixRaySurfaces`: albedo (sRGB) and coverage. Traversal meets a partly covered triangle by an
    integer hash of the ray's seed, the entry and its leaf position (`RayTests.Covered`), so the CPU oracle

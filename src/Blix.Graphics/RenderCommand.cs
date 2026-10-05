@@ -286,8 +286,14 @@ public sealed record DrawIndexedCommand(
     // the slice, so index 0 reads the slice's first vertex. The transient arena
     // (IGraphicsDevice.AllocVertices) returns a stride-aligned offset for exactly
     // this. 0 preserves historical whole-buffer behavior for every caller.
-    ulong VertexBufferByteOffset = 0) : RenderCommand
+    ulong VertexBufferByteOffset = 0,
+    // GPU buffers bound to the program's storage blocks by name, as on DispatchCommand and the indirect draw:
+    // what lets a fragment shader read a buffer a compute pass keeps (a probe clipmap's per-slot state).
+    IReadOnlyList<ShaderBufferBinding>? Buffers = null) : RenderCommand
 {
+    /// <summary>The GPU buffers this draw binds, copied at record time.</summary>
+    public IReadOnlyList<ShaderBufferBinding>? Buffers { get; init; } = Buffers?.ToArray();
+
     private readonly byte[]? pushConstants = PushConstants is null ? null : PushConstants.AsSpan().ToArray();
 
     private readonly IReadOnlyList<ShaderUniform> uniforms = Uniforms;
