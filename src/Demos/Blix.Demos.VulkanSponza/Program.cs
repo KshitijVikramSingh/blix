@@ -477,7 +477,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private const int AbPeriodFrames = 120;
     /// <summary>--orbit: a closed camera path, one revolution per A/B phase. See ApplyOrbit.</summary>
     private bool orbit;
-    private const int OrbitFrames = AbPeriodFrames;
+    // --orbit-frames N: a slower revolution, for what a walking camera sees (screen-probe history); the A/B
+    // alignment above holds only at the default.
+    private int OrbitFrames = AbPeriodFrames;
     // --ab lod alternates two error budgets in-process. Defaults compare the configured budget with
     // full detail; explicit arms compare two non-zero quality points without cross-run drift.
     private float lodArmOn = -1f;
@@ -832,6 +834,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private readonly List<Placement> blendPlacements = new();
     // Every placement's world matrix, both buckets: set 3 binding 0 (instances.glsl), written once.
     private readonly List<Matrix4x4> sceneTransforms = new();
+    // Each placement's material, by the same row: set 3 binding 2, the surface identity screen probes compare (the cook
+    // splits one wall into many placements, so the placement itself was too strict an identity).
+    private readonly List<uint> sceneTransformMaterials = new();
     // Set 3: the transform table and this frame's visible placement indices (every pass's list end to end).
     private IMaterialBindings? sceneInstances;
     private uint[] visibleScratch = System.Array.Empty<uint>();
@@ -857,7 +862,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private PassHandle occlusionPassHandle;
     private PipelineHandle occlusionPipeline;
     private PassHandle latePrepassHandle;
-    private GpuBufferHandle cullPlacements, cullDrawables, cullLods, cullState, cullCursor, sceneArgs, sceneVisible, sceneTransformBuffer;
+    private GpuBufferHandle cullPlacements, cullDrawables, cullLods, cullState, cullCursor, sceneArgs, sceneVisible, sceneTransformBuffer, sceneMaterialBuffer;
     private ShaderBufferBinding[] cullBuffers = System.Array.Empty<ShaderBufferBinding>();
     private ShaderBufferBinding[] sceneBuffers = System.Array.Empty<ShaderBufferBinding>();
     // A Selection-panel margin edit not yet sent: (global placement index + 1, value), carried by the

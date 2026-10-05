@@ -147,10 +147,12 @@ exactly where the world has changed.
    normal, plane, within one tile's footprint, still visible: disocclusion), and pixels blend toward
    the clipmap by how settled their probes are (foliage never settles under TAA jitter). Sponza as
    shaded median 0.97, |err| 0.0058 (field x GTAO was 1.14, 0.0095; p90 1.54 from 3.18); Bistro 0.95,
-   0.031 (0.92, 0.049). Default look bit-identical. Open: COST 19-23 ms (8160 probes x 8 rays + shadow
-   rays + clipmap samples at hits; estimate was 3 ms); history under motion (orbit keeps 64.5%; fresh
-   for identity 12% (cook splits a wall into many placements: material identity wanted), normal 9.5%,
-   no candidate 10%), so moving views mostly show the clipmap. Found on the way and fixed: the
+   0.031 (0.92, 0.049). Default look bit-identical. Identity is the MATERIAL (set 3 binding 2, a table
+   by transform row; placement identity broke at the cook's chunk seams). History per frame: still
+   91.4%; walking pace (`--orbit-frames 1200`, 0.3 deg/frame) Sponza 85.9%, Bistro 87.4% (the default
+   orbit, 3 deg/frame, is a whirl: 65.7%, nothing lives past ~30 frames on screen). Bistro's one mass
+   restart on that path is the camera leaving a building (correct). Open: COST 19-23 ms (8160 probes x
+   8 rays + shadow rays + clipmap samples at hits; estimate was 3 ms). Found on the way and fixed: the
    probe cook integrated diffuse irradiance with 64 samples a texel, which a bright aureole turned into
    +-25% texel noise (straight up, every floor's lookup, read 1.47x high); 4096 now (probe recipe 2). 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
    material, 16 area-stratified samples per triangle at a footprint-matched mip) gives every triangle a

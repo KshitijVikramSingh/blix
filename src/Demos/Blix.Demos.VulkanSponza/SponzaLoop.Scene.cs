@@ -327,6 +327,7 @@ internal sealed partial class SponzaLoop
             {
                 placements.Add(new Placement(bucket.Count, sceneTransforms.Count, WorldBounds(bm.Bounds, world)));
                 sceneTransforms.Add(world);
+                sceneTransformMaterials.Add((uint)s.Material.Id);
                 if (rayMeshes is not null)
                 {
                     rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
@@ -398,12 +399,17 @@ internal sealed partial class SponzaLoop
         visibleScratch = new uint[Math.Max(1, visibleCapacity)];
         var instances = device.CreateMaterial(
             litProgram, setIndex: 3, framesInFlight: device.MaxFramesInFlightCount, name: "sponza.instances",
-            arrayLengths: new Dictionary<int, int> { [0] = Math.Max(1, sceneTransforms.Count), [1] = visibleScratch.Length });
+            arrayLengths: new Dictionary<int, int> { [0] = Math.Max(1, sceneTransforms.Count), [1] = visibleScratch.Length, [2] = Math.Max(1, sceneTransformMaterials.Count) });
         Own(instances.Handle);
         sceneInstances = instances;
         // Static: written into every frame slot once, never again.
         var transformBytes = MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(sceneTransforms));
-        for (var slot = 0; slot < instances.FramesInFlight; slot++) instances.WriteBuffer(slot, 0, transformBytes);
+        var materialBytes = MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(sceneTransformMaterials));
+        for (var slot = 0; slot < instances.FramesInFlight; slot++)
+        {
+            instances.WriteBuffer(slot, 0, transformBytes);
+            instances.WriteBuffer(slot, 2, materialBytes);
+        }
     }
 
     // What scene_cull.comp reads, uploaded once, and what it writes, zeroed: every placement (bounds,
@@ -461,7 +467,12 @@ internal sealed partial class SponzaLoop
             new("CullState", cullState), new("CullCursor", cullCursor), new("SceneArgs", sceneArgs),
             new("SceneVisible", sceneVisible),
         };
-        sceneBuffers = new ShaderBufferBinding[] { new("SceneTransforms", sceneTransformBuffer), new("SceneVisible", sceneVisible) };
+        sceneMaterialBuffer = Own(device.CreateGpuBuffer(Math.Max(1, sceneTransformMaterials.Count) * 4,
+            MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(sceneTransformMaterials)), "sponza.scene.materials"));
+        sceneBuffers = new ShaderBufferBinding[]
+        {
+            new("SceneTransforms", sceneTransformBuffer), new("SceneVisible", sceneVisible), new("SceneMaterials", sceneMaterialBuffer),
+        };
         Console.WriteLine(
             $"[VulkanSponza] GPU cull: {placementCount} placements, {drawableCount} drawables x {lodSlots} levels, "
             + $"{records} indirect records, {visibleCapacity} visible slots "

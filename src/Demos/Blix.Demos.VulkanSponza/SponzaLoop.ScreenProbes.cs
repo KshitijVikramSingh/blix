@@ -129,16 +129,27 @@ internal sealed partial class SponzaLoop
         var placed = 0;
         var bins = new int[5];   // 1, 2-7, 8-31, 32-63, 64+
         var young = new List<string>();
+        var fine = new int[17];   // frames accumulated in fours, 0-3 up to 64+
         for (var i = 0; i < count; i++)
         {
             if (floats[i * ScreenProbeFloats + 3] <= 0f) continue;
             placed++;
             var n = floats[i * ScreenProbeFloats + 7];
             bins[n < 1.5f ? 0 : n < 7.5f ? 1 : n < 31.5f ? 2 : n < 63.5f ? 3 : 4]++;
+            fine[Math.Min(16, (int)(n / 4f))]++;
             if (n < 7.5f) young.Add(string.Create(Inv, $"{i % screenProbeTiles.X},{i / screenProbeTiles.X}"));
         }
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] screen probes after {screenProbeFrame} frames: {placed} of {count} tiles placed; frames accumulated: 1 {bins[0]}, 2-7 {bins[1]}, 8-31 {bins[2]}, 32-63 {bins[3]}, 64+ {bins[4]}."));
+        Console.WriteLine($"    frames accumulated, in fours from 0-3: {string.Join(' ', fine)}");
+        var exact = new SortedDictionary<float, int>();
+        for (var i = 0; i < count; i++)
+        {
+            if (floats[i * ScreenProbeFloats + 3] <= 0f) continue;
+            var n = floats[i * ScreenProbeFloats + 7];
+            if (n >= 24f) exact[n] = exact.GetValueOrDefault(n) + 1;
+        }
+        Console.WriteLine($"    frames accumulated from 24 up, exact: {string.Join(' ', exact.Select(e => string.Create(Inv, $"{e.Key:0.###}x{e.Value}")))}; history cap {screenProbeHistory}");
         Console.WriteLine($"    screen probes under 8 frames, tiles: {string.Join(' ', young)}");
         var stats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(screenProbeStats, 0, 32).AsSpan()).ToArray();
         double total = stats.Take(7).Sum(v => (double)v);

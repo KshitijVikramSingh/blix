@@ -5,9 +5,10 @@
 //
 // A workgroup holds 8 probes of 8 rays. Each probe:
 //   place    the tile's centre pixel, or the first of four inner points that has a surface; position from the
-//            depth, geometric normal and surface identity (its placement) from the pre-pass
+//            depth, geometric normal and surface identity (its material) from the pre-pass
 //   history  a past probe is this one's past only if it is the SAME SURFACE, by everything that can say so:
-//              identity   the same placement
+//              identity   the same material (not the same placement: the cook splits one wall into hundreds,
+//                         and placement identity restarted 12% of probes a frame under orbit at the seams)
 //              normal     within ~25 degrees
 //              plane      off this probe's plane by under 2% of the depth
 //              lateral    within one tile's footprint at this depth (not "a similar depth somewhere nearby": a
