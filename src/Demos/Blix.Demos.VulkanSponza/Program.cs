@@ -512,9 +512,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // than to the search radius.
     private float aoScale = 0.5f;
 
-    // The incident-light field's resolution, as a fraction of the framebuffer. Half by default:
-    // the probe volume it reconstructs is coarser than that by a wide margin. 1 via --incident-full
-    // for the paired comparison.
+    // The incident-light field's resolution, as a fraction of the framebuffer: the scene's choice
+    // (SceneProfile.IncidentScale), then --incident-full or --incident-scale.
     private float incidentScale = 0.5f;
     // Standard path: reconstruct sky visibility and bounce into the half-resolution incident field.
     // This measured -14.64 ms on the orbit and -29.99 ms with occupancy marching. --no-incident
