@@ -119,11 +119,9 @@ exactly where the world has changed.
 5. *PRT baked by the cook*: per-region probe transfer, relit by the sun at runtime: the static base and
    warm start of 4.
 
-Known synchronisation gaps, found mapping the graph for GPU buffers (stage 1c) and left open: the graph's barrier
+Known synchronisation gap, found mapping the graph for GPU buffers (stage 1c) and left open: the graph's barrier
 inference (`BarrierInference.Infer`) is an empty stub whose output nothing executes, so compute synchronisation is each
-dispatch's own (storage-image transitions, and since 1c GPU-buffer fences); and a storage image is transitioned from
-`Undefined` before every dispatch, so one a pass read-modify-writes across frames (`uProbeUsage`) is formally undefined
-between them.
+dispatch's own (storage-image transitions, and since 1c GPU-buffer fences).
 
 Known instrument gap: a Sponza `--shot` raises 9 validation errors on `main` as well (a storage image
 copied to a buffer without transfer-source usage, in the shot's readback). Not this arc's, and not fixed.

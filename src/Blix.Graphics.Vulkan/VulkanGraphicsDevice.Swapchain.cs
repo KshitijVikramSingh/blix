@@ -1421,10 +1421,14 @@ public sealed partial class VulkanGraphicsDevice
             {
                 var b = d.Textures[i];
                 if (!IsStorageBinding(prog, b)) continue;
+                // From where a storage image rests (created there, and returned there after every dispatch below),
+                // not from Undefined: Undefined lets the driver discard the contents, and a field kept across frames
+                // (a probe atlas updated in place, uProbeUsage's marks) is read back by the next dispatch. The
+                // dispatch reads as well as writes, so both are in the second scope.
                 RecordStorageBarrier(cmd, textureTable[b.Texture.Id],
-                    ImageLayout.Undefined, ImageLayout.General,
+                    ImageLayout.ShaderReadOnlyOptimal, ImageLayout.General,
                     PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderReadBit,
-                    PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderWriteBit);
+                    PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit);
             }
 
             var bindsGpuBuffers = d.Buffers is { Count: > 0 };

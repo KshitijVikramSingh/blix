@@ -500,8 +500,9 @@ public sealed partial class VulkanGraphicsDevice
 
     // 2D storage image (compute-writable + sampleable). No initial data — a
     // compute dispatch fills it; the dispatch's pre-barrier transitions it from
-    // Undefined to General each frame. Created in ShaderReadOnly, so sampling it
-    // before the first dispatch is valid. Usage STORAGE|SAMPLED.
+    // ShaderReadOnly (where it rests) to General, keeping its contents, and back after.
+    // Created in ShaderReadOnly, so sampling it before the first dispatch is valid.
+    // Usage STORAGE|SAMPLED.
     public unsafe TextureHandle CreateStorageTexture2D(
         int width, int height, TextureFormat format, SamplerDescription samplerDesc, string? name = null)
     {
@@ -573,7 +574,7 @@ public sealed partial class VulkanGraphicsDevice
 
     // 3D storage image (compute-writable + sampleable) — e.g. a froxel/volume
     // grid. No initial data; the compute dispatch's pre-barrier moves it from
-    // Undefined to General each frame. Usage STORAGE|SAMPLED, single mip/layer
+    // ShaderReadOnly (where it rests) to General, keeping its contents. Usage STORAGE|SAMPLED, single mip/layer
     // (depth lives in the extent, not array layers — barriers use layerCount 1).
     public unsafe TextureHandle CreateStorageTexture3D(
         int width, int height, int depth, TextureFormat format, SamplerDescription samplerDesc, string? name = null) =>
