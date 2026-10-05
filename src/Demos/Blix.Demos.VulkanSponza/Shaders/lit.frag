@@ -111,6 +111,9 @@ layout(set = 1, binding = 16) uniform texture3D uOccupancy;
 // The half-resolution incident-light field: rgb = bounced radiance, a = baked sky visibility.
 // Read instead of recomputing when uIncident.z says the pass ran (w: it is the clipmap's, which carries the sky too). See incident.frag.
 layout(set = 1, binding = 17) uniform texture2D uIncidentField;
+// How the incident light's luminance changes with the normal, at the geometric normal (incident_clipmap.frag):
+// what lets light the incident pass evaluated at the geometric normal reach the normal-mapped one.
+layout(set = 1, binding = 20) uniform texture2D uIncidentGradient;
 // The pre-pass normal, bound here ONLY so viz channel 22 can show what the incident field reads.
 // Nothing in the lit path samples it: lit.frag has its own, better normal.
 layout(set = 1, binding = 18) uniform texture2D uPrepassNormalViz;
@@ -559,6 +562,15 @@ void main() {
         vec3 incident;
         if (frame.uIncident.z > 0.5) {
             incident = incidentField.rgb;
+            // The field was evaluated at the geometric normal (the pre-pass carries no normal map). Carry it to
+            // the normal-mapped normal to first order: with the clipmap's field all indirect light arrives here,
+            // and without this a normal map's folds and relief go flat in it (15% of Sponza's pixels moved when
+            // the inline path was evaluated at the geometric normal instead).
+            if (frame.uIncident.w > 0.5) {
+                vec3 gradient = texture(sampler2D(uIncidentGradient, uLinearClamp), gl_FragCoord.xy / frame.uFog.xy).xyz;
+                float lum = dot(incident, vec3(0.2126, 0.7152, 0.0722));
+                if (lum > 1e-6) incident *= clamp(1.0 + dot(gradient, N - vizGeometricN) / lum, 0.0, 3.0);
+            }
             // The field carries no per-pixel confidence: each full-resolution texel has already
             // mixed four coarse samples. Channel 16 and the leak census therefore report full
             // confidence because receiver selection is not evaluated in this pass.

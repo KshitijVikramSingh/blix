@@ -168,7 +168,15 @@ exactly where the world has changed.
    accumulation continues unfiltered): Sponza 0.37%, 1.8% of pixels over 2% (clipmap 8.8%, default
    2.3%); Bistro 0.15%, 0.2% (clipmap 2.9%). Accuracy unchanged (Sponza 1.01, 0.0058; Bistro 0.95,
    0.030). Price: ~4 s for a lighting change to settle in; adaptive history is the fix when a scene
-   changes its light. MoltenVK 1.4.1 here has no VK_EXT_mesh_shader (descriptor indexing: yes). Found on the way and fixed: the
+   changes its light. MoltenVK 1.4.1 here has no VK_EXT_mesh_shader (descriptor indexing: yes).
+   Normal-map detail: with the clipmap's field ALL indirect diffuse comes from the incident pass, which
+   evaluates at the pre-pass's geometric normal, so normal maps stopped shaping it (the user: switching
+   the misnamed "Half-res incident field" toggle off, i.e. the inline baked path, looked more detailed;
+   the inline path at the geometric normal moves 15% of Sponza's pixels). The incident pass now writes
+   a second target, the light's luminance gradient with the normal (exact from screen probes' SH; the
+   clipmap contributes none), resolved alongside, and the lit pass carries the light to the normal-
+   mapped normal to first order (moves 8.4% of pixels; `--no-incident-gradient` the control). Open:
+   the clipmap's own answer (foliage, edges, past the probes) still has no gradient. Found on the way and fixed: the
    probe cook integrated diffuse irradiance with 64 samples a texel, which a bright aureole turned into
    +-25% texel noise (straight up, every floor's lookup, read 1.47x high); 4096 now (probe recipe 2). 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
    material, 16 area-stratified samples per triangle at a footprint-matched mip) gives every triangle a

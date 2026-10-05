@@ -103,7 +103,7 @@ internal sealed partial class SponzaLoop
             // Toggle the incident field under a still camera for direct visual comparison with the
             // inline path. Its allocation scale remains a launch flag because graph resources are
             // fixed at compile time.
-            incidentField = debug.Controls.Toggle("Half-res incident field", incidentField);
+            incidentField = debug.Controls.Toggle("Incident field (off: inline baked field)", incidentField);
         }
 
         // Expose the indirect solve's rays, refresh period, and occupancy interpretation together

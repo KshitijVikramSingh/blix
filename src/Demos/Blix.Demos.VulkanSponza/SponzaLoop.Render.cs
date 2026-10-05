@@ -948,6 +948,7 @@ internal sealed partial class SponzaLoop
                 new[]
                 {
                     new ShaderTextureBinding("uIncidentRaw", graph.GetColorTexture(incidentHandle)),
+                    new ShaderTextureBinding("uIncidentGradientRaw", graph.GetColorTexture(incidentGradientHandle)),
                     new ShaderTextureBinding(
                         "uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
                     new ShaderTextureBinding(

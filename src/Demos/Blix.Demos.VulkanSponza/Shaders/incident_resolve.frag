@@ -21,6 +21,8 @@
 
 layout(location = 0) in vec2 vUv;
 layout(location = 0) out vec4 outIncident;
+// The incident light's gradient with the normal (incident_clipmap.frag), resolved with the same weights.
+layout(location = 1) out vec4 outIncidentGradient;
 
 layout(set = 0, binding = 0) uniform Resolve {
     mat4 uInvProjection;
@@ -34,6 +36,7 @@ layout(set = 0, binding = 2) uniform sampler2D uSceneDepth;
 // depth-only resolve reached 9.17 mean sRGB at the chair view versus 1.29 on the square-on orbit.
 // The full-resolution pre-pass normal rejects those taps with one additional fetch each.
 layout(set = 0, binding = 4) uniform sampler2D uPrepassNormal;
+layout(set = 0, binding = 5) uniform sampler2D uIncidentGradientRaw;
 
 // View-space depth (positive, metres) — the scale the tolerance is relative to.
 float viewDepth(vec2 uv) {
@@ -56,6 +59,7 @@ void main() {
     vec2 frac = fract(f);
 
     vec4 sum = vec4(0.0);
+    vec4 gradientSum = vec4(0.0);
     float weightSum = 0.0;
     float tolerance = max(0.02 * centreDepth, 0.01);
     for (int i = 0; i < 4; ++i) {
@@ -78,10 +82,12 @@ void main() {
         }
 
         sum += texture(uIncidentRaw, at) * w;
+        gradientSum += texture(uIncidentGradientRaw, at) * w;
         weightSum += w;
     }
 
     // Every neighbour rejected — a one-pixel sliver whose coarse taps all belong to something else.
     // The nearest tap is the least wrong answer available, and it is what bilinear would have given.
     outIncident = weightSum > 1e-5 ? sum / weightSum : texture(uIncidentRaw, vUv);
+    outIncidentGradient = weightSum > 1e-5 ? gradientSum / weightSum : texture(uIncidentGradientRaw, vUv);
 }

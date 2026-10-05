@@ -40,6 +40,9 @@
 
 layout(location = 0) in vec2 vUv;
 layout(location = 0) out vec4 outIncident;
+// The pass's second target (incident_clipmap.frag's gradient). This field answers for its own normal and leaves
+// the lit pass to evaluate the sky at the normal-mapped normal itself, so it carries no gradient.
+layout(location = 1) out vec4 outIncidentGradient;
 
 layout(set = 0, binding = 0) uniform Incident {
     mat4 uInvProjection;   // clip -> view, for unprojecting depth
@@ -78,6 +81,7 @@ void main() {
     // the upsample would then drag onto the silhouettes next to it. Full visibility, zero bounce.
     if (texture(uSceneDepth, vUv).r >= 1.0 - 1e-6) {
         outIncident = vec4(0.0, 0.0, 0.0, 1.0);
+        outIncidentGradient = vec4(0.0);
         return;
     }
 
@@ -108,4 +112,5 @@ void main() {
     }
 
     outIncident = vec4(incident, skyVisibility);
+    outIncidentGradient = vec4(0.0);
 }

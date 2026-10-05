@@ -33,6 +33,9 @@ internal sealed partial class SponzaLoop
     private PipelineHandle screenProbeFilterPipeline;
     private GpuBufferHandle screenProbeFiltered;
     private int screenProbeFilterRadius = 1;
+    // --no-incident-gradient: the incident pass writes no gradient, so the lit pass shades indirect light at the
+    // geometric normal as before: the control for what carrying it to the normal-mapped normal changes.
+    private bool noIncidentGradient;
     private (int X, int Y) screenProbeTiles;
     private int screenProbeCurrent;
     private int screenProbeFrame;
@@ -138,7 +141,7 @@ internal sealed partial class SponzaLoop
     {
         if (ScreenProbesActive && screenProbeTiles.X > 0)
         {
-            return (new Vector4(1f, screenProbeTiles.X, screenProbeTiles.Y, 0f), new Vector4(frameWidth, frameHeight, 0f, 0f),
+            return (new Vector4(1f, screenProbeTiles.X, screenProbeTiles.Y, noIncidentGradient ? 1f : 0f), new Vector4(frameWidth, frameHeight, 0f, 0f),
                 screenProbeTileBuffers[screenProbeCurrent], screenProbeFiltered);
         }
         if (screenProbeDummy.Equals(default(GpuBufferHandle)))

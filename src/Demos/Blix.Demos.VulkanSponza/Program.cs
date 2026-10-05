@@ -195,6 +195,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private PipelineHandle incidentPipeline;
     // What the lit pass actually samples: the coarse field reconstructed to full resolution.
     private GraphResourceHandle incidentFullHandle;
+    // The incident light's luminance gradient with the normal, at incidentScale and resolved to full size: how the
+    // lit pass carries light evaluated at the geometric normal to its normal-mapped one (incident_clipmap.frag).
+    private GraphResourceHandle incidentGradientHandle;
+    private GraphResourceHandle incidentGradientFullHandle;
     private PassHandle incidentResolvePassHandle;
     private PipelineHandle incidentResolvePipeline;
     private ShaderProgramHandle gtaoProgram;

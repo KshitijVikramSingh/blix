@@ -12,6 +12,10 @@
 
 layout(location = 0) in vec2 vUv;
 layout(location = 0) out vec4 outIncident;
+// xyz: how the incident light's luminance changes with the normal, at the geometric normal (screen probes'
+// radiance gives it exactly; the clipmap answers for one normal only, and contributes none). The lit pass uses it
+// to carry the light to its normal-mapped normal. w unused.
+layout(location = 1) out vec4 outIncidentGradient;
 
 layout(set = 0, binding = 0) uniform IncidentClipmap {
     mat4 uInvProjection;
@@ -23,7 +27,8 @@ layout(set = 0, binding = 0) uniform IncidentClipmap {
     vec4 uOrigin1;
     vec4 uOrigin2;
     vec4 uOrigin3;
-    vec4 uScreen;        // screen probes: x 1 when they answer, yz tiles across and down; w unused
+    vec4 uScreen;        // screen probes: x 1 when they answer, yz tiles across and down; w 1: write no gradient
+                         // (--no-incident-gradient, the control for what the normal map adds)
     vec4 uFrameSize;     // xy the frame's pixels (the probes' tiles are in them)
 } g;
 
@@ -43,12 +48,12 @@ layout(std430, set = 0, binding = 8) readonly buffer ScreenProbes { ScreenProbe 
 // False where none of the four fits, and the clipmap's answer stands. confidence is how much of the fitting probes'
 // weight is accumulated history (a probe counts fully from 8 frames): foliage and depth edges, where TAA's jitter
 // puts each frame's probe on another surface, never accumulate, and there the clipmap's steady answer stays.
-bool screenProbesAt(vec3 worldPos, vec3 n, float viewDepth, out vec3 irradiance, out float confidence) {
+bool screenProbesAt(vec3 worldPos, vec3 n, float viewDepth, out vec3 irradiance, out vec3 gradient, out float confidence) {
     ivec2 tiles = ivec2(g.uScreen.yz);
     vec2 t = vUv * g.uFrameSize.xy / float(SCREEN_PROBE_TILE) - 0.5;
     ivec2 base = ivec2(floor(t));
     vec2 f = t - vec2(base);
-    vec3 sum = vec3(0.0);
+    vec3 sum = vec3(0.0), gradientSum = vec3(0.0);
     float weight = 0.0, fitting = 0.0;
     for (int i = 0; i < 4; ++i) {
         ivec2 o = ivec2(i & 1, i >> 1);
@@ -69,10 +74,12 @@ bool screenProbesAt(vec3 worldPos, vec3 n, float viewDepth, out vec3 irradiance,
             vec4 radiance[9];
             for (int k = 0; k < 9; ++k) radiance[k] = probes[index].radiance[k];
             sum += w * screenProbeIrradiance(radiance, n);
+            gradientSum += w * screenProbeIrradianceGradient(radiance, n);
             weight += w;
         }
     }
     irradiance = weight > 1e-6 ? sum / weight : vec3(0.0);
+    gradient = weight > 1e-6 ? gradientSum / weight : vec3(0.0);
     confidence = fitting > 1e-4 ? clamp(weight / fitting, 0.0, 1.0) : 0.0;
     return weight > 1e-6;
 }
@@ -86,6 +93,7 @@ void main() {
     float raw = texture(uSceneDepth, vUv).r;
     if (raw >= 1.0 - 1e-6) {
         outIncident = vec4(0.0, 0.0, 0.0, 1.0);
+        outIncidentGradient = vec4(0.0);
         return;
     }
     vec4 view = g.uInvProjection * vec4(vUv * 2.0 - 1.0, raw, 1.0);
@@ -107,9 +115,12 @@ void main() {
     bool found;
     vec4 field = blix_clipmapSample(c, worldPos, N, found);
     outIncident = found ? field : vec4(texture(uIrradiance, N).rgb, 1.0);
-    vec3 gathered;
+    outIncidentGradient = vec4(0.0);
+    vec3 gathered, gradient;
     float confidence;
-    if (g.uScreen.x > 0.5 && screenProbesAt(worldPos, N, viewDepth, gathered, confidence)) {
+    if (g.uScreen.x > 0.5 && screenProbesAt(worldPos, N, viewDepth, gathered, gradient, confidence)) {
         outIncident.rgb = mix(outIncident.rgb, gathered, confidence);
+        // The blend is linear in the light, so its gradient is the probes' scaled by their share.
+        outIncidentGradient = g.uScreen.w > 0.5 ? vec4(0.0) : vec4(gradient * confidence, 0.0);
     }
 }

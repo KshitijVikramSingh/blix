@@ -813,36 +813,42 @@ public sealed partial class VulkanGraphicsDevice
             StencilTestEnable = false,
         };
 
-        // TODO MRT: when surfaces grow multiple attachments, fan out per ColorBlends entry.
-        var blendState = description.ColorBlends.Count > 0 ? description.ColorBlends[0] : BlendState.Disabled;
-        var colorBlendAttachment = new PipelineColorBlendAttachmentState
+        // One attachment state per colour target: a pass with several (the incident light and its gradient) needs
+        // as many as its subpass has, or the pipeline is invalid for it. A description with none blends one.
+        var blendCount = Math.Max(1, description.ColorBlends.Count);
+        var colorBlendAttachments = stackalloc PipelineColorBlendAttachmentState[blendCount];
+        for (var a = 0; a < blendCount; a++)
         {
-            BlendEnable = blendState.Enabled,
-            ColorWriteMask = ColorComponentFlags.RBit | ColorComponentFlags.GBit
-                           | ColorComponentFlags.BBit | ColorComponentFlags.ABit,
-            // Additive: (One, One). PremultipliedAlpha: (One, 1-SrcA) — the source
-            // already carries colour*alpha, so don't scale it by alpha again. Alpha:
-            // (SrcA, 1-SrcA) — classic straight-alpha blend.
-            SrcColorBlendFactor = blendState.Mode switch
+            var blendState = a < description.ColorBlends.Count ? description.ColorBlends[a] : BlendState.Disabled;
+            colorBlendAttachments[a] = new PipelineColorBlendAttachmentState
             {
-                BlendMode.Additive => BlendFactor.One,
-                BlendMode.PremultipliedAlpha => BlendFactor.One,
-                _ => BlendFactor.SrcAlpha,
-            },
-            DstColorBlendFactor = blendState.Mode == BlendMode.Additive
-                ? BlendFactor.One
-                : BlendFactor.OneMinusSrcAlpha,
-            ColorBlendOp = BlendOp.Add,
-            SrcAlphaBlendFactor = BlendFactor.One,
-            DstAlphaBlendFactor = BlendFactor.Zero,
-            AlphaBlendOp = BlendOp.Add,
-        };
+                BlendEnable = blendState.Enabled,
+                ColorWriteMask = ColorComponentFlags.RBit | ColorComponentFlags.GBit
+                               | ColorComponentFlags.BBit | ColorComponentFlags.ABit,
+                // Additive: (One, One). PremultipliedAlpha: (One, 1-SrcA) — the source
+                // already carries colour*alpha, so don't scale it by alpha again. Alpha:
+                // (SrcA, 1-SrcA) — classic straight-alpha blend.
+                SrcColorBlendFactor = blendState.Mode switch
+                {
+                    BlendMode.Additive => BlendFactor.One,
+                    BlendMode.PremultipliedAlpha => BlendFactor.One,
+                    _ => BlendFactor.SrcAlpha,
+                },
+                DstColorBlendFactor = blendState.Mode == BlendMode.Additive
+                    ? BlendFactor.One
+                    : BlendFactor.OneMinusSrcAlpha,
+                ColorBlendOp = BlendOp.Add,
+                SrcAlphaBlendFactor = BlendFactor.One,
+                DstAlphaBlendFactor = BlendFactor.Zero,
+                AlphaBlendOp = BlendOp.Add,
+            };
+        }
         var colorBlend = new PipelineColorBlendStateCreateInfo
         {
             SType = StructureType.PipelineColorBlendStateCreateInfo,
             LogicOpEnable = false,
-            AttachmentCount = 1,
-            PAttachments = &colorBlendAttachment,
+            AttachmentCount = (uint)blendCount,
+            PAttachments = colorBlendAttachments,
         };
 
         var dynStates = stackalloc DynamicState[] { DynamicState.Viewport, DynamicState.Scissor };
