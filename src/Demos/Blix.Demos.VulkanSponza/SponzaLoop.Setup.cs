@@ -171,9 +171,11 @@ internal sealed partial class SponzaLoop
         // --no-taa: no TAA and so no sub-pixel jitter: the control for --stability, whose variation otherwise
         // counts every edge the jitter moves.
         if (args.Flag("no-taa")) render.Taa = 0f;
+        // --taa X: the history weight (the overlay's "Taa"), for measuring what it leaves of the jitter.
+        if (args.Float("taa") is { } taa) render.Taa = Math.Clamp(taa, 0f, 0.97f);
         // --stability K: per-pixel temporal variation over the K still frames before the shot (SponzaLoop.Stability).
         if (args.Int("stability") is { } stability) stabilityFrames = Math.Max(2, stability);
-        noIncidentGradient = args.Flag("no-incident-gradient");
+        if (args.Flag("incident-gradient")) noIncidentGradient = false;
         if (args.Int("clipmap-freeze") is { } freeze) clipmapFreeze = Math.Max(1, freeze);
         if (args.Int("screen-probe-filter") is { } spFilter) screenProbeFilterRadius = Math.Clamp(spFilter, 0, 4);
         if (args.Int("screen-probe-ablate") is { } ablate) screenProbeAblate = ablate;

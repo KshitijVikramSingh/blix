@@ -175,8 +175,14 @@ exactly where the world has changed.
    the inline path at the geometric normal moves 15% of Sponza's pixels). The incident pass now writes
    a second target, the light's luminance gradient with the normal (exact from screen probes' SH; the
    clipmap contributes none), resolved alongside, and the lit pass carries the light to the normal-
-   mapped normal to first order (moves 8.4% of pixels; `--no-incident-gradient` the control). Open:
-   the clipmap's own answer (foliage, edges, past the probes) still has no gradient. Found on the way and fixed: the
+   mapped normal to first order (moves 8.4% of pixels). OFF by default (`--incident-gradient`): the
+   user saw it shimmer; `--stability` now also reads the TAA-resolved image, and with the camera still
+   it measured median per-pixel variation default 3.16%, clipmap 3.30%, screen probes 3.40%, with the
+   SH gradient 5.70% (its directional bands are the noisiest part). Open: a steady source of normal-map
+   detail for the field (the clipmap's directional irradiance is deterministic: sample it at tilted
+   normals in the incident pass?). And the 3% floor in EVERY arm is the TAA: history 0.7 (0.9: 2.36%,
+   less than the longer average predicts, so its history clamp discards too) leaves the jitter
+   visible; the user's "jitters with foliage, alpha, taa, fog, history, everything". Found on the way and fixed: the
    probe cook integrated diffuse irradiance with 64 samples a texel, which a bright aureole turned into
    +-25% texel noise (straight up, every floor's lookup, read 1.47x high); 4096 now (probe recipe 2). 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
    material, 16 area-stratified samples per triangle at a footprint-matched mip) gives every triangle a

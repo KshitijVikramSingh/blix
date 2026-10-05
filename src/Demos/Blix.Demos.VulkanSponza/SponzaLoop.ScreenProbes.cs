@@ -33,9 +33,11 @@ internal sealed partial class SponzaLoop
     private PipelineHandle screenProbeFilterPipeline;
     private GpuBufferHandle screenProbeFiltered;
     private int screenProbeFilterRadius = 1;
-    // --no-incident-gradient: the incident pass writes no gradient, so the lit pass shades indirect light at the
-    // geometric normal as before: the control for what carrying it to the normal-mapped normal changes.
-    private bool noIncidentGradient;
+    // --incident-gradient: carry the light to the normal-mapped normal by the screen probes' SH gradient. Off by
+    // default: the user saw it shimmer, and --stability measured the TAA-resolved image (still camera) at a median
+    // 5.70% per-pixel variation with it against 3.40% without (default look 3.16%). The SH's directional bands are
+    // its noisiest part, and dividing by luminance amplifies them in the dark. A steadier source is wanted.
+    private bool noIncidentGradient = true;
     private (int X, int Y) screenProbeTiles;
     private int screenProbeCurrent;
     private int screenProbeFrame;

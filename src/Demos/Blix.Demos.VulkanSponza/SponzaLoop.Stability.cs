@@ -13,6 +13,9 @@ internal sealed partial class SponzaLoop
     private int stabilityFrames;
     private readonly List<float[]> stabilityIncident = new();
     private readonly List<float[]> stabilityScene = new();
+    // What is presented: the TAA-resolved image (empty with TAA off). The last completed frame wrote
+    // taaHandles[taaWrite]: this is sampled after the current frame flipped the pair.
+    private readonly List<float[]> stabilityResolved = new();
     private (int W, int H) stabilityGrid;
     private const int StabilityStride = 4;
 
@@ -23,11 +26,13 @@ internal sealed partial class SponzaLoop
         if (postLoadFrames < shotFrame - stabilityFrames || postLoadFrames >= shotFrame) return;
         var incident = device.ReadTexture(graph.GetColorTexture(incidentHandle), out var iw, out var ih, out _);
         var scene = device.ReadTexture(graph.GetColorTexture(hdrHandle), out var sw, out var sh, out _);
+        var resolved = render.Taa > 0f ? device.ReadTexture(graph.GetColorTexture(taaHandles[taaWrite]), out _, out _, out _) : null;
         var gw = sw / StabilityStride;
         var gh = sh / StabilityStride;
         stabilityGrid = (gw, gh);
         var inc = new float[gw * gh];
         var sce = new float[gw * gh];
+        var res = new float[gw * gh];
         for (var y = 0; y < gh; y++)
         for (var x = 0; x < gw; x++)
         {
@@ -39,17 +44,24 @@ internal sealed partial class SponzaLoop
             inc[y * gw + x] = Lum((float)BitConverter.ToHalf(incident, o), (float)BitConverter.ToHalf(incident, o + 2), (float)BitConverter.ToHalf(incident, o + 4));
             var packed = BitConverter.ToUInt32(scene, (py * sw + px) * 4);
             sce[y * gw + x] = Lum(UnpackFloat(packed & 0x7FF, 6), UnpackFloat((packed >> 11) & 0x7FF, 6), UnpackFloat((packed >> 22) & 0x3FF, 5));
+            if (resolved is not null)
+            {
+                var rp = BitConverter.ToUInt32(resolved, (py * sw + px) * 4);
+                res[y * gw + x] = Lum(UnpackFloat(rp & 0x7FF, 6), UnpackFloat((rp >> 11) & 0x7FF, 6), UnpackFloat((rp >> 22) & 0x3FF, 5));
+            }
         }
         stabilityIncident.Add(inc);
         stabilityScene.Add(sce);
+        if (resolved is not null) stabilityResolved.Add(res);
         static float Lum(float r, float g, float b) => 0.2126f * r + 0.7152f * g + 0.0722f * b;
     }
 
     private void WriteStability(string basePath)
     {
         if (stabilityIncident.Count < 2) return;
-        foreach (var (name, frames, map) in new[] { ("incident light", stabilityIncident, true), ("final image (HDR)", stabilityScene, false) })
+        foreach (var (name, frames, map) in new[] { ("incident light", stabilityIncident, true), ("lit image before TAA", stabilityScene, false), ("presented image (TAA-resolved)", stabilityResolved, false) })
         {
+            if (frames.Count < 2) continue;
             var (gw, gh) = stabilityGrid;
             var cv = new List<double>();
             var step = new List<double>();
