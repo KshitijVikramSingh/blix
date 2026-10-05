@@ -151,8 +151,14 @@ exactly where the world has changed.
    by transform row; placement identity broke at the cook's chunk seams). History per frame: still
    91.4%; walking pace (`--orbit-frames 1200`, 0.3 deg/frame) Sponza 85.9%, Bistro 87.4% (the default
    orbit, 3 deg/frame, is a whirl: 65.7%, nothing lives past ~30 frames on screen). Bistro's one mass
-   restart on that path is the camera leaving a building (correct). Open: COST 19-23 ms (8160 probes x
-   8 rays + shadow rays + clipmap samples at hits; estimate was 3 ms). Found on the way and fixed: the
+   restart on that path is the camera leaving a building (correct). Cost, attributed by
+   `--screen-probe-ablate` (Sponza, 600 frames, paired repeats): closest rays ~14.5 ms, shadow rays
+   ~6.5, clipmap at hits ~0, everything else 0.26 of 21.5. The sun at a hit now comes from the
+   cascades where they cover it (a shadow ray beyond): 24.4 -> 15.5 ms. Half the tile ROWS trace a
+   frame (whole workgroups skip; a checkerboard would idle lanes in busy SIMD groups): 15.0 -> 8.6-10.1
+   ms. At 1500 frames: Sponza 8.9 ms, as shaded median 1.00, |err| 0.0060 (0.97, 0.0058 before the
+   cuts); Bistro 4.9 ms (from 18.9), 0.96, 0.031. Open: the half that does not trace still costs ~4
+   ms on Sponza (history search: up to 9 candidates, a depth fetch for visibility each). Found on the way and fixed: the
    probe cook integrated diffuse irradiance with 64 samples a texel, which a bright aureole turned into
    +-25% texel noise (straight up, every floor's lookup, read 1.47x high); 4096 now (probe recipe 2). 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
    material, 16 area-stratified samples per triangle at a footprint-matched mip) gives every triangle a

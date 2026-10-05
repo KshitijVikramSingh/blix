@@ -168,6 +168,7 @@ internal sealed partial class SponzaLoop
         if (args.Float("clipmap-unknown-sky") is { } unknownSky) clipmapUnknownSky = Math.Clamp(unknownSky, 0f, 1f);
         // --gi-screen-probes: the per-tile gather over the clipmap (SponzaLoop.ScreenProbes); it needs the clipmap.
         screenProbesEnabled = args.Flag("gi-screen-probes");
+        if (args.Int("screen-probe-ablate") is { } ablate) screenProbeAblate = ablate;
         if (args.Int("orbit-frames") is { } orbitFrames) OrbitFrames = Math.Max(2, orbitFrames);
         if (screenProbesEnabled && !clipmapEnabled) throw new AppArgsException("--gi-screen-probes needs --gi-clipmap: its rays read the clipmap where they hit.");
         if (args.Float("screen-probe-history") is { } spHistory) screenProbeHistory = Math.Max(1f, spHistory);
@@ -486,11 +487,11 @@ internal sealed partial class SponzaLoop
         // Screen probes read this frame's depth and normals and write buffers the incident pass reads; declared
         // between them, and fenced like every pass that binds GPU buffers.
         screenProbeInterface = Reflect("screen_probe.comp");
-        screenProbePassHandle = graph.ComputePass("screen-probes")
+        var screenProbeBuilder = graph.ComputePass("screen-probes")
             .Read(SampleableSceneDepth)
-            .Read(SampleablePrepassNormal)
-            .Shader(screenProbeInterface)
-            .Handle;
+            .Read(SampleablePrepassNormal);
+        for (var c = 0; c < CascadeCount; c++) screenProbeBuilder = screenProbeBuilder.Read(cascadeHandles[c]);
+        screenProbePassHandle = screenProbeBuilder.Shader(screenProbeInterface).Handle;
 
         incidentPassHandle = graph.GraphicsPass("incident-light")
             .Target(incidentHandle, LoadOp.Clear, StoreOp.Store)

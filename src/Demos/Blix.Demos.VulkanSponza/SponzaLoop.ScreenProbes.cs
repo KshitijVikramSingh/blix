@@ -11,6 +11,8 @@ internal sealed partial class SponzaLoop
     private bool screenProbesEnabled;
     // --screen-probe-history N: frames a probe's radiance averages over at most.
     private float screenProbeHistory = 64f;
+    // --screen-probe-ablate N: drop parts of the trace to attribute its cost (screen_probe.comp, uParams.w).
+    private int screenProbeAblate;
     private ShaderInterface screenProbeInterface = null!;
     private PassHandle screenProbePassHandle;
     private PipelineHandle screenProbePipeline;
@@ -72,7 +74,7 @@ internal sealed partial class SponzaLoop
                 new("uPrevViewProj", new Matrix4x4Uniform(screenProbePrevViewProj)),
                 new("uTarget", new Vector4Uniform(new Vector4(frameWidth, frameHeight, tiles.Item1, tiles.Item2))),
                 new("uDims", new Vector4Uniform(new Vector4(ClipmapDims.X, ClipmapDims.Y, ClipmapDims.Z, clipmapSpacing))),
-                new("uParams", new Vector4Uniform(new Vector4(clipmap.BlendProbes, screenProbeHistoryValid ? 1f : 0f, pixelAtUnitDepth, 0f))),
+                new("uParams", new Vector4Uniform(new Vector4(clipmap.BlendProbes, screenProbeHistoryValid ? 1f : 0f, pixelAtUnitDepth, screenProbeAblate))),
                 new("uOrigin0", new Vector4Uniform(new Vector4(origins[0].X, origins[0].Y, origins[0].Z, 0f))),
                 new("uOrigin1", new Vector4Uniform(new Vector4(origins[1].X, origins[1].Y, origins[1].Z, 0f))),
                 new("uOrigin2", new Vector4Uniform(new Vector4(origins[2].X, origins[2].Y, origins[2].Z, 0f))),
@@ -81,6 +83,7 @@ internal sealed partial class SponzaLoop
                 new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 1f))),
                 // w: a ray's sky, a little blurred (one mip) so single directions do not flicker on the sky's detail.
                 new("uFrame", new Vector4Uniform(new Vector4(screenProbeFrame, screenProbeHistory, 1f, 1f))),
+                new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
             },
             new[]
             {
@@ -89,6 +92,9 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uClipmapIrradiance", clipmapIrradiance),
                 new ShaderTextureBinding("uClipmapDepth", clipmapDepth),
                 new ShaderTextureBinding("uSkyRadiance", envCubeTexture),
+                new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0])),
+                new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1])),
+                new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2])),
             },
             Buffers: rayBlockBuffers
                 .Append(new ShaderBufferBinding("ClipmapState", clipmapState))

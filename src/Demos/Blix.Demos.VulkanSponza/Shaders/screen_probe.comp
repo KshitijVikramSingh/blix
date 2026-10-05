@@ -19,10 +19,19 @@
 //            searched over the 3x3 tiles around where this probe falls in the last frame (TAA's jitter moves
 //            which surface a tile's centre lands on at edges); the closest candidate passing all of them wins,
 //            else the probe starts afresh
-//   trace    8 directions uniform over its hemisphere; a hit is lit by the sun (a shadow ray) and by the probe
-//            clipmap's irradiance at the hit, re-radiated in its albedo; an escape brings the disc-free sky
+//   trace    8 directions uniform over its hemisphere; a hit is lit by the sun and by the probe clipmap's
+//            irradiance at the hit, re-radiated in its albedo; an escape brings the disc-free sky. The sun at a hit
+//            is the shadow cascades' answer where they cover it (hard, as the fog takes it: the lit pass's own
+//            maps, so a hit agrees with how that surface is shaded), a shadow ray beyond them. Shadow rays were
+//            30% of this pass (6.5 of 21.5 ms on Sponza).
 //   blend    the frame's estimate (2 pi / rays per sample, the uniform hemisphere's density) averaged in at 1/n,
 //            n capped at uFrame.y
+//
+// Half the tile ROWS trace each frame, alternating (uParams.w bit 16 turns it off): a workgroup is 8 probes of one
+// row, so whole workgroups skip the trace. Skipping alternate probes inside a group would save nothing, since an
+// idle lane in a busy SIMD group costs what a working one does. A probe that does not trace still re-places itself,
+// finds its past and carries it on unchanged; one with no past and no rays holds nothing (accumulated 0, so
+// readers weigh it 0 and its neighbours or the clipmap answer).
 //
 // Writes the tile's header (first probe, count) as well as the probe: one per tile today, at pool index = tile.
 
@@ -40,7 +49,9 @@ layout(set = 0, binding = 0) uniform ScreenProbes {
     vec4 uTarget;          // xy frame pixels, zw tiles across and down
     vec4 uDims;            // the clipmap: xyz probes per level, w base spacing
     vec4 uParams;          // x the clipmap's blend band; y 1 when last frame's probes are valid; z one pixel's width
-                           // at unit depth (2 tan(fov/2) / height)
+                           // at unit depth (2 tan(fov/2) / height); w a cost-attribution switch (--screen-probe-
+                           // ablate): 1 no sun at hits, 2 no clipmap at hits, 4 no tracing at all, 8 shadow rays
+                           // everywhere (the cascades not consulted), 16 every row traces every frame
     vec4 uOrigin0;
     vec4 uOrigin1;
     vec4 uOrigin2;
@@ -48,6 +59,7 @@ layout(set = 0, binding = 0) uniform ScreenProbes {
     vec4 uSunDirection;    // xyz the direction the sun travels
     vec4 uSunIrradiance;   // rgb
     vec4 uFrame;           // x frame counter, y history cap (frames), z sky strength, w sky mip for a ray
+    mat4 uCascadeVP[3];
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -56,6 +68,8 @@ layout(set = 0, binding = 3) uniform sampler2D uClipmapIrradiance;
 layout(set = 0, binding = 4) uniform sampler2D uClipmapDepth;
 layout(std430, set = 0, binding = 5) readonly buffer ClipmapState { uvec4 states[]; };
 layout(set = 0, binding = 6) uniform samplerCube uSkyRadiance;
+layout(set = 0, binding = 12) uniform sampler2D uCascadeShadowMaps[3];
+#include "shadow.glsl"
 
 #include "screen_probe.glsl"
 layout(std430, set = 0, binding = 7) readonly buffer ScreenProbeTilesPrevious { ScreenProbeTile previousTiles[]; };
@@ -143,7 +157,9 @@ void main() {
     // Trace: every lane of a placed probe, one direction uniform over the hemisphere around its normal.
     vec3 radiance = vec3(0.0);
     vec3 dir = n;
-    if (placed) {
+    int ablate = int(u.uParams.w + 0.5);
+    bool traceRow = (ablate & 16) != 0 || ((tile.y + int(u.uFrame.x)) & 1) == 0;
+    if (placed && traceRow && (ablate & 4) == 0) {
         uint seed = blix_pcg(uint(u.uFrame.x) * 2654435761u + uint(probeIndex) * 9781u + ray);
         float u1 = (float(ray) + float(blix_pcg(seed) & 0xFFFFu) / 65536.0) / float(RAYS);   // stratified in height
         float u2 = float(blix_pcg(seed ^ 0x68E31DA4u) & 0xFFFFu) / 65536.0;
@@ -160,10 +176,23 @@ void main() {
             vec3 hitPos = origin + dir * hit.t;
             vec3 toSun = -normalize(u.uSunDirection.xyz);
             float ndotl = max(dot(hn, toSun), 0.0);
-            float sun = ndotl > 0.0 && !blix_traceAny(hitPos + hn * 0.01, toSun, 0.0, uintBitsToFloat(0x7F800000u), blix_pcg(seed ^ 0x5bd1e995u))
-                ? ndotl : 0.0;
-            bool known;
-            vec4 field = blix_clipmapSample(clipmap(), hitPos, hn, known);
+            float sun = 0.0;
+            if (ndotl > 0.0 && (ablate & 1) == 0) {
+                int cascade = -1;
+                float lit = 1.0;
+                if ((ablate & 8) == 0) {
+                    lit = blix_sun_shadow_cascaded_hard(
+                        uCascadeShadowMaps[0], uCascadeShadowMaps[1], uCascadeShadowMaps[2],
+                        u.uCascadeVP[0], u.uCascadeVP[1], u.uCascadeVP[2], hitPos + hn * 0.01, ndotl, cascade);
+                }
+                if (cascade < 0) {
+                    lit = blix_traceAny(hitPos + hn * 0.01, toSun, 0.0, uintBitsToFloat(0x7F800000u), blix_pcg(seed ^ 0x5bd1e995u)) ? 0.0 : 1.0;
+                }
+                sun = ndotl * lit;
+            }
+            bool known = false;
+            vec4 field = vec4(0.0);
+            if ((ablate & 2) == 0) field = blix_clipmapSample(clipmap(), hitPos, hn, known);
             radiance = hit.albedo * (u.uSunIrradiance.rgb * sun + (known ? field.rgb : vec3(0.0))) / PI;
         } else {
             radiance = textureLod(uSkyRadiance, dir, u.uFrame.w).rgb * u.uFrame.z;
@@ -232,6 +261,13 @@ void main() {
     }
     if (best >= 0) history = previous[best].normal.w;
     atomicAdd(stats[best >= 0 ? 6 : nearestReasonOut], 1u);
+    if (!traceRow) {
+        // No rays this frame: carry the past as it was, or hold nothing.
+        for (int i = 0; i < 9; ++i) probe.radiance[i] = best >= 0 ? previous[best].radiance[i] : vec4(0.0);
+        probe.normal.w = history;
+        current[probeIndex] = probe;
+        return;
+    }
     float count = min(history + 1.0, u.uFrame.y);
     float alpha = 1.0 / count;
     for (int i = 0; i < 9; ++i) {
