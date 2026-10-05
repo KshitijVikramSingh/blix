@@ -155,9 +155,47 @@ public sealed partial class RenderGraph : IDisposable
     {
         EnsureNotCompiled(nameof(Compile));
         RenderGraphValidation.Validate(this);
+        computeAttachmentReads = InferComputeAttachmentReads();
         // Test-mode graphs (parameterless ctor) have no backend to allocate.
         Backend?.Compile();
         IsCompiled = true;
+    }
+
+    private Dictionary<int, IReadOnlyList<int>> computeAttachmentReads = new();
+
+    /// <summary>
+    /// For each compute pass, the resources it reads that a graphics pass writes as an attachment (colour, depth,
+    /// or either's resolve target): the reads the backend must order explicitly before the pass's first dispatch.
+    /// </summary>
+    /// <remarks>
+    /// <b>Why the graph says it rather than the producer's render pass.</b> A render pass's outgoing subpass
+    /// dependency covers a later read only if its destination stages include the reader's, and that is a promise
+    /// every render-pass construction path has to keep separately. The MSAA depth-resolve path did not (fragment
+    /// only), so a compute pass sampling the resolved depth was ordered by nothing but the driver happening to
+    /// serialize (MoltenVK does). A compute pass's declared read is the one place that knows the consumer, so the
+    /// barrier is derived from it. Graphics-to-graphics reads stay with subpass dependencies; a storage image a
+    /// dispatch writes is barriered by the dispatch itself. History reads count too: last frame's attachment
+    /// write is still a write the read must follow.
+    /// </remarks>
+    internal IReadOnlyList<int> ComputeAttachmentReads(int computePassId) =>
+        computeAttachmentReads.TryGetValue(computePassId, out var reads) ? reads : Array.Empty<int>();
+
+    private Dictionary<int, IReadOnlyList<int>> InferComputeAttachmentReads()
+    {
+        var attachmentWritten = new HashSet<int>();
+        foreach (var g in GraphicsPasses.Values)
+        {
+            foreach (var c in g.ColorTargets) attachmentWritten.Add(c.View.Resource.Id);
+            if (g.Depth is { } d) attachmentWritten.Add(d.View.Resource.Id);
+            foreach (var r in g.ResolveTargets) attachmentWritten.Add(r.Resource.Id);
+            if (g.DepthResolveTarget is { } dr) attachmentWritten.Add(dr.Resource.Id);
+        }
+        var result = new Dictionary<int, IReadOnlyList<int>>();
+        foreach (var (id, pass) in ComputePasses)
+        {
+            result[id] = pass.Reads.Select(v => v.Resource.Id).Where(attachmentWritten.Contains).Distinct().ToArray();
+        }
+        return result;
     }
 
     // Synthetic RenderSurfaceHandle for a graph pass; pass it to
@@ -328,7 +366,12 @@ public sealed partial class RenderGraph : IDisposable
             {
                 if (recordedDispatches.TryGetValue(passId, out var dispatches))
                 {
-                    commandList.ComputePass(cpass.Name, dispatches);
+                    var reads = new List<TextureHandle>();
+                    foreach (var resourceId in ComputeAttachmentReads(passId))
+                    {
+                        if (Backend.TryGetSampleable(resourceId, out var texture) && texture is { } handle) reads.Add(handle);
+                    }
+                    commandList.ComputePass(cpass.Name, dispatches, reads);
                 }
                 continue;
             }

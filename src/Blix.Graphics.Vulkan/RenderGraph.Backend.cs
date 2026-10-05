@@ -25,10 +25,6 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
     internal Dictionary<int, GraphBackendPass> BackendPasses { get; } = new();
     internal bool BackendCompiled { get; private set; }
 
-    // Explicit barriers per pass, inferred at compile. Empty for graphics-only graphs: subpass
-    // dependencies cover cross-pass memory and layout; compute reads and writes add their own.
-    internal Dictionary<int, List<BarrierOp>> PerPassBarriers { get; private set; } = new();
-
     public ulong MatchSwapchainResourceGeneration { get; private set; }
 
     internal VulkanRenderGraphBackend(VulkanGraphicsDevice device, RenderGraph graph)
@@ -41,7 +37,6 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
     public void Compile()
     {
         CompileBackend();
-        PerPassBarriers = BarrierInference.Infer(graph);
     }
 
     public bool TryGetPassSurface(int passId, out RenderSurfaceHandle surface)
@@ -911,10 +906,16 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
             SType = StructureType.SubpassDependency2,
             SrcSubpass = Vk.SubpassExternal,
             DstSubpass = 0,
-            SrcStageMask = PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.LateFragmentTestsBit,
+            // Compute included, as in the single-sample path: a compute pass sampled last frame's resolved depth
+            // (screen probes, the ray view) and must finish before this pass resolves over it. It was missing here,
+            // and the read was ordered only by MoltenVK serializing.
+            // ColorAttachmentOutput and its write included: the previous frame's store of this pass's own colour
+            // attachments, which this pass's clear writes over (a write after write the synchronization validator
+            // reported on every frame; nothing else ordered them, Metal just serializes the encoders).
+            SrcStageMask = PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.LateFragmentTestsBit | PipelineStageFlags.ColorAttachmentOutputBit,
             DstStageMask = PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.EarlyFragmentTestsBit,
-            SrcAccessMask = AccessFlags.ShaderReadBit | AccessFlags.DepthStencilAttachmentWriteBit,
-            DstAccessMask = AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit,
+            SrcAccessMask = AccessFlags.ShaderReadBit | AccessFlags.DepthStencilAttachmentWriteBit | AccessFlags.ColorAttachmentWriteBit,
+            DstAccessMask = AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentReadBit | AccessFlags.DepthStencilAttachmentWriteBit,
             DependencyFlags = DependencyFlags.ByRegionBit,
         };
         deps[1] = new SubpassDependency2
@@ -923,6 +924,8 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
             SrcSubpass = 0,
             DstSubpass = Vk.SubpassExternal,
             SrcStageMask = PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.LateFragmentTestsBit,
+            // Fragment reads only: a compute pass that samples this pass's output orders that read itself, from its
+            // declared Read (RenderGraph.ComputeAttachmentReads, barriered in TranslateComputePass).
             DstStageMask = PipelineStageFlags.FragmentShaderBit,
             SrcAccessMask = AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit,
             DstAccessMask = AccessFlags.ShaderReadBit,
@@ -1072,10 +1075,13 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
             // before we overwrite it. LateFragmentTests+DepthWrite included so
             // a prior pass's depth write (depth pre-pass) is available to this
             // pass's depth load/test (EarlyFragmentTests).
-            SrcStageMask = PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.LateFragmentTestsBit,
-            SrcAccessMask = AccessFlags.ShaderReadBit | AccessFlags.DepthStencilAttachmentWriteBit,
+            // ColorAttachmentOutput and its write included: the previous frame's store of this pass's own colour
+            // attachments, which this pass's clear writes over (a write after write the synchronization validator
+            // reported on every frame; nothing else ordered them, Metal just serializes the encoders).
+            SrcStageMask = PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.LateFragmentTestsBit | PipelineStageFlags.ColorAttachmentOutputBit,
+            SrcAccessMask = AccessFlags.ShaderReadBit | AccessFlags.DepthStencilAttachmentWriteBit | AccessFlags.ColorAttachmentWriteBit,
             DstStageMask = PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.EarlyFragmentTestsBit,
-            DstAccessMask = AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit | AccessFlags.DepthStencilAttachmentReadBit,
+            DstAccessMask = AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit | AccessFlags.DepthStencilAttachmentReadBit,
             DependencyFlags = DependencyFlags.ByRegionBit,
         };
         deps[1] = new SubpassDependency

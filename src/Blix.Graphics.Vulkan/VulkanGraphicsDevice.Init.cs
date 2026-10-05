@@ -506,6 +506,19 @@ public sealed partial class VulkanGraphicsDevice
         void* userData)
     {
         var msg = Marshal.PtrToStringUTF8((nint)data->PMessage) ?? "(no message)";
+        // The objects the message is about, by debug name where one was set: a synchronization hazard's text names
+        // only commands, so without these it cannot be traced to a resource.
+        if (data->ObjectCount > 0 && data->PObjects is not null)
+        {
+            var names = new List<string>();
+            for (var i = 0; i < data->ObjectCount; i++)
+            {
+                var o = data->PObjects[i];
+                var name = o.PObjectName is null ? null : Marshal.PtrToStringUTF8((nint)o.PObjectName);
+                names.Add($"{o.ObjectType}{(name is null ? "" : $" '{name}'")}");
+            }
+            msg += $" [objects: {string.Join(", ", names)}]";
+        }
         var isError = severity.HasFlag(DebugUtilsMessageSeverityFlagsEXT.ErrorBitExt);
         if (isError) Interlocked.Increment(ref validationErrors);
         var label = isError ? "ERR " : "WARN";

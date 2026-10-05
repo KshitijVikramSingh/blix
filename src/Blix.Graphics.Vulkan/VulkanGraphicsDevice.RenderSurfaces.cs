@@ -333,10 +333,11 @@ public sealed partial class VulkanGraphicsDevice
         {
             SrcSubpass = Vk.SubpassExternal,
             DstSubpass = 0,
-            SrcStageMask = PipelineStageFlags.FragmentShaderBit,
-            SrcAccessMask = AccessFlags.ShaderReadBit,
+            // And the previous frame's store of this same attachment, which this pass's clear writes over.
+            SrcStageMask = PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ColorAttachmentOutputBit,
+            SrcAccessMask = AccessFlags.ShaderReadBit | AccessFlags.ColorAttachmentWriteBit,
             DstStageMask = PipelineStageFlags.ColorAttachmentOutputBit,
-            DstAccessMask = AccessFlags.ColorAttachmentWriteBit,
+            DstAccessMask = AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit,
             DependencyFlags = DependencyFlags.ByRegionBit,
         };
         deps[1] = new SubpassDependency

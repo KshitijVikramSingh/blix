@@ -22,4 +22,9 @@ public sealed record RenderPassDescription(
     //
     // Honoured only where the target's owner supplied a load-form render pass; a surface without one
     // still clears, which is what every surface did before.
-    bool LoadExisting = false);
+    bool LoadExisting = false,
+
+    // Compute pass: the attachment outputs of earlier graphics passes it samples (RenderGraph.ComputeAttachmentReads).
+    // The backend orders each explicitly (attachment write -> compute read) before the first dispatch, instead of
+    // relying on the producer's subpass dependency to have named the compute stage.
+    IReadOnlyList<TextureHandle>? AttachmentReads = null);

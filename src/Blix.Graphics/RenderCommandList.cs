@@ -45,7 +45,10 @@ public sealed class RenderCommandList
     public void ComputePass(string name, DispatchCommand dispatch) =>
         ComputePass(name, new[] { dispatch ?? throw new ArgumentNullException(nameof(dispatch)) });
 
-    public void ComputePass(string name, IReadOnlyList<DispatchCommand> dispatches)
+    public void ComputePass(string name, IReadOnlyList<DispatchCommand> dispatches) => ComputePass(name, dispatches, null);
+
+    /// <param name="attachmentReads">Render-target outputs the dispatches sample; see RenderPassDescription.AttachmentReads.</param>
+    public void ComputePass(string name, IReadOnlyList<DispatchCommand> dispatches, IReadOnlyList<TextureHandle>? attachmentReads)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentNullException.ThrowIfNull(dispatches);
@@ -55,7 +58,8 @@ public sealed class RenderCommandList
         try
         {
             var desc = new RenderPassDescription(
-                RenderSurfaceHandle.Default, Array.Empty<GraphicsColor?>(), ClearDepth: false, Compute: true);
+                RenderSurfaceHandle.Default, Array.Empty<GraphicsColor?>(), ClearDepth: false, Compute: true,
+                AttachmentReads: attachmentReads is { Count: > 0 } ? attachmentReads.ToArray() : null);
             passes.Add(new RenderPass(name, desc, dispatches.ToArray<RenderCommand>()));
         }
         finally

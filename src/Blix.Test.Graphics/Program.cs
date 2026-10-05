@@ -8,12 +8,6 @@ using Blix.Geometry;
 using Blix.Graphics;
 using Blix.Graphics.Vulkan;
 using Blix.Render;
-// Silk.NET.Vulkan types are used by Section N (BarrierOp value equality).
-// Aliased rather than globally imported to avoid ambiguity with
-// Blix.Graphics.Vulkan.PushConstantRange and Blix.Graphics.PrimitiveTopology.
-using VkImageLayout = Silk.NET.Vulkan.ImageLayout;
-using VkPipelineStageFlags = Silk.NET.Vulkan.PipelineStageFlags;
-using VkAccessFlags = Silk.NET.Vulkan.AccessFlags;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using Blix.Cooked;
@@ -1046,81 +1040,57 @@ static ShaderInterface MinimalShader() => new(new[]
 }
 
 // ============================================================================
-// Section N — Barrier inference contract (VB.iv).
+// Section N — compute reads of attachment outputs are ordered explicitly.
 // ============================================================================
 //
-// For v1 graphics-only graphs, per-pass barrier lists are empty —
-// subpass dependencies on each VkRenderPass already cover the
-// cross-pass color/depth → fragment-shader-read memory barrier. The
-// InferBarriers function ships its data shape now so the contract is
-// locked; explicit emission lights up when ComputePass.Execute does in
-// step 8.
+// A graphics-to-graphics read is covered by the producer's subpass dependency. A compute pass that samples a
+// render pass's output was covered only if that producer's dependency happened to name the compute stage, and the
+// MSAA depth-resolve path's did not. The graph now names those reads from the compute pass's own declaration
+// (RenderGraph.ComputeAttachmentReads), and the backend barriers each before the first dispatch. This replaced a
+// BarrierInference stub that returned empty lists nothing consumed.
 
 {
-    // N.1 — Empty graph produces empty per-pass barriers map. (Validation
-    // rejects empty graphs at Compile, so build a single-pass graph and
-    // assert the barrier list for that pass is empty.)
+    // N.1 — A compute pass reading a colour and a depth target that a graphics pass wrote names both.
     var graph = new RenderGraph();
+    var scene = graph.ColorTarget("scene", TextureFormat.Rgba16F, new FixedGraphSize(64, 64));
+    var depth = graph.DepthTarget("depth", new FixedGraphSize(64, 64));
+    var other = graph.ColorTarget("other", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
+    graph.GraphicsPass("draw").Target(scene, LoadOp.Clear, StoreOp.Store).Depth(depth, LoadOp.Clear, StoreOp.Store).Shader(MinimalShader());
+    graph.GraphicsPass("draw-other").Target(other, LoadOp.Clear, StoreOp.Store).Shader(MinimalShader());
+    var probes = graph.ComputePass("probes").Read(scene).Read(depth).Shader(MinimalShader()).Handle;
+    graph.Compile();
+    var reads = graph.ComputeAttachmentReads(probes.Id);
+    t.ExpectTrue("N.1 a compute read of a graphics pass's colour target is named", reads.Contains(scene.Id));
+    t.ExpectTrue("N.1 a compute read of a graphics pass's depth target is named", reads.Contains(depth.Id));
+    t.ExpectClose("N.1 only what it reads (not every attachment in the graph)", reads.Count, 2);
+}
+
+{
+    // N.2 — A target only a compute pass writes is not an attachment read (the dispatch's own storage barrier
+    // orders it); a history read of an attachment is (last frame's write is still a write to follow).
+    var graph = new RenderGraph();
+    var grid = graph.ColorTarget("grid", TextureFormat.Rgba16F, new FixedGraphSize(64, 64));
     var color = graph.ColorTarget("c", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
-    graph.GraphicsPass("solo").Target(color, LoadOp.Clear, StoreOp.Store).Shader(MinimalShader());
+    graph.ComputePass("fill").Write(grid).Shader(MinimalShader());
+    var reader = graph.ComputePass("read").Read(grid).ReadHistory(color).Shader(MinimalShader()).Handle;
+    graph.GraphicsPass("draw").Target(color, LoadOp.Clear, StoreOp.Store).Shader(MinimalShader());
     graph.Compile();
-    var barriers = BarrierInference.Infer(graph);
-    t.ExpectClose("N.1 single-pass graph has one barrier list",
-        barriers.Count, 1);
-    foreach (var list in barriers.Values)
-    {
-        t.ExpectClose("N.1 graphics-only pass barriers empty (subpass deps cover)", list.Count, 0);
-    }
+    var reads = graph.ComputeAttachmentReads(reader.Id);
+    t.ExpectTrue("N.2 a compute-written target is not an attachment read", !reads.Contains(grid.Id));
+    t.ExpectTrue("N.2 a history read of an attachment is one", reads.Contains(color.Id));
 }
 
 {
-    // N.2 — Multi-pass graph with a Read edge still produces no explicit
-    // barriers (the Read drives finalLayout = SHADER_READ_ONLY on the
-    // producer's color attachment + subpass deps cover the memory barrier).
-    var graph = new RenderGraph();
-    var sceneColor = graph.ColorTarget("scene", TextureFormat.Rgba16F, new FixedGraphSize(64, 64));
-    var presentColor = graph.ColorTarget("present", TextureFormat.Rgba8, new FixedGraphSize(64, 64));
-    graph.GraphicsPass("scene-pass")
-        .Target(sceneColor, LoadOp.Clear, StoreOp.Store)
-        .Shader(MinimalShader());
-    graph.GraphicsPass("present-pass")
-        .Target(presentColor, LoadOp.Clear, StoreOp.Store)
-        .Read(sceneColor)
-        .Shader(MinimalShader());
-    graph.Compile();
-    var twoPassBarriers = BarrierInference.Infer(graph);
-    t.ExpectClose("N.2 two-pass graph has two barrier lists",
-        twoPassBarriers.Count, 2);
-    var total = 0;
-    foreach (var list in twoPassBarriers.Values) total += list.Count;
-    t.ExpectClose("N.2 graphics-only multi-pass: zero explicit barriers (subpass deps cover)",
-        total, 0);
-}
-
-{
-    // N.3 — BarrierOp record value equality. Pins the data shape; useful
-    // when step 8 starts emitting real BarrierOps and tests need to
-    // compare expected vs actual.
-    var a = new BarrierOp(
-        ResourceId: 7,
-        OldLayout: VkImageLayout.ColorAttachmentOptimal,
-        NewLayout: VkImageLayout.ShaderReadOnlyOptimal,
-        SrcStage: VkPipelineStageFlags.ColorAttachmentOutputBit,
-        SrcAccess: VkAccessFlags.ColorAttachmentWriteBit,
-        DstStage: VkPipelineStageFlags.FragmentShaderBit,
-        DstAccess: VkAccessFlags.ShaderReadBit);
-    var b = new BarrierOp(
-        ResourceId: 7,
-        OldLayout: VkImageLayout.ColorAttachmentOptimal,
-        NewLayout: VkImageLayout.ShaderReadOnlyOptimal,
-        SrcStage: VkPipelineStageFlags.ColorAttachmentOutputBit,
-        SrcAccess: VkAccessFlags.ColorAttachmentWriteBit,
-        DstStage: VkPipelineStageFlags.FragmentShaderBit,
-        DstAccess: VkAccessFlags.ShaderReadBit);
-    t.ExpectTrue("N.3 BarrierOp value equality holds", a.Equals(b));
-
-    var differentResource = a with { ResourceId = 8 };
-    t.ExpectTrue("N.3 BarrierOp distinguishes different ResourceId", !a.Equals(differentResource));
+    // N.3 — The command list carries them on the compute pass's description; none is null, not empty.
+    var list = new RenderCommandList();
+    DispatchCommand D() => new(default, 1, 1, 1, Array.Empty<ShaderUniform>(), Array.Empty<ShaderTextureBinding>());
+    var tex = new TextureHandle(42);
+    list.ComputePass("with", new[] { D() }, new[] { tex });
+    list.ComputePass("without", new[] { D() }, Array.Empty<TextureHandle>());
+    var passes = list.Passes;
+    t.ExpectTrue("N.3 attachment reads reach the description",
+        passes[0].Description.AttachmentReads is { Count: 1 } r && r[0].Equals(tex));
+    t.ExpectTrue("N.3 no attachment reads is null", passes[1].Description.AttachmentReads is null);
 }
 
 // ============================================================================

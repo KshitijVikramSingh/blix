@@ -450,8 +450,10 @@ public sealed partial class VulkanGraphicsDevice
     {
         SrcSubpass = Vk.SubpassExternal,
         DstSubpass = 0,
-        SrcStageMask = PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.EarlyFragmentTestsBit,
-        SrcAccessMask = AccessFlags.ColorAttachmentWriteBit,
+        // The previous frame's depth writes (late tests) as well as its colour: this pass clears the depth
+        // buffer it reuses, a write after write the synchronization validator reported every frame.
+        SrcStageMask = PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.EarlyFragmentTestsBit | PipelineStageFlags.LateFragmentTestsBit,
+        SrcAccessMask = AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit,
         DstStageMask = PipelineStageFlags.ColorAttachmentOutputBit | PipelineStageFlags.EarlyFragmentTestsBit,
         DstAccessMask = AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit,
     };
@@ -1398,6 +1400,31 @@ public sealed partial class VulkanGraphicsDevice
     // sample them.
     private unsafe void TranslateComputePass(CommandBuffer cmd, RenderPass pass, int frameSlot)
     {
+        // Render-target outputs this pass samples: their attachment writes (this frame's, or last frame's for a
+        // history read) made available to compute reads. The image stays where render passes leave it,
+        // SHADER_READ_ONLY_OPTIMAL; this is ordering and visibility only.
+        foreach (var read in pass.Description.AttachmentReads ?? Array.Empty<TextureHandle>())
+        {
+            var tex = textureTable[read.Id];
+            var depth = IsDepthFormat(tex.Format);
+            var barrier = new ImageMemoryBarrier
+            {
+                SType = StructureType.ImageMemoryBarrier,
+                OldLayout = ImageLayout.ShaderReadOnlyOptimal,
+                NewLayout = ImageLayout.ShaderReadOnlyOptimal,
+                SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+                Image = tex.Image,
+                // Every mip and layer (a depth cube's six faces): the whole image is what was attached.
+                SubresourceRange = new ImageSubresourceRange(AspectOf(tex.Format), 0, Vk.RemainingMipLevels, 0, Vk.RemainingArrayLayers),
+                SrcAccessMask = depth ? AccessFlags.DepthStencilAttachmentWriteBit : AccessFlags.ColorAttachmentWriteBit,
+                DstAccessMask = AccessFlags.ShaderReadBit,
+            };
+            Vk.CmdPipelineBarrier(cmd,
+                depth ? PipelineStageFlags.EarlyFragmentTestsBit | PipelineStageFlags.LateFragmentTestsBit : PipelineStageFlags.ColorAttachmentOutputBit,
+                PipelineStageFlags.ComputeShaderBit, 0, 0, null, 0, null, 1, &barrier);
+        }
+
         foreach (var rc in pass.Commands)
         {
             if (rc is not DispatchCommand d)
@@ -1455,6 +1482,16 @@ public sealed partial class VulkanGraphicsDevice
             }
         }
     }
+
+    private static bool IsDepthFormat(Format f) =>
+        f is Format.D16Unorm or Format.D32Sfloat or Format.X8D24UnormPack32 or Format.D16UnormS8Uint or Format.D24UnormS8Uint or Format.D32SfloatS8Uint;
+
+    private static ImageAspectFlags AspectOf(Format f) => f switch
+    {
+        Format.D16UnormS8Uint or Format.D24UnormS8Uint or Format.D32SfloatS8Uint => ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit,
+        _ when IsDepthFormat(f) => ImageAspectFlags.DepthBit,
+        _ => ImageAspectFlags.ColorBit,
+    };
 
     private static GpuBufferHandle? GpuBufferNamed(IReadOnlyList<ShaderBufferBinding>? buffers, string? name)
     {
