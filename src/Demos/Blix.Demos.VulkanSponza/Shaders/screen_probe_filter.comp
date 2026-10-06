@@ -34,7 +34,10 @@ void main() {
     if (self.position.w <= 0.0) { filtered[index] = outProbe; return; }
 
     ivec2 tile = ivec2(index % tiles.x, index / tiles.x);
+    // Young probes filter wider (their own average is still a few rays): radius 3 under 16 frames, 2 under 64, then
+    // the base radius. uParams.y 1 turns the widening off.
     int radius = int(u.uParams.x + 0.5);
+    if (u.uParams.y < 0.5) radius = max(radius, self.normal.w < 16.0 ? 3 : self.normal.w < 64.0 ? 2 : radius);
     vec3 n = self.normal.xyz;
     float depth = self.position.w;
     vec3 sum[9];

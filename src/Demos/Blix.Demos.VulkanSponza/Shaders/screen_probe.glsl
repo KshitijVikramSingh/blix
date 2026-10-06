@@ -22,7 +22,7 @@
 #ifndef SCREEN_PROBE_GLSL
 #define SCREEN_PROBE_GLSL
 
-#define SCREEN_PROBE_TILE 16
+#define SCREEN_PROBE_TILE 32
 // The most probes a tile header may name; readers loop to this bound.
 #define SCREEN_PROBE_MAX_PER_TILE 2
 

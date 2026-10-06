@@ -199,6 +199,10 @@ internal sealed partial class SponzaLoop
         noIncidentGradient = args.Flag("no-incident-gradient");
         if (args.Float("incident-normal-bias") is { } nb) incidentNormalBias = Math.Clamp(nb, 0f, 12f);
         if (args.Float("incident-gradient-clamp") is { } gc) incidentGradientClamp = Math.Clamp(gc, 0f, 4f);
+        if (args.Int("screen-probe-reset-at") is { } resetAt) screenProbeResetAt = resetAt;
+        if (args.Int("screen-probe-seed-offset") is { } seedOffset) screenProbeSeedOffset = seedOffset;
+        if (args.Float("screen-probe-seed") is { } seed) screenProbeSeedFrames = Math.Max(0f, seed);
+        if (args.Flag("no-young-filter")) screenProbeYoungWide = false;
         if (args.Int("clipmap-freeze") is { } freeze) clipmapFreeze = Math.Max(1, freeze);
         if (args.Int("screen-probe-filter") is { } spFilter) screenProbeFilterRadius = Math.Clamp(spFilter, 0, 4);
         if (args.Int("screen-probe-ablate") is { } ablate) screenProbeAblate = ablate;

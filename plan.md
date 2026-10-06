@@ -204,7 +204,21 @@ exactly where the world has changed.
    where a pixel does not move: Sponza 0.83% -> 0.22% median, pixels over 2% 23.9% -> 7.8%, foliage
    settles; Bistro 0.34% -> 0.10%; screen probes 0.97% -> 0.34%. Open: that arm reads ~0.65 points
    more bias against the supersample (1.19% vs 1.05% total), not precision (a dithered write), not
-   tonemapping (linear blend), not window lag (K 256). Not measured: ghosting under motion. Found on the way and fixed: the
+   tonemapping (linear blend), not window lag (K 256). Not measured: ghosting under motion.
+   Then the user: bounce light "grainy/spotty, shimmers a second or two, settles into the same spotted
+   pattern" (incident field off removes it). Reproduced at the user's F12 camera with
+   `--screen-probe-reset-at F` (drops every probe's past, as a move does) and the raw indirect light
+   (`--viz 10`): 30/120/600 frames after a reset it differs from converged by 10.0/5.7/3.6%, and two
+   converged runs with different seeds (`--screen-probe-seed-offset`) still differ by 2.48%: the
+   probes' few rays, in light that arrives through a few bright openings. Fresh probes now start from
+   the clipmap's answer (as radiance, worth 16 frames), trace every frame while under 32 frames, and
+   filter wider while young (r3 under 16, r2 under 64): smooth at 30 frames, but the blotch phase only
+   moves (120: 5.9%). Fibonacci stratification: nothing. Wider filter r2 / every row every frame / both:
+   4.5 / 4.7 / 3.7% at 120 (the last at 10.7 ms). Tiles are a budget: 32 px x 32 rays, the same rays as
+   16 x 8, halves the frozen noise (2.48 -> 1.19%; 120 frames 4.4%) at ~the same cost, but Sponza's
+   accuracy tail goes back up (as shaded p90 1.56 -> 1.97, |err| 0.0058 -> 0.0071; Bistro 0.030 ->
+   0.033). Now 32 x 32. Next for noise without losing density: importance sampling toward each probe's
+   bright directions. Found on the way and fixed: the
    probe cook integrated diffuse irradiance with 64 samples a texel, which a bright aureole turned into
    +-25% texel noise (straight up, every floor's lookup, read 1.47x high); 4096 now (probe recipe 2). 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
    material, 16 area-stratified samples per triangle at a footprint-matched mip) gives every triangle a

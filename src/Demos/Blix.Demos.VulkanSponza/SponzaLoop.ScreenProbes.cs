@@ -33,6 +33,13 @@ internal sealed partial class SponzaLoop
     private PipelineHandle screenProbeFilterPipeline;
     private GpuBufferHandle screenProbeFiltered;
     private int screenProbeFilterRadius = 1;
+    // --screen-probe-reset-at F: drop every probe's past on post-load frame F, as a camera move does, so a shot a few
+    // frames later shows what the user sees for the first seconds after moving.
+    private int screenProbeResetAt = -1;
+    // --screen-probe-seed N: frames a fresh probe's clipmap prior counts for (0: from nothing); --no-young-filter:
+    // the filter keeps its base radius for young probes too.
+    private float screenProbeSeedFrames = 16f;
+    private bool screenProbeYoungWide = true;
     // --no-incident-gradient: the incident pass writes no gradient, and the lit pass shades indirect light at the
     // geometric normal (the control for what the normal map adds). The gradient comes from the clipmap's own
     // directional irradiance (incident_clipmap.frag), not the screen probes' SH, which shimmered.
@@ -50,6 +57,9 @@ internal sealed partial class SponzaLoop
     private (int X, int Y) screenProbeTiles;
     private int screenProbeCurrent;
     private int screenProbeFrame;
+    // --screen-probe-seed-offset K: start the probes' random sequence elsewhere. Two converged runs with different
+    // offsets differ only by the noise the probes have not averaged away: the measure of "settled into spots".
+    private int screenProbeSeedOffset;
     private Matrix4x4 screenProbePrevViewProj;
     private bool screenProbeHistoryValid;
 
@@ -57,8 +67,8 @@ internal sealed partial class SponzaLoop
     private const int ScreenProbeBytes = 12 * 16;
     private const int ScreenProbeTileBytes = 16;
     private const int ScreenProbeFloats = ScreenProbeBytes / 4;
-    private const int ScreenProbeTile = 16;
-    private const int ScreenProbesPerGroup = 8;
+    private const int ScreenProbeTile = 32;
+    private const int ScreenProbesPerGroup = 2;
 
     private bool ScreenProbesActive => screenProbesEnabled && ClipmapActive;
 
@@ -79,6 +89,7 @@ internal sealed partial class SponzaLoop
             if (screenProbeStats.Equals(default(GpuBufferHandle))) screenProbeStats = Own(device.CreateGpuBuffer(32, name: "sponza.screen-probe-stats"));
             screenProbeHistoryValid = false;
         }
+        if (postLoadFrames == screenProbeResetAt) screenProbeHistoryValid = false;
         var previous = screenProbeBuffers[screenProbeCurrent];
         var previousTiles = screenProbeTileBuffers[screenProbeCurrent];
         screenProbeCurrent ^= 1;
@@ -108,8 +119,9 @@ internal sealed partial class SponzaLoop
                 new("uSunDirection", new Vector4Uniform(new Vector4(sunDirection, 0f))),
                 new("uSunIrradiance", new Vector4Uniform(new Vector4(EffectiveSunIrradiance, 1f))),
                 // w: a ray's sky, a little blurred (one mip) so single directions do not flicker on the sky's detail.
-                new("uFrame", new Vector4Uniform(new Vector4(screenProbeFrame, screenProbeHistory, 1f, 1f))),
+                new("uFrame", new Vector4Uniform(new Vector4(screenProbeFrame + screenProbeSeedOffset, screenProbeHistory, 1f, 1f))),
                 new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
+                new("uParams2", new Vector4Uniform(new Vector4(screenProbeSeedFrames, 0f, 0f, 0f))),
             },
             new[]
             {
@@ -133,7 +145,7 @@ internal sealed partial class SponzaLoop
             new ShaderUniform[]
             {
                 new("uTarget", new Vector4Uniform(new Vector4(frameWidth, frameHeight, tiles.Item1, tiles.Item2))),
-                new("uParams", new Vector4Uniform(new Vector4(screenProbeFilterRadius, 0f, 0f, 0f))),
+                new("uParams", new Vector4Uniform(new Vector4(screenProbeFilterRadius, screenProbeYoungWide ? 0f : 1f, 0f, 0f))),
             },
             Array.Empty<ShaderTextureBinding>(),
             Buffers: new[]

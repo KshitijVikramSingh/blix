@@ -34,11 +34,18 @@
 // readers weigh it 0 and its neighbours or the clipmap answer).
 //
 // Writes the tile's header (first probe, count) as well as the probe: one per tile today, at pool index = tile.
+//
+// Young probes converge fast: after a camera move, a probe started from nothing showed its first few rays as
+// tile-sized blotches for seconds (the raw indirect light 30 / 120 / 600 frames after a reset differed from the
+// converged by 10.0 / 5.7 / 3.6%). So a probe with no past starts from the clipmap's answer there, as radiance
+// (the uniform hemisphere whose irradiance at this normal is the clipmap's), worth uParams2.x frames; a probe
+// under 32 frames traces every frame whatever its row; and the filter widens for young probes
+// (screen_probe_filter.comp). The prior is the world field, not another surface's stale history.
 
 layout(local_size_x = 64) in;
 
-#define RAYS 8
-#define PROBES_PER_GROUP 8
+#define RAYS 32
+#define PROBES_PER_GROUP 2
 #define PI 3.14159265359
 
 layout(set = 0, binding = 0) uniform ScreenProbes {
@@ -60,6 +67,7 @@ layout(set = 0, binding = 0) uniform ScreenProbes {
     vec4 uSunIrradiance;   // rgb
     vec4 uFrame;           // x frame counter, y history cap (frames), z sky strength, w sky mip for a ray
     mat4 uCascadeVP[3];
+    vec4 uParams2;         // x frames of history a fresh probe's clipmap prior counts for (0: start from nothing)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -150,7 +158,7 @@ void main() {
     if (inRange) {
         ivec2 corner = tile * SCREEN_PROBE_TILE;
         placed = surfaceAt(corner + SCREEN_PROBE_TILE / 2, world, viewDepth, n, identity);
-        const ivec2 inner[4] = ivec2[4](ivec2(4, 4), ivec2(12, 4), ivec2(4, 12), ivec2(12, 12));
+        const ivec2 inner[4] = ivec2[4](ivec2(SCREEN_PROBE_TILE / 4), ivec2(3 * SCREEN_PROBE_TILE / 4, SCREEN_PROBE_TILE / 4), ivec2(SCREEN_PROBE_TILE / 4, 3 * SCREEN_PROBE_TILE / 4), ivec2(3 * SCREEN_PROBE_TILE / 4));
         for (int i = 0; i < 4 && !placed; ++i) placed = surfaceAt(corner + inner[i], world, viewDepth, n, identity);
     }
 
@@ -159,13 +167,23 @@ void main() {
     vec3 dir = n;
     int ablate = int(u.uParams.w + 0.5);
     bool traceRow = (ablate & 16) != 0 || ((tile.y + int(u.uFrame.x)) & 1) == 0;
+    // Young probes trace every frame: whether this tile's probe is young is known only after its history search,
+    // so take last frame's probe in this same tile as the guide (a still or slow camera keeps a tile's probe).
+    if (inRange && u.uParams.y > 0.5) {
+        ScreenProbeTile here = previousTiles[probeIndex];
+        if (here.y == 0u || previous[here.x].normal.w < 32.0) traceRow = true;
+    }
     if (placed && traceRow && (ablate & 4) == 0) {
         uint seed = blix_pcg(uint(u.uFrame.x) * 2654435761u + uint(probeIndex) * 9781u + ray);
-        float u1 = (float(ray) + float(blix_pcg(seed) & 0xFFFFu) / 65536.0) / float(RAYS);   // stratified in height
-        float u2 = float(blix_pcg(seed ^ 0x68E31DA4u) & 0xFFFFu) / 65536.0;
-        float z = u1;
+        // A Fibonacci spiral over the hemisphere (uniform in solid angle), the whole set rotated about n and its
+        // heights jittered within their bands, both afresh per probe and frame: stratified in elevation AND azimuth.
+        // (Random azimuth alone let rays bunch on one side, and a few bright openings make each ray count.)
+        uint setSeed = blix_pcg(uint(u.uFrame.x) * 2654435761u + uint(probeIndex) * 9781u);
+        float rotation = float(blix_pcg(setSeed) & 0xFFFFu) / 65536.0;
+        float jitter = float(blix_pcg(seed) & 0xFFFFu) / 65536.0;
+        float z = (float(ray) + jitter) / float(RAYS);
         float r = sqrt(max(0.0, 1.0 - z * z));
-        float phi = 2.0 * PI * u2;
+        float phi = 2.0 * PI * fract(float(ray) * 0.618034 + rotation);
         vec3 t = normalize(abs(n.y) < 0.999 ? cross(vec3(0.0, 1.0, 0.0), n) : cross(vec3(1.0, 0.0, 0.0), n));
         vec3 b = cross(n, t);
         dir = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + n * z);
@@ -261,18 +279,36 @@ void main() {
     }
     if (best >= 0) history = previous[best].normal.w;
     atomicAdd(stats[best >= 0 ? 6 : nearestReasonOut], 1u);
+    vec4 prior[9];
+    for (int i = 0; i < 9; ++i) prior[i] = vec4(0.0);
+    float priorFrames = 0.0;
+    if (best < 0 && u.uParams2.x > 0.0) {
+        bool known;
+        vec4 field = blix_clipmapSample(clipmap(), world, n, known);
+        if (known) {
+            vec3 L = field.rgb / PI;
+            prior[0] = vec4(L * (2.0 * PI * 0.282095), 0.0);
+            vec3 k = L * (0.488603 * PI);
+            prior[1] = vec4(k * n.y, 0.0);
+            prior[2] = vec4(k * n.z, 0.0);
+            prior[3] = vec4(k * n.x, 0.0);
+            priorFrames = u.uParams2.x;
+        }
+    }
     if (!traceRow) {
         // No rays this frame: carry the past as it was, or hold nothing.
-        for (int i = 0; i < 9; ++i) probe.radiance[i] = best >= 0 ? previous[best].radiance[i] : vec4(0.0);
-        probe.normal.w = history;
+        for (int i = 0; i < 9; ++i) probe.radiance[i] = best >= 0 ? previous[best].radiance[i] : prior[i];
+        probe.normal.w = best >= 0 ? history : priorFrames;
         current[probeIndex] = probe;
         return;
     }
-    float count = min(history + 1.0, u.uFrame.y);
+    float past = best >= 0 ? history : priorFrames;
+    float count = min(past + 1.0, u.uFrame.y);
     float alpha = 1.0 / count;
     for (int i = 0; i < 9; ++i) {
         vec3 fresh = estimate[i] * scale;
-        probe.radiance[i] = vec4(best >= 0 ? mix(previous[best].radiance[i].rgb, fresh, alpha) : fresh, 0.0);
+        vec3 from = best >= 0 ? previous[best].radiance[i].rgb : prior[i].rgb;
+        probe.radiance[i] = vec4(past > 0.0 ? mix(from, fresh, alpha) : fresh, 0.0);
     }
     probe.normal.w = count;
     current[probeIndex] = probe;
