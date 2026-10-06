@@ -26,14 +26,16 @@ layout(std430, set = 0, binding = 2) readonly buffer ScreenProbes { ScreenProbe 
 layout(std430, set = 0, binding = 3) writeonly buffer ScreenProbesFiltered { ScreenProbe filtered[]; };
 
 void main() {
+    // One thread a probe slot (two a tile, stage 4f-iv).
     int index = int(gl_GlobalInvocationID.x);
     ivec2 tiles = ivec2(u.uTarget.zw);
-    if (index >= tiles.x * tiles.y) return;
+    if (index >= tiles.x * tiles.y * SCREEN_PROBE_MAX_PER_TILE) return;
     ScreenProbe self = probes[index];
     ScreenProbe outProbe = self;
     if (self.position.w <= 0.0) { filtered[index] = outProbe; return; }
 
-    ivec2 tile = ivec2(index % tiles.x, index / tiles.x);
+    int tileIndex = index / SCREEN_PROBE_MAX_PER_TILE;
+    ivec2 tile = ivec2(tileIndex % tiles.x, tileIndex / tiles.x);
     // Young probes filter wider (their own average is still a few rays): radius 3 under 16 frames, 2 under 64, then
     // the base radius. uParams.y 1 turns the widening off.
     int radius = int(u.uParams.x + 0.5);

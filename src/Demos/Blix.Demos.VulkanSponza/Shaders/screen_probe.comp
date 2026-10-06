@@ -83,7 +83,9 @@ layout(set = 0, binding = 0) uniform ScreenProbes {
     vec4 uDynamicMin;
     vec4 uDynamicMax;
     // Fresh probes (stage 4f-ii'): x passes of RAYS rays a fresh probe traces (1: as any other), y the frames under
-    // which last frame's probe in this tile makes this one fresh.
+    // which last frame's probe in this tile makes this one fresh; z 1: no second layer (--probe-layers 1); w passes
+    // a probe traces whose last trace had a path through a moving reach (--dependent-passes; such a probe also
+    // traces every frame, not every other row).
     vec4 uFresh;
 } u;
 
@@ -108,7 +110,8 @@ layout(std430, set = 0, binding = 10) writeonly buffer ScreenProbesCurrent { Scr
 // candidate failed. [0] no candidate tile at all, [1] ownership (key), [4] support, [6] probes that kept a past.
 // Displacement of those kept (diagnostic): [2] on a point that moved in the world, [3] moved further than its footprint, [7] their
 // world displacement summed in millimetres. [5] traced probes with a path through a moving reach (stage 4f).
-layout(std430, set = 0, binding = 11) buffer ScreenProbeStats { uint stats[8]; };
+// [8] second-layer probes placed (stage 4f-iv).
+layout(std430, set = 0, binding = 11) buffer ScreenProbeStats { uint stats[16]; };
 
 #define BLIX_RAY_SET 0
 #define BLIX_RAY_BINDING 13
@@ -123,6 +126,7 @@ shared vec3 sRadiance[64];
 shared vec3 sDirection[64];
 shared uint sDependent[64];
 shared int sPasses[PROBES_PER_GROUP];
+shared uint sPlaced[PROBES_PER_GROUP];
 
 // Stage 4f, dependency: whether the segment origin + dir * [0, tEnd] passes through the reach of geometry that moved
 // this frame. A path that does may carry light the motion changed; one that does not cannot have (lighting is
@@ -170,10 +174,16 @@ bool surfaceAt(ivec2 pixel, out vec3 world, out float viewDepth, out vec3 n, out
 void main() {
     uint lane = gl_LocalInvocationIndex;
     uint ray = lane % RAYS;
+    // Two probe slots a tile (stage 4f-iv), one workgroup a tile: slot = tile x 2 + layer. Layer 0 is the tile's
+    // surface as before; layer 1 a second surface in the same tile, where one is there (a depth edge: the recess
+    // behind a curtain whose tile probe sits on the curtain, which the incident pass otherwise answers from the
+    // clipmap). A tile's header counts the layers placed, from slot tile x 2.
     int probeIndex = int(gl_WorkGroupID.x) * PROBES_PER_GROUP + int(lane / RAYS);
+    int tileIndex = probeIndex / SCREEN_PROBE_MAX_PER_TILE;
+    int layer = probeIndex % SCREEN_PROBE_MAX_PER_TILE;
     ivec2 tiles = ivec2(u.uTarget.zw);
-    bool inRange = probeIndex < tiles.x * tiles.y;
-    ivec2 tile = ivec2(probeIndex % max(tiles.x, 1), probeIndex / max(tiles.x, 1));
+    bool inRange = tileIndex < tiles.x * tiles.y;
+    ivec2 tile = ivec2(tileIndex % max(tiles.x, 1), tileIndex / max(tiles.x, 1));
 
     vec3 world = vec3(0.0), n = vec3(0.0, 1.0, 0.0);
     float viewDepth = 0.0;
@@ -190,6 +200,43 @@ void main() {
             placedPixel = corner + inner[i];
             placed = surfaceAt(placedPixel, world, viewDepth, n, identity);
         }
+        if (layer == 1 && placed && u.uFresh.z < 0.5) {
+            // The second layer: of a 4 x 4 grid of points in the tile, those on another surface than layer 0's
+            // (another SurfaceKey, or off its plane by more than the filter's 2% of the depth); the probe goes on
+            // the one most of them share. None: the tile has one surface and this slot stays empty.
+            vec3 w0 = world, n0 = n;
+            float d0 = viewDepth;
+            uint k0 = identity;
+            vec3 cw[16];
+            vec3 cn[16];
+            float cd[16];
+            uint ck[16];
+            bool cOther[16];
+            for (int i = 0; i < 16; ++i) {
+                ivec2 px = corner + ivec2(4 + 8 * (i % 4), 4 + 8 * (i / 4));
+                bool on = surfaceAt(px, cw[i], cd[i], cn[i], ck[i]);
+                cOther[i] = on && (ck[i] != k0 || abs(dot(n0, cw[i] - w0)) > 0.02 * d0);
+            }
+            int bestCandidate = -1;
+            int bestShare = 0;
+            for (int i = 0; i < 16; ++i) {
+                if (!cOther[i]) continue;
+                int share = 0;
+                for (int j = 0; j < 16; ++j)
+                    if (cOther[j] && ck[j] == ck[i] && abs(dot(cn[i], cw[j] - cw[i])) <= 0.02 * cd[i]) share++;
+                if (share > bestShare) { bestShare = share; bestCandidate = i; }
+            }
+            placed = bestCandidate >= 0;
+            if (placed) {
+                world = cw[bestCandidate];
+                n = cn[bestCandidate];
+                viewDepth = cd[bestCandidate];
+                identity = ck[bestCandidate];
+                placedPixel = corner + ivec2(4 + 8 * (bestCandidate % 4), 4 + 8 * (bestCandidate / 4));
+            }
+        } else if (layer == 1) {
+            placed = false;
+        }
     }
 
     // Trace: every lane of a placed probe, one direction uniform over the hemisphere around its normal, per pass.
@@ -199,14 +246,23 @@ void main() {
     // Young probes trace every frame: whether this tile's probe is young is known only after its history search,
     // so take last frame's probe in this same tile as the guide (a still or slow camera keeps a tile's probe).
     if (inRange && u.uParams.y > 0.5) {
-        ScreenProbeTile here = previousTiles[probeIndex];
-        if (here.y == 0u || previous[here.x].normal.w < 32.0) traceRow = true;
+        ScreenProbeTile here = previousTiles[tileIndex];
+        bool guided = uint(layer) < here.y;
+        if (!guided || previous[here.x + uint(layer)].normal.w < 32.0) traceRow = true;
         // A fresh probe -- where the camera or a moving edge just uncovered a surface -- gets more rays of its own
         // rather than borrowing from the clipmap and its neighbours (both biased exactly at a lighting edge: the
         // mover's ring went +34 -> +21% without the clipmap prior, -> +16% without the young widening).
-        if (here.y == 0u || previous[here.x].normal.w < u.uFresh.y) passes = int(u.uFresh.x);
+        if (!guided || previous[here.x + uint(layer)].normal.w < u.uFresh.y) passes = int(u.uFresh.x);
+        // Where light is changing, spend rays there: a probe whose last trace crossed a moving reach traces every
+        // frame (half-rate rows doubled its dynamic part's lag) and with --dependent-passes passes. Its dynamic part
+        // lagged the mover's lighting: dynamic history 1 with every row tracing took the ring +16 -> +3.6%, at 26%
+        // median scatter from 32 rays.
+        if (guided && previous[here.x + uint(layer)].identity.z > 0u && u.uDynamicMin.w > 0.5) {
+            traceRow = true;
+            passes = max(passes, int(u.uFresh.w));
+        }
     }
-    if (ray == 0u) sPasses[lane / RAYS] = passes;
+    if (ray == 0u) { sPasses[lane / RAYS] = passes; sPlaced[lane / RAYS] = placed ? 1u : 0u; }
     barrier();
     int groupPasses = sPasses[0];
     for (int p = 1; p < PROBES_PER_GROUP; ++p) groupPasses = max(groupPasses, sPasses[p]);
@@ -293,7 +349,9 @@ void main() {
     }
 
     if (ray != 0u || !inRange) return;
-    currentTiles[probeIndex] = ScreenProbeTile(uint(probeIndex), placed ? 1u : 0u, 0u, 0u);
+    // Layer 1 is placed only where layer 0 is, so the tile's placed probes are its first slots.
+    if (layer == 0) currentTiles[tileIndex] = ScreenProbeTile(uint(tileIndex * SCREEN_PROBE_MAX_PER_TILE), placed ? 1u + sPlaced[1] : 0u, 0u, 0u);
+    if (layer == 1 && placed) atomicAdd(stats[8], 1u);
     ScreenProbe probe;
     probe.position = vec4(world, viewDepth);
     probe.normal = vec4(n, 0.0);
@@ -377,6 +435,7 @@ void main() {
         }
         probe.normal.w = best >= 0 ? history : priorFrames;
         probe.identity.y = uint(dynamicPast);
+    probe.identity.z = best >= 0 ? previous[best].identity.z : 0u;
         current[probeIndex] = probe;
         return;
     }
@@ -398,5 +457,6 @@ void main() {
     }
     probe.normal.w = count;
     probe.identity.y = uint(dynamicCount);
+    probe.identity.z = dependentRays;
     current[probeIndex] = probe;
 }

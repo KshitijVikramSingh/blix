@@ -23,6 +23,10 @@ internal sealed partial class SponzaLoop
     // many frames last frame's probe in the tile makes it fresh.
     private float freshPasses = 4f;
     private float freshFrames = 4f;
+    // --probe-layers 1|2: whether a tile may place a second probe on another surface (stage 4f-iv).
+    private int probeLayers = 2;
+    // --dependent-passes N: passes a probe traces whose last trace crossed a moving reach (it also traces every frame).
+    private float dependentPasses = 1f;
     private Bounds3 DependencyBox => dependencyEverything ? new Bounds3(new Vector3(-1e5f), new Vector3(1e5f)) : moverReach;
     private bool screenProbesEnabled;
     // --screen-probe-history N: frames a probe's radiance averages over at most. 256: at 64 a probe's average kept
@@ -88,6 +92,8 @@ internal sealed partial class SponzaLoop
     private const int ScreenProbeBytes = 21 * 16;
     private const int ScreenProbeTileBytes = 16;
     private const int ScreenProbeFloats = ScreenProbeBytes / 4;
+    // Probe slots a tile (SCREEN_PROBE_MAX_PER_TILE): the tile's surface, and a second where it spans one.
+    private const int ScreenProbeLayers = 2;
     private const int ScreenProbeTile = 32;
     private const int ScreenProbesPerGroup = 2;
 
@@ -99,15 +105,16 @@ internal sealed partial class SponzaLoop
         var tiles = ((frameWidth + ScreenProbeTile - 1) / ScreenProbeTile, (frameHeight + ScreenProbeTile - 1) / ScreenProbeTile);
         if (tiles != screenProbeTiles)
         {
-            // The pool holds one probe per tile today; the headers are what let that change.
+            // The pool holds two probe slots a tile (stage 4f-iv: a second surface where the tile spans one); each
+            // tile's header names the slots placed.
             for (var i = 0; i < 2; i++)
             {
-                screenProbeBuffers[i] = Own(device.CreateGpuBuffer(tiles.Item1 * tiles.Item2 * ScreenProbeBytes, name: $"sponza.screen-probes.{i}"));
+                screenProbeBuffers[i] = Own(device.CreateGpuBuffer(tiles.Item1 * tiles.Item2 * ScreenProbeLayers * ScreenProbeBytes, name: $"sponza.screen-probes.{i}"));
                 screenProbeTileBuffers[i] = Own(device.CreateGpuBuffer(tiles.Item1 * tiles.Item2 * ScreenProbeTileBytes, name: $"sponza.screen-probe-tiles.{i}"));
             }
             screenProbeTiles = tiles;
-            screenProbeFiltered = Own(device.CreateGpuBuffer(tiles.Item1 * tiles.Item2 * ScreenProbeBytes, name: "sponza.screen-probes.filtered"));
-            if (screenProbeStats.Equals(default(GpuBufferHandle))) screenProbeStats = Own(device.CreateGpuBuffer(32, name: "sponza.screen-probe-stats"));
+            screenProbeFiltered = Own(device.CreateGpuBuffer(tiles.Item1 * tiles.Item2 * ScreenProbeLayers * ScreenProbeBytes, name: "sponza.screen-probes.filtered"));
+            if (screenProbeStats.Equals(default(GpuBufferHandle))) screenProbeStats = Own(device.CreateGpuBuffer(64, name: "sponza.screen-probe-stats"));
             screenProbeHistoryValid = false;
         }
         if (postLoadFrames == screenProbeResetAt) screenProbeHistoryValid = false;
@@ -122,7 +129,7 @@ internal sealed partial class SponzaLoop
         Matrix4x4.Invert(cameraProjection, out var invProj);
         Matrix4x4.Invert(cameraView, out var invView);
         var origins = clipmap!.Origins;
-        var count = tiles.Item1 * tiles.Item2;
+        var count = tiles.Item1 * tiles.Item2 * ScreenProbeLayers;
         graph.Dispatch(screenProbePassHandle, new DispatchCommand(screenProbePipeline, (count + ScreenProbesPerGroup - 1) / ScreenProbesPerGroup, 1, 1,
             new ShaderUniform[]
             {
@@ -146,7 +153,7 @@ internal sealed partial class SponzaLoop
                 // The reach of what moved this frame: the mover's while it moves, none while held or absent.
                 new("uDynamicMin", new Vector4Uniform(MoverActive && moverMoved && !noDependency ? new Vector4(DependencyBox.Min, 1f) : Vector4.Zero)),
                 new("uDynamicMax", new Vector4Uniform(new Vector4(MoverActive ? DependencyBox.Max : Vector3.Zero, dynamicHistory))),
-                new("uFresh", new Vector4Uniform(new Vector4(freshPasses, freshFrames, 0f, 0f))),
+                new("uFresh", new Vector4Uniform(new Vector4(freshPasses, freshFrames, probeLayers < 2 ? 1f : 0f, dependentPasses))),
             },
             new[]
             {
@@ -208,9 +215,10 @@ internal sealed partial class SponzaLoop
     private void WriteScreenProbeCheck()
     {
         if (!ScreenProbesActive || screenProbeTiles.X == 0) return;
-        var count = screenProbeTiles.X * screenProbeTiles.Y;
+        var count = screenProbeTiles.X * screenProbeTiles.Y * ScreenProbeLayers;
         var floats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(
             device.ReadGpuBuffer(screenProbeBuffers[screenProbeCurrent], 0, count * ScreenProbeBytes).AsSpan()).ToArray();
+        var stats2 = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(screenProbeStats, 0, 64).AsSpan()).ToArray();
         var placed = 0;
         var bins = new int[5];   // 1, 2-7, 8-31, 32-63, 64+
         var young = new List<string>();
@@ -222,10 +230,10 @@ internal sealed partial class SponzaLoop
             var n = floats[i * ScreenProbeFloats + 7];
             bins[n < 1.5f ? 0 : n < 7.5f ? 1 : n < 31.5f ? 2 : n < 63.5f ? 3 : 4]++;
             fine[Math.Min(16, (int)(n / 4f))]++;
-            if (n < 7.5f) young.Add(string.Create(Inv, $"{i % screenProbeTiles.X},{i / screenProbeTiles.X}"));
+            if (n < 7.5f) young.Add(string.Create(Inv, $"{i / ScreenProbeLayers % screenProbeTiles.X},{i / ScreenProbeLayers / screenProbeTiles.X}"));
         }
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] screen probes after {screenProbeFrame} frames: {placed} of {count} tiles placed; frames accumulated: 1 {bins[0]}, 2-7 {bins[1]}, 8-31 {bins[2]}, 32-63 {bins[3]}, 64+ {bins[4]}."));
+            $"[VulkanSponza] screen probes after {screenProbeFrame} frames: {placed} probes placed in {count} slots ({stats2[8]} second-layer placements over the run); frames accumulated: 1 {bins[0]}, 2-7 {bins[1]}, 8-31 {bins[2]}, 32-63 {bins[3]}, 64+ {bins[4]}."));
         Console.WriteLine($"    frames accumulated, in fours from 0-3: {string.Join(' ', fine)}");
         var exact = new SortedDictionary<float, int>();
         for (var i = 0; i < count; i++)
@@ -254,7 +262,7 @@ internal sealed partial class SponzaLoop
                 $"{l.Count} probes, frames median {l.Select(x => x.Frames).OrderBy(x => x).ElementAt(l.Count / 2):0}, mean radiance (SH mean term) {l.Average(x => x.Dc):0.0000}");
             Console.WriteLine($"[VulkanSponza] screen probes on the mover: {Describe(on)}; elsewhere: {Describe(off)}");
         }
-        var stats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(screenProbeStats, 0, 32).AsSpan()).ToArray();
+        var stats = stats2;
         double total = (double)stats[0] + stats[1] + stats[4] + stats[6];
         string Pct(int i) => string.Create(Inv, $"{100.0 * stats[i] / Math.Max(1.0, total):0.0}%");
         Console.WriteLine($"[VulkanSponza] screen probe history over the run: kept {Pct(6)}; started afresh because the nearest candidate failed: no candidate {Pct(0)}, another surface (key) {Pct(1)}, outside support {Pct(4)}; a path through a moving reach {Pct(5)}");

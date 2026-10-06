@@ -33,7 +33,7 @@ struct ScreenProbe {
     vec4 position;      // xyz world, w view depth
     vec4 normal;        // xyz the geometric normal it was placed on, w frames accumulated
     uvec4 identity;     // x the surface's SurfaceKey (stage 4e: source primitive x instance), y frames the dynamic
-                        // part has accumulated, zw unused
+                        // part has accumulated, z rays of its last trace through a moving reach, w unused
     vec4 radiance[9];   // incoming radiance, rgb per spherical-harmonic coefficient: the STATIC part (stage 4f),
                         // over the directions whose paths cross no moving geometry's reach
     vec4 dynamicRadiance[9];   // the part over directions whose paths do, on a short history of its own; a reader

@@ -351,11 +351,25 @@ exactly where the world has changed.
        no dependency -30.5 | +46.5 | +2.2 / 0.7%     screen split only -5.2 | +18.6 | +0.9 / 2.0%
        + clipmap K=32 (default) -6.8 | +14.5 | -0.4 / 3.7%    K=48 -6.1 | +14.9 | -0.4 / 3.8%
      Kept on: 4 points off the ring and the rest's bias to zero, paid in scatter (median 2.0 -> 3.7%).
-   4f-iv (next candidate) screen probes covering what the clipmap now answers: the ring's remaining +14.5% is
-     mostly pixels in the recess behind the curtain that no same-surface tile probe covers (each tile has one
-     probe, placed on the curtain in front), so the incident pass falls back to the clipmap, which lags. A
-     second probe for a tile spanning a depth edge (SCREEN_PROBE_MAX_PER_TILE allows it) would put those
-     pixels on probes that already carry the dependency split and fresh-probe rays.
+   4f-iv DONE: a second probe per tile and rays where light is changing.
+     Two layers: a tile's slot 1 takes a second surface (of a 4 x 4 grid, points on another key or off layer
+     0's plane by 2% of the depth; the most shared of them), headers name the placed slots, the filter runs over
+     slots (`--probe-layers 1` for the A/B). Placed in ~1,300 of 2,040 tiles a frame (keys change across most
+     tiles, not only at depth edges). Same build, paired: ring +16.0 -> +13.4% (p90 45 -> 38%), curtain median
+     17 -> 15%, cost not measurable (one layer 24.6 / 25.0 ms, two 24.1 / 22.2). Still camera and walking
+     reference unchanged (Sponza 0.00030 vs 0.00027 |err| but ratio median 1.24 -> 1.14; Bistro 0.137 vs
+     0.136). So the recess falling back to the clipmap was NOT the ring's main cause.
+     The ring's residual was the dynamic part's LAG: dynamic history 1 with every row tracing took it +16 ->
+     +3.6% (at 26% median scatter). Now a probe whose last trace crossed a moving reach (identity.z) traces
+     every frame, not every other row; `--dependent-passes N` adds passes (not worth it: 2 passes 57 ms, 4
+     passes 97 ms, noisier at the shorter histories they were paired with). vs held, curtain | ring | rest:
+       before -3.3 | +13.4 | +1.0 / 3.4%     every frame, dynamic history 4 -1.4 | +7.9 (median 9.6%) | +0.9 / 3.5%
+       history 2 +1.2 | +5.2 | +0.2 / 4.1%  (default stays 4: lower scatter)
+     Cost while something moves: probe pass ~24 -> ~37 ms on this laptop (46% of probes dependent, now full
+     rate); nothing while nothing moves.
+   Where 4f stands: the curtain's own light within ~1-2%, the ring +7.9% (from +53%), the rest unbiased; the
+     remaining ring error is the dynamic part's 4-frame history at 32 rays a frame -- a noise/lag trade at a
+     ray budget, no longer a missing mechanism.
    4f-iii TAA: presented history also caches lighting (and relaxes its clamp on still pixels). Today the
      ring's resolved bias equals the incident's (+59.3 vs +59.2%), so TAA adds none; re-check after 4f-i.
      Its key test needs an isolated check with the GI lag out (no measurable effect while the lag swamps it).
