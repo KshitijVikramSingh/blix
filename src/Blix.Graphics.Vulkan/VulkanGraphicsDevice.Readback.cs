@@ -100,6 +100,8 @@ public sealed partial class VulkanGraphicsDevice
         // has to say how wide a pixel is. Without it a renderer using this as its scene target —
         // which is the point of the format — cannot be captured at all.
         TextureFormat.R11G11B10F => 4,
+        TextureFormat.R32Uint => 4,
+        TextureFormat.Rg16F => 4,
         _ => 0,
     };
 }

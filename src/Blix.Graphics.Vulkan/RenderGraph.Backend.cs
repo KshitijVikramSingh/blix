@@ -418,8 +418,10 @@ internal sealed partial class VulkanRenderGraphBackend : IRenderGraphBackend
         if (!msaa)
         {
             // Default sampler is LinearClamp — fits the typical "sample a
-            // fullscreen intermediate" use.
-            var sampler = device.GetOrCreateSampler(SamplerDescription.LinearClamp);
+            // fullscreen intermediate" use. An integer target (an identity) is NearestClamp: a linear
+            // sampler on a format that cannot filter is invalid even for texelFetch.
+            var sampler = device.GetOrCreateSampler(resource.Format!.Value.IsInteger()
+                ? SamplerDescription.NearestClamp : SamplerDescription.LinearClamp);
             handle = device.RegisterExternalTexture(
                 image, view, sampler,
                 (int)width, (int)height, mipCount: 1, format,

@@ -49,12 +49,22 @@ public enum TextureFormat
     // (env probes, baked irradiance). 8 bpp; preserves >1.0 values that BC7
     // would clamp.
     Bc6hUf16,
+    // One 32-bit unsigned integer per pixel (VK_FORMAT_R32_UINT): an identity, not a colour, so it is read
+    // exactly (texelFetch on a usampler2D) and never filtered or blended. Render-target only; a graph target
+    // of this format is sampled through NearestClamp. Not resolvable from MSAA (integers do not average).
+    R32Uint,
+    // Two 16-bit floats per pixel (VK_FORMAT_R16G16_SFLOAT): a 2D vector field such as screen-space motion, at
+    // half the width of Rgba16F. Render-target only.
+    Rg16F,
 }
 
 // Helpers for the compressed-format family. Centralised so the backend +
 // cook tool + .blixtex format agree on byte-layout math.
 public static class TextureFormatExtensions
 {
+    /// <summary>Whether the format holds integers: read exactly (texelFetch), never filtered, blended or resolved.</summary>
+    public static bool IsInteger(this TextureFormat format) => format == TextureFormat.R32Uint;
+
     public static bool IsCompressed(this TextureFormat format) => format switch
     {
         TextureFormat.Bc7Srgb or TextureFormat.Bc7Unorm
@@ -72,6 +82,8 @@ public static class TextureFormatExtensions
         TextureFormat.Rgba16F => width * height * 8,
         TextureFormat.R11G11B10F => width * height * 4,
         TextureFormat.R8 => width * height,
+        TextureFormat.R32Uint => width * height * 4,
+        TextureFormat.Rg16F => width * height * 4,
         // BC7 / BC5 / BC6h are all 16 bytes per 4x4 block.
         TextureFormat.Bc7Srgb or TextureFormat.Bc7Unorm
             or TextureFormat.Bc5Unorm or TextureFormat.Bc6hUf16
