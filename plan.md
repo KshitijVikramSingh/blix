@@ -370,9 +370,18 @@ exactly where the world has changed.
    Where 4f stands: the curtain's own light within ~1-2%, the ring +7.9% (from +53%), the rest unbiased; the
      remaining ring error is the dynamic part's 4-frame history at 32 rays a frame -- a noise/lag trade at a
      ray budget, no longer a missing mechanism.
-   4f-iii TAA: presented history also caches lighting (and relaxes its clamp on still pixels). Today the
-     ring's resolved bias equals the incident's (+59.3 vs +59.2%), so TAA adds none; re-check after 4f-i.
-     Its key test needs an isolated check with the GI lag out (no measurable effect while the lag swamps it).
+   4f-iii DONE TAA, isolated: runs without the clipmap or screen probes are deterministic (held vs held 0.00%),
+     and the shot now also dumps the image before TAA, so TAA's own share is resolved minus scene. (Not GI-free:
+     the default traced bounce volume has its own history, -12% incident on the curtain at 30 deg / 1 s.)
+     The key test earns its keep at disocclusions: fast swing ring bias -12.6 -> -6.0%, median 10.0 -> 6.6%,
+     p90 43 -> 34%; slow ring p90 11.8 -> 10.8%. Kept. What TAA still adds, with the key test:
+       ring, slow: p90 4.3 -> 10.8% (a ghosting tail at the edge the clamp leaves); fast: +0.5 pt bias
+       the moving curtain itself: slow -3.4 -> -2.4% bias, fast +0.5 -> +8.3% -- TAA's own staleness: history
+       correctly owned by a surface whose shading changes as it turns (n.l, its own shadow).
+     Open (TAA's 4f): the same dependency, per pixel -- a pixel's shading depends on the mover when its key is
+     the mover's (its own pose changes its shading: here surface motion IS the input that changed, known from
+     the key, not inferred from displacement) or its way to the sun crosses the moving reach (a shadow
+     receiver); such pixels accumulate on a short count.
    Only after 4f-i proves the shape: representations that scale past one mover (change epochs per reach,
    coarse spatial dirty fields, dependency hashes, reach IDs).
 5. *PRT baked by the cook*: per-region probe transfer, relit by the sun at runtime: the static base and

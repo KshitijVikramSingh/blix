@@ -249,6 +249,8 @@ internal sealed partial class SponzaLoop
         // as luminance, raw little-endian floats: a moving run's are held against a held run's, around the mask.
         WriteLuminance(basePath + ".resolved.f32", render.Taa > 0f ? taaHandles[taaWrite] : hdrHandle);
         WriteLuminance(basePath + ".incident.f32", incidentHandle);
+        // And the lit image before TAA: what TAA's history adds is the resolved image's error less this one's.
+        WriteLuminance(basePath + ".scene.f32", hdrHandle);
     }
 
     private void WriteLuminance(string path, GraphResourceHandle target)
