@@ -193,7 +193,18 @@ exactly where the world has changed.
    2.40% -> 0.34% / 0.49%). Variance clipping (5 taps) measured worse than the min/max box; linear vs
    tonemapped blend made no real difference. Defaults now: motion, Rgba16F, 0.9 (`--taa-reproject
    old`, `--taa-history11`, `--taa X`). Normal-map bias back to 1 (screen probes 1.24% presented).
-   Not measured: ghosting under motion (heavier history; the min/max box is what limits it). Found on the way and fixed: the
+   Then the user, looking: ivy/foliage never settles, and "tiny spots of light and dark across walls".
+   `--stability` now writes a heat map of the presented image's variation. The wall spots were the
+   normal-map gradient at bias 1 (weave- and grain-scale speckle with it, none without): back to 2.
+   Seeding fresh screen probes from the clipmap and an outlier clamp on probe updates measured nothing
+   and were dropped. Foliage was white in EVERY arm, the default included, and hashed alpha off changed
+   nothing: sub-pixel leaves are leaf or background per jittered frame, and their pixels were clipped
+   (so reset) every frame. TAA now accumulates a per-pixel count in the history's alpha (blend 1/count
+   up to 32 for a still pixel, 10 by a pixel of motion, i.e. the old 0.9) and relaxes the clamp box x3
+   where a pixel does not move: Sponza 0.83% -> 0.22% median, pixels over 2% 23.9% -> 7.8%, foliage
+   settles; Bistro 0.34% -> 0.10%; screen probes 0.97% -> 0.34%. Open: that arm reads ~0.65 points
+   more bias against the supersample (1.19% vs 1.05% total), not precision (a dithered write), not
+   tonemapping (linear blend), not window lag (K 256). Not measured: ghosting under motion. Found on the way and fixed: the
    probe cook integrated diffuse irradiance with 64 samples a texel, which a bright aureole turned into
    +-25% texel noise (straight up, every floor's lookup, read 1.47x high); 4096 now (probe recipe 2). 4a: a bake at load (`ray_surface_bake.comp`, one dispatch per
    material, 16 area-stratified samples per triangle at a footprint-matched mip) gives every triangle a

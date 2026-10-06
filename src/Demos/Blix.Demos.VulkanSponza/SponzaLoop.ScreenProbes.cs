@@ -42,8 +42,10 @@ internal sealed partial class SponzaLoop
     // (TAA off) against the presented image's median variation (TAA on): bias 0 (clamp 0-3) 13.0% / 6.69%, 1 5.3% /
     // 4.78%, 2 1.7% / 3.67%, 3 0.56% / 3.44%, none 0 / 3.40%. The detail IS the shimmer: what a normal map adds below
     // a few pixels, TAA's jitter samples differently every frame. Under the reworked TAA (motion reprojection,
-    // Rgba16F history, 0.9) the same sweep reads bias 0/1/2 at 1.83/1.24/0.97% (default look 0.83%): 1.
-    private float incidentNormalBias = 1f;
+    // Rgba16F history, 0.9) the same sweep reads bias 0/1/2 at 1.83/1.24/0.97% (no gradient 0.94%, default look
+    // 0.83%), and at 1 the user saw "tiny spots of light and dark across walls": the presented-variation heat map
+    // shows weave- and grain-scale speckle on every textured surface with it and none without. 2.
+    private float incidentNormalBias = 2f;
     private float incidentGradientClamp = 0.5f;
     private (int X, int Y) screenProbeTiles;
     private int screenProbeCurrent;

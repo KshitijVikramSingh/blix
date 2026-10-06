@@ -192,6 +192,8 @@ internal sealed partial class SponzaLoop
         // --taa-history11: the resolved history back in R11G11B10F (the control for history that stops converging
         // once a frame's step falls below half the format's rounding step); Rgba16F is the default.
         if (args.Flag("taa-history11")) taaHistory16 = false;
+        if (args.Float("taa-relax") is { } relax) taaRelax = Math.Max(1f, relax);
+        if (args.Float("taa-accumulate") is { } accumulate) taaAccumulate = Math.Max(0f, accumulate);
         // --stability K: per-pixel temporal variation over the K still frames before the shot (SponzaLoop.Stability).
         if (args.Int("stability") is { } stability) stabilityFrames = Math.Max(2, stability);
         noIncidentGradient = args.Flag("no-incident-gradient");

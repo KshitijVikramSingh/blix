@@ -110,7 +110,7 @@ internal sealed partial class SponzaLoop
             Console.WriteLine(string.Create(Inv,
                 $"[VulkanSponza] stability accuracy against the {stabilityScene.Count}-frame supersample: presented median error {100 * MedianError(stabilityResolved):0.00}%, of which bias (its own average's error) {100 * biasErrors[biasErrors.Count / 2]:0.00}%; one jittered frame (no TAA) {100 * MedianError(stabilityScene):0.00}%"));
         }
-        foreach (var (name, frames, map) in new[] { ("incident light", stabilityIncident, true), ("lit image before TAA", stabilityScene, false), ("presented image (TAA-resolved)", stabilityResolved, false) })
+        foreach (var (name, frames, map) in new[] { ("incident light", stabilityIncident, true), ("lit image before TAA", stabilityScene, false), ("presented image (TAA-resolved)", stabilityResolved, true) })
         {
             if (frames.Count < 2) continue;
             var (gw, gh) = stabilityGrid;
@@ -146,7 +146,7 @@ internal sealed partial class SponzaLoop
                 var b = (byte)Math.Clamp(cvMap[i] / 0.10 * 255.0, 0, 255);
                 rgba[i * 4] = b; rgba[i * 4 + 1] = b; rgba[i * 4 + 2] = b; rgba[i * 4 + 3] = 255;
             }
-            PngWriter.WriteRgba8(basePath + ".stability.png", rgba, gw, gh);
+            PngWriter.WriteRgba8(basePath + (name.StartsWith("presented") ? ".stability-presented.png" : ".stability.png"), rgba, gw, gh);
         }
     }
 }

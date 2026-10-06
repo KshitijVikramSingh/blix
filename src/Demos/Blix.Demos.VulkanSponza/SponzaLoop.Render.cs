@@ -2076,6 +2076,7 @@ internal sealed partial class SponzaLoop
             new("uViewProj",            new Matrix4x4Uniform(viewProj)),
             new("uMode",                new Vector4Uniform(new Vector4(
                 taaMotionReprojection ? 1f : 0f, taaVarianceClip ? 1f : 0f, taaGamma, taaLinearBlend ? 1f : 0f))),
+            new("uAccumulate",          new Vector4Uniform(new Vector4(taaHistory16 ? taaAccumulate : 0f, taaRelax, 0.25f, 0f))),
         };
         if (taaStats.Equals(default(GpuBufferHandle))) taaStats = Own(device.CreateGpuBuffer(8, name: "sponza.taa.stats"));
         var bindings = new[]

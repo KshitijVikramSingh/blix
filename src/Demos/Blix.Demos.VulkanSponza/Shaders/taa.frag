@@ -39,6 +39,15 @@ layout(set = 0, binding = 0) uniform Taa {
     // z the clip's gamma (box = mean +- gamma * sigma); w 1: blend in linear space (the control for the tonemapped
     // blend's bias, which averages high-contrast detail away from its linear mean).
     vec4 uMode;
+    // x: accumulate up to this many frames per pixel (0: the fixed history weight uParams.x). The count rides in
+    // the history's alpha (Rgba16F history). A still pixel then keeps converging toward the true average of what
+    // its jitter sees: sub-pixel foliage, where each frame sees leaf or background, never settled at a fixed 0.9
+    // (about 10 frames). Clipping cuts the count back, which is what keeps motion from ghosting.
+    // y: how much wider the clamp box may be where the pixel does not move (1: never); z: the motion, in pixels, by
+    // which it is back to its normal width. With no motion there is nothing to ghost, and a box from five taps of
+    // one jittered frame rarely contains what sub-pixel foliage averages to, so it clipped (and reset) every frame.
+    // w unused.
+    vec4 uAccumulate;
 } t;
 
 layout(std430, set = 0, binding = 4) buffer TaaStats { uint refusedCount; uint totalCount; };
@@ -90,6 +99,7 @@ void main() {
 
     float refused = 1.0;
     vec3 resolved = current;
+    float accumulated = 1.0;
     if (t.uParams.y > 0.5 && t.uParams.x > 0.0 && depth < 1.0) {
         vec4 world = t.uInvViewProjJittered * vec4(vUv * 2.0 - 1.0, depth, 1.0);
         vec3 worldPos = world.xyz / world.w;
@@ -100,10 +110,18 @@ void main() {
             // The surface's motion on the un-jittered grid, applied to this pixel's centre.
             if (t.uMode.x > 0.5) uvPrev = vUv + (uvPrev - ((clipNow.xy / clipNow.w) * 0.5 + 0.5));
             if (all(greaterThanEqual(uvPrev, vec2(0.0))) && all(lessThanEqual(uvPrev, vec2(1.0)))) {
-                vec3 history = texture(uHistory, uvPrev).rgb;
+                vec4 historySample = texture(uHistory, uvPrev);
+                vec3 history = historySample.rgb;
                 // Clamped to the neighbourhood, not rejected on a threshold: a disocclusion shows up
                 // as history outside what any nearby pixel of this frame contains, and pulling it to
                 // the edge of that range keeps the stability while dropping the stale colour.
+                // Relax the box where nothing moves (in pixels of this frame).
+                float motionPx = length((uvPrev - vUv) * vec2(textureSize(uCurrent, 0)));
+                float widen = mix(max(t.uAccumulate.y, 1.0), 1.0, clamp(motionPx / max(t.uAccumulate.z, 1e-3), 0.0, 1.0));
+                vec3 centre = 0.5 * (lo + hi);
+                lo = centre - (centre - lo) * widen;
+                hi = centre + (hi - centre) * widen;
+                sigma *= widen;
                 vec3 bounded;
                 if (t.uMode.y > 0.5) {
                     vec3 h = toYCoCg(toneIn(history));
@@ -112,9 +130,19 @@ void main() {
                     bounded = clamp(history, lo, hi);
                 }
                 refused = any(greaterThan(abs(bounded - history), vec3(1e-4 * max(1.0, dot(history, vec3(0.3333)))))) ? 1.0 : 0.0;
+                float weight = clamp(t.uParams.x, 0.0, 1.0);
+                if (t.uAccumulate.x > 0.0) {
+                    // A clipped pixel keeps a little history (the clip already pulled it to the neighbourhood).
+                    float count = refused > 0.5 ? min(historySample.a, 3.0) : historySample.a;
+                    // The long count is for pixels that hold still: by a pixel of motion it is back to 10 frames,
+                    // the fixed 0.9 weight's, so a moving view behaves as it did.
+                    float cap = mix(t.uAccumulate.x, min(t.uAccumulate.x, 10.0), clamp(motionPx, 0.0, 1.0));
+                    accumulated = min(count + 1.0, cap);
+                    weight = 1.0 - 1.0 / accumulated;
+                }
                 resolved = t.uMode.w > 0.5
-                    ? mix(current, bounded, clamp(t.uParams.x, 0.0, 1.0))
-                    : toneOut(mix(toneIn(current), toneIn(bounded), clamp(t.uParams.x, 0.0, 1.0)));
+                    ? mix(current, bounded, weight)
+                    : toneOut(mix(toneIn(current), toneIn(bounded), weight));
                 if (t.uParams.w > 0.5) {
                     atomicAdd(totalCount, 1u);
                     if (refused > 0.5) atomicAdd(refusedCount, 1u);
@@ -125,5 +153,5 @@ void main() {
 
     // Bright where history was refused or clamped back — disocclusions, the screen edge, and
     // anything the camera has just turned onto. A still camera should show almost nothing.
-    outColor = t.uParams.z > 0.5 ? vec4(vec3(refused), 1.0) : vec4(resolved, 1.0);
+    outColor = t.uParams.z > 0.5 ? vec4(vec3(refused), 1.0) : vec4(resolved, accumulated);
 }

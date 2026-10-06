@@ -151,6 +151,15 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private bool taaLinearBlend;
     // --taa-history11: the old R11G11B10F history (see above).
     private bool taaHistory16 = true;
+    // --taa-accumulate N: a per-pixel frame count (in the Rgba16F history's alpha), blended at 1/count up to N for a
+    // still pixel (10 by a pixel of motion); 0 is the fixed weight. --taa-relax W: the clamp box W times wider where
+    // a pixel does not move. Sponza, still camera, presented median variation / pixels over 2% / error against a
+    // 256-frame supersample: fixed 0.9 0.83% / 23.9% / 1.05%; N 32, W 3: 0.22% / 7.8% / 1.19%, the sub-pixel
+    // foliage settling (its pixels were clipped, and so reset, every frame). The accumulating arm's error is ~0.65
+    // points more bias, not from precision (a dithered write), tonemapping (a linear blend) or window lag (K 256):
+    // open. Needs the 16-bit history (R11G11B10F has no alpha).
+    private float taaAccumulate = 32f;
+    private float taaRelax = 3f;
     private GpuBufferHandle taaStats;
     private Matrix4x4 viewProjJittered = Matrix4x4.Identity;
     private GraphResourceHandle hdrMsaaHandle;   // MSAA colour the lit pass renders into
