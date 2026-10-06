@@ -19,6 +19,10 @@ internal sealed partial class SponzaLoop
     // --dependency-everything: a control -- the reach every path counts as crossing is the whole world, so every
     // probe runs on the dynamic history alone. Where the real reach leaves bias this removes, a path is being missed.
     private bool dependencyEverything;
+    // Stage 4f-ii': --fresh-passes N, how many passes of 32 rays a fresh probe traces; --fresh-frames F, under how
+    // many frames last frame's probe in the tile makes it fresh.
+    private float freshPasses = 4f;
+    private float freshFrames = 4f;
     private Bounds3 DependencyBox => dependencyEverything ? new Bounds3(new Vector3(-1e5f), new Vector3(1e5f)) : moverReach;
     private bool screenProbesEnabled;
     // --screen-probe-history N: frames a probe's radiance averages over at most. 256: at 64 a probe's average kept
@@ -48,10 +52,13 @@ internal sealed partial class SponzaLoop
     // --screen-probe-reset-at F: drop every probe's past on post-load frame F, as a camera move does, so a shot a few
     // frames later shows what the user sees for the first seconds after moving.
     private int screenProbeResetAt = -1;
-    // --screen-probe-seed N: frames a fresh probe's clipmap prior counts for (0: from nothing); --no-young-filter:
-    // the filter keeps its base radius for young probes too.
-    private float screenProbeSeedFrames = 16f;
-    private bool screenProbeYoungWide = true;
+    // --screen-probe-seed N: frames a fresh probe's clipmap prior counts for (0, the default: from its own rays);
+    // --young-filter: widen young probes' filter. Both off since stage 4f-ii': a fresh probe traces --fresh-passes
+    // (4) passes of its own instead, and borrowing was biased -- after a reset, 30 frames on, the rest of the frame
+    // read +8.1% (median 9.0%, p90 83%) with them against -0.3% (5.0%, 22%) with 4 passes and neither; the mover's
+    // ring +32% against +12%.
+    private float screenProbeSeedFrames = 0f;
+    private bool screenProbeYoungWide = false;
 
     // --no-incident-gradient: the incident pass writes no gradient, and the lit pass shades indirect light at the
     // geometric normal (the control for what the normal map adds). The gradient comes from the clipmap's own
@@ -139,6 +146,7 @@ internal sealed partial class SponzaLoop
                 // The reach of what moved this frame: the mover's while it moves, none while held or absent.
                 new("uDynamicMin", new Vector4Uniform(MoverActive && moverMoved && !noDependency ? new Vector4(DependencyBox.Min, 1f) : Vector4.Zero)),
                 new("uDynamicMax", new Vector4Uniform(new Vector4(MoverActive ? DependencyBox.Max : Vector3.Zero, dynamicHistory))),
+                new("uFresh", new Vector4Uniform(new Vector4(freshPasses, freshFrames, 0f, 0f))),
             },
             new[]
             {

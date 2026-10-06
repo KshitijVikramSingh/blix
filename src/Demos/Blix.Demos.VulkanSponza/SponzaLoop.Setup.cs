@@ -206,6 +206,8 @@ internal sealed partial class SponzaLoop
         dependencyReset = args.Flag("dependency-reset");
         noDependency = args.Flag("no-dependency");
         dependencyEverything = args.Flag("dependency-everything");
+        if (args.Int("fresh-passes") is { } fp) freshPasses = Math.Clamp(fp, 1, 16);
+        if (args.Float("fresh-frames") is { } ff) freshFrames = Math.Max(1f, ff);
         noClipmapDependency = args.Flag("no-clipmap-dependency");
         if (args.Int("clipmap-dependent-rays") is { } cdr) clipmapDependentRays = Math.Clamp(cdr, 1, 64);
         if (args.Float("clipmap-dependent-share") is { } cds) clipmapDependentShare = Math.Clamp(cds, 0f, 1f);
@@ -217,7 +219,9 @@ internal sealed partial class SponzaLoop
         if (args.Int("screen-probe-reset-at") is { } resetAt) screenProbeResetAt = resetAt;
         if (args.Int("screen-probe-seed-offset") is { } seedOffset) screenProbeSeedOffset = seedOffset;
         if (args.Float("screen-probe-seed") is { } seed) screenProbeSeedFrames = Math.Max(0f, seed);
-        if (args.Flag("no-young-filter")) screenProbeYoungWide = false;
+        // --young-filter: widen young probes' filter again (r3 under 16 frames, r2 under 64): the old arm, biased at
+        // lighting edges and after resets (stage 4f-ii').
+        if (args.Flag("young-filter")) screenProbeYoungWide = true;
         if (args.Int("clipmap-freeze") is { } freeze) clipmapFreeze = Math.Max(1, freeze);
         if (args.Int("screen-probe-filter") is { } spFilter) screenProbeFilterRadius = Math.Clamp(spFilter, 0, 4);
         if (args.Int("screen-probe-ablate") is { } ablate) screenProbeAblate = ablate;

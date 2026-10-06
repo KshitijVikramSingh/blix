@@ -330,11 +330,20 @@ exactly where the world has changed.
      where the curtain's edge sweeps (each switch is a key change): from the clipmap's coarse answer (prior)
      and with a filter widened across a lighting edge (young widening, 3 tiles) -- support reaching too far.
      The curtain's own probes now match the held pose (mean radiance 0.0081 vs 0.0079).
-   4f-ii' (next, open) fresh probes at lighting discontinuities: the prior and the young widening were added
-     against blotches (the user's spots) and are biased exactly where lighting has an edge. Candidates:
-     widen only across probes that agree (the dependency or the key of the neighbour), seed the prior from a
-     neighbour on the same key instead of the clipmap, or more rays for a fresh probe instead of borrowing.
-     And the clipmap's dependent noise: more rays for dependent probes, or a spatial pass over the dynamic part.
+   4f-ii' DONE fresh probes: a probe whose tile held no probe or one under `--fresh-frames` (4) last frame traces
+     `--fresh-passes` (4) passes of 32 rays, counted as that many frames, instead of borrowing: the clipmap prior
+     (`--screen-probe-seed`, was 16, now 0) and the young filter widening (`--young-filter`, now off) are the old
+     arm. Borrowing was the bias, rays alone change nothing (4 passes with both: ring +32%). Mover, 1200 frames,
+     curtain | ring | rest median: default -2.5 | +32 | 4.1%; 4 passes, no prior, no widening -5.8 | +12 | 4.5%;
+     8 passes -6.1 | +14 | 4.4% (no gain). After a reset (held, converged) the old arm was biased everywhere: 30
+     frames on, rest median 9.0% bias +8.1% p90 83% against 5.0% / -0.3% / 22%; 120 on 5.0 / +4.6 / 32 against
+     3.8 / -0.1 / 14. Walking against the surface reference, as shaded: Sponza mean |err| 0.00036 -> 0.00027
+     (ratio median 1.59 -> 1.24, p90 5.58 -> 3.65), Bistro 0.173 -> 0.136 (0.88 -> 0.91). Still camera unchanged
+     (presented variation median 0.28% both). Cost not resolved: this laptop's screen-probe timings scatter 8.8-15
+     ms between comparable arms (8 passes clearly dearer, 24 ms); needs paired A/B.
+   4f-ii'' (next) the clipmap's dependent noise: K=32 dependence costs the rest median 1.6 -> 13.7% clipmap-only
+     (64-ray dynamic re-solves at blend 0.5). Candidates: more rays for dependent probes (the fresh-probe lesson),
+     or a spatial pass over the dynamic part alone.
    4f-iii TAA: presented history also caches lighting (and relaxes its clamp on still pixels). Today the
      ring's resolved bias equals the incident's (+59.3 vs +59.2%), so TAA adds none; re-check after 4f-i.
      Its key test needs an isolated check with the GI lag out (no measurable effect while the lag swamps it).
