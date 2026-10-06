@@ -341,9 +341,21 @@ exactly where the world has changed.
      (ratio median 1.59 -> 1.24, p90 5.58 -> 3.65), Bistro 0.173 -> 0.136 (0.88 -> 0.91). Still camera unchanged
      (presented variation median 0.28% both). Cost not resolved: this laptop's screen-probe timings scatter 8.8-15
      ms between comparable arms (8 passes clearly dearer, 24 ms); needs paired A/B.
-   4f-ii'' (next) the clipmap's dependent noise: K=32 dependence costs the rest median 1.6 -> 13.7% clipmap-only
-     (64-ray dynamic re-solves at blend 0.5). Candidates: more rays for dependent probes (the fresh-probe lesson),
-     or a spatial pass over the dynamic part alone.
+   4f-ii'' the clipmap's dependent scatter -- measured, kept, not solvable at this budget. Clipmap only, the
+     rest of the frame stays at median 12-14% and bias -4..-7% whatever the lever (blend 0.25, share 0.75,
+     budget 1024, budget 1024 + blend 0.25), while the ring's bias flips sign arm to arm (+11, -9, -12, -5%):
+     LAG, not sampling noise -- ~650 strongly dependent world probes share 256 priority solves a frame and
+     each answer is blended over several, i.e. 10+ frames behind lighting that changes ~5x in a 3 s swing.
+     The clipmap alone cannot follow this mover at this cost; more rays or slower blends trade lag for noise.
+     Full stack, new defaults (floor 0.3%), curtain | ring | rest bias / median:
+       no dependency -30.5 | +46.5 | +2.2 / 0.7%     screen split only -5.2 | +18.6 | +0.9 / 2.0%
+       + clipmap K=32 (default) -6.8 | +14.5 | -0.4 / 3.7%    K=48 -6.1 | +14.9 | -0.4 / 3.8%
+     Kept on: 4 points off the ring and the rest's bias to zero, paid in scatter (median 2.0 -> 3.7%).
+   4f-iv (next candidate) screen probes covering what the clipmap now answers: the ring's remaining +14.5% is
+     mostly pixels in the recess behind the curtain that no same-surface tile probe covers (each tile has one
+     probe, placed on the curtain in front), so the incident pass falls back to the clipmap, which lags. A
+     second probe for a tile spanning a depth edge (SCREEN_PROBE_MAX_PER_TILE allows it) would put those
+     pixels on probes that already carry the dependency split and fresh-probe rays.
    4f-iii TAA: presented history also caches lighting (and relaxes its clamp on still pixels). Today the
      ring's resolved bias equals the incident's (+59.3 vs +59.2%), so TAA adds none; re-check after 4f-i.
      Its key test needs an isolated check with the GI lag out (no measurable effect while the lag swamps it).
