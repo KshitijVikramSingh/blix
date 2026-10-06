@@ -267,6 +267,15 @@ exactly where the world has changed.
      velocity and key, and drop material identity and whichever geometric tests measure redundant.
    4e-vi the mover (`--mover`): a few placements animated (a lantern swinging), and stability/accuracy
      on and around them, for TAA and screen probes.
+   Done so far: 4e-i (format v20 PrimitiveSource; Sponza/Bistro/city re-cooked) and 4e-ii (load census:
+   Sponza 454 surfaces over 5,450 rows and 138 instances against 37 materials; Bistro 1,591 / 7,403 /
+   1,296; city 123,422 rows, nothing split). 4e-iii/iv: set 3 binding 3 SurfaceKey and binding 4 previous
+   transform per row (static rows hold the transform twice); the pre-pass writes `surface-key` (R32Uint,
+   engine format added) and `velocity` (Rg16F, added) at one sample (integers do not resolve; under MSAA
+   none). `--surface-check` holds them against CPU rays: Sponza key = the ray's row 86.7%, the row behind
+   a decal/leaf 13.3%, none 0.0% (orbit 0.1%); velocity 0.000 px still, median 0.028 px at ~23 px/frame;
+   Bistro (walking orbit) 99.2% / 0.7%, velocity median 0.032 px, p99 1.04. Kept-history of the key
+   target lands with its first consumer (4e-v).
    Placement: provenance is asset truth and goes in the engine; the key table, targets and consumers
    start in the Sponza renderer (where the per-object data and both consumers live) and move into the
    engine when a second renderer wants them.

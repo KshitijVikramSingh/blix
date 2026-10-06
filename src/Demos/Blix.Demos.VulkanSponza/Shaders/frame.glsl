@@ -132,4 +132,9 @@ layout(set = 0, binding = 0) uniform Frame {
     // light either way (factor in [1 - y, 1 + y]). LAST in the block on purpose: skybox.vert hardcodes the offsets
     // of members before it.
     vec4  uIncidentGradient;
+    // Stage 4e's velocity: this frame's UN-jittered view-projection and last frame's. The pre-pass projects a
+    // vertex through both (current and previous world) and writes the difference, so motion never carries the
+    // jitter. LAST in the block for the same reason as above.
+    mat4  uViewProjUnjittered;
+    mat4  uPrevViewProjUnjittered;
 } frame;

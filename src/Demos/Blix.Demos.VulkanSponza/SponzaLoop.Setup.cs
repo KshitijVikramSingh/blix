@@ -197,6 +197,8 @@ internal sealed partial class SponzaLoop
         // --stability K: per-pixel temporal variation over the K still frames before the shot (SponzaLoop.Stability).
         if (args.Int("stability") is { } stability) stabilityFrames = Math.Max(2, stability);
         noIncidentGradient = args.Flag("no-incident-gradient");
+        // --surface-check: hold the pre-pass's SurfaceKey and velocity against CPU rays at the shot (stage 4e-iv).
+        surfaceCheck = args.Flag("surface-check");
         if (args.Float("incident-normal-bias") is { } nb) incidentNormalBias = Math.Clamp(nb, 0f, 12f);
         if (args.Float("incident-gradient-clamp") is { } gc) incidentGradientClamp = Math.Clamp(gc, 0f, 4f);
         if (args.Int("screen-probe-reset-at") is { } resetAt) screenProbeResetAt = resetAt;
@@ -441,10 +443,20 @@ internal sealed partial class SponzaLoop
                 "prepass-normal-1x", TextureFormat.Rgba16F, fullSize);
         }
 
+        if (SurfaceTargets)
+        {
+            surfaceKeyHandle = graph.ColorTarget("surface-key", TextureFormat.R32Uint, fullSize);
+            velocityHandle = graph.ColorTarget("velocity", TextureFormat.Rg16F, fullSize);
+        }
         var prepassBuilder = graph.GraphicsPass("depth-prepass")
             .Target(prepassNormalHandle, LoadOp.Clear, StoreOp.Store)
             .Depth(depthHandle, LoadOp.Clear, StoreOp.Store)
             .Shader(litInterface);
+        if (SurfaceTargets)
+        {
+            prepassBuilder = prepassBuilder.Target(surfaceKeyHandle, LoadOp.Clear, StoreOp.Store)
+                .Target(velocityHandle, LoadOp.Clear, StoreOp.Store);
+        }
         // Same rule as the depth: at one sample the target IS what a reader wants, and asking for
         // a resolve anyway is invalid.
         if (MsaaSamples > 1) prepassBuilder = prepassBuilder.ResolveColor(prepassNormalResolveHandle);
@@ -476,6 +488,11 @@ internal sealed partial class SponzaLoop
             .Target(prepassNormalHandle, LoadOp.Load, StoreOp.Store)
             .Depth(depthHandle, LoadOp.Load, StoreOp.Store)
             .Shader(litInterface);
+        if (SurfaceTargets)
+        {
+            lateBuilder = lateBuilder.Target(surfaceKeyHandle, LoadOp.Load, StoreOp.Store)
+                .Target(velocityHandle, LoadOp.Load, StoreOp.Store);
+        }
         if (MsaaSamples > 1) lateBuilder = lateBuilder.ResolveColor(prepassNormalResolveHandle).ResolveDepth(depthResolveHandle);
         latePrepassHandle = lateBuilder.Handle;
 
@@ -701,13 +718,13 @@ internal sealed partial class SponzaLoop
         prepassOpaqueProgram = Own(device.CreateShaderProgramFromSpv(litVertSpv, prepassOpaqueFragSpv, litInterface, "depth_prepass"));
         prepassOpaquePipeline = Pipeline(prepassOpaqueProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualWrite, RasterizerState.NoCulling,
-            new[] { BlendState.Disabled }, depthPrepassHandle, "depth_prepass");
+            PrepassBlends(), depthPrepassHandle, "depth_prepass");
 
         var prepassMaskFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "depth_prepass_mask.frag.spv"));
         prepassMaskProgram = Own(device.CreateShaderProgramFromSpv(litVertSpv, prepassMaskFragSpv, litInterface, "depth_prepass_mask"));
         prepassMaskPipeline = Pipeline(prepassMaskProgram, VertexPosition3NormalTangentTexture.Layout,
             DepthState.LessEqualWrite, RasterizerState.NoCulling,
-            new[] { BlendState.Disabled }, depthPrepassHandle, "depth_prepass_mask");
+            PrepassBlends(), depthPrepassHandle, "depth_prepass_mask");
 
         var presentVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.vert.spv"));
         var presentFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "present.frag.spv"));
@@ -1277,4 +1294,9 @@ internal sealed partial class SponzaLoop
             }
         }
     }
+
+    // The pre-pass's targets: the normal, and under single sampling the surface key and the velocity (stage 4e).
+    private BlendState[] PrepassBlends() => SurfaceTargets
+        ? new[] { BlendState.Disabled, BlendState.Disabled, BlendState.Disabled }
+        : new[] { BlendState.Disabled };
 }

@@ -484,6 +484,9 @@ internal sealed partial class SponzaLoop
                 // adds none of its own.
                 ClipmapActive && incidentField && !(abMode == "incident" && AbOffPhase) ? 1f : 0f))),
             new("uIncidentGradient", new Vector4Uniform(new Vector4(incidentNormalBias, incidentGradientClamp, 0f, 0f))),
+            new("uViewProjUnjittered", new Matrix4x4Uniform(viewProj)),
+            // Last frame's un-jittered camera, or this frame's on the first (zero motion rather than garbage).
+            new("uPrevViewProjUnjittered", new Matrix4x4Uniform(velocityPrevValid ? velocityPrevViewProj : viewProj)),
             // One component per --ab shading mode, live only during that mode's off-phase.
             new("uAbFlags",          new Vector4Uniform(new Vector4(
                 AbOffPhase && abMode == "textures" ? 1f : 0f,
@@ -1046,6 +1049,10 @@ internal sealed partial class SponzaLoop
 
         RecordPresentPass(commandList);
         taaWrite = taaWriteNext;
+        // The camera this frame's velocity was measured against becomes the next frame's "previous".
+        velocityPrevViewProj = viewProj;
+        velocityPrevValid = true;
+        RecordSurfaceCheckCamera();
 
         // Capture only a completed lit arm after at least one prior fully loaded frame has populated
         // readback targets. Deadlines use post-load frames and require a useful timing sample set.
@@ -1070,6 +1077,7 @@ internal sealed partial class SponzaLoop
             WriteAmbientRaw(Path.ChangeExtension(path, null) + ".raw.png");
             WriteSceneShot(Path.ChangeExtension(path, null) + ".scene.png");
             WriteStability(Path.ChangeExtension(path, null));
+            WriteSurfaceCheck();
             LeakCensus();
             WritePassBreakdown();
             WriteLodCensus();

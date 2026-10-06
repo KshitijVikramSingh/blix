@@ -412,7 +412,11 @@ internal sealed partial class SponzaLoop
         visibleScratch = new uint[Math.Max(1, visibleCapacity)];
         var instances = device.CreateMaterial(
             litProgram, setIndex: 3, framesInFlight: device.MaxFramesInFlightCount, name: "sponza.instances",
-            arrayLengths: new Dictionary<int, int> { [0] = Math.Max(1, sceneTransforms.Count), [1] = visibleScratch.Length, [2] = Math.Max(1, sceneTransformMaterials.Count) });
+            arrayLengths: new Dictionary<int, int>
+            {
+                [0] = Math.Max(1, sceneTransforms.Count), [1] = visibleScratch.Length, [2] = Math.Max(1, sceneTransformMaterials.Count),
+                [3] = Math.Max(1, sceneTransformSurfaceKeys.Count), [4] = Math.Max(1, sceneTransforms.Count),
+            });
         Own(instances.Handle);
         sceneInstances = instances;
         // Static: written into every frame slot once, never again.
@@ -422,6 +426,9 @@ internal sealed partial class SponzaLoop
         {
             instances.WriteBuffer(slot, 0, transformBytes);
             instances.WriteBuffer(slot, 2, materialBytes);
+            instances.WriteBuffer(slot, 3, MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(sceneTransformSurfaceKeys)));
+            // Nothing moves yet: the previous transforms are the transforms.
+            instances.WriteBuffer(slot, 4, transformBytes);
         }
     }
 
@@ -482,9 +489,16 @@ internal sealed partial class SponzaLoop
         };
         sceneMaterialBuffer = Own(device.CreateGpuBuffer(Math.Max(1, sceneTransformMaterials.Count) * 4,
             MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(sceneTransformMaterials)), "sponza.scene.materials"));
+        sceneSurfaceKeyBuffer = Own(device.CreateGpuBuffer(Math.Max(1, sceneTransformSurfaceKeys.Count) * 4,
+            MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(sceneTransformSurfaceKeys)), "sponza.scene.surface-keys"));
+        // Where each row stood last frame. Nothing moves yet, so it starts (and stays) equal to the transforms; a
+        // mover (4e-vi) writes a moved row's old matrix here before its new one goes in.
+        scenePreviousTransformBuffer = Own(device.CreateGpuBuffer(Math.Max(1, sceneTransforms.Count) * 64,
+            MemoryMarshal.AsBytes(CollectionsMarshal.AsSpan(sceneTransforms)), "sponza.scene.previous-transforms"));
         sceneBuffers = new ShaderBufferBinding[]
         {
             new("SceneTransforms", sceneTransformBuffer), new("SceneVisible", sceneVisible), new("SceneMaterials", sceneMaterialBuffer),
+            new("SceneSurfaceKeys", sceneSurfaceKeyBuffer), new("ScenePreviousTransforms", scenePreviousTransformBuffer),
         };
         Console.WriteLine(
             $"[VulkanSponza] GPU cull: {placementCount} placements, {drawableCount} drawables x {lodSlots} levels, "

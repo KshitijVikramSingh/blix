@@ -212,6 +212,17 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private GraphResourceHandle prepassNormalHandle;
     private GraphResourceHandle prepassNormalResolveHandle;
     /// <summary>The normal target a reader should sample: resolved under MSAA, direct at one sample.</summary>
+    // Stage 4e: the pre-pass's surface identity and motion. SurfaceKey (R32Uint): the surface each pixel shows (the
+    // transform row's key, 0 for none). Velocity (Rg16F): where that surface point was last frame, as this frame's
+    // un-jittered uv minus last frame's (previous transform x previous camera). Single-sample only: integers do not
+    // resolve, so under MSAA there are none and consumers keep their own reprojection.
+    private GraphResourceHandle surfaceKeyHandle;
+    private GraphResourceHandle velocityHandle;
+    private bool SurfaceTargets => MsaaSamples == 1;
+    // Last frame's un-jittered view-projection, for the velocity (the camera's half of it).
+    private Matrix4x4 velocityPrevViewProj;
+    private bool velocityPrevValid;
+
     private GraphResourceHandle SampleablePrepassNormal =>
         MsaaSamples > 1 ? prepassNormalResolveHandle : prepassNormalHandle;
 
@@ -908,7 +919,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private PassHandle occlusionPassHandle;
     private PipelineHandle occlusionPipeline;
     private PassHandle latePrepassHandle;
-    private GpuBufferHandle cullPlacements, cullDrawables, cullLods, cullState, cullCursor, sceneArgs, sceneVisible, sceneTransformBuffer, sceneMaterialBuffer;
+    private GpuBufferHandle cullPlacements, cullDrawables, cullLods, cullState, cullCursor, sceneArgs, sceneVisible, sceneTransformBuffer, sceneMaterialBuffer,
+        sceneSurfaceKeyBuffer, scenePreviousTransformBuffer;
     private ShaderBufferBinding[] cullBuffers = System.Array.Empty<ShaderBufferBinding>();
     private ShaderBufferBinding[] sceneBuffers = System.Array.Empty<ShaderBufferBinding>();
     // A Selection-panel margin edit not yet sent: (global placement index + 1, value), carried by the

@@ -24,6 +24,11 @@ layout(location = 4) out float vTangentSign;
 // The surface's material: the pre-pass writes it as the surface's identity (screen probes reuse a past probe only
 // on the same material). Consumed by the pre-pass stages; the lit stage ignores it.
 layout(location = 5) flat out uint vMaterial;
+// Stage 4e, for the pre-pass: the surface this is, and where this vertex is now and was last frame (un-jittered
+// clip space; the fragment divides, so the velocity is exact per pixel rather than interpolated after division).
+layout(location = 6) flat out uint vSurfaceKey;
+layout(location = 7) out vec4 vClipNow;
+layout(location = 8) out vec4 vClipPrev;
 
 // gl_Position must be bit-identical to the depth pre-pass (which reuses this
 // vertex shader) so the lit pass's LessEqual depth test matches the pre-pass
@@ -43,4 +48,7 @@ void main() {
     vUv = inUv;
     vWorldPos = world.xyz;
     vMaterial = instanceMaterial();
+    vSurfaceKey = instanceSurfaceKey();
+    vClipNow = frame.uViewProjUnjittered * world;
+    vClipPrev = frame.uPrevViewProjUnjittered * (instancePreviousWorld() * vec4(inPosition, 1.0));
 }

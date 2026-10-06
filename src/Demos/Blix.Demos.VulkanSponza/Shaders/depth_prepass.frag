@@ -18,10 +18,19 @@ layout(location = 5) flat in uint vMaterial;
 // rgb the geometric normal; a the surface's identity, its material id (mod 2048) + 1, exact in Rgba16F: what screen
 // probes compare before reusing a past probe (0 never written by a surface).
 layout(location = 0) out vec4 outNormal;
+layout(location = 6) flat in uint vSurfaceKey;
+layout(location = 7) in vec4 vClipNow;
+layout(location = 8) in vec4 vClipPrev;
+// Stage 4e: which surface this pixel shows, and its motion in uv since last frame (now minus then). Single-sample
+// passes only carry these targets; under MSAA the writes have nowhere to go and are dropped.
+layout(location = 1) out uint outSurfaceKey;
+layout(location = 2) out vec2 outVelocity;
 
 void main() {
     // Match lit.frag's back-face convention; depth alone cannot recover the facing hemisphere of a
     // two-sided sheet.
     vec3 n = normalize(vNormalWorld);
     outNormal = vec4(gl_FrontFacing ? n : -n, float(vMaterial % 2048u) + 1.0);
+    outSurfaceKey = vSurfaceKey;
+    outVelocity = (vClipNow.xy / vClipNow.w - vClipPrev.xy / vClipPrev.w) * 0.5;
 }
