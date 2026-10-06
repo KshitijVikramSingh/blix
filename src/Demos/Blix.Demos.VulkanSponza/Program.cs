@@ -218,6 +218,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // resolve, so under MSAA there are none and consumers keep their own reprojection.
     private GraphResourceHandle surfaceKeyHandle;
     private GraphResourceHandle velocityHandle;
+    // World motion (Rgba16F, xyz): that surface point's world position now minus last frame's. Velocity says where to
+    // look on screen; this says where the point was in the world, rigid or deforming alike, without the key standing
+    // for a transform.
+    private GraphResourceHandle motionHandle;
     private bool SurfaceTargets => MsaaSamples == 1;
     // The surface-key target as the previous frame left it (copied at the end of each frame), and TAA's per-pixel
     // accumulated count, ping-ponged with its colour (R32Uint: an integer, read at the nearest pixel).

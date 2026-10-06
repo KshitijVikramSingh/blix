@@ -133,6 +133,7 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uSkyRadiance", envCubeTexture),
                 new ShaderTextureBinding("uSurfaceKey", graph.GetColorTexture(surfaceKeyHandle)),
                 new ShaderTextureBinding("uVelocity", graph.GetColorTexture(velocityHandle)),
+                new ShaderTextureBinding("uMotion", graph.GetColorTexture(motionHandle)),
                 new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0])),
                 new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1])),
                 new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2])),
@@ -212,8 +213,13 @@ internal sealed partial class SponzaLoop
         Console.WriteLine($"    frames accumulated from 24 up, exact: {string.Join(' ', exact.Select(e => string.Create(Inv, $"{e.Key:0.###}x{e.Value}")))}; history cap {screenProbeHistory}");
         Console.WriteLine($"    screen probes under 8 frames, tiles: {string.Join(' ', young)}");
         var stats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(screenProbeStats, 0, 32).AsSpan()).ToArray();
-        double total = stats.Take(7).Sum(v => (double)v);
+        double total = (double)stats[0] + stats[1] + stats[4] + stats[6];
         string Pct(int i) => string.Create(Inv, $"{100.0 * stats[i] / Math.Max(1.0, total):0.0}%");
         Console.WriteLine($"[VulkanSponza] screen probe history over the run: kept {Pct(6)}; started afresh because the nearest candidate failed: no candidate {Pct(0)}, another surface (key) {Pct(1)}, outside support {Pct(4)}");
+        // Staleness, kept apart from correspondence: of the probes that kept a past, how many sit on a point that moved
+        // in the world (its cached light was gathered somewhere else), how far on average, and how many moved further
+        // than their own footprint. Measured, not acted on.
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] screen probe staleness: kept on a moving point {Pct(2)}, mean world displacement {(stats[2] > 0 ? stats[7] / (double)stats[2] : 0):0.0} mm, moved beyond its footprint {Pct(3)}"));
     }
 }

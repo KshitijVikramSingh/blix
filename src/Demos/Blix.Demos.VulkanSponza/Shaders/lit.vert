@@ -26,6 +26,10 @@ layout(location = 4) out float vTangentSign;
 layout(location = 6) flat out uint vSurfaceKey;
 layout(location = 7) out vec4 vClipNow;
 layout(location = 8) out vec4 vClipPrev;
+// And its motion in world space (now minus then): what a consumer needs to find where a surface point was without
+// asking how it moved. Affine in the position, so interpolation is exact for rigid motion; a still row holds the same
+// transform twice and writes exactly zero.
+layout(location = 9) out vec3 vWorldMotion;
 
 // gl_Position must be bit-identical to the depth pre-pass (which reuses this
 // vertex shader) so the lit pass's LessEqual depth test matches the pre-pass
@@ -46,5 +50,7 @@ void main() {
     vWorldPos = world.xyz;
     vSurfaceKey = instanceSurfaceKey();
     vClipNow = frame.uViewProjUnjittered * world;
-    vClipPrev = frame.uPrevViewProjUnjittered * (instancePreviousWorld() * vec4(inPosition, 1.0));
+    vec4 previousWorld = instancePreviousWorld() * vec4(inPosition, 1.0);
+    vClipPrev = frame.uPrevViewProjUnjittered * previousWorld;
+    vWorldMotion = world.xyz - previousWorld.xyz;
 }

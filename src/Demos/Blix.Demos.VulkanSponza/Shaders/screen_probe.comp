@@ -9,8 +9,10 @@
 //   history  two questions, kept apart (stage 4e):
 //              ownership  the same SurfaceKey (source primitive x instance, one across the cook's chunks), found where
 //                         the pre-pass's velocity says this pixel's surface was last frame. Mismatch: never reused.
-//              support    within one tile's footprint at this depth: whether a sample of the same surface is local
-//                         enough to stand in here. A key is authoring granularity, not a connected place (35 of
+//              support    within one tile's footprint at this depth of where this point WAS (its position now minus
+//                         the pre-pass's world motion): whether a sample of the same surface is local enough to stand
+//                         in here. Velocity finds the tile, world motion the place; neither asks how the surface moved
+//                         (rigid, skinned, wind), and the key stays ownership alone, not a stand-in for a transform. A key is authoring granularity, not a connected place (35 of
 //                         Sponza's 454 keys span disconnected regions, up to 4 over 15.5 m; Bistro 43 of 1,591, 30.9
 //                         m), and radiance varies along one surface.
 //            Measured under walking motion against the path-traced surface reference: key + support matched the old
@@ -18,6 +20,9 @@
 //            probes' history against 81-87%; key alone kept 97-98% and was 47% worse in Bistro. The old tests (same
 //            material, normal within 25 degrees, the same plane, still visible) were proxies for the identity the
 //            key now states, and went.
+//            Staleness is a third, separate quantity: a probe caches light that arrived at a place in the world, so a
+//            point that moved carries light gathered elsewhere even when the match is exact. Counted (the world
+//            displacement of kept probes), not acted on; the mover decides whether it becomes a weight.
 //            Searched over the 3x3 tiles around where the probe falls last frame (TAA's jitter moves which surface a
 //            tile's centre lands on at edges); the nearest candidate passing both wins, else the probe starts afresh.
 //   trace    8 directions uniform over its hemisphere; a hit is lit by the sun and by the probe clipmap's
@@ -80,6 +85,7 @@ layout(set = 0, binding = 6) uniform samplerCube uSkyRadiance;
 layout(set = 0, binding = 12) uniform sampler2D uCascadeShadowMaps[3];
 layout(set = 0, binding = 20) uniform usampler2D uSurfaceKey;
 layout(set = 0, binding = 21) uniform sampler2D uVelocity;
+layout(set = 0, binding = 22) uniform sampler2D uMotion;
 #include "shadow.glsl"
 
 #include "screen_probe.glsl"
@@ -88,8 +94,9 @@ layout(std430, set = 0, binding = 8) readonly buffer ScreenProbesPrevious { Scre
 layout(std430, set = 0, binding = 9) writeonly buffer ScreenProbeTilesCurrent { ScreenProbeTile currentTiles[]; };
 layout(std430, set = 0, binding = 10) writeonly buffer ScreenProbesCurrent { ScreenProbe current[]; };
 // Why probes start afresh, summed over the run: for each probe that found no past, the first test its nearest
-// candidate failed. [0] no candidate tile at all, [1] identity, [2] normal, [3] plane, [4] lateral, [5] no longer
-// visible, [6] probes that kept a past.
+// candidate failed. [0] no candidate tile at all, [1] ownership (key), [4] support, [6] probes that kept a past.
+// Staleness of those kept: [2] on a point that moved in the world, [3] moved further than its footprint, [7] their
+// world displacement summed in millimetres. [5] unused.
 layout(std430, set = 0, binding = 11) buffer ScreenProbeStats { uint stats[8]; };
 
 #define BLIX_RAY_SET 0
@@ -240,14 +247,17 @@ void main() {
     float history = 0.0;
     int best = -1;
     int nearestReasonOut = 0;
+    float displacement = 0.0, footprint = 0.0;
     if (u.uParams.y > 0.5) {
         // Where this surface point was last frame: the pre-pass's velocity at the probe's own pixel (camera and object
         // motion both; a camera-only reprojection cannot follow a moving object).
         ivec2 clampedPixel = clamp(placedPixel, ivec2(0), ivec2(u.uTarget.xy) - 1);
         {
             vec2 uv = (vec2(clampedPixel) + 0.5) / u.uTarget.xy - texelFetch(uVelocity, clampedPixel, 0).xy;
+            displacement = length(texelFetch(uMotion, clampedPixel, 0).xyz);
+            vec3 then = world - texelFetch(uMotion, clampedPixel, 0).xyz;
             ivec2 pastTile = ivec2(floor(uv * u.uTarget.xy / float(SCREEN_PROBE_TILE)));
-            float footprint = float(SCREEN_PROBE_TILE) * u.uParams.z * viewDepth;
+            footprint = float(SCREEN_PROBE_TILE) * u.uParams.z * viewDepth;
             float bestScore = 1e30;
             float nearest = 1e30;
             int nearestReason = 0;
@@ -258,7 +268,7 @@ void main() {
                 for (uint j = 0u; j < min(header.y, uint(SCREEN_PROBE_MAX_PER_TILE)); ++j) {
                     int index = int(header.x + j);
                     vec4 pp = previous[index].position;
-                    vec3 offset = world - pp.xyz;
+                    vec3 offset = then - pp.xyz;
                     float plane = abs(dot(n, offset));
                     float lateral = length(offset - n * dot(n, offset));
                     int reason = previous[index].identity.x != identity ? 1   // ownership
@@ -275,6 +285,11 @@ void main() {
     }
     if (best >= 0) history = previous[best].normal.w;
     atomicAdd(stats[best >= 0 ? 6 : nearestReasonOut], 1u);
+    if (best >= 0 && displacement > 0.0) {
+        atomicAdd(stats[2], 1u);
+        if (displacement > footprint) atomicAdd(stats[3], 1u);
+        atomicAdd(stats[7], uint(displacement * 1000.0 + 0.5));
+    }
     vec4 prior[9];
     for (int i = 0; i < 9; ++i) prior[i] = vec4(0.0);
     float priorFrames = 0.0;

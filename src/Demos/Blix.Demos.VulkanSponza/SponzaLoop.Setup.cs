@@ -454,6 +454,7 @@ internal sealed partial class SponzaLoop
         {
             surfaceKeyHandle = graph.ColorTarget("surface-key", TextureFormat.R32Uint, fullSize);
             velocityHandle = graph.ColorTarget("velocity", TextureFormat.Rg16F, fullSize);
+            motionHandle = graph.ColorTarget("world-motion", TextureFormat.Rgba16F, fullSize);
         }
         var prepassBuilder = graph.GraphicsPass("depth-prepass")
             .Target(prepassNormalHandle, LoadOp.Clear, StoreOp.Store)
@@ -462,7 +463,8 @@ internal sealed partial class SponzaLoop
         if (SurfaceTargets)
         {
             prepassBuilder = prepassBuilder.Target(surfaceKeyHandle, LoadOp.Clear, StoreOp.Store)
-                .Target(velocityHandle, LoadOp.Clear, StoreOp.Store);
+                .Target(velocityHandle, LoadOp.Clear, StoreOp.Store)
+                .Target(motionHandle, LoadOp.Clear, StoreOp.Store);
         }
         // Same rule as the depth: at one sample the target IS what a reader wants, and asking for
         // a resolve anyway is invalid.
@@ -498,7 +500,8 @@ internal sealed partial class SponzaLoop
         if (SurfaceTargets)
         {
             lateBuilder = lateBuilder.Target(surfaceKeyHandle, LoadOp.Load, StoreOp.Store)
-                .Target(velocityHandle, LoadOp.Load, StoreOp.Store);
+                .Target(velocityHandle, LoadOp.Load, StoreOp.Store)
+                .Target(motionHandle, LoadOp.Load, StoreOp.Store);
         }
         if (MsaaSamples > 1) lateBuilder = lateBuilder.ResolveColor(prepassNormalResolveHandle).ResolveDepth(depthResolveHandle);
         latePrepassHandle = lateBuilder.Handle;
@@ -554,7 +557,7 @@ internal sealed partial class SponzaLoop
         var screenProbeBuilder = graph.ComputePass("screen-probes")
             .Read(SampleableSceneDepth)
             .Read(SampleablePrepassNormal);
-        if (SurfaceTargets) screenProbeBuilder = screenProbeBuilder.Read(surfaceKeyHandle).Read(velocityHandle);
+        if (SurfaceTargets) screenProbeBuilder = screenProbeBuilder.Read(surfaceKeyHandle).Read(velocityHandle).Read(motionHandle);
         for (var c = 0; c < CascadeCount; c++) screenProbeBuilder = screenProbeBuilder.Read(cascadeHandles[c]);
         screenProbePassHandle = screenProbeBuilder.Shader(screenProbeInterface).Handle;
         screenProbeFilterInterface = Reflect("screen_probe_filter.comp");
@@ -1329,8 +1332,9 @@ internal sealed partial class SponzaLoop
         }
     }
 
-    // The pre-pass's targets: the normal, and under single sampling the surface key and the velocity (stage 4e).
+    // The pre-pass's targets: the normal, and under single sampling the surface key, the velocity and the world motion
+    // (stage 4e).
     private BlendState[] PrepassBlends() => SurfaceTargets
-        ? new[] { BlendState.Disabled, BlendState.Disabled, BlendState.Disabled }
+        ? new[] { BlendState.Disabled, BlendState.Disabled, BlendState.Disabled, BlendState.Disabled }
         : new[] { BlendState.Disabled };
 }

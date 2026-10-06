@@ -266,7 +266,10 @@ exactly where the world has changed.
      leaves the colour's alpha for a target read at the nearest pixel; screen probes find their past by
      velocity and key, and drop material identity and whichever geometric tests measure redundant.
    4e-vi the mover (`--mover`): a few placements animated (a lantern swinging), and stability/accuracy
-     on and around them, for TAA and screen probes.
+     on and around them, for TAA and screen probes. Its rows' previous matrices are written before the new
+     ones (GPU binding 4 and the CPU `PreviousTransformOf` the surface check holds world motion against);
+     judge TAA's key test, support at the predicted position, the staleness count, and the hostile
+     similar-surfaces case there.
    Done so far: 4e-i (format v20 PrimitiveSource; Sponza/Bistro/city re-cooked) and 4e-ii (load census:
    Sponza 454 surfaces over 5,450 rows and 138 instances against 37 materials; Bistro 1,591 / 7,403 /
    1,296; city 123,422 rows, nothing split). 4e-iii/iv: set 3 binding 3 SurfaceKey and binding 4 previous
@@ -288,6 +291,16 @@ exactly where the world has changed.
    support is needed). One key spanning disconnected places (gate 2): Sponza 35/454 keys (worst 4 regions,
    15.5 m apart), Bistro 43/1,591 (4, 30.9 m) -- support catches these. Angular support only if curved
    surfaces show bias. Sync validation clean on default, --msaa4, --cpu-cull and screen probes.
+   The key's contract (the compass): same key = same authored source primitive under the same placement
+   instance; it says nothing about connectivity (a provenance class). Locality is support's job. If the
+   hostile tests show a key spanning surfaces that must not share history, the next refinement is better
+   identity (e.g. the cook splitting by connected component), never resurrecting plane/normal tests.
+   Three quantities, kept apart: ownership (key), correspondence (velocity finds the tile; the pre-pass's
+   world-motion target, Rgba16F now minus then, gives where the point WAS, rigid or deforming alike, so the
+   key never stands in for a transform; support is measured there), staleness (a probe's cached light was
+   gathered at a world place; its world displacement is counted, not acted on, until the mover shows
+   whether it must become a weight). Static control: world motion exactly 0 (surface check still and
+   walking), probe history identical to before (97.3 / 94.3%), staleness 0.0%.
    Placement: provenance is asset truth and goes in the engine; the key table, targets and consumers
    start in the Sponza renderer (where the per-object data and both consumers live) and move into the
    engine when a second renderer wants them.
