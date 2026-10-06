@@ -828,6 +828,48 @@ public static class Program
     // That the triangles are the source's own, each with its winding, is the complete-vertex and node-hierarchy
     // checks above, which compare triangle SETS; the first check here holds that comparison to telling a
     // winding apart.
+    // ── Provenance: every chunk of a split primitive names its source (stage 4e-i) ─────────────────
+    // The cook splits a large primitive into spatial chunks; before format v20 a chunk's only link to its source
+    // was its name, so anything asking "is this the same surface?" (temporal history, selection) saw the pieces.
+    // Cooked with a small split budget, DamagedHelmet's one primitive becomes many chunks: each must carry the
+    // same source surface, the chunks must number 0..n-1 of n, and the source surfaces must be exactly the glTF's
+    // primitives. Read back from disk, so the format round-trips it.
+    private static void ProvenanceSurvivesTheSplit(TestRunner t)
+    {
+        if (FindFile("DamagedHelmet.glb") is not { } helmet)
+        {
+            t.Expect("4e-i provenance: DamagedHelmet.glb found", false);
+            return;
+        }
+        var temp = Path.Combine(Path.GetTempPath(), "blix-provenance-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            var cookedPath = Path.Combine(temp, "helmet-split.blixmesh");
+            MeshRecipe.CookShipped(helmet, cookedPath, splitTriBudget: 2048);
+            var cooked = BlixMeshReader.Read(cookedPath);
+            var primitives = cooked.Meshes.SelectMany(m => m.Primitives).ToArray();
+            t.Expect($"4e-i the split made chunks ({primitives.Length} cooked primitives)", primitives.Length > 1);
+            t.Expect("4e-i every cooked primitive carries its provenance", primitives.All(p => p.Source is not null));
+
+            var groups = primitives.Where(p => p.Source is not null).GroupBy(p => p.Source!.Value.Surface).ToArray();
+            var gltf = SharpGLTF.Schema2.ModelRoot.Load(helmet);
+            var authored = gltf.LogicalMeshes.SelectMany(m => m.Primitives.Select(p => (m.LogicalIndex, p.LogicalIndex))).ToHashSet();
+            t.Expect($"4e-i the source surfaces are exactly the glTF's primitives ({groups.Length} of {authored.Count})",
+                groups.Select(g => g.Key).ToHashSet().SetEquals(authored));
+            t.Expect("4e-i a source's chunks number 0..n-1 of n, each once",
+                groups.All(g => g.Select(p => p.Source!.Value.Chunk).OrderBy(c => c).SequenceEqual(Enumerable.Range(0, g.Count()))
+                                && g.All(p => p.Source!.Value.Chunks == g.Count())));
+            var model = Blix.ModelData.Load(cookedPath);
+            t.Expect("4e-i ModelData carries it to the runtime",
+                model.Meshes.SelectMany(m => m.Primitives).Select(p => p.Source).SequenceEqual(primitives.Select(p => p.Source)));
+        }
+        finally
+        {
+            try { Directory.Delete(temp, recursive: true); } catch (IOException) { }
+        }
+    }
+
     private static void ClustersTileAndBound(TestRunner t)
     {
         var square = TriangleSet(new uint[] { 0, 1, 2 }, v => v.ToString());
@@ -3114,6 +3156,7 @@ public static class Program
         QuantizedAttributesReadAsTheirFloats(t);
         NormalMapFramesFollowTheTextureTransform(t);
         ClustersTileAndBound(t);
+        ProvenanceSurvivesTheSplit(t);
         SimplifierWeighsTheUv(t);
         InterpolationGolden(t);
         SceneLevelMatchesGltf(t);

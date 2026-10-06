@@ -56,9 +56,11 @@ public static class BlixMesh
     // v18 adds the scene level: each node's visibility, instance transforms, camera and light; the
     // scenes with their roots and the default; the camera, light and variant tables; and each
     // primitive's KHR_materials_variants mapping. v19 gives every LOD level its cluster table (MeshCluster): the
-    // level's index list reordered so each cluster is one run, each with its bounds and normal cone. Older
+    // level's index list reordered so each cluster is one run, each with its bounds and normal cone. v20 gives
+    // every primitive its provenance (PrimitiveSource): the glTF mesh and primitive it was authored as, and which
+    // chunk of it this is, so the cook's spatial split no longer erases which chunks are one surface. Older
     // layouts must be re-cooked.
-    public const uint Version19 = 19;
+    public const uint Version20 = 20;
     public const uint LayoutPosition3NormalTexture = 1;        // 32-byte
     public const uint LayoutPosition3NormalTangentTexture = 2; // 48-byte
     public const uint LayoutPosition3NormalTextureSkin4Tangent = 3; // 80-byte, rigged
@@ -394,6 +396,23 @@ public sealed record BlixMeshIgnored(string Semantic, int Primitives);
 
 public sealed record BlixMeshMesh(string Name, IReadOnlyList<BlixMeshPrimitive> Primitives, int SkinIndex = -1);
 
+/// <summary>Where a cooked primitive came from: the source surface it is all or part of.</summary>
+/// <remarks>
+/// The cook splits a large primitive into spatial chunks (for LOD and culling); every chunk of one source
+/// primitive carries the same <see cref="Mesh"/> and <see cref="Primitive"/>, which is what lets anything that
+/// asks "is this the same surface?" (temporal history, selection) see one surface where the cook made many
+/// pieces. A primitive cooked whole is chunk 0 of 1.
+/// </remarks>
+/// <param name="Mesh">The source glTF mesh's index in the file (its logical index).</param>
+/// <param name="Primitive">The primitive's index within that mesh.</param>
+/// <param name="Chunk">Which chunk of the source primitive this is.</param>
+/// <param name="Chunks">How many chunks the source primitive was cooked into.</param>
+public readonly record struct PrimitiveSource(int Mesh, int Primitive, int Chunk, int Chunks)
+{
+    /// <summary>The source surface, chunk aside: equal for every chunk of one source primitive.</summary>
+    public (int Mesh, int Primitive) Surface => (Mesh, Primitive);
+}
+
 public sealed record BlixMeshPrimitive(
     string Name,
     /// <summary>
@@ -414,7 +433,9 @@ public sealed record BlixMeshPrimitive(
     /// <c>KHR_materials_variants</c>: per variant of the file, the material it gives this primitive, or
     /// -1 to keep <see cref="MaterialIndex"/>. Null when the file has no variants.
     /// </summary>
-    IReadOnlyList<int>? VariantMaterials = null);
+    IReadOnlyList<int>? VariantMaterials = null,
+    /// <summary>Its provenance; null for a primitive built in memory with none (written as -1s).</summary>
+    PrimitiveSource? Source = null);
 
 /// <param name="Cooked">
 /// The preamble, when this came off disk. Null when it was built in memory on the way to being
@@ -661,9 +682,17 @@ internal static class BlixMeshBinary
             for (var v = 0; v < variantCount; v++) variants[v] = br.ReadInt32();
         }
 
+        var source = new PrimitiveSource(br.ReadInt32(), br.ReadInt32(), br.ReadInt32(), br.ReadInt32());
+        if (source.Mesh < -1 || source.Primitive < -1 || source.Chunk < -1 || source.Chunks < -1
+            || (source.Mesh >= 0 && (source.Chunks < 1 || source.Chunk >= source.Chunks)))
+        {
+            throw new InvalidDataException($"'{path}' primitive '{name}' has invalid provenance {source}.");
+        }
+
         return new BlixMeshPrimitive(
             name, layout, materialIndex, bounds, vertexCount, vertexBytes,
-            isU32 ? IndexFormat.UInt32 : IndexFormat.UInt16, lods, variants);
+            isU32 ? IndexFormat.UInt32 : IndexFormat.UInt16, lods, variants,
+            source.Mesh < 0 ? null : source);
     }
 
     internal static Matrix4x4 ReadMatrix(BinaryReader br) => new(
@@ -786,7 +815,7 @@ public static class BlixMeshWriter
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(file);
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version19, stamp);
+        CookPreamble.Write(fs, BlixMesh.Magic, BlixMesh.Version20, stamp);
         using var bw = new BinaryWriter(fs);
 
         bw.Write(file.Nodes.Count);
@@ -1027,6 +1056,12 @@ public static class BlixMeshWriter
         var variants = p.VariantMaterials ?? Array.Empty<int>();
         bw.Write(variants.Count);
         foreach (var v in variants) bw.Write(v);
+
+        var source = p.Source ?? new PrimitiveSource(-1, -1, -1, -1);
+        bw.Write(source.Mesh);
+        bw.Write(source.Primitive);
+        bw.Write(source.Chunk);
+        bw.Write(source.Chunks);
     }
 
     private static void WriteMatrix(BinaryWriter bw, in Matrix4x4 m)
@@ -1113,7 +1148,7 @@ public static class BlixMeshReader
         return AssetImportException.Refusing(path, () =>
         {
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version19, path, ".blixmesh");
+            var header = CookPreamble.Read(fs, path).Require(BlixMesh.Magic, BlixMesh.Version20, path, ".blixmesh");
             return ReadBody(fs, path, header);
         }, ".blixmesh");
     }

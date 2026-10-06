@@ -240,12 +240,46 @@ exactly where the world has changed.
    transmission through leaves (the march had it), the probes' own placement still reads the occupancy
    grid (buried test), and the sky term has no reference yet (traced runs 7-16% brighter with the sun
    off).
+4e. *Surface identity and motion, below every temporal effect* (decided 2026-10-06; this arc, before
+   `bistro` merges). TAA history, screen-probe history, picking and later a visibility buffer all ask the
+   same two questions of a pixel: which surface is this, and where was it last frame. Today each answers
+   with its own heuristics: screen probes compare MATERIAL (placement identity broke at the cook's chunk
+   seams) plus plane, normal, footprint and visibility tests; TAA reprojects by depth and the camera
+   alone; four passes keep their own previous camera matrix; nothing knows an object moved. The facts are
+   missing below them: a split chunk's only link to its source is its name (`MeshRecipe.cs`:
+   `"<mesh>.<prim>#<chunk>"`; `BlixMeshPrimitive` has no source field), `Placed()` merges every node's
+   worlds per mesh, a placement keeps a drawable, a transform row and bounds, and transforms are written
+   once. Decided: the key is SOURCE PRIMITIVE x INSTANCE; motion is SCREEN-SPACE VELOCITY (two-channel
+   half float); moving geometry is tested by a SCRIPTED MOVER over existing placements (4d's dynamic
+   geometry stays its own stage). Steps:
+   4e-i provenance in the asset (engine): each cooked primitive records its source (glTF mesh, primitive)
+     and its chunk; every chunk of one source shares it; `.blixmesh` version bump; `ModelData.Primitive`
+     carries it. Deviceless test: a split primitive's chunks share one source.
+   4e-ii instance identity: each world keeps the node and instance it came from; the load assigns a dense
+     32-bit SurfaceKey per (instance, source primitive), a table by transform row (replacing the material
+     table in set 3); census of keys per drawable and per instance.
+   4e-iii previous transforms: a previous world matrix beside each row (static rows hold the same twice).
+   4e-iv pre-pass outputs: an integer SurfaceKey target (replacing the identity in the normal's alpha) and
+     a velocity target (unjittered, previous transform x previous camera against current); last frame's
+     key target kept as history. Control: on a static scene velocity equals camera-only reprojection.
+   4e-v consumers: TAA reprojects by velocity and rejects history where the key differs; its sample count
+     leaves the colour's alpha for a target read at the nearest pixel; screen probes find their past by
+     velocity and key, and drop material identity and whichever geometric tests measure redundant.
+   4e-vi the mover (`--mover`): a few placements animated (a lantern swinging), and stability/accuracy
+     on and around them, for TAA and screen probes.
+   Placement: provenance is asset truth and goes in the engine; the key table, targets and consumers
+   start in the Sponza renderer (where the per-object data and both consumers live) and move into the
+   engine when a second renderer wants them.
+   Declared approximations until then (bounded, recorded, not to be polished): the incident field's
+   normal-map gradient (normal map 2 mips down, factor in [0.5, 1.5]: the incident pass flattens the
+   probes' directional light at the geometric normal; a real fix lets the normal map take part where
+   directional light still exists: bindless materials, a visibility buffer, or the lit pass reading the
+   probes' SH); TAA's relaxed clamp (x3 where a pixel does not move: ~0.65 points more error against the
+   supersample, the bias side of the variance it buys); the TAA count in the colour's alpha (interpolated
+   under motion: fuzzy confidence, not a count; 4e-v moves it); screen-probe history by material identity
+   and geometric tests (4e-v replaces it).
 5. *PRT baked by the cook*: per-region probe transfer, relit by the sun at runtime: the static base and
    warm start of 4.
-
-Known synchronisation gap, found mapping the graph for GPU buffers (stage 1c) and left open: the graph's barrier
-inference (`BarrierInference.Infer`) is an empty stub whose output nothing executes, so compute synchronisation is each
-dispatch's own (storage-image transitions, and since 1c GPU-buffer fences).
 
 Known instrument gap: a Sponza `--shot` raises 9 validation errors on `main` as well (a storage image
 copied to a buffer without transfer-source usage, in the shot's readback). Not this arc's, and not fixed.

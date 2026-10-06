@@ -110,7 +110,9 @@ public static class MeshRecipe
     // cluster is one run, with its bounds and normal cone.
     // Version 20 weighs LOD collapses against the UV again (SimplifierInputs): since the complete vertex, the
     // simplifier had been reading the tangent's x and y where it meant the texture coordinates.
-    public const uint MeshRecipeVersion = 20;
+    // Version 21 (format v20) records each primitive's provenance: its source glTF mesh and primitive, and which
+    // chunk of the spatial split it is.
+    public const uint MeshRecipeVersion = 21;
 
     public static int CookToBlixMesh(
         string gltfPath, string outPath, bool flipTextureV = false,
@@ -270,8 +272,9 @@ public static class MeshRecipe
                 ? SplitPrimitive(meshData, layout.Stride, splitTriBudget, splitMaxExtent / scale)
                 : new List<MeshData> { meshData };
 
-            foreach (var chunk in chunks)
+            for (var c = 0; c < chunks.Count; c++)
             {
+                var chunk = chunks[c];
                 primitives.Add(new BlixMeshPrimitive(
                     Name: chunk.Name,
                     Layout: layout,
@@ -283,7 +286,8 @@ public static class MeshRecipe
                     Lods: MeshClusters.Clustered(BuildLods(chunk, simplify), chunk)
                         .Select(l => l with { Error = l.Error * scale })
                         .ToArray(),
-                    VariantMaterials: variants.For(prim)));
+                    VariantMaterials: variants.For(prim),
+                    Source: new PrimitiveSource(mesh.LogicalIndex, i, c, chunks.Count)));
             }
         }
 
@@ -314,7 +318,8 @@ public static class MeshRecipe
                 VertexBytes: complete.VertexBytes,
                 IndexFormat: complete.IndexFormat,
                 Lods: MeshClusters.Clustered(new[] { new BlixMeshLod(complete.Indices, complete.Indices32) }, complete),
-                VariantMaterials: variants.For(prim)));
+                VariantMaterials: variants.For(prim),
+                Source: new PrimitiveSource(mesh.LogicalIndex, i, 0, 1)));
         }
 
         return primitives;
@@ -1496,7 +1501,7 @@ public static class MeshRecipe
         MaterialPatch? patch = null)
     {
         var header = CookedFile.TryReadHeader(outputPath);
-        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version19 }) return false;
+        if (header is not { Magic: BlixMesh.Magic, FormatVersion: BlixMesh.Version20 }) return false;
         var stamp = header.Value.Stamp;
         if (!stamp.MatchesProducerAndSource(BlixMesh.ShippedRecipe, MeshRecipeVersion, sourcePath))
             return false;

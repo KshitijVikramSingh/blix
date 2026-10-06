@@ -57,7 +57,13 @@ public sealed class ModelData
     /// <c>KHR_materials_variants</c>: per variant of the model, the material it gives this primitive, or null
     /// to keep its own. Null when the model has no variants.
     /// </param>
-    public sealed record Primitive(MeshData Mesh, PbrMaterial? Material, int MaterialIndex, IReadOnlyList<VariantMaterial?>? Variants = null)
+    /// <param name="Source">
+    /// Its provenance (<see cref="Blix.Assets.PrimitiveSource"/>): the source glTF mesh and primitive it was cooked
+    /// from, and which chunk of it. Every chunk of one source primitive shares the surface, so a renderer can treat
+    /// them as one surface for anything temporal. Null for a primitive built without one.
+    /// </param>
+    public sealed record Primitive(MeshData Mesh, PbrMaterial? Material, int MaterialIndex, IReadOnlyList<VariantMaterial?>? Variants = null,
+        Blix.Assets.PrimitiveSource? Source = null)
     {
         /// <summary>The material <paramref name="variant"/> gives this primitive; its own for -1 or a variant that leaves it.</summary>
         public VariantMaterial MaterialFor(int variant) =>
@@ -349,7 +355,8 @@ public sealed class ModelData
                     CookedMaterials.MaterialFromCooked(file.MaterialTable, p.MaterialIndex, materialCache, textureCache, path),
                     p.MaterialIndex,
                     p.VariantMaterials?.Select(v => v < 0 ? null : new VariantMaterial(
-                        v, CookedMaterials.MaterialFromCooked(file.MaterialTable, v, materialCache, textureCache, path))).ToArray());
+                        v, CookedMaterials.MaterialFromCooked(file.MaterialTable, v, materialCache, textureCache, path))).ToArray(),
+                    p.Source);
             }).ToArray();
             return new Mesh(m.Name, primitives, m.SkinIndex, skinned);
         }).ToArray();
