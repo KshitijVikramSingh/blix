@@ -59,12 +59,16 @@ public sealed class RayMesh
 /// <para>
 /// Either way a hit names the placement and the triangle in its own mesh: a region keeps, per triangle, where it
 /// came from. This is the CPU reference, the oracle the GPU traversal (ray_query.glsl) is tested against. A
-/// placement that moves rebuilds the scene for now; refitting is for when something moves every frame.
+/// placement that moves rebuilds the scene, unless it was declared dynamic with a <see cref="Instance.Reach"/>: the
+/// world box it may occupy, which the top level is built around instead of where it stands, so <see cref="Move"/>
+/// changes only its matrix (no refit, nothing rebuilt) for as long as it stays within that box.
 /// </para>
 /// </remarks>
 public sealed class RayQueryScene
 {
-    public readonly record struct Instance(RayMesh Mesh, Matrix4x4 World, bool Dynamic = false);
+    /// <param name="Reach">For a dynamic placement that will <see cref="Move"/>: the world box it may occupy, which its
+    /// top-level box is. Null: where it stands now.</param>
+    public readonly record struct Instance(RayMesh Mesh, Matrix4x4 World, bool Dynamic = false, Bounds3? Reach = null);
 
     /// <summary>What the top level holds: a region (world space, with owners) or one instanced placement.</summary>
     internal sealed record Entry(TriangleBvh Bvh, Matrix4x4 WorldToLocal, int Placement, int[]? OwnerPlacement, int[]? OwnerTriangle, Vector2[]? Uvs)
@@ -79,16 +83,44 @@ public sealed class RayQueryScene
 
     private readonly Instance[] placements;
     private readonly Entry[] entries;
+    // Each placement's top-level entry, or -1 where it was merged into regions.
+    private readonly int[] entryOf;
 
     private RayQueryScene(Instance[] placements, Entry[] entries, BvhNode[] nodes, int[] order)
     {
         this.placements = placements;
         this.entries = entries;
+        entryOf = Enumerable.Repeat(-1, placements.Length).ToArray();
+        for (var e = 0; e < entries.Length; e++) if (!entries[e].IsRegion) entryOf[entries[e].Placement] = e;
         Nodes = nodes;
         Order = order;
     }
 
     public IReadOnlyList<Instance> Instances => placements;
+
+    /// <summary>The top-level entry a placement is (its row in <see cref="RayQueryGpuData"/>'s instances), or -1 when it
+    /// was merged into a region.</summary>
+    public int EntryOf(int placement) => entryOf[placement];
+
+    /// <summary>Moves a dynamic placement declared with a reach: its matrix only, as the GPU's instance row would be
+    /// rewritten.</summary>
+    /// <exception cref="InvalidOperationException">It was not declared dynamic with a reach, or the move would leave it.</exception>
+    /// <exception cref="ArgumentException">The matrix has no inverse.</exception>
+    public void Move(int placement, Matrix4x4 world)
+    {
+        var p = placements[placement];
+        if (!p.Dynamic || p.Reach is not { } reach)
+            throw new InvalidOperationException($"placement {placement} was not declared dynamic with a reach; moving it needs a rebuild.");
+        var e = entryOf[placement];
+        var box = WorldBounds(entries[e].Bvh.Bounds, world);
+        const float slack = 1e-4f;
+        if (Vector3.Min(box.Min, reach.Min - new Vector3(slack)) != reach.Min - new Vector3(slack)
+            || Vector3.Max(box.Max, reach.Max + new Vector3(slack)) != reach.Max + new Vector3(slack))
+            throw new InvalidOperationException($"placement {placement} moved outside its reach.");
+        if (!Matrix4x4.Invert(world, out var inverse)) throw new ArgumentException("the world matrix has no inverse.", nameof(world));
+        placements[placement] = p with { World = world };
+        entries[e] = entries[e] with { WorldToLocal = inverse };
+    }
     internal IReadOnlyList<Entry> Entries => entries;
     public BvhNode[] Nodes { get; }
     public int[] Order { get; }
@@ -114,6 +146,8 @@ public sealed class RayQueryScene
         var instanced = new List<int>();
         for (var i = 0; i < all.Length; i++)
         {
+            if (all[i].Reach is not null && !all[i].Dynamic)
+                throw new ArgumentException($"placement {i} has a reach but is not dynamic.", nameof(placements));
             if (!all[i].Dynamic && uses[all[i].Mesh] == 1 && all[i].Mesh.TriangleCount > 0) merged.Add(i);
             else instanced.Add(i);
         }
@@ -227,7 +261,9 @@ public sealed class RayQueryScene
             entries.Add(new Entry(meshBvhs[all[i].Mesh], inverse, i, null, null, all[i].Mesh.Uvs));
         }
 
-        var boxes = entries.Select(e => e.IsRegion ? e.Bvh.Bounds : WorldBounds(e.Bvh.Bounds, all[e.Placement].World)).ToArray();
+        var boxes = entries.Select(e => e.IsRegion ? e.Bvh.Bounds
+            : all[e.Placement].Reach is { } reach ? Union(reach, WorldBounds(e.Bvh.Bounds, all[e.Placement].World))
+            : WorldBounds(e.Bvh.Bounds, all[e.Placement].World)).ToArray();
         var (nodes, order) = BvhBuilder.Build(boxes, maxLeafSize: 1);
         return new RayQueryScene(all, entries.ToArray(), nodes, order);
     }
@@ -319,6 +355,8 @@ public sealed class RayQueryScene
     private ShearedRay Local(in Ray ray, int entry) => entries[entry].IsRegion
         ? new ShearedRay(ray.Origin, ray.Direction)
         : new ShearedRay(Vector3.Transform(ray.Origin, entries[entry].WorldToLocal), Vector3.TransformNormal(ray.Direction, entries[entry].WorldToLocal));
+
+    private static Bounds3 Union(Bounds3 a, Bounds3 b) => new(Vector3.Min(a.Min, b.Min), Vector3.Max(a.Max, b.Max));
 
     /// <summary>The world box around a mesh-space box under a matrix: its eight corners, carried and enclosed.</summary>
     public static Bounds3 WorldBounds(in Bounds3 local, in Matrix4x4 world)

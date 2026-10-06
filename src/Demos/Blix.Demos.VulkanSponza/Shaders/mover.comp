@@ -1,0 +1,24 @@
+#version 450
+
+// --mover (stage 4e-vi): the moved rows' new world matrices, and the ones they replace as their previous. One lane per
+// row; the matrices arrive byte-for-byte as the host keeps them, as the transform table was uploaded.
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) uniform Mover {
+    vec4 uCount;          // x rows
+    float uRows[32];      // each lane's transform row
+    mat4 uNow[32];
+    mat4 uPrevious[32];
+} u;
+
+layout(std430, set = 0, binding = 1) buffer SceneTransforms { mat4 transforms[]; };
+layout(std430, set = 0, binding = 2) buffer ScenePreviousTransforms { mat4 previousTransforms[]; };
+
+void main() {
+    uint i = gl_LocalInvocationID.x;
+    if (i >= uint(u.uCount.x)) return;
+    uint row = uint(u.uRows[i]);
+    previousTransforms[row] = u.uPrevious[i];
+    transforms[row] = u.uNow[i];
+}

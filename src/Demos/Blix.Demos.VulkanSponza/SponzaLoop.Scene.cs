@@ -340,6 +340,7 @@ internal sealed partial class SponzaLoop
                 sceneTransforms.Add(world);
                 sceneTransformMaterials.Add((uint)s.Material.Id);
                 sceneTransformSurfaceKeys.Add(SurfaceKeyOf(s, w, i, surfaceKeys));
+                sceneTransformInstances.Add(s.Instances[w]);
                 if (rayMeshes is not null)
                 {
                     rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
@@ -356,6 +357,7 @@ internal sealed partial class SponzaLoop
                 s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline));
         }
 
+        SelectMover(rayMeshes is not null ? rayInstances : null);
         if (rayMeshes is not null) BuildRayScene(rayMeshes, rayInstances);
         WriteSurfaceKeyCensus(ordered, surfaceKeys.Count);
 

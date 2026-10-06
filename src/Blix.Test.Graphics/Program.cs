@@ -6469,6 +6469,49 @@ static ShaderInterface MinimalShader() => new(new[]
             && Vector2.Distance(sk.Barycentrics, new Vector2(0.25f, 0.25f)) < 1e-5f, $"{skewHit}");
     }
 
+    // A dynamic placement declared with a reach moves by its matrix alone: after each move the scene answers, ray for
+    // ray, as one rebuilt with the placement where it now stands. Leaving the reach, or moving what has none, is
+    // refused rather than answered wrong. Its own generator, so the sections after it see the scenes they always did.
+    {
+        var own = new Random(5150);
+        Vector3 Within(float r) => new((float)own.NextDouble() * 2f * r - r, (float)own.NextDouble() * 2f * r - r, (float)own.NextDouble() * 2f * r - r);
+        var placements = new List<RayQueryScene.Instance>();
+        for (var i = 0; i < 30; i++)
+        {
+            var mesh = i % 3 == 0 ? gridMesh : i % 3 == 1 ? sphereMesh : new RayMesh((Vector3[])sphereMesh.Positions.Clone(), (uint[])sphereMesh.Indices.Clone());
+            placements.Add(new RayQueryScene.Instance(mesh, Matrix4x4.CreateFromAxisAngle(Vector3.Normalize(Within(1f) + new Vector3(0.01f)), i)
+                * Matrix4x4.CreateTranslation(Within(18f))));
+        }
+        var reach = new Bounds3(new Vector3(-12f), new Vector3(12f));
+        placements.Add(new RayQueryScene.Instance(sphereMesh, Matrix4x4.CreateScale(1.5f) * Matrix4x4.CreateTranslation(0f, 2f, 0f), Dynamic: true, Reach: reach));
+        var mover = placements.Count - 1;
+        var scene = RayQueryScene.Build(placements, regionTriangles: 12000);
+        int disagreements = 0, moverHits = 0;
+        for (var step = 0; step < 6; step++)
+        {
+            var world = Matrix4x4.CreateScale(1.5f) * Matrix4x4.CreateFromAxisAngle(Vector3.UnitX, step * 0.4f)
+                * Matrix4x4.CreateTranslation(step * 1.5f - 4f, 2f, step - 2f);
+            scene.Move(mover, world);
+            placements[mover] = placements[mover] with { World = world };
+            var rebuilt = RayQueryScene.Build(placements, regionTriangles: 12000);
+            for (var k = 0; k < 500; k++)
+            {
+                var ray = new Ray(Within(20f), Vector3.Normalize(Within(1f) + new Vector3(1e-3f)));
+                var a = scene.Closest(ray);
+                if (a != rebuilt.Closest(ray) || scene.Any(ray, 0f, 30f) != rebuilt.Any(ray, 0f, 30f)) disagreements++;
+                if (a is { } h && h.Instance == mover) moverHits++;
+            }
+        }
+        t.Expect("BV.5b a dynamic placement moved within its reach answers as a rebuild at its new pose, ray for ray", disagreements == 0 && moverHits > 50,
+            $"{disagreements} of 3000 disagree; {moverHits} hit the moved placement");
+        t.ExpectTrue("BV.5b its entry is an instance, the GPU's row to rewrite", scene.EntryOf(mover) >= 0);
+        var outside = false;
+        try { scene.Move(mover, Matrix4x4.CreateTranslation(40f, 0f, 0f)); } catch (InvalidOperationException) { outside = true; }
+        var unreached = false;
+        try { scene.Move(0, Matrix4x4.Identity); } catch (InvalidOperationException) { unreached = true; }
+        t.ExpectTrue("BV.5b moving out of its reach, or moving a placement declared without one, is refused", outside && unreached);
+    }
+
     // The packed form ray_query.glsl reads, walked on the CPU the way the shader walks it: top leaves naming entries,
     // rebased node, triangle and vertex indices, owners resolving a region's hit, a shared mesh packed once, an empty
     // mesh a dead leaf. It must give RayQueryScene's answer to the bit, so a packing fault is found here, without a device.

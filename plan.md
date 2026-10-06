@@ -265,11 +265,26 @@ exactly where the world has changed.
    4e-v consumers: TAA reprojects by velocity and rejects history where the key differs; its sample count
      leaves the colour's alpha for a target read at the nearest pixel; screen probes find their past by
      velocity and key, and drop material identity and whichever geometric tests measure redundant.
-   4e-vi the mover (`--mover`): a few placements animated (a lantern swinging), and stability/accuracy
-     on and around them, for TAA and screen probes. Its rows' previous matrices are written before the new
-     ones (GPU binding 4 and the CPU `PreviousTransformOf` the surface check holds world motion against);
-     judge TAA's key test, support at the predicted position, the staleness count, and the hostile
-     similar-surfaces case there.
+   4e-vi the mover (`--mover NAME --mover-pick K --mover-angle D --mover-period S [--mover-hold F]`): one
+     placement instance swings about the top of its bounds on frame time (deterministic; --mover-hold F is
+     the still pose a moving shot is held against). Built: mover.comp writes previous-then-new transforms
+     (CPU path: the slot's set 3), bounds cover the swing, the cascade cache is invalidated while it moves;
+     the ray scene moves with it (engine: `RayQueryScene.Instance.Reach` + `Move` + `EntryOf`, test BV.5b;
+     mover_rays.comp rewrites the GPU instance rows). Left at rest, the curtain's probes traced into their
+     own resting copy (mean radiance 0.0042 moving vs 0.0109 held): that approximation was not declarable.
+     Test: curtain_03 (`--mover curtain --mover-pick 6`, 82 rows) between identical curtains, camera
+     `--cam 2.1,1.8,2.5,0,0`; the shot dumps presented/incident luminance + a mover mask; comparison in
+     three regions (mover, a 12 px ring, rest) against a held run at the shot's pose.
+     Measured (12 deg / 3 s unless said; incident bias vs held, mover | ring; floor = held vs held with
+     another seed: -0.6 | -1.2%, median 3.5%): surface check on the mover: velocity median 0.002-0.005 px
+     (of 0.5-1.5 px), world motion 0.02-0.05 mm (of 1-2 cm), keys 100% (both cull paths); correspondence
+     holds (95.8% kept, key 3.1%, support 0.8%); TAA key test no measurable effect (-36.4 | +55.8 without,
+     -35.9 | +59.2 with); world-motion support vs support-now at 30 deg / 1 s: 0.9 vs 1.0% rejected
+     (footprints ~ a tile at this depth, so rarely decisive). THE error is lag, not identity: -35.9 | +59.2%
+     with history 256, -31.2 | +37.5% at 32, -0.4 | +5.3% at 1 (median 12%, noisier). Lighting here varies
+     ~5x across the swing (held -10 deg 0.0073, +10 deg 0.0023): correctly-owned history is stale twice
+     over, the mover's own light gathered at other poses and the ring's light gathered when the mover
+     stood elsewhere. Open: a dependency signal (see the discussion in the 4e-vi commit), not a cap.
    Done so far: 4e-i (format v20 PrimitiveSource; Sponza/Bistro/city re-cooked) and 4e-ii (load census:
    Sponza 454 surfaces over 5,450 rows and 138 instances against 37 materials; Bistro 1,591 / 7,403 /
    1,296; city 123,422 rows, nothing split). 4e-iii/iv: set 3 binding 3 SurfaceKey and binding 4 previous

@@ -73,7 +73,8 @@ layout(set = 0, binding = 0) uniform ScreenProbes {
     vec4 uSunIrradiance;   // rgb
     vec4 uFrame;           // x frame counter, y history cap (frames), z sky strength, w sky mip for a ray
     mat4 uCascadeVP[3];
-    vec4 uParams2;         // x frames of history a fresh probe's clipmap prior counts for (0: start from nothing)
+    vec4 uParams2;         // x frames of history a fresh probe's clipmap prior counts for (0: start from nothing), y 1:
+                           // support measured where the point is now, ignoring its world motion (--probe-support-now)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -255,7 +256,7 @@ void main() {
         {
             vec2 uv = (vec2(clampedPixel) + 0.5) / u.uTarget.xy - texelFetch(uVelocity, clampedPixel, 0).xy;
             displacement = length(texelFetch(uMotion, clampedPixel, 0).xyz);
-            vec3 then = world - texelFetch(uMotion, clampedPixel, 0).xyz;
+            vec3 then = u.uParams2.y > 0.5 ? world : world - texelFetch(uMotion, clampedPixel, 0).xyz;
             ivec2 pastTile = ivec2(floor(uv * u.uTarget.xy / float(SCREEN_PROBE_TILE)));
             footprint = float(SCREEN_PROBE_TILE) * u.uParams.z * viewDepth;
             float bestScore = 1e30;

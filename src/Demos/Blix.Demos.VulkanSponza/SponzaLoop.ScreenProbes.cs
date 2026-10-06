@@ -8,6 +8,7 @@ namespace Blix.Demos.VulkanSponza;
 // of the clipmap's own answer wherever a probe fits the pixel.
 internal sealed partial class SponzaLoop
 {
+    private bool probeSupportNow;
     private bool screenProbesEnabled;
     // --screen-probe-history N: frames a probe's radiance averages over at most. 256: at 64 a probe's average kept
     // wandering by its last few rays, and --stability (TAA off, still camera) measured the incident light varying
@@ -122,7 +123,7 @@ internal sealed partial class SponzaLoop
                 // w: a ray's sky, a little blurred (one mip) so single directions do not flicker on the sky's detail.
                 new("uFrame", new Vector4Uniform(new Vector4(screenProbeFrame + screenProbeSeedOffset, screenProbeHistory, 1f, 1f))),
                 new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
-                new("uParams2", new Vector4Uniform(new Vector4(screenProbeSeedFrames, 0f, 0f, 0f))),
+                new("uParams2", new Vector4Uniform(new Vector4(screenProbeSeedFrames, probeSupportNow ? 1f : 0f, 0f, 0f))),
             },
             new[]
             {
@@ -212,6 +213,23 @@ internal sealed partial class SponzaLoop
         }
         Console.WriteLine($"    frames accumulated from 24 up, exact: {string.Join(' ', exact.Select(e => string.Create(Inv, $"{e.Key:0.###}x{e.Value}")))}; history cap {screenProbeHistory}");
         Console.WriteLine($"    screen probes under 8 frames, tiles: {string.Join(' ', young)}");
+        if (MoverActive)
+        {
+            // The mover's probes against the rest: how many, how settled, and how bright their radiance's mean term is.
+            var on = new List<(float Frames, float Dc)>();
+            var off = new List<(float Frames, float Dc)>();
+            for (var i = 0; i < count; i++)
+            {
+                if (floats[i * ScreenProbeFloats + 3] <= 0f) continue;
+                var key = BitConverter.SingleToUInt32Bits(floats[i * ScreenProbeFloats + 8]);
+                var b = i * ScreenProbeFloats + 12;
+                var sample = (floats[i * ScreenProbeFloats + 7], 0.2126f * floats[b] + 0.7152f * floats[b + 1] + 0.0722f * floats[b + 2]);
+                (moverKeys.Contains(key) ? on : off).Add(sample);
+            }
+            string Describe(List<(float Frames, float Dc)> l) => l.Count == 0 ? "none" : string.Create(Inv,
+                $"{l.Count} probes, frames median {l.Select(x => x.Frames).OrderBy(x => x).ElementAt(l.Count / 2):0}, mean radiance (SH mean term) {l.Average(x => x.Dc):0.0000}");
+            Console.WriteLine($"[VulkanSponza] screen probes on the mover: {Describe(on)}; elsewhere: {Describe(off)}");
+        }
         var stats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(screenProbeStats, 0, 32).AsSpan()).ToArray();
         double total = (double)stats[0] + stats[1] + stats[4] + stats[6];
         string Pct(int i) => string.Create(Inv, $"{100.0 * stats[i] / Math.Max(1.0, total):0.0}%");

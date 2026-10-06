@@ -25,8 +25,11 @@ internal sealed partial class SponzaLoop
         surfaceCheckViewProj[2] = viewProj;
     }
 
-    // Where a row stood last frame. Nothing moves yet, so the transform itself; the mover (4e-vi) keeps its own.
-    private Matrix4x4 PreviousTransformOf(int row) => sceneTransforms[row];
+    // Where a row stood when the targets read back were written, and the frame before: the transform itself unless the
+    // mover (--mover) moved it, whose last three poses are kept beside the cameras.
+    private Matrix4x4 CheckedTransformOf(int row) => MoverIndexOf(row) is var i and >= 0 ? moverRest[i] * moverMotionHistory[1] : sceneTransforms[row];
+    private Matrix4x4 PreviousTransformOf(int row) => MoverIndexOf(row) is var i and >= 0 ? moverRest[i] * moverMotionHistory[0] : sceneTransforms[row];
+    private int MoverIndexOf(int row) => Array.IndexOf(moverRows, row);
 
     private void WriteSurfaceCheck()
     {
@@ -36,6 +39,15 @@ internal sealed partial class SponzaLoop
             Console.WriteLine("[VulkanSponza] surface check: needs single-sample targets and the ray scene.");
             return;
         }
+        // The CPU rays meet the mover where the frame that wrote these targets drew it, and are put back after.
+        for (var i = 0; i < moverRows.Length; i++) rayQueries.Move(moverRows[i], moverRest[i] * moverMotionHistory[1]);
+        try { CheckSurfaces(); }
+        finally { for (var i = 0; i < moverRows.Length; i++) rayQueries.Move(moverRows[i], sceneTransforms[moverRows[i]]); }
+    }
+
+    private void CheckSurfaces()
+    {
+        var rayQueries = this.rayQueries!;
         var keys = device.ReadTexture(graph.GetColorTexture(surfaceKeyHandle), out var w, out var h, out _);
         var velocity = device.ReadTexture(graph.GetColorTexture(velocityHandle), out _, out _, out _);
         var motion = device.ReadTexture(graph.GetColorTexture(motionHandle), out _, out _, out _);
@@ -59,6 +71,10 @@ internal sealed partial class SponzaLoop
         var errors = new List<double>();
         var motionErrors = new List<double>();
         double worldMotion = 0;
+        // The mover's own pixels, apart: the velocity and world motion of geometry that moved, not just the camera.
+        var moverErrors = new List<double>();
+        var moverMotionErrors = new List<double>();
+        double moverScreenMotion = 0, moverWorldMotion = 0;
         double cameraMotion = 0;
         for (var gy = 0; gy < grid * 9 / 16; gy++)
         for (var gx = 0; gx < grid; gx++)
@@ -96,24 +112,33 @@ internal sealed partial class SponzaLoop
                 mismatches[pair] = mismatches.GetValueOrDefault(pair) + 1;
             }
             var p = origin + dir * hit.T;
-            var expected = (Uv(now, p) - Uv(then, p)) * new Vector2(w, h);
+            var row = hit.Instance;
+            Matrix4x4.Invert(CheckedTransformOf(row), out var toLocal);
+            var pThen = Vector3.Transform(Vector3.Transform(p, toLocal), PreviousTransformOf(row));
+            var expected = (Uv(now, p) - Uv(then, pThen)) * new Vector2(w, h);
             var o = (py * w + px) * 4;
             var got = new Vector2((float)BitConverter.ToHalf(velocity, o), (float)BitConverter.ToHalf(velocity, o + 2)) * new Vector2(w, h);
-            errors.Add((got - expected).Length());
-            cameraMotion += expected.Length();
-            var row = hit.Instance;
-            Matrix4x4.Invert(sceneTransforms[row], out var toLocal);
-            var expectedMotion = p - Vector3.Transform(Vector3.Transform(p, toLocal), PreviousTransformOf(row));
+            var expectedMotion = p - pThen;
             var m = (py * w + px) * 8;
             var gotMotion = new Vector3((float)BitConverter.ToHalf(motion, m), (float)BitConverter.ToHalf(motion, m + 2), (float)BitConverter.ToHalf(motion, m + 4));
-            motionErrors.Add((gotMotion - expectedMotion).Length());
-            worldMotion += expectedMotion.Length();
+            var onMover = moverKeys.Contains(key) && sceneTransformSurfaceKeys[row] == key;
+            (onMover ? moverErrors : errors).Add((got - expected).Length());
+            (onMover ? moverMotionErrors : motionErrors).Add((gotMotion - expectedMotion).Length());
+            if (onMover) { moverScreenMotion += expected.Length(); moverWorldMotion += expectedMotion.Length(); }
+            else { cameraMotion += expected.Length(); worldMotion += expectedMotion.Length(); }
         }
         errors.Sort();
         motionErrors.Sort();
+        moverErrors.Sort();
+        moverMotionErrors.Sort();
         if (sampled == 0) { Console.WriteLine("[VulkanSponza] surface check: no pixel sampled."); return; }
         foreach (var (pair, n) in mismatches.OrderByDescending(m => m.Value).Take(8)) Console.WriteLine($"    key mismatch x{n}: {pair}");
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] surface check over {sampled} pixels ({edges} on surface edges and {background} background left out): key matches the hit row's {100.0 * keyRight / sampled:0.0}%, a row behind a thin layer (decal, leaf) {100.0 * keyBehind / sampled:0.0}%, none along the ray {100.0 * (sampled - keyRight - keyBehind) / sampled:0.0}%; velocity against camera reprojection, pixels: median error {errors[errors.Count / 2]:0.000}, p99 {errors[errors.Count * 99 / 100]:0.000}, max {errors[^1]:0.000} (mean motion {cameraMotion / sampled:0.00} px); world motion against the rows', metres: median error {motionErrors[motionErrors.Count / 2]:0.00000}, max {motionErrors[^1]:0.00000} (mean motion {worldMotion / sampled:0.0000})"));
+        if (moverErrors.Count > 0)
+        {
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] surface check on the mover, {moverErrors.Count} pixels: velocity against its own motion and the camera's, pixels: median error {moverErrors[moverErrors.Count / 2]:0.000}, p99 {moverErrors[moverErrors.Count * 99 / 100]:0.000} (mean motion {moverScreenMotion / moverErrors.Count:0.00} px); world motion, metres: median error {moverMotionErrors[moverMotionErrors.Count / 2]:0.00000}, p99 {moverMotionErrors[moverMotionErrors.Count * 99 / 100]:0.00000} (mean motion {moverWorldMotion / moverErrors.Count:0.0000})"));
+        }
     }
 }

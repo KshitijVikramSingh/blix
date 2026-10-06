@@ -903,6 +903,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // Each placement's material, by the same row: CPU only, for the surface-key census to compare against (it was
     // screen probes' identity before the SurfaceKey, and two walls of one stone share it).
     private readonly List<uint> sceneTransformMaterials = new();
+    // Which placement instance each row is (stage 4e): the mover moves one instance's rows together.
+    private readonly List<PlacementInstance> sceneTransformInstances = new();
     // Each placement row's SurfaceKey (stage 4e): one dense id per (instance, source primitive), from 1; every
     // cooked chunk of one source primitive on one instance shares it. 0 is no surface.
     private readonly List<uint> sceneTransformSurfaceKeys = new();

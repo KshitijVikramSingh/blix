@@ -198,6 +198,10 @@ internal sealed partial class SponzaLoop
         if (args.Int("stability") is { } stability) stabilityFrames = Math.Max(2, stability);
         noIncidentGradient = args.Flag("no-incident-gradient");
         taaNoKey = args.Flag("taa-no-key");
+        ParseMoverArgs();
+        // --probe-support-now: screen probes measure support at where a point is now, not where it was (the A/B for the
+        // world-motion target, which only a mover can show).
+        probeSupportNow = args.Flag("probe-support-now");
         // --surface-check: hold the pre-pass's SurfaceKey and velocity against CPU rays at the shot (stage 4e-iv).
         surfaceCheck = args.Flag("surface-check");
         if (args.Float("incident-normal-bias") is { } nb) incidentNormalBias = Math.Clamp(nb, 0f, 12f);
@@ -373,6 +377,11 @@ internal sealed partial class SponzaLoop
         // The scene cull: every pass's indirect records and visible list, written before the first pass
         // that draws from them (the cascades), so it is declared ahead of all of them. Its dispatches
         // are fenced on both sides because they bind GPU buffers; the graph tracks images only.
+        // The mover's rows are written first of all, before anything culls or draws from the transform table.
+        moverInterface = Reflect("mover.comp");
+        moverPassHandle = graph.ComputePass("mover").Shader(moverInterface).Handle;
+        moverRaysInterface = Reflect("mover_rays.comp");
+        moverRaysPassHandle = graph.ComputePass("mover-rays").Shader(moverRaysInterface).Handle;
         cullInterface = Reflect("scene_cull.comp");
         cullPassHandle = graph.ComputePass("scene-cull").Shader(cullInterface).Handle;
         raySurfaceBakeInterface = Reflect("ray_surface_bake.comp");
@@ -861,6 +870,10 @@ internal sealed partial class SponzaLoop
             probeUsagePipeline = Own(device.CreateComputePipeline(usageProgram, "probe_usage"));
         }
 
+        moverPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "mover.comp.spv")), moverInterface!, "mover")), "mover"));
+        moverRaysPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
+            File.ReadAllBytes(Path.Combine(shaderDir, "mover_rays.comp.spv")), moverRaysInterface!, "mover_rays")), "mover_rays"));
         var cullSpv = File.ReadAllBytes(Path.Combine(shaderDir, "scene_cull.comp.spv"));
         var cullProgram = Own(device.CreateComputeShaderProgramFromSpv(cullSpv, cullInterface, "scene_cull"));
         cullPipeline = Own(device.CreateComputePipeline(cullProgram, "scene_cull"));

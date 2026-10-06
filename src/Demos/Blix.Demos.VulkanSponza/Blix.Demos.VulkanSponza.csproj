@@ -60,6 +60,8 @@
     <GlslShader Include="Shaders\probe_debug.frag" />
     <GlslShader Include="Shaders\probe_usage.comp" />
     <GlslShader Include="Shaders\scene_cull.comp" />
+    <GlslShader Include="Shaders\mover.comp" />
+    <GlslShader Include="Shaders\mover_rays.comp" />
     <GlslShader Include="Shaders\scene_occlusion.comp" />
     <GlslShader Include="Shaders\ray_check.comp" />
     <GlslShader Include="Shaders\ray_view.comp" />

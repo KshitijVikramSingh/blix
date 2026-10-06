@@ -1,0 +1,22 @@
+#version 450
+
+// --mover (stage 4e-vi): the moved placements' rows in the ray scene (ray_query.glsl's BlixRayInstances), so rays
+// meet the mover where it is drawn. Only the world-to-mesh matrix changes: the top level was built around each one's
+// reach (RayQueryScene.Instance.Reach). One lane per row; matrices byte-for-byte as RayQueryGpuData packs them.
+
+layout(local_size_x = 32) in;
+
+layout(set = 0, binding = 0) uniform MoverRays {
+    vec4 uCount;              // x rows
+    float uEntries[32];       // each lane's top-level entry
+    mat4 uWorldToLocal[32];
+} u;
+
+struct BlixRayInstance { mat4 worldToLocal; uvec4 info; };
+layout(std430, set = 0, binding = 1) buffer BlixRayInstances { BlixRayInstance instances[]; };
+
+void main() {
+    uint i = gl_LocalInvocationID.x;
+    if (i >= uint(u.uCount.x)) return;
+    instances[uint(u.uEntries[i])].worldToLocal = u.uWorldToLocal[i];
+}

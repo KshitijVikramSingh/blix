@@ -538,6 +538,9 @@ internal sealed partial class SponzaLoop
             return;
         }
 
+        // The mover's pose for this frame, before the cascades and the camera cull read the transforms.
+        UpdateMover();
+
         // --- Shadow passes: opaque/mask occluders into each cascade ---------
         // Each cascade frustum-culls the opaque set against its ortho box, so
         // the near cascade only redraws nearby geometry instead of the whole
@@ -574,6 +577,7 @@ internal sealed partial class SponzaLoop
                 continue;
             }
             if (vp == cachedCascadeViewProj[ci]
+                && !moverMoved
                 && opaquePlacements.Count == cachedCascadeCasters[ci]
                 && lodKey == cachedCascadeLod[ci]
                 && (!shadowCasterCull || viewProj == cachedCascadeCamera[ci]))
@@ -1059,6 +1063,7 @@ internal sealed partial class SponzaLoop
         velocityPrevViewProj = viewProj;
         velocityPrevValid = true;
         RecordSurfaceCheckCamera();
+        RecordMoverPose();
 
         // Capture only a completed lit arm after at least one prior fully loaded frame has populated
         // readback targets. Deadlines use post-load frames and require a useful timing sample set.
@@ -1084,6 +1089,7 @@ internal sealed partial class SponzaLoop
             WriteSceneShot(Path.ChangeExtension(path, null) + ".scene.png");
             WriteStability(Path.ChangeExtension(path, null));
             WriteSurfaceCheck();
+            WriteMoverShot(Path.ChangeExtension(path, null));
             LeakCensus();
             WritePassBreakdown();
             WriteLodCensus();
