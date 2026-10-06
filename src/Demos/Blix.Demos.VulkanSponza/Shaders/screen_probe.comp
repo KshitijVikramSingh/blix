@@ -3,22 +3,23 @@
 // Screen probes (screen_probe.glsl): place one per tile on the visible surface, trace a few full-length rays from
 // it, and fold them into the radiance its past carried.
 //
-// A workgroup holds 8 probes of 8 rays. Each probe:
+// A workgroup holds PROBES_PER_GROUP probes of RAYS rays. Each probe:
 //   place    the tile's centre pixel, or the first of four inner points that has a surface; position from the
-//            depth, geometric normal and surface identity (its material) from the pre-pass
-//   history  a past probe is this one's past only if it is the SAME SURFACE, by everything that can say so:
-//              identity   the same material (not the same placement: the cook splits one wall into hundreds,
-//                         and placement identity restarted 12% of probes a frame under orbit at the seams)
-//              normal     within ~25 degrees
-//              plane      off this probe's plane by under 2% of the depth
-//              lateral    within one tile's footprint at this depth (not "a similar depth somewhere nearby": a
-//                         stale probe from the wall behind a pillar would carry that wall's light across the
-//                         pillar's shadow, the clipmap's spatial leak made temporal)
-//              visible    the past probe's own position is still the visible surface from this frame's camera
-//                         (nothing in front of it by more than 2% of its depth): disocclusion
-//            searched over the 3x3 tiles around where this probe falls in the last frame (TAA's jitter moves
-//            which surface a tile's centre lands on at edges); the closest candidate passing all of them wins,
-//            else the probe starts afresh
+//            depth, geometric normal and SurfaceKey from the pre-pass
+//   history  two questions, kept apart (stage 4e):
+//              ownership  the same SurfaceKey (source primitive x instance, one across the cook's chunks), found where
+//                         the pre-pass's velocity says this pixel's surface was last frame. Mismatch: never reused.
+//              support    within one tile's footprint at this depth: whether a sample of the same surface is local
+//                         enough to stand in here. A key is authoring granularity, not a connected place (35 of
+//                         Sponza's 454 keys span disconnected regions, up to 4 over 15.5 m; Bistro 43 of 1,591, 30.9
+//                         m), and radiance varies along one surface.
+//            Measured under walking motion against the path-traced surface reference: key + support matched the old
+//            rule's accuracy (Bistro mean error 0.173 against 0.172; Sponza 0.00037 against 0.00045) keeping 92-94% of
+//            probes' history against 81-87%; key alone kept 97-98% and was 47% worse in Bistro. The old tests (same
+//            material, normal within 25 degrees, the same plane, still visible) were proxies for the identity the
+//            key now states, and went.
+//            Searched over the 3x3 tiles around where the probe falls last frame (TAA's jitter moves which surface a
+//            tile's centre lands on at edges); the nearest candidate passing both wins, else the probe starts afresh.
 //   trace    8 directions uniform over its hemisphere; a hit is lit by the sun and by the probe clipmap's
 //            irradiance at the hit, re-radiated in its albedo; an escape brings the disc-free sky. The sun at a hit
 //            is the shadow cascades' answer where they cover it (hard, as the fog takes it: the lit pass's own
@@ -77,6 +78,8 @@ layout(set = 0, binding = 4) uniform sampler2D uClipmapDepth;
 layout(std430, set = 0, binding = 5) readonly buffer ClipmapState { uvec4 states[]; };
 layout(set = 0, binding = 6) uniform samplerCube uSkyRadiance;
 layout(set = 0, binding = 12) uniform sampler2D uCascadeShadowMaps[3];
+layout(set = 0, binding = 20) uniform usampler2D uSurfaceKey;
+layout(set = 0, binding = 21) uniform sampler2D uVelocity;
 #include "shadow.glsl"
 
 #include "screen_probe.glsl"
@@ -114,12 +117,12 @@ BlixClipmap clipmap() {
 }
 
 // A pixel's surface: world position, view depth, geometric normal and identity. False where nothing was drawn.
-bool surfaceAt(ivec2 pixel, out vec3 world, out float viewDepth, out vec3 n, out float identity) {
+bool surfaceAt(ivec2 pixel, out vec3 world, out float viewDepth, out vec3 n, out uint identity) {
     ivec2 size = ivec2(u.uTarget.xy);
     pixel = clamp(pixel, ivec2(0), size - 1);
     float raw = texelFetch(uSceneDepth, pixel, 0).r;
     vec4 ns = texelFetch(uPrepassNormal, pixel, 0);
-    world = vec3(0.0); viewDepth = 0.0; n = vec3(0.0, 1.0, 0.0); identity = 0.0;
+    world = vec3(0.0); viewDepth = 0.0; n = vec3(0.0, 1.0, 0.0); identity = 0u;
     if (raw >= 1.0 - 1e-6 || dot(ns.xyz, ns.xyz) < 1e-6) return false;
     vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
     vec4 view = u.uInvProjection * vec4(uv * 2.0 - 1.0, raw, 1.0);
@@ -127,21 +130,8 @@ bool surfaceAt(ivec2 pixel, out vec3 world, out float viewDepth, out vec3 n, out
     world = (u.uInvView * vec4(view.xyz, 1.0)).xyz;
     viewDepth = abs(view.z);
     n = normalize(ns.xyz);
-    identity = ns.w;
+    identity = texelFetch(uSurfaceKey, pixel, 0).r;
     return true;
-}
-
-// Whether a past probe at `at` is still the surface this frame's camera sees there (disocclusion): nothing in front
-// of it by more than 2% of its depth FROM THIS FRAME'S CAMERA (clip w; the depth it was stored with is last frame's,
-// and a moving camera changes it).
-bool stillVisible(vec3 at) {
-    vec4 clip = u.uViewProj * vec4(at, 1.0);
-    if (clip.w <= 1e-4) return false;
-    vec2 uv = clip.xy / clip.w * 0.5 + 0.5;
-    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return false;
-    vec3 w; float d; vec3 n; float id;
-    if (!surfaceAt(ivec2(uv * u.uTarget.xy), w, d, n, id)) return false;
-    return d > clip.w * 0.98;
 }
 
 void main() {
@@ -153,13 +143,20 @@ void main() {
     ivec2 tile = ivec2(probeIndex % max(tiles.x, 1), probeIndex / max(tiles.x, 1));
 
     vec3 world = vec3(0.0), n = vec3(0.0, 1.0, 0.0);
-    float viewDepth = 0.0, identity = 0.0;
+    float viewDepth = 0.0;
+    uint identity = 0u;
+    ivec2 placedPixel = ivec2(0);
     bool placed = false;
     if (inRange) {
         ivec2 corner = tile * SCREEN_PROBE_TILE;
-        placed = surfaceAt(corner + SCREEN_PROBE_TILE / 2, world, viewDepth, n, identity);
+        placedPixel = corner + SCREEN_PROBE_TILE / 2;
+        placed = surfaceAt(placedPixel, world, viewDepth, n, identity);
         const ivec2 inner[4] = ivec2[4](ivec2(SCREEN_PROBE_TILE / 4), ivec2(3 * SCREEN_PROBE_TILE / 4, SCREEN_PROBE_TILE / 4), ivec2(SCREEN_PROBE_TILE / 4, 3 * SCREEN_PROBE_TILE / 4), ivec2(3 * SCREEN_PROBE_TILE / 4));
-        for (int i = 0; i < 4 && !placed; ++i) placed = surfaceAt(corner + inner[i], world, viewDepth, n, identity);
+        for (int i = 0; i < 4 && !placed; ++i)
+        {
+            placedPixel = corner + inner[i];
+            placed = surfaceAt(placedPixel, world, viewDepth, n, identity);
+        }
     }
 
     // Trace: every lane of a placed probe, one direction uniform over the hemisphere around its normal.
@@ -225,7 +222,7 @@ void main() {
     ScreenProbe probe;
     probe.position = vec4(world, viewDepth);
     probe.normal = vec4(n, 0.0);
-    probe.identity = vec4(identity, 0.0, 0.0, 0.0);
+    probe.identity = uvec4(identity, 0u, 0u, 0u);
     for (int i = 0; i < 9; ++i) probe.radiance[i] = vec4(0.0);
     if (!placed) { current[probeIndex] = probe; return; }
 
@@ -244,9 +241,11 @@ void main() {
     int best = -1;
     int nearestReasonOut = 0;
     if (u.uParams.y > 0.5) {
-        vec4 clip = u.uPrevViewProj * vec4(world, 1.0);
-        if (clip.w > 1e-4) {
-            vec2 uv = clip.xy / clip.w * 0.5 + 0.5;
+        // Where this surface point was last frame: the pre-pass's velocity at the probe's own pixel (camera and object
+        // motion both; a camera-only reprojection cannot follow a moving object).
+        ivec2 clampedPixel = clamp(placedPixel, ivec2(0), ivec2(u.uTarget.xy) - 1);
+        {
+            vec2 uv = (vec2(clampedPixel) + 0.5) / u.uTarget.xy - texelFetch(uVelocity, clampedPixel, 0).xy;
             ivec2 pastTile = ivec2(floor(uv * u.uTarget.xy / float(SCREEN_PROBE_TILE)));
             float footprint = float(SCREEN_PROBE_TILE) * u.uParams.z * viewDepth;
             float bestScore = 1e30;
@@ -262,11 +261,8 @@ void main() {
                     vec3 offset = world - pp.xyz;
                     float plane = abs(dot(n, offset));
                     float lateral = length(offset - n * dot(n, offset));
-                    int reason = previous[index].identity.x != identity ? 1
-                        : dot(previous[index].normal.xyz, n) < 0.9 ? 2
-                        : plane > 0.02 * viewDepth ? 3
-                        : lateral > footprint ? 4
-                        : !stillVisible(pp.xyz) ? 5 : 0;
+                    int reason = previous[index].identity.x != identity ? 1   // ownership
+                        : lateral > footprint ? 4 : 0;                          // support
                     if (length(offset) < nearest) { nearest = length(offset); nearestReason = reason; nearestReasonOut = reason; }
                     if (reason != 0) continue;
                     float score = plane * 4.0 + lateral;

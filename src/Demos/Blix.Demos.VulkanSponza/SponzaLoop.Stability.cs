@@ -78,6 +78,27 @@ internal sealed partial class SponzaLoop
             Console.WriteLine(string.Create(Inv,
                 $"[VulkanSponza] TAA rejection over the run: history clipped at {100.0 * counts[0] / Math.Max(1u, counts[1]):0.0}% of {counts[1]:N0} resolved pixels"));
         }
+        // Lag: each presented frame against the same frame's raw lit image, median pixel, averaged over the frames.
+        // With a moving camera this is what history drags along (trails at disocclusions, smear); with a still one
+        // it is mostly the jitter TAA averages away. Comparative only: the same scene and path, one setting apart.
+        if (stabilityResolved.Count == stabilityScene.Count && stabilityScene.Count >= 1)
+        {
+            var lags = new List<double>();
+            for (var i = 0; i < stabilityScene[0].Length; i++)
+            {
+                double e = 0, n = 0;
+                for (var k = 0; k < stabilityScene.Count; k++)
+                {
+                    if (stabilityScene[k][i] < 1e-4f) continue;
+                    e += Math.Abs(stabilityResolved[k][i] - stabilityScene[k][i]) / stabilityScene[k][i];
+                    n++;
+                }
+                if (n > 0) lags.Add(e / n);
+            }
+            lags.Sort();
+            Console.WriteLine(string.Create(Inv,
+                $"[VulkanSponza] lag over {stabilityScene.Count} frames: presented against the same frame's raw image, median {100 * lags[lags.Count / 2]:0.00}%, p90 {100 * lags[lags.Count * 9 / 10]:0.00}%, p99 {100 * lags[lags.Count * 99 / 100]:0.00}%"));
+        }
         if (stabilityResolved.Count == stabilityScene.Count && stabilityScene.Count >= 2)
         {
             var (gw, gh) = stabilityGrid;

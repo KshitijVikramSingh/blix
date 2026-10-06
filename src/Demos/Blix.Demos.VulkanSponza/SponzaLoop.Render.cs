@@ -1044,6 +1044,12 @@ internal sealed partial class SponzaLoop
 
         // Resolve before the graph executes, so the pass is recorded with the rest of the frame.
         RecordTaaResolve();
+        // Last: this frame's surface keys become the next frame's history (after TAA and screen probes read it).
+        if (SurfaceTargets)
+        {
+            graph.Pass(surfaceKeyHistoryPassHandle, scope => fullscreen.Draw(scope, surfaceKeyHistoryPipeline,
+                new[] { new ShaderTextureBinding("uSource", graph.GetColorTexture(surfaceKeyHandle)) }));
+        }
         UploadVisible();
         graph.Execute(commandList);
 
@@ -2084,15 +2090,22 @@ internal sealed partial class SponzaLoop
             new("uViewProj",            new Matrix4x4Uniform(viewProj)),
             new("uMode",                new Vector4Uniform(new Vector4(
                 taaMotionReprojection ? 1f : 0f, taaVarianceClip ? 1f : 0f, taaGamma, taaLinearBlend ? 1f : 0f))),
-            new("uAccumulate",          new Vector4Uniform(new Vector4(taaHistory16 ? taaAccumulate : 0f, taaRelax, 0.25f, 0f))),
+            new("uAccumulate",          new Vector4Uniform(new Vector4(taaHistory16 ? taaAccumulate : 0f, taaRelax, 0.25f, taaNoKey ? 1f : 0f))),
         };
         if (taaStats.Equals(default(GpuBufferHandle))) taaStats = Own(device.CreateGpuBuffer(8, name: "sponza.taa.stats"));
-        var bindings = new[]
+        var bindings = new List<ShaderTextureBinding>
         {
             new ShaderTextureBinding("uCurrent", graph.GetColorTexture(hdrHandle)),
             new ShaderTextureBinding("uHistory", graph.GetColorTexture(taaHandles[taaWrite ^ 1])),
             new ShaderTextureBinding("uDepth", graph.GetDepthTexture(SampleableSceneDepth)),
         };
+        if (SurfaceTargets)
+        {
+            bindings.Add(new ShaderTextureBinding("uVelocity", graph.GetColorTexture(velocityHandle)));
+            bindings.Add(new ShaderTextureBinding("uSurfaceKey", graph.GetColorTexture(surfaceKeyHandle)));
+            bindings.Add(new ShaderTextureBinding("uSurfaceKeyPrev", graph.GetColorTexture(surfaceKeyHistoryHandle)));
+            bindings.Add(new ShaderTextureBinding("uCountPrev", graph.GetColorTexture(taaCountHandles[taaWrite ^ 1])));
+        }
         graph.Pass(taaPassHandles[taaWrite], scope => fullscreen.Draw(
             scope, taaPipelines[taaWrite], bindings, pushConstants: null, uniforms: uniforms,
             buffers: new[] { new ShaderBufferBinding("TaaStats", taaStats) }));

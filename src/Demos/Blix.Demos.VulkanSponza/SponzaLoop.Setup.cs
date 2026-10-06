@@ -197,6 +197,7 @@ internal sealed partial class SponzaLoop
         // --stability K: per-pixel temporal variation over the K still frames before the shot (SponzaLoop.Stability).
         if (args.Int("stability") is { } stability) stabilityFrames = Math.Max(2, stability);
         noIncidentGradient = args.Flag("no-incident-gradient");
+        taaNoKey = args.Flag("taa-no-key");
         // --surface-check: hold the pre-pass's SurfaceKey and velocity against CPU rays at the shot (stage 4e-iv).
         surfaceCheck = args.Flag("surface-check");
         if (args.Float("incident-normal-bias") is { } nb) incidentNormalBias = Math.Clamp(nb, 0f, 12f);
@@ -210,6 +211,7 @@ internal sealed partial class SponzaLoop
         if (args.Int("screen-probe-ablate") is { } ablate) screenProbeAblate = ablate;
         if (args.Int("orbit-frames") is { } orbitFrames) OrbitFrames = Math.Max(2, orbitFrames);
         if (screenProbesEnabled && !clipmapEnabled) throw new AppArgsException("--gi-screen-probes needs --gi-clipmap: its rays read the clipmap where they hit.");
+        if (screenProbesEnabled && MsaaSamples > 1) throw new AppArgsException("--gi-screen-probes needs a single-sample pre-pass: probes find their surface by its SurfaceKey and velocity, which MSAA cannot resolve.");
         if (args.Float("screen-probe-history") is { } spHistory) screenProbeHistory = Math.Max(1f, spHistory);
         // The triangle probe reference (--probe-reference) traces the ray scene too. GI's own need for it waits
         // for the scene to say whether it has a probe field at all (ConsolidateBuffers).
@@ -289,6 +291,11 @@ internal sealed partial class SponzaLoop
         // TAA ping-pongs because each resolve samples prior output while writing the next image.
         for (var i = 0; i < 2; i++)
             taaHandles[i] = graph.ColorTarget($"taa{i}", taaHistory16 ? TextureFormat.Rgba16F : TextureFormat.R11G11B10F, fullSize);
+        if (SurfaceTargets)
+        {
+            for (var i = 0; i < 2; i++) taaCountHandles[i] = graph.ColorTarget($"taa-count{i}", TextureFormat.R32Uint, fullSize);
+            surfaceKeyHistoryHandle = graph.ColorTarget("surface-key-history", TextureFormat.R32Uint, fullSize);
+        }
         // MSAA colour + depth the lit pass renders into; resolves to hdr.
         hdrMsaaHandle = graph.ColorTarget("hdr-msaa", TextureFormat.R11G11B10F, fullSize, samples: MsaaSamples);
         depthHandle = graph.DepthTarget("scene-depth", fullSize, samples: MsaaSamples);
@@ -547,6 +554,7 @@ internal sealed partial class SponzaLoop
         var screenProbeBuilder = graph.ComputePass("screen-probes")
             .Read(SampleableSceneDepth)
             .Read(SampleablePrepassNormal);
+        if (SurfaceTargets) screenProbeBuilder = screenProbeBuilder.Read(surfaceKeyHandle).Read(velocityHandle);
         for (var c = 0; c < CascadeCount; c++) screenProbeBuilder = screenProbeBuilder.Read(cascadeHandles[c]);
         screenProbePassHandle = screenProbeBuilder.Shader(screenProbeInterface).Handle;
         screenProbeFilterInterface = Reflect("screen_probe_filter.comp");
@@ -596,15 +604,32 @@ internal sealed partial class SponzaLoop
 
         // One pass per parity. Only one is recorded each frame; the other's target is that frame's
         // history, and ReadHistory is what lets a pass declare a read of it before it is rewritten.
-        var taaInterface = Reflect("present.vert", "taa.frag");
+        var taaInterface = Reflect("present.vert", SurfaceTargets ? "taa_surface.frag" : "taa.frag");
         for (var i = 0; i < 2; i++)
         {
-            taaPassHandles[i] = graph.GraphicsPass($"taa-resolve{i}")
+            var taaBuilder = graph.GraphicsPass($"taa-resolve{i}")
                 .Target(taaHandles[i], LoadOp.Clear, StoreOp.Store)
                 .Read(hdrHandle)
                 .Read(SampleableSceneDepth)
-                .ReadHistory(taaHandles[i ^ 1])
-                .Shader(taaInterface)
+                .ReadHistory(taaHandles[i ^ 1]);
+            if (SurfaceTargets)
+            {
+                taaBuilder = taaBuilder
+                    .Target(taaCountHandles[i], LoadOp.Clear, StoreOp.Store)
+                    .ReadHistory(taaCountHandles[i ^ 1])
+                    .Read(velocityHandle)
+                    .Read(surfaceKeyHandle)
+                    .ReadHistory(surfaceKeyHistoryHandle);
+            }
+            taaPassHandles[i] = taaBuilder.Shader(taaInterface).Handle;
+        }
+        if (SurfaceTargets)
+        {
+            // After every reader of last frame's keys (screen probes, TAA): this frame's become the history.
+            surfaceKeyHistoryPassHandle = graph.GraphicsPass("surface-key-history")
+                .Target(surfaceKeyHistoryHandle, LoadOp.Clear, StoreOp.Store)
+                .Read(surfaceKeyHandle)
+                .Shader(Reflect("present.vert", "copy_key.frag"))
                 .Handle;
         }
         graph.Compile();
@@ -760,13 +785,22 @@ internal sealed partial class SponzaLoop
         // One program, two pipelines — each bound to its own pass surface, because a pipeline is
         // compatible with the render pass it was built against and the two resolve passes target
         // different images.
-        var taaSpv = File.ReadAllBytes(Path.Combine(shaderDir, "taa.frag.spv"));
+        var taaSpv = File.ReadAllBytes(Path.Combine(shaderDir, SurfaceTargets ? "taa_surface.frag.spv" : "taa.frag.spv"));
         var taaProgram = Own(device.CreateShaderProgramFromSpv(presentVertSpv, taaSpv, taaInterface, "taa"));
         for (var i = 0; i < 2; i++)
         {
             taaPipelines[i] = Pipeline(taaProgram, VertexPosition3NormalTexture.Layout,
                 DepthState.Disabled, RasterizerState.NoCulling,
-                new[] { BlendState.Disabled }, taaPassHandles[i], $"taa{i}");
+                SurfaceTargets ? new[] { BlendState.Disabled, BlendState.Disabled } : new[] { BlendState.Disabled },
+                taaPassHandles[i], $"taa{i}");
+        }
+        if (SurfaceTargets)
+        {
+            var copyKeyInterface = Reflect("present.vert", "copy_key.frag");
+            surfaceKeyHistoryPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(presentVertSpv,
+                    File.ReadAllBytes(Path.Combine(shaderDir, "copy_key.frag.spv")), copyKeyInterface, "copy_key")),
+                VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
+                new[] { BlendState.Disabled }, surfaceKeyHistoryPassHandle, "copy_key");
         }
 
         var gtaoDenoiseSpv = File.ReadAllBytes(Path.Combine(shaderDir, "gtao_denoise.frag.spv"));

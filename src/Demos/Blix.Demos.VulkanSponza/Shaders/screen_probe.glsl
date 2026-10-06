@@ -32,7 +32,7 @@
 struct ScreenProbe {
     vec4 position;      // xyz world, w view depth
     vec4 normal;        // xyz the geometric normal it was placed on, w frames accumulated
-    vec4 identity;      // x the surface's identity (the pre-pass normal's alpha: its material), yzw unused
+    uvec4 identity;     // x the surface's SurfaceKey (stage 4e: source primitive x instance), yzw unused
     vec4 radiance[9];   // incoming radiance, rgb per spherical-harmonic coefficient
 };
 

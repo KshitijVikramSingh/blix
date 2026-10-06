@@ -21,9 +21,6 @@ layout(location = 1) out vec2 vUv;
 layout(location = 2) out vec3 vWorldPos;
 layout(location = 3) out vec3 vTangentWorld;
 layout(location = 4) out float vTangentSign;
-// The surface's material: the pre-pass writes it as the surface's identity (screen probes reuse a past probe only
-// on the same material). Consumed by the pre-pass stages; the lit stage ignores it.
-layout(location = 5) flat out uint vMaterial;
 // Stage 4e, for the pre-pass: the surface this is, and where this vertex is now and was last frame (un-jittered
 // clip space; the fragment divides, so the velocity is exact per pixel rather than interpolated after division).
 layout(location = 6) flat out uint vSurfaceKey;
@@ -47,7 +44,6 @@ void main() {
     vTangentSign = inTangent.w;
     vUv = inUv;
     vWorldPos = world.xyz;
-    vMaterial = instanceMaterial();
     vSurfaceKey = instanceSurfaceKey();
     vClipNow = frame.uViewProjUnjittered * world;
     vClipPrev = frame.uPrevViewProjUnjittered * (instancePreviousWorld() * vec4(inPosition, 1.0));

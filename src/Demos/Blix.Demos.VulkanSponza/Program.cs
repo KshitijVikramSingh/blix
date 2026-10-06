@@ -219,6 +219,14 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private GraphResourceHandle surfaceKeyHandle;
     private GraphResourceHandle velocityHandle;
     private bool SurfaceTargets => MsaaSamples == 1;
+    // The surface-key target as the previous frame left it (copied at the end of each frame), and TAA's per-pixel
+    // accumulated count, ping-ponged with its colour (R32Uint: an integer, read at the nearest pixel).
+    private GraphResourceHandle surfaceKeyHistoryHandle;
+    private PassHandle surfaceKeyHistoryPassHandle;
+    private PipelineHandle surfaceKeyHistoryPipeline;
+    private readonly GraphResourceHandle[] taaCountHandles = new GraphResourceHandle[2];
+    // --taa-no-key: the surface-identity test off in taa_surface.frag (the A/B for what it rejects).
+    private bool taaNoKey;
     // Last frame's un-jittered view-projection, for the velocity (the camera's half of it).
     private Matrix4x4 velocityPrevViewProj;
     private bool velocityPrevValid;
@@ -888,8 +896,8 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private readonly List<Placement> blendPlacements = new();
     // Every placement's world matrix, both buckets: set 3 binding 0 (instances.glsl), written once.
     private readonly List<Matrix4x4> sceneTransforms = new();
-    // Each placement's material, by the same row: set 3 binding 2, the surface identity screen probes compare (the cook
-    // splits one wall into many placements, so the placement itself was too strict an identity).
+    // Each placement's material, by the same row: CPU only, for the surface-key census to compare against (it was
+    // screen probes' identity before the SurfaceKey, and two walls of one stone share it).
     private readonly List<uint> sceneTransformMaterials = new();
     // Each placement row's SurfaceKey (stage 4e): one dense id per (instance, source primitive), from 1; every
     // cooked chunk of one source primitive on one instance shares it. 0 is no surface.
@@ -919,7 +927,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private PassHandle occlusionPassHandle;
     private PipelineHandle occlusionPipeline;
     private PassHandle latePrepassHandle;
-    private GpuBufferHandle cullPlacements, cullDrawables, cullLods, cullState, cullCursor, sceneArgs, sceneVisible, sceneTransformBuffer, sceneMaterialBuffer,
+    private GpuBufferHandle cullPlacements, cullDrawables, cullLods, cullState, cullCursor, sceneArgs, sceneVisible, sceneTransformBuffer,
         sceneSurfaceKeyBuffer, scenePreviousTransformBuffer;
     private ShaderBufferBinding[] cullBuffers = System.Array.Empty<ShaderBufferBinding>();
     private ShaderBufferBinding[] sceneBuffers = System.Array.Empty<ShaderBufferBinding>();

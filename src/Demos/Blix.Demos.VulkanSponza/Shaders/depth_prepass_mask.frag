@@ -25,10 +25,6 @@ layout(location = 1) in vec2 vUv;
 // subset of what the vertex stage produces, so this costs nothing new.
 layout(location = 2) in vec3 vWorldPos;
 
-layout(location = 5) flat in uint vMaterial;
-
-// rgb the geometric normal; a the surface's identity, its material id (mod 2048) + 1, exact in Rgba16F: what screen
-// probes compare before reusing a past probe (0 never written by a surface).
 layout(location = 0) out vec4 outNormal;
 layout(location = 6) flat in uint vSurfaceKey;
 layout(location = 7) in vec4 vClipNow;
@@ -40,7 +36,7 @@ layout(location = 2) out vec2 outVelocity;
 
 void main() {
     vec3 n = normalize(vNormalWorld);
-    outNormal = vec4(gl_FrontFacing ? n : -n, float(vMaterial % 2048u) + 1.0);
+    outNormal = vec4(gl_FrontFacing ? n : -n, 1.0);
     outSurfaceKey = vSurfaceKey;
     outVelocity = (vClipNow.xy / vClipNow.w - vClipPrev.xy / vClipPrev.w) * 0.5;
 

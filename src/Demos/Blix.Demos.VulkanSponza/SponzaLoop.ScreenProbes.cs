@@ -40,6 +40,7 @@ internal sealed partial class SponzaLoop
     // the filter keeps its base radius for young probes too.
     private float screenProbeSeedFrames = 16f;
     private bool screenProbeYoungWide = true;
+
     // --no-incident-gradient: the incident pass writes no gradient, and the lit pass shades indirect light at the
     // geometric normal (the control for what the normal map adds). The gradient comes from the clipmap's own
     // directional irradiance (incident_clipmap.frag), not the screen probes' SH, which shimmered.
@@ -130,6 +131,8 @@ internal sealed partial class SponzaLoop
                 new ShaderTextureBinding("uClipmapIrradiance", clipmapIrradiance),
                 new ShaderTextureBinding("uClipmapDepth", clipmapDepth),
                 new ShaderTextureBinding("uSkyRadiance", envCubeTexture),
+                new ShaderTextureBinding("uSurfaceKey", graph.GetColorTexture(surfaceKeyHandle)),
+                new ShaderTextureBinding("uVelocity", graph.GetColorTexture(velocityHandle)),
                 new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0])),
                 new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1])),
                 new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2])),
@@ -211,6 +214,6 @@ internal sealed partial class SponzaLoop
         var stats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(screenProbeStats, 0, 32).AsSpan()).ToArray();
         double total = stats.Take(7).Sum(v => (double)v);
         string Pct(int i) => string.Create(Inv, $"{100.0 * stats[i] / Math.Max(1.0, total):0.0}%");
-        Console.WriteLine($"[VulkanSponza] screen probe history over the run: kept {Pct(6)}; started afresh because the nearest candidate failed: no candidate {Pct(0)}, identity {Pct(1)}, normal {Pct(2)}, plane {Pct(3)}, lateral {Pct(4)}, no longer visible {Pct(5)}");
+        Console.WriteLine($"[VulkanSponza] screen probe history over the run: kept {Pct(6)}; started afresh because the nearest candidate failed: no candidate {Pct(0)}, another surface (key) {Pct(1)}, outside support {Pct(4)}");
     }
 }

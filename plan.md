@@ -274,8 +274,20 @@ exactly where the world has changed.
    engine format added) and `velocity` (Rg16F, added) at one sample (integers do not resolve; under MSAA
    none). `--surface-check` holds them against CPU rays: Sponza key = the ray's row 86.7%, the row behind
    a decal/leaf 13.3%, none 0.0% (orbit 0.1%); velocity 0.000 px still, median 0.028 px at ~23 px/frame;
-   Bistro (walking orbit) 99.2% / 0.7%, velocity median 0.032 px, p99 1.04. Kept-history of the key
-   target lands with its first consumer (4e-v).
+   Bistro (walking orbit) 99.2% / 0.7%, velocity median 0.032 px, p99 1.04.
+   4e-v: TAA's surface variant (the default at one sample) reprojects by velocity, rejects history whose
+   3x3 of last frame's key holds no match (skipped for alpha-tested keys: top bit, coverage is
+   stochastic), and keeps its count in an R32Uint target read at the nearest pixel. Still Sponza: median
+   0.22% either way (p90 2.37 with the key, 1.54 without); walking lag 9.78 vs 9.89%: no static benefit,
+   the mover judges it. Screen probes: the rule is OWNERSHIP (key differs: reject absolutely) and SUPPORT
+   (lateral footprint: locality, not identity); the normal, plane and visibility tests and the material
+   identity are deleted. Measured first, kept still/walking: all tests 91.8/81.1%, key only 99.3/98.2,
+   key+support 97.3/94.3 (final). Error against the surface reference walking (median/p90/mean |err|):
+   Sponza all 1.72/8.34/0.00045, key 1.22/5.17/0.00039, key+support 1.45/5.54/0.00037; Bistro all
+   0.88/1.10/0.172, key 0.73/1.00/0.254, key+support 0.88/1.09/0.173 (key alone loses Bistro's mean:
+   support is needed). One key spanning disconnected places (gate 2): Sponza 35/454 keys (worst 4 regions,
+   15.5 m apart), Bistro 43/1,591 (4, 30.9 m) -- support catches these. Angular support only if curved
+   surfaces show bias. Sync validation clean on default, --msaa4, --cpu-cull and screen probes.
    Placement: provenance is asset truth and goes in the engine; the key table, targets and consumers
    start in the Sponza renderer (where the per-object data and both consumers live) and move into the
    engine when a second renderer wants them.
@@ -284,9 +296,8 @@ exactly where the world has changed.
    probes' directional light at the geometric normal; a real fix lets the normal map take part where
    directional light still exists: bindless materials, a visibility buffer, or the lit pass reading the
    probes' SH); TAA's relaxed clamp (x3 where a pixel does not move: ~0.65 points more error against the
-   supersample, the bias side of the variance it buys); the TAA count in the colour's alpha (interpolated
-   under motion: fuzzy confidence, not a count; 4e-v moves it); screen-probe history by material identity
-   and geometric tests (4e-v replaces it).
+   supersample, the bias side of the variance it buys); under MSAA, TAA keeps the old path (count in the
+   colour's alpha, camera-only reprojection): the surface targets are single-sample.
 5. *PRT baked by the cook*: per-region probe transfer, relit by the sun at runtime: the static base and
    warm start of 4.
 
