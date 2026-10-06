@@ -290,14 +290,28 @@ exactly where the world has changed.
    - A uniform history cap is not the answer (32 barely helps; only ~1 removes the bias, at 2-3x the noise).
    - Dependency is necessary, not sufficient: a path crossing the reach may not have changed. Its price
      is noise where it fires; measure it, do not hide it.
-   4f-i (next, deliberately narrow; the mover is the oracle): one extra bit on a probe's estimate -- did any
-     path that built it depend on the mover's reach? The gather ray crossing it, and the hit's shadow ray
-     crossing it (the curtain changes whether a hit sees the sun). Mover unchanged: accumulate as now;
-     changed: reset, or shorten dependent history to N (N measured). Same mover / ring / rest comparison;
-     success = bias inside the floor without the frame going back to history-1 noise, the dependent
-     region's noise reported.
-   4f-ii the clipmap: its world probes trace through the reach too, and screen-probe hits read it. Measure
-     whether the ring's bias survives 4f-i through stale clipmap input before building anything for it.
+   4f-i DONE (narrow; the mover is the oracle): a probe ray is DEPENDENT when its gather segment, or its hit's
+     way to the sun (cascades or shadow ray alike), crosses the reach of what moved this frame (the mover's
+     swept box, passed only while it moves: held or absent, nothing is dependent). Each probe keeps TWO SH
+     accumulators -- static paths on the long history, dependent paths on `--dynamic-history N` (default 4)
+     -- valid because a still probe's directions through a fixed box are a fixed set, so the parts add to
+     the whole; the filter writes the sum. Arms (`--dependency-reset`: a dependent probe drops its whole
+     past; `--no-dependency`: as before). Incident bias vs held, curtain | ring | rest (bias / median):
+       no split   -36 | +59 | +2.9 / 3.2%       split N=1  +11 | +39 | +6.1 / 6.5%
+       split N=4   +3 | +43 | +4.2 / 3.9%       split N=16 -15 | +63 | +5.6 / 3.8%
+       whole-probe reset  +83 | +59 | +16 / 21% (the wrong shape: noise everywhere a ray crossed the box)
+     So the split fixes the curtain's own light at N=4 for little noise; 46% of traced probes had a path
+     through the box (a 4 x 5 x 2 m reach in an arcade is a big dependency). The ring did NOT move, and it is
+     not the probes' inputs: clipmap off at probe hits +41%, no clipmap prior for fresh probes +42%. It is
+     where the incident pass takes the clipmap's own answer (no same-surface probe covers the recess behind
+     the curtain: its tiles' probes sit on the curtain), and the clipmap is a stale cache too: clipmap only,
+     no screen probes, ring +26%.
+     Harness: runs are not bit-reproducible (the same held run twice: median 1-4%, bias within +-1.5%), so
+     controls hold at that floor, not to the bit (old vs new held: within it).
+   4f-ii (next) the clipmap: world probes traced on a round-robin budget and blended at a fixed rate,
+     knowing nothing about the mover. Same question, different cache: which world probes' rays cross a
+     moving reach, and what do they get -- priority in the update queue, a faster blend, or a split of
+     their own. Measure on the clipmap-only arm first (ring +26%), then with screen probes.
    4f-iii TAA: presented history also caches lighting (and relaxes its clamp on still pixels). Today the
      ring's resolved bias equals the incident's (+59.3 vs +59.2%), so TAA adds none; re-check after 4f-i.
      Its key test needs an isolated check with the GI lag out (no measurable effect while the lag swamps it).

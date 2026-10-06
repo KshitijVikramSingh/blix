@@ -9,6 +9,12 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private bool probeSupportNow;
+    // Stage 4f: --dynamic-history N, the history cap of the probes' dynamic part (paths through a moving reach);
+    // --dependency-reset, the control arm (a dependent probe drops its whole past); --no-dependency, no split at all
+    // (every path static, as before 4f).
+    private float dynamicHistory = 4f;
+    private bool dependencyReset;
+    private bool noDependency;
     private bool screenProbesEnabled;
     // --screen-probe-history N: frames a probe's radiance averages over at most. 256: at 64 a probe's average kept
     // wandering by its last few rays, and --stability (TAA off, still camera) measured the incident light varying
@@ -65,8 +71,9 @@ internal sealed partial class SponzaLoop
     private Matrix4x4 screenProbePrevViewProj;
     private bool screenProbeHistoryValid;
 
-    // 12 vec4: position, normal, identity, nine radiance coefficients. A tile header is one uvec4.
-    private const int ScreenProbeBytes = 12 * 16;
+    // 21 vec4: position, normal, identity, nine static radiance coefficients, nine dynamic (stage 4f). A tile header
+    // is one uvec4.
+    private const int ScreenProbeBytes = 21 * 16;
     private const int ScreenProbeTileBytes = 16;
     private const int ScreenProbeFloats = ScreenProbeBytes / 4;
     private const int ScreenProbeTile = 32;
@@ -123,7 +130,10 @@ internal sealed partial class SponzaLoop
                 // w: a ray's sky, a little blurred (one mip) so single directions do not flicker on the sky's detail.
                 new("uFrame", new Vector4Uniform(new Vector4(screenProbeFrame + screenProbeSeedOffset, screenProbeHistory, 1f, 1f))),
                 new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
-                new("uParams2", new Vector4Uniform(new Vector4(screenProbeSeedFrames, probeSupportNow ? 1f : 0f, 0f, 0f))),
+                new("uParams2", new Vector4Uniform(new Vector4(screenProbeSeedFrames, probeSupportNow ? 1f : 0f, dependencyReset ? 1f : 0f, 0f))),
+                // The reach of what moved this frame: the mover's while it moves, none while held or absent.
+                new("uDynamicMin", new Vector4Uniform(MoverActive && moverMoved && !noDependency ? new Vector4(moverReach.Min, 1f) : Vector4.Zero)),
+                new("uDynamicMax", new Vector4Uniform(new Vector4(MoverActive ? moverReach.Max : Vector3.Zero, dynamicHistory))),
             },
             new[]
             {
@@ -223,7 +233,8 @@ internal sealed partial class SponzaLoop
                 if (floats[i * ScreenProbeFloats + 3] <= 0f) continue;
                 var key = BitConverter.SingleToUInt32Bits(floats[i * ScreenProbeFloats + 8]);
                 var b = i * ScreenProbeFloats + 12;
-                var sample = (floats[i * ScreenProbeFloats + 7], 0.2126f * floats[b] + 0.7152f * floats[b + 1] + 0.0722f * floats[b + 2]);
+                var d = i * ScreenProbeFloats + 48;
+                var sample = (floats[i * ScreenProbeFloats + 7], 0.2126f * (floats[b] + floats[d]) + 0.7152f * (floats[b + 1] + floats[d + 1]) + 0.0722f * (floats[b + 2] + floats[d + 2]));
                 (moverKeys.Contains(key) ? on : off).Add(sample);
             }
             string Describe(List<(float Frames, float Dc)> l) => l.Count == 0 ? "none" : string.Create(Inv,
@@ -233,7 +244,7 @@ internal sealed partial class SponzaLoop
         var stats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(screenProbeStats, 0, 32).AsSpan()).ToArray();
         double total = (double)stats[0] + stats[1] + stats[4] + stats[6];
         string Pct(int i) => string.Create(Inv, $"{100.0 * stats[i] / Math.Max(1.0, total):0.0}%");
-        Console.WriteLine($"[VulkanSponza] screen probe history over the run: kept {Pct(6)}; started afresh because the nearest candidate failed: no candidate {Pct(0)}, another surface (key) {Pct(1)}, outside support {Pct(4)}");
+        Console.WriteLine($"[VulkanSponza] screen probe history over the run: kept {Pct(6)}; started afresh because the nearest candidate failed: no candidate {Pct(0)}, another surface (key) {Pct(1)}, outside support {Pct(4)}; a path through a moving reach {Pct(5)}");
         // Displacement, a diagnostic only: of the probes that kept a past, how many sit on a point that moved in the
         // world, how far on average, and how many moved further than their own footprint. Not staleness: surface motion
         // is not lighting invalidation (the mover: a still probe beside it went +59% stale), and it must not become the

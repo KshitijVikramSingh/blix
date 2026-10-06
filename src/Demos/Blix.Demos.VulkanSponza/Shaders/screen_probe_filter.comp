@@ -57,12 +57,16 @@ void main() {
             float falloff = exp(-float(dx * dx + dy * dy) / max(float(radius * radius), 1.0));
             float w = falloff * pow(facing, 8.0) * exp(-plane / (0.02 * depth)) * settled;
             if (w <= 1e-5) continue;
-            for (int i = 0; i < 9; ++i) sum[i] += w * probes[k].radiance[i].rgb;
+            // Static and dynamic parts together (stage 4f): readers see the whole.
+            for (int i = 0; i < 9; ++i) sum[i] += w * (probes[k].radiance[i].rgb + probes[k].dynamicRadiance[i].rgb);
             weight += w;
         }
     }
     if (weight > 1e-5) {
         for (int i = 0; i < 9; ++i) outProbe.radiance[i] = vec4(sum[i] / weight, 0.0);
+    } else {
+        for (int i = 0; i < 9; ++i) outProbe.radiance[i] = vec4(self.radiance[i].rgb + self.dynamicRadiance[i].rgb, 0.0);
     }
+    for (int i = 0; i < 9; ++i) outProbe.dynamicRadiance[i] = vec4(0.0);
     filtered[index] = outProbe;
 }

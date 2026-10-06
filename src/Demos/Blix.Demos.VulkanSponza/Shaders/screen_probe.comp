@@ -75,7 +75,12 @@ layout(set = 0, binding = 0) uniform ScreenProbes {
     vec4 uFrame;           // x frame counter, y history cap (frames), z sky strength, w sky mip for a ray
     mat4 uCascadeVP[3];
     vec4 uParams2;         // x frames of history a fresh probe's clipmap prior counts for (0: start from nothing), y 1:
-                           // support measured where the point is now, ignoring its world motion (--probe-support-now)
+                           // support measured where the point is now, ignoring its world motion (--probe-support-now),
+                           // z 1: the control arm (--dependency-reset): a dependent probe drops its whole past instead
+    // Stage 4f: the reach of geometry that moved this frame (the mover's), w of the min 1 when there is one; w of
+    // the max the dynamic part's history cap in frames (--dynamic-history).
+    vec4 uDynamicMin;
+    vec4 uDynamicMax;
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -98,7 +103,7 @@ layout(std430, set = 0, binding = 10) writeonly buffer ScreenProbesCurrent { Scr
 // Why probes start afresh, summed over the run: for each probe that found no past, the first test its nearest
 // candidate failed. [0] no candidate tile at all, [1] ownership (key), [4] support, [6] probes that kept a past.
 // Displacement of those kept (diagnostic): [2] on a point that moved in the world, [3] moved further than its footprint, [7] their
-// world displacement summed in millimetres. [5] unused.
+// world displacement summed in millimetres. [5] traced probes with a path through a moving reach (stage 4f).
 layout(std430, set = 0, binding = 11) buffer ScreenProbeStats { uint stats[8]; };
 
 #define BLIX_RAY_SET 0
@@ -112,6 +117,20 @@ layout(std430, set = 0, binding = 11) buffer ScreenProbeStats { uint stats[8]; }
 
 shared vec3 sRadiance[64];
 shared vec3 sDirection[64];
+shared uint sDependent[64];
+
+// Stage 4f, dependency: whether the segment origin + dir * [0, tEnd] passes through the reach of geometry that moved
+// this frame. A path that does may carry light the motion changed; one that does not cannot have (lighting is
+// otherwise static). Necessary, not sufficient: crossing the box need not mean the answer changed.
+bool crossesMovingReach(vec3 origin, vec3 dir, float tEnd) {
+    if (u.uDynamicMin.w < 0.5) return false;
+    vec3 safe = mix(dir, vec3(1e-8), lessThan(abs(dir), vec3(1e-8)));
+    vec3 t0 = (u.uDynamicMin.xyz - origin) / safe;
+    vec3 t1 = (u.uDynamicMax.xyz - origin) / safe;
+    vec3 lo = min(t0, t1);
+    vec3 hi = max(t0, t1);
+    return max(max(lo.x, lo.y), max(lo.z, 0.0)) <= min(min(hi.x, hi.y), min(hi.z, tEnd));
+}
 
 BlixClipmap clipmap() {
     BlixClipmap c;
@@ -171,6 +190,7 @@ void main() {
     // Trace: every lane of a placed probe, one direction uniform over the hemisphere around its normal.
     vec3 radiance = vec3(0.0);
     vec3 dir = n;
+    bool dependent = false;
     int ablate = int(u.uParams.w + 0.5);
     bool traceRow = (ablate & 16) != 0 || ((tile.y + int(u.uFrame.x)) & 1) == 0;
     // Young probes trace every frame: whether this tile's probe is young is known only after its history search,
@@ -200,6 +220,10 @@ void main() {
             vec3 hitPos = origin + dir * hit.t;
             vec3 toSun = -normalize(u.uSunDirection.xyz);
             float ndotl = max(dot(hn, toSun), 0.0);
+            // The gather segment, and the hit's way to the sun (the mover changes whether a hit sees it, whether the
+            // cascades or a shadow ray answer).
+            dependent = crossesMovingReach(origin, dir, hit.t)
+                || (ndotl > 0.0 && crossesMovingReach(hitPos + hn * 0.01, toSun, 1e30));
             float sun = 0.0;
             if (ndotl > 0.0 && (ablate & 1) == 0) {
                 int cascade = -1;
@@ -220,10 +244,12 @@ void main() {
             radiance = hit.albedo * (u.uSunIrradiance.rgb * sun + (known ? field.rgb : vec3(0.0))) / PI;
         } else {
             radiance = textureLod(uSkyRadiance, dir, u.uFrame.w).rgb * u.uFrame.z;
+            dependent = crossesMovingReach(origin, dir, 1e30);
         }
     }
     sRadiance[lane] = radiance;
     sDirection[lane] = dir;
+    sDependent[lane] = dependent ? 1u : 0u;
     barrier();
 
     if (ray != 0u || !inRange) return;
@@ -232,17 +258,29 @@ void main() {
     probe.position = vec4(world, viewDepth);
     probe.normal = vec4(n, 0.0);
     probe.identity = uvec4(identity, 0u, 0u, 0u);
-    for (int i = 0; i < 9; ++i) probe.radiance[i] = vec4(0.0);
+    for (int i = 0; i < 9; ++i) { probe.radiance[i] = vec4(0.0); probe.dynamicRadiance[i] = vec4(0.0); }
     if (!placed) { current[probeIndex] = probe; return; }
 
     // This frame's estimate: each ray's radiance times the basis, over the uniform hemisphere's density.
+    // Split by dependency (stage 4f): each part estimates the integral over its own directions (a still probe's
+    // directions through a fixed reach are a fixed set), so the parts add up to the whole and each keeps its own
+    // history. The control arm folds both into the static part.
+    bool split = u.uParams2.z < 0.5;
     vec3 estimate[9];
-    for (int i = 0; i < 9; ++i) estimate[i] = vec3(0.0);
+    vec3 estimateDynamic[9];
+    for (int i = 0; i < 9; ++i) { estimate[i] = vec3(0.0); estimateDynamic[i] = vec3(0.0); }
+    uint dependentRays = 0u;
     for (uint k = 0u; k < uint(RAYS); ++k) {
         float y[9];
         screenProbeBasis(sDirection[lane + k], y);
-        for (int i = 0; i < 9; ++i) estimate[i] += sRadiance[lane + k] * y[i];
+        bool d = sDependent[lane + k] != 0u;
+        if (d) dependentRays++;
+        for (int i = 0; i < 9; ++i) {
+            if (d && split) estimateDynamic[i] += sRadiance[lane + k] * y[i];
+            else estimate[i] += sRadiance[lane + k] * y[i];
+        }
     }
+    if (dependentRays > 0u) atomicAdd(stats[5], 1u);
     float scale = 2.0 * PI / float(RAYS);
 
     // Its past: the same surface, by every test in the header.
@@ -308,21 +346,33 @@ void main() {
             priorFrames = u.uParams2.x;
         }
     }
+    float dynamicPast = best >= 0 ? float(previous[best].identity.y) : 0.0;
     if (!traceRow) {
         // No rays this frame: carry the past as it was, or hold nothing.
-        for (int i = 0; i < 9; ++i) probe.radiance[i] = best >= 0 ? previous[best].radiance[i] : prior[i];
+        for (int i = 0; i < 9; ++i) {
+            probe.radiance[i] = best >= 0 ? previous[best].radiance[i] : prior[i];
+            probe.dynamicRadiance[i] = best >= 0 ? previous[best].dynamicRadiance[i] : vec4(0.0);
+        }
         probe.normal.w = best >= 0 ? history : priorFrames;
+        probe.identity.y = uint(dynamicPast);
         current[probeIndex] = probe;
         return;
     }
     float past = best >= 0 ? history : priorFrames;
+    // The control arm: a probe any of whose paths crossed the moving reach starts afresh, whole.
+    if (!split && dependentRays > 0u) past = 0.0;
+    float dynamicCount = min(dynamicPast + 1.0, max(u.uDynamicMax.w, 1.0));
     float count = min(past + 1.0, u.uFrame.y);
     float alpha = 1.0 / count;
     for (int i = 0; i < 9; ++i) {
         vec3 fresh = estimate[i] * scale;
         vec3 from = best >= 0 ? previous[best].radiance[i].rgb : prior[i].rgb;
         probe.radiance[i] = vec4(past > 0.0 ? mix(from, fresh, alpha) : fresh, 0.0);
+        vec3 freshDynamic = estimateDynamic[i] * scale;
+        vec3 fromDynamic = best >= 0 ? previous[best].dynamicRadiance[i].rgb : vec3(0.0);
+        probe.dynamicRadiance[i] = vec4(dynamicPast > 0.0 ? mix(fromDynamic, freshDynamic, 1.0 / dynamicCount) : freshDynamic, 0.0);
     }
     probe.normal.w = count;
+    probe.identity.y = uint(dynamicCount);
     current[probeIndex] = probe;
 }

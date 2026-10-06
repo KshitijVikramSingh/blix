@@ -33,6 +33,8 @@ internal sealed partial class SponzaLoop
     private Matrix4x4[] moverRest = Array.Empty<Matrix4x4>();
     private readonly HashSet<uint> moverKeys = new();
     private Vector3 moverPivot, moverAxis;
+    // Everything the mover can occupy through its swing: what a path must cross to depend on it (stage 4f).
+    private Bounds3 moverReach;
     private Matrix4x4 moverMotion = Matrix4x4.Identity;
     private int moverFrame;
     private bool moverMoved;
@@ -126,6 +128,7 @@ internal sealed partial class SponzaLoop
                 if (sceneTransformInstances[p.Transform] != chosen) continue;
                 list[i] = p with { Bounds = Swept(p.Bounds) };
             }
+        moverReach = Swept(rest);
         if (rayInstances is not null)
             foreach (var r in rows)
                 rayInstances[r] = rayInstances[r] with

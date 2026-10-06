@@ -202,6 +202,9 @@ internal sealed partial class SponzaLoop
         // --probe-support-now: screen probes measure support at where a point is now, not where it was (the A/B for the
         // world-motion target, which only a mover can show).
         probeSupportNow = args.Flag("probe-support-now");
+        if (args.Float("dynamic-history") is { } dh) dynamicHistory = Math.Max(1f, dh);
+        dependencyReset = args.Flag("dependency-reset");
+        noDependency = args.Flag("no-dependency");
         // --surface-check: hold the pre-pass's SurfaceKey and velocity against CPU rays at the shot (stage 4e-iv).
         surfaceCheck = args.Flag("surface-check");
         if (args.Float("incident-normal-bias") is { } nb) incidentNormalBias = Math.Clamp(nb, 0f, 12f);
