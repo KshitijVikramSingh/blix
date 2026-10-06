@@ -814,6 +814,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
         string Name,
         // Where the primitive stands: one world matrix per placement.
         Matrix4x4[] Worlds,
+        // Which instance each world is (parallel to Worlds), and where the primitive came from: together, the
+        // surface each placement row is (SurfaceKeyOf).
+        PlacementInstance[] Instances,
+        Blix.Assets.PrimitiveSource? Source,
         // The material's base colour factor (linear rgb, alpha): what a ray's surface bake multiplies the texture by.
         Vector4 BaseColor);
 
@@ -825,8 +829,17 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     /// </remarks>
     private readonly record struct Placement(int Drawable, int Transform, Bounds3 Bounds);
 
-    /// <summary>A unique cooked primitive, in mesh space, with every world it is placed at.</summary>
-    private sealed record PlacedPrimitive(ModelData.Primitive Primitive, Matrix4x4[] Worlds);
+    /// <summary>A unique cooked primitive, in mesh space, with every world it is placed at and which instance each is.</summary>
+    private sealed record PlacedPrimitive(ModelData.Primitive Primitive, Matrix4x4[] Worlds, PlacementInstance[] Instances);
+
+    /// <summary>Which instance a world is: the pack, the node that draws it, and which of that node's draws.</summary>
+    /// <remarks>
+    /// A node draws its mesh once, or once per <c>EXT_mesh_gpu_instancing</c> instance (Draw counts them). With the
+    /// primitive's <see cref="Blix.Assets.PrimitiveSource"/> this is a surface's identity (stage 4e): every cooked
+    /// chunk of one source primitive, drawn by one instance, is one surface. Node -1: the --flatten path, which
+    /// keeps no node (each baked primitive is its own instance).
+    /// </remarks>
+    private readonly record struct PlacementInstance(int Pack, int Node, int Draw);
 
     // Shared geometry buffers (one VB + one IB per index width), built from the
     // staging list by ConsolidateBuffers (via MeshBundler). Every draw is a
@@ -867,6 +880,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // Each placement's material, by the same row: set 3 binding 2, the surface identity screen probes compare (the cook
     // splits one wall into many placements, so the placement itself was too strict an identity).
     private readonly List<uint> sceneTransformMaterials = new();
+    // Each placement row's SurfaceKey (stage 4e): one dense id per (instance, source primitive), from 1; every
+    // cooked chunk of one source primitive on one instance shares it. 0 is no surface.
+    private readonly List<uint> sceneTransformSurfaceKeys = new();
     // Set 3: the transform table and this frame's visible placement indices (every pass's list end to end).
     private IMaterialBindings? sceneInstances;
     private uint[] visibleScratch = System.Array.Empty<uint>();

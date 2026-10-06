@@ -26,7 +26,7 @@ internal sealed partial class SponzaLoop
             try
             {
                 var model = ModelData.Load(p.Path, new ModelNeeds(Tangents: true, Skinned: false));
-                parsed[i] = (p.Name, flatten ? Flattened(model) : Placed(model));
+                parsed[i] = (p.Name, flatten ? Flattened(model, i) : Placed(model, i));
             }
             catch (Exception ex)
             {
@@ -37,16 +37,19 @@ internal sealed partial class SponzaLoop
     }
 
     // The old shape: every placement baked into world-space vertices, each placed once at identity.
-    private static PlacedPrimitive[] Flattened(ModelData model) => model.Flattened()
-        .Select(x => new PlacedPrimitive(x.Primitive, new[] { Matrix4x4.Identity }))
+    private static PlacedPrimitive[] Flattened(ModelData model, int pack) => model.Flattened()
+        .Select((x, i) => new PlacedPrimitive(x.Primitive, new[] { Matrix4x4.Identity }, new[] { new PlacementInstance(pack, -1, i) }))
         .ToArray();
 
     // Each mesh's primitives once, with every world a shown node draws the mesh at (DrawnWorlds: the
     // node's world, or each of its instances'), in the order the file first places the mesh. A skinned
     // mesh is drawn at its bind pose, unmoved, as Flattened draws it.
-    private static PlacedPrimitive[] Placed(ModelData model)
+    // Each world keeps which instance it is (pack, node, which of the node's draws): merging worlds per mesh is
+    // how the scene draws a mesh once for all its placements, and it must not also merge their identities.
+    private static PlacedPrimitive[] Placed(ModelData model, int pack)
     {
         var worlds = new Dictionary<int, List<Matrix4x4>>();
+        var instances = new Dictionary<int, List<PlacementInstance>>();
         var order = new List<int>();
         for (var n = 0; n < model.Nodes.Count; n++)
         {
@@ -55,15 +58,20 @@ internal sealed partial class SponzaLoop
             if (!worlds.TryGetValue(mesh, out var list))
             {
                 worlds[mesh] = list = new List<Matrix4x4>();
+                instances[mesh] = new List<PlacementInstance>();
                 order.Add(mesh);
             }
 
-            if (model.Meshes[mesh].Skinned) list.Add(Matrix4x4.Identity);
-            else list.AddRange(model.DrawnWorlds(n));
+            var drawn = model.Meshes[mesh].Skinned ? new[] { Matrix4x4.Identity } : model.DrawnWorlds(n).ToArray();
+            for (var d = 0; d < drawn.Length; d++)
+            {
+                list.Add(drawn[d]);
+                instances[mesh].Add(new PlacementInstance(pack, n, d));
+            }
         }
 
         return order
-            .SelectMany(mesh => model.Meshes[mesh].Primitives.Select(p => new PlacedPrimitive(p, worlds[mesh].ToArray())))
+            .SelectMany(mesh => model.Meshes[mesh].Primitives.Select(p => new PlacedPrimitive(p, worlds[mesh].ToArray(), instances[mesh].ToArray())))
             .ToArray();
     }
 
@@ -275,7 +283,8 @@ internal sealed partial class SponzaLoop
                 mesh.VertexBytes, mesh.VertexCount, lods, material, pipeline, mesh.Bounds,
                 albedo, alphaCutoff, baseColorAlpha,
                 new[] { new ShaderTextureBinding("uAlbedo", albedo) }, isBlend,
-                string.IsNullOrEmpty(mesh.Name) ? "primitive" : mesh.Name, placed.Worlds, pm?.BaseColorFactor ?? Vector4.One));
+                string.IsNullOrEmpty(mesh.Name) ? "primitive" : mesh.Name, placed.Worlds, placed.Instances, prim.Source,
+                pm?.BaseColorFactor ?? Vector4.One));
         }
     }
 
@@ -316,6 +325,7 @@ internal sealed partial class SponzaLoop
         var rayMeshes = rayScene || (giTrace && bounceReady) ? BuildRayMeshes(ordered) : null;
         var rayInstances = new List<RayQueryScene.Instance>();
         var nonUniform = 0;
+        var surfaceKeys = new Dictionary<SurfaceIdentity, uint>();
         for (var i = 0; i < ordered.Count; i++)
         {
             var s = ordered[i];
@@ -323,11 +333,13 @@ internal sealed partial class SponzaLoop
             var bucket = s.IsBlend ? blendDrawables : opaqueDrawables;
             var placements = s.IsBlend ? blendPlacements : opaquePlacements;
             var start = placements.Count;
-            foreach (var world in s.Worlds)
+            for (var w = 0; w < s.Worlds.Length; w++)
             {
+                var world = s.Worlds[w];
                 placements.Add(new Placement(bucket.Count, sceneTransforms.Count, WorldBounds(bm.Bounds, world)));
                 sceneTransforms.Add(world);
                 sceneTransformMaterials.Add((uint)s.Material.Id);
+                sceneTransformSurfaceKeys.Add(SurfaceKeyOf(s, w, i, surfaceKeys));
                 if (rayMeshes is not null)
                 {
                     rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
@@ -345,6 +357,7 @@ internal sealed partial class SponzaLoop
         }
 
         if (rayMeshes is not null) BuildRayScene(rayMeshes, rayInstances);
+        WriteSurfaceKeyCensus(ordered, surfaceKeys.Count);
 
         // lit.vert carries normals by the model's linear part, exact for rotation and uniform scale. Said
         // when it is not, rather than shaded wrong in silence.
@@ -603,4 +616,32 @@ internal sealed partial class SponzaLoop
             (_, true)                    => opaqueDoubleSidedPipeline,
             _                            => opaqueSolidPipeline,
         };
+
+    // A surface's identity (stage 4e): the instance that draws it and the source primitive it was cooked from.
+    // Without provenance (a primitive built in memory) the staged primitive itself stands in for its source.
+    private readonly record struct SurfaceIdentity(PlacementInstance Instance, int SourceMesh, int SourcePrimitive, int Unsourced);
+
+    // The SurfaceKey of staged primitive s's w-th placement: dense, from 1, assigned in load order, so every cooked
+    // chunk of one source primitive drawn by one instance gets the same key and nothing else does.
+    private static uint SurfaceKeyOf(DrawableStaging s, int w, int stagingIndex, Dictionary<SurfaceIdentity, uint> keys)
+    {
+        var identity = s.Source is { } src
+            ? new SurfaceIdentity(s.Instances[w], src.Mesh, src.Primitive, -1)
+            : new SurfaceIdentity(s.Instances[w], -1, -1, stagingIndex);
+        if (!keys.TryGetValue(identity, out var key)) keys[identity] = key = (uint)keys.Count + 1;
+        return key;
+    }
+
+    // What the keys say about the scene: how many surfaces, how many placement rows (cooked chunks x instances)
+    // each spans, and how much the cook's split would have fragmented an identity without provenance.
+    private void WriteSurfaceKeyCensus(IReadOnlyList<DrawableStaging> ordered, int keyCount)
+    {
+        var rows = sceneTransformSurfaceKeys.Count;
+        var rowsPerKey = sceneTransformSurfaceKeys.GroupBy(k => k).Select(g => g.Count()).OrderBy(c => c).ToArray();
+        var instances = ordered.SelectMany(s => s.Instances).Distinct().Count();
+        var unsourced = ordered.Count(s => s.Source is null);
+        var materials = sceneTransformMaterials.Distinct().Count();
+        Console.WriteLine(string.Create(Inv,
+            $"[VulkanSponza] surface keys: {keyCount:N0} surfaces over {rows:N0} placement rows ({instances:N0} instances; rows per surface median {rowsPerKey[rowsPerKey.Length / 2]}, max {rowsPerKey[^1]}); {materials} materials, {unsourced} staged primitive(s) without provenance."));
+    }
 }
