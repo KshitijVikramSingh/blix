@@ -42,15 +42,41 @@ layout(set = 0, binding = 0) uniform ClipmapInject {
     vec4 uSunIrradiance;   // rgb measured irradiance, w 1 when the sky irradiance cube is valid
     vec4 uFrame;           // x frame counter, y bounce strength, z sky strength, w depth lobe exponent
     vec4 uFallback;        // x the sky visibility taken at a hit no probe answers for, y the sky's mip for a ray
+    // Stage 4f: the reach of what moved this frame, w of the min 1 when there is one; w of the max the blend of a
+    // probe's dynamic part (paths through the reach) per update.
+    vec4 uDynamicMin;
+    vec4 uDynamicMax;
+    vec4 uDynamicQueue;    // x how many of a probe's rays must cross the reach for it to be re-solved first
+                           // (--clipmap-dependent-rays): fewer, and it keeps its split but waits for the round-robin;
+                           // y at most how many dependent probes a frame (--clipmap-dependent-share of the budget), so
+                           // the round-robin always keeps the rest: given all of it, 600-1,200 dependent probes stopped
+                           // the round-robin and the scene stayed at its first solves (rest median 32% against 10%)
 } u;
 
 layout(set = 0, binding = 1, rgba16f) uniform image2D uClipmapIrradiance;
 layout(set = 0, binding = 2, rgba16f) uniform image2D uClipmapDepth;
+// Stage 4f: each probe's irradiance in two parts, private to this pass -- static (paths that cross no moving reach,
+// on the steady blend) and dynamic (paths that do, on a short blend of their own). Both are normalised over all of a
+// texel's rays, so they add up to the whole; uClipmapIrradiance, what every reader samples, is their sum.
+layout(set = 0, binding = 7, rgba16f) uniform image2D uClipmapStatic;
+layout(set = 0, binding = 8, rgba16f) uniform image2D uClipmapDynamic;
+// Beside the engine's flags (SOLVED 1, BURIED 2, solves in bits 8-15): bits 16-23, how many of the probe's rays crossed
+// a moving reach at its last solve while something moved. Dependence is a fraction, not a flag: the coarse levels'
+// probes nearly all see some of the curtain's box (6,506 probes against a budget of 512 a frame, when any ray
+// counted), so only those that depend enough are re-solved first.
+#define CLIPMAP_DEPENDENT_SHIFT 16
+shared uint sDependentRays;
 layout(set = 0, binding = 3) uniform samplerCube uIrradiance;   // unused here since radiance replaced it; kept bound by the host
 layout(set = 0, binding = 6) uniform samplerCube uSkyRadiance;
 layout(std430, set = 0, binding = 4) buffer ClipmapState { uvec4 states[]; };
-// counts[0..3] per level, [4] hits this frame, [5] of them no probe answered for, [6..7] unused, then each level's
-// queue of global slots (level * probes-per-level slots each).
+// counts[0..3] per level, [4] hits this frame, [5] of them no probe answered for, [6] probes solved this frame with
+// a path through a moving reach, [7] dependent probes queued this frame; then each level's queue of global slots
+// (level * probes-per-level slots each); then the dependent queue (every slot's worth). The order a frame's budget
+// takes them in: unsolved first (a probe that answers nothing is worse than a stale one), then dependent, then the
+// round-robin. Dependent probes once shared the unsolved queues and, outnumbering the budget, starved them: after 300
+// frames level 0 was half solved and levels 1-3 not at all. The round-robin walks from a cursor kept after both
+// queues (never reset), advanced each frame by what it was given: it used to start at frame x budget, so the slots
+// the queues displaced from each frame's window were skipped.
 layout(std430, set = 0, binding = 5) buffer ClipmapQueue { uint queue[]; };
 
 #define BLIX_RAY_SET 0
@@ -66,6 +92,21 @@ shared vec3 sRadiance[RAYS];
 shared vec3 sDirection[RAYS];
 shared float sDistance[RAYS];
 shared float sEscaped[RAYS];
+shared uint sDependent[RAYS];
+shared uint sAnyDependent;
+shared vec3 sTexelDynamic[36];
+
+// Whether the segment origin + dir * [0, tEnd] passes through the reach of what moved this frame (screen_probe.comp
+// asks the same).
+bool crossesMovingReach(vec3 origin, vec3 dir, float tEnd) {
+    if (u.uDynamicMin.w < 0.5) return false;
+    vec3 safe = mix(dir, vec3(1e-8), lessThan(abs(dir), vec3(1e-8)));
+    vec3 t0 = (u.uDynamicMin.xyz - origin) / safe;
+    vec3 t1 = (u.uDynamicMax.xyz - origin) / safe;
+    vec3 lo = min(t0, t1);
+    vec3 hi = max(t0, t1);
+    return max(max(lo.x, lo.y), max(lo.z, 0.0)) <= min(min(hi.x, hi.y), min(hi.z, tEnd));
+}
 shared uint sBackfaces;
 shared vec4 sTexel[36];      // irradiance rgb, sky visibility a
 shared vec2 sMoments[36];
@@ -108,8 +149,15 @@ void main() {
     int perLevel = c.dims.x * c.dims.y * c.dims.z;
     int mode = int(u.uParams.z + 0.5);
 
+    uint cursorAt = 8u + 2u * uint(perLevel * BLIX_CLIPMAP_LEVELS);
     if (mode == 0) {
-        if (gl_GlobalInvocationID.x < 8u) queue[gl_GlobalInvocationID.x] = 0u;
+        if (gl_GlobalInvocationID.x == 0u) {
+            // Last frame's round-robin share, from last frame's counts, before they are cleared.
+            uint unsolved = queue[0] + queue[1] + queue[2] + queue[3];
+            uint used = min(uint(u.uParams.w), unsolved + min(queue[7], uint(u.uDynamicQueue.y)));
+            queue[cursorAt] = (queue[cursorAt] + uint(u.uParams.w) - used) % uint(perLevel * BLIX_CLIPMAP_LEVELS);
+            for (int i = 0; i < 8; ++i) queue[i] = 0u;
+        }
         return;
     }
 
@@ -128,6 +176,9 @@ void main() {
         if ((state.w & BLIX_CLIPMAP_SOLVED) == 0u) {
             uint k = atomicAdd(queue[level], 1u);
             queue[8u + uint(level * perLevel) + k] = uint(g);
+        } else if (u.uDynamicMin.w > 0.5 && ((state.w >> CLIPMAP_DEPENDENT_SHIFT) & 0xFFu) >= uint(u.uDynamicQueue.x)) {
+            uint k = atomicAdd(queue[7], 1u);
+            queue[8u + uint(BLIX_CLIPMAP_LEVELS * perLevel) + k] = uint(g);
         }
         return;
     }
@@ -143,12 +194,19 @@ void main() {
             else k -= count;
         }
         if (chosen < 0) {
-            // The budget the queues left over sweeps every probe in turn.
+            int count = min(int(queue[7]), int(u.uDynamicQueue.y));
+            if (k < count) chosen = int(queue[8 + BLIX_CLIPMAP_LEVELS * perLevel + k]);
+            else k -= count;
+        }
+        if (chosen < 0) {
+            // The budget the queues left over sweeps every probe in turn, from the cursor.
             uint total = uint(perLevel * BLIX_CLIPMAP_LEVELS);
-            chosen = int((uint(u.uFrame.x) * uint(u.uParams.w) + gl_WorkGroupID.x) % total);
+            chosen = int((queue[cursorAt] + uint(k)) % total);
         }
         sProbe = chosen;
         sBackfaces = 0u;
+        sAnyDependent = 0u;
+        sDependentRays = 0u;
     }
     barrier();
     int g = sProbe;
@@ -168,6 +226,7 @@ void main() {
     vec3 radiance = vec3(0.0);
     float distance = farDistance;
     float escaped = 1.0;
+    bool dependent = false;
     if (blix_traceClosest(origin, dir, 0.0, uintBitsToFloat(0x7F800000u), seed ^ lane, hit)) {
         escaped = 0.0;
         distance = min(hit.t, farDistance);
@@ -175,6 +234,8 @@ void main() {
         vec3 n = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
         vec3 hitPos = origin + dir * hit.t;
         float ndotl = max(dot(n, toSun), 0.0);
+        // The gather segment, and the hit's way to the sun (stage 4f).
+        dependent = crossesMovingReach(origin, dir, hit.t) || (ndotl > 0.0 && crossesMovingReach(hitPos + n * 0.01, toSun, 1e30));
         float sun = ndotl > 0.0 && !blix_traceAny(hitPos + n * 0.01, toSun, 0.0, uintBitsToFloat(0x7F800000u), blix_pcg(seed ^ lane ^ 0x5bd1e995u))
             ? ndotl : 0.0;
         // What the clipmap knows at the hit, from earlier solves: bounce in rgb, sky visibility in a. Beyond its
@@ -190,7 +251,10 @@ void main() {
     } else {
         // The sky this direction sees, as the lighting integrals see it (no disc: the sun is the shadow rays' job).
         radiance = textureLod(uSkyRadiance, dir, u.uFallback.y).rgb * u.uFrame.z;
+        dependent = crossesMovingReach(origin, dir, 1e30);
     }
+    if (dependent) { atomicOr(sAnyDependent, 1u); atomicAdd(sDependentRays, 1u); }
+    sDependent[lane] = dependent ? 1u : 0u;
     sRadiance[lane] = radiance;
     sDirection[lane] = dir;
     sDistance[lane] = distance;
@@ -201,12 +265,14 @@ void main() {
         ivec2 t = ivec2(int(lane) % 6, int(lane) / 6);
         vec3 texelDir = blix_octDecode(((vec2(t) + 0.5) / 6.0) * 2.0 - 1.0);
         vec3 irr = vec3(0.0);
+        vec3 irrDynamic = vec3(0.0);
         float cosSum = 0.0, skySum = 0.0;
         float dSum = 0.0, d2Sum = 0.0, dWeight = 0.0;
         for (int i = 0; i < RAYS; ++i) {
             float k = max(dot(texelDir, sDirection[i]), 0.0);
             if (k <= 0.0) continue;
-            irr += sRadiance[i] * k;
+            if (sDependent[i] != 0u) irrDynamic += sRadiance[i] * k;
+            else irr += sRadiance[i] * k;
             skySum += sEscaped[i] * k;
             cosSum += k;
             float w = pow(k, u.uFrame.w);
@@ -215,6 +281,7 @@ void main() {
             dWeight += w;
         }
         sTexel[lane] = cosSum > 0.0 ? vec4(irr * (PI / cosSum), skySum / cosSum) : vec4(0.0, 0.0, 0.0, 1.0);
+        sTexelDynamic[lane] = cosSum > 0.0 ? irrDynamic * (PI / cosSum) : vec3(0.0);
         float mean = dWeight > 0.0 ? dSum / dWeight : farDistance;
         sMoments[lane] = vec2(mean, dWeight > 0.0 ? max(d2Sum / dWeight - mean * mean, 0.0) : 0.0);
     }
@@ -234,10 +301,22 @@ void main() {
     ivec2 src = blix_octBorderSource(texel, 8);
     int interior = (src.y - 1) * 6 + (src.x - 1);
     vec4 value = sTexel[interior];
-    vec4 old = imageLoad(uClipmapIrradiance, tile + texel);
+    vec3 oldStatic = imageLoad(uClipmapStatic, tile + texel).rgb;
+    vec3 oldDynamic = imageLoad(uClipmapDynamic, tile + texel).rgb;
     vec4 oldDepth = imageLoad(uClipmapDepth, tile + texel);
-    imageStore(uClipmapIrradiance, tile + texel, vec4(mix(old.rgb, value.rgb, converge), 1.0));
+    vec3 newStatic = mix(oldStatic, value.rgb, converge);
+    vec3 newDynamic = mix(oldDynamic, sTexelDynamic[interior], max(u.uDynamicMax.w, 1.0 / float(solves + 1u)));
+    imageStore(uClipmapStatic, tile + texel, vec4(newStatic, 1.0));
+    imageStore(uClipmapDynamic, tile + texel, vec4(newDynamic, 1.0));
+    imageStore(uClipmapIrradiance, tile + texel, vec4(newStatic + newDynamic, 1.0));
     imageStore(uClipmapDepth, tile + texel, vec4(mix(oldDepth.rg, sMoments[interior], converge), 0.0, mix(oldDepth.a, value.a, converge)));
     barrier();
-    if (lane == 0u) states[g] = uvec4(uvec3(cell), BLIX_CLIPMAP_SOLVED | (buried ? BLIX_CLIPMAP_BURIED : 0u) | (min(solves + 1u, 255u) << 8));
+    if (lane == 0u) {
+        // Dependent stays set while nothing moves (no path can be classified then), so a probe that depended on the
+        // mover is queued again the moment it moves; a solve while it moves sets or clears it.
+        uint dependentRays = u.uDynamicMin.w > 0.5 ? sDependentRays : (previousFlags >> CLIPMAP_DEPENDENT_SHIFT) & 0xFFu;
+        if (sAnyDependent != 0u) atomicAdd(queue[6], 1u);
+        states[g] = uvec4(uvec3(cell), BLIX_CLIPMAP_SOLVED | (buried ? BLIX_CLIPMAP_BURIED : 0u)
+            | (min(solves + 1u, 255u) << 8) | (dependentRays << CLIPMAP_DEPENDENT_SHIFT));
+    }
 }

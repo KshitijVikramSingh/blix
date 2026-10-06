@@ -22,6 +22,17 @@ internal sealed partial class SponzaLoop
     private ProbeClipmap? clipmap;
     private TextureHandle clipmapIrradiance;
     private TextureHandle clipmapDepth;
+    // Stage 4f: the irradiance's two parts, private to the injection (their sum is clipmapIrradiance).
+    private TextureHandle clipmapStatic;
+    private TextureHandle clipmapDynamic;
+    // --clipmap-dynamic-converge B: the dynamic part's blend per update (1: no history); --no-clipmap-dependency: no
+    // split and no priority for the clipmap alone (screen probes keep theirs).
+    private float clipmapDynamicConverge = 0.5f;
+    private bool noClipmapDependency;
+    // --clipmap-dependent-rays K: of a probe's 64 rays, how many must cross the moving reach for it to be re-solved first.
+    private int clipmapDependentRays = 32;
+    // --clipmap-dependent-share F: at most this share of the budget re-solves dependent probes a frame.
+    private float clipmapDependentShare = 0.5f;
     private GpuBufferHandle clipmapState;
     private GpuBufferHandle clipmapQueue;
     private ShaderInterface clipmapInterface = null!;
@@ -84,12 +95,17 @@ internal sealed partial class SponzaLoop
             SamplerDescription.LinearClamp, "sponza.clipmap.irradiance"));
         clipmapDepth = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, clipmap.AtlasHeight, TextureFormat.Rgba16F,
             SamplerDescription.LinearClamp, "sponza.clipmap.depth"));
+        clipmapStatic = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, clipmap.AtlasHeight, TextureFormat.Rgba16F,
+            SamplerDescription.LinearClamp, "sponza.clipmap.static"));
+        clipmapDynamic = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, clipmap.AtlasHeight, TextureFormat.Rgba16F,
+            SamplerDescription.LinearClamp, "sponza.clipmap.dynamic"));
         var slots = ClipmapLevels * clipmap.ProbesPerLevel;
         // Every slot starts holding a cell no block contains, unsolved: the first scan re-points and queues all of them.
         var initial = new uint[slots * 4];
         for (var i = 0; i < slots; i++) { initial[i * 4] = 0x80000000u; initial[i * 4 + 1] = 0x80000000u; initial[i * 4 + 2] = 0x80000000u; }
         clipmapState = Own(device.CreateGpuBuffer(slots * 16, MemoryMarshal.AsBytes(initial.AsSpan()), "sponza.clipmap.state"));
-        clipmapQueue = Own(device.CreateGpuBuffer((8 + slots) * 4, name: "sponza.clipmap.queue"));
+        // Counters, the per-level unsolved queues, and the dependent queue (stage 4f).
+        clipmapQueue = Own(device.CreateGpuBuffer((8 + 2 * slots + 1) * 4, name: "sponza.clipmap.queue"));
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] probe clipmap: {ClipmapLevels} levels of {ClipmapDims.X}x{ClipmapDims.Y}x{ClipmapDims.Z} probes, spacing {clipmapSpacing:0.##} m doubling (level {ClipmapLevels - 1} spans {clipmap.Spacing(ClipmapLevels - 1) * ClipmapDims.X:0} m), atlases {clipmap.AtlasWidth}x{clipmap.AtlasHeight}, {clipmapBudget} probes a frame."));
     }
@@ -106,9 +122,13 @@ internal sealed partial class SponzaLoop
         {
             new ShaderTextureBinding("uClipmapIrradiance", clipmapIrradiance),
             new ShaderTextureBinding("uClipmapDepth", clipmapDepth),
+            new ShaderTextureBinding("uClipmapStatic", clipmapStatic),
+            new ShaderTextureBinding("uClipmapDynamic", clipmapDynamic),
             new ShaderTextureBinding("uIrradiance", irradianceCubeTexture),
             new ShaderTextureBinding("uSkyRadiance", envCubeTexture),
         };
+        // The reach of what moved this frame: the mover's while it moves (stage 4f).
+        var dynamicActive = MoverActive && moverMoved && !noDependency && !noClipmapDependency;
         var buffers = rayBlockBuffers
             .Append(new ShaderBufferBinding("ClipmapState", clipmapState))
             .Append(new ShaderBufferBinding("ClipmapQueue", clipmapQueue)).ToArray();
@@ -125,6 +145,9 @@ internal sealed partial class SponzaLoop
             new("uFrame", new Vector4Uniform(new Vector4(clipmapFrame, 1f, 1f, ClipmapDepthLobe))),
             // y: the prefiltered sky's mip a probe ray reads, about a ray's 1/64 of the sphere (a ~15 degree cone).
             new("uFallback", new Vector4Uniform(new Vector4(clipmapUnknownSky, MathF.Min(1.5f, Math.Max(0, iblPrefilterMips - 1)), 0f, 0f))),
+            new("uDynamicMin", new Vector4Uniform(dynamicActive ? new Vector4(moverReach.Min, 1f) : Vector4.Zero)),
+            new("uDynamicMax", new Vector4Uniform(new Vector4(MoverActive ? moverReach.Max : Vector3.Zero, clipmapDynamicConverge))),
+            new("uDynamicQueue", new Vector4Uniform(new Vector4(clipmapDependentRays, MathF.Floor(clipmapBudget * clipmapDependentShare), 0f, 0f))),
         }, textures, Buffers: buffers);
         graph.Dispatch(clipmapPassHandle, Phase(0, 1));
         graph.Dispatch(clipmapPassHandle, Phase(1, (slots + 63) / 64));
@@ -155,7 +178,7 @@ internal sealed partial class SponzaLoop
         }
         var counters = MemoryMarshal.Cast<byte, uint>(device.ReadGpuBuffer(clipmapQueue, 0, 32).AsSpan()).ToArray();
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] probe clipmap, last frame: {counters[4]:N0} ray hits, {counters[5]:N0} ({100.0 * counters[5] / Math.Max(1u, counters[4]):0.0}%) where no probe answered (sky taken as {clipmapUnknownSky:0.##})."));
+            $"[VulkanSponza] probe clipmap, last frame: {counters[4]:N0} ray hits, {counters[5]:N0} ({100.0 * counters[5] / Math.Max(1u, counters[4]):0.0}%) where no probe answered (sky taken as {clipmapUnknownSky:0.##}); dependent probes queued {counters[7]:N0}, solved with a path through a moving reach {counters[6]:N0} (budget {clipmapBudget})."));
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] probe clipmap after {clipmapFrame} frames: slots whose cell differs from ProbeClipmap's {mismatched} of {slots}; solved per level {string.Join(" / ", solved)} of {clipmap.ProbesPerLevel}, buried {string.Join(" / ", buried)}."));
     }

@@ -205,6 +205,11 @@ internal sealed partial class SponzaLoop
         if (args.Float("dynamic-history") is { } dh) dynamicHistory = Math.Max(1f, dh);
         dependencyReset = args.Flag("dependency-reset");
         noDependency = args.Flag("no-dependency");
+        dependencyEverything = args.Flag("dependency-everything");
+        noClipmapDependency = args.Flag("no-clipmap-dependency");
+        if (args.Int("clipmap-dependent-rays") is { } cdr) clipmapDependentRays = Math.Clamp(cdr, 1, 64);
+        if (args.Float("clipmap-dependent-share") is { } cds) clipmapDependentShare = Math.Clamp(cds, 0f, 1f);
+        if (args.Float("clipmap-dynamic-converge") is { } cdc) clipmapDynamicConverge = Math.Clamp(cdc, 0.01f, 1f);
         // --surface-check: hold the pre-pass's SurfaceKey and velocity against CPU rays at the shot (stage 4e-iv).
         surfaceCheck = args.Flag("surface-check");
         if (args.Float("incident-normal-bias") is { } nb) incidentNormalBias = Math.Clamp(nb, 0f, 12f);

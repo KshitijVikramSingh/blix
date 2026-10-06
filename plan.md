@@ -308,10 +308,33 @@ exactly where the world has changed.
      no screen probes, ring +26%.
      Harness: runs are not bit-reproducible (the same held run twice: median 1-4%, bias within +-1.5%), so
      controls hold at that floor, not to the bit (old vs new held: within it).
-   4f-ii (next) the clipmap: world probes traced on a round-robin budget and blended at a fixed rate,
-     knowing nothing about the mover. Same question, different cache: which world probes' rays cross a
-     moving reach, and what do they get -- priority in the update queue, a faster blend, or a split of
-     their own. Measure on the clipmap-only arm first (ring +26%), then with screen probes.
+   4f-ii DONE (the clipmap's half): the same split for world probes -- per-texel static and dynamic irradiance in
+     two private atlases, both normalised over all of a texel's rays, their sum published to the one every
+     reader samples. A probe's dependence is a COUNT (its rays through the reach at its last solve, state bits
+     16-23), not a flag: with any ray counting, 6,506 probes were dependent against a budget of 512 (the coarse
+     levels see the curtain's box from everywhere). Probes with >= `--clipmap-dependent-rays` (32) are
+     re-solved first, after unsolved ones and capped at `--clipmap-dependent-share` (half) of the budget;
+     dynamic blend `--clipmap-dynamic-converge` 0.5. Found and fixed on the way: priority sharing the unsolved
+     queues starved them (300 frames: level 0 half solved, levels 1-3 never); the round-robin started each
+     frame at frame x budget and so skipped whatever the queues displaced (now a persistent cursor).
+     The instrument had to change too: at 300 frames the clipmap is unconverged and two held runs differed by
+     up to -7.7% (ring); the 300-frame clipmap verdicts above (incl. "clipmap off at hits", "no prior") were
+     inside that noise. At 1200 frames the floors are 1-2% (clipmap only) and 0.3-0.5% (full). Converged:
+       clipmap only: no dependency ring +26% (real); K=32 ring +4.4%, but rest median 1.6 -> 13.7% (dynamic
+       parts re-solved from 64 rays at blend 0.5: the price of dependence is noise, and it is large here)
+       full stack, curtain | ring | rest median:   none -32 | +53 | 0.9%    screen split -2.4 | +34 | 2.3%
+       + clipmap K=32 -2.5 | +32 | 4.1%   + no clipmap prior for fresh probes -5.4 | +21 | 3.5%
+       + no young-probe filter widening -6.7 | +16 | 3.8%
+     Controls at 1200: every path dependent (all probes on history 4) still leaves the ring +37%, and no
+     clipmap at probe hits +28%: the ring's residual is NOT stale cached light. It is how FRESH probes start
+     where the curtain's edge sweeps (each switch is a key change): from the clipmap's coarse answer (prior)
+     and with a filter widened across a lighting edge (young widening, 3 tiles) -- support reaching too far.
+     The curtain's own probes now match the held pose (mean radiance 0.0081 vs 0.0079).
+   4f-ii' (next, open) fresh probes at lighting discontinuities: the prior and the young widening were added
+     against blotches (the user's spots) and are biased exactly where lighting has an edge. Candidates:
+     widen only across probes that agree (the dependency or the key of the neighbour), seed the prior from a
+     neighbour on the same key instead of the clipmap, or more rays for a fresh probe instead of borrowing.
+     And the clipmap's dependent noise: more rays for dependent probes, or a spatial pass over the dynamic part.
    4f-iii TAA: presented history also caches lighting (and relaxes its clamp on still pixels). Today the
      ring's resolved bias equals the incident's (+59.3 vs +59.2%), so TAA adds none; re-check after 4f-i.
      Its key test needs an isolated check with the GI lag out (no measurable effect while the lag swamps it).

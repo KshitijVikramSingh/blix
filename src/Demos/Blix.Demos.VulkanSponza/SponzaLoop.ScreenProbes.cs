@@ -1,4 +1,5 @@
 using System.Numerics;
+using Blix.Geometry;
 using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
@@ -15,6 +16,10 @@ internal sealed partial class SponzaLoop
     private float dynamicHistory = 4f;
     private bool dependencyReset;
     private bool noDependency;
+    // --dependency-everything: a control -- the reach every path counts as crossing is the whole world, so every
+    // probe runs on the dynamic history alone. Where the real reach leaves bias this removes, a path is being missed.
+    private bool dependencyEverything;
+    private Bounds3 DependencyBox => dependencyEverything ? new Bounds3(new Vector3(-1e5f), new Vector3(1e5f)) : moverReach;
     private bool screenProbesEnabled;
     // --screen-probe-history N: frames a probe's radiance averages over at most. 256: at 64 a probe's average kept
     // wandering by its last few rays, and --stability (TAA off, still camera) measured the incident light varying
@@ -132,8 +137,8 @@ internal sealed partial class SponzaLoop
                 new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
                 new("uParams2", new Vector4Uniform(new Vector4(screenProbeSeedFrames, probeSupportNow ? 1f : 0f, dependencyReset ? 1f : 0f, 0f))),
                 // The reach of what moved this frame: the mover's while it moves, none while held or absent.
-                new("uDynamicMin", new Vector4Uniform(MoverActive && moverMoved && !noDependency ? new Vector4(moverReach.Min, 1f) : Vector4.Zero)),
-                new("uDynamicMax", new Vector4Uniform(new Vector4(MoverActive ? moverReach.Max : Vector3.Zero, dynamicHistory))),
+                new("uDynamicMin", new Vector4Uniform(MoverActive && moverMoved && !noDependency ? new Vector4(DependencyBox.Min, 1f) : Vector4.Zero)),
+                new("uDynamicMax", new Vector4Uniform(new Vector4(MoverActive ? DependencyBox.Max : Vector3.Zero, dynamicHistory))),
             },
             new[]
             {
