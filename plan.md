@@ -240,92 +240,69 @@ exactly where the world has changed.
    transmission through leaves (the march had it), the probes' own placement still reads the occupancy
    grid (buried test), and the sky term has no reference yet (traced runs 7-16% brighter with the sun
    off).
-4e. *Surface identity and motion, below every temporal effect* (decided 2026-10-06; this arc, before
-   `bistro` merges). TAA history, screen-probe history, picking and later a visibility buffer all ask the
-   same two questions of a pixel: which surface is this, and where was it last frame. Today each answers
-   with its own heuristics: screen probes compare MATERIAL (placement identity broke at the cook's chunk
-   seams) plus plane, normal, footprint and visibility tests; TAA reprojects by depth and the camera
-   alone; four passes keep their own previous camera matrix; nothing knows an object moved. The facts are
-   missing below them: a split chunk's only link to its source is its name (`MeshRecipe.cs`:
-   `"<mesh>.<prim>#<chunk>"`; `BlixMeshPrimitive` has no source field), `Placed()` merges every node's
-   worlds per mesh, a placement keeps a drawable, a transform row and bounds, and transforms are written
-   once. Decided: the key is SOURCE PRIMITIVE x INSTANCE; motion is SCREEN-SPACE VELOCITY (two-channel
-   half float); moving geometry is tested by a SCRIPTED MOVER over existing placements (4d's dynamic
-   geometry stays its own stage). Steps:
-   4e-i provenance in the asset (engine): each cooked primitive records its source (glTF mesh, primitive)
-     and its chunk; every chunk of one source shares it; `.blixmesh` version bump; `ModelData.Primitive`
-     carries it. Deviceless test: a split primitive's chunks share one source.
-   4e-ii instance identity: each world keeps the node and instance it came from; the load assigns a dense
-     32-bit SurfaceKey per (instance, source primitive), a table by transform row (replacing the material
-     table in set 3); census of keys per drawable and per instance.
-   4e-iii previous transforms: a previous world matrix beside each row (static rows hold the same twice).
-   4e-iv pre-pass outputs: an integer SurfaceKey target (replacing the identity in the normal's alpha) and
-     a velocity target (unjittered, previous transform x previous camera against current); last frame's
-     key target kept as history. Control: on a static scene velocity equals camera-only reprojection.
-   4e-v consumers: TAA reprojects by velocity and rejects history where the key differs; its sample count
-     leaves the colour's alpha for a target read at the nearest pixel; screen probes find their past by
-     velocity and key, and drop material identity and whichever geometric tests measure redundant.
-   4e-vi the mover (`--mover NAME --mover-pick K --mover-angle D --mover-period S [--mover-hold F]`): one
-     placement instance swings about the top of its bounds on frame time (deterministic; --mover-hold F is
-     the still pose a moving shot is held against). Built: mover.comp writes previous-then-new transforms
-     (CPU path: the slot's set 3), bounds cover the swing, the cascade cache is invalidated while it moves;
-     the ray scene moves with it (engine: `RayQueryScene.Instance.Reach` + `Move` + `EntryOf`, test BV.5b;
-     mover_rays.comp rewrites the GPU instance rows). Left at rest, the curtain's probes traced into their
-     own resting copy (mean radiance 0.0042 moving vs 0.0109 held): that approximation was not declarable.
-     Test: curtain_03 (`--mover curtain --mover-pick 6`, 82 rows) between identical curtains, camera
-     `--cam 2.1,1.8,2.5,0,0`; the shot dumps presented/incident luminance + a mover mask; comparison in
-     three regions (mover, a 12 px ring, rest) against a held run at the shot's pose.
-     Measured (12 deg / 3 s unless said; incident bias vs held, mover | ring; floor = held vs held with
-     another seed: -0.6 | -1.2%, median 3.5%): surface check on the mover: velocity median 0.002-0.005 px
-     (of 0.5-1.5 px), world motion 0.02-0.05 mm (of 1-2 cm), keys 100% (both cull paths); correspondence
-     holds (95.8% kept, key 3.1%, support 0.8%); TAA key test no measurable effect (-36.4 | +55.8 without,
-     -35.9 | +59.2 with); world-motion support vs support-now at 30 deg / 1 s: 0.9 vs 1.0% rejected
-     (footprints ~ a tile at this depth, so rarely decisive). THE error is lag, not identity: -35.9 | +59.2%
-     with history 256, -31.2 | +37.5% at 32, -0.4 | +5.3% at 1 (median 12%, noisier). Lighting here varies
-     ~5x across the swing (held -10 deg 0.0073, +10 deg 0.0023): correctly-owned history is stale twice
-     over, the mover's own light gathered at other poses and the ring's light gathered when the mover
-     stood elsewhere. Open: a dependency signal (see the discussion in the 4e-vi commit), not a cap.
-   Done so far: 4e-i (format v20 PrimitiveSource; Sponza/Bistro/city re-cooked) and 4e-ii (load census:
-   Sponza 454 surfaces over 5,450 rows and 138 instances against 37 materials; Bistro 1,591 / 7,403 /
-   1,296; city 123,422 rows, nothing split). 4e-iii/iv: set 3 binding 3 SurfaceKey and binding 4 previous
-   transform per row (static rows hold the transform twice); the pre-pass writes `surface-key` (R32Uint,
-   engine format added) and `velocity` (Rg16F, added) at one sample (integers do not resolve; under MSAA
-   none). `--surface-check` holds them against CPU rays: Sponza key = the ray's row 86.7%, the row behind
-   a decal/leaf 13.3%, none 0.0% (orbit 0.1%); velocity 0.000 px still, median 0.028 px at ~23 px/frame;
-   Bistro (walking orbit) 99.2% / 0.7%, velocity median 0.032 px, p99 1.04.
-   4e-v: TAA's surface variant (the default at one sample) reprojects by velocity, rejects history whose
-   3x3 of last frame's key holds no match (skipped for alpha-tested keys: top bit, coverage is
-   stochastic), and keeps its count in an R32Uint target read at the nearest pixel. Still Sponza: median
-   0.22% either way (p90 2.37 with the key, 1.54 without); walking lag 9.78 vs 9.89%: no static benefit,
-   the mover judges it. Screen probes: the rule is OWNERSHIP (key differs: reject absolutely) and SUPPORT
-   (lateral footprint: locality, not identity); the normal, plane and visibility tests and the material
-   identity are deleted. Measured first, kept still/walking: all tests 91.8/81.1%, key only 99.3/98.2,
-   key+support 97.3/94.3 (final). Error against the surface reference walking (median/p90/mean |err|):
-   Sponza all 1.72/8.34/0.00045, key 1.22/5.17/0.00039, key+support 1.45/5.54/0.00037; Bistro all
-   0.88/1.10/0.172, key 0.73/1.00/0.254, key+support 0.88/1.09/0.173 (key alone loses Bistro's mean:
-   support is needed). One key spanning disconnected places (gate 2): Sponza 35/454 keys (worst 4 regions,
-   15.5 m apart), Bistro 43/1,591 (4, 30.9 m) -- support catches these. Angular support only if curved
-   surfaces show bias. Sync validation clean on default, --msaa4, --cpu-cull and screen probes.
-   The key's contract (the compass): same key = same authored source primitive under the same placement
-   instance; it says nothing about connectivity (a provenance class). Locality is support's job. If the
-   hostile tests show a key spanning surfaces that must not share history, the next refinement is better
-   identity (e.g. the cook splitting by connected component), never resurrecting plane/normal tests.
-   Three quantities, kept apart: ownership (key), correspondence (velocity finds the tile; the pre-pass's
-   world-motion target, Rgba16F now minus then, gives where the point WAS, rigid or deforming alike, so the
-   key never stands in for a transform; support is measured there), staleness (a probe's cached light was
-   gathered at a world place; its world displacement is counted, not acted on, until the mover shows
-   whether it must become a weight). Static control: world motion exactly 0 (surface check still and
-   walking), probe history identical to before (97.3 / 94.3%), staleness 0.0%.
-   Placement: provenance is asset truth and goes in the engine; the key table, targets and consumers
-   start in the Sponza renderer (where the per-object data and both consumers live) and move into the
-   engine when a second renderer wants them.
-   Declared approximations until then (bounded, recorded, not to be polished): the incident field's
-   normal-map gradient (normal map 2 mips down, factor in [0.5, 1.5]: the incident pass flattens the
-   probes' directional light at the geometric normal; a real fix lets the normal map take part where
-   directional light still exists: bindless materials, a visibility buffer, or the lit pass reading the
-   probes' SH); TAA's relaxed clamp (x3 where a pixel does not move: ~0.65 points more error against the
-   supersample, the bias side of the variance it buys); under MSAA, TAA keeps the old path (count in the
-   colour's alpha, camera-only reprojection): the surface targets are single-sample.
+4e. *Surface identity and motion, below every temporal effect* -- DONE (dcab204..fb8c1ce, 2026-10-06). It
+   left four separate questions, each with its own answer, where there used to be one heuristic pile:
+     OWNERSHIP       the SurfaceKey: source primitive (`PrimitiveSource`, format v20, survives the cook's
+                     split) x placement instance, a provenance class -- NOT connectivity (Sponza 35/454 keys,
+                     Bistro 43/1,591 span disconnected places, up to 30.9 m). A key mismatch rejects absolutely.
+                     If a hostile case needs finer identity, the refinement is better identity (e.g. the cook
+                     splitting by connected component), never plane/normal tests again.
+     CORRESPONDENCE  where the point was: screen velocity (Rg16F) finds the tile, world motion (Rgba16F, now
+                     minus then, from previous transforms) gives the place; rigid or deforming alike, so the key
+                     never stands in for a transform. Surface check: velocity 0.002-0.005 px of 0.5-1.5 px on
+                     the mover, world motion 0.02-0.05 mm of 1-2 cm, keys 100%.
+     SUPPORT         the local radiance-reuse radius (one tile's footprint, measured at where the point was).
+                     Locality, not identity.
+     STALENESS       has the lighting cached there changed? Unanswered: stage 4f.
+   Screen probes went from material + normal + plane + footprint + visibility to key + support (walking,
+   against the surface reference: Sponza mean |err| 0.00037 vs 0.00045 with all tests, Bistro 0.173 vs
+   0.172, history kept 92-94% vs 81-87%; key alone loses Bistro's mean, so support stays). TAA's surface
+   variant (default at one sample) reprojects by velocity, tests the key over a 3x3 (skipped for
+   alpha-tested keys), and keeps its count in an R32Uint target.
+   Instruments: `--surface-check` (targets against CPU rays, the mover posed as the targets' frame drew it);
+   `--mover NAME --mover-pick K --mover-angle D --mover-period S [--mover-hold F]` (frame-time swing,
+   deterministic; held = the still answer at a pose); the shot's `.resolved/.incident.f32` + `.mover.pgm`,
+   compared mover / 12 px ring / rest against a held run (floor: held vs held, other seed, bias within
+   +-1.4%, median ~3.5%). The test case: curtain_03 (`--mover curtain --mover-pick 6`) between identical
+   curtains, `--cam 2.1,1.8,2.5,0,0`.
+   Bounded dynamics (engine): `RayQueryScene.Instance.Reach` -- a dynamic placement declares the world box
+   it may occupy, the top level is built for it, `Move` changes the matrix alone and refuses to leave the
+   reach (BV.5b: ray for ray equal to a rebuild). Honest for bounded motion; NOT the answer for unbounded
+   motion (something crossing a kilometre): refit, cell migration or rebuild are 4d's to decide.
+   Placement: provenance is engine (asset truth); the key table, targets and consumers live in the Sponza
+   renderer until a second renderer wants them.
+   Declared approximations (bounded, recorded, not to be polished): the incident field's normal-map gradient
+   (normal map 2 mips down, factor in [0.5, 1.5]; a real fix needs bindless materials, a visibility buffer, or
+   the lit pass reading the probes' SH); TAA's relaxed clamp (x3 on still pixels: ~0.65 points more bias
+   against the supersample); under MSAA, TAA keeps camera-only reprojection and its count in the colour's
+   alpha (the surface targets are single-sample; no integer-resolve story invented for symmetry).
+4f. *Cached lighting and what it depends on* (opened 2026-10-06 by the mover). The sample is unquestionably
+   mine; is what it remembers still true? Under the mover (12 deg / 3 s) correspondence holds (95.8% kept,
+   key 3.1%, support 0.8%) and the lighting is still badly wrong, incident bias against the held pose
+   (curtain | ring): history 256 -35.9 | +59.2%, 32 -31.2 | +37.5%, 1 -0.4 | +5.3% (but median 12%: noise).
+   Two stalenesses at once, both with impeccable keys: a probe ON the curtain carries light gathered at
+   other poses; a probe NEAR it carries light gathered when the curtain blocked or exposed other paths.
+   Rules:
+   - Surface motion is not lighting invalidation. A surface can move metres through uniform light and keep
+     excellent history; a still one can lose all of it when something two metres away moves. Displacement
+     must not become the invalidation rule (it would be the temporal normal/plane test); the displacement
+     stat stays a diagnostic.
+   - A uniform history cap is not the answer (32 barely helps; only ~1 removes the bias, at 2-3x the noise).
+   - Dependency is necessary, not sufficient: a path crossing the reach may not have changed. Its price
+     is noise where it fires; measure it, do not hide it.
+   4f-i (next, deliberately narrow; the mover is the oracle): one extra bit on a probe's estimate -- did any
+     path that built it depend on the mover's reach? The gather ray crossing it, and the hit's shadow ray
+     crossing it (the curtain changes whether a hit sees the sun). Mover unchanged: accumulate as now;
+     changed: reset, or shorten dependent history to N (N measured). Same mover / ring / rest comparison;
+     success = bias inside the floor without the frame going back to history-1 noise, the dependent
+     region's noise reported.
+   4f-ii the clipmap: its world probes trace through the reach too, and screen-probe hits read it. Measure
+     whether the ring's bias survives 4f-i through stale clipmap input before building anything for it.
+   4f-iii TAA: presented history also caches lighting (and relaxes its clamp on still pixels). Today the
+     ring's resolved bias equals the incident's (+59.3 vs +59.2%), so TAA adds none; re-check after 4f-i.
+     Its key test needs an isolated check with the GI lag out (no measurable effect while the lag swamps it).
+   Only after 4f-i proves the shape: representations that scale past one mover (change epochs per reach,
+   coarse spatial dirty fields, dependency hashes, reach IDs).
 5. *PRT baked by the cook*: per-region probe transfer, relit by the sun at runtime: the static base and
    warm start of 4.
 

@@ -20,9 +20,10 @@
 //            probes' history against 81-87%; key alone kept 97-98% and was 47% worse in Bistro. The old tests (same
 //            material, normal within 25 degrees, the same plane, still visible) were proxies for the identity the
 //            key now states, and went.
-//            Staleness is a third, separate quantity: a probe caches light that arrived at a place in the world, so a
-//            point that moved carries light gathered elsewhere even when the match is exact. Counted (the world
-//            displacement of kept probes), not acted on; the mover decides whether it becomes a weight.
+//            Staleness -- has the lighting cached here changed? -- is a fourth question, and open (plan stage 4f):
+//            under the mover, correctly owned history read -36% on the curtain and +59% on the still wall beside it.
+//            Surface motion is not lighting invalidation, so a kept probe's world displacement is counted as a
+//            diagnostic only, never used to drop history.
 //            Searched over the 3x3 tiles around where the probe falls last frame (TAA's jitter moves which surface a
 //            tile's centre lands on at edges); the nearest candidate passing both wins, else the probe starts afresh.
 //   trace    8 directions uniform over its hemisphere; a hit is lit by the sun and by the probe clipmap's
@@ -96,7 +97,7 @@ layout(std430, set = 0, binding = 9) writeonly buffer ScreenProbeTilesCurrent { 
 layout(std430, set = 0, binding = 10) writeonly buffer ScreenProbesCurrent { ScreenProbe current[]; };
 // Why probes start afresh, summed over the run: for each probe that found no past, the first test its nearest
 // candidate failed. [0] no candidate tile at all, [1] ownership (key), [4] support, [6] probes that kept a past.
-// Staleness of those kept: [2] on a point that moved in the world, [3] moved further than its footprint, [7] their
+// Displacement of those kept (diagnostic): [2] on a point that moved in the world, [3] moved further than its footprint, [7] their
 // world displacement summed in millimetres. [5] unused.
 layout(std430, set = 0, binding = 11) buffer ScreenProbeStats { uint stats[8]; };
 

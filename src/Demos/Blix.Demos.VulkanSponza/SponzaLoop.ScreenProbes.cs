@@ -234,10 +234,11 @@ internal sealed partial class SponzaLoop
         double total = (double)stats[0] + stats[1] + stats[4] + stats[6];
         string Pct(int i) => string.Create(Inv, $"{100.0 * stats[i] / Math.Max(1.0, total):0.0}%");
         Console.WriteLine($"[VulkanSponza] screen probe history over the run: kept {Pct(6)}; started afresh because the nearest candidate failed: no candidate {Pct(0)}, another surface (key) {Pct(1)}, outside support {Pct(4)}");
-        // Staleness, kept apart from correspondence: of the probes that kept a past, how many sit on a point that moved
-        // in the world (its cached light was gathered somewhere else), how far on average, and how many moved further
-        // than their own footprint. Measured, not acted on.
+        // Displacement, a diagnostic only: of the probes that kept a past, how many sit on a point that moved in the
+        // world, how far on average, and how many moved further than their own footprint. Not staleness: surface motion
+        // is not lighting invalidation (the mover: a still probe beside it went +59% stale), and it must not become the
+        // invalidation rule (stage 4f).
         Console.WriteLine(string.Create(Inv,
-            $"[VulkanSponza] screen probe staleness: kept on a moving point {Pct(2)}, mean world displacement {(stats[2] > 0 ? stats[7] / (double)stats[2] : 0):0.0} mm, moved beyond its footprint {Pct(3)}"));
+            $"[VulkanSponza] screen probe displacement: kept on a moving point {Pct(2)}, mean world displacement {(stats[2] > 0 ? stats[7] / (double)stats[2] : 0):0.0} mm, moved beyond its footprint {Pct(3)}"));
     }
 }
