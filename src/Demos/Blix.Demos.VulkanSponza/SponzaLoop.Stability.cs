@@ -11,6 +11,9 @@ namespace Blix.Demos.VulkanSponza;
 internal sealed partial class SponzaLoop
 {
     private int stabilityFrames;
+    // Set when a frame read targets back (each read waits for the GPU), so the next frame period is left out of
+    // the frame-time statistics.
+    private bool stabilityStalled;
     private readonly List<float[]> stabilityIncident = new();
     private readonly List<float[]> stabilityScene = new();
     // What is presented: the TAA-resolved image (empty with TAA off). The last completed frame wrote
@@ -24,6 +27,7 @@ internal sealed partial class SponzaLoop
     {
         if (stabilityFrames <= 0 || shotPath is null || shotWritten || !fullyLoaded) return;
         if (postLoadFrames < shotFrame - stabilityFrames || postLoadFrames >= shotFrame) return;
+        stabilityStalled = true;
         var incident = device.ReadTexture(graph.GetColorTexture(incidentHandle), out var iw, out var ih, out _);
         var scene = device.ReadTexture(graph.GetColorTexture(hdrHandle), out var sw, out var sh, out _);
         var resolvedFormat = TextureFormat.R11G11B10F;

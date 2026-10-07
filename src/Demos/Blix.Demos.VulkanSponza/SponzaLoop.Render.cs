@@ -395,6 +395,11 @@ internal sealed partial class SponzaLoop
                 flatPeriodsMs[flatPeriodCount % flatPeriodsMs.Length] = periodMs;
                 flatPeriodCount++;
             }
+            else if (stabilityStalled)
+            {
+                // The period after a --stability readback includes its wait for the GPU: not a frame's cost.
+                stabilityStalled = false;
+            }
             else
             {
                 framePeriodsMs[framePeriodCount % framePeriodsMs.Length] = periodMs;
@@ -1459,10 +1464,15 @@ internal sealed partial class SponzaLoop
             + $"({Share(coneTris - clusterHiddenTris):0.0}%, {clustersVisible:N0} clusters)."));
     }
 
-    /// <summary>Prints resolved GPU milliseconds per pass, heaviest first.</summary>
+    // The device's cumulative GPU pass totals when the scene finished loading: the breakdown is the window since.
+    // (It used to print lifetime means, ~1,000 flat-preview loading frames included.)
+    private Dictionary<string, GpuPassTotal> gpuTotalsAtLoad = new();
+
+    /// <summary>Prints resolved GPU milliseconds per pass since load, heaviest per frame first.</summary>
     /// <remarks>
-    /// Uses cumulative resolved device timestamps and prints sample counts beside each lifetime
-    /// mean. On tile GPUs these timings attribute encoders but do not partition total frame time.
+    /// Per run is one execution's mean; per frame divides by every frame since load, so a pass that runs every
+    /// other frame or only when due (cascades) counts what it costs a frame. On tile GPUs these timings attribute
+    /// encoders but do not partition total frame time.
     /// </remarks>
     private void WritePassBreakdown()
     {
@@ -1479,16 +1489,22 @@ internal sealed partial class SponzaLoop
             return;
         }
 
-        Console.WriteLine("[VulkanSponza] GPU ms per pass (mean over resolved frames):");
+        var windowFrames = Math.Max(1, postLoadFrames);
+        Console.WriteLine(string.Create(Inv, $"[VulkanSponza] GPU ms per pass since load ({windowFrames} frames; resolved timestamps):"));
+        Console.WriteLine("     per-run    per-frame   runs/frame  pass");
         double frameTotal = 0;
-        foreach (var entry in totals.OrderByDescending(e => e.Value.MeanMs))
+        var window = totals
+            .Select(e => (Pass: e.Key, Total: e.Value - gpuTotalsAtLoad.GetValueOrDefault(e.Key)))
+            .Where(e => e.Total.Samples > 0)
+            .OrderByDescending(e => e.Total.TotalMs);
+        foreach (var (pass, total) in window)
         {
-            if (entry.Value.Samples == 0) continue;
-            var mean = entry.Value.MeanMs;
-            frameTotal += mean;
-            Console.WriteLine($"  {mean,8:0.000} ms  {entry.Key}  (n={entry.Value.Samples})");
+            var perFrame = total.TotalMs / windowFrames;
+            frameTotal += perFrame;
+            Console.WriteLine(string.Create(Inv,
+                $"  {total.TotalMs / total.Samples,9:0.000} ms {perFrame,9:0.000} ms   {(double)total.Samples / windowFrames,8:0.00}   {pass}"));
         }
-        Console.WriteLine($"  {frameTotal,8:0.000} ms  TOTAL");
+        Console.WriteLine(string.Create(Inv, $"            {frameTotal,9:0.000} ms  TOTAL per frame"));
         Console.WriteLine(
             "  NOTE: on a tile-based GPU (Apple/MoltenVK) these bracket ENCODER submission, not the "
             + "deferred tiled execution, so they do not sum to the frame. Compare them to each other, "

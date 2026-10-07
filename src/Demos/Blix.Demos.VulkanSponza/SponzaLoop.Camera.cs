@@ -31,6 +31,8 @@ internal sealed partial class SponzaLoop
                 // frames rendered a different (flat) path entirely, and counting them diluted the
                 // amortised cost of everything that only runs once the real path is live.
                 host.Timing.ResetIsolatedTotals();
+                // The device's GPU totals are cumulative by design: the window starts with this snapshot.
+                gpuTotalsAtLoad = new Dictionary<string, GpuPassTotal>(host.Timing.GpuPassTotals);
                 triangleFrames = 0;
                 cameraTriangleSum = 0;
                 System.Array.Clear(cascadeTriangleSum);

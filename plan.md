@@ -408,8 +408,17 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      isolated, whatever the level): a single-dispatch downsample is the win; the late pre-pass loads and stores
      five attachments even when its list is empty (needs the count on the GPU, or a cheaper attachment set);
      six previous-frame cameras (hygiene, no measurable cost).
-   Next: F1 the instrument (lifetime GPU totals reset at load, the 32-pass query cap, a TOTAL that counts
-     only frames a pass ran), then F5 hot spots: the clipmap's incident pass (11.6-12.4 ms: three clipmap
+   F1 DONE the instrument: the pass breakdown is the window since load (the device's totals are cumulative by
+     design; the demo never took the snapshot, so it printed lifetime means with ~1,000 loading frames in them),
+     with per-run, per-frame and runs-per-frame columns and a TOTAL per frame; the engine's timestamp slot holds
+     128 passes (was 32: a 33-pass frame lost its tail in silence) and says once if a frame runs out; the frame
+     period after a --stability readback (a GPU wait) is left out of the frame-time statistics. Not fixed,
+     because it never fires: a NotReady timestamp result surviving into the next reset (0 of 878 run logs).
+     Normal (non-isolated) per-pass times are only meaningful for compute passes on MoltenVK (render passes
+     bracket encoders); --gpu-isolate remains the per-pass truth for everything.
+     First reading with it: screen probes cost 41 ms a frame while the mover swings (46% of probes dependent and
+     tracing every frame, plus fresh-probe passes), 27 ms isolated when still.
+   Next: F5 hot spots: the clipmap's incident pass (11.6-12.4 ms: three clipmap
      samples a pixel for the gradient, up to 8 screen probes), screen-probe register pressure (the second
      layer's 16-point candidate arrays in every lane) and lane-0 SH reduction, the pyramids, barriers around
      buffer dispatches, CPU allocations.

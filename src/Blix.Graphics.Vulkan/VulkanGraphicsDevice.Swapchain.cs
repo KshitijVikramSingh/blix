@@ -73,7 +73,10 @@ public sealed partial class VulkanGraphicsDevice
     // MaxPendingPerSlot and flush stale entries instead of waiting forever.
     // Native Vulkan drivers on Linux/Windows resolve correctly. On macOS the
     // CPU timers (frame/build-commands/execute/swap) carry the perf story.
-    private const uint QueriesPerFrameSlot = 64;
+    // Two per timed pass. 64 held 32 passes, and a frame with the probe clipmap, screen probes and every cascade
+    // re-rendering records 33: the tail went untimed in silence. 256 holds 128, and running out is now said once.
+    private const uint QueriesPerFrameSlot = 256;
+    private bool reportedQueryCap;
     private const int MaxPendingPerSlot = 32;
     // --- per-pass isolation --------------------------------------------------
     // <b>What the timestamps cannot see, bought by refusing to overlap.</b> vkCmdWriteTimestamp on
@@ -783,6 +786,7 @@ public sealed partial class VulkanGraphicsDevice
                 var cEnd = nextQueryIndex + 1;
                 var canTimeCompute = timestampsSupported && nextQueryIndex + 1 < slotQueryBase + QueriesPerFrameSlot;
                 if (canTimeCompute) nextQueryIndex += 2;
+                else ReportQueryCap(pass.Name);
 
                 currentPassName = pass.Name;
                 CountPass(pass.Name);
@@ -901,7 +905,7 @@ public sealed partial class VulkanGraphicsDevice
             var startIndex = nextQueryIndex;
             var endIndex = nextQueryIndex + 1;
             var canTimePass = timestampsSupported && nextQueryIndex + 1 < slotQueryBase + QueriesPerFrameSlot;
-            if (!canTimePass) startIndex = endIndex = uint.MaxValue;
+            if (!canTimePass) { startIndex = endIndex = uint.MaxValue; ReportQueryCap(pass.Name); }
             else nextQueryIndex += 2;
 
             // Named so a uniform-conflict message can say WHICH two passes disagreed, which is the
@@ -1189,6 +1193,14 @@ public sealed partial class VulkanGraphicsDevice
             AccumulateGpuPassTotal(t.PassName, deltaMs);
         }
         pending.Clear();
+    }
+
+    // A pass past the query slot's capacity is not timed; say so once rather than let its GPU time read as nothing.
+    private void ReportQueryCap(string pass)
+    {
+        if (!timestampsSupported || reportedQueryCap) return;
+        reportedQueryCap = true;
+        Console.WriteLine($"[blix] GPU pass timings: more than {QueriesPerFrameSlot / 2} passes in a frame; '{pass}' and any after it are not timed.");
     }
 
     private unsafe void TranslateDrawIndexed(CommandBuffer cmd, DrawIndexedCommand d, int frameSlot)
