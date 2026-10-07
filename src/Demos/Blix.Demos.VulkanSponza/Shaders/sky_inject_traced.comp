@@ -1,4 +1,0 @@
-#version 450
-// The probe injection, tracing each ray through the ray scene (ray_query.glsl). The body is sky_inject.glsl.
-#define SKY_INJECT_TRACED
-#include "sky_inject.glsl"

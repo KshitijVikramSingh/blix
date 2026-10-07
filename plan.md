@@ -102,9 +102,8 @@ exactly where the world has changed.
    reference`): sky visibility against triangles at baked probes, and the SURFACE reference, which judges
    what is shaded at camera-visible points (so it sees leaks). At Sponza's surfaces the clipmap's sky
    visibility is unbiased (median 0.99, error 0.008) where the bake is low (0.64, 0.014); sun-only bounce
-   is over at the p90 in both (bounds 2.8x, clipmap 3.1x: leaks). Open, and why the clipmap is not the
-   default: its 40% brighter picture was start-up glare (an unanswered hit took the sky as open; fixed:
-   closed, and early solves averaged), settled it agrees with the bounds field. The surface reference now
+   is over at the p90 in both (bounds 2.8x, clipmap 3.1x: leaks). The clipmap is the DEFAULT and the only diffuse
+   GI since the frame audit (stage 3, below): the bounds-sized atlas, its injection and the cooked volumes are gone. The surface reference now
    judges sky-carried bounce too, with the sky's radiance on the CPU (`SkyRadiance`: the cooked
    environment with the sun disc replaced as the cook does, checked against the cooked irradiance to
    0.97-1.03 for every normal). Both fields carry about 1.5x too much (bounds median 1.52, clipmap 1.45):
@@ -225,21 +224,10 @@ exactly where the world has changed.
    word in `BlixRaySurfaces`: albedo (sRGB) and coverage. Traversal meets a partly covered triangle by an
    integer hash of the ray's seed, the entry and its leaf position (`RayTests.Covered`), so the CPU oracle
    flips the same coins and stays bit-exact; hits carry linear albedo. Sponza: 1.35M of 12.8M triangles
-   partly covered; the traced view's disagreement at foliage halves (5.45% -> 2.76%). 4b: `--gi-trace`
-   swaps the injection's march for traced rays into the same atlas (`sky_inject_traced.comp`; the body is
-   `sky_inject.glsl`, two programs so default runs build no ray scene; `--ab trace` alternates). Warm A/B
-   on the orbit: Bistro 20.2 against 21.9 ms, Sponza 27.5 against 28.6: faster than the march. Pictures
-   within 1.6/255 on average, traced a little brighter (Sponza's curtains and upper walls). The traced
-   field is the right one: `--probe-reference` now also path-traces the triangles (baked albedo and
-   coverage; the old reference traced the occupancy grid, the march's own geometry). Sun-only field
-   against it, 48 probes: Sponza march median ratio 0.73 and mean error 0.0300, traced 0.98 and 0.0027
-   (11x smaller); Bistro 0.0116 against 0.0052. The grid under-lights Sponza's arcades by about a
-   quarter, and the grid reference shares the bias (18% under the triangles). Traced is now the
-   default (`--gi-march` for the A/B), tracing at 2 cm (`--ray-lod-error`; same error against the
-   full-detail reference, Sponza 506 MB on the GPU), built only where there is a probe field. Open: coloured
-   transmission through leaves (the march had it), the probes' own placement still reads the occupancy
-   grid (buried test), and the sky term has no reference yet (traced runs 7-16% brighter with the sun
-   off).
+   partly covered; the traced view's disagreement at foliage halves (5.45% -> 2.76%). 4b (traced rays into the
+   bounds-sized atlas, A/B against the occupancy march) found the grid under-lit Sponza's arcades by a quarter
+   (march median 0.73 against the triangle reference, traced 0.98); both the atlas and the march are retired now.
+   Open: coloured transmission through leaves (the march had it), and the sky term has no reference yet.
 4e. *Surface identity and motion, below every temporal effect* -- DONE (dcab204..fb8c1ce, 2026-10-06). It
    left four separate questions, each with its own answer, where there used to be one heuristic pile:
      OWNERSHIP       the SurfaceKey: source primitive (`PrimitiveSource`, format v20, survives the cook's
@@ -390,6 +378,30 @@ exactly where the world has changed.
      shading; only knowing HOW the shading changed (not that it did) would remove it. Not pursued.
    Only after 4f-i proves the shape: representations that scale past one mover (change epochs per reach,
    coarse spatial dirty fields, dependency hashes, reach IDs).
+F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table"). Structural first, then the
+   instrument, then hot spots. Isolated per-pass GPU ms (`--gpu-isolate`; totals across sessions are NOT comparable
+   on this laptop -- the same lit pass isolated 15.2 ms one morning, 21.4 the next afternoon).
+   Baseline (2026-10-07): default sky-inject 22.2, lit 15.2, depth-prepass 8.9, late 4.0, incident 3.8, resolve
+   1.4, gtao + denoise 2.4, 12 pyramid passes ~5; clipmap + screen probes: screen-probes 27.0, sky-inject 26.7
+   (feeding nothing with fog off), lit 17.3, incident 8.8, late 5.5, clipmap 3.3.
+   F2 DONE (5bc3224) dead work: the bounce atlas only while read; the incident field fixed at full resolution
+     (scale, resolve pass and targets gone; the resolve was NOT an identity at scale 1 -- its rounding mixed
+     neighbours across edges on ~14% of pixels); world motion only when read; GTAO writes visibility alone to
+     R16F (engine format; its bent normal shaded nothing). Default config bit-identical apart from the resolve.
+   F3 DONE GI on the clipmap: the fog reads it; the bounds-sized atlas, sky_inject (march + traced), probe_usage,
+     the cooked sky-visibility / occupancy / albedo volumes, incident.frag, the probe display, the bounds
+     references and censuses are deleted (29 files, -3,033 lines); scene bounds come from placements (2% pad,
+     with the mover's reach). Walking vs the surface reference, total indirect |err|: Bistro bounds 0.405 ->
+     clipmap 0.153, Sponza 0.0111 -> 0.0011. As shaded: Sponza clipmap 1.71 ratio / 0.00040 (+ screen probes
+     1.13 / 0.00030), Bistro 0.88 / 0.181 (0.91 / 0.137). Glass reflections are unoccluded now (no baked sky
+     visibility), diffuse transmission's back side takes the clipmap's. Engine gap found: the Vulkan->engine
+     format map lacked R16F/R32Uint/Rg16F, so readbacks of R16F read garbage (test BX.1 now holds every colour
+     format to the round trip). Cost: the 22-27 ms injection is gone; the clipmap's incident pass is now 11.6-12.4
+     ms (three clipmap samples a pixel for the gradient, up to 8 screen probes) -- a step 4/5 target.
+     Left on the asset side, unused by this demo: SkyVisibilityBaker, BlixSkyVolume, .blixsky in the cook script.
+   F4 (next) duplicated work: one Hi-Z pyramid, skip the empty late pre-pass, the clipmap's sun through the
+     cascades where they cover a hit, one previous-frame camera. Then F1 the instrument, F5 hot spots (incident
+     pass, screen-probe register pressure, barriers, CPU allocations).
 5. *PRT baked by the cook*: per-region probe transfer, relit by the sun at runtime: the static base and
    warm start of 4.
 

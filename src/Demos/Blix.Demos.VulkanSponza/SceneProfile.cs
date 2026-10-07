@@ -17,8 +17,8 @@ internal sealed record ScenePack(string Directory, bool Required = false, bool F
 /// reach and where the camera starts. Those are this record, one per scene, chosen with <c>--scene</c>.
 /// </para>
 /// <para>
-/// They are the demo's decisions, so they live here and not in the engine or the cook. The probe's sun and
-/// the sky volume still come from the cooked tree, as they did.
+/// They are the demo's decisions, so they live here and not in the engine or the cook. The probe's sun still
+/// comes from the cooked tree, as it did; the scene's bounds come from its placements.
 /// </para>
 /// </remarks>
 internal sealed record SceneProfile(
@@ -97,7 +97,7 @@ internal sealed record SceneProfile(
 
     /// <summary>The generated city (<c>blix city</c>, tools/city/setup.sh): the scale scene, any size from a seed.</summary>
     /// <remarks>
-    /// No probe or sky volume ships with it, so it lights with the procedural sky and the open-sky fallback:
+    /// No probe ships with it, so it lights with the procedural sky (the clipmap still traces it):
     /// it is for measuring how the frame grows with the world, not for how it looks. The start pose stands
     /// in the street at x = -7 (the street east of the fourth block column at the default sizes), looking
     /// down it.

@@ -9,7 +9,7 @@
 // Each term ablated in-process on the measurement orbit (--ab <term>), ratios first because the
 // three runs sat at 28.8, 32.6 and 49.7 ms medians and the ratio is the part that reproduces:
 //
-//     probe-volume terms          1.312x   8.69 ms
+//     probe-volume terms          1.312x   8.69 ms   (the baked volumes, since retired)
 //     material texture bandwidth  1.150x   5.42 ms
 //     normal mapping              1.108x   3.97 ms
 //     image-based lighting        1.084x   3.77 ms
@@ -31,10 +31,8 @@
 
 #include "shadow.glsl"
 #include "sheen.glsl"
-#include "probe_volume.glsl"
 #include "noise.glsl"
 #include "coverage.glsl"
-#include "sky_visibility.glsl"
 #include "froxel.glsl"
 
 // Lit fragment shader — Cook-Torrance split-sum IBL on top of a Lambert N·L
@@ -79,20 +77,6 @@ layout(set = 1, binding = 3) uniform texture2D   uCascadeShadowMaps[3];
 layout(set = 1, binding = 4) uniform texture3D   uFroxelGrid;
 // Ambient visibility from the GTAO pass: .xyz = bent normal (WORLD space), .a = visibility.
 layout(set = 1, binding = 5) uniform texture2D   uAmbientVisibility;
-// Baked directional sky visibility. The compact SH volumes get coherent hardware trilinear
-// filtering; an octahedral form reconstructed more accurately but doubled the measured frame cost
-// at these frequent call sites. The transport atlas below has different frequency/cost constraints.
-layout(set = 1, binding = 6)  uniform texture3D uSkyVisibility;   // L0, L1 x/y/z
-layout(set = 1, binding = 14) uniform texture3D uSkyVisibility1;  // L2 -2,-1,0,+1
-layout(set = 1, binding = 15) uniform texture3D uSkyVisibility2;  // L2 +2
-// Dynamic incident-light atlas: one 8x8 octahedral tile per probe, with a 6x6 directional interior
-// and border ring. Direction matters here because surfaces at one point can face distinct coloured
-// emitters and occluders.
-layout(set = 1, binding = 7) uniform texture2D uSkyBounce;
-layout(set = 1, binding = 13) uniform texture2D uSkyBounceDepth;
-// Probe-usage writes deliberately happen in compute, not here. Declaring a fragment-stage image3D
-// disabled tile-renderer behavior and measured 35 ms -> 290 ms even with stores removed. The
-// depth-driven compute pass derives the same visible-probe set without fragment scatter.
 // The environment convolved with CHARLIE rather than GGX, and the Charlie lobe's directional
 // albedo. Separate from uPrefilteredEnv on purpose: a GGX cube in sheen's place renders something
 // dimmer and rimless and entirely plausible, which is the failure this whole arc keeps closing.
@@ -104,12 +88,8 @@ layout(set = 1, binding = 9) uniform texture2D   uSheenLut;
 // skybox, which per-draw descriptor sets made moot.)
 layout(set = 1, binding = 10) uniform textureCube uEnvCube;
 
-// The same density grid the injection pass marches, here as the leak metric's ground truth. It is
-// not in the lit path: nothing outside the `uVizChannel > 20.5` branch samples it.
-layout(set = 1, binding = 16) uniform texture3D uOccupancy;
-
-// The half-resolution incident-light field: rgb = bounced radiance, a = baked sky visibility.
-// Read instead of recomputing when uIncident.z says the pass ran (w: it is the clipmap's, which carries the sky too). See incident.frag.
+// The incident-light field from the probe clipmap: rgb = all the indirect diffuse light arriving (sky included),
+// a = sky visibility. Read when uIncident.z says the pass ran. See incident_clipmap.frag.
 layout(set = 1, binding = 17) uniform texture2D uIncidentField;
 // How the incident light's luminance changes with the normal, at the geometric normal (incident_clipmap.frag):
 // what lets light the incident pass evaluated at the geometric normal reach the normal-mapped one.
@@ -210,14 +190,6 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
 // view-depth boundary arcs that can occur across a wide frustum, and it owns PCF, normal offset,
 // bias, and diagnostic tint consistently with other renderers.
 
-// Available before material branching so glass reflections and opaque ambient share enclosure.
-float blixSkyVisibility(vec3 worldPos, vec3 dir, float push) {
-    if (frame.uSkyMin.w <= 0.5 || frame.uAbFlags2.x > 0.5) return 1.0;
-    return blix_skyVisibility(uSkyVisibility, uSkyVisibility1, uSkyVisibility2, uLinearClamp,
-                              frame.uSkyMin.xyz, frame.uSkyScale.xyz, push,
-                              worldPos, dir);
-}
-
 void main() {
     // A shader that statically writes gl_SampleMask must assign it on every invocation; opaque
     // fragments start fully covered and cutout handling narrows the mask below.
@@ -316,16 +288,17 @@ void main() {
     float transmission = mat.uMaterialParams2.x;
     if (transmission > 0.0) {
         float lod = roughness * (frame.uEnvMipCount - 1.0);
-        // Occluded like every other indirect term. Evaluated along R rather than N because a
-        // reflection gathers from where it points, and a window deep inside a room points at a wall.
-        vec3 envRefl = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), R, lod).rgb * blixSkyVisibility(vWorldPos, R, 0.0);
+        // Unoccluded. Panes are absent from the pre-pass, so the incident field (a screen-space read of the
+        // surface in front) has nothing to say about them; the baked volume that used to occlude this
+        // along R is retired.
+        vec3 envRefl = textureLod(samplerCube(uPrefilteredEnv, uLinearClamp), R, lod).rgb;
         float fresnel = 0.04 + 0.96 * pow(clamp(1.0 - NdotV, 0.0, 1.0), 5.0);
         // No opacity floor: this branch models Fresnel reflection over the background, without
         // refraction or absorption. Clean head-on glass is therefore nearly transparent.
         float glassAlpha = mix(albedo4.a, fresnel, transmission);
         // Handle diagnostics before the early return so transmissive surfaces remain inspectable.
         if (frame.uVizChannel > 0.5) {
-            float vis = blixSkyVisibility(vWorldPos, R, 0.0);
+            float vis = 1.0;
             vec3 c = frame.uVizChannel < 1.5 ? vizGeometricN * 0.5 + 0.5 :
                      frame.uVizChannel < 2.5 ? N * 0.5 + 0.5 :
                      frame.uVizChannel < 7.5 ? vec3(vis) : vec3(vis);
@@ -475,47 +448,25 @@ void main() {
     bool inDepthPrepass = mat.uMaterialParams2.x <= 0.0;
     float visibility = inDepthPrepass ? ambientVis.r : 1.0;
 
-    // IBL, sky visibility and bounce use the surface normal; uAmbientGeoNormal isolates interpolated versus
-    // normal-mapped input. (GTAO no longer writes a bent normal: nothing shaded with it.)
+    // IBL uses the shading normal. (GTAO no longer writes a bent normal: nothing shaded with it.)
     vec3 cubeN   = N;
-    vec3 skyVisN = frame.uAmbientGeoNormal > 0.5 ? vizGeometricN : N;   // geometric by default
-    vec3 bounceN = frame.uAmbientGeoNormal > 0.5 ? vizGeometricN : N;   // -- see the declaration
     vec3 irradiance = frame.uAbFlags.z > 0.5 ? vec3(0.2) : texture(samplerCube(uIrradiance, uLinearClamp), cubeN).rgb;
 
-    // --- Baked sky visibility -------------------------------------------
-    // Baked sky visibility supplies building-scale enclosure beyond GTAO's screen-space radius.
-    // The lookup is pushed along the normal so a probe cell straddling a wall reads the surface's
-    // side of the enclosure.
-    float skyVisibility = 1.0;
-    vec3 vizProbeUv = vec3(0.0);
-    vec4 vizSh = vec4(0.0);
-    BlixSkySample skySample;
-    bool skySampleValid = false;
-    // The incident field carries .a sky visibility and .rgb incoming bounce, replacing two volume
-    // reconstructions while leaving material response and direct/specular lighting in this pass.
-    vec4 incidentField = frame.uIncident.z > 0.5
+    // --- The incident field (the probe clipmap) ------------------------------------------------
+    // .a is the sky visibility the clipmap's probes see, supplying building-scale enclosure beyond
+    // GTAO's screen-space radius; .rgb is all the indirect diffuse light arriving, sky included.
+    // Without the field (--no-incident, or before the clipmap's first solve) the sky is open:
+    // visibility 1 and the irradiance cube's light.
+    bool incidentOn = frame.uIncident.z > 0.5;
+    bool incidentUsed = incidentOn && frame.uIncident.x > 0.5;
+    vec4 incidentField = incidentOn
         ? texture(sampler2D(uIncidentField, uLinearClamp), gl_FragCoord.xy / frame.uFog.xy)
         : vec4(0.0);
-    if (frame.uIncident.z > 0.5) {
-        skyVisibility = frame.uSkyMin.w > 0.5 ? incidentField.a : 1.0;
-        vizSh = vec4(skyVisibility);
-    } else if (frame.uSkyMin.w > 0.5) {
-        vec3 probeUv = (vWorldPos + N * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz;
-        vizProbeUv = probeUv;
-        // Fetch once and evaluate for both N and -N; with no positional push both directions share
-        // the same three volume texels.
-        skySample = blix_skyFetch(uSkyVisibility, uSkyVisibility1, uSkyVisibility2, uLinearClamp,
-                                  frame.uSkyMin.xyz, frame.uSkyScale.xyz, vWorldPos);
-        skySampleValid = true;
-        skyVisibility = frame.uSkyDropL2 > 0.5
-            ? blix_skyEvaluateL1(skySample.sh0, skyVisN)
-            : blix_skyEvaluate(skySample, skyVisN);
-        vizSh = vec4(skyVisibility);
-    }
+    float skyVisibility = incidentUsed ? incidentField.a : 1.0;
 
-    // With the probe clipmap's field (frame.uIncident.w) the sky's diffuse light arrives through the incident field,
-    // as the sky the surface actually sees; adding the cube's irradiance times visibility here would count it twice.
-    vec3 diffuseIBL = frame.uIncident.w > 0.5 ? vec3(0.0) : irradiance * albedo * skyVisibility;
+    // With the field the sky's diffuse light arrives through it, as the sky the surface actually sees;
+    // adding the cube's irradiance times visibility here would count it twice.
+    vec3 diffuseIBL = incidentOn ? vec3(0.0) : irradiance * albedo * skyVisibility;
 
     // Specular: prefiltered env at LOD = roughness × (mipCount - 1), times
     // the BRDF LUT integration (split-sum approximation of the specular term).
@@ -537,61 +488,30 @@ void main() {
     float specularVisibility = clamp(
         pow(max(NdotV + visibility, 0.0), exp2(-16.0 * roughness - 1.0)) - 1.0 + visibility,
         0.0, 1.0);
-    // Bounce is added to visibility-scaled sky light. It is incident light arriving from elsewhere,
-    // not another visibility factor to multiply into the sky field.
+    // The field's light is added to the sum, reflected with the same albedo response as diffuse IBL.
+    // It is incident light arriving from elsewhere, not another visibility factor.
     vec3 bounce = vec3(0.0);
     vec3 vizBounceRaw = vec3(0.0);
-    float probeConfidence = 0.0;
-    // Negative means "not measured here" — no probe volume, no occupancy grid, or not the channel
-    // that asks. The census needs that distinct from a measured zero, or every unlit pixel in the
-    // frame votes "no leak" and the average is whatever fraction of the screen is sky.
-    float vizProbeLeak = -1.0;
-    if (frame.uBounceStrength > 0.0 && frame.uAbFlags2.x < 0.5 && frame.uNoBounceTerm < 0.5) {
-        vec3 probeUv = (vWorldPos + N * frame.uSkyScale.w - frame.uSkyMin.xyz) * frame.uSkyScale.xyz;
-        // Incident irradiance is reflected with the same albedo response as diffuse IBL. Inline
-        // reconstruction blends up to eight probes with depth/occupancy visibility to prevent a
-        // nearest probe on the far side of a wall from contributing.
-        vec3 incident;
-        if (frame.uIncident.z > 0.5) {
-            incident = incidentField.rgb;
-            // The field was evaluated at the geometric normal (the pre-pass carries no normal map). Carry it to
-            // the normal-mapped normal to first order: with the clipmap's field all indirect light arrives here,
-            // and without this a normal map's folds and relief go flat in it (15% of Sponza's pixels moved when
-            // the inline path was evaluated at the geometric normal instead).
-            if (frame.uIncident.w > 0.5) {
-                vec3 gradient = texture(sampler2D(uIncidentGradient, uLinearClamp), gl_FragCoord.xy / frame.uFog.xy).xyz;
-                float lum = dot(incident, vec3(0.2126, 0.7152, 0.0722));
-                if (lum > 1e-6) {
-                    // The normal map read blurred (uIncidentGradient.x mips down), through the same frame: indirect
-                    // diffuse follows a surface's folds and relief, and the weave below a pixel that TAA's jitter
-                    // samples differently each frame stays with the direct light.
-                    vec2 nxyLow = (texture(uNormalMap, uv, frame.uIncidentGradient.x).xy * 2.0 - 1.0)
-                                * normalScale * (1.0 - frame.uAbFlags.w);
-                    vec3 nLow = normalize(mat3(T, B, vizGeometricN) * vec3(nxyLow, sqrt(max(0.0, 1.0 - dot(nxyLow, nxyLow)))));
-                    float range = frame.uIncidentGradient.y;
-                    incident *= clamp(1.0 + dot(gradient, nLow - vizGeometricN) / lum, 1.0 - range, 1.0 + range);
-                }
-            }
-            // The field carries no per-pixel confidence: each full-resolution texel has already
-            // mixed four coarse samples. Channel 16 and the leak census therefore report full
-            // confidence because receiver selection is not evaluated in this pass.
-            probeConfidence = 1.0;
-        } else {
-            incident = blix_probeIrradianceEx(
-                uSkyBounce, uSkyBounceDepth, uOccupancy, uLinearClamp, ivec3(frame.uBounceDims.xyz),
-                ivec3(frame.uOccupancyDims.xyz), frame.uSkyMin.xyz, 1.0 / frame.uSkyScale.xyz,
-                vWorldPos, bounceN, frame.uProbeTetrahedral > 0.5,
-                frame.uOccupancyDims.w > 0.5 && frame.uAbFlags2.y < 0.5 ? frame.uProbeOcclusion : 0.0,
-                probeConfidence);
+    if (incidentUsed && frame.uNoBounceTerm < 0.5) {
+        vec3 incident = incidentField.rgb;
+        // The field was evaluated at the geometric normal (the pre-pass carries no normal map). Carry it to
+        // the normal-mapped normal to first order: all indirect light arrives here, and without this a normal
+        // map's folds and relief go flat in it (15% of Sponza's pixels moved when the inline path was
+        // evaluated at the geometric normal instead).
+        vec3 gradient = texture(sampler2D(uIncidentGradient, uLinearClamp), gl_FragCoord.xy / frame.uFog.xy).xyz;
+        float lum = dot(incident, vec3(0.2126, 0.7152, 0.0722));
+        if (lum > 1e-6) {
+            // The normal map read blurred (uIncidentGradient.x mips down), through the same frame: indirect
+            // diffuse follows a surface's folds and relief, and the weave below a pixel that TAA's jitter
+            // samples differently each frame stays with the direct light.
+            vec2 nxyLow = (texture(uNormalMap, uv, frame.uIncidentGradient.x).xy * 2.0 - 1.0)
+                        * normalScale * (1.0 - frame.uAbFlags.w);
+            vec3 nLow = normalize(mat3(T, B, vizGeometricN) * vec3(nxyLow, sqrt(max(0.0, 1.0 - dot(nxyLow, nxyLow)))));
+            float range = frame.uIncidentGradient.y;
+            incident *= clamp(1.0 + dot(gradient, nLow - vizGeometricN) / lum, 1.0 - range, 1.0 + range);
         }
         vizBounceRaw = incident;
         bounce = incident * albedo * (1.0 - metallic) * ao * visibility;
-        if (frame.uVizChannel > 20.5 && frame.uOccupancyDims.w > 0.5) {
-            vizProbeLeak = blix_probeLeakFraction(
-                uSkyBounceDepth, uOccupancy, uLinearClamp, ivec3(frame.uBounceDims.xyz),
-                ivec3(frame.uOccupancyDims.xyz), frame.uSkyMin.xyz, 1.0 / frame.uSkyScale.xyz,
-                vWorldPos, bounceN, frame.uProbeTetrahedral > 0.5, frame.uProbeOcclusion);
-        }
     }
 
     // Sheen's own prefiltered environment, at the sheen roughness rather than the base one, times
@@ -608,11 +528,10 @@ void main() {
     // direct sun on it at all, and that is most of what makes cloth read as thin.
     vec3 transmittedIBL = vec3(0.0);
     if (diffTrans > 0.0) {
-        // Diffuse transmission queries the back side's own baked sky visibility along -N. The
-        // world-space field supports both directions; GTAO remains a front-view approximation.
-        float backVis = skySampleValid
-            ? blix_skyEvaluate(skySample, -N)
-            : blixSkyVisibility(vWorldPos, -N, 0.0);
+        // The back side's sky visibility. The incident field answers only at the front's geometric
+        // normal, so its visibility stands in for -N's (the clipmap resolves enclosure at room scale,
+        // where the two sides of a sheet share it); without the field the sky is open.
+        float backVis = incidentUsed ? incidentField.a : 1.0;
         vec3 backIrradiance = texture(samplerCube(uIrradiance, uLinearClamp), -cubeN).rgb * backVis;
         transmittedIBL = blix_diffuseTransmissionAmbient(
             backIrradiance, dtColor, diffTrans) * ao * visibility;
@@ -640,11 +559,8 @@ void main() {
             frame.uVizChannel < 5.5 ? T * 0.5 + 0.5 :
             frame.uVizChannel < 6.5 ? B * 0.5 + 0.5 :
             frame.uVizChannel < 7.5 ? vec3(skyVisibility) :
-            // 8 = the probe lookup coordinate, 9 = the raw L0 it read back, scaled to [0,1] by the
-            // value a fully open sphere produces. Between them these say whether a near-zero result
-            // is a bad coordinate, a bad uniform, or a bad texel.
-            frame.uVizChannel < 8.5 ? clamp(vizProbeUv, vec3(0.0), vec3(1.0)) :
-            frame.uVizChannel < 9.5 ? vec3(clamp(vizSh.x / (4.0 * PI * 0.282095), 0.0, 1.0)) :
+            // 8 and 9 are unused (they read the retired baked volume); black.
+            frame.uVizChannel < 9.5 ? vec3(0.0) :
             // 10 is raw incident bounce; 11 includes surface response and occlusion; 12 is direct
             // sun for scale. Keeping these stages separate distinguishes weak transport from later
             // attenuation.
@@ -655,13 +571,8 @@ void main() {
             frame.uVizChannel < 13.5 ? vec3(visibility) :
             frame.uVizChannel < 14.5 ? vec3(ao) :
             frame.uVizChannel < 15.5 ? vec3(skyVisibility * visibility * ao) :
-            // 16 shows probe-blend confidence: green is surviving weight, red is the nearest-probe
-            // fallback after all candidates were rejected, and blue means transport was disabled.
-            frame.uVizChannel < 16.5 ? (frame.uBounceStrength <= 0.0
-                                            ? vec3(0.0, 0.1, 1.0)
-                                            : probeConfidence <= 1e-5
-                                                ? vec3(1.0, 0.0, 0.0)
-                                                : vec3(0.0, clamp(probeConfidence, 0.0, 1.0), 0.0)) :
+            // 16 is unused (the retired volume's probe-blend confidence); black.
+            frame.uVizChannel < 16.5 ? vec3(0.0) :
             // 17-20 expose the ambient sum before addition: diffuse sky, specular sky, thin-sheet
             // transmission, and bounce.
             frame.uVizChannel < 17.5 ? kD * diffuseIBL * transScale * visibility * ao :
@@ -672,14 +583,8 @@ void main() {
             // with geometric channel 1 and shading channel 2 to localize reconstruction faults.
             frame.uVizChannel < 22.5 && frame.uVizChannel > 21.5
                 ? texture(sampler2D(uPrepassNormalViz, uLinearClamp), gl_FragCoord.xy / frame.uFog.xy).xyz * 0.5 + 0.5 :
-            // 21 compares the probe blend with an occupancy march: red is leaked weight and green
-            // is 0.5 + 0.5*confidence for measured pixels. Reporting both prevents zero-leak scores
-            // achieved by rejecting all useful light.
-                                       vec3(max(vizProbeLeak, 0.0),
-                                            vizProbeLeak >= 0.0
-                                                ? 0.5 + 0.5 * clamp(probeConfidence, 0.0, 1.0)
-                                                : 0.0,
-                                            0.0);
+            // 21 is unused (the retired volume's leak metric); black.
+                                       vec3(0.0);
         // Straight out, no exposure and no tonemap — these are directions and flags, and a film
         // curve on a direction is a way to misread it.
         // Diagnostics force full coverage so dropped foliage samples cannot reveal the skybox and

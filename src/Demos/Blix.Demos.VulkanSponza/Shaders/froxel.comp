@@ -14,17 +14,15 @@
 // scene renders with), so the Vulkan clip-space Y flip is handled for free and
 // the grid aligns with gl_FragCoord in the lit shader.
 //
-// Ambient in-scatter comes from the same scene fields as surfaces: environment irradiance weighted
-// by baked sky visibility plus dynamic probe bounce. The fallback constant applies only when those
-// fields are unavailable. Medium density falls from the volume floor and varies over a slowly
+// Ambient in-scatter comes from the same field as surfaces: the probe clipmap, which carries all the
+// indirect light arriving at a point, sky included. The fallback constant applies only when the
+// clipmap is unavailable. Medium density falls from the volume floor and varies over a slowly
 // drifting noise field so both extinction and scattering have spatial structure.
 //
 // Deliberate simplification: shadow lookup is one cascade texel per froxel rather than filtered
 // PCF. Cascade selection still uses the shared fitted-volume lookup.
 
 #include "shadow.glsl"
-#include "sky_visibility.glsl"
-#include "probe_volume.glsl"
 #include "froxel.glsl"
 #include "noise.glsl"
 
@@ -38,12 +36,14 @@ layout(set = 0, binding = 0) uniform Froxel {
     vec4 uSunDir;        // xyz direction into scene, w = sun intensity
     vec4 uSunColor;      // rgb sun colour, w = scattering albedo
     vec4 uFogParams;     // x = phase g, y = ambient fallback, z = indirect available (0/1), w = time
-    vec4 uBoundsMin;     // xyz sky/probe volume min
-    vec4 uBoundsSpan;    // xyz sky/probe volume span
-    vec4 uProbeDims;     // xyz bounce grid dimensions
-    // xyz occupancy grid dims, w = line-of-sight occupancy weight. Held at zero here so the surface
-    // pass remains the sole owner of that measurement axis.
-    vec4 uOccupancyDims;
+    vec4 uBoundsMin;     // y the ground the height falloff starts from
+    // The probe clipmap the medium is lit by (as incident_clipmap.frag reads it).
+    vec4 uClipDims;      // xyz probes per level, w base spacing
+    vec4 uClipParams;    // x blend band (probes)
+    vec4 uOrigin0;
+    vec4 uOrigin1;
+    vec4 uOrigin2;
+    vec4 uOrigin3;
     vec4 uMedium;        // x = height scale (m), y = noise amount 0..1
     vec4 uTemporal;      // x = history weight, y = slice jitter, z = visualize rejection
     mat4 uPrevViewProj;  // last frame's camera, for reprojecting the medium
@@ -52,19 +52,20 @@ layout(set = 0, binding = 0) uniform Froxel {
 
 layout(set = 0, binding = 1, rgba16f) uniform writeonly image3D uGrid;
 layout(set = 0, binding = 2) uniform sampler2D uCascadeShadowMaps[3];
-// Only the L0 band, because a volume point wants the spherical mean (see blix_skyVisibilityMean).
-layout(set = 0, binding = 3) uniform sampler3D  uSkyVisibility;
 layout(set = 0, binding = 4) uniform samplerCube uIrradiance;
-layout(set = 0, binding = 5) uniform sampler2D  uAtlas;
-layout(set = 0, binding = 6) uniform sampler2D  uDepthAtlas;
+// The clipmap: all the indirect light arriving at a point, sky included (what the surfaces are lit by too).
+layout(set = 0, binding = 5) uniform sampler2D  uClipmapIrradiance;
+layout(set = 0, binding = 6) uniform sampler2D  uClipmapDepth;
+layout(std430, set = 0, binding = 3) readonly buffer ClipmapState { uvec4 states[]; };
 // Reproject local medium state, not the camera-relative integral. RGB stores in-scattered radiance
 // and alpha stores extinction before front-to-back integration; after blending, uGrid receives the
 // newly integrated result for the current camera.
 layout(set = 0, binding = 7) uniform sampler3D uScatterPrev;
 layout(set = 0, binding = 8, rgba16f) uniform writeonly image3D uScatter;
-// The density grid, for the probe blend's line-of-sight test. Bound rather than passed a stand-in
-// texture so the argument means what it says even while uOccupancyDims.w holds it at zero.
-layout(set = 0, binding = 9) uniform sampler3D uOccupancy;
+#define BLIX_CLIPMAP_IRRADIANCE(t) texelFetch(uClipmapIrradiance, t, 0)
+#define BLIX_CLIPMAP_DEPTH(t) texelFetch(uClipmapDepth, t, 0)
+#define BLIX_CLIPMAP_STATE(s) states[s]
+#include "probe_clipmap.glsl"
 
 const float PI = 3.14159265359;
 
@@ -136,7 +137,14 @@ void main()
     // irradiance cube is a cosine convolution of the sky, so E(n)/pi is the mean radiance over the
     // hemisphere about n, and the six axes average to the sphere.
     vec3 skyRadiance = vec3(0.0);
-    vec3 invSpan = vec3(1.0) / max(f.uBoundsSpan.xyz, vec3(1e-4));
+    BlixClipmap c;
+    c.dims = ivec3(f.uClipDims.xyz);
+    c.baseSpacing = f.uClipDims.w;
+    c.blendProbes = f.uClipParams.x;
+    c.origin[0] = ivec3(f.uOrigin0.xyz);
+    c.origin[1] = ivec3(f.uOrigin1.xyz);
+    c.origin[2] = ivec3(f.uOrigin2.xyz);
+    c.origin[3] = ivec3(f.uOrigin3.xyz);
     if (giOn) {
         skyRadiance = (texture(uIrradiance, vec3( 1.0, 0.0, 0.0)).rgb
                      + texture(uIrradiance, vec3(-1.0, 0.0, 0.0)).rgb
@@ -182,16 +190,14 @@ void main()
         vec3 ambientRadiance = vec3(f.uFogParams.y);
         if (giOn) {
             if ((z % PROBE_STRIDE) == 0) {
-                // Bounced light arriving along the view ray. The probe blend is directional, and
-                // the direction that matters for in-scatter toward the eye is the one the light
-                // travels to get here.
-                bounce = blix_probeIrradiance(
-                    uAtlas, uDepthAtlas, uOccupancy, ivec3(f.uProbeDims.xyz),
-                    ivec3(f.uOccupancyDims.xyz), f.uBoundsMin.xyz, f.uBoundsSpan.xyz,
-                    worldPos, -rayDir, f.uOccupancyDims.w) / PI;
+                // The clipmap's irradiance arriving along the view ray (the direction in-scatter toward the eye
+                // travels), as radiance: everything indirect, the sky that reaches here included. Past its coarsest
+                // level, the open sky.
+                bool found;
+                vec4 field = blix_clipmapSample(c, worldPos, -rayDir, found);
+                bounce = found ? field.rgb / PI : skyRadiance;
             }
-            float skyVis = blix_skyVisibilityMean(uSkyVisibility, f.uBoundsMin.xyz, invSpan, worldPos);
-            ambientRadiance = skyRadiance * skyVis + bounce;
+            ambientRadiance = bounce;
         }
 
         vec3 sunLit = f.uSunColor.rgb * f.uSunDir.w * phase * vis;

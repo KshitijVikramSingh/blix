@@ -100,40 +100,9 @@ internal sealed partial class SponzaLoop
             device.VsyncEnabled = debug.Controls.Toggle("Vsync", device.VsyncEnabled);
             // Visualization channels are named here and share the shader's stable integer IDs.
             vizChannel = debug.Controls.Enum("Show", (int)MathF.Round(vizChannel), VizChannelNames);
-            // Toggle the incident field under a still camera for direct visual comparison with the
-            // inline path. Its allocation scale remains a launch flag because graph resources are
-            // fixed at compile time.
-            incidentField = debug.Controls.Toggle("Incident field (off: inline baked field)", incidentField);
-        }
-
-        // Expose the indirect solve's rays, refresh period, and occupancy interpretation together
-        // so their cost and image effect can be compared within one run.
-        if (skyVisibilityEnabled)
-        {
-            // Display raw per-probe fields before material albedo, AO, and visibility attenuate the
-            // indirect contribution seen by the camera.
-            using (debug.Scope("Probes"))
-            {
-                showProbes    = debug.Controls.Toggle("Show probes", showProbes);
-                probeRadius   = debug.Controls.Float("Radius (m)", probeRadius, 0.02f, 0.4f);
-                probeExposure = debug.Controls.Float("Exposure", probeExposure, 0.1f, 20f);
-                probeField    = debug.Controls.Enum("Field", (int)probeField,
-                    new[] { "Bounce radiance", "Sky visibility", "Usefulness", "Reachable (red = rejected)" });
-            }
-
-            using (debug.Scope("Indirect"))
-            {
-                injectDensity = debug.Controls.Toggle("Density march", injectDensity);
-                // 256 is the ceiling: the workgroup has 256 lanes and each marches one ray.
-                injectRays    = debug.Controls.Float("Rays / probe", injectRays, 8f, 256f);
-                injectPeriod  = debug.Controls.Float("Refresh period", injectPeriod, 4f, 64f);
-                // A multiplier on what the bake read out of each material, so 1.0 is "as authored"
-                // and 0 is the A/B that removes the term. Above 1 exaggerates it for judgment.
-                injectTransmissionScale = debug.Controls.Float(
-                    "Transmission x", injectTransmissionScale, 0f, 2f);
-                // Zero disables sleeping and supplies the full-grid A/B baseline.
-                probeSleepFrames = MathF.Round(debug.Controls.Float("Sleep after (frames)", probeSleepFrames, 0f, 600f));
-            }
+            // Toggle the incident field under a still camera: off, the lit pass uses the open-sky cube
+            // with no clipmap light, the diagnostic --no-incident is.
+            incidentField = debug.Controls.Toggle("Incident field (off: open sky cube)", incidentField);
         }
 
         // Spatial gizmos: sun direction + the three cascade ortho boxes.
@@ -182,33 +151,6 @@ internal sealed partial class SponzaLoop
         {
             debug.Values.Value("sun-irradiance",
                 $"{EffectiveSunIrradiance.X:0.00} ({sunIrradiance.X:0.00} measured)");
-        }
-
-        using (debug.Scope("Indirect"))
-        {
-            // Report a windowed injection cost beside the controls that affect it; see gpuPasses.
-            var injectMs = gpuPasses.MeanMs("sky-inject");
-            debug.Values.Value("inject-gpu", lastFramePeriodMs > 0.01
-                ? $"{injectMs:0.00} ms ({injectMs / lastFramePeriodMs * 100.0:0.0}% of a {lastFramePeriodMs:0.0} ms frame)"
-                : $"{injectMs:0.00} ms");
-
-            // Report commanded work rather than inferring it from refresh period. Every probe
-            // launches a workgroup each frame; selected probes march rays, while skipped probes copy
-            // their irradiance and depth tiles into the other ping-pong atlas. Carry cost therefore
-            // scales with probe count rather than refresh rate.
-            var probes = bounceX * bounceY * bounceZ;
-            const int tileTexels = 8 * 8;
-            var rays = Math.Clamp((int)MathF.Round(injectRays), 8, 256);
-            var period = MathF.Max(1f, MathF.Round(injectPeriod));
-            var solving = Math.Max(1, (int)MathF.Round(probes / period));
-            // Use invariant formatting so captures and measurement notes compare across locales.
-            debug.Values.Value("inject-dispatch", string.Create(Inv,
-                $"{probes:N0} workgroups x {tileTexels} lanes"));
-            debug.Values.Value("inject-solving", string.Create(Inv,
-                $"{solving:N0} probes x {rays} rays = {solving * (long)rays:N0} rays"));
-            debug.Values.Value("inject-carry", string.Create(Inv,
-                $"{(probes - solving) * (long)tileTexels * 2:N0} texel copies (irradiance+depth), period-independent"));
-            debug.Values.Value("probe-refresh", $"{rays} rays every {period:0}f");
         }
 
         // Per-pass GPU time, the CPU split and what was submitted are on the Perf tab, from the host's

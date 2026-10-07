@@ -94,6 +94,10 @@ internal sealed partial class SponzaLoop
         return new Bounds3(min, max);
     }
 
+    // The scene's extent: everything that can cast or receive is a placement, so their union is the volume caster
+    // culling sweeps to, the fog's ground sits on and the orbit frames. Padded by 2% of the span on each side, as the
+    // retired sky-visibility cook padded the volume this replaces, and widened to the mover's reach so a moving
+    // caster's shadow still reaches the ground it sweeps over. Called after ConsolidateBuffers, which selects the mover.
     private void FitSceneVolumeToDrawables()
     {
         var all = opaquePlacements.Concat(blendPlacements).ToList();
@@ -106,9 +110,18 @@ internal sealed partial class SponzaLoop
             max = Vector3.Max(max, p.Bounds.Max);
         }
 
-        skyVolumeMin = min;
-        skyVolumeSpan = max - min;
-        Console.WriteLine($"[VulkanSponza] scene volume (no .blixsky): {min} .. {max}");
+        var pad = (max - min) * 0.02f;
+        min -= pad;
+        max += pad;
+        if (MoverActive)
+        {
+            min = Vector3.Min(min, moverReach.Min);
+            max = Vector3.Max(max, moverReach.Max);
+        }
+
+        sceneBoundsMin = min;
+        sceneBoundsSpan = max - min;
+        Console.WriteLine($"[VulkanSponza] scene bounds: {min} .. {max}");
     }
 
     private void TryFinishLoad()
@@ -127,10 +140,9 @@ internal sealed partial class SponzaLoop
 
         // Everything staged → build the shared buffers + finish.
         ConsolidateBuffers();
-        // With no baked sky volume, the scene's extent is still the truth caster culling sweeps to and the
-        // orbit frames: everything that can cast or receive is a drawable, so their union is that volume.
-        // Without this both read a zero box, and offscreen casters lost their shadows.
-        if (!skyVolumeLoaded) FitSceneVolumeToDrawables();
+        // After ConsolidateBuffers: it selects the mover, whose reach the bounds include. Without the bounds caster
+        // culling and the orbit read a zero box, and offscreen casters lost their shadows.
+        FitSceneVolumeToDrawables();
         RegisterSelectables();
         BuildCullBuffers();
         Console.WriteLine(
@@ -321,8 +333,8 @@ internal sealed partial class SponzaLoop
         // blend buckets (bundle order == ordered order). Each drawable's placements follow as one
         // contiguous run of its bucket's placement list, and every placement takes a row of the
         // transform table.
-        // Traced GI needs the ray scene only where there is a probe field to inject into.
-        var rayMeshes = rayScene || (giTrace && bounceReady) ? BuildRayMeshes(ordered) : null;
+        // The clipmap traces the ray scene, so it is always built.
+        var rayMeshes = BuildRayMeshes(ordered);
         var rayInstances = new List<RayQueryScene.Instance>();
         var nonUniform = 0;
         var surfaceKeys = new Dictionary<SurfaceIdentity, uint>();
@@ -341,11 +353,8 @@ internal sealed partial class SponzaLoop
                 sceneTransformMaterials.Add((uint)s.Material.Id);
                 sceneTransformSurfaceKeys.Add(SurfaceKeyOf(s, w, i, surfaceKeys));
                 sceneTransformInstances.Add(s.Instances[w]);
-                if (rayMeshes is not null)
-                {
-                    rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
-                    rayPlacementMaterials.Add(new RayMaterial(s.Albedo, s.BaseColor, s.AlphaCutoff));
-                }
+                rayInstances.Add(new RayQueryScene.Instance(rayMeshes[i], world));
+                rayPlacementMaterials.Add(new RayMaterial(s.Albedo, s.BaseColor, s.AlphaCutoff));
                 if (!UniformScale(world)) nonUniform++;
             }
 
@@ -357,8 +366,8 @@ internal sealed partial class SponzaLoop
                 s.Pipeline == opaqueDoubleSidedPipeline || s.Pipeline == blendDoubleSidedPipeline));
         }
 
-        SelectMover(rayMeshes is not null ? rayInstances : null);
-        if (rayMeshes is not null) BuildRayScene(rayMeshes, rayInstances);
+        SelectMover(rayInstances);
+        BuildRayScene(rayMeshes, rayInstances);
         WriteSurfaceKeyCensus(ordered, surfaceKeys.Count);
 
         // lit.vert carries normals by the model's linear part, exact for rotation and uniform scale. Said

@@ -44,14 +44,18 @@ public sealed partial class VulkanGraphicsDevice
 
     // Inverse of MapTextureFormat. Render-graph attachments register through
     // RegisterExternalTexture with only a raw Vulkan Format; this recovers the
-    // engine format for the diagnostics snapshot. Depth + anything unrecognised
-    // is labelled conservatively — this output only feeds the diagnostic view.
+    // engine format -- for the diagnostics snapshot AND for ReadTexture, which sizes its copy by it: a format
+    // missing here read back as Rgba8 (R16F's 2-byte pixels copied as 4). Test BX.1 holds every colour format to
+    // the round trip. Depth + anything unrecognised is labelled conservatively.
     internal static TextureFormat MapVkFormatToEngine(Format f) => f switch
     {
         Format.R8G8B8A8Unorm => TextureFormat.Rgba8,
         Format.R8G8B8A8Srgb => TextureFormat.Rgba8Srgb,
         Format.R8Unorm => TextureFormat.R8,
         Format.R16G16B16A16Sfloat => TextureFormat.Rgba16F,
+        Format.R32Uint => TextureFormat.R32Uint,
+        Format.R16G16Sfloat => TextureFormat.Rg16F,
+        Format.R16Sfloat => TextureFormat.R16F,
         Format.B10G11R11UfloatPack32 => TextureFormat.R11G11B10F,
         Format.BC7SrgbBlock => TextureFormat.Bc7Srgb,
         Format.BC7UnormBlock => TextureFormat.Bc7Unorm,

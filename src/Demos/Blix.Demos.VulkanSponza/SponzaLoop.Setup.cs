@@ -60,19 +60,15 @@ internal sealed partial class SponzaLoop
         if (args.Flag("no-ao")) ambient.Enabled = false;
         if (args.Flag("no-shadow")) shadows.Enabled = false;
         if (args.Flag("ao-fullres")) aoScale = 1f;
-        // The incident-light field ships on; --no-incident selects the inline reference path.
+        // The incident-light field ships on. --no-incident is a diagnostic: the lit pass then uses the open-sky
+        // irradiance cube with sky visibility 1, no clipmap light at all.
         if (args.Flag("no-incident")) incidentField = false;
         if (args.Flag("incident")) incidentField = true;
         if (args.Flag("no-prepass")) noPrepass = true;
         if (args.String("probe") is { } probe) probeName = probe;
-        // The census has to be able to ask about the FIELD rather than about the sleep policy:
-        // with sleeping on, a probe the camera never looked at is zero, and a census of a still
-        // camera's frame is then mostly a count of what the camera did not face.
-        if (args.Float("probe-sleep") is { } ps) probeSleepFrames = MathF.Max(0f, ps);
         // Zero isolates sky-fed transport from the direct-sun source for probe censuses.
         if (args.Float("sun-strength") is { } ss) sunStrength = MathF.Max(0f, ss);
         if (args.Int("ref-bounces") is { } rb) refBounces = Math.Clamp(rb, 1, 8);
-        if (args.Int("ref-probes") is { } rp) referenceProbes = Math.Clamp(rp, 1, 1024);
         if (args.String("shadow-maps") is { } shadowMaps)
         {
             var sm = shadowMaps.Split(',');
@@ -85,16 +81,10 @@ internal sealed partial class SponzaLoop
         }
         if (args.Float("foliage-lod") is { } fl) FoliageLodMargin = MathF.Max(0.1f, fl);
         if (args.Float("shadow-lod") is { } sl) shadowLodTexels = MathF.Max(0.1f, sl);
-        if (args.Float("bounce-div") is { } bd) bounceDiv = Math.Clamp(bd, 0.5f, 8f);
-        // The same axis stated the way it is usually wanted: a multiplier on probe COUNT.
-        // --bounce-x2 is --bounce-div 1.587 without anybody having to know that.
-        if (args.Float("bounce-x") is { } bx && bx > 0f) bounceDiv = 2f / MathF.Cbrt(bx);
-        if (args.Float("inject-feedback") is { } ifb) injectFeedback = Math.Clamp(ifb, 0f, 4f);
-        if (args.Float("transport-occlusion") is { } to) transportOcclusion = Math.Clamp(to, 0f, 1f);
-        if (args.Flag("sky-no-inject")) skipInject = true;
         if (args.Flag("sky-no-sample")) skipSkySample = true;
-        // Standard rendering uses baked enclosure and dynamic bounce. --no-sky disables both;
-        // --sky remains a compatibility no-op for existing invocations.
+        // Standard rendering takes the clipmap's sky visibility and light through the incident field. --no-sky
+        // turns both off in the lit pass (visibility 1, no incident light); --sky remains a compatibility no-op for
+        // existing invocations.
         args.Flag("sky");
         skyVisibilityEnabled = !args.Flag("no-sky");
         if (skyVisibilityEnabled)
@@ -119,9 +109,6 @@ internal sealed partial class SponzaLoop
         // --sun-overhead maximizes directly lit courtyard area when isolating base lighting. The
         // cascade fit handles the vertical-light up-vector degeneracy.
         if (args.Flag("sun-overhead")) sunOverhead = true;
-        // Expose the probe view to automated/headless runs as well as the overlay checkbox.
-        if (args.Flag("show-probes")) showProbes = true;
-        if (args.Flag("probe-carryless")) probeCarryless = true;
         // GPU isolation submits and waits per pass. It attributes real tile execution but removes
         // overlap, so isolated pass times are not additive components of the normal frame.
         if (args.Flag("gpu-isolate")) host.Timing.IsolatePasses = true;
@@ -136,8 +123,8 @@ internal sealed partial class SponzaLoop
         // --lit-flat: the lit pass shades opaque geometry with flat.frag, everything else unchanged (same lit.vert,
         // culling, pre-pass and LOD). What a cost does under it is the part that is not material shading.
         litFlat = args.Flag("lit-flat");
-        // --ray-scene: build CPU ray-query hierarchies over the scene at load and time camera rays (SponzaLoop.RayScene).
-        rayScene = args.Flag("ray-scene");
+        // --ray-scene: a no-op now. The ray scene is always built, because the clipmap traces it.
+        _ = args.Flag("ray-scene");
         // --ray-check: also trace a fixed batch of rays on the GPU every frame and hold them against the CPU at the shot.
         rayCheck = args.Flag("ray-check");
         if (args.String("ray-bench") is { } bench)
@@ -149,16 +136,13 @@ internal sealed partial class SponzaLoop
         // --ray-view: trace the camera's view and hold it against the raster at the shot (it brings the ray check with it).
         rayView = args.Flag("ray-view");
         rayCheck |= rayView;
-        // The probe injection traces the scene's triangles by default: against a path-traced reference on the
-        // triangles its field's per-probe error is 11x smaller than the occupancy march's on Sponza (which it
-        // under-lit by about a quarter) and 2x on Bistro, and it is cheaper. --gi-march keeps the march for the A/B.
-        giTrace = !args.Flag("gi-march");
-        // --gi-clipmap: solve the camera-relative probe clipmap as well (stage 4c, SponzaLoop.Clipmap).
-        clipmapEnabled = args.Flag("gi-clipmap");
+        // The camera-relative probe clipmap (SponzaLoop.Clipmap) is the diffuse GI, always on; --gi-clipmap, which once
+        // asked for it, is a no-op kept for existing invocations.
+        _ = args.Flag("gi-clipmap");
         if (args.Float("clipmap-spacing") is { } clipSpacing) clipmapSpacing = Math.Max(0.05f, clipSpacing);
         if (args.Int("clipmap-budget") is { } clipBudget) clipmapBudget = Math.Clamp(clipBudget, 1, 65535);
         if (args.Float("clipmap-unknown-sky") is { } unknownSky) clipmapUnknownSky = Math.Clamp(unknownSky, 0f, 1f);
-        // --gi-screen-probes: the per-tile gather over the clipmap (SponzaLoop.ScreenProbes); it needs the clipmap.
+        // --gi-screen-probes: the per-tile gather over the clipmap (SponzaLoop.ScreenProbes).
         screenProbesEnabled = args.Flag("gi-screen-probes");
         // --no-taa: no TAA and so no sub-pixel jitter: the control for --stability, whose variation otherwise
         // counts every edge the jitter moves.
@@ -222,12 +206,8 @@ internal sealed partial class SponzaLoop
         if (args.Int("screen-probe-filter") is { } spFilter) screenProbeFilterRadius = Math.Clamp(spFilter, 0, 4);
         if (args.Int("screen-probe-ablate") is { } ablate) screenProbeAblate = ablate;
         if (args.Int("orbit-frames") is { } orbitFrames) OrbitFrames = Math.Max(2, orbitFrames);
-        if (screenProbesEnabled && !clipmapEnabled) throw new AppArgsException("--gi-screen-probes needs --gi-clipmap: its rays read the clipmap where they hit.");
         if (screenProbesEnabled && MsaaSamples > 1) throw new AppArgsException("--gi-screen-probes needs a single-sample pre-pass: probes find their surface by its SurfaceKey and velocity, which MSAA cannot resolve.");
         if (args.Float("screen-probe-history") is { } spHistory) screenProbeHistory = Math.Max(1f, spHistory);
-        // The triangle probe reference (--probe-reference) traces the ray scene too. GI's own need for it waits
-        // for the scene to say whether it has a probe field at all (ConsolidateBuffers).
-        rayScene |= rayCheck || abMode == "trace" || args.Flag("probe-reference") || clipmapEnabled;
         if (args.Int("ray-region-triangles") is { } regionTriangles) rayRegionTriangles = Math.Max(1, regionTriangles);
         if (args.Float("ray-lod-error") is { } lodError) rayLodError = Math.Max(0f, lodError);
         if (args.Values("ray-probe", 3) is [var probeRay, var probeInstance, var probeTriangle])
@@ -241,7 +221,6 @@ internal sealed partial class SponzaLoop
         // the whole frame: the case history cannot help, and the proof that the late list is complete.
         occlusionCut = args.Flag("occlusion-cut");
         if (args.Flag("probe-reference")) probeReference = true;
-        if (args.Flag("no-sky-bounce")) noSkyBounce = true;
         if (args.Int("fog-slices") is { } fs) froxelGridZ = Math.Clamp(fs, 8, 128);
         // --orbit: drive the camera on a fixed path so a measurement is of the renderer rather than
         // of one photograph of it. Ignores --cam, which is the still counterpart.
@@ -290,7 +269,6 @@ internal sealed partial class SponzaLoop
             return;
         }
         LoadIbl(assetsRoot);
-        LoadSkyVisibility(assetsRoot);
 
         // --- Render graph ------------------------------------------------
         graph = new RenderGraph(device);
@@ -338,20 +316,17 @@ internal sealed partial class SponzaLoop
 
         var litInterface = Reflect("lit.vert", "lit.frag");
         var skyInterface = Reflect("skybox.vert", "skybox.frag");
-        var probeInterface = Reflect("probe_debug.vert", "probe_debug.frag");
         var presentInterface = Reflect("present.vert", "present.frag");
         // Reuses present.vert: both are fullscreen triangles synthesised from gl_VertexIndex.
         var gtaoInterface = Reflect("present.vert", "gtao.frag");
         var gtaoDenoiseInterface = Reflect("present.vert", "gtao_denoise.frag");
         var hiZInterface = Reflect("present.vert", "hiz_build.frag");
-        var incidentInterface = Reflect("present.vert", "incident.frag");
         incidentClipmapInterface = Reflect("present.vert", "incident_clipmap.frag");
         var shadowOpaqueInterface = Reflect("shadow.vert", "shadow.frag");
         var shadowMaskInterface = Reflect("shadow_mask.vert", "shadow_mask.frag");
 
         // Programs sharing the frame buffer must agree on reflected std140 offsets across program
-        // boundaries; stage merging validates only one program at a time. Probe debug is excluded
-        // because its set-0 block is a separate buffer on a separate pipeline.
+        // boundaries; stage merging validates only one program at a time.
         AssertFrameBlockAgrees(litInterface, ("skybox", skyInterface));
 
         // Scan lit.frag's //@tune decorators (shipped alongside the .spv) and
@@ -413,14 +388,6 @@ internal sealed partial class SponzaLoop
         // shadow maps are rendered (it samples them) and before the lit pass
         // composites its result. Reflected interface: UBO (set 0 binding 0),
         // the storage grid (binding 1), the cascade shadow maps (binding 2).
-        var injectInterface = Reflect("sky_inject.comp");
-        injectPassHandle = graph.ComputePass("sky-inject").Shader(injectInterface).Handle;
-
-        // Samples the previous frame's resolved depth: declaration order puts this before the
-        // current frame's depth pre-pass. Its marks are consumed by the NEXT frame's injection.
-        usageInterface = Reflect("probe_usage.comp");
-        probeUsagePassHandle = graph.ComputePass("probe-usage").Shader(usageInterface).Handle;
-
         var froxelInterface = Reflect("froxel.comp");
         var froxelPass = graph.ComputePass("froxel-fog").Shader(froxelInterface);
         for (var c = 0; c < CascadeCount; c++)
@@ -446,7 +413,7 @@ internal sealed partial class SponzaLoop
             "ambient-visibility", TextureFormat.R16F, new MatchSwapchainGraphSize(aoScale));
         ambientDenoisedHandle = graph.ColorTarget("ambient-visibility-denoised", TextureFormat.R16F, fullSize);
 
-        // Incident light, full resolution: rgb bounce, a sky visibility. Rgba16F preserves HDR gradients.
+        // Incident light, full resolution: rgb the clipmap's incoming light, a sky visibility. Rgba16F preserves HDR gradients.
         incidentHandle = graph.ColorTarget("incident-light", TextureFormat.Rgba16F, fullSize);
         incidentGradientHandle = graph.ColorTarget("incident-gradient", TextureFormat.Rgba16F, fullSize);
 
@@ -559,9 +526,8 @@ internal sealed partial class SponzaLoop
             .Shader(gtaoDenoiseInterface)
             .Handle;
 
-        // Between the depth it unprojects and the lit pass that reads it. It also reads the bounce
-        // atlas the injection dispatch writes. That atlas is device-owned rather than a graph
-        // resource, so declaration order carries this dependency without a graph edge.
+        // The incident pass sits between the depth it unprojects and the lit pass that reads it. It also reads the
+        // clipmap's atlases, device-owned rather than graph resources, so declaration order carries that dependency.
         // Screen probes read this frame's depth and normals and write buffers the incident pass reads; declared
         // between them, and fenced like every pass that binds GPU buffers.
         screenProbeInterface = Reflect("screen_probe.comp");
@@ -580,7 +546,7 @@ internal sealed partial class SponzaLoop
             .Target(incidentGradientHandle, LoadOp.Clear, StoreOp.Store)
             .Read(SampleableSceneDepth)
             .Read(SampleablePrepassNormal)
-            .Shader(incidentInterface, incidentClipmapInterface)
+            .Shader(incidentClipmapInterface)
             .Handle;
 
 
@@ -689,18 +655,6 @@ internal sealed partial class SponzaLoop
         var skyFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "skybox.frag.spv"));
         skyProgram = Own(device.CreateShaderProgramFromSpv(skyVertSpv, skyFragSpv, skyInterface, "skybox"));
 
-        // One quad per probe, positions synthesised: the vertex buffer exists to satisfy the draw
-        // and its contents are never read, exactly as FullscreenPass does for its triangle.
-        var probeVertSpv = File.ReadAllBytes(Path.Combine(shaderDir, "probe_debug.vert.spv"));
-        var probeFragSpv = File.ReadAllBytes(Path.Combine(shaderDir, "probe_debug.frag.spv"));
-        probeProgram = Own(device.CreateShaderProgramFromSpv(probeVertSpv, probeFragSpv, probeInterface, "probe_debug"));
-        var probeDummy = new VertexPosition3NormalTexture[4];
-        for (var i = 0; i < 4; i++)
-            probeDummy[i] = new VertexPosition3NormalTexture(
-                new GraphicsVector3(0, 0, 0), new GraphicsVector3(0, 0, 1), new GraphicsVector2(0, 0));
-        probeVb = Own(device.CreateVertexBuffer(
-            VertexPosition3NormalTexture.CreateBufferData(probeDummy), "probe.vb"));
-        probeIb = Own(device.CreateIndexBuffer(new ushort[] { 0, 1, 2, 2, 1, 3 }, name: "probe.ib"));
         skyPipeline = Pipeline(skyProgram,
             VertexPosition3NormalTexture.Layout, // ignored — sky vert synthesises positions
             DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
@@ -816,12 +770,6 @@ internal sealed partial class SponzaLoop
             DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled }, gtaoDenoisePassHandle, "gtao_denoise");
 
-        var incidentSpv = File.ReadAllBytes(Path.Combine(shaderDir, "incident.frag.spv"));
-        var incidentProgram = Own(device.CreateShaderProgramFromSpv(
-            presentVertSpv, incidentSpv, incidentInterface, "incident"));
-        incidentPipeline = Pipeline(incidentProgram, VertexPosition3NormalTexture.Layout,
-            DepthState.Disabled, RasterizerState.NoCulling,
-            new[] { BlendState.Disabled, BlendState.Disabled }, incidentPassHandle, "incident");
         var incidentClipmapSpv = File.ReadAllBytes(Path.Combine(shaderDir, "incident_clipmap.frag.spv"));
         incidentClipmapPipeline = Pipeline(Own(device.CreateShaderProgramFromSpv(
                 presentVertSpv, incidentClipmapSpv, incidentClipmapInterface, "incident_clipmap")),
@@ -832,31 +780,6 @@ internal sealed partial class SponzaLoop
         // Fullscreen triangle for the sky + present passes (positions synthesised
         // from gl_VertexIndex in the vertex shader — the buffer is never sampled).
         fullscreen = new FullscreenPass(device, "present.dummy");
-        // Depth-tested so probes sit in the scene rather than over it, and no depth WRITE so they
-        // never occlude the geometry whose lighting they are there to explain.
-        probePipeline = Pipeline(probeProgram, VertexPosition3NormalTexture.Layout,
-            DepthState.LessEqualNoWrite, RasterizerState.NoCulling,
-            new[] { BlendState.Disabled }, litPassHandle, "probe_debug");
-
-        if (bounceReady)
-        {
-            var injectSpv = File.ReadAllBytes(Path.Combine(shaderDir, "sky_inject.comp.spv"));
-            injectProgram = Own(device.CreateComputeShaderProgramFromSpv(injectSpv, injectInterface, "sky_inject"));
-            injectPipeline = Own(device.CreateComputePipeline(injectProgram, "sky_inject"));
-            if (rayScene || giTrace)
-            {
-                var tracedInterface = Reflect("sky_inject_traced.comp");
-                var tracedSpv = File.ReadAllBytes(Path.Combine(shaderDir, "sky_inject_traced.comp.spv"));
-                injectTracedPipeline = Own(device.CreateComputePipeline(
-                    Own(device.CreateComputeShaderProgramFromSpv(tracedSpv, tracedInterface, "sky_inject_traced")), "sky_inject_traced"));
-            }
-            // Rebuilt each frame around the write/read pair; see BounceBindings.
-            injectBindings = BounceBindings();
-
-            var usageSpv = File.ReadAllBytes(Path.Combine(shaderDir, "probe_usage.comp.spv"));
-            var usageProgram = Own(device.CreateComputeShaderProgramFromSpv(usageSpv, usageInterface, "probe_usage"));
-            probeUsagePipeline = Own(device.CreateComputePipeline(usageProgram, "probe_usage"));
-        }
 
         moverPipeline = Own(device.CreateComputePipeline(Own(device.CreateComputeShaderProgramFromSpv(
             File.ReadAllBytes(Path.Combine(shaderDir, "mover.comp.spv")), moverInterface!, "mover")), "mover"));
@@ -927,22 +850,11 @@ internal sealed partial class SponzaLoop
             new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2])),
             new ShaderTextureBinding("uFroxelGrid",           froxelGridTexture),
             new ShaderTextureBinding("uAmbientVisibility", graph.GetColorTexture(ambientDenoisedHandle)),
-            new ShaderTextureBinding("uSkyVisibility",  skyVisibilityTextures[0]),
-            new ShaderTextureBinding("uSkyVisibility1", skyVisibilityTextures[1]),
-            new ShaderTextureBinding("uSkyVisibility2", skyVisibilityTextures[2]),
-            // Bound per frame in OnRender, which flips between the pair; this is the initial one.
-            new ShaderTextureBinding("uSkyBounce", bounceReady ? bounceTextures[0] : brdfLutTexture),
-            new ShaderTextureBinding("uSkyBounceDepth", bounceReady ? bounceDepthTextures[0] : brdfLutTexture),
             // Bound to SOMETHING valid always — a descriptor set with a hole is a device loss, not a
             // dark curtain. uSheenMipCount being zero is what tells the shader not to read them.
             new ShaderTextureBinding("uSheenEnv", sheenMipCount > 0 ? sheenEnvTexture : envCubeTexture),
             new ShaderTextureBinding("uSheenLut", sheenMipCount > 0 ? sheenLutTexture : brdfLutTexture),
             new ShaderTextureBinding("uEnvCube", skyCubeTexture),
-            // Ground truth for the leak metric. Same no-holes rule as uSheenEnv above: bound to a
-            // valid 3D texture whether or not the volume shipped one, with uOccupancyDims.w the
-            // flag that decides whether the shader may read it.
-            new ShaderTextureBinding("uOccupancy",
-                occX > 0 ? occupancyTexture : skyVisibilityTextures[0]),
             new ShaderTextureBinding(
                 "uIncidentField", graph.GetColorTexture(incidentHandle)),
             new ShaderTextureBinding(
@@ -951,15 +863,11 @@ internal sealed partial class SponzaLoop
                 "uPrepassNormalViz", graph.GetColorTexture(SampleablePrepassNormal)),
         };
 
-        // The one binding that is not constant: the lit pass reads whichever of the bounce pair the
-        // injection is not writing, so its slot is rewritten each frame.
-        skyBounceBinding = Array.FindIndex(passBindings, b => b.Name == "uSkyBounce");
-        // Same reason, different cause: the grid is re-created when the framebuffer changes size.
+        // The one binding that is not constant: the grid is re-created when the framebuffer changes size.
         froxelGridBinding = Array.FindIndex(passBindings, b => b.Name == "uFroxelGrid");
 
         // skybox.frag's two, taken from the lit list so the two can never hold different textures.
-        // uSkyBounce's per-frame swap does not reach it (the sky does not read the bounce), and
-        // uFroxelGrid's re-creation does, through its own index.
+        // uFroxelGrid's re-creation reaches it through its own index.
         string[] skySamples = { "uFroxelGrid", "uEnvCube" };
         skyBindings = skySamples.Select(n => passBindings.Single(b => b.Name == n)).ToArray();
         skyFroxelGridBinding = Array.FindIndex(skyBindings, b => b.Name == "uFroxelGrid");
@@ -1134,164 +1042,6 @@ internal sealed partial class SponzaLoop
         irradianceCubeTexture = sky.Irradiance;
         brdfLutTexture = sky.BrdfLut;
         iblPrefilterMips = sky.PrefilterMips;
-    }
-
-    /// <summary>Loads the baked sky-visibility volume, if the pack ships one.</summary>
-    /// <remarks>
-    /// This bake is optional. When absent, identity volumes keep descriptors valid and describe a
-    /// fully visible sky, preserving a uniform binding layout across both paths.
-    /// </remarks>
-    private void LoadSkyVisibility(string assetsRoot)
-    {
-        var path = Directory.EnumerateFiles(assetsRoot, "*.blixsky", SearchOption.AllDirectories)
-            .FirstOrDefault();
-        if (path is not null)
-        {
-            try
-            {
-                var volume = Blix.Graphics.Images.BlixSkyVolume.Read(path);
-                for (var t = 0; t < 3; t++)
-                    skyVisibilityTextures[t] = Own(device.CreateTexture3D(
-                        volume.SizeX, volume.SizeY, volume.SizeZ, TextureFormat.Rgba16F,
-                        SamplerDescription.LinearClamp, volume.ToRgba16F(t), $"sponza.skyvis{t}"));
-                skyVisibilityTexture = skyVisibilityTextures[0];
-                skyVolumeMin = volume.Min;
-                var span = volume.Max - volume.Min;
-                skyVolumeSpan = span;
-                skyVolumeInvSpan = new Vector3(1f / span.X, 1f / span.Y, 1f / span.Z);
-                skyVolumeLoaded = true;
-                probeX = volume.SizeX; probeY = volume.SizeY; probeZ = volume.SizeZ;
-
-                // Mean of the L0 band over the whole volume. Every higher band integrates to zero
-                // over the sphere, so this single coefficient IS the average fraction of sky a point
-                // in this scene can see — the number the probe census measures the bounce against.
-                var band0 = volume.ToRgba16F(0);
-                var cells = volume.SizeX * volume.SizeY * volume.SizeZ;
-                cellSkyVisibility = new float[cells];
-                double visSum = 0;
-                for (var c = 0; c < cells; c++)
-                {
-                    var v = (float)((float)BitConverter.ToHalf(band0, c * 8) * 0.282095);
-                    cellSkyVisibility[c] = v;
-                    visSum += v;
-                }
-                meanSkyVisibility = cells > 0 ? visSum / cells : 0;
-
-                if (volume.HasOccupancy)
-                {
-                    occX = volume.OccupancyX; occY = volume.OccupancyY; occZ = volume.OccupancyZ;
-                    occupancyCpu = volume.Occupancy;
-                    occCpuX = occX; occCpuY = occY; occCpuZ = occZ;
-                    occupancyTexture = Own(device.CreateTexture3D(
-                        occX, occY, occZ, TextureFormat.R8,
-                        SamplerDescription.LinearClamp, volume.Occupancy!, "sponza.occupancy"));
-                    // Falls back to the occupancy texture's slot being filled by SOMETHING valid
-                    // rather than going unbound: a missing albedo grid means an older .blixsky, and
-                    // the shader's uAlbedoDims.w tells it to use the flat scalar instead.
-                    if (volume.HasAlbedo)
-                    {
-                        albX = volume.AlbedoX; albY = volume.AlbedoY; albZ = volume.AlbedoZ;
-                        albedoCpu = volume.Albedo;
-                        albCpuX = albX; albCpuY = albY; albCpuZ = albZ;
-                        // Albedo is one-to-one with occupancy cells. Nearest sampling preserves the
-                        // struck cell's material instead of mixing the one-cell surface shell with
-                        // empty space or neighbouring materials.
-                        albedoTexture = Own(device.CreateTexture3D(
-                            albX, albY, albZ, TextureFormat.Rgba8,
-                            SamplerDescription.NearestClamp, volume.Albedo!, "sponza.albedo"));
-                        Console.WriteLine(
-                            $"[VulkanSponza]   albedo {albX}x{albY}x{albZ} ({volume.Albedo!.Length / 1024.0 / 1024.0:0.00} MB), so the bounce carries surface colour.");
-                    }
-                    // --bounce-div controls the spatial side of the atlas trade-off independently
-                    // from its 36 directional samples. A divisor of one matches the visibility
-                    // grid's roughly 0.8 m spacing; total solve cost scales cubically per axis.
-                    bounceX = Math.Max(2, (int)MathF.Round(probeX / bounceDiv));
-                    bounceY = Math.Max(2, (int)MathF.Round(probeY / bounceDiv));
-                    bounceZ = Math.Max(2, (int)MathF.Round(probeZ / bounceDiv));
-                    var atlasW = bounceX * OctTile;
-                    var atlasH = bounceY * bounceZ * OctTile;
-                    for (var i = 0; i < bounceTextures.Length; i++)
-                    {
-                        bounceTextures[i] = Own(device.CreateStorageTexture2D(
-                            atlasW, atlasH, TextureFormat.Rgba16F,
-                            SamplerDescription.LinearClamp, $"sponza.bounce{i}"));
-                        bounceDepthTextures[i] = Own(device.CreateStorageTexture2D(
-                            atlasW, atlasH, TextureFormat.Rgba16F,
-                            SamplerDescription.LinearClamp, $"sponza.bounceDepth{i}"));
-                    }
-                    probeUsageTexture = Own(device.CreateStorageTexture3D(
-                        bounceX, bounceY, bounceZ, TextureFormat.Rgba16F,
-                        SamplerDescription.LinearClamp, "sponza.probeUsage"));
-                    Console.WriteLine(
-                        $"[VulkanSponza]   bounce probes {bounceX}x{bounceY}x{bounceZ} = " +
-                        $"{bounceX * bounceY * bounceZ:N0}, octahedral atlas {atlasW}x{atlasH} " +
-                        $"({2.0 * atlasW * atlasH * 8 / 1024 / 1024:0.00} MB for both buffers)");
-                    bounceReady = true;
-                    Console.WriteLine(
-                        $"[VulkanSponza]   occupancy {occX}x{occY}x{occZ} shipped; sun bounce injected at runtime.");
-                }
-                Console.WriteLine(
-                    $"[VulkanSponza] sky visibility: {Path.GetFileName(path)} " +
-                    $"{volume.SizeX}x{volume.SizeY}x{volume.SizeZ} probes, " +
-                    $"min {volume.Min} span {span} invSpan {skyVolumeInvSpan}");
-                // Report shader participation, not merely successful file I/O.
-                Console.WriteLine(
-                    skyVisibilityEnabled && !skipSkySample
-                        ? "[VulkanSponza]   sampled: sky visibility LIVE, bounce LIVE."
-                        : $"[VulkanSponza]   sampled: NOT SAMPLED — every surface sees a full sky and " +
-                          $"nothing bounces (skyVisibility={skyVisibilityEnabled}, skipSample={skipSkySample}).");
-                // What the CPU thinks an up-facing surface sees, at two known places, so the
-                // shader's answer can be compared against something rather than eyeballed.
-                foreach (var (label, at) in new[]
-                {
-                    ("atrium floor", new Vector3(0f, 0.5f, 0f)),
-                    ("above roof",   new Vector3(0f, 18f, 0f)),
-                })
-                {
-                    var t = (at - volume.Min) * skyVolumeInvSpan;
-                    var cx = Math.Clamp((int)(t.X * volume.SizeX), 0, volume.SizeX - 1);
-                    var cy = Math.Clamp((int)(t.Y * volume.SizeY), 0, volume.SizeY - 1);
-                    var cz = Math.Clamp((int)(t.Z * volume.SizeZ), 0, volume.SizeZ - 1);
-                    // Derive cell stride from the format so CPU diagnostics follow SH band changes.
-                    var o = ((cz * volume.SizeY + cy) * volume.SizeX + cx) * BlixSkyVolume.FloatsPerCell;
-                    var l0 = volume.Coefficients[o];
-                    var l1 = new Vector3(volume.Coefficients[o + 1], volume.Coefficients[o + 2], volume.Coefficients[o + 3]);
-                    // The same cosine-convolved L2 evaluation the shader runs (sky_visibility.glsl),
-                    // against +Y. Stopping at L1 here would have made the CPU and GPU answers differ
-                    // by the exact band the last commit added, which is the one worth checking.
-                    // dir = +Y, so of the five L2 terms only the two that survive dir.x = dir.z = 0
-                    // contribute: the zonal (3z^2 - 1) collapses to -1 and (x^2 - y^2) to -1. Writing
-                    // the whole basis out and substituting would be the same number with four more
-                    // ways to mistype it.
-                    const float Y0 = 0.282095f, Y1 = 0.488603f, Y20C = 0.315392f, Y22C = 0.546274f;
-                    var band2 = -Y20C * volume.Coefficients[o + 6] - Y22C * volume.Coefficients[o + 8];
-                    var vis = (MathF.PI * Y0 * l0
-                               + (2f * MathF.PI / 3f) * Y1 * Vector3.Dot(l1, Vector3.UnitY)
-                               + (MathF.PI / 4f) * band2) / MathF.PI;
-                    Console.WriteLine($"[VulkanSponza]   {label,-13} uv {t} -> L0 {l0:0.000} vis(up) {vis:0.000}");
-                }
-                return;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[VulkanSponza] sky visibility: {Path.GetFileName(path)} unreadable — {ex.Message}");
-            }
-        }
-
-        var open = new byte[4 * 2];
-        // L0 for a fully open sphere: integral of Y0 over the sphere = 4*pi*0.282095.
-        BitConverter.TryWriteBytes(open.AsSpan(0, 2), (Half)(4f * MathF.PI * 0.282095f));
-        skyVisibilityTexture = Own(device.CreateTexture3D(
-            1, 1, 1, TextureFormat.Rgba16F, SamplerDescription.LinearClamp, open, "sponza.skyvis.open"));
-        // All three bands are bound whether or not a volume shipped (passBindings, the froxel and incident
-        // passes), and a handle of 0 is no texture at all. An open sky is L0 alone: the higher bands are zero.
-        var zero = Own(device.CreateTexture3D(
-            1, 1, 1, TextureFormat.Rgba16F, SamplerDescription.LinearClamp, new byte[4 * 2], "sponza.skyvis.zero"));
-        skyVisibilityTextures[0] = skyVisibilityTexture;
-        skyVisibilityTextures[1] = zero;
-        skyVisibilityTextures[2] = zero;
-        skyVolumeLoaded = false;
-        Console.WriteLine("[VulkanSponza] sky visibility: none found — every surface sees a full sky.");
     }
 
     // The Frame block, as every program that declares it sees it. `authority` is the full

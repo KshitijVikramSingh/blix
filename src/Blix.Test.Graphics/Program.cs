@@ -6778,6 +6778,27 @@ static ShaderInterface MinimalShader() => new(new[]
     t.ExpectTrue("BW.6 cells at the bound still find their slots", NoThrow(() => clip.Slot(new Int3(ProbeClipmap.MaxCell - 1, -(ProbeClipmap.MaxCell - 1), 0))));
     t.ExpectTrue("BW.6 and past it are refused", ThrowsArgument(() => clip.Slot(new Int3(ProbeClipmap.MaxCell, 0, 0))));
 }
+
+// ============================================================================
+// Section BX — every engine colour format survives the trip to Vulkan and back.
+// ============================================================================
+//
+// A graph attachment registers with its raw Vulkan format, and the engine format recovered from it is what
+// ReadTexture sizes its copy by. R16F was missing from the way back and read back as Rgba8 (two-byte pixels
+// copied as four), which put garbage into a shot's GTAO numbers while the image itself was right.
+{
+    var lost = new List<string>();
+    foreach (var format in Enum.GetValues<TextureFormat>())
+    {
+        if (format == TextureFormat.Depth24) continue;
+        Silk.NET.Vulkan.Format vk;
+        try { vk = VulkanGraphicsDevice.MapTextureFormat(format); }
+        catch (Exception) { continue; }
+        var back = VulkanGraphicsDevice.MapVkFormatToEngine(vk);
+        if (back != format) lost.Add($"{format} -> {vk} -> {back}");
+    }
+    t.Expect("BX.1 every colour format maps to Vulkan and back to itself", lost.Count == 0, string.Join("; ", lost));
+}
 t.PrintSummary();
 return t.Failed;
 

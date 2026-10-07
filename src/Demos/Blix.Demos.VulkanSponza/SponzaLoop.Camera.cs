@@ -83,11 +83,11 @@ internal sealed partial class SponzaLoop
         var angle = t * MathF.Tau;
         // Orbit the foliage when there is any, because that is the content a measurement most often
         // wants in frame and the one a bounds-derived path missed entirely.
-        var centre = foliageValid ? foliageCentre : skyVolumeMin + skyVolumeSpan * 0.5f;
+        var centre = foliageValid ? foliageCentre : sceneBoundsMin + sceneBoundsSpan * 0.5f;
         // Inside the building rather than around it: the arcade is where the overdraw, the cutout
         // foliage and the cascade transitions all are, and an exterior orbit sees none of them.
-        var radius = MathF.Min(skyVolumeSpan.X, skyVolumeSpan.Z) * 0.20f;
-        var eyeY = centre.Y * 0.55f + skyVolumeMin.Y * 0.45f;
+        var radius = MathF.Min(sceneBoundsSpan.X, sceneBoundsSpan.Z) * 0.20f;
+        var eyeY = centre.Y * 0.55f + sceneBoundsMin.Y * 0.45f;
         var eye = new Vector3(
             centre.X + MathF.Cos(angle) * radius,
             eyeY,

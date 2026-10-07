@@ -29,8 +29,6 @@ layout(set = 0, binding = 0) uniform Frame {
     float uSheenMipCount;
     // Sample count, so the coverage dither knows how big one quantum is.
     float uMsaaSamples;
-    vec4  uSkyDims;        // xyz visibility probe counts
-    vec4  uBounceDims;     // xyz bounce probe counts
     float uShadowStrength;         // 0 = sun shadows off, 1 = on
     vec3  _cascadePad;
     mat4  uCascadeViewProj[3];     // light view-proj per cascade
@@ -50,48 +48,11 @@ layout(set = 0, binding = 0) uniform Frame {
     // pixels. This separates coverage compositing from shading-term faults.
     //@tune bool
     float uForceOpaqueCutout;
-    // Four-corner tetrahedral probe reconstruction instead of eight-corner trilinear. Halves this
-    // lookup's fetches and pays a few compares; watch for LEAKING rather than blurring, since
-    // fewer candidates means the visibility test empties the set more often.
-    //@tune bool
-    float uProbeTetrahedral;
-    // Whether the probe blend trusts a marched line of sight through the occupancy grid over the
-    // Chebyshev depth-moment test. Off is the shipped behaviour exactly; on rejects any probe the
-    // march says is behind geometry. Read the leak census (--viz 21) and the fallback rate
-    // together: rejecting everything reports no leak and no light.
-    //
-    // <b>Off by default, and that reverts a measured improvement on purpose.</b> With it on,
-    // leak falls from 17.4% of blend weight to zero while surviving weight falls from 24.4% to
-    // 21.0% -- so the number that justified defaulting it on is real and is kept here rather than
-    // deleted with it. What the number does not capture is what the darkening costs by eye, which
-    // is the judgement this default now follows.
-    //
-    // It was also a 0..1 slider, and the intermediate values were a fiction: nothing chose 0.4
-    // between two rejection strategies. A switch is what it is.
-    //@tune bool
-    float uProbeOcclusion;
-    // Transport diagnostics. Measurement helpers must forward argument arrays with "$@"; collapsed
-    // multi-flag invocations invalidate these A/B controls.
-    //@tune bool
-    float uSkyDropL2;
+    // Transport diagnostic: drop the incident field's light (all indirect diffuse) from the lit sum.
+    // Measurement helpers must forward argument arrays with "$@"; collapsed multi-flag invocations
+    // invalidate these A/B controls.
     //@tune bool
     float uNoBounceTerm;
-    // Which normal the inline ambient asks the world-space fields along: 1 (the default) is the
-    // INTERPOLATED GEOMETRIC normal, 0 is the normal-mapped one.
-    //
-    // <b>Defaults to geometric because these are metre-scale fields.</b> Baked sky visibility and
-    // the bounce probes resolve enclosure at roughly the size of a room; a normal map varies over
-    // millimetres. Feeding the mapped normal into them adds high-frequency variation to a query
-    // that has no high-frequency information to give back, so the relief shows up as noise on the
-    // ambient term rather than as detail. Direct lighting and specular keep the mapped normal,
-    // which is where surface relief belongs and is visible.
-    //
-    // Kept as a dial rather than welded shut: the half-res incident field's error is all normal
-    // and does not shrink with resolution, so flipping this to 0 still splits that error into the
-    // two halves with different fixes -- relief the field can never see, versus a depth
-    // reconstruction a prepass normal target would repair.
-    //@tune bool
-    float uAmbientGeoNormal;
     // Measurement switches, one per --ab mode. Each removes one term from the fragment so a paired
     // interleaved run can price it:
     //   x  collapse every material UV to a constant, so the five material samples all hit one
@@ -101,10 +62,6 @@ layout(set = 0, binding = 0) uniform Frame {
     //   z  skip the three IBL lookups and the split-sum, using a flat ambient. Prices IBL whole.
     //   w  skip the normal map sample and the tangent-space transform.
     vec4  uAbFlags;
-    //   x  skip the probe bounce lookup AND the baked sky-visibility evaluation. Prices the two
-    //      terms that read the probe volumes, which is the pair a half-res pass would move.
-    //   y  drop the occupancy line-of-sight test back to Chebyshev alone. Prices the march.
-    vec4  uAbFlags2;
     // --viz N: write one of the shading inputs instead of the lit colour. The normal path is the
     // hardest thing here to be sure about by reading code — a double-sided sheet whose back face
     // lights from the wrong hemisphere looks exactly like a material problem — so it is worth being
@@ -113,28 +70,20 @@ layout(set = 0, binding = 0) uniform Frame {
     //   3 tangent-space normal-map value                    4 front/back facing
     //   5 world tangent                                     6 world bitangent
     float uVizChannel;
-    // xyz = world-space min of the sky volume, w = 1 when the volume is loaded.
-    vec4  uSkyMin;
-    // xyz = 1 / (max - min), w = how far along the normal to push the lookup, in metres.
-    vec4  uSkyScale;
-    float uBounceStrength;
-    vec3  _occPad;
-    // xyz = occupancy grid dims, w = 1 when the grid is bound. Read only by the leak metric
-    // (viz channel 21), which marches it for ground-truth line of sight between a point and the
-    // probes voting on it — the thing the Chebyshev test in probe_volume.glsl only approximates.
-    vec4  uOccupancyDims;
-    // xy = the incident field's size in pixels, z = 1 when the lit pass should read it instead of
-    // reconstructing the probe volumes itself, w unused.
+    // z = 1 when the lit pass reads the incident field (the probe clipmap's light: all of its indirect
+    // diffuse, sky included). Off -- --no-incident, or before the clipmap's first solve -- the lit
+    // pass falls back to the open-sky irradiance cube with sky visibility 1.
+    // x = 1 when it takes the field's sky visibility and light at all (--no-sky / --sky-no-sample
+    // zero it: sky visibility 1, no incident light). y, w unused.
     vec4  uIncident;
     // How the lit pass carries the incident field's light to its normal-mapped normal (incident_clipmap.frag's
     // gradient): x the mip bias the normal map is read at for it (indirect diffuse answers to folds and relief, not
     // to a weave finer than a pixel, which under TAA's jitter shimmered), y how far the correction may scale the
-    // light either way (factor in [1 - y, 1 + y]). LAST in the block on purpose: skybox.vert hardcodes the offsets
-    // of members before it.
+    // light either way (factor in [1 - y, 1 + y]).
     vec4  uIncidentGradient;
     // Stage 4e's velocity: this frame's UN-jittered view-projection and last frame's. The pre-pass projects a
     // vertex through both (current and previous world) and writes the difference, so motion never carries the
-    // jitter. LAST in the block for the same reason as above.
+    // jitter.
     mat4  uViewProjUnjittered;
     mat4  uPrevViewProjUnjittered;
 } frame;

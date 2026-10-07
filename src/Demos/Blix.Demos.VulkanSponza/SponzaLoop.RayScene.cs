@@ -6,18 +6,11 @@ using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
 
-// --ray-scene: the scene under CPU ray-query hierarchies (Blix.Geometry), built at load over every primitive's
-// full-detail triangles: regions over the placements of meshes used once, an instance per placement of a mesh
-// used more. Stage 3's measure of whether a load-time build fits these scenes, and what a CPU ray costs in them.
+// The scene under CPU ray-query hierarchies (Blix.Geometry), built at load over every primitive's full-detail
+// triangles: regions over the placements of meshes used once, an instance per placement of a mesh used more. Always
+// built: the clipmap traces it (--ray-scene, which once asked for it, is a no-op kept for existing invocations). Stage 3's measure of whether a load-time build fits these scenes, and what a CPU ray costs in them.
 internal sealed partial class SponzaLoop
 {
-    private bool rayScene;
-    // The probe injection traces its rays through the ray scene (sky_inject_traced.comp) unless --gi-march asks for
-    // the baked occupancy grid's march. --ab trace alternates the two in one process.
-    private bool giTrace;
-    private PipelineHandle injectTracedPipeline;
-    private bool InjectTracedNow => injectTracedPipeline.Id != 0 && rayBlockBuffers.Length > 0 && raySurfacesBaked
-        && (abMode == "trace" ? !AbOffPhase : giTrace);
     private RayQueryScene? rayQueries;
     // Per ray-scene placement (the transform table's order): the material a surface bake reads.
     private readonly record struct RayMaterial(TextureHandle Albedo, Vector4 BaseColor, float AlphaCutoff);
@@ -79,8 +72,9 @@ internal sealed partial class SponzaLoop
         var nodes = rayQueries.MeshNodeCount;
         Console.WriteLine(string.Create(Inv,
             $"[VulkanSponza] ray scene: {instances.Count:N0} placements of {meshes.Length:N0} meshes as {rayQueries.RegionCount:N0} regions (at most {rayRegionTriangles:N0} triangles) and {rayQueries.InstanceEntryCount:N0} instances, {rayQueries.StoredTriangleCount:N0} triangles stored, built in {clock.Elapsed.TotalMilliseconds:0} ms on {Environment.ProcessorCount} threads; {nodes:N0} nodes ({nodes * BvhNode.SizeInBytes / 1048576.0:0.0} MB), top level {rayQueries.Nodes.Length:N0}."));
-        if ((rayCheck || giTrace || probeReference || clipmapEnabled) && instances.Count > 0) BuildRayGpu();
-        if (clipmapEnabled && instances.Count > 0) CreateClipmap();
+        // The GPU scene and the clipmap are the diffuse GI, so both are built whenever there is a scene.
+        if (instances.Count > 0) BuildRayGpu();
+        if (instances.Count > 0) CreateClipmap();
         if (rayCheck && instances.Count > 0) BuildRayCheck();
     }
 

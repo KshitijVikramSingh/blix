@@ -1,11 +1,10 @@
 #version 450
-// The incident-light field from the camera-relative probe clipmap (--gi-clipmap): what incident.frag writes, the
-// same two quantities for the lit pass (rgb bounce, a sky visibility), read from the clipmap's traced probes rather
-// than from the baked bounds-sized volumes. Its own program because it declares the clipmap's state buffer, which
-// only exists when the clipmap does.
+// The incident-light field from the camera-relative probe clipmap: the two quantities the lit pass reads (rgb
+// incoming indirect light, a sky visibility), from the clipmap's traced probes. The clipmap is the scene's only
+// diffuse GI; the screen probes, when on, refine this pass's answer.
 //
 // rgb is ALL the indirect diffuse light arriving (the clipmap's probes carry the sky they see, not a visibility
-// fraction of it), so the lit pass adds no sky irradiance of its own when this field is active (frame.uIncident.w).
+// fraction of it), so the lit pass adds no sky irradiance of its own when this field is active (frame.uIncident.z).
 // Past the clipmap's coarsest level nothing answers: the cooked sky irradiance, as if the sky were open.
 
 #include "fullscreen.glsl"

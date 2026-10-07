@@ -1,3 +1,0 @@
-#version 450
-// The probe injection, marching the baked occupancy grid. The body is sky_inject.glsl.
-#include "sky_inject.glsl"

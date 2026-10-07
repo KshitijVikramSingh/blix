@@ -251,7 +251,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // resolve cost 1.4-1.6 ms isolated, and at full scale its rounding mixed neighbours across edges.)
     private GraphResourceHandle incidentHandle;
     private PassHandle incidentPassHandle;
-    private PipelineHandle incidentPipeline;
     // The incident light's luminance gradient with the normal: how the lit pass carries light evaluated at the
     // geometric normal to its normal-mapped one (incident_clipmap.frag).
     private GraphResourceHandle incidentGradientHandle;
@@ -261,121 +260,26 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private PipelineHandle gtaoDenoisePipeline;
     private readonly AmbientSettings ambient = new();
 
-    // Baked sky visibility (.blixsky), uploaded as three Rgba16F 3D textures of L2 coefficients.
-    // Three volumes for nine L2 coefficients: L0+L1, four L2 terms, and the last with slots spare.
-    private readonly TextureHandle[] skyVisibilityTextures = new TextureHandle[3];
-    private TextureHandle skyVisibilityTexture;
-    private Vector3 skyVolumeMin;
-    private Vector3 skyVolumeInvSpan;
-    private bool skyVolumeLoaded;
+    // The scene's extent (placements, padded, and the mover's reach): what caster culling sweeps to, the fog's
+    // ground and the orbit's frame. See FitSceneVolumeToDrawables.
+    private Vector3 sceneBoundsMin;
+    private Vector3 sceneBoundsSpan;
 
-    // The standard path enables baked sky visibility and runtime bounce. --no-sky disables both.
+    // The standard path takes the clipmap's sky visibility and light in the lit pass. --no-sky disables both.
     private bool skyVisibilityEnabled;
 
-    // Runtime sun-bounce injection over the shipped voxel grid.
-    private TextureHandle occupancyTexture;
-    // Linear surface colour per occupancy cell, used by transport at voxel hits.
-    private TextureHandle albedoTexture;
     // The sheen half of the probe. Zero mips means the probe predates .blixprobe v4 and the shader
     // is told so rather than handed the specular cube, which would render a plausible non-answer.
     private TextureHandle sheenEnvTexture;
     private TextureHandle sheenLutTexture;
     private float sheenMipCount;
-    // Ping-pong atlases let shading read the prior solve without a same-frame compute-to-fragment
-    // dependency. That dependency measured roughly 15 ms even though either side alone was near
-    // free; one frame of latency is smaller than the probe sweep's own amortisation.
-    private readonly TextureHandle[] bounceTextures = new TextureHandle[2];
-    // Directional mean hit distance, variance, and reachability, using the same tile layout. These
-    // let consumers reject a probe hidden behind geometry from the shading point.
-    private readonly TextureHandle[] bounceDepthTextures = new TextureHandle[2];
-
-    /// <summary>
-    /// Probe counts for the dynamic incident-light atlas.
-    /// </summary>
-    /// <remarks>
-    /// Each probe carries a 6x6 directional interior. Spatial density is controlled independently
-    /// from the baked visibility grid because marching cost scales with total probe count.
-    /// </remarks>
-    private int bounceX, bounceY, bounceZ;
-
-    // Which probes shading read, and how quickly an unread probe sleeps. Zero disables sleeping.
-    private TextureHandle probeUsageTexture;
-    private PassHandle probeUsagePassHandle;
-    private ShaderInterface usageInterface = null!;
     private ShaderInterface cullInterface = null!;
     private ShaderInterface occlusionInterface = null!;
-    private PipelineHandle probeUsagePipeline;
-    // Usage marking reads prior-frame depth before the current pre-pass. A current-frame dependency
-    // made the isolated injection cheaper but the whole frame slower by breaking tile pass merging.
     // Smoothed frame period, for the overlay's "share of frame" readouts. The A/B harness keeps
     // its own unsmoothed samples.
     private double lastFramePeriodMs;
-    /// <summary>Frames an unread probe remains awake; zero is the no-sleep baseline.</summary>
-    /// <remarks>
-    /// Sixteen frames is the current balance between camera-motion wake latency and dense-grid
-    /// injection cost. At 41,472 probes, disabling sleep measured 2.96 ms -> 26.26 ms.
-    /// </remarks>
-    private float probeSleepFrames = 16f;
-    /// <summary>The sleep setting the --ab sleep arm restores in its off phase.</summary>
-    private float ProbeSleepNow => abMode == "sleep" && AbOffPhase ? 0f : probeSleepFrames;
-    private const int OctTile = 8;
-    private int bounceWrite;
-    /// <summary>Experimental single-atlas transport path retained for the carry-cost comparison.</summary>
-    /// <remarks>
-    /// Carrying skipped tiles costs about 76 MB/frame at the tested dense configuration. Removing
-    /// it measured 2.22 ms versus 1.61 ms for ping-pong and introduces sampled/storage aliasing, so
-    /// the paired path remains standard. The flag preserves a repeatable comparison.
-    /// </remarks>
-    private bool probeCarryless;
-    private bool probePingPong => !probeCarryless;
-    private int BounceRead => probePingPong ? (bounceWrite ^ 1) : bounceWrite;
-    private int skyBounceBinding = -1;   // where uSkyBounce sits in passBindings
-    private ShaderProgramHandle injectProgram;
-    private PipelineHandle injectPipeline;
-    private PassHandle injectPassHandle;
-    private ShaderTextureBinding[] injectBindings = Array.Empty<ShaderTextureBinding>();
-    private int probeX, probeY, probeZ, occX, occY, occZ, albX, albY, albZ;
-    private Vector3 skyVolumeSpan;
-    private bool bounceReady;
-    private float injectRays = 256f;
-    // False treats occupancy as binary; true uses the baker's continuous density. Keep this as a
-    // live A/B so the interpretation and its image effect remain visible in the same process.
-    private bool injectDensity = true;
-    // Frames for a full refresh of the probe grid, chosen by sweeping it against both cost and the
-    // converged image:
-    //
-    //     period   8   36.15 ms   scene mean 0.0348
-    //     period  16   30.72 ms   scene mean 0.0348
-    //     period  32   28.21 ms   scene mean 0.0349
-    //     period  64   25.62 ms   scene mean 0.0323
-    //
-    // Thirty-two is where the output stops changing and the cost has not yet stopped falling: the
-    // same picture as eight, eight milliseconds cheaper, a full refresh in about 0.6 s at 50 fps. At
-    // sixty-four the steady state starts to drift, which is the multi-bounce feedback no longer
-    // keeping up with its own convergence.
-    private float injectPeriod = 32f;
-    // A SCALE on the baked per-material value, not the value. 1.0 takes the material at its word;
-    // the slider stays because the term is judged by eye, and dragging it to 0 is the A/B.
-    //
-    // <b>It was a global 0.5 for the whole scene, and the note explaining why named the wrong
-    // extension.</b> That note said Sponza authors transmission nowhere, every material reporting
-    // TransmissionFactor 0 — true, and about KHR_materials_transmission, the clear pane you see
-    // THROUGH. What the bounce needed was KHR_materials_diffuse_transmission, the thin sheet that
-    // GLOWS backlit, which the scene's patches author on exactly the surfaces that have it:
-    // LeafSpring and IvyLeaf at 0.45, and the three curtains at an explicit measured 0. Two
-    // extensions, two lines apart in the material table, and checking the near one made a
-    // per-material bake look like it would buy nothing.
-    //
-    // The cost of the conflation was not subtle once found: every non-opaque cell in the scene
-    // scattered half its light, so the curtains passed tinted light in the bounce that their own
-    // material says they do not pass.
-    private float injectTransmissionScale = 1.0f;
-
-    // Isolate the sky path's two costs: the compute solve and the two 3D fetches made by every lit
-    // fragment. Amortising the dispatch 8x recovered only 4 of 19 ms, so keep both switches for a
-    // direct measurement rather than attributing the remainder by inference.
-    private bool skipInject;    // --sky-no-inject
-    private bool skipSkySample; // --sky-no-sample
+    // --sky-no-sample: the lit pass takes no sky visibility or light from the incident field (as --no-sky).
+    private bool skipSkySample;
 
     private ShaderProgramHandle prepassOpaqueProgram;
     private ShaderProgramHandle prepassMaskProgram;
@@ -417,20 +321,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private ShaderProgramHandle presentProgram;
     private PipelineHandle presentPipeline;
     private FullscreenPass fullscreen = null!;
-    // Its own dummy pair rather than FullscreenPass's: that one indexes three vertices for a
-    // triangle and a probe impostor needs four for a quad. Contents are never read — the vertex
-    // shader synthesises corners from gl_VertexIndex, same trick, one more corner.
-    private VertexBufferHandle probeVb;
-    private IndexBufferHandle probeIb;
-    private ShaderProgramHandle probeProgram;
-    private PipelineHandle probePipeline;
-
-    // The probe view. Off by default — it draws a sphere per probe, and there are 41,472 of them.
-    private bool showProbes;
-    private float probeRadius = 0.08f;
-    // 0 = bounce, 1 = sky visibility, 2 = usefulness, 3 = reachability.
-    private float probeField;
-    private float probeExposure = 1f;
 
     // --- Froxel volumetric fog --------------------------------------------
     // A compute pass fills a view-aligned 3D grid with sun in-scattering and
@@ -520,14 +410,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private bool noPrepass;
     /// <summary>--probe &lt;name&gt;: a cooked .blixprobe to prefer over the default list.</summary>
     private string? probeName;
-    /// <summary>--bounce-div N: dynamic-light grid dimensions equal visibility dimensions divided by N.</summary>
-    /// <remarks>
-    /// This is continuous because total probe count is cubic in the per-axis divisor. One matches
-    /// the cooked visibility grid (48x27x32), costing about 2 ms and 40 MB. Finer spacing cannot add
-    /// baked visibility detail; grid-aligned interpolation bands require better placement or
-    /// reconstruction rather than still more probes.
-    /// </remarks>
-    private float bounceDiv = 1f;
     /// <summary>--sun-overhead: straight down, so the courtyard is lit while base lighting is worked on.</summary>
     private bool sunOverhead;
     private string abMode = "";
@@ -555,13 +437,14 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     {
         "Lit scene", "Geometric normal", "Shading normal", "Tangent-space normal",
         "Front/back facing", "Tangent", "Bitangent", "Sky visibility",
-        "Probe UV", "Raw probe L0",
+        // 8, 9, 16 and 21 read the retired baked volume. Kept as names because the index is the channel id.
+        "unused", "unused",
         "Bounce radiance (raw)", "Bounce contribution", "Direct sun only",
         "GTAO visibility", "Texture AO", "Occlusion product",
-        "Probe confidence (red = fallback)",
+        "unused",
         "Ambient: sky diffuse", "Ambient: sky specular",
         "Ambient: transmitted", "Ambient: bounce",
-        "Probe leak (red = weight through walls)",
+        "unused",
         "Pre-pass normal (what the incident field reads)",
     };
 
@@ -572,16 +455,9 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // than to the search radius.
     private float aoScale = 0.5f;
 
-    // Standard path: reconstruct sky visibility and bounce into the half-resolution incident field.
-    // This measured -14.64 ms on the orbit and -29.99 ms with occupancy marching. --no-incident
-    // preserves the inline reference path for comparison.
+    // Standard path: the probe clipmap's light reaches the lit pass through the full-resolution incident field.
+    // --no-incident is a diagnostic: the lit pass then uses the open-sky irradiance cube with sky visibility 1.
     private bool incidentField = true;
-
-    // Multi-bounce feedback strength in the injection solve. 0 = single bounce, which is the
-    // discriminator for whether a colour cast is transport leakage accumulating over rounds.
-    private float injectFeedback = 1f;
-    // Occupancy-march strength for feedback visibility, parallel to shading's uProbeOcclusion.
-    private float transportOcclusion;
 
     // --ao-debug N: make the GTAO pass write an intermediate instead of the bent normal. See gtao.frag.
     private float aoDebug;
@@ -667,15 +543,11 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private Frustum cameraFrustumThisFrame;
     /// <summary>--no-caster-cull turns off culling casters by where their shadow can land.</summary>
     private bool shadowCasterCull = true;
-    /// <summary>--probe-reference: path-trace a few probes on the CPU and print them beside the field.</summary>
+    /// <summary>--probe-reference: path-trace references on the CPU and print them beside the clipmap's answers.</summary>
     private bool probeReference;
-    /// <summary>--no-sky-bounce: the injector scatters the sun only, for the CPU reference to match.</summary>
-    private bool noSkyBounce;
     /// <summary>--no-foliage: skip the ivy and tree packs, to price alpha-cutout overdraw.</summary>
     private bool noFoliage;
     private int refBounces = 3;
-    // --ref-probes N: how many probes the references path-trace (12 by default, spread through the volume).
-    private int referenceProbes = 12;
     private Matrix4x4 prevAmbientViewProj = Matrix4x4.Identity;
     private bool ambientHistoryValid;
     // Two shadow caster pipelines: opaque casters use a push-only program (no
@@ -1044,10 +916,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     /// one place a number is still chosen rather than derived, and it says so.
     /// </remarks>
     private Vector3 sunIrradiance = new(9.42f, 9.42f, 9.42f);
-    /// <summary>Mean sky visibility over the baked volume, for the probe census to compare against.</summary>
-    private double meanSkyVisibility;
-    /// <summary>Per-cell sky visibility, kept so the probe census can bin the field by enclosure.</summary>
-    private float[] cellSkyVisibility = System.Array.Empty<float>();
 
     /// <summary>Multiplier on measured probe sun irradiance; 1 preserves the measurement.</summary>
     /// <remarks>
@@ -1159,9 +1027,6 @@ internal sealed class AmbientSettings
     [Tune]            public bool Enabled = true;
     [Tune(0.1f, 4f)]  public float RadiusMetres = 0.8f;
 
-    // Multiplier over transport computed from measured sun, geometry, and the baked albedo grid.
-    // One preserves that result; values above one are an explicit scene-level artistic choice.
-    [Tune(0f, 4f)]    public float BounceStrength = 1.0f;
     // How much visibility comes from previous frames. The shipping shader uses two slices with four
     // radial steps; spatial denoise and temporal accumulation supply convergence. Zero disables
     // history and remains the baseline.

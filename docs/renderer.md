@@ -259,7 +259,7 @@ unclamped so the texture's mip count limits it.
 
 **The library functions come in both forms.** GLSL builds `sampler2D(t, s)` only
 where it samples, so it cannot be passed to a function. The sampling functions in
-`shadow.glsl`, `sky_visibility.glsl`, `probe_volume.glsl` and `sheen.glsl`
+`shadow.glsl` and `sheen.glsl`
 therefore exist as overload pairs, and the separate one takes a single sampler
 after its textures:
 
@@ -347,7 +347,7 @@ defines after `#version`, and `#line` mappings for useful compiler errors.
 | `fullscreen.glsl` | Fullscreen-triangle vertex synthesis |
 | `bloom.glsl` | Bright extraction and separable Gaussian blur |
 | `froxel.glsl` | Shared froxel addressing and integration helpers |
-| `probe_volume.glsl`, `sky_visibility.glsl`, `octahedral.glsl` | Probe-volume and directional-field sampling |
+| `probe_clipmap.glsl`, `octahedral.glsl` | Probe-clipmap and directional-field sampling |
 | `sheen.glsl`, `coverage.glsl`, `noise.glsl` | Material sheen, coverage shaping, and stochastic helpers |
 
 Application shaders stay with the application. A helper should graduate into

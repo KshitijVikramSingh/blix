@@ -218,8 +218,8 @@ internal sealed partial class SponzaLoop
                 new("uCull", new Matrix4x4Uniform(cullViewProj ?? viewProj)),
                 new("uReceivers", new Matrix4x4Uniform(receiversViewProj ?? Matrix4x4.Identity)),
                 new("uSweep", new Vector4Uniform(new Vector4(shadowSweepDir, shadowSweepDir == Vector3.Zero ? 0f : 1f))),
-                new("uVolumeMin", new Vector4Uniform(new Vector4(skyVolumeMin, 0f))),
-                new("uVolumeMax", new Vector4Uniform(new Vector4(skyVolumeMin + skyVolumeSpan, 0f))),
+                new("uVolumeMin", new Vector4Uniform(new Vector4(sceneBoundsMin, 0f))),
+                new("uVolumeMax", new Vector4Uniform(new Vector4(sceneBoundsMin + sceneBoundsSpan, 0f))),
                 new("uCamera", new Vector4Uniform(new Vector4(cameraPosition, LodErrorScale))),
                 new("uLod", new Vector4Uniform(new Vector4(LodErrorPixelsNow, worldErrorBudget, LodHysteresis, margin))),
                 new("uRange", new Vector4Uniform(new Vector4(firstPlacement, placementCount, firstDrawable, visibleBase))),
@@ -449,10 +449,6 @@ internal sealed partial class SponzaLoop
             new("uEnvMipCount",      new FloatUniform(iblPrefilterMips)),
             new("uSheenMipCount",    new FloatUniform(sheenMipCount)),
             new("uMsaaSamples",      new FloatUniform(MsaaSamples)),
-            new("uSkyDims",          new Vector4Uniform(new Vector4(probeX, probeY, probeZ, 0f))),
-            // w marks whether shading should write usage at all — off while the volume is not ready.
-            new("uBounceDims", new Vector4Uniform(new Vector4(
-                bounceX, bounceY, bounceZ, bounceReady && ProbeSleepNow > 0f ? 1f : 0f))),
             new("uShadowStrength",   new FloatUniform(
                 shadows.Enabled && !(abMode == "shadow" && AbOffPhase) ? 1f : 0f)),
             new("uCascadeViewProj",  new Matrix4x4ArrayUniform(cascadeViewProj)),
@@ -464,25 +460,15 @@ internal sealed partial class SponzaLoop
             new("uFog",              new Vector4Uniform(
                 new Vector4(frame.Width, frame.Height, fog.Far, fog.Enabled ? 1f : 0f))),
             new("uVizChannel",       new FloatUniform(vizChannel)),
-            // w: sky visibility is available, baked or (through the incident field) from the clipmap.
-            new("uSkyMin",           new Vector4Uniform(new Vector4(
-                skyVolumeMin, (skyVolumeLoaded || (ClipmapActive && incidentField)) && skyVisibilityEnabled && !skipSkySample ? 1f : 0f))),
-            // w: how far along the normal the probe lookup is pushed. About one cell, so a surface
-            // asks the cell in FRONT of it rather than the one it is embedded in.
-            new("uSkyScale",         new Vector4Uniform(new Vector4(skyVolumeInvSpan, 0.6f))),
-            new("uBounceStrength",   new FloatUniform((bounceReady || ClipmapActive) && skyVisibilityEnabled && !skipSkySample ? 1f : 0f)),
-            // w gates the leak metric's march: 0 means no occupancy grid shipped and channel 21
-            // has nothing to be the truth about.
-            new("uOccupancyDims",    new Vector4Uniform(new Vector4(occX, occY, occZ, occX > 0 ? 1f : 0f))),
-            // z gates the read. Off in the --ab off phase alongside the passes that fill it, so the
-            // arm prices the whole substitution rather than half of it.
+            // z gates the read: the incident field is there once the clipmap has solved. Off in the --ab incident
+            // off phase alongside the pass that fills it, so the arm prices the whole substitution rather than
+            // half of it. x: whether the lit pass takes the field's sky visibility and light (--no-sky and
+            // --sky-no-sample turn both off).
             new("uIncident",         new Vector4Uniform(new Vector4(
-                frame.Width,
-                frame.Height,
-                incidentField && !(abMode == "incident" && AbOffPhase) ? 1f : 0f,
-                // w: the incident field carries the sky's diffuse light itself (the probe clipmap), so the lit pass
-                // adds none of its own.
-                ClipmapActive && incidentField && !(abMode == "incident" && AbOffPhase) ? 1f : 0f))),
+                skyVisibilityEnabled && !skipSkySample ? 1f : 0f,
+                0f,
+                IncidentFieldNow ? 1f : 0f,
+                0f))),
             new("uIncidentGradient", new Vector4Uniform(new Vector4(incidentNormalBias, incidentGradientClamp, 0f, 0f))),
             new("uViewProjUnjittered", new Matrix4x4Uniform(viewProj)),
             // Last frame's un-jittered camera, or this frame's on the first (zero motion rather than garbage).
@@ -493,11 +479,6 @@ internal sealed partial class SponzaLoop
                 AbOffPhase && abMode == "pbr"      ? 1f : 0f,
                 AbOffPhase && abMode == "ibl"      ? 1f : 0f,
                 AbOffPhase && abMode == "normal"   ? 1f : 0f))),
-            new("uAbFlags2",         new Vector4Uniform(new Vector4(
-                AbOffPhase && abMode == "indirect" ? 1f : 0f,
-                //   y  drop the occupancy line-of-sight test back to Chebyshev alone, so the
-                //      march's cost can be priced against the leak it removes.
-                AbOffPhase && abMode == "occlusion" ? 1f : 0f, 0f, 0f))),
         };
         // The remaining //@tune uniforms (shadow slope scale, uVisualizeCascades) are appended by
         // name from the overlay panel — reflection lands each at its offset. The intensity and
@@ -667,12 +648,14 @@ internal sealed partial class SponzaLoop
                 new("uPrevViewProj",  new Matrix4x4Uniform(fogHistoryValid ? prevFogViewProj : viewProj)),
                 new("uPrevCamPos",    new Vector4Uniform(new Vector4(
                     fogHistoryValid ? prevFogCamPos : cameraPosition, 0f))),
-                new("uBoundsMin",     new Vector4Uniform(new Vector4(skyVolumeMin, 0f))),
-                new("uBoundsSpan",    new Vector4Uniform(new Vector4(skyVolumeSpan, 0f))),
-                new("uProbeDims",     new Vector4Uniform(new Vector4(bounceX, bounceY, bounceZ, 0f))),
-                // w = 0: the fog's probe blend keeps the Chebyshev-only visibility test while the
-                // lit pass's occlusion dial is being measured. One pass at a time.
-                new("uOccupancyDims", new Vector4Uniform(new Vector4(occX, occY, occZ, 0f))),
+                new("uBoundsMin",     new Vector4Uniform(new Vector4(sceneBoundsMin, 0f))),
+                // The clipmap the medium is lit by, as the surfaces are.
+                new("uClipDims",      new Vector4Uniform(new Vector4(ClipmapDims.X, ClipmapDims.Y, ClipmapDims.Z, clipmapSpacing))),
+                new("uClipParams",    new Vector4Uniform(new Vector4(clipmap?.BlendProbes ?? 0f, 0f, 0f, 0f))),
+                new("uOrigin0",       new Vector4Uniform(ClipmapOrigin(0))),
+                new("uOrigin1",       new Vector4Uniform(ClipmapOrigin(1))),
+                new("uOrigin2",       new Vector4Uniform(ClipmapOrigin(2))),
+                new("uOrigin3",       new Vector4Uniform(ClipmapOrigin(3))),
                 // No split depths: fog and surfaces share fitted-volume containment so they select
                 // the same cascade at the same world position.
                 new("uCascadeVP",     new Matrix4x4ArrayUniform(cascadeViewProj)),
@@ -680,7 +663,8 @@ internal sealed partial class SponzaLoop
             graph.Dispatch(froxelPassHandle, new DispatchCommand(
                 froxelPipeline,
                 (froxelGridX + 7) / 8, (froxelGridY + 7) / 8, 1,
-                froxelUniforms, FroxelBindings()));
+                froxelUniforms, FroxelBindings(),
+                Buffers: new[] { new ShaderBufferBinding("ClipmapState", ClipmapStateOrPlaceholder) }));
             prevFogViewProj = viewProj;
             prevFogCamPos = cameraPosition;
             fogScatterWrite ^= 1;
@@ -736,91 +720,6 @@ internal sealed partial class SponzaLoop
         });
         if (occlusionNow) RecordOcclusion(cameraCull, perFrame, frame.Width, frame.Height);
         RecordRayView(frame.Width, frame.Height);
-
-        // Flip before dispatching: the pass writes one texture while every reader — the lit pass,
-        // and the pass's own multi-bounce feedback — takes the other, which is what keeps the
-        // compute off the fragment stage's critical path.
-        // --ab inject skips only the compute dispatch. The prior atlas remains valid, isolating
-        // injection cost from the shading path that consumes the field.
-        var skipInjectNow = skipInject || (abMode == "inject" && AbOffPhase);
-        if (probePingPong && bounceReady && skyVisibilityEnabled && !skipInjectNow) bounceWrite ^= 1;
-        if (bounceReady && skyBounceBinding >= 0)
-        {
-            passBindings[skyBounceBinding] = new ShaderTextureBinding(
-                "uSkyBounce", bounceTextures[BounceRead]);
-            passBindings[skyBounceBinding + 1] = new ShaderTextureBinding(
-                "uSkyBounceDepth", bounceDepthTextures[BounceRead]);
-        }
-
-        // Sun bounce into the probe grid. Cheap enough to redo every frame at this probe count, and
-        // redoing it is the point: the whole reason it is not baked is that it must follow the sun.
-        if (bounceReady && skyVisibilityEnabled && !skipInjectNow && BounceAtlasRead)
-        {
-            var injectUniforms = new ShaderUniform[]
-            {
-                new("uBoundsMin",  new Vector4Uniform(new Vector4(skyVolumeMin, 0f))),
-                new("uBoundsSpan", new Vector4Uniform(new Vector4(skyVolumeSpan, ambient.BounceStrength))),
-                new("uProbeDims",  new Vector4Uniform(new Vector4(bounceX, bounceY, bounceZ, MathF.Round(injectRays)))),
-                new("uOccupancyDims", new Vector4Uniform(new Vector4(occX, occY, occZ, injectDensity ? 1f : 0f))),
-                // w carries translucency: how much of what a partial cell absorbs comes out the far
-                // side wearing its colour. Zero on opaque cells in the shader, or walls would leak.
-                new("uAlbedoDims", new Vector4Uniform(new Vector4(albX, albY, albZ, injectTransmissionScale))),
-                new("uSunDirection",  new Vector4Uniform(new Vector4(sunDirection, 0f))),
-                // w: whether the sky-visibility volume is loaded, so the injector knows whether its
-                // sky SOURCE term can be evaluated at all.
-                // w gates the injector's SKY source term. --no-sky-bounce zeroes it while leaving the
-                // visibility volume loaded for the lit pass, so the field carries the sun's bounce
-                // alone — which is the only thing the CPU reference can reproduce faithfully, since
-                // the irradiance cube it would need lives on the GPU.
-                new("uSunIrradiance", new Vector4Uniform(new Vector4(
-                    EffectiveSunIrradiance, skyVolumeLoaded && !noSkyBounce ? 1f : 0f))),
-                new("uSchedule", new Vector4Uniform(new Vector4(
-                    postLoadFrames, MathF.Round(injectPeriod),
-                    ProbeSleepNow > 0f ? 1f / ProbeSleepNow : 0f,
-                    probePingPong ? 1f : 0f))),
-                // Eight injection periods before anything is allowed to sleep — enough for every
-                // probe to solve and for several rounds of multi-bounce to propagate through the
-                // ones no camera ever looks at.
-                new("uWarmup", new Vector4Uniform(new Vector4(injectPeriod * 8f, 0f, 0f, 0f))),
-                new("uTransport", new Vector4Uniform(new Vector4(
-                    injectFeedback, transportOcclusion, 0f, 0f))),
-            };
-            // Traced (--gi-trace, or the on-phase of --ab trace): the same probes and atlas, rays through the ray scene.
-            var traced = InjectTracedNow;
-            graph.Dispatch(injectPassHandle, new DispatchCommand(
-                traced ? injectTracedPipeline : injectPipeline,
-                // One workgroup per probe: its 64 threads are the rays shared across all 36
-                // interior texels of that probe's tile.
-                bounceX * bounceY * bounceZ, 1, 1,
-                injectUniforms, BounceBindings(), Buffers: traced ? rayBlockBuffers : null));
-        }
-
-        // Which probes this camera needs, sampled from the previous frame's resolved depth because
-        // the usage dispatch executes before this frame's pre-pass. Marks are read by the NEXT
-        // frame's injection; see probe_usage.comp for why this is not done in lit.frag.
-        if (bounceReady && skyVisibilityEnabled && ProbeSleepNow > 0f && BounceAtlasRead)
-        {
-            Matrix4x4.Invert(viewProj, out var invViewProj);
-            var usageUniforms = new ShaderUniform[]
-            {
-                new("uInvViewProj", new Matrix4x4Uniform(invViewProj)),
-                new("uBoundsMin",   new Vector4Uniform(new Vector4(skyVolumeMin, 0f))),
-                new("uBoundsSpan",  new Vector4Uniform(new Vector4(skyVolumeSpan, 0f))),
-                new("uProbeDims",   new Vector4Uniform(new Vector4(bounceX, bounceY, bounceZ, 0f))),
-                new("uDepthSize",   new Vector4Uniform(new Vector4(
-                    frame.Width, frame.Height, 1f / frame.Width, 1f / frame.Height))),
-            };
-            var usageBindings = new[]
-            {
-                new ShaderTextureBinding("uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
-                new ShaderTextureBinding("uProbeUsage", probeUsageTexture),
-            };
-            // One invocation per 8x8 pixel block; the shader strides by 8 again inside.
-            var groupsX = (frame.Width / 8 + 7) / 8;
-            var groupsY = (frame.Height / 8 + 7) / 8;
-            graph.Dispatch(probeUsagePassHandle, new DispatchCommand(
-                probeUsagePipeline, groupsX, groupsY, 1, usageUniforms, usageBindings));
-        }
 
         // Hi-Z pyramid: level 0 reduces the resolved depth, each level after reduces its parent.
         RecordPyramid(hiZPassHandles, hiZPipelines, hiZHandles, frame.Width, frame.Height, skip: abMode == "hiz" && AbOffPhase);
@@ -898,58 +797,22 @@ internal sealed partial class SponzaLoop
                 uniforms: denoiseUniforms));
         }
 
-        // The incident-light field. Recorded unconditionally so the graph's target is never stale,
-        // but skipped in the --ab off phase so the arm prices the PASS as well as the lit pass's
-        // saving — leaving it running in both arms would count the saving and not what pays for it.
+        // The incident-light field, from the probe clipmap. Skipped in the --ab off phase so the arm prices the PASS
+        // as well as the lit pass's saving -- leaving it running in both arms would count the saving and not what
+        // pays for it.
         if (incidentField && !(abMode == "incident" && AbOffPhase))
         {
-            Matrix4x4.Invert(cameraProjection, out var incidentInvProj);
-            Matrix4x4.Invert(cameraView, out var incidentInvView);
-            var incW = frame.Width;
-            var incH = frame.Height;
-            var incidentUniforms = new ShaderUniform[]
-            {
-                new("uInvProjection", new Matrix4x4Uniform(incidentInvProj)),
-                new("uInvView",       new Matrix4x4Uniform(incidentInvView)),
-                new("uTarget",        new Vector4Uniform(new Vector4(
-                    incW, incH, 1f / incW, 1f / incH))),
-                new("uSkyMin",        new Vector4Uniform(new Vector4(
-                    skyVolumeMin, skyVolumeLoaded && skyVisibilityEnabled && !skipSkySample ? 1f : 0f))),
-                new("uSkyScale",      new Vector4Uniform(new Vector4(skyVolumeInvSpan, 0.6f))),
-                new("uBounceDims",    new Vector4Uniform(new Vector4(bounceX, bounceY, bounceZ, 0f))),
-                new("uOccupancyDims", new Vector4Uniform(new Vector4(
-                    // Share the lit pass's occupancy control so inline and incident reconstruction
-                    // use the same visibility policy.
-                    occX, occY, occZ, occX > 0 ? tunePanel.Value("uProbeOcclusion") : 0f))),
-                new("uParams",        new Vector4Uniform(new Vector4(
-                    bounceReady && skyVisibilityEnabled && !skipSkySample ? 1f : 0f,
-                    tunePanel.Value("uProbeTetrahedral"), 0f, 0f))),
-            };
             if (ClipmapActive)
             {
+                Matrix4x4.Invert(cameraProjection, out var incidentInvProj);
+                Matrix4x4.Invert(cameraView, out var incidentInvView);
                 RecordScreenProbes(frame.Width, frame.Height);
-                RecordIncidentClipmap(incidentInvProj, incidentInvView, incW, incH, frame.Width, frame.Height);
+                RecordIncidentClipmap(incidentInvProj, incidentInvView, frame.Width, frame.Height, frame.Width, frame.Height);
             }
-            else graph.Pass(incidentPassHandle, scope => fullscreen.Draw(
-                scope, incidentPipeline,
-                new[]
-                {
-                    new ShaderTextureBinding(
-                        "uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
-                    new ShaderTextureBinding(
-                        "uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
-                    new ShaderTextureBinding("uSkyBounce",
-                        bounceReady ? bounceTextures[BounceRead] : brdfLutTexture),
-                    new ShaderTextureBinding("uSkyBounceDepth",
-                        bounceReady ? bounceDepthTextures[BounceRead] : brdfLutTexture),
-                    new ShaderTextureBinding("uSkyVisibility",  skyVisibilityTextures[0]),
-                    new ShaderTextureBinding("uSkyVisibility1", skyVisibilityTextures[1]),
-                    new ShaderTextureBinding("uSkyVisibility2", skyVisibilityTextures[2]),
-                    new ShaderTextureBinding("uOccupancy",
-                        occX > 0 ? occupancyTexture : skyVisibilityTextures[0]),
-                },
-                pushConstants: null,
-                uniforms: incidentUniforms));
+            // Before the clipmap's first solve there is nothing to read, and the lit pass does not (uIncident.z is 0
+            // until then). Recorded empty anyway: the graph runs a pass with nothing drawn, so its Clear load op
+            // leaves the targets black rather than undefined.
+            else graph.Pass(incidentPassHandle, _ => { });
         }
 
         graph.Pass(litPassHandle, scope =>
@@ -973,49 +836,6 @@ internal sealed partial class SponzaLoop
                 if (litFlat) pipeline = g.Pipeline == opaqueDoubleSidedPipeline ? flatPipeline : flatSolidPipeline;
                 DrawSceneGroup(scope, occlusionNow ? SceneListCameraFinal : SceneListCamera, g, pipeline, perFrame, passBindings, g.Material);
             }
-            // The probe view, before the sky so the sky can still fill where nothing was drawn, and
-            // before blend so glass composites over it like any other geometry.
-            if (showProbes && skyVolumeLoaded)
-            {
-                var probeUniforms = new ShaderUniform[]
-                {
-                    new("uViewProj",  new Matrix4x4Uniform(viewProj)),
-                    new("uCameraPos", new Vector4Uniform(new Vector4(cameraPosition, 0f))),
-                    new("uProbeMin",  new Vector4Uniform(new Vector4(skyVolumeMin, probeRadius))),
-                    new("uProbeSpan", new Vector4Uniform(new Vector4(skyVolumeSpan, 0f))),
-                    // Field 1 is sky visibility, which lives on the dense VISIBILITY grid; 0 and 2
-                    // are the bounce and its usefulness, which live on the coarser bounce grid.
-                    new("uProbeDims", new Vector4Uniform(probeField > 0.5f && probeField < 1.5f
-                        ? new Vector4(probeX, probeY, probeZ, 0f)
-                        : new Vector4(bounceX, bounceY, bounceZ, 0f))),
-
-                    new("uProbeMode", new Vector4Uniform(new Vector4(probeField, probeExposure, 0f, 0f))),
-                    new("uBounceDims", new Vector4Uniform(new Vector4(bounceX, bounceY, bounceZ, 0f))),
-                };
-                scope.DrawIndexedInstanced(
-                    probeVb, probeIb, probePipeline,
-                    indexCount: 6,
-                    instanceCount: probeField > 0.5f && probeField < 1.5f
-                        ? probeX * probeY * probeZ
-                        : bounceX * bounceY * bounceZ,
-                    // Its OWN bindings: the probe shader declares uSkyBounce/uSkyVisibility at set 1
-                    // slots 0 and 1, where the lit pass's list puts them at 7 and 6. Handing over a
-                    // list built for a different shader binds by slot, not by name.
-                    uniforms: probeUniforms,
-                    textures: new[]
-                    {
-                        new ShaderTextureBinding("uSkyBounce",
-                            bounceReady ? bounceTextures[BounceRead] : brdfLutTexture),
-                        new ShaderTextureBinding("uSkyVisibility", skyVisibilityTexture),
-                        new ShaderTextureBinding("uOccupancy", occupancyTexture),
-                        new ShaderTextureBinding("uSkyBounceDepth",
-                            bounceReady ? bounceDepthTextures[BounceRead] : brdfLutTexture),
-                    },
-                    // null, not an empty array: an empty array still counts as "push constants supplied", and
-                    // this shader declares no ranges.
-                    perDrawMaterial: null, pushConstants: null!);
-            }
-
             // Sky after opaque, before blend. Fullscreen triangle; positions are
             // synthesised in skybox.vert, so it binds set-0 perFrame + textures only.
             fullscreen.Draw(scope, skyPipeline, skyBindings, uniforms: perFrame);
@@ -1062,7 +882,6 @@ internal sealed partial class SponzaLoop
             }
             VerifyHiZ();
             OcclusionCensus();
-            ProbeReachCensus();
             WriteAmbientShot(path);
             // Preserve the raw GTAO result beside the denoised lighting input so horizon-search
             // output can be inspected without the 3x3 bilateral neighbourhood.
@@ -1071,7 +890,6 @@ internal sealed partial class SponzaLoop
             WriteStability(Path.ChangeExtension(path, null));
             WriteSurfaceCheck();
             WriteMoverShot(Path.ChangeExtension(path, null));
-            LeakCensus();
             WritePassBreakdown();
             WriteLodCensus();
             WriteClusterCensus();
@@ -1080,11 +898,8 @@ internal sealed partial class SponzaLoop
             WriteClipmapCheck();
             WriteScreenProbeCheck();
             WriteRayView(Path.ChangeExtension(path, null));
-            WriteProbeCensus();
             if (probeReference)
             {
-                WriteProbeReference(probeCount: referenceProbes, paths: 4096, bounces: refBounces);
-                WriteProbeReferenceTriangles(probeCount: referenceProbes, paths: 4096, bounces: refBounces);
                 WriteSkyVisibilityReference(samples: 200, rays: 2048);
                 WriteSkyConsistency();
                 WriteSurfaceReference(grid: 24, paths: 1024, bounces: refBounces);
@@ -1092,55 +907,6 @@ internal sealed partial class SponzaLoop
             WriteFrameStats();
             host.RequestClose();
         }
-    }
-
-    /// <summary>
-    /// How much of the probe blend, over everything the camera can see, arrives through a wall.
-    /// </summary>
-    /// <remarks>
-    /// Channel 21 marches occupancy to each contributing probe and reports leaked blend weight.
-    /// Mean and tail quantiles are both retained because localized high leakage is more visible than
-    /// the same weight distributed across the frame. The expensive march runs only for this channel.
-    /// </remarks>
-    private void LeakCensus()
-    {
-        if (vizChannel < 20.5f || vizChannel > 21.5f) return;
-
-        var pixels = device.ReadTexture(
-            graph.GetColorTexture(hdrHandle), out var width, out var height, out var format);
-        if (format != TextureFormat.R11G11B10F) return;
-
-        var measured = new List<float>(width * height / 4);
-        double sum = 0;
-        double confidenceSum = 0;
-        for (var i = 0; i < width * height; i++)
-        {
-            var packed = BitConverter.ToUInt32(pixels, i * 4);
-            // Channel 21 marks measured surfaces with green >= 0.5 and exactly zero blue. Requiring
-            // both excludes bright skybox pixels that never ran the leak instrument.
-            var green = UnpackFloat((packed >> 11) & 0x7FF, 6);
-            if (green < 0.49f) continue;
-            if (UnpackFloat((packed >> 22) & 0x3FF, 5) > 1e-4f) continue;
-            var leak = UnpackFloat(packed & 0x7FF, 6);
-            measured.Add(leak);
-            sum += leak;
-            confidenceSum += Math.Clamp((green - 0.5f) * 2f, 0f, 1f);
-        }
-
-        if (measured.Count == 0)
-        {
-            Console.WriteLine("[VulkanSponza] leak census: no pixel read the probe volume.");
-            return;
-        }
-
-        measured.Sort();
-        float Quantile(double q) => measured[Math.Clamp((int)(q * measured.Count), 0, measured.Count - 1)];
-        var over = (double)measured.Count(v => v > 0.25f) / measured.Count;
-        Console.WriteLine(
-            $"[VulkanSponza] leak census ({measured.Count:N0} probe-lit pixels of {width * height:N0}): " +
-            $"mean {sum / measured.Count:P1}, median {Quantile(0.5):P1}, p95 {Quantile(0.95):P1}, " +
-            $"p99 {Quantile(0.99):P1}, {over:P1} of pixels over 25%, " +
-            $"mean surviving weight {confidenceSum / measured.Count:P1}");
     }
 
     /// <summary>The ambient buffer before the denoise: rgb as written, alpha as visibility.</summary>
@@ -1161,82 +927,6 @@ internal sealed partial class SponzaLoop
         var visPath = Path.ChangeExtension(path, null) + ".vis.png";
         PngWriter.WriteRgba8(visPath, vis, width, height);
         Console.WriteLine($"[VulkanSponza]   {Path.GetFileName(visPath)}  ({width}x{height}, pre-denoise)");
-    }
-
-    /// <summary>What the injector actually wrote into the reachability channel, per probe.</summary>
-    /// <remarks>
-    /// Reads GPU output directly and reports reachability by height, avoiding drift between a CPU
-    /// model of the march and the shader implementation.
-    /// </remarks>
-    private void ProbeReachCensus()
-    {
-        if (!bounceReady) return;
-        var pixels = device.ReadTexture(
-            bounceDepthTextures[BounceRead], out var w, out var h, out var format);
-        if (format != TextureFormat.Rgba16F) { Console.WriteLine("[VulkanSponza] probe reach: unexpected format"); return; }
-
-        Console.WriteLine("[VulkanSponza] probe reachability, as written by the injector:");
-        var liveByY = new int[bounceY];
-        var totalByY = new int[bounceY];
-        var live = 0;
-        for (var z = 0; z < bounceZ; z++)
-        for (var y = 0; y < bounceY; y++)
-        for (var x = 0; x < bounceX; x++)
-        {
-            // The tile's first INTERIOR texel; the border ring is copied from the interior and the
-            // flag is constant across the tile, so any interior texel answers for the probe.
-            var tx = x * OctTile + 1;
-            var ty = (y + z * bounceY) * OctTile + 1;
-            var reach = (float)BitConverter.ToHalf(pixels, ((ty * w) + tx) * 8 + 4);   // .b
-            totalByY[y]++;
-            if (reach >= 0.5f) { liveByY[y]++; live++; }
-        }
-        var total = bounceX * bounceY * bounceZ;
-        Console.WriteLine($"  live {live:N0} of {total:N0} ({100.0 * live / total:0.0}%), rejected {total - live:N0}");
-        // Optional raw dump preserves mean and variance for visibility analysis against the exact
-        // atlas the GPU produced, plus the paired irradiance atlas below.
-        if (Environment.GetEnvironmentVariable("BLIX_DUMP_PROBE_DEPTH") is { Length: > 0 } dumpPath)
-        {
-            var floats = new float[w * h * 2];
-            for (var i = 0; i < w * h; i++)
-            {
-                floats[i * 2]     = (float)BitConverter.ToHalf(pixels, i * 8);       // mean
-                floats[i * 2 + 1] = (float)BitConverter.ToHalf(pixels, i * 8 + 2);   // variance
-            }
-            var bytes = new byte[16 + floats.Length * 4];
-            BitConverter.TryWriteBytes(bytes.AsSpan(0, 4), w);
-            BitConverter.TryWriteBytes(bytes.AsSpan(4, 4), h);
-            BitConverter.TryWriteBytes(bytes.AsSpan(8, 4), bounceX);
-            BitConverter.TryWriteBytes(bytes.AsSpan(12, 4), bounceY);
-            Buffer.BlockCopy(floats, 0, bytes, 16, floats.Length * 4);
-            File.WriteAllBytes(dumpPath, bytes);
-            Console.WriteLine($"  dumped depth atlas {w}x{h} to {dumpPath}");
-
-            // The irradiance atlas beside it, same layout: the two are only meaningful together,
-            // because every question about the blend is "what weight, times what colour".
-            var irr = device.ReadTexture(bounceTextures[BounceRead], out var iw, out var ih, out _);
-            var ifl = new float[iw * ih * 3];
-            for (var i = 0; i < iw * ih; i++)
-            {
-                ifl[i * 3]     = (float)BitConverter.ToHalf(irr, i * 8);
-                ifl[i * 3 + 1] = (float)BitConverter.ToHalf(irr, i * 8 + 2);
-                ifl[i * 3 + 2] = (float)BitConverter.ToHalf(irr, i * 8 + 4);
-            }
-            var ib = new byte[16 + ifl.Length * 4];
-            BitConverter.TryWriteBytes(ib.AsSpan(0, 4), iw);
-            BitConverter.TryWriteBytes(ib.AsSpan(4, 4), ih);
-            BitConverter.TryWriteBytes(ib.AsSpan(8, 4), bounceX);
-            BitConverter.TryWriteBytes(ib.AsSpan(12, 4), bounceY);
-            Buffer.BlockCopy(ifl, 0, ib, 16, ifl.Length * 4);
-            var irrPath = Path.ChangeExtension(dumpPath, null) + ".irr.bin";
-            File.WriteAllBytes(irrPath, ib);
-            Console.WriteLine($"  dumped irradiance atlas {iw}x{ih} to {irrPath}");
-        }
-        for (var y = 0; y < bounceY; y++)
-        {
-            var wy = skyVolumeMin.Y + (y + 0.5f) * skyVolumeSpan.Y / bounceY;
-            Console.WriteLine($"    y={wy,7:0.00} m  live {liveByY[y],4}/{totalByY[y],-4} ({100.0 * liveByY[y] / totalByY[y]:0}%)");
-        }
     }
 
     /// <summary>Measures how much on-screen submitted geometry is hidden behind other geometry.</summary>
@@ -1429,12 +1119,8 @@ internal sealed partial class SponzaLoop
             "pbr"    => "the GGX specular lobe",
             "ibl"    => "image-based lighting",
             "normal" => "normal mapping",
-            "indirect"=> "the probe-volume terms (bounce + baked sky visibility)",
-            "inject"  => "the bounce injection dispatch",
-            "trace"   => "probe rays traced through the ray scene rather than marched through the occupancy grid",
             "cull"    => "camera frustum culling",
             "castercull" => "shadow caster culling against the camera",
-            "sleep"   => "probes sleeping when nothing samples them",
             "lod"     => lodArmOff > 0f
                 ? string.Create(Inv, $"mesh LOD at {lodArmOn:0.##} px rather than {lodArmOff:0.##} px")
                 : "mesh level of detail",
@@ -1535,7 +1221,6 @@ internal sealed partial class SponzaLoop
         return (byte)Math.Clamp((int)MathF.Round(encoded * 255f), 0, 255);
     }
 
-    /// <summary>The injection pass's textures for this frame: write one, read the other.</summary>
     // The grid follows the framebuffer, so a resize re-creates it. It is a descriptor in two live
     // sets and cannot be swapped under work in flight — but a resize already stalls the pipeline,
     // which makes this the cheapest correct place to pay for the idle. Texture ids are never
@@ -1581,12 +1266,12 @@ internal sealed partial class SponzaLoop
     private float FogJitter() => (float)((postLoadFrames * 0.7548776662) % 1.0);
 
     // How far a point in these bounds can travel along `dir` before it leaves the scene volume.
-    // A slab test against the sky volume, which is the authored extent of everything that can cast
-    // or receive — past it there is nothing left to darken.
+    // A slab test against the scene bounds, the extent of everything that can cast or receive --
+    // past it there is nothing left to darken.
     private float SceneExitDistance(Bounds3 bounds, Vector3 dir)
     {
-        var min = skyVolumeMin;
-        var max = skyVolumeMin + skyVolumeSpan;
+        var min = sceneBoundsMin;
+        var max = sceneBoundsMin + sceneBoundsSpan;
         var t = float.MaxValue;
         for (var a = 0; a < 3; a++)
         {
@@ -1602,7 +1287,7 @@ internal sealed partial class SponzaLoop
                 : (a == 0 ? min.X : a == 1 ? min.Y : min.Z);
             t = MathF.Min(t, MathF.Max((wall - start) / d, 0f));
         }
-        return t == float.MaxValue ? skyVolumeSpan.Length() : t;
+        return t == float.MaxValue ? sceneBoundsSpan.Length() : t;
     }
 
     /// <summary>Halton low-discrepancy sequence, one dimension.</summary>
@@ -1620,21 +1305,13 @@ internal sealed partial class SponzaLoop
         return result;
     }
 
-    // Whether the fog has real fields to scatter. Both halves must be there: the baked sky
-    // visibility volume decides how much sky a froxel sees, and the bounce atlas supplies what the
-    // scene sent back. Either one missing and the medium is back to a constant, so say so once
-    // here rather than testing three flags at the dispatch.
-    private bool fogIndirect =>
-        skyVolumeLoaded && skyVisibilityEnabled && bounceReady && !skipSkySample;
+    // Whether the fog has a real field to scatter: the probe clipmap, once it has solved. Until then the medium is
+    // back to a constant, so say so once here rather than at the dispatch.
+    private bool fogIndirect => ClipmapActive;
 
-    // Rebuilt per frame, because the bounce atlas alternates: recorded BEFORE the write index
-    // flips, so bounceTextures[bounceWrite] here is the solution the previous frame finished —
-    // the same texture the lit pass reads as bounceTextures[BounceRead] after the flip.
-    // Whether anything reads the bounds-sized bounce atlas this frame: the incident field when the clipmap is not
-    // answering, the lit pass's inline path (no incident field), the fog, the probe display and the probe reference.
-    // With the clipmap answering and fog off nothing does, yet the injection ran every frame (isolated: 26.7 ms of a
-    // 121 ms frame, plus probe-usage). Skipped then, the atlas holds its last solve and warms again if a reader returns.
-    private bool BounceAtlasRead => !(ClipmapActive && incidentField) || fog.Enabled || probeReference || probeField > 0f;
+    // Whether the lit pass reads the incident field this frame: on (not --no-incident), the clipmap has solved, and
+    // not the --ab incident off phase. The incident pass records its draw under the same conditions.
+    private bool IncidentFieldNow => incidentField && ClipmapActive && !(abMode == "incident" && AbOffPhase);
 
     private ShaderTextureBinding[] FroxelBindings() => new[]
     {
@@ -1642,34 +1319,13 @@ internal sealed partial class SponzaLoop
         new ShaderTextureBinding("uCascadeShadowMaps[0]", graph.GetDepthTexture(cascadeHandles[0])),
         new ShaderTextureBinding("uCascadeShadowMaps[1]", graph.GetDepthTexture(cascadeHandles[1])),
         new ShaderTextureBinding("uCascadeShadowMaps[2]", graph.GetDepthTexture(cascadeHandles[2])),
-        new ShaderTextureBinding("uSkyVisibility", skyVisibilityTextures[0]),
         new ShaderTextureBinding("uIrradiance", irradianceCubeTexture),
         // Never a hole, even before the first solve: a descriptor set with a gap is a device loss,
         // and uFogParams.z is what tells the shader not to read these.
-        new ShaderTextureBinding("uAtlas", bounceReady ? bounceTextures[bounceWrite] : brdfLutTexture),
-        new ShaderTextureBinding("uDepthAtlas", bounceReady ? bounceDepthTextures[bounceWrite] : brdfLutTexture),
+        new ShaderTextureBinding("uClipmapIrradiance", clipmap is not null ? clipmapIrradiance : brdfLutTexture),
+        new ShaderTextureBinding("uClipmapDepth", clipmap is not null ? clipmapDepth : brdfLutTexture),
         new ShaderTextureBinding("uScatterPrev", fogScatterTextures[fogScatterWrite ^ 1]),
         new ShaderTextureBinding("uScatter", fogScatterTextures[fogScatterWrite]),
-        new ShaderTextureBinding("uOccupancy",
-            occX > 0 ? occupancyTexture : skyVisibilityTextures[0]),
-    };
-
-    private ShaderTextureBinding[] BounceBindings() => new[]
-    {
-        new ShaderTextureBinding("uAtlas", bounceTextures[bounceWrite]),
-        new ShaderTextureBinding("uDepthAtlas", bounceDepthTextures[bounceWrite]),
-        new ShaderTextureBinding("uDepthAtlasPrev", bounceDepthTextures[BounceRead]),
-        new ShaderTextureBinding("uOccupancy", occupancyTexture),
-        new ShaderTextureBinding("uAlbedo", albX > 0 ? albedoTexture : occupancyTexture),
-        new ShaderTextureBinding("uProbeUsage", probeUsageTexture),
-        // All SH bands plus irradiance form the injector's distant-sky source term.
-        new ShaderTextureBinding("uSkyVisibility", skyVisibilityTextures[0]),
-        new ShaderTextureBinding("uSkyVisibility1", skyVisibilityTextures[1]),
-        new ShaderTextureBinding("uSkyVisibility2", skyVisibilityTextures[2]),
-        new ShaderTextureBinding("uIrradiance", irradianceCubeTexture),
-        // Last frame's solution, which is what turns a rotation of sweeps into successive bounces
-        // AND what lets this dispatch run without the lit pass waiting on it.
-        new ShaderTextureBinding("uAtlasPrev", bounceTextures[BounceRead]),
     };
 
     // --- live GPU pass cost ----------------------------------------------
@@ -1677,120 +1333,6 @@ internal sealed partial class SponzaLoop
     // the overlay's Perf tab shows. A window rather than a lifetime mean, which includes loading and
     // responds too slowly for live controls.
     private GpuPassWindow gpuPasses = new(FrameTimings.None);
-
-    /// <summary>What the probe field actually holds, against what the inputs say it should.</summary>
-    /// <remarks>
-    /// Compares stored incident light with measured sun, sky irradiance, enclosure, and closure so
-    /// transport loss can be distinguished from presentation choices.
-    ///
-    /// The floor printed here is the SKY alone: sky irradiance times the mean visibility of the
-    /// volume. It is a floor and not a target, because every probe should additionally carry bounce.
-    /// A field sitting at or below it is carrying no bounce at all.
-    /// </remarks>
-    private void WriteProbeCensus()
-    {
-        if (!bounceReady) { Console.WriteLine("[VulkanSponza] probe census: no bounce field."); return; }
-        var irr = device.ReadTexture(bounceTextures[BounceRead], out var w, out var h, out var format);
-        if (format != TextureFormat.Rgba16F) { Console.WriteLine("[VulkanSponza] probe census: unexpected atlas format."); return; }
-
-        // The depth atlas alongside it, for the ray closure the march parked in its alpha.
-        var depth = device.ReadTexture(bounceDepthTextures[BounceRead], out var dw, out var dh, out _);
-        var closureFlat = new double[dw * dh];
-        for (var i = 0; i < dw * dh; i++)
-            closureFlat[i] = (float)BitConverter.ToHalf(depth, i * 8 + 6);
-
-        double sunlitSum = 0;
-        var sunlitCount = 0;
-        var lum = new List<double>(w * h);
-        var lumFlat = new double[w * h];
-        double sum = 0;
-        var black = 0;
-        const int tile = 8;
-        // Tile (px,py) for probe p, matching blix_probeTile: x = p.x, y = p.y + p.z * dims.y.
-        double lumByProbe(int probe, int t, int perProbe)
-        {
-            var px = probe % bounceX;
-            var py = (probe / bounceX) % bounceY;
-            var pz = probe / (bounceX * bounceY);
-            var x0 = px * tile;
-            var y0 = (py + pz * bounceY) * tile;
-            var tx = x0 + (t % tile);
-            var ty = y0 + (t / tile);
-            if (tx >= w || ty >= h) return 0;
-            return lumFlat[ty * w + tx];
-        }
-        for (var i = 0; i < w * h; i++)
-        {
-            var a = (float)BitConverter.ToHalf(irr, i * 8 + 6);
-            if (a > 0.25) { sunlitSum += (a - 0.5) * 2.0; sunlitCount++; }
-            double r = (float)BitConverter.ToHalf(irr, i * 8);
-            double g = (float)BitConverter.ToHalf(irr, i * 8 + 2);
-            double b = (float)BitConverter.ToHalf(irr, i * 8 + 4);
-            var y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            if (y <= 1e-6) black++;
-            lum.Add(y);
-            lumFlat[i] = y;
-            sum += y;
-        }
-        lum.Sort();
-        double Pct(double p) => lum.Count == 0 ? 0 : lum[Math.Clamp((int)(p * lum.Count), 0, lum.Count - 1)];
-
-        var sunLum = 0.2126 * EffectiveSunIrradiance.X + 0.7152 * EffectiveSunIrradiance.Y + 0.0722 * EffectiveSunIrradiance.Z;
-        var median = Pct(0.5);
-        Console.WriteLine("[VulkanSponza] probe census — irradiance the field is carrying:");
-        Console.WriteLine(string.Create(Inv,
-            $"    texels {lum.Count:N0} over {bounceX}x{bounceY}x{bounceZ} probes, {black * 100.0 / Math.Max(1, lum.Count):0.0}% exactly zero"));
-        Console.WriteLine(string.Create(Inv,
-            $"    luminance  median {median:0.0000}   p25 {Pct(0.25):0.0000}   p75 {Pct(0.75):0.0000}   p95 {Pct(0.95):0.0000}   mean {sum / Math.Max(1, lum.Count):0.0000}"));
-        Console.WriteLine(string.Create(Inv,
-            $"    against    sun irradiance {sunLum:0.000}  ->  median is {median / Math.Max(sunLum, 1e-6) * 100.0:0.00}% of it"));
-        Console.WriteLine(string.Create(Inv,
-            $"    sunlit     {(sunlitCount > 0 ? sunlitSum / sunlitCount : 0) * 100.0:0.0}% of what the probes can see is in sun (mean over solved texels)"));
-        Console.WriteLine(string.Create(Inv,
-            $"    volume     mean sky visibility {meanSkyVisibility:0.000} (a surface seeing this much sky, under an albedo ~0.27 scene)"));
-        // Bin by baked cell visibility so open and enclosed regions do not collapse into one median.
-        if (cellSkyVisibility.Length == bounceX * bounceY * bounceZ)
-        {
-            // Include height because equal sky visibility can describe geometrically distinct
-            // courtyard and arcade regions.
-            var bins = new (double Sum, int Count, double Vis, double Y, double Closure)[5];
-            var perProbe = lum.Count / Math.Max(1, bounceX * bounceY * bounceZ);
-            for (var probe = 0; probe < bounceX * bounceY * bounceZ; probe++)
-            {
-                var vis = cellSkyVisibility[probe];
-                var bin = Math.Clamp((int)(vis * 5.0), 0, 4);
-                double probeSum = 0;
-                for (var t = 0; t < perProbe; t++) probeSum += lumByProbe(probe, t, perProbe);
-                bins[bin].Sum += probeSum / Math.Max(1, perProbe);
-                bins[bin].Count++;
-                bins[bin].Vis += vis;
-                var pz = probe / (bounceX * bounceY);
-                var py2 = (probe / bounceX) % bounceY;
-                bins[bin].Y += skyVolumeMin.Y + (py2 + 0.5f) * skyVolumeSpan.Y / bounceY;
-                // Closure is constant across a tile, so the tile's first texel is the whole answer.
-                var cx = (probe % bounceX) * tile;
-                var cy = ((probe / bounceX) % bounceY + (probe / (bounceX * bounceY)) * bounceY) * tile;
-                if (cx < dw && cy < dh) bins[bin].Closure += closureFlat[cy * dw + cx];
-            }
-            Console.WriteLine("    by enclosure (the cell's own sky visibility):");
-            for (var b = 0; b < 5; b++)
-            {
-                if (bins[b].Count == 0) continue;
-                Console.WriteLine(string.Create(Inv,
-                    $"      visibility {b * 20,3}-{(b + 1) * 20,3}%  n={bins[b].Count,6:N0}  " +
-                    $"mean visibility {bins[b].Vis / bins[b].Count:0.000}  " +
-                    $"mean y {bins[b].Y / bins[b].Count,6:0.0} m  " +
-                    $"irradiance {bins[b].Sum / bins[b].Count:0.0000}  " +
-                    // Independently baked visibility predicts closure as 1 - visibility.
-                    $"closure {bins[b].Closure / bins[b].Count:0.000} vs expected {1.0 - bins[b].Vis / bins[b].Count:0.000}"));
-            }
-        }
-        else
-        {
-            Console.WriteLine(
-                "    (no per-cell binning: the bounce grid is not 1:1 with the visibility volume)");
-        }
-    }
 
     /// <summary>What each LOD budget actually submits, counted rather than timed.</summary>
     /// <remarks>

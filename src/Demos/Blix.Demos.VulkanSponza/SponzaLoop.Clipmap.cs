@@ -5,13 +5,12 @@ using Blix.Graphics;
 
 namespace Blix.Demos.VulkanSponza;
 
-// --gi-clipmap: the camera-relative probe clipmap (stage 4c), solved by clipmap_inject.comp through the ray scene
-// with nothing baked. Blix.Geometry's ProbeClipmap places its probes; this keeps the GPU side in step with it every
+// The camera-relative probe clipmap (stage 4c), the scene's diffuse GI, solved by clipmap_inject.comp through the ray
+// scene with nothing baked. Blix.Geometry's ProbeClipmap places its probes; this keeps the GPU side in step with it every
 // frame (where each level's block is), owns the atlases and the per-slot state, and checks at the shot that the
 // GPU's addressing is the C# contract's.
 internal sealed partial class SponzaLoop
 {
-    private bool clipmapEnabled;
     // --clipmap-spacing M: level 0's probe spacing; --clipmap-budget N: probes solved a frame (64 rays each).
     private float clipmapSpacing = 0.5f;
     private int clipmapBudget = 512;
@@ -45,10 +44,18 @@ internal sealed partial class SponzaLoop
     private ShaderInterface incidentClipmapInterface = null!;
     private PipelineHandle incidentClipmapPipeline;
 
+    private Vector4 ClipmapOrigin(int level) => clipmap is { } c
+        ? new Vector4(c.Origins[level].X, c.Origins[level].Y, c.Origins[level].Z, 0f) : Vector4.Zero;
+    // The fog binds the state buffer whether or not there is a clipmap (a hole is a device loss); uFogParams.z gates it.
+    private GpuBufferHandle clipmapStatePlaceholder;
+    private GpuBufferHandle ClipmapStateOrPlaceholder => clipmap is not null ? clipmapState
+        : clipmapStatePlaceholder.Equals(default(GpuBufferHandle))
+            ? clipmapStatePlaceholder = Own(device.CreateGpuBuffer(16, name: "sponza.clipmap.state.none")) : clipmapStatePlaceholder;
+
     // The clipmap is what the incident field and the lit pass read once it has been solved at least once.
     private bool ClipmapActive => clipmap is not null && clipmapFrame > 0;
 
-    // The incident field from the clipmap (incident_clipmap.frag): the same target, the same two quantities.
+    // The incident field from the clipmap (incident_clipmap.frag): rgb the light arriving, a sky visibility.
     private void RecordIncidentClipmap(Matrix4x4 invProjection, Matrix4x4 invView, int width, int height, int frameWidth, int frameHeight)
     {
         var origins = clipmap!.Origins;
@@ -89,7 +96,7 @@ internal sealed partial class SponzaLoop
 
     private void CreateClipmap()
     {
-        if (!clipmapEnabled || clipmap is not null) return;
+        if (clipmap is not null) return;
         clipmap = new ProbeClipmap(ClipmapLevels, ClipmapDims, clipmapSpacing);
         clipmapIrradiance = Own(device.CreateStorageTexture2D(clipmap.AtlasWidth, clipmap.AtlasHeight, TextureFormat.Rgba16F,
             SamplerDescription.LinearClamp, "sponza.clipmap.irradiance"));
