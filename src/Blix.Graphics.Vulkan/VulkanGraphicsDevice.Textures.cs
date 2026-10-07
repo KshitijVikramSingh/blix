@@ -1164,6 +1164,7 @@ public sealed partial class VulkanGraphicsDevice
         TextureFormat.R11G11B10F => Format.B10G11R11UfloatPack32,
         TextureFormat.R32Uint => Format.R32Uint,
         TextureFormat.Rg16F => Format.R16G16Sfloat,
+        TextureFormat.R16F => Format.R16Sfloat,
         TextureFormat.Bc7Srgb => Format.BC7SrgbBlock,
         TextureFormat.Bc7Unorm => Format.BC7UnormBlock,
         TextureFormat.Bc5Unorm => Format.BC5UnormBlock,

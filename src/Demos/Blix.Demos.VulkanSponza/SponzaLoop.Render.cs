@@ -477,8 +477,8 @@ internal sealed partial class SponzaLoop
             // z gates the read. Off in the --ab off phase alongside the passes that fill it, so the
             // arm prices the whole substitution rather than half of it.
             new("uIncident",         new Vector4Uniform(new Vector4(
-                Math.Max(1, (int)(frame.Width * incidentScale)),
-                Math.Max(1, (int)(frame.Height * incidentScale)),
+                frame.Width,
+                frame.Height,
                 incidentField && !(abMode == "incident" && AbOffPhase) ? 1f : 0f,
                 // w: the incident field carries the sky's diffuse light itself (the probe clipmap), so the lit pass
                 // adds none of its own.
@@ -754,7 +754,7 @@ internal sealed partial class SponzaLoop
 
         // Sun bounce into the probe grid. Cheap enough to redo every frame at this probe count, and
         // redoing it is the point: the whole reason it is not baked is that it must follow the sun.
-        if (bounceReady && skyVisibilityEnabled && !skipInjectNow)
+        if (bounceReady && skyVisibilityEnabled && !skipInjectNow && BounceAtlasRead)
         {
             var injectUniforms = new ShaderUniform[]
             {
@@ -798,7 +798,7 @@ internal sealed partial class SponzaLoop
         // Which probes this camera needs, sampled from the previous frame's resolved depth because
         // the usage dispatch executes before this frame's pre-pass. Marks are read by the NEXT
         // frame's injection; see probe_usage.comp for why this is not done in lit.frag.
-        if (bounceReady && skyVisibilityEnabled && ProbeSleepNow > 0f)
+        if (bounceReady && skyVisibilityEnabled && ProbeSleepNow > 0f && BounceAtlasRead)
         {
             Matrix4x4.Invert(viewProj, out var invViewProj);
             var usageUniforms = new ShaderUniform[]
@@ -905,8 +905,8 @@ internal sealed partial class SponzaLoop
         {
             Matrix4x4.Invert(cameraProjection, out var incidentInvProj);
             Matrix4x4.Invert(cameraView, out var incidentInvView);
-            var incW = Math.Max(1, (int)(frame.Width * incidentScale));
-            var incH = Math.Max(1, (int)(frame.Height * incidentScale));
+            var incW = frame.Width;
+            var incH = frame.Height;
             var incidentUniforms = new ShaderUniform[]
             {
                 new("uInvProjection", new Matrix4x4Uniform(incidentInvProj)),
@@ -950,25 +950,6 @@ internal sealed partial class SponzaLoop
                 },
                 pushConstants: null,
                 uniforms: incidentUniforms));
-
-            graph.Pass(incidentResolvePassHandle, scope => fullscreen.Draw(
-                scope, incidentResolvePipeline,
-                new[]
-                {
-                    new ShaderTextureBinding("uIncidentRaw", graph.GetColorTexture(incidentHandle)),
-                    new ShaderTextureBinding("uIncidentGradientRaw", graph.GetColorTexture(incidentGradientHandle)),
-                    new ShaderTextureBinding(
-                        "uPrepassNormal", graph.GetColorTexture(SampleablePrepassNormal)),
-                    new ShaderTextureBinding(
-                        "uSceneDepth", graph.GetDepthTexture(SampleableSceneDepth)),
-                },
-                pushConstants: null,
-                uniforms: new ShaderUniform[]
-                {
-                    new("uInvProjection", new Matrix4x4Uniform(incidentInvProj)),
-                    new("uSource", new Vector4Uniform(new Vector4(
-                        incW, incH, 1f / incW, 1f / incH))),
-                }));
         }
 
         graph.Pass(litPassHandle, scope =>
@@ -1167,28 +1148,19 @@ internal sealed partial class SponzaLoop
     {
         var pixels = device.ReadTexture(
             graph.GetColorTexture(ambientHandle), out var width, out var height, out var format);
-        if (format != TextureFormat.Rgba16F) return;
+        if (format != TextureFormat.R16F) return;
 
-        var rgb = new byte[width * height * 4];
         var vis = new byte[width * height * 4];
         for (var i = 0; i < width * height; i++)
         {
-            var src = i * 8;
+            var a = (float)BitConverter.ToHalf(pixels, i * 2);
             var dst = i * 4;
-            for (var c = 0; c < 3; c++)
-            {
-                var v = (float)BitConverter.ToHalf(pixels, src + c * 2);
-                rgb[dst + c] = (byte)Math.Clamp((int)MathF.Round(v * 255f), 0, 255);
-            }
-            rgb[dst + 3] = 255;
-            var a = (float)BitConverter.ToHalf(pixels, src + 6);
             vis[dst] = vis[dst + 1] = vis[dst + 2] = (byte)Math.Clamp((int)MathF.Round(a * 255f), 0, 255);
             vis[dst + 3] = 255;
         }
-        PngWriter.WriteRgba8(path, rgb, width, height);
         var visPath = Path.ChangeExtension(path, null) + ".vis.png";
         PngWriter.WriteRgba8(visPath, vis, width, height);
-        Console.WriteLine($"[VulkanSponza]   {path} + {Path.GetFileName(visPath)}  ({width}x{height}, pre-denoise)");
+        Console.WriteLine($"[VulkanSponza]   {Path.GetFileName(visPath)}  ({width}x{height}, pre-denoise)");
     }
 
     /// <summary>What the injector actually wrote into the reachability channel, per probe.</summary>
@@ -1658,6 +1630,12 @@ internal sealed partial class SponzaLoop
     // Rebuilt per frame, because the bounce atlas alternates: recorded BEFORE the write index
     // flips, so bounceTextures[bounceWrite] here is the solution the previous frame finished —
     // the same texture the lit pass reads as bounceTextures[BounceRead] after the flip.
+    // Whether anything reads the bounds-sized bounce atlas this frame: the incident field when the clipmap is not
+    // answering, the lit pass's inline path (no incident field), the fog, the probe display and the probe reference.
+    // With the clipmap answering and fog off nothing does, yet the injection ran every frame (isolated: 26.7 ms of a
+    // 121 ms frame, plus probe-usage). Skipped then, the atlas holds its last solve and warms again if a reader returns.
+    private bool BounceAtlasRead => !(ClipmapActive && incidentField) || fog.Enabled || probeReference || probeField > 0f;
+
     private ShaderTextureBinding[] FroxelBindings() => new[]
     {
         new ShaderTextureBinding("uGrid", froxelGridTexture),
@@ -2041,45 +2019,31 @@ internal sealed partial class SponzaLoop
     {
         var pixels = device.ReadTexture(
             graph.GetColorTexture(ambientDenoisedHandle), out var width, out var height, out var format);
-        if (format != TextureFormat.Rgba16F)
+        if (format != TextureFormat.R16F)
         {
-            Console.Error.WriteLine($"[VulkanSponza] ambient target is {format}, expected Rgba16F.");
+            Console.Error.WriteLine($"[VulkanSponza] ambient target is {format}, expected R16F.");
             return;
         }
 
         var visibility = new byte[width * height * 4];
-        var bent = new byte[width * height * 4];
         double sum = 0;
         var min = float.MaxValue;
         var max = float.MinValue;
         for (var i = 0; i < width * height; i++)
         {
-            var src = i * 8;
-            var nx = (float)BitConverter.ToHalf(pixels, src);
-            var ny = (float)BitConverter.ToHalf(pixels, src + 2);
-            var nz = (float)BitConverter.ToHalf(pixels, src + 4);
-            var v  = (float)BitConverter.ToHalf(pixels, src + 6);
-
+            var v = (float)BitConverter.ToHalf(pixels, i * 2);
             sum += v; min = MathF.Min(min, v); max = MathF.Max(max, v);
             var dst = i * 4;
             var g = (byte)Math.Clamp((int)MathF.Round(v * 255f), 0, 255);
             visibility[dst] = visibility[dst + 1] = visibility[dst + 2] = g;
             visibility[dst + 3] = 255;
-            // Directions are signed; the usual half-and-shift so -1 reads black and +1 white.
-            bent[dst]     = (byte)Math.Clamp((int)MathF.Round((nx * 0.5f + 0.5f) * 255f), 0, 255);
-            bent[dst + 1] = (byte)Math.Clamp((int)MathF.Round((ny * 0.5f + 0.5f) * 255f), 0, 255);
-            bent[dst + 2] = (byte)Math.Clamp((int)MathF.Round((nz * 0.5f + 0.5f) * 255f), 0, 255);
-            bent[dst + 3] = 255;
         }
 
-        var bentPath = Path.ChangeExtension(path, null) + ".bent.png";
         PngWriter.WriteRgba8(path, visibility, width, height);
-        PngWriter.WriteRgba8(bentPath, bent, width, height);
         Console.WriteLine(
             $"[VulkanSponza] ambient visibility {width}x{height}: " +
             $"min {min:0.000} max {max:0.000} mean {sum / (width * height):0.000}");
         Console.WriteLine($"[VulkanSponza]   {path}");
-        Console.WriteLine($"[VulkanSponza]   {bentPath}");
     }
 
     // Record one parity pass. The unrecorded target keeps the previous frame and becomes history.

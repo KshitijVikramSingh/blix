@@ -30,8 +30,8 @@
 //
 // Store evaluated sky visibility rather than interpolated SH coefficients. Carrying L0/L1 to full
 // resolution increased the sky-term error from 2.73 to 3.69 mean sRGB, while omitted L2 measured
-// only 0.36. The dominant residual is positional: a coarse texel centre can reconstruct a different
-// world point from the fine pixel. Tune incidentScale or the sampling position, not the payload.
+// only 0.36. The dominant residual was positional (a coarse texel centre reconstructing a different world point
+// from the fine pixel), which is why the field is now evaluated at full resolution, per pixel.
 // --no-incident retains the inline reference and the host records the paired timing comparison.
 
 #include "fullscreen.glsl"

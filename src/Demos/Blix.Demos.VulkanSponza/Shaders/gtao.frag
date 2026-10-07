@@ -6,12 +6,11 @@
 //
 // This supplies ambient visibility independently of directional sun visibility.
 //
-//   out .rgb  bent normal, WORLD space: the average unoccluded direction. The IBL
-//             diffuse lookup uses this instead of the geometric normal, so a surface in
-//             a corner gathers light from the opening rather than from the wall.
-//   out .a    visibility in [0,1]. Multiplied into indirect light. Not raised to a
+//   out .r    visibility in [0,1] (an R16F target). Multiplied into indirect light. Not raised to a
 //             power, not scaled by a strength dial — the integral already answers the
 //             question, and a knob on top of it would only be a way to disagree with it.
+//             (A bent normal was also written, in rgb of an Rgba16F target, and denoised at full
+//             resolution; nothing shaded with it -- only an ambient visualisation read it -- so it went.)
 //
 // Inputs are depth only because occlusion is geometric. Normal-map detail must not invent
 // occluders, so the geometric normal is reconstructed from neighbouring depth.
@@ -23,7 +22,7 @@ layout(location = 0) out vec4 outAmbient;
 
 layout(set = 0, binding = 0) uniform Gtao {
     mat4  uInvProjection;   // clip -> view
-    mat4  uInvView;         // view -> world (for the bent normal)
+    mat4  uInvView;         // view -> world (the temporal reprojection)
     vec4  uTarget;          // xy = size in pixels, zw = 1/size
     // x = world-space radius of the search, y = projection scale (pixels per view-space unit at
     // unit depth), z = debug channel (0 off), w unused.
@@ -114,7 +113,7 @@ vec3 reconstructNormal(vec2 uv, vec3 P) {
 void main() {
     // The linear-depth pyramid reports the far-plane distance where the pre-pass drew nothing.
     if (hiZDepth(0, vUv) >= g.uRay.z) {
-        outAmbient = vec4(normalize((g.uInvView * vec4(0.0, 0.0, 1.0, 0.0)).xyz), 1.0);
+        outAmbient = vec4(1.0);
         return;
     }
 
@@ -129,7 +128,7 @@ void main() {
     // not turn into a full-screen gather.
     float radiusPixels = min(worldRadius * g.uParams.y / max(-P.z, 1e-3), MAX_RADIUS_PIXELS);
     if (radiusPixels < 1.0) {
-        outAmbient = vec4(normalize((g.uInvView * vec4(N, 0.0)).xyz), 1.0);
+        outAmbient = vec4(1.0);
         return;
     }
 
@@ -148,9 +147,6 @@ void main() {
 
     float visibility = 0.0;
     float visibilitySq = 0.0;   // for the per-pixel spread the history is clamped against
-    vec3  bentNormal = vec3(0.0);
-    float projectedLengthSum = 0.0;
-    float arcSum = 0.0;
 
     for (int s = 0; s < SLICES; ++s) {
         float phi = (float(s) / float(SLICES)) * PI + sliceRotation;
@@ -217,12 +213,6 @@ void main() {
         float sliceVisibility = projectedLength * arc;
         visibility += sliceVisibility;
         visibilitySq += sliceVisibility * sliceVisibility;
-        projectedLengthSum += projectedLength;
-        arcSum += projectedLength * arc;
-
-        // The bisector of the unoccluded arc is where this slice's light comes from.
-        float bent = (h1 + h2) * 0.5;
-        bentNormal += (V * cos(bent) + tangent * sin(bent)) * projectedLength;
     }
 
     // Slice variance bounds acceptable history before the spatial neighbourhood exists.
@@ -240,7 +230,7 @@ void main() {
         if (clipPrev.w > 1e-4) {
             vec2 uvPrev = (clipPrev.xy / clipPrev.w) * 0.5 + 0.5;
             if (all(greaterThanEqual(uvPrev, vec2(0.0))) && all(lessThanEqual(uvPrev, vec2(1.0)))) {
-                float history = texture(uHistory, uvPrev).a;
+                float history = texture(uHistory, uvPrev).r;
                 // Refused outright off-screen, and bounded by this pixel's own spread everywhere
                 // else — so a disocclusion, where history disagrees by far more than the estimator's
                 // noise, is pulled back to something this frame would have accepted rather than
@@ -253,29 +243,7 @@ void main() {
         }
     }
 
-    // If every slice was degenerate the sum is zero and normalize() would produce NaN,
-    // which spreads through the IBL lookup and paints black pixels that no amount of
-    // staring at the AO buffer explains.
-    vec3 bentView = length(bentNormal) > 1e-5 ? normalize(bentNormal) : N;
-    vec3 bentWorld = normalize((g.uInvView * vec4(bentView, 0.0)).xyz);
-
-    outAmbient = vec4(bentWorld, visibility);
+    outAmbient = vec4(visibility);
     // Bright where history was refused or clamped back — the disocclusions and the screen edge.
-    if (g.uTemporal.z > 0.5) outAmbient = vec4(vec3(refused), visibility);
-
-    // Debug channels, written into rgb so the capture's bent-normal PNG carries them. The point is
-    // to see the INPUTS: once a surface is heavily occluded the bent normal is the bisector of
-    // whatever arc survived, so reading the reconstructed normal off it is circular.
-    //   1 = reconstructed geometric normal, world space
-    //   2 = mean |projected normal| per slice  (collapses -> visibility collapses)
-    //   3 = mean unoccluded-arc fraction
-    if (g.uParams.z > 0.5) {
-        if (g.uParams.z < 1.5) {
-            outAmbient = vec4(normalize((g.uInvView * vec4(N, 0.0)).xyz) * 0.5 + 0.5, visibility);
-        } else if (g.uParams.z < 2.5) {
-            outAmbient = vec4(vec3(projectedLengthSum / float(SLICES)), visibility);
-        } else {
-            outAmbient = vec4(vec3(arcSum / max(projectedLengthSum, 1e-4)), visibility);
-        }
-    }
+    if (g.uTemporal.z > 0.5) outAmbient = vec4(refused);
 }

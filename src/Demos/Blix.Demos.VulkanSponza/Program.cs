@@ -194,7 +194,7 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     /// already sampleable.</remarks>
     private GraphResourceHandle SampleableSceneDepth =>
         MsaaSamples > 1 ? depthResolveHandle : depthHandle;
-    private GraphResourceHandle ambientHandle;        // rgb = bent normal (world), a = visibility
+    private GraphResourceHandle ambientHandle;        // R16F visibility
     // --- Hi-Z depth pyramid -----------------------------------------------
     // Six levels from half the framebuffer down, each the min/max linear view depth of its parent's
     // footprint. Separate targets rather than mips of one image — see hiz_build.frag for why.
@@ -222,6 +222,10 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // look on screen; this says where the point was in the world, rigid or deforming alike, without the key standing
     // for a transform.
     private GraphResourceHandle motionHandle;
+    // Only screen probes (and --surface-check) read world motion; elsewhere the full-resolution Rgba16F target was
+    // written by both pre-passes and loaded again by the late one for nothing. The shaders still write it: with no
+    // attachment there the writes are dropped, as under MSAA.
+    private bool MotionTarget => SurfaceTargets && (screenProbesEnabled || surfaceCheck);
     private bool SurfaceTargets => MsaaSamples == 1;
     // The surface-key target as the previous frame left it (copied at the end of each frame), and TAA's per-pixel
     // accumulated count, ping-ponged with its colour (R32Uint: an integer, read at the nearest pixel).
@@ -242,18 +246,15 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     private GraphResourceHandle SampleablePrepassNormal =>
         MsaaSamples > 1 ? prepassNormalResolveHandle : prepassNormalHandle;
 
-    // rgb = incident bounced radiance, a = baked sky visibility, at incidentScale.
+    // rgb = incident bounced radiance, a = sky visibility, at full resolution: the lit pass samples it as it is.
+    // (A fractional scale and a bilateral resolve back to full size were removed: full was already the default, the
+    // resolve cost 1.4-1.6 ms isolated, and at full scale its rounding mixed neighbours across edges.)
     private GraphResourceHandle incidentHandle;
     private PassHandle incidentPassHandle;
     private PipelineHandle incidentPipeline;
-    // What the lit pass actually samples: the coarse field reconstructed to full resolution.
-    private GraphResourceHandle incidentFullHandle;
-    // The incident light's luminance gradient with the normal, at incidentScale and resolved to full size: how the
-    // lit pass carries light evaluated at the geometric normal to its normal-mapped one (incident_clipmap.frag).
+    // The incident light's luminance gradient with the normal: how the lit pass carries light evaluated at the
+    // geometric normal to its normal-mapped one (incident_clipmap.frag).
     private GraphResourceHandle incidentGradientHandle;
-    private GraphResourceHandle incidentGradientFullHandle;
-    private PassHandle incidentResolvePassHandle;
-    private PipelineHandle incidentResolvePipeline;
     private ShaderProgramHandle gtaoProgram;
     private PipelineHandle gtaoPipeline;
     private ShaderProgramHandle gtaoDenoiseProgram;
@@ -571,11 +572,6 @@ internal sealed partial class SponzaLoop : IGameLoop, IDebuggable, IDebugSelecta
     // than to the search radius.
     private float aoScale = 0.5f;
 
-    // The incident-light field's resolution, as a fraction of the framebuffer. Full by default: at half the
-    // bounce visibly loses detail on close, folded surfaces (seen headed on Sponza, 2026-10-05), for a cost
-    // within run-to-run noise (31.2 / 32.7 ms full against 31.1 / 32.3 half on the orbit). --incident-scale
-    // for anything less.
-    private float incidentScale = 1f;
     // Standard path: reconstruct sky visibility and bounce into the half-resolution incident field.
     // This measured -14.64 ms on the orbit and -29.99 ms with occupancy marching. --no-incident
     // preserves the inline reference path for comparison.

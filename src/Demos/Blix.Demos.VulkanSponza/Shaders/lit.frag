@@ -49,7 +49,7 @@
 //   set 1 binding 2 : texture2D   uBrdfLut         (split-sum BRDF integration)
 //   set 1 binding 3 : texture2D   uCascadeShadowMaps[3]
 //   set 1 binding 4 : texture3D   uFroxelGrid      (volumetric fog)
-//   set 1 binding 5 : texture2D   uAmbientVisibility (GTAO: bent normal + visibility)
+//   set 1 binding 5 : texture2D   uAmbientVisibility (GTAO: visibility in .r)
 //   set 2 binding 0 : per-material UBO (BaseColorFactor, EmissiveFactor,
 //                                       MaterialParams = alphaCutoff/normalScale/
 //                                       roughness/metallic, MaterialParams2 = the two
@@ -473,18 +473,10 @@ void main() {
     // KHR_materials_diffuse_transmission that once put a flat translucency on every cell of the
     // light-transport bake.
     bool inDepthPrepass = mat.uMaterialParams2.x <= 0.0;
-    float visibility = inDepthPrepass ? ambientVis.a : 1.0;
-    // The bent normal is where the unoccluded sky actually is. Gathering irradiance along it
-    // instead of along N is what makes a surface in a corner pick up the light from the opening
-    // rather than an average that includes the wall it is pressed against.
-    vec3 gatherN = inDepthPrepass ? normalize(ambientVis.xyz) : N;
-    // Keep the bent normal in the geometric normal's hemisphere. Screen-space depth cannot identify
-    // the active side of a two-sided sheet, and crossing the hemisphere samples unrelated incident
-    // light on back-facing foliage.
-    if (dot(gatherN, N) < 0.0) gatherN = N;
+    float visibility = inDepthPrepass ? ambientVis.r : 1.0;
 
-    // Bent normal remains an inspectable GTAO output. Production IBL, sky visibility, and bounce
-    // use the surface normal; uAmbientGeoNormal isolates interpolated versus normal-mapped input.
+    // IBL, sky visibility and bounce use the surface normal; uAmbientGeoNormal isolates interpolated versus
+    // normal-mapped input. (GTAO no longer writes a bent normal: nothing shaded with it.)
     vec3 cubeN   = N;
     vec3 skyVisN = frame.uAmbientGeoNormal > 0.5 ? vizGeometricN : N;   // geometric by default
     vec3 bounceN = frame.uAmbientGeoNormal > 0.5 ? vizGeometricN : N;   // -- see the declaration
@@ -697,7 +689,7 @@ void main() {
     }
 
     if (frame.uVisualizeAmbient > 0.5) {
-        color = frame.uVisualizeAmbient < 1.5 ? vec3(visibility) : (gatherN * 0.5 + 0.5);
+        color = vec3(visibility);
     }
 
     if (frame.uVisualizeCascades > 0.5) {

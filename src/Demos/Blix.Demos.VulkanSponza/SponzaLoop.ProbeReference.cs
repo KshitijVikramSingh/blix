@@ -871,7 +871,7 @@ internal sealed partial class SponzaLoop
         // With the clipmap: which probes answered each pixel, and which of them the surface cannot see (a segment
         // from the surface to the probe meets geometry). Those shares are light from the far side of a wall.
         var clipmapRead = clipmapForGather;
-        // GTAO's visibility, which the lit pass multiplies the field by (ambientVis.a): the shaded indirect is field
+        // GTAO's visibility, which the lit pass multiplies the field by (ambientVis.r): the shaded indirect is field
         // times this, so that product is what the reference judges.
         var gtao = device.ReadTexture(graph.GetColorTexture(ambientDenoisedHandle), out var gw, out var gh, out var gf);
         float GtaoAt(float px, float py)
@@ -880,6 +880,7 @@ internal sealed partial class SponzaLoop
             var y = Math.Clamp((int)(py / ih * gh), 0, gh - 1);
             return gf switch
             {
+                TextureFormat.R16F => (float)BitConverter.ToHalf(gtao, (y * gw + x) * 2),
                 TextureFormat.Rgba16F => (float)BitConverter.ToHalf(gtao, (y * gw + x) * 8 + 6),
                 TextureFormat.Rgba8 => gtao[(y * gw + x) * 4 + 3] / 255f,
                 _ => float.NaN,

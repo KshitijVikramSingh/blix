@@ -63,14 +63,6 @@ internal sealed partial class SponzaLoop
         // The incident-light field ships on; --no-incident selects the inline reference path.
         if (args.Flag("no-incident")) incidentField = false;
         if (args.Flag("incident")) incidentField = true;
-        if (args.Flag("incident-full")) { incidentField = true; incidentScale = 1f; }
-        // The resolution knob itself, because "half" is a guess and the error it costs is a
-        // function of how far the coarse texel centre sits from the fine pixel it answers for.
-        if (args.Float("incident-scale") is { } isc)
-        {
-            incidentField = true;
-            incidentScale = Math.Clamp(isc, 0.25f, 1f);
-        }
         if (args.Flag("no-prepass")) noPrepass = true;
         if (args.String("probe") is { } probe) probeName = probe;
         // The census has to be able to ask about the FIELD rather than about the sleep policy:
@@ -354,7 +346,6 @@ internal sealed partial class SponzaLoop
         var hiZInterface = Reflect("present.vert", "hiz_build.frag");
         var incidentInterface = Reflect("present.vert", "incident.frag");
         incidentClipmapInterface = Reflect("present.vert", "incident_clipmap.frag");
-        var incidentResolveInterface = Reflect("present.vert", "incident_resolve.frag");
         var shadowOpaqueInterface = Reflect("shadow.vert", "shadow.frag");
         var shadowMaskInterface = Reflect("shadow_mask.vert", "shadow_mask.frag");
 
@@ -452,17 +443,12 @@ internal sealed partial class SponzaLoop
         // against a 49.8 ms rest-of-frame baseline. Bilateral denoise restores full-size output
         // without introducing temporal reconstruction.
         ambientHandle = graph.ColorTarget(
-            "ambient-visibility", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(aoScale));
-        ambientDenoisedHandle = graph.ColorTarget("ambient-visibility-denoised", TextureFormat.Rgba16F, fullSize);
+            "ambient-visibility", TextureFormat.R16F, new MatchSwapchainGraphSize(aoScale));
+        ambientDenoisedHandle = graph.ColorTarget("ambient-visibility-denoised", TextureFormat.R16F, fullSize);
 
-        // Incident light is evaluated at volume frequency: rgb is bounce and a is baked sky
-        // visibility. Rgba16F preserves HDR gradients; incidentScale 1 is the full-resolution arm.
-        incidentHandle = graph.ColorTarget(
-            "incident-light", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(incidentScale));
-        incidentFullHandle = graph.ColorTarget("incident-light-full", TextureFormat.Rgba16F, fullSize);
-        incidentGradientHandle = graph.ColorTarget(
-            "incident-gradient", TextureFormat.Rgba16F, new MatchSwapchainGraphSize(incidentScale));
-        incidentGradientFullHandle = graph.ColorTarget("incident-gradient-full", TextureFormat.Rgba16F, fullSize);
+        // Incident light, full resolution: rgb bounce, a sky visibility. Rgba16F preserves HDR gradients.
+        incidentHandle = graph.ColorTarget("incident-light", TextureFormat.Rgba16F, fullSize);
+        incidentGradientHandle = graph.ColorTarget("incident-gradient", TextureFormat.Rgba16F, fullSize);
 
         // The pre-pass writes geometric normals for incident reconstruction instead of inferring
         // them from depth. That inference measured 5.31 mean sRGB error. Rgba16F avoids directional
@@ -479,7 +465,7 @@ internal sealed partial class SponzaLoop
         {
             surfaceKeyHandle = graph.ColorTarget("surface-key", TextureFormat.R32Uint, fullSize);
             velocityHandle = graph.ColorTarget("velocity", TextureFormat.Rg16F, fullSize);
-            motionHandle = graph.ColorTarget("world-motion", TextureFormat.Rgba16F, fullSize);
+            if (MotionTarget) motionHandle = graph.ColorTarget("world-motion", TextureFormat.Rgba16F, fullSize);
         }
         var prepassBuilder = graph.GraphicsPass("depth-prepass")
             .Target(prepassNormalHandle, LoadOp.Clear, StoreOp.Store)
@@ -488,8 +474,8 @@ internal sealed partial class SponzaLoop
         if (SurfaceTargets)
         {
             prepassBuilder = prepassBuilder.Target(surfaceKeyHandle, LoadOp.Clear, StoreOp.Store)
-                .Target(velocityHandle, LoadOp.Clear, StoreOp.Store)
-                .Target(motionHandle, LoadOp.Clear, StoreOp.Store);
+                .Target(velocityHandle, LoadOp.Clear, StoreOp.Store);
+            if (MotionTarget) prepassBuilder = prepassBuilder.Target(motionHandle, LoadOp.Clear, StoreOp.Store);
         }
         // Same rule as the depth: at one sample the target IS what a reader wants, and asking for
         // a resolve anyway is invalid.
@@ -525,8 +511,8 @@ internal sealed partial class SponzaLoop
         if (SurfaceTargets)
         {
             lateBuilder = lateBuilder.Target(surfaceKeyHandle, LoadOp.Load, StoreOp.Store)
-                .Target(velocityHandle, LoadOp.Load, StoreOp.Store)
-                .Target(motionHandle, LoadOp.Load, StoreOp.Store);
+                .Target(velocityHandle, LoadOp.Load, StoreOp.Store);
+            if (MotionTarget) lateBuilder = lateBuilder.Target(motionHandle, LoadOp.Load, StoreOp.Store);
         }
         if (MsaaSamples > 1) lateBuilder = lateBuilder.ResolveColor(prepassNormalResolveHandle).ResolveDepth(depthResolveHandle);
         latePrepassHandle = lateBuilder.Handle;
@@ -582,7 +568,8 @@ internal sealed partial class SponzaLoop
         var screenProbeBuilder = graph.ComputePass("screen-probes")
             .Read(SampleableSceneDepth)
             .Read(SampleablePrepassNormal);
-        if (SurfaceTargets) screenProbeBuilder = screenProbeBuilder.Read(surfaceKeyHandle).Read(velocityHandle).Read(motionHandle);
+        if (SurfaceTargets) screenProbeBuilder = screenProbeBuilder.Read(surfaceKeyHandle).Read(velocityHandle);
+        if (MotionTarget) screenProbeBuilder = screenProbeBuilder.Read(motionHandle);
         for (var c = 0; c < CascadeCount; c++) screenProbeBuilder = screenProbeBuilder.Read(cascadeHandles[c]);
         screenProbePassHandle = screenProbeBuilder.Shader(screenProbeInterface).Handle;
         screenProbeFilterInterface = Reflect("screen_probe_filter.comp");
@@ -596,15 +583,6 @@ internal sealed partial class SponzaLoop
             .Shader(incidentInterface, incidentClipmapInterface)
             .Handle;
 
-        incidentResolvePassHandle = graph.GraphicsPass("incident-resolve")
-            .Target(incidentFullHandle, LoadOp.Clear, StoreOp.Store)
-            .Target(incidentGradientFullHandle, LoadOp.Clear, StoreOp.Store)
-            .Read(incidentHandle)
-            .Read(incidentGradientHandle)
-            .Read(SampleableSceneDepth)
-            .Read(SampleablePrepassNormal)
-            .Shader(incidentResolveInterface)
-            .Handle;
 
         // At one sample there is nothing to resolve, and asking for a resolve anyway is invalid —
         // so the single-sample path renders straight into the target present reads.
@@ -626,8 +604,8 @@ internal sealed partial class SponzaLoop
             litPass = litPass.Read(cascadeHandles[c]);
         }
         litPass = litPass.Read(ambientDenoisedHandle);
-        litPass = litPass.Read(incidentFullHandle);
-        litPass = litPass.Read(incidentGradientFullHandle);
+        litPass = litPass.Read(incidentHandle);
+        litPass = litPass.Read(incidentGradientHandle);
         litPassHandle = litPass.Handle;
 
         // One pass per parity. Only one is recorded each frame; the other's target is that frame's
@@ -850,12 +828,6 @@ internal sealed partial class SponzaLoop
             VertexPosition3NormalTexture.Layout, DepthState.Disabled, RasterizerState.NoCulling,
             new[] { BlendState.Disabled, BlendState.Disabled }, incidentPassHandle, "incident_clipmap");
 
-        var incidentResolveSpv = File.ReadAllBytes(Path.Combine(shaderDir, "incident_resolve.frag.spv"));
-        var incidentResolveProgram = Own(device.CreateShaderProgramFromSpv(
-            presentVertSpv, incidentResolveSpv, incidentResolveInterface, "incident_resolve"));
-        incidentResolvePipeline = Pipeline(incidentResolveProgram, VertexPosition3NormalTexture.Layout,
-            DepthState.Disabled, RasterizerState.NoCulling,
-            new[] { BlendState.Disabled, BlendState.Disabled }, incidentResolvePassHandle, "incident_resolve");
 
         // Fullscreen triangle for the sky + present passes (positions synthesised
         // from gl_VertexIndex in the vertex shader — the buffer is never sampled).
@@ -972,9 +944,9 @@ internal sealed partial class SponzaLoop
             new ShaderTextureBinding("uOccupancy",
                 occX > 0 ? occupancyTexture : skyVisibilityTextures[0]),
             new ShaderTextureBinding(
-                "uIncidentField", graph.GetColorTexture(incidentFullHandle)),
+                "uIncidentField", graph.GetColorTexture(incidentHandle)),
             new ShaderTextureBinding(
-                "uIncidentGradient", graph.GetColorTexture(incidentGradientFullHandle)),
+                "uIncidentGradient", graph.GetColorTexture(incidentGradientHandle)),
             new ShaderTextureBinding(
                 "uPrepassNormalViz", graph.GetColorTexture(SampleablePrepassNormal)),
         };
@@ -1363,7 +1335,5 @@ internal sealed partial class SponzaLoop
 
     // The pre-pass's targets: the normal, and under single sampling the surface key, the velocity and the world motion
     // (stage 4e).
-    private BlendState[] PrepassBlends() => SurfaceTargets
-        ? new[] { BlendState.Disabled, BlendState.Disabled, BlendState.Disabled, BlendState.Disabled }
-        : new[] { BlendState.Disabled };
+    private BlendState[] PrepassBlends() => Enumerable.Repeat(BlendState.Disabled, !SurfaceTargets ? 1 : MotionTarget ? 4 : 3).ToArray();
 }
