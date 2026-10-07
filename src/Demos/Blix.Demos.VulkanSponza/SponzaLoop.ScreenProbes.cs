@@ -23,8 +23,12 @@ internal sealed partial class SponzaLoop
     // many frames last frame's probe in the tile makes it fresh.
     private float freshPasses = 4f;
     private float freshFrames = 4f;
+    // --probe-ray-length M: how far a probe ray traces before the clipmap takes over (0: the whole way).
+    private float probeRayLength = 0f;
     // --probe-layers 1|2: whether a tile may place a second probe on another surface (stage 4f-iv).
     private int probeLayers = 2;
+    // --probe-layer-keys: a different SurfaceKey alone opens a second layer (the rule before depth discontinuities).
+    private bool probeLayerKeys;
     // --dependent-passes N: passes a probe traces whose last trace crossed a moving reach (it also traces every frame).
     private float dependentPasses = 1f;
     private Bounds3 DependencyBox => dependencyEverything ? new Bounds3(new Vector3(-1e5f), new Vector3(1e5f)) : moverReach;
@@ -149,11 +153,12 @@ internal sealed partial class SponzaLoop
                 // w: a ray's sky, a little blurred (one mip) so single directions do not flicker on the sky's detail.
                 new("uFrame", new Vector4Uniform(new Vector4(screenProbeFrame + screenProbeSeedOffset, screenProbeHistory, 1f, 1f))),
                 new("uCascadeVP", new Matrix4x4ArrayUniform(cascadeViewProj)),
-                new("uParams2", new Vector4Uniform(new Vector4(screenProbeSeedFrames, probeSupportNow ? 1f : 0f, dependencyReset ? 1f : 0f, 0f))),
+                new("uParams2", new Vector4Uniform(new Vector4(screenProbeSeedFrames, probeSupportNow ? 1f : 0f, dependencyReset ? 1f : 0f, probeRayLength))),
                 // The reach of what moved this frame: the mover's while it moves, none while held or absent.
                 new("uDynamicMin", new Vector4Uniform(MoverActive && moverMoved && !noDependency ? new Vector4(DependencyBox.Min, 1f) : Vector4.Zero)),
                 new("uDynamicMax", new Vector4Uniform(new Vector4(MoverActive ? DependencyBox.Max : Vector3.Zero, dynamicHistory))),
                 new("uFresh", new Vector4Uniform(new Vector4(freshPasses, freshFrames, probeLayers < 2 ? 1f : 0f, dependentPasses))),
+                new("uLayers", new Vector4Uniform(new Vector4(probeLayerKeys ? 1f : 0f, 0f, 0f, 0f))),
             },
             new[]
             {

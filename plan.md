@@ -418,7 +418,28 @@ F. *The frame audit* (opened 2026-10-07: "a lot of pure performance on the table
      bracket encoders); --gpu-isolate remains the per-pass truth for everything.
      First reading with it: screen probes cost 41 ms a frame while the mover swings (46% of probes dependent and
      tracing every frame, plus fresh-probe passes), 27 ms isolated when still.
-   Next: F5 hot spots: the clipmap's incident pass (11.6-12.4 ms: three clipmap
+   F5 (in progress). Decomposition first (isolated, screen probes on, still): screen probes ~36 ms of which
+     ~32 is traversal (no tracing at all: 4.0; no sun at hits: no change, the cascades answer; no clipmap at hits:
+     -3.5; one layer: -10); the incident pass ~11 ms of which the gradient is ~1 -- the rest is the clipmap's
+     per-pixel sample (8 probes x 5 lookups x a manual 4-tap bilinear, sometimes over two levels).
+     Ray length (rejected as a default; `--probe-ray-length M` kept, 0 = the whole way): a ray stopped at M
+     and took the clipmap's light at its end looking onward. 2 / 4 / 8 m: probe pass 33.5 -> 22.2 / 26.3 / 31.2
+     ms, but Bistro walking |err| 0.137 -> 0.233 / 0.267 / 0.312 (WORSE with length: the end lands in the
+     clipmap's coarse, leaky levels) and the user saw lighting jump at distance in Sponza's courtyard even at
+     8 m. The far field must be fit to hand off to first: radiance (not irradiance) in the world probes, and
+     coarse levels that do not leak.
+     DONE the second layer opens only at a depth discontinuity (off layer 0's plane by 2% of the depth; a
+     different key alone no longer counts -- `--probe-layer-keys` the A/B), its candidates scored in shared
+     memory, one per lane (they were 16-element arrays in every lane): probe pass 36.8 -> 22.1 ms, Sponza
+     |err| 0.00031 -> 0.00030, Bistro 0.137 -> 0.134, mover ring +6.5 -> +2.8%.
+     DONE filtered clipmap fetches: readers holding a sampler (incident, screen probes, fog) take each tile
+     lookup as one hardware-bilinear fetch (the border ring makes it safe), the injection keeps the manual
+     path for its storage images (probe_clipmap.glsl's optional BLIX_CLIPMAP_*_FILTERED). Interleaved A/B
+     builds: incident 12.6 / 12.2 -> 9.8 / 9.3 ms; accuracy and stability unchanged. (Timing drifts a lot
+     within a session -- the probe pass read 22 then 38-40 ms an hour apart -- so only interleaved arms count.)
+   Next in F5: traversal itself (a wider BVH, compressed nodes, ray order: engine work in Blix.Geometry's
+     packing and ray_query.glsl, every ray consumer gains), then the raster side (lit 15-22, pre-pass 9-12,
+     late 4-6 ms), the pyramids' passes, barriers around buffer dispatches, CPU allocations. Old list: the clipmap's incident pass (11.6-12.4 ms: three clipmap
      samples a pixel for the gradient, up to 8 screen probes), screen-probe register pressure (the second
      layer's 16-point candidate arrays in every lane) and lane-0 SH reduction, the pyramids, barriers around
      buffer dispatches, CPU allocations.

@@ -82,6 +82,12 @@ int blix_clipmapLocate(BlixClipmap c, vec3 world, out float blend) {
 //   BLIX_CLIPMAP_IRRADIANCE(ivec2 texel)  -> vec4
 //   BLIX_CLIPMAP_DEPTH(ivec2 texel)       -> vec4
 //   BLIX_CLIPMAP_STATE(int slot)          -> uvec4  (slot = level * probes-per-level + slot index)
+// A reader that holds the atlases through a sampler may also define, at an atlas position in texels (texel centres
+// at +0.5), one filtered fetch apiece -- the border ring is what makes hardware bilinear safe at the fold:
+//   BLIX_CLIPMAP_IRRADIANCE_FILTERED(vec2 position) -> vec4
+//   BLIX_CLIPMAP_DEPTH_FILTERED(vec2 position)      -> vec4
+// Each lookup is then one fetch, not four texelFetch (the shading's clipmap sample was ~10 ms of the incident pass:
+// eight probes, five lookups each, sometimes over two levels, at every pixel).
 #define BLIX_CLIPMAP_SOLVED 1u
 #define BLIX_CLIPMAP_BURIED 2u
 
@@ -91,6 +97,11 @@ int blix_clipmapLocate(BlixClipmap c, vec3 world, out float blend) {
 // A direction's place in a tile's interior, bilinear by hand over the four texels around it.
 vec4 blix_clipmapTileSample(ivec2 tile, vec3 dir, bool depth) {
     vec2 t = (blix_octEncode(normalize(dir)) * 0.5 + 0.5) * 6.0 + 0.5;   // texel space, past the border ring
+#ifdef BLIX_CLIPMAP_IRRADIANCE_FILTERED
+    // Texel base + f, as below, is the hardware's bilinear at t + 0.5.
+    vec2 at = vec2(tile) + t + 0.5;
+    return depth ? BLIX_CLIPMAP_DEPTH_FILTERED(at) : BLIX_CLIPMAP_IRRADIANCE_FILTERED(at);
+#endif
     ivec2 base = ivec2(floor(t));
     vec2 f = t - vec2(base);
     vec4 a, b, c, d;

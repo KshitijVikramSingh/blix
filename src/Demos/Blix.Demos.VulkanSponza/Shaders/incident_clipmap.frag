@@ -86,6 +86,8 @@ bool screenProbesAt(vec3 worldPos, vec3 n, float viewDepth, out vec3 irradiance,
 
 #define BLIX_CLIPMAP_IRRADIANCE(t) texelFetch(uClipmapIrradiance, t, 0)
 #define BLIX_CLIPMAP_DEPTH(t) texelFetch(uClipmapDepth, t, 0)
+#define BLIX_CLIPMAP_IRRADIANCE_FILTERED(p) textureLod(uClipmapIrradiance, (p) / vec2(textureSize(uClipmapIrradiance, 0)), 0.0)
+#define BLIX_CLIPMAP_DEPTH_FILTERED(p) textureLod(uClipmapDepth, (p) / vec2(textureSize(uClipmapDepth, 0)), 0.0)
 #define BLIX_CLIPMAP_STATE(s) states[s]
 #include "probe_clipmap.glsl"
 

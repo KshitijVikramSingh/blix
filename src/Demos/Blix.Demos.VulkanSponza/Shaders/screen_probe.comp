@@ -77,7 +77,8 @@ layout(set = 0, binding = 0) uniform ScreenProbes {
     mat4 uCascadeVP[3];
     vec4 uParams2;         // x frames of history a fresh probe's clipmap prior counts for (0: start from nothing), y 1:
                            // support measured where the point is now, ignoring its world motion (--probe-support-now),
-                           // z 1: the control arm (--dependency-reset): a dependent probe drops its whole past instead
+                           // z 1: the control arm (--dependency-reset): a dependent probe drops its whole past instead,
+                           // w how far a probe ray traces, metres (--probe-ray-length; 0: the whole way)
     // Stage 4f: the reach of geometry that moved this frame (the mover's), w of the min 1 when there is one; w of
     // the max the dynamic part's history cap in frames (--dynamic-history).
     vec4 uDynamicMin;
@@ -87,6 +88,7 @@ layout(set = 0, binding = 0) uniform ScreenProbes {
     // a probe traces whose last trace had a path through a moving reach (--dependent-passes; such a probe also
     // traces every frame, not every other row).
     vec4 uFresh;
+    vec4 uLayers;          // x 1: a different SurfaceKey alone opens a second layer, as before (--probe-layer-keys)
 } u;
 
 layout(set = 0, binding = 1) uniform sampler2D uSceneDepth;
@@ -119,6 +121,8 @@ layout(std430, set = 0, binding = 11) buffer ScreenProbeStats { uint stats[16]; 
 
 #define BLIX_CLIPMAP_IRRADIANCE(t) texelFetch(uClipmapIrradiance, t, 0)
 #define BLIX_CLIPMAP_DEPTH(t) texelFetch(uClipmapDepth, t, 0)
+#define BLIX_CLIPMAP_IRRADIANCE_FILTERED(p) textureLod(uClipmapIrradiance, (p) / vec2(textureSize(uClipmapIrradiance, 0)), 0.0)
+#define BLIX_CLIPMAP_DEPTH_FILTERED(p) textureLod(uClipmapDepth, (p) / vec2(textureSize(uClipmapDepth, 0)), 0.0)
 #define BLIX_CLIPMAP_STATE(s) states[s]
 #include "probe_clipmap.glsl"
 
@@ -127,6 +131,11 @@ shared vec3 sDirection[64];
 shared uint sDependent[64];
 shared int sPasses[PROBES_PER_GROUP];
 shared uint sPlaced[PROBES_PER_GROUP];
+// The second layer's candidates (one tile a workgroup): xyz world, w view depth when off layer 0's surface, else -1.
+shared vec4 sCandidate[16];
+shared vec3 sCandidateNormal[16];
+shared uint sCandidateKey[16];
+shared int sCandidateShare[16];
 
 // Stage 4f, dependency: whether the segment origin + dir * [0, tEnd] passes through the reach of geometry that moved
 // this frame. A path that does may carry light the motion changed; one that does not cannot have (lighting is
@@ -190,8 +199,8 @@ void main() {
     uint identity = 0u;
     ivec2 placedPixel = ivec2(0);
     bool placed = false;
+    ivec2 corner = tile * SCREEN_PROBE_TILE;
     if (inRange) {
-        ivec2 corner = tile * SCREEN_PROBE_TILE;
         placedPixel = corner + SCREEN_PROBE_TILE / 2;
         placed = surfaceAt(placedPixel, world, viewDepth, n, identity);
         const ivec2 inner[4] = ivec2[4](ivec2(SCREEN_PROBE_TILE / 4), ivec2(3 * SCREEN_PROBE_TILE / 4, SCREEN_PROBE_TILE / 4), ivec2(SCREEN_PROBE_TILE / 4, 3 * SCREEN_PROBE_TILE / 4), ivec2(3 * SCREEN_PROBE_TILE / 4));
@@ -200,42 +209,50 @@ void main() {
             placedPixel = corner + inner[i];
             placed = surfaceAt(placedPixel, world, viewDepth, n, identity);
         }
-        if (layer == 1 && placed && u.uFresh.z < 0.5) {
-            // The second layer: of a 4 x 4 grid of points in the tile, those on another surface than layer 0's
-            // (another SurfaceKey, or off its plane by more than the filter's 2% of the depth); the probe goes on
-            // the one most of them share. None: the tile has one surface and this slot stays empty.
-            vec3 w0 = world, n0 = n;
-            float d0 = viewDepth;
-            uint k0 = identity;
-            vec3 cw[16];
-            vec3 cn[16];
-            float cd[16];
-            uint ck[16];
-            bool cOther[16];
-            for (int i = 0; i < 16; ++i) {
-                ivec2 px = corner + ivec2(4 + 8 * (i % 4), 4 + 8 * (i / 4));
-                bool on = surfaceAt(px, cw[i], cd[i], cn[i], ck[i]);
-                cOther[i] = on && (ck[i] != k0 || abs(dot(n0, cw[i] - w0)) > 0.02 * d0);
-            }
-            int bestCandidate = -1;
-            int bestShare = 0;
-            for (int i = 0; i < 16; ++i) {
-                if (!cOther[i]) continue;
-                int share = 0;
-                for (int j = 0; j < 16; ++j)
-                    if (cOther[j] && ck[j] == ck[i] && abs(dot(cn[i], cw[j] - cw[i])) <= 0.02 * cd[i]) share++;
-                if (share > bestShare) { bestShare = share; bestCandidate = i; }
-            }
-            placed = bestCandidate >= 0;
-            if (placed) {
-                world = cw[bestCandidate];
-                n = cn[bestCandidate];
-                viewDepth = cd[bestCandidate];
-                identity = ck[bestCandidate];
-                placedPixel = corner + ivec2(4 + 8 * (bestCandidate % 4), 4 + 8 * (bestCandidate / 4));
-            }
-        } else if (layer == 1) {
-            placed = false;
+    }
+
+    // The second layer (stage 4f-iv): of a 4 x 4 grid of points in the tile, those off layer 0's plane by more than
+    // the filter's 2% of the depth -- a depth discontinuity, such as the recess behind a curtain whose tile probe
+    // sits on the curtain -- and the probe goes on the one most of them share. A different SurfaceKey on the same
+    // plane (a floor seam) no longer counts unless --probe-layer-keys: keys change across ~64% of tiles, and the
+    // second layer cost ~10 of the pass's ~36 ms. One tile a workgroup, so the candidates live in shared memory:
+    // one per lane of the second probe, scored in parallel (they were 16-element arrays in every lane's registers).
+    bool secondLayer = inRange && layer == 1 && placed && u.uFresh.z < 0.5;
+    if (layer == 1 && ray < 16u) {
+        int i = int(ray);
+        vec3 cw = vec3(0.0), cn = vec3(0.0, 1.0, 0.0);
+        float cd = 0.0;
+        uint ck = 0u;
+        bool on = secondLayer && surfaceAt(corner + ivec2(4 + 8 * (i % 4), 4 + 8 * (i / 4)), cw, cd, cn, ck);
+        bool off = abs(dot(n, cw - world)) > 0.02 * viewDepth;
+        bool other = on && (off || (u.uLayers.x > 0.5 && ck != identity));
+        sCandidate[i] = vec4(cw, other ? cd : -1.0);
+        sCandidateNormal[i] = cn;
+        sCandidateKey[i] = ck;
+    }
+    barrier();
+    if (layer == 1 && ray < 16u) {
+        int i = int(ray);
+        int share = 0;
+        if (sCandidate[i].w > 0.0)
+            for (int j = 0; j < 16; ++j)
+                if (sCandidate[j].w > 0.0 && sCandidateKey[j] == sCandidateKey[i]
+                    && abs(dot(sCandidateNormal[i], sCandidate[j].xyz - sCandidate[i].xyz)) <= 0.02 * sCandidate[i].w) share++;
+        sCandidateShare[i] = share;
+    }
+    barrier();
+    if (layer == 1) {
+        int bestCandidate = -1;
+        int bestShare = 0;
+        for (int i = 0; i < 16; ++i)
+            if (sCandidateShare[i] > bestShare) { bestShare = sCandidateShare[i]; bestCandidate = i; }
+        placed = secondLayer && bestCandidate >= 0;
+        if (placed) {
+            world = sCandidate[bestCandidate].xyz;
+            n = sCandidateNormal[bestCandidate];
+            viewDepth = sCandidate[bestCandidate].w;
+            identity = sCandidateKey[bestCandidate];
+            placedPixel = corner + ivec2(4 + 8 * (bestCandidate % 4), 4 + 8 * (bestCandidate / 4));
         }
     }
 
@@ -293,7 +310,12 @@ void main() {
         dir = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + n * z);
         vec3 origin = world + n * (0.01 + 0.001 * viewDepth);
         BlixRayHit hit;
-        if (blix_traceClosest(origin, dir, 0.0, uintBitsToFloat(0x7F800000u), seed, hit)) {
+        // Short rays, continued by the clipmap (frame audit F5): a ray traces --probe-ray-length metres and, if it
+        // meets nothing, takes the clipmap's light at its end looking onward (irradiance facing along the ray / pi:
+        // the far field, cosine-blurred, which the clipmap already holds). Traversal was ~32 of the pass's ~36 ms,
+        // and its far reaches are exactly what the world probes answer.
+        float rayLength = u.uParams2.w > 0.0 ? u.uParams2.w : uintBitsToFloat(0x7F800000u);
+        if (blix_traceClosest(origin, dir, 0.0, rayLength, seed, hit)) {
             vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
             vec3 hitPos = origin + dir * hit.t;
             vec3 toSun = -normalize(u.uSunDirection.xyz);
@@ -320,6 +342,12 @@ void main() {
             vec4 field = vec4(0.0);
             if ((ablate & 2) == 0) field = blix_clipmapSample(clipmap(), hitPos, hn, known);
             radiance = hit.albedo * (u.uSunIrradiance.rgb * sun + (known ? field.rgb : vec3(0.0))) / PI;
+        } else if (u.uParams2.w > 0.0) {
+            bool known;
+            vec4 far = blix_clipmapSample(clipmap(), origin + dir * rayLength, dir, known);
+            radiance = known ? far.rgb / PI : textureLod(uSkyRadiance, dir, u.uFrame.w).rgb * u.uFrame.z;
+            // Beyond the segment the clipmap carries its own dependent part.
+            dependent = crossesMovingReach(origin, dir, rayLength);
         } else {
             radiance = textureLod(uSkyRadiance, dir, u.uFrame.w).rgb * u.uFrame.z;
             dependent = crossesMovingReach(origin, dir, 1e30);

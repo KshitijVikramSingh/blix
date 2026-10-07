@@ -186,7 +186,9 @@ internal sealed partial class SponzaLoop
         dependencyEverything = args.Flag("dependency-everything");
         if (args.Int("fresh-passes") is { } fp) freshPasses = Math.Clamp(fp, 1, 16);
         if (args.Float("fresh-frames") is { } ff) freshFrames = Math.Max(1f, ff);
+        if (args.Float("probe-ray-length") is { } prl) probeRayLength = Math.Max(0f, prl);
         if (args.Int("probe-layers") is { } pl) probeLayers = Math.Clamp(pl, 1, 2);
+        probeLayerKeys = args.Flag("probe-layer-keys");
         if (args.Int("dependent-passes") is { } dp) dependentPasses = Math.Clamp(dp, 1, 16);
         noClipmapDependency = args.Flag("no-clipmap-dependency");
         if (args.Int("clipmap-dependent-rays") is { } cdr) clipmapDependentRays = Math.Clamp(cdr, 1, 64);
